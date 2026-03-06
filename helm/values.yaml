@@ -3,7 +3,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/mctlhq/mctl-api
   tag: "latest"
-  pullPolicy: Always
+  pullPolicy: IfNotPresent
 
 imagePullSecrets:
   - name: ghcr-credentials
