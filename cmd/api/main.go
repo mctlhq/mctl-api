@@ -66,7 +66,6 @@ func main() {
 		Executor:       executor,
 		AuthMiddleware: authMiddleware,
 		MCPServer:      mcpSrv,
-		SelfURL:        cfg.SelfURL,
 		BackstageURL:   cfg.BackstageURL,
 		BackstageToken: cfg.BackstageToken,
 	})

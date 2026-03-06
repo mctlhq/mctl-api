@@ -11,19 +11,23 @@ spec:
   ingressClassName: {{ .Values.ingress.className }}
   {{- if .Values.ingress.tls }}
   tls:
+    {{- range .Values.ingress.hosts }}
     - hosts:
-        - {{ .Values.ingress.host }}
-      secretName: {{ .Chart.Name }}-tls
+        - {{ .host }}
+      secretName: {{ $.Chart.Name }}-{{ .host | replace "." "-" }}-tls
+    {{- end }}
   {{- end }}
   rules:
-    - host: {{ .Values.ingress.host }}
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host }}
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: {{ .Chart.Name }}
+                name: {{ $.Chart.Name }}
                 port:
-                  number: {{ .Values.service.port }}
+                  number: {{ $.Values.service.port }}
+    {{- end }}
 {{- end }}

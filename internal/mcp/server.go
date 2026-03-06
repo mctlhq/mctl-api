@@ -32,17 +32,15 @@ func NewServer(apiURL, apiToken string) *Server {
 	}
 }
 
-// NewSSEHandler returns an HTTP handler that serves the MCP SSE transport.
-// Mount it at /mcp/sse and /mcp/message in the authenticated route group.
-// The SSE context function forwards the auth context (user + raw token) so
-// tool handlers can authenticate downstream API calls.
-func (s *Server) NewSSEHandler(baseURL string) *server.SSEServer {
-	return server.NewSSEServer(
+// NewStreamableHTTPHandler returns an HTTP handler that serves the MCP Streamable HTTP transport.
+// Mount at /mcp in the authenticated route group (single endpoint, all methods).
+// Streamable HTTP is the primary transport in the current MCP spec: single POST/GET endpoint,
+// auth headers on every request, works cleanly with reverse proxies.
+// The context function forwards the auth context (user + raw token) to tool handlers.
+func (s *Server) NewStreamableHTTPHandler() http.Handler {
+	return server.NewStreamableHTTPServer(
 		s.NewMCPServer(),
-		server.WithBaseURL(baseURL),
-		server.WithSSEEndpoint("/mcp/sse"),
-		server.WithMessageEndpoint("/mcp/message"),
-		server.WithSSEContextFunc(func(ctx context.Context, r *http.Request) context.Context {
+		server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
 			// Forward the request context (contains auth user + raw token set by middleware).
 			return r.Context()
 		}),

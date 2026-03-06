@@ -21,16 +21,18 @@ Two token types are accepted:
 
 Get a GitHub token: `gh auth token`
 
-## MCP: Claude Desktop via SSE (recommended)
+## MCP: Claude Desktop via Streamable HTTP (recommended)
 
-No local binary needed. Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+No local binary needed. Uses the current MCP spec transport — single HTTP endpoint, auth on every request, works cleanly through reverse proxies.
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "mctl": {
-      "type": "sse",
-      "url": "https://api.mctl.ai/mcp/sse",
+      "type": "http",
+      "url": "https://api.mctl.ai/mcp",
       "headers": {
         "Authorization": "Bearer <your-github-token>"
       }
@@ -40,6 +42,11 @@ No local binary needed. Add to `~/Library/Application Support/Claude/claude_desk
 ```
 
 Get token: `gh auth token`
+
+Also works via `api.mctl.me`:
+```json
+"url": "https://api.mctl.me/mcp"
+```
 
 Restart Claude Desktop — it will connect and expose 8 platform tools.
 

@@ -14,9 +14,11 @@ service:
 
 ingress:
   enabled: true
-  host: api.mctl.ai
   className: traefik
   tls: true
+  hosts:
+    - host: api.mctl.ai
+    - host: api.mctl.me
 
 resources:
   requests:

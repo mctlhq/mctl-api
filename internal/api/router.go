@@ -20,11 +20,8 @@ type Options struct {
 	AuditLog       *audit.Logger
 	Executor       *operations.Executor
 	AuthMiddleware func(http.Handler) http.Handler
-	// MCPServer exposes platform tools over MCP SSE transport at /mcp/sse.
+	// MCPServer exposes platform tools over MCP Streamable HTTP at /mcp.
 	MCPServer      *mctlmcp.Server
-	// SelfURL is the public base URL of this server (e.g. https://api.mctl.ai).
-	// Used to configure the MCP SSE endpoint URL returned to clients.
-	SelfURL        string
 	// Optional Backstage integration for immediate catalog sync.
 	BackstageURL   string
 	BackstageToken string
@@ -84,12 +81,12 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/operations/{name}/execute", h.ExecuteOperation)
 		})
 
-		// MCP SSE transport — remote endpoint for Claude Desktop, Cursor, etc.
-		// Clients connect to /mcp/sse with Authorization: Bearer <token>.
+		// MCP Streamable HTTP transport — single endpoint for Claude Desktop, Cursor, etc.
+		// POST /mcp  → send request (can return streaming SSE response)
+		// GET  /mcp  → open persistent listen stream (optional, for server-initiated messages)
+		// Auth: Authorization: Bearer <token> on every request.
 		if opts.MCPServer != nil {
-			sseServer := opts.MCPServer.NewSSEHandler(opts.SelfURL)
-			r.Get("/mcp/sse", sseServer.SSEHandler().ServeHTTP)
-			r.Post("/mcp/message", sseServer.MessageHandler().ServeHTTP)
+			r.Handle("/mcp", opts.MCPServer.NewStreamableHTTPHandler())
 		}
 	})
 
