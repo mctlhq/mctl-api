@@ -15,6 +15,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
@@ -33,21 +34,39 @@ func main() {
 		os.Exit(1)
 	}
 
-	// GitHub auth: validate tokens via GitHub API, resolve tenant groups from gitops.
+	// Dex JWT verifier (optional — disabled if DEX_ISSUER_URL is unset or unreachable).
+	var dexVerifier *auth.DexVerifier
+	if cfg.DexIssuerURL != "" {
+		dv, dexErr := auth.NewDexVerifier(context.Background(), cfg.DexIssuerURL)
+		if dexErr != nil {
+			slog.Warn("dex OIDC init failed — JWT auth disabled", "issuer", cfg.DexIssuerURL, "error", dexErr)
+		} else {
+			dexVerifier = dv
+			slog.Info("dex OIDC initialized", "issuer", cfg.DexIssuerURL)
+		}
+	}
+
+	// Auth middleware: validates GitHub tokens or Dex JWTs.
 	ghValidator := auth.NewGitHubValidator(cfg.GitHubOrg, cfg.AdminUsers)
-	authMiddleware := auth.Middleware(ghValidator, gitReader)
+	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier)
 
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
 	auditLog := audit.NewLogger()
 	executor := operations.NewExecutor(cfg.ArgoWorkflowsNamespace)
 
+	// MCP server for SSE transport (embedded in this process).
+	// Tools make REST calls back to this server using the caller's token (forwarded via context).
+	mcpSrv := mctlmcp.NewServer(cfg.SelfURL, "")
+
 	router := mctlapi.NewRouter(mctlapi.Options{
-		Registry:      registry,
-		GitReader:     gitReader,
-		ArgoCD:        argoClient,
-		AuditLog:      auditLog,
-		Executor:      executor,
+		Registry:       registry,
+		GitReader:      gitReader,
+		ArgoCD:         argoClient,
+		AuditLog:       auditLog,
+		Executor:       executor,
 		AuthMiddleware: authMiddleware,
+		MCPServer:      mcpSrv,
+		SelfURL:        cfg.SelfURL,
 		BackstageURL:   cfg.BackstageURL,
 		BackstageToken: cfg.BackstageToken,
 	})
@@ -103,6 +122,10 @@ type config struct {
 	AdminUsers             []string
 	BackstageURL           string
 	BackstageToken         string
+	// Dex OIDC issuer for JWT validation (dual-token auth alongside GitHub tokens).
+	DexIssuerURL           string
+	// SelfURL is the public base URL used in MCP SSE endpoint advertisement.
+	SelfURL                string
 }
 
 func loadConfig() config {
@@ -117,17 +140,19 @@ func loadConfig() config {
 	}
 
 	return config{
-		Port:                   envOr("PORT", "8080"),
-		GitOpsRepoURL:         envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-core.git"),
-		GitOpsBranch:          envOr("GITOPS_BRANCH", "main"),
-		GitOpsLocalPath:       envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-core"),
-		ArgoCDURL:             envOr("ARGOCD_URL", "https://ops.mctl.me"),
-		ArgoCDToken:           os.Getenv("ARGOCD_TOKEN"),
-		ArgoWorkflowsNamespace: envOr("ARGO_WORKFLOWS_NAMESPACE", "argo-workflows"),
-		GitHubOrg:             envOr("GITHUB_ORG", "mctlhq"),
-		AdminUsers:            adminList,
-		BackstageURL:          os.Getenv("BACKSTAGE_URL"),
-		BackstageToken:        os.Getenv("BACKSTAGE_TOKEN"),
+		Port:                    envOr("PORT", "8080"),
+		GitOpsRepoURL:           envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-core.git"),
+		GitOpsBranch:            envOr("GITOPS_BRANCH", "main"),
+		GitOpsLocalPath:         envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-core"),
+		ArgoCDURL:               envOr("ARGOCD_URL", "https://ops.mctl.me"),
+		ArgoCDToken:             os.Getenv("ARGOCD_TOKEN"),
+		ArgoWorkflowsNamespace:  envOr("ARGO_WORKFLOWS_NAMESPACE", "argo-workflows"),
+		GitHubOrg:               envOr("GITHUB_ORG", "mctlhq"),
+		AdminUsers:              adminList,
+		BackstageURL:            os.Getenv("BACKSTAGE_URL"),
+		BackstageToken:          os.Getenv("BACKSTAGE_TOKEN"),
+		DexIssuerURL:            envOr("DEX_ISSUER_URL", "https://ops.mctl.me/api/dex"),
+		SelfURL:                 envOr("SELF_URL", "https://api.mctl.ai"),
 	}
 }
 

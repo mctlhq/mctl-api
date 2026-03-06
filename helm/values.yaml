@@ -30,6 +30,5 @@ env:
   ARGOCD_URL: https://ops.mctl.me
   ARGO_WORKFLOWS_NAMESPACE: argo-workflows
 
-# Secret env vars (from ExternalSecret/Vault)
-secretEnv:
-  ARGOCD_TOKEN: ""
+# Name of an existing Secret to mount as envFrom (created by ExternalSecret)
+envFromSecret: ""

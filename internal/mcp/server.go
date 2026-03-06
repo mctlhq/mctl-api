@@ -11,6 +11,7 @@ import (
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 // Server is the MCP server that exposes platform operations as AI tools.
@@ -29,6 +30,23 @@ func NewServer(apiURL, apiToken string) *Server {
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// NewSSEHandler returns an HTTP handler that serves the MCP SSE transport.
+// Mount it at /mcp/sse and /mcp/message in the authenticated route group.
+// The SSE context function forwards the auth context (user + raw token) so
+// tool handlers can authenticate downstream API calls.
+func (s *Server) NewSSEHandler(baseURL string) *server.SSEServer {
+	return server.NewSSEServer(
+		s.NewMCPServer(),
+		server.WithBaseURL(baseURL),
+		server.WithSSEEndpoint("/mcp/sse"),
+		server.WithMessageEndpoint("/mcp/message"),
+		server.WithSSEContextFunc(func(ctx context.Context, r *http.Request) context.Context {
+			// Forward the request context (contains auth user + raw token set by middleware).
+			return r.Context()
+		}),
+	)
 }
 
 // NewMCPServer creates the mcp-go Server with all tool definitions.
@@ -62,7 +80,7 @@ func (s *Server) toolListTenants() (mcplib.Tool, server.ToolHandlerFunc) {
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		body, err := s.apiGet("/api/v1/tenants")
+		body, err := s.apiGet(ctx, "/api/v1/tenants")
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list tenants: %v", err)), nil
 		}
@@ -86,7 +104,7 @@ func (s *Server) toolListServices() (mcplib.Tool, server.ToolHandlerFunc) {
 		if team, ok := args["team"].(string); ok && team != "" {
 			path += "?team=" + team
 		}
-		body, err := s.apiGet(path)
+		body, err := s.apiGet(ctx, path)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list services: %v", err)), nil
 		}
@@ -113,7 +131,7 @@ func (s *Server) toolGetServiceStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 		args := req.GetArguments()
 		team := args["team"].(string)
 		service := args["service"].(string)
-		body, err := s.apiGet(fmt.Sprintf("/api/v1/status/%s/%s", team, service))
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/status/%s/%s", team, service))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get status for %s/%s: %v", team, service, err)), nil
 		}
@@ -135,7 +153,7 @@ func (s *Server) toolGetWorkflowStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		args := req.GetArguments()
 		name := args["workflow_name"].(string)
-		body, err := s.apiGet(fmt.Sprintf("/api/v1/workflows/%s", name))
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/workflows/%s", name))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get workflow %s: %v", name, err)), nil
 		}
@@ -157,7 +175,7 @@ func (s *Server) toolGetResourceUsage() (mcplib.Tool, server.ToolHandlerFunc) {
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		args := req.GetArguments()
 		team := args["team"].(string)
-		body, err := s.apiGet(fmt.Sprintf("/api/v1/resources/%s", team))
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/resources/%s", team))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get resource usage for %s: %v", team, err)), nil
 		}
@@ -220,7 +238,7 @@ For background workers, omit the host parameter.`),
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		params := extractStringParams(req.GetArguments())
-		body, err := s.apiPost("/api/v1/operations/deploy-service/execute", params)
+		body, err := s.apiPost(ctx, "/api/v1/operations/deploy-service/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to deploy service: %v", err)), nil
 		}
@@ -268,7 +286,7 @@ The workspace name must be unique, DNS-safe (lowercase letters, numbers, hyphens
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		params := extractStringParams(req.GetArguments())
-		body, err := s.apiPost("/api/v1/operations/create-tenant/execute", params)
+		body, err := s.apiPost(ctx, "/api/v1/operations/create-tenant/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create tenant: %v", err)), nil
 		}
@@ -301,7 +319,7 @@ The database name follows the convention: {team_name}-{app_name}.`),
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		params := extractStringParams(req.GetArguments())
-		body, err := s.apiPost("/api/v1/operations/provision-database/execute", params)
+		body, err := s.apiPost(ctx, "/api/v1/operations/provision-database/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to provision database: %v", err)), nil
 		}
@@ -313,30 +331,38 @@ The database name follows the convention: {team_name}-{app_name}.`),
 
 // --- HTTP helpers ---
 
-func (s *Server) apiGet(path string) ([]byte, error) {
-	req, err := http.NewRequest("GET", s.apiURL+path, nil)
+// effectiveToken returns the token from context (SSE mode) or falls back to s.apiToken (stdio mode).
+func (s *Server) effectiveToken(ctx context.Context) string {
+	if t := auth.TokenFromContext(ctx); t != "" {
+		return t
+	}
+	return s.apiToken
+}
+
+func (s *Server) apiGet(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", s.apiURL+path, nil)
 	if err != nil {
 		return nil, err
 	}
-	return s.doRequest(req)
+	return s.doRequest(req, s.effectiveToken(ctx))
 }
 
-func (s *Server) apiPost(path string, body map[string]string) ([]byte, error) {
+func (s *Server) apiPost(ctx context.Context, path string, body map[string]string) ([]byte, error) {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", s.apiURL+path, strings.NewReader(string(jsonBody)))
+	req, err := http.NewRequestWithContext(ctx, "POST", s.apiURL+path, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return s.doRequest(req)
+	return s.doRequest(req, s.effectiveToken(ctx))
 }
 
-func (s *Server) doRequest(req *http.Request) ([]byte, error) {
-	if s.apiToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.apiToken)
+func (s *Server) doRequest(req *http.Request, token string) ([]byte, error) {
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	req.Header.Set("Accept", "application/json")
 

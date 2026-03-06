@@ -2,16 +2,22 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/coreos/go-oidc/v3/oidc"
 )
 
 // contextKey is an unexported type for context keys in this package.
 type contextKey string
 
-const userContextKey contextKey = "user"
+const (
+	userContextKey  contextKey = "user"
+	rawTokenKey     contextKey = "rawToken"
+)
 
 // User represents an authenticated user.
 type User struct {
@@ -48,20 +54,78 @@ func UserFromContext(ctx context.Context) *User {
 	return u
 }
 
+// TokenFromContext returns the raw bearer token stored by the auth middleware.
+// Tool handlers use this to forward auth to downstream API calls.
+func TokenFromContext(ctx context.Context) string {
+	t, _ := ctx.Value(rawTokenKey).(string)
+	return t
+}
+
 // TenantResolver resolves which tenants a GitHub user belongs to.
 // Implemented by gitops.Reader.
 type TenantResolver interface {
 	GetTenantsForUser(login string) ([]string, error)
 }
 
-// Middleware returns HTTP middleware that validates GitHub tokens.
+// DexVerifier validates Dex-issued JWTs.
+type DexVerifier struct {
+	verifier *oidc.IDTokenVerifier
+}
+
+// NewDexVerifier creates a DexVerifier by fetching OIDC configuration from the issuer.
+func NewDexVerifier(ctx context.Context, issuerURL string) (*DexVerifier, error) {
+	provider, err := oidc.NewProvider(ctx, issuerURL)
+	if err != nil {
+		return nil, fmt.Errorf("oidc provider init failed for %s: %w", issuerURL, err)
+	}
+	// SkipClientIDCheck: we don't enforce a specific audience — any valid Dex JWT is accepted.
+	verifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
+	return &DexVerifier{verifier: verifier}, nil
+}
+
+// Verify validates a Dex JWT and returns the authenticated user.
+// Groups come directly from the token (Backstage populates them); no gitops lookup needed.
+func (d *DexVerifier) Verify(ctx context.Context, token string) (*User, error) {
+	idToken, err := d.verifier.Verify(ctx, token)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Dex JWT: %w", err)
+	}
+
+	var claims struct {
+		Sub               string   `json:"sub"`
+		PreferredUsername string   `json:"preferred_username"`
+		Email             string   `json:"email"`
+		Groups            []string `json:"groups"`
+	}
+	if err := idToken.Claims(&claims); err != nil {
+		return nil, fmt.Errorf("failed to parse JWT claims: %w", err)
+	}
+
+	username := claims.PreferredUsername
+	if username == "" {
+		username = claims.Email
+	}
+	if username == "" {
+		username = claims.Sub
+	}
+
+	return &User{ID: username, Groups: claims.Groups}, nil
+}
+
+// isJWT returns true if the token looks like a JWT (three dot-separated parts).
+func isJWT(token string) bool {
+	return strings.Count(token, ".") == 2
+}
+
+// Middleware returns HTTP middleware that validates GitHub tokens or Dex JWTs.
 //
 // Auth flow:
 //  1. No token + AUTH_REQUIRED=false → dev-user admin (local development)
-//  2. Bearer <github_token> → validate via GitHub API → resolve tenant groups
+//  2. Bearer <jwt> (3 dot-separated parts) → validate via Dex JWKS → extract username + groups
+//  3. Bearer <github_token> → validate via GitHub API → resolve groups from gitops
 //
-// The GitHub token is obtained via: gh auth token
-func Middleware(validator *GitHubValidator, resolver TenantResolver) func(http.Handler) http.Handler {
+// dex may be nil; in that case JWT tokens are rejected with an error.
+func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier) func(http.Handler) http.Handler {
 	authRequired := os.Getenv("AUTH_REQUIRED") != "false"
 
 	return func(next http.Handler) http.Handler {
@@ -77,10 +141,9 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver) func(http.H
 			// No token: allow in dev mode, reject in production.
 			if authHeader == "" {
 				if authRequired {
-					writeUnauthorized(w, "authentication required — set Authorization: Bearer <gh auth token>")
+					writeUnauthorized(w, "authentication required — set Authorization: Bearer <token>")
 					return
 				}
-				// Development: admin bypass.
 				ctx := context.WithValue(r.Context(), userContextKey, &User{
 					ID:     "dev-user",
 					Groups: []string{"admins"},
@@ -95,28 +158,44 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver) func(http.H
 				return
 			}
 
-			// Validate the GitHub token.
-			login, err := validator.Validate(r.Context(), token)
-			if err != nil {
-				slog.Warn("auth failed", "error", err, "path", r.URL.Path)
-				writeUnauthorized(w, err.Error())
-				return
+			var (
+				user *User
+				err  error
+			)
+
+			if isJWT(token) {
+				// Dex JWT path: validate and extract user + groups from claims.
+				if dex == nil {
+					writeUnauthorized(w, "JWT auth not configured on this server")
+					return
+				}
+				user, err = dex.Verify(r.Context(), token)
+				if err != nil {
+					slog.Warn("dex JWT auth failed", "error", err, "path", r.URL.Path)
+					writeUnauthorized(w, err.Error())
+					return
+				}
+			} else {
+				// GitHub token path: validate via GitHub API, resolve groups from gitops.
+				login, ghErr := validator.Validate(r.Context(), token)
+				if ghErr != nil {
+					slog.Warn("github auth failed", "error", ghErr, "path", r.URL.Path)
+					writeUnauthorized(w, ghErr.Error())
+					return
+				}
+				groups := resolveGroups(login, validator, resolver)
+				user = &User{ID: login, Groups: groups}
 			}
 
-			// Resolve tenant memberships from gitops.
-			groups := resolveGroups(login, validator, resolver)
-
-			ctx := context.WithValue(r.Context(), userContextKey, &User{
-				ID:     login,
-				Groups: groups,
-			})
+			// Store user and raw token in context for downstream handlers.
+			ctx := context.WithValue(r.Context(), userContextKey, user)
+			ctx = context.WithValue(ctx, rawTokenKey, token)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
 
 // resolveGroups builds the list of groups (tenant names) for a GitHub user.
-// Admin users are always in the "admins" group.
 func resolveGroups(login string, validator *GitHubValidator, resolver TenantResolver) []string {
 	var groups []string
 
