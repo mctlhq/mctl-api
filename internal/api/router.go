@@ -86,7 +86,10 @@ func NewRouter(opts Options) http.Handler {
 		// GET  /mcp  → open persistent listen stream (optional, for server-initiated messages)
 		// Auth: Authorization: Bearer <token> on every request.
 		if opts.MCPServer != nil {
-			r.Handle("/mcp", opts.MCPServer.NewStreamableHTTPHandler())
+			mcpH := opts.MCPServer.NewStreamableHTTPHandler()
+			r.Post("/mcp", mcpH.ServeHTTP)
+			r.Get("/mcp", mcpH.ServeHTTP)
+			r.Delete("/mcp", mcpH.ServeHTTP)
 		}
 	})
 
