@@ -3,7 +3,7 @@ name: build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ["[0-9]*"]
   pull_request:
     branches: [main]
 
@@ -62,7 +62,7 @@ jobs:
 
       # On semver tag: pin the new image version in GitOps repo
       - name: Update mctl-core image tag
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.ref_type == 'tag'
         env:
           GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
           VERSION: ${{ steps.meta.outputs.version }}

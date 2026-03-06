@@ -266,7 +266,7 @@ Auth is bypassed locally (`AUTH_REQUIRED` defaults to `false` when unset — set
 | `ADMIN_USERS` | — | Comma-separated GitHub logins with admin access |
 | `DEX_ISSUER_URL` | `https://ops.mctl.me/api/dex` | Dex OIDC issuer for JWT auth |
 | `DEX_CLIENT_ID` | — | Dex client ID (informational) |
-| `SELF_URL` | `https://api.mctl.ai` | Public base URL (advertised in MCP SSE) |
+| `SELF_URL` | `https://api.mctl.ai` | Public base URL (advertised in MCP) |
 | `AUTH_REQUIRED` | `true` | Set to `false` to bypass auth in dev |
 | `BACKSTAGE_URL` | — | Backstage URL for catalog sync |
 | `BACKSTAGE_TOKEN` | — | Backstage service token |
@@ -288,4 +288,12 @@ vault kv put platform/mctl-api/backstage-token token="<token>"
 vault kv put platform/mctl-api/sso client-id="mctl-api" client-secret="<random-32-chars>"
 ```
 
-Image is built and pushed to `ghcr.io/mctlhq/mctl-api:latest` on every push to `main`.
+## Release
+
+```bash
+git tag 0.2.0 && git push origin 0.2.0
+# → CI builds ghcr.io/mctlhq/mctl-api:0.2.0
+# → CI commits new tag to mctl-core → ArgoCD deploys
+```
+
+Tags use no `v` prefix. On every push to `main`, a `latest` image is also built (for local dev).
