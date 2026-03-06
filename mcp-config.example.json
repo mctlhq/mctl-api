@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mctl": {
+      "command": "/path/to/mctl-mcp",
+      "env": {
+        "MCTL_API_URL": "http://localhost:8080",
+        "MCTL_API_TOKEN": ""
+      }
+    }
+  }
+}

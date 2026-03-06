@@ -1,0 +1,35 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/mctlhq/mctl-api
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  host: api.mctl.ai
+  className: traefik
+  tls: true
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+env:
+  GITOPS_REPO_URL: https://github.com/mctlhq/mctl-core.git
+  GITOPS_BRANCH: main
+  GITOPS_LOCAL_PATH: /data/mctl-core
+  ARGOCD_URL: https://ops.mctl.me
+  ARGO_WORKFLOWS_NAMESPACE: argo-workflows
+
+# Secret env vars (from ExternalSecret/Vault)
+secretEnv:
+  ARGOCD_TOKEN: ""
