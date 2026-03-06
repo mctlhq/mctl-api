@@ -16,6 +16,10 @@ spec:
         app.kubernetes.io/name: {{ .Chart.Name }}
     spec:
       serviceAccountName: {{ .Chart.Name }}
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
