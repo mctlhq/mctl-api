@@ -5,9 +5,15 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 func (h *Handlers) ListTenants(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil || !user.IsAdmin() {
+		writeError(w, http.StatusForbidden, "listing all tenants requires admin access")
+		return
+	}
 	tenants, err := h.opts.GitReader.ListTenants()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list tenants: "+err.Error())

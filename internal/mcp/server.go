@@ -74,7 +74,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 
 func (s *Server) toolListTenants() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_tenants",
-		mcplib.WithDescription("List all team workspaces on the mctl.ai platform with their resource quotas and member counts. Use this to see what teams exist and their configuration."),
+		mcplib.WithDescription("List all team workspaces on the mctl.ai platform with their resource quotas and member counts. Requires admin access."),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
