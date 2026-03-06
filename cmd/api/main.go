@@ -143,14 +143,14 @@ func loadConfig() config {
 		GitOpsRepoURL:           envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-core.git"),
 		GitOpsBranch:            envOr("GITOPS_BRANCH", "main"),
 		GitOpsLocalPath:         envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-core"),
-		ArgoCDURL:               envOr("ARGOCD_URL", "https://ops.mctl.me"),
+		ArgoCDURL:               envOr("ARGOCD_URL", "https://ops.mctl.ai"),
 		ArgoCDToken:             os.Getenv("ARGOCD_TOKEN"),
 		ArgoWorkflowsNamespace:  envOr("ARGO_WORKFLOWS_NAMESPACE", "argo-workflows"),
 		GitHubOrg:               envOr("GITHUB_ORG", "mctlhq"),
 		AdminUsers:              adminList,
 		BackstageURL:            os.Getenv("BACKSTAGE_URL"),
 		BackstageToken:          os.Getenv("BACKSTAGE_TOKEN"),
-		DexIssuerURL:            envOr("DEX_ISSUER_URL", "https://ops.mctl.me/api/dex"),
+		DexIssuerURL:            envOr("DEX_ISSUER_URL", "https://ops.mctl.ai/api/dex"),
 		SelfURL:                 envOr("SELF_URL", "https://api.mctl.ai"),
 	}
 }

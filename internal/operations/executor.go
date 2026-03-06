@@ -4,14 +4,28 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
+
+var workflowGVR = schema.GroupVersionResource{
+	Group:    "argoproj.io",
+	Version:  "v1alpha1",
+	Resource: "workflows",
+}
 
 // Executor submits Argo Workflows for platform operations.
 type Executor struct {
-	namespace string
+	namespace     string
+	dynamicClient dynamic.Interface
 }
 
 // SubmitResult contains the result of submitting a workflow.
@@ -24,27 +38,33 @@ type SubmitResult struct {
 }
 
 // NewExecutor creates an Executor for the given Argo Workflows namespace.
+// Tries in-cluster config first, falls back to KUBECONFIG for local dev.
 func NewExecutor(namespace string) *Executor {
-	return &Executor{namespace: namespace}
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		kubeconfig := os.Getenv("KUBECONFIG")
+		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if err != nil {
+			slog.Warn("failed to build kubeconfig — workflow submission will be unavailable", "error", err)
+			return &Executor{namespace: namespace}
+		}
+	}
+
+	dynClient, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		slog.Warn("failed to create dynamic client — workflow submission will be unavailable", "error", err)
+		return &Executor{namespace: namespace}
+	}
+
+	return &Executor{namespace: namespace, dynamicClient: dynClient}
 }
 
-// Submit creates and submits an Argo Workflow from a ClusterWorkflowTemplate.
-//
-// In production, this uses the Kubernetes API (client-go) to create a Workflow CR
-// that references the ClusterWorkflowTemplate. For the PoC, we construct the
-// Workflow manifest and apply it.
+// Submit creates an Argo Workflow CR referencing the ClusterWorkflowTemplate.
 func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]string, userID string) (*SubmitResult, error) {
 	requestID := uuid.New().String()[:8]
 	workflowName := fmt.Sprintf("%s-%s", op.WorkflowTemplate, requestID)
 
-	slog.Info("submitting workflow",
-		"operation", op.Name,
-		"workflow", workflowName,
-		"user", userID,
-		"requestId", requestID,
-	)
-
-	// Build workflow parameters, filtering out secret values from logs.
+	// Log params, redacting secrets.
 	logParams := make(map[string]string, len(params))
 	for _, p := range op.Parameters {
 		if v, ok := params[p.Name]; ok {
@@ -55,34 +75,47 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 			}
 		}
 	}
-	slog.Info("workflow parameters", "params", logParams)
+	slog.Info("submitting workflow",
+		"operation", op.Name,
+		"workflow", workflowName,
+		"user", userID,
+		"requestId", requestID,
+		"params", logParams,
+	)
 
-	// TODO: Use client-go to create the Workflow CR.
-	// For now, return a simulated result for local development.
-	//
-	// Production implementation:
-	//   wf := &unstructured.Unstructured{}
-	//   wf.SetGroupVersionKind(schema.GroupVersionKind{
-	//       Group: "argoproj.io", Version: "v1alpha1", Kind: "Workflow",
-	//   })
-	//   wf.SetName(workflowName)
-	//   wf.SetNamespace(e.namespace)
-	//   wf.SetLabels(map[string]string{
-	//       "mctl.ai/operation":  op.Name,
-	//       "mctl.ai/request-id": requestID,
-	//       "mctl.ai/user":       userID,
-	//   })
-	//   spec := map[string]interface{}{
-	//       "workflowTemplateRef": map[string]interface{}{
-	//           "name":         op.WorkflowTemplate,
-	//           "clusterScope": true,
-	//       },
-	//       "arguments": map[string]interface{}{
-	//           "parameters": buildArgoParams(params),
-	//       },
-	//   }
-	//   wf.Object["spec"] = spec
-	//   _, err := dynamicClient.Resource(workflowGVR).Namespace(e.namespace).Create(ctx, wf, metav1.CreateOptions{})
+	if e.dynamicClient == nil {
+		return nil, fmt.Errorf("kubernetes client not available — check cluster config")
+	}
+
+	wf := &unstructured.Unstructured{}
+	wf.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "argoproj.io",
+		Version: "v1alpha1",
+		Kind:    "Workflow",
+	})
+	wf.SetName(workflowName)
+	wf.SetNamespace(e.namespace)
+	wf.SetLabels(map[string]string{
+		"mctl.ai/operation":  op.Name,
+		"mctl.ai/request-id": requestID,
+		"mctl.ai/user":       userID,
+	})
+	wf.Object["spec"] = map[string]interface{}{
+		"workflowTemplateRef": map[string]interface{}{
+			"name":         op.WorkflowTemplate,
+			"clusterScope": true,
+		},
+		"arguments": map[string]interface{}{
+			"parameters": buildArgoParams(params),
+		},
+	}
+
+	_, err := e.dynamicClient.Resource(workflowGVR).Namespace(e.namespace).Create(ctx, wf, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("create workflow %s: %w", workflowName, err)
+	}
+
+	slog.Info("workflow created", "workflow", workflowName, "namespace", e.namespace)
 
 	return &SubmitResult{
 		WorkflowName: workflowName,
@@ -91,4 +124,12 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 		Status:       "Pending",
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}, nil
+}
+
+func buildArgoParams(params map[string]string) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(params))
+	for k, v := range params {
+		result = append(result, map[string]interface{}{"name": k, "value": v})
+	}
+	return result
 }
