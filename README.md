@@ -5,9 +5,9 @@ REST API + MCP server for the mctl.ai platform. Exposes platform operations (dep
 ## Architecture
 
 ```
-Claude Desktop / Cursor ──(SSE)──┐
-mctl CLI / Backstage    ──(REST)──┤──► mctl-api ──► Argo Workflows ──► GitOps ──► ArgoCD
-mctl-mcp (stdio)        ──(REST)──┘                                              └──► K8s
+Claude Desktop / Cursor / Copilot ──(MCP)──┐
+mctl CLI / Backstage               ──(REST)──┤──► mctl-api ──► Argo Workflows ──► GitOps ──► ArgoCD
+mctl-mcp (stdio)                   ──(REST)──┘                                              └──► K8s
 ```
 
 ## Auth
@@ -73,7 +73,107 @@ The binary picks up `gh auth token` automatically if `MCTL_API_TOKEN` is not set
 
 ## MCP: Cursor IDE
 
-Same JSON structure in Cursor → Settings → MCP.
+Settings → Cursor Settings → MCP → Add server:
+
+```json
+{
+  "mcpServers": {
+    "mctl": {
+      "type": "http",
+      "url": "https://api.mctl.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-github-token>"
+      }
+    }
+  }
+}
+```
+
+## MCP: VS Code (GitHub Copilot)
+
+Create `.vscode/mcp.json` in your project (or use the global MCP settings):
+
+```json
+{
+  "servers": {
+    "mctl": {
+      "type": "http",
+      "url": "https://api.mctl.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:mctlToken}"
+      }
+    }
+  },
+  "inputs": [
+    {
+      "id": "mctlToken",
+      "type": "promptString",
+      "description": "GitHub token (run: gh auth token)",
+      "password": true
+    }
+  ]
+}
+```
+
+VS Code will prompt for the token once and cache it in the session.
+
+Requires VS Code ≥ 1.99 with GitHub Copilot Chat extension.
+
+## MCP: Windsurf (Codeium)
+
+Settings → Windsurf Settings → MCP → Add server (same format as Cursor):
+
+```json
+{
+  "mcpServers": {
+    "mctl": {
+      "type": "http",
+      "url": "https://api.mctl.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-github-token>"
+      }
+    }
+  }
+}
+```
+
+## MCP: Gemini CLI
+
+Add to `~/.gemini/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "mctl": {
+      "httpUrl": "https://api.mctl.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-github-token>"
+      }
+    }
+  }
+}
+```
+
+## MCP: Continue.dev
+
+Add to `~/.continue/config.json`:
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "mctl",
+      "transport": {
+        "type": "streamable-http",
+        "url": "https://api.mctl.ai/mcp",
+        "headers": {
+          "Authorization": "Bearer <your-github-token>"
+        }
+      }
+    }
+  ]
+}
+```
 
 ## Available Tools
 
