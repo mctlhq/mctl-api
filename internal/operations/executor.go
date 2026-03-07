@@ -60,12 +60,11 @@ func NewExecutor(namespace string) *Executor {
 }
 
 // Submit creates an Argo Workflow CR referencing the ClusterWorkflowTemplate.
-// If namespace is non-empty, the workflow is created in that namespace (e.g. the target team's namespace);
-// otherwise it falls back to the global Argo Workflows namespace configured on the executor.
-func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]string, userID string, namespace string) (*SubmitResult, error) {
-	if namespace == "" {
-		namespace = e.namespace
-	}
+// Workflows always execute in the global Argo Workflows namespace (where service
+// accounts and infrastructure secrets live). The target team is recorded via the
+// mctl.ai/team label so workflows are filterable in the Argo Workflows UI.
+func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]string, userID string, team string) (*SubmitResult, error) {
+	namespace := e.namespace
 	requestID := uuid.New().String()[:8]
 	workflowName := fmt.Sprintf("%s-%s", op.WorkflowTemplate, requestID)
 
@@ -100,11 +99,15 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 	})
 	wf.SetName(workflowName)
 	wf.SetNamespace(namespace)
-	wf.SetLabels(map[string]string{
+	labels := map[string]string{
 		"mctl.ai/operation":  op.Name,
 		"mctl.ai/request-id": requestID,
 		"mctl.ai/user":       userID,
-	})
+	}
+	if team != "" {
+		labels["mctl.ai/team"] = team
+	}
+	wf.SetLabels(labels)
 	wf.Object["spec"] = map[string]interface{}{
 		"workflowTemplateRef": map[string]interface{}{
 			"name":         op.WorkflowTemplate,

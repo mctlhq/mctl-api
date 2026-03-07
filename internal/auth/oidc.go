@@ -54,6 +54,11 @@ func UserFromContext(ctx context.Context) *User {
 	return u
 }
 
+// WithUser returns a context with the given user injected. Useful in tests.
+func WithUser(ctx context.Context, u *User) context.Context {
+	return context.WithValue(ctx, userContextKey, u)
+}
+
 // TokenFromContext returns the raw bearer token stored by the auth middleware.
 // Tool handlers use this to forward auth to downstream API calls.
 func TokenFromContext(ctx context.Context) string {

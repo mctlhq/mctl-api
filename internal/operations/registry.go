@@ -201,4 +201,14 @@ var builtinOperations = []Operation{
 			{Name: "tenant_name", Type: "string", Required: true, Description: "Workspace name to delete", Pattern: "^[a-z0-9][a-z0-9-]{1,62}$"},
 		},
 	},
+	{
+		Name:             "smoke-test",
+		DisplayName:      "Platform Smoke Test",
+		Description:      "End-to-end smoke test: onboard → verify pod → deploy with env+secret → verify Vault/ExternalSecret/pod env → provision DB → verify DB secret → update-config → verify env → retire. Runs in the tests team. onExit handler always retires on failure.",
+		WorkflowTemplate: "smoke-test",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		ModifiesPaths:    []string{},
+		Parameters:       []ParameterDef{},
+	},
 }

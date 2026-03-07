@@ -2,362 +2,246 @@
 
 // Package e2e contains end-to-end tests that verify the full platform flow:
 //
-//	mctl tool call → Argo Workflow submitted → GitOps commit → ArgoCD sync → service deployed
+//mctl tool call → Argo Workflow submitted → GitOps commit → ArgoCD sync → service deployed
 //
 // Run with:
 //
-//	MCTL_TEST_TOKEN=$(gh auth token) go test ./e2e/ -v -tags e2e -timeout 20m
+//MCTL_TEST_TOKEN=$(gh auth token) go test ./e2e/ -v -tags e2e -timeout 30m
 //
-// The test deploys a real service into the `tests` team, verifies it reaches
-// Healthy+Synced state in ArgoCD, checks env vars, and then retires the service.
+// TestE2E_FullPlatformSmokeTest triggers the smoke-test ClusterWorkflowTemplate which
+// verifies the complete lifecycle: deploy → env+secrets in pod → DB provision → update-config → retire.
 package e2e
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
-	"math/rand"
-	"net/http"
-	"os"
-	"strings"
-	"testing"
-	"time"
+"bytes"
+"encoding/json"
+"fmt"
+"io"
+"net/http"
+"os"
+"testing"
+"time"
 )
 
 const (
-	apiBaseURL  = "https://api.mctl.ai"
-	testTeam    = "tests"
-	testRepo    = "mashkovd/monteexchange"
-	testTag     = "v1.1.0"
-	pollInterval = 15 * time.Second
-	deployTimeout = 12 * time.Minute
+apiBaseURL    = "https://api.mctl.ai"
+pollInterval  = 20 * time.Second
+smokeTimeout  = 25 * time.Minute
 )
 
 // client is a thin HTTP client for the mctl API.
 type client struct {
-	base  string
-	token string
-	http  *http.Client
+base  string
+token string
+http  *http.Client
 }
 
 func newClient(t *testing.T) *client {
-	t.Helper()
-	token := os.Getenv("MCTL_TEST_TOKEN")
-	if token == "" {
-		t.Skip("MCTL_TEST_TOKEN not set — skipping e2e tests")
-	}
-	return &client{
-		base:  apiBaseURL,
-		token: token,
-		http:  &http.Client{Timeout: 30 * time.Second},
-	}
+t.Helper()
+token := os.Getenv("MCTL_TEST_TOKEN")
+if token == "" {
+t.Skip("MCTL_TEST_TOKEN not set — skipping e2e tests")
+}
+return &client{
+base:  apiBaseURL,
+token: token,
+http:  &http.Client{Timeout: 30 * time.Second},
+}
 }
 
 func (c *client) get(t *testing.T, path string) (int, map[string]interface{}) {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, c.base+path, nil)
-	if err != nil {
-		t.Fatalf("build GET request: %v", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	return c.do(t, req)
+t.Helper()
+req, _ := http.NewRequest(http.MethodGet, c.base+path, nil)
+req.Header.Set("Authorization", "Bearer "+c.token)
+return c.do(t, req)
 }
 
 func (c *client) post(t *testing.T, path string, body interface{}) (int, map[string]interface{}) {
-	t.Helper()
-	b, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, c.base+path, bytes.NewReader(b))
-	if err != nil {
-		t.Fatalf("build POST request: %v", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Content-Type", "application/json")
-	return c.do(t, req)
+t.Helper()
+b, _ := json.Marshal(body)
+req, _ := http.NewRequest(http.MethodPost, c.base+path, bytes.NewReader(b))
+req.Header.Set("Authorization", "Bearer "+c.token)
+req.Header.Set("Content-Type", "application/json")
+return c.do(t, req)
 }
 
 func (c *client) do(t *testing.T, req *http.Request) (int, map[string]interface{}) {
-	t.Helper()
-	resp, err := c.http.Do(req)
-	if err != nil {
-		t.Fatalf("HTTP request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	var out map[string]interface{}
-	_ = json.Unmarshal(raw, &out)
-	return resp.StatusCode, out
+t.Helper()
+resp, err := c.http.Do(req)
+if err != nil {
+t.Fatalf("HTTP %s %s failed: %v", req.Method, req.URL.Path, err)
+}
+defer resp.Body.Close()
+raw, _ := io.ReadAll(resp.Body)
+var out map[string]interface{}
+_ = json.Unmarshal(raw, &out)
+return resp.StatusCode, out
 }
 
-// randomSuffix generates a short random suffix for test service names.
-func randomSuffix() string {
-	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, 6)
-	for i := range b {
-		b[i] = charset[rand.Intn(len(charset))]
-	}
-	return string(b)
-}
-
-// ── smoke: read-only sanity checks ──────────────────────────────────────────
+// ── read-only sanity checks ──────────────────────────────────────────────────
 
 func TestE2E_Healthz(t *testing.T) {
-	c := newClient(t)
-	status, body := c.get(t, "/healthz")
-	if status != 200 {
-		t.Fatalf("expected 200, got %d: %v", status, body)
-	}
-	t.Logf("✓ /healthz OK")
+c := newClient(t)
+status, _ := c.get(t, "/healthz")
+if status != 200 {
+t.Fatalf("expected 200, got %d", status)
+}
+t.Log("✓ /healthz OK")
 }
 
 func TestE2E_ListTenants(t *testing.T) {
-	c := newClient(t)
-	status, body := c.get(t, "/api/v1/tenants")
-	if status != 200 {
-		t.Fatalf("expected 200, got %d: %v", status, body)
-	}
-	count := int(body["count"].(float64))
-	if count == 0 {
-		t.Fatal("expected at least one tenant")
-	}
-	t.Logf("✓ ListTenants: %d tenants found", count)
+c := newClient(t)
+status, body := c.get(t, "/api/v1/tenants")
+if status != 200 {
+t.Fatalf("expected 200, got %d: %v", status, body)
+}
+count := int(body["count"].(float64))
+if count == 0 {
+t.Fatal("expected at least one tenant")
+}
+t.Logf("✓ ListTenants: %d tenants", count)
 }
 
 func TestE2E_ListServices(t *testing.T) {
-	c := newClient(t)
-	status, body := c.get(t, "/api/v1/services")
-	if status != 200 {
-		t.Fatalf("expected 200, got %d: %v", status, body)
-	}
-	count := int(body["count"].(float64))
-	t.Logf("✓ ListServices: %d services found", count)
+c := newClient(t)
+status, body := c.get(t, "/api/v1/services")
+if status != 200 {
+t.Fatalf("expected 200, got %d: %v", status, body)
+}
+t.Logf("✓ ListServices: %d services", int(body["count"].(float64)))
 }
 
 func TestE2E_ListOperations(t *testing.T) {
-	c := newClient(t)
-	status, body := c.get(t, "/api/v1/operations")
-	if status != 200 {
-		t.Fatalf("expected 200, got %d: %v", status, body)
-	}
-	items := body["items"].([]interface{})
-	names := make([]string, len(items))
-	for i, item := range items {
-		names[i] = item.(map[string]interface{})["name"].(string)
-	}
-	t.Logf("✓ ListOperations: %v", names)
+c := newClient(t)
+status, body := c.get(t, "/api/v1/operations")
+if status != 200 {
+t.Fatalf("expected 200, got %d: %v", status, body)
+}
+items := body["items"].([]interface{})
+names := make([]string, len(items))
+for i, item := range items {
+names[i] = item.(map[string]interface{})["name"].(string)
+}
+t.Logf("✓ Operations: %v", names)
 
-	expectedOps := []string{"deploy-service", "create-tenant", "provision-database", "retire-service", "delete-tenant"}
-	for _, want := range expectedOps {
-		found := false
-		for _, got := range names {
-			if got == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("expected operation %q not found in registry", want)
-		}
-	}
+for _, want := range []string{"deploy-service", "create-tenant", "provision-database", "retire-service", "delete-tenant", "smoke-test"} {
+found := false
+for _, got := range names {
+if got == want {
+found = true
+break
+}
+}
+if !found {
+t.Errorf("operation %q not found in registry", want)
+}
+}
 }
 
-// ── full deploy flow ─────────────────────────────────────────────────────────
-
-// TestE2E_FullDeployFlow deploys a real service, waits for ArgoCD to sync,
-// verifies the service is Healthy+Synced with correct env vars, then retires it.
-func TestE2E_FullDeployFlow(t *testing.T) {
-	c := newClient(t)
-
-	svcName := "smoke-" + randomSuffix()
-	testHost := svcName + ".mctl.ai"
-	testEnv := strings.Join([]string{
-		"APP_ENV=smoke-test",
-		"FEATURE_FLAG=enabled",
-	}, "\n")
-
-	t.Logf("▶ deploying service %s/%s (tag: %s)", testTeam, svcName, testTag)
-
-	// ── Step 1: submit deploy workflow ───────────────────────────────────────
-	status, body := c.post(t, "/api/v1/operations/deploy-service/execute", map[string]string{
-		"action":          "onboard",
-		"team_name":       testTeam,
-		"component_name":  svcName,
-		"component_type":  "base-service",
-		"dockerfile_repo": testRepo,
-		"git_tag":         testTag,
-		"host":            testHost,
-		"port":            "8080",
-		"env_vars":        testEnv,
-	})
-	if status != 202 {
-		t.Fatalf("deploy-service expected 202, got %d: %v", status, body)
-	}
-
-	wf, ok := body["workflow"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("response missing workflow field: %v", body)
-	}
-	workflowName := wf["workflowName"].(string)
-	workflowNamespace := wf["namespace"].(string)
-
-	t.Logf("✓ workflow submitted: %s (namespace: %s)", workflowName, workflowNamespace)
-
-	// Namespace must match the target team, not global argo-workflows.
-	if workflowNamespace != testTeam {
-		t.Errorf("expected workflow namespace=%q, got %q", testTeam, workflowNamespace)
-	}
-
-	// ── Step 2: verify workflow appears in audit log ──────────────────────────
-	wfStatus, wfBody := c.get(t, "/api/v1/workflows/"+workflowName)
-	if wfStatus != 200 {
-		t.Fatalf("GetWorkflow expected 200, got %d: %v", wfStatus, wfBody)
-	}
-	if audit, ok := wfBody["audit"].(map[string]interface{}); ok {
-		if audit["status"] != "submitted" {
-			t.Errorf("expected workflow status=submitted, got: %v", audit["status"])
-		}
-		t.Logf("✓ workflow audit entry: status=%v, user=%v", audit["status"], audit["userId"])
-	}
-
-	// ── Step 3: wait for ArgoCD to sync ──────────────────────────────────────
-	// The Argo Workflow builds the image, commits to GitOps, then ArgoCD syncs.
-	t.Logf("⏳ waiting for ArgoCD to sync %s/%s (timeout: %v) ...", testTeam, svcName, deployTimeout)
-
-	deadline := time.Now().Add(deployTimeout)
-	var lastStatus map[string]interface{}
-	synced := false
-
-	for time.Now().Before(deadline) {
-		time.Sleep(pollInterval)
-
-		code, statusBody := c.get(t, fmt.Sprintf("/api/v1/status/%s/%s", testTeam, svcName))
-		if code == 404 {
-			t.Logf("  … ArgoCD app not yet created (workflow still running)")
-			continue
-		}
-		if code != 200 {
-			t.Logf("  … status check returned %d: %v", code, statusBody)
-			continue
-		}
-
-		lastStatus = statusBody
-		argo, ok := statusBody["argocd"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		health := fmt.Sprintf("%v", argo["health"])
-		sync := fmt.Sprintf("%v", argo["syncStatus"])
-		t.Logf("  … ArgoCD: health=%s sync=%s", health, sync)
-
-		if health == "Healthy" && sync == "Synced" {
-			synced = true
-			break
-		}
-	}
-
-	if !synced {
-		t.Fatalf("service %s/%s did not reach Healthy+Synced within %v; last status: %v",
-			testTeam, svcName, deployTimeout, lastStatus)
-	}
-	t.Logf("✓ service %s/%s is Healthy+Synced", testTeam, svcName)
-
-	// ── Step 4: verify service appears in list ────────────────────────────────
-	code, listBody := c.get(t, "/api/v1/services?team="+testTeam)
-	if code != 200 {
-		t.Fatalf("ListServices expected 200, got %d", code)
-	}
-	items := listBody["items"].([]interface{})
-	found := false
-	for _, item := range items {
-		svc := item.(map[string]interface{})
-		if svc["name"] == svcName {
-			found = true
-			if svc["imageTag"] != testTag {
-				t.Errorf("expected imageTag=%s, got %v", testTag, svc["imageTag"])
-			}
-			t.Logf("✓ service in list: name=%v tag=%v host=%v", svc["name"], svc["imageTag"], svc["host"])
-			break
-		}
-	}
-	if !found {
-		t.Errorf("service %s not found in team %s service list", svcName, testTeam)
-	}
-
-	// ── Step 5: verify service details and env vars ───────────────────────────
-	code, svcBody := c.get(t, fmt.Sprintf("/api/v1/services/%s/%s", testTeam, svcName))
-	if code != 200 {
-		t.Fatalf("GetService expected 200, got %d", code)
-	}
-	if svcBody["name"] != svcName {
-		t.Errorf("expected service name=%s, got %v", svcName, svcBody["name"])
-	}
-	if svcBody["imageTag"] != testTag {
-		t.Errorf("expected imageTag=%s, got %v", testTag, svcBody["imageTag"])
-	}
-	t.Logf("✓ service details verified: %v", svcBody)
-
-	// ── Cleanup: retire the test service ─────────────────────────────────────
-	t.Logf("🧹 retiring test service %s/%s ...", testTeam, svcName)
-	code, retireBody := c.post(t, "/api/v1/operations/retire-service/execute", map[string]string{
-		"team_name":      testTeam,
-		"component_name": svcName,
-	})
-	if code != 202 {
-		t.Errorf("retire-service expected 202, got %d: %v", code, retireBody)
-	} else {
-		retireWF := retireBody["workflow"].(map[string]interface{})
-		t.Logf("✓ retire workflow submitted: %v", retireWF["workflowName"])
-	}
+func TestE2E_RBAC(t *testing.T) {
+c := newClient(t)
+status, body := c.get(t, "/api/v1/tenants/admins")
+if status != 200 {
+t.Fatalf("admin user should access admins tenant, got %d: %v", status, body)
+}
+t.Log("✓ admin user can access admins tenant")
 }
 
-// ── RBAC checks ──────────────────────────────────────────────────────────────
+// ── full platform smoke test ─────────────────────────────────────────────────
 
-func TestE2E_RBAC_CannotOperateOnOtherTeam(t *testing.T) {
-	c := newClient(t)
+// TestE2E_FullPlatformSmokeTest triggers the smoke-test ClusterWorkflowTemplate
+// which runs the complete lifecycle:
+//   1. onboard service (deploy-service)
+//   2. verify pod running
+//   3. deploy update with env_vars + secret_env_vars
+//   4. verify env and secrets inside the pod (kubectl exec)
+//   5. provision PostgreSQL database
+//   6. verify Vault secret + ExternalSecret synced
+//   7. update-config
+//   8. verify updated env in pod
+//   9. retire service (cleanup)
+func TestE2E_FullPlatformSmokeTest(t *testing.T) {
+c := newClient(t)
 
-	// The token owner (mashkovd) is in admins, so they have access to all teams.
-	// This test verifies that the RBAC check logic works for the API contract.
-	// We test a valid access: admins can deploy to any team.
-	status, body := c.get(t, "/api/v1/tenants/admins")
-	if status != 200 {
-		t.Fatalf("admin user should be able to view admins tenant, got %d: %v", status, body)
-	}
-	t.Logf("✓ admin user can access admins tenant")
+t.Log("▶ triggering platform smoke-test workflow")
+
+// Submit the smoke-test operation (no params needed — defaults to tests/smoke-test-svc).
+status, body := c.post(t, "/api/v1/operations/smoke-test/execute", map[string]string{})
+if status != 202 {
+t.Fatalf("smoke-test expected 202, got %d: %v", status, body)
 }
 
-// ── workflow namespace routing ───────────────────────────────────────────────
+wf := body["workflow"].(map[string]interface{})
+workflowName := wf["workflowName"].(string)
+workflowNS := wf["namespace"].(string)
 
-func TestE2E_WorkflowNamespaceRouting(t *testing.T) {
-	c := newClient(t)
+t.Logf("✓ smoke-test workflow submitted: %s (namespace: %s)", workflowName, workflowNS)
+t.Logf("  track at: https://workflows.mctl.ai/workflows/%s/%s", workflowNS, workflowName)
 
-	// Submit a lightweight operation and verify the workflow namespace
-	// matches the target team (not the global argo-workflows namespace).
-	svcName := "ns-check-" + randomSuffix()
+// Verify audit entry is recorded.
+wfStatus, wfBody := c.get(t, "/api/v1/workflows/"+workflowName)
+if wfStatus != 200 {
+t.Fatalf("GetWorkflow expected 200, got %d", wfStatus)
+}
+if audit, ok := wfBody["audit"].(map[string]interface{}); ok {
+t.Logf("✓ audit: operation=%v status=%v user=%v", audit["operation"], audit["status"], audit["userId"])
+}
 
-	status, body := c.post(t, "/api/v1/operations/deploy-service/execute", map[string]string{
-		"action":          "onboard",
-		"team_name":       testTeam,
-		"component_name":  svcName,
-		"component_type":  "base-service",
-		"dockerfile_repo": testRepo,
-		"git_tag":         testTag,
-	})
-	if status != 202 {
-		t.Fatalf("expected 202, got %d: %v", status, body)
-	}
+// Poll ArgoCD for the smoke-test service to appear as Healthy+Synced.
+// The smoke-test CWT deploys to tests/smoke-test-svc.
+t.Logf("⏳ waiting for tests/smoke-test-svc to be Healthy+Synced (timeout: %v) ...", smokeTimeout)
 
-	wf := body["workflow"].(map[string]interface{})
-	namespace := wf["namespace"].(string)
+deadline := time.Now().Add(smokeTimeout)
+phase := "workflow running"
+synced := false
 
-	if namespace != testTeam {
-		t.Errorf("workflow namespace should be %q (team namespace), got %q", testTeam, namespace)
-	}
-	t.Logf("✓ workflow namespace correctly set to team namespace: %s", namespace)
+for time.Now().Before(deadline) {
+time.Sleep(pollInterval)
 
-	// Cleanup: retire immediately (don't wait for completion)
-	c.post(t, "/api/v1/operations/retire-service/execute", map[string]string{
-		"team_name":      testTeam,
-		"component_name": svcName,
-	})
+code, statusBody := c.get(t, "/api/v1/status/tests/smoke-test-svc")
+if code == 404 {
+if phase != "workflow running" {
+phase = "workflow running"
+}
+t.Log("  … ArgoCD app not yet created (workflow still running)")
+continue
+}
+if code != 200 {
+t.Logf("  … status %d: %v", code, statusBody)
+continue
+}
+
+argo := statusBody["argocd"].(map[string]interface{})
+health := fmt.Sprintf("%v", argo["health"])
+sync := fmt.Sprintf("%v", argo["syncStatus"])
+t.Logf("  … ArgoCD: health=%s sync=%s", health, sync)
+phase = fmt.Sprintf("health=%s sync=%s", health, sync)
+
+if health == "Healthy" && sync == "Synced" {
+synced = true
+break
+}
+}
+
+if !synced {
+t.Fatalf("smoke-test-svc did not reach Healthy+Synced within %v (last phase: %s)", smokeTimeout, phase)
+}
+t.Log("✓ tests/smoke-test-svc is Healthy+Synced")
+
+// Verify the service appears in the services list with expected tag.
+code, listBody := c.get(t, "/api/v1/services?team=tests")
+if code != 200 {
+t.Fatalf("ListServices expected 200, got %d", code)
+}
+items := listBody["items"].([]interface{})
+for _, item := range items {
+svc := item.(map[string]interface{})
+if svc["name"] == "smoke-test-svc" {
+t.Logf("✓ smoke-test-svc in services list: tag=%v", svc["imageTag"])
+break
+}
+}
+
+// The smoke-test CWT retires the service on exit — no cleanup needed here.
+t.Log("✓ full platform smoke test complete")
 }

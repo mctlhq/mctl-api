@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
@@ -83,7 +84,10 @@ func (f *fakeExecutor) Submit(_ context.Context, op operations.Operation, _ map[
 
 func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 	t.Helper()
-	t.Setenv("AUTH_REQUIRED", "false") // dev mode: auto-admin user
+	// Only set dev mode if the caller hasn't already configured AUTH_REQUIRED.
+	if os.Getenv("AUTH_REQUIRED") == "" {
+		t.Setenv("AUTH_REQUIRED", "false") // dev mode: auto-admin user
+	}
 
 	gitReader := &fakeGitReader{
 		tenants: []gitops.Tenant{
@@ -117,6 +121,31 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 func get(t *testing.T, router http.Handler, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+// getAs calls GET with an admin user injected into context.
+func getAs(t *testing.T, router http.Handler, path string, user *auth.User) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req = req.WithContext(auth.WithUser(req.Context(), user))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+// adminUser is a pre-built admin user for test helpers.
+var adminUser = &auth.User{ID: "test-admin", Groups: []string{"admins"}}
+
+// postAs sends POST with a user injected into context.
+func postAs(t *testing.T, router http.Handler, path string, body interface{}, user *auth.User) *httptest.ResponseRecorder {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(auth.WithUser(req.Context(), user))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	return w
@@ -196,12 +225,17 @@ func TestSmoke_Tenants(t *testing.T) {
 	router, _ := newTestRouter(t)
 
 	t.Run("list tenants returns all tenants", func(t *testing.T) {
-		w := get(t, router, "/api/v1/tenants")
+		w := getAs(t, router, "/api/v1/tenants", adminUser)
 		assertStatus(t, w, http.StatusOK)
 		body := decodeJSON(t, w)
 		if body["count"].(float64) != 2 {
 			t.Errorf("expected 2 tenants, got: %v", body["count"])
 		}
+	})
+
+	t.Run("list tenants without admin returns 403", func(t *testing.T) {
+		w := get(t, router, "/api/v1/tenants")
+		assertStatus(t, w, http.StatusForbidden)
 	})
 
 	t.Run("get existing tenant returns details", func(t *testing.T) {
@@ -279,13 +313,13 @@ func TestSmoke_ExecuteOperation(t *testing.T) {
 	router, exec := newTestRouter(t)
 
 	t.Run("deploy-service with valid params submits workflow", func(t *testing.T) {
-		w := post(t, router, "/api/v1/operations/deploy-service/execute", map[string]string{
+		w := postAs(t, router, "/api/v1/operations/deploy-service/execute", map[string]string{
 			"action":          "onboard",
 			"team_name":       "tests",
 			"component_name":  "my-app",
 			"dockerfile_repo": "myorg/my-app",
 			"git_tag":         "v1.0.0",
-		})
+		}, adminUser)
 		assertStatus(t, w, http.StatusAccepted)
 		body := decodeJSON(t, w)
 		if body["operation"] != "deploy-service" {
@@ -297,25 +331,25 @@ func TestSmoke_ExecuteOperation(t *testing.T) {
 	})
 
 	t.Run("deploy-service with missing required param returns 400", func(t *testing.T) {
-		w := post(t, router, "/api/v1/operations/deploy-service/execute", map[string]string{
+		w := postAs(t, router, "/api/v1/operations/deploy-service/execute", map[string]string{
 			"action":    "onboard",
 			"team_name": "tests",
 			// missing component_name
-		})
+		}, adminUser)
 		assertStatus(t, w, http.StatusBadRequest)
 	})
 
 	t.Run("deploy-service with invalid action enum returns 400", func(t *testing.T) {
-		w := post(t, router, "/api/v1/operations/deploy-service/execute", map[string]string{
+		w := postAs(t, router, "/api/v1/operations/deploy-service/execute", map[string]string{
 			"action":         "bad-action",
 			"team_name":      "tests",
 			"component_name": "my-app",
-		})
+		}, adminUser)
 		assertStatus(t, w, http.StatusBadRequest)
 	})
 
 	t.Run("execute unknown operation returns 404", func(t *testing.T) {
-		w := post(t, router, "/api/v1/operations/does-not-exist/execute", map[string]string{})
+		w := postAs(t, router, "/api/v1/operations/does-not-exist/execute", map[string]string{}, adminUser)
 		assertStatus(t, w, http.StatusNotFound)
 	})
 }
@@ -325,10 +359,14 @@ func TestSmoke_Auth(t *testing.T) {
 		t.Setenv("AUTH_REQUIRED", "true")
 		router, _ := newTestRouter(t)
 
+		// Wrap with the real auth middleware (nil github validator, nil resolver — will reject all tokens).
+		mw := auth.Middleware(nil, nil, nil)
+		handler := mw(router)
+
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants", nil)
 		// no Authorization header
 		w := httptest.NewRecorder()
-		router.ServeHTTP(w, req)
+		handler.ServeHTTP(w, req)
 		assertStatus(t, w, http.StatusUnauthorized)
 	})
 }

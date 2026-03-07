@@ -19,7 +19,73 @@ Two token types are accepted:
 | GitHub token | no dots | GitHub API → tenant groups from gitops |
 | Dex JWT | 3 dot-separated parts | Dex JWKS → groups from token claims |
 
-Get a GitHub token: `gh auth token`
+## Getting a Token
+
+All MCP clients need a Bearer token. Two options:
+
+1. **GitHub token** (simplest) — run `gh auth token` in your terminal
+2. **Web flow** — go to [mctl.me/mcp](https://mctl.me/mcp), click "Sign in with GitHub", copy the pre-filled config
+
+Your GitHub account must be a member of the `mctlhq` organization. Token is validated on every MCP request via GitHub API.
+
+> **Token rotation:** GitHub tokens expire. When a client shows "needs authentication" or tools stop working, get a fresh token with `gh auth token` and update the config.
+
+## MCP: GitHub Copilot CLI
+
+Add to `~/.copilot/mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mctl": {
+      "type": "http",
+      "url": "https://api.mctl.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-github-token>"
+      }
+    }
+  }
+}
+```
+
+**Setup & auth:**
+
+```bash
+# 1. Get token
+gh auth token
+
+# 2. Create config (replace <token> with actual value)
+cat > ~/.copilot/mcp-config.json << 'EOF'
+{
+  "mcpServers": {
+    "mctl": {
+      "type": "http",
+      "url": "https://api.mctl.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer <token>"
+      }
+    }
+  }
+}
+EOF
+
+# 3. Restart Copilot CLI
+# Exit current session (ctrl+d) and start a new one.
+
+# 4. Verify — run /mcp in the CLI. Expected:
+#    ✓ mctl   http   https://api.mctl.ai/mcp
+```
+
+**Troubleshooting:**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `✗ mctl … needs authentication` | Token expired or missing | Update token in `~/.copilot/mcp-config.json` with fresh `gh auth token`, restart CLI |
+| `✗ mctl … connection refused` | API unreachable | Check `curl https://api.mctl.ai/healthz` |
+| Tools not visible after restart | Config not loaded | Verify file is valid JSON: `python3 -m json.tool ~/.copilot/mcp-config.json` |
+| `/mcp auth mctl` does nothing | No OAuth discovery endpoint | Expected — mctl uses static Bearer tokens, not OAuth flow. Update token manually |
+
+> **Note:** Copilot CLI may show "OAuth: needs authentication" in `/mcp` status even when the server works fine — this is a cosmetic label because the config uses `type: "http"`. The actual auth uses the `Authorization` header, not OAuth.
 
 ## MCP: Claude Desktop via Streamable HTTP (recommended)
 
@@ -40,8 +106,6 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   }
 }
 ```
-
-Get token: `gh auth token`
 
 Also works via `api.mctl.me`:
 ```json
