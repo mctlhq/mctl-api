@@ -1,10 +1,13 @@
 package gitops
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,11 +19,13 @@ import (
 // Reader provides read access to the GitOps mono-repo state.
 // It clones the repo locally and refreshes periodically.
 type Reader struct {
-	repoURL   string
-	branch    string
-	localPath string
-	mu        sync.RWMutex
-	lastSync  time.Time
+	repoURL    string
+	branch     string
+	localPath  string
+	token      string // GitHub token for HTTPS auth (optional)
+	sshKeyPath string // Path to SSH private key (optional, takes precedence over token)
+	mu         sync.RWMutex
+	lastSync   time.Time
 }
 
 // Tenant represents a workspace read from the GitOps repo.
@@ -51,11 +56,16 @@ type Service struct {
 }
 
 // NewReader creates a new gitops reader.
-func NewReader(repoURL, branch, localPath string) (*Reader, error) {
+// token is an optional GitHub token for HTTPS auth.
+// sshKeyPath is an optional path to an SSH private key for SSH auth.
+// If sshKeyPath is set, it takes precedence and the repo URL should be SSH format.
+func NewReader(repoURL, branch, localPath, token, sshKeyPath string) (*Reader, error) {
 	r := &Reader{
-		repoURL:   repoURL,
-		branch:    branch,
-		localPath: localPath,
+		repoURL:    repoURL,
+		branch:     branch,
+		localPath:  localPath,
+		token:      token,
+		sshKeyPath: sshKeyPath,
 	}
 	return r, nil
 }
@@ -86,10 +96,42 @@ func (r *Reader) refresh() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// For local development / PoC: if the path exists, treat it as a local checkout.
-	// In production, this would do a git pull.
-	if _, err := os.Stat(r.localPath); os.IsNotExist(err) {
-		slog.Info("gitops repo not found locally, will use mock data", "path", r.localPath)
+	var cloneURL string
+	var sshEnv []string
+
+	if r.sshKeyPath != "" {
+		// SSH auth: use key file, skip host key checking for GitHub
+		cloneURL = r.repoURL
+		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", r.sshKeyPath)
+		sshEnv = []string{"GIT_SSH_COMMAND=" + sshCmd}
+	} else if r.token != "" {
+		// HTTPS auth: inject token into URL
+		if u, err := url.Parse(r.repoURL); err == nil {
+			u.User = url.UserPassword("x-access-token", r.token)
+			cloneURL = u.String()
+		} else {
+			cloneURL = r.repoURL
+		}
+	} else {
+		cloneURL = r.repoURL
+	}
+
+	gitDir := filepath.Join(r.localPath, ".git")
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		slog.Info("cloning gitops repo", "url", r.repoURL, "branch", r.branch, "path", r.localPath)
+		cmd := exec.Command("git", "clone", "--depth=1", "--branch="+r.branch, "--single-branch", cloneURL, r.localPath)
+		cmd.Env = append(os.Environ(), sshEnv...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git clone failed: %w\n%s", err, bytes.TrimSpace(out))
+		}
+		slog.Info("gitops repo cloned successfully")
+	} else {
+		args := []string{"-C", r.localPath, "pull", "--ff-only", cloneURL, r.branch}
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(), sshEnv...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git pull failed: %w\n%s", err, bytes.TrimSpace(out))
+		}
 	}
 
 	r.lastSync = time.Now()

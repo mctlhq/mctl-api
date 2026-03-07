@@ -39,6 +39,10 @@ spec:
             {{- end }}
             - name: PORT
               value: {{ .Values.service.port | quote }}
+            {{- if .Values.gitopsSSHSecret }}
+            - name: GITOPS_SSH_KEY_PATH
+              value: /etc/gitops-ssh/ssh-privatekey
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -56,7 +60,18 @@ spec:
           volumeMounts:
             - name: gitops-cache
               mountPath: /data/mctl-core
+            {{- if .Values.gitopsSSHSecret }}
+            - name: gitops-ssh
+              mountPath: /etc/gitops-ssh
+              readOnly: true
+            {{- end }}
       volumes:
         - name: gitops-cache
           emptyDir:
             sizeLimit: 500Mi
+        {{- if .Values.gitopsSSHSecret }}
+        - name: gitops-ssh
+          secret:
+            secretName: {{ .Values.gitopsSSHSecret }}
+            defaultMode: 0400
+        {{- end }}

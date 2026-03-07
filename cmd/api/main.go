@@ -28,7 +28,7 @@ func main() {
 	// Initialize components.
 	registry := operations.NewRegistry()
 
-	gitReader, err := gitops.NewReader(cfg.GitOpsRepoURL, cfg.GitOpsBranch, cfg.GitOpsLocalPath)
+	gitReader, err := gitops.NewReader(cfg.GitOpsRepoURL, cfg.GitOpsBranch, cfg.GitOpsLocalPath, cfg.GitOpsToken, cfg.GitOpsSSHKeyPath)
 	if err != nil {
 		slog.Error("failed to initialize gitops reader", "error", err)
 		os.Exit(1)
@@ -114,6 +114,8 @@ type config struct {
 	GitOpsRepoURL          string
 	GitOpsBranch           string
 	GitOpsLocalPath        string
+	GitOpsToken            string // GitHub token for HTTPS auth (optional)
+	GitOpsSSHKeyPath       string // Path to SSH key for SSH auth (optional, takes precedence)
 	ArgoCDURL              string
 	ArgoCDToken            string
 	ArgoWorkflowsNamespace string
@@ -143,6 +145,8 @@ func loadConfig() config {
 		GitOpsRepoURL:           envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-core.git"),
 		GitOpsBranch:            envOr("GITOPS_BRANCH", "main"),
 		GitOpsLocalPath:         envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-core"),
+		GitOpsToken:             os.Getenv("GITOPS_REPO_TOKEN"),
+		GitOpsSSHKeyPath:        envOr("GITOPS_SSH_KEY_PATH", "/etc/gitops-ssh/ssh-privatekey"),
 		ArgoCDURL:               envOr("ARGOCD_URL", "https://ops.mctl.ai"),
 		ArgoCDToken:             os.Getenv("ARGOCD_TOKEN"),
 		ArgoWorkflowsNamespace:  envOr("ARGO_WORKFLOWS_NAMESPACE", "argo-workflows"),

@@ -37,3 +37,8 @@ env:
 
 # Name of an existing Secret to mount as envFrom (created by ExternalSecret)
 envFromSecret: ""
+
+# Optional: mount an SSH private key for gitops repo access.
+# If set, mounts the secret at /etc/gitops-ssh/ and sets GITOPS_SSH_KEY_PATH.
+# The secret must have a key named "ssh-privatekey".
+gitopsSSHSecret: ""
