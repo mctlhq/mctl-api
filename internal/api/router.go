@@ -115,6 +115,12 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/repos", h.ListRepos)
 			r.Post("/repos/sync", h.SyncRepos)
 
+			// Custom domains (proxied to Backstage custom-domains plugin).
+			r.Get("/domains", h.ListDomains)
+			r.Post("/domains", h.AddDomain)
+			r.Post("/domains/{id}/verify", h.VerifyDomain)
+			r.Delete("/domains/{id}", h.DeleteDomain)
+
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)
 			r.Get("/operations/{name}", h.GetOperation)
