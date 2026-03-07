@@ -129,8 +129,39 @@ func (v *GitHubValidator) fetchLogin(ctx context.Context, token string) (string,
 }
 
 func (v *GitHubValidator) checkOrgMembership(ctx context.Context, token, login string) (bool, error) {
+	// Primary check: list the authenticated user's own org memberships via /user/orgs.
+	// This works regardless of whether the OAuth App is approved in the org, because
+	// the user is querying their own data (not org resources).
+	member, err := v.checkOrgMembershipViaUserOrgs(ctx, token)
+	if err == nil {
+		return member, nil
+	}
+
+	// Fallback: org-level membership check. Requires OAuth App to be approved in org.
+	// If denied (403), the app is not approved — treat as non-member (fail closed).
 	url := fmt.Sprintf("https://api.github.com/orgs/%s/members/%s", v.org, login)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err2 := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err2 != nil {
+		return false, err2
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err2 := v.client.Do(req)
+	if err2 != nil {
+		return false, err2
+	}
+	defer resp.Body.Close()
+
+	// 204 = member, 302/404 = not a member, 403 = OAuth App not approved in org (deny)
+	return resp.StatusCode == http.StatusNoContent, nil
+}
+
+// checkOrgMembershipViaUserOrgs uses GET /user/orgs to list the authenticated user's
+// org memberships. This endpoint works even when the OAuth App is not approved in the
+// target org, because the user is reading their own membership data.
+func (v *GitHubValidator) checkOrgMembershipViaUserOrgs(ctx context.Context, token string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user/orgs?per_page=100", nil)
 	if err != nil {
 		return false, err
 	}
@@ -143,13 +174,22 @@ func (v *GitHubValidator) checkOrgMembership(ctx context.Context, token, login s
 	}
 	defer resp.Body.Close()
 
-	// 204 = member, 302/404 = not a member, 403 = no permission to check (allow)
-	if resp.StatusCode == http.StatusNoContent {
-		return true, nil
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("GET /user/orgs returned %d", resp.StatusCode)
 	}
-	if resp.StatusCode == http.StatusForbidden {
-		// Can't check membership (token lacks org:read scope) — allow through.
-		return true, nil
+
+	body, _ := io.ReadAll(resp.Body)
+	var orgs []struct {
+		Login string `json:"login"`
+	}
+	if err := json.Unmarshal(body, &orgs); err != nil {
+		return false, fmt.Errorf("failed to parse /user/orgs response: %w", err)
+	}
+
+	for _, org := range orgs {
+		if strings.EqualFold(org.Login, v.org) {
+			return true, nil
+		}
 	}
 	return false, nil
 }
