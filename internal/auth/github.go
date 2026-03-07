@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -64,8 +65,8 @@ func (v *GitHubValidator) Validate(ctx context.Context, token string) (string, e
 	if v.org != "" {
 		orgMember, err = v.checkOrgMembership(ctx, token, login)
 		if err != nil {
-			// Treat API errors as "unknown" (allow through, log the error).
-			orgMember = true
+			slog.Warn("org membership check failed — denying access (fail closed)", "user", login, "org", v.org, "error", err)
+			return "", fmt.Errorf("org membership check failed: %w", err)
 		}
 	}
 

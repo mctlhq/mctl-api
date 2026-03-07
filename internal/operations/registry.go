@@ -1,5 +1,7 @@
 package operations
 
+import "regexp"
+
 // Registry holds all available platform operations mapped to Argo WorkflowTemplates.
 type Registry struct {
 	ops map[string]Operation
@@ -86,6 +88,11 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 				errors = append(errors, p.Name+": must be one of "+joinStrings(p.Enum))
 			}
 		}
+		if p.Pattern != "" {
+			if !regexp.MustCompile(p.Pattern).MatchString(val) {
+				errors = append(errors, p.Name+": must match pattern "+p.Pattern)
+			}
+		}
 	}
 	return errors
 }
@@ -97,7 +104,7 @@ func (r *Registry) ApplyDefaults(op Operation, input map[string]string) map[stri
 		result[k] = v
 	}
 	for _, p := range op.Parameters {
-		if _, exists := result[p.Name]; !exists && p.Default != "" {
+		if _, exists := result[p.Name]; !exists {
 			result[p.Name] = p.Default
 		}
 	}

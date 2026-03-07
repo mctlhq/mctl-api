@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -57,15 +58,20 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 
 	// Read tools (safe, always available).
 	srv.AddTool(s.toolListTenants())
+	srv.AddTool(s.toolGetTenant())
 	srv.AddTool(s.toolListServices())
 	srv.AddTool(s.toolGetServiceStatus())
+	srv.AddTool(s.toolGetServiceConfig())
 	srv.AddTool(s.toolGetWorkflowStatus())
 	srv.AddTool(s.toolGetResourceUsage())
+	srv.AddTool(s.toolListRecentOperations())
 
 	// Write tools (trigger workflows).
 	srv.AddTool(s.toolDeployService())
 	srv.AddTool(s.toolCreateTenant())
 	srv.AddTool(s.toolProvisionDatabase())
+	srv.AddTool(s.toolRetireService())
+	srv.AddTool(s.toolDeleteTenant())
 
 	return srv
 }
@@ -100,7 +106,7 @@ func (s *Server) toolListServices() (mcplib.Tool, server.ToolHandlerFunc) {
 		args := req.GetArguments()
 		path := "/api/v1/services"
 		if team, ok := args["team"].(string); ok && team != "" {
-			path += "?team=" + team
+			path += "?team=" + url.QueryEscape(team)
 		}
 		body, err := s.apiGet(ctx, path)
 		if err != nil {
@@ -129,7 +135,7 @@ func (s *Server) toolGetServiceStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 		args := req.GetArguments()
 		team := args["team"].(string)
 		service := args["service"].(string)
-		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/status/%s/%s", team, service))
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/status/%s/%s", url.PathEscape(team), url.PathEscape(service)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get status for %s/%s: %v", team, service, err)), nil
 		}
@@ -151,7 +157,7 @@ func (s *Server) toolGetWorkflowStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		args := req.GetArguments()
 		name := args["workflow_name"].(string)
-		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/workflows/%s", name))
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/workflows/%s", url.PathEscape(name)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get workflow %s: %v", name, err)), nil
 		}
@@ -173,7 +179,7 @@ func (s *Server) toolGetResourceUsage() (mcplib.Tool, server.ToolHandlerFunc) {
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		args := req.GetArguments()
 		team := args["team"].(string)
-		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/resources/%s", team))
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/resources/%s", url.PathEscape(team)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get resource usage for %s: %v", team, err)), nil
 		}
@@ -195,7 +201,9 @@ Actions:
 - "update-config": Change environment variables or secrets without rebuilding.
 
 The service will be available at {host} after ArgoCD syncs (typically 1-2 minutes).
-For background workers, omit the host parameter.`),
+For background workers, omit the host parameter.
+
+Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track progress.`),
 		mcplib.WithString("action",
 			mcplib.Required(),
 			mcplib.Description("Operation type: onboard (first deploy), deploy (update version), update-config (change env)"),
@@ -257,7 +265,9 @@ This provisions:
 - ArgoCD RBAC (team members can view/sync their apps)
 - SSO access to Argo Workflows UI
 
-The workspace name must be unique, DNS-safe (lowercase letters, numbers, hyphens).`),
+The workspace name must be unique, DNS-safe (lowercase letters, numbers, hyphens).
+
+Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track progress.`),
 		mcplib.WithString("tenant_name",
 			mcplib.Required(),
 			mcplib.Description("Workspace name (DNS-safe, 2-63 chars, e.g. 'billing', 'data-team')"),
@@ -304,7 +314,9 @@ This creates:
 - ExternalSecret that syncs Vault credentials to a Kubernetes Secret
 - Connection details available as environment variables (DATABASE_URL, DB_HOST, etc.)
 
-The database name follows the convention: {team_name}-{app_name}.`),
+The database name follows the convention: {team_name}-{app_name}.
+
+Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track progress.`),
 		mcplib.WithString("team_name",
 			mcplib.Required(),
 			mcplib.Description("Team name"),
@@ -320,6 +332,130 @@ The database name follows the convention: {team_name}-{app_name}.`),
 		body, err := s.apiPost(ctx, "/api/v1/operations/provision-database/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to provision database: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolGetTenant() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_tenant",
+		mcplib.WithDescription("Get details of a specific team workspace: members, quotas, and deployed services."),
+		mcplib.WithString("name",
+			mcplib.Required(),
+			mcplib.Description("Tenant (workspace) name"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		name := args["name"].(string)
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/tenants/%s", url.PathEscape(name)))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get tenant %s: %v", name, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolGetServiceConfig() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_service_config",
+		mcplib.WithDescription("Get full configuration of a service from the GitOps repo: image tag, host, port, component type, and database status. Use this when you need full details beyond what list_services provides."),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		team := args["team"].(string)
+		service := args["service"].(string)
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/services/%s/%s", url.PathEscape(team), url.PathEscape(service)))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get config for %s/%s: %v", team, service, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolListRecentOperations() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_recent_operations",
+		mcplib.WithDescription("List the most recent platform operations from the audit log (up to 50 entries). Shows who ran what operation, when, and what workflow was triggered. Useful for reviewing recent activity before making changes."),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiGet(ctx, "/api/v1/audit")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list recent operations: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolRetireService() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_retire_service",
+		mcplib.WithDescription(`DESTRUCTIVE: Remove a service from the platform permanently.
+
+Deletes GitOps manifests, Vault secrets, ArgoCD Application, and all Kubernetes resources.
+This action is irreversible — all data and configuration will be lost.
+
+Confirm the team and service names carefully before calling this tool.
+Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track progress.`),
+		mcplib.WithString("team_name",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("component_name",
+			mcplib.Required(),
+			mcplib.Description("Service name to retire"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/retire-service/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to retire service: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolDeleteTenant() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_delete_tenant",
+		mcplib.WithDescription(`DESTRUCTIVE: Delete a team workspace and all its platform resources permanently.
+
+Removes the Kubernetes namespace, ArgoCD RBAC, and Vault policy.
+All services in the workspace must be retired first (use mctl_retire_service).
+This action is irreversible.
+
+Confirm the tenant name carefully before calling this tool.
+Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track progress.`),
+		mcplib.WithString("tenant_name",
+			mcplib.Required(),
+			mcplib.Description("Workspace name to delete"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/delete-tenant/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete tenant: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}
