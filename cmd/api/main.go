@@ -37,12 +37,12 @@ func main() {
 	// Dex JWT verifier (optional — disabled if DEX_ISSUER_URL is unset or unreachable).
 	var dexVerifier *auth.DexVerifier
 	if cfg.DexIssuerURL != "" {
-		dv, dexErr := auth.NewDexVerifier(context.Background(), cfg.DexIssuerURL)
+		dv, dexErr := auth.NewDexVerifier(context.Background(), cfg.DexIssuerURL, cfg.DexClientID)
 		if dexErr != nil {
 			slog.Warn("dex OIDC init failed — JWT auth disabled", "issuer", cfg.DexIssuerURL, "error", dexErr)
 		} else {
 			dexVerifier = dv
-			slog.Info("dex OIDC initialized", "issuer", cfg.DexIssuerURL)
+			slog.Info("dex OIDC initialized", "issuer", cfg.DexIssuerURL, "clientID", cfg.DexClientID)
 		}
 	}
 
@@ -68,6 +68,7 @@ func main() {
 		MCPServer:      mcpSrv,
 		BackstageURL:   cfg.BackstageURL,
 		BackstageToken: cfg.BackstageToken,
+		AllowedOrigins: cfg.AllowedOrigins,
 	})
 
 	srv := &http.Server{
@@ -125,8 +126,12 @@ type config struct {
 	BackstageToken         string
 	// Dex OIDC issuer for JWT validation (dual-token auth alongside GitHub tokens).
 	DexIssuerURL           string
+	// DexClientID is the expected audience for Dex JWTs. If empty, audience check is skipped.
+	DexClientID            string
 	// SelfURL is the public base URL used in MCP SSE endpoint advertisement.
 	SelfURL                string
+	// AllowedOrigins is a list of origins permitted by CORS policy.
+	AllowedOrigins         []string
 }
 
 func loadConfig() config {
@@ -137,6 +142,24 @@ func loadConfig() config {
 			if a = strings.TrimSpace(a); a != "" {
 				adminList = append(adminList, a)
 			}
+		}
+	}
+
+	var origins []string
+	if raw := os.Getenv("ALLOWED_ORIGINS"); raw != "" {
+		for _, o := range strings.Split(raw, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				origins = append(origins, o)
+			}
+		}
+	} else {
+		origins = []string{
+			"https://mctl.ai",
+			"https://mctl.me",
+			"https://app.mctl.ai",
+			"https://app.mctl.me",
+			"https://ops.mctl.ai",
+			"https://ops.mctl.me",
 		}
 	}
 
@@ -155,7 +178,9 @@ func loadConfig() config {
 		BackstageURL:            os.Getenv("BACKSTAGE_URL"),
 		BackstageToken:          os.Getenv("BACKSTAGE_TOKEN"),
 		DexIssuerURL:            envOr("DEX_ISSUER_URL", "https://ops.mctl.ai/api/dex"),
+		DexClientID:             os.Getenv("DEX_CLIENT_ID"),
 		SelfURL:                 envOr("SELF_URL", "https://api.mctl.ai"),
+		AllowedOrigins:          origins,
 	}
 }
 
