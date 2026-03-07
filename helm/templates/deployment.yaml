@@ -32,6 +32,10 @@ spec:
             - secretRef:
                 name: {{ .Values.envFromSecret }}
             {{- end }}
+            {{- if .Values.envFromExtraSecret }}
+            - secretRef:
+                name: {{ .Values.envFromExtraSecret }}
+            {{- end }}
           env:
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}

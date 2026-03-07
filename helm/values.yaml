@@ -42,3 +42,4 @@ envFromSecret: ""
 # If set, mounts the secret at /etc/gitops-ssh/ and sets GITOPS_SSH_KEY_PATH.
 # The secret must have a key named "ssh-privatekey".
 gitopsSSHSecret: ""
+envFromExtraSecret: ""
