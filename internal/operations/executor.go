@@ -60,7 +60,12 @@ func NewExecutor(namespace string) *Executor {
 }
 
 // Submit creates an Argo Workflow CR referencing the ClusterWorkflowTemplate.
-func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]string, userID string) (*SubmitResult, error) {
+// If namespace is non-empty, the workflow is created in that namespace (e.g. the target team's namespace);
+// otherwise it falls back to the global Argo Workflows namespace configured on the executor.
+func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]string, userID string, namespace string) (*SubmitResult, error) {
+	if namespace == "" {
+		namespace = e.namespace
+	}
 	requestID := uuid.New().String()[:8]
 	workflowName := fmt.Sprintf("%s-%s", op.WorkflowTemplate, requestID)
 
@@ -94,7 +99,7 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 		Kind:    "Workflow",
 	})
 	wf.SetName(workflowName)
-	wf.SetNamespace(e.namespace)
+	wf.SetNamespace(namespace)
 	wf.SetLabels(map[string]string{
 		"mctl.ai/operation":  op.Name,
 		"mctl.ai/request-id": requestID,
@@ -110,16 +115,16 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 		},
 	}
 
-	_, err := e.dynamicClient.Resource(workflowGVR).Namespace(e.namespace).Create(ctx, wf, metav1.CreateOptions{})
+	_, err := e.dynamicClient.Resource(workflowGVR).Namespace(namespace).Create(ctx, wf, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("create workflow %s: %w", workflowName, err)
 	}
 
-	slog.Info("workflow created", "workflow", workflowName, "namespace", e.namespace)
+	slog.Info("workflow created", "workflow", workflowName, "namespace", namespace)
 
 	return &SubmitResult{
 		WorkflowName: workflowName,
-		Namespace:    e.namespace,
+		Namespace:    namespace,
 		RequestID:    requestID,
 		Status:       "Pending",
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),

@@ -67,8 +67,8 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		go h.notifyBackstage(input)
 	}
 
-	// Submit the Argo Workflow.
-	result, err := h.opts.Executor.Submit(r.Context(), op, input, user.ID)
+	// Submit the Argo Workflow in the target team's namespace (falls back to global namespace if no tenant param).
+	result, err := h.opts.Executor.Submit(r.Context(), op, input, user.ID, tenantParam)
 	if err != nil {
 		h.opts.AuditLog.Log(audit.Entry{
 			UserID:     user.ID,
