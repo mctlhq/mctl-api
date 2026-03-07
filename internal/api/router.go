@@ -5,9 +5,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/mctlhq/mctl-api/internal/argocd"
-	"github.com/mctlhq/mctl-api/internal/audit"
-	"github.com/mctlhq/mctl-api/internal/gitops"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
@@ -15,10 +12,10 @@ import (
 // Options holds all dependencies for the API router.
 type Options struct {
 	Registry       *operations.Registry
-	GitReader      *gitops.Reader
-	ArgoCD         *argocd.Client
-	AuditLog       *audit.Logger
-	Executor       *operations.Executor
+	GitReader      GitReader
+	ArgoCD         ArgoStatusClient
+	AuditLog       AuditLog
+	Executor       WorkflowExecutor
 	AuthMiddleware func(http.Handler) http.Handler
 	// MCPServer exposes platform tools over MCP Streamable HTTP at /mcp.
 	MCPServer      *mctlmcp.Server
