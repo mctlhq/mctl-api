@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"time"
 
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/loki"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
@@ -35,3 +37,8 @@ type WorkflowExecutor interface {
 // AuditLog is the interface for recording and querying audit events.
 // Implemented by audit.Logger (in-memory) and audit.PostgresLogger (persistent).
 type AuditLog = audit.Log
+
+// LogQuerier fetches log lines from Loki for a given namespace/app.
+type LogQuerier interface {
+	QueryRange(ctx context.Context, namespace, app string, lines int, since time.Duration) ([]loki.LogLine, error)
+}

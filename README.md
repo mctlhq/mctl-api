@@ -249,15 +249,19 @@ Add to `~/.continue/config.json`:
 | `mctl_list_services` | List services, optional `team` filter |
 | `mctl_get_service_status` | ArgoCD health + sync state for a service |
 | `mctl_get_workflow_status` | Status and logs of an Argo Workflow run |
-| `mctl_get_resource_usage` | CPU/memory/pods quota for a team |
+| `mctl_get_resource_usage` | Live CPU/memory/pods usage from K8s ResourceQuota |
+| `mctl_get_service_logs` | Recent log lines from Loki (requires Loki enabled) |
 
 **Write (trigger Argo Workflows):**
 
 | Tool | What it does |
 |---|---|
-| `mctl_deploy_service` | Onboard, deploy, or update-config a service |
+| `mctl_deploy_service` | Onboard, deploy, or update-config a service (supports autoscaling params) |
 | `mctl_create_tenant` | Create team workspace with namespace, quotas, Vault scope |
 | `mctl_provision_database` | Provision PostgreSQL on shared CNPG cluster |
+| `mctl_rollback_service` | Roll back a service to a previous image tag |
+| `mctl_create_preview` | Deploy ephemeral preview environment for a service |
+| `mctl_delete_preview` | Delete a preview environment |
 
 ## Example conversations
 
@@ -278,6 +282,52 @@ Add to `~/.continue/config.json`:
 → mctl_get_workflow_status(workflow_name="deploy-service-abc123")
 ```
 
+## API Docs (OpenAPI)
+
+The full API spec is available at runtime — no separate tooling needed.
+
+| URL | What you get |
+|---|---|
+| `https://api.mctl.ai/openapi.yaml` | Raw OpenAPI 3.0 spec (download or import) |
+| `https://api.mctl.ai/docs` | Swagger UI (auto-redirect, no local install) |
+
+### Browse interactively
+
+Open `https://api.mctl.ai/docs` in your browser. The Swagger UI loads the live spec and lets you:
+- Read endpoint descriptions, required params, and response schemas
+- Click "Authorize" → paste your GitHub token → try endpoints directly in the browser
+
+### Import into Postman / Insomnia / Paw
+
+```bash
+# Download spec
+curl -O https://api.mctl.ai/openapi.yaml
+
+# Import into Postman:
+# File → Import → select openapi.yaml
+# Postman creates a collection with all endpoints pre-configured.
+```
+
+### Import into Cursor / Windsurf
+
+Some IDEs let you reference an OpenAPI spec for autocomplete in HTTP files:
+
+```
+# .http file example (VS Code REST Client / JetBrains HTTP Client)
+GET https://api.mctl.ai/api/v1/tenants
+Authorization: Bearer {{token}}
+```
+
+### Validate locally
+
+```bash
+npx @redocly/cli lint https://api.mctl.ai/openapi.yaml
+# or
+docker run --rm -v $(pwd):/spec redocly/cli lint /spec/openapi.yaml
+```
+
+---
+
 ## REST API
 
 ```bash
@@ -292,6 +342,10 @@ curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/serv
 
 # Service status
 curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/status/billing/payment-api
+
+# Service logs (last 50 lines from past 30 minutes)
+curl -H "Authorization: Bearer $(gh auth token)" \
+     "https://api.mctl.ai/api/v1/logs/billing/payment-api?lines=50&since=30m"
 
 # Trigger operation
 curl -H "Authorization: Bearer $(gh auth token)" \
@@ -334,6 +388,8 @@ Auth is bypassed locally (`AUTH_REQUIRED` defaults to `false` when unset — set
 | `AUTH_REQUIRED` | `true` | Set to `false` to bypass auth in dev |
 | `BACKSTAGE_URL` | — | Backstage URL for catalog sync |
 | `BACKSTAGE_TOKEN` | — | Backstage service token |
+| `AUDIT_DB_URL` | — | PostgreSQL connection string for persistent audit log (falls back to in-memory) |
+| `LOKI_URL` | — | Loki base URL for log querying (e.g. `http://loki.monitoring:3100`) |
 
 ## Deployment
 

@@ -16,6 +16,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/k8s"
+	"github.com/mctlhq/mctl-api/internal/loki"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
@@ -80,6 +81,13 @@ func main() {
 		quotaReader = qc
 	}
 
+	// Loki log client (optional — enabled when LOKI_URL is set).
+	var logQuerier mctlapi.LogQuerier
+	if lokiURL := os.Getenv("LOKI_URL"); lokiURL != "" {
+		logQuerier = loki.NewClient(lokiURL)
+		slog.Info("loki log querying enabled", "url", lokiURL)
+	}
+
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Registry:             registry,
 		GitReader:            gitReader,
@@ -89,6 +97,7 @@ func main() {
 		AuthMiddleware:       authMiddleware,
 		MCPServer:            mcpSrv,
 		QuotaReader:          quotaReader,
+		LogQuerier:           logQuerier,
 		BackstageURL:         cfg.BackstageURL,
 		BackstageToken:       cfg.BackstageToken,
 		BackstageInternalURL: cfg.BackstageInternalURL,

@@ -66,6 +66,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolGetResourceUsage())
 	srv.AddTool(s.toolListRecentOperations())
 	srv.AddTool(s.toolListRepos())
+	srv.AddTool(s.toolGetServiceLogs())
 
 	// Write tools (trigger workflows).
 	srv.AddTool(s.toolDeployService())
@@ -658,6 +659,62 @@ func (s *Server) toolDeletePreview() (mcplib.Tool, server.ToolHandlerFunc) {
 		body, err := s.apiPost(ctx, "/api/v1/operations/preview-delete/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete preview: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolGetServiceLogs() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_service_logs",
+		mcplib.WithDescription(`Fetch recent log lines for a service from Loki.
+
+Returns log lines sorted by timestamp (most recent first).
+Use this when debugging service issues or investigating errors.
+
+Parameters:
+- lines: number of log lines to return (default 100, max 1000)
+- since: time window — e.g. "15m", "1h", "6h", "24h" (default "1h")
+
+Requires in-cluster deployment with Loki enabled (LOKI_URL env var).`),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+		mcplib.WithString("lines",
+			mcplib.Description("Number of log lines to return (default: 100, max: 1000)"),
+		),
+		mcplib.WithString("since",
+			mcplib.Description("Time window: 15m, 1h, 6h, 24h (default: 1h)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		team, _ := args["team"].(string)
+		service, _ := args["service"].(string)
+
+		path := fmt.Sprintf("/api/v1/logs/%s/%s", url.PathEscape(team), url.PathEscape(service))
+
+		q := url.Values{}
+		if lines, ok := args["lines"].(string); ok && lines != "" {
+			q.Set("lines", lines)
+		}
+		if since, ok := args["since"].(string); ok && since != "" {
+			q.Set("since", since)
+		}
+		if len(q) > 0 {
+			path += "?" + q.Encode()
+		}
+
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get logs for %s/%s: %v", team, service, err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

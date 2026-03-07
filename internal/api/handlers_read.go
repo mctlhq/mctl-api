@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -137,6 +139,51 @@ func (h *Handlers) GetResourceUsage(w http.ResponseWriter, r *http.Request) {
 		resp["note"] = "Live usage metrics require in-cluster deployment"
 	}
 
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handlers) GetServiceLogs(w http.ResponseWriter, r *http.Request) {
+	team := chi.URLParam(r, "team")
+	app := chi.URLParam(r, "app")
+
+	lines := 100
+	if l := r.URL.Query().Get("lines"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 1000 {
+			lines = n
+		}
+	}
+
+	since := time.Hour
+	if s := r.URL.Query().Get("since"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			since = d
+		}
+	}
+
+	resp := map[string]interface{}{
+		"team": team,
+		"app":  app,
+	}
+
+	if h.opts.LogQuerier == nil {
+		resp["lines"] = []interface{}{}
+		resp["count"] = 0
+		resp["note"] = "Log querying requires in-cluster deployment with Loki (set LOKI_URL)"
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	logLines, err := h.opts.LogQuerier.QueryRange(r.Context(), team, app, lines, since)
+	if err != nil {
+		resp["lines"] = []interface{}{}
+		resp["count"] = 0
+		resp["note"] = "Loki query error: " + err.Error()
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	resp["lines"] = logLines
+	resp["count"] = len(logLines)
 	writeJSON(w, http.StatusOK, resp)
 }
 

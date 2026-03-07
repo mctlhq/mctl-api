@@ -265,4 +265,32 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{},
 		Parameters:       []ParameterDef{},
 	},
+	{
+		Name:             "add-custom-domain",
+		DisplayName:      "Add Custom Domain",
+		Description:      "Add a verified custom domain to a service. Validates DNS (CNAME must point to {team}-{service}.mctl.ai), updates ingress configuration, and provisions TLS certificate via HTTP-01 challenge.",
+		WorkflowTemplate: "add-custom-domain",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{service_name}/"},
+		Parameters: []ParameterDef{
+			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			{Name: "service_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			{Name: "domain", Type: "string", Required: true, Description: "Custom domain to add (e.g. api.mycompany.com)"},
+		},
+	},
+	{
+		Name:             "remove-custom-domain",
+		DisplayName:      "Remove Custom Domain",
+		Description:      "Remove a custom domain from a service. Cleans up ingress hosts and TLS configuration.",
+		WorkflowTemplate: "remove-custom-domain",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{service_name}/"},
+		Parameters: []ParameterDef{
+			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			{Name: "service_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			{Name: "domain", Type: "string", Required: true, Description: "Custom domain to remove"},
+		},
+	},
 }
