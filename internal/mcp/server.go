@@ -203,6 +203,12 @@ Actions:
 The service will be available at {host} after ArgoCD syncs (typically 1-2 minutes).
 For background workers, omit the host parameter.
 
+Repository access for building:
+- Repos in the mctlhq GitHub org are accessed automatically via the platform GitHub App.
+- For repos outside the org (private), store a PAT in Vault first:
+  Vault path: secret/data/teams/{team_name}/{component_name}/repo-pat → {"pat": "ghp_..."}
+- Public repos work without any credentials.
+
 Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track progress.`),
 		mcplib.WithString("action",
 			mcplib.Required(),
