@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -78,13 +79,20 @@ type DexVerifier struct {
 }
 
 // NewDexVerifier creates a DexVerifier by fetching OIDC configuration from the issuer.
-func NewDexVerifier(ctx context.Context, issuerURL string) (*DexVerifier, error) {
+// If clientID is non-empty, JWTs are validated against the expected audience (recommended).
+// If clientID is empty, audience check is skipped (for local development only).
+func NewDexVerifier(ctx context.Context, issuerURL, clientID string) (*DexVerifier, error) {
 	provider, err := oidc.NewProvider(ctx, issuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("oidc provider init failed for %s: %w", issuerURL, err)
 	}
-	// SkipClientIDCheck: we don't enforce a specific audience — any valid Dex JWT is accepted.
-	verifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
+	cfg := &oidc.Config{}
+	if clientID != "" {
+		cfg.ClientID = clientID
+	} else {
+		cfg.SkipClientIDCheck = true
+	}
+	verifier := provider.Verifier(cfg)
 	return &DexVerifier{verifier: verifier}, nil
 }
 
@@ -223,5 +231,5 @@ func resolveGroups(login string, validator *GitHubValidator, resolver TenantReso
 func writeUnauthorized(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
-	w.Write([]byte(`{"error":"` + msg + `"}`))
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
