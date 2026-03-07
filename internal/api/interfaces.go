@@ -9,6 +9,11 @@ import (
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
+// QuotaReader fetches live Kubernetes ResourceQuota usage for a namespace.
+type QuotaReader interface {
+	GetNamespaceUsage(ctx context.Context, namespace string) (used, hard map[string]string, err error)
+}
+
 // GitReader is the subset of gitops.Reader used by API handlers.
 type GitReader interface {
 	ListTenants() ([]gitops.Tenant, error)
@@ -27,9 +32,6 @@ type WorkflowExecutor interface {
 	Submit(ctx context.Context, op operations.Operation, params map[string]string, userID string, namespace string) (*operations.SubmitResult, error)
 }
 
-// AuditLog is the subset of audit.Logger used by API handlers.
-type AuditLog interface {
-	Log(entry audit.Entry)
-	List(limit int) []audit.Entry
-	GetByWorkflow(name string) *audit.Entry
-}
+// AuditLog is the interface for recording and querying audit events.
+// Implemented by audit.Logger (in-memory) and audit.PostgresLogger (persistent).
+type AuditLog = audit.Log
