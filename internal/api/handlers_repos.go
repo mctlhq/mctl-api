@@ -42,7 +42,7 @@ func (h *Handlers) ListRepos(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"backstage unavailable"}`, http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	w.Header().Set("Content-Type", "application/json")
@@ -100,7 +100,7 @@ func (h *Handlers) SyncRepos(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"backstage unavailable"}`, http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	w.Header().Set("Content-Type", "application/json")

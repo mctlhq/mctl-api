@@ -141,7 +141,7 @@ func (h *Handlers) notifyBackstage(input map[string]string) {
 		slog.Warn("backstage notify: request failed", "error", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		slog.Warn("backstage notify: API returned error", "status", resp.StatusCode)

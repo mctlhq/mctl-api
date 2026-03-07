@@ -43,8 +43,8 @@ type ParameterDef struct {
 // NewRegistry creates the operation registry with all known operations.
 func NewRegistry() *Registry {
 	r := &Registry{ops: make(map[string]Operation)}
-	for _, op := range builtinOperations {
-		r.ops[op.Name] = op //nolint:gocritic // rangeValCopy acceptable for init
+	for i := range builtinOperations {
+		r.ops[builtinOperations[i].Name] = builtinOperations[i]
 	}
 	return r
 }
@@ -58,8 +58,8 @@ func (r *Registry) Get(name string) (Operation, bool) {
 // List returns all registered operations.
 func (r *Registry) List() []Operation {
 	out := make([]Operation, 0, len(r.ops))
-	for _, op := range r.ops {
-		out = append(out, op) //nolint:gocritic // rangeValCopy acceptable for small list
+	for k := range r.ops {
+		out = append(out, r.ops[k])
 	}
 	return out
 }
