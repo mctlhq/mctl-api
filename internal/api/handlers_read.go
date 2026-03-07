@@ -119,12 +119,25 @@ func (h *Handlers) GetResourceUsage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "tenant not found: "+tenant)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+
+	resp := map[string]interface{}{
 		"tenant":    tenant,
 		"allocated": t.Quotas,
 		"used":      map[string]string{},
-		"note":      "Live usage metrics require in-cluster deployment",
-	})
+	}
+
+	if h.opts.QuotaReader != nil {
+		used, _, quotaErr := h.opts.QuotaReader.GetNamespaceUsage(r.Context(), tenant)
+		if quotaErr == nil && used != nil {
+			resp["used"] = used
+		} else if quotaErr != nil {
+			resp["note"] = "quota fetch error: " + quotaErr.Error()
+		}
+	} else {
+		resp["note"] = "Live usage metrics require in-cluster deployment"
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handlers) ListAudit(w http.ResponseWriter, r *http.Request) {

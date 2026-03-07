@@ -23,6 +23,8 @@ type Options struct {
 	AuthMiddleware func(http.Handler) http.Handler
 	// MCPServer exposes platform tools over MCP Streamable HTTP at /mcp.
 	MCPServer      *mctlmcp.Server
+	// QuotaReader fetches live K8s resource usage (optional — nil in local/test).
+	QuotaReader    QuotaReader
 	// Optional Backstage integration for immediate catalog sync.
 	BackstageURL   string
 	BackstageToken string
