@@ -26,6 +26,9 @@ type Options struct {
 	// Optional Backstage integration for immediate catalog sync.
 	BackstageURL   string
 	BackstageToken string
+	// BackstageInternalURL is the cluster-internal URL for Backstage (e.g. http://backstage.backstage.svc:7007).
+	// Used for proxying repo operations to the github-app-connect plugin.
+	BackstageInternalURL string
 	// AllowedOrigins is the list of origins permitted by CORS.
 	// If empty, no Access-Control-Allow-Origin header is set (deny all cross-origin).
 	AllowedOrigins []string
@@ -84,6 +87,10 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/workflows/{name}", h.GetWorkflow)
 			r.Get("/resources/{tenant}", h.GetResourceUsage)
 			r.Get("/audit", h.ListAudit)
+
+			// Repository discovery (proxied to Backstage github-app-connect plugin).
+			r.Get("/repos", h.ListRepos)
+			r.Post("/repos/sync", h.SyncRepos)
 
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)

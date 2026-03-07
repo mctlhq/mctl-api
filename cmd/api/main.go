@@ -68,6 +68,7 @@ func main() {
 		MCPServer:      mcpSrv,
 		BackstageURL:   cfg.BackstageURL,
 		BackstageToken: cfg.BackstageToken,
+		BackstageInternalURL: cfg.BackstageInternalURL,
 		AllowedOrigins: cfg.AllowedOrigins,
 	})
 
@@ -124,6 +125,7 @@ type config struct {
 	AdminUsers             []string
 	BackstageURL           string
 	BackstageToken         string
+	BackstageInternalURL   string
 	// Dex OIDC issuer for JWT validation (dual-token auth alongside GitHub tokens).
 	DexIssuerURL           string
 	// DexClientID is the expected audience for Dex JWTs. If empty, audience check is skipped.
@@ -177,6 +179,7 @@ func loadConfig() config {
 		AdminUsers:              adminList,
 		BackstageURL:            os.Getenv("BACKSTAGE_URL"),
 		BackstageToken:          os.Getenv("BACKSTAGE_TOKEN"),
+		BackstageInternalURL:    envOr("BACKSTAGE_INTERNAL_URL", "http://backstage.backstage.svc.cluster.local:7007"),
 		DexIssuerURL:            envOr("DEX_ISSUER_URL", "https://ops.mctl.ai/api/dex"),
 		DexClientID:             os.Getenv("DEX_CLIENT_ID"),
 		SelfURL:                 envOr("SELF_URL", "https://api.mctl.ai"),

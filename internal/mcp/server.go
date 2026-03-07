@@ -65,6 +65,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolGetWorkflowStatus())
 	srv.AddTool(s.toolGetResourceUsage())
 	srv.AddTool(s.toolListRecentOperations())
+	srv.AddTool(s.toolListRepos())
 
 	// Write tools (trigger workflows).
 	srv.AddTool(s.toolDeployService())
@@ -72,6 +73,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolProvisionDatabase())
 	srv.AddTool(s.toolRetireService())
 	srv.AddTool(s.toolDeleteTenant())
+	srv.AddTool(s.toolSyncRepos())
 
 	return srv
 }
@@ -204,6 +206,7 @@ The service will be available at {host} after ArgoCD syncs (typically 1-2 minute
 For background workers, omit the host parameter.
 
 Repository access for building:
+- Use mctl_list_repos(team) to see available repos, and mctl_sync_repos(team) to discover new ones.
 - Repos in the mctlhq GitHub org are accessed automatically via the platform GitHub App.
 - For repos outside the org (private), store a PAT in Vault first:
   Vault path: secret/data/teams/{team_name}/{component_name}/repo-pat → {"pat": "ghp_..."}
@@ -462,6 +465,72 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		body, err := s.apiPost(ctx, "/api/v1/operations/delete-tenant/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete tenant: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolListRepos() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_repos",
+		mcplib.WithDescription(`List GitHub repositories available to a team for deployment.
+
+Shows repos from GitHub App installations registered for the team.
+Admins see organization repos (mctlhq) + personal repos.
+Other teams see personal repos + repos added via GitHub App popup.
+
+If no repos are returned, run mctl_sync_repos first to discover installations.
+For repos outside GitHub App scope, store a PAT in Vault (see mctl_deploy_service help).`),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name to list repos for"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		team := args["team"].(string)
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/repos?team=%s", url.QueryEscape(team)))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list repos for team %s: %v", team, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolSyncRepos() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_sync_repos",
+		mcplib.WithDescription(`Discover and register GitHub repositories for a team.
+
+Scans GitHub App installations accessible to the user and registers found repos for the team.
+After sync, repos appear in mctl_list_repos and in the Backstage onboard-service UI.
+
+For admins: discovers organization installations (mctlhq) + user's personal repos.
+For other teams: discovers user's personal repos only (org repos are added via GitHub App popup in Backstage UI).
+
+If the GitHub App is not installed on your account, visit: https://github.com/apps/mctl-app/installations/new`),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name to sync repos for"),
+		),
+		mcplib.WithString("user",
+			mcplib.Description("GitHub username (defaults to authenticated user)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		params := make(map[string]string)
+		params["team"] = args["team"].(string)
+		if user, ok := args["user"].(string); ok && user != "" {
+			params["user"] = user
+		}
+		body, err := s.apiPost(ctx, "/api/v1/repos/sync", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to sync repos: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}
