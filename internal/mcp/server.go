@@ -205,8 +205,9 @@ Actions:
 - "deploy": Update an existing service to a new version. Rebuilds and updates image tag.
 - "update-config": Change environment variables or secrets without rebuilding.
 
-The service will be available at {host} after ArgoCD syncs (typically 1-2 minutes).
-For background workers, omit the host parameter.
+The service domain is auto-generated as {team_name}-{component_name}.mctl.ai.
+Custom domains can be added after deployment using mctl_add_custom_domain.
+For background workers, set component_type to 'worker-service' (no ingress).
 
 Repository access for building:
 - Use mctl_list_repos(team) to see available repos, and mctl_sync_repos(team) to discover new ones.
@@ -242,9 +243,6 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		mcplib.WithString("port",
 			mcplib.Description("Service port (default: 8080)"),
 		),
-		mcplib.WithString("host",
-			mcplib.Description("Ingress hostname, e.g. 'my-app.mctl.ai'. Omit for background workers."),
-		),
 		mcplib.WithString("env_vars",
 			mcplib.Description("Plaintext environment variables, newline-separated KEY=value"),
 		),
@@ -269,6 +267,18 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		params := extractStringParams(req.GetArguments())
+		// Auto-generate domain: workflow computes {team}-{service}.mctl.ai
+		if _, hasHost := params["host"]; !hasHost {
+			componentType := params["component_type"]
+			if componentType == "" {
+				componentType = "base-service"
+			}
+			if componentType == "worker-service" {
+				params["host"] = "none"
+			} else {
+				params["host"] = "auto"
+			}
+		}
 		body, err := s.apiPost(ctx, "/api/v1/operations/deploy-service/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to deploy service: %v", err)), nil
