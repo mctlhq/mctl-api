@@ -146,7 +146,7 @@ func loadConfig() config {
 		GitOpsBranch:            envOr("GITOPS_BRANCH", "main"),
 		GitOpsLocalPath:         envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-core"),
 		GitOpsToken:             os.Getenv("GITOPS_REPO_TOKEN"),
-		GitOpsSSHKeyPath:        envOr("GITOPS_SSH_KEY_PATH", "/etc/gitops-ssh/ssh-privatekey"),
+		GitOpsSSHKeyPath:        os.Getenv("GITOPS_SSH_KEY_PATH"),
 		ArgoCDURL:               envOr("ARGOCD_URL", "https://ops.mctl.ai"),
 		ArgoCDToken:             os.Getenv("ARGOCD_TOKEN"),
 		ArgoWorkflowsNamespace:  envOr("ARGO_WORKFLOWS_NAMESPACE", "argo-workflows"),
