@@ -15,6 +15,8 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/k8s"
+	"github.com/mctlhq/mctl-api/internal/loki"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
@@ -51,25 +53,55 @@ func main() {
 	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier)
 
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
-	auditLog := audit.NewLogger()
+
+	var auditLog audit.Log
+	if dbURL := os.Getenv("AUDIT_DB_URL"); dbURL != "" {
+		pgLog, pgErr := audit.NewPostgresLogger(context.Background(), dbURL)
+		if pgErr != nil {
+			slog.Warn("postgres audit log init failed, falling back to in-memory", "error", pgErr)
+			auditLog = audit.NewLogger()
+		} else {
+			auditLog = pgLog
+		}
+	} else {
+		auditLog = audit.NewLogger()
+	}
+
 	executor := operations.NewExecutor(cfg.ArgoWorkflowsNamespace)
 
 	// MCP server for SSE transport (embedded in this process).
 	// Tools make REST calls back to this server using the caller's token (forwarded via context).
 	mcpSrv := mctlmcp.NewServer(cfg.SelfURL, "")
 
+	// Kubernetes quota client (optional — fails gracefully outside cluster).
+	var quotaReader mctlapi.QuotaReader
+	if qc, qErr := k8s.NewQuotaClient(); qErr != nil {
+		slog.Warn("k8s quota client unavailable, resource usage will be empty", "error", qErr)
+	} else {
+		quotaReader = qc
+	}
+
+	// Loki log client (optional — enabled when LOKI_URL is set).
+	var logQuerier mctlapi.LogQuerier
+	if lokiURL := os.Getenv("LOKI_URL"); lokiURL != "" {
+		logQuerier = loki.NewClient(lokiURL)
+		slog.Info("loki log querying enabled", "url", lokiURL)
+	}
+
 	router := mctlapi.NewRouter(mctlapi.Options{
-		Registry:       registry,
-		GitReader:      gitReader,
-		ArgoCD:         argoClient,
-		AuditLog:       auditLog,
-		Executor:       executor,
-		AuthMiddleware: authMiddleware,
-		MCPServer:      mcpSrv,
-		BackstageURL:   cfg.BackstageURL,
-		BackstageToken: cfg.BackstageToken,
+		Registry:             registry,
+		GitReader:            gitReader,
+		ArgoCD:               argoClient,
+		AuditLog:             auditLog,
+		Executor:             executor,
+		AuthMiddleware:       authMiddleware,
+		MCPServer:            mcpSrv,
+		QuotaReader:          quotaReader,
+		LogQuerier:           logQuerier,
+		BackstageURL:         cfg.BackstageURL,
+		BackstageToken:       cfg.BackstageToken,
 		BackstageInternalURL: cfg.BackstageInternalURL,
-		AllowedOrigins: cfg.AllowedOrigins,
+		AllowedOrigins:       cfg.AllowedOrigins,
 	})
 
 	srv := &http.Server{

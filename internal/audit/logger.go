@@ -19,6 +19,13 @@ type Entry struct {
 	Message      string            `json:"message,omitempty"`
 }
 
+// Log is the interface for recording and querying audit events.
+type Log interface {
+	Log(entry Entry)
+	List(limit int) []Entry
+	GetByWorkflow(name string) *Entry
+}
+
 // Logger stores audit entries. In production, this writes to PostgreSQL.
 // For the PoC, it uses an in-memory store.
 type Logger struct {

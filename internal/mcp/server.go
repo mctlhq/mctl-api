@@ -66,6 +66,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolGetResourceUsage())
 	srv.AddTool(s.toolListRecentOperations())
 	srv.AddTool(s.toolListRepos())
+	srv.AddTool(s.toolGetServiceLogs())
 
 	// Write tools (trigger workflows).
 	srv.AddTool(s.toolDeployService())
@@ -74,6 +75,13 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolRetireService())
 	srv.AddTool(s.toolDeleteTenant())
 	srv.AddTool(s.toolSyncRepos())
+	srv.AddTool(s.toolRollbackService())
+	srv.AddTool(s.toolCreatePreview())
+	srv.AddTool(s.toolDeletePreview())
+	srv.AddTool(s.toolAddCustomDomain())
+	srv.AddTool(s.toolRemoveCustomDomain())
+	srv.AddTool(s.toolListDomains())
+	srv.AddTool(s.toolVerifyDomain())
 
 	return srv
 }
@@ -202,8 +210,9 @@ Actions:
 - "deploy": Update an existing service to a new version. Rebuilds and updates image tag.
 - "update-config": Change environment variables or secrets without rebuilding.
 
-The service will be available at {host} after ArgoCD syncs (typically 1-2 minutes).
-For background workers, omit the host parameter.
+The service domain is auto-generated as {team_name}-{component_name}.mctl.ai.
+Custom domains can be added after deployment using mctl_add_custom_domain.
+For background workers, set component_type to 'worker-service' (no ingress).
 
 Repository access for building:
 - Use mctl_list_repos(team) to see available repos, and mctl_sync_repos(team) to discover new ones.
@@ -239,9 +248,6 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		mcplib.WithString("port",
 			mcplib.Description("Service port (default: 8080)"),
 		),
-		mcplib.WithString("host",
-			mcplib.Description("Ingress hostname, e.g. 'my-app.mctl.ai'. Omit for background workers."),
-		),
 		mcplib.WithString("env_vars",
 			mcplib.Description("Plaintext environment variables, newline-separated KEY=value"),
 		),
@@ -249,10 +255,35 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			mcplib.Description("Also provision a PostgreSQL database: 'true' or 'false' (default: false)"),
 			mcplib.Enum("true", "false"),
 		),
+		mcplib.WithString("autoscaling_enabled",
+			mcplib.Description("Enable HPA autoscaling: 'true' or 'false' (default: false)"),
+			mcplib.Enum("true", "false"),
+		),
+		mcplib.WithString("min_replicas",
+			mcplib.Description("Minimum replica count when autoscaling is enabled (default: 1)"),
+		),
+		mcplib.WithString("max_replicas",
+			mcplib.Description("Maximum replica count when autoscaling is enabled (default: 5)"),
+		),
+		mcplib.WithString("cpu_threshold",
+			mcplib.Description("CPU utilization % to trigger scale-up (default: 80)"),
+		),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		params := extractStringParams(req.GetArguments())
+		// Auto-generate domain: workflow computes {team}-{service}.mctl.ai
+		if _, hasHost := params["host"]; !hasHost {
+			componentType := params["component_type"]
+			if componentType == "" {
+				componentType = "base-service"
+			}
+			if componentType == "worker-service" {
+				params["host"] = "none"
+			} else {
+				params["host"] = "auto"
+			}
+		}
 		body, err := s.apiPost(ctx, "/api/v1/operations/deploy-service/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to deploy service: %v", err)), nil
@@ -531,6 +562,339 @@ If the GitHub App is not installed on your account, visit: https://github.com/ap
 		body, err := s.apiPost(ctx, "/api/v1/repos/sync", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to sync repos: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+// --- Custom Domain Tools ---
+
+func (s *Server) toolListDomains() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_domains",
+		mcplib.WithDescription("List custom domains for a team or specific service. Shows domain, auto-generated domain ({team}-{service}.mctl.ai), status (pending/verified/active), and verification timestamp."),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name"),
+		),
+		mcplib.WithString("service",
+			mcplib.Description("Service name (optional, filters to specific service)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		team, _ := args["team"].(string)
+		service, _ := args["service"].(string)
+		path := "/api/v1/domains?team=" + url.QueryEscape(team)
+		if service != "" {
+			path += "&service=" + url.QueryEscape(service)
+		}
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list domains: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolAddCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_add_custom_domain",
+		mcplib.WithDescription(`Add a custom domain to a service.
+
+The service must already be deployed (it gets an auto-generated domain: {team}-{service}.mctl.ai).
+
+Steps:
+1. Registers domain in the platform database
+2. Triggers the add-custom-domain workflow which:
+   - Verifies DNS: domain must have a CNAME pointing to {team}-{service}.mctl.ai
+   - Updates service ingress configuration
+   - Provisions TLS certificate via HTTP-01 challenge
+
+Before calling this, tell the user to create a CNAME record:
+  {domain} CNAME → {team}-{service}.mctl.ai
+
+Returns the registered domain info. Use mctl_verify_domain to check DNS status.`),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name"),
+		),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+		mcplib.WithString("domain",
+			mcplib.Required(),
+			mcplib.Description("Custom domain to add, e.g. 'api.mycompany.com'"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		params := map[string]string{
+			"team":    args["team"].(string),
+			"service": args["service"].(string),
+			"domain":  args["domain"].(string),
+		}
+		// Register domain in Backstage DB
+		body, err := s.apiPost(ctx, "/api/v1/domains", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to register domain: %v", err)), nil
+		}
+
+		// Trigger the add-custom-domain workflow
+		wfParams := map[string]string{
+			"team_name":    params["team"],
+			"service_name": params["service"],
+			"domain":       params["domain"],
+		}
+		wfBody, err := s.apiPost(ctx, "/api/v1/operations/add-custom-domain/execute", wfParams)
+		if err != nil {
+			return mcplib.NewToolResultText(fmt.Sprintf("Domain registered but workflow failed: %v\nRegistration: %s", err, string(body))), nil
+		}
+		return mcplib.NewToolResultText(fmt.Sprintf("Domain registered:\n%s\n\nWorkflow triggered:\n%s", string(body), string(wfBody))), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_remove_custom_domain",
+		mcplib.WithDescription("Remove a custom domain from a service. This removes it from the ingress configuration and database. The auto-generated {team}-{service}.mctl.ai domain is not affected."),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name"),
+		),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+		mcplib.WithString("domain",
+			mcplib.Required(),
+			mcplib.Description("Custom domain to remove"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		// Trigger the remove-custom-domain workflow
+		wfParams := map[string]string{
+			"team_name":    args["team"].(string),
+			"service_name": args["service"].(string),
+			"domain":       args["domain"].(string),
+		}
+		body, err := s.apiPost(ctx, "/api/v1/operations/remove-custom-domain/execute", wfParams)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to remove domain: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_verify_domain",
+		mcplib.WithDescription("Check if a custom domain's DNS is correctly configured. Verifies that the CNAME record points to the expected {team}-{service}.mctl.ai target."),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name"),
+		),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		team, _ := args["team"].(string)
+		service, _ := args["service"].(string)
+		// List domains to find IDs, then verify each
+		path := "/api/v1/domains?team=" + url.QueryEscape(team) + "&service=" + url.QueryEscape(service)
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list domains: %v", err)), nil
+		}
+
+		var resp struct {
+			Domains []struct {
+				ID     string `json:"id"`
+				Domain string `json:"domain"`
+			} `json:"domains"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil || len(resp.Domains) == 0 {
+			return mcplib.NewToolResultText("No custom domains found for " + team + "/" + service), nil
+		}
+
+		var results []string
+		for _, d := range resp.Domains {
+			vBody, vErr := s.apiPost(ctx, "/api/v1/domains/"+d.ID+"/verify", nil)
+			if vErr != nil {
+				results = append(results, fmt.Sprintf("%s: verification failed: %v", d.Domain, vErr))
+			} else {
+				results = append(results, fmt.Sprintf("%s: %s", d.Domain, string(vBody)))
+			}
+		}
+		return mcplib.NewToolResultText(strings.Join(results, "\n")), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolRollbackService() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_rollback_service",
+		mcplib.WithDescription(`Roll back a service to a previously deployed image tag.
+
+Updates image.tag in the GitOps values.yaml and triggers an ArgoCD sync.
+Use mctl_get_service_config first to see the current image tag, then specify a previous tag.
+
+Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track progress.`),
+		mcplib.WithString("team_name",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("component_name",
+			mcplib.Required(),
+			mcplib.Description("Service name to roll back"),
+		),
+		mcplib.WithString("target_tag",
+			mcplib.Required(),
+			mcplib.Description("Image tag to roll back to (e.g. '1.2.3'). Use mctl_get_service_config to find available tags."),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/rollback-service/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to rollback service: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolCreatePreview() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_create_preview",
+		mcplib.WithDescription(`Deploy an ephemeral preview environment for a service.
+
+Uses an existing built image tag — no rebuild required.
+The preview is accessible at {app}-{preview_id}.preview.mctl.ai.
+It is automatically deleted after ttl_hours (default: 24).
+
+Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track progress.`),
+		mcplib.WithString("team_name",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("component_name",
+			mcplib.Required(),
+			mcplib.Description("Service name to preview"),
+		),
+		mcplib.WithString("image_tag",
+			mcplib.Required(),
+			mcplib.Description("Existing image tag to deploy (must already be built)"),
+		),
+		mcplib.WithString("ttl_hours",
+			mcplib.Description("Preview lifetime in hours (default: 24)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/preview-deploy/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create preview: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolDeletePreview() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_delete_preview",
+		mcplib.WithDescription("Remove a preview environment and all its Kubernetes resources immediately."),
+		mcplib.WithString("team_name",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("component_name",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+		mcplib.WithString("preview_id",
+			mcplib.Required(),
+			mcplib.Description("Preview ID returned by mctl_create_preview"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/preview-delete/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete preview: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolGetServiceLogs() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_service_logs",
+		mcplib.WithDescription(`Fetch recent log lines for a service from Loki.
+
+Returns log lines sorted by timestamp (most recent first).
+Use this when debugging service issues or investigating errors.
+
+Parameters:
+- lines: number of log lines to return (default 100, max 1000)
+- since: time window — e.g. "15m", "1h", "6h", "24h" (default "1h")
+
+Requires in-cluster deployment with Loki enabled (LOKI_URL env var).`),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+		mcplib.WithString("lines",
+			mcplib.Description("Number of log lines to return (default: 100, max: 1000)"),
+		),
+		mcplib.WithString("since",
+			mcplib.Description("Time window: 15m, 1h, 6h, 24h (default: 1h)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		team, _ := args["team"].(string)
+		service, _ := args["service"].(string)
+
+		path := fmt.Sprintf("/api/v1/logs/%s/%s", url.PathEscape(team), url.PathEscape(service))
+
+		q := url.Values{}
+		if lines, ok := args["lines"].(string); ok && lines != "" {
+			q.Set("lines", lines)
+		}
+		if since, ok := args["since"].(string); ok && since != "" {
+			q.Set("since", since)
+		}
+		if len(q) > 0 {
+			path += "?" + q.Encode()
+		}
+
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get logs for %s/%s: %v", team, service, err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

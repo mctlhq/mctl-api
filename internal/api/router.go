@@ -11,6 +11,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/openapi"
 )
 
 // Options holds all dependencies for the API router.
@@ -23,6 +24,10 @@ type Options struct {
 	AuthMiddleware func(http.Handler) http.Handler
 	// MCPServer exposes platform tools over MCP Streamable HTTP at /mcp.
 	MCPServer      *mctlmcp.Server
+	// QuotaReader fetches live K8s resource usage (optional — nil in local/test).
+	QuotaReader    QuotaReader
+	// LogQuerier queries Loki for service logs (optional — nil outside cluster).
+	LogQuerier     LogQuerier
 	// Optional Backstage integration for immediate catalog sync.
 	BackstageURL   string
 	BackstageToken string
@@ -61,6 +66,23 @@ func NewRouter(opts Options) http.Handler {
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
 	})
 
+	// OpenAPI spec — public, no auth required.
+	r.Get("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml")
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		_, _ = w.Write(openapi.Spec)
+	})
+	// Swagger UI redirect — opens editor.swagger.io pre-loaded with our spec.
+	r.Get("/docs", func(w http.ResponseWriter, r *http.Request) {
+		scheme := "https"
+		if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") == "" {
+			scheme = "http"
+		}
+		specURL := scheme + "://" + r.Host + "/openapi.yaml"
+		target := "https://petstore.swagger.io/?url=" + specURL
+		http.Redirect(w, r, target, http.StatusFound)
+	})
+
 	// Authenticated API routes.
 	r.Group(func(r chi.Router) {
 		if opts.AuthMiddleware != nil {
@@ -86,11 +108,18 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/workflows", h.ListWorkflows)
 			r.Get("/workflows/{name}", h.GetWorkflow)
 			r.Get("/resources/{tenant}", h.GetResourceUsage)
+			r.Get("/logs/{team}/{app}", h.GetServiceLogs)
 			r.Get("/audit", h.ListAudit)
 
 			// Repository discovery (proxied to Backstage github-app-connect plugin).
 			r.Get("/repos", h.ListRepos)
 			r.Post("/repos/sync", h.SyncRepos)
+
+			// Custom domains (proxied to Backstage custom-domains plugin).
+			r.Get("/domains", h.ListDomains)
+			r.Post("/domains", h.AddDomain)
+			r.Post("/domains/{id}/verify", h.VerifyDomain)
+			r.Delete("/domains/{id}", h.DeleteDomain)
 
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)
