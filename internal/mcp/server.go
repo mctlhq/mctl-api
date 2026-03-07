@@ -74,6 +74,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolRetireService())
 	srv.AddTool(s.toolDeleteTenant())
 	srv.AddTool(s.toolSyncRepos())
+	srv.AddTool(s.toolRollbackService())
+	srv.AddTool(s.toolCreatePreview())
+	srv.AddTool(s.toolDeletePreview())
 
 	return srv
 }
@@ -248,6 +251,19 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		mcplib.WithString("provision_database",
 			mcplib.Description("Also provision a PostgreSQL database: 'true' or 'false' (default: false)"),
 			mcplib.Enum("true", "false"),
+		),
+		mcplib.WithString("autoscaling_enabled",
+			mcplib.Description("Enable HPA autoscaling: 'true' or 'false' (default: false)"),
+			mcplib.Enum("true", "false"),
+		),
+		mcplib.WithString("min_replicas",
+			mcplib.Description("Minimum replica count when autoscaling is enabled (default: 1)"),
+		),
+		mcplib.WithString("max_replicas",
+			mcplib.Description("Maximum replica count when autoscaling is enabled (default: 5)"),
+		),
+		mcplib.WithString("cpu_threshold",
+			mcplib.Description("CPU utilization % to trigger scale-up (default: 80)"),
 		),
 	)
 
@@ -531,6 +547,107 @@ If the GitHub App is not installed on your account, visit: https://github.com/ap
 		body, err := s.apiPost(ctx, "/api/v1/repos/sync", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to sync repos: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolRollbackService() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_rollback_service",
+		mcplib.WithDescription(`Roll back a service to a previously deployed image tag.
+
+Updates image.tag in the GitOps values.yaml and triggers an ArgoCD sync.
+Use mctl_get_service_config first to see the current image tag, then specify a previous tag.
+
+Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track progress.`),
+		mcplib.WithString("team_name",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("component_name",
+			mcplib.Required(),
+			mcplib.Description("Service name to roll back"),
+		),
+		mcplib.WithString("target_tag",
+			mcplib.Required(),
+			mcplib.Description("Image tag to roll back to (e.g. '1.2.3'). Use mctl_get_service_config to find available tags."),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/rollback-service/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to rollback service: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolCreatePreview() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_create_preview",
+		mcplib.WithDescription(`Deploy an ephemeral preview environment for a service.
+
+Uses an existing built image tag — no rebuild required.
+The preview is accessible at {app}-{preview_id}.preview.mctl.ai.
+It is automatically deleted after ttl_hours (default: 24).
+
+Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track progress.`),
+		mcplib.WithString("team_name",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("component_name",
+			mcplib.Required(),
+			mcplib.Description("Service name to preview"),
+		),
+		mcplib.WithString("image_tag",
+			mcplib.Required(),
+			mcplib.Description("Existing image tag to deploy (must already be built)"),
+		),
+		mcplib.WithString("ttl_hours",
+			mcplib.Description("Preview lifetime in hours (default: 24)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/preview-deploy/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create preview: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolDeletePreview() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_delete_preview",
+		mcplib.WithDescription("Remove a preview environment and all its Kubernetes resources immediately."),
+		mcplib.WithString("team_name",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("component_name",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+		mcplib.WithString("preview_id",
+			mcplib.Required(),
+			mcplib.Description("Preview ID returned by mctl_create_preview"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/preview-delete/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete preview: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}
