@@ -47,7 +47,7 @@ func main() {
 	}
 
 	// Auth middleware: validates GitHub tokens or Dex JWTs.
-	ghValidator := auth.NewGitHubValidator(cfg.GitHubOrg, cfg.AdminUsers)
+	ghValidator := auth.NewGitHubValidator(cfg.AdminUsers)
 	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier)
 
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
