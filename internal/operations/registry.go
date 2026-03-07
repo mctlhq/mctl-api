@@ -44,7 +44,7 @@ type ParameterDef struct {
 func NewRegistry() *Registry {
 	r := &Registry{ops: make(map[string]Operation)}
 	for _, op := range builtinOperations {
-		r.ops[op.Name] = op
+		r.ops[op.Name] = op //nolint:gocritic // rangeValCopy acceptable for init
 	}
 	return r
 }
@@ -59,7 +59,7 @@ func (r *Registry) Get(name string) (Operation, bool) {
 func (r *Registry) List() []Operation {
 	out := make([]Operation, 0, len(r.ops))
 	for _, op := range r.ops {
-		out = append(out, op)
+		out = append(out, op) //nolint:gocritic // rangeValCopy acceptable for small list
 	}
 	return out
 }

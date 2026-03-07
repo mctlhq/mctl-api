@@ -99,12 +99,13 @@ func (r *Reader) refresh() error {
 	var cloneURL string
 	var sshEnv []string
 
-	if r.sshKeyPath != "" {
+	switch {
+	case r.sshKeyPath != "":
 		// SSH auth: use key file, skip host key checking for GitHub
 		cloneURL = r.repoURL
 		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", r.sshKeyPath)
 		sshEnv = []string{"GIT_SSH_COMMAND=" + sshCmd}
-	} else if r.token != "" {
+	case r.token != "":
 		// HTTPS auth: inject token into URL
 		if u, err := url.Parse(r.repoURL); err == nil {
 			u.User = url.UserPassword("x-access-token", r.token)
@@ -112,14 +113,14 @@ func (r *Reader) refresh() error {
 		} else {
 			cloneURL = r.repoURL
 		}
-	} else {
+	default:
 		cloneURL = r.repoURL
 	}
 
 	gitDir := filepath.Join(r.localPath, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		slog.Info("cloning gitops repo", "url", r.repoURL, "branch", r.branch, "path", r.localPath)
-		cmd := exec.Command("git", "clone", "--depth=1", "--branch="+r.branch, "--single-branch", cloneURL, r.localPath)
+		cmd := exec.Command("git", "clone", "--depth=1", "--branch="+r.branch, "--single-branch", cloneURL, r.localPath) //nolint:gosec // args are from trusted config
 		cmd.Env = append(os.Environ(), sshEnv...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git clone failed: %w\n%s", err, bytes.TrimSpace(out))
@@ -127,7 +128,7 @@ func (r *Reader) refresh() error {
 		slog.Info("gitops repo cloned successfully")
 	} else {
 		args := []string{"-C", r.localPath, "pull", "--ff-only", cloneURL, r.branch}
-		cmd := exec.Command("git", args...)
+		cmd := exec.Command("git", args...) //nolint:gosec // args are from trusted config
 		cmd.Env = append(os.Environ(), sshEnv...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git pull failed: %w\n%s", err, bytes.TrimSpace(out))
@@ -178,7 +179,7 @@ func (r *Reader) GetTenant(name string) (*Tenant, error) {
 
 func (r *Reader) readTenant(name string) (*Tenant, error) {
 	valuesPath := filepath.Join(r.localPath, "platform-gitops", "tenants", name, "values.yaml")
-	data, err := os.ReadFile(valuesPath)
+	data, err := os.ReadFile(valuesPath) //nolint:gosec // path built from trusted repo root
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", valuesPath, err)
 	}
@@ -270,7 +271,7 @@ func (r *Reader) GetService(team, app string) (*Service, error) {
 
 func (r *Reader) readService(team, app string) (*Service, error) {
 	valuesPath := filepath.Join(r.localPath, "platform-gitops", "services", team, app, "values.yaml")
-	data, err := os.ReadFile(valuesPath)
+	data, err := os.ReadFile(valuesPath) //nolint:gosec // path built from trusted repo root
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", valuesPath, err)
 	}
@@ -319,11 +320,10 @@ func (r *Reader) GetTenantsForUser(login string) ([]string, error) {
 		return nil, err
 	}
 
-	login = strings.ToLower(login)
 	var result []string
 	for _, t := range tenants {
 		for _, m := range t.Members {
-			if strings.ToLower(m.UserID) == login {
+			if strings.EqualFold(m.UserID, login) {
 				result = append(result, t.Name)
 				break
 			}

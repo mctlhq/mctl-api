@@ -152,7 +152,7 @@ func (c *Client) doGet(url string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("argocd request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

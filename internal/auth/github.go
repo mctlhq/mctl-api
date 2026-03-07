@@ -84,7 +84,7 @@ func (v *GitHubValidator) fetchLogin(ctx context.Context, token string) (string,
 	if err != nil {
 		return "", fmt.Errorf("GitHub API request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {

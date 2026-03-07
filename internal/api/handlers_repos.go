@@ -47,7 +47,7 @@ func (h *Handlers) ListRepos(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(resp.Body)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
+	_, _ = w.Write(body) //nolint:errcheck
 }
 
 // SyncRepos triggers a repo sync for a team via Backstage's github-app-connect plugin.
@@ -105,5 +105,5 @@ func (h *Handlers) SyncRepos(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(resp.Body)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
+	_, _ = w.Write(body) //nolint:errcheck
 }

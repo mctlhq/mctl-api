@@ -151,6 +151,9 @@ func postAs(t *testing.T, router http.Handler, path string, body interface{}, us
 	return w
 }
 
+// post is a test helper for making POST requests. Currently unused but kept for future tests.
+var _ = post
+
 func post(t *testing.T, router http.Handler, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	b, _ := json.Marshal(body)
