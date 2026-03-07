@@ -77,6 +77,10 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolRollbackService())
 	srv.AddTool(s.toolCreatePreview())
 	srv.AddTool(s.toolDeletePreview())
+	srv.AddTool(s.toolAddCustomDomain())
+	srv.AddTool(s.toolRemoveCustomDomain())
+	srv.AddTool(s.toolListDomains())
+	srv.AddTool(s.toolVerifyDomain())
 
 	return srv
 }
@@ -559,6 +563,182 @@ If the GitHub App is not installed on your account, visit: https://github.com/ap
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to sync repos: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+// --- Custom Domain Tools ---
+
+func (s *Server) toolListDomains() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_domains",
+		mcplib.WithDescription("List custom domains for a team or specific service. Shows domain, auto-generated domain ({team}-{service}.mctl.ai), status (pending/verified/active), and verification timestamp."),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name"),
+		),
+		mcplib.WithString("service",
+			mcplib.Description("Service name (optional, filters to specific service)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		team, _ := args["team"].(string)
+		service, _ := args["service"].(string)
+		path := "/api/v1/domains?team=" + url.QueryEscape(team)
+		if service != "" {
+			path += "&service=" + url.QueryEscape(service)
+		}
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list domains: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolAddCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_add_custom_domain",
+		mcplib.WithDescription(`Add a custom domain to a service.
+
+The service must already be deployed (it gets an auto-generated domain: {team}-{service}.mctl.ai).
+
+Steps:
+1. Registers domain in the platform database
+2. Triggers the add-custom-domain workflow which:
+   - Verifies DNS: domain must have a CNAME pointing to {team}-{service}.mctl.ai
+   - Updates service ingress configuration
+   - Provisions TLS certificate via HTTP-01 challenge
+
+Before calling this, tell the user to create a CNAME record:
+  {domain} CNAME → {team}-{service}.mctl.ai
+
+Returns the registered domain info. Use mctl_verify_domain to check DNS status.`),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name"),
+		),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+		mcplib.WithString("domain",
+			mcplib.Required(),
+			mcplib.Description("Custom domain to add, e.g. 'api.mycompany.com'"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		params := map[string]string{
+			"team":    args["team"].(string),
+			"service": args["service"].(string),
+			"domain":  args["domain"].(string),
+		}
+		// Register domain in Backstage DB
+		body, err := s.apiPost(ctx, "/api/v1/domains", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to register domain: %v", err)), nil
+		}
+
+		// Trigger the add-custom-domain workflow
+		wfParams := map[string]string{
+			"team_name":    params["team"],
+			"service_name": params["service"],
+			"domain":       params["domain"],
+		}
+		wfBody, err := s.apiPost(ctx, "/api/v1/operations/add-custom-domain/execute", wfParams)
+		if err != nil {
+			return mcplib.NewToolResultText(fmt.Sprintf("Domain registered but workflow failed: %v\nRegistration: %s", err, string(body))), nil
+		}
+		return mcplib.NewToolResultText(fmt.Sprintf("Domain registered:\n%s\n\nWorkflow triggered:\n%s", string(body), string(wfBody))), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_remove_custom_domain",
+		mcplib.WithDescription("Remove a custom domain from a service. This removes it from the ingress configuration and database. The auto-generated {team}-{service}.mctl.ai domain is not affected."),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name"),
+		),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+		mcplib.WithString("domain",
+			mcplib.Required(),
+			mcplib.Description("Custom domain to remove"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		// Trigger the remove-custom-domain workflow
+		wfParams := map[string]string{
+			"team_name":    args["team"].(string),
+			"service_name": args["service"].(string),
+			"domain":       args["domain"].(string),
+		}
+		body, err := s.apiPost(ctx, "/api/v1/operations/remove-custom-domain/execute", wfParams)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to remove domain: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_verify_domain",
+		mcplib.WithDescription("Check if a custom domain's DNS is correctly configured. Verifies that the CNAME record points to the expected {team}-{service}.mctl.ai target."),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name"),
+		),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		team, _ := args["team"].(string)
+		service, _ := args["service"].(string)
+		// List domains to find IDs, then verify each
+		path := "/api/v1/domains?team=" + url.QueryEscape(team) + "&service=" + url.QueryEscape(service)
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list domains: %v", err)), nil
+		}
+
+		var resp struct {
+			Domains []struct {
+				ID     string `json:"id"`
+				Domain string `json:"domain"`
+			} `json:"domains"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil || len(resp.Domains) == 0 {
+			return mcplib.NewToolResultText("No custom domains found for " + team + "/" + service), nil
+		}
+
+		var results []string
+		for _, d := range resp.Domains {
+			vBody, vErr := s.apiPost(ctx, "/api/v1/domains/"+d.ID+"/verify", nil)
+			if vErr != nil {
+				results = append(results, fmt.Sprintf("%s: verification failed: %v", d.Domain, vErr))
+			} else {
+				results = append(results, fmt.Sprintf("%s: %s", d.Domain, string(vBody)))
+			}
+		}
+		return mcplib.NewToolResultText(strings.Join(results, "\n")), nil
 	}
 
 	return tool, handler
