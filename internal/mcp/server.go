@@ -726,7 +726,7 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 				Domain string `json:"domain"`
 			} `json:"domains"`
 		}
-		if json.Unmarshal(body, &resp) != nil || len(resp.Domains) == 0 {
+		if json.Unmarshal(body, &resp) != nil || len(resp.Domains) == 0 { //nolint:nilerr
 			return mcplib.NewToolResultText("No custom domains found for " + team + "/" + service), nil
 		}
 
