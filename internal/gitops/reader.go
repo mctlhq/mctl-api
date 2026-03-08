@@ -101,9 +101,9 @@ func (r *Reader) refresh() error {
 
 	switch {
 	case r.sshKeyPath != "":
-		// SSH auth: use key file, skip host key checking for GitHub
+		// SSH auth: use key file, accept-new trusts on first connect (TOFU)
 		cloneURL = r.repoURL
-		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", r.sshKeyPath)
+		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=accept-new", r.sshKeyPath)
 		sshEnv = []string{"GIT_SSH_COMMAND=" + sshCmd}
 	case r.token != "":
 		// HTTPS auth: inject token into URL
