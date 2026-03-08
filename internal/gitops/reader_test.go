@@ -16,10 +16,10 @@ func setupTempRepo(t *testing.T) (string, *Reader) {
 func writeTenantYAML(t *testing.T, dir, name, content string) {
 	t.Helper()
 	tenantDir := filepath.Join(dir, "platform-gitops", "tenants", name)
-	if err := os.MkdirAll(tenantDir, 0o755); err != nil {
+	if err := os.MkdirAll(tenantDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(tenantDir, "values.yaml"), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tenantDir, "values.yaml"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -27,10 +27,10 @@ func writeTenantYAML(t *testing.T, dir, name, content string) {
 func writeServiceYAML(t *testing.T, dir, team, app, content string) {
 	t.Helper()
 	svcDir := filepath.Join(dir, "platform-gitops", "services", team, app)
-	if err := os.MkdirAll(svcDir, 0o755); err != nil {
+	if err := os.MkdirAll(svcDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(svcDir, "values.yaml"), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(svcDir, "values.yaml"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
