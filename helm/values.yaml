@@ -1,0 +1,45 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/mctlhq/mctl-api
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ghcr-credentials
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: traefik
+  tls: true
+  hosts:
+    - host: api.mctl.ai
+    - host: api.mctl.me
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+env:
+  GITOPS_REPO_URL: https://github.com/mctlhq/mctl-gitops.git
+  GITOPS_BRANCH: main
+  GITOPS_LOCAL_PATH: /data/mctl-gitops
+  ARGOCD_URL: https://ops.mctl.me
+  ARGO_WORKFLOWS_NAMESPACE: argo-workflows
+
+# Name of an existing Secret to mount as envFrom (created by ExternalSecret)
+envFromSecret: ""
+
+# Optional: mount an SSH private key for gitops repo access.
+# If set, mounts the secret at /etc/gitops-ssh/ and sets GITOPS_SSH_KEY_PATH.
+# The secret must have a key named "ssh-privatekey".
+gitopsSSHSecret: ""
+envFromExtraSecret: ""

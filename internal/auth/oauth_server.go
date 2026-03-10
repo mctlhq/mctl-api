@@ -1,0 +1,317 @@
+package auth
+
+import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+)
+
+// OAuthServer implements OAuth 2.0 Authorization Code flow with PKCE (RFC 7636).
+// It acts as a public-client OAuth server backed by GitHub for user authentication.
+// Access tokens are short-lived JWTs signed with HMAC-SHA256.
+type OAuthServer struct {
+	// BaseURL is the public base URL of this server, e.g. "https://api.mctl.ai".
+	BaseURL string
+	// GitHubClientID / GitHubClientSecret are the GitHub OAuth App credentials.
+	GitHubClientID     string
+	GitHubClientSecret string
+	// JWTSecret is the HMAC-SHA256 signing key for issued access tokens.
+	JWTSecret []byte
+	// AllowedRedirectURIs is the whitelist of permitted redirect_uri values.
+	AllowedRedirectURIs []string
+	// AccessTokenTTL is the lifetime of issued access tokens (default: 1h).
+	AccessTokenTTL time.Duration
+	// GitHubValidator is used to resolve team memberships for GitHub logins.
+	GitHubValidator *GitHubValidator
+	// TenantResolver resolves which tenants a GitHub login belongs to.
+	TenantResolver TenantResolver
+
+	codes authCodeStore
+}
+
+// NewOAuthServer creates a ready-to-use OAuthServer with sensible defaults.
+func NewOAuthServer(baseURL, ghClientID, ghClientSecret string, jwtSecret []byte, allowedRedirectURIs []string, ghValidator *GitHubValidator) *OAuthServer {
+	s := &OAuthServer{
+		BaseURL:             baseURL,
+		GitHubClientID:     ghClientID,
+		GitHubClientSecret: ghClientSecret,
+		JWTSecret:          jwtSecret,
+		AllowedRedirectURIs: allowedRedirectURIs,
+		AccessTokenTTL:      time.Hour,
+		GitHubValidator:     ghValidator,
+	}
+	s.codes.init()
+	return s
+}
+
+// ResolveGroups resolves the tenant groups for a GitHub login.
+func (s *OAuthServer) ResolveGroups(login string) []string {
+	var groups []string
+	if s.GitHubValidator.IsAdmin(login) {
+		groups = append(groups, "admins")
+	}
+	if s.TenantResolver != nil {
+		tenants, err := s.TenantResolver.GetTenantsForUser(login)
+		if err == nil {
+			groups = append(groups, tenants...)
+		}
+	}
+	return groups
+}
+
+// IsRedirectURIAllowed returns true if uri is in the whitelist.
+func (s *OAuthServer) IsRedirectURIAllowed(uri string) bool {
+	for _, allowed := range s.AllowedRedirectURIs {
+		if allowed == uri {
+			return true
+		}
+	}
+	return false
+}
+
+// GenerateState creates a secure random state value for CSRF protection.
+func GenerateState() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// StoreAuthCode stores a pending authorization code entry keyed by opaque state,
+// before the user has authenticated with GitHub.
+func (s *OAuthServer) StorePendingAuth(state, clientID, redirectURI, codeChallenge string) {
+	s.codes.storePending(state, pendingAuth{
+		ClientID:      clientID,
+		RedirectURI:   redirectURI,
+		CodeChallenge: codeChallenge,
+		CreatedAt:     time.Now(),
+	})
+}
+
+// LoadPendingAuth returns and removes the pending auth entry for a state value.
+func (s *OAuthServer) LoadPendingAuth(state string) (pendingAuth, bool) {
+	return s.codes.loadPending(state)
+}
+
+// IssueCode generates a random authorization code for a GitHub login.
+// The code is stored alongside the PKCE challenge for later verification.
+func (s *OAuthServer) IssueCode(login, clientID, redirectURI, codeChallenge string, groups []string) (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate code: %w", err)
+	}
+	code := base64.RawURLEncoding.EncodeToString(b)
+	s.codes.store(code, authCodeEntry{
+		Login:         login,
+		Groups:        groups,
+		ClientID:      clientID,
+		RedirectURI:   redirectURI,
+		CodeChallenge: codeChallenge,
+		CreatedAt:     time.Now(),
+	})
+	return code, nil
+}
+
+// ExchangeCode validates an authorization code + PKCE verifier and returns a signed JWT.
+// The code is consumed (one-time use).
+func (s *OAuthServer) ExchangeCode(code, codeVerifier, clientID, redirectURI string) (string, error) {
+	entry, ok := s.codes.loadAndDelete(code)
+	if !ok {
+		return "", errors.New("invalid or expired authorization code")
+	}
+	if entry.ClientID != clientID {
+		return "", errors.New("client_id mismatch")
+	}
+	if entry.RedirectURI != redirectURI {
+		return "", errors.New("redirect_uri mismatch")
+	}
+	if !verifyPKCE(codeVerifier, entry.CodeChallenge) {
+		return "", errors.New("PKCE verification failed")
+	}
+	return s.IssueJWT(entry.Login, entry.Groups)
+}
+
+// IssueJWT creates a signed JWT access token for the given user.
+func (s *OAuthServer) IssueJWT(login string, groups []string) (string, error) {
+	ttl := s.AccessTokenTTL
+	if ttl == 0 {
+		ttl = time.Hour
+	}
+	now := time.Now()
+	payload := jwtPayload{
+		Issuer:    s.BaseURL,
+		Subject:   login,
+		Groups:    groups,
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(ttl).Unix(),
+	}
+	return signJWT(payload, s.JWTSecret)
+}
+
+// ValidateJWT validates a JWT issued by this server and returns the User.
+func (s *OAuthServer) ValidateJWT(token string) (*User, error) {
+	payload, err := verifyJWT(token, s.JWTSecret, s.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	return &User{
+		ID:     payload.Subject,
+		Groups: payload.Groups,
+	}, nil
+}
+
+// ─── PKCE ─────────────────────────────────────────────────────────────────────
+
+// verifyPKCE checks that SHA256(verifier) == challenge (base64url-encoded).
+func verifyPKCE(verifier, challenge string) bool {
+	if verifier == "" || challenge == "" {
+		return false
+	}
+	h := sha256.New()
+	h.Write([]byte(verifier))
+	computed := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+	return hmac.Equal([]byte(computed), []byte(challenge))
+}
+
+// ─── Minimal JWT (HMAC-SHA256, no external library) ───────────────────────────
+
+var jwtHeader = base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+
+type jwtPayload struct {
+	Issuer    string   `json:"iss"`
+	Subject   string   `json:"sub"`
+	Groups    []string `json:"groups"`
+	IssuedAt  int64    `json:"iat"`
+	ExpiresAt int64    `json:"exp"`
+}
+
+func signJWT(payload jwtPayload, secret []byte) (string, error) {
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadJSON)
+	sigInput := jwtHeader + "." + payloadB64
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(sigInput))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return sigInput + "." + sig, nil
+}
+
+func verifyJWT(token string, secret []byte, expectedIssuer string) (*jwtPayload, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, errors.New("malformed JWT")
+	}
+	sigInput := parts[0] + "." + parts[1]
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(sigInput))
+	expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expectedSig), []byte(parts[2])) {
+		return nil, errors.New("invalid JWT signature")
+	}
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, errors.New("malformed JWT payload")
+	}
+	var payload jwtPayload
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		return nil, errors.New("malformed JWT payload")
+	}
+	if payload.Issuer != expectedIssuer {
+		return nil, fmt.Errorf("unexpected JWT issuer: %q", payload.Issuer)
+	}
+	if time.Now().Unix() > payload.ExpiresAt {
+		return nil, errors.New("JWT expired")
+	}
+	return &payload, nil
+}
+
+// ─── Auth code storage ────────────────────────────────────────────────────────
+
+const authCodeTTL = 10 * time.Minute
+const pendingAuthTTL = 5 * time.Minute
+
+type authCodeEntry struct {
+	Login         string
+	Groups        []string
+	ClientID      string
+	RedirectURI   string
+	CodeChallenge string
+	CreatedAt     time.Time
+}
+
+type pendingAuth struct {
+	ClientID      string
+	RedirectURI   string
+	CodeChallenge string
+	CreatedAt     time.Time
+}
+
+type authCodeStore struct {
+	codes   sync.Map // code → authCodeEntry
+	pending sync.Map // state → pendingAuth
+}
+
+func (s *authCodeStore) init() {
+	go s.gcLoop()
+}
+
+func (s *authCodeStore) store(code string, e authCodeEntry) {
+	s.codes.Store(code, e)
+}
+
+func (s *authCodeStore) loadAndDelete(code string) (authCodeEntry, bool) {
+	v, ok := s.codes.LoadAndDelete(code)
+	if !ok {
+		return authCodeEntry{}, false
+	}
+	e := v.(authCodeEntry)
+	if time.Since(e.CreatedAt) > authCodeTTL {
+		return authCodeEntry{}, false
+	}
+	return e, true
+}
+
+func (s *authCodeStore) storePending(state string, p pendingAuth) {
+	s.pending.Store(state, p)
+}
+
+func (s *authCodeStore) loadPending(state string) (pendingAuth, bool) {
+	v, ok := s.pending.LoadAndDelete(state)
+	if !ok {
+		return pendingAuth{}, false
+	}
+	p := v.(pendingAuth)
+	if time.Since(p.CreatedAt) > pendingAuthTTL {
+		return pendingAuth{}, false
+	}
+	return p, true
+}
+
+func (s *authCodeStore) gcLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.codes.Range(func(k, v any) bool {
+			if time.Since(v.(authCodeEntry).CreatedAt) > authCodeTTL {
+				s.codes.Delete(k)
+			}
+			return true
+		})
+		s.pending.Range(func(k, v any) bool {
+			if time.Since(v.(pendingAuth).CreatedAt) > pendingAuthTTL {
+				s.pending.Delete(k)
+			}
+			return true
+		})
+	}
+}

@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+    spec:
+      serviceAccountName: {{ .Chart.Name }}
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          envFrom:
+            {{- if .Values.envFromSecret }}
+            - secretRef:
+                name: {{ .Values.envFromSecret }}
+            {{- end }}
+            {{- if .Values.envFromExtraSecret }}
+            - secretRef:
+                name: {{ .Values.envFromExtraSecret }}
+            {{- end }}
+          env:
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            - name: PORT
+              value: {{ .Values.service.port | quote }}
+            {{- if .Values.gitopsSSHSecret }}
+            - name: GITOPS_SSH_KEY_PATH
+              value: /etc/gitops-ssh/ssh-privatekey
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: gitops-cache
+              mountPath: /data/mctl-gitops
+            {{- if .Values.gitopsSSHSecret }}
+            - name: gitops-ssh
+              mountPath: /etc/gitops-ssh
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: gitops-cache
+          emptyDir:
+            sizeLimit: 500Mi
+        {{- if .Values.gitopsSSHSecret }}
+        - name: gitops-ssh
+          secret:
+            secretName: {{ .Values.gitopsSSHSecret }}
+            defaultMode: 0400
+        {{- end }}

@@ -1,0 +1,812 @@
+openapi: "3.0.3"
+info:
+  title: mctl API
+  version: "1.0.0"
+  description: |
+    REST API for the mctl.ai Internal Developer Platform.
+
+    ## Authentication
+
+    All `/api/v1/*` endpoints require a `Bearer` token in the `Authorization` header.
+    Two token types are accepted:
+
+    - **GitHub personal access token** — validated against the GitHub API.
+      Required scopes: `read:user` (for identity). Membership in your team is resolved
+      from the GitOps repo.
+    - **Dex JWT** — issued by the platform SSO at `ops.mctl.ai`. Obtained via Backstage
+      login or the `/mcp` OAuth flow on `mctl.me`.
+
+    ```
+    Authorization: Bearer ghp_xxxxxxxxxxxx
+    Authorization: Bearer eyJhbGciOiJSUzI1NiJ9...
+    ```
+
+    ## Rate Limits
+
+    - Read endpoints: **100 requests/minute** per authenticated user
+    - Write endpoints (`/execute`): **20 requests/minute** per authenticated user
+
+    ## MCP Integration
+
+    In addition to the REST API, all operations are available as MCP tools at `POST /mcp`.
+    Configure your AI client with `https://api.mctl.ai` as the MCP server URL.
+
+servers:
+  - url: https://api.mctl.ai
+    description: Production
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: GitHub personal access token or Dex JWT
+
+  schemas:
+    Tenant:
+      type: object
+      properties:
+        name:
+          type: string
+          example: billing
+        displayName:
+          type: string
+          example: Billing Team
+        description:
+          type: string
+        contactEmail:
+          type: string
+          format: email
+        quotas:
+          type: object
+          additionalProperties:
+            type: string
+          example:
+            cpu: "2"
+            memory: 4Gi
+            pods: "10"
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantMember'
+
+    TenantMember:
+      type: object
+      properties:
+        userId:
+          type: string
+          example: alice
+        role:
+          type: string
+          example: admin
+
+    Service:
+      type: object
+      properties:
+        team:
+          type: string
+          example: billing
+        name:
+          type: string
+          example: payment-api
+        imageTag:
+          type: string
+          example: "1.2.3"
+        host:
+          type: string
+          example: payment-api.mctl.ai
+        port:
+          type: string
+          example: "8080"
+        componentType:
+          type: string
+          enum: [base-service, worker-service]
+        hasDatabase:
+          type: boolean
+
+    ArgoStatus:
+      type: object
+      properties:
+        name:
+          type: string
+        syncStatus:
+          type: string
+          enum: [Synced, OutOfSync, Unknown]
+        healthStatus:
+          type: string
+          enum: [Healthy, Progressing, Degraded, Suspended, Missing, Unknown]
+        message:
+          type: string
+
+    WorkflowStatus:
+      type: object
+      properties:
+        workflow:
+          type: string
+        audit:
+          $ref: '#/components/schemas/AuditEntry'
+        note:
+          type: string
+
+    AuditEntry:
+      type: object
+      properties:
+        id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        userId:
+          type: string
+        operation:
+          type: string
+        parameters:
+          type: object
+          additionalProperties:
+            type: string
+        workflowName:
+          type: string
+        status:
+          type: string
+          enum: [submitted, succeeded, failed]
+        riskLevel:
+          type: string
+          enum: [low, medium, high]
+        message:
+          type: string
+
+    ResourceUsage:
+      type: object
+      properties:
+        tenant:
+          type: string
+        allocated:
+          type: object
+          additionalProperties:
+            type: string
+        used:
+          type: object
+          additionalProperties:
+            type: string
+        note:
+          type: string
+
+    LogLine:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        line:
+          type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+
+    Operation:
+      type: object
+      properties:
+        name:
+          type: string
+        displayName:
+          type: string
+        description:
+          type: string
+        workflowTemplate:
+          type: string
+        riskLevel:
+          type: string
+          enum: [low, medium, high]
+        requiresConfirm:
+          type: boolean
+        parameters:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParameterDef'
+
+    ParameterDef:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        required:
+          type: boolean
+        default:
+          type: string
+        description:
+          type: string
+        enum:
+          type: array
+          items:
+            type: string
+
+    ExecuteRequest:
+      type: object
+      description: Key-value map of operation parameters
+      additionalProperties:
+        type: string
+      example:
+        team_name: billing
+        component_name: payment-api
+        action: deploy
+        git_tag: "1.2.3"
+
+    ExecuteResponse:
+      type: object
+      properties:
+        workflowName:
+          type: string
+          example: deploy-service-abc12
+        operation:
+          type: string
+        status:
+          type: string
+          example: submitted
+        message:
+          type: string
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      description: Returns 200 if the server is running. No authentication required.
+      security: []
+      tags: [Health]
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /readyz:
+    get:
+      summary: Readiness check
+      description: Returns 200 if the server is ready to handle traffic. No authentication required.
+      security: []
+      tags: [Health]
+      responses:
+        '200':
+          description: Server is ready
+
+  /openapi.yaml:
+    get:
+      summary: OpenAPI specification
+      description: Returns this OpenAPI 3.0 spec in YAML format. No authentication required.
+      security: []
+      tags: [Docs]
+      responses:
+        '200':
+          description: OpenAPI YAML spec
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /docs:
+    get:
+      summary: Swagger UI
+      description: Redirects to Swagger UI pre-loaded with the mctl API spec. No authentication required.
+      security: []
+      tags: [Docs]
+      responses:
+        '302':
+          description: Redirect to Swagger UI
+
+  /api/v1/tenants:
+    get:
+      summary: List all team workspaces
+      description: Returns all tenant workspaces with their quotas and members. **Admin access required.**
+      tags: [Tenants]
+      responses:
+        '200':
+          description: List of tenants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Tenant'
+                  count:
+                    type: integer
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/tenants/{name}:
+    get:
+      summary: Get a team workspace
+      description: Returns details of a specific tenant including members, quotas, and deployed services.
+      tags: [Tenants]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: billing
+      responses:
+        '200':
+          description: Tenant details with services
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant:
+                    $ref: '#/components/schemas/Tenant'
+                  services:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Service'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/services:
+    get:
+      summary: List deployed services
+      description: Returns all deployed services. Optionally filter by team.
+      tags: [Services]
+      parameters:
+        - name: team
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by team name
+          example: billing
+      responses:
+        '200':
+          description: List of services
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Service'
+                  count:
+                    type: integer
+
+  /api/v1/services/{team}/{app}:
+    get:
+      summary: Get service configuration
+      description: |
+        Returns the full GitOps configuration for a service: image tag, host, port,
+        component type, and database status. Use this when you need full details
+        beyond what list_services provides — especially to find the current image tag
+        before a rollback.
+      tags: [Services]
+      parameters:
+        - name: team
+          in: path
+          required: true
+          schema:
+            type: string
+          example: billing
+        - name: app
+          in: path
+          required: true
+          schema:
+            type: string
+          example: payment-api
+      responses:
+        '200':
+          description: Service configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Service'
+        '404':
+          description: Service not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/status/{team}/{app}:
+    get:
+      summary: Get service live status
+      description: |
+        Returns the live ArgoCD sync and health status for a service.
+        Includes sync state (Synced/OutOfSync), health (Healthy/Degraded/Progressing),
+        and the current service configuration from GitOps.
+      tags: [Services]
+      parameters:
+        - name: team
+          in: path
+          required: true
+          schema:
+            type: string
+          example: billing
+        - name: app
+          in: path
+          required: true
+          schema:
+            type: string
+          example: payment-api
+      responses:
+        '200':
+          description: Service status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  argocd:
+                    $ref: '#/components/schemas/ArgoStatus'
+                  service:
+                    $ref: '#/components/schemas/Service'
+        '404':
+          description: ArgoCD application not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/logs/{team}/{app}:
+    get:
+      summary: Get service logs
+      description: |
+        Fetches recent log lines for a service from Loki.
+        Requires in-cluster deployment with Loki accessible at `LOKI_URL`.
+
+        Returns log lines sorted by timestamp (most recent first).
+      tags: [Services]
+      parameters:
+        - name: team
+          in: path
+          required: true
+          schema:
+            type: string
+          example: billing
+        - name: app
+          in: path
+          required: true
+          schema:
+            type: string
+          example: payment-api
+        - name: lines
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+          description: Number of log lines to return (max 1000)
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+            default: 1h
+          description: Time window for log retrieval (e.g. 15m, 1h, 6h, 24h)
+      responses:
+        '200':
+          description: Log lines
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  team:
+                    type: string
+                  app:
+                    type: string
+                  lines:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LogLine'
+                  count:
+                    type: integer
+                  note:
+                    type: string
+        '404':
+          description: Service or tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/workflows/{name}:
+    get:
+      summary: Get workflow status
+      description: |
+        Returns the status and audit log entry for an Argo Workflow.
+        Use this after triggering an operation to track progress.
+      tags: [Workflows]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: deploy-service-abc12
+      responses:
+        '200':
+          description: Workflow status and audit entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowStatus'
+
+  /api/v1/resources/{tenant}:
+    get:
+      summary: Get resource quota usage
+      description: |
+        Returns CPU, memory, and pod quota allocation and live usage for a team namespace.
+        Live usage requires in-cluster deployment; otherwise returns empty `used` map.
+      tags: [Resources]
+      parameters:
+        - name: tenant
+          in: path
+          required: true
+          schema:
+            type: string
+          example: billing
+      responses:
+        '200':
+          description: Resource quota usage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceUsage'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/audit:
+    get:
+      summary: List recent platform operations
+      description: |
+        Returns the most recent 50 audit log entries — who ran what operation,
+        when, and which workflow was triggered.
+      tags: [Audit]
+      responses:
+        '200':
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditEntry'
+                  count:
+                    type: integer
+
+  /api/v1/repos:
+    get:
+      summary: List available GitHub repositories
+      description: |
+        Lists GitHub repositories available to a team for deployment.
+        Shows repos from GitHub App installations registered for the team.
+      tags: [Repos]
+      parameters:
+        - name: team
+          in: query
+          required: true
+          schema:
+            type: string
+          example: billing
+      responses:
+        '200':
+          description: Available repositories
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/v1/repos/sync:
+    post:
+      summary: Discover and register GitHub repositories
+      description: |
+        Scans GitHub App installations accessible to the authenticated user
+        and registers found repos for the team.
+      tags: [Repos]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                team:
+                  type: string
+                user:
+                  type: string
+      responses:
+        '200':
+          description: Sync result
+
+  /api/v1/operations:
+    get:
+      summary: List available operations
+      description: Returns all registered platform operations with their parameter definitions.
+      tags: [Operations]
+      responses:
+        '200':
+          description: Operations list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Operation'
+                  count:
+                    type: integer
+
+  /api/v1/operations/{name}:
+    get:
+      summary: Get operation definition
+      description: Returns the parameter definitions and metadata for a specific operation.
+      tags: [Operations]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: deploy-service
+      responses:
+        '200':
+          description: Operation definition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '404':
+          description: Operation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/operations/{name}/execute:
+    post:
+      summary: Execute a platform operation
+      description: |
+        Submits an Argo Workflow to execute the named operation.
+        Returns a `workflowName` that can be polled via `GET /api/v1/workflows/{name}`.
+
+        **Available operations:**
+
+        | Name | Description | Risk |
+        |------|-------------|------|
+        | `deploy-service` | Build image and deploy / update service | medium |
+        | `create-tenant` | Create new team workspace | medium |
+        | `provision-database` | Provision PostgreSQL database | medium |
+        | `retire-service` | Permanently remove a service | high |
+        | `delete-tenant` | Delete team workspace | high |
+        | `rollback-service` | Roll back to a previous image tag | medium |
+        | `preview-deploy` | Deploy ephemeral preview environment | low |
+        | `preview-delete` | Remove preview environment | low |
+
+        **Rate limit:** 20 requests/minute per user.
+      tags: [Operations]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: deploy-service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecuteRequest'
+            examples:
+              deploy:
+                summary: Deploy a service
+                value:
+                  team_name: billing
+                  component_name: payment-api
+                  action: deploy
+                  git_tag: "1.2.3"
+                  dockerfile_repo: mctlhq/payment-api
+              update-config:
+                summary: Update environment variables
+                value:
+                  team_name: billing
+                  component_name: payment-api
+                  action: update-config
+                  env_vars: "LOG_LEVEL=debug\nTIMEOUT=30"
+              rollback:
+                summary: Roll back to previous tag
+                value:
+                  team_name: billing
+                  component_name: payment-api
+                  target_tag: "1.1.0"
+              preview:
+                summary: Create preview environment
+                value:
+                  team_name: billing
+                  component_name: payment-api
+                  image_tag: "1.2.3"
+                  ttl_hours: "4"
+      responses:
+        '200':
+          description: Workflow submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecuteResponse'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Access denied to this team's resources
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Operation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+tags:
+  - name: Health
+    description: Health and readiness probes
+  - name: Docs
+    description: API documentation endpoints
+  - name: Tenants
+    description: Team workspace management
+  - name: Services
+    description: Service deployment and monitoring
+  - name: Workflows
+    description: Argo Workflow status
+  - name: Resources
+    description: Resource quota monitoring
+  - name: Audit
+    description: Audit log
+  - name: Repos
+    description: GitHub repository discovery
+  - name: Operations
+    description: Platform operation registry and execution
