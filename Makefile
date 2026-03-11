@@ -12,7 +12,7 @@ build-mcp:
 	go build $(LDFLAGS) -o bin/mctl-mcp ./cmd/mcp
 
 run: build-api
-	GITOPS_LOCAL_PATH=../mctl-core bin/mctl-api
+	GITOPS_LOCAL_PATH=../mctl-gitops bin/mctl-api
 
 run-mcp: build-mcp
 	MCTL_API_URL=http://localhost:8080 bin/mctl-mcp
