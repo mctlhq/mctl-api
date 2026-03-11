@@ -1,3 +1,17 @@
+// Copyright 2025 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package operations
 
 import "regexp"
@@ -139,7 +153,7 @@ var builtinOperations = []Operation{
 			{Name: "dockerfile_repo", Type: "string", Description: "GitHub repo (owner/name) containing the Dockerfile"},
 			{Name: "git_tag", Type: "string", Description: "Git tag to build (e.g. v1.0.0)"},
 			{Name: "port", Type: "string", Default: "8080", Description: "Service port"},
-			{Name: "host", Type: "string", Description: "Ingress hostname (e.g. my-app.mctl.ai). Omit for background workers."},
+			{Name: "host", Type: "string", Description: "Ingress hostname (e.g. my-app.example.com). Omit for background workers."},
 			{Name: "env_vars", Type: "string", Description: "Plaintext environment variables, newline-separated KEY=value"},
 			{Name: "secret_env_vars", Type: "string", Description: "Secret environment variables stored in Vault, newline-separated KEY=value", Secret: true},
 			{Name: "provision_database", Type: "string", Default: "false", Description: "Also provision a PostgreSQL database", Enum: []string{"true", "false"}},
@@ -230,7 +244,7 @@ var builtinOperations = []Operation{
 	{
 		Name:             "preview-deploy",
 		DisplayName:      "Deploy Preview Environment",
-		Description:      "Deploy an ephemeral preview copy of a service using an existing image tag. The preview is accessible at {app}-{id}.preview.mctl.ai and is automatically deleted after the TTL expires.",
+		Description:      "Deploy an ephemeral preview copy of a service using an existing image tag. The preview is accessible at {app}-{id}.preview.{platform_domain} and is automatically deleted after the TTL expires.",
 		WorkflowTemplate: "preview-deploy",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
@@ -269,7 +283,7 @@ var builtinOperations = []Operation{
 	{
 		Name:             "add-custom-domain",
 		DisplayName:      "Add Custom Domain",
-		Description:      "Add a verified custom domain to a service. Validates DNS (CNAME must point to {team}-{service}.mctl.ai), updates ingress configuration, and provisions TLS certificate via HTTP-01 challenge.",
+		Description:      "Add a verified custom domain to a service. Validates DNS (CNAME must point to the auto-generated domain), updates ingress configuration, and provisions TLS certificate via HTTP-01 challenge.",
 		WorkflowTemplate: "add-custom-domain",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,

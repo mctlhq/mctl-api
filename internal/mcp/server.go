@@ -1,3 +1,17 @@
+// Copyright 2025 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package mcp
 
 import (
@@ -91,7 +105,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 
 func (s *Server) toolListTenants() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_tenants",
-		mcplib.WithDescription("List all team workspaces on the mctl.ai platform with their resource quotas and member counts. Requires admin access."),
+		mcplib.WithDescription("List all team workspaces on the platform with their resource quotas and member counts. Requires admin access."),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -204,20 +218,20 @@ func (s *Server) toolGetResourceUsage() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolDeployService() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_deploy_service",
-		mcplib.WithDescription(`Deploy a service to the mctl.ai platform.
+		mcplib.WithDescription(`Deploy a service to the platform.
 
 Actions:
 - "onboard": First-time deploy. Builds Docker image, creates Helm manifests, commits to GitOps repo.
 - "deploy": Update an existing service to a new version. Rebuilds and updates image tag.
 - "update-config": Change environment variables or secrets without rebuilding.
 
-The service domain is auto-generated as {team_name}-{component_name}.mctl.ai.
+The service domain is auto-generated as {team_name}-{component_name}.{platform_domain}.
 Custom domains can be added after deployment using mctl_add_custom_domain.
 For background workers, set component_type to 'worker-service' (no ingress).
 
 Repository access for building:
 - Use mctl_list_repos(team) to see available repos, and mctl_sync_repos(team) to discover new ones.
-- Repos in the mctlhq GitHub org are accessed automatically via the platform GitHub App.
+- Repos in the configured GitHub org are accessed automatically via the platform GitHub App.
 - For repos outside the org (private), store a PAT in Vault first:
   Vault path: secret/data/teams/{team_name}/{component_name}/repo-pat → {"pat": "ghp_..."}
 - Public repos work without any credentials.
@@ -241,7 +255,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			mcplib.Enum("base-service", "worker-service"),
 		),
 		mcplib.WithString("dockerfile_repo",
-			mcplib.Description("GitHub repo containing Dockerfile, e.g. 'mctlhq/my-app'. Required for onboard/deploy."),
+			mcplib.Description("GitHub repo containing Dockerfile, e.g. 'myorg/my-app'. Required for onboard/deploy."),
 		),
 		mcplib.WithString("git_tag",
 			mcplib.Description("Git tag to build, e.g. 'v1.0.0'. Required for onboard/deploy."),
@@ -273,7 +287,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		params := extractStringParams(req.GetArguments())
-		// Auto-generate domain: workflow computes {team}-{service}.mctl.ai
+		// Auto-generate domain: workflow computes {team}-{service}.{platform_domain}
 		if _, hasHost := params["host"]; !hasHost {
 			componentType := params["component_type"]
 			if componentType == "" {
@@ -311,7 +325,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 
 func (s *Server) toolCreateTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_create_tenant",
-		mcplib.WithDescription(`Create a new team workspace on the mctl.ai platform.
+		mcplib.WithDescription(`Create a new team workspace on the platform.
 
 This provisions:
 - Kubernetes namespace with resource quotas
@@ -523,7 +537,7 @@ func (s *Server) toolListRepos() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithDescription(`List GitHub repositories available to a team for deployment.
 
 Shows repos from GitHub App installations registered for the team.
-Admins see organization repos (mctlhq) + personal repos.
+Admins see organization repos + personal repos.
 Other teams see personal repos + repos added via GitHub App popup.
 
 If no repos are returned, run mctl_sync_repos first to discover installations.
@@ -615,7 +629,7 @@ func (s *Server) toolSyncRepos() (mcplib.Tool, server.ToolHandlerFunc) {
 Scans GitHub App installations accessible to the user and registers found repos for the team.
 After sync, repos appear in mctl_list_repos and in the Backstage onboard-service UI.
 
-For admins: discovers organization installations (mctlhq) + user's personal repos.
+For admins: discovers organization installations + user's personal repos.
 For other teams: discovers user's personal repos only (org repos are added via GitHub App popup in Backstage UI).
 
 If the GitHub App is not installed on your account, visit: https://github.com/apps/mctl-app/installations/new`),
@@ -649,7 +663,7 @@ If the GitHub App is not installed on your account, visit: https://github.com/ap
 
 func (s *Server) toolListDomains() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_domains",
-		mcplib.WithDescription("List custom domains for a team or specific service. Shows domain, auto-generated domain ({team}-{service}.mctl.ai), status (pending/verified/active), and verification timestamp."),
+		mcplib.WithDescription("List custom domains for a team or specific service. Shows domain, auto-generated domain ({team}-{service}.{platform_domain}), status (pending/verified/active), and verification timestamp."),
 		mcplib.WithString("team",
 			mcplib.Required(),
 			mcplib.Description("Team name"),
@@ -681,17 +695,17 @@ func (s *Server) toolAddCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_add_custom_domain",
 		mcplib.WithDescription(`Add a custom domain to a service.
 
-The service must already be deployed (it gets an auto-generated domain: {team}-{service}.mctl.ai).
+The service must already be deployed (it gets an auto-generated domain: {team}-{service}.{platform_domain}).
 
 Steps:
 1. Registers domain in the platform database
 2. Triggers the add-custom-domain workflow which:
-   - Verifies DNS: domain must have a CNAME pointing to {team}-{service}.mctl.ai
+   - Verifies DNS: domain must have a CNAME pointing to {team}-{service}.{platform_domain}
    - Updates service ingress configuration
    - Provisions TLS certificate via HTTP-01 challenge
 
 Before calling this, tell the user to create a CNAME record:
-  {domain} CNAME → {team}-{service}.mctl.ai
+  {domain} CNAME → {team}-{service}.{platform_domain}
 
 Returns the registered domain info. Use mctl_verify_domain to check DNS status.`),
 		mcplib.WithString("team",
@@ -739,7 +753,7 @@ Returns the registered domain info. Use mctl_verify_domain to check DNS status.`
 
 func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_remove_custom_domain",
-		mcplib.WithDescription("Remove a custom domain from a service. This removes it from the ingress configuration and database. The auto-generated {team}-{service}.mctl.ai domain is not affected."),
+		mcplib.WithDescription("Remove a custom domain from a service. This removes it from the ingress configuration and database. The auto-generated {team}-{service}.{platform_domain} domain is not affected."),
 		mcplib.WithString("team",
 			mcplib.Required(),
 			mcplib.Description("Team name"),
@@ -774,7 +788,7 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 
 func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_verify_domain",
-		mcplib.WithDescription("Check if a custom domain's DNS is correctly configured. Verifies that the CNAME record points to the expected {team}-{service}.mctl.ai target."),
+		mcplib.WithDescription("Check if a custom domain's DNS is correctly configured. Verifies that the CNAME record points to the expected {team}-{service}.{platform_domain} target."),
 		mcplib.WithString("team",
 			mcplib.Required(),
 			mcplib.Description("Team name"),
@@ -860,7 +874,7 @@ func (s *Server) toolCreatePreview() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithDescription(`Deploy an ephemeral preview environment for a service.
 
 Uses an existing built image tag — no rebuild required.
-The preview is accessible at {app}-{preview_id}.preview.mctl.ai.
+The preview is accessible at {app}-{preview_id}.preview.{platform_domain}.
 It is automatically deleted after ttl_hours (default: 24).
 
 Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track progress.`),

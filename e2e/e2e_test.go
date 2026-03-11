@@ -1,5 +1,19 @@
 //go:build e2e
 
+// Copyright 2025 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // Package e2e contains end-to-end tests that verify the full platform flow:
 //
 //mctl tool call → Argo Workflow submitted → GitOps commit → ArgoCD sync → service deployed
@@ -25,10 +39,17 @@ import (
 )
 
 const (
-	apiBaseURL   = "https://api.mctl.ai"
-	pollInterval = 20 * time.Second
-	smokeTimeout = 25 * time.Minute
+	defaultAPIBaseURL = "https://api.mctl.ai"
+	pollInterval      = 20 * time.Second
+	smokeTimeout      = 25 * time.Minute
 )
+
+func apiBaseURL() string {
+	if u := os.Getenv("MCTL_API_URL"); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	return defaultAPIBaseURL
+}
 
 // client is a thin HTTP client for the mctl API.
 type client struct {
@@ -44,7 +65,7 @@ func newClient(t *testing.T) *client {
 		t.Skip("MCTL_TEST_TOKEN not set — skipping e2e tests")
 	}
 	return &client{
-		base:  apiBaseURL,
+		base:  apiBaseURL(),
 		token: token,
 		http:  &http.Client{Timeout: 30 * time.Second},
 	}

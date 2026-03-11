@@ -90,7 +90,7 @@ jobs:
           GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          git clone https://x-access-token:${GITOPS_TOKEN}@github.com/mctlhq/mctl-gitops.git /tmp/mctl-gitops
+          git clone https://x-access-token:${GITOPS_TOKEN}@github.com/${{ vars.GITOPS_REPO || 'mctlhq/mctl-gitops' }}.git /tmp/mctl-gitops
           cd /tmp/mctl-gitops
           python3 - <<'PYEOF'
           import re, os
