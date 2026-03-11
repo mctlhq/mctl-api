@@ -1,360 +1,85 @@
 # mctl-api
 
-REST API + MCP server for the mctl.ai platform. Exposes platform operations (deploy services, create workspaces, provision databases) as HTTP endpoints and MCP tools for AI clients.
+Control plane API for the mctl.ai Internal Developer Platform — dual-protocol (REST + MCP) access to manage services, workspaces, databases, previews, and platform operations.
+
+## What It Does
+
+mctl-api is the central gateway for the mctl.ai platform. It exposes every platform operation — deploying services, creating team workspaces, provisioning databases, managing custom domains — as both REST endpoints and MCP tools. AI coding assistants (Claude, Copilot, Cursor, Gemini, and others) connect via the MCP protocol, while Backstage and CLI tools use the REST API. All write operations are executed through Argo Workflows and reconciled by ArgoCD through a GitOps repository.
 
 ## Architecture
 
 ```
-Claude Desktop / Cursor / Copilot ──(MCP)──┐
-mctl CLI / Backstage               ──(REST)──┤──► mctl-api ──► Argo Workflows ──► GitOps ──► ArgoCD
-mctl-mcp (stdio)                   ──(REST)──┘                                              └──► K8s
+AI Clients (Copilot CLI / Claude / Cursor / VS Code / Windsurf / Gemini / Continue.dev)
+    │
+    ▼
+MCP Server (/mcp endpoint, Streamable HTTP)
+    │
+    ▼
+REST API (/api/v1/*)  ◄── Backstage / CLI / HTTP clients
+    │
+    ├──► Argo Workflows    (submits deploy/provision/rollback jobs)
+    ├──► GitOps Repo       (reads service configs, commits changes)
+    ├──► ArgoCD            (sync status, health checks)
+    ├──► Kubernetes        (resource quota usage)
+    ├──► Loki              (service log queries)
+    └──► PostgreSQL        (audit log)
 ```
 
-## Auth
+## Tech Stack
 
-Two token types are accepted:
+| Category | Details |
+|----------|---------|
+| Language | Go 1.24 |
+| HTTP Router | chi v5.2 |
+| MCP Server | mcp-go v0.31 (Streamable HTTP transport) |
+| Auth | GitHub token resolution, Dex/OIDC JWT, OAuth 2.0 PKCE |
+| Database | PostgreSQL via pgx v5.8 (audit logs) |
+| Kubernetes | client-go v0.32 (quota reader) |
+| Rate Limiting | httprate v0.15 (100 req/min read, 20 req/min write) |
+| Container Registry | ghcr.io/mctlhq/mctl-api |
+| Linting | golangci-lint (errcheck, govet, staticcheck, gosec, bodyclose) |
 
-| Token type | Detection | Validation |
-|---|---|---|
-| GitHub token | no dots | GitHub API → tenant groups from gitops |
-| Dex JWT | 3 dot-separated parts | Dex JWKS → groups from token claims |
-
-## Getting a Token
-
-All MCP clients need a Bearer token. Two options:
-
-1. **GitHub token** (simplest) — run `gh auth token` in your terminal
-2. **Web flow** — go to [mctl.me/mcp](https://mctl.me/mcp), click "Sign in with GitHub", copy the pre-filled config
-
-Your GitHub account must be a member of the `mctlhq` organization. Token is validated on every MCP request via GitHub API.
-
-> **Token rotation:** GitHub tokens expire. When a client shows "needs authentication" or tools stop working, get a fresh token with `gh auth token` and update the config.
-
-## MCP: GitHub Copilot CLI
-
-Add to `~/.copilot/mcp-config.json`:
-
-```json
-{
-  "mcpServers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": {
-        "Authorization": "Bearer <your-github-token>"
-      }
-    }
-  }
-}
-```
-
-**Setup & auth:**
-
-```bash
-# 1. Get token
-gh auth token
-
-# 2. Create config (replace <token> with actual value)
-cat > ~/.copilot/mcp-config.json << 'EOF'
-{
-  "mcpServers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": {
-        "Authorization": "Bearer <token>"
-      }
-    }
-  }
-}
-EOF
-
-# 3. Restart Copilot CLI
-# Exit current session (ctrl+d) and start a new one.
-
-# 4. Verify — run /mcp in the CLI. Expected:
-#    ✓ mctl   http   https://api.mctl.ai/mcp
-```
-
-**Troubleshooting:**
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `✗ mctl … needs authentication` | Token expired or missing | Update token in `~/.copilot/mcp-config.json` with fresh `gh auth token`, restart CLI |
-| `✗ mctl … connection refused` | API unreachable | Check `curl https://api.mctl.ai/healthz` |
-| Tools not visible after restart | Config not loaded | Verify file is valid JSON: `python3 -m json.tool ~/.copilot/mcp-config.json` |
-| `/mcp auth mctl` does nothing | No OAuth discovery endpoint | Expected — mctl uses static Bearer tokens, not OAuth flow. Update token manually |
-
-> **Note:** Copilot CLI may show "OAuth: needs authentication" in `/mcp` status even when the server works fine — this is a cosmetic label because the config uses `type: "http"`. The actual auth uses the `Authorization` header, not OAuth.
-
-## MCP: Claude Desktop via Streamable HTTP (recommended)
-
-No local binary needed. Uses the current MCP spec transport — single HTTP endpoint, auth on every request, works cleanly through reverse proxies.
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": {
-        "Authorization": "Bearer <your-github-token>"
-      }
-    }
-  }
-}
-```
-
-Also works via `api.mctl.me`:
-```json
-"url": "https://api.mctl.me/mcp"
-```
-
-Restart Claude Desktop — it will connect and expose 8 platform tools.
-
-## MCP: Claude Desktop via stdio (local binary)
-
-```bash
-go install github.com/mctlhq/mctl-api/cmd/mcp@latest
-```
-
-```json
-{
-  "mcpServers": {
-    "mctl": {
-      "command": "/Users/<you>/go/bin/mcp",
-      "env": {
-        "MCTL_API_URL": "https://api.mctl.ai"
-      }
-    }
-  }
-}
-```
-
-The binary picks up `gh auth token` automatically if `MCTL_API_TOKEN` is not set.
-
-## MCP: Cursor IDE
-
-Settings → Cursor Settings → MCP → Add server:
-
-```json
-{
-  "mcpServers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": {
-        "Authorization": "Bearer <your-github-token>"
-      }
-    }
-  }
-}
-```
-
-## MCP: VS Code (GitHub Copilot)
-
-Create `.vscode/mcp.json` in your project (or use the global MCP settings):
-
-```json
-{
-  "servers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": {
-        "Authorization": "Bearer ${input:mctlToken}"
-      }
-    }
-  },
-  "inputs": [
-    {
-      "id": "mctlToken",
-      "type": "promptString",
-      "description": "GitHub token (run: gh auth token)",
-      "password": true
-    }
-  ]
-}
-```
-
-VS Code will prompt for the token once and cache it in the session.
-
-Requires VS Code ≥ 1.99 with GitHub Copilot Chat extension.
-
-## MCP: Windsurf (Codeium)
-
-Settings → Windsurf Settings → MCP → Add server (same format as Cursor):
-
-```json
-{
-  "mcpServers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": {
-        "Authorization": "Bearer <your-github-token>"
-      }
-    }
-  }
-}
-```
-
-## MCP: Gemini CLI
-
-Add to `~/.gemini/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "mctl": {
-      "httpUrl": "https://api.mctl.ai/mcp",
-      "headers": {
-        "Authorization": "Bearer <your-github-token>"
-      }
-    }
-  }
-}
-```
-
-## MCP: Continue.dev
-
-Add to `~/.continue/config.json`:
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "mctl",
-      "transport": {
-        "type": "streamable-http",
-        "url": "https://api.mctl.ai/mcp",
-        "headers": {
-          "Authorization": "Bearer <your-github-token>"
-        }
-      }
-    }
-  ]
-}
-```
-
-## Available Tools
-
-**Read (safe, no confirmation needed):**
-
-| Tool | What it does |
-|---|---|
-| `mctl_list_tenants` | List all team workspaces with quotas |
-| `mctl_list_services` | List services, optional `team` filter |
-| `mctl_get_service_status` | ArgoCD health + sync state for a service |
-| `mctl_get_workflow_status` | Status and logs of an Argo Workflow run |
-| `mctl_get_resource_usage` | Live CPU/memory/pods usage from K8s ResourceQuota |
-| `mctl_get_service_logs` | Recent log lines from Loki (requires Loki enabled) |
-
-**Write (trigger Argo Workflows):**
-
-| Tool | What it does |
-|---|---|
-| `mctl_deploy_service` | Onboard, deploy, or update-config a service (supports autoscaling params) |
-| `mctl_create_tenant` | Create team workspace with namespace, quotas, Vault scope |
-| `mctl_provision_database` | Provision PostgreSQL on shared CNPG cluster |
-| `mctl_rollback_service` | Roll back a service to a previous image tag |
-| `mctl_create_preview` | Deploy ephemeral preview environment for a service |
-| `mctl_delete_preview` | Delete a preview environment |
-
-## Example conversations
+## Project Structure
 
 ```
-"What teams exist on the platform?"
-→ mctl_list_tenants
-
-"Is payment-api healthy?"
-→ mctl_get_service_status(team="billing", service="payment-api")
-
-"Create a workspace for the data team"
-→ mctl_create_tenant(tenant_name="data", display_name="Data Team")
-
-"Deploy auth-service v2.1.0 for the platform team"
-→ mctl_deploy_service(action="deploy", team_name="platform", component_name="auth-service", git_tag="v2.1.0")
-
-"Did the deploy finish?"
-→ mctl_get_workflow_status(workflow_name="deploy-service-abc123")
+mctl-api/
+├── cmd/api/main.go              # Entry point, server bootstrap
+├── internal/
+│   ├── api/                     # REST handlers & router
+│   │   ├── handlers_read.go     # Read operations (list, status, config)
+│   │   ├── handlers_write.go    # Write operations (deploy, create, retire)
+│   │   ├── handlers_domains.go  # Custom domain management
+│   │   ├── handlers_repos.go    # Repository access management
+│   │   ├── oauth_handlers.go    # OAuth 2.0 Authorization Code + PKCE
+│   │   └── router.go            # Route definitions & middleware
+│   ├── auth/                    # GitHub + OIDC + OAuth authentication
+│   ├── mcp/                     # MCP server implementation (tool registry)
+│   ├── operations/              # Platform operation registry & executor
+│   ├── argocd/                  # ArgoCD API client
+│   ├── gitops/                  # GitOps repo reader (clone, parse values)
+│   ├── audit/                   # Audit logging (PostgreSQL-backed)
+│   ├── k8s/                     # Kubernetes quota reader
+│   ├── loki/                    # Loki log query client
+│   └── openapi/                 # Embedded OpenAPI spec
+├── e2e/                         # End-to-end tests (build tag: e2e)
+├── helm/                        # Kubernetes Helm chart
+├── Dockerfile                   # Multi-stage Alpine build
+├── Makefile                     # Dev commands (run, test, lint, build)
+├── .golangci.yml                # Linter configuration
+├── .env.example                 # Environment variable template
+├── mcp-config.example.json      # MCP client config examples
+└── .github/workflows/build.yml  # CI/CD pipeline
 ```
 
-## API Docs (OpenAPI)
+## Getting Started
 
-The full API spec is available at runtime — no separate tooling needed.
+### Prerequisites
 
-| URL | What you get |
-|---|---|
-| `https://api.mctl.ai/openapi.yaml` | Raw OpenAPI 3.0 spec (download or import) |
-| `https://api.mctl.ai/docs` | Swagger UI (auto-redirect, no local install) |
+- Go 1.24+
+- GitHub CLI (`gh`) — for obtaining auth tokens
+- Access to the `mctlhq` GitHub organization
 
-### Browse interactively
-
-Open `https://api.mctl.ai/docs` in your browser. The Swagger UI loads the live spec and lets you:
-- Read endpoint descriptions, required params, and response schemas
-- Click "Authorize" → paste your GitHub token → try endpoints directly in the browser
-
-### Import into Postman / Insomnia / Paw
-
-```bash
-# Download spec
-curl -O https://api.mctl.ai/openapi.yaml
-
-# Import into Postman:
-# File → Import → select openapi.yaml
-# Postman creates a collection with all endpoints pre-configured.
-```
-
-### Import into Cursor / Windsurf
-
-Some IDEs let you reference an OpenAPI spec for autocomplete in HTTP files:
-
-```
-# .http file example (VS Code REST Client / JetBrains HTTP Client)
-GET https://api.mctl.ai/api/v1/tenants
-Authorization: Bearer {{token}}
-```
-
-### Validate locally
-
-```bash
-npx @redocly/cli lint https://api.mctl.ai/openapi.yaml
-# or
-docker run --rm -v $(pwd):/spec redocly/cli lint /spec/openapi.yaml
-```
-
----
-
-## REST API
-
-```bash
-# Health
-curl https://api.mctl.ai/healthz
-
-# List tenants (GitHub token)
-curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/tenants
-
-# List services
-curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/services
-
-# Service status
-curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/status/billing/payment-api
-
-# Service logs (last 50 lines from past 30 minutes)
-curl -H "Authorization: Bearer $(gh auth token)" \
-     "https://api.mctl.ai/api/v1/logs/billing/payment-api?lines=50&since=30m"
-
-# Trigger operation
-curl -H "Authorization: Bearer $(gh auth token)" \
-     -H "Content-Type: application/json" \
-     -d '{"team_name":"billing","component_name":"payment-api","action":"deploy","git_tag":"v1.2.0"}' \
-     https://api.mctl.ai/api/v1/operations/deploy-service/execute
-```
-
-## Local Development
+### Local Development
 
 ```bash
 # Run API against local gitops clone
@@ -368,47 +93,264 @@ make run &
 make run-mcp
 ```
 
-Auth is bypassed locally (`AUTH_REQUIRED` defaults to `false` when unset — set `AUTH_REQUIRED=true` to test auth).
+Auth is bypassed locally (`AUTH_REQUIRED` defaults to `false` when unset). Set `AUTH_REQUIRED=true` to test authentication.
 
-## Environment Variables
+### Docker
 
-| Variable | Default | Description |
-|---|---|---|
-| `PORT` | `8080` | HTTP listen port |
-| `GITOPS_REPO_URL` | `https://github.com/mctlhq/mctl-gitops.git` | GitOps repo to clone |
-| `GITOPS_LOCAL_PATH` | `/tmp/mctl-gitops` | Local clone path |
-| `ARGOCD_URL` | `https://ops.mctl.me` | ArgoCD API URL |
-| `ARGOCD_TOKEN` | — | ArgoCD API token (from Vault) |
-| `ARGO_WORKFLOWS_NAMESPACE` | `argo-workflows` | Namespace for workflow submission |
-| `GITHUB_ORG` | `mctlhq` | Required GitHub org for token auth |
-| `ADMIN_USERS` | — | Comma-separated GitHub logins with admin access |
-| `DEX_ISSUER_URL` | `https://ops.mctl.me/api/dex` | Dex OIDC issuer for JWT auth |
-| `DEX_CLIENT_ID` | — | Dex client ID (informational) |
-| `SELF_URL` | `https://api.mctl.ai` | Public base URL (advertised in MCP) |
-| `AUTH_REQUIRED` | `true` | Set to `false` to bypass auth in dev |
-| `BACKSTAGE_URL` | — | Backstage URL for catalog sync |
-| `BACKSTAGE_TOKEN` | — | Backstage service token |
-| `AUDIT_DB_URL` | — | PostgreSQL connection string for persistent audit log (falls back to in-memory) |
-| `LOKI_URL` | — | Loki base URL for log querying (e.g. `http://loki.monitoring:3100`) |
+```bash
+docker build -t mctl-api .
+docker run -p 8080:8080 mctl-api
+```
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `PORT` | HTTP server port | `8080` | No |
+| `AUTH_REQUIRED` | Enable authentication | `true` | No |
+| `ADMIN_USERS` | Admin GitHub usernames (comma-separated) | — | No |
+| `GITOPS_REPO_URL` | GitOps repository URL | `https://github.com/mctlhq/mctl-gitops.git` | No |
+| `GITOPS_BRANCH` | GitOps branch | `main` | No |
+| `GITOPS_LOCAL_PATH` | Local cache path for gitops clone | `/tmp/mctl-gitops` | No |
+| `GITOPS_REPO_TOKEN` | GitHub token for HTTPS clone | — | No |
+| `GITOPS_SSH_KEY_PATH` | SSH key path for git clone | — | No |
+| `ARGOCD_URL` | ArgoCD API endpoint | `https://ops.mctl.ai` | No |
+| `ARGOCD_TOKEN` | ArgoCD auth token (from Vault) | — | Yes |
+| `ARGO_WORKFLOWS_NAMESPACE` | Kubernetes namespace for workflows | `argo-workflows` | No |
+| `GITHUB_ORG` | Required GitHub organization | `mctlhq` | No |
+| `DEX_ISSUER_URL` | OIDC issuer URL | `https://ops.mctl.ai/api/dex` | No |
+| `DEX_CLIENT_ID` | JWT audience for Dex | — | No |
+| `SELF_URL` | Public base URL | `https://api.mctl.ai` | No |
+| `ALLOWED_ORIGINS` | CORS allowed origins | — | No |
+| `OAUTH_GITHUB_CLIENT_ID` | GitHub OAuth app client ID | — | No |
+| `OAUTH_GITHUB_CLIENT_SECRET` | GitHub OAuth app client secret | — | No |
+| `OAUTH_JWT_SECRET` | JWT signing secret for OAuth tokens | — | No |
+| `OAUTH_ALLOWED_REDIRECT_URIS` | Allowed OAuth redirect URIs | — | No |
+| `AUDIT_DB_URL` | PostgreSQL connection string (falls back to in-memory) | — | No |
+| `BACKSTAGE_URL` | Backstage catalog URL | — | No |
+| `BACKSTAGE_TOKEN` | Backstage service token | — | No |
+| `LOKI_URL` | Loki base URL for log queries | — | No |
+
+## API / Endpoints
+
+### Authentication
+
+Three authentication methods are supported:
+
+| Method | Detection | Validation |
+|--------|-----------|------------|
+| GitHub personal token | No dots in token | GitHub API → resolve org membership |
+| Dex/OIDC JWT | 3 dot-separated parts | JWKS validation → groups from claims |
+| OAuth 2.0 + PKCE | Authorization Code flow | For Claude.ai custom connectors |
+
+Get a token: run `gh auth token` or visit [mctl.ai/mcp](https://mctl.ai/mcp) to sign in and copy a pre-filled config. Your GitHub account must be a member of the `mctlhq` organization.
+
+### REST API
+
+```bash
+# Health check
+curl https://api.mctl.ai/healthz
+
+# List tenants
+curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/tenants
+
+# List services
+curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/services
+
+# Service status
+curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/status/billing/payment-api
+
+# Service logs (last 50 lines, past 30 minutes)
+curl -H "Authorization: Bearer $(gh auth token)" \
+     "https://api.mctl.ai/api/v1/logs/billing/payment-api?lines=50&since=30m"
+
+# Trigger a deploy
+curl -H "Authorization: Bearer $(gh auth token)" \
+     -H "Content-Type: application/json" \
+     -d '{"team_name":"billing","component_name":"payment-api","action":"deploy","git_tag":"v1.2.0"}' \
+     https://api.mctl.ai/api/v1/operations/deploy-service/execute
+```
+
+### OpenAPI Documentation
+
+| URL | Description |
+|-----|-------------|
+| `https://api.mctl.ai/openapi.yaml` | Raw OpenAPI 3.0 spec |
+| `https://api.mctl.ai/docs` | Interactive Swagger UI |
+
+### MCP Setup
+
+The MCP endpoint is available at `https://api.mctl.ai/mcp` (Streamable HTTP). All clients use the same auth — a GitHub token passed as a Bearer header.
+
+**Copilot CLI** — add to `~/.copilot/mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mctl": {
+      "type": "http",
+      "url": "https://api.mctl.ai/mcp",
+      "headers": { "Authorization": "Bearer <your-github-token>" }
+    }
+  }
+}
+```
+
+**Claude Desktop** (Streamable HTTP) — add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mctl": {
+      "type": "http",
+      "url": "https://api.mctl.ai/mcp",
+      "headers": { "Authorization": "Bearer <your-github-token>" }
+    }
+  }
+}
+```
+
+**Claude Desktop** (stdio, local binary):
+
+```bash
+go install github.com/mctlhq/mctl-api/cmd/mcp@latest
+```
+
+```json
+{
+  "mcpServers": {
+    "mctl": {
+      "command": "/Users/<you>/go/bin/mcp",
+      "env": { "MCTL_API_URL": "https://api.mctl.ai" }
+    }
+  }
+}
+```
+
+**Cursor** — Settings → Cursor Settings → MCP → Add server (same JSON as Copilot CLI).
+
+**VS Code** — create `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "mctl": {
+      "type": "http",
+      "url": "https://api.mctl.ai/mcp",
+      "headers": { "Authorization": "Bearer ${input:mctlToken}" }
+    }
+  },
+  "inputs": [
+    { "id": "mctlToken", "type": "promptString", "description": "GitHub token (run: gh auth token)", "password": true }
+  ]
+}
+```
+
+**Windsurf** — Settings → Windsurf Settings → MCP → Add server (same JSON as Copilot CLI).
+
+**Gemini CLI** — add to `~/.gemini/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "mctl": {
+      "httpUrl": "https://api.mctl.ai/mcp",
+      "headers": { "Authorization": "Bearer <your-github-token>" }
+    }
+  }
+}
+```
+
+**Continue.dev** — add to `~/.continue/config.json`:
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "mctl",
+      "transport": {
+        "type": "streamable-http",
+        "url": "https://api.mctl.ai/mcp",
+        "headers": { "Authorization": "Bearer <your-github-token>" }
+      }
+    }
+  ]
+}
+```
+
+### MCP Tools
+
+**Read operations** (safe, no side effects):
+
+| Tool | Description |
+|------|-------------|
+| `mctl_list_tenants` | List all team workspaces with quotas |
+| `mctl_list_services` | List services, optional team filter |
+| `mctl_get_tenant` | Get workspace details and members |
+| `mctl_get_service_status` | ArgoCD health + sync state |
+| `mctl_get_service_config` | Full service config from GitOps repo |
+| `mctl_get_resource_usage` | Live CPU/memory/pods from K8s ResourceQuota |
+| `mctl_get_service_logs` | Recent log lines from Loki |
+
+**Write operations** (trigger Argo Workflows):
+
+| Tool | Description |
+|------|-------------|
+| `mctl_deploy_service` | Onboard, deploy, or update-config a service |
+| `mctl_create_tenant` | Create team workspace (namespace, quotas, Vault) |
+| `mctl_provision_database` | Provision PostgreSQL on shared CNPG cluster |
+| `mctl_rollback_service` | Roll back to a previous image tag |
+| `mctl_retire_service` | Permanently remove a service |
+| `mctl_create_preview` / `mctl_delete_preview` | Ephemeral preview environments |
+| `mctl_add_custom_domain` / `mctl_remove_custom_domain` | Custom domain management |
+| `mctl_list_repos` / `mctl_sync_repos` / `mctl_grant_repo_access` | Repository access |
+
+## Testing
+
+```bash
+# Unit tests
+make test
+
+# Lint
+make lint
+
+# End-to-end tests (requires running platform)
+go test -tags=e2e ./e2e/ -run TestE2E_FullPlatformSmokeTest
+```
+
+Linting uses golangci-lint with errcheck, govet, staticcheck, gosec, bodyclose, and other checkers configured in `.golangci.yml`.
+
+## CI/CD
+
+GitHub Actions workflow (`.github/workflows/build.yml`):
+
+- **Triggers:** Semver tags (`*.*.*`) and pull requests to `main`
+- **Steps:** Checkout → Go 1.24 setup → golangci-lint → Build + test → Docker build → Push to GHCR → Trivy vulnerability scan → GitOps tag update → Telegram notification
+- **Registry:** `ghcr.io/mctlhq/mctl-api`
+- **Dependabot:** Enabled for `go.mod` dependency updates
 
 ## Deployment
 
-ArgoCD syncs from `platform-gitops/apps/templates/mctl-api.yaml`. Secrets come from Vault via ExternalSecret.
+Deployed to Kubernetes via Helm chart (`helm/`). ArgoCD syncs the desired state from the mctl-gitops repository.
 
-Vault secrets to create before first deploy:
+**Domain:** `api.mctl.ai`
+
+Vault secrets required before first deploy:
 
 ```bash
-# ArgoCD API token (Settings → Accounts → mctl-api → Generate Token)
+# ArgoCD API token
 vault kv put platform/mctl-api/argocd-token token="<token>"
 
 # Backstage service token
 vault kv put platform/mctl-api/backstage-token token="<token>"
 
-# Dex SSO client secret (must match argocd/values.yaml staticClients)
-vault kv put platform/mctl-api/sso client-id="mctl-api" client-secret="<random-32-chars>"
+# Dex SSO client secret
+vault kv put platform/mctl-api/sso client-id="mctl-api" client-secret="<secret>"
 ```
 
-## Release
+## Release Process
 
 ```bash
 git tag 0.2.0 && git push origin 0.2.0
@@ -416,4 +358,17 @@ git tag 0.2.0 && git push origin 0.2.0
 # → CI commits new tag to mctl-gitops → ArgoCD deploys
 ```
 
-Tags use no `v` prefix. On every push to `main`, a `latest` image is also built (for local dev).
+Tags use **no `v` prefix**. Every push to `main` also builds a `latest` image for local development.
+
+## Related Projects
+
+| Repository | Description |
+|------------|-------------|
+| [mctl-gitops](https://github.com/mctlhq/mctl-gitops) | GitOps repository — Helm values, ArgoCD app definitions |
+| [mctl-portal](https://github.com/mctlhq/mctl-portal) | Web portal for token management and MCP config generation |
+| [mctl-web](https://github.com/mctlhq/mctl-web) | Marketing site (mctl.ai) |
+| [mctl-agent](https://github.com/mctlhq/mctl-agent) | Platform agent components |
+
+## License
+
+Apache 2.0
