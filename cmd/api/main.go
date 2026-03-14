@@ -97,7 +97,7 @@ func main() {
 		auditLog = audit.NewLogger()
 	}
 
-	executor := operations.NewExecutor(cfg.ArgoWorkflowsNamespace)
+	executor := operations.NewExecutor()
 
 	// MCP server for SSE transport (embedded in this process).
 	// Tools make REST calls back to this server using the caller's token (forwarded via context).
@@ -183,7 +183,6 @@ type config struct {
 	GitOpsSSHKeyPath       string // Path to SSH key for SSH auth (optional, takes precedence)
 	ArgoCDURL              string
 	ArgoCDToken            string
-	ArgoWorkflowsNamespace string
 	GitHubOrg              string
 	AdminUsers             []string
 	BackstageURL           string
@@ -251,7 +250,6 @@ func loadConfig() config {
 		GitOpsSSHKeyPath:        os.Getenv("GITOPS_SSH_KEY_PATH"),
 		ArgoCDURL:               envOr("ARGOCD_URL", "https://ops.mctl.ai"),
 		ArgoCDToken:             os.Getenv("ARGOCD_TOKEN"),
-		ArgoWorkflowsNamespace:  envOr("ARGO_WORKFLOWS_NAMESPACE", "argo-workflows"),
 		GitHubOrg:               envOr("GITHUB_ORG", "mctlhq"),
 		AdminUsers:              adminList,
 		BackstageURL:            os.Getenv("BACKSTAGE_URL"),

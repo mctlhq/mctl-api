@@ -23,8 +23,47 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/argocd"
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
+
+func (h *Handlers) Whoami(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	// Build list of accessible Argo Workflow namespaces.
+	var namespaces []string
+	for _, g := range user.Groups {
+		if g == "admins" {
+			continue
+		}
+		namespaces = append(namespaces, "team-"+g)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id":         user.ID,
+		"groups":     user.Groups,
+		"isAdmin":    user.IsAdmin(),
+		"namespaces": namespaces,
+	})
+}
+
+// Logout acknowledges a logout request. Since access tokens are stateless JWTs,
+// they cannot be actively invalidated — they expire naturally within 1 hour.
+func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message": "logged out",
+		"note":    "Stateless JWT tokens expire naturally within 1 hour. Discard the token on the client side.",
+	})
+}
 
 func (h *Handlers) ListTenants(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
@@ -121,23 +160,60 @@ func (h *Handlers) GetServiceStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) ListWorkflows(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	// Build accessible team namespaces for the user.
+	var namespaces []string
+	if user.IsAdmin() {
+		namespaces = []string{"all"}
+	} else {
+		for _, g := range user.Groups {
+			if g != "admins" {
+				namespaces = append(namespaces, "team-"+g)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"items": []interface{}{},
-		"count": 0,
-		"note":  "Argo Workflows API integration requires in-cluster deployment",
+		"items":      []interface{}{},
+		"count":      0,
+		"namespaces": namespaces,
+		"note":       "Argo Workflows API integration requires in-cluster deployment",
 	})
 }
 
 func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	// Check audit log for a record of this workflow.
 	entry := h.opts.AuditLog.GetByWorkflow(name)
 	if entry != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
+		// Enforce team namespace access: non-admin users can only view
+		// workflows that belong to their teams.
+		team := auditEntryTenant(entry)
+		if !user.IsAdmin() && team != "" && !user.HasTenantAccess(team) {
+			writeError(w, http.StatusForbidden, "access denied: workflow belongs to team "+team)
+			return
+		}
+		resp := map[string]interface{}{
 			"workflow": name,
 			"audit":    entry,
 			"note":     "Live Argo Workflows log requires in-cluster deployment",
-		})
+		}
+		if team != "" {
+			resp["namespace"] = "team-" + team
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -244,6 +320,19 @@ func (h *Handlers) GetOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, op)
+}
+
+// auditEntryTenant extracts the tenant/team from an audit entry's parameters.
+func auditEntryTenant(entry *audit.Entry) string {
+	if entry == nil || entry.Parameters == nil {
+		return ""
+	}
+	for _, key := range []string{"tenant_name", "team_name"} {
+		if v, ok := entry.Parameters[key]; ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

@@ -392,7 +392,7 @@ func TestSmoke_Workflow(t *testing.T) {
 	router, _ := newTestRouter(t)
 
 	t.Run("get unknown workflow returns status unknown", func(t *testing.T) {
-		w := get(t, router, "/api/v1/workflows/nonexistent-workflow")
+		w := getAs(t, router, "/api/v1/workflows/nonexistent-workflow", adminUser)
 		assertStatus(t, w, http.StatusOK)
 		body := decodeJSON(t, w)
 		if body["status"] != "unknown" {
@@ -401,11 +401,21 @@ func TestSmoke_Workflow(t *testing.T) {
 	})
 
 	t.Run("list workflows returns empty list", func(t *testing.T) {
-		w := get(t, router, "/api/v1/workflows")
+		w := getAs(t, router, "/api/v1/workflows", adminUser)
 		assertStatus(t, w, http.StatusOK)
 		body := decodeJSON(t, w)
 		if body["count"].(float64) != 0 {
 			t.Errorf("expected count=0, got: %v", body["count"])
 		}
+	})
+
+	t.Run("list workflows without auth returns 401", func(t *testing.T) {
+		w := get(t, router, "/api/v1/workflows")
+		assertStatus(t, w, http.StatusUnauthorized)
+	})
+
+	t.Run("get workflow without auth returns 401", func(t *testing.T) {
+		w := get(t, router, "/api/v1/workflows/some-workflow")
+		assertStatus(t, w, http.StatusUnauthorized)
 	})
 }
