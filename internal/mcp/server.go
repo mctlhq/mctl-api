@@ -1060,6 +1060,7 @@ func (s *Server) toolListWorkflows() (mcplib.Tool, server.ToolHandlerFunc) {
 Shows workflows that were submitted for the team's namespace (team-{name}).
 Use this to find workflow names before calling mctl_get_workflow_status.
 Admins can see workflows across all namespaces.`),
+		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithString("team",
 			mcplib.Description("Team name to filter workflows (optional for admins)"),
 		),
