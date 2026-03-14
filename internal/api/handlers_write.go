@@ -52,7 +52,11 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 
 	// RBAC: check tenant access.
 	tenantParam := extractTenantParam(op, input)
-	if tenantParam != "" && !user.HasTenantAccess(tenantParam) {
+	if tenantParam == "" {
+		writeError(w, http.StatusBadRequest, "team/tenant is required for workflow operations")
+		return
+	}
+	if !user.HasTenantAccess(tenantParam) {
 		h.opts.AuditLog.Log(audit.Entry{
 			UserID:    user.ID,
 			Operation: opName,
@@ -81,9 +85,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		go h.notifyBackstage(input)
 	}
 
-	// Submit the Argo Workflow. Workflows always run in the global argo-workflows namespace
-	// (where infrastructure service accounts and secrets live). The target team is attached
-	// as the mctl.ai/team label so the workflow is filterable in the Argo Workflows UI.
+	// Submit the Argo Workflow in the team's namespace (team-{name}).
 	result, err := h.opts.Executor.Submit(r.Context(), op, input, user.ID, tenantParam)
 	if err != nil {
 		h.opts.AuditLog.Log(audit.Entry{

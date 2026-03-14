@@ -123,6 +123,10 @@ func NewRouter(opts Options) http.Handler {
 		})))
 
 		r.Route("/api/v1", func(r chi.Router) {
+			// Auth endpoints.
+			r.Get("/whoami", h.Whoami)
+			r.Post("/auth/logout", h.Logout)
+
 			// Read endpoints (safe, no side effects).
 			r.Get("/tenants", h.ListTenants)
 			r.Get("/tenants/{name}", h.GetTenant)

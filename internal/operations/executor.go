@@ -38,7 +38,6 @@ var workflowGVR = schema.GroupVersionResource{
 
 // Executor submits Argo Workflows for platform operations.
 type Executor struct {
-	namespace     string
 	dynamicClient dynamic.Interface
 }
 
@@ -51,34 +50,36 @@ type SubmitResult struct {
 	CreatedAt    string `json:"createdAt"`
 }
 
-// NewExecutor creates an Executor for the given Argo Workflows namespace.
+// NewExecutor creates an Executor that submits workflows to team namespaces.
 // Tries in-cluster config first, falls back to KUBECONFIG for local dev.
-func NewExecutor(namespace string) *Executor {
+func NewExecutor() *Executor {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		kubeconfig := os.Getenv("KUBECONFIG")
 		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
 			slog.Warn("failed to build kubeconfig — workflow submission will be unavailable", "error", err)
-			return &Executor{namespace: namespace}
+			return &Executor{}
 		}
 	}
 
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		slog.Warn("failed to create dynamic client — workflow submission will be unavailable", "error", err)
-		return &Executor{namespace: namespace}
+		return &Executor{}
 	}
 
-	return &Executor{namespace: namespace, dynamicClient: dynClient}
+	return &Executor{dynamicClient: dynClient}
 }
 
 // Submit creates an Argo Workflow CR referencing the ClusterWorkflowTemplate.
-// Workflows always execute in the global Argo Workflows namespace (where service
-// accounts and infrastructure secrets live). The target team is recorded via the
-// mctl.ai/team label so workflows are filterable in the Argo Workflows UI.
+// Workflows execute in the team's namespace (team-{name}) where team-scoped
+// service accounts and secrets live.
 func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]string, userID string, team string) (*SubmitResult, error) {
-	namespace := e.namespace
+	if team == "" {
+		return nil, fmt.Errorf("team is required for workflow submission")
+	}
+	namespace := "team-" + team
 	requestID := uuid.New().String()[:8]
 	workflowName := fmt.Sprintf("%s-%s", op.WorkflowTemplate, requestID)
 
@@ -117,9 +118,7 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 		"mctl.ai/operation":  op.Name,
 		"mctl.ai/request-id": requestID,
 		"mctl.ai/user":       userID,
-	}
-	if team != "" {
-		labels["mctl.ai/team"] = team
+		"mctl.ai/team":       team,
 	}
 	wf.SetLabels(labels)
 	wf.Object["spec"] = map[string]interface{}{
