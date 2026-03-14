@@ -135,6 +135,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/status/{team}/{app}", h.GetServiceStatus)
 			r.Get("/workflows", h.ListWorkflows)
 			r.Get("/workflows/{name}", h.GetWorkflow)
+			r.Get("/previews", h.ListPreviews)
 			r.Get("/resources/{tenant}", h.GetResourceUsage)
 			r.Get("/logs/{team}/{app}", h.GetServiceLogs)
 			r.Get("/audit", h.ListAudit)

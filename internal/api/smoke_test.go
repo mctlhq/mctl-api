@@ -80,6 +80,14 @@ func (f *fakeArgoCD) GetAppStatus(name string) (*argocd.AppStatus, error) {
 	return nil, fmt.Errorf("app not found: %s", name)
 }
 
+func (f *fakeArgoCD) ListApps(_ string) ([]argocd.AppStatus, error) {
+	var out []argocd.AppStatus
+	for _, s := range f.apps {
+		out = append(out, *s)
+	}
+	return out, nil
+}
+
 type fakeExecutor struct {
 	submitted []string
 }
