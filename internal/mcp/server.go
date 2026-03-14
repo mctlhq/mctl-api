@@ -71,8 +71,6 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	)
 
 	// Auth tools.
-	srv.AddTool(s.toolLogin())
-	srv.AddTool(s.toolLogout())
 	srv.AddTool(s.toolWhoami())
 
 	// Read tools (safe, always available).
@@ -113,21 +111,19 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 
 // --- Auth Tools ---
 
-func (s *Server) toolLogin() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_login",
-		mcplib.WithDescription(`Authenticate and check access to the mctl platform.
+func (s *Server) toolWhoami() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_whoami",
+		mcplib.WithDescription(`Check your current authentication status on the mctl platform.
 
-Validates your current credentials, shows your identity, team memberships,
-and which Argo Workflow namespaces (team-{name}) you can access.
-Also shows the connected API environment.
-
-Use this first to confirm you are authenticated before running other tools.`),
+Returns your user ID, team memberships, admin status, and accessible namespaces.
+Authentication is handled automatically by the MCP connector's OAuth flow.
+To switch accounts, disconnect and reconnect the mctl connector in your client settings.`),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		body, err := s.apiGet(ctx, "/api/v1/whoami")
 		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Authentication failed: %v\n\nTo authenticate, provide a valid Bearer token (GitHub PAT, Dex JWT, or OAuth token).", err)), nil
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get identity: %v", err)), nil
 		}
 
 		var identity struct {
@@ -138,7 +134,7 @@ Use this first to confirm you are authenticated before running other tools.`),
 		}
 		_ = json.Unmarshal(body, &identity)
 
-		msg := fmt.Sprintf("Logged in to %s\n\nUser: %s\nAdmin: %v\nTeams: %v\nAccessible namespaces: %v",
+		msg := fmt.Sprintf("Authenticated to %s\n\nUser: %s\nAdmin: %v\nTeams: %v\nAccessible namespaces: %v",
 			s.apiURL, identity.ID, identity.IsAdmin, identity.Groups, identity.Namespaces)
 		return mcplib.NewToolResultText(msg), nil
 	}
@@ -146,39 +142,7 @@ Use this first to confirm you are authenticated before running other tools.`),
 	return tool, handler
 }
 
-func (s *Server) toolLogout() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_logout",
-		mcplib.WithDescription("Log out from the mctl platform. Signals the server that you are done. Note: stateless JWT tokens expire naturally within 1 hour — discard the token on the client side."),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		body, err := s.apiPost(ctx, "/api/v1/auth/logout", nil)
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Logout failed: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
 // --- Read Tools ---
-
-func (s *Server) toolWhoami() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_whoami",
-		mcplib.WithDescription("Check your identity: returns your user ID, team memberships, and admin status."),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		body, err := s.apiGet(ctx, "/api/v1/whoami")
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get identity: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
 
 func (s *Server) toolListTenants() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_tenants",
