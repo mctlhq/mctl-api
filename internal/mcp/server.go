@@ -81,14 +81,19 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListServices())
 	srv.AddTool(s.toolGetServiceStatus())
 	srv.AddTool(s.toolGetServiceConfig())
+	srv.AddTool(s.toolListWorkflows())
 	srv.AddTool(s.toolGetWorkflowStatus())
 	srv.AddTool(s.toolGetResourceUsage())
 	srv.AddTool(s.toolListRecentOperations())
+	srv.AddTool(s.toolListOperations())
+	srv.AddTool(s.toolGetOperation())
 	srv.AddTool(s.toolListRepos())
 	srv.AddTool(s.toolGrantRepoAccess())
 	srv.AddTool(s.toolGetServiceLogs())
+	srv.AddTool(s.toolListPreviews())
 
 	// Write tools (trigger workflows).
+	srv.AddTool(s.toolScaleService())
 	srv.AddTool(s.toolDeployService())
 	srv.AddTool(s.toolCreateTenant())
 	srv.AddTool(s.toolProvisionDatabase())
@@ -1057,6 +1062,153 @@ Requires in-cluster deployment with Loki enabled (LOKI_URL env var).`),
 		body, err := s.apiGet(ctx, path)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get logs for %s/%s: %v", team, service, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+// --- Discovery Tools ---
+
+func (s *Server) toolListWorkflows() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_workflows",
+		mcplib.WithDescription(`List recent Argo Workflow runs for a team.
+
+Shows workflows that were submitted for the team's namespace (team-{name}).
+Use this to find workflow names before calling mctl_get_workflow_status.
+Admins can see workflows across all namespaces.`),
+		mcplib.WithString("team",
+			mcplib.Description("Team name to filter workflows (optional for admins)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		path := "/api/v1/workflows"
+		if team, ok := args["team"].(string); ok && team != "" {
+			path += "?team=" + url.QueryEscape(team)
+		}
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list workflows: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolListOperations() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_operations",
+		mcplib.WithDescription("List all available platform operations with their parameters, risk levels, and descriptions. Use this to discover what actions are available on the platform."),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiGet(ctx, "/api/v1/operations")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list operations: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolGetOperation() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_operation",
+		mcplib.WithDescription("Get detailed schema of a specific platform operation: all parameters with types, defaults, validation patterns, and risk level. Use this to understand exactly what an operation requires before executing it."),
+		mcplib.WithString("name",
+			mcplib.Required(),
+			mcplib.Description("Operation name (e.g. 'deploy-service', 'create-tenant')"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		name := args["name"].(string)
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/operations/%s", url.PathEscape(name)))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get operation %s: %v", name, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolScaleService() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_scale_service",
+		mcplib.WithDescription(`Scale a service by updating its autoscaling configuration.
+
+Enables or disables HPA autoscaling and sets min/max replica counts and CPU threshold.
+This is a convenience wrapper around deploy-service with action=update-config.
+
+Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track progress.`),
+		mcplib.WithString("team_name",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("component_name",
+			mcplib.Required(),
+			mcplib.Description("Service name to scale"),
+		),
+		mcplib.WithString("autoscaling_enabled",
+			mcplib.Required(),
+			mcplib.Description("Enable HPA autoscaling: 'true' or 'false'"),
+			mcplib.Enum("true", "false"),
+		),
+		mcplib.WithString("min_replicas",
+			mcplib.Description("Minimum replica count (default: 1)"),
+		),
+		mcplib.WithString("max_replicas",
+			mcplib.Description("Maximum replica count (default: 5)"),
+		),
+		mcplib.WithString("cpu_threshold",
+			mcplib.Description("CPU utilization % to trigger scale-up (default: 80)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		params["action"] = "update-config"
+		body, err := s.apiPost(ctx, "/api/v1/operations/deploy-service/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to scale service: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolListPreviews() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_previews",
+		mcplib.WithDescription(`List active preview environments for a team.
+
+Shows all preview ArgoCD applications with their health status, sync state, and namespace.
+Preview environments follow the naming pattern: preview-{team}-{service}-{id}.
+
+Use this to check which previews are running before creating new ones or cleaning up stale ones.`),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name"),
+		),
+		mcplib.WithString("service",
+			mcplib.Description("Service name (optional, filters to specific service)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		team := args["team"].(string)
+		path := "/api/v1/previews?team=" + url.QueryEscape(team)
+		if svc, ok := args["service"].(string); ok && svc != "" {
+			path += "&service=" + url.QueryEscape(svc)
+		}
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list previews for %s: %v", team, err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

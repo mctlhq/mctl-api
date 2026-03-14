@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -220,6 +221,54 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 		"workflow": name,
 		"status":   "unknown",
 		"note":     "Argo Workflows API integration requires in-cluster deployment",
+	})
+}
+
+func (h *Handlers) ListPreviews(w http.ResponseWriter, r *http.Request) {
+	team := r.URL.Query().Get("team")
+	service := r.URL.Query().Get("service")
+
+	if team == "" {
+		writeError(w, http.StatusBadRequest, "team query parameter is required")
+		return
+	}
+
+	// Preview ArgoCD apps follow the naming convention: preview-{team}-{service}-{id}
+	// List all apps in the team's project and filter for preview prefix.
+	apps, err := h.opts.ArgoCD.ListApps(team)
+	if err != nil {
+		if errors.Is(err, argocd.ErrUnauthenticated) {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"items": []interface{}{},
+				"count": 0,
+				"error": "ArgoCD token invalid or expired",
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"items": []interface{}{},
+			"count": 0,
+			"note":  "ArgoCD query failed: " + err.Error(),
+		})
+		return
+	}
+
+	prefix := "preview-" + team + "-"
+	if service != "" {
+		prefix = "preview-" + team + "-" + service + "-"
+	}
+
+	var previews []argocd.AppStatus
+	for _, app := range apps {
+		if strings.HasPrefix(app.Name, prefix) {
+			previews = append(previews, app)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"items": previews,
+		"count": len(previews),
+		"team":  team,
 	})
 }
 
