@@ -73,13 +73,13 @@ func NewExecutor() *Executor {
 }
 
 // Submit creates an Argo Workflow CR referencing the ClusterWorkflowTemplate.
-// Workflows execute in the team's namespace (team-{name}) where team-scoped
-// service accounts and secrets live.
+// Workflows execute in the tenant's namespace (same name as the tenant) where
+// team-scoped service accounts and secrets live.
 func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]string, userID string, team string) (*SubmitResult, error) {
 	if team == "" {
 		return nil, fmt.Errorf("team is required for workflow submission")
 	}
-	namespace := "team-" + team
+	namespace := team
 	requestID := uuid.New().String()[:8]
 	workflowName := fmt.Sprintf("%s-%s", op.WorkflowTemplate, requestID)
 

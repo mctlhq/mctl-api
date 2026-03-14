@@ -41,7 +41,7 @@ func (h *Handlers) Whoami(w http.ResponseWriter, r *http.Request) {
 		if g == "admins" {
 			continue
 		}
-		namespaces = append(namespaces, "team-"+g)
+		namespaces = append(namespaces, g)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -174,7 +174,7 @@ func (h *Handlers) ListWorkflows(w http.ResponseWriter, r *http.Request) {
 	} else {
 		for _, g := range user.Groups {
 			if g != "admins" {
-				namespaces = append(namespaces, "team-"+g)
+				namespaces = append(namespaces, g)
 			}
 		}
 	}
@@ -212,7 +212,7 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 			"note":     "Live Argo Workflows log requires in-cluster deployment",
 		}
 		if team != "" {
-			resp["namespace"] = "team-" + team
+			resp["namespace"] = team
 		}
 		writeJSON(w, http.StatusOK, resp)
 		return
