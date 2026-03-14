@@ -49,9 +49,9 @@ func NewClient(baseURL string) *Client {
 
 // QueryRange fetches log lines for a namespace/app in the given time window.
 // namespace corresponds to the team name; app is the service name.
+// Uses pod label regex to match the ArgoCD naming convention: {team}-{app}-{chart}-.
 func (c *Client) QueryRange(ctx context.Context, namespace, app string, lines int, since time.Duration) ([]LogLine, error) {
-	query := fmt.Sprintf(`{namespace=%q, app=%q}`, namespace, app)
-	// Fallback: also try kubernetes_pod_name label pattern if app label absent.
+	query := fmt.Sprintf(`{namespace=%q, pod=~"%s-%s-.+"}`, namespace, namespace, app)
 	return c.query(ctx, query, lines, since)
 }
 
