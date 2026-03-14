@@ -259,9 +259,9 @@ func (h *Handlers) ListPreviews(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var previews []argocd.AppStatus
-	for _, app := range apps {
-		if strings.HasPrefix(app.Name, prefix) {
-			previews = append(previews, app)
+	for i := range apps {
+		if strings.HasPrefix(apps[i].Name, prefix) {
+			previews = append(previews, apps[i])
 		}
 	}
 
