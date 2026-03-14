@@ -50,12 +50,78 @@ type Tenant struct {
 	ContactEmail string            `json:"contactEmail"`
 	Quotas       map[string]string `json:"quotas"`
 	Members      []TenantMember    `json:"members,omitempty"`
+	Teams        []Team            `json:"teams,omitempty"` // optional: multi-team support
+}
+
+// Team represents a team within a multi-team tenant.
+// Each team gets its own namespace: {tenant}-{team}.
+type Team struct {
+	Name        string         `json:"name"`
+	DisplayName string         `json:"displayName,omitempty"`
+	Members     []TenantMember `json:"members,omitempty"`
 }
 
 // TenantMember represents a member of a tenant.
 type TenantMember struct {
 	UserID string `json:"userId"`
 	Role   string `json:"role,omitempty"`
+}
+
+// IsMultiTeam returns true if the tenant has explicit teams defined.
+func (t *Tenant) IsMultiTeam() bool {
+	return len(t.Teams) > 0
+}
+
+// Namespaces returns the list of K8s namespaces this tenant owns.
+// For legacy tenants (no teams): returns [tenantName].
+// For multi-team tenants: returns [tenant-team1, tenant-team2, ...].
+func (t *Tenant) Namespaces() []string {
+	if !t.IsMultiTeam() {
+		return []string{t.Name}
+	}
+	ns := make([]string, 0, len(t.Teams))
+	for _, team := range t.Teams {
+		ns = append(ns, t.Name+"-"+team.Name)
+	}
+	return ns
+}
+
+// UserNamespaces returns the namespaces accessible to a specific user (case-insensitive).
+// For legacy tenants: returns [tenantName] if user is a member.
+// For multi-team: returns compound namespaces for teams the user belongs to.
+func (t *Tenant) UserNamespaces(login string) []string {
+	if !t.IsMultiTeam() {
+		for _, m := range t.Members {
+			if strings.EqualFold(m.UserID, login) {
+				return []string{t.Name}
+			}
+		}
+		return nil
+	}
+	// Multi-team: check team-level membership first, then tenant-level fallback.
+	var ns []string
+	isTenantMember := false
+	for _, m := range t.Members {
+		if strings.EqualFold(m.UserID, login) {
+			isTenantMember = true
+			break
+		}
+	}
+	for _, team := range t.Teams {
+		compound := t.Name + "-" + team.Name
+		if isTenantMember {
+			// Tenant-level members have access to all teams.
+			ns = append(ns, compound)
+			continue
+		}
+		for _, m := range team.Members {
+			if strings.EqualFold(m.UserID, login) {
+				ns = append(ns, compound)
+				break
+			}
+		}
+	}
+	return ns
 }
 
 // Service represents a deployed service read from the GitOps repo.
@@ -208,6 +274,14 @@ func (r *Reader) readTenant(name string) (*Tenant, error) {
 				UserID string `yaml:"userId"`
 				Role   string `yaml:"role"`
 			} `yaml:"members"`
+			Teams []struct {
+				Name        string `yaml:"name"`
+				DisplayName string `yaml:"displayName"`
+				Members     []struct {
+					UserID string `yaml:"userId"`
+					Role   string `yaml:"role"`
+				} `yaml:"members"`
+			} `yaml:"teams"`
 			Quotas map[string]string `yaml:"quotas"`
 		} `yaml:"tenant"`
 	}
@@ -227,6 +301,13 @@ func (r *Reader) readTenant(name string) (*Tenant, error) {
 	}
 	for _, m := range raw.Tenant.Members {
 		t.Members = append(t.Members, TenantMember{UserID: m.UserID, Role: m.Role})
+	}
+	for _, team := range raw.Tenant.Teams {
+		tm := Team{Name: team.Name, DisplayName: team.DisplayName}
+		for _, m := range team.Members {
+			tm.Members = append(tm.Members, TenantMember{UserID: m.UserID, Role: m.Role})
+		}
+		t.Teams = append(t.Teams, tm)
 	}
 	return t, nil
 }
@@ -326,7 +407,9 @@ func (r *Reader) readService(team, app string) (*Service, error) {
 	return svc, nil
 }
 
-// GetTenantsForUser returns the list of tenant names a GitHub user belongs to.
+// GetTenantsForUser returns the list of namespace names a GitHub user has access to.
+// For legacy tenants (no teams): returns the tenant name.
+// For multi-team tenants: returns compound names ({tenant}-{team}) for teams the user belongs to.
 // Implements auth.TenantResolver.
 func (r *Reader) GetTenantsForUser(login string) ([]string, error) {
 	tenants, err := r.ListTenants()
@@ -336,12 +419,8 @@ func (r *Reader) GetTenantsForUser(login string) ([]string, error) {
 
 	var result []string
 	for _, t := range tenants {
-		for _, m := range t.Members {
-			if strings.EqualFold(m.UserID, login) {
-				result = append(result, t.Name)
-				break
-			}
-		}
+		ns := t.UserNamespaces(login)
+		result = append(result, ns...)
 	}
 	return result, nil
 }
