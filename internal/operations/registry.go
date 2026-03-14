@@ -213,6 +213,7 @@ var builtinOperations = []Operation{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name to retire", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "component_type", Type: "string", Required: false, Default: "base-service", Description: "Chart type: base-service or worker-service", Enum: []string{"base-service", "worker-service"}},
+			{Name: "delete_vault_secrets", Type: "string", Required: false, Default: "true", Description: "Delete Vault secrets for the service", Enum: []string{"true", "false"}},
 		},
 	},
 	{
