@@ -191,3 +191,189 @@ image:
 		t.Errorf("componentType: got %q, want worker-service", svc.ComponentType)
 	}
 }
+
+func TestReadTenant_MultiTeam(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	writeTenantYAML(t, dir, "knot-capital", `
+tenant:
+  name: knot-capital
+  displayName: Knot Capital
+  quotas:
+    cpu: "4"
+  members:
+    - userId: owner1
+      role: owner
+  teams:
+    - name: backend
+      displayName: Backend Team
+      members:
+        - userId: dev1
+        - userId: dev2
+    - name: frontend
+      displayName: Frontend Team
+      members:
+        - userId: dev3
+`)
+	tenant, err := r.readTenant("knot-capital")
+	if err != nil {
+		t.Fatalf("readTenant: %v", err)
+	}
+	if tenant.Name != "knot-capital" {
+		t.Errorf("name: got %q", tenant.Name)
+	}
+	if !tenant.IsMultiTeam() {
+		t.Error("should be multi-team")
+	}
+	if len(tenant.Teams) != 2 {
+		t.Fatalf("teams: got %d, want 2", len(tenant.Teams))
+	}
+	if tenant.Teams[0].Name != "backend" {
+		t.Errorf("team[0]: got %q", tenant.Teams[0].Name)
+	}
+	if len(tenant.Teams[0].Members) != 2 {
+		t.Errorf("team[0] members: got %d, want 2", len(tenant.Teams[0].Members))
+	}
+}
+
+func TestTenant_Namespaces(t *testing.T) {
+	// Legacy tenant — single namespace.
+	legacy := Tenant{Name: "billing", Members: []TenantMember{{UserID: "alice"}}}
+	ns := legacy.Namespaces()
+	if len(ns) != 1 || ns[0] != "billing" {
+		t.Errorf("legacy namespaces: got %v, want [billing]", ns)
+	}
+
+	// Multi-team tenant — compound namespaces.
+	multi := Tenant{
+		Name: "knot-capital",
+		Teams: []Team{
+			{Name: "backend"},
+			{Name: "frontend"},
+		},
+	}
+	ns = multi.Namespaces()
+	if len(ns) != 2 {
+		t.Fatalf("multi-team namespaces: got %d, want 2", len(ns))
+	}
+	if ns[0] != "knot-capital-backend" || ns[1] != "knot-capital-frontend" {
+		t.Errorf("multi-team namespaces: got %v", ns)
+	}
+}
+
+func TestTenant_UserNamespaces(t *testing.T) {
+	multi := Tenant{
+		Name: "knot-capital",
+		Members: []TenantMember{
+			{UserID: "owner1", Role: "owner"},
+		},
+		Teams: []Team{
+			{Name: "backend", Members: []TenantMember{{UserID: "dev1"}, {UserID: "dev2"}}},
+			{Name: "frontend", Members: []TenantMember{{UserID: "dev3"}}},
+		},
+	}
+
+	// Tenant-level member gets all team namespaces.
+	ns := multi.UserNamespaces("owner1")
+	if len(ns) != 2 {
+		t.Errorf("owner1 should access 2 namespaces, got %v", ns)
+	}
+
+	// Team member gets only their team namespace.
+	ns = multi.UserNamespaces("dev1")
+	if len(ns) != 1 || ns[0] != "knot-capital-backend" {
+		t.Errorf("dev1 should access [knot-capital-backend], got %v", ns)
+	}
+
+	ns = multi.UserNamespaces("dev3")
+	if len(ns) != 1 || ns[0] != "knot-capital-frontend" {
+		t.Errorf("dev3 should access [knot-capital-frontend], got %v", ns)
+	}
+
+	// Unknown user gets nothing.
+	ns = multi.UserNamespaces("nobody")
+	if len(ns) != 0 {
+		t.Errorf("nobody should access 0 namespaces, got %v", ns)
+	}
+
+	// Case-insensitive match.
+	ns = multi.UserNamespaces("Dev1")
+	if len(ns) != 1 {
+		t.Errorf("Dev1 (case-insensitive) should match dev1, got %v", ns)
+	}
+}
+
+func TestGetTenantsForUser_MultiTeam(t *testing.T) {
+	dir, r := setupTempRepo(t)
+
+	// Legacy tenant.
+	writeTenantYAML(t, dir, "billing", `
+tenant:
+  name: billing
+  quotas: {}
+  members:
+    - userId: alice
+`)
+
+	// Multi-team tenant.
+	writeTenantYAML(t, dir, "knot-capital", `
+tenant:
+  name: knot-capital
+  quotas: {}
+  members:
+    - userId: alice
+      role: owner
+  teams:
+    - name: backend
+      members:
+        - userId: bob
+    - name: frontend
+      members:
+        - userId: charlie
+`)
+
+	// Alice: member of billing + owner of knot-capital (all teams).
+	tenants, err := r.GetTenantsForUser("alice")
+	if err != nil {
+		t.Fatalf("GetTenantsForUser(alice): %v", err)
+	}
+	want := map[string]bool{"billing": true, "knot-capital-backend": true, "knot-capital-frontend": true}
+	got := make(map[string]bool)
+	for _, tn := range tenants {
+		got[tn] = true
+	}
+	for k := range want {
+		if !got[k] {
+			t.Errorf("alice missing namespace %q, got %v", k, tenants)
+		}
+	}
+
+	// Bob: team member of knot-capital/backend only.
+	tenants, err = r.GetTenantsForUser("bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tenants) != 1 || tenants[0] != "knot-capital-backend" {
+		t.Errorf("bob should have [knot-capital-backend], got %v", tenants)
+	}
+
+	// Charlie: team member of knot-capital/frontend only.
+	tenants, err = r.GetTenantsForUser("charlie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tenants) != 1 || tenants[0] != "knot-capital-frontend" {
+		t.Errorf("charlie should have [knot-capital-frontend], got %v", tenants)
+	}
+}
+
+func TestTenant_IsMultiTeam(t *testing.T) {
+	legacy := Tenant{Name: "billing"}
+	if legacy.IsMultiTeam() {
+		t.Error("legacy tenant should not be multi-team")
+	}
+
+	multi := Tenant{Name: "x", Teams: []Team{{Name: "a"}}}
+	if !multi.IsMultiTeam() {
+		t.Error("tenant with teams should be multi-team")
+	}
+}
