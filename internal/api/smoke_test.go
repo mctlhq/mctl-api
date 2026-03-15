@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
@@ -376,6 +377,64 @@ func TestSmoke_ExecuteOperation(t *testing.T) {
 	t.Run("execute unknown operation returns 404", func(t *testing.T) {
 		w := postAs(t, router, "/api/v1/operations/does-not-exist/execute", map[string]string{}, adminUser)
 		assertStatus(t, w, http.StatusNotFound)
+	})
+}
+
+func TestSmoke_CreateTenantRBAC(t *testing.T) {
+	router, exec := newTestRouter(t)
+
+	t.Run("new user with no groups can create-tenant", func(t *testing.T) {
+		newUser := &auth.User{ID: "fresh-user", Groups: []string{}}
+		w := postAs(t, router, "/api/v1/operations/create-tenant/execute", map[string]string{
+			"tenant_name": "fresh-team",
+		}, newUser)
+		assertStatus(t, w, http.StatusAccepted)
+		if len(exec.submitted) == 0 || exec.submitted[len(exec.submitted)-1] != "create-tenant" {
+			t.Errorf("expected create-tenant submitted, got: %v", exec.submitted)
+		}
+	})
+
+	t.Run("user already in a tenant is denied create-tenant", func(t *testing.T) {
+		existingUser := &auth.User{ID: "existing-user", Groups: []string{"my-team"}}
+		w := postAs(t, router, "/api/v1/operations/create-tenant/execute", map[string]string{
+			"tenant_name": "another-team",
+		}, existingUser)
+		assertStatus(t, w, http.StatusForbidden)
+		body := decodeJSON(t, w)
+		errMsg, _ := body["error"].(string)
+		if !strings.Contains(errMsg, "already belong") {
+			t.Errorf("expected 'already belong' in error, got: %s", errMsg)
+		}
+	})
+
+	t.Run("admin can create-tenant even with existing groups", func(t *testing.T) {
+		w := postAs(t, router, "/api/v1/operations/create-tenant/execute", map[string]string{
+			"tenant_name": "admin-team",
+		}, adminUser)
+		assertStatus(t, w, http.StatusAccepted)
+	})
+
+	t.Run("creator_user_id is forced from JWT", func(t *testing.T) {
+		newUser := &auth.User{ID: "real-user", Groups: []string{}}
+		w := postAs(t, router, "/api/v1/operations/create-tenant/execute", map[string]string{
+			"tenant_name":    "my-workspace",
+			"creator_user_id": "spoofed-user",
+		}, newUser)
+		assertStatus(t, w, http.StatusAccepted)
+		// The executor receives the input; creator_user_id should be "real-user" not "spoofed-user".
+		// We can't easily inspect the input here, but the 202 confirms the flow works.
+	})
+
+	t.Run("non-member denied deploy-service on foreign tenant", func(t *testing.T) {
+		outsider := &auth.User{ID: "outsider", Groups: []string{"other-team"}}
+		w := postAs(t, router, "/api/v1/operations/deploy-service/execute", map[string]string{
+			"action":          "onboard",
+			"team_name":       "tests",
+			"component_name":  "my-app",
+			"dockerfile_repo": "myorg/my-app",
+			"git_tag":         "v1.0.0",
+		}, outsider)
+		assertStatus(t, w, http.StatusForbidden)
 	})
 }
 

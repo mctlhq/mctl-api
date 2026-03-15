@@ -56,7 +56,28 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "team/tenant is required for workflow operations")
 		return
 	}
-	if !user.HasTenantAccess(tenantParam) {
+
+	if opName == "create-tenant" {
+		// Self-service: any authenticated user can create ONE workspace.
+		// Admins bypass the one-tenant limit (they manage the platform).
+		if !user.IsAdmin() {
+			existing := filterNonAdmin(user.Groups)
+			if len(existing) > 0 {
+				h.opts.AuditLog.Log(audit.Entry{
+					UserID:    user.ID,
+					Operation: opName,
+					Status:    "denied",
+					RiskLevel: string(op.RiskLevel),
+					Message:   fmt.Sprintf("user %q already belongs to tenant %q", user.ID, existing[0]),
+				})
+				writeError(w, http.StatusForbidden,
+					"you already belong to workspace \""+existing[0]+"\"; only one workspace per user is allowed")
+				return
+			}
+		}
+		// Force creator_user_id from the authenticated session (prevent spoofing).
+		input["creator_user_id"] = user.ID
+	} else if !user.HasTenantAccess(tenantParam) {
 		h.opts.AuditLog.Log(audit.Entry{
 			UserID:    user.ID,
 			Operation: opName,
@@ -192,4 +213,16 @@ func redactSecrets(op operations.Operation, input map[string]string) map[string]
 		}
 	}
 	return result
+}
+
+// filterNonAdmin returns group names that are NOT the "admins" group.
+// Used to check if a user already belongs to a tenant.
+func filterNonAdmin(groups []string) []string {
+	var out []string
+	for _, g := range groups {
+		if g != "admins" {
+			out = append(out, g)
+		}
+	}
+	return out
 }
