@@ -246,7 +246,7 @@ func loadConfig() config {
 		GitOpsRepoURL:           envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-gitops.git"),
 		GitOpsBranch:            envOr("GITOPS_BRANCH", "main"),
 		GitOpsLocalPath:         envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-gitops"),
-		GitOpsToken:             os.Getenv("GITOPS_REPO_TOKEN"),
+		GitOpsToken:             envOr("GITOPS_REPO_TOKEN", os.Getenv("GITHUB_TOKEN")),
 		GitOpsSSHKeyPath:        os.Getenv("GITOPS_SSH_KEY_PATH"),
 		ArgoCDURL:               envOr("ARGOCD_URL", "https://ops.mctl.ai"),
 		ArgoCDToken:             os.Getenv("ARGOCD_TOKEN"),
