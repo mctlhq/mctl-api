@@ -15,6 +15,8 @@
 package mcp
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 )
 
@@ -97,5 +99,43 @@ func TestNewServer_TrimsTrailingSlash(t *testing.T) {
 	srv := NewServer("https://api.mctl.ai/", "")
 	if srv.apiURL != "https://api.mctl.ai" {
 		t.Errorf("trailing slash not trimmed: got %q", srv.apiURL)
+	}
+}
+
+func TestAllToolsHaveTitleAnnotation(t *testing.T) {
+	srv := NewServer("http://localhost:8080", "")
+	mcpSrv := srv.NewMCPServer()
+
+	// Send a tools/list request to get all registered tools.
+	req := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	resp := mcpSrv.HandleMessage(context.Background(), req)
+
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal response: %v", err)
+	}
+
+	var result struct {
+		Result struct {
+			Tools []struct {
+				Name        string `json:"name"`
+				Annotations struct {
+					Title string `json:"title"`
+				} `json:"annotations"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("failed to unmarshal tools/list response: %v", err)
+	}
+
+	if len(result.Result.Tools) != 30 {
+		t.Errorf("expected 30 tools, got %d", len(result.Result.Tools))
+	}
+
+	for _, tool := range result.Result.Tools {
+		if tool.Annotations.Title == "" {
+			t.Errorf("tool %q is missing title annotation", tool.Name)
+		}
 	}
 }

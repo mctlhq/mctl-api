@@ -113,6 +113,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 
 func (s *Server) toolWhoami() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_whoami",
+		mcplib.WithTitleAnnotation("Check Identity"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription(`Check your current authentication status on the mctl platform.
 
@@ -147,6 +148,7 @@ To switch accounts, disconnect and reconnect the mctl connector in your client s
 
 func (s *Server) toolListTenants() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_tenants",
+		mcplib.WithTitleAnnotation("List Workspaces"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("List all team workspaces on the platform with their resource quotas and member counts. Requires admin access."),
 	)
@@ -164,6 +166,7 @@ func (s *Server) toolListTenants() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolListServices() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_services",
+		mcplib.WithTitleAnnotation("List Services"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("List deployed services on the platform. Shows service name, team, image tag, host, and database status. Optionally filter by team name."),
 		mcplib.WithString("team",
@@ -189,6 +192,7 @@ func (s *Server) toolListServices() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolGetServiceStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_service_status",
+		mcplib.WithTitleAnnotation("Get Service Status"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("Get detailed status of a service including ArgoCD sync state, health status, and service configuration. Use this to check if a service is healthy and up-to-date."),
 		mcplib.WithString("team",
@@ -217,6 +221,7 @@ func (s *Server) toolGetServiceStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolGetWorkflowStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_workflow_status",
+		mcplib.WithTitleAnnotation("Get Workflow Status"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("Get status and logs of an Argo Workflow run. Use this after triggering an operation (deploy, create tenant, etc.) to check if it completed successfully."),
 		mcplib.WithString("workflow_name",
@@ -240,6 +245,7 @@ func (s *Server) toolGetWorkflowStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolGetResourceUsage() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_resource_usage",
+		mcplib.WithTitleAnnotation("Get Resource Usage"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("Get resource quota usage for a team workspace: CPU, memory, pods used vs allocated. Use this to check if a team is running low on resources."),
 		mcplib.WithString("team",
@@ -265,6 +271,7 @@ func (s *Server) toolGetResourceUsage() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolDeployService() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_deploy_service",
+		mcplib.WithTitleAnnotation("Deploy Service"),
 		mcplib.WithDescription(`Deploy a service to the platform.
 
 Actions:
@@ -372,6 +379,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 
 func (s *Server) toolCreateTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_create_tenant",
+		mcplib.WithTitleAnnotation("Create Workspace"),
 		mcplib.WithDescription(`Create a new team workspace on the platform.
 
 This provisions:
@@ -422,6 +430,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 
 func (s *Server) toolProvisionDatabase() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_provision_database",
+		mcplib.WithTitleAnnotation("Provision Database"),
 		mcplib.WithDescription(`Provision a PostgreSQL database on the shared CNPG cluster.
 
 This creates:
@@ -457,6 +466,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 
 func (s *Server) toolGetTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_tenant",
+		mcplib.WithTitleAnnotation("Get Workspace Details"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("Get details of a specific team workspace: members, quotas, and deployed services."),
 		mcplib.WithString("name",
@@ -480,6 +490,7 @@ func (s *Server) toolGetTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolGetServiceConfig() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_service_config",
+		mcplib.WithTitleAnnotation("Get Service Config"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("Get full configuration of a service from the GitOps repo: image tag, host, port, component type, and database status. Use this when you need full details beyond what list_services provides."),
 		mcplib.WithString("team",
@@ -508,6 +519,7 @@ func (s *Server) toolGetServiceConfig() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolListRecentOperations() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_recent_operations",
+		mcplib.WithTitleAnnotation("Recent Activity"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("List the most recent platform operations from the audit log (up to 50 entries). Shows who ran what operation, when, and what workflow was triggered. Useful for reviewing recent activity before making changes."),
 	)
@@ -525,6 +537,7 @@ func (s *Server) toolListRecentOperations() (mcplib.Tool, server.ToolHandlerFunc
 
 func (s *Server) toolRetireService() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_retire_service",
+		mcplib.WithTitleAnnotation("Retire Service"),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`DESTRUCTIVE: Remove a service from the platform permanently.
 
@@ -557,6 +570,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 
 func (s *Server) toolDeleteTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_delete_tenant",
+		mcplib.WithTitleAnnotation("Delete Workspace"),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`DESTRUCTIVE: Delete a team workspace and all its platform resources permanently.
 
@@ -586,6 +600,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 
 func (s *Server) toolListRepos() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_repos",
+		mcplib.WithTitleAnnotation("List Repositories"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription(`List GitHub repositories available to a team for deployment.
 
@@ -616,6 +631,7 @@ For repos outside GitHub App scope, store a PAT in Vault (see mctl_deploy_servic
 
 func (s *Server) toolGrantRepoAccess() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_grant_repo_access",
+		mcplib.WithTitleAnnotation("Grant Repo Access"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription(`Generate a GitHub App installation URL to grant the platform access to a repository.
 
@@ -678,6 +694,7 @@ After the browser flow completes, run mctl_sync_repos to register the newly acce
 
 func (s *Server) toolSyncRepos() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_sync_repos",
+		mcplib.WithTitleAnnotation("Sync Repositories"),
 		mcplib.WithDescription(`Discover and register GitHub repositories for a team.
 
 Scans GitHub App installations accessible to the user and registers found repos for the team.
@@ -717,6 +734,7 @@ If the GitHub App is not installed on your account, visit: https://github.com/ap
 
 func (s *Server) toolListDomains() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_domains",
+		mcplib.WithTitleAnnotation("List Domains"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("List custom domains for a team or specific service. Shows domain, auto-generated domain ({team}-{service}.{platform_domain}), status (pending/verified/active), and verification timestamp."),
 		mcplib.WithString("team",
@@ -748,6 +766,7 @@ func (s *Server) toolListDomains() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolAddCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_add_custom_domain",
+		mcplib.WithTitleAnnotation("Add Custom Domain"),
 		mcplib.WithDescription(`Add a custom domain to a service.
 
 The service must already be deployed (it gets an auto-generated domain: {team}-{service}.{platform_domain}).
@@ -808,6 +827,7 @@ Returns the registered domain info. Use mctl_verify_domain to check DNS status.`
 
 func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_remove_custom_domain",
+		mcplib.WithTitleAnnotation("Remove Custom Domain"),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription("Remove a custom domain from a service. This removes it from the ingress configuration and database. The auto-generated {team}-{service}.{platform_domain} domain is not affected."),
 		mcplib.WithString("team",
@@ -844,6 +864,7 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 
 func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_verify_domain",
+		mcplib.WithTitleAnnotation("Verify Domain DNS"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("Check if a custom domain's DNS is correctly configured. Verifies that the CNAME record points to the expected {team}-{service}.{platform_domain} target."),
 		mcplib.WithString("team",
@@ -894,6 +915,7 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolRollbackService() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_rollback_service",
+		mcplib.WithTitleAnnotation("Rollback Service"),
 		mcplib.WithDescription(`Roll back a service to a previously deployed image tag.
 
 Updates image.tag in the GitOps values.yaml and triggers an ArgoCD sync.
@@ -928,6 +950,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 
 func (s *Server) toolCreatePreview() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_create_preview",
+		mcplib.WithTitleAnnotation("Create Preview"),
 		mcplib.WithDescription(`Deploy an ephemeral preview environment for a service.
 
 Uses an existing built image tag — no rebuild required.
@@ -966,6 +989,7 @@ Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track pro
 
 func (s *Server) toolDeletePreview() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_delete_preview",
+		mcplib.WithTitleAnnotation("Delete Preview"),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription("Remove a preview environment and all its Kubernetes resources immediately."),
 		mcplib.WithString("team_name",
@@ -996,6 +1020,7 @@ func (s *Server) toolDeletePreview() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolGetServiceLogs() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_service_logs",
+		mcplib.WithTitleAnnotation("Get Service Logs"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription(`Fetch recent log lines for a service from Loki.
 
@@ -1055,6 +1080,7 @@ Requires in-cluster deployment with Loki enabled (LOKI_URL env var).`),
 
 func (s *Server) toolListWorkflows() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_workflows",
+		mcplib.WithTitleAnnotation("List Workflows"),
 		mcplib.WithDescription(`List recent Argo Workflow runs for a team.
 
 Shows workflows that were submitted for the team's namespace (team-{name}).
@@ -1084,6 +1110,7 @@ Admins can see workflows across all namespaces.`),
 
 func (s *Server) toolListOperations() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_operations",
+		mcplib.WithTitleAnnotation("List Operations"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("List all available platform operations with their parameters, risk levels, and descriptions. Use this to discover what actions are available on the platform."),
 	)
@@ -1101,6 +1128,7 @@ func (s *Server) toolListOperations() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolGetOperation() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_operation",
+		mcplib.WithTitleAnnotation("Get Operation Details"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription("Get detailed schema of a specific platform operation: all parameters with types, defaults, validation patterns, and risk level. Use this to understand exactly what an operation requires before executing it."),
 		mcplib.WithString("name",
@@ -1124,6 +1152,7 @@ func (s *Server) toolGetOperation() (mcplib.Tool, server.ToolHandlerFunc) {
 
 func (s *Server) toolScaleService() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_scale_service",
+		mcplib.WithTitleAnnotation("Scale Service"),
 		mcplib.WithDescription(`Scale a service by updating its autoscaling configuration.
 
 Enables or disables HPA autoscaling and sets min/max replica counts and CPU threshold.
@@ -1169,6 +1198,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 
 func (s *Server) toolListPreviews() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_previews",
+		mcplib.WithTitleAnnotation("List Previews"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription(`List active preview environments for a team.
 
