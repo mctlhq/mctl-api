@@ -337,6 +337,10 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		mcplib.WithString("cpu_threshold",
 			mcplib.Description("CPU utilization % to trigger scale-up (default: 80)"),
 		),
+		mcplib.WithString("service_template",
+			mcplib.Description("Service template preset. 'openclaw' pre-configures resources, probes, volumes, and gateway token for OpenClaw deployments. Default: 'default'"),
+			mcplib.Enum("default", "openclaw"),
+		),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {

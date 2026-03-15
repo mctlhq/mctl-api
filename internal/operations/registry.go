@@ -164,6 +164,7 @@ var builtinOperations = []Operation{
 			{Name: "min_replicas", Type: "string", Default: "1", Description: "Minimum replica count (autoscaling)"},
 			{Name: "max_replicas", Type: "string", Default: "5", Description: "Maximum replica count (autoscaling)"},
 			{Name: "cpu_threshold", Type: "string", Default: "80", Description: "CPU utilization % to trigger scale-up"},
+			{Name: "service_template", Type: "string", Default: "default", Description: "Service template preset (pre-fills resources, probes, volumes). Use 'openclaw' for OpenClaw deployments.", Enum: []string{"default", "openclaw"}},
 		},
 	},
 	{
