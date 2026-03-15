@@ -47,7 +47,41 @@ type OAuthServer struct {
 	// TenantResolver resolves which tenants a GitHub login belongs to.
 	TenantResolver TenantResolver
 
-	codes authCodeStore
+	codes   authCodeStore
+	clients sync.Map // clientID → RegisteredClient (RFC 7591)
+}
+
+// RegisteredClient stores a dynamically registered OAuth client (RFC 7591).
+type RegisteredClient struct {
+	ClientID     string   `json:"client_id"`
+	ClientName   string   `json:"client_name,omitempty"`
+	RedirectURIs []string `json:"redirect_uris"`
+	CreatedAt    time.Time `json:"client_id_issued_at,omitempty"`
+}
+
+// RegisterClient stores a dynamically registered client and returns the assigned client_id.
+func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) RegisteredClient {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	clientID := base64.RawURLEncoding.EncodeToString(b)
+
+	client := RegisteredClient{
+		ClientID:     clientID,
+		ClientName:   name,
+		RedirectURIs: redirectURIs,
+		CreatedAt:    time.Now(),
+	}
+	s.clients.Store(clientID, client)
+	return client
+}
+
+// GetClient returns a registered client by ID, or false if not found.
+func (s *OAuthServer) GetClient(clientID string) (RegisteredClient, bool) {
+	v, ok := s.clients.Load(clientID)
+	if !ok {
+		return RegisteredClient{}, false
+	}
+	return v.(RegisteredClient), true
 }
 
 // NewOAuthServer creates a ready-to-use OAuthServer with sensible defaults.
@@ -80,14 +114,27 @@ func (s *OAuthServer) ResolveGroups(login string) []string {
 	return groups
 }
 
-// IsRedirectURIAllowed returns true if uri is in the whitelist.
+// IsRedirectURIAllowed returns true if uri is in the static whitelist
+// or was registered by a dynamic client (RFC 7591).
 func (s *OAuthServer) IsRedirectURIAllowed(uri string) bool {
 	for _, allowed := range s.AllowedRedirectURIs {
 		if allowed == uri {
 			return true
 		}
 	}
-	return false
+	// Check dynamically registered clients.
+	found := false
+	s.clients.Range(func(_, v any) bool {
+		c := v.(RegisteredClient)
+		for _, u := range c.RedirectURIs {
+			if u == uri {
+				found = true
+				return false // stop iteration
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // GenerateState creates a secure random state value for CSRF protection.

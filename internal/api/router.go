@@ -106,6 +106,7 @@ func NewRouter(opts Options) http.Handler {
 	r.Get("/oauth/github/callback", h.handleOAuthGitHubCallback)
 	r.Post("/oauth/token", h.handleOAuthToken)
 	r.Post("/oauth/revoke", h.handleOAuthRevoke)
+	r.Post("/oauth/register", h.handleOAuthRegister)
 
 	// Authenticated API routes.
 	r.Group(func(r chi.Router) {

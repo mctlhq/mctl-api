@@ -33,6 +33,7 @@ type OAuthMeta struct {
 	Issuer                            string   `json:"issuer"`
 	AuthorizationEndpoint             string   `json:"authorization_endpoint"`
 	TokenEndpoint                     string   `json:"token_endpoint"`
+	RegistrationEndpoint              string   `json:"registration_endpoint"`
 	RevocationEndpoint                string   `json:"revocation_endpoint,omitempty"`
 	ScopesSupported                   []string `json:"scopes_supported"`
 	ResponseTypesSupported            []string `json:"response_types_supported"`
@@ -52,6 +53,7 @@ func (h *Handlers) handleOAuthMeta(w http.ResponseWriter, r *http.Request) {
 		Issuer:                            base,
 		AuthorizationEndpoint:             base + "/oauth/authorize",
 		TokenEndpoint:                     base + "/oauth/token",
+		RegistrationEndpoint:              base + "/oauth/register",
 		RevocationEndpoint:                base + "/oauth/revoke",
 		ScopesSupported:                   []string{"mctl"},
 		ResponseTypesSupported:            []string{"code"},
@@ -289,6 +291,60 @@ func (h *Handlers) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	// Per RFC 7009, a successful revocation always returns 200.
 	w.WriteHeader(http.StatusOK)
+}
+
+// handleOAuthRegister implements RFC 7591 Dynamic Client Registration.
+// MCP clients (e.g. Claude Desktop) call this to register before starting OAuth flow.
+//
+// POST /oauth/register
+// Content-Type: application/json
+// {"client_name":"...","redirect_uris":["..."]}
+func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
+	o := h.opts.OAuthServer
+	if o == nil {
+		http.Error(w, "OAuth not configured", http.StatusNotFound)
+		return
+	}
+
+	var req struct {
+		ClientName   string   `json:"client_name"`
+		RedirectURIs []string `json:"redirect_uris"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_client_metadata",
+			"error_description": "failed to parse request body",
+		})
+		return
+	}
+
+	if len(req.RedirectURIs) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_client_metadata",
+			"error_description": "redirect_uris is required",
+		})
+		return
+	}
+
+	client := o.RegisterClient(req.ClientName, req.RedirectURIs)
+
+	slog.Info("OAuth client registered", "client_id", client.ClientID, "client_name", client.ClientName, "redirect_uris", client.RedirectURIs)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"client_id":                client.ClientID,
+		"client_name":              client.ClientName,
+		"redirect_uris":            client.RedirectURIs,
+		"token_endpoint_auth_method": "none",
+		"grant_types":              []string{"authorization_code"},
+		"response_types":           []string{"code"},
+		"client_id_issued_at":      client.CreatedAt.Unix(),
+	})
 }
 
 // ─── GitHub OAuth helpers ─────────────────────────────────────────────────────
