@@ -156,6 +156,8 @@ var builtinOperations = []Operation{
 			{Name: "host", Type: "string", Description: "Ingress hostname (e.g. my-app.example.com). Omit for background workers."},
 			{Name: "env_vars", Type: "string", Description: "Plaintext environment variables, newline-separated KEY=value"},
 			{Name: "secret_env_vars", Type: "string", Description: "Secret environment variables stored in Vault, newline-separated KEY=value", Secret: true},
+			{Name: "clear_env", Type: "string", Default: "false", Description: "Clear existing plaintext environment variables", Enum: []string{"true", "false"}},
+			{Name: "clear_secrets", Type: "string", Default: "false", Description: "Clear existing secret environment variables", Enum: []string{"true", "false"}},
 			{Name: "provision_database", Type: "string", Default: "false", Description: "Also provision a PostgreSQL database", Enum: []string{"true", "false"}},
 			{Name: "skip_health_check", Type: "string", Default: "false", Description: "Skip post-deploy health check", Enum: []string{"true", "false"}},
 			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Description: "Path to Dockerfile in the repo"},
