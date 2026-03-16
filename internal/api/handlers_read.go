@@ -172,11 +172,12 @@ func (h *Handlers) ListWorkflows(w http.ResponseWriter, r *http.Request) {
 	// Get workflows from audit log, filtered by team access.
 	entries := h.opts.AuditLog.List(50)
 	var items []map[string]interface{}
-	for _, e := range entries {
+	for i := range entries {
+		e := &entries[i]
 		if e.WorkflowName == "" {
 			continue
 		}
-		team := auditEntryTenant(&e)
+		team := auditEntryTenant(e)
 		if !user.IsAdmin() && team != "" && !user.HasTenantAccess(team) {
 			continue
 		}
