@@ -46,7 +46,7 @@ func NewGitHubValidator(adminUsers []string) *GitHubValidator {
 	return &GitHubValidator{
 		cache:      make(map[string]*githubUserInfo),
 		ttl:        5 * time.Minute,
-		client:     &http.Client{Timeout: 10 * time.Second},
+		client:     &http.Client{Timeout: 30 * time.Second},
 		adminUsers: adminUsers,
 	}
 }

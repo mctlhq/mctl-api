@@ -101,7 +101,8 @@ func main() {
 
 	// MCP server for SSE transport (embedded in this process).
 	// Tools make REST calls back to this server using the caller's token (forwarded via context).
-	mcpSrv := mctlmcp.NewServer(cfg.SelfURL, "")
+	// Use localhost to avoid hairpin routing and public egress issues.
+	mcpSrv := mctlmcp.NewServer("http://localhost:"+cfg.Port, "")
 
 	// Kubernetes quota client (optional — fails gracefully outside cluster).
 	var quotaReader mctlapi.QuotaReader
