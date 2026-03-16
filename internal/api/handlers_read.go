@@ -167,23 +167,37 @@ func (h *Handlers) ListWorkflows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build accessible team namespaces for the user.
-	var namespaces []string
-	if user.IsAdmin() {
-		namespaces = []string{"all"}
-	} else {
-		for _, g := range user.Groups {
-			if g != "admins" {
-				namespaces = append(namespaces, g)
-			}
-		}
-	}
+	teamFilter := r.URL.Query().Get("team")
 
+	// Get workflows from audit log, filtered by team access.
+	entries := h.opts.AuditLog.List(50)
+	var items []map[string]interface{}
+	for _, e := range entries {
+		if e.WorkflowName == "" {
+			continue
+		}
+		team := auditEntryTenant(&e)
+		if !user.IsAdmin() && team != "" && !user.HasTenantAccess(team) {
+			continue
+		}
+		if teamFilter != "" && team != teamFilter {
+			continue
+		}
+		items = append(items, map[string]interface{}{
+			"workflowName": e.WorkflowName,
+			"operation":    e.Operation,
+			"status":       e.Status,
+			"team":         team,
+			"user":         e.UserID,
+			"timestamp":    e.Timestamp,
+		})
+	}
+	if items == nil {
+		items = []map[string]interface{}{}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"items":      []interface{}{},
-		"count":      0,
-		"namespaces": namespaces,
-		"note":       "Argo Workflows API integration requires in-cluster deployment",
+		"items": items,
+		"count": len(items),
 	})
 }
 
