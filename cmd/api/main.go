@@ -229,6 +229,7 @@ func loadConfig() config {
 			"http://localhost:*",
 			"http://127.0.0.1:*",
 			"https://claude.ai",
+			"https://glama.ai",
 		}
 		slog.Warn("ALLOWED_ORIGINS not set, using localhost-only defaults")
 	}
@@ -240,6 +241,13 @@ func loadConfig() config {
 				oauthRedirectURIs = append(oauthRedirectURIs, u)
 			}
 		}
+	} else {
+		// Default: allow Glama.ai inspector and Smithery to work without configuration.
+		oauthRedirectURIs = []string{
+			"https://glama.ai/mcp/inspector/oauth/callback",
+			"https://smithery.ai/mcp/inspector/oauth/callback",
+		}
+		slog.Warn("OAUTH_ALLOWED_REDIRECT_URIS not set, using default common tool redirect URIs")
 	}
 
 	return config{
