@@ -1,6 +1,17 @@
 {
-  "_comment": "Streamable HTTP (recommended) — no local binary needed",
+  "_comment_gemini": "Gemini CLI (~/.gemini/settings.json) — Streamable HTTP",
   "mcpServers": {
+    "mctl": {
+      "httpUrl": "https://api.mctl.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-github-token>"
+      },
+      "trust": true
+    }
+  },
+
+  "_comment_claude": "Claude Desktop / Generic — Streamable HTTP",
+  "mcpServers_claude": {
     "mctl": {
       "type": "http",
       "url": "https://api.mctl.ai/mcp",
