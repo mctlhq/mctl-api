@@ -651,7 +651,6 @@ For repos outside GitHub App scope, store a PAT in Vault (see mctl_deploy_servic
 func (s *Server) toolGrantRepoAccess() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_grant_repo_access",
 		mcplib.WithTitleAnnotation("Grant Repo Access"),
-		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription(`Generate a GitHub App installation URL to grant the platform access to a repository.
 
 Use this when mctl_list_repos returns no repos, or when a specific private repo is not yet accessible.
@@ -1100,12 +1099,12 @@ Requires in-cluster deployment with Loki enabled (LOKI_URL env var).`),
 func (s *Server) toolListWorkflows() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_workflows",
 		mcplib.WithTitleAnnotation("List Workflows"),
+		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription(`List recent Argo Workflow runs for a team.
 
 Shows workflows that were submitted for the team's namespace (team-{name}).
 Use this to find workflow names before calling mctl_get_workflow_status.
 Admins can see workflows across all namespaces.`),
-		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithString("team",
 			mcplib.Description("Team name to filter workflows (optional for admins)"),
 		),
@@ -1341,7 +1340,6 @@ Returns the incident with all collected evidence (logs, alerts, workflow data).`
 func (s *Server) toolIncidentSummary() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_incident_summary",
 		mcplib.WithTitleAnnotation("Incident Summary"),
-		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription(`Get aggregate counts of active incidents by status, severity, and type.
 
 Useful for a quick overview of platform health. Excludes resolved and suppressed incidents.`),
