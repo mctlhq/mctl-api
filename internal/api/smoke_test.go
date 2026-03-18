@@ -329,9 +329,12 @@ func TestSmoke_ServiceStatus(t *testing.T) {
 		}
 	})
 
-	t.Run("get status of unknown app returns 404", func(t *testing.T) {
+	t.Run("get status of unknown app returns 200 with note", func(t *testing.T) {
 		w := get(t, router, "/api/v1/status/tests/ghost")
-		assertStatus(t, w, http.StatusNotFound)
+		assertStatus(t, w, http.StatusOK)
+		if !strings.Contains(w.Body.String(), "ArgoCD application not found") {
+			t.Errorf("expected note about app not found, got: %s", w.Body.String())
+		}
 	})
 }
 

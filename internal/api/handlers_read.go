@@ -139,6 +139,7 @@ func (h *Handlers) GetServiceStatus(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		// 403 or 404 — try preview app name
 		status, err = h.opts.ArgoCD.GetAppStatus("preview-" + argoAppName)
 		if err != nil {
 			if errors.Is(err, argocd.ErrUnauthenticated) {
@@ -149,7 +150,12 @@ func (h *Handlers) GetServiceStatus(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
-			writeError(w, http.StatusNotFound, "ArgoCD application not found: "+argoAppName)
+			// App not found in ArgoCD — return service info without ArgoCD status
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"argocd":  nil,
+				"service": svc,
+				"note":    "ArgoCD application not found: " + argoAppName + " (service may not be deployed yet or uses a different naming convention)",
+			})
 			return
 		}
 	}
@@ -256,7 +262,15 @@ func (h *Handlers) ListPreviews(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]interface{}{
 				"items": []interface{}{},
 				"count": 0,
-				"error": "ArgoCD token invalid or expired",
+				"error": "ArgoCD token invalid or expired — update ARGOCD_TOKEN in Vault at platform/mctl-api/argocd-token",
+			})
+			return
+		}
+		if errors.Is(err, argocd.ErrForbidden) {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"items": []interface{}{},
+				"count": 0,
+				"note":  "ArgoCD access denied for project: " + team,
 			})
 			return
 		}

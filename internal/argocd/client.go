@@ -26,8 +26,11 @@ import (
 // ErrNotFound is returned when an ArgoCD application does not exist.
 var ErrNotFound = errors.New("argocd application not found")
 
-// ErrUnauthenticated is returned when the ArgoCD token is invalid or expired.
+// ErrUnauthenticated is returned when the ArgoCD token is invalid or expired (HTTP 401).
 var ErrUnauthenticated = errors.New("argocd token invalid or expired")
+
+// ErrForbidden is returned when the ArgoCD token lacks permissions (HTTP 403).
+var ErrForbidden = errors.New("argocd access denied")
 
 // Client communicates with the ArgoCD API to read application status.
 type Client struct {
@@ -185,8 +188,10 @@ func (c *Client) doGet(url string) ([]byte, error) {
 		// success
 	case http.StatusNotFound:
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, string(body))
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized:
 		return nil, fmt.Errorf("%w: %s", ErrUnauthenticated, string(body))
+	case http.StatusForbidden:
+		return nil, fmt.Errorf("%w: %s", ErrForbidden, string(body))
 	default:
 		return nil, fmt.Errorf("argocd returned %d: %s", resp.StatusCode, string(body))
 	}
