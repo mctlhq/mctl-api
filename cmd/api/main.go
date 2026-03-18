@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/alerts"
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
@@ -97,6 +98,24 @@ func main() {
 		auditLog = audit.NewLogger()
 	}
 
+	// Alert store (optional — enabled when ALERT_DB_URL or AUDIT_DB_URL is set).
+	var alertStore *alerts.Store
+	if alertDBURL := os.Getenv("ALERT_DB_URL"); alertDBURL != "" {
+		as, asErr := alerts.NewStore(context.Background(), alertDBURL)
+		if asErr != nil {
+			slog.Warn("alert store init failed", "error", asErr)
+		} else {
+			alertStore = as
+		}
+	} else if dbURL := os.Getenv("AUDIT_DB_URL"); dbURL != "" {
+		as, asErr := alerts.NewStore(context.Background(), dbURL)
+		if asErr != nil {
+			slog.Warn("alert store init failed (using AUDIT_DB_URL)", "error", asErr)
+		} else {
+			alertStore = as
+		}
+	}
+
 	executor := operations.NewExecutor()
 
 	// MCP server for SSE transport (embedded in this process).
@@ -134,6 +153,7 @@ func main() {
 		BackstageInternalURL: cfg.BackstageInternalURL,
 		AllowedOrigins:       cfg.AllowedOrigins,
 		OAuthServer:          oauthServer,
+		AlertStore:           alertStore,
 	})
 
 	srv := &http.Server{
