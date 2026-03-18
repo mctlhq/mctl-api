@@ -573,10 +573,18 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			mcplib.Required(),
 			mcplib.Description("Service name to retire"),
 		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		params := extractStringParams(req.GetArguments())
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("retire service %q in team %q", args["component_name"], args["team_name"])); r != nil {
+			return r, nil
+		}
+		params := extractStringParams(args)
+		delete(params, "confirm")
 		body, err := s.apiPost(ctx, "/api/v1/operations/retire-service/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to retire service: %v", err)), nil
@@ -603,10 +611,18 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			mcplib.Required(),
 			mcplib.Description("Workspace name to delete"),
 		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		params := extractStringParams(req.GetArguments())
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("delete workspace %q and all its services", args["tenant_name"])); r != nil {
+			return r, nil
+		}
+		params := extractStringParams(args)
+		delete(params, "confirm")
 		body, err := s.apiPost(ctx, "/api/v1/operations/delete-tenant/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete tenant: %v", err)), nil
@@ -860,10 +876,16 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 			mcplib.Required(),
 			mcplib.Description("Custom domain to remove"),
 		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("remove custom domain %q from %q/%q", args["domain"], args["team"], args["service"])); r != nil {
+			return r, nil
+		}
 		// Trigger the remove-custom-domain workflow
 		wfParams := map[string]string{
 			"team_name":    args["team"].(string),
@@ -952,10 +974,18 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			mcplib.Required(),
 			mcplib.Description("Image tag to roll back to (e.g. '1.2.3'). Use mctl_get_service_config to find available tags."),
 		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		params := extractStringParams(req.GetArguments())
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("roll back service %q in team %q to tag %q", args["component_name"], args["team_name"], args["target_tag"])); r != nil {
+			return r, nil
+		}
+		params := extractStringParams(args)
+		delete(params, "confirm")
 		body, err := s.apiPost(ctx, "/api/v1/operations/rollback-service/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to rollback service: %v", err)), nil
@@ -1022,10 +1052,18 @@ func (s *Server) toolDeletePreview() (mcplib.Tool, server.ToolHandlerFunc) {
 			mcplib.Required(),
 			mcplib.Description("Preview ID returned by mctl_create_preview"),
 		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		params := extractStringParams(req.GetArguments())
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("delete preview %q for %q in team %q", args["preview_id"], args["component_name"], args["team_name"])); r != nil {
+			return r, nil
+		}
+		params := extractStringParams(args)
+		delete(params, "confirm")
 		body, err := s.apiPost(ctx, "/api/v1/operations/preview-delete/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete preview: %v", err)), nil
@@ -1477,4 +1515,21 @@ func extractStringParams(args map[string]any) map[string]string {
 		}
 	}
 	return result
+}
+
+// requireConfirm checks that args["confirm"] == "yes" (case-insensitive).
+// Returns an instructive error result if not confirmed, nil if confirmed.
+func requireConfirm(args map[string]any, subject string) *mcplib.CallToolResult {
+	confirm, _ := args["confirm"].(string)
+	if strings.EqualFold(strings.TrimSpace(confirm), "yes") {
+		return nil
+	}
+	return mcplib.NewToolResultError(fmt.Sprintf(
+		"Confirmation required to %s.\n\n"+
+			"This action cannot be undone. Before retrying:\n"+
+			"1. Show the user exactly what will happen\n"+
+			"2. Ask them to explicitly say \"yes\"\n"+
+			"3. Call this tool again with confirm=\"yes\"",
+		subject,
+	))
 }
