@@ -106,6 +106,13 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListDomains())
 	srv.AddTool(s.toolVerifyDomain())
 
+	// Incident tools.
+	srv.AddTool(s.toolListIncidents())
+	srv.AddTool(s.toolGetIncident())
+	srv.AddTool(s.toolIncidentSummary())
+	srv.AddTool(s.toolAcknowledgeIncident())
+	srv.AddTool(s.toolResolveIncident())
+
 	return srv
 }
 
@@ -1237,6 +1244,171 @@ Use this to check which previews are running before creating new ones or cleanin
 		body, err := s.apiGet(ctx, path)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list previews for %s: %v", team, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+// --- Incident Tools ---
+
+func (s *Server) toolListIncidents() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_incidents",
+		mcplib.WithTitleAnnotation("List Incidents"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`List platform incidents (alerts from AlertManager, GitHub Actions failures, polling).
+
+Returns incidents with their status, severity, and summary. Filter by team, service, status, or severity.
+Default: returns open incidents, most recent first.`),
+		mcplib.WithString("team",
+			mcplib.Description("Filter by team/tenant name"),
+		),
+		mcplib.WithString("service",
+			mcplib.Description("Filter by service name"),
+		),
+		mcplib.WithString("status",
+			mcplib.Description("Filter by status: open, analyzing, fix_proposed, resolved, suppressed, acknowledged (default: open)"),
+		),
+		mcplib.WithString("severity",
+			mcplib.Description("Filter by severity: critical, warning, info"),
+		),
+		mcplib.WithString("limit",
+			mcplib.Description("Maximum number of results (default: 20)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		path := "/api/v1/incidents?"
+		if v, ok := args["team"].(string); ok && v != "" {
+			path += "tenant=" + url.QueryEscape(v) + "&"
+		}
+		if v, ok := args["service"].(string); ok && v != "" {
+			path += "service=" + url.QueryEscape(v) + "&"
+		}
+		if v, ok := args["status"].(string); ok && v != "" {
+			path += "status=" + url.QueryEscape(v) + "&"
+		} else {
+			path += "status=open&"
+		}
+		if v, ok := args["severity"].(string); ok && v != "" {
+			path += "severity=" + url.QueryEscape(v) + "&"
+		}
+		if v, ok := args["limit"].(string); ok && v != "" {
+			path += "limit=" + url.QueryEscape(v) + "&"
+		} else {
+			path += "limit=20&"
+		}
+		path = strings.TrimRight(path, "&?")
+
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list incidents: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolGetIncident() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_incident",
+		mcplib.WithTitleAnnotation("Get Incident Detail"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Get full details of an incident including evidence, analysis, and PR information.
+
+Accepts a full incident ID or an 8-character prefix (as shown in Telegram notifications).
+Returns the incident with all collected evidence (logs, alerts, workflow data).`),
+		mcplib.WithString("id",
+			mcplib.Required(),
+			mcplib.Description("Incident ID (full UUID or 8-char prefix)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := req.GetArguments()["id"].(string)
+		body, err := s.apiGet(ctx, "/api/v1/incidents/"+url.PathEscape(id))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get incident %s: %v", id, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolIncidentSummary() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_incident_summary",
+		mcplib.WithTitleAnnotation("Incident Summary"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Get aggregate counts of active incidents by status, severity, and type.
+
+Useful for a quick overview of platform health. Excludes resolved and suppressed incidents.`),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiGet(ctx, "/api/v1/incidents/summary")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get incident summary: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolAcknowledgeIncident() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_acknowledge_incident",
+		mcplib.WithTitleAnnotation("Acknowledge Incident"),
+		mcplib.WithDescription(`Mark an incident as acknowledged/reviewed.
+
+Records the current user as the acknowledger. Use this when you've reviewed an incident
+and want to signal that someone is aware of it.`),
+		mcplib.WithString("id",
+			mcplib.Required(),
+			mcplib.Description("Incident ID (full UUID or 8-char prefix)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := req.GetArguments()["id"].(string)
+		body, err := s.apiPost(ctx, "/api/v1/incidents/"+url.PathEscape(id)+"/ack", nil)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to acknowledge incident %s: %v", id, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolResolveIncident() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_resolve_incident",
+		mcplib.WithTitleAnnotation("Resolve Incident"),
+		mcplib.WithDescription(`Mark an incident as resolved.
+
+Optionally provide a reason for the resolution. This closes the incident and records
+the resolution timestamp.`),
+		mcplib.WithString("id",
+			mcplib.Required(),
+			mcplib.Description("Incident ID (full UUID or 8-char prefix)"),
+		),
+		mcplib.WithString("reason",
+			mcplib.Description("Optional resolution reason"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		id := args["id"].(string)
+		params := make(map[string]string)
+		if v, ok := args["reason"].(string); ok && v != "" {
+			params["reason"] = v
+		}
+		body, err := s.apiPost(ctx, "/api/v1/incidents/"+url.PathEscape(id)+"/resolve", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to resolve incident %s: %v", id, err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

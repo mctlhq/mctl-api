@@ -22,6 +22,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
+	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
@@ -54,6 +55,8 @@ type Options struct {
 	// OAuthServer handles OAuth 2.0 Authorization Code + PKCE flow for Claude.ai connectors.
 	// If nil, all /oauth/* endpoints return 404.
 	OAuthServer    *auth.OAuthServer
+	// AlertStore persists incident alerts to PostgreSQL (optional — nil disables incident endpoints).
+	AlertStore     *alerts.Store
 }
 
 // Handlers holds all API handler dependencies.
@@ -151,6 +154,15 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/domains", h.AddDomain)
 			r.Post("/domains/{id}/verify", h.VerifyDomain)
 			r.Delete("/domains/{id}", h.DeleteDomain)
+
+			// Incident endpoints (alert store).
+			r.Get("/incidents/summary", h.IncidentSummary)
+			r.Get("/incidents", h.ListIncidents)
+			r.Get("/incidents/{id}", h.GetIncident)
+			r.Post("/incidents", h.CreateIncident)
+			r.Patch("/incidents/{id}", h.UpdateIncident)
+			r.Post("/incidents/{id}/ack", h.AcknowledgeIncident)
+			r.Post("/incidents/{id}/resolve", h.ResolveIncident)
 
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)
