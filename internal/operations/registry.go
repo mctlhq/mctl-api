@@ -185,7 +185,7 @@ var builtinOperations = []Operation{
 			{Name: "quota_cpu_lim", Type: "string", Default: "2", Description: "CPU limit quota"},
 			{Name: "quota_memory_req", Type: "string", Default: "2Gi", Description: "Memory request quota"},
 			{Name: "quota_memory_lim", Type: "string", Default: "3Gi", Description: "Memory limit quota"},
-			{Name: "quota_pods", Type: "string", Default: "5", Description: "Maximum pods"},
+			{Name: "quota_pods", Type: "string", Default: "10", Description: "Maximum pods"},
 			{Name: "allow_internet_egress", Type: "string", Default: "true", Description: "Allow outbound internet", Enum: []string{"true", "false"}},
 			{Name: "contact_email", Type: "string", Description: "Team contact email"},
 			{Name: "creator_user_id", Type: "string", Description: "GitHub user ID of the workspace creator"},
