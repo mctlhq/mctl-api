@@ -47,6 +47,7 @@ type ArgoStatusClient interface {
 // WorkflowExecutor is the subset of operations.Executor used by API handlers.
 type WorkflowExecutor interface {
 	Submit(ctx context.Context, op operations.Operation, params map[string]string, userID string, namespace string) (*operations.SubmitResult, error)
+	GetWorkflowStatus(ctx context.Context, namespace, name string) (map[string]interface{}, error)
 }
 
 // AuditLog is the interface for recording and querying audit events.

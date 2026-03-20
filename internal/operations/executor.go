@@ -151,6 +151,20 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 	}, nil
 }
 
+// GetWorkflowStatus fetches the current state of a workflow from the Kubernetes API.
+func (e *Executor) GetWorkflowStatus(ctx context.Context, namespace, name string) (map[string]interface{}, error) {
+	if e.dynamicClient == nil {
+		return nil, fmt.Errorf("kubernetes client not available")
+	}
+
+	wf, err := e.dynamicClient.Resource(workflowGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	return wf.Object, nil
+}
+
 func buildArgoParams(params map[string]string) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(params))
 	for k, v := range params {

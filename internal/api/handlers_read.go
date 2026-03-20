@@ -217,31 +217,43 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check audit log for a record of this workflow.
+	// Check audit log for a record of this workflow to determine the namespace and team.
 	entry := h.opts.AuditLog.GetByWorkflow(name)
-	if entry != nil {
-		// Enforce team namespace access: non-admin users can only view
-		// workflows that belong to their teams.
-		team := auditEntryTenant(entry)
-		if !user.IsAdmin() && team != "" && !user.HasTenantAccess(team) {
-			writeError(w, http.StatusForbidden, "access denied: workflow belongs to team "+team)
-			return
-		}
-		resp := map[string]interface{}{
-			"workflow": name,
-			"audit":    entry,
-			"note":     "Live Argo Workflows log requires in-cluster deployment",
-		}
-		if team != "" {
-			resp["namespace"] = team
-		}
-		writeJSON(w, http.StatusOK, resp)
+	if entry == nil {
+		writeError(w, http.StatusNotFound, "workflow record not found in audit log")
 		return
 	}
+
+	// Enforce team namespace access.
+	team := auditEntryTenant(entry)
+	if !user.IsAdmin() && team != "" && !user.HasTenantAccess(team) {
+		writeError(w, http.StatusForbidden, "access denied: workflow belongs to team "+team)
+		return
+	}
+
+	namespace := team
+	if entry.Operation == "create-tenant" || entry.Operation == "delete-tenant" {
+		namespace = "argo-workflows"
+	}
+
+	// Fetch live status from Kubernetes.
+	wf, err := h.opts.Workflows.GetWorkflowStatus(r.Context(), namespace, name)
+	if err != nil {
+		// Fallback to audit log only if live fetch fails.
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"workflow":  name,
+			"audit":     entry,
+			"namespace": namespace,
+			"note":      "Live status unavailable: " + err.Error(),
+		})
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"workflow": name,
-		"status":   "unknown",
-		"note":     "Argo Workflows API integration requires in-cluster deployment",
+		"workflow":  name,
+		"audit":     entry,
+		"namespace": namespace,
+		"live":      wf,
 	})
 }
 
