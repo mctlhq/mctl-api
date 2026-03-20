@@ -183,7 +183,7 @@ var builtinOperations = []Operation{
 			{Name: "description", Type: "string", Description: "Team description"},
 			{Name: "quota_cpu_req", Type: "string", Default: "1", Description: "CPU request quota"},
 			{Name: "quota_cpu_lim", Type: "string", Default: "2", Description: "CPU limit quota"},
-			{Name: "quota_memory_req", Type: "string", Default: "2Gi", Description: "Memory request quota"},
+			{Name: "quota_memory_req", Type: "string", Default: "1.5Gi", Description: "Memory request quota"},
 			{Name: "quota_memory_lim", Type: "string", Default: "3Gi", Description: "Memory limit quota"},
 			{Name: "quota_pods", Type: "string", Default: "10", Description: "Maximum pods"},
 			{Name: "allow_internet_egress", Type: "string", Default: "true", Description: "Allow outbound internet", Enum: []string{"true", "false"}},
