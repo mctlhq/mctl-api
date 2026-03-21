@@ -152,6 +152,7 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 }
 
 // GetWorkflowStatus fetches the current state of a workflow from the Kubernetes API.
+// Returns a trimmed view with only the fields useful for status reporting.
 func (e *Executor) GetWorkflowStatus(ctx context.Context, namespace, name string) (map[string]interface{}, error) {
 	if e.dynamicClient == nil {
 		return nil, fmt.Errorf("kubernetes client not available")
@@ -162,7 +163,53 @@ func (e *Executor) GetWorkflowStatus(ctx context.Context, namespace, name string
 		return nil, err
 	}
 
-	return wf.Object, nil
+	return trimWorkflowStatus(wf.Object), nil
+}
+
+// trimWorkflowStatus extracts only the fields needed for status reporting,
+// dropping verbose metadata (managedFields, annotations) and the full spec.
+func trimWorkflowStatus(obj map[string]interface{}) map[string]interface{} {
+	result := map[string]interface{}{}
+
+	// Minimal metadata: name, namespace, labels, creationTimestamp.
+	if meta, ok := obj["metadata"].(map[string]interface{}); ok {
+		trimmed := map[string]interface{}{}
+		for _, key := range []string{"name", "namespace", "creationTimestamp", "labels"} {
+			if v, exists := meta[key]; exists {
+				trimmed[key] = v
+			}
+		}
+		result["metadata"] = trimmed
+	}
+
+	// Full status block — contains phase, nodes, conditions, timestamps.
+	if status, ok := obj["status"].(map[string]interface{}); ok {
+		trimmedStatus := map[string]interface{}{}
+		for _, key := range []string{"phase", "startedAt", "finishedAt", "estimatedDuration", "progress", "message", "conditions"} {
+			if v, exists := status[key]; exists {
+				trimmedStatus[key] = v
+			}
+		}
+		// Trim nodes to essential fields only.
+		if nodes, ok := status["nodes"].(map[string]interface{}); ok {
+			trimmedNodes := map[string]interface{}{}
+			for nodeID, nodeVal := range nodes {
+				if node, ok := nodeVal.(map[string]interface{}); ok {
+					tn := map[string]interface{}{}
+					for _, key := range []string{"displayName", "phase", "type", "startedAt", "finishedAt", "message", "templateName"} {
+						if v, exists := node[key]; exists {
+							tn[key] = v
+						}
+					}
+					trimmedNodes[nodeID] = tn
+				}
+			}
+			trimmedStatus["nodes"] = trimmedNodes
+		}
+		result["status"] = trimmedStatus
+	}
+
+	return result
 }
 
 func buildArgoParams(params map[string]string) []map[string]interface{} {
