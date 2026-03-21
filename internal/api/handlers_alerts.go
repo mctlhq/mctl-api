@@ -113,9 +113,9 @@ func (h *Handlers) ListIncidents(w http.ResponseWriter, r *http.Request) {
 
 	// Post-filter: non-admins see only their accessible tenants.
 	var items []alerts.Alert
-	for _, a := range all {
-		if user.IsAdmin() || user.HasTenantAccess(a.Tenant) {
-			items = append(items, a)
+	for i := range all {
+		if user.IsAdmin() || user.HasTenantAccess(all[i].Tenant) {
+			items = append(items, all[i])
 		}
 	}
 	if items == nil {
@@ -343,16 +343,16 @@ func (h *Handlers) IncidentSummary(w http.ResponseWriter, r *http.Request) {
 		BySeverity: make(map[string]int),
 		ByType:     make(map[string]int),
 	}
-	for _, a := range all {
-		if !user.HasTenantAccess(a.Tenant) {
+	for i := range all {
+		if !user.HasTenantAccess(all[i].Tenant) {
 			continue
 		}
-		if a.Status == alerts.StatusResolved || a.Status == "suppressed" {
+		if all[i].Status == alerts.StatusResolved || all[i].Status == "suppressed" {
 			continue
 		}
-		sum.ByStatus[a.Status]++
-		sum.BySeverity[a.Severity]++
-		sum.ByType[a.Type]++
+		sum.ByStatus[all[i].Status]++
+		sum.BySeverity[all[i].Severity]++
+		sum.ByType[all[i].Type]++
 		sum.Total++
 	}
 

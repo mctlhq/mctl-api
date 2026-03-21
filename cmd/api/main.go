@@ -78,7 +78,8 @@ func main() {
 			ghValidator,
 		)
 		oauthServer.TenantResolver = gitReader
-		slog.Info("OAuth 2.0 server enabled", "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs)
+		oauthServer.AccessTokenTTL = cfg.OAuthTokenTTL
+		slog.Info("OAuth 2.0 server enabled", "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL)
 	}
 
 	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer)
@@ -222,6 +223,7 @@ type config struct {
 	OAuthGitHubClientSecret  string
 	OAuthJWTSecret           string
 	OAuthAllowedRedirectURIs []string
+	OAuthTokenTTL            time.Duration
 }
 
 func loadConfig() config {
@@ -288,10 +290,11 @@ func loadConfig() config {
 		DexClientID:             os.Getenv("DEX_CLIENT_ID"),
 		SelfURL:                 envOr("SELF_URL", "https://api.mctl.ai"),
 		AllowedOrigins:          origins,
-		OAuthGitHubClientID:     os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
-		OAuthGitHubClientSecret: os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
-		OAuthJWTSecret:          os.Getenv("OAUTH_JWT_SECRET"),
+		OAuthGitHubClientID:      os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
+		OAuthGitHubClientSecret:  os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
+		OAuthJWTSecret:           os.Getenv("OAUTH_JWT_SECRET"),
 		OAuthAllowedRedirectURIs: oauthRedirectURIs,
+		OAuthTokenTTL:            parseDuration(os.Getenv("OAUTH_TOKEN_TTL"), time.Hour),
 	}
 }
 
@@ -300,4 +303,15 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func parseDuration(s string, fallback time.Duration) time.Duration {
+	if s == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
 }
