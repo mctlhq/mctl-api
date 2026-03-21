@@ -84,7 +84,18 @@ func (h *Handlers) ListTenants(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) GetTenant(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	name := chi.URLParam(r, "name")
+	if !user.IsAdmin() && !user.HasTenantAccess(name) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+
 	tenant, err := h.opts.GitReader.GetTenant(name)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "tenant not found: "+name)
@@ -299,11 +310,22 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) ListPreviews(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	team := r.URL.Query().Get("team")
 	service := r.URL.Query().Get("service")
 
 	if team == "" {
 		writeError(w, http.StatusBadRequest, "team query parameter is required")
+		return
+	}
+
+	if !user.IsAdmin() && !user.HasTenantAccess(team) {
+		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
 
@@ -355,7 +377,18 @@ func (h *Handlers) ListPreviews(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) GetResourceUsage(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	tenant := chi.URLParam(r, "tenant")
+	if !user.IsAdmin() && !user.HasTenantAccess(tenant) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+
 	t, err := h.opts.GitReader.GetTenant(tenant)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "tenant not found: "+tenant)
@@ -383,8 +416,20 @@ func (h *Handlers) GetResourceUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) GetServiceLogs(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	team := chi.URLParam(r, "team")
 	app := chi.URLParam(r, "app")
+
+	if !user.IsAdmin() && !user.HasTenantAccess(team) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+
 
 	lines := 100
 	if l := r.URL.Query().Get("lines"); l != "" {
@@ -428,10 +473,27 @@ func (h *Handlers) GetServiceLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) ListAudit(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	entries := h.opts.AuditLog.List(50)
+	var items []interface{}
+	for i := range entries {
+		team := auditEntryTenant(&entries[i])
+		if !user.IsAdmin() && team != "" && !user.HasTenantAccess(team) {
+			continue
+		}
+		items = append(items, entries[i])
+	}
+	if items == nil {
+		items = []interface{}{}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"items": entries,
-		"count": len(entries),
+		"items": items,
+		"count": len(items),
 	})
 }
 

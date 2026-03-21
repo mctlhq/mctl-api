@@ -32,6 +32,12 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	var a alerts.Alert
 	if err := json.NewDecoder(r.Body).Decode(&a); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -40,6 +46,11 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 
 	if a.ID == "" || a.Source == "" || a.Type == "" || a.Tenant == "" || a.Summary == "" || a.Severity == "" {
 		writeError(w, http.StatusBadRequest, "missing required fields: id, source, type, tenant, summary, severity")
+		return
+	}
+
+	if !user.IsAdmin() && !user.HasTenantAccess(a.Tenant) {
+		writeError(w, http.StatusForbidden, "access denied to tenant: "+a.Tenant)
 		return
 	}
 
@@ -62,6 +73,12 @@ func (h *Handlers) ListIncidents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	q := r.URL.Query()
 	f := alerts.ListFilter{
 		Status:   q.Get("status"),
@@ -69,6 +86,12 @@ func (h *Handlers) ListIncidents(w http.ResponseWriter, r *http.Request) {
 		Service:  q.Get("service"),
 		Type:     q.Get("type"),
 		Severity: q.Get("severity"),
+	}
+
+	// Non-admins requesting a specific tenant must have access to it.
+	if !user.IsAdmin() && f.Tenant != "" && !user.HasTenantAccess(f.Tenant) {
+		writeError(w, http.StatusForbidden, "access denied to tenant: "+f.Tenant)
+		return
 	}
 
 	if v := q.Get("limit"); v != "" {
@@ -82,12 +105,19 @@ func (h *Handlers) ListIncidents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	items, err := h.opts.AlertStore.List(r.Context(), f)
+	all, err := h.opts.AlertStore.List(r.Context(), f)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list incidents: "+err.Error())
 		return
 	}
 
+	// Post-filter: non-admins see only their accessible tenants.
+	var items []alerts.Alert
+	for _, a := range all {
+		if user.IsAdmin() || user.HasTenantAccess(a.Tenant) {
+			items = append(items, a)
+		}
+	}
 	if items == nil {
 		items = []alerts.Alert{}
 	}
@@ -105,10 +135,21 @@ func (h *Handlers) GetIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	id := chi.URLParam(r, "id")
 	a, err := h.opts.AlertStore.GetByPrefix(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "incident not found: "+id)
+		return
+	}
+
+	if !user.IsAdmin() && !user.HasTenantAccess(a.Tenant) {
+		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
 
@@ -122,12 +163,24 @@ func (h *Handlers) UpdateIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	id := chi.URLParam(r, "id")
 	existing, err := h.opts.AlertStore.GetByPrefix(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "incident not found: "+id)
 		return
 	}
+
+	if !user.IsAdmin() && !user.HasTenantAccess(existing.Tenant) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+
 
 	var patch struct {
 		Status      *string `json:"status"`
@@ -176,6 +229,12 @@ func (h *Handlers) AcknowledgeIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	id := chi.URLParam(r, "id")
 	existing, err := h.opts.AlertStore.GetByPrefix(r.Context(), id)
 	if err != nil {
@@ -183,11 +242,12 @@ func (h *Handlers) AcknowledgeIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user := auth.UserFromContext(r.Context())
-	userID := "unknown"
-	if user != nil {
-		userID = user.ID
+	if !user.IsAdmin() && !user.HasTenantAccess(existing.Tenant) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
 	}
+
+	userID := user.ID
 
 	now := time.Now().UTC()
 	existing.AcknowledgedBy = userID
@@ -209,12 +269,24 @@ func (h *Handlers) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	id := chi.URLParam(r, "id")
 	existing, err := h.opts.AlertStore.GetByPrefix(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "incident not found: "+id)
 		return
 	}
+
+	if !user.IsAdmin() && !user.HasTenantAccess(existing.Tenant) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+
 
 	var body struct {
 		Reason string `json:"reason"`
@@ -243,10 +315,45 @@ func (h *Handlers) IncidentSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sum, err := h.opts.AlertStore.Summary(r.Context())
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	// Admins get the global summary; non-admins get a summary scoped to their tenants.
+	if user.IsAdmin() {
+		sum, err := h.opts.AlertStore.Summary(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to get summary: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, sum)
+		return
+	}
+
+	all, err := h.opts.AlertStore.List(r.Context(), alerts.ListFilter{})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get summary: "+err.Error())
 		return
+	}
+
+	sum := &alerts.Summary{
+		ByStatus:   make(map[string]int),
+		BySeverity: make(map[string]int),
+		ByType:     make(map[string]int),
+	}
+	for _, a := range all {
+		if !user.HasTenantAccess(a.Tenant) {
+			continue
+		}
+		if a.Status == alerts.StatusResolved || a.Status == "suppressed" {
+			continue
+		}
+		sum.ByStatus[a.Status]++
+		sum.BySeverity[a.Severity]++
+		sum.ByType[a.Type]++
+		sum.Total++
 	}
 
 	writeJSON(w, http.StatusOK, sum)

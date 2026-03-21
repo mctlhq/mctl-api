@@ -272,8 +272,8 @@ func TestSmoke_Tenants(t *testing.T) {
 		assertStatus(t, w, http.StatusForbidden)
 	})
 
-	t.Run("get existing tenant returns details", func(t *testing.T) {
-		w := get(t, router, "/api/v1/tenants/admins")
+	t.Run("get existing tenant returns details for admin", func(t *testing.T) {
+		w := getAs(t, router, "/api/v1/tenants/admins", adminUser)
 		assertStatus(t, w, http.StatusOK)
 		body := decodeJSON(t, w)
 		tenant := body["tenant"].(map[string]interface{})
@@ -282,8 +282,14 @@ func TestSmoke_Tenants(t *testing.T) {
 		}
 	})
 
+	t.Run("get tenant in other team returns 403 for non-admin", func(t *testing.T) {
+		user := &auth.User{ID: "test-user", Groups: []string{"tests"}}
+		w := getAs(t, router, "/api/v1/tenants/admins", user)
+		assertStatus(t, w, http.StatusForbidden)
+	})
+
 	t.Run("get unknown tenant returns 404", func(t *testing.T) {
-		w := get(t, router, "/api/v1/tenants/ghost")
+		w := getAs(t, router, "/api/v1/tenants/ghost", adminUser)
 		assertStatus(t, w, http.StatusNotFound)
 	})
 }
