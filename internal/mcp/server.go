@@ -1500,6 +1500,12 @@ func (s *Server) doRequest(req *http.Request, token string) ([]byte, error) {
 	}
 
 	if resp.StatusCode >= 400 {
+		var apiErr struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &apiErr) == nil && apiErr.Error != "" {
+			return nil, fmt.Errorf("%s", apiErr.Error)
+		}
 		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
 	}
 
