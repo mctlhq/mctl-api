@@ -103,6 +103,14 @@ func (f *fakeExecutor) Submit(_ context.Context, op operations.Operation, _ map[
 	}, nil
 }
 
+func (f *fakeExecutor) GetWorkflowStatus(_ context.Context, namespace, name string) (map[string]interface{}, error) {
+	return map[string]interface{}{
+		"name":      name,
+		"namespace": namespace,
+		"phase":     "Succeeded",
+	}, nil
+}
+
 // ── test fixtures ─────────────────────────────────────────────────────────────
 
 func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
@@ -283,8 +291,8 @@ func TestSmoke_Tenants(t *testing.T) {
 func TestSmoke_Services(t *testing.T) {
 	router, _ := newTestRouter(t)
 
-	t.Run("list all services returns all services", func(t *testing.T) {
-		w := get(t, router, "/api/v1/services")
+	t.Run("list all services returns all services for admin", func(t *testing.T) {
+		w := getAs(t, router, "/api/v1/services", adminUser)
 		assertStatus(t, w, http.StatusOK)
 		body := decodeJSON(t, w)
 		if body["count"].(float64) != 2 {
@@ -292,8 +300,8 @@ func TestSmoke_Services(t *testing.T) {
 		}
 	})
 
-	t.Run("list services filtered by team", func(t *testing.T) {
-		w := get(t, router, "/api/v1/services?team=admins")
+	t.Run("list services filtered by team for admin", func(t *testing.T) {
+		w := getAs(t, router, "/api/v1/services?team=admins", adminUser)
 		assertStatus(t, w, http.StatusOK)
 		body := decodeJSON(t, w)
 		if body["count"].(float64) != 1 {
@@ -301,8 +309,18 @@ func TestSmoke_Services(t *testing.T) {
 		}
 	})
 
+	t.Run("non-admin sees only own team services", func(t *testing.T) {
+		user := &auth.User{ID: "test-user", Groups: []string{"tests"}}
+		w := getAs(t, router, "/api/v1/services", user)
+		assertStatus(t, w, http.StatusOK)
+		body := decodeJSON(t, w)
+		if body["count"].(float64) != 1 {
+			t.Errorf("expected 1 service for non-admin, got: %v", body["count"])
+		}
+	})
+
 	t.Run("get existing service returns details", func(t *testing.T) {
-		w := get(t, router, "/api/v1/services/admins/mctl-web")
+		w := getAs(t, router, "/api/v1/services/admins/mctl-web", adminUser)
 		assertStatus(t, w, http.StatusOK)
 		body := decodeJSON(t, w)
 		if body["name"] != "mctl-web" {
@@ -310,8 +328,14 @@ func TestSmoke_Services(t *testing.T) {
 		}
 	})
 
+	t.Run("get service in other team returns 403 for non-admin", func(t *testing.T) {
+		user := &auth.User{ID: "test-user", Groups: []string{"tests"}}
+		w := getAs(t, router, "/api/v1/services/admins/mctl-web", user)
+		assertStatus(t, w, http.StatusForbidden)
+	})
+
 	t.Run("get unknown service returns 404", func(t *testing.T) {
-		w := get(t, router, "/api/v1/services/admins/ghost")
+		w := getAs(t, router, "/api/v1/services/admins/ghost", adminUser)
 		assertStatus(t, w, http.StatusNotFound)
 	})
 }
@@ -320,7 +344,7 @@ func TestSmoke_ServiceStatus(t *testing.T) {
 	router, _ := newTestRouter(t)
 
 	t.Run("get status of known ArgoCD app", func(t *testing.T) {
-		w := get(t, router, "/api/v1/status/admins/mctl-web")
+		w := getAs(t, router, "/api/v1/status/admins/mctl-web", adminUser)
 		assertStatus(t, w, http.StatusOK)
 		body := decodeJSON(t, w)
 		argoStatus := body["argocd"].(map[string]interface{})
@@ -330,11 +354,17 @@ func TestSmoke_ServiceStatus(t *testing.T) {
 	})
 
 	t.Run("get status of unknown app returns 200 with note", func(t *testing.T) {
-		w := get(t, router, "/api/v1/status/tests/ghost")
+		w := getAs(t, router, "/api/v1/status/tests/ghost", adminUser)
 		assertStatus(t, w, http.StatusOK)
 		if !strings.Contains(w.Body.String(), "ArgoCD application not found") {
 			t.Errorf("expected note about app not found, got: %s", w.Body.String())
 		}
+	})
+
+	t.Run("get status in other team returns 403 for non-admin", func(t *testing.T) {
+		user := &auth.User{ID: "test-user", Groups: []string{"tests"}}
+		w := getAs(t, router, "/api/v1/status/admins/mctl-web", user)
+		assertStatus(t, w, http.StatusForbidden)
 	})
 }
 
@@ -461,13 +491,9 @@ func TestSmoke_Auth(t *testing.T) {
 func TestSmoke_Workflow(t *testing.T) {
 	router, _ := newTestRouter(t)
 
-	t.Run("get unknown workflow returns status unknown", func(t *testing.T) {
+	t.Run("get unknown workflow returns 404", func(t *testing.T) {
 		w := getAs(t, router, "/api/v1/workflows/nonexistent-workflow", adminUser)
-		assertStatus(t, w, http.StatusOK)
-		body := decodeJSON(t, w)
-		if body["status"] != "unknown" {
-			t.Errorf("expected status=unknown for nonexistent workflow, got: %v", body["status"])
-		}
+		assertStatus(t, w, http.StatusNotFound)
 	})
 
 	t.Run("list workflows returns empty list", func(t *testing.T) {

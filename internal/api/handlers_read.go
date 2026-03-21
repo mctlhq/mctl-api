@@ -98,11 +98,28 @@ func (h *Handlers) GetTenant(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) ListServices(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	teamFilter := r.URL.Query().Get("team")
-	services, err := h.opts.GitReader.ListServices(teamFilter)
+	all, err := h.opts.GitReader.ListServices(teamFilter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list services: "+err.Error())
 		return
+	}
+
+	var services []interface{}
+	for _, svc := range all {
+		if !user.IsAdmin() && !user.HasTenantAccess(svc.Team) {
+			continue
+		}
+		services = append(services, svc)
+	}
+	if services == nil {
+		services = []interface{}{}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"items": services,
@@ -111,8 +128,20 @@ func (h *Handlers) ListServices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) GetService(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	team := chi.URLParam(r, "team")
 	app := chi.URLParam(r, "app")
+
+	if !user.IsAdmin() && !user.HasTenantAccess(team) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+
 	svc, err := h.opts.GitReader.GetService(team, app)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "service not found: "+team+"/"+app)
@@ -122,8 +151,20 @@ func (h *Handlers) GetService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) GetServiceStatus(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	team := chi.URLParam(r, "team")
 	app := chi.URLParam(r, "app")
+
+	if !user.IsAdmin() && !user.HasTenantAccess(team) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+
 
 	svc, _ := h.opts.GitReader.GetService(team, app)
 
@@ -237,7 +278,7 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch live status from Kubernetes.
-	wf, err := h.opts.Workflows.GetWorkflowStatus(r.Context(), namespace, name)
+	wf, err := h.opts.Executor.GetWorkflowStatus(r.Context(), namespace, name)
 	if err != nil {
 		// Fallback to audit log only if live fetch fails.
 		writeJSON(w, http.StatusOK, map[string]interface{}{
