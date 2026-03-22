@@ -79,6 +79,7 @@ func main() {
 		)
 		oauthServer.TenantResolver = gitReader
 		oauthServer.AccessTokenTTL = cfg.OAuthTokenTTL
+		oauthServer.RefreshTokenTTL = cfg.OAuthRefreshTokenTTL
 		slog.Info("OAuth 2.0 server enabled", "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL)
 	}
 
@@ -197,33 +198,34 @@ func main() {
 }
 
 type config struct {
-	Port                   string
-	GitOpsRepoURL          string
-	GitOpsBranch           string
-	GitOpsLocalPath        string
-	GitOpsToken            string // GitHub token for HTTPS auth (optional)
-	GitOpsSSHKeyPath       string // Path to SSH key for SSH auth (optional, takes precedence)
-	ArgoCDURL              string
-	ArgoCDToken            string
-	GitHubOrg              string
-	AdminUsers             []string
-	BackstageURL           string
-	BackstageToken         string
-	BackstageInternalURL   string
+	Port                 string
+	GitOpsRepoURL        string
+	GitOpsBranch         string
+	GitOpsLocalPath      string
+	GitOpsToken          string // GitHub token for HTTPS auth (optional)
+	GitOpsSSHKeyPath     string // Path to SSH key for SSH auth (optional, takes precedence)
+	ArgoCDURL            string
+	ArgoCDToken          string
+	GitHubOrg            string
+	AdminUsers           []string
+	BackstageURL         string
+	BackstageToken       string
+	BackstageInternalURL string
 	// Dex OIDC issuer for JWT validation (dual-token auth alongside GitHub tokens).
-	DexIssuerURL           string
+	DexIssuerURL string
 	// DexClientID is the expected audience for Dex JWTs. If empty, audience check is skipped.
-	DexClientID            string
+	DexClientID string
 	// SelfURL is the public base URL used in MCP SSE endpoint advertisement.
-	SelfURL                string
+	SelfURL string
 	// AllowedOrigins is a list of origins permitted by CORS policy.
-	AllowedOrigins         []string
+	AllowedOrigins []string
 	// OAuth 2.0 server settings for Claude.ai custom connector support.
 	OAuthGitHubClientID      string
 	OAuthGitHubClientSecret  string
 	OAuthJWTSecret           string
 	OAuthAllowedRedirectURIs []string
 	OAuthTokenTTL            time.Duration
+	OAuthRefreshTokenTTL     time.Duration
 }
 
 func loadConfig() config {
@@ -273,28 +275,29 @@ func loadConfig() config {
 	}
 
 	return config{
-		Port:                    envOr("PORT", "8080"),
-		GitOpsRepoURL:           envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-gitops.git"),
-		GitOpsBranch:            envOr("GITOPS_BRANCH", "main"),
-		GitOpsLocalPath:         envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-gitops"),
-		GitOpsToken:             envOr("GITOPS_REPO_TOKEN", os.Getenv("GITHUB_TOKEN")),
-		GitOpsSSHKeyPath:        os.Getenv("GITOPS_SSH_KEY_PATH"),
-		ArgoCDURL:               envOr("ARGOCD_URL", "https://ops.mctl.ai"),
-		ArgoCDToken:             os.Getenv("ARGOCD_TOKEN"),
-		GitHubOrg:               envOr("GITHUB_ORG", "mctlhq"),
-		AdminUsers:              adminList,
-		BackstageURL:            os.Getenv("BACKSTAGE_URL"),
-		BackstageToken:          os.Getenv("BACKSTAGE_TOKEN"),
-		BackstageInternalURL:    envOr("BACKSTAGE_INTERNAL_URL", "http://backstage.backstage.svc.cluster.local:7007"),
-		DexIssuerURL:            envOr("DEX_ISSUER_URL", "https://ops.mctl.ai/api/dex"),
-		DexClientID:             os.Getenv("DEX_CLIENT_ID"),
-		SelfURL:                 envOr("SELF_URL", "https://api.mctl.ai"),
-		AllowedOrigins:          origins,
+		Port:                     envOr("PORT", "8080"),
+		GitOpsRepoURL:            envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-gitops.git"),
+		GitOpsBranch:             envOr("GITOPS_BRANCH", "main"),
+		GitOpsLocalPath:          envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-gitops"),
+		GitOpsToken:              envOr("GITOPS_REPO_TOKEN", os.Getenv("GITHUB_TOKEN")),
+		GitOpsSSHKeyPath:         os.Getenv("GITOPS_SSH_KEY_PATH"),
+		ArgoCDURL:                envOr("ARGOCD_URL", "https://ops.mctl.ai"),
+		ArgoCDToken:              os.Getenv("ARGOCD_TOKEN"),
+		GitHubOrg:                envOr("GITHUB_ORG", "mctlhq"),
+		AdminUsers:               adminList,
+		BackstageURL:             os.Getenv("BACKSTAGE_URL"),
+		BackstageToken:           os.Getenv("BACKSTAGE_TOKEN"),
+		BackstageInternalURL:     envOr("BACKSTAGE_INTERNAL_URL", "http://backstage.backstage.svc.cluster.local:7007"),
+		DexIssuerURL:             envOr("DEX_ISSUER_URL", "https://ops.mctl.ai/api/dex"),
+		DexClientID:              os.Getenv("DEX_CLIENT_ID"),
+		SelfURL:                  envOr("SELF_URL", "https://api.mctl.ai"),
+		AllowedOrigins:           origins,
 		OAuthGitHubClientID:      os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
 		OAuthGitHubClientSecret:  os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
 		OAuthJWTSecret:           os.Getenv("OAUTH_JWT_SECRET"),
 		OAuthAllowedRedirectURIs: oauthRedirectURIs,
 		OAuthTokenTTL:            parseDuration(os.Getenv("OAUTH_TOKEN_TTL"), time.Hour),
+		OAuthRefreshTokenTTL:     parseDuration(os.Getenv("OAUTH_REFRESH_TOKEN_TTL"), 30*24*time.Hour),
 	}
 }
 

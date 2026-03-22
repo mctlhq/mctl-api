@@ -57,7 +57,7 @@ func (h *Handlers) handleOAuthMeta(w http.ResponseWriter, r *http.Request) {
 		RevocationEndpoint:                base + "/oauth/revoke",
 		ScopesSupported:                   []string{"mctl"},
 		ResponseTypesSupported:            []string{"code"},
-		GrantTypesSupported:               []string{"authorization_code"},
+		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
 		CodeChallengeMethodsSupported:     []string{"S256"},
 		TokenEndpointAuthMethodsSupported: []string{"none"},
 	}
@@ -226,11 +226,12 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 	http.Redirect(w, r, target.String(), http.StatusFound)
 }
 
-// handleOAuthToken exchanges an authorization code for an access token.
+// handleOAuthToken exchanges an authorization code or refresh token for an access token.
 //
 // POST /oauth/token
 // Content-Type: application/x-www-form-urlencoded
 // grant_type=authorization_code&code=...&code_verifier=...&client_id=...&redirect_uri=...
+// grant_type=refresh_token&refresh_token=...&client_id=...
 func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 	o := h.opts.OAuthServer
 	if o == nil {
@@ -244,24 +245,36 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	grantType := r.FormValue("grant_type")
-	if grantType != "authorization_code" {
-		tokenError(w, "unsupported_grant_type", "only grant_type=authorization_code is supported")
-		return
-	}
-
-	code := r.FormValue("code")
-	codeVerifier := r.FormValue("code_verifier")
 	clientID := r.FormValue("client_id")
-	redirectURI := r.FormValue("redirect_uri")
+	var (
+		accessToken  string
+		refreshToken string
+		err          error
+	)
 
-	if code == "" || codeVerifier == "" || clientID == "" || redirectURI == "" {
-		tokenError(w, "invalid_request", "code, code_verifier, client_id and redirect_uri are required")
+	switch grantType {
+	case "authorization_code":
+		code := r.FormValue("code")
+		codeVerifier := r.FormValue("code_verifier")
+		redirectURI := r.FormValue("redirect_uri")
+		if code == "" || codeVerifier == "" || clientID == "" || redirectURI == "" {
+			tokenError(w, "invalid_request", "code, code_verifier, client_id and redirect_uri are required")
+			return
+		}
+		accessToken, refreshToken, err = o.ExchangeCode(code, codeVerifier, clientID, redirectURI)
+	case "refresh_token":
+		refreshGrant := r.FormValue("refresh_token")
+		if refreshGrant == "" || clientID == "" {
+			tokenError(w, "invalid_request", "refresh_token and client_id are required")
+			return
+		}
+		accessToken, refreshToken, err = o.RefreshAccessToken(refreshGrant, clientID)
+	default:
+		tokenError(w, "unsupported_grant_type", "supported grant_type values are authorization_code and refresh_token")
 		return
 	}
-
-	jwt, err := o.ExchangeCode(code, codeVerifier, clientID, redirectURI)
 	if err != nil {
-		slog.Warn("token exchange failed", "error", err)
+		slog.Warn("token exchange failed", "grant_type", grantType, "error", err)
 		tokenError(w, "invalid_grant", err.Error())
 		return
 	}
@@ -274,20 +287,24 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"access_token": jwt,
-		"token_type":   "Bearer",
-		"expires_in":   int(ttl.Seconds()),
-		"scope":        "mctl",
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+		"token_type":    "Bearer",
+		"expires_in":    int(ttl.Seconds()),
+		"scope":         "mctl",
 	})
 }
 
 // handleOAuthRevoke accepts a token revocation request.
-// Since our access tokens are stateless JWTs, we accept the request but can't
-// actively invalidate them — they expire naturally within 1 hour.
+// Access tokens remain stateless JWTs, but refresh tokens are actively revoked.
 func (h *Handlers) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
-	if h.opts.OAuthServer == nil {
+	o := h.opts.OAuthServer
+	if o == nil {
 		http.NotFound(w, r)
 		return
+	}
+	if err := r.ParseForm(); err == nil {
+		o.RevokeRefreshToken(r.FormValue("token"))
 	}
 	// Per RFC 7009, a successful revocation always returns 200.
 	w.WriteHeader(http.StatusOK)
@@ -337,13 +354,13 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"client_id":                client.ClientID,
-		"client_name":              client.ClientName,
-		"redirect_uris":            client.RedirectURIs,
+		"client_id":                  client.ClientID,
+		"client_name":                client.ClientName,
+		"redirect_uris":              client.RedirectURIs,
 		"token_endpoint_auth_method": "none",
-		"grant_types":              []string{"authorization_code"},
-		"response_types":           []string{"code"},
-		"client_id_issued_at":      client.CreatedAt.Unix(),
+		"grant_types":                []string{"authorization_code", "refresh_token"},
+		"response_types":             []string{"code"},
+		"client_id_issued_at":        client.CreatedAt.Unix(),
 	})
 }
 

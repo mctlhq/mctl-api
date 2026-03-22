@@ -42,20 +42,23 @@ type OAuthServer struct {
 	AllowedRedirectURIs []string
 	// AccessTokenTTL is the lifetime of issued access tokens (default: 1h).
 	AccessTokenTTL time.Duration
+	// RefreshTokenTTL is the lifetime of issued refresh tokens (default: 30d).
+	RefreshTokenTTL time.Duration
 	// GitHubValidator is used to resolve team memberships for GitHub logins.
 	GitHubValidator *GitHubValidator
 	// TenantResolver resolves which tenants a GitHub login belongs to.
 	TenantResolver TenantResolver
 
-	codes   authCodeStore
-	clients sync.Map // clientID → RegisteredClient (RFC 7591)
+	codes         authCodeStore
+	refreshTokens refreshTokenStore
+	clients       sync.Map // clientID → RegisteredClient (RFC 7591)
 }
 
 // RegisteredClient stores a dynamically registered OAuth client (RFC 7591).
 type RegisteredClient struct {
-	ClientID     string   `json:"client_id"`
-	ClientName   string   `json:"client_name,omitempty"`
-	RedirectURIs []string `json:"redirect_uris"`
+	ClientID     string    `json:"client_id"`
+	ClientName   string    `json:"client_name,omitempty"`
+	RedirectURIs []string  `json:"redirect_uris"`
 	CreatedAt    time.Time `json:"client_id_issued_at,omitempty"`
 }
 
@@ -88,14 +91,16 @@ func (s *OAuthServer) GetClient(clientID string) (RegisteredClient, bool) {
 func NewOAuthServer(baseURL, ghClientID, ghClientSecret string, jwtSecret []byte, allowedRedirectURIs []string, ghValidator *GitHubValidator) *OAuthServer {
 	s := &OAuthServer{
 		BaseURL:             baseURL,
-		GitHubClientID:     ghClientID,
-		GitHubClientSecret: ghClientSecret,
-		JWTSecret:          jwtSecret,
+		GitHubClientID:      ghClientID,
+		GitHubClientSecret:  ghClientSecret,
+		JWTSecret:           jwtSecret,
 		AllowedRedirectURIs: allowedRedirectURIs,
 		AccessTokenTTL:      time.Hour,
+		RefreshTokenTTL:     30 * 24 * time.Hour,
 		GitHubValidator:     ghValidator,
 	}
 	s.codes.init()
+	s.refreshTokens.init()
 	return s
 }
 
@@ -183,21 +188,29 @@ func (s *OAuthServer) IssueCode(login, clientID, redirectURI, codeChallenge stri
 
 // ExchangeCode validates an authorization code + PKCE verifier and returns a signed JWT.
 // The code is consumed (one-time use).
-func (s *OAuthServer) ExchangeCode(code, codeVerifier, clientID, redirectURI string) (string, error) {
+func (s *OAuthServer) ExchangeCode(code, codeVerifier, clientID, redirectURI string) (string, string, error) {
 	entry, ok := s.codes.loadAndDelete(code)
 	if !ok {
-		return "", errors.New("invalid or expired authorization code")
+		return "", "", errors.New("invalid or expired authorization code")
 	}
 	if entry.ClientID != clientID {
-		return "", errors.New("client_id mismatch")
+		return "", "", errors.New("client_id mismatch")
 	}
 	if entry.RedirectURI != redirectURI {
-		return "", errors.New("redirect_uri mismatch")
+		return "", "", errors.New("redirect_uri mismatch")
 	}
 	if !verifyPKCE(codeVerifier, entry.CodeChallenge) {
-		return "", errors.New("PKCE verification failed")
+		return "", "", errors.New("PKCE verification failed")
 	}
-	return s.IssueJWT(entry.Login, entry.Groups)
+	accessToken, err := s.IssueJWT(entry.Login, entry.Groups)
+	if err != nil {
+		return "", "", err
+	}
+	refreshToken, err := s.IssueRefreshToken(entry.Login, entry.Groups, clientID)
+	if err != nil {
+		return "", "", err
+	}
+	return accessToken, refreshToken, nil
 }
 
 // IssueJWT creates a signed JWT access token for the given user.
@@ -215,6 +228,55 @@ func (s *OAuthServer) IssueJWT(login string, groups []string) (string, error) {
 		ExpiresAt: now.Add(ttl).Unix(),
 	}
 	return signJWT(payload, s.JWTSecret)
+}
+
+// IssueRefreshToken creates and stores a refresh token for the given user and client.
+func (s *OAuthServer) IssueRefreshToken(login string, groups []string, clientID string) (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate refresh token: %w", err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(b)
+	ttl := s.RefreshTokenTTL
+	if ttl == 0 {
+		ttl = 30 * 24 * time.Hour
+	}
+	s.refreshTokens.store(token, refreshTokenEntry{
+		Login:     login,
+		Groups:    groups,
+		ClientID:  clientID,
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(ttl),
+	})
+	return token, nil
+}
+
+// RefreshAccessToken validates a refresh token, rotates it, and issues a new access token.
+func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string, string, error) {
+	entry, ok := s.refreshTokens.loadAndDelete(refreshToken)
+	if !ok {
+		return "", "", errors.New("invalid or expired refresh token")
+	}
+	if entry.ClientID != clientID {
+		return "", "", errors.New("client_id mismatch")
+	}
+	accessToken, err := s.IssueJWT(entry.Login, entry.Groups)
+	if err != nil {
+		return "", "", err
+	}
+	newRefreshToken, err := s.IssueRefreshToken(entry.Login, entry.Groups, clientID)
+	if err != nil {
+		return "", "", err
+	}
+	return accessToken, newRefreshToken, nil
+}
+
+// RevokeRefreshToken deletes a stored refresh token if it exists.
+func (s *OAuthServer) RevokeRefreshToken(refreshToken string) {
+	if refreshToken == "" {
+		return
+	}
+	s.refreshTokens.delete(refreshToken)
 }
 
 // ValidateJWT validates a JWT issued by this server and returns the User.
@@ -317,9 +379,21 @@ type pendingAuth struct {
 	CreatedAt     time.Time
 }
 
+type refreshTokenEntry struct {
+	Login     string
+	Groups    []string
+	ClientID  string
+	CreatedAt time.Time
+	ExpiresAt time.Time
+}
+
 type authCodeStore struct {
 	codes   sync.Map // code → authCodeEntry
 	pending sync.Map // state → pendingAuth
+}
+
+type refreshTokenStore struct {
+	tokens sync.Map // token → refreshTokenEntry
 }
 
 func (s *authCodeStore) init() {
@@ -371,6 +445,43 @@ func (s *authCodeStore) gcLoop() {
 		s.pending.Range(func(k, v any) bool {
 			if time.Since(v.(pendingAuth).CreatedAt) > pendingAuthTTL {
 				s.pending.Delete(k)
+			}
+			return true
+		})
+	}
+}
+
+func (s *refreshTokenStore) init() {
+	go s.gcLoop()
+}
+
+func (s *refreshTokenStore) store(token string, entry refreshTokenEntry) {
+	s.tokens.Store(token, entry)
+}
+
+func (s *refreshTokenStore) loadAndDelete(token string) (refreshTokenEntry, bool) {
+	v, ok := s.tokens.LoadAndDelete(token)
+	if !ok {
+		return refreshTokenEntry{}, false
+	}
+	entry := v.(refreshTokenEntry)
+	if time.Now().After(entry.ExpiresAt) {
+		return refreshTokenEntry{}, false
+	}
+	return entry, true
+}
+
+func (s *refreshTokenStore) delete(token string) {
+	s.tokens.Delete(token)
+}
+
+func (s *refreshTokenStore) gcLoop() {
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.tokens.Range(func(k, v any) bool {
+			if time.Now().After(v.(refreshTokenEntry).ExpiresAt) {
+				s.tokens.Delete(k)
 			}
 			return true
 		})
