@@ -71,6 +71,12 @@ var openClawProfiles = map[string]openClawResourceProfile{
 	},
 }
 
+var openClawStartupQuotaFloor = map[string]string{
+	"limits.cpu":                     "2500m",
+	"limits.memory":                  "5Gi",
+	"networking.allowInternetEgress": "true",
+}
+
 func (h *Handlers) StartOpenClawDeploy(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
@@ -121,6 +127,7 @@ func (h *Handlers) StartOpenClawDeploy(w http.ResponseWriter, r *http.Request) {
 		"botTokenIntakeURL": intakeURL,
 		"nextStep":          "Open the intake URL, save the Telegram bot token there, then call resume-openclaw-deploy.",
 		"startupProfile":    openClawProfiles["startup"],
+		"quotaFloor":        openClawStartupQuotaFloor,
 	})
 }
 
@@ -178,6 +185,29 @@ func (h *Handlers) ResumeOpenClawDeploy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	provisionOp, ok := h.opts.Registry.Get("provision-database")
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "provision-database operation is not registered")
+		return
+	}
+	provisionParams := map[string]string{
+		"team_name": req.TeamName,
+		"app_name":  req.ComponentName,
+	}
+	provisionParams = h.opts.Registry.ApplyDefaults(provisionOp, provisionParams)
+	if errs := h.opts.Registry.ValidateInput(provisionOp, provisionParams); len(errs) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"error":            "database validation failed",
+			"validationErrors": errs,
+		})
+		return
+	}
+	dbResult, err := h.opts.Executor.Submit(r.Context(), provisionOp, provisionParams, user.ID, req.TeamName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to submit database workflow: "+err.Error())
+		return
+	}
+
 	op, ok := h.opts.Registry.Get("deploy-service")
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "deploy-service operation is not registered")
@@ -210,9 +240,10 @@ func (h *Handlers) ResumeOpenClawDeploy(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"workflow":     result,
-		"dashboardURL": "https://" + req.Host + "/",
-		"message":      "OpenClaw onboarding submitted. Open the dashboard after rollout, then connect OpenAI Codex from the Control UI or chat.",
+		"workflow":         result,
+		"databaseWorkflow": dbResult,
+		"dashboardURL":     "https://" + req.Host + "/",
+		"message":          "OpenClaw onboarding submitted. Database provisioning was started first, then the service deploy. Open the dashboard after rollout, then connect OpenAI Codex from the Control UI or chat.",
 	})
 }
 
@@ -361,16 +392,14 @@ func (h *Handlers) requireOpenClawOwner(w http.ResponseWriter, r *http.Request, 
 
 func validateOpenClawPreflight(tenant *gitops.Tenant) []map[string]string {
 	var issues []map[string]string
-	required := openClawProfiles["startup"]
-
-	if q := tenant.Quotas["limits.cpu"]; q != "" && quantityLessThan(q, required.LimitCPU) {
-		issues = append(issues, map[string]string{"field": "limits.cpu", "required": required.LimitCPU, "actual": q})
+	if q := tenant.Quotas["limits.cpu"]; q != "" && quantityLessThan(q, openClawStartupQuotaFloor["limits.cpu"]) {
+		issues = append(issues, map[string]string{"field": "limits.cpu", "required": openClawStartupQuotaFloor["limits.cpu"], "actual": q})
 	}
-	if q := tenant.Quotas["limits.memory"]; q != "" && quantityLessThan(q, required.LimitMemory) {
-		issues = append(issues, map[string]string{"field": "limits.memory", "required": required.LimitMemory, "actual": q})
+	if q := tenant.Quotas["limits.memory"]; q != "" && quantityLessThan(q, openClawStartupQuotaFloor["limits.memory"]) {
+		issues = append(issues, map[string]string{"field": "limits.memory", "required": openClawStartupQuotaFloor["limits.memory"], "actual": q})
 	}
 	if tenant.Networking != nil && !tenant.Networking["allowInternetEgress"] {
-		issues = append(issues, map[string]string{"field": "networking.allowInternetEgress", "required": "true", "actual": "false"})
+		issues = append(issues, map[string]string{"field": "networking.allowInternetEgress", "required": openClawStartupQuotaFloor["networking.allowInternetEgress"], "actual": "false"})
 	}
 	return issues
 }

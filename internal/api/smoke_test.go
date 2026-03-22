@@ -140,7 +140,7 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 	gitReader := &fakeGitReader{
 		tenants: []gitops.Tenant{
 			{Name: "admins", DisplayName: "Admins", Quotas: map[string]string{"pods": "20"}},
-			{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10", "limits.cpu": "2", "limits.memory": "4Gi"}, Members: []gitops.TenantMember{{UserID: "test-owner", Role: "owner"}}},
+			{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10", "limits.cpu": "2500m", "limits.memory": "5Gi"}, Networking: map[string]bool{"allowInternetEgress": true}, Members: []gitops.TenantMember{{UserID: "test-owner", Role: "owner"}}},
 		},
 		services: []gitops.Service{
 			{Team: "admins", Name: "mctl-web", ImageTag: "2.1.0", ComponentType: "base-service"},
@@ -301,15 +301,15 @@ func TestSmoke_OpenClawFlows(t *testing.T) {
 		}
 	})
 
-	t.Run("resume submits deploy-service workflow", func(t *testing.T) {
+	t.Run("resume submits database and deploy workflows", func(t *testing.T) {
 		w := postAs(t, router, "/api/v1/openclaw/deploy/resume", map[string]string{
 			"team_name":         "tests",
 			"component_name":    "openclaw",
 			"telegram_owner_id": "12345",
 		}, adminUser)
 		assertStatus(t, w, http.StatusAccepted)
-		if len(exec.submitted) == 0 || exec.submitted[len(exec.submitted)-1] != "deploy-service" {
-			t.Fatalf("expected deploy-service submission, got %v", exec.submitted)
+		if len(exec.submitted) < 2 || exec.submitted[len(exec.submitted)-2] != "provision-database" || exec.submitted[len(exec.submitted)-1] != "deploy-service" {
+			t.Fatalf("expected provision-database then deploy-service submission, got %v", exec.submitted)
 		}
 	})
 
