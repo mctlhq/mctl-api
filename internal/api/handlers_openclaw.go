@@ -243,7 +243,12 @@ func (h *Handlers) ResumeOpenClawDeploy(w http.ResponseWriter, r *http.Request) 
 		"workflow":         result,
 		"databaseWorkflow": dbResult,
 		"dashboardURL":     "https://" + req.Host + "/",
-		"message":          "OpenClaw onboarding submitted. Database provisioning was started first, then the service deploy. Open the dashboard after rollout, then connect OpenAI Codex from the Control UI or chat.",
+		"message":          "OpenClaw onboarding submitted. Database provisioning was started first, then the service deploy.",
+		"nextSteps": []string{
+			"Open the dashboard after rollout.",
+			"To connect Codex, use Overview -> Connect OpenAI Codex.",
+			"Or in the OpenClaw chat, type: /connect codex",
+		},
 	})
 }
 

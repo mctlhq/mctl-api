@@ -458,6 +458,10 @@ func (s *Server) toolDeployOpenClaw() (mcplib.Tool, server.ToolHandlerFunc) {
 This does not deploy immediately. It performs preflight checks, returns a secure Telegram bot-token intake URL,
 and tells you how to resume once the secret has been saved in Vault.
 
+After the later resume step finishes and the dashboard is healthy, the user should open the OpenClaw dashboard and connect Codex in one of two ways:
+- Overview -> Connect OpenAI Codex
+- chat command: /connect codex
+
 Use this for Claude-assisted OpenClaw onboarding instead of raw deploy-service.`),
 		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name that will own the OpenClaw service")),
 		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
@@ -489,7 +493,12 @@ func (s *Server) toolResumeOpenClawDeploy() (mcplib.Tool, server.ToolHandlerFunc
 		mcplib.WithTitleAnnotation("Resume OpenClaw Onboarding"),
 		mcplib.WithDescription(`Resume OpenClaw onboarding after the Telegram bot token has been saved through the secure browser form.
 
-This submits the normal deploy-service workflow using the hardened openclaw template.`),
+This provisions the database if needed and submits the normal deploy-service workflow using the hardened openclaw template.
+
+When this succeeds, tell the user exactly how to connect Codex:
+- open the dashboard
+- either go to Overview -> Connect OpenAI Codex
+- or type /connect codex in the OpenClaw chat`),
 		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name that owns the service")),
 		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
 		mcplib.WithString("telegram_owner_id", mcplib.Required(), mcplib.Description("Telegram user ID to authorize for the bot")),
