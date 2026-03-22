@@ -422,7 +422,7 @@ func recommendOpenClawProfile(stats ContainerUsageStats) openClawResourceProfile
 
 func openClawConfigPatch(profile openClawResourceProfile) string {
 	return fmt.Sprintf(
-		`.resources.requests.cpu = "%s" | .resources.requests.memory = "%s" | .resources.limits.cpu = "%s" | .resources.limits.memory = "%s" | .env.NODE_OPTIONS = "--max-old-space-size=%s"`,
+		`.resources.requests.cpu = %q | .resources.requests.memory = %q | .resources.limits.cpu = %q | .resources.limits.memory = %q | .env.NODE_OPTIONS = "--max-old-space-size=%s"`,
 		profile.RequestCPU,
 		profile.RequestMemory,
 		profile.LimitCPU,

@@ -429,8 +429,8 @@ func (r *Reader) GetTenantsForUser(login string) ([]string, error) {
 	}
 
 	var result []string
-	for _, t := range tenants {
-		ns := t.UserNamespaces(login)
+	for i := range tenants {
+		ns := tenants[i].UserNamespaces(login)
 		result = append(result, ns...)
 	}
 	return result, nil

@@ -43,8 +43,8 @@ type fakeGitReader struct {
 
 func (f *fakeGitReader) ListTenants() ([]gitops.Tenant, error) { return f.tenants, nil }
 func (f *fakeGitReader) GetTenant(name string) (*gitops.Tenant, error) {
-	for i, t := range f.tenants {
-		if t.Name == name {
+	for i := range f.tenants {
+		if f.tenants[i].Name == name {
 			return &f.tenants[i], nil
 		}
 	}
