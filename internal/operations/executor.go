@@ -81,7 +81,7 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 		return nil, fmt.Errorf("team is required for workflow submission")
 	}
 	namespace := team
-	if op.WorkflowTemplate == "create-tenant" || op.WorkflowTemplate == "delete-tenant" {
+	if op.WorkflowTemplate == "create-tenant" || op.WorkflowTemplate == "delete-tenant" || op.WorkflowTemplate == "delete-tenant-safe" {
 		namespace = "argo-workflows"
 	}
 	requestID := uuid.New().String()[:8]

@@ -222,8 +222,8 @@ var builtinOperations = []Operation{
 	{
 		Name:             "delete-tenant",
 		DisplayName:      "Delete Workspace",
-		Description:      "Delete a team workspace and all its resources. Removes namespace, ArgoCD RBAC, Vault policy. All services in the workspace must be retired first.",
-		WorkflowTemplate: "delete-tenant",
+		Description:      "Safely delete a team workspace and all its resources. Retires all services first, then removes namespace, ArgoCD RBAC, and Vault policy.",
+		WorkflowTemplate: "delete-tenant-safe",
 		RiskLevel:        RiskHigh,
 		RequiresConfirm:  true,
 		ModifiesPaths:    []string{"platform-gitops/tenants/{tenant_name}/", "platform-gitops/argocd/values.yaml"},

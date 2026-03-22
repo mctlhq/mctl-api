@@ -600,8 +600,8 @@ func (s *Server) toolDeleteTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`DESTRUCTIVE: Delete a team workspace and all its platform resources permanently.
 
-Removes the Kubernetes namespace, ArgoCD RBAC, and Vault policy.
-All services in the workspace must be retired first (use mctl_retire_service).
+Retires all services in the workspace first, then removes the Kubernetes namespace,
+ArgoCD RBAC, and Vault policy.
 This action is irreversible.
 
 Confirm the tenant name carefully before calling this tool.
