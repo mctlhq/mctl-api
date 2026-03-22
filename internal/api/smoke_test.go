@@ -24,6 +24,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/argocd"
@@ -111,6 +112,22 @@ func (f *fakeExecutor) GetWorkflowStatus(_ context.Context, namespace, name stri
 	}, nil
 }
 
+type fakeVaultReader struct {
+	paths map[string]map[string]string
+}
+
+func (f *fakeVaultReader) ReadKV(_ context.Context, path string) (map[string]string, error) {
+	return f.paths[path], nil
+}
+
+type fakeMetricsQuerier struct {
+	stats mctlapi.ContainerUsageStats
+}
+
+func (f *fakeMetricsQuerier) GetContainerUsage(_ context.Context, namespace, app, container string, lookback time.Duration) (mctlapi.ContainerUsageStats, error) {
+	return f.stats, nil
+}
+
 // ── test fixtures ─────────────────────────────────────────────────────────────
 
 func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
@@ -123,11 +140,12 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 	gitReader := &fakeGitReader{
 		tenants: []gitops.Tenant{
 			{Name: "admins", DisplayName: "Admins", Quotas: map[string]string{"pods": "20"}},
-			{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10"}},
+			{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10", "limits.cpu": "2", "limits.memory": "4Gi"}, Members: []gitops.TenantMember{{UserID: "test-owner", Role: "owner"}}},
 		},
 		services: []gitops.Service{
 			{Team: "admins", Name: "mctl-web", ImageTag: "2.1.0", ComponentType: "base-service"},
 			{Team: "tests", Name: "my-app", ImageTag: "1.0.0", ComponentType: "base-service"},
+			{Team: "tests", Name: "openclaw", ImageTag: "2026.3.22-beta.2", ComponentType: "base-service"},
 		},
 	}
 	argoClient := &fakeArgoCD{
@@ -138,11 +156,22 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 	exec := &fakeExecutor{}
 
 	router := mctlapi.NewRouter(mctlapi.Options{
-		Registry: operations.NewRegistry(),
+		Registry:  operations.NewRegistry(),
 		GitReader: gitReader,
-		ArgoCD:   argoClient,
-		AuditLog: audit.NewLogger(),
-		Executor: exec,
+		ArgoCD:    argoClient,
+		AuditLog:  audit.NewLogger(),
+		Executor:  exec,
+		VaultReader: &fakeVaultReader{paths: map[string]map[string]string{
+			"teams/tests/openclaw/telegram": {"telegram-bot-token": "secret"},
+		}},
+		MetricsQuerier: &fakeMetricsQuerier{stats: mctlapi.ContainerUsageStats{
+			MemoryMaxBytes: 2.6 * 1024 * 1024 * 1024,
+			MemoryP95Bytes: 1.8 * 1024 * 1024 * 1024,
+			CPUMaxCores:    1.3,
+			CPUP95Cores:    0.8,
+			SampleCount:    12,
+		}},
+		BackstageURL: "https://app.mctl.ai",
 	})
 	return router, exec
 }
@@ -169,6 +198,7 @@ func getAs(t *testing.T, router http.Handler, path string, user *auth.User) *htt
 
 // adminUser is a pre-built admin user for test helpers.
 var adminUser = &auth.User{ID: "test-admin", Groups: []string{"admins"}}
+var ownerUser = &auth.User{ID: "test-owner", Groups: []string{"tests"}}
 
 // postAs sends POST with a user injected into context.
 func postAs(t *testing.T, router http.Handler, path string, body interface{}, user *auth.User) *httptest.ResponseRecorder {
@@ -255,6 +285,44 @@ func TestSmoke_Operations(t *testing.T) {
 	})
 }
 
+func TestSmoke_OpenClawFlows(t *testing.T) {
+	router, exec := newTestRouter(t)
+
+	t.Run("start returns secure intake url", func(t *testing.T) {
+		w := postAs(t, router, "/api/v1/openclaw/deploy/start", map[string]string{
+			"team_name":         "tests",
+			"component_name":    "openclaw-new",
+			"telegram_owner_id": "12345",
+		}, ownerUser)
+		assertStatus(t, w, http.StatusOK)
+		body := decodeJSON(t, w)
+		if !strings.Contains(fmt.Sprint(body["botTokenIntakeURL"]), "/api/vault-secrets/openclaw/intake") {
+			t.Fatalf("expected intake URL, got: %v", body["botTokenIntakeURL"])
+		}
+	})
+
+	t.Run("resume submits deploy-service workflow", func(t *testing.T) {
+		w := postAs(t, router, "/api/v1/openclaw/deploy/resume", map[string]string{
+			"team_name":         "tests",
+			"component_name":    "openclaw",
+			"telegram_owner_id": "12345",
+		}, adminUser)
+		assertStatus(t, w, http.StatusAccepted)
+		if len(exec.submitted) == 0 || exec.submitted[len(exec.submitted)-1] != "deploy-service" {
+			t.Fatalf("expected deploy-service submission, got %v", exec.submitted)
+		}
+	})
+
+	t.Run("sizing recommendation maps to startup", func(t *testing.T) {
+		w := getAs(t, router, "/api/v1/openclaw/tests/openclaw/sizing?lookback_hours=24", adminUser)
+		assertStatus(t, w, http.StatusOK)
+		body := decodeJSON(t, w)
+		if body["profile"] != "startup" {
+			t.Fatalf("expected startup profile, got %v", body["profile"])
+		}
+	})
+}
+
 func TestSmoke_Tenants(t *testing.T) {
 	router, _ := newTestRouter(t)
 
@@ -301,8 +369,8 @@ func TestSmoke_Services(t *testing.T) {
 		w := getAs(t, router, "/api/v1/services", adminUser)
 		assertStatus(t, w, http.StatusOK)
 		body := decodeJSON(t, w)
-		if body["count"].(float64) != 2 {
-			t.Errorf("expected 2 services, got: %v", body["count"])
+		if body["count"].(float64) != 3 {
+			t.Errorf("expected 3 services, got: %v", body["count"])
 		}
 	})
 
@@ -320,8 +388,8 @@ func TestSmoke_Services(t *testing.T) {
 		w := getAs(t, router, "/api/v1/services", user)
 		assertStatus(t, w, http.StatusOK)
 		body := decodeJSON(t, w)
-		if body["count"].(float64) != 1 {
-			t.Errorf("expected 1 service for non-admin, got: %v", body["count"])
+		if body["count"].(float64) != 2 {
+			t.Errorf("expected 2 services for non-admin, got: %v", body["count"])
 		}
 	})
 
@@ -456,7 +524,7 @@ func TestSmoke_CreateTenantRBAC(t *testing.T) {
 	t.Run("creator_user_id is forced from JWT", func(t *testing.T) {
 		newUser := &auth.User{ID: "real-user", Groups: []string{}}
 		w := postAs(t, router, "/api/v1/operations/create-tenant/execute", map[string]string{
-			"tenant_name":    "my-workspace",
+			"tenant_name":     "my-workspace",
 			"creator_user_id": "spoofed-user",
 		}, newUser)
 		assertStatus(t, w, http.StatusAccepted)

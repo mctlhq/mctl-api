@@ -25,8 +25,8 @@ import (
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
-	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/openapi"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
 // Options holds all dependencies for the API router.
@@ -38,11 +38,15 @@ type Options struct {
 	Executor       WorkflowExecutor
 	AuthMiddleware func(http.Handler) http.Handler
 	// MCPServer exposes platform tools over MCP Streamable HTTP at /mcp.
-	MCPServer      *mctlmcp.Server
+	MCPServer *mctlmcp.Server
 	// QuotaReader fetches live K8s resource usage (optional — nil in local/test).
-	QuotaReader    QuotaReader
+	QuotaReader QuotaReader
 	// LogQuerier queries Loki for service logs (optional — nil outside cluster).
-	LogQuerier     LogQuerier
+	LogQuerier LogQuerier
+	// VaultReader checks persisted secrets for onboarding preflight (optional — nil outside cluster).
+	VaultReader VaultReader
+	// MetricsQuerier fetches historical runtime usage for right-sizing decisions (optional).
+	MetricsQuerier MetricsQuerier
 	// Optional Backstage integration for immediate catalog sync.
 	BackstageURL   string
 	BackstageToken string
@@ -54,9 +58,9 @@ type Options struct {
 	AllowedOrigins []string
 	// OAuthServer handles OAuth 2.0 Authorization Code + PKCE flow for Claude.ai connectors.
 	// If nil, all /oauth/* endpoints return 404.
-	OAuthServer    *auth.OAuthServer
+	OAuthServer *auth.OAuthServer
 	// AlertStore persists incident alerts to PostgreSQL (optional — nil disables incident endpoints).
-	AlertStore     *alerts.Store
+	AlertStore *alerts.Store
 }
 
 // Handlers holds all API handler dependencies.
@@ -148,6 +152,12 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/repos", h.ListRepos)
 			r.Get("/repos/install-url", h.GetRepoInstallURL)
 			r.Post("/repos/sync", h.SyncRepos)
+
+			// OpenClaw self-service onboarding and right-sizing.
+			r.Post("/openclaw/deploy/start", h.StartOpenClawDeploy)
+			r.Post("/openclaw/deploy/resume", h.ResumeOpenClawDeploy)
+			r.Get("/openclaw/{team}/{app}/sizing", h.GetOpenClawSizingRecommendation)
+			r.Post("/openclaw/{team}/{app}/resource-profile", h.ApplyOpenClawResourceProfile)
 
 			// Custom domains (proxied to Backstage custom-domains plugin).
 			r.Get("/domains", h.ListDomains)

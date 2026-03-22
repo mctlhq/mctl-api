@@ -93,6 +93,10 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	// Write tools (trigger workflows).
 	srv.AddTool(s.toolScaleService())
 	srv.AddTool(s.toolDeployService())
+	srv.AddTool(s.toolDeployOpenClaw())
+	srv.AddTool(s.toolResumeOpenClawDeploy())
+	srv.AddTool(s.toolGetOpenClawSizingRecommendation())
+	srv.AddTool(s.toolApplyOpenClawResourceProfile())
 	srv.AddTool(s.toolCreateTenant())
 	srv.AddTool(s.toolProvisionDatabase())
 	srv.AddTool(s.toolRetireService())
@@ -439,6 +443,132 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		body, err := s.apiPost(ctx, "/api/v1/operations/create-tenant/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create tenant: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolDeployOpenClaw() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_deploy_openclaw",
+		mcplib.WithTitleAnnotation("Start OpenClaw Onboarding"),
+		mcplib.WithDescription(`Prepare a self-service OpenClaw deployment for a team.
+
+This does not deploy immediately. It performs preflight checks, returns a secure Telegram bot-token intake URL,
+and tells you how to resume once the secret has been saved in Vault.
+
+Use this for Claude-assisted OpenClaw onboarding instead of raw deploy-service.`),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name that will own the OpenClaw service")),
+		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
+		mcplib.WithString("telegram_owner_id", mcplib.Required(), mcplib.Description("Telegram user ID to authorize for the bot")),
+		mcplib.WithString("default_model", mcplib.Description("Default primary model (default: openai-codex/gpt-5.4)")),
+		mcplib.WithString("host", mcplib.Description("Explicit host override; defaults to {team}-{service}.mctl.ai")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := map[string]string{
+			"team_name":         stringArg(req, "team_name"),
+			"component_name":    stringArg(req, "component_name"),
+			"telegram_owner_id": stringArg(req, "telegram_owner_id"),
+			"default_model":     stringArg(req, "default_model"),
+			"host":              stringArg(req, "host"),
+		}
+		body, err := s.apiPost(ctx, "/api/v1/openclaw/deploy/start", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to start OpenClaw onboarding: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolResumeOpenClawDeploy() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_resume_openclaw_deploy",
+		mcplib.WithTitleAnnotation("Resume OpenClaw Onboarding"),
+		mcplib.WithDescription(`Resume OpenClaw onboarding after the Telegram bot token has been saved through the secure browser form.
+
+This submits the normal deploy-service workflow using the hardened openclaw template.`),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name that owns the service")),
+		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
+		mcplib.WithString("telegram_owner_id", mcplib.Required(), mcplib.Description("Telegram user ID to authorize for the bot")),
+		mcplib.WithString("default_model", mcplib.Description("Default primary model (default: openai-codex/gpt-5.4)")),
+		mcplib.WithString("host", mcplib.Description("Explicit host override; defaults to {team}-{service}.mctl.ai")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := map[string]string{
+			"team_name":         stringArg(req, "team_name"),
+			"component_name":    stringArg(req, "component_name"),
+			"telegram_owner_id": stringArg(req, "telegram_owner_id"),
+			"default_model":     stringArg(req, "default_model"),
+			"host":              stringArg(req, "host"),
+		}
+		body, err := s.apiPost(ctx, "/api/v1/openclaw/deploy/resume", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to resume OpenClaw onboarding: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolGetOpenClawSizingRecommendation() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_openclaw_sizing_recommendation",
+		mcplib.WithTitleAnnotation("Get OpenClaw Sizing Recommendation"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription("Read VictoriaMetrics history for an OpenClaw service and return the recommended resource profile."),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
+		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
+		mcplib.WithString("lookback_hours", mcplib.Description("History window in hours (default: 24)")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team := stringArg(req, "team_name")
+		component := stringArg(req, "component_name")
+		if component == "" {
+			component = "openclaw"
+		}
+		path := fmt.Sprintf("/api/v1/openclaw/%s/%s/sizing", url.PathEscape(team), url.PathEscape(component))
+		if lookback := stringArg(req, "lookback_hours"); lookback != "" {
+			path += "?lookback_hours=" + url.QueryEscape(lookback)
+		}
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get OpenClaw sizing recommendation: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolApplyOpenClawResourceProfile() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_apply_openclaw_resource_profile",
+		mcplib.WithTitleAnnotation("Apply OpenClaw Resource Profile"),
+		mcplib.WithDescription("Apply one of the named OpenClaw runtime profiles by patching the service values through GitOps."),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
+		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
+		mcplib.WithString("profile",
+			mcplib.Required(),
+			mcplib.Description("Named profile to apply"),
+			mcplib.Enum("startup", "steady-medium", "steady-small"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team := stringArg(req, "team_name")
+		component := stringArg(req, "component_name")
+		if component == "" {
+			component = "openclaw"
+		}
+		body, err := s.apiPost(ctx, fmt.Sprintf("/api/v1/openclaw/%s/%s/resource-profile", url.PathEscape(team), url.PathEscape(component)), map[string]string{
+			"profile": stringArg(req, "profile"),
+		})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to apply OpenClaw resource profile: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}
@@ -1520,6 +1650,13 @@ func extractStringParams(args map[string]any) map[string]string {
 		}
 	}
 	return result
+}
+
+func stringArg(req mcplib.CallToolRequest, name string) string {
+	if value, ok := req.GetArguments()[name].(string); ok {
+		return value
+	}
+	return ""
 }
 
 // requireConfirm checks that args["confirm"] == "yes" (case-insensitive).

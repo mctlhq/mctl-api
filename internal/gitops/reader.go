@@ -49,6 +49,7 @@ type Tenant struct {
 	Description  string            `json:"description"`
 	ContactEmail string            `json:"contactEmail"`
 	Quotas       map[string]string `json:"quotas"`
+	Networking   map[string]bool   `json:"networking,omitempty"`
 	Members      []TenantMember    `json:"members,omitempty"`
 	Teams        []Team            `json:"teams,omitempty"` // optional: multi-team support
 }
@@ -282,7 +283,12 @@ func (r *Reader) readTenant(name string) (*Tenant, error) {
 					Role   string `yaml:"role"`
 				} `yaml:"members"`
 			} `yaml:"teams"`
-			Quotas map[string]string `yaml:"quotas"`
+			Quotas     map[string]string `yaml:"quotas"`
+			Networking struct {
+				AllowIntraNamespace bool `yaml:"allowIntraNamespace"`
+				AllowClusterEgress  bool `yaml:"allowClusterEgress"`
+				AllowInternetEgress bool `yaml:"allowInternetEgress"`
+			} `yaml:"networking"`
 		} `yaml:"tenant"`
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
@@ -295,6 +301,11 @@ func (r *Reader) readTenant(name string) (*Tenant, error) {
 		Description:  raw.Tenant.Description,
 		ContactEmail: raw.Tenant.ContactEmail,
 		Quotas:       raw.Tenant.Quotas,
+		Networking: map[string]bool{
+			"allowIntraNamespace": raw.Tenant.Networking.AllowIntraNamespace,
+			"allowClusterEgress":  raw.Tenant.Networking.AllowClusterEgress,
+			"allowInternetEgress": raw.Tenant.Networking.AllowInternetEgress,
+		},
 	}
 	if t.Name == "" {
 		t.Name = name

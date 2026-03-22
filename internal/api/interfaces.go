@@ -58,3 +58,22 @@ type AuditLog = audit.Log
 type LogQuerier interface {
 	QueryRange(ctx context.Context, namespace, app string, lines int, since time.Duration) ([]loki.LogLine, error)
 }
+
+// VaultReader exposes the subset of Vault reads needed by onboarding flows.
+type VaultReader interface {
+	ReadKV(ctx context.Context, path string) (map[string]string, error)
+}
+
+// MetricsQuerier fetches historical container usage stats for right-sizing decisions.
+type MetricsQuerier interface {
+	GetContainerUsage(ctx context.Context, namespace, app, container string, lookback time.Duration) (ContainerUsageStats, error)
+}
+
+// ContainerUsageStats summarizes recent runtime consumption for a single container.
+type ContainerUsageStats struct {
+	MemoryMaxBytes float64 `json:"memoryMaxBytes"`
+	MemoryP95Bytes float64 `json:"memoryP95Bytes"`
+	CPUMaxCores    float64 `json:"cpuMaxCores"`
+	CPUP95Cores    float64 `json:"cpuP95Cores"`
+	SampleCount    int     `json:"sampleCount"`
+}

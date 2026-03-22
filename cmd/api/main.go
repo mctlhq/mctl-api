@@ -34,6 +34,8 @@ import (
 	"github.com/mctlhq/mctl-api/internal/loki"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/vault"
+	"github.com/mctlhq/mctl-api/internal/vmetrics"
 )
 
 func main() {
@@ -140,6 +142,20 @@ func main() {
 		slog.Info("loki log querying enabled", "url", lokiURL)
 	}
 
+	// Vault client (optional — used for onboarding secret preflight).
+	var vaultReader mctlapi.VaultReader
+	if cfg.VaultAddr != "" && cfg.VaultToken != "" {
+		vaultReader = vault.NewClient(cfg.VaultAddr, cfg.VaultToken)
+		slog.Info("vault client enabled", "addr", cfg.VaultAddr)
+	}
+
+	// VictoriaMetrics client (optional — used for OpenClaw sizing recommendations).
+	var metricsQuerier mctlapi.MetricsQuerier
+	if cfg.VictoriaMetricsURL != "" {
+		metricsQuerier = vmetrics.NewClient(cfg.VictoriaMetricsURL)
+		slog.Info("victoriametrics client enabled", "url", cfg.VictoriaMetricsURL)
+	}
+
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Registry:             registry,
 		GitReader:            gitReader,
@@ -150,6 +166,8 @@ func main() {
 		MCPServer:            mcpSrv,
 		QuotaReader:          quotaReader,
 		LogQuerier:           logQuerier,
+		VaultReader:          vaultReader,
+		MetricsQuerier:       metricsQuerier,
 		BackstageURL:         cfg.BackstageURL,
 		BackstageToken:       cfg.BackstageToken,
 		BackstageInternalURL: cfg.BackstageInternalURL,
@@ -226,6 +244,9 @@ type config struct {
 	OAuthAllowedRedirectURIs []string
 	OAuthTokenTTL            time.Duration
 	OAuthRefreshTokenTTL     time.Duration
+	VaultAddr                string
+	VaultToken               string
+	VictoriaMetricsURL       string
 }
 
 func loadConfig() config {
@@ -298,6 +319,9 @@ func loadConfig() config {
 		OAuthAllowedRedirectURIs: oauthRedirectURIs,
 		OAuthTokenTTL:            parseDuration(os.Getenv("OAUTH_TOKEN_TTL"), time.Hour),
 		OAuthRefreshTokenTTL:     parseDuration(os.Getenv("OAUTH_REFRESH_TOKEN_TTL"), 30*24*time.Hour),
+		VaultAddr:                os.Getenv("VAULT_ADDR"),
+		VaultToken:               os.Getenv("VAULT_TOKEN"),
+		VictoriaMetricsURL:       envOr("VICTORIA_METRICS_URL", "http://vmsingle-monitoring-victoria-metrics-k8s-stack.monitoring.svc:8428"),
 	}
 }
 
