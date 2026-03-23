@@ -56,18 +56,18 @@ var openClawProfiles = map[string]openClawResourceProfile{
 	"steady-medium": {
 		Name:            "steady-medium",
 		RequestCPU:      "350m",
-		RequestMemory:   "768Mi",
+		RequestMemory:   "1Gi",
 		LimitCPU:        "1500m",
 		LimitMemory:     "3Gi",
-		NodeMaxOldSpace: "2560",
+		NodeMaxOldSpace: "2048",
 	},
 	"steady-small": {
 		Name:            "steady-small",
 		RequestCPU:      "250m",
-		RequestMemory:   "512Mi",
+		RequestMemory:   "768Mi",
 		LimitCPU:        "1",
-		LimitMemory:     "2Gi",
-		NodeMaxOldSpace: "1536",
+		LimitMemory:     "2560Mi",
+		NodeMaxOldSpace: "1792",
 	},
 }
 
