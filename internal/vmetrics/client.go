@@ -28,10 +28,15 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
+func servicePodRegex(namespace, app string) string {
+	return fmt.Sprintf("%s-%s-base-service-.*", namespace, app)
+}
+
 // GetContainerUsage returns historical CPU and memory stats for a service container.
 func (c *Client) GetContainerUsage(ctx context.Context, namespace, app, container string, lookback time.Duration) (api.ContainerUsageStats, error) {
-	memExpr := fmt.Sprintf(`container_memory_working_set_bytes{namespace=%q,pod=~%q,container=%q}`, namespace, app+"-base-service-.*", container)
-	cpuExpr := fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{namespace=%q,pod=~%q,container=%q}[5m]))`, namespace, app+"-base-service-.*", container)
+	podRegex := servicePodRegex(namespace, app)
+	memExpr := fmt.Sprintf(`container_memory_working_set_bytes{namespace=%q,pod=~%q,container=%q}`, namespace, podRegex, container)
+	cpuExpr := fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{namespace=%q,pod=~%q,container=%q}[5m]))`, namespace, podRegex, container)
 
 	memSamples, err := c.queryRange(ctx, memExpr, lookback, 15*time.Minute)
 	if err != nil {
