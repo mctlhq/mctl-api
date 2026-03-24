@@ -34,6 +34,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -347,6 +348,20 @@ func waitForTenantVisible(t *testing.T, c *client, tenant string, timeout time.D
 	}
 	t.Fatalf("tenant %s not readable within %v: last=%v", tenant, timeout, last)
 	return nil
+}
+
+func waitForTenantWorkflowSubmitterRBAC(t *testing.T, tenant string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		cmd := exec.Command("kubectl", "-n", tenant, "get", "rolebinding", "mctl-api-workflow-submitter")
+		if err := cmd.Run(); err == nil {
+			t.Logf("✓ tenant workflow submitter RBAC ready in %s", tenant)
+			return
+		}
+		time.Sleep(10 * time.Second)
+	}
+	t.Fatalf("tenant workflow submitter RBAC not ready in %s within %v", tenant, timeout)
 }
 
 func randomSuffix() string {
@@ -694,6 +709,15 @@ func TestE2E_MCPDestructiveEphemeralTenantSmoke(t *testing.T) {
 	t.Logf("✓ create tenant workflow: https://workflows.mctl.ai/workflows/%s/%s", createNS, createWorkflow)
 	waitForWorkflowPhase(t, c, createWorkflow, "Succeeded", 20*time.Minute)
 	waitForTenantVisible(t, c, tenant, 10*time.Minute)
+	waitForTenantWorkflowSubmitterRBAC(t, tenant, 10*time.Minute)
+
+	provisionText := mcpToolText(t, c, sessionID, "mctl_provision_database", map[string]interface{}{
+		"team_name": tenant,
+		"app_name":  service,
+	}, 101)
+	provisionWorkflow, provisionNS := mustWorkflowRef(t, "mctl_provision_database", provisionText)
+	t.Logf("✓ provision database workflow: https://workflows.mctl.ai/workflows/%s/%s", provisionNS, provisionWorkflow)
+	waitForWorkflowPhase(t, c, provisionWorkflow, "Succeeded", 15*time.Minute)
 
 	deployText := mcpToolText(t, c, sessionID, "mctl_deploy_service", map[string]interface{}{
 		"action":           "onboard",
@@ -703,20 +727,13 @@ func TestE2E_MCPDestructiveEphemeralTenantSmoke(t *testing.T) {
 		"dockerfile_repo":  "mctlhq/spring-test",
 		"git_tag":          "main",
 		"port":             "8080",
-		"service_template": "default",
-	}, 101)
+		"provision_database": "true",
+		"service_template": "spring-worker",
+	}, 102)
 	deployWorkflow, deployNS := mustWorkflowRef(t, "mctl_deploy_service", deployText)
 	t.Logf("✓ deploy service workflow: https://workflows.mctl.ai/workflows/%s/%s", deployNS, deployWorkflow)
 	waitForWorkflowPhase(t, c, deployWorkflow, "Succeeded", smokeTimeout)
 	waitForServiceHealthySynced(t, c, tenant, service, smokeTimeout)
-
-	provisionText := mcpToolText(t, c, sessionID, "mctl_provision_database", map[string]interface{}{
-		"team_name": tenant,
-		"app_name":  service,
-	}, 102)
-	provisionWorkflow, provisionNS := mustWorkflowRef(t, "mctl_provision_database", provisionText)
-	t.Logf("✓ provision database workflow: https://workflows.mctl.ai/workflows/%s/%s", provisionNS, provisionWorkflow)
-	waitForWorkflowPhase(t, c, provisionWorkflow, "Succeeded", 15*time.Minute)
 
 	retireText := mcpToolText(t, c, sessionID, "mctl_retire_service", map[string]interface{}{
 		"team_name":      tenant,
