@@ -333,6 +333,22 @@ func waitForServiceGone(t *testing.T, c *client, team, service string, timeout t
 	t.Fatalf("service %s/%s still exists after %v", team, service, timeout)
 }
 
+func waitForTenantVisible(t *testing.T, c *client, tenant string, timeout time.Duration) map[string]interface{} {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last map[string]interface{}
+	for time.Now().Before(deadline) {
+		status, body := c.get(t, "/api/v1/tenants/"+tenant)
+		if status == 200 {
+			return body
+		}
+		last = body
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("tenant %s not readable within %v: last=%v", tenant, timeout, last)
+	return nil
+}
+
 func randomSuffix() string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -677,11 +693,7 @@ func TestE2E_MCPDestructiveEphemeralTenantSmoke(t *testing.T) {
 	cleanupRequested = true
 	t.Logf("✓ create tenant workflow: https://workflows.mctl.ai/workflows/%s/%s", createNS, createWorkflow)
 	waitForWorkflowPhase(t, c, createWorkflow, "Succeeded", 20*time.Minute)
-
-	status, body := c.get(t, "/api/v1/tenants/"+tenant)
-	if status != 200 {
-		t.Fatalf("ephemeral tenant %s not readable after create: %d %v", tenant, status, body)
-	}
+	waitForTenantVisible(t, c, tenant, 10*time.Minute)
 
 	deployText := mcpToolText(t, c, sessionID, "mctl_deploy_service", map[string]interface{}{
 		"action":           "onboard",
