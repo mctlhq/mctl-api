@@ -302,7 +302,7 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	namespace := team
-	if entry.Operation == "create-tenant" || entry.Operation == "delete-tenant" {
+	if entry.Operation == "create-tenant" || entry.Operation == "delete-tenant" || entry.Operation == "delete-tenant-safe" {
 		namespace = "argo-workflows"
 	}
 

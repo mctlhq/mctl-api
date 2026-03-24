@@ -18,6 +18,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Entry represents a single audit log entry.
@@ -59,6 +61,9 @@ func (l *Logger) Log(entry Entry) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	if entry.ID == "" {
+		entry.ID = uuid.NewString()
+	}
 	entry.Timestamp = time.Now().UTC()
 	l.entries = append(l.entries, entry)
 

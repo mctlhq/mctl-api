@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -61,6 +62,9 @@ func NewPostgresLogger(ctx context.Context, connStr string) (*PostgresLogger, er
 
 // Log inserts an audit entry into PostgreSQL.
 func (p *PostgresLogger) Log(entry Entry) {
+	if entry.ID == "" {
+		entry.ID = uuid.NewString()
+	}
 	entry.Timestamp = time.Now().UTC()
 
 	params, _ := json.Marshal(entry.Parameters)
