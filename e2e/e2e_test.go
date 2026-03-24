@@ -350,6 +350,55 @@ func waitForTenantVisible(t *testing.T, c *client, tenant string, timeout time.D
 	return nil
 }
 
+func kubectlIsNotFound(args ...string) (bool, string) {
+	cmd := exec.Command("kubectl", args...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return false, string(out)
+	}
+	text := string(out)
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "notfound") || strings.Contains(lower, "not found") {
+		return true, text
+	}
+	return false, text
+}
+
+func waitForTenantFullyRemoved(t *testing.T, c *client, tenant, service string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	serviceApp := tenant + "-" + service
+	tenantApp := "tenant-" + tenant
+	lastState := ""
+
+	for time.Now().Before(deadline) {
+		tenantStatus, _ := c.get(t, "/api/v1/tenants/"+tenant)
+
+		serviceAppGone, serviceAppOut := kubectlIsNotFound("-n", "argocd", "get", "app", serviceApp)
+		tenantAppGone, tenantAppOut := kubectlIsNotFound("-n", "argocd", "get", "app", tenantApp)
+		namespaceGone, namespaceOut := kubectlIsNotFound("get", "ns", tenant)
+
+		lastState = fmt.Sprintf(
+			"tenantStatus=%d serviceAppGone=%t tenantAppGone=%t namespaceGone=%t serviceAppOut=%q tenantAppOut=%q namespaceOut=%q",
+			tenantStatus,
+			serviceAppGone,
+			tenantAppGone,
+			namespaceGone,
+			strings.TrimSpace(serviceAppOut),
+			strings.TrimSpace(tenantAppOut),
+			strings.TrimSpace(namespaceOut),
+		)
+		if tenantStatus == 404 && serviceAppGone && tenantAppGone && namespaceGone {
+			t.Logf("✓ tenant %s cleanup complete: service app, tenant app, namespace gone and API returns 404", tenant)
+			return
+		}
+
+		time.Sleep(15 * time.Second)
+	}
+
+	t.Fatalf("tenant %s cleanup incomplete after %v: %s", tenant, timeout, lastState)
+}
+
 func waitForTenantWorkflowSubmitterRBAC(t *testing.T, tenant string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -753,17 +802,8 @@ func TestE2E_MCPDestructiveEphemeralTenantSmoke(t *testing.T) {
 	t.Logf("✓ delete tenant workflow: https://workflows.mctl.ai/workflows/%s/%s", deleteNS, deleteWorkflow)
 	waitForWorkflowPhase(t, c, deleteWorkflow, "Succeeded", smokeTimeout)
 	cleanupRequested = false
-
-	deadline := time.Now().Add(10 * time.Minute)
-	for time.Now().Before(deadline) {
-		status, _ := c.get(t, "/api/v1/tenants/"+tenant)
-		if status == 404 {
-			t.Logf("✓ ephemeral tenant %s fully removed", tenant)
-			return
-		}
-		time.Sleep(15 * time.Second)
-	}
-	t.Fatalf("ephemeral tenant %s still readable after delete workflow", tenant)
+	waitForTenantFullyRemoved(t, c, tenant, service, 10*time.Minute)
+	t.Logf("✓ ephemeral tenant %s fully removed", tenant)
 }
 
 // ── full platform smoke test ─────────────────────────────────────────────────
