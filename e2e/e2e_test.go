@@ -16,11 +16,11 @@
 
 // Package e2e contains end-to-end tests that verify the full platform flow:
 //
-//mctl tool call → Argo Workflow submitted → GitOps commit → ArgoCD sync → service deployed
+// mctl tool call → Argo Workflow submitted → GitOps commit → ArgoCD sync → service deployed
 //
 // Run with:
 //
-//MCTL_TEST_TOKEN=$(gh auth token) go test ./e2e/ -v -tags e2e -timeout 30m
+// MCTL_TEST_TOKEN=$(gh auth token) go test ./e2e/ -v -tags e2e -timeout 30m
 //
 // TestE2E_FullPlatformSmokeTest triggers the smoke-test ClusterWorkflowTemplate which
 // verifies the complete lifecycle: deploy → env+secrets in pod → DB provision → update-config → retire.
@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -165,6 +166,181 @@ func (c *client) mcpCall(t *testing.T, sessionID string, method string, params i
 		t.Fatalf("MCP %s returned error: %v", method, rpcErr)
 	}
 	return out, newSessionID
+}
+
+func mcpInitialize(t *testing.T, c *client) string {
+	t.Helper()
+	initResp, sessionID := c.mcpCall(t, "", "initialize", map[string]interface{}{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]interface{}{},
+		"clientInfo":      map[string]interface{}{"name": "e2e-smoke", "version": "1.0"},
+	}, 1)
+	t.Logf("✓ MCP initialize: serverInfo=%v sessionID=%s", initResp["result"], sessionID)
+	return sessionID
+}
+
+func mcpToolsList(t *testing.T, c *client, sessionID string) []map[string]interface{} {
+	t.Helper()
+	listResp, _ := c.mcpCall(t, sessionID, "tools/list", map[string]interface{}{}, 2)
+	result, ok := listResp["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("tools/list: 'result' missing or wrong type: %v", listResp)
+	}
+	toolsList, ok := result["tools"].([]interface{})
+	if !ok {
+		t.Fatalf("tools/list: 'result.tools' missing: %v", result)
+	}
+	out := make([]map[string]interface{}, 0, len(toolsList))
+	for _, tool := range toolsList {
+		typed, ok := tool.(map[string]interface{})
+		if !ok {
+			t.Fatalf("tools/list: unexpected tool payload: %T", tool)
+		}
+		out = append(out, typed)
+	}
+	return out
+}
+
+func mcpToolText(t *testing.T, c *client, sessionID, tool string, args map[string]interface{}, id int) string {
+	t.Helper()
+	callResp, _ := c.mcpCall(t, sessionID, "tools/call", map[string]interface{}{
+		"name":      tool,
+		"arguments": args,
+	}, id)
+	callResult, ok := callResp["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("tools/call %s: result missing: %v", tool, callResp)
+	}
+	content, ok := callResult["content"].([]interface{})
+	if !ok || len(content) == 0 {
+		t.Fatalf("tools/call %s: content empty: %v", tool, callResult)
+	}
+	firstContent, ok := content[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("tools/call %s: first content item has wrong type", tool)
+	}
+	text := fmt.Sprintf("%v", firstContent["text"])
+	if strings.Contains(strings.ToLower(text), "resource not found") {
+		t.Fatalf("tools/call %s returned discovery/invoke mismatch: %s", tool, text)
+	}
+	return text
+}
+
+func parseJSONText(t *testing.T, tool, text string) map[string]interface{} {
+	t.Helper()
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		t.Fatalf("%s returned non-JSON text: %v\ntext: %s", tool, err, text)
+	}
+	return parsed
+}
+
+func parseWhoamiText(t *testing.T, text string) map[string]string {
+	t.Helper()
+	lines := strings.Split(text, "\n")
+	out := make(map[string]string)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, ":") {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		out[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+	}
+	if out["User"] == "" {
+		t.Fatalf("mctl_whoami text missing User field: %s", text)
+	}
+	return out
+}
+
+func mustWorkflowRef(t *testing.T, tool, text string) (string, string) {
+	t.Helper()
+	parsed := parseJSONText(t, tool, text)
+	workflow, ok := parsed["workflow"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("%s response missing workflow object: %v", tool, parsed)
+	}
+	name := fmt.Sprintf("%v", workflow["workflowName"])
+	namespace := fmt.Sprintf("%v", workflow["namespace"])
+	if name == "" || namespace == "" {
+		t.Fatalf("%s response missing workflow name/namespace: %v", tool, workflow)
+	}
+	return name, namespace
+}
+
+func waitForWorkflowPhase(t *testing.T, c *client, workflowName, wantPhase string, timeout time.Duration) map[string]interface{} {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last map[string]interface{}
+	for time.Now().Before(deadline) {
+		status, body := c.get(t, "/api/v1/workflows/"+workflowName)
+		if status != 200 {
+			t.Fatalf("GetWorkflow %s expected 200, got %d: %v", workflowName, status, body)
+		}
+		last = body
+		live, _ := body["live"].(map[string]interface{})
+		statusBlock, _ := live["status"].(map[string]interface{})
+		phase := fmt.Sprintf("%v", statusBlock["phase"])
+		if phase == wantPhase {
+			return body
+		}
+		if phase == "Failed" || phase == "Error" {
+			t.Fatalf("workflow %s reached terminal failure phase %s: %v", workflowName, phase, body)
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("workflow %s did not reach %s within %v: last=%v", workflowName, wantPhase, timeout, last)
+	return nil
+}
+
+func waitForServiceHealthySynced(t *testing.T, c *client, team, service string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last map[string]interface{}
+	for time.Now().Before(deadline) {
+		status, body := c.get(t, fmt.Sprintf("/api/v1/status/%s/%s", team, service))
+		if status == 404 {
+			time.Sleep(pollInterval)
+			continue
+		}
+		if status != 200 {
+			last = body
+			time.Sleep(pollInterval)
+			continue
+		}
+		last = body
+		argo, _ := body["argocd"].(map[string]interface{})
+		health := fmt.Sprintf("%v", argo["health"])
+		sync := fmt.Sprintf("%v", argo["syncStatus"])
+		if health == "Healthy" && sync == "Synced" {
+			return
+		}
+		time.Sleep(pollInterval)
+	}
+	t.Fatalf("service %s/%s did not reach Healthy+Synced within %v: last=%v", team, service, timeout, last)
+}
+
+func waitForServiceGone(t *testing.T, c *client, team, service string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status, _ := c.get(t, fmt.Sprintf("/api/v1/services/%s/%s", team, service))
+		if status == 404 {
+			return
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("service %s/%s still exists after %v", team, service, timeout)
+}
+
+func randomSuffix() string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	buf := make([]byte, 6)
+	for i := range buf {
+		buf[i] = alphabet[rng.Intn(len(alphabet))]
+	}
+	return string(buf)
 }
 
 // ── read-only sanity checks ──────────────────────────────────────────────────
@@ -364,31 +540,12 @@ func TestE2E_Domains(t *testing.T) {
 //  3. tools/call mctl_list_tenants → returns valid JSON with tenant data
 func TestE2E_MCPSmoke(t *testing.T) {
 	c := newClient(t)
-
-	// Step 1: initialize.
-	initResp, sessionID := c.mcpCall(t, "", "initialize", map[string]interface{}{
-		"protocolVersion": "2024-11-05",
-		"capabilities":    map[string]interface{}{},
-		"clientInfo":      map[string]interface{}{"name": "e2e-smoke", "version": "1.0"},
-	}, 1)
-	t.Logf("✓ MCP initialize: serverInfo=%v sessionID=%s", initResp["result"], sessionID)
-
-	// Step 2: tools/list.
-	listResp, _ := c.mcpCall(t, sessionID, "tools/list", map[string]interface{}{}, 2)
-	result, ok := listResp["result"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("tools/list: 'result' missing or wrong type: %v", listResp)
-	}
-	toolsList, ok := result["tools"].([]interface{})
-	if !ok {
-		t.Fatalf("tools/list: 'result.tools' missing: %v", result)
-	}
+	sessionID := mcpInitialize(t, c)
+	toolsList := mcpToolsList(t, c, sessionID)
 
 	toolNames := make(map[string]bool, len(toolsList))
-	for _, tl := range toolsList {
-		if tm, ok := tl.(map[string]interface{}); ok {
-			toolNames[fmt.Sprintf("%v", tm["name"])] = true
-		}
+	for _, tool := range toolsList {
+		toolNames[fmt.Sprintf("%v", tool["name"])] = true
 	}
 	t.Logf("✓ MCP tools/list: %d tools registered", len(toolNames))
 
@@ -428,25 +585,156 @@ func TestE2E_MCPSmoke(t *testing.T) {
 		t.Errorf("MCP tools missing: %v\nregistered: %v", missing, toolNames)
 	}
 
-	// Step 3: tools/call — read-only tool (safe to call in smoke test).
-	callResp, _ := c.mcpCall(t, sessionID, "tools/call", map[string]interface{}{
-		"name":      "mctl_list_tenants",
-		"arguments": map[string]interface{}{},
-	}, 3)
-	callResult, ok := callResp["result"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("tools/call mctl_list_tenants: result missing: %v", callResp)
+	checks := []struct {
+		name string
+		args map[string]interface{}
+	}{
+		{name: "mctl_whoami", args: map[string]interface{}{}},
+		{name: "mctl_list_operations", args: map[string]interface{}{}},
+		{name: "mctl_list_tenants", args: map[string]interface{}{}},
+		{name: "mctl_get_tenant", args: map[string]interface{}{"name": "admins"}},
+		{name: "mctl_list_services", args: map[string]interface{}{}},
+		{name: "mctl_list_recent_operations", args: map[string]interface{}{}},
+		{name: "mctl_get_operation", args: map[string]interface{}{"name": "deploy-service"}},
+		{name: "mctl_incident_summary", args: map[string]interface{}{}},
 	}
-	content, ok := callResult["content"].([]interface{})
-	if !ok || len(content) == 0 {
-		t.Fatalf("tools/call mctl_list_tenants: content empty: %v", callResult)
+
+	for idx, check := range checks {
+		text := mcpToolText(t, c, sessionID, check.name, check.args, 10+idx)
+		switch check.name {
+		case "mctl_whoami":
+			who := parseWhoamiText(t, text)
+			if who["Teams"] == "" {
+				t.Fatalf("mctl_whoami missing Teams in text output: %s", text)
+			}
+			if strings.Count(who["Teams"], "admins") > 1 {
+				t.Errorf("mctl_whoami duplicated admin membership: %s", text)
+			}
+			t.Logf("✓ MCP %s callable", check.name)
+			continue
+		case "mctl_incident_summary":
+			if strings.Contains(strings.ToLower(text), "alert store not configured") {
+				t.Logf("✓ MCP %s callable but dependency degraded: %s", check.name, text)
+				continue
+			}
+		}
+
+		parsed := parseJSONText(t, check.name, text)
+		if len(parsed) == 0 {
+			t.Fatalf("%s returned empty JSON object", check.name)
+		}
+		switch check.name {
+		case "mctl_list_operations", "mctl_list_tenants", "mctl_list_services", "mctl_list_recent_operations":
+			if _, ok := parsed["items"]; !ok {
+				t.Fatalf("%s missing items field: %v", check.name, parsed)
+			}
+		case "mctl_get_tenant":
+			if _, ok := parsed["tenant"]; !ok {
+				t.Fatalf("mctl_get_tenant missing tenant field: %v", parsed)
+			}
+		case "mctl_get_operation":
+			if _, ok := parsed["name"]; !ok {
+				t.Fatalf("mctl_get_operation missing operation payload: %v", parsed)
+			}
+		case "mctl_incident_summary":
+			if _, ok := parsed["summary"]; !ok {
+				t.Logf("incident summary payload: %v", parsed)
+			}
+		}
+		t.Logf("✓ MCP %s callable", check.name)
 	}
-	firstContent := content[0].(map[string]interface{})
-	text := fmt.Sprintf("%v", firstContent["text"])
-	if !strings.Contains(text, "count") && !strings.Contains(text, "items") && !strings.Contains(text, "tenant") {
-		t.Fatalf("mctl_list_tenants response doesn't look like tenant data: %s", text[:min(300, len(text))])
+}
+
+func TestE2E_MCPDestructiveEphemeralTenantSmoke(t *testing.T) {
+	if os.Getenv("MCTL_RUN_DESTRUCTIVE_SMOKE") != "1" {
+		t.Skip("set MCTL_RUN_DESTRUCTIVE_SMOKE=1 to run destructive ephemeral-tenant smoke")
 	}
-	t.Logf("✓ MCP tools/call mctl_list_tenants: %d chars returned", len(text))
+
+	c := newClient(t)
+	sessionID := mcpInitialize(t, c)
+
+	tenant := "mcp-smoke-" + randomSuffix()
+	service := "smoke-svc"
+	t.Logf("▶ destructive MCP smoke on ephemeral tenant %s", tenant)
+
+	cleanupRequested := false
+	defer func() {
+		if !cleanupRequested {
+			return
+		}
+		_, _ = c.post(t, "/api/v1/operations/delete-tenant/execute", map[string]string{
+			"tenant_name": tenant,
+		})
+	}()
+
+	createText := mcpToolText(t, c, sessionID, "mctl_create_tenant", map[string]interface{}{
+		"tenant_name":   tenant,
+		"display_name":  "MCP Smoke " + tenant,
+		"description":   "Ephemeral MCP smoke tenant",
+		"contact_email": "platform-smoke@mctl.ai",
+	}, 100)
+	createWorkflow, createNS := mustWorkflowRef(t, "mctl_create_tenant", createText)
+	cleanupRequested = true
+	t.Logf("✓ create tenant workflow: https://workflows.mctl.ai/workflows/%s/%s", createNS, createWorkflow)
+	waitForWorkflowPhase(t, c, createWorkflow, "Succeeded", 20*time.Minute)
+
+	status, body := c.get(t, "/api/v1/tenants/"+tenant)
+	if status != 200 {
+		t.Fatalf("ephemeral tenant %s not readable after create: %d %v", tenant, status, body)
+	}
+
+	deployText := mcpToolText(t, c, sessionID, "mctl_deploy_service", map[string]interface{}{
+		"action":           "onboard",
+		"team_name":        tenant,
+		"component_name":   service,
+		"component_type":   "worker-service",
+		"dockerfile_repo":  "mctlhq/spring-test",
+		"git_tag":          "main",
+		"port":             "8080",
+		"service_template": "default",
+	}, 101)
+	deployWorkflow, deployNS := mustWorkflowRef(t, "mctl_deploy_service", deployText)
+	t.Logf("✓ deploy service workflow: https://workflows.mctl.ai/workflows/%s/%s", deployNS, deployWorkflow)
+	waitForWorkflowPhase(t, c, deployWorkflow, "Succeeded", smokeTimeout)
+	waitForServiceHealthySynced(t, c, tenant, service, smokeTimeout)
+
+	provisionText := mcpToolText(t, c, sessionID, "mctl_provision_database", map[string]interface{}{
+		"team_name": tenant,
+		"app_name":  service,
+	}, 102)
+	provisionWorkflow, provisionNS := mustWorkflowRef(t, "mctl_provision_database", provisionText)
+	t.Logf("✓ provision database workflow: https://workflows.mctl.ai/workflows/%s/%s", provisionNS, provisionWorkflow)
+	waitForWorkflowPhase(t, c, provisionWorkflow, "Succeeded", 15*time.Minute)
+
+	retireText := mcpToolText(t, c, sessionID, "mctl_retire_service", map[string]interface{}{
+		"team_name":      tenant,
+		"component_name": service,
+		"confirm":        "yes",
+	}, 103)
+	retireWorkflow, retireNS := mustWorkflowRef(t, "mctl_retire_service", retireText)
+	t.Logf("✓ retire service workflow: https://workflows.mctl.ai/workflows/%s/%s", retireNS, retireWorkflow)
+	waitForWorkflowPhase(t, c, retireWorkflow, "Succeeded", smokeTimeout)
+	waitForServiceGone(t, c, tenant, service, smokeTimeout)
+
+	deleteText := mcpToolText(t, c, sessionID, "mctl_delete_tenant", map[string]interface{}{
+		"tenant_name": tenant,
+		"confirm":     "yes",
+	}, 104)
+	deleteWorkflow, deleteNS := mustWorkflowRef(t, "mctl_delete_tenant", deleteText)
+	t.Logf("✓ delete tenant workflow: https://workflows.mctl.ai/workflows/%s/%s", deleteNS, deleteWorkflow)
+	waitForWorkflowPhase(t, c, deleteWorkflow, "Succeeded", smokeTimeout)
+	cleanupRequested = false
+
+	deadline := time.Now().Add(10 * time.Minute)
+	for time.Now().Before(deadline) {
+		status, _ := c.get(t, "/api/v1/tenants/"+tenant)
+		if status == 404 {
+			t.Logf("✓ ephemeral tenant %s fully removed", tenant)
+			return
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("ephemeral tenant %s still readable after delete workflow", tenant)
 }
 
 // ── full platform smoke test ─────────────────────────────────────────────────

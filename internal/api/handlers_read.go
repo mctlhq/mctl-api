@@ -35,9 +35,11 @@ func (h *Handlers) Whoami(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	groups := uniquePreserveOrder(user.Groups)
+
 	// Build list of accessible Argo Workflow namespaces.
 	var namespaces []string
-	for _, g := range user.Groups {
+	for _, g := range groups {
 		if g == "admins" {
 			continue
 		}
@@ -46,10 +48,27 @@ func (h *Handlers) Whoami(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"id":         user.ID,
-		"groups":     user.Groups,
+		"groups":     groups,
 		"isAdmin":    user.IsAdmin(),
 		"namespaces": namespaces,
 	})
+}
+
+func uniquePreserveOrder(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 // Logout acknowledges a logout request. Since access tokens are stateless JWTs,
@@ -175,7 +194,6 @@ func (h *Handlers) GetServiceStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
-
 
 	svc, _ := h.opts.GitReader.GetService(team, app)
 
@@ -429,7 +447,6 @@ func (h *Handlers) GetServiceLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
-
 
 	lines := 100
 	if l := r.URL.Query().Get("lines"); l != "" {
