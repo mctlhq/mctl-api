@@ -72,8 +72,10 @@ var openClawProfiles = map[string]openClawResourceProfile{
 }
 
 var openClawStartupQuotaFloor = map[string]string{
-	"limits.cpu":                     "2500m",
-	"limits.memory":                  "5Gi",
+	"requests.cpu":                   "500m",
+	"requests.memory":                "1280Mi",
+	"limits.cpu":                     "2",
+	"limits.memory":                  "4Gi",
 	"networking.allowInternetEgress": "true",
 }
 
@@ -397,6 +399,12 @@ func (h *Handlers) requireOpenClawOwner(w http.ResponseWriter, r *http.Request, 
 
 func validateOpenClawPreflight(tenant *gitops.Tenant) []map[string]string {
 	var issues []map[string]string
+	if q := tenant.Quotas["requests.cpu"]; q != "" && quantityLessThan(q, openClawStartupQuotaFloor["requests.cpu"]) {
+		issues = append(issues, map[string]string{"field": "requests.cpu", "required": openClawStartupQuotaFloor["requests.cpu"], "actual": q})
+	}
+	if q := tenant.Quotas["requests.memory"]; q != "" && quantityLessThan(q, openClawStartupQuotaFloor["requests.memory"]) {
+		issues = append(issues, map[string]string{"field": "requests.memory", "required": openClawStartupQuotaFloor["requests.memory"], "actual": q})
+	}
 	if q := tenant.Quotas["limits.cpu"]; q != "" && quantityLessThan(q, openClawStartupQuotaFloor["limits.cpu"]) {
 		issues = append(issues, map[string]string{"field": "limits.cpu", "required": openClawStartupQuotaFloor["limits.cpu"], "actual": q})
 	}
