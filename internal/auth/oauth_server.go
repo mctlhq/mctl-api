@@ -121,9 +121,15 @@ func (s *OAuthServer) ResolveGroups(login string) []string {
 
 // IsRedirectURIAllowed returns true if uri is in the static whitelist
 // or was registered by a dynamic client (RFC 7591).
+// Allowlist entries ending with "/*" are treated as prefix matches
+// (e.g. "https://chatgpt.com/connector/oauth/*" matches any path under that prefix).
 func (s *OAuthServer) IsRedirectURIAllowed(uri string) bool {
 	for _, allowed := range s.AllowedRedirectURIs {
-		if allowed == uri {
+		if strings.HasSuffix(allowed, "/*") {
+			if strings.HasPrefix(uri, strings.TrimSuffix(allowed, "*")) {
+				return true
+			}
+		} else if allowed == uri {
 			return true
 		}
 	}

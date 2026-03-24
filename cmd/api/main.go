@@ -287,10 +287,12 @@ func loadConfig() config {
 			}
 		}
 	} else {
-		// Default: allow Glama.ai inspector and Smithery to work without configuration.
+		// Default: allow common MCP clients to work without configuration.
+		// Entries ending with "/*" use prefix matching for dynamic callback paths.
 		oauthRedirectURIs = []string{
 			"https://glama.ai/mcp/inspector/oauth/callback",
 			"https://smithery.ai/mcp/inspector/oauth/callback",
+			"https://chatgpt.com/connector/oauth/*",
 		}
 		slog.Warn("OAUTH_ALLOWED_REDIRECT_URIS not set, using default common tool redirect URIs")
 	}
