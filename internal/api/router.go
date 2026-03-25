@@ -16,6 +16,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,8 @@ import (
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/openapi"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Options holds all dependencies for the API router.
@@ -89,6 +92,12 @@ func NewRouter(opts Options) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
 	})
+
+	// Prometheus metrics (no auth).
+	r.Handle("/metrics", promhttp.Handler())
+
+	// Metrics recording middleware (excludes health/metrics endpoints).
+	r.Use(metricsMiddleware())
 
 	// OpenAPI spec — public, no auth required.
 	r.Get("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +209,65 @@ func NewRouter(opts Options) http.Handler {
 	})
 
 	return r
+}
+
+var (
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests.",
+		},
+		[]string{"method", "path", "code"},
+	)
+	httpRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "Duration of HTTP requests in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "path"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(httpRequestDuration)
+}
+
+// metricsMiddleware returns middleware that records Prometheus metrics for each
+// request. It skips infrastructure paths (/healthz, /readyz, /metrics) to avoid
+// noise. The chi route pattern is used for the path label to prevent high cardinality.
+func metricsMiddleware() func(http.Handler) http.Handler {
+	skip := map[string]bool{
+		"/healthz": true,
+		"/readyz":  true,
+		"/metrics": true,
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if skip[r.URL.Path] {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			start := time.Now()
+
+			next.ServeHTTP(ww, r)
+
+			duration := time.Since(start).Seconds()
+
+			path := r.URL.Path
+			if rctx := chi.RouteContext(r.Context()); rctx != nil {
+				if pattern := rctx.RoutePattern(); pattern != "" {
+					path = pattern
+				}
+			}
+
+			httpRequestsTotal.WithLabelValues(r.Method, path, strconv.Itoa(ww.Status())).Inc()
+			httpRequestDuration.WithLabelValues(r.Method, path).Observe(duration)
+		})
+	}
 }
 
 // corsMiddleware returns middleware that validates the request Origin against
