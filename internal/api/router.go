@@ -82,8 +82,9 @@ func NewRouter(opts Options) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(opts.AllowedOrigins))
+	r.Use(metricsMiddleware())
 
-	// Health checks (no auth).
+	// Health checks and metrics (no auth).
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
@@ -92,12 +93,7 @@ func NewRouter(opts Options) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
 	})
-
-	// Prometheus metrics (no auth).
 	r.Handle("/metrics", promhttp.Handler())
-
-	// Metrics recording middleware (excludes health/metrics endpoints).
-	r.Use(metricsMiddleware())
 
 	// OpenAPI spec — public, no auth required.
 	r.Get("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
