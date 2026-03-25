@@ -165,6 +165,20 @@ func jwtIssuer(token string) string {
 	return claims.Issuer
 }
 
+// staticServiceUser returns a platform-internal service principal when the
+// bearer token matches a configured service token. This bypasses GitHub/Dex
+// validation for trusted in-cluster automation such as mctl-agent.
+func staticServiceUser(token string) *User {
+	serviceToken := strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN"))
+	if serviceToken != "" && token == serviceToken {
+		return &User{
+			ID:     "mctl-agent",
+			Groups: []string{"admins"},
+		}
+	}
+	return nil
+}
+
 // Middleware returns HTTP middleware that validates GitHub tokens or Dex JWTs.
 //
 // Auth flow:
@@ -221,7 +235,9 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 				err  error
 			)
 
-			if isJWT(token) {
+			if svc := staticServiceUser(token); svc != nil {
+				user = svc
+			} else if isJWT(token) {
 				// Peek at the JWT issuer to route to the correct verifier.
 				if oauth != nil && jwtIssuer(token) == oauth.BaseURL {
 					// Local OAuth JWT: validate with HMAC-SHA256.

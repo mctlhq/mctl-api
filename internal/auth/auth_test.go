@@ -138,3 +138,32 @@ func TestUserFromContext_nil(t *testing.T) {
 		t.Errorf("expected nil user from empty context, got %+v", got)
 	}
 }
+
+func TestMiddlewareAcceptsMctlAgentServiceToken(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	t.Setenv("MCTL_AGENT_SERVICE_TOKEN", "svc-token-123")
+
+	mw := Middleware(NewGitHubValidator(nil), nil, nil, nil)
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := UserFromContext(r.Context())
+		if user == nil {
+			t.Fatal("expected user in context")
+		}
+		if user.ID != "mctl-agent" {
+			t.Fatalf("expected mctl-agent user, got %q", user.ID)
+		}
+		if !user.IsAdmin() {
+			t.Fatal("expected service user to be admin")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil)
+	req.Header.Set("Authorization", "Bearer svc-token-123")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+}
