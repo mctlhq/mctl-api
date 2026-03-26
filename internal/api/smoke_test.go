@@ -91,11 +91,21 @@ func (f *fakeArgoCD) ListApps(_ string) ([]argocd.AppStatus, error) {
 }
 
 type fakeExecutor struct {
-	submitted []string
+	submitted      []string
+	submittedParams []map[string]string
 }
 
-func (f *fakeExecutor) Submit(_ context.Context, op operations.Operation, _ map[string]string, userID, namespace string) (*operations.SubmitResult, error) {
+func (f *fakeExecutor) Submit(_ context.Context, op operations.Operation, params map[string]string, userID, namespace string) (*operations.SubmitResult, error) {
 	f.submitted = append(f.submitted, op.Name)
+	if params != nil {
+		cp := make(map[string]string, len(params))
+		for k, v := range params {
+			cp[k] = v
+		}
+		f.submittedParams = append(f.submittedParams, cp)
+	} else {
+		f.submittedParams = append(f.submittedParams, nil)
+	}
 	return &operations.SubmitResult{
 		WorkflowName: "smoke-test-workflow-abc123",
 		Namespace:    namespace,
@@ -310,6 +320,13 @@ func TestSmoke_OpenClawFlows(t *testing.T) {
 		assertStatus(t, w, http.StatusAccepted)
 		if len(exec.submitted) < 2 || exec.submitted[len(exec.submitted)-2] != "provision-database" || exec.submitted[len(exec.submitted)-1] != "deploy-service" {
 			t.Fatalf("expected provision-database then deploy-service submission, got %v", exec.submitted)
+		}
+		deployParams := exec.submittedParams[len(exec.submittedParams)-1]
+		if deployParams["dockerfile_repo"] != "mctlhq/mctl-openclaw" {
+			t.Fatalf("expected deploy-service dockerfile_repo=mctlhq/mctl-openclaw, got %q", deployParams["dockerfile_repo"])
+		}
+		if deployParams["service_template"] != "openclaw" {
+			t.Fatalf("expected deploy-service service_template=openclaw, got %q", deployParams["service_template"])
 		}
 	})
 

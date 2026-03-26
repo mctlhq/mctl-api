@@ -220,6 +220,7 @@ func (h *Handlers) ResumeOpenClawDeploy(w http.ResponseWriter, r *http.Request) 
 		"team_name":         req.TeamName,
 		"component_name":    req.ComponentName,
 		"component_type":    "base-service",
+		"dockerfile_repo":   "mctlhq/mctl-openclaw",
 		"service_template":  "openclaw",
 		"host":              req.Host,
 		"port":              "18789",
