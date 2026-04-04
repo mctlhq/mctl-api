@@ -99,6 +99,7 @@ func NewRouter(opts Options) http.Handler {
 	r.Get("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/yaml")
 		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		_, _ = w.Write(openapi.Spec)
 	})
 	// Swagger UI redirect — opens editor.swagger.io pre-loaded with our spec.
