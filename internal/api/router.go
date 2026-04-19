@@ -164,6 +164,10 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/openclaw/deploy/resume", h.ResumeOpenClawDeploy)
 			r.Get("/openclaw/{team}/{app}/sizing", h.GetOpenClawSizingRecommendation)
 			r.Post("/openclaw/{team}/{app}/resource-profile", h.ApplyOpenClawResourceProfile)
+			r.Get("/openclaw/{team}/skills", h.ListOpenClawSkills)
+			r.Get("/openclaw/{team}/skills/{name}", h.GetOpenClawSkill)
+			r.Post("/openclaw/{team}/skills", h.SaveOpenClawSkill)
+			r.Delete("/openclaw/{team}/skills/{name}", h.DeleteOpenClawSkill)
 
 			// Custom domains (proxied to Backstage custom-domains plugin).
 			r.Get("/domains", h.ListDomains)

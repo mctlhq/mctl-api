@@ -312,4 +312,33 @@ var builtinOperations = []Operation{
 			{Name: "domain", Type: "string", Required: true, Description: "Custom domain to remove"},
 		},
 	},
+	{
+		Name:             "openclaw-skill-save",
+		DisplayName:      "Save OpenClaw Skill to GitOps",
+		Description:      "Back up a single OpenClaw SKILL.md file to the gitops repo. Writes platform-gitops/services/{team}/openclaw/skills/{skill_name}.md from a base64-encoded payload. Overwrites an existing file. Commits with the triggering user recorded in the commit body.",
+		WorkflowTemplate: "openclaw-skill-save",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
+		Parameters: []ParameterDef{
+			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name (kebab-case, 1-64 chars)", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
+			{Name: "content_b64", Type: "string", Required: true, Description: "Base64-encoded SKILL.md content"},
+			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
+		},
+	},
+	{
+		Name:             "openclaw-skill-delete",
+		DisplayName:      "Remove OpenClaw Skill from GitOps",
+		Description:      "Remove a single SKILL.md file from the gitops backup. Idempotent — succeeds with a no-op if the file is already absent. Does not touch the tenant's runtime workspace.",
+		WorkflowTemplate: "openclaw-skill-delete",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
+		Parameters: []ParameterDef{
+			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
+			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
+		},
+	},
 }

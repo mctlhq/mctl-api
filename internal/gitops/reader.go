@@ -442,3 +442,62 @@ func (r *Reader) LastSync() time.Time {
 	defer r.mu.RUnlock()
 	return r.lastSync
 }
+
+// OpenClawSkill describes a single SKILL.md file backed up in the gitops repo.
+type OpenClawSkill struct {
+	Name         string    `json:"name"`
+	Size         int64     `json:"size"`
+	LastModified time.Time `json:"lastModified"`
+}
+
+// ListOpenClawSkills lists .md files under platform-gitops/services/{team}/openclaw/skills/.
+// Returns an empty slice (not an error) if the directory does not exist.
+func (r *Reader) ListOpenClawSkills(team string) ([]OpenClawSkill, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	dir := filepath.Join(r.localPath, "platform-gitops", "services", team, "openclaw", "skills")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []OpenClawSkill{}, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", dir, err)
+	}
+
+	out := make([]OpenClawSkill, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".md") || name == "README.md" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		out = append(out, OpenClawSkill{
+			Name:         strings.TrimSuffix(name, ".md"),
+			Size:         info.Size(),
+			LastModified: info.ModTime().UTC(),
+		})
+	}
+	return out, nil
+}
+
+// ReadOpenClawSkill returns the raw text content of
+// platform-gitops/services/{team}/openclaw/skills/{name}.md.
+// Returns os.ErrNotExist wrapped if the file is missing.
+func (r *Reader) ReadOpenClawSkill(team, name string) (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	path := filepath.Join(r.localPath, "platform-gitops", "services", team, "openclaw", "skills", name+".md")
+	data, err := os.ReadFile(path) //nolint:gosec // path built from validated components
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", path, err)
+	}
+	return string(data), nil
+}

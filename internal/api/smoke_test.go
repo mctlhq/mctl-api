@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +40,7 @@ import (
 type fakeGitReader struct {
 	tenants  []gitops.Tenant
 	services []gitops.Service
+	skills   map[string]map[string]string // team -> name -> content
 }
 
 func (f *fakeGitReader) ListTenants() ([]gitops.Tenant, error) { return f.tenants, nil }
@@ -70,6 +72,21 @@ func (f *fakeGitReader) GetService(team, app string) (*gitops.Service, error) {
 	}
 	return nil, fmt.Errorf("service not found: %s/%s", team, app)
 }
+func (f *fakeGitReader) ListOpenClawSkills(team string) ([]gitops.OpenClawSkill, error) {
+	out := make([]gitops.OpenClawSkill, 0)
+	for name, content := range f.skills[team] {
+		out = append(out, gitops.OpenClawSkill{Name: name, Size: int64(len(content))})
+	}
+	return out, nil
+}
+func (f *fakeGitReader) ReadOpenClawSkill(team, name string) (string, error) {
+	if byName, ok := f.skills[team]; ok {
+		if content, ok := byName[name]; ok {
+			return content, nil
+		}
+	}
+	return "", fs.ErrNotExist
+}
 
 type fakeArgoCD struct {
 	apps map[string]*argocd.AppStatus
@@ -91,7 +108,7 @@ func (f *fakeArgoCD) ListApps(_ string) ([]argocd.AppStatus, error) {
 }
 
 type fakeExecutor struct {
-	submitted      []string
+	submitted       []string
 	submittedParams []map[string]string
 }
 
