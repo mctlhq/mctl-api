@@ -23,23 +23,67 @@ import (
 // Matches the same regex enforced by the openclaw-skill-save workflow template as defense-in-depth.
 var openClawSkillNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`)
 
+// telegramOwnerIDPattern matches a numeric Telegram user ID (1-20 digits).
+var telegramOwnerIDPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
+
 // maxOpenClawSkillContentBytes is the maximum allowed SKILL.md size (decoded).
 const maxOpenClawSkillContentBytes = 100 * 1024
 
+// parseTelegramOwnerIDs accepts the comma-separated MCP-friendly form plus
+// the legacy single-ID field and returns the canonical []string + a JSON-
+// encoded array string ready to ship as an Argo workflow parameter.
+// Callers pass the preferred comma-separated string first, then the legacy
+// single ID as a fallback. Returns an error if any ID fails numeric
+// validation or if the combined list is empty.
+func parseTelegramOwnerIDs(preferred, legacy string) ([]string, string, error) {
+	var raw []string
+	if preferred = strings.TrimSpace(preferred); preferred != "" {
+		for _, part := range strings.Split(preferred, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				raw = append(raw, part)
+			}
+		}
+	} else if legacy = strings.TrimSpace(legacy); legacy != "" {
+		raw = []string{legacy}
+	}
+	if len(raw) == 0 {
+		return nil, "", fmt.Errorf("at least one Telegram owner ID is required")
+	}
+	seen := make(map[string]struct{}, len(raw))
+	dedup := make([]string, 0, len(raw))
+	for _, id := range raw {
+		if !telegramOwnerIDPattern.MatchString(id) {
+			return nil, "", fmt.Errorf("invalid Telegram owner ID: %q (must be numeric, 1-20 digits)", id)
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		dedup = append(dedup, id)
+	}
+	encoded, err := json.Marshal(dedup)
+	if err != nil {
+		return nil, "", fmt.Errorf("encode telegram owner ids: %w", err)
+	}
+	return dedup, string(encoded), nil
+}
+
 type openClawDeployStartRequest struct {
-	TeamName        string `json:"team_name"`
-	ComponentName   string `json:"component_name"`
-	TelegramOwnerID string `json:"telegram_owner_id"`
-	DefaultModel    string `json:"default_model"`
-	Host            string `json:"host"`
+	TeamName         string `json:"team_name"`
+	ComponentName    string `json:"component_name"`
+	TelegramOwnerID  string `json:"telegram_owner_id"`  // deprecated; prefer telegram_owner_ids
+	TelegramOwnerIDs string `json:"telegram_owner_ids"` // comma-separated list
+	DefaultModel     string `json:"default_model"`
+	Host             string `json:"host"`
 }
 
 type openClawDeployResumeRequest struct {
-	TeamName        string `json:"team_name"`
-	ComponentName   string `json:"component_name"`
-	TelegramOwnerID string `json:"telegram_owner_id"`
-	DefaultModel    string `json:"default_model"`
-	Host            string `json:"host"`
+	TeamName         string `json:"team_name"`
+	ComponentName    string `json:"component_name"`
+	TelegramOwnerID  string `json:"telegram_owner_id"`  // deprecated; prefer telegram_owner_ids
+	TelegramOwnerIDs string `json:"telegram_owner_ids"` // comma-separated list
+	DefaultModel     string `json:"default_model"`
+	Host             string `json:"host"`
 }
 
 type openClawApplyProfileRequest struct {
@@ -102,7 +146,7 @@ func (h *Handlers) StartOpenClawDeploy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
-	normalizeOpenClawRequest(&req.TeamName, &req.ComponentName, &req.TelegramOwnerID, &req.DefaultModel, &req.Host)
+	normalizeOpenClawRequest(&req.TeamName, &req.ComponentName, &req.TelegramOwnerID, &req.TelegramOwnerIDs, &req.DefaultModel, &req.Host)
 	if req.ComponentName == "" {
 		req.ComponentName = "openclaw"
 	}
@@ -111,6 +155,12 @@ func (h *Handlers) StartOpenClawDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Host == "" {
 		req.Host = defaultOpenClawHost(req.TeamName, req.ComponentName)
+	}
+
+	ownerIDs, _, err := parseTelegramOwnerIDs(req.TelegramOwnerIDs, req.TelegramOwnerID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	tenant, denied := h.requireOpenClawOwner(w, r, user, req.TeamName)
@@ -134,7 +184,7 @@ func (h *Handlers) StartOpenClawDeploy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"teamName":          req.TeamName,
 		"componentName":     req.ComponentName,
-		"telegramOwnerID":   req.TelegramOwnerID,
+		"telegramOwnerIDs":  ownerIDs,
 		"defaultModel":      req.DefaultModel,
 		"dashboardURL":      "https://" + req.Host + "/",
 		"botTokenIntakeURL": intakeURL,
@@ -156,7 +206,7 @@ func (h *Handlers) ResumeOpenClawDeploy(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
-	normalizeOpenClawRequest(&req.TeamName, &req.ComponentName, &req.TelegramOwnerID, &req.DefaultModel, &req.Host)
+	normalizeOpenClawRequest(&req.TeamName, &req.ComponentName, &req.TelegramOwnerID, &req.TelegramOwnerIDs, &req.DefaultModel, &req.Host)
 	if req.ComponentName == "" {
 		req.ComponentName = "openclaw"
 	}
@@ -165,6 +215,12 @@ func (h *Handlers) ResumeOpenClawDeploy(w http.ResponseWriter, r *http.Request) 
 	}
 	if req.Host == "" {
 		req.Host = defaultOpenClawHost(req.TeamName, req.ComponentName)
+	}
+
+	ownerIDs, ownerIDsJSON, parseErr := parseTelegramOwnerIDs(req.TelegramOwnerIDs, req.TelegramOwnerID)
+	if parseErr != nil {
+		writeError(w, http.StatusBadRequest, parseErr.Error())
+		return
 	}
 
 	tenant, denied := h.requireOpenClawOwner(w, r, user, req.TeamName)
@@ -227,16 +283,17 @@ func (h *Handlers) ResumeOpenClawDeploy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	params := map[string]string{
-		"action":            "onboard",
-		"team_name":         req.TeamName,
-		"component_name":    req.ComponentName,
-		"component_type":    "base-service",
-		"dockerfile_repo":   "mctlhq/mctl-openclaw",
-		"service_template":  "openclaw",
-		"host":              req.Host,
-		"port":              "18789",
-		"default_model":     req.DefaultModel,
-		"telegram_owner_id": req.TelegramOwnerID,
+		"action":                  "onboard",
+		"team_name":               req.TeamName,
+		"component_name":          req.ComponentName,
+		"component_type":          "base-service",
+		"dockerfile_repo":         "mctlhq/mctl-openclaw",
+		"service_template":        "openclaw",
+		"host":                    req.Host,
+		"port":                    "18789",
+		"default_model":           req.DefaultModel,
+		"telegram_owner_id":       ownerIDs[0], // deprecated: kept for backward-compat with older tpl-git-commit
+		"telegram_owner_ids_json": ownerIDsJSON,
 	}
 	params = h.opts.Registry.ApplyDefaults(op, params)
 	if errs := h.opts.Registry.ValidateInput(op, params); len(errs) > 0 {

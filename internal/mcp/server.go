@@ -469,18 +469,20 @@ After the later resume step finishes and the dashboard is healthy, the user shou
 Use this for Claude-assisted OpenClaw onboarding instead of raw deploy-service.`),
 		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name that will own the OpenClaw service")),
 		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
-		mcplib.WithString("telegram_owner_id", mcplib.Required(), mcplib.Description("Telegram user ID to authorize for the bot")),
+		mcplib.WithString("telegram_owner_ids", mcplib.Description("Comma-separated list of Telegram user IDs authorized for the bot (e.g. \"210408407,317748297\"). At least one of telegram_owner_ids or telegram_owner_id is required.")),
+		mcplib.WithString("telegram_owner_id", mcplib.Description("Deprecated: single Telegram user ID. Prefer telegram_owner_ids for multi-owner support.")),
 		mcplib.WithString("default_model", mcplib.Description("Default primary model (default: openai-codex/gpt-5.4)")),
 		mcplib.WithString("host", mcplib.Description("Explicit host override; defaults to {team}-{service}.mctl.ai")),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		params := map[string]string{
-			"team_name":         stringArg(req, "team_name"),
-			"component_name":    stringArg(req, "component_name"),
-			"telegram_owner_id": stringArg(req, "telegram_owner_id"),
-			"default_model":     stringArg(req, "default_model"),
-			"host":              stringArg(req, "host"),
+			"team_name":          stringArg(req, "team_name"),
+			"component_name":     stringArg(req, "component_name"),
+			"telegram_owner_ids": stringArg(req, "telegram_owner_ids"),
+			"telegram_owner_id":  stringArg(req, "telegram_owner_id"),
+			"default_model":      stringArg(req, "default_model"),
+			"host":               stringArg(req, "host"),
 		}
 		body, err := s.apiPost(ctx, "/api/v1/openclaw/deploy/start", params)
 		if err != nil {
@@ -505,18 +507,20 @@ When this succeeds, tell the user exactly how to connect Codex:
 - or type /connect codex in the OpenClaw chat`),
 		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name that owns the service")),
 		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
-		mcplib.WithString("telegram_owner_id", mcplib.Required(), mcplib.Description("Telegram user ID to authorize for the bot")),
+		mcplib.WithString("telegram_owner_ids", mcplib.Description("Comma-separated list of Telegram user IDs authorized for the bot (e.g. \"210408407,317748297\"). At least one of telegram_owner_ids or telegram_owner_id is required.")),
+		mcplib.WithString("telegram_owner_id", mcplib.Description("Deprecated: single Telegram user ID. Prefer telegram_owner_ids for multi-owner support.")),
 		mcplib.WithString("default_model", mcplib.Description("Default primary model (default: openai-codex/gpt-5.4)")),
 		mcplib.WithString("host", mcplib.Description("Explicit host override; defaults to {team}-{service}.mctl.ai")),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		params := map[string]string{
-			"team_name":         stringArg(req, "team_name"),
-			"component_name":    stringArg(req, "component_name"),
-			"telegram_owner_id": stringArg(req, "telegram_owner_id"),
-			"default_model":     stringArg(req, "default_model"),
-			"host":              stringArg(req, "host"),
+			"team_name":          stringArg(req, "team_name"),
+			"component_name":     stringArg(req, "component_name"),
+			"telegram_owner_ids": stringArg(req, "telegram_owner_ids"),
+			"telegram_owner_id":  stringArg(req, "telegram_owner_id"),
+			"default_model":      stringArg(req, "default_model"),
+			"host":               stringArg(req, "host"),
 		}
 		body, err := s.apiPost(ctx, "/api/v1/openclaw/deploy/resume", params)
 		if err != nil {
