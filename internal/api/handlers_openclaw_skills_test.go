@@ -115,6 +115,26 @@ func TestOpenClawSkills_Save(t *testing.T) {
 		assertStatus(t, w, http.StatusRequestEntityTooLarge)
 	})
 
+	// Ownership is gated before any body parsing / size check so an unauthorized
+	// caller can't use 400/413 responses to probe payload-size or name-format
+	// behavior (codex P2 finding on PR #32).
+	t.Run("non-owner rejected with 403 even for oversize body", func(t *testing.T) {
+		outsider := &auth.User{ID: "someone-else", Groups: []string{"other"}}
+		huge := strings.Repeat("x", 100*1024+1)
+		w := postAs(t, router, "/api/v1/openclaw/tests/skills", payload("my-skill", huge), outsider)
+		assertStatus(t, w, http.StatusForbidden)
+	})
+
+	t.Run("non-owner rejected with 403 even for malformed JSON", func(t *testing.T) {
+		outsider := &auth.User{ID: "someone-else", Groups: []string{"other"}}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/openclaw/tests/skills", bytes.NewReader([]byte("{not json")))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(auth.WithUser(req.Context(), outsider))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assertStatus(t, w, http.StatusForbidden)
+	})
+
 	t.Run("owner save submits openclaw-skill-save workflow", func(t *testing.T) {
 		before := len(exec.submitted)
 		w := postAs(t, router, "/api/v1/openclaw/tests/skills", payload("my-skill", "---\nname: my-skill\ndescription: test\n---\n# body"), ownerUser)

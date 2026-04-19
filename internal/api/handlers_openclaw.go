@@ -501,10 +501,6 @@ type openClawSkillSaveRequest struct {
 	Content   string `json:"content"`
 }
 
-type openClawSkillDeleteRequest struct {
-	SkillName string `json:"skill_name"`
-}
-
 // ListOpenClawSkills returns the set of skills backed up in gitops for a team.
 // GET /api/v1/openclaw/{team}/skills
 func (h *Handlers) ListOpenClawSkills(w http.ResponseWriter, r *http.Request) {
@@ -530,12 +526,13 @@ func (h *Handlers) ListOpenClawSkills(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) GetOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	team := strings.TrimSpace(chi.URLParam(r, "team"))
+	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+		return
+	}
+
 	name := strings.TrimSpace(chi.URLParam(r, "name"))
 	if err := validateOpenClawSkillName(name); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
 		return
 	}
 
@@ -562,8 +559,20 @@ func (h *Handlers) SaveOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	team := strings.TrimSpace(chi.URLParam(r, "team"))
 
+	// Gate on ownership before any body parsing or validation so unauthorized
+	// callers don't get to probe payload-size or name-format behavior.
+	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxOpenClawSkillContentBytes+4*1024)
 	var req openClawSkillSaveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d bytes", maxOpenClawSkillContentBytes))
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
@@ -578,10 +587,6 @@ func (h *Handlers) SaveOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Content) > maxOpenClawSkillContentBytes {
 		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("content exceeds %d bytes", maxOpenClawSkillContentBytes))
-		return
-	}
-
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
 		return
 	}
 
@@ -623,21 +628,13 @@ func (h *Handlers) SaveOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) DeleteOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	team := strings.TrimSpace(chi.URLParam(r, "team"))
-	name := strings.TrimSpace(chi.URLParam(r, "name"))
-
-	// When DELETE lacks a path param, accept name from JSON body for REST/MCP parity.
-	if name == "" {
-		var req openClawSkillDeleteRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-			name = strings.TrimSpace(req.SkillName)
-		}
-	}
-	if err := validateOpenClawSkillName(name); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
 		return
 	}
 
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+	name := strings.TrimSpace(chi.URLParam(r, "name"))
+	if err := validateOpenClawSkillName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
