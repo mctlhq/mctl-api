@@ -306,7 +306,7 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 	// submitted. We prefer the Registry → WorkflowTemplate mapping because the
 	// audit entry records the op name, which can differ from the template
 	// (e.g. op "delete-tenant" uses template "delete-tenant-safe").
-	namespace := team
+	var namespace string
 	if op, ok := h.opts.Registry.Get(entry.Operation); ok {
 		namespace = operations.WorkflowNamespace(op.WorkflowTemplate, team)
 	} else {
