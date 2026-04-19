@@ -26,6 +26,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
 func (h *Handlers) Whoami(w http.ResponseWriter, r *http.Request) {
@@ -301,9 +302,16 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Route status lookups to the same namespace where the workflow was
+	// submitted. We prefer the Registry → WorkflowTemplate mapping because the
+	// audit entry records the op name, which can differ from the template
+	// (e.g. op "delete-tenant" uses template "delete-tenant-safe").
 	namespace := team
-	if entry.Operation == "create-tenant" || entry.Operation == "delete-tenant" || entry.Operation == "delete-tenant-safe" {
-		namespace = "argo-workflows"
+	if op, ok := h.opts.Registry.Get(entry.Operation); ok {
+		namespace = operations.WorkflowNamespace(op.WorkflowTemplate, team)
+	} else {
+		// Audit stored a template name directly (legacy) — route on that.
+		namespace = operations.WorkflowNamespace(entry.Operation, team)
 	}
 
 	// Fetch live status from Kubernetes.
