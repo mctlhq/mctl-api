@@ -345,6 +345,33 @@ func TestSmoke_OpenClawFlows(t *testing.T) {
 		if deployParams["service_template"] != "openclaw" {
 			t.Fatalf("expected deploy-service service_template=openclaw, got %q", deployParams["service_template"])
 		}
+		if deployParams["telegram_owner_ids_json"] != `["12345"]` {
+			t.Fatalf("expected legacy single ID wrapped as JSON array, got %q", deployParams["telegram_owner_ids_json"])
+		}
+	})
+
+	t.Run("resume with multi-owner list emits JSON array", func(t *testing.T) {
+		w := postAs(t, router, "/api/v1/openclaw/deploy/resume", map[string]string{
+			"team_name":          "tests",
+			"component_name":     "openclaw",
+			"telegram_owner_ids": "210408407,317748297",
+		}, adminUser)
+		assertStatus(t, w, http.StatusAccepted)
+		deployParams := exec.submittedParams[len(exec.submittedParams)-1]
+		if deployParams["telegram_owner_ids_json"] != `["210408407","317748297"]` {
+			t.Fatalf("expected multi-owner JSON array, got %q", deployParams["telegram_owner_ids_json"])
+		}
+		if deployParams["telegram_owner_id"] != "210408407" {
+			t.Fatalf("expected legacy single-id param to be first of list, got %q", deployParams["telegram_owner_id"])
+		}
+	})
+
+	t.Run("resume rejects empty owner list", func(t *testing.T) {
+		w := postAs(t, router, "/api/v1/openclaw/deploy/resume", map[string]string{
+			"team_name":      "tests",
+			"component_name": "openclaw",
+		}, adminUser)
+		assertStatus(t, w, http.StatusBadRequest)
 	})
 
 	t.Run("sizing recommendation maps to startup", func(t *testing.T) {
