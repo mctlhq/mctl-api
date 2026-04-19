@@ -117,4 +117,3 @@ func (v *GitHubValidator) fetchLogin(ctx context.Context, token string) (string,
 
 	return user.Login, nil
 }
-

@@ -1,10 +1,14 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +18,13 @@ import (
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+// openClawSkillNamePattern matches 2-64 char kebab-case names that start and end with an alphanumeric.
+// Matches the same regex enforced by the openclaw-skill-save workflow template as defense-in-depth.
+var openClawSkillNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`)
+
+// maxOpenClawSkillContentBytes is the maximum allowed SKILL.md size (decoded).
+const maxOpenClawSkillContentBytes = 100 * 1024
 
 type openClawDeployStartRequest struct {
 	TeamName        string `json:"team_name"`
@@ -472,4 +483,188 @@ func openClawConfigPatch(profile openClawResourceProfile) string {
 		profile.LimitMemory,
 		profile.NodeMaxOldSpace,
 	)
+}
+
+// validateOpenClawSkillName returns nil when name is a safe kebab-case identifier.
+func validateOpenClawSkillName(name string) error {
+	if name == "" {
+		return errors.New("skill name is required")
+	}
+	if !openClawSkillNamePattern.MatchString(name) {
+		return errors.New("skill name must be 1-64 chars, kebab-case (lowercase letters, digits, hyphens), starting and ending with an alphanumeric")
+	}
+	return nil
+}
+
+type openClawSkillSaveRequest struct {
+	SkillName string `json:"skill_name"`
+	Content   string `json:"content"`
+}
+
+// ListOpenClawSkills returns the set of skills backed up in gitops for a team.
+// GET /api/v1/openclaw/{team}/skills
+func (h *Handlers) ListOpenClawSkills(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	team := strings.TrimSpace(chi.URLParam(r, "team"))
+	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+		return
+	}
+
+	skills, err := h.opts.GitReader.ListOpenClawSkills(team)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list skills: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"team":   team,
+		"skills": skills,
+	})
+}
+
+// GetOpenClawSkill returns the raw content of a single SKILL.md backed up in gitops.
+// GET /api/v1/openclaw/{team}/skills/{name}
+func (h *Handlers) GetOpenClawSkill(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	team := strings.TrimSpace(chi.URLParam(r, "team"))
+	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+		return
+	}
+
+	name := strings.TrimSpace(chi.URLParam(r, "name"))
+	if err := validateOpenClawSkillName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	content, err := h.opts.GitReader.ReadOpenClawSkill(team, name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			writeError(w, http.StatusNotFound, "skill not found: "+name)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to read skill: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"team":    team,
+		"name":    name,
+		"content": content,
+	})
+}
+
+// SaveOpenClawSkill submits the openclaw-skill-save workflow which writes the
+// SKILL.md file to the gitops repo as a durable backup.
+// POST /api/v1/openclaw/{team}/skills (body: {skill_name, content})
+func (h *Handlers) SaveOpenClawSkill(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	team := strings.TrimSpace(chi.URLParam(r, "team"))
+
+	// Gate on ownership before any body parsing or validation so unauthorized
+	// callers don't get to probe payload-size or name-format behavior.
+	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxOpenClawSkillContentBytes+4*1024)
+	var req openClawSkillSaveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d bytes", maxOpenClawSkillContentBytes))
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	req.SkillName = strings.TrimSpace(req.SkillName)
+	if err := validateOpenClawSkillName(req.SkillName); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Content) == "" {
+		writeError(w, http.StatusBadRequest, "content must not be empty")
+		return
+	}
+	if len(req.Content) > maxOpenClawSkillContentBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("content exceeds %d bytes", maxOpenClawSkillContentBytes))
+		return
+	}
+
+	op, ok := h.opts.Registry.Get("openclaw-skill-save")
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "openclaw-skill-save operation is not registered")
+		return
+	}
+	params := map[string]string{
+		"team_name":   team,
+		"skill_name":  req.SkillName,
+		"content_b64": base64.StdEncoding.EncodeToString([]byte(req.Content)),
+		"actor":       user.ID,
+	}
+	params = h.opts.Registry.ApplyDefaults(op, params)
+	if errs := h.opts.Registry.ValidateInput(op, params); len(errs) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"error":            "validation failed",
+			"validationErrors": errs,
+		})
+		return
+	}
+	result, err := h.opts.Executor.Submit(r.Context(), op, params, user.ID, team)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to submit workflow: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"workflow": result,
+		"team":     team,
+		"name":     req.SkillName,
+		"message":  "Skill save submitted. Wait for the workflow to succeed before the commit lands in gitops.",
+	})
+}
+
+// DeleteOpenClawSkill submits the openclaw-skill-delete workflow which removes
+// the SKILL.md file from the gitops backup.
+// DELETE /api/v1/openclaw/{team}/skills/{name}
+func (h *Handlers) DeleteOpenClawSkill(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	team := strings.TrimSpace(chi.URLParam(r, "team"))
+	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+		return
+	}
+
+	name := strings.TrimSpace(chi.URLParam(r, "name"))
+	if err := validateOpenClawSkillName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	op, ok := h.opts.Registry.Get("openclaw-skill-delete")
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "openclaw-skill-delete operation is not registered")
+		return
+	}
+	params := map[string]string{
+		"team_name":  team,
+		"skill_name": name,
+		"actor":      user.ID,
+	}
+	params = h.opts.Registry.ApplyDefaults(op, params)
+	if errs := h.opts.Registry.ValidateInput(op, params); len(errs) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"error":            "validation failed",
+			"validationErrors": errs,
+		})
+		return
+	}
+	result, err := h.opts.Executor.Submit(r.Context(), op, params, user.ID, team)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to submit workflow: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"workflow": result,
+		"team":     team,
+		"name":     name,
+		"message":  "Skill delete submitted.",
+	})
 }

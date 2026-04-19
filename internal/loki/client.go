@@ -28,8 +28,8 @@ import (
 
 // LogLine represents a single log entry with its timestamp.
 type LogLine struct {
-	Timestamp time.Time `json:"timestamp"`
-	Line      string    `json:"line"`
+	Timestamp time.Time         `json:"timestamp"`
+	Line      string            `json:"line"`
 	Labels    map[string]string `json:"labels,omitempty"`
 }
 
@@ -42,7 +42,7 @@ type Client struct {
 // NewClient creates a Loki client pointing at baseURL (e.g. "http://loki-stack.monitoring.svc.cluster.local:3100").
 func NewClient(baseURL string) *Client {
 	return &Client{
-		baseURL: baseURL,
+		baseURL:    baseURL,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 	}
 }

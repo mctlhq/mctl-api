@@ -97,6 +97,10 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolResumeOpenClawDeploy())
 	srv.AddTool(s.toolGetOpenClawSizingRecommendation())
 	srv.AddTool(s.toolApplyOpenClawResourceProfile())
+	srv.AddTool(s.toolListOpenClawSkills())
+	srv.AddTool(s.toolReadOpenClawSkill())
+	srv.AddTool(s.toolSaveOpenClawSkill())
+	srv.AddTool(s.toolDeleteOpenClawSkill())
 	srv.AddTool(s.toolCreateTenant())
 	srv.AddTool(s.toolProvisionDatabase())
 	srv.AddTool(s.toolRetireService())
@@ -578,6 +582,113 @@ func (s *Server) toolApplyOpenClawResourceProfile() (mcplib.Tool, server.ToolHan
 		})
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to apply OpenClaw resource profile: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolListOpenClawSkills() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_openclaw_skills",
+		mcplib.WithTitleAnnotation("List OpenClaw Skills (gitops backup)"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`List OpenClaw SKILL.md files that are backed up in gitops for a team.
+
+Reads platform-gitops/services/{team}/openclaw/skills/*.md. This is the durable backup set, not the tenant's live runtime workspace — to inspect what the agent is running right now, use the pod's own file tools inside the OpenClaw chat.
+
+Requires owner role on the team.`),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team := stringArg(req, "team_name")
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/openclaw/%s/skills", url.PathEscape(team)))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list OpenClaw skills: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolReadOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_read_openclaw_skill",
+		mcplib.WithTitleAnnotation("Read OpenClaw Skill (gitops backup)"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Return the raw content of a single SKILL.md backed up in gitops.
+
+Use this to restore a skill into the tenant's runtime workspace: read the content here, then write it to workspace/skills/{name}/SKILL.md from the OpenClaw chat.
+
+Requires owner role on the team.`),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
+		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name (kebab-case, without .md)")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team := stringArg(req, "team_name")
+		name := stringArg(req, "skill_name")
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/openclaw/%s/skills/%s", url.PathEscape(team), url.PathEscape(name)))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to read OpenClaw skill: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolSaveOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_save_openclaw_skill",
+		mcplib.WithTitleAnnotation("Save OpenClaw Skill to GitOps"),
+		mcplib.WithDescription(`Back up a single OpenClaw SKILL.md to the gitops repo.
+
+Submits the openclaw-skill-save workflow, which commits platform-gitops/services/{team}/openclaw/skills/{skill_name}.md on behalf of the triggering user. Overwrites an existing file. Returns workflow_name — wait for it to succeed before reporting the save to the operator.
+
+Runtime workspace edits are not synced by this call. Call this only when the operator explicitly asks to back up / save / persist a skill.
+
+Requires owner role on the team. Content size cap: 100 KB.`),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
+		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name (kebab-case, 2-64 chars)")),
+		mcplib.WithString("content", mcplib.Required(), mcplib.Description("Full SKILL.md content as Markdown (UTF-8, ≤100 KB)")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team := stringArg(req, "team_name")
+		params := map[string]string{
+			"skill_name": stringArg(req, "skill_name"),
+			"content":    stringArg(req, "content"),
+		}
+		body, err := s.apiPost(ctx, fmt.Sprintf("/api/v1/openclaw/%s/skills", url.PathEscape(team)), params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to save OpenClaw skill: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolDeleteOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_delete_openclaw_skill",
+		mcplib.WithTitleAnnotation("Remove OpenClaw Skill from GitOps"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Remove a single SKILL.md from the gitops backup.
+
+Submits the openclaw-skill-delete workflow. Idempotent — succeeds with a no-op commit skip if the file is already absent. Does not touch the tenant's runtime workspace.
+
+Requires owner role on the team.`),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
+		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team := stringArg(req, "team_name")
+		name := stringArg(req, "skill_name")
+		body, err := s.apiDelete(ctx, fmt.Sprintf("/api/v1/openclaw/%s/skills/%s", url.PathEscape(team), url.PathEscape(name)))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete OpenClaw skill: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}
@@ -1618,6 +1729,14 @@ func (s *Server) apiPost(ctx context.Context, path string, body map[string]strin
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return s.doRequest(req, s.effectiveToken(ctx))
+}
+
+func (s *Server) apiDelete(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "DELETE", s.apiURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
 	return s.doRequest(req, s.effectiveToken(ctx))
 }
 
