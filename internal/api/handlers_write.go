@@ -142,16 +142,16 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 // Failures are non-fatal: the Argo Workflow is the source of truth.
 func (h *Handlers) notifyBackstage(input map[string]string) {
 	payload := map[string]string{
-		"tenantName":      input["tenant_name"],
-		"displayName":     input["display_name"],
-		"description":     input["description"],
-		"contactEmail":    input["contact_email"],
-		"quotaCpuReq":     input["quota_cpu_req"],
-		"quotaCpuLim":     input["quota_cpu_lim"],
-		"quotaMemoryReq":  input["quota_memory_req"],
-		"quotaMemoryLim":  input["quota_memory_lim"],
-		"quotaPods":       input["quota_pods"],
-		"creatorUserId":   input["creator_user_id"],
+		"tenantName":     input["tenant_name"],
+		"displayName":    input["display_name"],
+		"description":    input["description"],
+		"contactEmail":   input["contact_email"],
+		"quotaCpuReq":    input["quota_cpu_req"],
+		"quotaCpuLim":    input["quota_cpu_lim"],
+		"quotaMemoryReq": input["quota_memory_req"],
+		"quotaMemoryLim": input["quota_memory_lim"],
+		"quotaPods":      input["quota_pods"],
+		"creatorUserId":  input["creator_user_id"],
 	}
 	if v, ok := input["allow_internet_egress"]; ok {
 		payload["allowInternetEgress"] = v

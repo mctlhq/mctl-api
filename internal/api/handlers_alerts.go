@@ -181,7 +181,6 @@ func (h *Handlers) UpdateIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
 	var patch struct {
 		Status      *string `json:"status"`
 		Analysis    *string `json:"analysis"`
@@ -286,7 +285,6 @@ func (h *Handlers) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
-
 
 	var body struct {
 		Reason string `json:"reason"`

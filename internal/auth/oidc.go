@@ -31,8 +31,8 @@ import (
 type contextKey string
 
 const (
-	userContextKey  contextKey = "user"
-	rawTokenKey     contextKey = "rawToken"
+	userContextKey contextKey = "user"
+	rawTokenKey    contextKey = "rawToken"
 )
 
 // User represents an authenticated user.
