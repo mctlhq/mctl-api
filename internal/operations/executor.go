@@ -72,18 +72,28 @@ func NewExecutor() *Executor {
 	return &Executor{dynamicClient: dynClient}
 }
 
-// Submit creates an Argo Workflow CR referencing the ClusterWorkflowTemplate.
+// WorkflowNamespace returns the namespace a workflow should run in.
 // Most workflows execute in the tenant's namespace where team-scoped secrets live.
 // Tenant lifecycle operations (create/delete) run in argo-workflows namespace
 // because the tenant namespace may not exist yet (create) or is being removed (delete).
+// OpenClaw skill workflows (save/delete) also run in argo-workflows: they only
+// need the gitops deploy key secret (cluster-wide) and would otherwise contend
+// with the tenant's running OpenClaw pod for its CPU quota.
+func WorkflowNamespace(workflowTemplate, team string) string {
+	switch workflowTemplate {
+	case "create-tenant", "delete-tenant", "delete-tenant-safe",
+		"openclaw-skill-save", "openclaw-skill-delete":
+		return "argo-workflows"
+	}
+	return team
+}
+
+// Submit creates an Argo Workflow CR referencing the ClusterWorkflowTemplate.
 func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]string, userID string, team string) (*SubmitResult, error) {
 	if team == "" {
 		return nil, fmt.Errorf("team is required for workflow submission")
 	}
-	namespace := team
-	if op.WorkflowTemplate == "create-tenant" || op.WorkflowTemplate == "delete-tenant" || op.WorkflowTemplate == "delete-tenant-safe" {
-		namespace = "argo-workflows"
-	}
+	namespace := WorkflowNamespace(op.WorkflowTemplate, team)
 	requestID := uuid.New().String()[:8]
 	workflowName := fmt.Sprintf("%s-%s", op.WorkflowTemplate, requestID)
 
