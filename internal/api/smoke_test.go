@@ -167,7 +167,7 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 	gitReader := &fakeGitReader{
 		tenants: []gitops.Tenant{
 			{Name: "admins", DisplayName: "Admins", Quotas: map[string]string{"pods": "20"}},
-			{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10", "limits.cpu": "2500m", "limits.memory": "5Gi"}, Networking: map[string]bool{"allowInternetEgress": true}, Members: []gitops.TenantMember{{UserID: "test-owner", Role: "owner"}}},
+			{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10", "limits.cpu": "3", "limits.memory": "5Gi"}, Networking: map[string]bool{"allowInternetEgress": true}, Members: []gitops.TenantMember{{UserID: "test-owner", Role: "owner"}}},
 		},
 		services: []gitops.Service{
 			{Team: "admins", Name: "mctl-web", ImageTag: "2.1.0", ComponentType: "base-service"},
