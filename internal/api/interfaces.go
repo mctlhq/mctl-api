@@ -38,6 +38,8 @@ type GitReader interface {
 	GetService(team, app string) (*gitops.Service, error)
 	ListOpenClawSkills(team string) ([]gitops.OpenClawSkill, error)
 	ReadOpenClawSkill(team, name string) (string, error)
+	ListOpenClawIdentity(team string) ([]gitops.OpenClawIdentityFile, error)
+	ReadOpenClawIdentity(team, fileName string) (string, error)
 }
 
 // ArgoStatusClient is the subset of argocd.Client used by API handlers.

@@ -41,6 +41,7 @@ type fakeGitReader struct {
 	tenants  []gitops.Tenant
 	services []gitops.Service
 	skills   map[string]map[string]string // team -> name -> content
+	identity map[string]map[string]string // team -> fileName -> content
 }
 
 func (f *fakeGitReader) ListTenants() ([]gitops.Tenant, error) { return f.tenants, nil }
@@ -82,6 +83,21 @@ func (f *fakeGitReader) ListOpenClawSkills(team string) ([]gitops.OpenClawSkill,
 func (f *fakeGitReader) ReadOpenClawSkill(team, name string) (string, error) {
 	if byName, ok := f.skills[team]; ok {
 		if content, ok := byName[name]; ok {
+			return content, nil
+		}
+	}
+	return "", fs.ErrNotExist
+}
+func (f *fakeGitReader) ListOpenClawIdentity(team string) ([]gitops.OpenClawIdentityFile, error) {
+	out := make([]gitops.OpenClawIdentityFile, 0)
+	for name, content := range f.identity[team] {
+		out = append(out, gitops.OpenClawIdentityFile{Name: name, Size: int64(len(content))})
+	}
+	return out, nil
+}
+func (f *fakeGitReader) ReadOpenClawIdentity(team, fileName string) (string, error) {
+	if byName, ok := f.identity[team]; ok {
+		if content, ok := byName[fileName]; ok {
 			return content, nil
 		}
 	}

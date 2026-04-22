@@ -501,3 +501,70 @@ func (r *Reader) ReadOpenClawSkill(team, name string) (string, error) {
 	}
 	return string(data), nil
 }
+
+// OpenClawIdentityFile describes a single identity override file backed up in
+// the gitops repo (one of AGENTS.md / SOUL.md / IDENTITY.md / USER.md /
+// TOOLS.md). Naming mirrors OpenClawSkill but the filename is kept verbatim
+// (including .md) since identity files are a fixed allowlist, not kebab-case
+// slugs.
+type OpenClawIdentityFile struct {
+	Name         string    `json:"name"`
+	Size         int64     `json:"size"`
+	LastModified time.Time `json:"lastModified"`
+}
+
+// ListOpenClawIdentity lists .md files under
+// platform-gitops/services/{team}/openclaw/identity/.
+// Returns an empty slice (not an error) if the directory does not exist —
+// tenants without any overrides fall back to image defaults.
+func (r *Reader) ListOpenClawIdentity(team string) ([]OpenClawIdentityFile, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	dir := filepath.Join(r.localPath, "platform-gitops", "services", team, "openclaw", "identity")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []OpenClawIdentityFile{}, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", dir, err)
+	}
+
+	out := make([]OpenClawIdentityFile, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".md") || name == "README.md" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		out = append(out, OpenClawIdentityFile{
+			Name:         name,
+			Size:         info.Size(),
+			LastModified: info.ModTime().UTC(),
+		})
+	}
+	return out, nil
+}
+
+// ReadOpenClawIdentity returns the raw text content of
+// platform-gitops/services/{team}/openclaw/identity/{fileName}.
+// fileName must be validated by the caller against the identity allowlist
+// before being passed in — this function does no validation of its own.
+// Returns os.ErrNotExist wrapped if the file is missing.
+func (r *Reader) ReadOpenClawIdentity(team, fileName string) (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	path := filepath.Join(r.localPath, "platform-gitops", "services", team, "openclaw", "identity", fileName)
+	data, err := os.ReadFile(path) //nolint:gosec // path built from validated components
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", path, err)
+	}
+	return string(data), nil
+}

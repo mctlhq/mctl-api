@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/secretscan"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -26,8 +27,9 @@ var openClawSkillNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}[a-z0
 // telegramOwnerIDPattern matches a numeric Telegram user ID (1-20 digits).
 var telegramOwnerIDPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
 
-// maxOpenClawSkillContentBytes is the maximum allowed SKILL.md size (decoded).
-const maxOpenClawSkillContentBytes = 100 * 1024
+// Per-skill size cap is now configurable via the OpenClawQuotaConfig on the
+// router Options (chart values openclaw.skills.maxPerSkillBytes). The legacy
+// constant has been removed — runtime calls read h.openClawQuota directly.
 
 // parseTelegramOwnerIDs accepts the comma-separated MCP-friendly form plus
 // the legacy single-ID field and returns the canonical []string + a JSON-
@@ -622,12 +624,13 @@ func (h *Handlers) SaveOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxOpenClawSkillContentBytes+4*1024)
+	perSkillCap := h.openClawQuota.MaxPerSkillBytes
+	r.Body = http.MaxBytesReader(w, r.Body, int64(perSkillCap)+4*1024)
 	var req openClawSkillSaveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d bytes", maxOpenClawSkillContentBytes))
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d bytes", perSkillCap))
 			return
 		}
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -642,8 +645,49 @@ func (h *Handlers) SaveOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "content must not be empty")
 		return
 	}
-	if len(req.Content) > maxOpenClawSkillContentBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("content exceeds %d bytes", maxOpenClawSkillContentBytes))
+	if len(req.Content) > perSkillCap {
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("content exceeds %d bytes", perSkillCap))
+		return
+	}
+
+	// Secret-pattern scan happens before any gitops lookup / workflow submit
+	// so a leaked credential never reaches the commit actor's git log.
+	if pattern, found := secretscan.Scan([]byte(req.Content)); found {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("content appears to contain a secret (matched pattern: %s); skills/identity files must not embed credentials — use mctl_* runtime tools instead", pattern))
+		return
+	}
+
+	// Enforce tenant-wide caps before spending a workflow submission.
+	// Sum + count existing skills via the cached gitops reader (cheap).
+	existing, listErr := h.opts.GitReader.ListOpenClawSkills(team)
+	if listErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read existing skills for quota check: "+listErr.Error())
+		return
+	}
+	var existingBytes int
+	var updatingExisting bool
+	for _, s := range existing {
+		if s.Name == req.SkillName {
+			updatingExisting = true
+			continue // exclude from existing total — this save will replace it
+		}
+		existingBytes += int(s.Size)
+	}
+	if !updatingExisting && len(existing) >= h.openClawQuota.MaxSkillsPerTenant {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("skill count limit reached (%d of %d used for team %q); delete an unused skill with mctl_delete_openclaw_skill before saving a new one", len(existing), h.openClawQuota.MaxSkillsPerTenant, team))
+		return
+	}
+	projected := existingBytes + len(req.Content) + len(req.SkillName)
+	if projected > h.openClawQuota.MaxSkillsTotalBytes {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("per-tenant skill ConfigMap size limit would be exceeded (current %d bytes + new %d bytes > cap %d bytes for team %q)", existingBytes, len(req.Content)+len(req.SkillName), h.openClawQuota.MaxSkillsTotalBytes, team))
+		return
+	}
+
+	// Rate limit applies per (team, actor) and is shared with identity writes.
+	rateKey := openClawRateKey(team, user.ID)
+	if allowed, retryAfter := h.openClawRateLimiter.Allow(rateKey); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("save rate limit exceeded for team %q (cap: %d writes/hour per user across skill + identity)", team, h.openClawQuota.SaveRatePerHour))
 		return
 	}
 
@@ -677,6 +721,13 @@ func (h *Handlers) SaveOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 		"name":     req.SkillName,
 		"message":  "Skill save submitted. Wait for the workflow to succeed before the commit lands in gitops.",
 	})
+}
+
+// openClawRateKey builds the composite rate-limit key used by both skill and
+// identity save/delete handlers — callers share a single budget so a user
+// can't double it by alternating between write paths.
+func openClawRateKey(team, userID string) string {
+	return team + "|" + userID
 }
 
 // DeleteOpenClawSkill submits the openclaw-skill-delete workflow which removes
