@@ -129,7 +129,7 @@ var openClawProfiles = map[string]openClawResourceProfile{
 var openClawStartupQuotaFloor = map[string]string{
 	"requests.cpu":                   "500m",
 	"requests.memory":                "1280Mi",
-	"limits.cpu":                     "2",
+	"limits.cpu":                     "3",
 	"limits.memory":                  "4Gi",
 	"networking.allowInternetEgress": "true",
 }
