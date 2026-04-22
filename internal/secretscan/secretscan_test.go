@@ -16,6 +16,7 @@ func TestScan_DetectsKnownPrefixes(t *testing.T) {
 		content string
 		want    string
 	}{
+		{"github-fine-grained-pat", "github_pat_11AAAAAAA0ABCDEFGHIJKL_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "github-fine-grained-pat"},
 		{"github-pat", "authorization: token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij12", "github-pat"},
 		{"github-oauth-token", "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij12", "github-oauth-token"},
 		{"github-user-token", "ghu_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij12", "github-user-token"},
@@ -60,11 +61,12 @@ func TestScan_DoesNotFlagBenignContent(t *testing.T) {
 		"",
 		"# SKILL.md\n\nThis skill teaches the agent to call `mctl_list_services`.\n",
 		"Use the API to fetch data. See the docs for details.",
-		"short=abc",                         // too short for generic pattern
-		"ghp_tooshort",                      // wrong length for github-pat
-		"AKIA123",                           // too short for aws-access-key-id
-		"eyJ.eyJ.sig",                       // JWT-ish but too short to match the regex
-		"-----BEGIN CERTIFICATE-----\n...",  // a cert header is not a private-key header
+		"short=abc",                        // too short for generic pattern
+		"ghp_tooshort",                     // wrong length for github-pat
+		"github_pat_tooshort",              // wrong length for fine-grained PAT
+		"AKIA123",                          // too short for aws-access-key-id
+		"eyJ.eyJ.sig",                      // JWT-ish but too short to match the regex
+		"-----BEGIN CERTIFICATE-----\n...", // a cert header is not a private-key header
 	}
 	for _, s := range benign {
 		if name, found := Scan([]byte(s)); found {

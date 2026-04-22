@@ -746,6 +746,13 @@ func (h *Handlers) DeleteOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rateKey := openClawRateKey(team, user.ID)
+	if allowed, retryAfter := h.openClawRateLimiter.Allow(rateKey); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("write rate limit exceeded for team %q (cap: %d writes/hour per user across skill + identity)", team, h.openClawQuota.SaveRatePerHour))
+		return
+	}
+
 	op, ok := h.opts.Registry.Get("openclaw-skill-delete")
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "openclaw-skill-delete operation is not registered")

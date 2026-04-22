@@ -31,6 +31,7 @@ type patternEntry struct {
 // most informative label on ambiguous matches (e.g. a JWT inside a generic
 // bearer assignment still reports as "jwt").
 var patterns = []patternEntry{
+	{name: "github-fine-grained-pat", re: regexp.MustCompile(`github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}`)},
 	{name: "github-pat", re: regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`)},
 	{name: "github-oauth-token", re: regexp.MustCompile(`gho_[A-Za-z0-9]{36}`)},
 	{name: "github-user-token", re: regexp.MustCompile(`ghu_[A-Za-z0-9]{36}`)},

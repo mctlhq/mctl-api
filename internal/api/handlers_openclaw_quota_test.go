@@ -156,6 +156,35 @@ func TestOpenClawSave_RateLimit(t *testing.T) {
 	}
 }
 
+// Deletes share the (team, user) write budget with saves — an owner cannot
+// bypass the configured rate by alternating saves with deletes. Covers the
+// codex-review concern that made the delete path enter the rate limiter.
+func TestOpenClawDelete_RateLimit(t *testing.T) {
+	router, _ := newQuotaTestRouter(t, map[string]string{"alpha": "body", "beta": "body"}, mctlapi.OpenClawQuotaConfig{
+		SaveRatePerHour: 2,
+	})
+
+	for _, name := range []string{"alpha", "beta"} {
+		w := deleteAs(t, router, "/api/v1/openclaw/tests/skills/"+name, ownerUser)
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("delete %s: expected 202, got %d; body: %s", name, w.Code, w.Body.String())
+		}
+	}
+
+	w := deleteAs(t, router, "/api/v1/openclaw/tests/skills/alpha", ownerUser)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on 3rd delete, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("expected Retry-After header on 429 response")
+	}
+
+	w = deleteAs(t, router, "/api/v1/openclaw/tests/identity/AGENTS.md", ownerUser)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected identity delete to share the budget (429), got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
 // makeContent returns a deterministic n-byte payload that won't trigger the
 // secret-scan regex (plain ascii letters, no credential-ish keywords).
 func makeContent(n int) string {
@@ -166,4 +195,3 @@ func makeContent(n int) string {
 	}
 	return string(out)
 }
-
