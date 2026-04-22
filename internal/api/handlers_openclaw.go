@@ -686,7 +686,7 @@ func (h *Handlers) SaveOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 	// Rate limit applies per (team, actor) and is shared with identity writes.
 	rateKey := openClawRateKey(team, user.ID)
 	if allowed, retryAfter := h.openClawRateLimiter.Allow(rateKey); !allowed {
-		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(retryAfter)))
 		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("save rate limit exceeded for team %q (cap: %d writes/hour per user across skill + identity)", team, h.openClawQuota.SaveRatePerHour))
 		return
 	}
@@ -748,7 +748,7 @@ func (h *Handlers) DeleteOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 
 	rateKey := openClawRateKey(team, user.ID)
 	if allowed, retryAfter := h.openClawRateLimiter.Allow(rateKey); !allowed {
-		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(retryAfter)))
 		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("write rate limit exceeded for team %q (cap: %d writes/hour per user across skill + identity)", team, h.openClawQuota.SaveRatePerHour))
 		return
 	}

@@ -19,6 +19,18 @@ import (
 	"time"
 )
 
+// retryAfterSeconds converts a sub-second-resolution wait duration into the
+// whole-second value advertised in the HTTP `Retry-After` header. Uses
+// ceiling rounding so a 1.9s delay is reported as 2s, not 1s — a
+// truncation would let the client retry before the limiter has actually
+// refilled, producing a tight 429 loop.
+func retryAfterSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 1
+	}
+	return int((d + time.Second - 1) / time.Second)
+}
+
 // OpenClawQuotaConfig controls the soft caps enforced on skill/identity save
 // handlers. Values are exposed as chart values on the mctl-api Helm chart so
 // ops can tune without code changes — see helm/values.yaml. Zero values are
@@ -98,8 +110,15 @@ type saveRateLimiter struct {
 	mu         sync.Mutex
 	buckets    map[string]*saveRateBucket
 	maxPerHour int
+	ops        uint64           // #Allow calls since last sweep (guarded by mu)
 	now        func() time.Time // injectable for deterministic testing
 }
+
+// sweepEveryOps is the number of Allow calls between opportunistic sweeps
+// that evict buckets whose windows have fully emptied. Small enough that a
+// long-lived process serving many one-off callers does not accumulate
+// unbounded map state, large enough that the per-call overhead is amortized.
+const sweepEveryOps = 128
 
 func newSaveRateLimiter(maxPerHour int) *saveRateLimiter {
 	return &saveRateLimiter{
@@ -138,6 +157,8 @@ func (l *saveRateLimiter) Allow(key string) (bool, time.Duration) {
 	}
 	bucket.times = trimmed
 
+	defer l.maybeSweepLocked(cutoff)
+
 	if len(bucket.times) >= l.maxPerHour {
 		// Retry-After is the time until the oldest in-window entry expires.
 		oldest := bucket.times[0]
@@ -149,4 +170,28 @@ func (l *saveRateLimiter) Allow(key string) (bool, time.Duration) {
 	}
 	bucket.times = append(bucket.times, now)
 	return true, 0
+}
+
+// maybeSweepLocked evicts buckets that have emptied since their last hit.
+// Runs once every sweepEveryOps calls so one-off callers don't leave
+// permanent `(team,user)` entries in the map for the lifetime of the
+// process. Caller must hold l.mu.
+func (l *saveRateLimiter) maybeSweepLocked(cutoff time.Time) {
+	l.ops++
+	if l.ops < sweepEveryOps {
+		return
+	}
+	l.ops = 0
+	for key, bucket := range l.buckets {
+		trimmed := bucket.times[:0]
+		for _, t := range bucket.times {
+			if t.After(cutoff) {
+				trimmed = append(trimmed, t)
+			}
+		}
+		bucket.times = trimmed
+		if len(bucket.times) == 0 {
+			delete(l.buckets, key)
+		}
+	}
 }
