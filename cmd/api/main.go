@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -156,6 +157,15 @@ func main() {
 		slog.Info("victoriametrics client enabled", "url", cfg.VictoriaMetricsURL)
 	}
 
+	openClawQuota := mctlapi.OpenClawQuotaConfig{
+		MaxPerSkillBytes:          parseIntEnv("OPENCLAW_SKILLS_MAX_PER_SKILL_BYTES", 0),
+		MaxSkillsPerTenant:        parseIntEnv("OPENCLAW_SKILLS_MAX_PER_TENANT", 0),
+		MaxSkillsTotalBytes:       parseIntEnv("OPENCLAW_SKILLS_MAX_TOTAL_BYTES", 0),
+		MaxIdentityFilesPerTenant: parseIntEnv("OPENCLAW_IDENTITY_MAX_PER_TENANT", 0),
+		MaxIdentityTotalBytes:     parseIntEnv("OPENCLAW_IDENTITY_MAX_TOTAL_BYTES", 0),
+		SaveRatePerHour:           parseIntEnv("OPENCLAW_SKILLS_SAVE_RATE_PER_HOUR", 0),
+	}
+
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Registry:             registry,
 		GitReader:            gitReader,
@@ -168,6 +178,7 @@ func main() {
 		LogQuerier:           logQuerier,
 		VaultReader:          vaultReader,
 		MetricsQuerier:       metricsQuerier,
+		OpenClaw:             openClawQuota,
 		BackstageURL:         cfg.BackstageURL,
 		BackstageToken:       cfg.BackstageToken,
 		BackstageInternalURL: cfg.BackstageInternalURL,
@@ -343,4 +354,19 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// parseIntEnv reads a positive integer from the given env var. Returns the
+// fallback when the var is unset, empty, non-numeric, or non-positive; zero
+// means "use package default" downstream.
+func parseIntEnv(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
 }

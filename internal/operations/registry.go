@@ -40,6 +40,11 @@ type Operation struct {
 	RiskLevel        RiskLevel      `json:"riskLevel"`
 	RequiresConfirm  bool           `json:"requiresConfirm"`
 	ModifiesPaths    []string       `json:"modifiesPaths"` // gitops paths affected
+	// HandlerOnly marks operations that must only be submitted through their
+	// dedicated REST handler. The generic POST /api/v1/operations/{name}/execute
+	// path refuses them so they can't bypass the owner gate, quota checks,
+	// secret scan, or rate limiter that only the dedicated handler enforces.
+	HandlerOnly bool `json:"handlerOnly,omitempty"`
 }
 
 // ParameterDef describes a single operation parameter.
@@ -319,6 +324,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "openclaw-skill-save",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -334,10 +340,42 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "openclaw-skill-delete",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
+			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
+		},
+	},
+	{
+		Name:             "openclaw-identity-save",
+		DisplayName:      "Save OpenClaw Identity File to GitOps",
+		Description:      "Back up a single OpenClaw identity override (AGENTS.md / SOUL.md / IDENTITY.md / USER.md / TOOLS.md) to the gitops repo. Writes platform-gitops/services/{team}/openclaw/identity/{file_name} from a base64-encoded payload. Overwrites an existing file. Commits with the triggering user recorded in the commit body.",
+		WorkflowTemplate: "openclaw-identity-save",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		HandlerOnly:      true,
+		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/identity/"},
+		Parameters: []ParameterDef{
+			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			{Name: "file_name", Type: "string", Required: true, Description: "Identity file name (one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md)", Enum: []string{"AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md"}},
+			{Name: "content_b64", Type: "string", Required: true, Description: "Base64-encoded identity file content"},
+			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
+		},
+	},
+	{
+		Name:             "openclaw-identity-delete",
+		DisplayName:      "Remove OpenClaw Identity File from GitOps",
+		Description:      "Remove a single identity override (AGENTS.md / SOUL.md / IDENTITY.md / USER.md / TOOLS.md) from the gitops backup. Idempotent — succeeds with a no-op if the file is already absent. The tenant reverts to the image-shipped default at the next sidecar reconcile.",
+		WorkflowTemplate: "openclaw-identity-delete",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		HandlerOnly:      true,
+		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/identity/"},
+		Parameters: []ParameterDef{
+			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			{Name: "file_name", Type: "string", Required: true, Description: "Identity file name (one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md)", Enum: []string{"AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md"}},
 			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
 		},
 	},

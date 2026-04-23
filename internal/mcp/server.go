@@ -101,6 +101,10 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolReadOpenClawSkill())
 	srv.AddTool(s.toolSaveOpenClawSkill())
 	srv.AddTool(s.toolDeleteOpenClawSkill())
+	srv.AddTool(s.toolListOpenClawIdentity())
+	srv.AddTool(s.toolReadOpenClawIdentity())
+	srv.AddTool(s.toolSaveOpenClawIdentity())
+	srv.AddTool(s.toolDeleteOpenClawIdentity())
 	srv.AddTool(s.toolCreateTenant())
 	srv.AddTool(s.toolProvisionDatabase())
 	srv.AddTool(s.toolRetireService())
@@ -595,11 +599,11 @@ func (s *Server) toolApplyOpenClawResourceProfile() (mcplib.Tool, server.ToolHan
 
 func (s *Server) toolListOpenClawSkills() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_openclaw_skills",
-		mcplib.WithTitleAnnotation("List OpenClaw Skills (gitops backup)"),
+		mcplib.WithTitleAnnotation("List OpenClaw Skills"),
 		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDescription(`List OpenClaw SKILL.md files that are backed up in gitops for a team.
+		mcplib.WithDescription(`List OpenClaw skills managed in gitops for a team.
 
-Reads platform-gitops/services/{team}/openclaw/skills/*.md. This is the durable backup set, not the tenant's live runtime workspace — to inspect what the agent is running right now, use the pod's own file tools inside the OpenClaw chat.
+Reads platform-gitops/services/{team}/openclaw/skills/*.md. These files drive the per-tenant {team}-openclaw-skills ConfigMap; ArgoCD plus a pod-side sidecar fan them out into the live agent workspace within ~1-2 minutes of commit.
 
 Requires owner role on the team.`),
 		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
@@ -619,11 +623,11 @@ Requires owner role on the team.`),
 
 func (s *Server) toolReadOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_read_openclaw_skill",
-		mcplib.WithTitleAnnotation("Read OpenClaw Skill (gitops backup)"),
+		mcplib.WithTitleAnnotation("Read OpenClaw Skill"),
 		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDescription(`Return the raw content of a single SKILL.md backed up in gitops.
+		mcplib.WithDescription(`Return the raw content of a single skill from gitops.
 
-Use this to restore a skill into the tenant's runtime workspace: read the content here, then write it to workspace/skills/{name}/SKILL.md from the OpenClaw chat.
+Reads platform-gitops/services/{team}/openclaw/skills/{skill_name}.md. This is the source of truth that feeds the tenant's openclaw-skills ConfigMap and, via the sidecar fan-out, the running agent's workspace.
 
 Requires owner role on the team.`),
 		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
@@ -645,14 +649,14 @@ Requires owner role on the team.`),
 
 func (s *Server) toolSaveOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_save_openclaw_skill",
-		mcplib.WithTitleAnnotation("Save OpenClaw Skill to GitOps"),
-		mcplib.WithDescription(`Back up a single OpenClaw SKILL.md to the gitops repo.
+		mcplib.WithTitleAnnotation("Save OpenClaw Skill"),
+		mcplib.WithDescription(`Saves a skill to the tenant's OpenClaw agent.
 
-Submits the openclaw-skill-save workflow, which commits platform-gitops/services/{team}/openclaw/skills/{skill_name}.md on behalf of the triggering user. Overwrites an existing file. Returns workflow_name — wait for it to succeed before reporting the save to the operator.
+Commits to gitops at platform-gitops/services/{team}/openclaw/skills/{skill_name}.md; ArgoCD syncs a per-tenant {team}-openclaw-skills ConfigMap which a pod-side sidecar fans out into the live workspace. New skills become available in the running agent within ~1-2 minutes of commit.
 
-Runtime workspace edits are not synced by this call. Call this only when the operator explicitly asks to back up / save / persist a skill.
+Returns workflow_name — wait for it to succeed before reporting the save to the operator.
 
-Requires owner role on the team. Content size cap: 100 KB.`),
+Requires owner role on the team. Per-skill content cap: 100 KB. Per-tenant caps: 100 skills, 900 KB total. Write rate limit: 30 per hour per user (shared with identity saves). Content must not embed secrets — saves are rejected on regex match (GitHub PATs, AWS keys, JWTs, private keys, etc.); use mctl_* runtime tools for credentials.`),
 		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
 		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name (kebab-case, 2-64 chars)")),
 		mcplib.WithString("content", mcplib.Required(), mcplib.Description("Full SKILL.md content as Markdown (UTF-8, ≤100 KB)")),
@@ -676,11 +680,13 @@ Requires owner role on the team. Content size cap: 100 KB.`),
 
 func (s *Server) toolDeleteOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_delete_openclaw_skill",
-		mcplib.WithTitleAnnotation("Remove OpenClaw Skill from GitOps"),
+		mcplib.WithTitleAnnotation("Remove OpenClaw Skill"),
 		mcplib.WithDestructiveHintAnnotation(true),
-		mcplib.WithDescription(`Remove a single SKILL.md from the gitops backup.
+		mcplib.WithDescription(`Removes a skill from the tenant's OpenClaw agent.
 
-Submits the openclaw-skill-delete workflow. Idempotent — succeeds with a no-op commit skip if the file is already absent. Does not touch the tenant's runtime workspace.
+Deletes platform-gitops/services/{team}/openclaw/skills/{skill_name}.md. ArgoCD removes the key from the {team}-openclaw-skills ConfigMap; the pod-side sidecar prunes the workspace file. The skill disappears from the running agent within ~1-2 minutes of commit.
+
+Idempotent — succeeds with a no-op commit skip if the file is already absent.
 
 Requires owner role on the team.`),
 		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
@@ -693,6 +699,124 @@ Requires owner role on the team.`),
 		body, err := s.apiDelete(ctx, fmt.Sprintf("/api/v1/openclaw/%s/skills/%s", url.PathEscape(team), url.PathEscape(name)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete OpenClaw skill: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+// openClawIdentityFileEnum is the fixed set of identity override filenames a
+// tenant can manage. Matches the allowlist enforced by the HTTP handler and
+// workflow templates as defense-in-depth.
+var openClawIdentityFileEnum = []string{"AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md"}
+
+func (s *Server) toolListOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_openclaw_identity",
+		mcplib.WithTitleAnnotation("List OpenClaw Identity Overrides"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`List OpenClaw identity override files managed in gitops for a team.
+
+Reads platform-gitops/services/{team}/openclaw/identity/*.md. These files drive the per-tenant {team}-openclaw-identity ConfigMap; ArgoCD plus a pod-side sidecar fan them out into the live agent workspace within ~1-2 minutes of commit. An empty list means the tenant is on the image-shipped defaults.
+
+Requires owner role on the team.`),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team := stringArg(req, "team_name")
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/openclaw/%s/identity", url.PathEscape(team)))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list OpenClaw identity files: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolReadOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_read_openclaw_identity",
+		mcplib.WithTitleAnnotation("Read OpenClaw Identity Override"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Return the raw content of a single identity override file from gitops.
+
+Reads platform-gitops/services/{team}/openclaw/identity/{file_name}. file_name must be one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md — any other value returns 400. Returns 404 if the tenant has not saved an override for that filename (agent is using the image default).
+
+Requires owner role on the team.`),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
+		mcplib.WithString("file_name", mcplib.Required(), mcplib.Enum(openClawIdentityFileEnum...), mcplib.Description("Identity filename (AGENTS.md | SOUL.md | IDENTITY.md | USER.md | TOOLS.md)")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team := stringArg(req, "team_name")
+		name := stringArg(req, "file_name")
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/openclaw/%s/identity/%s", url.PathEscape(team), url.PathEscape(name)))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to read OpenClaw identity file: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolSaveOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_save_openclaw_identity",
+		mcplib.WithTitleAnnotation("Save OpenClaw Identity Override"),
+		mcplib.WithDescription(`Saves an identity override to the tenant's OpenClaw agent.
+
+Commits to gitops at platform-gitops/services/{team}/openclaw/identity/{file_name}; ArgoCD syncs a per-tenant {team}-openclaw-identity ConfigMap which a pod-side sidecar fans out into the live workspace, overriding the image-shipped default. Changes become visible in the running agent within ~1-2 minutes of commit.
+
+file_name must be one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md — any other value is rejected (400).
+
+Returns workflow_name — wait for it to succeed before reporting the save to the operator.
+
+Requires owner role on the team. Per-file content cap: 100 KB. Write rate limit: 30 per hour per user (shared with skill saves). Content must not embed secrets — saves are rejected on regex match; use mctl_* runtime tools for credentials.`),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
+		mcplib.WithString("file_name", mcplib.Required(), mcplib.Enum(openClawIdentityFileEnum...), mcplib.Description("Identity filename (AGENTS.md | SOUL.md | IDENTITY.md | USER.md | TOOLS.md)")),
+		mcplib.WithString("content", mcplib.Required(), mcplib.Description("Full file content as Markdown (UTF-8, ≤100 KB)")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team := stringArg(req, "team_name")
+		params := map[string]string{
+			"file_name": stringArg(req, "file_name"),
+			"content":   stringArg(req, "content"),
+		}
+		body, err := s.apiPost(ctx, fmt.Sprintf("/api/v1/openclaw/%s/identity", url.PathEscape(team)), params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to save OpenClaw identity file: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolDeleteOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_delete_openclaw_identity",
+		mcplib.WithTitleAnnotation("Remove OpenClaw Identity Override"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Removes an identity override from the tenant's OpenClaw agent.
+
+Deletes platform-gitops/services/{team}/openclaw/identity/{file_name}. ArgoCD removes the key from the {team}-openclaw-identity ConfigMap; the pod-side sidecar prunes the override and the agent falls back to the image-shipped default file within ~1-2 minutes of commit.
+
+file_name must be one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md.
+
+Idempotent — succeeds with a no-op commit skip if the file is already absent.
+
+Requires owner role on the team.`),
+		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
+		mcplib.WithString("file_name", mcplib.Required(), mcplib.Enum(openClawIdentityFileEnum...), mcplib.Description("Identity filename (AGENTS.md | SOUL.md | IDENTITY.md | USER.md | TOOLS.md)")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team := stringArg(req, "team_name")
+		name := stringArg(req, "file_name")
+		body, err := s.apiDelete(ctx, fmt.Sprintf("/api/v1/openclaw/%s/identity/%s", url.PathEscape(team), url.PathEscape(name)))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete OpenClaw identity file: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

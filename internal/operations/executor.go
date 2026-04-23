@@ -76,13 +76,14 @@ func NewExecutor() *Executor {
 // Most workflows execute in the tenant's namespace where team-scoped secrets live.
 // Tenant lifecycle operations (create/delete) run in argo-workflows namespace
 // because the tenant namespace may not exist yet (create) or is being removed (delete).
-// OpenClaw skill workflows (save/delete) also run in argo-workflows: they only
-// need the gitops deploy key secret (cluster-wide) and would otherwise contend
-// with the tenant's running OpenClaw pod for its CPU quota.
+// OpenClaw skill and identity workflows (save/delete) also run in argo-workflows:
+// they only need the gitops deploy key secret (cluster-wide) and would otherwise
+// contend with the tenant's running OpenClaw pod for its CPU quota.
 func WorkflowNamespace(workflowTemplate, team string) string {
 	switch workflowTemplate {
 	case "create-tenant", "delete-tenant", "delete-tenant-safe",
-		"openclaw-skill-save", "openclaw-skill-delete":
+		"openclaw-skill-save", "openclaw-skill-delete",
+		"openclaw-identity-save", "openclaw-identity-delete":
 		return "argo-workflows"
 	}
 	return team

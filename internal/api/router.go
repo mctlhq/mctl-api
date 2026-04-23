@@ -64,16 +64,28 @@ type Options struct {
 	OAuthServer *auth.OAuthServer
 	// AlertStore persists incident alerts to PostgreSQL (optional — nil disables incident endpoints).
 	AlertStore *alerts.Store
+	// OpenClaw controls quota and rate limits on the skill/identity save handlers.
+	// Zero values fall back to defaults (see OpenClawQuotaDefaults).
+	OpenClaw OpenClawQuotaConfig
 }
 
 // Handlers holds all API handler dependencies.
 type Handlers struct {
 	opts Options
+	// openClawQuota is the effective quota config after default fill-in.
+	// Pre-computed at router init so each save call is a plain map lookup.
+	openClawQuota       OpenClawQuotaConfig
+	openClawRateLimiter *saveRateLimiter
 }
 
 // NewRouter creates the HTTP router with all API routes.
 func NewRouter(opts Options) http.Handler {
-	h := &Handlers{opts: opts}
+	quota := opts.OpenClaw.withDefaults()
+	h := &Handlers{
+		opts:                opts,
+		openClawQuota:       quota,
+		openClawRateLimiter: newSaveRateLimiter(quota.SaveRatePerHour),
+	}
 
 	r := chi.NewRouter()
 
@@ -168,6 +180,10 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/openclaw/{team}/skills/{name}", h.GetOpenClawSkill)
 			r.Post("/openclaw/{team}/skills", h.SaveOpenClawSkill)
 			r.Delete("/openclaw/{team}/skills/{name}", h.DeleteOpenClawSkill)
+			r.Get("/openclaw/{team}/identity", h.ListOpenClawIdentity)
+			r.Get("/openclaw/{team}/identity/{name}", h.GetOpenClawIdentity)
+			r.Post("/openclaw/{team}/identity", h.SaveOpenClawIdentity)
+			r.Delete("/openclaw/{team}/identity/{name}", h.DeleteOpenClawIdentity)
 
 			// Custom domains (proxied to Backstage custom-domains plugin).
 			r.Get("/domains", h.ListDomains)

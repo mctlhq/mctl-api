@@ -47,6 +47,36 @@ spec:
             - name: GITOPS_SSH_KEY_PATH
               value: /etc/gitops-ssh/ssh-privatekey
             {{- end }}
+            {{- with .Values.openclaw }}
+            {{- with .skills }}
+            {{- if .maxPerSkillBytes }}
+            - name: OPENCLAW_SKILLS_MAX_PER_SKILL_BYTES
+              value: {{ .maxPerSkillBytes | quote }}
+            {{- end }}
+            {{- if .maxPerTenant }}
+            - name: OPENCLAW_SKILLS_MAX_PER_TENANT
+              value: {{ .maxPerTenant | quote }}
+            {{- end }}
+            {{- if .maxTotalBytes }}
+            - name: OPENCLAW_SKILLS_MAX_TOTAL_BYTES
+              value: {{ .maxTotalBytes | quote }}
+            {{- end }}
+            {{- if .saveRatePerHour }}
+            - name: OPENCLAW_SKILLS_SAVE_RATE_PER_HOUR
+              value: {{ .saveRatePerHour | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .identity }}
+            {{- if .maxPerTenant }}
+            - name: OPENCLAW_IDENTITY_MAX_PER_TENANT
+              value: {{ .maxPerTenant | quote }}
+            {{- end }}
+            {{- if .maxTotalBytes }}
+            - name: OPENCLAW_IDENTITY_MAX_TOTAL_BYTES
+              value: {{ .maxTotalBytes | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

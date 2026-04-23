@@ -35,6 +35,27 @@ env:
   ARGOCD_URL: https://ops.mctl.me
   ARGO_WORKFLOWS_NAMESPACE: argo-workflows
 
+# OpenClaw skill/identity save caps. Enforced in the save handlers
+# (internal/api/handlers_openclaw.go) before any workflow submission.
+# Aligns with the layered-skills plan (/docs/plans/openclaw-layered-skills.md):
+# the K8s ConfigMap 1 MiB limit is the hard ceiling; these leave headroom for
+# keys/metadata and protect the tenant from runaway agent edits.
+openclaw:
+  skills:
+    # Max bytes in a single SKILL.md / identity file.
+    maxPerSkillBytes: 102400
+    # Max number of skill files per tenant.
+    maxPerTenant: 100
+    # Max total skill-file bytes per tenant (≤ ConfigMap 1 MiB headroom).
+    maxTotalBytes: 921600
+    # Max saves/deletes per hour per (team, user) — shared with identity.
+    saveRatePerHour: 30
+  identity:
+    # Max identity overrides per tenant (hard cap is the 5-file allowlist).
+    maxPerTenant: 5
+    # Max total identity-file bytes per tenant.
+    maxTotalBytes: 512000
+
 # Name of an existing Secret to mount as envFrom (created by ExternalSecret)
 envFromSecret: ""
 
