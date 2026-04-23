@@ -20,7 +20,7 @@ import (
 // process serving many distinct callers would grow l.buckets without bound.
 func TestSaveRateLimiter_EvictsIdleBuckets(t *testing.T) {
 	t.Parallel()
-	var clock time.Time = time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	clock := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	l := newSaveRateLimiter(10)
 	l.now = func() time.Time { return clock }
 
@@ -62,7 +62,7 @@ func TestSaveRateLimiter_EvictsIdleBuckets(t *testing.T) {
 // limiter would silently drop enforcement for active callers.
 func TestSaveRateLimiter_BucketPersistsWithActiveEntries(t *testing.T) {
 	t.Parallel()
-	var clock time.Time = time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	clock := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	l := newSaveRateLimiter(2)
 	l.now = func() time.Time { return clock }
 
