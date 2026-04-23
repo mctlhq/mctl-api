@@ -513,7 +513,22 @@ type OpenClawIdentityFile struct {
 	LastModified time.Time `json:"lastModified"`
 }
 
-// ListOpenClawIdentity lists .md files under
+// openClawIdentityFilenames is the fixed allowlist of identity override files
+// a tenant can own. Kept in sync with openClawIdentityFileAllowlist in the api
+// package (defense-in-depth also lives in the workflow templates). Mirrored
+// here so the reader returns identity files consistently regardless of any
+// stray markdown files a manual gitops edit might have dropped into the
+// identity/ directory — otherwise the quota sum would drift against what
+// save/delete paths actually manipulate.
+var openClawIdentityFilenames = map[string]struct{}{
+	"AGENTS.md":   {},
+	"SOUL.md":     {},
+	"IDENTITY.md": {},
+	"USER.md":     {},
+	"TOOLS.md":    {},
+}
+
+// ListOpenClawIdentity lists allowlisted identity override files under
 // platform-gitops/services/{team}/openclaw/identity/.
 // Returns an empty slice (not an error) if the directory does not exist —
 // tenants without any overrides fall back to image defaults.
@@ -536,7 +551,7 @@ func (r *Reader) ListOpenClawIdentity(team string) ([]OpenClawIdentityFile, erro
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasSuffix(name, ".md") || name == "README.md" {
+		if _, ok := openClawIdentityFilenames[name]; !ok {
 			continue
 		}
 		info, err := entry.Info()
