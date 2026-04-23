@@ -658,23 +658,31 @@ func (h *Handlers) SaveOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enforce tenant-wide caps before spending a workflow submission.
-	// Sum + count existing skills via the cached gitops reader (cheap).
+	// Sum + count existing API-manageable skills via the cached gitops reader.
+	// Filter to entries that pass validateOpenClawSkillName — any stray
+	// markdown file left by a manual gitops edit is not reachable via the
+	// save/delete endpoints and must not consume quota (otherwise a rogue
+	// file could block all future saves while being unreachable via the API).
 	existing, listErr := h.opts.GitReader.ListOpenClawSkills(team)
 	if listErr != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read existing skills for quota check: "+listErr.Error())
 		return
 	}
-	var existingBytes int
+	var managedCount, existingBytes int
 	var updatingExisting bool
 	for _, s := range existing {
+		if validateOpenClawSkillName(s.Name) != nil {
+			continue
+		}
 		if s.Name == req.SkillName {
 			updatingExisting = true
 			continue // exclude from existing total — this save will replace it
 		}
+		managedCount++
 		existingBytes += int(s.Size)
 	}
-	if !updatingExisting && len(existing) >= h.openClawQuota.MaxSkillsPerTenant {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("skill count limit reached (%d of %d used for team %q); delete an unused skill with mctl_delete_openclaw_skill before saving a new one", len(existing), h.openClawQuota.MaxSkillsPerTenant, team))
+	if !updatingExisting && managedCount >= h.openClawQuota.MaxSkillsPerTenant {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("skill count limit reached (%d of %d used for team %q); delete an unused skill with mctl_delete_openclaw_skill before saving a new one", managedCount, h.openClawQuota.MaxSkillsPerTenant, team))
 		return
 	}
 	projected := existingBytes + len(req.Content) + len(req.SkillName)
