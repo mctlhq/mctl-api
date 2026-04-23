@@ -38,6 +38,15 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// HandlerOnly operations skip this generic execute path on purpose — the
+	// dedicated REST handler enforces owner-gate / quota / secret-scan /
+	// rate-limit checks that are not part of the generic path's RBAC, so
+	// allowing execute here would let a tenant member bypass them.
+	if op.HandlerOnly {
+		writeError(w, http.StatusMethodNotAllowed, "operation "+opName+" is not submittable via /operations/{name}/execute; use its dedicated REST endpoint")
+		return
+	}
+
 	var input map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())

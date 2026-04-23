@@ -40,6 +40,11 @@ type Operation struct {
 	RiskLevel        RiskLevel      `json:"riskLevel"`
 	RequiresConfirm  bool           `json:"requiresConfirm"`
 	ModifiesPaths    []string       `json:"modifiesPaths"` // gitops paths affected
+	// HandlerOnly marks operations that must only be submitted through their
+	// dedicated REST handler. The generic POST /api/v1/operations/{name}/execute
+	// path refuses them so they can't bypass the owner gate, quota checks,
+	// secret scan, or rate limiter that only the dedicated handler enforces.
+	HandlerOnly bool `json:"handlerOnly,omitempty"`
 }
 
 // ParameterDef describes a single operation parameter.
@@ -319,6 +324,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "openclaw-skill-save",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -334,6 +340,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "openclaw-skill-delete",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -348,6 +355,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "openclaw-identity-save",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/identity/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -363,6 +371,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "openclaw-identity-delete",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/identity/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},

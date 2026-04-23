@@ -562,6 +562,26 @@ func TestSmoke_ExecuteOperation(t *testing.T) {
 		w := postAs(t, router, "/api/v1/operations/does-not-exist/execute", map[string]string{}, adminUser)
 		assertStatus(t, w, http.StatusNotFound)
 	})
+
+	// HandlerOnly-flagged operations (openclaw skill/identity save + delete)
+	// must NOT be reachable via the generic execute path — the dedicated
+	// REST handlers enforce owner-gate / quota / secret-scan / rate-limit
+	// checks the generic path does not.
+	t.Run("HandlerOnly operation rejected via generic execute", func(t *testing.T) {
+		for _, op := range []string{
+			"openclaw-skill-save",
+			"openclaw-skill-delete",
+			"openclaw-identity-save",
+			"openclaw-identity-delete",
+		} {
+			w := postAs(t, router, "/api/v1/operations/"+op+"/execute", map[string]string{
+				"team_name": "tests",
+			}, adminUser)
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Errorf("%s: expected 405 from generic execute, got %d; body: %s", op, w.Code, w.Body.String())
+			}
+		}
+	})
 }
 
 func TestSmoke_CreateTenantRBAC(t *testing.T) {
