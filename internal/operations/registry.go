@@ -45,6 +45,11 @@ type Operation struct {
 	// path refuses them so they can't bypass the owner gate, quota checks,
 	// secret scan, or rate limiter that only the dedicated handler enforces.
 	HandlerOnly bool `json:"handlerOnly,omitempty"`
+	// AdminOnly marks platform-scoped operations that require admin group
+	// membership and have no team_name / tenant_name parameter. The generic
+	// execute handler bypasses the tenant-access check for these and uses
+	// the sentinel team "platform" when constructing the workflow.
+	AdminOnly bool `json:"adminOnly,omitempty"`
 }
 
 // ParameterDef describes a single operation parameter.
@@ -362,6 +367,54 @@ var builtinOperations = []Operation{
 			{Name: "file_name", Type: "string", Required: true, Description: "Identity file name (one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md)", Enum: []string{"AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md"}},
 			{Name: "content_b64", Type: "string", Required: true, Description: "Base64-encoded identity file content"},
 			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
+		},
+	},
+	// ─── mctl-agents triggers ─────────────────────────────────────────────
+	// Three platform-scoped (AdminOnly) operations that submit Workflows
+	// against the mctl-agents-run ClusterWorkflowTemplate (mctl-gitops repo).
+	// All three reference the SAME WorkflowTemplate; only the `mode` (and
+	// optional `service`) parameter changes. Cost / duration estimates in
+	// the Description so the LLM caller can warn the user before triggering.
+	{
+		Name:             "mctl-agents-run",
+		DisplayName:      "Run mctl-agents (full pipeline)",
+		Description:      "Trigger the full mctl-agents pipeline: every service-agent (researcher → analyst → spec-writer in parallel) followed by the mentor weekly digest. Same as the daily 06:00 UTC cron. Cost: ~$10 (subscription quota). Duration: ~15 min. Result lands as a chore(agents) commit in mctl-gitops main under platform-gitops/agents-state/.",
+		WorkflowTemplate: "mctl-agents-run",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		AdminOnly:        true,
+		ModifiesPaths:    []string{"platform-gitops/agents-state/"},
+		Parameters: []ParameterDef{
+			{Name: "mode", Type: "string", Required: false, Default: "full", Description: "Run mode (locked to 'full' for this operation)", Enum: []string{"full"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for full mode"},
+		},
+	},
+	{
+		Name:             "mctl-agents-mentor-only",
+		DisplayName:      "Run mctl-agents (mentor only)",
+		Description:      "Trigger mentor only — re-aggregates existing proposals across all services into a fresh weekly digest. Skips the expensive service-agent runs. Useful after manually triaging proposals. Cost: ~$1. Duration: ~2 min. Updates _mentor/digest/ in mctl-gitops main.",
+		WorkflowTemplate: "mctl-agents-run",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		AdminOnly:        true,
+		ModifiesPaths:    []string{"platform-gitops/agents-state/_mentor/digest/"},
+		Parameters: []ParameterDef{
+			{Name: "mode", Type: "string", Required: false, Default: "mentor-only", Description: "Run mode (locked to 'mentor-only')", Enum: []string{"mentor-only"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for mentor-only mode"},
+		},
+	},
+	{
+		Name:             "mctl-agents-single-service",
+		DisplayName:      "Run mctl-agents (single service)",
+		Description:      "Trigger one service-agent only (no mentor). Useful after large changes in a specific repo when you want fresh proposals without paying for a full run. Cost: ~$1.50. Duration: ~7 min. Updates only that service's inbox/ and proposals/ in mctl-gitops main.",
+		WorkflowTemplate: "mctl-agents-run",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		AdminOnly:        true,
+		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/"},
+		Parameters: []ParameterDef{
+			{Name: "mode", Type: "string", Required: false, Default: "single-service", Description: "Run mode (locked to 'single-service')", Enum: []string{"single-service"}},
+			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: []string{"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops"}},
 		},
 	},
 	{

@@ -165,6 +165,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/resources/{tenant}", h.GetResourceUsage)
 			r.Get("/logs/{team}/{app}", h.GetServiceLogs)
 			r.Get("/audit", h.ListAudit)
+			r.Get("/agent-runs", h.ListAgentRuns)
 
 			// Repository discovery (proxied to Backstage github-app-connect plugin).
 			r.Get("/repos", h.ListRepos)
