@@ -418,6 +418,26 @@ var builtinOperations = []Operation{
 		},
 	},
 	{
+		// Tier 2 implementer — turns accepted proposals into PRs in sibling
+		// repos. Risk classified as medium (it OPENS PRs as the bot user;
+		// PRs themselves are reviewable, so no human-irreversible side
+		// effects, but the action is more consequential than the read-only
+		// service-agent runs above). Admin-only.
+		Name:             "mctl-agents-implement",
+		DisplayName:      "Run mctl-agents Tier 2 implementer",
+		Description:      "Tier 2 implementer: take accepted proposals (those with .status.yaml status=accepted) and open PRs in the matching sibling repos under mctlhq/. Optionally filter by service or slug. Admin-only. Cost: ~$3 per proposal (subscription quota). Duration: variable (1–10 min per proposal). Updates .status.yaml in mctl-gitops main and opens one PR per implemented proposal.",
+		WorkflowTemplate: "mctl-agents-implement",
+		RiskLevel:        RiskMedium,
+		RequiresConfirm:  false,
+		AdminOnly:        true,
+		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch>"},
+		Parameters: []ParameterDef{
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops"}},
+			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
+			{Name: "force", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to retry a proposal stuck in `in-progress` (previous attempt may have crashed). Default 'false' (skip such proposals).", Enum: []string{"true", "false"}},
+		},
+	},
+	{
 		Name:             "openclaw-identity-delete",
 		DisplayName:      "Remove OpenClaw Identity File from GitOps",
 		Description:      "Remove a single identity override (AGENTS.md / SOUL.md / IDENTITY.md / USER.md / TOOLS.md) from the gitops backup. Idempotent — succeeds with a no-op if the file is already absent. The tenant reverts to the image-shipped default at the next sidecar reconcile.",
