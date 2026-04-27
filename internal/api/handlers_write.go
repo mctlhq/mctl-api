@@ -59,9 +59,28 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RBAC: check tenant access.
+	// AdminOnly platform-scoped ops (e.g. mctl-agents triggers) skip the
+	// tenant-access check — they have no team_name parameter and are
+	// gated only by admin group membership. The Executor labels them with
+	// the sentinel team "platform" for audit/UI grouping.
 	tenantParam := extractTenantParam(op, input)
-	if tenantParam == "" {
+	if op.AdminOnly {
+		if !user.IsAdmin() {
+			h.opts.AuditLog.Log(audit.Entry{
+				UserID:    user.ID,
+				Operation: opName,
+				Status:    "denied",
+				RiskLevel: string(op.RiskLevel),
+				Message:   fmt.Sprintf("user %q not in admins group; %q is admin-only", user.ID, opName),
+			})
+			writeError(w, http.StatusForbidden, "operation requires admin group membership")
+			return
+		}
+		if tenantParam == "" {
+			tenantParam = "platform"
+		}
+	} else if tenantParam == "" {
+		// Non-admin tenant-scoped ops: tenant is mandatory.
 		writeError(w, http.StatusBadRequest, "team/tenant is required for workflow operations")
 		return
 	}

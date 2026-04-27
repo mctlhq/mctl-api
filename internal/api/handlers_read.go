@@ -237,6 +237,58 @@ func (h *Handlers) GetServiceStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ListAgentRuns returns recent mctl-agents-* operations from the audit log.
+// Admin-only — same gate as the corresponding MCP triggers.
+// Mirrors ListWorkflows but filters to operation names starting with
+// "mctl-agents-" and enriches each item with mode / service from the
+// recorded parameters so the caller doesn't need to look them up.
+func (h *Handlers) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if !user.IsAdmin() {
+		writeError(w, http.StatusForbidden, "admin group membership required")
+		return
+	}
+
+	entries := h.opts.AuditLog.List(50)
+	var items []map[string]interface{}
+	for i := range entries {
+		e := &entries[i]
+		if !strings.HasPrefix(e.Operation, "mctl-agents-") {
+			continue
+		}
+		mode, service := "", ""
+		if e.Parameters != nil {
+			mode = e.Parameters["mode"]
+			service = e.Parameters["service"]
+		}
+		items = append(items, map[string]interface{}{
+			"workflowName": e.WorkflowName,
+			"operation":    e.Operation,
+			"mode":         mode,
+			"service":      service,
+			"status":       e.Status,
+			"user":         e.UserID,
+			"timestamp":    e.Timestamp,
+			"riskLevel":    e.RiskLevel,
+			"message":      e.Message,
+		})
+		if len(items) >= 10 {
+			break
+		}
+	}
+	if items == nil {
+		items = []map[string]interface{}{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"items": items,
+		"count": len(items),
+	})
+}
+
 func (h *Handlers) ListWorkflows(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	if user == nil {

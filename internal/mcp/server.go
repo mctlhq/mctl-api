@@ -125,6 +125,12 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolAcknowledgeIncident())
 	srv.AddTool(s.toolResolveIncident())
 
+	// mctl-agents triggers (admin-only platform-scoped pipeline).
+	srv.AddTool(s.toolTriggerAgentsRun())
+	srv.AddTool(s.toolTriggerMentorOnly())
+	srv.AddTool(s.toolTriggerSingleService())
+	srv.AddTool(s.toolListRecentAgentRuns())
+
 	return srv
 }
 
@@ -1930,4 +1936,96 @@ func requireConfirm(args map[string]any, subject string) *mcplib.CallToolResult 
 			"3. Call this tool again with confirm=\"yes\"",
 		subject,
 	))
+}
+
+// ─── mctl-agents triggers ─────────────────────────────────────────────
+// Four admin-only tools that drive the mctl-agents pipeline (proactive
+// platform R&D — researcher → analyst → spec-writer per service, plus a
+// mentor weekly digest). The first three submit the same Argo
+// ClusterWorkflowTemplate `mctl-agents-run` with different `mode`
+// parameters; the fourth lists recent runs.
+
+func (s *Server) toolTriggerAgentsRun() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_trigger_agents_run",
+		mcplib.WithTitleAnnotation("Run mctl-agents (full)"),
+		mcplib.WithDescription(`Trigger a full mctl-agents run — every service-agent (researcher → analyst → spec-writer in parallel) followed by the mentor weekly digest. Same as the daily 06:00 UTC cron, on demand.
+
+Cost: ~$10 against the Claude Pro/Max subscription (no Console billing).
+Duration: ~15 minutes.
+Result: a chore(agents) commit lands in mctl-gitops main under platform-gitops/agents-state/.
+
+Admin-only. Returns workflow_name; poll mctl_get_workflow_status(workflow_name) or mctl_list_recent_agent_runs to track progress.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-run/execute", map[string]string{})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger agents run: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolTriggerMentorOnly() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_trigger_mentor_only",
+		mcplib.WithTitleAnnotation("Run mctl-agents (mentor only)"),
+		mcplib.WithDescription(`Trigger mentor only — re-aggregates the existing per-service proposals into a fresh weekly digest. Skips the expensive service-agent runs. Useful after manually triaging proposals when you want the digest to reflect updated state.
+
+Cost: ~$1.
+Duration: ~2 minutes.
+Result: only platform-gitops/agents-state/_mentor/digest/<YYYY-WNN>.md is rewritten in mctl-gitops main.
+
+Admin-only. Returns workflow_name.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-mentor-only/execute", map[string]string{})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger mentor: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolTriggerSingleService() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_trigger_single_service",
+		mcplib.WithTitleAnnotation("Run mctl-agents (single service)"),
+		mcplib.WithDescription(`Trigger one service-agent only (no mentor). Useful after a large change in a specific repo when you want fresh proposals for that service without paying for a full pipeline run.
+
+Cost: ~$1.50.
+Duration: ~7 minutes.
+Result: only that service's inbox/ and proposals/ are updated in mctl-gitops main.
+
+Admin-only. Returns workflow_name.`),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Which service-agent to run"),
+			mcplib.Enum("mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-single-service/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger single service: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolListRecentAgentRuns() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_recent_agent_runs",
+		mcplib.WithTitleAnnotation("Recent mctl-agents runs"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`List the most recent mctl-agents triggers (up to 10): scheduled cron runs, manual triggers via the other three tools, and any operator-initiated submissions. Each item includes mode, service (for single-service runs), status, who triggered it, and timestamp. Admin-only.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiGet(ctx, "/api/v1/agent-runs")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list agent runs: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
 }
