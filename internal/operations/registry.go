@@ -370,11 +370,16 @@ var builtinOperations = []Operation{
 		},
 	},
 	// ─── mctl-agents triggers ─────────────────────────────────────────────
-	// Three platform-scoped (AdminOnly) operations that submit Workflows
-	// against the mctl-agents-run ClusterWorkflowTemplate (mctl-gitops repo).
-	// All three reference the SAME WorkflowTemplate; only the `mode` (and
-	// optional `service`) parameter changes. Cost / duration estimates in
-	// the Description so the LLM caller can warn the user before triggering.
+	// Four platform-scoped (AdminOnly) operations that submit Workflows in
+	// the argo-workflows namespace (mctl-gitops repo holds the CWFTs):
+	//   - mctl-agents-run / mctl-agents-mentor-only / mctl-agents-single-service
+	//     all reference the SAME `mctl-agents-run` ClusterWorkflowTemplate;
+	//     only the `mode` (and optional `service`) parameter changes.
+	//   - mctl-agents-implement (Tier 2) references its own
+	//     `mctl-agents-implement` ClusterWorkflowTemplate — it opens PRs in
+	//     sibling repos, so it carries RiskMedium instead of RiskLow.
+	// Cost / duration estimates in the Description so the LLM caller can warn
+	// the user before triggering.
 	{
 		Name:             "mctl-agents-run",
 		DisplayName:      "Run mctl-agents (full pipeline)",

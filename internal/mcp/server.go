@@ -1940,11 +1940,14 @@ func requireConfirm(args map[string]any, subject string) *mcplib.CallToolResult 
 }
 
 // ─── mctl-agents triggers ─────────────────────────────────────────────
-// Four admin-only tools that drive the mctl-agents pipeline (proactive
+// Five admin-only tools that drive the mctl-agents pipeline (proactive
 // platform R&D — researcher → analyst → spec-writer per service, plus a
-// mentor weekly digest). The first three submit the same Argo
+// mentor weekly digest, plus a Tier 2 implementer that opens PRs from
+// accepted proposals). Three of them submit the same Argo
 // ClusterWorkflowTemplate `mctl-agents-run` with different `mode`
-// parameters; the fourth lists recent runs.
+// parameters; `mctl_trigger_implementer` submits the separate
+// `mctl-agents-implement` template (RiskMedium — opens PRs in sibling
+// repos); `mctl_list_recent_agent_runs` lists recent runs.
 
 func (s *Server) toolTriggerAgentsRun() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_agents_run",

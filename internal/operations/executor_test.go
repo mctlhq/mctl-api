@@ -22,6 +22,8 @@ func TestWorkflowNamespace(t *testing.T) {
 		{"tenant lifecycle delete (safe)", "delete-tenant-safe", "acme", "argo-workflows"},
 		{"skill save runs centrally", "openclaw-skill-save", "acme", "argo-workflows"},
 		{"skill delete runs centrally", "openclaw-skill-delete", "acme", "argo-workflows"},
+		{"mctl-agents-run runs centrally", "mctl-agents-run", "acme", "argo-workflows"},
+		{"mctl-agents-implement runs centrally", "mctl-agents-implement", "acme", "argo-workflows"},
 		{"service deploy runs in team ns", "deploy-service", "acme", "acme"},
 		{"retire service runs in team ns", "retire-service", "acme", "acme"},
 		{"unknown template falls back to team ns", "anything-else", "acme", "acme"},
