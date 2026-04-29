@@ -81,12 +81,14 @@ func NewExecutor() *Executor {
 // contend with the tenant's running OpenClaw pod for its CPU quota.
 // mctl-agents-run is platform-scoped and lives in argo-workflows ns where its
 // secrets (mctl-agents-secrets, ghcr-credentials, mctl-gitops-deploy-key) are.
+// mctl-agents-implement (Tier 2) shares the same secrets and runs in the same ns.
 func WorkflowNamespace(workflowTemplate, team string) string {
 	switch workflowTemplate {
 	case "create-tenant", "delete-tenant", "delete-tenant-safe",
 		"openclaw-skill-save", "openclaw-skill-delete",
 		"openclaw-identity-save", "openclaw-identity-delete",
-		"mctl-agents-run":
+		"mctl-agents-run",
+		"mctl-agents-implement":
 		return "argo-workflows"
 	}
 	return team

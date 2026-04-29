@@ -129,6 +129,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerAgentsRun())
 	srv.AddTool(s.toolTriggerMentorOnly())
 	srv.AddTool(s.toolTriggerSingleService())
+	srv.AddTool(s.toolTriggerImplementer())
 	srv.AddTool(s.toolListRecentAgentRuns())
 
 	return srv
@@ -1939,11 +1940,14 @@ func requireConfirm(args map[string]any, subject string) *mcplib.CallToolResult 
 }
 
 // ─── mctl-agents triggers ─────────────────────────────────────────────
-// Four admin-only tools that drive the mctl-agents pipeline (proactive
+// Five admin-only tools that drive the mctl-agents pipeline (proactive
 // platform R&D — researcher → analyst → spec-writer per service, plus a
-// mentor weekly digest). The first three submit the same Argo
+// mentor weekly digest, plus a Tier 2 implementer that opens PRs from
+// accepted proposals). Three of them submit the same Argo
 // ClusterWorkflowTemplate `mctl-agents-run` with different `mode`
-// parameters; the fourth lists recent runs.
+// parameters; `mctl_trigger_implementer` submits the separate
+// `mctl-agents-implement` template (RiskMedium — opens PRs in sibling
+// repos); `mctl_list_recent_agent_runs` lists recent runs.
 
 func (s *Server) toolTriggerAgentsRun() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_agents_run",
@@ -2008,6 +2012,42 @@ Admin-only. Returns workflow_name.`),
 		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-single-service/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger single service: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolTriggerImplementer() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_trigger_implementer",
+		mcplib.WithTitleAnnotation("Run mctl-agents Tier 2 implementer"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Trigger Tier 2 implementer agents to open PRs from accepted proposals. The implementer scans platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml for entries with status=accepted, and for each one: gh-clones the matching mctlhq/<service> repo, runs the per-service implementer sub-agent to make the change, pushes a feat/agents-<slug> branch, and opens a PR. After a successful PR, .status.yaml is updated to status=implemented with the PR URL.
+
+Cost: ~$3 per proposal (subscription quota).
+Duration: variable, typically 1-10 minutes per proposal.
+Result: one PR per implemented proposal in mctlhq/<service>, plus a chore(agents) commit in mctl-gitops main bumping .status.yaml entries.
+
+Optional filters narrow the run scope. By default ALL accepted proposals are processed. force=true retries proposals stuck in 'in-progress' (e.g. from a crashed earlier run).
+
+Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
+		mcplib.WithString("service",
+			mcplib.Description("Optional. Filter to one service. Leave empty to consider all services."),
+			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops"),
+		),
+		mcplib.WithString("slug",
+			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
+		),
+		mcplib.WithString("force",
+			mcplib.Description("Set to 'true' to retry a proposal stuck in `in-progress`. Default 'false' (skip such proposals)."),
+			mcplib.Enum("true", "false"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-implement/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger implementer: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

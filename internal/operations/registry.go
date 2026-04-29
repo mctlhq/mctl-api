@@ -370,11 +370,16 @@ var builtinOperations = []Operation{
 		},
 	},
 	// ─── mctl-agents triggers ─────────────────────────────────────────────
-	// Three platform-scoped (AdminOnly) operations that submit Workflows
-	// against the mctl-agents-run ClusterWorkflowTemplate (mctl-gitops repo).
-	// All three reference the SAME WorkflowTemplate; only the `mode` (and
-	// optional `service`) parameter changes. Cost / duration estimates in
-	// the Description so the LLM caller can warn the user before triggering.
+	// Four platform-scoped (AdminOnly) operations that submit Workflows in
+	// the argo-workflows namespace (mctl-gitops repo holds the CWFTs):
+	//   - mctl-agents-run / mctl-agents-mentor-only / mctl-agents-single-service
+	//     all reference the SAME `mctl-agents-run` ClusterWorkflowTemplate;
+	//     only the `mode` (and optional `service`) parameter changes.
+	//   - mctl-agents-implement (Tier 2) references its own
+	//     `mctl-agents-implement` ClusterWorkflowTemplate — it opens PRs in
+	//     sibling repos, so it carries RiskMedium instead of RiskLow.
+	// Cost / duration estimates in the Description so the LLM caller can warn
+	// the user before triggering.
 	{
 		Name:             "mctl-agents-run",
 		DisplayName:      "Run mctl-agents (full pipeline)",
@@ -415,6 +420,26 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "single-service", Description: "Run mode (locked to 'single-service')", Enum: []string{"single-service"}},
 			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: []string{"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops"}},
+		},
+	},
+	{
+		// Tier 2 implementer — turns accepted proposals into PRs in sibling
+		// repos. Risk classified as medium (it OPENS PRs as the bot user;
+		// PRs themselves are reviewable, so no human-irreversible side
+		// effects, but the action is more consequential than the read-only
+		// service-agent runs above). Admin-only.
+		Name:             "mctl-agents-implement",
+		DisplayName:      "Run mctl-agents Tier 2 implementer",
+		Description:      "Tier 2 implementer: take accepted proposals (those with .status.yaml status=accepted) and open PRs in the matching sibling repos under mctlhq/. Optionally filter by service or slug. Admin-only. Cost: ~$3 per proposal (subscription quota). Duration: variable (1–10 min per proposal). Updates .status.yaml in mctl-gitops main and opens one PR per implemented proposal.",
+		WorkflowTemplate: "mctl-agents-implement",
+		RiskLevel:        RiskMedium,
+		RequiresConfirm:  false,
+		AdminOnly:        true,
+		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch>"},
+		Parameters: []ParameterDef{
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops"}},
+			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
+			{Name: "force", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to retry a proposal stuck in `in-progress` (previous attempt may have crashed). Default 'false' (skip such proposals).", Enum: []string{"true", "false"}},
 		},
 	},
 	{
