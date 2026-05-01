@@ -466,6 +466,14 @@ var builtinOperations = []Operation{
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch> (follow-up commits or merge)"},
 		Parameters: []ParameterDef{
+			// `mctl-agents` is intentionally INCLUDED in the shepherd's service
+			// enum (and the matching MCP tool enum), aligned with the Tier 2
+			// implementer which added `mctl-agents` to its allowlist in
+			// mctlhq/mctl-agents PR #11. The implementer's self-improvement
+			// pipeline produces PRs in the agents repo itself (e.g. the
+			// tier3-shepherd PRs landing now); the shepherd must drive those
+			// to merge too. If the implementer's allowlist ever changes,
+			// mirror the change here.
 			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}},
 			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
 			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to evaluate decide() for every matched proposal and print the decision WITHOUT calling the implementer or merging anything. Default 'false'.", Enum: []string{"true", "false"}},

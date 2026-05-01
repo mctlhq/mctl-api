@@ -2062,9 +2062,24 @@ func (s *Server) toolTriggerShepherd() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_shepherd",
 		mcplib.WithTitleAnnotation("Run mctl-agents Tier 3 PR shepherd"),
 		mcplib.WithDestructiveHintAnnotation(true),
-		mcplib.WithDescription(`Trigger Tier 3 PR shepherd to drive an existing implementer-PR through codex review fix loops to merge. The shepherd reads .status.yaml entries with status in {implementing, review-fixing}, evaluates decide() against the linked PR's codex review state, and may invoke the implementer with --review-feedback or merge the PR with --match-head-commit. Cost: ~$1-5 per proposal (subscription quota). Duration: 1-10 minutes per proposal. Result: either a follow-up commit on the implementer's branch (review-fixing transition) or a merged PR + .status.yaml=merged. Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
+		mcplib.WithDescription(`Trigger Tier 3 PR shepherd to drive an existing implementer-PR through codex review fix loops to merge.
+
+The shepherd reads .status.yaml entries with status in {implementing, review-fixing}, evaluates decide() against the linked PR's codex review state, and may invoke the implementer with --review-feedback or merge the PR with --match-head-commit.
+
+Cost: ~$1-5 per proposal (subscription quota).
+Duration: 1-10 minutes per proposal.
+Result: either a follow-up commit on the implementer's branch (review-fixing transition) or a merged PR + .status.yaml=merged.
+
+Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
 		mcplib.WithString("service",
 			mcplib.Description("Optional. Filter to one service. Leave empty to consider all services."),
+			// `mctl-agents` is intentionally INCLUDED here, mirroring the
+			// Tier 2 implementer's allowlist (which added mctl-agents in
+			// mctlhq/mctl-agents PR #11). The implementer produces PRs in
+			// the agents repo itself for self-improvement (e.g. the Tier 3
+			// shepherd PRs); the shepherd must drive those to merge too.
+			// Keep aligned with internal/operations/registry.go entry for
+			// `mctl-agents-shepherd` and with the implementer's enum.
 			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"),
 		),
 		mcplib.WithString("slug",
