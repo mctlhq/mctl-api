@@ -130,6 +130,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerMentorOnly())
 	srv.AddTool(s.toolTriggerSingleService())
 	srv.AddTool(s.toolTriggerImplementer())
+	srv.AddTool(s.toolTriggerShepherd())
 	srv.AddTool(s.toolListRecentAgentRuns())
 
 	return srv
@@ -1940,14 +1941,17 @@ func requireConfirm(args map[string]any, subject string) *mcplib.CallToolResult 
 }
 
 // ─── mctl-agents triggers ─────────────────────────────────────────────
-// Five admin-only tools that drive the mctl-agents pipeline (proactive
+// Six admin-only tools that drive the mctl-agents pipeline (proactive
 // platform R&D — researcher → analyst → spec-writer per service, plus a
 // mentor weekly digest, plus a Tier 2 implementer that opens PRs from
-// accepted proposals). Three of them submit the same Argo
-// ClusterWorkflowTemplate `mctl-agents-run` with different `mode`
-// parameters; `mctl_trigger_implementer` submits the separate
-// `mctl-agents-implement` template (RiskMedium — opens PRs in sibling
-// repos); `mctl_list_recent_agent_runs` lists recent runs.
+// accepted proposals, plus a Tier 3 shepherd that drives those PRs to
+// merge). Three of them submit the same Argo ClusterWorkflowTemplate
+// `mctl-agents-run` with different `mode` parameters;
+// `mctl_trigger_implementer` submits the separate `mctl-agents-implement`
+// template (RiskMedium — opens PRs in sibling repos);
+// `mctl_trigger_shepherd` submits the separate `mctl-agents-shepherd`
+// template (RiskMedium — drives review fix loops and merges PRs);
+// `mctl_list_recent_agent_runs` lists recent runs.
 
 func (s *Server) toolTriggerAgentsRun() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_agents_run",
@@ -2054,11 +2058,39 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_re
 	return tool, handler
 }
 
+func (s *Server) toolTriggerShepherd() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_trigger_shepherd",
+		mcplib.WithTitleAnnotation("Run mctl-agents Tier 3 PR shepherd"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Trigger Tier 3 PR shepherd to drive an existing implementer-PR through codex review fix loops to merge. The shepherd reads .status.yaml entries with status in {implementing, review-fixing}, evaluates decide() against the linked PR's codex review state, and may invoke the implementer with --review-feedback or merge the PR with --match-head-commit. Cost: ~$1-5 per proposal (subscription quota). Duration: 1-10 minutes per proposal. Result: either a follow-up commit on the implementer's branch (review-fixing transition) or a merged PR + .status.yaml=merged. Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
+		mcplib.WithString("service",
+			mcplib.Description("Optional. Filter to one service. Leave empty to consider all services."),
+			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"),
+		),
+		mcplib.WithString("slug",
+			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
+		),
+		mcplib.WithString("dry_run",
+			mcplib.Description("Set to 'true' to evaluate decide() for every matched proposal and print the decision WITHOUT calling the implementer or merging anything. Default 'false'."),
+			mcplib.Enum("true", "false"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-shepherd/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger shepherd: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
 func (s *Server) toolListRecentAgentRuns() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_recent_agent_runs",
 		mcplib.WithTitleAnnotation("Recent mctl-agents runs"),
 		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDescription(`List the most recent mctl-agents triggers (up to 10): scheduled cron runs, manual triggers via the other three tools, and any operator-initiated submissions. Each item includes mode, service (for single-service runs), status, who triggered it, and timestamp. Admin-only.`),
+		mcplib.WithDescription(`List the most recent mctl-agents triggers (up to 10): scheduled cron runs, manual triggers via the other four trigger tools, and any operator-initiated submissions. Each item includes mode, service (for single-service runs), status, who triggered it, and timestamp. Admin-only.`),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		body, err := s.apiGet(ctx, "/api/v1/agent-runs")
