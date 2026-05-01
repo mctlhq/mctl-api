@@ -42,6 +42,11 @@ type OAuthMeta struct {
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
 }
 
+// maxOAuthFormBytes caps the request body size for OAuth form-encoded endpoints
+// (token, revoke). Real OAuth bodies are well under 1 KB; 16 KB leaves headroom
+// for unusually long client_id / refresh_token values without enabling abuse.
+const maxOAuthFormBytes = 1 << 14 // 16 KiB
+
 // handleOAuthMeta serves the RFC 8414 OAuth server metadata document.
 func (h *Handlers) handleOAuthMeta(w http.ResponseWriter, r *http.Request) {
 	if h.opts.OAuthServer == nil {
@@ -239,6 +244,7 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
 	if err := r.ParseForm(); err != nil {
 		tokenError(w, "invalid_request", "failed to parse request body")
 		return
@@ -303,6 +309,7 @@ func (h *Handlers) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
 	if err := r.ParseForm(); err == nil {
 		o.RevokeRefreshToken(r.FormValue("token"))
 	}
