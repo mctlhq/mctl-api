@@ -29,11 +29,11 @@ REST API (/api/v1/*)  ◄── Backstage / CLI / HTTP clients
 
 | Category | Details |
 |----------|---------|
-| Language | Go 1.24 |
+| Language | Go 1.25 |
 | HTTP Router | chi v5.2 |
 | MCP Server | mcp-go v0.31 (Streamable HTTP transport) |
 | Auth | GitHub token resolution, Dex/OIDC JWT, OAuth 2.0 PKCE |
-| Database | PostgreSQL via pgx v5.8 (audit logs) |
+| Database | PostgreSQL via pgx v5.9 (audit logs) |
 | Kubernetes | client-go v0.32 (quota reader) |
 | Rate Limiting | httprate v0.15 (100 req/min read, 20 req/min write) |
 | Container Registry | ghcr.io/mctlhq/mctl-api |
@@ -75,7 +75,7 @@ mctl-api/
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - GitHub CLI (`gh`) — for obtaining auth tokens
 - Access to the `mctlhq` GitHub organization
 
@@ -327,7 +327,7 @@ Linting uses golangci-lint with errcheck, govet, staticcheck, gosec, bodyclose, 
 GitHub Actions workflow (`.github/workflows/build.yml`):
 
 - **Triggers:** Semver tags (`*.*.*`) and pull requests to `main`
-- **Steps:** Checkout → Go 1.24 setup → golangci-lint → Build + test → Docker build → Push to GHCR → Trivy vulnerability scan → GitOps tag update → Telegram notification
+- **Steps:** Checkout → Go 1.25 setup → golangci-lint → Build + test → Docker build → Push to GHCR → Trivy vulnerability scan → GitOps tag update → Telegram notification
 - **Registry:** `ghcr.io/mctlhq/mctl-api`
 - **Dependabot:** Enabled for `go.mod` dependency updates
 
