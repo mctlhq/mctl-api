@@ -33,3 +33,8 @@ linters:
         # Taint analysis is too coarse to express this, so we rely on review
         # for new outbound HTTP sites instead of per-call #nosec annotations.
         - G704
+        # G706 (log injection): the application logs through stdlib
+        # slog.JSONHandler (cmd/api/main.go), which JSON-escapes attribute
+        # values, so untrusted strings cannot break out of the structured
+        # log format.
+        - G706
