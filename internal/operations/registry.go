@@ -370,7 +370,7 @@ var builtinOperations = []Operation{
 		},
 	},
 	// ─── mctl-agents triggers ─────────────────────────────────────────────
-	// Four platform-scoped (AdminOnly) operations that submit Workflows in
+	// Five platform-scoped (AdminOnly) operations that submit Workflows in
 	// the argo-workflows namespace (mctl-gitops repo holds the CWFTs):
 	//   - mctl-agents-run / mctl-agents-mentor-only / mctl-agents-single-service
 	//     all reference the SAME `mctl-agents-run` ClusterWorkflowTemplate;
@@ -378,6 +378,11 @@ var builtinOperations = []Operation{
 	//   - mctl-agents-implement (Tier 2) references its own
 	//     `mctl-agents-implement` ClusterWorkflowTemplate — it opens PRs in
 	//     sibling repos, so it carries RiskMedium instead of RiskLow.
+	//   - mctl-agents-shepherd (Tier 3) references its own
+	//     `mctl-agents-shepherd` ClusterWorkflowTemplate — it drives existing
+	//     implementer-PRs through codex review fix loops to merge, so it
+	//     carries RiskMedium (merging is irreversible per-PR but reviewable
+	//     before the fact).
 	// Cost / duration estimates in the Description so the LLM caller can warn
 	// the user before triggering.
 	{
@@ -419,7 +424,7 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/"},
 		Parameters: []ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "single-service", Description: "Run mode (locked to 'single-service')", Enum: []string{"single-service"}},
-			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: []string{"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops"}},
+			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: []string{"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}},
 		},
 	},
 	{
@@ -437,9 +442,41 @@ var builtinOperations = []Operation{
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch>"},
 		Parameters: []ParameterDef{
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}},
 			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
 			{Name: "force", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to retry a proposal stuck in `in-progress` (previous attempt may have crashed). Default 'false' (skip such proposals).", Enum: []string{"true", "false"}},
+		},
+	},
+	{
+		// Tier 3 PR shepherd — drives existing implementer-PRs through codex
+		// review fix loops to merge. Reads .status.yaml entries with status in
+		// {implementing, review-fixing}, evaluates decide() against the linked
+		// PR's codex review state, and may invoke the implementer with
+		// --review-feedback or merge the PR with --match-head-commit. Risk
+		// classified as medium (it MERGES PRs as the bot user — irreversible
+		// per-PR, but each merge is gated by an upfront codex review and the
+		// human-set acceptance gate, so no unsupervised destructive action).
+		// Admin-only.
+		Name:             "mctl-agents-shepherd",
+		DisplayName:      "Run mctl-agents Tier 3 PR shepherd",
+		Description:      "Tier 3 PR shepherd: drive existing implementer-PRs through codex review fix loops to merge. Reads .status.yaml entries with status in {implementing, review-fixing} and, per the decide() policy, either invokes the implementer with --review-feedback to push a follow-up commit (review-fixing transition) or merges the PR with --match-head-commit (status=merged). Optionally filter by service or slug; dry_run=true prints decisions without acting. Admin-only. Cost: ~$1–5 per proposal (subscription quota). Duration: 1–10 min per proposal. Updates .status.yaml in mctl-gitops main and may merge PRs in mctlhq/<service>.",
+		WorkflowTemplate: "mctl-agents-shepherd",
+		RiskLevel:        RiskMedium,
+		RequiresConfirm:  false,
+		AdminOnly:        true,
+		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch> (follow-up commits or merge)"},
+		Parameters: []ParameterDef{
+			// `mctl-agents` is intentionally INCLUDED in the shepherd's service
+			// enum (and the matching MCP tool enum), aligned with the Tier 2
+			// implementer which added `mctl-agents` to its allowlist in
+			// mctlhq/mctl-agents PR #11. The implementer's self-improvement
+			// pipeline produces PRs in the agents repo itself (e.g. the
+			// tier3-shepherd PRs landing now); the shepherd must drive those
+			// to merge too. If the implementer's allowlist ever changes,
+			// mirror the change here.
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}},
+			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
+			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to evaluate decide() for every matched proposal and print the decision WITHOUT calling the implementer or merging anything. Default 'false'.", Enum: []string{"true", "false"}},
 		},
 	},
 	{
