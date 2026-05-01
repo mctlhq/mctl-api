@@ -2008,7 +2008,7 @@ Admin-only. Returns workflow_name.`),
 		mcplib.WithString("service",
 			mcplib.Required(),
 			mcplib.Description("Which service-agent to run"),
-			mcplib.Enum("mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops"),
+			mcplib.Enum("mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -2037,7 +2037,7 @@ Optional filters narrow the run scope. By default ALL accepted proposals are pro
 Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
 		mcplib.WithString("service",
 			mcplib.Description("Optional. Filter to one service. Leave empty to consider all services."),
-			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops"),
+			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"),
 		),
 		mcplib.WithString("slug",
 			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
