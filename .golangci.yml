@@ -26,3 +26,10 @@ linters:
     gosec:
       excludes:
         - G104
+        # G704 (SSRF): outbound HTTP calls in this codebase are either against
+        # internal services configured at startup (BackstageInternalURL, MCP
+        # apiURL) or against well-known fixed endpoints (github.com OAuth).
+        # User-controlled segments are url.PathEscape/url.QueryEscape'd.
+        # Taint analysis is too coarse to express this, so we rely on review
+        # for new outbound HTTP sites instead of per-call #nosec annotations.
+        - G704
