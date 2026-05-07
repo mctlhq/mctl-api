@@ -17,7 +17,9 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -253,8 +255,11 @@ func (h *Handlers) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Operator-initiated runs from the audit log. Don't cap here —
+	// merge with cron-driven runs first, then sort+truncate so the
+	// response shows the actual most-recent activity.
 	entries := h.opts.AuditLog.List(50)
-	var items []map[string]interface{}
+	items := []map[string]interface{}{}
 	for i := range entries {
 		e := &entries[i]
 		if !strings.HasPrefix(e.Operation, "mctl-agents-") {
@@ -272,17 +277,49 @@ func (h *Handlers) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
 			"service":      service,
 			"status":       e.Status,
 			"user":         e.UserID,
-			"timestamp":    e.Timestamp,
-			"riskLevel":    e.RiskLevel,
-			"message":      e.Message,
+			// Format timestamp as RFC3339 string so the merge-sort
+			// comparator (string compare) sees uniform types — cron
+			// items already arrive as Z-suffixed RFC3339 strings.
+			// audit.Entry.Timestamp is a time.Time, so without this
+			// the type assertion in the comparator falls through to
+			// "" and operator entries always sort last.
+			"timestamp": e.Timestamp.UTC().Format(time.RFC3339),
+			"riskLevel": e.RiskLevel,
+			"message":   e.Message,
+			"source":    "operator",
 		})
-		if len(items) >= 10 {
-			break
-		}
 	}
-	if items == nil {
-		items = []map[string]interface{}{}
+
+	// Cron-driven runs from Argo Workflow API. The audit log only
+	// records operator triggers (REST POST → Append), so without
+	// this the response misses every scheduled mctl-agents-daily /
+	// mctl-agents-shepherd firing. Limit to 14d so the merge stays
+	// bounded; degrade gracefully on lookup errors instead of
+	// failing the whole response — the operator panel still wants
+	// audit-log data even if the cluster API is briefly unreachable.
+	since := time.Now().Add(-14 * 24 * time.Hour)
+	cronItems, err := h.opts.Executor.ListCronAgentRuns(r.Context(), "argo-workflows", "mctl-agents-", since)
+	if err != nil {
+		slog.Warn("ListCronAgentRuns failed; returning audit-only view",
+			"error", err)
+	} else {
+		items = append(items, cronItems...)
 	}
+
+	// Sort by timestamp descending (newest first), then cap at 10.
+	sort.SliceStable(items, func(i, j int) bool {
+		ti, _ := items[i]["timestamp"].(string)
+		tj, _ := items[j]["timestamp"].(string)
+		// RFC3339 is lexicographically sortable when both values
+		// have identical fractional-second precision; the audit
+		// log and Argo both emit Zulu-suffixed RFC3339 without
+		// fractional seconds, so direct string compare is safe.
+		return ti > tj
+	})
+	if len(items) > 10 {
+		items = items[:10]
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"items": items,
 		"count": len(items),
