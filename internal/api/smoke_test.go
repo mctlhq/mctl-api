@@ -126,6 +126,7 @@ func (f *fakeArgoCD) ListApps(_ string) ([]argocd.AppStatus, error) {
 type fakeExecutor struct {
 	submitted       []string
 	submittedParams []map[string]string
+	cronAgentRuns   []map[string]interface{}
 }
 
 func (f *fakeExecutor) Submit(_ context.Context, op operations.Operation, params map[string]string, userID, namespace string) (*operations.SubmitResult, error) {
@@ -153,6 +154,10 @@ func (f *fakeExecutor) GetWorkflowStatus(_ context.Context, namespace, name stri
 		"namespace": namespace,
 		"phase":     "Succeeded",
 	}, nil
+}
+
+func (f *fakeExecutor) ListCronAgentRuns(_ context.Context, _, _ string, _ time.Time) ([]map[string]interface{}, error) {
+	return f.cronAgentRuns, nil
 }
 
 type fakeVaultReader struct {

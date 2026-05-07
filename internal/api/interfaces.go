@@ -52,6 +52,13 @@ type ArgoStatusClient interface {
 type WorkflowExecutor interface {
 	Submit(ctx context.Context, op operations.Operation, params map[string]string, userID string, namespace string) (*operations.SubmitResult, error)
 	GetWorkflowStatus(ctx context.Context, namespace, name string) (map[string]interface{}, error)
+	// ListCronAgentRuns returns Workflow objects spawned by a
+	// CronWorkflow (label workflows.argoproj.io/cron-workflow=...).
+	// Used by ListAgentRuns to surface cron-driven runs alongside
+	// operator-initiated audit-log entries — without this the MCP
+	// tool mctl_list_recent_agent_runs is blind to scheduled cron
+	// firings (see ~/.claude/plans/mctl-agents-daily-cron-visibility.md).
+	ListCronAgentRuns(ctx context.Context, namespace, cronNamePrefix string, since time.Time) ([]map[string]interface{}, error)
 }
 
 // AuditLog is the interface for recording and querying audit events.

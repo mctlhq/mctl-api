@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -167,6 +168,94 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 		Status:       "Pending",
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}, nil
+}
+
+// ListCronAgentRuns returns Argo Workflows in `namespace` that were
+// launched directly by a CronWorkflow (label
+// `workflows.argoproj.io/cron-workflow=<name>`) where the cron name
+// matches `cronNamePrefix`. Workflows older than `since` are dropped.
+//
+// The audit log only records operator-initiated triggers (mctl-api
+// REST POST → AuditLog.Append), so without this method
+// `mctl_list_recent_agent_runs` is blind to cron-driven runs and the
+// operator gets a false "agent system idle" reading. See
+// ~/.claude/plans/mctl-agents-daily-cron-visibility.md for the
+// 2026-05-07 incident that exposed this gap.
+//
+// Returns the same shape as audit-log entries (workflowName,
+// operation, status, user, timestamp, riskLevel, message) plus a
+// `source: "cron"` tag so the handler can merge cleanly.
+func (e *Executor) ListCronAgentRuns(ctx context.Context, namespace, cronNamePrefix string, since time.Time) ([]map[string]interface{}, error) {
+	if e.dynamicClient == nil {
+		return nil, fmt.Errorf("kubernetes client not available")
+	}
+
+	list, err := e.dynamicClient.Resource(workflowGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
+		// Label selector: any Workflow with the cron-workflow label
+		// (Argo CronWorkflow controller stamps this on every spawned
+		// child Workflow). We further filter by name prefix in code
+		// because LabelSelector doesn't support starts-with semantics.
+		LabelSelector: "workflows.argoproj.io/cron-workflow",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list cron-driven workflows: %w", err)
+	}
+
+	items := make([]map[string]interface{}, 0, len(list.Items))
+	for i := range list.Items {
+		wf := &list.Items[i]
+		meta, _ := wf.Object["metadata"].(map[string]interface{})
+		if meta == nil {
+			continue
+		}
+		labels, _ := meta["labels"].(map[string]interface{})
+		cronName, _ := labels["workflows.argoproj.io/cron-workflow"].(string)
+		if cronNamePrefix != "" && !strings.HasPrefix(cronName, cronNamePrefix) {
+			continue
+		}
+		creationTimestamp, _ := meta["creationTimestamp"].(string)
+		if !since.IsZero() && creationTimestamp != "" {
+			t, err := time.Parse(time.RFC3339, creationTimestamp)
+			if err == nil && t.Before(since) {
+				continue
+			}
+		}
+		name, _ := meta["name"].(string)
+		status, _ := wf.Object["status"].(map[string]interface{})
+		phase, _ := status["phase"].(string)
+		message, _ := status["message"].(string)
+
+		items = append(items, map[string]interface{}{
+			"workflowName": name,
+			"operation":    cronName,
+			"status":       phaseToOpStatus(phase),
+			"user":         "cron",
+			"timestamp":    creationTimestamp,
+			"riskLevel":    "low",
+			"message":      message,
+			"source":       "cron",
+		})
+	}
+	return items, nil
+}
+
+// phaseToOpStatus maps Argo's workflow.status.phase to the same
+// status vocabulary the audit log uses ("submitted" / "succeeded" /
+// "failed" / "error"), so audit + cron entries can be merged in the
+// handler without the caller second-guessing two formats.
+func phaseToOpStatus(phase string) string {
+	switch phase {
+	case "Pending", "Running":
+		return "submitted"
+	case "Succeeded":
+		return "succeeded"
+	case "Failed":
+		return "failed"
+	case "Error":
+		return "error"
+	default:
+		return "unknown"
+	}
 }
 
 // GetWorkflowStatus fetches the current state of a workflow from the Kubernetes API.

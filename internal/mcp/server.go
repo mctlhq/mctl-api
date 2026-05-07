@@ -2105,7 +2105,7 @@ func (s *Server) toolListRecentAgentRuns() (mcplib.Tool, server.ToolHandlerFunc)
 	tool := mcplib.NewTool("mctl_list_recent_agent_runs",
 		mcplib.WithTitleAnnotation("Recent mctl-agents runs"),
 		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDescription(`List the most recent mctl-agents triggers (up to 10): scheduled cron runs, manual triggers via the other four trigger tools, and any operator-initiated submissions. Each item includes mode, service (for single-service runs), status, who triggered it, and timestamp. Admin-only.`),
+		mcplib.WithDescription(`List the most recent mctl-agents triggers (up to 10): scheduled cron runs and operator-initiated submissions, merged and sorted newest-first. Each item includes operation, mode, service (for single-service runs), status, who triggered it (user id or "cron"), timestamp, and a "source" field of "cron" or "operator" so the caller can distinguish autonomous schedule firings from manual triggers. Admin-only.`),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		body, err := s.apiGet(ctx, "/api/v1/agent-runs")
