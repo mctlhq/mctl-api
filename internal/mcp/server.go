@@ -1704,7 +1704,8 @@ func (s *Server) toolListIncidents() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithDescription(`List platform incidents (alerts from AlertManager, GitHub Actions failures, polling).
 
 Returns incidents with their status, severity, and summary. Filter by team, service, status, or severity.
-Default: returns open incidents, most recent first.`),
+Default: returns active incidents (open + analyzing + fix_proposed + acknowledged), most recent first.
+Pass status=open for the legacy "freshly fired" filter, or status=resolved to inspect history.`),
 		mcplib.WithString("team",
 			mcplib.Description("Filter by team/tenant name"),
 		),
@@ -1712,7 +1713,7 @@ Default: returns open incidents, most recent first.`),
 			mcplib.Description("Filter by service name"),
 		),
 		mcplib.WithString("status",
-			mcplib.Description("Filter by status: open, analyzing, fix_proposed, resolved, suppressed, acknowledged (default: open)"),
+			mcplib.Description("Filter by status: active, open, analyzing, fix_proposed, resolved, suppressed, acknowledged (default: active = any non-terminal)"),
 		),
 		mcplib.WithString("severity",
 			mcplib.Description("Filter by severity: critical, warning, info"),
@@ -1734,7 +1735,11 @@ Default: returns open incidents, most recent first.`),
 		if v, ok := args["status"].(string); ok && v != "" {
 			path += "status=" + url.QueryEscape(v) + "&"
 		} else {
-			path += "status=open&"
+			// Default: anything the operator might still need to react to.
+			// Empty filter would expose resolved+suppressed noise; "open" used
+			// to be the default but missed analyzing/fix_proposed/acknowledged
+			// which is where most live incidents actually sit.
+			path += "status=active&"
 		}
 		if v, ok := args["severity"].(string); ok && v != "" {
 			path += "severity=" + url.QueryEscape(v) + "&"
