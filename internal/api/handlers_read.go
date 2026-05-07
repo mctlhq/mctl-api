@@ -277,10 +277,16 @@ func (h *Handlers) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
 			"service":      service,
 			"status":       e.Status,
 			"user":         e.UserID,
-			"timestamp":    e.Timestamp,
-			"riskLevel":    e.RiskLevel,
-			"message":      e.Message,
-			"source":       "operator",
+			// Format timestamp as RFC3339 string so the merge-sort
+			// comparator (string compare) sees uniform types — cron
+			// items already arrive as Z-suffixed RFC3339 strings.
+			// audit.Entry.Timestamp is a time.Time, so without this
+			// the type assertion in the comparator falls through to
+			// "" and operator entries always sort last.
+			"timestamp": e.Timestamp.UTC().Format(time.RFC3339),
+			"riskLevel": e.RiskLevel,
+			"message":   e.Message,
+			"source":    "operator",
 		})
 	}
 
