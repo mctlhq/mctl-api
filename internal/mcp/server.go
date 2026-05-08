@@ -306,6 +306,23 @@ Actions:
 - "deploy": Update an existing service to a new version. Rebuilds and updates image tag.
 - "update-config": Change environment variables or secrets without rebuilding.
 
+Pre-conditions (BEFORE calling onboard):
+- Repo must contain a Dockerfile at <dockerfile_path>. If absent, see
+  https://docs.mctl.ai/guides/scaffolding for canonical Node/Python/Go/static
+  templates — copy verbatim, adjust EXPOSE port and entrypoint command.
+- For auto-deploy on push to main, the repo should also contain
+  .github/workflows/ci.yml with a "deploy" job that POSTs to
+  https://api.mctl.ai/api/v1/operations/deploy-service/execute on push to main.
+  The same scaffolding guide ships the canonical SemVer-bumping job snippet.
+- That job needs a GitHub Actions secret MCTL_GITHUB_TOKEN — a classic
+  GitHub PAT with scope "read:user" — to authenticate to mctl-api.
+
+Order of operations for a brand-new repo:
+1. (One-time) mctl_grant_repo_access — install the GitHub App if mctl_list_repos doesn't see the repo.
+2. (One-time) mctl_sync_repos — refresh the visible repo list.
+3. mctl_deploy_service action=onboard with git_tag="0.1.0".
+4. Future pushes to main auto-deploy via the ci.yml job.
+
 The service domain is auto-generated as {team_name}-{component_name}.{platform_domain}.
 Custom domains can be added after deployment using mctl_add_custom_domain.
 For background workers, set component_type to 'worker-service' (no ingress).
@@ -1058,7 +1075,12 @@ Use this when mctl_list_repos returns no repos, or when a specific private repo 
 The returned URL must be opened in a browser — the user installs the GitHub App on their account or org,
 which grants the platform access to clone and build from that repo.
 
-After the browser flow completes, run mctl_sync_repos to register the newly accessible repos.`),
+After the browser flow completes, run mctl_sync_repos to register the newly accessible repos.
+
+For a fresh service the typical next step after sync is mctl_deploy_service action=onboard. That call
+expects the repo to already contain a Dockerfile (and, for auto-deploy on push, a .github/workflows/ci.yml
+with the canonical deploy job and the MCTL_GITHUB_TOKEN secret). If those are missing, see the
+copy-paste templates and onboard checklist at https://docs.mctl.ai/guides/scaffolding before calling onboard.`),
 		mcplib.WithString("team",
 			mcplib.Required(),
 			mcplib.Description("Team name that needs access to the repo"),
