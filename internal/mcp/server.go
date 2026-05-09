@@ -1978,7 +1978,7 @@ func requireConfirm(args map[string]any, subject string) *mcplib.CallToolResult 
 func (s *Server) toolTriggerAgentsRun() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_agents_run",
 		mcplib.WithTitleAnnotation("Run mctl-agents (full)"),
-		mcplib.WithDescription(`Trigger a full mctl-agents run — every service-agent (researcher → analyst → spec-writer in parallel) followed by the mentor weekly digest. Same as the daily 06:00 UTC cron, on demand.
+		mcplib.WithDescription(`Trigger a full mctl-agents run — every service-agent (researcher → analyst → spec-writer in parallel) followed by the mentor weekly digest. Same as the weekly Saturday 00:00 UTC cron, on demand.
 
 Cost: ~$10 against the Claude Pro/Max subscription (no Console billing).
 Duration: ~15 minutes.
