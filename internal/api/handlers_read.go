@@ -403,13 +403,17 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 		namespace = operations.WorkflowNamespace(entry.Operation, team)
 	}
 
+	// Mask sensitive parameter values before exposing the audit entry to
+	// the client (see internal/audit/redact.go).
+	redactedEntry := audit.RedactEntry(*entry)
+
 	// Fetch live status from Kubernetes.
 	wf, err := h.opts.Executor.GetWorkflowStatus(r.Context(), namespace, name)
 	if err != nil {
 		// Fallback to audit log only if live fetch fails.
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"workflow":  name,
-			"audit":     entry,
+			"audit":     redactedEntry,
 			"namespace": namespace,
 			"note":      "Live status unavailable: " + err.Error(),
 		})
@@ -418,7 +422,7 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"workflow":  name,
-		"audit":     entry,
+		"audit":     redactedEntry,
 		"namespace": namespace,
 		"live":      wf,
 	})
@@ -600,7 +604,10 @@ func (h *Handlers) ListAudit(w http.ResponseWriter, r *http.Request) {
 		if !user.IsAdmin() && team != "" && !user.HasTenantAccess(team) {
 			continue
 		}
-		items = append(items, entries[i])
+		// Redact at read-time so historical entries persisted before the
+		// audit/redact module landed are also protected. See
+		// internal/audit/redact.go for the heuristic.
+		items = append(items, audit.RedactEntry(entries[i]))
 	}
 	if items == nil {
 		items = []interface{}{}

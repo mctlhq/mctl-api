@@ -213,7 +213,13 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]Alert, error) {
 	var args []interface{}
 	argIdx := 1
 
-	if f.Status != "" {
+	// "active" is a virtual status meaning "any non-terminal" — i.e. anything
+	// the operator might still need to react to. Mirrors the implicit filter
+	// used by Summary() so list and summary stay consistent.
+	if f.Status == StatusActive {
+		conditions = append(conditions,
+			fmt.Sprintf("status NOT IN ('%s', '%s')", StatusResolved, StatusSuppressed))
+	} else if f.Status != "" {
 		conditions = append(conditions, fmt.Sprintf("status=$%d", argIdx))
 		args = append(args, f.Status)
 		argIdx++

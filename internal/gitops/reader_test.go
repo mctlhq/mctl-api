@@ -176,6 +176,89 @@ dbSecret: billing-payment-api-db
 	}
 }
 
+func TestReadService_NestedHostAndPort(t *testing.T) {
+	// Mirrors the shape that deploy-service actually writes today: top-level
+	// host is absent, hostname lives in ingress.hosts[0], port lives in
+	// service.port. Without the fallback both fields rendered empty in MCP
+	// responses.
+	dir, r := setupTempRepo(t)
+	writeServiceYAML(t, dir, "admins", "mctl-docs", `
+image:
+  tag: "0.1.17"
+service:
+  port: 80
+ingress:
+  enabled: true
+  hosts:
+    - docs.mctl.ai
+    - admins-mctl-docs.mctl.ai
+`)
+	svc, err := r.readService("admins", "mctl-docs")
+	if err != nil {
+		t.Fatalf("readService: %v", err)
+	}
+	if svc.Host != "docs.mctl.ai" {
+		t.Errorf("Host (from ingress.hosts[0]): got %q, want docs.mctl.ai", svc.Host)
+	}
+	if svc.Port != "80" {
+		t.Errorf("Port (from service.port): got %q, want 80", svc.Port)
+	}
+}
+
+func TestReadService_TopLevelOverridesNested(t *testing.T) {
+	// Legacy values still populate the fields when present at the top level.
+	dir, r := setupTempRepo(t)
+	writeServiceYAML(t, dir, "billing", "legacy", `
+image:
+  tag: "1.0.0"
+host: legacy.example.com
+port: 9090
+service:
+  port: 80
+ingress:
+  hosts:
+    - other.example.com
+`)
+	svc, err := r.readService("billing", "legacy")
+	if err != nil {
+		t.Fatalf("readService: %v", err)
+	}
+	if svc.Host != "legacy.example.com" {
+		t.Errorf("top-level host should win, got %q", svc.Host)
+	}
+	if svc.Port != "9090" {
+		t.Errorf("top-level port should win, got %q", svc.Port)
+	}
+}
+
+func TestReadService_IngressHostsLongForm(t *testing.T) {
+	// Some charts (and a chunk of upstream Helm content) ship hosts as
+	// `[{host: foo, paths: [...]}]`. Exercise that branch too.
+	dir, r := setupTempRepo(t)
+	writeServiceYAML(t, dir, "team", "longform", `
+image:
+  tag: "0.1.0"
+service:
+  port: 3000
+ingress:
+  hosts:
+    - host: longform.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+`)
+	svc, err := r.readService("team", "longform")
+	if err != nil {
+		t.Fatalf("readService: %v", err)
+	}
+	if svc.Host != "longform.example.com" {
+		t.Errorf("Host (from ingress.hosts[0].host): got %q", svc.Host)
+	}
+	if svc.Port != "3000" {
+		t.Errorf("Port (from service.port): got %q", svc.Port)
+	}
+}
+
 func TestReadService_worker(t *testing.T) {
 	dir, r := setupTempRepo(t)
 	writeServiceYAML(t, dir, "billing", "worker", `

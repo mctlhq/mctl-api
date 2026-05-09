@@ -397,11 +397,33 @@ func (r *Reader) readService(team, app string) (*Service, error) {
 			svc.ImageTag = tag
 		}
 	}
-	if host, ok := raw["host"].(string); ok {
+	// Host: prefer top-level (legacy), then ingress.hosts[0] which is what
+	// the base-service chart actually consumes. Without this fallback the
+	// field always rendered empty since deploy-service writes the host into
+	// `ingress.hosts`, not the top level.
+	if host, ok := raw["host"].(string); ok && host != "" {
 		svc.Host = host
+	} else if ingress, ok := raw["ingress"].(map[string]interface{}); ok {
+		if hosts, ok := ingress["hosts"].([]interface{}); ok && len(hosts) > 0 {
+			switch v := hosts[0].(type) {
+			case string:
+				svc.Host = v
+			case map[string]interface{}:
+				// Some charts use the long form: {host: foo, paths: [...]}
+				if h, ok := v["host"].(string); ok {
+					svc.Host = h
+				}
+			}
+		}
 	}
-	if port, ok := raw["port"]; ok {
+	// Port: prefer top-level (legacy), then service.port (nested) which is
+	// what the base-service chart's Service template reads.
+	if port, ok := raw["port"]; ok && port != nil {
 		svc.Port = fmt.Sprintf("%v", port)
+	} else if service, ok := raw["service"].(map[string]interface{}); ok {
+		if port, ok := service["port"]; ok && port != nil {
+			svc.Port = fmt.Sprintf("%v", port)
+		}
 	}
 	if _, ok := raw["dbSecret"]; ok {
 		svc.HasDatabase = true

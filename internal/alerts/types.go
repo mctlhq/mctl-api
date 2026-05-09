@@ -32,6 +32,13 @@ const (
 	StatusResolved     = "resolved"
 	StatusSuppressed   = "suppressed"
 	StatusAcknowledged = "acknowledged"
+
+	// StatusActive is a virtual filter value meaning "any non-terminal" —
+	// open, analyzing, fix_proposed, or acknowledged. Used as the default
+	// for list endpoints so operators see everything that might still need
+	// attention without having to enumerate intermediate states. Resolved
+	// and suppressed are excluded.
+	StatusActive = "active"
 )
 
 // Severity levels.
