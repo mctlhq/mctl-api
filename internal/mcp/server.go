@@ -1470,17 +1470,17 @@ Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track pro
 func sanitizePreviewTag(ref string) string {
 	var b []byte
 	for _, c := range []byte(ref) {
-		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+		switch {
+		case (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'):
 			b = append(b, c)
-		} else if c >= 'A' && c <= 'Z' {
+		case c >= 'A' && c <= 'Z':
 			b = append(b, c+32) // to lower
-		} else {
+		default:
 			if len(b) > 0 && b[len(b)-1] != '-' {
 				b = append(b, '-')
 			}
 		}
 	}
-	// trim trailing dash
 	for len(b) > 0 && b[len(b)-1] == '-' {
 		b = b[:len(b)-1]
 	}
