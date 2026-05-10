@@ -95,7 +95,7 @@ func NewOAuthServer(baseURL, ghClientID, ghClientSecret string, jwtSecret []byte
 		GitHubClientSecret:  ghClientSecret,
 		JWTSecret:           jwtSecret,
 		AllowedRedirectURIs: allowedRedirectURIs,
-		AccessTokenTTL:      time.Hour,
+		AccessTokenTTL:      7 * 24 * time.Hour,
 		RefreshTokenTTL:     30 * 24 * time.Hour,
 		GitHubValidator:     ghValidator,
 	}
