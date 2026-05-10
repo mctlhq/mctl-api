@@ -258,7 +258,7 @@ var builtinOperations = []Operation{
 	{
 		Name:             "preview-deploy",
 		DisplayName:      "Deploy Preview Environment",
-		Description:      "Deploy an ephemeral preview copy of a service using an existing image tag. The preview is accessible at {app}-{id}.preview.{platform_domain} and is automatically deleted after the TTL expires.",
+		Description:      "Deploy an ephemeral preview copy of a service. Supports two modes: (1) existing image — pass image_tag directly; (2) build from branch — pass git_ref + dockerfile_repo and the platform builds the image first. Preview is accessible at {app}-{id}.{platform_domain} and auto-deleted after the TTL.",
 		WorkflowTemplate: "preview-deploy",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
@@ -266,8 +266,11 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "image_tag", Type: "string", Required: true, Description: "Existing image tag to deploy (must already be built)"},
+			{Name: "image_tag", Type: "string", Required: true, Description: "Image tag to deploy. When git_ref is set the MCP layer auto-generates this."},
 			{Name: "ttl_hours", Type: "string", Default: "24", Description: "Preview lifetime in hours (default: 24)"},
+			{Name: "git_ref", Type: "string", Default: "", Description: "Branch, SHA, or tag to build from. Leave empty to deploy an existing image_tag."},
+			{Name: "dockerfile_repo", Type: "string", Default: "", Description: "Source repo in org/repo format. Required when git_ref is set."},
+			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Description: "Path to Dockerfile inside dockerfile_repo (default: Dockerfile)"},
 		},
 	},
 	{

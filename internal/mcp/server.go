@@ -1408,8 +1408,12 @@ func (s *Server) toolCreatePreview() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Create Preview"),
 		mcplib.WithDescription(`Deploy an ephemeral preview environment for a service.
 
-Uses an existing built image tag — no rebuild required.
-The preview is accessible at {app}-{preview_id}.preview.{platform_domain}.
+Two modes:
+  1. Existing image: provide image_tag — deploys immediately, no build.
+  2. Build from branch: provide git_ref + dockerfile_repo — the platform builds
+     the image from source, then deploys. image_tag is auto-generated.
+
+The preview is accessible at {app}-{preview_id}.{platform_domain}.
 It is automatically deleted after ttl_hours (default: 24).
 
 Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track progress.`),
@@ -1422,8 +1426,16 @@ Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track pro
 			mcplib.Description("Service name to preview"),
 		),
 		mcplib.WithString("image_tag",
-			mcplib.Required(),
-			mcplib.Description("Existing image tag to deploy (must already be built)"),
+			mcplib.Description("Existing image tag to deploy. Omit when git_ref is set — the tag is auto-generated."),
+		),
+		mcplib.WithString("git_ref",
+			mcplib.Description("Branch, SHA, or tag to build from (e.g. 'feat/my-feature'). Triggers a build before deploy."),
+		),
+		mcplib.WithString("dockerfile_repo",
+			mcplib.Description("Source repo in org/repo format (e.g. 'myorg/my-service'). Required when git_ref is set."),
+		),
+		mcplib.WithString("dockerfile_path",
+			mcplib.Description("Path to Dockerfile inside dockerfile_repo (default: Dockerfile)"),
 		),
 		mcplib.WithString("ttl_hours",
 			mcplib.Description("Preview lifetime in hours (default: 24)"),
@@ -1432,6 +1444,17 @@ Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track pro
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		params := extractStringParams(req.GetArguments())
+
+		// When building from a branch: auto-generate image_tag if not provided.
+		if params["git_ref"] != "" && params["image_tag"] == "" {
+			safe := sanitizePreviewTag(params["git_ref"])
+			params["image_tag"] = fmt.Sprintf("preview-%s-%d", safe, time.Now().Unix()%100000)
+		}
+
+		if params["image_tag"] == "" {
+			return mcplib.NewToolResultError("image_tag is required when git_ref is not set"), nil
+		}
+
 		body, err := s.apiPost(ctx, "/api/v1/operations/preview-deploy/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create preview: %v", err)), nil
@@ -1440,6 +1463,31 @@ Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track pro
 	}
 
 	return tool, handler
+}
+
+// sanitizePreviewTag converts a git ref to a valid image tag segment:
+// replaces non-alphanumeric chars with hyphens and trims to 30 chars.
+func sanitizePreviewTag(ref string) string {
+	var b []byte
+	for _, c := range []byte(ref) {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			b = append(b, c)
+		} else if c >= 'A' && c <= 'Z' {
+			b = append(b, c+32) // to lower
+		} else {
+			if len(b) > 0 && b[len(b)-1] != '-' {
+				b = append(b, '-')
+			}
+		}
+	}
+	// trim trailing dash
+	for len(b) > 0 && b[len(b)-1] == '-' {
+		b = b[:len(b)-1]
+	}
+	if len(b) > 30 {
+		b = b[:30]
+	}
+	return string(b)
 }
 
 func (s *Server) toolDeletePreview() (mcplib.Tool, server.ToolHandlerFunc) {
