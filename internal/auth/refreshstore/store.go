@@ -57,8 +57,9 @@ type Store interface {
 	Rotate(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time) (login string, groups []string, err error)
 
 	// RevokeFamily revokes all tokens that share a family_id with rawToken.
+	// If clientID is non-empty, only tokens matching that client_id are revoked.
 	// Idempotent: no error if the token does not exist.
-	RevokeFamily(rawToken, reason string) error
+	RevokeFamily(rawToken, clientID, reason string) error
 
 	// GC hard-deletes rows where expires_at < now()-7d AND revoked_at IS NOT NULL.
 	// Safe to call on a schedule; never deletes live tokens.

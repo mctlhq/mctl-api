@@ -322,7 +322,7 @@ func (h *Handlers) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
 	if err := r.ParseForm(); err == nil {
-		o.RevokeRefreshToken(r.FormValue("token"))
+		o.RevokeRefreshToken(r.FormValue("token"), r.FormValue("client_id"))
 	}
 	// Per RFC 7009, a successful revocation always returns 200.
 	w.WriteHeader(http.StatusOK)

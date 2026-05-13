@@ -331,12 +331,14 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 
 // RevokeRefreshToken revokes a stored refresh token (and its whole family when
 // the persistent store is active — see refreshstore.Store).
-func (s *OAuthServer) RevokeRefreshToken(refreshToken string) {
+// clientID scopes the revocation to tokens issued for that client; pass ""
+// to revoke unconditionally (in-memory fallback, or when client is unknown).
+func (s *OAuthServer) RevokeRefreshToken(refreshToken, clientID string) {
 	if refreshToken == "" {
 		return
 	}
 	if s.RefreshStore != nil {
-		if err := s.RefreshStore.RevokeFamily(refreshToken, "explicit_revoke"); err != nil {
+		if err := s.RefreshStore.RevokeFamily(refreshToken, clientID, "explicit_revoke"); err != nil {
 			slog.Warn("oauth: failed to revoke refresh token family", "error", err)
 		}
 		return

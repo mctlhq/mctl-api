@@ -164,10 +164,15 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	}
 
 	// Reuse detection: token was already rotated → attacker replayed an old token.
+	// Grace window (30s): if the rotation was very recent the client may be
+	// retrying after a lost response — treat as invalid rather than revoking.
 	// Revoke the whole family to protect the legitimate session. Fail closed:
 	// if the revocation write fails, return an error rather than silently
 	// reporting successful revocation.
 	if rotatedAt != nil {
+		if time.Since(*rotatedAt) < 30*time.Second {
+			return "", nil, ErrInvalidToken
+		}
 		now := time.Now().UTC()
 		if _, execErr := tx.Exec(ctx,
 			`UPDATE oauth_refresh_tokens
@@ -231,18 +236,31 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 }
 
 // RevokeFamily revokes all non-revoked tokens in the same family as rawToken.
-func (s *PostgresStore) RevokeFamily(rawToken, reason string) error {
+// If clientID is non-empty, only tokens belonging to that client are affected.
+func (s *PostgresStore) RevokeFamily(rawToken, clientID, reason string) error {
 	hash := tokenHash(rawToken)
 	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := s.pool.Exec(ctx,
-		`UPDATE oauth_refresh_tokens
-		 SET revoked_at = $1, revoked_reason = $2
-		 WHERE family_id = (SELECT family_id FROM oauth_refresh_tokens WHERE token_hash = $3)
-		   AND revoked_at IS NULL`,
-		now, reason, hash,
-	)
+	var err error
+	if clientID != "" {
+		_, err = s.pool.Exec(ctx,
+			`UPDATE oauth_refresh_tokens
+			 SET revoked_at = $1, revoked_reason = $2
+			 WHERE family_id = (SELECT family_id FROM oauth_refresh_tokens WHERE token_hash = $3)
+			   AND client_id = $4
+			   AND revoked_at IS NULL`,
+			now, reason, hash, clientID,
+		)
+	} else {
+		_, err = s.pool.Exec(ctx,
+			`UPDATE oauth_refresh_tokens
+			 SET revoked_at = $1, revoked_reason = $2
+			 WHERE family_id = (SELECT family_id FROM oauth_refresh_tokens WHERE token_hash = $3)
+			   AND revoked_at IS NULL`,
+			now, reason, hash,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("oauth refresh store: revoke family: %w", err)
 	}
