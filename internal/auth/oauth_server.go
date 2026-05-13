@@ -264,7 +264,8 @@ func (s *OAuthServer) IssueRefreshToken(login string, groups []string, clientID 
 	expiresAt := time.Now().Add(ttl)
 	if s.RefreshStore != nil {
 		if err := s.RefreshStore.Insert(token, login, clientID, groups, expiresAt); err != nil {
-			return "", fmt.Errorf("store refresh token: %w", err)
+			slog.Error("oauth: refresh store insert failed", "error", err)
+			return "", fmt.Errorf("store refresh token: %w", ErrServerError)
 		}
 		return token, nil
 	}
