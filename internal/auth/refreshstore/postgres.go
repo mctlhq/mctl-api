@@ -1,0 +1,217 @@
+// Copyright 2025 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package refreshstore
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const schema = `
+CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+    token_hash        BYTEA       PRIMARY KEY,
+    client_id         TEXT        NOT NULL,
+    login             TEXT        NOT NULL,
+    groups            JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    family_id         UUID        NOT NULL,
+    parent_token_hash BYTEA,
+    issued_at         TIMESTAMPTZ NOT NULL,
+    expires_at        TIMESTAMPTZ NOT NULL,
+    rotated_at        TIMESTAMPTZ,
+    revoked_at        TIMESTAMPTZ,
+    revoked_reason    TEXT
+);
+CREATE INDEX IF NOT EXISTS oauth_refresh_tokens_family
+    ON oauth_refresh_tokens (family_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS oauth_refresh_tokens_expires
+    ON oauth_refresh_tokens (expires_at) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS oauth_refresh_tokens_login
+    ON oauth_refresh_tokens (login);
+`
+
+// PostgresStore is a Postgres-backed implementation of Store.
+type PostgresStore struct {
+	pool *pgxpool.Pool
+}
+
+// NewPostgresStore creates a PostgresStore and auto-creates the schema.
+func NewPostgresStore(ctx context.Context, connStr string) (*PostgresStore, error) {
+	pool, err := pgxpool.New(ctx, connStr)
+	if err != nil {
+		return nil, fmt.Errorf("oauth refresh store: connect: %w", err)
+	}
+	if _, err := pool.Exec(ctx, schema); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("oauth refresh store: create schema: %w", err)
+	}
+	slog.Info("oauth refresh token store initialized")
+	return &PostgresStore{pool: pool}, nil
+}
+
+func tokenHash(raw string) []byte {
+	h := sha256.Sum256([]byte(raw))
+	return h[:]
+}
+
+// Insert stores a brand-new refresh token (new token family).
+func (s *PostgresStore) Insert(rawToken, login, clientID string, groups []string, expiresAt time.Time) error {
+	groupsJSON, err := json.Marshal(groups)
+	if err != nil {
+		return fmt.Errorf("oauth refresh store: marshal groups: %w", err)
+	}
+	_, err = s.pool.Exec(context.Background(),
+		`INSERT INTO oauth_refresh_tokens
+		 (token_hash, client_id, login, groups, family_id, parent_token_hash, issued_at, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, NULL, NOW(), $6)`,
+		tokenHash(rawToken), clientID, login, groupsJSON, uuid.New(), expiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("oauth refresh store: insert: %w", err)
+	}
+	return nil
+}
+
+// Rotate atomically invalidates oldRawToken and inserts newRawToken in the same family.
+func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time) (string, []string, error) {
+	oldHash := tokenHash(oldRawToken)
+	newHash := tokenHash(newRawToken)
+
+	tx, err := s.pool.BeginTx(context.Background(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return "", nil, fmt.Errorf("oauth refresh store: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var storedClientID, login string
+	var groupsJSON []byte
+	var familyID uuid.UUID
+	var expiresAt time.Time
+	var rotatedAt *time.Time
+	var revokedAt *time.Time
+
+	err = tx.QueryRow(context.Background(),
+		`SELECT client_id, login, groups, family_id, expires_at, rotated_at, revoked_at
+		 FROM oauth_refresh_tokens
+		 WHERE token_hash = $1
+		 FOR UPDATE`,
+		oldHash,
+	).Scan(&storedClientID, &login, &groupsJSON, &familyID, &expiresAt, &rotatedAt, &revokedAt)
+	if err == pgx.ErrNoRows {
+		return "", nil, ErrInvalidToken
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("oauth refresh store: lookup: %w", err)
+	}
+
+	if time.Now().After(expiresAt) {
+		return "", nil, ErrInvalidToken
+	}
+
+	// Reuse detection: token was already rotated → attacker replayed an old token.
+	// Revoke the whole family to protect the legitimate session.
+	if rotatedAt != nil {
+		now := time.Now().UTC()
+		_, _ = tx.Exec(context.Background(),
+			`UPDATE oauth_refresh_tokens
+			 SET revoked_at = $1, revoked_reason = 'reuse_detected'
+			 WHERE family_id = $2 AND revoked_at IS NULL`,
+			now, familyID,
+		)
+		_ = tx.Commit(context.Background())
+		slog.Warn("oauth refresh token reuse detected; family revoked",
+			"family_id", familyID, "login", login, "client_id", storedClientID)
+		return "", nil, ErrReuseDetected
+	}
+
+	if revokedAt != nil {
+		return "", nil, ErrInvalidToken
+	}
+	if storedClientID != clientID {
+		return "", nil, ErrClientMismatch
+	}
+
+	var groups []string
+	if err := json.Unmarshal(groupsJSON, &groups); err != nil {
+		groups = nil
+	}
+
+	now := time.Now().UTC()
+
+	// Mark old token as rotated.
+	_, err = tx.Exec(context.Background(),
+		`UPDATE oauth_refresh_tokens SET rotated_at = $1 WHERE token_hash = $2`,
+		now, oldHash,
+	)
+	if err != nil {
+		return "", nil, fmt.Errorf("oauth refresh store: mark rotated: %w", err)
+	}
+
+	// Insert new token inheriting the same family.
+	newGroupsJSON, _ := json.Marshal(groups)
+	_, err = tx.Exec(context.Background(),
+		`INSERT INTO oauth_refresh_tokens
+		 (token_hash, client_id, login, groups, family_id, parent_token_hash, issued_at, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		newHash, clientID, login, newGroupsJSON, familyID, oldHash, now, newExpiresAt,
+	)
+	if err != nil {
+		return "", nil, fmt.Errorf("oauth refresh store: insert rotated: %w", err)
+	}
+
+	if err := tx.Commit(context.Background()); err != nil {
+		return "", nil, fmt.Errorf("oauth refresh store: commit: %w", err)
+	}
+	return login, groups, nil
+}
+
+// RevokeFamily revokes all non-revoked tokens in the same family as rawToken.
+func (s *PostgresStore) RevokeFamily(rawToken, reason string) error {
+	hash := tokenHash(rawToken)
+	now := time.Now().UTC()
+	_, err := s.pool.Exec(context.Background(),
+		`UPDATE oauth_refresh_tokens
+		 SET revoked_at = $1, revoked_reason = $2
+		 WHERE family_id = (SELECT family_id FROM oauth_refresh_tokens WHERE token_hash = $3)
+		   AND revoked_at IS NULL`,
+		now, reason, hash,
+	)
+	if err != nil {
+		return fmt.Errorf("oauth refresh store: revoke family: %w", err)
+	}
+	return nil
+}
+
+// GC hard-deletes rows that expired more than 7 days ago (regardless of revocation
+// state). The 7-day grace window ensures any in-flight refresh that completed just
+// before the token expired is not caught by a race with the GC ticker.
+func (s *PostgresStore) GC() error {
+	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	_, err := s.pool.Exec(context.Background(),
+		`DELETE FROM oauth_refresh_tokens WHERE expires_at < $1`,
+		cutoff,
+	)
+	if err != nil {
+		return fmt.Errorf("oauth refresh store: gc: %w", err)
+	}
+	return nil
+}

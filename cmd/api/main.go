@@ -30,6 +30,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/loki"
@@ -84,6 +85,27 @@ func main() {
 		oauthServer.AccessTokenTTL = cfg.OAuthTokenTTL
 		oauthServer.RefreshTokenTTL = cfg.OAuthRefreshTokenTTL
 		slog.Info("OAuth 2.0 server enabled", "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL)
+
+		// Persistent refresh-token store: prefer OAUTH_DB_URL, fall back to AUDIT_DB_URL.
+		// When available, refresh tokens survive pod restarts; without it the in-memory
+		// fallback is used (tokens lost on restart — the original band-aid behaviour).
+		if oauthDBURL := envOr("OAUTH_DB_URL", os.Getenv("AUDIT_DB_URL")); oauthDBURL != "" {
+			rs, rsErr := refreshstore.NewPostgresStore(context.Background(), oauthDBURL)
+			if rsErr != nil {
+				slog.Warn("oauth refresh store init failed; falling back to in-memory", "error", rsErr)
+			} else {
+				oauthServer.RefreshStore = rs
+				go func() {
+					ticker := time.NewTicker(15 * time.Minute)
+					defer ticker.Stop()
+					for range ticker.C {
+						if err := rs.GC(); err != nil {
+							slog.Warn("oauth refresh store gc failed", "error", err)
+						}
+					}
+				}()
+			}
+		}
 	}
 
 	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer)

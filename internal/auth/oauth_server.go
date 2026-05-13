@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 )
 
 // OAuthServer implements OAuth 2.0 Authorization Code flow with PKCE (RFC 7636).
@@ -48,6 +50,11 @@ type OAuthServer struct {
 	GitHubValidator *GitHubValidator
 	// TenantResolver resolves which tenants a GitHub login belongs to.
 	TenantResolver TenantResolver
+
+	// RefreshStore is an optional persistent store for refresh tokens.
+	// When non-nil it replaces the in-memory refreshTokens store, making
+	// refresh tokens survive pod restarts. Inject via main.go after construction.
+	RefreshStore refreshstore.Store
 
 	codes         authCodeStore
 	refreshTokens refreshTokenStore
@@ -247,18 +254,54 @@ func (s *OAuthServer) IssueRefreshToken(login string, groups []string, clientID 
 	if ttl == 0 {
 		ttl = 30 * 24 * time.Hour
 	}
+	expiresAt := time.Now().Add(ttl)
+	if s.RefreshStore != nil {
+		if err := s.RefreshStore.Insert(token, login, clientID, groups, expiresAt); err != nil {
+			return "", fmt.Errorf("store refresh token: %w", err)
+		}
+		return token, nil
+	}
 	s.refreshTokens.store(token, refreshTokenEntry{
 		Login:     login,
 		Groups:    groups,
 		ClientID:  clientID,
 		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(ttl),
+		ExpiresAt: expiresAt,
 	})
 	return token, nil
 }
 
 // RefreshAccessToken validates a refresh token, rotates it, and issues a new access token.
 func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string, string, error) {
+	if s.RefreshStore != nil {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return "", "", fmt.Errorf("generate refresh token: %w", err)
+		}
+		newToken := base64.RawURLEncoding.EncodeToString(b)
+		ttl := s.RefreshTokenTTL
+		if ttl == 0 {
+			ttl = 30 * 24 * time.Hour
+		}
+		login, groups, err := s.RefreshStore.Rotate(refreshToken, newToken, clientID, time.Now().Add(ttl))
+		if err != nil {
+			// Map store errors to the same string used by the in-memory path so
+			// oauth_handlers.go doesn't need to import the refreshstore package.
+			if errors.Is(err, refreshstore.ErrInvalidToken) || errors.Is(err, refreshstore.ErrReuseDetected) {
+				return "", "", errors.New("invalid or expired refresh token")
+			}
+			if errors.Is(err, refreshstore.ErrClientMismatch) {
+				return "", "", errors.New("client_id mismatch")
+			}
+			return "", "", err
+		}
+		accessToken, err := s.IssueJWT(login, groups)
+		if err != nil {
+			return "", "", err
+		}
+		return accessToken, newToken, nil
+	}
+
 	entry, ok := s.refreshTokens.loadAndDelete(refreshToken)
 	if !ok {
 		return "", "", errors.New("invalid or expired refresh token")
@@ -277,9 +320,14 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 	return accessToken, newRefreshToken, nil
 }
 
-// RevokeRefreshToken deletes a stored refresh token if it exists.
+// RevokeRefreshToken revokes a stored refresh token (and its whole family when
+// the persistent store is active — see refreshstore.Store).
 func (s *OAuthServer) RevokeRefreshToken(refreshToken string) {
 	if refreshToken == "" {
+		return
+	}
+	if s.RefreshStore != nil {
+		_ = s.RefreshStore.RevokeFamily(refreshToken, "explicit_revoke")
 		return
 	}
 	s.refreshTokens.delete(refreshToken)
