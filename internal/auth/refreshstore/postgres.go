@@ -107,7 +107,8 @@ func (s *PostgresStore) Insert(rawToken, login, clientID string, groups []string
 
 // Rotate atomically invalidates oldRawToken and inserts newRawToken in the same
 // family. It retries on Postgres serialization failures (up to 3 attempts);
-// if all retries fail it returns ErrInvalidToken.
+// if all retries fail it returns ErrServerError (transient DB failure, not a
+// bad token) so callers map it to HTTP 500 rather than invalid_grant.
 func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time) (string, []string, error) {
 	backoff := []time.Duration{5 * time.Millisecond, 15 * time.Millisecond}
 	for attempt := range 3 {
@@ -121,7 +122,7 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 			time.Sleep(backoff[attempt])
 		}
 	}
-	return "", nil, ErrInvalidToken
+	return "", nil, ErrServerError
 }
 
 func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time) (string, []string, error) {

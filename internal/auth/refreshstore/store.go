@@ -33,6 +33,10 @@ var ErrClientMismatch = errors.New("client_id mismatch")
 // When detected, the entire token family is revoked (RFC 6819 §5.2.2.3).
 var ErrReuseDetected = errors.New("refresh token reuse detected; token family revoked")
 
+// ErrServerError is returned for transient infrastructure failures (e.g. DB serialization
+// retries exhausted). Unlike ErrInvalidToken it must map to HTTP 500, not invalid_grant.
+var ErrServerError = errors.New("transient server error; retry later")
+
 // Store is the interface OAuthServer uses to persist refresh tokens.
 // A nil Store means "use the in-memory fallback" — OAuthServer checks for nil before
 // calling any method.
