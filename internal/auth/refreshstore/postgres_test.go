@@ -173,7 +173,7 @@ func TestRevokeFamily(t *testing.T) {
 	if _, _, err := s.Rotate(tok1, tok2, "c4", exp); err != nil {
 		t.Fatalf("Rotate: %v", err)
 	}
-	if err := s.RevokeFamily(tok1, "test_revoke"); err != nil {
+	if err := s.RevokeFamily(tok1, "c4", "test_revoke"); err != nil {
 		t.Fatalf("RevokeFamily: %v", err)
 	}
 	_, _, err := s.Rotate(tok2, tok3, "c4", exp)
@@ -190,7 +190,7 @@ func TestGCRemovesOldRevokedRows(t *testing.T) {
 	if err := s.Insert(tok, "grace", "c5", []string{}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if err := s.RevokeFamily(tok, "gc_test"); err != nil {
+	if err := s.RevokeFamily(tok, "c5", "gc_test"); err != nil {
 		t.Fatalf("RevokeFamily: %v", err)
 	}
 	if err := s.GC(); err != nil {
