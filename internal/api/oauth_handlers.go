@@ -17,6 +17,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -281,6 +282,16 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		slog.Warn("token exchange failed", "grant_type", grantType, "error", err)
+		if errors.Is(err, auth.ErrServerError) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error":             "server_error",
+				"error_description": "internal server error",
+			})
+			return
+		}
 		tokenError(w, "invalid_grant", err.Error())
 		return
 	}

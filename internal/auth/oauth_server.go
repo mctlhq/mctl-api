@@ -30,6 +30,12 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 )
 
+// ErrServerError is returned by OAuth server operations that fail due to a
+// transient infrastructure problem (e.g. database unavailability) rather than
+// an invalid token or client credential. Token-endpoint handlers must respond
+// with HTTP 500 / error:"server_error" when they encounter this sentinel.
+var ErrServerError = errors.New("server_error")
+
 // OAuthServer implements OAuth 2.0 Authorization Code flow with PKCE (RFC 7636).
 // It acts as a public-client OAuth server backed by GitHub for user authentication.
 // Access tokens are short-lived JWTs signed with HMAC-SHA256.
@@ -295,7 +301,7 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 				return "", "", errors.New("client_id mismatch")
 			}
 			slog.Error("oauth: refresh store unexpected error", "error", err)
-			return "", "", errors.New("server_error")
+			return "", "", fmt.Errorf("oauth: %w", ErrServerError)
 		}
 		accessToken, err := s.IssueJWT(login, groups)
 		if err != nil {

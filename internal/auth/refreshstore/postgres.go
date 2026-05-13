@@ -18,12 +18,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -73,6 +75,16 @@ func tokenHash(raw string) []byte {
 	return h[:]
 }
 
+// isSerializationFailure reports whether err is a Postgres serialization or
+// deadlock error (codes 40001 / 40P01). These are safe to retry.
+func isSerializationFailure(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "40001" || pgErr.Code == "40P01"
+	}
+	return false
+}
+
 // Insert stores a brand-new refresh token (new token family).
 func (s *PostgresStore) Insert(rawToken, login, clientID string, groups []string, expiresAt time.Time) error {
 	groupsJSON, err := json.Marshal(groups)
@@ -93,8 +105,26 @@ func (s *PostgresStore) Insert(rawToken, login, clientID string, groups []string
 	return nil
 }
 
-// Rotate atomically invalidates oldRawToken and inserts newRawToken in the same family.
+// Rotate atomically invalidates oldRawToken and inserts newRawToken in the same
+// family. It retries on Postgres serialization failures (up to 3 attempts);
+// if all retries fail it returns ErrInvalidToken.
 func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time) (string, []string, error) {
+	backoff := []time.Duration{5 * time.Millisecond, 15 * time.Millisecond}
+	for attempt := range 3 {
+		login, groups, err := s.rotateTx(oldRawToken, newRawToken, clientID, newExpiresAt)
+		if err == nil || !isSerializationFailure(err) {
+			return login, groups, err
+		}
+		slog.Warn("oauth refresh store: serialization failure, retrying",
+			"attempt", attempt+1, "error", err)
+		if attempt < len(backoff) {
+			time.Sleep(backoff[attempt])
+		}
+	}
+	return "", nil, ErrInvalidToken
+}
+
+func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time) (string, []string, error) {
 	oldHash := tokenHash(oldRawToken)
 	newHash := tokenHash(newRawToken)
 
@@ -133,7 +163,9 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 	}
 
 	// Reuse detection: token was already rotated → attacker replayed an old token.
-	// Revoke the whole family to protect the legitimate session.
+	// Revoke the whole family to protect the legitimate session. Fail closed:
+	// if the revocation write fails, return an error rather than silently
+	// reporting successful revocation.
 	if rotatedAt != nil {
 		now := time.Now().UTC()
 		if _, execErr := tx.Exec(ctx,
@@ -144,9 +176,12 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 		); execErr != nil {
 			slog.Error("oauth refresh token reuse: failed to revoke family",
 				"family_id", familyID, "error", execErr)
-		} else if commitErr := tx.Commit(ctx); commitErr != nil {
+			return "", nil, fmt.Errorf("oauth refresh store: reuse revocation failed: %w", execErr)
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
 			slog.Error("oauth refresh token reuse: failed to commit family revocation",
 				"family_id", familyID, "error", commitErr)
+			return "", nil, fmt.Errorf("oauth refresh store: reuse revocation commit failed: %w", commitErr)
 		}
 		slog.Warn("oauth refresh token reuse detected; family revoked",
 			"family_id", familyID, "login", login, "client_id", storedClientID)
