@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -293,7 +294,8 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 			if errors.Is(err, refreshstore.ErrClientMismatch) {
 				return "", "", errors.New("client_id mismatch")
 			}
-			return "", "", err
+			slog.Error("oauth: refresh store unexpected error", "error", err)
+			return "", "", errors.New("server_error")
 		}
 		accessToken, err := s.IssueJWT(login, groups)
 		if err != nil {
@@ -327,7 +329,9 @@ func (s *OAuthServer) RevokeRefreshToken(refreshToken string) {
 		return
 	}
 	if s.RefreshStore != nil {
-		_ = s.RefreshStore.RevokeFamily(refreshToken, "explicit_revoke")
+		if err := s.RefreshStore.RevokeFamily(refreshToken, "explicit_revoke"); err != nil {
+			slog.Warn("oauth: failed to revoke refresh token family", "error", err)
+		}
 		return
 	}
 	s.refreshTokens.delete(refreshToken)

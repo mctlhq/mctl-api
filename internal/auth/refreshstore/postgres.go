@@ -79,7 +79,9 @@ func (s *PostgresStore) Insert(rawToken, login, clientID string, groups []string
 	if err != nil {
 		return fmt.Errorf("oauth refresh store: marshal groups: %w", err)
 	}
-	_, err = s.pool.Exec(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = s.pool.Exec(ctx,
 		`INSERT INTO oauth_refresh_tokens
 		 (token_hash, client_id, login, groups, family_id, parent_token_hash, issued_at, expires_at)
 		 VALUES ($1, $2, $3, $4, $5, NULL, NOW(), $6)`,
@@ -96,7 +98,10 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 	oldHash := tokenHash(oldRawToken)
 	newHash := tokenHash(newRawToken)
 
-	tx, err := s.pool.BeginTx(context.Background(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return "", nil, fmt.Errorf("oauth refresh store: begin tx: %w", err)
 	}
@@ -109,7 +114,7 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 	var rotatedAt *time.Time
 	var revokedAt *time.Time
 
-	err = tx.QueryRow(context.Background(),
+	err = tx.QueryRow(ctx,
 		`SELECT client_id, login, groups, family_id, expires_at, rotated_at, revoked_at
 		 FROM oauth_refresh_tokens
 		 WHERE token_hash = $1
@@ -131,13 +136,18 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 	// Revoke the whole family to protect the legitimate session.
 	if rotatedAt != nil {
 		now := time.Now().UTC()
-		_, _ = tx.Exec(context.Background(),
+		if _, execErr := tx.Exec(ctx,
 			`UPDATE oauth_refresh_tokens
 			 SET revoked_at = $1, revoked_reason = 'reuse_detected'
 			 WHERE family_id = $2 AND revoked_at IS NULL`,
 			now, familyID,
-		)
-		_ = tx.Commit(context.Background())
+		); execErr != nil {
+			slog.Error("oauth refresh token reuse: failed to revoke family",
+				"family_id", familyID, "error", execErr)
+		} else if commitErr := tx.Commit(ctx); commitErr != nil {
+			slog.Error("oauth refresh token reuse: failed to commit family revocation",
+				"family_id", familyID, "error", commitErr)
+		}
 		slog.Warn("oauth refresh token reuse detected; family revoked",
 			"family_id", familyID, "login", login, "client_id", storedClientID)
 		return "", nil, ErrReuseDetected
@@ -158,7 +168,7 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 	now := time.Now().UTC()
 
 	// Mark old token as rotated.
-	_, err = tx.Exec(context.Background(),
+	_, err = tx.Exec(ctx,
 		`UPDATE oauth_refresh_tokens SET rotated_at = $1 WHERE token_hash = $2`,
 		now, oldHash,
 	)
@@ -168,7 +178,7 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 
 	// Insert new token inheriting the same family.
 	newGroupsJSON, _ := json.Marshal(groups)
-	_, err = tx.Exec(context.Background(),
+	_, err = tx.Exec(ctx,
 		`INSERT INTO oauth_refresh_tokens
 		 (token_hash, client_id, login, groups, family_id, parent_token_hash, issued_at, expires_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -178,7 +188,7 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 		return "", nil, fmt.Errorf("oauth refresh store: insert rotated: %w", err)
 	}
 
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return "", nil, fmt.Errorf("oauth refresh store: commit: %w", err)
 	}
 	return login, groups, nil
@@ -188,7 +198,9 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 func (s *PostgresStore) RevokeFamily(rawToken, reason string) error {
 	hash := tokenHash(rawToken)
 	now := time.Now().UTC()
-	_, err := s.pool.Exec(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.pool.Exec(ctx,
 		`UPDATE oauth_refresh_tokens
 		 SET revoked_at = $1, revoked_reason = $2
 		 WHERE family_id = (SELECT family_id FROM oauth_refresh_tokens WHERE token_hash = $3)
@@ -206,7 +218,9 @@ func (s *PostgresStore) RevokeFamily(rawToken, reason string) error {
 // before the token expired is not caught by a race with the GC ticker.
 func (s *PostgresStore) GC() error {
 	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
-	_, err := s.pool.Exec(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.pool.Exec(ctx,
 		`DELETE FROM oauth_refresh_tokens WHERE expires_at < $1`,
 		cutoff,
 	)
