@@ -292,7 +292,7 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		tokenError(w, "invalid_grant", err.Error())
+		tokenError(w, "invalid_grant", "invalid or expired token")
 		return
 	}
 
