@@ -22,10 +22,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 )
+
+// ErrServerError is returned by OAuth server operations that fail due to a
+// transient infrastructure problem (e.g. database unavailability) rather than
+// an invalid token or client credential. Token-endpoint handlers must respond
+// with HTTP 500 / error:"server_error" when they encounter this sentinel.
+var ErrServerError = errors.New("server_error")
 
 // OAuthServer implements OAuth 2.0 Authorization Code flow with PKCE (RFC 7636).
 // It acts as a public-client OAuth server backed by GitHub for user authentication.
@@ -48,6 +57,11 @@ type OAuthServer struct {
 	GitHubValidator *GitHubValidator
 	// TenantResolver resolves which tenants a GitHub login belongs to.
 	TenantResolver TenantResolver
+
+	// RefreshStore is an optional persistent store for refresh tokens.
+	// When non-nil it replaces the in-memory refreshTokens store, making
+	// refresh tokens survive pod restarts. Inject via main.go after construction.
+	RefreshStore refreshstore.Store
 
 	codes         authCodeStore
 	refreshTokens refreshTokenStore
@@ -247,18 +261,56 @@ func (s *OAuthServer) IssueRefreshToken(login string, groups []string, clientID 
 	if ttl == 0 {
 		ttl = 30 * 24 * time.Hour
 	}
+	expiresAt := time.Now().Add(ttl)
+	if s.RefreshStore != nil {
+		if err := s.RefreshStore.Insert(token, login, clientID, groups, expiresAt); err != nil {
+			slog.Error("oauth: refresh store insert failed", "error", err)
+			return "", fmt.Errorf("store refresh token: %w", ErrServerError)
+		}
+		return token, nil
+	}
 	s.refreshTokens.store(token, refreshTokenEntry{
 		Login:     login,
 		Groups:    groups,
 		ClientID:  clientID,
 		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(ttl),
+		ExpiresAt: expiresAt,
 	})
 	return token, nil
 }
 
 // RefreshAccessToken validates a refresh token, rotates it, and issues a new access token.
 func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string, string, error) {
+	if s.RefreshStore != nil {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return "", "", fmt.Errorf("generate refresh token: %w", err)
+		}
+		newToken := base64.RawURLEncoding.EncodeToString(b)
+		ttl := s.RefreshTokenTTL
+		if ttl == 0 {
+			ttl = 30 * 24 * time.Hour
+		}
+		login, groups, err := s.RefreshStore.Rotate(refreshToken, newToken, clientID, time.Now().Add(ttl))
+		if err != nil {
+			// Map store errors to the same string used by the in-memory path so
+			// oauth_handlers.go doesn't need to import the refreshstore package.
+			if errors.Is(err, refreshstore.ErrInvalidToken) || errors.Is(err, refreshstore.ErrReuseDetected) {
+				return "", "", errors.New("invalid or expired refresh token")
+			}
+			if errors.Is(err, refreshstore.ErrClientMismatch) {
+				return "", "", errors.New("client_id mismatch")
+			}
+			slog.Error("oauth: refresh store unexpected error", "error", err)
+			return "", "", fmt.Errorf("oauth: %w", ErrServerError)
+		}
+		accessToken, err := s.IssueJWT(login, groups)
+		if err != nil {
+			return "", "", err
+		}
+		return accessToken, newToken, nil
+	}
+
 	entry, ok := s.refreshTokens.loadAndDelete(refreshToken)
 	if !ok {
 		return "", "", errors.New("invalid or expired refresh token")
@@ -277,9 +329,18 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 	return accessToken, newRefreshToken, nil
 }
 
-// RevokeRefreshToken deletes a stored refresh token if it exists.
-func (s *OAuthServer) RevokeRefreshToken(refreshToken string) {
+// RevokeRefreshToken revokes a stored refresh token (and its whole family when
+// the persistent store is active — see refreshstore.Store).
+// clientID scopes the revocation to tokens issued for that client; pass ""
+// to revoke unconditionally (in-memory fallback, or when client is unknown).
+func (s *OAuthServer) RevokeRefreshToken(refreshToken, clientID string) {
 	if refreshToken == "" {
+		return
+	}
+	if s.RefreshStore != nil {
+		if err := s.RefreshStore.RevokeFamily(refreshToken, clientID, "explicit_revoke"); err != nil {
+			slog.Warn("oauth: failed to revoke refresh token family", "error", err)
+		}
 		return
 	}
 	s.refreshTokens.delete(refreshToken)

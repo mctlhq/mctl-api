@@ -17,6 +17,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -281,7 +282,17 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		slog.Warn("token exchange failed", "grant_type", grantType, "error", err)
-		tokenError(w, "invalid_grant", err.Error())
+		if errors.Is(err, auth.ErrServerError) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error":             "server_error",
+				"error_description": "internal server error",
+			})
+			return
+		}
+		tokenError(w, "invalid_grant", "invalid or expired token")
 		return
 	}
 
@@ -311,7 +322,7 @@ func (h *Handlers) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
 	if err := r.ParseForm(); err == nil {
-		o.RevokeRefreshToken(r.FormValue("token"))
+		o.RevokeRefreshToken(r.FormValue("token"), r.FormValue("client_id"))
 	}
 	// Per RFC 7009, a successful revocation always returns 200.
 	w.WriteHeader(http.StatusOK)
