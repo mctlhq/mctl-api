@@ -480,6 +480,26 @@ var builtinOperations = []Operation{
 		},
 	},
 	{
+		// Issue-investigator — the issue-driven entry point. Reads a GitHub
+		// issue, investigates the target repo, and writes a spec-driven
+		// proposal (requirements/design/tasks.md + .status.yaml) under
+		// agents-state/. It stops at status=proposed for human approval, so
+		// it opens no PR and merges nothing — RiskLow. Admin-only, same as
+		// the other mctl-agents triggers. References its own
+		// `mctl-agents-investigate` ClusterWorkflowTemplate.
+		Name:             "mctl-agents-investigate",
+		DisplayName:      "Run mctl-agents issue-investigator",
+		Description:      "Issue-driven entry point: take a GitHub issue URL and turn it into a spec-driven proposal (requirements/design/tasks.md) under platform-gitops/agents-state/<service>/proposals/<slug>/ with .status.yaml status=proposed. The investigator reads the issue, clones the target repo read-only to ground the design in real code, and comments the proposal link back on the issue. The proposal then awaits human approval (flip .status.yaml to accepted) before the Tier 2 implementer picks it up. Admin-only. Cost: ~$3 (subscription quota). Duration: ~5-10 min. Updates mctl-gitops main with the new proposal directory.",
+		WorkflowTemplate: "mctl-agents-investigate",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		AdminOnly:        true,
+		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/"},
+		Parameters: []ParameterDef{
+			{Name: "issue_url", Type: "string", Required: true, Description: "Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123", Pattern: `^https://github\.com/mctlhq/[A-Za-z0-9_.-]+/issues/[0-9]+$`},
+		},
+	},
+	{
 		Name:             "openclaw-identity-delete",
 		DisplayName:      "Remove OpenClaw Identity File from GitOps",
 		Description:      "Remove a single identity override (AGENTS.md / SOUL.md / IDENTITY.md / USER.md / TOOLS.md) from the gitops backup. Idempotent — succeeds with a no-op if the file is already absent. The tenant reverts to the image-shipped default at the next sidecar reconcile.",
