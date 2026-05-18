@@ -131,6 +131,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerSingleService())
 	srv.AddTool(s.toolTriggerImplementer())
 	srv.AddTool(s.toolTriggerShepherd())
+	srv.AddTool(s.toolTriggerIssue())
 	srv.AddTool(s.toolListRecentAgentRuns())
 
 	return srv
@@ -2122,6 +2123,40 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_re
 		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-shepherd/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger shepherd: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolTriggerIssue() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_trigger_issue",
+		mcplib.WithTitleAnnotation("Run mctl-agents issue-investigator"),
+		// Not destructive: the investigator only writes a proposal and posts
+		// an issue comment. It opens no PR and merges nothing — the proposal
+		// stops at status=proposed for human approval.
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription(`Trigger the mctl-agents issue-investigator to turn a GitHub issue into a spec-driven proposal.
+
+Given a GitHub issue URL under the mctlhq org, the investigator reads the issue, clones the target repo read-only to ground the design in real code, and writes requirements.md / design.md / tasks.md plus a .status.yaml (status=proposed) under platform-gitops/agents-state/<service>/proposals/<slug>/. It then comments the proposal link back on the issue.
+
+The proposal stops at status=proposed and awaits human approval — review the spec and flip .status.yaml to 'accepted' before the Tier 2 implementer (mctl_trigger_implementer) picks it up. No PR is opened by this step.
+
+Cost: ~$3 (subscription quota).
+Duration: ~5-10 minutes.
+Result: a new proposal directory committed to mctl-gitops main, plus a comment on the issue.
+
+Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
+		mcplib.WithString("issue_url",
+			mcplib.Required(),
+			mcplib.Description("Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-investigate/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger issue-investigator: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}
