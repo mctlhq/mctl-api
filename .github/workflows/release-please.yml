@@ -7,6 +7,11 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release-please:
@@ -44,3 +49,14 @@ jobs:
             -f team_name=admins \
             -f component_name=mctl-api \
             -f values_path=platform-gitops/bootstrap/templates/mctl-platform/mctl-api.yaml
+
+      - name: Notify Telegram on release/deploy failure
+        if: ${{ failure() && steps.release.outputs.release_created == 'true' }}
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          message: |
+            ❌ *mctl-api release-deploy dispatch failed*
+            Tag `${{ steps.release.outputs.tag_name }}` was created but the centralized deploy did not dispatch.
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
