@@ -83,7 +83,7 @@ jobs:
         # below decides whether a failure is a transient quota limit (neutral)
         # or a real error (block).
         continue-on-error: true
-        uses: anthropics/claude-code-action@51ea8ea73a139f2a74ff649e3092c25a904aed7e # v1
+        uses: anthropics/claude-code-action@fbda2eb1bdc90d319b8d853f5deb53bca199a7c1 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
@@ -128,7 +128,7 @@ jobs:
         id: review2
         continue-on-error: true
         if: steps.review.outcome == 'failure' && steps.token-check.outputs.has_fallback == 'true'
-        uses: anthropics/claude-code-action@51ea8ea73a139f2a74ff649e3092c25a904aed7e # v1
+        uses: anthropics/claude-code-action@fbda2eb1bdc90d319b8d853f5deb53bca199a7c1 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
           track_progress: true
