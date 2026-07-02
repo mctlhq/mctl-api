@@ -10,6 +10,14 @@ package operations
 
 import "testing"
 
+func TestGeneratePreviewTagUnique(t *testing.T) {
+	first := GeneratePreviewTag("main")
+	second := GeneratePreviewTag("main")
+	if first == second {
+		t.Errorf("GeneratePreviewTag(%q) produced identical tags on successive calls: %q", "main", first)
+	}
+}
+
 func TestSanitizePreviewTag(t *testing.T) {
 	tests := []struct {
 		name string

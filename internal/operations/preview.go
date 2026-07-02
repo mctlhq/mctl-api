@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // SanitizePreviewTag converts a git ref to a valid Docker image tag segment:
@@ -54,10 +56,11 @@ func SanitizePreviewTag(ref string) string {
 }
 
 // GeneratePreviewTag builds an auto-generated image tag for a build-from-branch
-// preview deploy. It uses the full Unix timestamp (not a truncated modulo) so
-// two builds triggered for the same branch within the same run don't collide.
+// preview deploy. It combines the Unix timestamp with a short random suffix so
+// concurrent builds for the same ref (e.g. a rerun fired within the same
+// second) don't collide on the same tag.
 func GeneratePreviewTag(ref string) string {
-	return fmt.Sprintf("preview-%s-%d", SanitizePreviewTag(ref), time.Now().Unix())
+	return fmt.Sprintf("preview-%s-%d-%s", SanitizePreviewTag(ref), time.Now().Unix(), uuid.New().String()[:8])
 }
 
 // PreparePreviewDeployInput mutates input in place for the "preview-deploy"

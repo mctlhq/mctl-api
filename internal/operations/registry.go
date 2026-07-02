@@ -268,9 +268,9 @@ var builtinOperations = []Operation{
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "image_tag", Type: "string", Description: "Image tag to deploy. Required unless git_ref is set — PreparePreviewDeployInput then auto-generates it."},
 			{Name: "ttl_hours", Type: "string", Default: "24", Description: "Preview lifetime in hours (default: 24)"},
-			{Name: "git_ref", Type: "string", Default: "", Description: "Branch, SHA, or tag to build from. Leave empty to deploy an existing image_tag."},
-			{Name: "dockerfile_repo", Type: "string", Default: "", Description: "Source repo in org/repo format. Required when git_ref is set."},
-			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Description: "Path to Dockerfile inside dockerfile_repo (default: Dockerfile)"},
+			{Name: "git_ref", Type: "string", Default: "", Pattern: `^[A-Za-z0-9._/-]+$`, Description: "Branch, SHA, or tag to build from. Leave empty to deploy an existing image_tag."},
+			{Name: "dockerfile_repo", Type: "string", Default: "", Pattern: `^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`, Description: "Source repo in org/repo format. Required when git_ref is set."},
+			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Pattern: `^[A-Za-z0-9][A-Za-z0-9._/-]*$`, Description: "Path to Dockerfile inside dockerfile_repo (default: Dockerfile)"},
 		},
 	},
 	{
