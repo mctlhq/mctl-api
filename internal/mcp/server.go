@@ -27,6 +27,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
 // Server is the MCP server that exposes platform operations as AI tools.
@@ -1409,8 +1410,12 @@ func (s *Server) toolCreatePreview() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Create Preview"),
 		mcplib.WithDescription(`Deploy an ephemeral preview environment for a service.
 
-Uses an existing built image tag — no rebuild required.
-The preview is accessible at {app}-{preview_id}.preview.{platform_domain}.
+Two modes:
+  1. Existing image: provide image_tag — deploys immediately, no build.
+  2. Build from branch: provide git_ref + dockerfile_repo — the platform builds
+     the image from source, then deploys. image_tag is auto-generated.
+
+The preview is accessible at {app}-{preview_id}.{platform_domain}.
 It is automatically deleted after ttl_hours (default: 24).
 
 Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track progress.`),
@@ -1423,8 +1428,16 @@ Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track pro
 			mcplib.Description("Service name to preview"),
 		),
 		mcplib.WithString("image_tag",
-			mcplib.Required(),
-			mcplib.Description("Existing image tag to deploy (must already be built)"),
+			mcplib.Description("Existing image tag to deploy. Omit when git_ref is set — the tag is auto-generated."),
+		),
+		mcplib.WithString("git_ref",
+			mcplib.Description("Branch, SHA, or tag to build from (e.g. 'feat/my-feature'). Triggers a build before deploy."),
+		),
+		mcplib.WithString("dockerfile_repo",
+			mcplib.Description("Source repo in org/repo format (e.g. 'myorg/my-service'). Required when git_ref is set."),
+		),
+		mcplib.WithString("dockerfile_path",
+			mcplib.Description("Path to Dockerfile inside dockerfile_repo (default: Dockerfile)"),
 		),
 		mcplib.WithString("ttl_hours",
 			mcplib.Description("Preview lifetime in hours (default: 24)"),
@@ -1433,6 +1446,11 @@ Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track pro
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		params := extractStringParams(req.GetArguments())
+
+		if err := operations.PreparePreviewDeployInput(params); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+
 		body, err := s.apiPost(ctx, "/api/v1/operations/preview-deploy/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create preview: %v", err)), nil

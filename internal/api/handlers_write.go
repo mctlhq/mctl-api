@@ -117,6 +117,13 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if opName == "preview-deploy" {
+		if err := operations.PreparePreviewDeployInput(input); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	// Apply defaults then validate.
 	input = h.opts.Registry.ApplyDefaults(op, input)
 	if errs := h.opts.Registry.ValidateInput(op, input); len(errs) > 0 {
