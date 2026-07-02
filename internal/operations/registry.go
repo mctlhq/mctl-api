@@ -266,7 +266,7 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "image_tag", Type: "string", Required: true, Description: "Image tag to deploy. When git_ref is set the MCP layer auto-generates this."},
+			{Name: "image_tag", Type: "string", Description: "Image tag to deploy. Required unless git_ref is set — PreparePreviewDeployInput then auto-generates it."},
 			{Name: "ttl_hours", Type: "string", Default: "24", Description: "Preview lifetime in hours (default: 24)"},
 			{Name: "git_ref", Type: "string", Default: "", Description: "Branch, SHA, or tag to build from. Leave empty to deploy an existing image_tag."},
 			{Name: "dockerfile_repo", Type: "string", Default: "", Description: "Source repo in org/repo format. Required when git_ref is set."},
