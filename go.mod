@@ -11,8 +11,8 @@ require (
 	github.com/mark3labs/mcp-go v0.55.1
 	github.com/prometheus/client_golang v1.23.2
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.36.1
-	k8s.io/apimachinery v0.36.1
+	k8s.io/api v0.36.2
+	k8s.io/apimachinery v0.36.2
 	k8s.io/client-go v0.36.1
 )
 
