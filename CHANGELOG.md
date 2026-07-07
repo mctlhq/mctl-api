@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.21.2](https://github.com/mctlhq/mctl-api/compare/4.21.1...4.21.2) (2026-07-07)
+
+
+### Bug Fixes
+
+* bump Docker builder image to golang:1.26-alpine ([07b2343](https://github.com/mctlhq/mctl-api/commit/07b23433b4c0c7cd4c3627bfef6834d899601682))
+* bump Docker builder image to golang:1.26-alpine ([d4ee340](https://github.com/mctlhq/mctl-api/commit/d4ee340b458c309587e2afb156764475a53eb078))
+
 ## [4.21.1](https://github.com/mctlhq/mctl-api/compare/4.21.0...4.21.1) (2026-07-07)
 
 
