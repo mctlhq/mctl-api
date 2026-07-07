@@ -15,8 +15,11 @@
 package gitops
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -46,6 +49,85 @@ func writeServiceYAML(t *testing.T, dir, team, app, content string) {
 	}
 	if err := os.WriteFile(filepath.Join(svcDir, "values.yaml"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...) //nolint:gosec // test arguments are fixed by the test
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, bytes.TrimSpace(out))
+	}
+	return string(out)
+}
+
+func commitAll(t *testing.T, dir, message string) string {
+	t.Helper()
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", message)
+	return runGit(t, dir, "rev-parse", "--short", "HEAD")
+}
+
+func TestRefreshResetsDivergedCache(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	work := filepath.Join(root, "work")
+	cache := filepath.Join(root, "cache")
+
+	runGit(t, root, "init", "--bare", remote)
+	runGit(t, root, "clone", remote, work)
+	runGit(t, work, "checkout", "-b", "main")
+	runGit(t, work, "config", "user.email", "test@example.com")
+	runGit(t, work, "config", "user.name", "Test User")
+
+	writeTenantYAML(t, work, "alpha", `tenant: {name: alpha, quotas: {}}`)
+	commitAll(t, work, "initial tenant")
+	runGit(t, work, "push", "origin", "main")
+
+	r := &Reader{
+		repoURL:   remote,
+		branch:    "main",
+		localPath: cache,
+	}
+	if err := r.refresh(); err != nil {
+		t.Fatalf("initial refresh: %v", err)
+	}
+
+	runGit(t, cache, "config", "user.email", "cache@example.com")
+	runGit(t, cache, "config", "user.name", "Cache User")
+	writeTenantYAML(t, cache, "local-only", `tenant: {name: local-only, quotas: {}}`)
+	commitAll(t, cache, "local divergent commit")
+
+	writeTenantYAML(t, work, "nfc", `
+tenant:
+  name: nfc
+  quotas: {}
+  members:
+    - userId: WannaBeGeekster
+      role: owner
+`)
+	remoteHead := commitAll(t, work, "add nfc tenant")
+	runGit(t, work, "push", "origin", "main")
+
+	if err := r.refresh(); err != nil {
+		t.Fatalf("refresh after divergence: %v", err)
+	}
+
+	gotHead := strings.TrimSpace(runGit(t, cache, "rev-parse", "--short", "HEAD"))
+	if gotHead != strings.TrimSpace(remoteHead) {
+		t.Fatalf("cache HEAD = %q, want remote HEAD %q", gotHead, remoteHead)
+	}
+	if _, err := os.Stat(filepath.Join(cache, "platform-gitops", "tenants", "local-only")); !os.IsNotExist(err) {
+		t.Fatalf("local-only tenant should be removed after cache reset, stat err=%v", err)
+	}
+	tenant, err := r.GetTenant("nfc")
+	if err != nil {
+		t.Fatalf("GetTenant(nfc): %v", err)
+	}
+	if tenant.Name != "nfc" || len(tenant.Members) != 1 || tenant.Members[0].UserID != "WannaBeGeekster" {
+		t.Fatalf("unexpected nfc tenant: %+v", tenant)
 	}
 }
 
