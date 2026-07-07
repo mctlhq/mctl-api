@@ -208,17 +208,48 @@ func (r *Reader) refresh() error {
 		}
 		slog.Info("gitops repo cloned successfully")
 	} else {
-		args := []string{"-C", r.localPath, "pull", "--ff-only", cloneURL, r.branch}
-		cmd := exec.Command("git", args...) //nolint:gosec // args are from trusted config
-		cmd.Env = append(os.Environ(), sshEnv...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git pull failed: %w\n%s", err, bytes.TrimSpace(out))
+		if err := r.runGit(sshEnv, "fetch", "--depth=1", cloneURL, r.branch); err != nil {
+			return fmt.Errorf("git fetch failed: %w", err)
+		}
+		if err := r.runGit(sshEnv, "reset", "--hard", "FETCH_HEAD"); err != nil {
+			return fmt.Errorf("git reset failed: %w", err)
+		}
+		if err := r.runGit(sshEnv, "checkout", "-B", r.branch, "FETCH_HEAD"); err != nil {
+			return fmt.Errorf("git checkout failed: %w", err)
+		}
+		if err := r.runGit(sshEnv, "clean", "-fd"); err != nil {
+			return fmt.Errorf("git clean failed: %w", err)
 		}
 	}
 
 	r.lastSync = time.Now()
-	slog.Debug("gitops refreshed", "lastSync", r.lastSync)
+	if head, err := r.gitOutput(sshEnv, "rev-parse", "--short", "HEAD"); err == nil {
+		slog.Info("gitops refreshed",
+			"branch", r.branch,
+			"path", r.localPath,
+			"head", strings.TrimSpace(string(head)),
+			"lastSync", r.lastSync,
+		)
+	} else {
+		slog.Info("gitops refreshed", "branch", r.branch, "path", r.localPath, "lastSync", r.lastSync)
+	}
 	return nil
+}
+
+func (r *Reader) runGit(extraEnv []string, args ...string) error {
+	_, err := r.gitOutput(extraEnv, args...)
+	return err
+}
+
+func (r *Reader) gitOutput(extraEnv []string, args ...string) ([]byte, error) {
+	fullArgs := append([]string{"-C", r.localPath}, args...)
+	cmd := exec.Command("git", fullArgs...) //nolint:gosec // args are from trusted config
+	cmd.Env = append(os.Environ(), extraEnv...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, fmt.Errorf("%w\n%s", err, bytes.TrimSpace(out))
+	}
+	return out, nil
 }
 
 // ListTenants reads all tenants from the GitOps repo.
