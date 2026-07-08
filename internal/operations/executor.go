@@ -90,6 +90,8 @@ func WorkflowNamespace(workflowTemplate, team string) string {
 	case "create-tenant", "delete-tenant", "delete-tenant-safe",
 		"openclaw-skill-save", "openclaw-skill-delete",
 		"openclaw-identity-save", "openclaw-identity-delete",
+		"platform-skill-publish", "platform-skill-deprecate",
+		"platform-skill-enable", "platform-skill-disable",
 		"mctl-agents-run",
 		"mctl-agents-implement",
 		"mctl-agents-shepherd",
