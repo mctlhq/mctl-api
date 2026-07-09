@@ -253,6 +253,78 @@ components:
         message:
           type: string
 
+    PlatformSkillMetadata:
+      type: object
+      properties:
+        name:
+          type: string
+          example: mctl-platform
+        title:
+          type: string
+        description:
+          type: string
+        visibility:
+          type: string
+          enum: [public, tenant, admin, platform-internal]
+        status:
+          type: string
+          enum: [draft, active, deprecated]
+        owner:
+          type: string
+        runtimes:
+          type: array
+          items:
+            type: string
+          example: [claude, codex]
+
+    PlatformSkill:
+      type: object
+      properties:
+        metadata:
+          $ref: '#/components/schemas/PlatformSkillMetadata'
+        hasContent:
+          type: boolean
+        size:
+          type: integer
+        lastModified:
+          type: string
+          format: date-time
+
+    PlatformSkillBinding:
+      type: object
+      properties:
+        tenant:
+          type: string
+          example: nfc
+        role:
+          type: string
+          example: admins
+        enabledSkills:
+          type: array
+          items:
+            type: string
+
+    PlatformSkillWorkflowResponse:
+      type: object
+      properties:
+        operation:
+          type: string
+          example: platform-skill-enable
+        workflow:
+          type: object
+          properties:
+            workflowName:
+              type: string
+            namespace:
+              type: string
+            requestId:
+              type: string
+            status:
+              type: string
+            createdAt:
+              type: string
+              format: date-time
+
     Error:
       type: object
       properties:
@@ -791,6 +863,275 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/platform-skills:
+    get:
+      summary: List platform-wide skills
+      description: |
+        Returns the platform skill catalog, filtered to what the caller can see.
+        `platform-internal` skills are never returned. `draft` skills are admin-only.
+        `tenant`-visibility skills are only included if enabled for one of the
+        caller's tenants or role bindings.
+      tags: [Platform Skills]
+      responses:
+        '200':
+          description: List of platform skills
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PlatformSkill'
+                  count:
+                    type: integer
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: Publish or update a platform skill
+      description: |
+        Submits the `platform-skill-publish` workflow to write a catalog entry
+        (`metadata.yaml` + `SKILL.md`) to `mctl-gitops`. **Admin access required.**
+        Content is scanned for obvious secret patterns and rejected if any are found.
+      tags: [Platform Skills]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, title, description, owner, content]
+              properties:
+                name:
+                  type: string
+                  example: mctl-platform
+                title:
+                  type: string
+                description:
+                  type: string
+                visibility:
+                  type: string
+                  enum: [public, tenant, admin, platform-internal]
+                  default: tenant
+                status:
+                  type: string
+                  enum: [draft, active, deprecated]
+                  default: active
+                owner:
+                  type: string
+                runtimes:
+                  type: array
+                  items:
+                    type: string
+                content:
+                  type: string
+                  description: Raw SKILL.md content
+      responses:
+        '202':
+          description: Publish workflow submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformSkillWorkflowResponse'
+        '400':
+          description: Invalid metadata, empty content, or a detected secret pattern
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/platform-skills/{name}:
+    get:
+      summary: Read a platform skill
+      description: |
+        Returns metadata and raw `SKILL.md` content for a single skill, if the
+        caller can access it (per the same visibility rules as the list endpoint).
+      tags: [Platform Skills]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: mctl-platform
+      responses:
+        '200':
+          description: Skill metadata and content
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  metadata:
+                    $ref: '#/components/schemas/PlatformSkillMetadata'
+                  content:
+                    type: string
+        '403':
+          description: Access denied to this skill
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Platform skill not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/platform-skills/{name}/deprecate:
+    post:
+      summary: Deprecate a platform skill
+      description: |
+        Submits the `platform-skill-deprecate` workflow to mark a catalog
+        entry's `status` as `deprecated`. **Admin access required.**
+        Deprecated skills remain readable for tenants that already have them
+        enabled, but cannot be newly enabled for other tenants.
+      tags: [Platform Skills]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: mctl-platform
+      responses:
+        '202':
+          description: Deprecate workflow submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformSkillWorkflowResponse'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/platform-skills/bindings/tenants:
+    get:
+      summary: List tenant skill bindings
+      description: |
+        Returns tenant skill bindings. Admins see all tenants; non-admins see
+        only bindings for tenants they belong to.
+      tags: [Platform Skills]
+      responses:
+        '200':
+          description: List of tenant bindings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PlatformSkillBinding'
+                  count:
+                    type: integer
+
+  /api/v1/platform-skills/bindings/tenants/enable:
+    post:
+      summary: Enable a platform skill for a tenant
+      description: |
+        Submits the `platform-skill-enable` workflow to add a skill to a
+        tenant's `enabledSkills` binding. **Admin access required.**
+        Rejected if the skill is not `active`, does not have `tenant`
+        visibility, or is denied for the tenant by `policy.yaml`.
+      tags: [Platform Skills]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant, skill]
+              properties:
+                tenant:
+                  type: string
+                  example: nfc
+                skill:
+                  type: string
+                  example: mctl-platform
+      responses:
+        '202':
+          description: Enable workflow submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformSkillWorkflowResponse'
+        '400':
+          description: Invalid tenant/skill name, or the skill is not eligible for tenant binding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Platform skill not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/platform-skills/bindings/tenants/disable:
+    post:
+      summary: Disable a platform skill for a tenant
+      description: |
+        Submits the `platform-skill-disable` workflow to remove a skill from
+        a tenant's `enabledSkills` binding. **Admin access required.**
+      tags: [Platform Skills]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant, skill]
+              properties:
+                tenant:
+                  type: string
+                  example: nfc
+                skill:
+                  type: string
+                  example: mctl-platform
+      responses:
+        '202':
+          description: Disable workflow submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformSkillWorkflowResponse'
+        '400':
+          description: Invalid tenant/skill name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
 tags:
   - name: Health
     description: Health and readiness probes
@@ -810,3 +1151,5 @@ tags:
     description: GitHub repository discovery
   - name: Operations
     description: Platform operation registry and execution
+  - name: Platform Skills
+    description: Platform-wide skill catalog and tenant bindings

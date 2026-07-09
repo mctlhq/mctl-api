@@ -17,7 +17,9 @@ package gitops
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -134,6 +136,38 @@ type Service struct {
 	Port          string `json:"port,omitempty"`
 	ComponentType string `json:"componentType,omitempty"`
 	HasDatabase   bool   `json:"hasDatabase"`
+}
+
+// PlatformSkillMetadata is the policy-bearing metadata for a platform-wide skill.
+type PlatformSkillMetadata struct {
+	Name        string   `json:"name" yaml:"name"`
+	Title       string   `json:"title" yaml:"title"`
+	Description string   `json:"description" yaml:"description"`
+	Visibility  string   `json:"visibility" yaml:"visibility"`
+	Status      string   `json:"status" yaml:"status"`
+	Owner       string   `json:"owner" yaml:"owner"`
+	Runtimes    []string `json:"runtimes" yaml:"runtimes"`
+}
+
+// PlatformSkill is a skill entry from platform-gitops/platform-skills/catalog.
+type PlatformSkill struct {
+	Metadata     PlatformSkillMetadata `json:"metadata"`
+	HasContent   bool                  `json:"hasContent"`
+	Size         int64                 `json:"size,omitempty"`
+	LastModified time.Time             `json:"lastModified,omitempty"`
+}
+
+// PlatformSkillBinding describes role- or tenant-level skill grants.
+type PlatformSkillBinding struct {
+	Tenant        string   `json:"tenant,omitempty" yaml:"tenant"`
+	Role          string   `json:"role,omitempty" yaml:"role"`
+	EnabledSkills []string `json:"enabledSkills" yaml:"enabledSkills"`
+}
+
+// PlatformSkillPolicy holds coarse allow/deny rules for tenant enables.
+type PlatformSkillPolicy struct {
+	TenantAllowlist map[string][]string `json:"tenantAllowlist,omitempty" yaml:"tenantAllowlist"`
+	TenantDenylist  map[string][]string `json:"tenantDenylist,omitempty" yaml:"tenantDenylist"`
 }
 
 // NewReader creates a new gitops reader.
@@ -494,6 +528,216 @@ func (r *Reader) LastSync() time.Time {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.lastSync
+}
+
+// ListPlatformSkills reads all platform-wide skills from
+// platform-gitops/platform-skills/catalog.
+func (r *Reader) ListPlatformSkills() ([]PlatformSkill, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	dir := filepath.Join(r.localPath, "platform-gitops", "platform-skills", "catalog")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []PlatformSkill{}, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", dir, err)
+	}
+
+	out := make([]PlatformSkill, 0, len(entries))
+	seen := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		skill, err := r.readPlatformSkillLocked(entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		if previous, ok := seen[skill.Metadata.Name]; ok {
+			return nil, fmt.Errorf("duplicate platform skill name %q in %s and %s", skill.Metadata.Name, previous, entry.Name())
+		}
+		seen[skill.Metadata.Name] = entry.Name()
+		out = append(out, *skill)
+	}
+	return out, nil
+}
+
+// GetPlatformSkill reads one platform-wide skill by name. The catalog
+// directory name is enforced to match the metadata name at publish time
+// (see validatePlatformSkillMetadata), so name can be used directly as the
+// directory to read.
+func (r *Reader) GetPlatformSkill(name string) (*PlatformSkill, string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	skill, err := r.readPlatformSkillLocked(name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, "", fmt.Errorf("platform skill not found: %s: %w", name, fs.ErrNotExist)
+		}
+		return nil, "", err
+	}
+	contentPath := filepath.Join(r.localPath, "platform-gitops", "platform-skills", "catalog", name, "SKILL.md")
+	data, err := os.ReadFile(contentPath) //nolint:gosec // path is constrained to catalog root
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, "", fmt.Errorf("platform skill not found: %s: %w", name, fs.ErrNotExist)
+		}
+		return nil, "", fmt.Errorf("reading %s: %w", contentPath, err)
+	}
+	return skill, string(data), nil
+}
+
+func (r *Reader) readPlatformSkillLocked(dirName string) (*PlatformSkill, error) {
+	base := filepath.Join(r.localPath, "platform-gitops", "platform-skills", "catalog", dirName)
+	metadataPath := filepath.Join(base, "metadata.yaml")
+	data, err := os.ReadFile(metadataPath) //nolint:gosec // path is constrained to catalog root
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", metadataPath, err)
+	}
+	var meta PlatformSkillMetadata
+	if err := yaml.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", metadataPath, err)
+	}
+	if err := validatePlatformSkillMetadata(dirName, meta); err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", metadataPath, err)
+	}
+
+	skill := &PlatformSkill{Metadata: meta}
+	if info, err := os.Stat(filepath.Join(base, "SKILL.md")); err == nil {
+		skill.HasContent = true
+		skill.Size = info.Size()
+		skill.LastModified = info.ModTime().UTC()
+	}
+	return skill, nil
+}
+
+func validatePlatformSkillMetadata(dirName string, meta PlatformSkillMetadata) error {
+	if meta.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if meta.Name != dirName {
+		return fmt.Errorf("name %q must match catalog directory %q", meta.Name, dirName)
+	}
+	if !validPlatformSkillName(meta.Name) {
+		return fmt.Errorf("name must be kebab-case")
+	}
+	if meta.Title == "" {
+		return fmt.Errorf("title is required")
+	}
+	if meta.Description == "" {
+		return fmt.Errorf("description is required")
+	}
+	if !oneOf(meta.Visibility, "public", "tenant", "admin", "platform-internal") {
+		return fmt.Errorf("visibility must be one of public, tenant, admin, platform-internal")
+	}
+	if !oneOf(meta.Status, "draft", "active", "deprecated") {
+		return fmt.Errorf("status must be one of draft, active, deprecated")
+	}
+	if meta.Owner == "" {
+		return fmt.Errorf("owner is required")
+	}
+	return nil
+}
+
+func validPlatformSkillName(name string) bool {
+	if len(name) < 2 || len(name) > 64 {
+		return false
+	}
+	first := name[0]
+	if (first < 'a' || first > 'z') && (first < '0' || first > '9') {
+		return false
+	}
+	last := name[len(name)-1]
+	if (last < 'a' || last > 'z') && (last < '0' || last > '9') {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func oneOf(value string, allowed ...string) bool {
+	for _, item := range allowed {
+		if value == item {
+			return true
+		}
+	}
+	return false
+}
+
+// ListPlatformTenantBindings reads tenant skill bindings.
+func (r *Reader) ListPlatformTenantBindings() ([]PlatformSkillBinding, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.listPlatformBindingsLocked("tenants")
+}
+
+// ListPlatformRoleBindings reads role skill bindings.
+func (r *Reader) ListPlatformRoleBindings() ([]PlatformSkillBinding, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.listPlatformBindingsLocked("roles")
+}
+
+func (r *Reader) listPlatformBindingsLocked(kind string) ([]PlatformSkillBinding, error) {
+	dir := filepath.Join(r.localPath, "platform-gitops", "platform-skills", "bindings", kind)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []PlatformSkillBinding{}, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", dir, err)
+	}
+	out := make([]PlatformSkillBinding, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path) //nolint:gosec // path is constrained to bindings root
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", path, err)
+		}
+		var binding PlatformSkillBinding
+		if err := yaml.Unmarshal(data, &binding); err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+		if kind == "tenants" && binding.Tenant == "" {
+			return nil, fmt.Errorf("invalid %s: tenant is required", path)
+		}
+		if kind == "roles" && binding.Role == "" {
+			return nil, fmt.Errorf("invalid %s: role is required", path)
+		}
+		out = append(out, binding)
+	}
+	return out, nil
+}
+
+// GetPlatformPolicy reads platform-skills/policy.yaml. Missing policy is empty.
+func (r *Reader) GetPlatformPolicy() (*PlatformSkillPolicy, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	path := filepath.Join(r.localPath, "platform-gitops", "platform-skills", "policy.yaml")
+	data, err := os.ReadFile(path) //nolint:gosec // path is constrained to platform-skills root
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &PlatformSkillPolicy{}, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	var policy PlatformSkillPolicy
+	if err := yaml.Unmarshal(data, &policy); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return &policy, nil
 }
 
 // OpenClawSkill describes a single SKILL.md file backed up in the gitops repo.

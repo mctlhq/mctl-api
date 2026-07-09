@@ -167,6 +167,15 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/audit", h.ListAudit)
 			r.Get("/agent-runs", h.ListAgentRuns)
 
+			// Platform-wide skill registry.
+			r.Get("/platform-skills", h.ListPlatformSkills)
+			r.Get("/platform-skills/bindings/tenants", h.ListTenantSkillBindings)
+			r.Post("/platform-skills/bindings/tenants/enable", h.EnableTenantSkill)
+			r.Post("/platform-skills/bindings/tenants/disable", h.DisableTenantSkill)
+			r.Post("/platform-skills", h.PublishPlatformSkill)
+			r.Get("/platform-skills/{name}", h.ReadPlatformSkill)
+			r.Post("/platform-skills/{name}/deprecate", h.DeprecatePlatformSkill)
+
 			// Repository discovery (proxied to Backstage github-app-connect plugin).
 			r.Get("/repos", h.ListRepos)
 			r.Get("/repos/install-url", h.GetRepoInstallURL)

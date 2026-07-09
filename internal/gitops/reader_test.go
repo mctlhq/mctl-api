@@ -16,6 +16,8 @@ package gitops
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +50,20 @@ func writeServiceYAML(t *testing.T, dir, team, app, content string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(svcDir, "values.yaml"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writePlatformSkill(t *testing.T, dir, name, metadata, content string) {
+	t.Helper()
+	skillDir := filepath.Join(dir, "platform-gitops", "platform-skills", "catalog", name)
+	if err := os.MkdirAll(skillDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "metadata.yaml"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -540,5 +556,78 @@ func TestTenant_IsMultiTeam(t *testing.T) {
 	multi := Tenant{Name: "x", Teams: []Team{{Name: "a"}}}
 	if !multi.IsMultiTeam() {
 		t.Error("tenant with teams should be multi-team")
+	}
+}
+
+func TestPlatformSkills_ListAndRead(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	writePlatformSkill(t, dir, "mctl-platform", `
+name: mctl-platform
+title: MCTL Platform
+description: Platform guidance
+visibility: admin
+status: active
+owner: platform
+runtimes: [mcp, codex]
+`, "# MCTL Platform")
+
+	skills, err := r.ListPlatformSkills()
+	if err != nil {
+		t.Fatalf("ListPlatformSkills: %v", err)
+	}
+	if len(skills) != 1 || skills[0].Metadata.Name != "mctl-platform" || !skills[0].HasContent {
+		t.Fatalf("unexpected skills: %+v", skills)
+	}
+	skill, content, err := r.GetPlatformSkill("mctl-platform")
+	if err != nil {
+		t.Fatalf("GetPlatformSkill: %v", err)
+	}
+	if skill.Metadata.Visibility != "admin" || content != "# MCTL Platform" {
+		t.Fatalf("unexpected skill/content: %+v %q", skill, content)
+	}
+}
+
+func TestPlatformSkills_GetUnknownSkillWrapsErrNotExist(t *testing.T) {
+	_, r := setupTempRepo(t)
+	_, _, err := r.GetPlatformSkill("does-not-exist")
+	if err == nil {
+		t.Fatal("expected error for unknown skill")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected error to wrap fs.ErrNotExist, got: %v", err)
+	}
+}
+
+func TestPlatformSkills_MalformedMetadataReturnsError(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	writePlatformSkill(t, dir, "bad-skill", `
+name: bad-skill
+title: Bad
+description: Missing valid visibility
+visibility: everyone
+status: active
+owner: platform
+runtimes: [mcp]
+`, "# Bad")
+
+	if _, err := r.ListPlatformSkills(); err == nil || !strings.Contains(err.Error(), "visibility") {
+		t.Fatalf("expected visibility error, got %v", err)
+	}
+}
+
+func TestPlatformSkills_MetadataNameMustMatchDirectory(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	writePlatformSkill(t, dir, "beta-skill", `
+name: alpha-skill
+title: Beta
+description: Mismatched skill
+visibility: public
+status: active
+owner: platform
+runtimes: [mcp]
+`, "# Beta")
+
+	if _, err := r.ListPlatformSkills(); err == nil || !strings.Contains(err.Error(), "must match") {
+		t.Fatalf("expected name mismatch error, got %v", err)
 	}
 }

@@ -38,10 +38,15 @@ import (
 // ── fakes ────────────────────────────────────────────────────────────────────
 
 type fakeGitReader struct {
-	tenants  []gitops.Tenant
-	services []gitops.Service
-	skills   map[string]map[string]string // team -> name -> content
-	identity map[string]map[string]string // team -> fileName -> content
+	tenants                []gitops.Tenant
+	services               []gitops.Service
+	skills                 map[string]map[string]string // team -> name -> content
+	identity               map[string]map[string]string // team -> fileName -> content
+	platformSkills         []gitops.PlatformSkill
+	platformSkillContent   map[string]string
+	platformTenantBindings []gitops.PlatformSkillBinding
+	platformRoleBindings   []gitops.PlatformSkillBinding
+	platformPolicy         *gitops.PlatformSkillPolicy
 }
 
 func (f *fakeGitReader) ListTenants() ([]gitops.Tenant, error) { return f.tenants, nil }
@@ -102,6 +107,29 @@ func (f *fakeGitReader) ReadOpenClawIdentity(team, fileName string) (string, err
 		}
 	}
 	return "", fs.ErrNotExist
+}
+func (f *fakeGitReader) ListPlatformSkills() ([]gitops.PlatformSkill, error) {
+	return f.platformSkills, nil
+}
+func (f *fakeGitReader) GetPlatformSkill(name string) (*gitops.PlatformSkill, string, error) {
+	for i := range f.platformSkills {
+		if f.platformSkills[i].Metadata.Name == name {
+			return &f.platformSkills[i], f.platformSkillContent[name], nil
+		}
+	}
+	return nil, "", fs.ErrNotExist
+}
+func (f *fakeGitReader) ListPlatformTenantBindings() ([]gitops.PlatformSkillBinding, error) {
+	return f.platformTenantBindings, nil
+}
+func (f *fakeGitReader) ListPlatformRoleBindings() ([]gitops.PlatformSkillBinding, error) {
+	return f.platformRoleBindings, nil
+}
+func (f *fakeGitReader) GetPlatformPolicy() (*gitops.PlatformSkillPolicy, error) {
+	if f.platformPolicy != nil {
+		return f.platformPolicy, nil
+	}
+	return &gitops.PlatformSkillPolicy{}, nil
 }
 
 type fakeArgoCD struct {
@@ -195,6 +223,23 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 			{Team: "tests", Name: "my-app", ImageTag: "1.0.0", ComponentType: "base-service"},
 			{Team: "tests", Name: "openclaw", ImageTag: "2026.3.22-beta.2", ComponentType: "base-service"},
 		},
+		platformSkills: []gitops.PlatformSkill{
+			{Metadata: gitops.PlatformSkillMetadata{Name: "public-skill", Title: "Public Skill", Description: "Visible to all users", Visibility: "public", Status: "active", Owner: "platform", Runtimes: []string{"mcp"}}},
+			{Metadata: gitops.PlatformSkillMetadata{Name: "tenant-skill", Title: "Tenant Skill", Description: "Tenant-bound skill", Visibility: "tenant", Status: "active", Owner: "platform", Runtimes: []string{"mcp", "openclaw"}}},
+			{Metadata: gitops.PlatformSkillMetadata{Name: "admin-skill", Title: "Admin Skill", Description: "Admin-only skill", Visibility: "admin", Status: "active", Owner: "platform", Runtimes: []string{"codex"}}},
+			{Metadata: gitops.PlatformSkillMetadata{Name: "draft-skill", Title: "Draft Skill", Description: "Draft skill", Visibility: "tenant", Status: "draft", Owner: "platform", Runtimes: []string{"mcp"}}},
+			{Metadata: gitops.PlatformSkillMetadata{Name: "internal-skill", Title: "Internal Skill", Description: "Platform internal skill", Visibility: "platform-internal", Status: "active", Owner: "platform", Runtimes: []string{"mcp"}}},
+		},
+		platformSkillContent: map[string]string{
+			"public-skill":   "# Public",
+			"tenant-skill":   "# Tenant",
+			"admin-skill":    "# Admin",
+			"draft-skill":    "# Draft",
+			"internal-skill": "# Internal",
+		},
+		platformTenantBindings: []gitops.PlatformSkillBinding{
+			{Tenant: "tests", EnabledSkills: []string{"tenant-skill"}},
+		},
 	}
 	argoClient := &fakeArgoCD{
 		apps: map[string]*argocd.AppStatus{
@@ -277,6 +322,13 @@ func assertStatus(t *testing.T, w *httptest.ResponseRecorder, expected int) {
 	t.Helper()
 	if w.Code != expected {
 		t.Errorf("expected status %d, got %d; body: %s", expected, w.Code, w.Body.String())
+	}
+}
+
+func mustJSON(t *testing.T, data []byte, out interface{}) {
+	t.Helper()
+	if err := json.Unmarshal(data, out); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v\n%s", err, string(data))
 	}
 }
 
@@ -522,6 +574,56 @@ func TestSmoke_ServiceStatus(t *testing.T) {
 		w := getAs(t, router, "/api/v1/status/admins/mctl-web", user)
 		assertStatus(t, w, http.StatusForbidden)
 	})
+
+	t.Run("tenant user lists only public and enabled tenant platform skills", func(t *testing.T) {
+		w := getAs(t, router, "/api/v1/platform-skills", ownerUser)
+		assertStatus(t, w, http.StatusOK)
+		var body map[string]interface{}
+		mustJSON(t, w.Body.Bytes(), &body)
+		items := body["items"].([]interface{})
+		if len(items) != 2 {
+			t.Fatalf("expected 2 platform skills, got %d: %s", len(items), w.Body.String())
+		}
+		names := map[string]bool{}
+		for _, item := range items {
+			metadata := item.(map[string]interface{})["metadata"].(map[string]interface{})
+			names[metadata["name"].(string)] = true
+		}
+		if !names["public-skill"] || !names["tenant-skill"] || names["admin-skill"] || names["internal-skill"] {
+			t.Fatalf("unexpected visible skills: %v", names)
+		}
+	})
+
+	t.Run("admin lists public admin tenant and draft but not internal platform skills", func(t *testing.T) {
+		w := getAs(t, router, "/api/v1/platform-skills", adminUser)
+		assertStatus(t, w, http.StatusOK)
+		var body map[string]interface{}
+		mustJSON(t, w.Body.Bytes(), &body)
+		items := body["items"].([]interface{})
+		if len(items) != 4 {
+			t.Fatalf("expected 4 platform skills, got %d: %s", len(items), w.Body.String())
+		}
+	})
+
+	t.Run("tenant cannot read admin or internal platform skill", func(t *testing.T) {
+		w := getAs(t, router, "/api/v1/platform-skills/admin-skill", ownerUser)
+		assertStatus(t, w, http.StatusForbidden)
+		w = getAs(t, router, "/api/v1/platform-skills/internal-skill", ownerUser)
+		assertStatus(t, w, http.StatusForbidden)
+	})
+
+	t.Run("tenant cannot read draft skill even if bound", func(t *testing.T) {
+		w := getAs(t, router, "/api/v1/platform-skills/draft-skill", ownerUser)
+		assertStatus(t, w, http.StatusForbidden)
+	})
+
+	t.Run("tenant owner cannot enable tenant skill directly", func(t *testing.T) {
+		w := postAs(t, router, "/api/v1/platform-skills/bindings/tenants/enable", map[string]string{
+			"tenant": "tests",
+			"skill":  "tenant-skill",
+		}, ownerUser)
+		assertStatus(t, w, http.StatusForbidden)
+	})
 }
 
 func TestSmoke_ExecuteOperation(t *testing.T) {
@@ -578,6 +680,10 @@ func TestSmoke_ExecuteOperation(t *testing.T) {
 			"openclaw-skill-delete",
 			"openclaw-identity-save",
 			"openclaw-identity-delete",
+			"platform-skill-publish",
+			"platform-skill-deprecate",
+			"platform-skill-enable",
+			"platform-skill-disable",
 		} {
 			w := postAs(t, router, "/api/v1/operations/"+op+"/execute", map[string]string{
 				"team_name": "tests",

@@ -102,6 +102,13 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolReadOpenClawSkill())
 	srv.AddTool(s.toolSaveOpenClawSkill())
 	srv.AddTool(s.toolDeleteOpenClawSkill())
+	srv.AddTool(s.toolListPlatformSkills())
+	srv.AddTool(s.toolReadPlatformSkill())
+	srv.AddTool(s.toolListTenantSkillBindings())
+	srv.AddTool(s.toolEnableTenantSkill())
+	srv.AddTool(s.toolDisableTenantSkill())
+	srv.AddTool(s.toolPublishPlatformSkill())
+	srv.AddTool(s.toolDeprecatePlatformSkill())
 	srv.AddTool(s.toolListOpenClawIdentity())
 	srv.AddTool(s.toolReadOpenClawIdentity())
 	srv.AddTool(s.toolSaveOpenClawIdentity())
@@ -730,6 +737,153 @@ Requires owner role on the team.`),
 		return mcplib.NewToolResultText(string(body)), nil
 	}
 
+	return tool, handler
+}
+
+func (s *Server) toolListPlatformSkills() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_platform_skills",
+		mcplib.WithTitleAnnotation("List Platform Skills"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription("List platform-wide skills available to the current user after visibility, status, and tenant binding filters."),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiGet(ctx, "/api/v1/platform-skills")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list platform skills: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolReadPlatformSkill() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_read_platform_skill",
+		mcplib.WithTitleAnnotation("Read Platform Skill"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription("Read a platform-wide skill from the GitOps catalog if the current user has access."),
+		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		name := stringArg(req, "skill_name")
+		body, err := s.apiGet(ctx, "/api/v1/platform-skills/"+url.PathEscape(name))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to read platform skill: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolListTenantSkillBindings() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_tenant_skill_bindings",
+		mcplib.WithTitleAnnotation("List Tenant Skill Bindings"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription("List platform skill bindings for tenants. Admins see all bindings; tenant members see their own."),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiGet(ctx, "/api/v1/platform-skills/bindings/tenants")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list tenant skill bindings: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolEnableTenantSkill() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_enable_tenant_skill",
+		mcplib.WithTitleAnnotation("Enable Tenant Skill"),
+		mcplib.WithDescription("Admin-only. Enable an active tenant-visible platform skill for a tenant through a GitOps workflow."),
+		mcplib.WithString("tenant", mcplib.Required(), mcplib.Description("Tenant name")),
+		mcplib.WithString("skill", mcplib.Required(), mcplib.Description("Skill name")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiPost(ctx, "/api/v1/platform-skills/bindings/tenants/enable", map[string]string{
+			"tenant": stringArg(req, "tenant"),
+			"skill":  stringArg(req, "skill"),
+		})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to enable tenant skill: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolDisableTenantSkill() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_disable_tenant_skill",
+		mcplib.WithTitleAnnotation("Disable Tenant Skill"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription("Admin-only. Disable a platform skill for a tenant through a GitOps workflow."),
+		mcplib.WithString("tenant", mcplib.Required(), mcplib.Description("Tenant name")),
+		mcplib.WithString("skill", mcplib.Required(), mcplib.Description("Skill name")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiPost(ctx, "/api/v1/platform-skills/bindings/tenants/disable", map[string]string{
+			"tenant": stringArg(req, "tenant"),
+			"skill":  stringArg(req, "skill"),
+		})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to disable tenant skill: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolPublishPlatformSkill() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_publish_platform_skill",
+		mcplib.WithTitleAnnotation("Publish Platform Skill"),
+		mcplib.WithDescription("Admin-only. Publish or update a platform-wide skill through a GitOps workflow."),
+		mcplib.WithString("name", mcplib.Required(), mcplib.Description("Skill name")),
+		mcplib.WithString("title", mcplib.Required(), mcplib.Description("Human-readable title")),
+		mcplib.WithString("description", mcplib.Required(), mcplib.Description("Short description")),
+		mcplib.WithString("visibility", mcplib.Required(), mcplib.Enum("public", "tenant", "admin", "platform-internal"), mcplib.Description("Skill visibility")),
+		mcplib.WithString("status", mcplib.Enum("draft", "active", "deprecated"), mcplib.Description("Skill status, default active")),
+		mcplib.WithString("owner", mcplib.Required(), mcplib.Description("Owning team or group")),
+		mcplib.WithString("runtimes", mcplib.Description("Comma-separated runtimes, for example mcp,codex,openclaw")),
+		mcplib.WithString("content", mcplib.Required(), mcplib.Description("Full SKILL.md content")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		runtimes := []string{}
+		for _, part := range strings.Split(stringArg(req, "runtimes"), ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				runtimes = append(runtimes, part)
+			}
+		}
+		body, err := s.apiPostJSON(ctx, "/api/v1/platform-skills", map[string]interface{}{
+			"name":        stringArg(req, "name"),
+			"title":       stringArg(req, "title"),
+			"description": stringArg(req, "description"),
+			"visibility":  stringArg(req, "visibility"),
+			"status":      stringArg(req, "status"),
+			"owner":       stringArg(req, "owner"),
+			"runtimes":    runtimes,
+			"content":     stringArg(req, "content"),
+		})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to publish platform skill: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolDeprecatePlatformSkill() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_deprecate_platform_skill",
+		mcplib.WithTitleAnnotation("Deprecate Platform Skill"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription("Admin-only. Mark a platform-wide skill deprecated through a GitOps workflow."),
+		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		name := stringArg(req, "skill_name")
+		body, err := s.apiPost(ctx, "/api/v1/platform-skills/"+url.PathEscape(name)+"/deprecate", map[string]string{})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to deprecate platform skill: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
 	return tool, handler
 }
 
@@ -1902,6 +2056,10 @@ func (s *Server) apiGet(ctx context.Context, path string) ([]byte, error) {
 }
 
 func (s *Server) apiPost(ctx context.Context, path string, body map[string]string) ([]byte, error) {
+	return s.apiPostJSON(ctx, path, body)
+}
+
+func (s *Server) apiPostJSON(ctx context.Context, path string, body interface{}) ([]byte, error) {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
