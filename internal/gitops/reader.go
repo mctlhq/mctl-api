@@ -17,7 +17,9 @@ package gitops
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -562,35 +564,30 @@ func (r *Reader) ListPlatformSkills() ([]PlatformSkill, error) {
 	return out, nil
 }
 
-// GetPlatformSkill reads one platform-wide skill by metadata name.
+// GetPlatformSkill reads one platform-wide skill by name. The catalog
+// directory name is enforced to match the metadata name at publish time
+// (see validatePlatformSkillMetadata), so name can be used directly as the
+// directory to read.
 func (r *Reader) GetPlatformSkill(name string) (*PlatformSkill, string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	dir := filepath.Join(r.localPath, "platform-gitops", "platform-skills", "catalog")
-	entries, err := os.ReadDir(dir)
+	skill, err := r.readPlatformSkillLocked(name)
 	if err != nil {
-		return nil, "", fmt.Errorf("reading %s: %w", dir, err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, "", fmt.Errorf("platform skill not found: %s: %w", name, fs.ErrNotExist)
+		}
+		return nil, "", err
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	contentPath := filepath.Join(r.localPath, "platform-gitops", "platform-skills", "catalog", name, "SKILL.md")
+	data, err := os.ReadFile(contentPath) //nolint:gosec // path is constrained to catalog root
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, "", fmt.Errorf("platform skill not found: %s: %w", name, fs.ErrNotExist)
 		}
-		skill, err := r.readPlatformSkillLocked(entry.Name())
-		if err != nil {
-			return nil, "", err
-		}
-		if skill.Metadata.Name != name {
-			continue
-		}
-		contentPath := filepath.Join(dir, entry.Name(), "SKILL.md")
-		data, err := os.ReadFile(contentPath) //nolint:gosec // path is constrained to catalog root
-		if err != nil {
-			return nil, "", fmt.Errorf("reading %s: %w", contentPath, err)
-		}
-		return skill, string(data), nil
+		return nil, "", fmt.Errorf("reading %s: %w", contentPath, err)
 	}
-	return nil, "", fmt.Errorf("platform skill not found: %s", name)
+	return skill, string(data), nil
 }
 
 func (r *Reader) readPlatformSkillLocked(dirName string) (*PlatformSkill, error) {

@@ -675,6 +675,10 @@ func TestSmoke_ExecuteOperation(t *testing.T) {
 			"openclaw-skill-delete",
 			"openclaw-identity-save",
 			"openclaw-identity-delete",
+			"platform-skill-publish",
+			"platform-skill-deprecate",
+			"platform-skill-enable",
+			"platform-skill-disable",
 		} {
 			w := postAs(t, router, "/api/v1/operations/"+op+"/execute", map[string]string{
 				"team_name": "tests",

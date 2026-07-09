@@ -16,6 +16,8 @@ package gitops
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -582,6 +584,17 @@ runtimes: [mcp, codex]
 	}
 	if skill.Metadata.Visibility != "admin" || content != "# MCTL Platform" {
 		t.Fatalf("unexpected skill/content: %+v %q", skill, content)
+	}
+}
+
+func TestPlatformSkills_GetUnknownSkillWrapsErrNotExist(t *testing.T) {
+	_, r := setupTempRepo(t)
+	_, _, err := r.GetPlatformSkill("does-not-exist")
+	if err == nil {
+		t.Fatal("expected error for unknown skill")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected error to wrap fs.ErrNotExist, got: %v", err)
 	}
 }
 

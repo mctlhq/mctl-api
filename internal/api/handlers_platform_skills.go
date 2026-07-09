@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/secretscan"
@@ -148,6 +149,7 @@ func (h *Handlers) submitTenantSkillBindingChange(w http.ResponseWriter, r *http
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
 	var req platformSkillTenantBindingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -161,6 +163,10 @@ func (h *Handlers) submitTenantSkillBindingChange(w http.ResponseWriter, r *http
 	}
 	if !user.IsAdmin() {
 		writeError(w, http.StatusForbidden, "operation requires admin group membership")
+		return
+	}
+	if _, err := h.opts.GitReader.GetTenant(req.Tenant); err != nil {
+		writeError(w, http.StatusNotFound, "tenant not found: "+req.Tenant)
 		return
 	}
 	if opName == "platform-skill-enable" {
@@ -190,9 +196,25 @@ func (h *Handlers) submitTenantSkillBindingChange(w http.ResponseWriter, r *http
 	}
 	result, err := h.opts.Executor.Submit(r.Context(), op, params, user.ID, "platform")
 	if err != nil {
+		h.opts.AuditLog.Log(audit.Entry{
+			UserID:     user.ID,
+			Operation:  opName,
+			Parameters: params,
+			Status:     "failed",
+			RiskLevel:  string(op.RiskLevel),
+			Message:    "submit failed: " + err.Error(),
+		})
 		writeError(w, http.StatusInternalServerError, "failed to submit workflow: "+err.Error())
 		return
 	}
+	h.opts.AuditLog.Log(audit.Entry{
+		UserID:       user.ID,
+		Operation:    opName,
+		Parameters:   params,
+		WorkflowName: result.WorkflowName,
+		Status:       "submitted",
+		RiskLevel:    string(op.RiskLevel),
+	})
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{"operation": opName, "workflow": result})
 }
 
@@ -260,11 +282,28 @@ func (h *Handlers) PublishPlatformSkill(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "validation failed", "validationErrors": errs})
 		return
 	}
+	auditParams := map[string]string{"skill_name": req.Name, "actor": user.ID}
 	result, err := h.opts.Executor.Submit(r.Context(), op, params, user.ID, "platform")
 	if err != nil {
+		h.opts.AuditLog.Log(audit.Entry{
+			UserID:     user.ID,
+			Operation:  "platform-skill-publish",
+			Parameters: auditParams,
+			Status:     "failed",
+			RiskLevel:  string(op.RiskLevel),
+			Message:    "submit failed: " + err.Error(),
+		})
 		writeError(w, http.StatusInternalServerError, "failed to submit workflow: "+err.Error())
 		return
 	}
+	h.opts.AuditLog.Log(audit.Entry{
+		UserID:       user.ID,
+		Operation:    "platform-skill-publish",
+		Parameters:   auditParams,
+		WorkflowName: result.WorkflowName,
+		Status:       "submitted",
+		RiskLevel:    string(op.RiskLevel),
+	})
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{"operation": "platform-skill-publish", "workflow": result})
 }
 
@@ -284,17 +323,41 @@ func (h *Handlers) DeprecatePlatformSkill(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid skill name")
 		return
 	}
+	if _, _, err := h.opts.GitReader.GetPlatformSkill(name); err != nil {
+		writeError(w, http.StatusNotFound, "platform skill not found: "+name)
+		return
+	}
 	op, ok := h.opts.Registry.Get("platform-skill-deprecate")
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "platform-skill-deprecate operation is not registered")
 		return
 	}
 	params := h.opts.Registry.ApplyDefaults(op, map[string]string{"skill_name": name, "actor": user.ID})
+	if errs := h.opts.Registry.ValidateInput(op, params); len(errs) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "validation failed", "validationErrors": errs})
+		return
+	}
 	result, err := h.opts.Executor.Submit(r.Context(), op, params, user.ID, "platform")
 	if err != nil {
+		h.opts.AuditLog.Log(audit.Entry{
+			UserID:     user.ID,
+			Operation:  "platform-skill-deprecate",
+			Parameters: params,
+			Status:     "failed",
+			RiskLevel:  string(op.RiskLevel),
+			Message:    "submit failed: " + err.Error(),
+		})
 		writeError(w, http.StatusInternalServerError, "failed to submit workflow: "+err.Error())
 		return
 	}
+	h.opts.AuditLog.Log(audit.Entry{
+		UserID:       user.ID,
+		Operation:    "platform-skill-deprecate",
+		Parameters:   params,
+		WorkflowName: result.WorkflowName,
+		Status:       "submitted",
+		RiskLevel:    string(op.RiskLevel),
+	})
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{"operation": "platform-skill-deprecate", "workflow": result})
 }
 
@@ -361,6 +424,9 @@ func (a platformSkillAccess) canRead(skill gitops.PlatformSkill) bool {
 	case "public":
 		return skill.Metadata.Status == "active" || skill.Metadata.Status == "deprecated"
 	case "tenant":
+		if skill.Metadata.Status != "active" && skill.Metadata.Status != "deprecated" {
+			return false
+		}
 		return a.enabledForUserTenant(skill.Metadata.Name)
 	default:
 		return false

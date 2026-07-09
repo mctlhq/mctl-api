@@ -380,6 +380,7 @@ var builtinOperations = []Operation{
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
 		AdminOnly:        true,
+		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/catalog/{skill_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
@@ -396,6 +397,7 @@ var builtinOperations = []Operation{
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
 		AdminOnly:        true,
+		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/catalog/{skill_name}/metadata.yaml"},
 		Parameters: []ParameterDef{
 			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
@@ -410,6 +412,7 @@ var builtinOperations = []Operation{
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
 		AdminOnly:        true,
+		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/bindings/tenants/{tenant_name}.yaml"},
 		Parameters: []ParameterDef{
 			{Name: "tenant_name", Type: "string", Required: true, Description: "Tenant name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
@@ -425,6 +428,7 @@ var builtinOperations = []Operation{
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
 		AdminOnly:        true,
+		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/bindings/tenants/{tenant_name}.yaml"},
 		Parameters: []ParameterDef{
 			{Name: "tenant_name", Type: "string", Required: true, Description: "Tenant name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
