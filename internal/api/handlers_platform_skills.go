@@ -59,9 +59,9 @@ func (h *Handlers) ListPlatformSkills(w http.ResponseWriter, r *http.Request) {
 	}
 	access := platformSkillAccess{user: user, tenantBindings: tenantBindings, roleBindings: roleBindings}
 	items := make([]gitops.PlatformSkill, 0, len(skills))
-	for _, skill := range skills {
-		if access.canList(skill) {
-			items = append(items, skill)
+	for i := range skills {
+		if access.canList(skills[i]) {
+			items = append(items, skills[i])
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -84,7 +84,7 @@ func (h *Handlers) ReadPlatformSkill(w http.ResponseWriter, r *http.Request) {
 	}
 	skill, content, err := h.opts.GitReader.GetPlatformSkill(name)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, fs.ErrNotExist) {
 			writeError(w, http.StatusNotFound, "platform skill not found: "+name)
 			return
 		}

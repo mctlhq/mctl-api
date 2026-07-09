@@ -612,6 +612,11 @@ func TestSmoke_ServiceStatus(t *testing.T) {
 		assertStatus(t, w, http.StatusForbidden)
 	})
 
+	t.Run("tenant cannot read draft skill even if bound", func(t *testing.T) {
+		w := getAs(t, router, "/api/v1/platform-skills/draft-skill", ownerUser)
+		assertStatus(t, w, http.StatusForbidden)
+	})
+
 	t.Run("tenant owner cannot enable tenant skill directly", func(t *testing.T) {
 		w := postAs(t, router, "/api/v1/platform-skills/bindings/tenants/enable", map[string]string{
 			"tenant": "tests",
