@@ -17,7 +17,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
 func TestExtractStringParams(t *testing.T) {
@@ -137,5 +141,111 @@ func TestAllToolsHaveTitleAnnotation(t *testing.T) {
 		if tool.Annotations.Title == "" {
 			t.Errorf("tool %q is missing title annotation", tool.Name)
 		}
+	}
+}
+
+func TestPromptsListExposesPlatformSkill(t *testing.T) {
+	srv := NewServer("http://localhost:8080", "")
+	mcpSrv := srv.NewMCPServer()
+
+	req := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"prompts/list"}`)
+	resp := mcpSrv.HandleMessage(context.Background(), req)
+
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal response: %v", err)
+	}
+
+	var result struct {
+		Result struct {
+			Prompts []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				Arguments   []struct {
+					Name     string `json:"name"`
+					Required bool   `json:"required"`
+				} `json:"arguments"`
+			} `json:"prompts"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("failed to unmarshal prompts/list response: %v", err)
+	}
+
+	if len(result.Result.Prompts) != 1 {
+		t.Fatalf("expected 1 prompt, got %d", len(result.Result.Prompts))
+	}
+	prompt := result.Result.Prompts[0]
+	if prompt.Name != "platform-skill" {
+		t.Errorf("prompt name: got %q, want %q", prompt.Name, "platform-skill")
+	}
+	if prompt.Description == "" {
+		t.Error("prompt is missing a description")
+	}
+	if len(prompt.Arguments) != 1 || prompt.Arguments[0].Name != "skill" || !prompt.Arguments[0].Required {
+		t.Errorf("expected a single required argument %q, got %+v", "skill", prompt.Arguments)
+	}
+}
+
+func TestPromptPlatformSkill_GetReturnsContent(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/platform-skills/mctl-platform" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"metadata":{"name":"mctl-platform","title":"MCTL Platform","description":"Operating the mctl platform"},"content":"# mctl-platform\n\nSkill body."}`))
+	}))
+	defer backend.Close()
+
+	srv := NewServer(backend.URL, "test-token")
+	_, handler := srv.promptPlatformSkill()
+
+	result, err := handler(context.Background(), mcplib.GetPromptRequest{
+		Params: mcplib.GetPromptParams{Arguments: map[string]string{"skill": "mctl-platform"}},
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.Description != "Operating the mctl platform" {
+		t.Errorf("description: got %q", result.Description)
+	}
+	if len(result.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result.Messages))
+	}
+	text, ok := result.Messages[0].Content.(mcplib.TextContent)
+	if !ok {
+		t.Fatalf("expected text content, got %T", result.Messages[0].Content)
+	}
+	if text.Text != "# mctl-platform\n\nSkill body." {
+		t.Errorf("content: got %q", text.Text)
+	}
+}
+
+func TestPromptPlatformSkill_MissingArgument(t *testing.T) {
+	srv := NewServer("http://localhost:8080", "")
+	_, handler := srv.promptPlatformSkill()
+
+	if _, err := handler(context.Background(), mcplib.GetPromptRequest{}); err == nil {
+		t.Error("expected error for missing skill argument, got nil")
+	}
+}
+
+func TestPromptPlatformSkill_ForwardsAPIError(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"access denied"}`))
+	}))
+	defer backend.Close()
+
+	srv := NewServer(backend.URL, "test-token")
+	_, handler := srv.promptPlatformSkill()
+
+	_, err := handler(context.Background(), mcplib.GetPromptRequest{
+		Params: mcplib.GetPromptParams{Arguments: map[string]string{"skill": "admin-only"}},
+	})
+	if err == nil {
+		t.Fatal("expected error for forbidden skill, got nil")
 	}
 }
