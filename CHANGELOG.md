@@ -1,5 +1,23 @@
 # Changelog
 
+## [4.22.0](https://github.com/mctlhq/mctl-api/compare/4.21.2...4.22.0) (2026-07-10)
+
+
+### Features
+
+* add platform skill registry API ([994482a](https://github.com/mctlhq/mctl-api/commit/994482a341333a9e0399ab4247ccf0af483caf9a))
+* add platform skill registry API ([870b81e](https://github.com/mctlhq/mctl-api/commit/870b81ef54551e9ec7bd85eb1d3b3f51cc4c60f7))
+* **mcp:** expose platform skills as MCP prompt ([28838cb](https://github.com/mctlhq/mctl-api/commit/28838cbe9c3c026699fa96ccad91f4960e563301))
+* **mcp:** expose platform skills as MCP prompt ([e20a03d](https://github.com/mctlhq/mctl-api/commit/e20a03db4e6531031b9a16965caa58ec4fe72852))
+
+
+### Bug Fixes
+
+* address rangeValCopy lint and dead-code review nits ([9e8645a](https://github.com/mctlhq/mctl-api/commit/9e8645a2f16da3706e0500ac746b2d19dc864ecb))
+* **ci:** detect claude-review SDK failure the outcome field misses ([6ba48a0](https://github.com/mctlhq/mctl-api/commit/6ba48a00bc1487f50efa4540d94b5bdf7e72211c))
+* **ci:** detect claude-review SDK failure the outcome field misses ([7abd32c](https://github.com/mctlhq/mctl-api/commit/7abd32c5ed377efa20ad73d29839f9b7a401fa5a))
+* close platform skill review-gate findings ([a436aa7](https://github.com/mctlhq/mctl-api/commit/a436aa77b7563713d1996cdb2477eafa57e2047e))
+
 ## [4.21.2](https://github.com/mctlhq/mctl-api/compare/4.21.1...4.21.2) (2026-07-07)
 
 
