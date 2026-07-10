@@ -69,6 +69,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		"mctl",
 		"0.1.0",
 		server.WithToolCapabilities(true),
+		server.WithPromptCapabilities(false),
 	)
 
 	// Auth tools.
@@ -141,6 +142,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerShepherd())
 	srv.AddTool(s.toolTriggerIssue())
 	srv.AddTool(s.toolListRecentAgentRuns())
+
+	// Prompts (explicit skill invocation, e.g. /mctl:platform-skill in Claude Code).
+	srv.AddPrompt(s.promptPlatformSkill())
 
 	return srv
 }
@@ -2035,6 +2039,53 @@ the resolution timestamp.`),
 	}
 
 	return tool, handler
+}
+
+// --- Prompts ---
+
+// promptPlatformSkill exposes the platform skill catalog as a single generic
+// prompt taking the skill name as an argument. The prompt list is global and
+// built before any user authenticates, so enumerating the catalog as
+// individual prompts would leak admin and platform-internal skill names to
+// every client; access to skill content stays enforced by the REST handler.
+func (s *Server) promptPlatformSkill() (mcplib.Prompt, server.PromptHandlerFunc) {
+	prompt := mcplib.NewPrompt("platform-skill",
+		mcplib.WithPromptDescription("Load a platform-wide skill from the GitOps catalog into the conversation. Use the mctl_list_platform_skills tool to discover skill names available to you."),
+		mcplib.WithArgument("skill",
+			mcplib.RequiredArgument(),
+			mcplib.ArgumentDescription("Platform skill name, e.g. mctl-platform"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.GetPromptRequest) (*mcplib.GetPromptResult, error) {
+		name := strings.TrimSpace(req.Params.Arguments["skill"])
+		if name == "" {
+			return nil, fmt.Errorf("missing required argument: skill")
+		}
+		body, err := s.apiGet(ctx, "/api/v1/platform-skills/"+url.PathEscape(name))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read platform skill %q: %w", name, err)
+		}
+		var skill struct {
+			Metadata struct {
+				Title       string `json:"title"`
+				Description string `json:"description"`
+			} `json:"metadata"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(body, &skill); err != nil {
+			return nil, fmt.Errorf("failed to parse platform skill %q: %w", name, err)
+		}
+		description := skill.Metadata.Description
+		if description == "" {
+			description = skill.Metadata.Title
+		}
+		return mcplib.NewGetPromptResult(description, []mcplib.PromptMessage{
+			mcplib.NewPromptMessage(mcplib.RoleUser, mcplib.NewTextContent(skill.Content)),
+		}), nil
+	}
+
+	return prompt, handler
 }
 
 // --- HTTP helpers ---
