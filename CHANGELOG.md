@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.23.0](https://github.com/mctlhq/mctl-api/compare/4.22.0...4.23.0) (2026-07-11)
+
+
+### Features
+
+* add MCP trigger for mctl-agents incident responder ([0ba2259](https://github.com/mctlhq/mctl-api/commit/0ba2259a3cd1ffdcdc66f532832ec16faa552b8d))
+* add MCP trigger for mctl-agents incident responder ([61e6d92](https://github.com/mctlhq/mctl-api/commit/61e6d92714d3b98ced3feaec743bccefc0cbf34f))
+
 ## [4.22.0](https://github.com/mctlhq/mctl-api/compare/4.21.2...4.22.0) (2026-07-10)
 
 
