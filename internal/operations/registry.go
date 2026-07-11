@@ -437,11 +437,12 @@ var builtinOperations = []Operation{
 		},
 	},
 	// ─── mctl-agents triggers ─────────────────────────────────────────────
-	// Five platform-scoped (AdminOnly) operations that submit Workflows in
+	// Six platform-scoped (AdminOnly) operations that submit Workflows in
 	// the argo-workflows namespace (mctl-gitops repo holds the CWFTs):
-	//   - mctl-agents-run / mctl-agents-mentor-only / mctl-agents-single-service
-	//     all reference the SAME `mctl-agents-run` ClusterWorkflowTemplate;
-	//     only the `mode` (and optional `service`) parameter changes.
+	//   - mctl-agents-run / mctl-agents-mentor-only / mctl-agents-single-service /
+	//     mctl-agents-incidents all reference the SAME `mctl-agents-run`
+	//     ClusterWorkflowTemplate; only the `mode` (and optional `service`)
+	//     parameter changes.
 	//   - mctl-agents-implement (Tier 2) references its own
 	//     `mctl-agents-implement` ClusterWorkflowTemplate — it opens PRs in
 	//     sibling repos, so it carries RiskMedium instead of RiskLow.
@@ -492,6 +493,27 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "single-service", Description: "Run mode (locked to 'single-service')", Enum: []string{"single-service"}},
 			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: []string{"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}},
+		},
+	},
+	{
+		// Incident responder — same `mctl-agents-run` CWFT, mode=incident-responder.
+		// Lists mctl incidents with status=analyzing, filters to TypeGeneric ones
+		// older than 30 min (up to 5 per run), diagnoses each via logs, writes an
+		// auto-accepted proposal to agents-state/<service>/proposals/incident-<id[:8]>/,
+		// and resolves the incident. RiskLow — it writes proposals and resolves
+		// incidents, it never opens PRs itself (Tier 2 implementer does, on its
+		// own run). Admin-only, same as the sibling mctl-agents triggers.
+		Name:             "mctl-agents-incidents",
+		DisplayName:      "Run mctl-agents incident responder",
+		Description:      "Trigger the incident responder: diagnose TypeGeneric incidents stuck in status=analyzing (older than 30 min) and write auto-accepted proposals for the Tier 2 implementer, then resolve the incident. Same as the every-30-minute cron (15,45 * * * * UTC), on demand. Cost: ~$2 (subscription quota), max 5 incidents per run. Duration: variable, up to ~10 min. Result: proposal directories land in mctl-gitops main under platform-gitops/agents-state/<service>/proposals/incident-<id>/, and matched incidents are resolved.",
+		WorkflowTemplate: "mctl-agents-run",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		AdminOnly:        true,
+		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/incident-{id}/"},
+		Parameters: []ParameterDef{
+			{Name: "mode", Type: "string", Required: false, Default: "incident-responder", Description: "Run mode (locked to 'incident-responder')", Enum: []string{"incident-responder"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for incident-responder mode"},
 		},
 	},
 	{
