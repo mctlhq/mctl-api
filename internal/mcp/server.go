@@ -138,6 +138,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerAgentsRun())
 	srv.AddTool(s.toolTriggerMentorOnly())
 	srv.AddTool(s.toolTriggerSingleService())
+	srv.AddTool(s.toolTriggerIncidentResponder())
 	srv.AddTool(s.toolTriggerImplementer())
 	srv.AddTool(s.toolTriggerShepherd())
 	srv.AddTool(s.toolTriggerIssue())
@@ -2271,6 +2272,27 @@ Admin-only. Returns workflow_name.`),
 		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-single-service/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger single service: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolTriggerIncidentResponder() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_trigger_incident_responder",
+		mcplib.WithTitleAnnotation("Run mctl-agents incident responder"),
+		mcplib.WithDescription(`Trigger the incident responder: diagnose TypeGeneric incidents stuck in status=analyzing (older than 30 minutes) and write auto-accepted proposals for the Tier 2 implementer, then resolve the incident. Same as the every-30-minute cron (15,45 * * * * UTC), on demand.
+
+Cost: ~$2 (subscription quota), max 5 incidents per run.
+Duration: variable, up to ~10 minutes.
+Result: proposal directories (requirements/design/tasks.md + .status.yaml status=accepted) land in mctl-gitops main under platform-gitops/agents-state/<service>/proposals/incident-<id>/, and matched incidents are resolved.
+
+Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-incidents/execute", map[string]string{})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger incident responder: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}
