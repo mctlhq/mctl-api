@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.23.1](https://github.com/mctlhq/mctl-api/compare/4.23.0...4.23.1) (2026-07-12)
+
+
+### Bug Fixes
+
+* **api:** explicitly empty tenant allowlist now denies all skill enables ([5f6ec5c](https://github.com/mctlhq/mctl-api/commit/5f6ec5c9dcc7518603251c402fc3344e2aca4a6a))
+* **api:** explicitly empty tenant allowlist now denies all skill enables ([c2d9e69](https://github.com/mctlhq/mctl-api/commit/c2d9e692c2f76f05206fec9d54cfda238482f139))
+
 ## [4.23.0](https://github.com/mctlhq/mctl-api/compare/4.22.0...4.23.0) (2026-07-11)
 
 
