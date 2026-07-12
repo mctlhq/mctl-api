@@ -110,6 +110,17 @@ func TestValidateTenantSkillEnable_AllowlistSemantics(t *testing.T) {
 			wantErr: "deprecated",
 		},
 		{
+			name: "draft skill rejected before policy check",
+			skill: gitops.PlatformSkill{
+				Metadata: gitops.PlatformSkillMetadata{
+					Name:       "s1",
+					Visibility: "tenant",
+					Status:     "draft",
+				},
+			},
+			wantErr: "only active skills",
+		},
+		{
 			name: "non-tenant visibility",
 			skill: gitops.PlatformSkill{
 				Metadata: gitops.PlatformSkillMetadata{
