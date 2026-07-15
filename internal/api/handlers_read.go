@@ -380,7 +380,31 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 	// Check audit log for a record of this workflow to determine the namespace and team.
 	entry := h.opts.AuditLog.GetByWorkflow(name)
 	if entry == nil {
-		writeError(w, http.StatusNotFound, "workflow record not found in audit log")
+		// Not an operator-submitted operation — it may still be an instance
+		// spawned directly by the mctl-agents CronWorkflows (e.g.
+		// mctl-agents-reconcile-<epoch>), which never go through Submit() and
+		// so never get an audit entry. Those always run in the shared
+		// argo-workflows namespace (see cluster-templates/cronworkflow-mctl-agents-*.yaml
+		// in mctl-gitops), same prefix/namespace ListCronAgentRuns already
+		// queries for /api/v1/agent-runs. Gate on the prefix so an arbitrary
+		// unknown name still 404s cleanly instead of probing the cluster.
+		// Without an audit entry there's no team to check tenant access
+		// against either, so this fallback is admin-only.
+		if !user.IsAdmin() || !strings.HasPrefix(name, "mctl-agents-") {
+			writeError(w, http.StatusNotFound, "workflow record not found in audit log")
+			return
+		}
+		wf, err := h.opts.Executor.GetWorkflowStatus(r.Context(), "argo-workflows", name)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "workflow record not found in audit log; live lookup in argo-workflows also failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"workflow":  name,
+			"namespace": "argo-workflows",
+			"live":      wf,
+			"note":      "no audit log entry (likely cron-spawned); admin live-lookup fallback",
+		})
 		return
 	}
 

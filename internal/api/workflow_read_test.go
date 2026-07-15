@@ -7,8 +7,56 @@ import (
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
+	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
+
+// TestGetWorkflowCronFallbackForAdmin pins the fix for cron-spawned
+// workflow instances (e.g. mctl-agents-reconcile-<epoch>) that never go
+// through Submit() and so have no audit log entry. Discovered while
+// diagnosing mctl-gitops#593 recurring on 2026-07-15: mctl_get_workflow_status
+// 404s on every such name even though the workflow is live in the cluster.
+func TestGetWorkflowCronFallbackForAdmin(t *testing.T) {
+	router := mctlapi.NewRouter(mctlapi.Options{
+		Registry:  operations.NewRegistry(),
+		GitReader: &fakeGitReader{},
+		ArgoCD:    &fakeArgoCD{apps: map[string]*argocd.AppStatus{}},
+		AuditLog:  audit.NewLogger(),
+		Executor:  &fakeExecutor{},
+	})
+
+	w := getAs(t, router, "/api/v1/workflows/mctl-agents-reconcile-1784139300", adminUser)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	body := decodeJSON(t, w)
+	if body["namespace"] != "argo-workflows" {
+		t.Fatalf("expected namespace argo-workflows, got %v", body["namespace"])
+	}
+	if _, ok := body["live"]; !ok {
+		t.Fatalf("expected live status in response, got %v", body)
+	}
+}
+
+// TestGetWorkflowCronFallbackDeniedForNonAdmin ensures the fallback stays
+// admin-only: without an audit entry there's no team to check tenant
+// access against, so a non-admin must still get 404, not a live lookup.
+func TestGetWorkflowCronFallbackDeniedForNonAdmin(t *testing.T) {
+	router := mctlapi.NewRouter(mctlapi.Options{
+		Registry:  operations.NewRegistry(),
+		GitReader: &fakeGitReader{},
+		ArgoCD:    &fakeArgoCD{apps: map[string]*argocd.AppStatus{}},
+		AuditLog:  audit.NewLogger(),
+		Executor:  &fakeExecutor{},
+	})
+
+	outsider := &auth.User{ID: "someone-else", Groups: []string{"other"}}
+	w := getAs(t, router, "/api/v1/workflows/mctl-agents-reconcile-1784139300", outsider)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404 for non-admin, got %d: %s", w.Code, w.Body.String())
+	}
+}
 
 func TestGetWorkflowDeleteTenantSafeUsesArgoWorkflowsNamespace(t *testing.T) {
 	logger := audit.NewLogger()

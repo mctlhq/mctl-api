@@ -264,7 +264,7 @@ func (s *Server) toolGetWorkflowStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_workflow_status",
 		mcplib.WithTitleAnnotation("Get Workflow Status"),
 		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDescription("Get status and logs of an Argo Workflow run. Use this after triggering an operation (deploy, create tenant, etc.) to check if it completed successfully."),
+		mcplib.WithDescription("Get status and logs of an Argo Workflow run. Use this after triggering an operation (deploy, create tenant, etc.) to check if it completed successfully. Also works (admin-only) for mctl-agents-* instances spawned directly by a CronWorkflow, e.g. mctl-agents-reconcile-1784139300, which have no audit log entry of their own."),
 		mcplib.WithString("workflow_name",
 			mcplib.Required(),
 			mcplib.Description("Workflow name (returned from operation calls like mctl_deploy_service)"),
