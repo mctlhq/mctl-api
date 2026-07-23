@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.24.0](https://github.com/mctlhq/mctl-api/compare/4.23.1...4.24.0) (2026-07-23)
+
+
+### Features
+
+* **alerts:** fingerprint-based dedup for incident creation ([12d9bd9](https://github.com/mctlhq/mctl-api/commit/12d9bd9a599c8f50c935531f6268a699f9908d4d))
+* **alerts:** fingerprint-based dedup for incident creation ([898d6af](https://github.com/mctlhq/mctl-api/commit/898d6af4c2b1792a56f5e1022b0b30c0cf8aa2dd))
+
+
+### Bug Fixes
+
+* **alerts:** ignore caller-supplied occurrence_count, fix evidence on dedup hit ([0f648de](https://github.com/mctlhq/mctl-api/commit/0f648deb32c3c46e3e08bb6af63a520ead53eaab))
+* **alerts:** reject cross-tenant id collisions instead of leaking the row ([007d813](https://github.com/mctlhq/mctl-api/commit/007d81384777ad8765ba5598e13f3cd153ee8b63))
+* **alerts:** scope fingerprint dedup by tenant, handle id-retry ([34b2961](https://github.com/mctlhq/mctl-api/commit/34b2961ba57fa8c7036da3f61849f1204948be63))
+* **ci:** preserve zero diff-line count in Claude review ([#103](https://github.com/mctlhq/mctl-api/issues/103)) ([83d71e0](https://github.com/mctlhq/mctl-api/commit/83d71e0b0f2107e39461270a3fa11238af0c3e80))
+
 ## [4.23.1](https://github.com/mctlhq/mctl-api/compare/4.23.0...4.23.1) (2026-07-12)
 
 
