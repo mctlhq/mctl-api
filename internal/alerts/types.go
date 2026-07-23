@@ -70,7 +70,7 @@ type Alert struct {
 	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
 	// Fingerprint identifies the underlying failure class for dedup purposes.
 	// Empty (the default) opts an alert out of dedup entirely — see the
-	// partial unique index on (fingerprint) in alertSchema.
+	// partial unique index on (tenant, fingerprint) in alertSchema.
 	Fingerprint     string     `json:"fingerprint,omitempty"`
 	OccurrenceCount int        `json:"occurrence_count,omitempty"`
 	LastSeenAt      *time.Time `json:"last_seen_at,omitempty"`

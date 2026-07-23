@@ -16,11 +16,13 @@ package alerts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -53,8 +55,9 @@ ALTER TABLE alerts ADD COLUMN IF NOT EXISTS fingerprint      TEXT NOT NULL DEFAU
 ALTER TABLE alerts ADD COLUMN IF NOT EXISTS occurrence_count INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE alerts ADD COLUMN IF NOT EXISTS last_seen_at     TIMESTAMPTZ;
 
-CREATE UNIQUE INDEX IF NOT EXISTS alerts_fingerprint_open
-  ON alerts (fingerprint)
+DROP INDEX IF EXISTS alerts_fingerprint_open;
+CREATE UNIQUE INDEX IF NOT EXISTS alerts_tenant_fingerprint_open
+  ON alerts (tenant, fingerprint)
   WHERE fingerprint <> '' AND status NOT IN ('resolved', 'suppressed');
 
 CREATE TABLE IF NOT EXISTS alert_evidence (
@@ -107,7 +110,7 @@ func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 		 analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at,
 		 acknowledged_by, acknowledged_at, fingerprint, occurrence_count, last_seen_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-		 ON CONFLICT (fingerprint) WHERE fingerprint <> '' AND status NOT IN ('resolved','suppressed')
+		 ON CONFLICT (tenant, fingerprint) WHERE fingerprint <> '' AND status NOT IN ('resolved','suppressed')
 		 DO UPDATE SET occurrence_count = alerts.occurrence_count + 1,
 		               last_seen_at = EXCLUDED.updated_at,
 		               updated_at = EXCLUDED.updated_at
@@ -127,6 +130,17 @@ func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 		&stored.LastSeenAt,
 	)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "alerts_pkey" {
+			// Same-id retry (e.g. a network retry of the same POST): treat as
+			// an idempotent no-op and return the row already on disk, matching
+			// the old ON CONFLICT (id) DO NOTHING behavior.
+			existing, getErr := s.Get(ctx, a.ID)
+			if getErr != nil {
+				return nil, fmt.Errorf("alerts store: create: id %q already exists: %w", a.ID, getErr)
+			}
+			return existing, nil
+		}
 		return nil, fmt.Errorf("alerts store: create: %w", err)
 	}
 

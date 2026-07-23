@@ -98,6 +98,74 @@ func TestCreate_SameFingerprint_Dedups(t *testing.T) {
 	}
 }
 
+func TestCreate_SameFingerprint_DifferentTenants_BothPersist(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	a := newAlert("tenant-a-1", "workflow_failed:run:shared")
+	a.Tenant = "tenant-a"
+	first, err := s.Create(ctx, a)
+	if err != nil {
+		t.Fatalf("create tenant-a: %v", err)
+	}
+
+	b := newAlert("tenant-b-1", "workflow_failed:run:shared")
+	b.Tenant = "tenant-b"
+	second, err := s.Create(ctx, b)
+	if err != nil {
+		t.Fatalf("create tenant-b: %v", err)
+	}
+
+	if second.ID == first.ID {
+		t.Fatalf("expected independent alerts for the same fingerprint under different tenants, got merged id %q", second.ID)
+	}
+	if first.OccurrenceCount != 1 || second.OccurrenceCount != 1 {
+		t.Fatalf("expected occurrence_count=1 for both tenants' alerts (no cross-tenant merge), got %d and %d",
+			first.OccurrenceCount, second.OccurrenceCount)
+	}
+
+	all, err := s.List(ctx, ListFilter{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 independent rows across tenants sharing a fingerprint, got %d", len(all))
+	}
+}
+
+func TestCreate_SameID_Retry_ReturnsExistingRow(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Two distinct fingerprints so the retry can only be caught by the id
+	// (PK) collision path, not the fingerprint dedup path.
+	first, err := s.Create(ctx, newAlert("retry-1", "workflow_failed:run:x"))
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+
+	retry := newAlert("retry-1", "workflow_failed:run:y")
+	got, err := s.Create(ctx, retry)
+	if err != nil {
+		t.Fatalf("expected a same-id retry to be a no-op, not an error: %v", err)
+	}
+	if got.ID != first.ID {
+		t.Fatalf("expected retry to return the existing row's id %q, got %q", first.ID, got.ID)
+	}
+	if got.Fingerprint != first.Fingerprint {
+		t.Fatalf("expected retry to return the ORIGINAL stored row, not the retry's payload; got fingerprint %q, want %q",
+			got.Fingerprint, first.Fingerprint)
+	}
+
+	all, err := s.List(ctx, ListFilter{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected exactly 1 row after a same-id retry, got %d", len(all))
+	}
+}
+
 func TestCreate_DifferentFingerprints_BothPersist(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
