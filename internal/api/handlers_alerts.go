@@ -58,6 +58,11 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 		a.Status = alerts.StatusOpen
 	}
 
+	// occurrence_count and last_seen_at are store-managed; ignore any
+	// caller-supplied values so a POST can't seed or corrupt the dedup counter.
+	a.OccurrenceCount = 0
+	a.LastSeenAt = nil
+
 	stored, err := h.opts.AlertStore.Create(r.Context(), &a)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create incident: "+err.Error())

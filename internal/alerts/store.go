@@ -155,7 +155,14 @@ func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 		}
 	}
 
-	stored.Evidence = a.Evidence
+	if stored.ID == a.ID {
+		stored.Evidence = a.Evidence
+	} else {
+		// Dedup hit: stored.ID is the original alert's ID, so a.Evidence (just
+		// the newly submitted evidence) would be an incomplete picture. Return
+		// the full accumulated evidence list instead.
+		stored.Evidence, _ = s.getEvidence(ctx, stored.ID)
+	}
 	return stored, nil
 }
 
