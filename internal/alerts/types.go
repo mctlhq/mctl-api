@@ -68,7 +68,13 @@ type Alert struct {
 	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
 	AcknowledgedBy string     `json:"acknowledged_by,omitempty"`
 	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
-	Evidence       []Evidence `json:"evidence,omitempty"`
+	// Fingerprint identifies the underlying failure class for dedup purposes.
+	// Empty (the default) opts an alert out of dedup entirely — see the
+	// partial unique index on (tenant, fingerprint) in alertSchema.
+	Fingerprint     string     `json:"fingerprint,omitempty"`
+	OccurrenceCount int        `json:"occurrence_count,omitempty"`
+	LastSeenAt      *time.Time `json:"last_seen_at,omitempty"`
+	Evidence        []Evidence `json:"evidence,omitempty"`
 }
 
 // Evidence attached to an alert.
