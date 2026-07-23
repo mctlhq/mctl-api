@@ -26,6 +26,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// ErrIDConflict is returned by Create when the alert's id collides with an
+// existing row owned by a different tenant. Callers must not surface which
+// tenant actually owns the id — that would reopen the same leak.
+var ErrIDConflict = errors.New("alerts store: id already exists")
+
 const alertSchema = `
 CREATE TABLE IF NOT EXISTS alerts (
     id              TEXT PRIMARY KEY,
@@ -134,10 +139,18 @@ func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "alerts_pkey" {
 			// Same-id retry (e.g. a network retry of the same POST): treat as
 			// an idempotent no-op and return the row already on disk, matching
-			// the old ON CONFLICT (id) DO NOTHING behavior.
+			// the old ON CONFLICT (id) DO NOTHING behavior. But the id is
+			// caller-supplied, so a cross-tenant caller could guess/enumerate
+			// another tenant's id and use this path to read their alert. Only
+			// treat it as an idempotent no-op when the existing row belongs to
+			// the same tenant; otherwise report a conflict without revealing
+			// the row.
 			existing, getErr := s.Get(ctx, a.ID)
 			if getErr != nil {
 				return nil, fmt.Errorf("alerts store: create: id %q already exists: %w", a.ID, getErr)
+			}
+			if existing.Tenant != a.Tenant {
+				return nil, ErrIDConflict
 			}
 			return existing, nil
 		}

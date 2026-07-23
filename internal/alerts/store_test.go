@@ -16,6 +16,7 @@ package alerts
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 )
@@ -163,6 +164,40 @@ func TestCreate_SameID_Retry_ReturnsExistingRow(t *testing.T) {
 	}
 	if len(all) != 1 {
 		t.Fatalf("expected exactly 1 row after a same-id retry, got %d", len(all))
+	}
+}
+
+func TestCreate_SameID_DifferentTenant_DoesNotLeak(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	a := newAlert("shared-id", "workflow_failed:run:a")
+	a.Tenant = "tenant-a"
+	a.Summary = "tenant-a secret summary"
+	first, err := s.Create(ctx, a)
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+
+	b := newAlert("shared-id", "workflow_failed:run:b")
+	b.Tenant = "tenant-b"
+	got, err := s.Create(ctx, b)
+	if !errors.Is(err, ErrIDConflict) {
+		t.Fatalf("expected ErrIDConflict for a cross-tenant id collision, got err=%v, got=%+v", err, got)
+	}
+	if got != nil {
+		t.Fatalf("expected no row to be returned on a cross-tenant id collision, got %+v", got)
+	}
+
+	all, err := s.List(ctx, ListFilter{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected the tenant-b create to be rejected (no new row), got %d rows", len(all))
+	}
+	if all[0].ID != first.ID || all[0].Tenant != "tenant-a" {
+		t.Fatalf("expected only the original tenant-a row to remain, got %+v", all[0])
 	}
 }
 

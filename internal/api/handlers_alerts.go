@@ -16,6 +16,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -65,6 +66,10 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 
 	stored, err := h.opts.AlertStore.Create(r.Context(), &a)
 	if err != nil {
+		if errors.Is(err, alerts.ErrIDConflict) {
+			writeError(w, http.StatusConflict, "incident id already in use")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to create incident: "+err.Error())
 		return
 	}
