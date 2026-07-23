@@ -58,12 +58,54 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 		a.Status = alerts.StatusOpen
 	}
 
-	if err := h.opts.AlertStore.Create(r.Context(), &a); err != nil {
+	stored, err := h.opts.AlertStore.Create(r.Context(), &a)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create incident: "+err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, a)
+	writeJSON(w, http.StatusCreated, stored)
+}
+
+// ResolveIncidentByFingerprint handles POST /api/v1/incidents/resolve-by-fingerprint.
+func (h *Handlers) ResolveIncidentByFingerprint(w http.ResponseWriter, r *http.Request) {
+	if h.opts.AlertStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "alert store not configured")
+		return
+	}
+
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	var body struct {
+		Tenant      string `json:"tenant"`
+		Fingerprint string `json:"fingerprint"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	if body.Tenant == "" || body.Fingerprint == "" {
+		writeError(w, http.StatusBadRequest, "missing required fields: tenant, fingerprint")
+		return
+	}
+
+	if !user.IsAdmin() && !user.HasTenantAccess(body.Tenant) {
+		writeError(w, http.StatusForbidden, "access denied to tenant: "+body.Tenant)
+		return
+	}
+
+	resolved, err := h.opts.AlertStore.ResolveByFingerprint(r.Context(), body.Tenant, body.Fingerprint)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve incident: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"resolved": resolved})
 }
 
 // ListIncidents handles GET /api/v1/incidents.

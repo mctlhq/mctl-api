@@ -206,6 +206,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/incidents", h.ListIncidents)
 			r.Get("/incidents/{id}", h.GetIncident)
 			r.Post("/incidents", h.CreateIncident)
+			r.Post("/incidents/resolve-by-fingerprint", h.ResolveIncidentByFingerprint)
 			r.Patch("/incidents/{id}", h.UpdateIncident)
 			r.Post("/incidents/{id}/ack", h.AcknowledgeIncident)
 			r.Post("/incidents/{id}/resolve", h.ResolveIncident)

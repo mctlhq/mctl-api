@@ -49,6 +49,14 @@ CREATE INDEX IF NOT EXISTS alerts_status ON alerts (status);
 CREATE INDEX IF NOT EXISTS alerts_tenant ON alerts (tenant);
 CREATE INDEX IF NOT EXISTS alerts_created_at ON alerts (created_at DESC);
 
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS fingerprint      TEXT NOT NULL DEFAULT '';
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS occurrence_count INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS last_seen_at     TIMESTAMPTZ;
+
+CREATE UNIQUE INDEX IF NOT EXISTS alerts_fingerprint_open
+  ON alerts (fingerprint)
+  WHERE fingerprint <> '' AND status NOT IN ('resolved', 'suppressed');
+
 CREATE TABLE IF NOT EXISTS alert_evidence (
     id           SERIAL PRIMARY KEY,
     alert_id     TEXT NOT NULL REFERENCES alerts(id),
@@ -78,40 +86,63 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 	return &Store{pool: pool}, nil
 }
 
-// Create inserts a new alert with its evidence.
-func (s *Store) Create(ctx context.Context, a *Alert) error {
+// Create inserts a new alert with its evidence, or — when a.Fingerprint is
+// non-empty and matches an existing open alert — merges into that alert
+// instead (bumping occurrence_count and last_seen_at). The returned Alert is
+// the actual stored/matched row, so on a dedup hit its ID is the ORIGINAL
+// incident's ID, not a.ID.
+func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 	now := time.Now().UTC()
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = now
 	}
 	a.UpdatedAt = now
+	if a.OccurrenceCount == 0 {
+		a.OccurrenceCount = 1
+	}
 
-	_, err := s.pool.Exec(ctx,
+	stored := &Alert{}
+	err := s.pool.QueryRow(ctx,
 		`INSERT INTO alerts (id, source, type, tenant, service, summary, severity, status,
 		 analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at,
-		 acknowledged_by, acknowledged_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-		 ON CONFLICT (id) DO NOTHING`,
+		 acknowledged_by, acknowledged_at, fingerprint, occurrence_count, last_seen_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+		 ON CONFLICT (fingerprint) WHERE fingerprint <> '' AND status NOT IN ('resolved','suppressed')
+		 DO UPDATE SET occurrence_count = alerts.occurrence_count + 1,
+		               last_seen_at = EXCLUDED.updated_at,
+		               updated_at = EXCLUDED.updated_at
+		 RETURNING id, source, type, tenant, service, summary, severity, status,
+		           analysis, proposed_fix, pr_url, pr_number, confidence,
+		           created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at,
+		           fingerprint, occurrence_count, last_seen_at`,
 		a.ID, a.Source, a.Type, a.Tenant, a.Service, a.Summary, a.Severity, a.Status,
 		a.Analysis, a.ProposedFix, a.PRURL, a.PRNumber, a.Confidence,
 		a.CreatedAt, a.UpdatedAt, a.ResolvedAt, a.AcknowledgedBy, a.AcknowledgedAt,
+		a.Fingerprint, a.OccurrenceCount, a.LastSeenAt,
+	).Scan(
+		&stored.ID, &stored.Source, &stored.Type, &stored.Tenant, &stored.Service, &stored.Summary,
+		&stored.Severity, &stored.Status, &stored.Analysis, &stored.ProposedFix, &stored.PRURL,
+		&stored.PRNumber, &stored.Confidence, &stored.CreatedAt, &stored.UpdatedAt, &stored.ResolvedAt,
+		&stored.AcknowledgedBy, &stored.AcknowledgedAt, &stored.Fingerprint, &stored.OccurrenceCount,
+		&stored.LastSeenAt,
 	)
 	if err != nil {
-		return fmt.Errorf("alerts store: create: %w", err)
+		return nil, fmt.Errorf("alerts store: create: %w", err)
 	}
 
 	for _, ev := range a.Evidence {
 		_, err := s.pool.Exec(ctx,
 			`INSERT INTO alert_evidence (alert_id, type, content, collected_at)
 			 VALUES ($1, $2, $3, $4)`,
-			a.ID, ev.Type, ev.Content, ev.CollectedAt,
+			stored.ID, ev.Type, ev.Content, ev.CollectedAt,
 		)
 		if err != nil {
-			slog.Error("alerts store: insert evidence failed", "alert_id", a.ID, "error", err)
+			slog.Error("alerts store: insert evidence failed", "alert_id", stored.ID, "error", err)
 		}
 	}
 
-	return nil
+	stored.Evidence = a.Evidence
+	return stored, nil
 }
 
 // Update patches an existing alert (status, analysis, pr_url, etc).
@@ -149,11 +180,13 @@ func (s *Store) Get(ctx context.Context, id string) (*Alert, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, source, type, tenant, service, summary, severity, status,
 		 analysis, proposed_fix, pr_url, pr_number, confidence,
-		 created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at
+		 created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at,
+		 fingerprint, occurrence_count, last_seen_at
 		 FROM alerts WHERE id=$1`, id).Scan(
 		&a.ID, &a.Source, &a.Type, &a.Tenant, &a.Service, &a.Summary, &a.Severity, &a.Status,
 		&a.Analysis, &a.ProposedFix, &a.PRURL, &a.PRNumber, &a.Confidence,
 		&a.CreatedAt, &a.UpdatedAt, &a.ResolvedAt, &a.AcknowledgedBy, &a.AcknowledgedAt,
+		&a.Fingerprint, &a.OccurrenceCount, &a.LastSeenAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("alerts store: get: %w", err)
@@ -173,11 +206,13 @@ func (s *Store) GetByPrefix(ctx context.Context, prefix string) (*Alert, error) 
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, source, type, tenant, service, summary, severity, status,
 		 analysis, proposed_fix, pr_url, pr_number, confidence,
-		 created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at
+		 created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at,
+		 fingerprint, occurrence_count, last_seen_at
 		 FROM alerts WHERE id LIKE $1 ORDER BY created_at DESC LIMIT 1`, prefix+"%").Scan(
 		&a.ID, &a.Source, &a.Type, &a.Tenant, &a.Service, &a.Summary, &a.Severity, &a.Status,
 		&a.Analysis, &a.ProposedFix, &a.PRURL, &a.PRNumber, &a.Confidence,
 		&a.CreatedAt, &a.UpdatedAt, &a.ResolvedAt, &a.AcknowledgedBy, &a.AcknowledgedAt,
+		&a.Fingerprint, &a.OccurrenceCount, &a.LastSeenAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("alerts store: get by prefix: %w", err)
@@ -185,6 +220,21 @@ func (s *Store) GetByPrefix(ctx context.Context, prefix string) (*Alert, error) 
 
 	a.Evidence, _ = s.getEvidence(ctx, a.ID)
 	return a, nil
+}
+
+// ResolveByFingerprint resolves the open alert matching tenant+fingerprint,
+// if one exists. Zero rows affected (no matching open alert) is expected and
+// not an error — it just means nothing needed resolving.
+func (s *Store) ResolveByFingerprint(ctx context.Context, tenant, fingerprint string) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE alerts SET status='resolved', resolved_at=now(), updated_at=now()
+		 WHERE tenant=$1 AND fingerprint=$2 AND status NOT IN ('resolved','suppressed')`,
+		tenant, fingerprint,
+	)
+	if err != nil {
+		return false, fmt.Errorf("alerts store: resolve by fingerprint: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 func (s *Store) getEvidence(ctx context.Context, alertID string) ([]Evidence, error) {
@@ -252,7 +302,8 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]Alert, error) {
 
 	query := `SELECT id, source, type, tenant, service, summary, severity, status,
 		analysis, proposed_fix, pr_url, pr_number, confidence,
-		created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at
+		created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at,
+		fingerprint, occurrence_count, last_seen_at
 		FROM alerts`
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
@@ -279,6 +330,7 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]Alert, error) {
 			&a.ID, &a.Source, &a.Type, &a.Tenant, &a.Service, &a.Summary, &a.Severity, &a.Status,
 			&a.Analysis, &a.ProposedFix, &a.PRURL, &a.PRNumber, &a.Confidence,
 			&a.CreatedAt, &a.UpdatedAt, &a.ResolvedAt, &a.AcknowledgedBy, &a.AcknowledgedAt,
+			&a.Fingerprint, &a.OccurrenceCount, &a.LastSeenAt,
 		); err != nil {
 			slog.Error("alerts store: scan failed", "error", err)
 			continue
