@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
 func TestExtractStringParams(t *testing.T) {
@@ -82,6 +83,36 @@ func TestToolDescriptions_NotEmpty(t *testing.T) {
 		result := tc.fn()
 		if result == nil {
 			t.Errorf("%s returned nil tool", tc.name)
+		}
+	}
+}
+
+// TestToolDeployService_ExposesEveryOperationParameter guards against the
+// MCP tool schema silently drifting from what the backend operation actually
+// accepts: extractStringParams passes through any string argument regardless
+// of the declared schema, so a parameter present in operations.Registry but
+// missing from toolDeployService's WithString list is invisible to callers
+// even though the backend would honor it (found in practice: dockerfile_path,
+// image_tag, secret_env_vars, and skip_health_check were all already
+// supported server-side but absent here).
+func TestToolDeployService_ExposesEveryOperationParameter(t *testing.T) {
+	srv := NewServer("http://localhost:8080", "")
+	tool, _ := srv.toolDeployService()
+
+	reg := operations.NewRegistry()
+	op, ok := reg.Get("deploy-service")
+	if !ok {
+		t.Fatal("deploy-service operation not found in registry")
+	}
+
+	for _, p := range op.Parameters {
+		if p.Name == "host" {
+			// host is derived by the handler from component_type, never a
+			// user-facing MCP parameter — see toolDeployService's handler.
+			continue
+		}
+		if _, exposed := tool.InputSchema.Properties[p.Name]; !exposed {
+			t.Errorf("operation parameter %q is not exposed on the mctl_deploy_service MCP tool schema", p.Name)
 		}
 	}
 }

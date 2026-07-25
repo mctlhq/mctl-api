@@ -340,6 +340,8 @@ Order of operations for a brand-new repo:
 The service domain is auto-generated as {team_name}-{component_name}.{platform_domain}.
 Custom domains can be added after deployment using mctl_add_custom_domain.
 For background workers, set component_type to 'worker-service' (no ingress).
+If the worker has no HTTP health endpoint, also set skip_health_check=true —
+otherwise the post-deploy check will fail waiting on a path that doesn't exist.
 
 Repository access for building:
 - Use mctl_list_repos(team) to see available repos, and mctl_sync_repos(team) to discover new ones.
@@ -375,8 +377,21 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		mcplib.WithString("port",
 			mcplib.Description("Service port (default: 8080)"),
 		),
+		mcplib.WithString("dockerfile_path",
+			mcplib.Description("Path to the Dockerfile within dockerfile_repo (default: 'Dockerfile'). Set this to build from a non-default Dockerfile, e.g. a dedicated runtime image for a worker-service."),
+		),
+		mcplib.WithString("image_tag",
+			mcplib.Description("Explicit image tag override. Default: derived from git_tag."),
+		),
 		mcplib.WithString("env_vars",
 			mcplib.Description("Plaintext environment variables, newline-separated KEY=value"),
+		),
+		mcplib.WithString("secret_env_vars",
+			mcplib.Description("Secret environment variables, newline-separated KEY=value. Stored in Vault, never echoed back in logs or responses."),
+		),
+		mcplib.WithString("skip_health_check",
+			mcplib.Description("Skip the post-deploy health check: 'true' or 'false' (default: false). Only set 'true' for a worker-service that has no HTTP health endpoint."),
+			mcplib.Enum("true", "false"),
 		),
 		mcplib.WithString("clear_env",
 			mcplib.Description("Clear existing plaintext environment variables: 'true' or 'false' (default: false)"),
