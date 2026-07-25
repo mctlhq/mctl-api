@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.24.1](https://github.com/mctlhq/mctl-api/compare/4.24.0...4.24.1) (2026-07-25)
+
+
+### Bug Fixes
+
+* **mcp:** expose dockerfile_path, image_tag, secret_env_vars, skip_health_check on mctl_deploy_service ([ba77205](https://github.com/mctlhq/mctl-api/commit/ba7720510c731fc47b14fbf970f005ffff059213))
+* **mcp:** expose dockerfile_path, image_tag, secret_env_vars, skip_health_check on mctl_deploy_service ([6cc2f42](https://github.com/mctlhq/mctl-api/commit/6cc2f428ba983ae1114c64f2209572af0c6177bf))
+
 ## [4.24.0](https://github.com/mctlhq/mctl-api/compare/4.23.1...4.24.0) (2026-07-23)
 
 
