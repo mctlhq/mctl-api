@@ -524,7 +524,7 @@ var builtinOperations = []Operation{
 		// service-agent runs above). Admin-only.
 		Name:             "mctl-agents-implement",
 		DisplayName:      "Run mctl-agents Tier 2 implementer",
-		Description:      "Tier 2 implementer: take accepted proposals (those with .status.yaml status=accepted) and open PRs in the matching sibling repos under mctlhq/. Optionally filter by service or slug. Admin-only. Cost: ~$3 per proposal (subscription quota). Duration: variable (1–10 min per proposal). Updates .status.yaml in mctl-gitops main and opens one PR per implemented proposal.",
+		Description:      "Tier 2 implementer: process at most one accepted proposal after a fail-closed GitHub preflight. Existing branches/PRs are reconciled without invoking the model. Failures move to needs-triage and are never force-retried. Optionally filter by service or slug. Admin-only. Cost: up to one model attempt per run. Updates .status.yaml in mctl-gitops main and may open one PR.",
 		WorkflowTemplate: "mctl-agents-implement",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
@@ -533,7 +533,7 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}},
 			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
-			{Name: "force", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to retry a proposal stuck in `in-progress` (previous attempt may have crashed). Default 'false' (skip such proposals).", Enum: []string{"true", "false"}},
+			{Name: "max_proposals", Type: "string", Required: false, Default: "1", Description: "Safety bound. The API permits exactly one proposal per run.", Enum: []string{"1"}},
 		},
 	},
 	{
