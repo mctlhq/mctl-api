@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.24.2](https://github.com/mctlhq/mctl-api/compare/4.24.1...4.24.2) (2026-07-29)
+
+
+### Bug Fixes
+
+* remove implementer force retries from API ([53e17bc](https://github.com/mctlhq/mctl-api/commit/53e17bcde69ca2208183df4fc1c4723b88bc821f))
+* remove implementer force retries from API ([b8b675b](https://github.com/mctlhq/mctl-api/commit/b8b675bc0a785db58ca175956e849545b31a61ef))
+
 ## [4.24.1](https://github.com/mctlhq/mctl-api/compare/4.24.0...4.24.1) (2026-07-25)
 
 
