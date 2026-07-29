@@ -2318,13 +2318,15 @@ func (s *Server) toolTriggerImplementer() (mcplib.Tool, server.ToolHandlerFunc) 
 	tool := mcplib.NewTool("mctl_trigger_implementer",
 		mcplib.WithTitleAnnotation("Run mctl-agents Tier 2 implementer"),
 		mcplib.WithDestructiveHintAnnotation(true),
-		mcplib.WithDescription(`Trigger Tier 2 implementer agents to open PRs from accepted proposals. The implementer scans platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml for entries with status=accepted, and for each one: gh-clones the matching mctlhq/<service> repo, runs the per-service implementer sub-agent to make the change, pushes a feat/agents-<slug> branch, and opens a PR. After a successful PR, .status.yaml is updated to status=implemented with the PR URL.
+		mcplib.WithDescription(`Trigger Tier 2 implementer for at most one accepted proposal. Before any model call it queries GitHub for the deterministic feat/agents-<slug> branch and canonical PR. Existing open/merged/closed results are reconciled without spending model quota. Only when no prior result exists does it run the sub-agent, push the branch, and open a PR.
 
-Cost: ~$3 per proposal (subscription quota).
+Failures and no-commit results move to needs-triage and are not retried automatically. Retry requires an operator-reviewed GitOps change moving that one proposal back to accepted.
+
+Cost: at most one model attempt per invocation.
 Duration: variable, typically 1-10 minutes per proposal.
-Result: one PR per implemented proposal in mctlhq/<service>, plus a chore(agents) commit in mctl-gitops main bumping .status.yaml entries.
+Result: a reconciled existing result or at most one new PR, plus a durable .status.yaml projection.
 
-Optional filters narrow the run scope. By default ALL accepted proposals are processed. force=true retries proposals stuck in 'in-progress' (e.g. from a crashed earlier run).
+Optional service/slug filters narrow the run scope. There is no force or unbounded batch mode.
 
 Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
 		mcplib.WithString("service",
@@ -2333,10 +2335,6 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_re
 		),
 		mcplib.WithString("slug",
 			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
-		),
-		mcplib.WithString("force",
-			mcplib.Description("Set to 'true' to retry a proposal stuck in `in-progress`. Default 'false' (skip such proposals)."),
-			mcplib.Enum("true", "false"),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
