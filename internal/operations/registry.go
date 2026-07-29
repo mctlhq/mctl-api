@@ -170,6 +170,7 @@ var builtinOperations = []Operation{
 			{Name: "clear_secrets", Type: "string", Default: "false", Description: "Clear existing secret environment variables", Enum: []string{"true", "false"}},
 			{Name: "provision_database", Type: "string", Default: "false", Description: "Also provision a PostgreSQL database", Enum: []string{"true", "false"}},
 			{Name: "skip_health_check", Type: "string", Default: "false", Description: "Skip post-deploy health check", Enum: []string{"true", "false"}},
+			{Name: "health_check_path", Type: "string", Default: "", Description: "Override the liveness/readiness probe HTTP path (default: chart default /healthz + /readyz). Empty = unchanged."},
 			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Description: "Path to Dockerfile in the repo"},
 			{Name: "image_tag", Type: "string", Description: "Explicit image tag override (default: derived from git_tag)"},
 			{Name: "autoscaling_enabled", Type: "string", Default: "false", Description: "Enable HPA autoscaling", Enum: []string{"true", "false"}},
