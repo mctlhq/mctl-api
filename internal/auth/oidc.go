@@ -202,7 +202,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 			// writeErr writes a 401 with WWW-Authenticate header when OAuth is configured.
 			writeErr := func(msg string) {
 				if oauth != nil {
-					writeUnauthorizedOAuth(w, msg, oauth.BaseURL)
+					writeUnauthorizedOAuth(w, msg, oauth.BaseURL, r.URL.Path)
 				} else {
 					writeUnauthorized(w, msg)
 				}
@@ -306,8 +306,17 @@ func writeUnauthorized(w http.ResponseWriter, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-func writeUnauthorizedOAuth(w http.ResponseWriter, msg, baseURL string) {
-	w.Header().Set("WWW-Authenticate", `Bearer realm="`+baseURL+`"`)
+// writeUnauthorizedOAuth writes a 401 with a WWW-Authenticate header
+// pointing at this resource's RFC 9728 Protected Resource Metadata document
+// — the /mcp-suffixed form for the MCP endpoint itself, the root form for
+// every other protected API route, matching how both are registered in
+// router.go.
+func writeUnauthorizedOAuth(w http.ResponseWriter, msg, baseURL, path string) {
+	metadataURL := baseURL + "/.well-known/oauth-protected-resource"
+	if path == "/mcp" {
+		metadataURL = baseURL + "/.well-known/oauth-protected-resource/mcp"
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer realm="`+baseURL+`", resource_metadata="`+metadataURL+`"`)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})

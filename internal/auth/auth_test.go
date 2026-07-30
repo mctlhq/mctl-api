@@ -167,3 +167,47 @@ func TestMiddlewareAcceptsMctlAgentServiceToken(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
 }
+
+func TestMiddlewareUnauthorized_MCPRouteHasPathSpecificResourceMetadata(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+
+	oauth := &OAuthServer{BaseURL: "https://api.mctl.ai"}
+	mw := Middleware(NewGitHubValidator(nil), nil, nil, oauth)
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be reached without a token")
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+	want := `Bearer realm="https://api.mctl.ai", resource_metadata="https://api.mctl.ai/.well-known/oauth-protected-resource/mcp"`
+	if got := rr.Header().Get("WWW-Authenticate"); got != want {
+		t.Errorf("WWW-Authenticate = %q, want %q", got, want)
+	}
+}
+
+func TestMiddlewareUnauthorized_OtherRouteHasRootResourceMetadata(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+
+	oauth := &OAuthServer{BaseURL: "https://api.mctl.ai"}
+	mw := Middleware(NewGitHubValidator(nil), nil, nil, oauth)
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be reached without a token")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+	want := `Bearer realm="https://api.mctl.ai", resource_metadata="https://api.mctl.ai/.well-known/oauth-protected-resource"`
+	if got := rr.Header().Get("WWW-Authenticate"); got != want {
+		t.Errorf("WWW-Authenticate = %q, want %q", got, want)
+	}
+}

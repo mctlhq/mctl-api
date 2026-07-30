@@ -71,6 +71,35 @@ func (h *Handlers) handleOAuthMeta(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(meta)
 }
 
+// ProtectedResourceMeta is returned by /.well-known/oauth-protected-resource
+// and its /mcp-suffixed alias (RFC 9728). Some MCP clients probe the
+// path-specific form, others the root form with a resource field pointing at
+// /mcp — both are served identically here so neither client shape is left
+// unable to discover the authorization server.
+type ProtectedResourceMeta struct {
+	Resource             string   `json:"resource"`
+	AuthorizationServers []string `json:"authorization_servers"`
+	ScopesSupported      []string `json:"scopes_supported"`
+}
+
+// handleProtectedResourceMeta serves the RFC 9728 OAuth Protected Resource
+// Metadata document for the /mcp resource.
+func (h *Handlers) handleProtectedResourceMeta(w http.ResponseWriter, r *http.Request) {
+	if h.opts.OAuthServer == nil {
+		http.NotFound(w, r)
+		return
+	}
+	base := h.opts.OAuthServer.BaseURL
+	meta := ProtectedResourceMeta{
+		Resource:             base + "/mcp",
+		AuthorizationServers: []string{base},
+		ScopesSupported:      []string{"mctl"},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_ = json.NewEncoder(w).Encode(meta)
+}
+
 // handleOAuthAuthorize initiates the OAuth Authorization Code flow.
 // It validates the request parameters, stores pending state, and redirects to GitHub.
 //
