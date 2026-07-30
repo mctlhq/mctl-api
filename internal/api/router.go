@@ -127,6 +127,10 @@ func NewRouter(opts Options) http.Handler {
 
 	// OAuth 2.0 endpoints — public (no auth middleware), required for Claude.ai connector.
 	r.Get("/.well-known/oauth-authorization-server", h.handleOAuthMeta)
+	// RFC 9728 Protected Resource Metadata — registered at both the root path
+	// and the /mcp-suffixed alias since clients probe either form.
+	r.Get("/.well-known/oauth-protected-resource", h.handleProtectedResourceMeta)
+	r.Get("/.well-known/oauth-protected-resource/mcp", h.handleProtectedResourceMeta)
 	r.Get("/oauth/authorize", h.handleOAuthAuthorize)
 	r.Get("/oauth/github/callback", h.handleOAuthGitHubCallback)
 	r.Post("/oauth/token", h.handleOAuthToken)

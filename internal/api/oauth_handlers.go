@@ -71,6 +71,46 @@ func (h *Handlers) handleOAuthMeta(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(meta)
 }
 
+// ProtectedResourceMeta is returned by /.well-known/oauth-protected-resource
+// and its /mcp-suffixed alias (RFC 9728). The two describe DIFFERENT
+// resources sharing one authorization server: the /mcp-suffixed document
+// describes the MCP endpoint, the root document describes the REST API as a
+// whole. Advertising `resource: <base>/mcp` from the root document would
+// mismatch RFC 9728 clients validating resource identity when they were
+// challenged on a non-MCP route (e.g. /api/v1/whoami) — a client that
+// checks its own resource matches the returned metadata's `resource` field
+// may reject it, breaking discovery for everything except /mcp.
+type ProtectedResourceMeta struct {
+	Resource             string   `json:"resource"`
+	AuthorizationServers []string `json:"authorization_servers"`
+	ScopesSupported      []string `json:"scopes_supported"`
+}
+
+// handleProtectedResourceMeta serves the RFC 9728 OAuth Protected Resource
+// Metadata document. Registered at both /.well-known/oauth-protected-resource
+// and its /mcp-suffixed alias; the resource identity in the response reflects
+// which one was requested, matching the same path-based split used for the
+// WWW-Authenticate resource_metadata hint (see writeUnauthorizedOAuth).
+func (h *Handlers) handleProtectedResourceMeta(w http.ResponseWriter, r *http.Request) {
+	if h.opts.OAuthServer == nil {
+		http.NotFound(w, r)
+		return
+	}
+	base := h.opts.OAuthServer.BaseURL
+	resource := base
+	if strings.HasSuffix(r.URL.Path, "/mcp") {
+		resource = base + "/mcp"
+	}
+	meta := ProtectedResourceMeta{
+		Resource:             resource,
+		AuthorizationServers: []string{base},
+		ScopesSupported:      []string{"mctl"},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_ = json.NewEncoder(w).Encode(meta)
+}
+
 // handleOAuthAuthorize initiates the OAuth Authorization Code flow.
 // It validates the request parameters, stores pending state, and redirects to GitHub.
 //
