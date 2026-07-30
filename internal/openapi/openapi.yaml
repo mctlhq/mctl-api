@@ -633,6 +633,99 @@ paths:
               schema:
                 $ref: '#/components/schemas/WorkflowStatus'
 
+  /api/v1/workflows/{name}/logs:
+    get:
+      summary: Get workflow step logs
+      description: |
+        Returns Argo Workflow step logs from the archive Argo uploads them to.
+
+        This is a different source from `/api/v1/logs/{team}/{app}`, which
+        queries Loki: Loki only ingests long-lived service pods matching the
+        tenant naming convention, so it cannot serve Argo step pods.
+
+        Without `step`, lists the archived steps. That listing is itself
+        diagnostic — a step missing from an otherwise-populated workflow never
+        produced output, the signature of a pod that never started rather than
+        one that ran and failed.
+
+        Access is scoped to the workflow's owning team as recorded in the audit
+        log. Workflows with no owning team — every cron-driven run, plus
+        platform-scoped operations — require admin group membership.
+
+        Requires the archive to be configured (`ARGO_LOGS_R2_*`); otherwise the
+        response carries an explanatory `note`.
+      tags: [Workflows]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: mctl-agents-issue-poll-1785399300
+        - name: step
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Step name substring to read logs for. Omit to list archived steps.
+          example: run-poller
+        - name: lines
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+          description: Trailing log lines per step (max 1000)
+      responses:
+        '200':
+          description: Archived step listing, or step log bodies when `step` is given
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflow:
+                    type: string
+                  count:
+                    type: integer
+                  steps:
+                    type: array
+                    description: Present when `step` is omitted.
+                    items:
+                      type: object
+                      properties:
+                        step:
+                          type: string
+                        pod:
+                          type: string
+                        key:
+                          type: string
+                        size:
+                          type: integer
+                        lastModified:
+                          type: string
+                          format: date-time
+                  logs:
+                    type: array
+                    description: Present when `step` is given.
+                    items:
+                      type: object
+                      properties:
+                        step:
+                          type: string
+                        pod:
+                          type: string
+                        size:
+                          type: integer
+                        lines:
+                          type: string
+                        error:
+                          type: string
+                  note:
+                    type: string
+        '403':
+          description: Workflow belongs to another team, or has no owning team and the caller is not an admin
+
   /api/v1/resources/{tenant}:
     get:
       summary: Get resource quota usage

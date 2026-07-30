@@ -90,6 +90,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListRepos())
 	srv.AddTool(s.toolGrantRepoAccess())
 	srv.AddTool(s.toolGetServiceLogs())
+	srv.AddTool(s.toolGetWorkflowLogs())
 	srv.AddTool(s.toolListPreviews())
 
 	// Write tools (trigger workflows).
@@ -1728,6 +1729,65 @@ Requires in-cluster deployment with Loki enabled (LOKI_URL env var).`),
 		body, err := s.apiGet(ctx, path)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get logs for %s/%s: %v", team, service, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolGetWorkflowLogs() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_workflow_logs",
+		mcplib.WithTitleAnnotation("Get Workflow Step Logs"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Fetch Argo Workflow step logs from the workflow log archive.
+
+Use this for workflow/job failures. mctl_get_service_logs cannot reach these:
+it queries Loki, which only ingests long-lived service pods, never Argo step pods.
+
+Call WITHOUT "step" first to list the archived steps of a run. That listing is
+itself diagnostic — a step missing from an otherwise-populated workflow never
+produced output, which is the signature of a pod stuck Pending (e.g. an image
+pull or scheduling problem) rather than a step that ran and failed.
+
+Then call again with "step" (a substring such as "run-poller" or
+"notify-telegram") to read that step's log tail.
+
+Covers completed runs even after the Workflow object and its pods are gone —
+the archive retains logs far longer than the cluster does. Access is
+team-scoped; cron-driven runs (mctl-agents-*) are admin-only.`),
+		mcplib.WithString("workflow_name",
+			mcplib.Required(),
+			mcplib.Description("Full workflow name, e.g. mctl-agents-issue-poll-1785399300"),
+		),
+		mcplib.WithString("step",
+			mcplib.Description("Step name substring to read logs for (e.g. run-poller). Omit to list archived steps."),
+		),
+		mcplib.WithString("lines",
+			mcplib.Description("Trailing log lines per step (default: 100, max: 1000)"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		workflowName, _ := args["workflow_name"].(string)
+
+		path := fmt.Sprintf("/api/v1/workflows/%s/logs", url.PathEscape(workflowName))
+
+		q := url.Values{}
+		if step, ok := args["step"].(string); ok && step != "" {
+			q.Set("step", step)
+		}
+		if lines, ok := args["lines"].(string); ok && lines != "" {
+			q.Set("lines", lines)
+		}
+		if len(q) > 0 {
+			path += "?" + q.Encode()
+		}
+
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get workflow logs for %s: %v", workflowName, err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

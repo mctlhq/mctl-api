@@ -18,6 +18,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/argoarchive"
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/gitops"
@@ -73,6 +74,15 @@ type AuditLog = audit.Log
 // LogQuerier fetches log lines from Loki for a given namespace/app.
 type LogQuerier interface {
 	QueryRange(ctx context.Context, namespace, app string, lines int, since time.Duration) ([]loki.LogLine, error)
+}
+
+// WorkflowLogArchive reads Argo Workflow step logs from the object store
+// Argo archives them to. This is a separate source from LogQuerier on
+// purpose: Loki only ingests long-lived service pods matching the tenant
+// naming convention, so it structurally cannot serve an Argo step pod.
+type WorkflowLogArchive interface {
+	ListSteps(ctx context.Context, workflow string) ([]argoarchive.StepLog, error)
+	GetStep(ctx context.Context, key string, tailLines int) (string, error)
 }
 
 // VaultReader exposes the subset of Vault reads needed by onboarding flows.
