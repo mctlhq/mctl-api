@@ -300,7 +300,7 @@ func (h *Handlers) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
 	// failing the whole response — the operator panel still wants
 	// audit-log data even if the cluster API is briefly unreachable.
 	since := time.Now().Add(-14 * 24 * time.Hour)
-	cronItems, err := h.opts.Executor.ListCronAgentRuns(r.Context(), "argo-workflows", "mctl-agents-", since)
+	cronItems, err := h.opts.Executor.ListCronAgentRuns(r.Context(), cronWorkflowNamespace, "mctl-agents-", since)
 	if err != nil {
 		slog.Warn("ListCronAgentRuns failed; returning audit-only view",
 			"error", err)
@@ -370,6 +370,12 @@ func (h *Handlers) ListWorkflows(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// cronWorkflowNamespace is where every mctl-agents-* CronWorkflow spawns its
+// child Workflows, regardless of which service-agent it targets. It is not
+// derived from operations.WorkflowNamespace because cron runs are created by
+// Argo's CronWorkflow controller directly, bypassing Submit() entirely.
+const cronWorkflowNamespace = "argo-workflows"
+
 func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
@@ -382,7 +388,30 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 	// Check audit log for a record of this workflow to determine the namespace and team.
 	entry := h.opts.AuditLog.GetByWorkflow(name)
 	if entry == nil {
-		writeError(w, http.StatusNotFound, "workflow record not found in audit log")
+		// The audit log only records operator-initiated submissions
+		// (mctl-api REST POST -> AuditLog.Append); every cron-driven run
+		// (mctl-agents-issue-poll, -implement, -run, -shepherd, ...) is
+		// spawned directly by Argo's CronWorkflow controller and never
+		// appears here. Rather than 404 those outright, fall back to a
+		// live k8s lookup in the namespace ListAgentRuns already assumes
+		// all mctl-agents cron runs live in. Admin-only: without an audit
+		// entry we cannot verify team ownership, mirroring the gate
+		// GetWorkflowLogs uses for the same situation.
+		if !user.IsAdmin() {
+			writeError(w, http.StatusNotFound, "workflow record not found in audit log")
+			return
+		}
+		wf, err := h.opts.Executor.GetWorkflowStatus(r.Context(), cronWorkflowNamespace, name)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "workflow record not found in audit log, and no live workflow found in namespace "+cronWorkflowNamespace+": "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"workflow":  name,
+			"namespace": cronWorkflowNamespace,
+			"live":      wf,
+			"note":      "No audit log entry — this is expected for cron-driven runs, which Argo's CronWorkflow controller spawns directly. Status fetched live from Kubernetes.",
+		})
 		return
 	}
 

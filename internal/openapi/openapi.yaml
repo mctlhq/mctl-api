@@ -617,6 +617,14 @@ paths:
       description: |
         Returns the status and audit log entry for an Argo Workflow.
         Use this after triggering an operation to track progress.
+
+        Cron-driven runs (e.g. mctl-agents-issue-poll, -implement, -run,
+        -shepherd) are spawned directly by Argo's CronWorkflow controller and
+        never enter the audit log, since only operator-initiated REST
+        submissions do. For admins, a workflow absent from the audit log
+        falls back to a live Kubernetes lookup in the argo-workflows
+        namespace instead of 404ing outright; non-admins still get a 404,
+        since there is no audit entry to check team ownership against.
       tags: [Workflows]
       parameters:
         - name: name

@@ -265,7 +265,7 @@ func (s *Server) toolGetWorkflowStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_workflow_status",
 		mcplib.WithTitleAnnotation("Get Workflow Status"),
 		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDescription("Get status and logs of an Argo Workflow run. Use this after triggering an operation (deploy, create tenant, etc.) to check if it completed successfully."),
+		mcplib.WithDescription("Get status and logs of an Argo Workflow run. Use this after triggering an operation (deploy, create tenant, etc.) to check if it completed successfully. Also works for cron-driven runs (mctl-agents-issue-poll, -implement, -run, -shepherd, ...) that never appear in the audit log — admins get a live Kubernetes lookup as a fallback."),
 		mcplib.WithString("workflow_name",
 			mcplib.Required(),
 			mcplib.Description("Workflow name (returned from operation calls like mctl_deploy_service)"),
