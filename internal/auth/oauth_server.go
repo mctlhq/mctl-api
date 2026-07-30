@@ -282,11 +282,7 @@ func (s *OAuthServer) IssueRefreshToken(login string, groups []string, clientID 
 // RefreshAccessToken validates a refresh token, rotates it, and issues a new access token.
 func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string, string, error) {
 	if s.RefreshStore != nil {
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
-			return "", "", fmt.Errorf("generate refresh token: %w", err)
-		}
-		newToken := base64.RawURLEncoding.EncodeToString(b)
+		newToken := deriveSuccessorRefreshToken(s.JWTSecret, refreshToken)
 		ttl := s.RefreshTokenTTL
 		if ttl == 0 {
 			ttl = 30 * 24 * time.Hour
