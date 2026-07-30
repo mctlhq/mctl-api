@@ -54,7 +54,7 @@ func TestListStepsParsesArchive(t *testing.T) {
 		if auth := r.Header.Get("Authorization"); !strings.HasPrefix(auth, signAlgorithm) {
 			t.Errorf("request was not signed: %q", auth)
 		}
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	})
 
 	steps, err := c.ListSteps(context.Background(), "wf-1")
@@ -96,7 +96,7 @@ func TestListStepsFollowsPagination(t *testing.T) {
 			if strings.Contains(r.URL.RawQuery, "continuation-token") {
 				t.Error("first page must not send a continuation token")
 			}
-			fmt.Fprint(w, `<ListBucketResult>
+			_, _ = fmt.Fprint(w, `<ListBucketResult>
   <IsTruncated>true</IsTruncated>
   <NextContinuationToken>tok2</NextContinuationToken>
   <Contents><Key>wf/wf-a-1/main.log</Key><Size>1</Size></Contents>
@@ -106,7 +106,7 @@ func TestListStepsFollowsPagination(t *testing.T) {
 		if !strings.Contains(r.URL.RawQuery, "continuation-token=tok2") {
 			t.Errorf("continuation token not forwarded: %s", r.URL.RawQuery)
 		}
-		fmt.Fprint(w, `<ListBucketResult>
+		_, _ = fmt.Fprint(w, `<ListBucketResult>
   <IsTruncated>false</IsTruncated>
   <Contents><Key>wf/wf-b-2/main.log</Key><Size>2</Size></Contents>
 </ListBucketResult>`)
@@ -123,7 +123,7 @@ func TestListStepsFollowsPagination(t *testing.T) {
 
 func TestListStepsEmptyIsNotAnError(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+		_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
 	})
 
 	steps, err := c.ListSteps(context.Background(), "missing-wf")
@@ -145,7 +145,7 @@ func TestListStepsRequiresWorkflow(t *testing.T) {
 func TestListStepsSurfacesHTTPError(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprint(w, `<Error><Code>SignatureDoesNotMatch</Code></Error>`)
+		_, _ = fmt.Fprint(w, `<Error><Code>SignatureDoesNotMatch</Code></Error>`)
 	})
 
 	_, err := c.ListSteps(context.Background(), "wf")
@@ -165,7 +165,7 @@ func TestGetStepDropsPartialFirstLineOnRangedRead(t *testing.T) {
 		}
 		w.Header().Set("Content-Range", "bytes 4096-4120/8192")
 		w.WriteHeader(http.StatusPartialContent)
-		fmt.Fprint(w, "ncated line\nsecond\nthird\n")
+		_, _ = fmt.Fprint(w, "ncated line\nsecond\nthird\n")
 	})
 
 	got, err := c.GetStep(context.Background(), "wf/pod/main.log", 10)
@@ -185,7 +185,7 @@ func TestGetStepKeepsFirstLineWhenRangeCoversWholeObject(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Range", "bytes 0-35/36")
 		w.WriteHeader(http.StatusPartialContent)
-		fmt.Fprint(w, "telegram http=200\nincident http=401\n")
+		_, _ = fmt.Fprint(w, "telegram http=200\nincident http=401\n")
 	})
 
 	got, err := c.GetStep(context.Background(), "wf/pod/main.log", 10)
@@ -200,7 +200,7 @@ func TestGetStepKeepsFirstLineWhenRangeCoversWholeObject(t *testing.T) {
 func TestGetStepKeepsEveryLineOnFullRead(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		// Server ignored the range entirely: plain 200, no Content-Range.
-		fmt.Fprint(w, "telegram http=200\nincident http=401\n")
+		_, _ = fmt.Fprint(w, "telegram http=200\nincident http=401\n")
 	})
 
 	got, err := c.GetStep(context.Background(), "wf/pod/main.log", 10)
@@ -232,7 +232,7 @@ func TestStartsMidObject(t *testing.T) {
 
 func TestGetStepAppliesTailLimit(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "one\ntwo\nthree\nfour\n")
+		_, _ = fmt.Fprint(w, "one\ntwo\nthree\nfour\n")
 	})
 
 	got, err := c.GetStep(context.Background(), "wf/pod/main.log", 2)
@@ -301,7 +301,7 @@ func TestGetStepExpandsWindowForLongLines(t *testing.T) {
 		start := total - n
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, total-1, total))
 		w.WriteHeader(http.StatusPartialContent)
-		fmt.Fprint(w, full[start:])
+		_, _ = fmt.Fprint(w, full[start:])
 	})
 
 	got, err := c.GetStep(context.Background(), "wf/pod/main.log", 100)
