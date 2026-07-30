@@ -459,8 +459,10 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 		// genuine absence from a cluster-side failure (RBAC denied, API
 		// server unreachable) so the note doesn't read as "gone" when the
 		// real story is "couldn't check."
-		note := "Live status unavailable: " + err.Error()
-		if !apierrors.IsNotFound(err) {
+		var note string
+		if apierrors.IsNotFound(err) {
+			note = "Live status unavailable: " + err.Error()
+		} else {
 			note = "Live status unavailable (cluster-side error, not confirmed missing): " + err.Error()
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
