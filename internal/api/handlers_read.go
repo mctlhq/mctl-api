@@ -22,9 +22,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mctlhq/mctl-api/internal/argoarchive"
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -426,6 +428,146 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 		"namespace": namespace,
 		"live":      wf,
 	})
+}
+
+// maxLogBodiesPerRequest caps how many step logs one call will return in
+// full, so a broad `step` filter cannot produce an unbounded response.
+const maxLogBodiesPerRequest = 10
+
+// GetWorkflowLogs returns Argo step logs for a workflow from the archive
+// Argo uploads them to.
+//
+// Without `step` it lists the archived steps. That listing is itself
+// diagnostic: a step missing from an otherwise-populated workflow never
+// ran, which is how a pod stuck in Pending is identified.
+func (h *Handlers) GetWorkflowLogs(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	// Ownership comes from the audit log, which only records
+	// operator-initiated submissions. Anything without an identifiable
+	// owning team is admin-only:
+	//   - no audit entry at all — every cron-driven run (mctl-agents-*),
+	//     mirroring the gate ListAgentRuns uses for cron visibility;
+	//   - an entry with no team_name/tenant_name — by definition an
+	//     AdminOnly platform-scoped operation (see operations.Registry).
+	// This is deliberately stricter than GetWorkflow, which tolerates an
+	// empty team: a step log exposes far more than a status phase does.
+	if !user.IsAdmin() {
+		team := auditEntryTenant(h.opts.AuditLog.GetByWorkflow(name))
+		if team == "" {
+			writeError(w, http.StatusForbidden, "admin group membership required: workflow has no owning team")
+			return
+		}
+		if !user.HasTenantAccess(team) {
+			writeError(w, http.StatusForbidden, "access denied: workflow belongs to team "+team)
+			return
+		}
+	}
+
+	lines := 100
+	if l := r.URL.Query().Get("lines"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 1000 {
+			lines = n
+		}
+	}
+	stepFilter := r.URL.Query().Get("step")
+
+	resp := map[string]interface{}{"workflow": name}
+
+	if h.opts.WorkflowLogArchive == nil {
+		resp["steps"] = []interface{}{}
+		resp["count"] = 0
+		resp["note"] = "Workflow log archive not configured (set ARGO_LOGS_R2_ENDPOINT, ARGO_LOGS_R2_BUCKET, ARGO_LOGS_R2_ACCESS_KEY, ARGO_LOGS_R2_SECRET_KEY)"
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	steps, err := h.opts.WorkflowLogArchive.ListSteps(r.Context(), name)
+	if err != nil {
+		resp["steps"] = []interface{}{}
+		resp["count"] = 0
+		resp["note"] = "Log archive error: " + err.Error()
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	if len(steps) == 0 {
+		resp["steps"] = []interface{}{}
+		resp["count"] = 0
+		resp["note"] = "No archived step logs. The workflow name may be wrong, the run may have aged out of the archive's retention window, or no step produced output."
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	if stepFilter == "" {
+		resp["steps"] = steps
+		resp["count"] = len(steps)
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	matched := make([]argoarchive.StepLog, 0, len(steps))
+	for _, s := range steps {
+		if strings.Contains(s.Step, stepFilter) || strings.Contains(s.Pod, stepFilter) {
+			matched = append(matched, s)
+		}
+	}
+	if len(matched) == 0 {
+		available := make([]string, 0, len(steps))
+		for _, s := range steps {
+			available = append(available, s.Step)
+		}
+		resp["logs"] = []interface{}{}
+		resp["count"] = 0
+		resp["note"] = "No step matched " + strconv.Quote(stepFilter) + ". Archived steps: " + strings.Join(available, ", ")
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	truncated := false
+	if len(matched) > maxLogBodiesPerRequest {
+		matched = matched[:maxLogBodiesPerRequest]
+		truncated = true
+	}
+
+	// Fetched concurrently: each archive read can itself take up to the
+	// client's own 30s timeout, and the route's auth middleware imposes a
+	// 30s deadline on the whole request — serial reads of even a few
+	// matched steps could exceed it.
+	logs := make([]map[string]interface{}, len(matched))
+	var wg sync.WaitGroup
+	for i, s := range matched {
+		wg.Add(1)
+		go func(i int, s argoarchive.StepLog) {
+			defer wg.Done()
+			entry := map[string]interface{}{
+				"step": s.Step,
+				"pod":  s.Pod,
+				"size": s.Size,
+			}
+			body, err := h.opts.WorkflowLogArchive.GetStep(r.Context(), s.Key, lines)
+			if err != nil {
+				entry["error"] = err.Error()
+			} else {
+				entry["lines"] = body
+			}
+			logs[i] = entry
+		}(i, s)
+	}
+	wg.Wait()
+
+	resp["logs"] = logs
+	resp["count"] = len(logs)
+	if truncated {
+		resp["note"] = "Response truncated to the first " + strconv.Itoa(maxLogBodiesPerRequest) + " matching steps; narrow the step filter."
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handlers) ListPreviews(w http.ResponseWriter, r *http.Request) {

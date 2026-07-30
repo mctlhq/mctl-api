@@ -46,6 +46,9 @@ type Options struct {
 	QuotaReader QuotaReader
 	// LogQuerier queries Loki for service logs (optional — nil outside cluster).
 	LogQuerier LogQuerier
+	// WorkflowLogArchive reads archived Argo step logs from object storage
+	// (optional — nil when the archive env vars are unset).
+	WorkflowLogArchive WorkflowLogArchive
 	// VaultReader checks persisted secrets for onboarding preflight (optional — nil outside cluster).
 	VaultReader VaultReader
 	// MetricsQuerier fetches historical runtime usage for right-sizing decisions (optional).
@@ -165,6 +168,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/status/{team}/{app}", h.GetServiceStatus)
 			r.Get("/workflows", h.ListWorkflows)
 			r.Get("/workflows/{name}", h.GetWorkflow)
+			r.Get("/workflows/{name}/logs", h.GetWorkflowLogs)
 			r.Get("/previews", h.ListPreviews)
 			r.Get("/resources/{tenant}", h.GetResourceUsage)
 			r.Get("/logs/{team}/{app}", h.GetServiceLogs)

@@ -27,6 +27,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
+	"github.com/mctlhq/mctl-api/internal/argoarchive"
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -165,6 +166,21 @@ func main() {
 		slog.Info("loki log querying enabled", "url", lokiURL)
 	}
 
+	// Argo Workflows step-log archive (optional — enabled when the object
+	// store is configured). Separate from Loki: Loki only ingests
+	// long-lived service pods, never Argo step pods.
+	var workflowLogArchive mctlapi.WorkflowLogArchive
+	if ep, bucket := os.Getenv("ARGO_LOGS_R2_ENDPOINT"), os.Getenv("ARGO_LOGS_R2_BUCKET"); ep != "" && bucket != "" {
+		accessKey := os.Getenv("ARGO_LOGS_R2_ACCESS_KEY")
+		secretKey := os.Getenv("ARGO_LOGS_R2_SECRET_KEY")
+		if accessKey == "" || secretKey == "" {
+			slog.Warn("workflow log archive endpoint set but credentials are missing, archived step logs disabled")
+		} else {
+			workflowLogArchive = argoarchive.NewClient(ep, bucket, accessKey, secretKey)
+			slog.Info("workflow log archive enabled", "endpoint", ep, "bucket", bucket)
+		}
+	}
+
 	// Vault client (optional — used for onboarding secret preflight).
 	var vaultReader mctlapi.VaultReader
 	if cfg.VaultAddr != "" && cfg.VaultToken != "" {
@@ -198,6 +214,7 @@ func main() {
 		MCPServer:            mcpSrv,
 		QuotaReader:          quotaReader,
 		LogQuerier:           logQuerier,
+		WorkflowLogArchive:   workflowLogArchive,
 		VaultReader:          vaultReader,
 		MetricsQuerier:       metricsQuerier,
 		OpenClaw:             openClawQuota,
