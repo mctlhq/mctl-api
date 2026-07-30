@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.25.0](https://github.com/mctlhq/mctl-api/compare/4.24.2...4.25.0) (2026-07-30)
+
+
+### Features
+
+* add health_check_path param to deploy-service operation ([1e6543b](https://github.com/mctlhq/mctl-api/commit/1e6543b1c9aeba06318fc7ec4a9783a9f2ccf4b3))
+
+
+### Bug Fixes
+
+* address review findings on grace-window locking, errors, and CI isolation ([a4d0b16](https://github.com/mctlhq/mctl-api/commit/a4d0b16366347b0d2a0c5e61e54d1b652dc75549))
+* **oauth:** recover refresh-token rotation races instead of failing them ([86795a8](https://github.com/mctlhq/mctl-api/commit/86795a8b1d7850cc28db468af8f192c1cf9e7281))
+* **oauth:** recover refresh-token rotation races instead of failing them ([ed2b66c](https://github.com/mctlhq/mctl-api/commit/ed2b66c158eab0804a5663d44734c23354b750ae))
+* silence gosec false positive on the rotation domain-separation constant ([1304204](https://github.com/mctlhq/mctl-api/commit/1304204bf41a3163ac5acdaec24e8c277b54ba9d))
+
 ## [4.24.2](https://github.com/mctlhq/mctl-api/compare/4.24.1...4.24.2) (2026-07-29)
 
 
