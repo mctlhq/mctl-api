@@ -26,26 +26,39 @@ import (
 func TestHandleProtectedResourceMeta_ReturnsExpectedShape(t *testing.T) {
 	h := &Handlers{opts: Options{OAuthServer: &auth.OAuthServer{BaseURL: "https://api.mctl.ai"}}}
 
-	for _, path := range []string{"/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"} {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
+	// The two registered paths describe DIFFERENT resources: the /mcp-suffixed
+	// document must identify /mcp specifically, while the root document must
+	// identify the REST API's base resource, not /mcp — a client challenged
+	// on a non-MCP route (e.g. /api/v1/whoami) is pointed at the root
+	// document and validates that its `resource` field matches what it was
+	// actually accessing (RFC 9728 resource-identity check).
+	cases := []struct {
+		path         string
+		wantResource string
+	}{
+		{"/.well-known/oauth-protected-resource", "https://api.mctl.ai"},
+		{"/.well-known/oauth-protected-resource/mcp", "https://api.mctl.ai/mcp"},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, c.path, nil)
 		rec := httptest.NewRecorder()
 		h.handleProtectedResourceMeta(rec, req)
 
 		if rec.Code != http.StatusOK {
-			t.Fatalf("%s: status = %d, want 200", path, rec.Code)
+			t.Fatalf("%s: status = %d, want 200", c.path, rec.Code)
 		}
 		var meta ProtectedResourceMeta
 		if err := json.NewDecoder(rec.Body).Decode(&meta); err != nil {
-			t.Fatalf("%s: decode: %v", path, err)
+			t.Fatalf("%s: decode: %v", c.path, err)
 		}
-		if meta.Resource != "https://api.mctl.ai/mcp" {
-			t.Errorf("%s: resource = %q, want https://api.mctl.ai/mcp", path, meta.Resource)
+		if meta.Resource != c.wantResource {
+			t.Errorf("%s: resource = %q, want %q", c.path, meta.Resource, c.wantResource)
 		}
 		if len(meta.AuthorizationServers) != 1 || meta.AuthorizationServers[0] != "https://api.mctl.ai" {
-			t.Errorf("%s: authorization_servers = %v, want [https://api.mctl.ai]", path, meta.AuthorizationServers)
+			t.Errorf("%s: authorization_servers = %v, want [https://api.mctl.ai]", c.path, meta.AuthorizationServers)
 		}
 		if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
-			t.Errorf("%s: Content-Type = %q, want application/json", path, ct)
+			t.Errorf("%s: Content-Type = %q, want application/json", c.path, ct)
 		}
 	}
 }
