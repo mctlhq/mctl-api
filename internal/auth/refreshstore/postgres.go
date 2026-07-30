@@ -56,6 +56,12 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
+// rotationGraceWindow is how long after a rotation a replay of the
+// predecessor token is treated as a possible lost-response retry (see
+// rotateTx) rather than reuse. A package-level var, not a const, so tests can
+// shrink it instead of sleeping real wall-clock time.
+var rotationGraceWindow = 30 * time.Second
+
 // NewPostgresStore creates a PostgresStore and auto-creates the schema.
 func NewPostgresStore(ctx context.Context, connStr string) (*PostgresStore, error) {
 	pool, err := pgxpool.New(ctx, connStr)
@@ -163,14 +169,71 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 		return "", nil, ErrInvalidToken
 	}
 
-	// Reuse detection: token was already rotated → attacker replayed an old token.
-	// Grace window (30s): if the rotation was very recent the client may be
-	// retrying after a lost response — treat as invalid rather than revoking.
-	// Revoke the whole family to protect the legitimate session. Fail closed:
-	// if the revocation write fails, return an error rather than silently
-	// reporting successful revocation.
+	// Reuse detection: token was already rotated → either an honest client is
+	// retrying after a lost response, or an attacker replayed an old token.
+	//
+	// Grace window (rotationGraceWindow): if the rotation was very recent,
+	// recompute the deterministic successor the caller would have derived
+	// from oldRawToken (see deriveSuccessorRefreshToken) and check whether it
+	// is exactly the live, unrevoked child this rotation already committed.
+	// A match means the caller is legitimately retrying its own prior call —
+	// re-issue that same successor rather than failing it. Any mismatch
+	// (wrong client, successor itself already superseded, or missing row) is
+	// NOT trusted and falls through to the same ErrInvalidToken a genuine
+	// miss gets — this only ever widens success for the one caller who can
+	// already prove they held oldRawToken, it never grants anything new.
+	//
+	// Past the grace window, revoke the whole family to protect the
+	// legitimate session. Fail closed: if the revocation write fails, return
+	// an error rather than silently reporting successful revocation.
 	if rotatedAt != nil {
-		if time.Since(*rotatedAt) < 30*time.Second {
+		if time.Since(*rotatedAt) < rotationGraceWindow {
+			var childLogin string
+			var childGroupsJSON []byte
+			var childRevokedAt *time.Time
+			var childRotatedAt *time.Time
+			var childExpiresAt time.Time
+			// FOR UPDATE: without this, a plain SELECT under this
+			// transaction's REPEATABLE READ snapshot could still see the
+			// child's pre-rotation state (rotated_at = NULL) even after a
+			// concurrent B->C rotation has since committed, letting a grace
+			// replay of A resurrect an already-superseded B. Locking forces
+			// either the up-to-date row or a 40001 serialization error that
+			// the outer Rotate retry loop already handles.
+			lookupErr := tx.QueryRow(ctx,
+				`SELECT login, groups, revoked_at, rotated_at, expires_at FROM oauth_refresh_tokens
+				 WHERE token_hash = $1 AND parent_token_hash = $2
+				   AND family_id = $3 AND client_id = $4
+				 FOR UPDATE`,
+				newHash, oldHash, familyID, clientID,
+			).Scan(&childLogin, &childGroupsJSON, &childRevokedAt, &childRotatedAt, &childExpiresAt)
+			if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+				// A real DB error (including a caught-and-surfaced
+				// serialization failure) must not be misreported as
+				// invalid_grant — that would defeat the point of this fix
+				// for the exact case it targets. Let the caller's retry loop
+				// and server_error mapping handle it.
+				return "", nil, fmt.Errorf("oauth refresh store: grace lookup: %w", lookupErr)
+			}
+			// The child must still be the live, unexpired tip of the
+			// family: not revoked, not itself already superseded by a
+			// further rotation (a two-hops-back replay must not resurrect a
+			// child that has since been rotated again), and not past its
+			// own expiry (a shortened TTL between predecessor issuance and
+			// rotation could otherwise let grace replay hand back an
+			// already-expired token).
+			if lookupErr == nil && childRevokedAt == nil && childRotatedAt == nil && time.Now().Before(childExpiresAt) {
+				var childGroups []string
+				if err := json.Unmarshal(childGroupsJSON, &childGroups); err != nil {
+					return "", nil, fmt.Errorf("oauth refresh store: grace unmarshal groups: %w", err)
+				}
+				if commitErr := tx.Commit(ctx); commitErr != nil {
+					return "", nil, fmt.Errorf("oauth refresh store: grace commit: %w", commitErr)
+				}
+				slog.Info("oauth refresh token grace-window replay: re-issuing existing successor",
+					"family_id", familyID, "login", childLogin)
+				return childLogin, childGroups, nil
+			}
 			return "", nil, ErrInvalidToken
 		}
 		now := time.Now().UTC()
