@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.26.0](https://github.com/mctlhq/mctl-api/compare/4.25.0...4.26.0) (2026-07-30)
+
+
+### Features
+
+* **oauth:** add RFC 9728 Protected Resource Metadata discovery ([b90a03c](https://github.com/mctlhq/mctl-api/commit/b90a03c4ee285c9f3dae0522ddc7c35bf0e62e1f))
+* **oauth:** add RFC 9728 Protected Resource Metadata discovery ([15235f2](https://github.com/mctlhq/mctl-api/commit/15235f22760eb507ce5c377ce661deef0ed1738a))
+
+
+### Bug Fixes
+
+* identify the correct resource in the root PRM document ([1194cfd](https://github.com/mctlhq/mctl-api/commit/1194cfddc37ca3bc1a66102c8efaf270ae52adcc))
+
 ## [4.25.0](https://github.com/mctlhq/mctl-api/compare/4.24.2...4.25.0) (2026-07-30)
 
 
