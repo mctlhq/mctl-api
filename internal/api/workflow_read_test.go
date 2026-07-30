@@ -1,12 +1,14 @@
 package api_test
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
+	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
@@ -36,6 +38,73 @@ func TestGetWorkflowDeleteTenantSafeUsesArgoWorkflowsNamespace(t *testing.T) {
 	body := decodeJSON(t, w)
 	if body["namespace"] != "argo-workflows" {
 		t.Fatalf("expected namespace argo-workflows, got %v", body["namespace"])
+	}
+}
+
+// Regression: cron-driven runs (mctl-agents-issue-poll, -implement, -run,
+// -shepherd, ...) are spawned directly by Argo's CronWorkflow controller and
+// never enter the audit log, since only operator-initiated REST submissions
+// do. GetWorkflow used to 404 all of these outright; it must now fall back
+// to a live k8s lookup in the argo-workflows namespace for admins.
+func TestGetWorkflowFallsBackToLiveLookupForCronRuns(t *testing.T) {
+	router := mctlapi.NewRouter(mctlapi.Options{
+		Registry:  operations.NewRegistry(),
+		GitReader: &fakeGitReader{},
+		ArgoCD:    &fakeArgoCD{apps: map[string]*argocd.AppStatus{}},
+		AuditLog:  audit.NewLogger(),
+		Executor:  &fakeExecutor{},
+	})
+
+	w := getAs(t, router, "/api/v1/workflows/mctl-agents-issue-poll-1785399300", adminUser)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := decodeJSON(t, w)
+	if body["namespace"] != "argo-workflows" {
+		t.Errorf("namespace = %v, want argo-workflows", body["namespace"])
+	}
+	if _, ok := body["live"]; !ok {
+		t.Errorf("expected a live status block, got %v", body)
+	}
+	if _, ok := body["audit"]; ok {
+		t.Errorf("should not fabricate an audit entry, got %v", body["audit"])
+	}
+}
+
+// A non-admin must not get the fallback: without an audit entry there is no
+// team to check access against, so absence must still 404 for anyone who
+// isn't an admin (mirrors GetWorkflowLogs's team-less gate).
+func TestGetWorkflowFallbackIsAdminOnly(t *testing.T) {
+	router := mctlapi.NewRouter(mctlapi.Options{
+		Registry:  operations.NewRegistry(),
+		GitReader: &fakeGitReader{},
+		ArgoCD:    &fakeArgoCD{apps: map[string]*argocd.AppStatus{}},
+		AuditLog:  audit.NewLogger(),
+		Executor:  &fakeExecutor{},
+	})
+
+	tenantUser := &auth.User{ID: "dev", Groups: []string{"labs"}}
+	w := getAs(t, router, "/api/v1/workflows/mctl-agents-issue-poll-1785399300", tenantUser)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for non-admin with no audit entry, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// When the fallback k8s lookup also fails (the workflow has aged out, or the
+// name is simply wrong), the response must still be a 404 rather than a
+// live-status response with a nil body.
+func TestGetWorkflowFallbackSurfaces404WhenLiveLookupFails(t *testing.T) {
+	router := mctlapi.NewRouter(mctlapi.Options{
+		Registry:  operations.NewRegistry(),
+		GitReader: &fakeGitReader{},
+		ArgoCD:    &fakeArgoCD{apps: map[string]*argocd.AppStatus{}},
+		AuditLog:  audit.NewLogger(),
+		Executor:  &fakeExecutor{getWorkflowStatusErr: errors.New("workflows.argoproj.io \"nope\" not found")},
+	})
+
+	w := getAs(t, router, "/api/v1/workflows/totally-unknown-workflow", adminUser)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

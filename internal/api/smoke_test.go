@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -152,9 +153,10 @@ func (f *fakeArgoCD) ListApps(_ string) ([]argocd.AppStatus, error) {
 }
 
 type fakeExecutor struct {
-	submitted       []string
-	submittedParams []map[string]string
-	cronAgentRuns   []map[string]interface{}
+	submitted            []string
+	submittedParams      []map[string]string
+	cronAgentRuns        []map[string]interface{}
+	getWorkflowStatusErr error
 }
 
 func (f *fakeExecutor) Submit(_ context.Context, op operations.Operation, params map[string]string, userID, namespace string) (*operations.SubmitResult, error) {
@@ -177,6 +179,9 @@ func (f *fakeExecutor) Submit(_ context.Context, op operations.Operation, params
 }
 
 func (f *fakeExecutor) GetWorkflowStatus(_ context.Context, namespace, name string) (map[string]interface{}, error) {
+	if f.getWorkflowStatusErr != nil {
+		return nil, f.getWorkflowStatusErr
+	}
 	return map[string]interface{}{
 		"name":      name,
 		"namespace": namespace,
@@ -771,7 +776,12 @@ func TestSmoke_Auth(t *testing.T) {
 }
 
 func TestSmoke_Workflow(t *testing.T) {
-	router, _ := newTestRouter(t)
+	router, executor := newTestRouter(t)
+
+	// An admin with no audit entry now falls back to a live k8s lookup
+	// (see TestGetWorkflowFallsBackToLiveLookupForCronRuns); a workflow
+	// truly unknown to both the audit log and the cluster must still 404.
+	executor.getWorkflowStatusErr = errors.New("workflows.argoproj.io \"nonexistent-workflow\" not found")
 
 	t.Run("get unknown workflow returns 404", func(t *testing.T) {
 		w := getAs(t, router, "/api/v1/workflows/nonexistent-workflow", adminUser)
