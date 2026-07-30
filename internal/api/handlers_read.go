@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	"github.com/mctlhq/mctl-api/internal/argoarchive"
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
@@ -403,7 +405,19 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 		}
 		wf, err := h.opts.Executor.GetWorkflowStatus(r.Context(), cronWorkflowNamespace, name)
 		if err != nil {
-			writeError(w, http.StatusNotFound, "workflow record not found in audit log, and no live workflow found in namespace "+cronWorkflowNamespace+": "+err.Error())
+			if apierrors.IsNotFound(err) {
+				writeError(w, http.StatusNotFound, "workflow record not found in audit log, and no live workflow found in namespace "+cronWorkflowNamespace)
+				return
+			}
+			// A non-NotFound error here means the live lookup itself failed
+			// (RBAC denied, API server unreachable, timeout) — the workflow
+			// may well exist. Collapsing this into the same 404 as a genuine
+			// absence reads as "no such workflow" during an incident, when
+			// the real story is "the cluster couldn't be asked." Log the
+			// detail server-side rather than pasting it into the response.
+			slog.Warn("live workflow lookup failed for cron fallback",
+				"workflow", name, "namespace", cronWorkflowNamespace, "error", err)
+			writeError(w, http.StatusBadGateway, "workflow record not found in audit log, and live lookup in namespace "+cronWorkflowNamespace+" failed (cluster-side error, workflow may still exist)")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -441,12 +455,21 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 	// Fetch live status from Kubernetes.
 	wf, err := h.opts.Executor.GetWorkflowStatus(r.Context(), namespace, name)
 	if err != nil {
-		// Fallback to audit log only if live fetch fails.
+		// Fallback to audit log only if live fetch fails. Distinguish a
+		// genuine absence from a cluster-side failure (RBAC denied, API
+		// server unreachable) so the note doesn't read as "gone" when the
+		// real story is "couldn't check."
+		var note string
+		if apierrors.IsNotFound(err) {
+			note = "Live status unavailable: " + err.Error()
+		} else {
+			note = "Live status unavailable (cluster-side error, not confirmed missing): " + err.Error()
+		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"workflow":  name,
 			"audit":     redactedEntry,
 			"namespace": namespace,
-			"note":      "Live status unavailable: " + err.Error(),
+			"note":      note,
 		})
 		return
 	}

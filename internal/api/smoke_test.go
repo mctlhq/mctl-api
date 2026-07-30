@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -28,6 +27,9 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
@@ -35,6 +37,10 @@ import (
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
+
+// workflowGroupResource mirrors the GVR Executor.GetWorkflowStatus queries,
+// so fake errors behave like the real apierrors the k8s dynamic client returns.
+var workflowGroupResource = schema.GroupResource{Group: "argoproj.io", Resource: "workflows"}
 
 // ── fakes ────────────────────────────────────────────────────────────────────
 
@@ -781,7 +787,7 @@ func TestSmoke_Workflow(t *testing.T) {
 	// An admin with no audit entry now falls back to a live k8s lookup
 	// (see TestGetWorkflowFallsBackToLiveLookupForCronRuns); a workflow
 	// truly unknown to both the audit log and the cluster must still 404.
-	executor.getWorkflowStatusErr = errors.New("workflows.argoproj.io \"nonexistent-workflow\" not found")
+	executor.getWorkflowStatusErr = apierrors.NewNotFound(workflowGroupResource, "nonexistent-workflow")
 
 	t.Run("get unknown workflow returns 404", func(t *testing.T) {
 		w := getAs(t, router, "/api/v1/workflows/nonexistent-workflow", adminUser)

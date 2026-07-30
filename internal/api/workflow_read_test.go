@@ -3,7 +3,11 @@ package api_test
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/argocd"
@@ -94,17 +98,70 @@ func TestGetWorkflowFallbackIsAdminOnly(t *testing.T) {
 // name is simply wrong), the response must still be a 404 rather than a
 // live-status response with a nil body.
 func TestGetWorkflowFallbackSurfaces404WhenLiveLookupFails(t *testing.T) {
+	group := schema.GroupResource{Group: "argoproj.io", Resource: "workflows"}
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Registry:  operations.NewRegistry(),
 		GitReader: &fakeGitReader{},
 		ArgoCD:    &fakeArgoCD{apps: map[string]*argocd.AppStatus{}},
 		AuditLog:  audit.NewLogger(),
-		Executor:  &fakeExecutor{getWorkflowStatusErr: errors.New("workflows.argoproj.io \"nope\" not found")},
+		Executor:  &fakeExecutor{getWorkflowStatusErr: apierrors.NewNotFound(group, "nope")},
 	})
 
 	w := getAs(t, router, "/api/v1/workflows/totally-unknown-workflow", adminUser)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// Regression for review P3 on #121: a cluster-side failure (RBAC denied, API
+// server unreachable, timeout) must not read as "no such workflow" — that
+// misleads an admin triaging a live incident into thinking a workflow never
+// ran when the real story is "couldn't ask the cluster."
+func TestGetWorkflowFallbackSurfaces502OnClusterError(t *testing.T) {
+	router := mctlapi.NewRouter(mctlapi.Options{
+		Registry:  operations.NewRegistry(),
+		GitReader: &fakeGitReader{},
+		ArgoCD:    &fakeArgoCD{apps: map[string]*argocd.AppStatus{}},
+		AuditLog:  audit.NewLogger(),
+		Executor:  &fakeExecutor{getWorkflowStatusErr: errors.New("Get \"https://k8s/apis/argoproj.io/v1alpha1/namespaces/argo-workflows/workflows/x\": context deadline exceeded")},
+	})
+
+	w := getAs(t, router, "/api/v1/workflows/some-cron-run", adminUser)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 for a non-NotFound cluster error, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// Regression for the same P3, on the audit-fallback path: when a workflow
+// has an audit entry but the live lookup fails with something other than
+// NotFound, the degraded 200 response's note must say so rather than
+// implying the workflow is simply gone.
+func TestGetWorkflowAuditFallbackNoteDistinguishesClusterError(t *testing.T) {
+	logger := audit.NewLogger()
+	logger.Log(audit.Entry{
+		UserID:       "test-admin",
+		Operation:    "delete-tenant-safe",
+		Parameters:   map[string]string{"tenant_name": "tests"},
+		WorkflowName: "delete-tenant-safe-abc123",
+		Status:       "submitted",
+	})
+
+	router := mctlapi.NewRouter(mctlapi.Options{
+		Registry:  operations.NewRegistry(),
+		GitReader: &fakeGitReader{},
+		ArgoCD:    &fakeArgoCD{apps: map[string]*argocd.AppStatus{}},
+		AuditLog:  logger,
+		Executor:  &fakeExecutor{getWorkflowStatusErr: errors.New("connection refused")},
+	})
+
+	w := getAs(t, router, "/api/v1/workflows/delete-tenant-safe-abc123", adminUser)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (audit fallback), got %d: %s", w.Code, w.Body.String())
+	}
+	body := decodeJSON(t, w)
+	note, _ := body["note"].(string)
+	if !strings.Contains(note, "not confirmed missing") {
+		t.Errorf("expected note to distinguish a cluster-side error from absence, got: %q", note)
 	}
 }
 
