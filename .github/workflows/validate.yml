@@ -53,7 +53,14 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/mctl_api_test?sslmode=disable
         run: |
           go build ./...
-          go test ./...
+          # -p 1: internal/alerts and internal/api both run Postgres-backed
+          # tests against the same TEST_DATABASE_URL and both issue unscoped
+          # DELETE FROM alerts/alert_evidence in setup/cleanup. Running test
+          # binaries for different packages in parallel (Go's default) would
+          # let one package's cleanup wipe rows another package's test is
+          # still asserting on. Forcing serial package execution avoids that
+          # cross-package race entirely, at the cost of some CI wall time.
+          go test -p 1 ./...
 
       - name: Notify Telegram on failure
         if: failure()

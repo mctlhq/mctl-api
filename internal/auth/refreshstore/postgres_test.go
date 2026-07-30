@@ -115,7 +115,12 @@ func withShortGraceWindow(t *testing.T, d time.Duration) {
 // invalid_grant.
 func TestRotateGraceWindowReplay_Succeeds(t *testing.T) {
 	s := newTestStore(t)
-	withShortGraceWindow(t, 50*time.Millisecond)
+	// A wide window, not a short one: the replay happens immediately after
+	// the first rotation with no intentional delay, so a generous window
+	// costs nothing here and avoids CI scheduling jitter turning this into a
+	// flaky post-grace failure (a tight window measured against wall-clock
+	// time is what the boundary-crossing test below is for).
+	withShortGraceWindow(t, time.Hour)
 
 	exp := time.Now().Add(time.Hour)
 	tok1 := uniqueTok(t, "1")
@@ -155,7 +160,7 @@ func TestRotateGraceWindowReplay_Succeeds(t *testing.T) {
 // trusted, and doesn't disturb the legitimate successor.
 func TestRotateGraceWindow_WrongClientRejected(t *testing.T) {
 	s := newTestStore(t)
-	withShortGraceWindow(t, 50*time.Millisecond)
+	withShortGraceWindow(t, time.Hour) // wide window; rejection is by client_id, not timing
 
 	exp := time.Now().Add(time.Hour)
 	tok1 := uniqueTok(t, "1")
@@ -176,6 +181,33 @@ func TestRotateGraceWindow_WrongClientRejected(t *testing.T) {
 	tok3 := uniqueTok(t, "3")
 	if _, _, err := s.Rotate(tok2, tok3, "c2", exp); err != nil {
 		t.Errorf("legitimate successor should still work after rejected cross-client replay: %v", err)
+	}
+}
+
+// TestRotateGraceWindow_ExpiredSuccessorRejected ensures a grace replay never
+// hands back a successor that is itself already past its own expiry — e.g. a
+// long-lived predecessor rotated into a short-lived successor (TTL lowered
+// between issuance and rotation) must not let a grace-window replay resurrect
+// that successor once it's expired, even though the replay itself is still
+// within the rotation's grace window.
+func TestRotateGraceWindow_ExpiredSuccessorRejected(t *testing.T) {
+	s := newTestStore(t)
+	withShortGraceWindow(t, time.Hour) // isolate the expiry check from timing
+
+	longExp := time.Now().Add(30 * 24 * time.Hour)
+	alreadyExpired := time.Now().Add(-time.Minute)
+	tok1 := uniqueTok(t, "1")
+	tok2 := uniqueTok(t, "2")
+
+	if err := s.Insert(tok1, "dave", "c2", []string{}, longExp); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if _, _, err := s.Rotate(tok1, tok2, "c2", alreadyExpired); err != nil {
+		t.Fatalf("first Rotate: %v", err)
+	}
+
+	if _, _, err := s.Rotate(tok1, tok2, "c2", longExp); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("expected ErrInvalidToken for expired successor grace replay, got %v", err)
 	}
 }
 

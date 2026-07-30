@@ -192,20 +192,40 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 			var childGroupsJSON []byte
 			var childRevokedAt *time.Time
 			var childRotatedAt *time.Time
+			var childExpiresAt time.Time
+			// FOR UPDATE: without this, a plain SELECT under this
+			// transaction's REPEATABLE READ snapshot could still see the
+			// child's pre-rotation state (rotated_at = NULL) even after a
+			// concurrent B->C rotation has since committed, letting a grace
+			// replay of A resurrect an already-superseded B. Locking forces
+			// either the up-to-date row or a 40001 serialization error that
+			// the outer Rotate retry loop already handles.
 			lookupErr := tx.QueryRow(ctx,
-				`SELECT login, groups, revoked_at, rotated_at FROM oauth_refresh_tokens
+				`SELECT login, groups, revoked_at, rotated_at, expires_at FROM oauth_refresh_tokens
 				 WHERE token_hash = $1 AND parent_token_hash = $2
-				   AND family_id = $3 AND client_id = $4`,
+				   AND family_id = $3 AND client_id = $4
+				 FOR UPDATE`,
 				newHash, oldHash, familyID, clientID,
-			).Scan(&childLogin, &childGroupsJSON, &childRevokedAt, &childRotatedAt)
-			// The child must still be the live tip of the family: not
-			// revoked, and not itself already superseded by a further
-			// rotation (a two-hops-back replay must not resurrect a child
-			// that has since been rotated again).
-			if lookupErr == nil && childRevokedAt == nil && childRotatedAt == nil {
+			).Scan(&childLogin, &childGroupsJSON, &childRevokedAt, &childRotatedAt, &childExpiresAt)
+			if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+				// A real DB error (including a caught-and-surfaced
+				// serialization failure) must not be misreported as
+				// invalid_grant — that would defeat the point of this fix
+				// for the exact case it targets. Let the caller's retry loop
+				// and server_error mapping handle it.
+				return "", nil, fmt.Errorf("oauth refresh store: grace lookup: %w", lookupErr)
+			}
+			// The child must still be the live, unexpired tip of the
+			// family: not revoked, not itself already superseded by a
+			// further rotation (a two-hops-back replay must not resurrect a
+			// child that has since been rotated again), and not past its
+			// own expiry (a shortened TTL between predecessor issuance and
+			// rotation could otherwise let grace replay hand back an
+			// already-expired token).
+			if lookupErr == nil && childRevokedAt == nil && childRotatedAt == nil && time.Now().Before(childExpiresAt) {
 				var childGroups []string
 				if err := json.Unmarshal(childGroupsJSON, &childGroups); err != nil {
-					childGroups = nil
+					return "", nil, fmt.Errorf("oauth refresh store: grace unmarshal groups: %w", err)
 				}
 				if commitErr := tx.Commit(ctx); commitErr != nil {
 					return "", nil, fmt.Errorf("oauth refresh store: grace commit: %w", commitErr)
