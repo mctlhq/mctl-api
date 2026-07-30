@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -535,21 +536,31 @@ func (h *Handlers) GetWorkflowLogs(w http.ResponseWriter, r *http.Request) {
 		truncated = true
 	}
 
-	logs := make([]map[string]interface{}, 0, len(matched))
-	for _, s := range matched {
-		entry := map[string]interface{}{
-			"step": s.Step,
-			"pod":  s.Pod,
-			"size": s.Size,
-		}
-		body, err := h.opts.WorkflowLogArchive.GetStep(r.Context(), s.Key, lines)
-		if err != nil {
-			entry["error"] = err.Error()
-		} else {
-			entry["lines"] = body
-		}
-		logs = append(logs, entry)
+	// Fetched concurrently: each archive read can itself take up to the
+	// client's own 30s timeout, and the route's auth middleware imposes a
+	// 30s deadline on the whole request — serial reads of even a few
+	// matched steps could exceed it.
+	logs := make([]map[string]interface{}, len(matched))
+	var wg sync.WaitGroup
+	for i, s := range matched {
+		wg.Add(1)
+		go func(i int, s argoarchive.StepLog) {
+			defer wg.Done()
+			entry := map[string]interface{}{
+				"step": s.Step,
+				"pod":  s.Pod,
+				"size": s.Size,
+			}
+			body, err := h.opts.WorkflowLogArchive.GetStep(r.Context(), s.Key, lines)
+			if err != nil {
+				entry["error"] = err.Error()
+			} else {
+				entry["lines"] = body
+			}
+			logs[i] = entry
+		}(i, s)
 	}
+	wg.Wait()
 
 	resp["logs"] = logs
 	resp["count"] = len(logs)

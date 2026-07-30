@@ -165,15 +165,20 @@ func (c *Client) ListSteps(ctx context.Context, workflow string) ([]StepLog, err
 	return steps, nil
 }
 
+// mainLogName is the exact object name Argo's wait sidecar uploads a step's
+// log as. Anything else under a pod's prefix (output artifacts, directory
+// markers) is not a log and must not be surfaced as one.
+const mainLogName = "main.log"
+
 // podFromKey extracts the pod-name segment from "<prefix><pod>/main.log".
-// Keys that do not have that shape are skipped by returning "".
+// Keys that do not have that exact shape are skipped by returning "".
 func podFromKey(key, prefix string) string {
 	rest := strings.TrimPrefix(key, prefix)
 	if rest == key {
 		return ""
 	}
-	pod, _, found := strings.Cut(rest, "/")
-	if !found || pod == "" {
+	pod, name, found := strings.Cut(rest, "/")
+	if !found || pod == "" || name != mainLogName {
 		return ""
 	}
 	return pod
@@ -182,7 +187,11 @@ func podFromKey(key, prefix string) string {
 // GetStep fetches the last tailLines lines of an archived step log.
 //
 // The tail is retrieved with a Range request so a multi-megabyte log does
-// not have to be buffered in full.
+// not have to be buffered in full. bytesPerLineHint is only a starting
+// guess: if actual lines run longer (verbose agent output regularly
+// exceeds 2KiB/line), the first window can come back short of tailLines
+// lines. The window doubles until it holds enough lines, the whole object
+// has been fetched, or maxTailBytes is reached.
 func (c *Client) GetStep(ctx context.Context, key string, tailLines int) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("argoarchive: object key is required")
@@ -195,25 +204,44 @@ func (c *Client) GetStep(ctx context.Context, key string, tailLines int) (string
 	if want < minTailBytes {
 		want = minTailBytes
 	}
-	if want > maxTailBytes {
-		want = maxTailBytes
-	}
 
-	res, err := c.get(ctx, "/"+c.bucket+"/"+key, "", fmt.Sprintf("bytes=-%d", want))
-	if err != nil {
-		return "", err
-	}
-
-	text := string(res.body)
-	if startsMidObject(res.contentRange) {
-		// The window opened mid-line, so drop the leading fragment
-		// rather than hand back a truncated first line.
-		if _, after, found := strings.Cut(text, "\n"); found {
-			text = after
+	var text string
+	for {
+		if want > maxTailBytes {
+			want = maxTailBytes
 		}
+
+		res, err := c.get(ctx, "/"+c.bucket+"/"+key, "", fmt.Sprintf("bytes=-%d", want))
+		if err != nil {
+			return "", err
+		}
+
+		text = string(res.body)
+		wholeObject := !startsMidObject(res.contentRange)
+		if !wholeObject {
+			// The window opened mid-line, so drop the leading fragment
+			// rather than hand back a truncated first line.
+			if _, after, found := strings.Cut(text, "\n"); found {
+				text = after
+			}
+		}
+
+		if wholeObject || want >= maxTailBytes || countLines(text) >= tailLines {
+			break
+		}
+		want *= 2
 	}
 
 	return lastLines(text, tailLines), nil
+}
+
+// countLines returns the number of newline-delimited lines in s.
+func countLines(s string) int {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
 }
 
 // startsMidObject reports whether a Content-Range response header
@@ -291,6 +319,13 @@ func (c *Client) get(ctx context.Context, path, rawQuery, rangeHeader string) (g
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTailBytes+(1<<20)))
 	if err != nil {
 		return getResult{}, fmt.Errorf("argoarchive: read response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && rangeHeader != "" {
+		// A suffix range against a zero-byte object (a step that produced
+		// no output) is rejected with 416 rather than an empty 206 — this
+		// is a valid empty log, not an error.
+		return getResult{status: resp.StatusCode}, nil
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {

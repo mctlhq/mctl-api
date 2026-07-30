@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
@@ -15,13 +16,17 @@ import (
 )
 
 // fakeLogArchive stands in for the object store holding archived Argo step
-// logs.
+// logs. GetStep is called concurrently by the handler for multi-step
+// requests, so its mutable state is mutex-guarded.
 type fakeLogArchive struct {
-	steps    []argoarchive.StepLog
-	bodies   map[string]string
-	listErr  error
-	getErr   error
+	steps   []argoarchive.StepLog
+	bodies  map[string]string
+	listErr error
+	getErr  error
+
+	mu       sync.Mutex
 	lastTail int
+	getCalls int
 }
 
 func (f *fakeLogArchive) ListSteps(_ context.Context, _ string) ([]argoarchive.StepLog, error) {
@@ -32,7 +37,10 @@ func (f *fakeLogArchive) ListSteps(_ context.Context, _ string) ([]argoarchive.S
 }
 
 func (f *fakeLogArchive) GetStep(_ context.Context, key string, tailLines int) (string, error) {
+	f.mu.Lock()
 	f.lastTail = tailLines
+	f.getCalls++
+	f.mu.Unlock()
 	if f.getErr != nil {
 		return "", f.getErr
 	}
@@ -112,6 +120,44 @@ func TestGetWorkflowLogsRejectsOutOfRangeLines(t *testing.T) {
 	getAs(t, router, "/api/v1/workflows/wf-1/logs?step=notify&lines=99999", adminUser)
 	if archive.lastTail != 100 {
 		t.Errorf("out-of-range lines should fall back to 100, got %d", archive.lastTail)
+	}
+}
+
+// Regression: multi-step reads used to fetch serially, each bounded only by
+// the archive client's own 30s timeout, which could exceed the route's
+// request deadline. Confirms a filter matching several steps still returns
+// every body (run with -race to catch any shared-state issue in the
+// concurrent fetch).
+func TestGetWorkflowLogsFetchesMultipleMatchesConcurrently(t *testing.T) {
+	archive := &fakeLogArchive{
+		steps: []argoarchive.StepLog{
+			{Step: "run-poller-1", Pod: "wf-2-run-poller-1", Key: "k1"},
+			{Step: "run-poller-2", Pod: "wf-2-run-poller-2", Key: "k2"},
+			{Step: "run-poller-3", Pod: "wf-2-run-poller-3", Key: "k3"},
+		},
+		bodies: map[string]string{
+			"k1": "poller one",
+			"k2": "poller two",
+			"k3": "poller three",
+		},
+	}
+	router := logsRouter(archive, nil)
+
+	w := getAs(t, router, "/api/v1/workflows/wf-2/logs?step=run-poller", adminUser)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+
+	raw := w.Body.String()
+	for _, want := range []string{"poller one", "poller two", "poller three"} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("response missing %q: %s", want, raw)
+		}
+	}
+	archive.mu.Lock()
+	defer archive.mu.Unlock()
+	if archive.getCalls != 3 {
+		t.Errorf("expected 3 GetStep calls, got %d", archive.getCalls)
 	}
 }
 

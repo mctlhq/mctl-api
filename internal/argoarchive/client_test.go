@@ -257,11 +257,80 @@ func TestPodFromKey(t *testing.T) {
 		{"other/wf-1-run-poller-9/main.log", "wf-1/", ""},
 		{"wf-1/main.log", "wf-1/", ""},
 		{"wf-1/", "wf-1/", ""},
+		// Regression: only the exact leaf "main.log" is a step log. Anything
+		// else under a pod's prefix (an output artifact, a nested marker)
+		// must not be surfaced as one — a prior version accepted anything
+		// with a second "/", which would have let GetStep return binary
+		// artifact bytes as if they were log lines.
+		{"wf-1/wf-1-run-poller-9/output.json", "wf-1/", ""},
+		{"wf-1/wf-1-run-poller-9/archive/main.log", "wf-1/", ""},
 	}
 	for _, tc := range tests {
 		if got := podFromKey(tc.key, tc.prefix); got != tc.want {
 			t.Errorf("podFromKey(%q, %q) = %q, want %q", tc.key, tc.prefix, got, tc.want)
 		}
+	}
+}
+
+// Regression: bytesPerLineHint is only a starting guess. When actual lines
+// run well past 2KiB (verbose agent output), the first window can land
+// short of the requested line count; GetStep must widen the window instead
+// of silently handing back fewer lines than asked for.
+func TestGetStepExpandsWindowForLongLines(t *testing.T) {
+	const lineSize = 4000
+	const totalLines = 200
+	var line strings.Builder
+	for i := 0; i < lineSize-1; i++ {
+		line.WriteByte('x')
+	}
+	oneLine := line.String() + "\n"
+	full := strings.Repeat(oneLine, totalLines)
+
+	requests := 0
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		rng := r.Header.Get("Range")
+		var n int
+		if _, err := fmt.Sscanf(rng, "bytes=-%d", &n); err != nil {
+			t.Fatalf("unexpected Range header %q: %v", rng, err)
+		}
+		total := len(full)
+		if n > total {
+			n = total
+		}
+		start := total - n
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, total-1, total))
+		w.WriteHeader(http.StatusPartialContent)
+		fmt.Fprint(w, full[start:])
+	})
+
+	got, err := c.GetStep(context.Background(), "wf/pod/main.log", 100)
+	if err != nil {
+		t.Fatalf("GetStep: %v", err)
+	}
+	if n := countLines(got); n < 100 {
+		t.Errorf("got %d lines, want at least 100 (window did not expand)", n)
+	}
+	if requests < 2 {
+		t.Errorf("expected the window to widen across multiple requests, got %d request(s)", requests)
+	}
+}
+
+// Regression: Argo can archive a zero-byte main.log for a step that produced
+// no output. A suffix range against an empty object comes back as 416, not
+// an empty 206 — that must be treated as a valid empty log, not an error.
+func TestGetStepHandlesZeroByteObject(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes */0")
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+	})
+
+	got, err := c.GetStep(context.Background(), "wf/pod/main.log", 10)
+	if err != nil {
+		t.Fatalf("GetStep on an empty archived log should not error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetStep = %q, want empty string for a zero-byte log", got)
 	}
 }
 
