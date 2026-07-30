@@ -24,7 +24,7 @@ import (
 // from every other use of JWTSecret in this service (JWT signing) and from
 // mctl-telegram's own derivation, even though the two services can share the
 // same underlying secret bytes in shared-hmac deployments.
-const refreshTokenSuccessorDomain = "mctl-api-refresh-token-v1"
+const refreshTokenSuccessorDomain = "mctl-api-refresh-token-v1" //nolint:gosec // domain-separation label, not a credential
 
 // deriveSuccessorRefreshToken deterministically computes the next refresh
 // token in a rotation chain from its predecessor and the server's signing
