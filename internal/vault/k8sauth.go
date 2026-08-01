@@ -129,7 +129,7 @@ func NewKubernetesTokenProvider(opts KubernetesAuthOptions) TokenProvider {
 	}
 	if opts.ReadJWT == nil {
 		opts.ReadJWT = func(path string) (string, error) {
-			b, err := os.ReadFile(path)
+			b, err := os.ReadFile(path) //nolint:gosec // JWTPath is the config-supplied projected ServiceAccount token path, not user input
 			if err != nil {
 				return "", err
 			}
@@ -267,7 +267,7 @@ func (p *kubernetesTokenProvider) GetToken(ctx context.Context) (string, error) 
 		// with an HTTP request's context, and one caller disconnecting
 		// must not cancel a refresh that other concurrent callers are
 		// waiting on.
-		go p.runLogin(attempt, fallback)
+		go p.runLogin(attempt, fallback) //nolint:gosec // deliberate: this login is shared across every concurrent caller, so it must not inherit any single caller's cancellable context
 	}
 	p.mu.Unlock()
 
