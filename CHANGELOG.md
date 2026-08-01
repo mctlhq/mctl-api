@@ -1,5 +1,26 @@
 # Changelog
 
+## [4.27.0](https://github.com/mctlhq/mctl-api/compare/4.26.0...4.27.0) (2026-08-01)
+
+
+### Features
+
+* **logs:** add mctl_get_workflow_logs for Argo step logs ([80d7c5a](https://github.com/mctlhq/mctl-api/commit/80d7c5ae5dbc786fa78e13b2e3258a52cdc54865))
+* **vault:** authenticate to Vault with the pod ServiceAccount ([ed72aea](https://github.com/mctlhq/mctl-api/commit/ed72aea7fe269292dc9e6329d012ddcef0d96c61))
+* **vault:** authenticate to Vault with the pod ServiceAccount ([24ecc64](https://github.com/mctlhq/mctl-api/commit/24ecc6410ea1dfcf6ffbb7feeebafec5606f3990))
+
+
+### Bug Fixes
+
+* **lint:** satisfy golangci-lint (errcheck, gosec) on log archive tests ([de9eb86](https://github.com/mctlhq/mctl-api/commit/de9eb869f1de93f9b34a966d992c5dd9d046358d))
+* **lint:** silence two gosec false positives with rationale ([db8aad1](https://github.com/mctlhq/mctl-api/commit/db8aad1de2af0b6f33c5507617a2d7a2ce8c7267))
+* **logs:** address Codex review findings on workflow log archive ([234dbf7](https://github.com/mctlhq/mctl-api/commit/234dbf75040d5eca2de2096e0d90d12a91d75675))
+* **vault:** decouple login from caller context, back off after fallback, fix hardExpiry for non-expiring tokens ([6063d51](https://github.com/mctlhq/mctl-api/commit/6063d51ac358e65250ef5d28f0a758ce4f41c78c))
+* **workflows:** distinguish not-found from cluster errors in GetWorkflow ([8c55ec7](https://github.com/mctlhq/mctl-api/commit/8c55ec786ff95cb06fa010254946d0812c7b9c23))
+* **workflows:** distinguish not-found from cluster errors in GetWorkflow ([3f7b0ac](https://github.com/mctlhq/mctl-api/commit/3f7b0ac400432b7c2c69852518a14007fdd73373))
+* **workflows:** fall back to live k8s lookup for cron-driven runs ([37933a4](https://github.com/mctlhq/mctl-api/commit/37933a4df096c89fb2d9b3ccd06982c97a8267a8))
+* **workflows:** fall back to live k8s lookup for cron-driven runs ([b4ef61e](https://github.com/mctlhq/mctl-api/commit/b4ef61e4c8d7227942c2cbc4a2e0ff6b7a3f9c34))
+
 ## [4.26.0](https://github.com/mctlhq/mctl-api/compare/4.25.0...4.26.0) (2026-07-30)
 
 
