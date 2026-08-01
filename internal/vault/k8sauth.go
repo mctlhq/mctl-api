@@ -201,25 +201,47 @@ func (p *kubernetesTokenProvider) login(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("vault k8s auth for role %q returned no client_token", p.opts.Role)
 	}
 
-	// A zero/absent lease means a root-ish token with no expiry; re-login
-	// hourly anyway so a revoked one self-heals.
+	// A zero/absent lease means a root-ish token Vault never expires on its
+	// own. Re-login hourly anyway so a revoked one self-heals, but that
+	// cadence is a renewal *preference*, not a real expiry — see hardExpiry
+	// below.
 	leaseSeconds := parsed.Auth.LeaseDuration
-	if leaseSeconds <= 0 {
-		leaseSeconds = 3600
+	noRealExpiry := leaseSeconds <= 0
+	effectiveLeaseSeconds := leaseSeconds
+	if noRealExpiry {
+		effectiveLeaseSeconds = 3600
 	}
 
 	now := p.opts.Now()
+	renewAfter := now.Add(time.Duration(float64(effectiveLeaseSeconds) * renewAt * float64(time.Second)))
+	// hardExpiry is when the fallback path (below) must stop trusting the
+	// cached token. For a real lease that's the lease's actual end. For a
+	// non-expiring token there is no real end — inventing one here (e.g.
+	// reusing the hourly re-login cadence) would make GetToken discard a
+	// token that is still perfectly valid at Vault the moment our own
+	// renewal attempts have been failing for longer than that cadence.
+	hardExpiry := now.Add(time.Duration(leaseSeconds) * time.Second)
+	if noRealExpiry {
+		hardExpiry = now.Add(100 * 365 * 24 * time.Hour)
+	}
+
 	p.mu.Lock()
 	p.cached = &cachedToken{
 		token:      parsed.Auth.ClientToken,
-		renewAfter: now.Add(time.Duration(float64(leaseSeconds) * renewAt * float64(time.Second))),
-		hardExpiry: now.Add(time.Duration(leaseSeconds) * time.Second),
+		renewAfter: renewAfter,
+		hardExpiry: hardExpiry,
 	}
 	p.mu.Unlock()
 
 	p.opts.Logger.Info("vault kubernetes auth succeeded", "role", p.opts.Role, "lease_duration", leaseSeconds)
 	return parsed.Auth.ClientToken, nil
 }
+
+// loginTimeout bounds the background login/renewal HTTP call. Deliberately
+// longer than the HTTP client's own per-request timeout would suggest is
+// necessary — this budget is shared by every concurrent waiter, not just
+// whichever caller happened to trigger it.
+const loginTimeout = 20 * time.Second
 
 func (p *kubernetesTokenProvider) GetToken(ctx context.Context) (string, error) {
 	p.mu.Lock()
@@ -236,30 +258,64 @@ func (p *kubernetesTokenProvider) GetToken(ctx context.Context) (string, error) 
 	// transient renewal hiccup into a hard outage.
 	fallback := p.cached
 
-	if p.inFlight != nil {
-		attempt := p.inFlight
-		p.mu.Unlock()
-		<-attempt.done
-		return attempt.result, attempt.err
+	attempt := p.inFlight
+	if attempt == nil {
+		attempt = &loginAttempt{done: make(chan struct{})}
+		p.inFlight = attempt
+		// The actual HTTP call runs on its own context, independent of
+		// whichever caller happened to trigger it: ReadKV calls GetToken
+		// with an HTTP request's context, and one caller disconnecting
+		// must not cancel a refresh that other concurrent callers are
+		// waiting on.
+		go p.runLogin(attempt, fallback)
 	}
-
-	attempt := &loginAttempt{done: make(chan struct{})}
-	p.inFlight = attempt
 	p.mu.Unlock()
 
-	token, err := p.login(ctx)
+	select {
+	case <-attempt.done:
+		return attempt.result, attempt.err
+	case <-ctx.Done():
+		// This caller gives up, but the shared login keeps running in the
+		// background for whoever else is still waiting on it.
+		return "", ctx.Err()
+	}
+}
+
+func (p *kubernetesTokenProvider) runLogin(attempt *loginAttempt, fallback *cachedToken) {
+	loginCtx, cancel := context.WithTimeout(context.Background(), loginTimeout)
+	defer cancel()
+
+	token, err := p.login(loginCtx)
 	if err != nil {
-		if fallback != nil && p.opts.Now().Before(fallback.hardExpiry) {
+		p.mu.Lock()
+		// Only trust fallback if the cache still holds the exact struct we
+		// snapshotted — if a concurrent Invalidate() already cleared it,
+		// that token is one Vault has already rejected, and resurrecting it
+		// here would hand it right back out.
+		useFallback := fallback != nil && p.cached == fallback && p.opts.Now().Before(fallback.hardExpiry)
+		switch {
+		case useFallback:
+			// Back off the next few calls instead of re-entering login on
+			// every single one while Vault is still flaking.
+			const fallbackBackoff = 30 * time.Second
+			newRenewAfter := p.opts.Now().Add(fallbackBackoff)
+			if newRenewAfter.After(fallback.hardExpiry) {
+				newRenewAfter = fallback.hardExpiry
+			}
+			p.cached = &cachedToken{token: fallback.token, renewAfter: newRenewAfter, hardExpiry: fallback.hardExpiry}
+		case p.cached == fallback:
+			// No usable fallback and nothing else has touched the cache —
+			// either this is the first login ever, or the old token's
+			// lease has actually run out. Drop it so the cache never holds
+			// a token we already know Vault will refuse.
+			p.cached = nil
+		}
+		p.mu.Unlock()
+
+		if useFallback {
 			p.opts.Logger.Warn("vault kubernetes auth renewal failed; reusing the still-valid cached token until its lease expires",
 				"role", p.opts.Role, "error", err.Error())
 			token, err = fallback.token, nil
-		} else {
-			// No usable fallback — either this is the first login ever, or
-			// the old token's lease has actually run out. Drop it so the
-			// cache never holds a token we already know Vault will refuse.
-			p.mu.Lock()
-			p.cached = nil
-			p.mu.Unlock()
 		}
 	}
 
@@ -269,8 +325,6 @@ func (p *kubernetesTokenProvider) GetToken(ctx context.Context) (string, error) 
 	p.inFlight = nil
 	p.mu.Unlock()
 	close(attempt.done)
-
-	return token, err
 }
 
 func (p *kubernetesTokenProvider) Invalidate(rejected string) {

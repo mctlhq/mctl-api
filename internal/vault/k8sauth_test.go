@@ -346,10 +346,201 @@ func TestKubernetesTokenProvider_KeepsServingOldTokenWhenRenewalFailsWithinLease
 		t.Fatalf("login calls = %d; want 2 (renewal attempted and failed)", got)
 	}
 
-	clock.Advance(5 * time.Second)
+	// Past both the backoff window applied after a fallback and the lease's
+	// actual hard expiry — unambiguously time for a fresh, unconstrained
+	// login attempt.
+	clock.Advance(15 * time.Second)
 	tok, err = p.GetToken(context.Background())
 	if err != nil || tok != "s.third" {
 		t.Fatalf("GetToken() next call = %q, %v; want s.third, nil (retry succeeds)", tok, err)
+	}
+}
+
+// Claude P3 (mctl-api#125, 2026-08-01): a fallback must not itself trigger a
+// login on every subsequent call while Vault keeps flaking — that turns a
+// blip into sustained request pressure against the endpoint that's already
+// unhealthy. Uses a long lease so the backoff window isn't coincidentally
+// capped by hardExpiry (that interaction is exercised separately above).
+func TestKubernetesTokenProvider_BacksOffAfterFallbackInsteadOfRetryingEveryCall(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		switch n {
+		case 1:
+			loginOK("s.first", 1000)(w, r)
+		case 2:
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			loginOK("s.third", 1000)(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	clock := newFakeClock()
+	p := NewKubernetesTokenProvider(KubernetesAuthOptions{
+		VaultAddr: srv.URL,
+		Role:      "backstage",
+		ReadJWT:   staticJWT("jwt-1"),
+		Now:       clock.Now,
+	})
+
+	if _, err := p.GetToken(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	clock.Advance(850 * time.Second) // past the 800s renew threshold, well inside the 1000s lease
+	tok, err := p.GetToken(context.Background())
+	if err != nil || tok != "s.first" {
+		t.Fatalf("GetToken() during fallback = %q, %v; want s.first, nil", tok, err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("login calls after fallback = %d; want 2", got)
+	}
+
+	clock.Advance(10 * time.Second) // +860s: inside the backoff window
+	tok, err = p.GetToken(context.Background())
+	if err != nil || tok != "s.first" {
+		t.Fatalf("GetToken() inside backoff window = %q, %v; want s.first, nil", tok, err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("login calls inside backoff window = %d; want 2 (no re-login storm)", got)
+	}
+
+	clock.Advance(21 * time.Second) // +881s: past the backoff window, still inside the lease
+	tok, err = p.GetToken(context.Background())
+	if err != nil || tok != "s.third" {
+		t.Fatalf("GetToken() after backoff window = %q, %v; want s.third, nil", tok, err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("login calls after backoff window = %d; want 3", got)
+	}
+}
+
+// Claude P3 (mctl-api#125, 2026-08-01): fallback must re-check that the
+// cache still holds the exact token it snapshotted before serving it — a
+// concurrent Invalidate() for that same token means Vault has already
+// rejected it, and handing it back out defeats the point of invalidating.
+func TestKubernetesTokenProvider_DoesNotResurrectATokenInvalidatedDuringRenewal(t *testing.T) {
+	var calls int32
+	var loginStartedOnce sync.Once
+	loginStarted := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			loginOK("s.first", 100)(w, r)
+			return
+		}
+		if n == 2 {
+			loginStartedOnce.Do(func() { close(loginStarted) })
+			<-release
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer srv.Close()
+
+	clock := newFakeClock()
+	p := NewKubernetesTokenProvider(KubernetesAuthOptions{
+		VaultAddr: srv.URL,
+		Role:      "backstage",
+		ReadJWT:   staticJWT("jwt-1"),
+		Now:       clock.Now,
+	})
+
+	first, err := p.GetToken(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clock.Advance(90 * time.Second) // past renewAfter, inside the 100s lease
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = p.GetToken(context.Background())
+	}()
+
+	<-loginStarted
+	// The in-flight renewal's request already carried `first`; a straggler
+	// 403 from an earlier request arrives now and invalidates it mid-flight.
+	p.Invalidate(first)
+	close(release)
+	wg.Wait()
+
+	// The renewal failed, and the token it would have fallen back to was
+	// invalidated while it was in flight — there is nothing left to trust,
+	// so the next call must attempt a fresh login (and error, since the mock
+	// keeps failing) rather than replay `first`.
+	tok, err := p.GetToken(context.Background())
+	if tok == "s.first" {
+		t.Fatal("GetToken() resurrected a token that was invalidated during renewal")
+	}
+	if err == nil {
+		t.Fatal("expected an error from the fresh login attempt, got nil")
+	}
+}
+
+// Codex P2 (mctl-api#125, 2026-08-01): one caller's context must not cancel
+// a login/renewal that other concurrent callers are waiting on, and a
+// canceled caller must not block on a login it no longer cares about.
+func TestKubernetesTokenProvider_OneCallersCancellationDoesNotAffectOthers(t *testing.T) {
+	var calls int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		<-release
+		loginOK("s.k8s", 3600)(w, r)
+	}))
+	defer srv.Close()
+
+	p := NewKubernetesTokenProvider(KubernetesAuthOptions{
+		VaultAddr: srv.URL,
+		Role:      "backstage",
+		ReadJWT:   staticJWT("jwt-1"),
+	})
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+
+	var wg sync.WaitGroup
+	var cancelledErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, cancelledErr = p.GetToken(cancelCtx)
+	}()
+
+	var okTok string
+	var okErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		okTok, okErr = p.GetToken(context.Background())
+	}()
+
+	time.Sleep(50 * time.Millisecond) // let both goroutines reach the wait
+	cancel()                          // cancel only the first caller
+	time.Sleep(50 * time.Millisecond) // let the cancellation actually propagate
+	close(release)                    // let the shared login complete
+	wg.Wait()
+
+	if cancelledErr == nil {
+		t.Fatal("expected the canceled caller to receive an error")
+	}
+	if okErr != nil || okTok != "s.k8s" {
+		t.Fatalf("uncancelled caller got %q, %v; want s.k8s, nil", okTok, okErr)
+	}
+
+	// The background login must have completed and cached its result
+	// despite the leader-or-follower cancellation — a later call should not
+	// need to hit the server again.
+	if tok, err := p.GetToken(context.Background()); err != nil || tok != "s.k8s" {
+		t.Fatalf("GetToken() after both calls settled = %q, %v; want s.k8s, nil", tok, err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("login calls = %d; want 1 (cancellation must not trigger a duplicate login)", got)
 	}
 }
 
@@ -567,5 +758,49 @@ func TestKubernetesTokenProvider_FallsBackToHourlyRenewalWhenNoLease(t *testing.
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Fatalf("login calls = %d; want 2", got)
+	}
+}
+
+// Codex P2 (mctl-api#125, 2026-08-01): a non-expiring token (lease_duration
+// 0, e.g. a root-ish token) must not get an artificial hard expiry tied to
+// the hourly re-login cadence. If Vault's own auth path has been flaking for
+// longer than an hour, the token itself is still genuinely valid — GetToken
+// should keep falling back to it, not discard it just because our own
+// preferred renewal cadence has elapsed many times over.
+func TestKubernetesTokenProvider_NonExpiringTokenHasNoArtificialHardExpiry(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			loginOK("s.first", 0)(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer srv.Close()
+
+	clock := newFakeClock()
+	p := NewKubernetesTokenProvider(KubernetesAuthOptions{
+		VaultAddr: srv.URL,
+		Role:      "backstage",
+		ReadJWT:   staticJWT("jwt-1"),
+		Now:       clock.Now,
+	})
+
+	if _, err := p.GetToken(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance well past the hourly renewal cadence — many hours, not just
+	// past the 2880s (80% of the assumed 3600s) renew threshold — with
+	// every renewal attempt failing the whole time.
+	clock.Advance(10 * time.Hour)
+	tok, err := p.GetToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetToken() after 10h of failed renewals = %v; want nil error (token is still genuinely valid)", err)
+	}
+	if tok != "s.first" {
+		t.Fatalf("GetToken() = %q; want s.first (fallback to the still-valid non-expiring token)", tok)
 	}
 }
