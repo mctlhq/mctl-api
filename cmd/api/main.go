@@ -182,10 +182,24 @@ func main() {
 	}
 
 	// Vault client (optional — used for onboarding secret preflight).
+	// Kubernetes auth is preferred: the pod proves its identity with its own
+	// projected ServiceAccount token and Vault issues a short-lived
+	// credential it can re-mint. The static token stays supported as a
+	// fallback, but it is the mode that broke Backstage in production when
+	// the token was revoked with nothing to renew it (2026-08-01).
 	var vaultReader mctlapi.VaultReader
-	if cfg.VaultAddr != "" && cfg.VaultToken != "" {
+	switch {
+	case cfg.VaultAddr != "" && cfg.VaultKubernetesRole != "":
+		tokens := vault.NewKubernetesTokenProvider(vault.KubernetesAuthOptions{
+			VaultAddr: cfg.VaultAddr,
+			Role:      cfg.VaultKubernetesRole,
+			AuthPath:  cfg.VaultKubernetesAuthPath,
+		})
+		vaultReader = vault.NewClientWithTokenProvider(cfg.VaultAddr, tokens)
+		slog.Info("vault client enabled", "addr", cfg.VaultAddr, "auth", "kubernetes", "role", cfg.VaultKubernetesRole)
+	case cfg.VaultAddr != "" && cfg.VaultToken != "":
 		vaultReader = vault.NewClient(cfg.VaultAddr, cfg.VaultToken)
-		slog.Info("vault client enabled", "addr", cfg.VaultAddr)
+		slog.Info("vault client enabled", "addr", cfg.VaultAddr, "auth", "static-token")
 	}
 
 	// VictoriaMetrics client (optional — used for OpenClaw sizing recommendations).
@@ -296,6 +310,8 @@ type config struct {
 	OAuthRefreshTokenTTL     time.Duration
 	VaultAddr                string
 	VaultToken               string
+	VaultKubernetesRole      string
+	VaultKubernetesAuthPath  string
 	VictoriaMetricsURL       string
 }
 
@@ -373,6 +389,8 @@ func loadConfig() config {
 		OAuthRefreshTokenTTL:     parseDuration(os.Getenv("OAUTH_REFRESH_TOKEN_TTL"), 30*24*time.Hour),
 		VaultAddr:                os.Getenv("VAULT_ADDR"),
 		VaultToken:               os.Getenv("VAULT_TOKEN"),
+		VaultKubernetesRole:      os.Getenv("VAULT_KUBERNETES_ROLE"),
+		VaultKubernetesAuthPath:  os.Getenv("VAULT_KUBERNETES_AUTH_PATH"),
 		VictoriaMetricsURL:       envOr("VICTORIA_METRICS_URL", "http://vmsingle-monitoring-victoria-metrics-k8s-stack.monitoring.svc:8428"),
 	}
 }
