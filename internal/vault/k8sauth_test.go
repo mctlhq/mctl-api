@@ -486,11 +486,18 @@ func TestKubernetesTokenProvider_DoesNotResurrectATokenInvalidatedDuringRenewal(
 // Codex P2 (mctl-api#125, 2026-08-01): one caller's context must not cancel
 // a login/renewal that other concurrent callers are waiting on, and a
 // canceled caller must not block on a login it no longer cares about.
-func TestKubernetesTokenProvider_OneCallersCancellationDoesNotAffectOthers(t *testing.T) {
+// The leader is whichever caller's GetToken call actually spawns the shared
+// login (sees no inFlight attempt yet). Giving it a head start before the
+// follower calls in makes that deterministic — without it, either goroutine
+// could win the race and the assertion below wouldn't reliably exercise the
+// "leader disconnects" scenario at all.
+func TestKubernetesTokenProvider_LeaderCancellationDoesNotAffectFollower(t *testing.T) {
 	var calls int32
+	loginStarted := make(chan struct{})
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
+		close(loginStarted)
 		<-release
 		loginOK("s.k8s", 3600)(w, r)
 	}))
@@ -502,46 +509,96 @@ func TestKubernetesTokenProvider_OneCallersCancellationDoesNotAffectOthers(t *te
 		ReadJWT:   staticJWT("jwt-1"),
 	})
 
-	cancelCtx, cancel := context.WithCancel(context.Background())
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 
 	var wg sync.WaitGroup
-	var cancelledErr error
+	var leaderErr error
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, cancelledErr = p.GetToken(cancelCtx)
+		_, leaderErr = p.GetToken(leaderCtx)
 	}()
 
-	var okTok string
-	var okErr error
+	<-loginStarted // the leader's request is now in flight against the server
+
+	var followerTok string
+	var followerErr error
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		okTok, okErr = p.GetToken(context.Background())
+		followerTok, followerErr = p.GetToken(context.Background())
 	}()
 
-	time.Sleep(50 * time.Millisecond) // let both goroutines reach the wait
-	cancel()                          // cancel only the first caller
-	time.Sleep(50 * time.Millisecond) // let the cancellation actually propagate
+	time.Sleep(20 * time.Millisecond) // let the follower join as a waiter
+	cancelLeader()
+	time.Sleep(50 * time.Millisecond) // let the cancellation propagate, if it wrongly does
 	close(release)                    // let the shared login complete
 	wg.Wait()
 
-	if cancelledErr == nil {
-		t.Fatal("expected the canceled caller to receive an error")
+	if leaderErr == nil {
+		t.Fatal("expected the canceled leader to receive an error")
 	}
-	if okErr != nil || okTok != "s.k8s" {
-		t.Fatalf("uncancelled caller got %q, %v; want s.k8s, nil", okTok, okErr)
+	if followerErr != nil || followerTok != "s.k8s" {
+		t.Fatalf("follower got %q, %v; want s.k8s, nil — leader's cancellation must not affect it", followerTok, followerErr)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("login calls = %d; want 1 (leader's cancellation must not trigger a second login)", got)
 	}
 
 	// The background login must have completed and cached its result
-	// despite the leader-or-follower cancellation — a later call should not
-	// need to hit the server again.
+	// despite the leader's cancellation — a later call should not need to
+	// hit the server again.
 	if tok, err := p.GetToken(context.Background()); err != nil || tok != "s.k8s" {
 		t.Fatalf("GetToken() after both calls settled = %q, %v; want s.k8s, nil", tok, err)
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("login calls = %d; want 1 (cancellation must not trigger a duplicate login)", got)
+}
+
+// A follower that gives up must not block until the leader's login
+// finishes — it should return as soon as its own context is done.
+func TestKubernetesTokenProvider_FollowerCancellationReturnsPromptly(t *testing.T) {
+	loginStarted := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(loginStarted)
+		<-release
+		loginOK("s.k8s", 3600)(w, r)
+	}))
+	defer srv.Close()
+
+	p := NewKubernetesTokenProvider(KubernetesAuthOptions{
+		VaultAddr: srv.URL,
+		Role:      "backstage",
+		ReadJWT:   staticJWT("jwt-1"),
+	})
+
+	// The leader (uncancellable) starts the login and blocks on the server.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = p.GetToken(context.Background())
+	}()
+	<-loginStarted
+
+	followerCtx, cancelFollower := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.GetToken(followerCtx)
+		done <- err
+	}()
+
+	cancelFollower()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected the canceled follower to receive an error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("follower did not return promptly after its own context was canceled")
 	}
+
+	close(release)
+	wg.Wait()
 }
 
 // Once the old token's lease has actually run out, a failing renewal must
