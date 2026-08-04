@@ -145,6 +145,12 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerIssue())
 	srv.AddTool(s.toolListRecentAgentRuns())
 
+	// Agent registry (mctl-agents AgentManifest versions/releases).
+	srv.AddTool(s.toolListAgentVersions())
+	srv.AddTool(s.toolResolveAgent())
+	srv.AddTool(s.toolPromoteAgent())
+	srv.AddTool(s.toolRollbackAgent())
+
 	// Prompts (explicit skill invocation, e.g. /mctl:platform-skill in Claude Code).
 	srv.AddPrompt(s.promptPlatformSkill())
 
@@ -2498,6 +2504,151 @@ func (s *Server) toolListRecentAgentRuns() (mcplib.Tool, server.ToolHandlerFunc)
 		body, err := s.apiGet(ctx, "/api/v1/agent-runs")
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list agent runs: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+// agentRegistryEnvironmentEnum mirrors agentregistry.EnvironmentProduction /
+// EnvironmentShadow — the only two environments the registry accepts in v1.
+var agentRegistryEnvironmentEnum = []string{"production", "shadow"}
+
+func (s *Server) toolListAgentVersions() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_agent_versions",
+		mcplib.WithTitleAnnotation("List Agent Versions"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`List every published version of an mctl-agents agent (e.g. issue-investigator, implementer, shepherd), newest first.
+
+Each version is immutable and carries the manifest, git SHA, image reference, and prompt hash it was published with. Use this to find a version to pass to mctl_promote_agent. Admin-only.`),
+		mcplib.WithString("agent_name",
+			mcplib.Required(),
+			mcplib.Description("Agent name, e.g. issue-investigator, implementer, shepherd, incident-responder, service-agent, mentor"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		agent := stringArg(req, "agent_name")
+		body, err := s.apiGet(ctx, "/api/v1/agents/"+url.PathEscape(agent)+"/versions")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list agent versions: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolResolveAgent() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_resolve_agent",
+		mcplib.WithTitleAnnotation("Resolve Agent Release"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Resolve which version of an agent is currently released to an environment.
+
+This is the read path the dev-loop pipeline pins a version from at the start of a run. Returns 404 if no version has ever been promoted to that agent/environment pair. Admin-only.`),
+		mcplib.WithString("agent_name",
+			mcplib.Required(),
+			mcplib.Description("Agent name, e.g. issue-investigator, implementer, shepherd, incident-responder, service-agent, mentor"),
+		),
+		mcplib.WithString("environment",
+			mcplib.Required(),
+			mcplib.Enum(agentRegistryEnvironmentEnum...),
+			mcplib.Description("Environment to resolve"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		agent := stringArg(req, "agent_name")
+		environment := stringArg(req, "environment")
+		path := "/api/v1/agents/" + url.PathEscape(agent) + "/resolve?environment=" + url.QueryEscape(environment)
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to resolve agent release: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolPromoteAgent() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_promote_agent",
+		mcplib.WithTitleAnnotation("Promote Agent Version"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Promote a published agent version to an environment (production or shadow).
+
+Takes effect for the next dev-loop run that resolves this agent/environment — in-flight runs keep whatever version they already pinned. Use mctl_list_agent_versions to find a version first. Records a promotion audit row. Admin-only.`),
+		mcplib.WithString("agent_name",
+			mcplib.Required(),
+			mcplib.Description("Agent name, e.g. issue-investigator, implementer, shepherd, incident-responder, service-agent, mentor"),
+		),
+		mcplib.WithString("environment",
+			mcplib.Required(),
+			mcplib.Enum(agentRegistryEnvironmentEnum...),
+			mcplib.Description("Environment to promote into"),
+		),
+		mcplib.WithString("version",
+			mcplib.Required(),
+			mcplib.Description("Published agent version to promote, from mctl_list_agent_versions"),
+		),
+		mcplib.WithString("reason",
+			mcplib.Description("Why this version is being promoted, recorded in the audit log"),
+		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("promote agent %q to version %q in environment %q", args["agent_name"], args["version"], args["environment"])); r != nil {
+			return r, nil
+		}
+		agent := stringArg(req, "agent_name")
+		body, err := s.apiPostJSON(ctx, "/api/v1/agents/"+url.PathEscape(agent)+"/releases", map[string]interface{}{
+			"environment": stringArg(req, "environment"),
+			"version":     stringArg(req, "version"),
+			"reason":      stringArg(req, "reason"),
+		})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to promote agent: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolRollbackAgent() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_rollback_agent",
+		mcplib.WithTitleAnnotation("Rollback Agent Release"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Roll an agent's release in an environment back to the version it had immediately before the current one.
+
+Reads the most recent promotion audit row for this agent/environment and reverts to its from_version — no gitops PR, no redeploy. Fails if there is no prior promotion to roll back to. Admin-only.`),
+		mcplib.WithString("agent_name",
+			mcplib.Required(),
+			mcplib.Description("Agent name, e.g. issue-investigator, implementer, shepherd, incident-responder, service-agent, mentor"),
+		),
+		mcplib.WithString("environment",
+			mcplib.Required(),
+			mcplib.Enum(agentRegistryEnvironmentEnum...),
+			mcplib.Description("Environment to roll back"),
+		),
+		mcplib.WithString("reason",
+			mcplib.Description("Why this rollback is happening, recorded in the audit log"),
+		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("roll back agent %q in environment %q to its prior version", args["agent_name"], args["environment"])); r != nil {
+			return r, nil
+		}
+		agent := stringArg(req, "agent_name")
+		body, err := s.apiPostJSON(ctx, "/api/v1/agents/"+url.PathEscape(agent)+"/releases", map[string]interface{}{
+			"environment": stringArg(req, "environment"),
+			"rollback":    true,
+			"reason":      stringArg(req, "reason"),
+		})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to roll back agent: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

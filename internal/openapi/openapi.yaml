@@ -325,6 +325,78 @@ components:
               type: string
               format: date-time
 
+    AgentDefinition:
+      type: object
+      properties:
+        name:
+          type: string
+          example: issue-investigator
+        description:
+          type: string
+        owner:
+          type: string
+          example: mctl-agents
+        created_at:
+          type: string
+          format: date-time
+        archived_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    AgentVersion:
+      type: object
+      properties:
+        id:
+          type: integer
+        agent:
+          type: string
+          example: issue-investigator
+        version:
+          type: string
+          example: 1.0.0
+        manifest_json:
+          type: string
+          description: The published AgentManifest (agent.yaml), as JSON
+        git_sha:
+          type: string
+        image_repository:
+          type: string
+          example: ghcr.io/mctlhq/mctl-agents
+        image_digest:
+          type: string
+        prompt_hash:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+
+    AgentRelease:
+      type: object
+      properties:
+        agent:
+          type: string
+          example: issue-investigator
+        environment:
+          type: string
+          enum: [production, shadow]
+        version:
+          type: string
+          example: 1.0.0
+        status:
+          type: string
+          example: active
+        traffic_weight:
+          type: integer
+          example: 100
+        updated_at:
+          type: string
+          format: date-time
+        updated_by:
+          type: string
+
     Error:
       type: object
       properties:
@@ -1233,6 +1305,273 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/agents:
+    post:
+      summary: Create or update an agent definition
+      description: |
+        Idempotent by design — republishing the same name updates
+        description/owner in place (blank fields leave the existing value
+        untouched, so a caller that only knows the name can't wipe it out).
+        **Admin access required.**
+      tags: [Agent Registry]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: issue-investigator
+                description:
+                  type: string
+                owner:
+                  type: string
+                  example: mctl-agents
+      responses:
+        '201':
+          description: Agent definition created or updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentDefinition'
+        '400':
+          description: Missing required field
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/agents/{name}/versions:
+    get:
+      summary: List published versions of an agent
+      description: |
+        Every published version of one agent, newest first. Versions are
+        immutable — this never returns fewer or different rows for a given
+        (agent, version) pair once published. **Admin access required.**
+      tags: [Agent Registry]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: issue-investigator
+      responses:
+        '200':
+          description: List of agent versions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AgentVersion'
+                  count:
+                    type: integer
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: Publish an immutable agent version
+      description: |
+        Intended caller: CI, after `orchestrator/validate_manifest.py` has
+        passed. `(agent, version)` is a once-only key — republishing the same
+        version is rejected, never overwritten. **Admin access required.**
+      tags: [Agent Registry]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: issue-investigator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, manifest_json, git_sha, image_repository, prompt_hash]
+              properties:
+                version:
+                  type: string
+                  example: 1.0.0
+                manifest_json:
+                  type: string
+                  description: The published AgentManifest (agent.yaml), as JSON
+                git_sha:
+                  type: string
+                image_repository:
+                  type: string
+                  example: ghcr.io/mctlhq/mctl-agents
+                image_digest:
+                  type: string
+                prompt_hash:
+                  type: string
+      responses:
+        '201':
+          description: Version published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentVersion'
+        '400':
+          description: Missing required field
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Agent has no definition yet — POST /api/v1/agents first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Version already published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/agents/{name}/releases:
+    post:
+      summary: Promote or roll back an agent's release in an environment
+      description: |
+        Set `version` to promote to an explicit published version, or set
+        `rollback: true` (with no `version`) to revert to whatever the
+        environment had immediately before its current release — derived
+        from the promotion audit trail, not a separate pointer. The two are
+        mutually exclusive: setting both is rejected. Takes effect for the
+        next resolve; in-flight workflows keep whatever version they already
+        pinned. **Admin access required.**
+      tags: [Agent Registry]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: issue-investigator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [environment]
+              properties:
+                environment:
+                  type: string
+                  enum: [production, shadow]
+                version:
+                  type: string
+                  example: 1.0.0
+                  description: Required unless rollback is true; must not be set together with rollback
+                rollback:
+                  type: boolean
+                  default: false
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Release updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentRelease'
+        '400':
+          description: Missing/contradictory fields, or an invalid environment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: version does not exist among the agent's published versions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: No prior version to roll back to
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/agents/{name}/resolve:
+    get:
+      summary: Resolve the version currently released to an environment
+      description: |
+        The read path a Temporal DevLoopWorkflow activity calls once per
+        agent step to pin an immutable version for the rest of that
+        workflow run. **Admin access required.**
+      tags: [Agent Registry]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: issue-investigator
+        - name: environment
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [production, shadow]
+      responses:
+        '200':
+          description: Currently released version
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentRelease'
+        '400':
+          description: Missing or invalid environment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No release for this agent/environment pair
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
 tags:
   - name: Health
     description: Health and readiness probes
@@ -1254,3 +1593,5 @@ tags:
     description: Platform operation registry and execution
   - name: Platform Skills
     description: Platform-wide skill catalog and tenant bindings
+  - name: Agent Registry
+    description: mctl-agents AgentManifest versions, releases, and promote/rollback
