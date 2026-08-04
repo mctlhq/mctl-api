@@ -164,8 +164,8 @@ func TestAllToolsHaveTitleAnnotation(t *testing.T) {
 		t.Fatalf("failed to unmarshal tools/list response: %v", err)
 	}
 
-	if len(result.Result.Tools) != 63 {
-		t.Errorf("expected 63 tools, got %d", len(result.Result.Tools))
+	if len(result.Result.Tools) != 67 {
+		t.Errorf("expected 67 tools, got %d", len(result.Result.Tools))
 	}
 
 	for _, tool := range result.Result.Tools {

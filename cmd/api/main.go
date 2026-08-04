@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/agentregistry"
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/argoarchive"
@@ -144,6 +145,24 @@ func main() {
 		}
 	}
 
+	// Agent registry (optional — enabled when AGENT_REGISTRY_DB_URL or AUDIT_DB_URL is set).
+	var agentRegistryStore *agentregistry.Store
+	if agentRegistryDBURL := os.Getenv("AGENT_REGISTRY_DB_URL"); agentRegistryDBURL != "" {
+		ars, arsErr := agentregistry.NewStore(context.Background(), agentRegistryDBURL)
+		if arsErr != nil {
+			slog.Warn("agent registry store init failed", "error", arsErr)
+		} else {
+			agentRegistryStore = ars
+		}
+	} else if dbURL := os.Getenv("AUDIT_DB_URL"); dbURL != "" {
+		ars, arsErr := agentregistry.NewStore(context.Background(), dbURL)
+		if arsErr != nil {
+			slog.Warn("agent registry store init failed (using AUDIT_DB_URL)", "error", arsErr)
+		} else {
+			agentRegistryStore = ars
+		}
+	}
+
 	executor := operations.NewExecutor()
 
 	// MCP server for SSE transport (embedded in this process).
@@ -238,6 +257,7 @@ func main() {
 		AllowedOrigins:       cfg.AllowedOrigins,
 		OAuthServer:          oauthServer,
 		AlertStore:           alertStore,
+		AgentRegistry:        agentRegistryStore,
 	})
 
 	srv := &http.Server{

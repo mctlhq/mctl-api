@@ -23,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
+	"github.com/mctlhq/mctl-api/internal/agentregistry"
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
@@ -67,6 +68,9 @@ type Options struct {
 	OAuthServer *auth.OAuthServer
 	// AlertStore persists incident alerts to PostgreSQL (optional — nil disables incident endpoints).
 	AlertStore *alerts.Store
+	// AgentRegistry persists mctl-agents AgentManifest versions/releases to
+	// PostgreSQL (optional — nil disables the agent registry endpoints).
+	AgentRegistry *agentregistry.Store
 	// OpenClaw controls quota and rate limits on the skill/identity save handlers.
 	// Zero values fall back to defaults (see OpenClawQuotaDefaults).
 	OpenClaw OpenClawQuotaConfig
@@ -218,6 +222,13 @@ func NewRouter(opts Options) http.Handler {
 			r.Patch("/incidents/{id}", h.UpdateIncident)
 			r.Post("/incidents/{id}/ack", h.AcknowledgeIncident)
 			r.Post("/incidents/{id}/resolve", h.ResolveIncident)
+
+			// Agent registry (mctl-agents AgentManifest versions/releases). Admin-only.
+			r.Post("/agents", h.CreateAgentDefinition)
+			r.Post("/agents/{name}/versions", h.PublishAgentVersion)
+			r.Get("/agents/{name}/versions", h.ListAgentVersions)
+			r.Post("/agents/{name}/releases", h.UpdateAgentRelease)
+			r.Get("/agents/{name}/resolve", h.ResolveAgentRelease)
 
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)
