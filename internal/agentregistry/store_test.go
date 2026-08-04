@@ -248,6 +248,79 @@ func TestRollback_OnlyOnePromotionRejected(t *testing.T) {
 	}
 }
 
+func TestCreateDefinition_BlankFieldsDoNotWipeExistingValues(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateDefinition(ctx, "mentor", "digest writer", "mctl-agents"); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+
+	// Republishing with blank description/owner (e.g. a CI job that only
+	// knows the name) must not blank out what's already stored.
+	second, err := s.CreateDefinition(ctx, "mentor", "", "")
+	if err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+	if second.Description != "digest writer" {
+		t.Fatalf("expected description to survive a blank republish, got %q", second.Description)
+	}
+	if second.Owner != "mctl-agents" {
+		t.Fatalf("expected owner to survive a blank republish, got %q", second.Owner)
+	}
+}
+
+func TestPromoteRelease_RetryIsIdempotentAndPreservesRollbackHistory(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateDefinition(ctx, "implementer", "", ""); err != nil {
+		t.Fatalf("create definition: %v", err)
+	}
+	if _, err := s.PublishVersion(ctx, newVersion("implementer", "1.0.0")); err != nil {
+		t.Fatalf("publish 1.0.0: %v", err)
+	}
+	if _, err := s.PublishVersion(ctx, newVersion("implementer", "2.0.0")); err != nil {
+		t.Fatalf("publish 2.0.0: %v", err)
+	}
+
+	if _, err := s.PromoteRelease(ctx, "implementer", EnvironmentProduction, "1.0.0", "initial", "mashkovd"); err != nil {
+		t.Fatalf("promote 1.0.0: %v", err)
+	}
+	if _, err := s.PromoteRelease(ctx, "implementer", EnvironmentProduction, "2.0.0", "prompt edit", "mashkovd"); err != nil {
+		t.Fatalf("promote 2.0.0: %v", err)
+	}
+
+	// A client retries the same promotion after losing the response —
+	// must be a no-op: no new promotion row, and in particular no row
+	// whose from_version equals its own to_version (which would make
+	// Rollback resolve right back to 2.0.0 instead of the real prior
+	// release, 1.0.0).
+	retried, err := s.PromoteRelease(ctx, "implementer", EnvironmentProduction, "2.0.0", "prompt edit", "mashkovd")
+	if err != nil {
+		t.Fatalf("retried promote: %v", err)
+	}
+	if retried.Version != "2.0.0" {
+		t.Fatalf("expected retried promote to report the already-current version, got %q", retried.Version)
+	}
+
+	promotions, err := s.ListPromotions(ctx, "implementer", EnvironmentProduction)
+	if err != nil {
+		t.Fatalf("list promotions: %v", err)
+	}
+	if len(promotions) != 2 {
+		t.Fatalf("expected the retried promotion to add no new row (still 2), got %d", len(promotions))
+	}
+
+	rolledBack, err := s.Rollback(ctx, "implementer", EnvironmentProduction, "reverting prompt edit", "mashkovd")
+	if err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if rolledBack.Version != "1.0.0" {
+		t.Fatalf("expected rollback to still revert to the real prior release 1.0.0, got %q", rolledBack.Version)
+	}
+}
+
 func TestResolveRelease_NotFound(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

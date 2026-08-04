@@ -185,6 +185,14 @@ func (h *Handlers) UpdateAgentRelease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "version is required unless rollback is true")
 		return
 	}
+	if body.Rollback && body.Version != "" {
+		// Silently ignoring version here would be a footgun: a caller
+		// meaning "promote to 1.0.0" who also (mistakenly) sets
+		// rollback=true would instead get rolled back to whatever the store
+		// considers the prior version, not 1.0.0.
+		writeError(w, http.StatusBadRequest, "version must not be set when rollback is true — they express contradictory intent")
+		return
+	}
 
 	var release *agentregistry.AgentRelease
 	var err error

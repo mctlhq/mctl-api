@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS agent_promotions (
     rollback_of  INTEGER,
     created_at   TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX IF NOT EXISTS agent_promotions_agent_env ON agent_promotions (agent, environment, created_at DESC);
+CREATE INDEX IF NOT EXISTS agent_promotions_agent_env ON agent_promotions (agent, environment, id DESC);
 `
 
 // Store is a PostgreSQL-backed agent registry.
@@ -113,7 +113,10 @@ func validEnvironment(env string) bool {
 // CreateDefinition creates or updates an agent's top-level record.
 // Idempotent by design — republishing the same name updates
 // description/owner in place, matching the "overwrite an existing entry"
-// convention the platform-skill-publish operation already uses.
+// convention the platform-skill-publish operation already uses. An update
+// with an empty description/owner keeps whatever was already stored rather
+// than blanking it out — a CI job that republishes a definition without
+// setting owner shouldn't wipe out a previously-set one.
 // created_at is preserved across an update: only the initial INSERT sets it.
 func (s *Store) CreateDefinition(ctx context.Context, name, description, owner string) (*AgentDefinition, error) {
 	now := time.Now().UTC()
@@ -121,7 +124,9 @@ func (s *Store) CreateDefinition(ctx context.Context, name, description, owner s
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO agent_definitions (name, description, owner, created_at)
 		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description, owner = EXCLUDED.owner
+		 ON CONFLICT (name) DO UPDATE SET
+		   description = COALESCE(NULLIF(EXCLUDED.description, ''), agent_definitions.description),
+		   owner = COALESCE(NULLIF(EXCLUDED.owner, ''), agent_definitions.owner)
 		 RETURNING name, description, owner, created_at, archived_at`,
 		name, description, owner, now,
 	).Scan(&d.Name, &d.Description, &d.Owner, &d.CreatedAt, &d.ArchivedAt)
@@ -169,7 +174,7 @@ func (s *Store) PublishVersion(ctx context.Context, v *AgentVersion) (*AgentVers
 func (s *Store) ListVersions(ctx context.Context, agent string) ([]AgentVersion, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, agent, version, manifest_json, git_sha, image_repository, image_digest, prompt_hash, created_at, created_by
-		 FROM agent_versions WHERE agent = $1 ORDER BY created_at DESC`,
+		 FROM agent_versions WHERE agent = $1 ORDER BY id DESC`,
 		agent,
 	)
 	if err != nil {
@@ -220,7 +225,8 @@ func (s *Store) PromoteRelease(ctx context.Context, agent, environment, version,
 	if !validEnvironment(environment) {
 		return nil, fmt.Errorf("agentregistry: promote: %w: %q", ErrInvalidEnvironment, environment)
 	}
-	return s.promote(ctx, agent, environment, version, reason, actor, nil)
+	return s.promote(ctx, agent, environment, reason, actor,
+		func(context.Context, pgx.Tx) (string, *int, error) { return version, nil, nil })
 }
 
 // Rollback reverts one agent/environment to the version it had immediately
@@ -232,37 +238,65 @@ func (s *Store) Rollback(ctx context.Context, agent, environment, reason, actor 
 	if !validEnvironment(environment) {
 		return nil, fmt.Errorf("agentregistry: rollback: %w: %q", ErrInvalidEnvironment, environment)
 	}
-
-	var lastPromotionID int
-	var fromVersion string
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, from_version FROM agent_promotions
-		 WHERE agent = $1 AND environment = $2
-		 ORDER BY created_at DESC LIMIT 1`,
-		agent, environment,
-	).Scan(&lastPromotionID, &fromVersion)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("agentregistry: rollback: %s/%s: %w", agent, environment, ErrNoRollbackTarget)
+	// Resolving "what was here before" runs inside promote()'s locked
+	// transaction (see resolveTarget below) rather than as a separate
+	// query beforehand — otherwise a promotion landing between this lookup
+	// and the write could make the answer stale before it's even applied.
+	return s.promote(ctx, agent, environment, reason, actor, func(ctx context.Context, tx pgx.Tx) (string, *int, error) {
+		var lastPromotionID int
+		var fromVersion string
+		err := tx.QueryRow(ctx,
+			`SELECT id, from_version FROM agent_promotions
+			 WHERE agent = $1 AND environment = $2
+			 ORDER BY id DESC LIMIT 1`,
+			agent, environment,
+		).Scan(&lastPromotionID, &fromVersion)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return "", nil, fmt.Errorf("agentregistry: rollback: %s/%s: %w", agent, environment, ErrNoRollbackTarget)
+			}
+			return "", nil, fmt.Errorf("agentregistry: rollback: %w", err)
 		}
-		return nil, fmt.Errorf("agentregistry: rollback: %w", err)
-	}
-	if fromVersion == "" {
-		return nil, fmt.Errorf("agentregistry: rollback: %s/%s: %w", agent, environment, ErrNoRollbackTarget)
-	}
-
-	return s.promote(ctx, agent, environment, fromVersion, reason, actor, &lastPromotionID)
+		if fromVersion == "" {
+			return "", nil, fmt.Errorf("agentregistry: rollback: %s/%s: %w", agent, environment, ErrNoRollbackTarget)
+		}
+		return fromVersion, &lastPromotionID, nil
+	})
 }
 
-// promote is the shared implementation behind PromoteRelease and Rollback:
-// verify the target version exists, upsert agent_releases, and append an
-// agent_promotions audit row recording what it replaced. rollbackOf is nil
-// for a forward promotion.
+// promote is the shared implementation behind PromoteRelease and Rollback.
+// Everything — target-version resolution (via resolveTarget), the current-
+// release read, the release upsert, and the audit-row insert — runs inside
+// one transaction, serialized per (agent, environment) by a Postgres
+// advisory lock (rather than a row lock, since agent_releases may not have
+// a row yet on a pair's first promotion). That closes two races the
+// previous unlocked, multi-statement version had: two concurrent promotions
+// (or a promote racing a rollback) computing the same stale "current
+// version" and both recording it as from_version, and Rollback's own
+// "what was here before" lookup going stale between reading it and applying
+// it. A failed audit insert now rolls back the release upsert with it,
+// instead of leaving a release the audit trail can't explain.
 func (s *Store) promote(
-	ctx context.Context, agent, environment, version, reason, actor string, rollbackOf *int,
+	ctx context.Context, agent, environment, reason, actor string,
+	resolveTarget func(ctx context.Context, tx pgx.Tx) (version string, rollbackOf *int, err error),
 ) (*AgentRelease, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("agentregistry: promote: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit has succeeded
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, agent+"/"+environment); err != nil {
+		return nil, fmt.Errorf("agentregistry: promote: acquire lock: %w", err)
+	}
+
+	version, rollbackOf, err := resolveTarget(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+
 	var exists bool
-	if err := s.pool.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM agent_versions WHERE agent = $1 AND version = $2)`,
 		agent, version,
 	).Scan(&exists); err != nil {
@@ -272,19 +306,41 @@ func (s *Store) promote(
 		return nil, fmt.Errorf("agentregistry: promote: %w: %s@%s", ErrVersionNotFound, agent, version)
 	}
 
-	now := time.Now().UTC()
-
 	// Current release version, if any — becomes from_version on the audit
 	// row below. No release yet is expected (first promotion for this
-	// pair), not an error.
+	// pair), not an error; any other failure is.
 	var fromVersion string
-	_ = s.pool.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT version FROM agent_releases WHERE agent = $1 AND environment = $2`,
 		agent, environment,
-	).Scan(&fromVersion)
+	).Scan(&fromVersion); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("agentregistry: promote: read current release: %w", err)
+	}
 
+	now := time.Now().UTC()
 	release := &AgentRelease{}
-	err := s.pool.QueryRow(ctx,
+
+	if fromVersion == version {
+		// Idempotent no-op: promoting to the version that's already current
+		// (e.g. a client retrying a promotion whose response it lost). An
+		// audit row here would record from_version == to_version, and
+		// Rollback resolves purely from the latest such row — so it would
+		// "successfully" roll back to the version already live, silently
+		// losing the real prior release as a target.
+		if err := tx.QueryRow(ctx,
+			`SELECT agent, environment, version, status, traffic_weight, updated_at, updated_by
+			 FROM agent_releases WHERE agent = $1 AND environment = $2`,
+			agent, environment,
+		).Scan(&release.Agent, &release.Environment, &release.Version, &release.Status, &release.TrafficWeight, &release.UpdatedAt, &release.UpdatedBy); err != nil {
+			return nil, fmt.Errorf("agentregistry: promote: read release for no-op: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("agentregistry: promote: commit: %w", err)
+		}
+		return release, nil
+	}
+
+	if err := tx.QueryRow(ctx,
 		`INSERT INTO agent_releases (agent, environment, version, status, traffic_weight, updated_at, updated_by)
 		 VALUES ($1, $2, $3, $4, 100, $5, $6)
 		 ON CONFLICT (agent, environment) DO UPDATE SET
@@ -292,22 +348,21 @@ func (s *Store) promote(
 		   updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by
 		 RETURNING agent, environment, version, status, traffic_weight, updated_at, updated_by`,
 		agent, environment, version, ReleaseStatusActive, now, actor,
-	).Scan(&release.Agent, &release.Environment, &release.Version, &release.Status, &release.TrafficWeight, &release.UpdatedAt, &release.UpdatedBy)
-	if err != nil {
+	).Scan(&release.Agent, &release.Environment, &release.Version, &release.Status, &release.TrafficWeight, &release.UpdatedAt, &release.UpdatedBy); err != nil {
 		return nil, fmt.Errorf("agentregistry: promote: upsert release: %w", err)
 	}
 
-	if _, err := s.pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO agent_promotions (agent, environment, from_version, to_version, reason, actor, rollback_of, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		agent, environment, fromVersion, version, reason, actor, rollbackOf, now,
 	); err != nil {
-		// The release itself already landed — a failed audit-row insert
-		// shouldn't roll that back (matches alerts.Store.Create's evidence
-		// insert, which logs-and-continues for the same reason).
-		slog.Error("agentregistry: record promotion failed", "agent", agent, "environment", environment, "error", err)
+		return nil, fmt.Errorf("agentregistry: promote: record promotion: %w", err)
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("agentregistry: promote: commit: %w", err)
+	}
 	return release, nil
 }
 
@@ -316,7 +371,7 @@ func (s *Store) promote(
 func (s *Store) ListPromotions(ctx context.Context, agent, environment string) ([]AgentPromotion, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, agent, environment, from_version, to_version, reason, actor, rollback_of, created_at
-		 FROM agent_promotions WHERE agent = $1 AND environment = $2 ORDER BY created_at DESC`,
+		 FROM agent_promotions WHERE agent = $1 AND environment = $2 ORDER BY id DESC`,
 		agent, environment,
 	)
 	if err != nil {

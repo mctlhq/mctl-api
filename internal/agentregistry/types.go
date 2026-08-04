@@ -78,13 +78,13 @@ type AgentRelease struct {
 // AgentPromotion is an audit-log row: every release change, whether a
 // forward promotion or a rollback, in order.
 type AgentPromotion struct {
-	ID          int       `json:"id"`
-	Agent       string    `json:"agent"`
-	Environment string    `json:"environment"`
-	FromVersion string    `json:"from_version,omitempty"`
-	ToVersion   string    `json:"to_version"`
-	Reason      string    `json:"reason,omitempty"`
-	Actor       string    `json:"actor,omitempty"`
+	ID          int    `json:"id"`
+	Agent       string `json:"agent"`
+	Environment string `json:"environment"`
+	FromVersion string `json:"from_version,omitempty"`
+	ToVersion   string `json:"to_version"`
+	Reason      string `json:"reason,omitempty"`
+	Actor       string `json:"actor,omitempty"`
 	// RollbackOf points at the agent_promotions row this promotion undid —
 	// nil for a forward promotion.
 	RollbackOf *int      `json:"rollback_of,omitempty"`
