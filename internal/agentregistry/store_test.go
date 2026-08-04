@@ -37,6 +37,7 @@ func newTestStore(t *testing.T) *Store {
 		t.Fatalf("NewStore: %v", err)
 	}
 	t.Cleanup(func() {
+		_, _ = s.pool.Exec(ctx, "DELETE FROM agent_executions")
 		_, _ = s.pool.Exec(ctx, "DELETE FROM agent_promotions")
 		_, _ = s.pool.Exec(ctx, "DELETE FROM agent_releases")
 		_, _ = s.pool.Exec(ctx, "DELETE FROM agent_versions")
@@ -45,7 +46,7 @@ func newTestStore(t *testing.T) *Store {
 	})
 
 	// Isolate from any rows left by other tests/runs.
-	for _, table := range []string{"agent_promotions", "agent_releases", "agent_versions", "agent_definitions"} {
+	for _, table := range []string{"agent_executions", "agent_promotions", "agent_releases", "agent_versions", "agent_definitions"} {
 		if _, err := s.pool.Exec(ctx, "DELETE FROM "+table); err != nil {
 			t.Fatalf("cleanup %s: %v", table, err)
 		}
@@ -332,5 +333,75 @@ func TestResolveRelease_NotFound(t *testing.T) {
 	_, err := s.ResolveRelease(ctx, "implementer", EnvironmentProduction)
 	if !errors.Is(err, ErrReleaseNotFound) {
 		t.Fatalf("expected ErrReleaseNotFound before any promotion, got %v", err)
+	}
+}
+
+func TestRecordExecution_UnregisteredAgentSucceedsWithEmptyVersion(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// No CreateDefinition call — this is the case that matters: a
+	// DevLoopWorkflow step ran before this agent was ever registered.
+	execution, err := s.RecordExecution(ctx, &AgentExecution{
+		TemporalWorkflowID: "dev-loop-mctlhq-mctl-telegram-1",
+		Agent:              "issue-investigator",
+		Environment:        EnvironmentProduction,
+		ArgoWorkflowName:   "mctl-agents-investigate-ab12cd34",
+		Phase:              "Succeeded",
+	})
+	if err != nil {
+		t.Fatalf("record execution: %v", err)
+	}
+	if execution.Version != "" || execution.ImageRef != "" {
+		t.Fatalf("expected empty version/image_ref for an unregistered agent, got version=%q image_ref=%q",
+			execution.Version, execution.ImageRef)
+	}
+	if execution.ID == 0 {
+		t.Fatal("expected a non-zero generated ID")
+	}
+}
+
+func TestListExecutions_FiltersByAgentAndOrdersNewestFirst(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	for i, phase := range []string{"Succeeded", "Failed", "Succeeded"} {
+		if _, err := s.RecordExecution(ctx, &AgentExecution{
+			TemporalWorkflowID: "dev-loop-a",
+			Agent:              "issue-investigator",
+			Environment:        EnvironmentProduction,
+			ArgoWorkflowName:   "wf-investigator",
+			Phase:              phase,
+		}); err != nil {
+			t.Fatalf("record execution %d: %v", i, err)
+		}
+	}
+	if _, err := s.RecordExecution(ctx, &AgentExecution{
+		TemporalWorkflowID: "dev-loop-b",
+		Agent:              "implementer",
+		Environment:        EnvironmentProduction,
+		ArgoWorkflowName:   "wf-implementer",
+		Phase:              "Succeeded",
+	}); err != nil {
+		t.Fatalf("record implementer execution: %v", err)
+	}
+
+	filtered, err := s.ListExecutions(ctx, "issue-investigator", 0)
+	if err != nil {
+		t.Fatalf("list executions filtered: %v", err)
+	}
+	if len(filtered) != 3 {
+		t.Fatalf("expected 3 issue-investigator executions, got %d", len(filtered))
+	}
+	if filtered[0].Phase != "Succeeded" || filtered[0].ArgoWorkflowName != "wf-investigator" {
+		t.Fatalf("expected newest-first ordering, got phase=%q", filtered[0].Phase)
+	}
+
+	all, err := s.ListExecutions(ctx, "", 0)
+	if err != nil {
+		t.Fatalf("list executions unfiltered: %v", err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("expected 4 executions across both agents, got %d", len(all))
 	}
 }

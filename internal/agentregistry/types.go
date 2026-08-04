@@ -90,3 +90,19 @@ type AgentPromotion struct {
 	RollbackOf *int      `json:"rollback_of,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 }
+
+// AgentExecution is one DevLoopWorkflow step's durable outcome (plan phase
+// 4) — written by orchestrator/temporal/activities/state.py after the
+// underlying Argo workflow reaches a terminal phase. Version/ImageRef are
+// empty when the step ran before this agent had any registered release.
+type AgentExecution struct {
+	ID                 int       `json:"id"`
+	TemporalWorkflowID string    `json:"temporal_workflow_id"`
+	Agent              string    `json:"agent"`
+	Environment        string    `json:"environment"`
+	Version            string    `json:"version,omitempty"`
+	ImageRef           string    `json:"image_ref,omitempty"`
+	ArgoWorkflowName   string    `json:"argo_workflow_name,omitempty"`
+	Phase              string    `json:"phase"`
+	CreatedAt          time.Time `json:"created_at"`
+}

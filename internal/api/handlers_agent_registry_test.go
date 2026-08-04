@@ -50,7 +50,7 @@ func newTestAgentRegistryStore(t *testing.T) *agentregistry.Store {
 		t.Fatalf("cleanup pool: %v", err)
 	}
 	cleanup := func() {
-		for _, table := range []string{"agent_promotions", "agent_releases", "agent_versions", "agent_definitions"} {
+		for _, table := range []string{"agent_executions", "agent_promotions", "agent_releases", "agent_versions", "agent_definitions"} {
 			_, _ = cleanupPool.Exec(ctx, "DELETE FROM "+table)
 		}
 	}
@@ -331,5 +331,57 @@ func TestResolveAgentRelease_NotFoundIs404(t *testing.T) {
 	h.ResolveAgentRelease(rec, req)
 	if rec.Code != 404 {
 		t.Fatalf("expected 404 before any promotion, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRecordAgentExecution_MissingFields(t *testing.T) {
+	store := newTestAgentRegistryStore(t)
+	h := &Handlers{opts: Options{AgentRegistry: store}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/executions", bytes.NewBufferString(`{"agent":"issue-investigator"}`))
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.RecordAgentExecution(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 for missing temporal_workflow_id/environment/phase, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRecordAgentExecution_SucceedsForUnregisteredAgent(t *testing.T) {
+	store := newTestAgentRegistryStore(t)
+	h := &Handlers{opts: Options{AgentRegistry: store}}
+
+	// No CreateAgentDefinition call — this is the case that matters: the
+	// Temporal worker records a step before the agent has ever been
+	// registered (before its first mctl_promote_agent).
+	body := `{"temporal_workflow_id":"dev-loop-mctlhq-mctl-telegram-1","agent":"issue-investigator","environment":"production","argo_workflow_name":"mctl-agents-investigate-ab12cd34","phase":"Succeeded"}`
+	req := httptest.NewRequest("POST", "/api/v1/agents/executions", bytes.NewBufferString(body))
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.RecordAgentExecution(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListAgentExecutions_FiltersByAgent(t *testing.T) {
+	store := newTestAgentRegistryStore(t)
+	h := &Handlers{opts: Options{AgentRegistry: store}}
+
+	for _, agent := range []string{"issue-investigator", "issue-investigator", "implementer"} {
+		body := `{"temporal_workflow_id":"dev-loop-x","agent":"` + agent + `","environment":"production","argo_workflow_name":"wf","phase":"Succeeded"}`
+		req := adminCtx(httptest.NewRequest("POST", "/api/v1/agents/executions", bytes.NewBufferString(body)))
+		h.RecordAgentExecution(httptest.NewRecorder(), req)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/executions?agent=issue-investigator", nil)
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.ListAgentExecutions(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"count":2`)) {
+		t.Fatalf("expected count=2 for issue-investigator only, got %s", rec.Body.String())
 	}
 }

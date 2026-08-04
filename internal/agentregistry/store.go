@@ -85,6 +85,32 @@ CREATE TABLE IF NOT EXISTS agent_promotions (
     created_at   TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS agent_promotions_agent_env ON agent_promotions (agent, environment, id DESC);
+
+-- Phase 4 (Temporal dev-loop worker): one row per agent step a
+-- DevLoopWorkflow ran, written by orchestrator/temporal/activities/state.py
+-- after the underlying Argo workflow reaches a terminal phase. Argo
+-- workflow objects expire after ttlStrategy.secondsAfterCompletion (as
+-- little as 24h), so this is the durable record of "which agent version
+-- produced this PR" the plan's phase-4 problem statement calls for.
+--
+-- Deliberately NOT FK-constrained to agent_definitions(name): a workflow
+-- records an execution even when resolve_agent_release found no release
+-- yet (version/image_ref empty, the CWFT's own baked-in default image
+-- ran) — the whole point is that this table is populated before an agent
+-- is ever registered here, not only after.
+CREATE TABLE IF NOT EXISTS agent_executions (
+    id                   SERIAL PRIMARY KEY,
+    temporal_workflow_id TEXT NOT NULL,
+    agent                TEXT NOT NULL,
+    environment          TEXT NOT NULL,
+    version              TEXT NOT NULL DEFAULT '',
+    image_ref            TEXT NOT NULL DEFAULT '',
+    argo_workflow_name   TEXT NOT NULL DEFAULT '',
+    phase                TEXT NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_executions_agent ON agent_executions (agent, id DESC);
+CREATE INDEX IF NOT EXISTS agent_executions_workflow ON agent_executions (temporal_workflow_id);
 `
 
 // Store is a PostgreSQL-backed agent registry.
@@ -389,4 +415,59 @@ func (s *Store) ListPromotions(ctx context.Context, agent, environment string) (
 		promotions = append(promotions, p)
 	}
 	return promotions, nil
+}
+
+// RecordExecution persists one DevLoopWorkflow step's outcome (phase 4).
+// version/image_ref are commonly empty — a step that ran before the agent
+// had any registered release still gets recorded, with the CWFT's own
+// default image having been what actually ran.
+func (s *Store) RecordExecution(ctx context.Context, e *AgentExecution) (*AgentExecution, error) {
+	now := time.Now().UTC()
+	result := &AgentExecution{}
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO agent_executions
+		   (temporal_workflow_id, agent, environment, version, image_ref, argo_workflow_name, phase, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 RETURNING id, temporal_workflow_id, agent, environment, version, image_ref, argo_workflow_name, phase, created_at`,
+		e.TemporalWorkflowID, e.Agent, e.Environment, e.Version, e.ImageRef, e.ArgoWorkflowName, e.Phase, now,
+	).Scan(&result.ID, &result.TemporalWorkflowID, &result.Agent, &result.Environment, &result.Version,
+		&result.ImageRef, &result.ArgoWorkflowName, &result.Phase, &result.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("agentregistry: record execution: %w", err)
+	}
+	return result, nil
+}
+
+// ListExecutions returns the most recent execution records, newest first.
+// agent filters to one agent when non-empty; limit is clamped to (0, 100],
+// defaulting to 20.
+func (s *Store) ListExecutions(ctx context.Context, agent string, limit int) ([]AgentExecution, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	const baseQuery = `SELECT id, temporal_workflow_id, agent, environment, version, image_ref, argo_workflow_name, phase, created_at
+		FROM agent_executions`
+
+	var rows pgx.Rows
+	var err error
+	if agent != "" {
+		rows, err = s.pool.Query(ctx, baseQuery+` WHERE agent = $1 ORDER BY id DESC LIMIT $2`, agent, limit)
+	} else {
+		rows, err = s.pool.Query(ctx, baseQuery+` ORDER BY id DESC LIMIT $1`, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("agentregistry: list executions: %w", err)
+	}
+	defer rows.Close()
+
+	var executions []AgentExecution
+	for rows.Next() {
+		var e AgentExecution
+		if err := rows.Scan(&e.ID, &e.TemporalWorkflowID, &e.Agent, &e.Environment, &e.Version,
+			&e.ImageRef, &e.ArgoWorkflowName, &e.Phase, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("agentregistry: scan execution: %w", err)
+		}
+		executions = append(executions, e)
+	}
+	return executions, rows.Err()
 }

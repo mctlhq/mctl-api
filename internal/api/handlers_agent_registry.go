@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/agentregistry"
@@ -37,6 +38,18 @@ type publishAgentVersionRequest struct {
 	ImageRepository string `json:"image_repository"`
 	ImageDigest     string `json:"image_digest"`
 	PromptHash      string `json:"prompt_hash"`
+}
+
+// recordExecutionRequest is what orchestrator/temporal/activities/state.py
+// POSTs after each DevLoopWorkflow step reaches a terminal Argo phase.
+type recordExecutionRequest struct {
+	TemporalWorkflowID string `json:"temporal_workflow_id"`
+	Agent              string `json:"agent"`
+	Environment        string `json:"environment"`
+	Version            string `json:"version,omitempty"`
+	ImageRef           string `json:"image_ref,omitempty"`
+	ArgoWorkflowName   string `json:"argo_workflow_name,omitempty"`
+	Phase              string `json:"phase"`
 }
 
 // agentReleaseRequest drives both promotion and rollback through one
@@ -246,4 +259,75 @@ func (h *Handlers) ResolveAgentRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, release)
+}
+
+// RecordAgentExecution handles POST /api/v1/agents/executions — the phase-4
+// Temporal worker's durable audit trail for one DevLoopWorkflow step. Not
+// gated on the agent already having a definition/release: a step that ran
+// before its first mctl_promote_agent still gets recorded (version/image_ref
+// empty), which is the expected case for an agent the registry doesn't yet
+// track.
+func (h *Handlers) RecordAgentExecution(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAgentRegistryAdmin(w, r); !ok {
+		return
+	}
+
+	var body recordExecutionRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.TemporalWorkflowID == "" || body.Agent == "" || body.Environment == "" || body.Phase == "" {
+		writeError(w, http.StatusBadRequest,
+			"missing required fields: temporal_workflow_id, agent, environment, phase")
+		return
+	}
+
+	execution, err := h.opts.AgentRegistry.RecordExecution(r.Context(), &agentregistry.AgentExecution{
+		TemporalWorkflowID: body.TemporalWorkflowID,
+		Agent:              body.Agent,
+		Environment:        body.Environment,
+		Version:            body.Version,
+		ImageRef:           body.ImageRef,
+		ArgoWorkflowName:   body.ArgoWorkflowName,
+		Phase:              body.Phase,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record agent execution: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, execution)
+}
+
+// ListAgentExecutions handles GET /api/v1/agents/executions?agent=&limit=.
+// Both query parameters are optional — omitting agent lists across every
+// agent; limit defaults to 20, clamped to 100 by the store.
+func (h *Handlers) ListAgentExecutions(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAgentRegistryAdmin(w, r); !ok {
+		return
+	}
+
+	agent := r.URL.Query().Get("agent")
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "limit must be an integer")
+			return
+		}
+		limit = parsed
+	}
+
+	executions, err := h.opts.AgentRegistry.ListExecutions(r.Context(), agent, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list agent executions: "+err.Error())
+		return
+	}
+	if executions == nil {
+		executions = []agentregistry.AgentExecution{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"items": executions,
+		"count": len(executions),
+	})
 }

@@ -397,6 +397,42 @@ components:
         updated_by:
           type: string
 
+    AgentExecution:
+      type: object
+      description: >-
+        One DevLoopWorkflow step's durable outcome (dev-workflow control
+        plane, plan phase 4). Written by the Temporal worker after the
+        underlying Argo workflow reaches a terminal phase, since Argo
+        workflow objects expire after ttlStrategy.secondsAfterCompletion.
+      properties:
+        id:
+          type: integer
+        temporal_workflow_id:
+          type: string
+          example: dev-loop-mctlhq-mctl-telegram-296
+        agent:
+          type: string
+          example: issue-investigator
+        environment:
+          type: string
+          enum: [production, shadow]
+        version:
+          type: string
+          description: Empty when this step ran before the agent had any registered release.
+          example: 1.0.0
+        image_ref:
+          type: string
+          example: ghcr.io/mctlhq/mctl-agents@sha256:abc123
+        argo_workflow_name:
+          type: string
+          example: mctl-agents-investigate-ab12cd34
+        phase:
+          type: string
+          enum: [Succeeded, Failed, Error]
+        created_at:
+          type: string
+          format: date-time
+
     Error:
       type: object
       properties:
@@ -1567,6 +1603,101 @@ paths:
                 $ref: '#/components/schemas/Error'
         '404':
           description: No release for this agent/environment pair
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/agents/executions:
+    post:
+      summary: Record one DevLoopWorkflow step's durable outcome
+      description: |
+        Written by orchestrator/temporal/activities/state.py after the
+        underlying Argo workflow reaches a terminal phase (phase 4). Not
+        gated on the agent already having a definition/release — a step
+        that ran before its first promotion still gets recorded, with
+        version/image_ref empty. **Admin access required.**
+      tags: [Agent Registry]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [temporal_workflow_id, agent, environment, phase]
+              properties:
+                temporal_workflow_id:
+                  type: string
+                agent:
+                  type: string
+                environment:
+                  type: string
+                  enum: [production, shadow]
+                version:
+                  type: string
+                image_ref:
+                  type: string
+                argo_workflow_name:
+                  type: string
+                phase:
+                  type: string
+                  enum: [Succeeded, Failed, Error]
+      responses:
+        '201':
+          description: Execution record created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentExecution'
+        '400':
+          description: Missing required field
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      summary: List execution records, newest first
+      description: |
+        Unlike the live Argo view behind mctl_list_recent_agent_runs, these
+        records persist independent of Argo's ttlStrategy. **Admin access
+        required.**
+      tags: [Agent Registry]
+      parameters:
+        - name: agent
+          in: query
+          required: false
+          schema:
+            type: string
+          example: issue-investigator
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: Execution records
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AgentExecution'
+                  count:
+                    type: integer
+        '403':
+          description: Admin access required
           content:
             application/json:
               schema:

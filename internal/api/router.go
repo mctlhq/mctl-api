@@ -229,6 +229,12 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/agents/{name}/versions", h.ListAgentVersions)
 			r.Post("/agents/{name}/releases", h.UpdateAgentRelease)
 			r.Get("/agents/{name}/resolve", h.ResolveAgentRelease)
+			// Static "executions" segment before the {name} wildcard routes
+			// above — chi's radix tree prefers the static match regardless
+			// of registration order, but keeping it adjacent to them here
+			// documents the collision was considered, not accidental.
+			r.Post("/agents/executions", h.RecordAgentExecution)
+			r.Get("/agents/executions", h.ListAgentExecutions)
 
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)
