@@ -102,6 +102,7 @@ type AgentExecution struct {
 	Environment        string    `json:"environment"`
 	Version            string    `json:"version,omitempty"`
 	ImageRef           string    `json:"image_ref,omitempty"`
+	TargetRepo         string    `json:"target_repo,omitempty"`
 	ArgoWorkflowName   string    `json:"argo_workflow_name,omitempty"`
 	Phase              string    `json:"phase"`
 	CreatedAt          time.Time `json:"created_at"`
