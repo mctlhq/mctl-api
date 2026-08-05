@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.29.0](https://github.com/mctlhq/mctl-api/compare/4.28.1...4.29.0) (2026-08-05)
+
+
+### Features
+
+* **mcp:** add mctl_create_agent and mctl_publish_agent_version tools ([84db5f1](https://github.com/mctlhq/mctl-api/commit/84db5f125648bb1576f9d11ec228e5415a03545a))
+* **mcp:** add mctl_create_agent and mctl_publish_agent_version tools ([89ada4a](https://github.com/mctlhq/mctl-api/commit/89ada4a7af620cd5b27e30cb9d6508014bcec7d9))
+
 ## [4.28.1](https://github.com/mctlhq/mctl-api/compare/4.28.0...4.28.1) (2026-08-05)
 
 
