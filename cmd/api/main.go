@@ -169,7 +169,13 @@ func main() {
 	// agentRegistryStore above: mctl_trigger_issue's use_temporal path
 	// simply stays unavailable (503) rather than failing startup, since
 	// today's direct-Argo-submission path is unaffected either way.
-	var temporalCli *temporalclient.Client
+	// Declared as the mctlapi.DevLoopClient interface, not the concrete
+	// *temporalclient.Client, and left as its zero value (nil interface) on
+	// every path that doesn't assign a real client below. Assigning a nil
+	// *temporalclient.Client pointer to an interface-typed field would
+	// produce a non-nil interface wrapping a nil pointer — requireTemporalAdmin's
+	// `h.opts.TemporalClient == nil` check would then wrongly see "configured".
+	var devLoopClient mctlapi.DevLoopClient
 	if temporalAddress := os.Getenv("TEMPORAL_ADDRESS"); temporalAddress != "" {
 		temporalNamespace := os.Getenv("TEMPORAL_NAMESPACE")
 		if temporalNamespace == "" {
@@ -179,7 +185,7 @@ func main() {
 		if tcErr != nil {
 			slog.Warn("temporal client init failed", "error", tcErr)
 		} else {
-			temporalCli = tc
+			devLoopClient = tc
 			defer tc.Close()
 		}
 	}
@@ -279,7 +285,7 @@ func main() {
 		OAuthServer:          oauthServer,
 		AlertStore:           alertStore,
 		AgentRegistry:        agentRegistryStore,
-		TemporalClient:       temporalCli,
+		TemporalClient:       devLoopClient,
 	})
 
 	srv := &http.Server{

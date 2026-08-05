@@ -16,10 +16,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/temporalclient"
 )
 
 // requireTemporalAdmin mirrors requireAgentRegistryAdmin: configured,
@@ -70,7 +72,16 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 
 	workflowID, runID, err := h.opts.TemporalClient.StartDevLoopWorkflow(r.Context(), body.IssueURL)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to start dev-loop workflow: "+err.Error())
+		// ErrInvalidIssueURL is caller input (a malformed issue_url) — real
+		// 400. Everything else is a Temporal RPC/connectivity failure the
+		// caller sent a perfectly valid request for and can't fix by
+		// retrying with different input, so it gets 502 instead of being
+		// indistinguishable from a bad request.
+		if errors.Is(err, temporalclient.ErrInvalidIssueURL) {
+			writeError(w, http.StatusBadRequest, "invalid issue_url: "+err.Error())
+			return
+		}
+		writeError(w, http.StatusBadGateway, "failed to start dev-loop workflow: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
@@ -89,8 +100,16 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 	}
 
 	workflowID := chi.URLParam(r, "workflow_id")
+	if workflowID == "" {
+		writeError(w, http.StatusBadRequest, "missing workflow_id path parameter")
+		return
+	}
 	if err := h.opts.TemporalClient.SignalApprove(r.Context(), workflowID); err != nil {
-		writeError(w, http.StatusBadRequest, "failed to signal approval: "+err.Error())
+		if temporalclient.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "workflow not found: "+workflowID)
+			return
+		}
+		writeError(w, http.StatusBadGateway, "failed to signal approval: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{

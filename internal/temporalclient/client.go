@@ -22,11 +22,20 @@ package temporalclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 )
+
+// ErrInvalidIssueURL marks a caller-input validation failure (malformed
+// issue_url), as opposed to a Temporal RPC/connectivity failure — callers
+// use errors.Is against this to pick an HTTP status: 400 for this, 502/503
+// for everything else StartDevLoopWorkflow can return.
+var ErrInvalidIssueURL = errors.New("temporalclient: not a well-formed mctlhq GitHub issue URL")
 
 const (
 	// TaskQueue must match orchestrator/temporal/worker.py's TASK_QUEUE.
@@ -81,23 +90,31 @@ type issueRef struct {
 func WorkflowIDForIssueURL(issueURL string) (string, error) {
 	m := issueURLPattern.FindStringSubmatch(issueURL)
 	if m == nil {
-		return "", fmt.Errorf("temporalclient: %q is not a well-formed mctlhq GitHub issue URL", issueURL)
+		return "", fmt.Errorf("%w: %q", ErrInvalidIssueURL, issueURL)
 	}
 	repo, issueNumber := m[1], m[2]
 	return fmt.Sprintf("dev-loop-mctlhq-%s-%s", repo, issueNumber), nil
 }
 
-// StartDevLoopWorkflow starts (or, on a matching workflow ID, no-ops
-// against the already-running/completed) a DevLoopWorkflow run for one
-// issue. Returns the workflow ID and run ID.
+// StartDevLoopWorkflow starts a DevLoopWorkflow run for one issue, or on a
+// matching workflow ID, truly no-ops: WorkflowIDReusePolicy REJECT_DUPLICATE
+// plus WorkflowIDConflictPolicy USE_EXISTING mean a closed prior run is not
+// restarted and a running prior run is not errored on — both return that
+// same run's ID/run ID instead. (The Temporal default policies would
+// otherwise start a fresh run once the prior one closes, or error while one
+// is still running — mirror any change here in orchestrator/temporal/cli.py's
+// _connect/start, which uses the SDK default today.) Returns the workflow ID
+// and run ID.
 func (c *Client) StartDevLoopWorkflow(ctx context.Context, issueURL string) (workflowID, runID string, err error) {
 	workflowID, err = WorkflowIDForIssueURL(issueURL)
 	if err != nil {
 		return "", "", err
 	}
 	run, err := c.temporal.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-		ID:        workflowID,
-		TaskQueue: TaskQueue,
+		ID:                       workflowID,
+		TaskQueue:                TaskQueue,
+		WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
+		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	}, DevLoopWorkflowType, issueRef{IssueURL: issueURL})
 	if err != nil {
 		return "", "", fmt.Errorf("temporalclient: start workflow: %w", err)
@@ -114,4 +131,13 @@ func (c *Client) SignalApprove(ctx context.Context, workflowID string) error {
 		return fmt.Errorf("temporalclient: signal approve on %s: %w", workflowID, err)
 	}
 	return nil
+}
+
+// IsNotFound reports whether err is (or wraps) Temporal's NotFound service
+// error — the case SignalApprove hits when workflowID doesn't correspond to
+// any workflow (never started, or already past retention). Callers use this
+// to map that specific case to HTTP 404 instead of a generic 502.
+func IsNotFound(err error) bool {
+	var notFound *serviceerror.NotFound
+	return errors.As(err, &notFound)
 }

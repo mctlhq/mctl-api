@@ -16,16 +16,38 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/temporalclient"
+	"go.temporal.io/api/serviceerror"
 )
 
-// TemporalClient is a real client.Client wrapper that requires a live
-// Temporal server to construct (see internal/temporalclient.New) — these
-// handler tests only exercise the paths that don't need one: unconfigured,
-// unauthenticated, missing-field. Behavior once a client exists is covered
-// in internal/temporalclient's own tests, against a mocked client.Client.
+// fakeDevLoopClient implements DevLoopClient without needing a live
+// Temporal server — internal/temporalclient's own tests cover the real
+// client against a mocked client.Client; these tests only need to verify
+// the HTTP-layer wiring (auth, status-code mapping, request validation).
+type fakeDevLoopClient struct {
+	startErr             error
+	workflowID, runID    string
+	approveErr           error
+	lastApprovedWorkflow string
+}
+
+func (f *fakeDevLoopClient) StartDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
+	if f.startErr != nil {
+		return "", "", f.startErr
+	}
+	return f.workflowID, f.runID, nil
+}
+
+func (f *fakeDevLoopClient) SignalApprove(ctx context.Context, workflowID string) error {
+	f.lastApprovedWorkflow = workflowID
+	return f.approveErr
+}
 
 func TestStartDevLoopWorkflow_NotConfigured(t *testing.T) {
 	h := &Handlers{opts: Options{}} // TemporalClient left nil
@@ -40,17 +62,77 @@ func TestStartDevLoopWorkflow_NotConfigured(t *testing.T) {
 }
 
 func TestStartDevLoopWorkflow_RequiresAuth(t *testing.T) {
-	h := &Handlers{opts: Options{}}
+	// A configured (fake) client, so these assertions actually exercise the
+	// auth branch in requireTemporalAdmin instead of short-circuiting on the
+	// nil-client 503 first — that's exactly what the DevLoopClient interface
+	// (see interfaces.go) exists to make testable.
+	h := &Handlers{opts: Options{TemporalClient: &fakeDevLoopClient{}}}
 
-	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{}`))
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
 	// No adminCtx — unauthenticated.
 	rec := httptest.NewRecorder()
 	h.StartDevLoopWorkflow(rec, req)
-	// TemporalClient is nil, so the 503 nil-check fires before the auth
-	// check — same ordering as requireAgentRegistryAdmin. Still verifies
-	// this handler never proceeds without both a client AND a user.
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated: expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+	req = req.WithContext(auth.WithUser(req.Context(), &auth.User{ID: "tester", Groups: []string{"some-tenant"}}))
+	rec = httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStartDevLoopWorkflow_MissingIssueURL(t *testing.T) {
+	h := &Handlers{opts: Options{TemporalClient: &fakeDevLoopClient{}}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{}`))
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a missing issue_url, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStartDevLoopWorkflow_InvalidIssueURLIs400(t *testing.T) {
+	fake := &fakeDevLoopClient{startErr: temporalclient.ErrInvalidIssueURL}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"not-a-url"}`))
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for ErrInvalidIssueURL, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStartDevLoopWorkflow_TemporalFailureIs502(t *testing.T) {
+	fake := &fakeDevLoopClient{startErr: serviceerror.NewUnavailable("temporal frontend unreachable")}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 for a Temporal RPC failure (not caller input), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStartDevLoopWorkflow_Success(t *testing.T) {
+	fake := &fakeDevLoopClient{workflowID: "dev-loop-mctlhq-mctl-telegram-1", runID: "run-1"}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -64,5 +146,76 @@ func TestApproveDevLoopWorkflow_NotConfigured(t *testing.T) {
 	h.ApproveDevLoopWorkflow(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 when the Temporal client isn't configured, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestApproveDevLoopWorkflow_RequiresAuth(t *testing.T) {
+	h := &Handlers{opts: Options{TemporalClient: &fakeDevLoopClient{}}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
+	// No adminCtx — unauthenticated.
+	rec := httptest.NewRecorder()
+	h.ApproveDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated: expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestApproveDevLoopWorkflow_MissingWorkflowID(t *testing.T) {
+	h := &Handlers{opts: Options{TemporalClient: &fakeDevLoopClient{}}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop//approve", nil)
+	req = withChiParam(req, "workflow_id", "")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.ApproveDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an empty workflow_id, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestApproveDevLoopWorkflow_UnknownWorkflowIs404(t *testing.T) {
+	fake := &fakeDevLoopClient{approveErr: serviceerror.NewNotFound("workflow not found")}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-999/approve", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-999")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.ApproveDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for an unknown workflow_id, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestApproveDevLoopWorkflow_TemporalFailureIs502(t *testing.T) {
+	fake := &fakeDevLoopClient{approveErr: serviceerror.NewUnavailable("temporal frontend unreachable")}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.ApproveDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 for a Temporal RPC failure, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestApproveDevLoopWorkflow_Success(t *testing.T) {
+	fake := &fakeDevLoopClient{}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.ApproveDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if fake.lastApprovedWorkflow != "dev-loop-mctlhq-mctl-telegram-1" {
+		t.Fatalf("expected SignalApprove to be called with the workflow_id, got %q", fake.lastApprovedWorkflow)
 	}
 }
