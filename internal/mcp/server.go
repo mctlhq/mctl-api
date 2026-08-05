@@ -146,6 +146,8 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListRecentAgentRuns())
 
 	// Agent registry (mctl-agents AgentManifest versions/releases).
+	srv.AddTool(s.toolCreateAgent())
+	srv.AddTool(s.toolPublishAgentVersion())
 	srv.AddTool(s.toolListAgentVersions())
 	srv.AddTool(s.toolResolveAgent())
 	srv.AddTool(s.toolPromoteAgent())
@@ -2528,6 +2530,85 @@ func (s *Server) toolListRecentAgentRuns() (mcplib.Tool, server.ToolHandlerFunc)
 // agentRegistryEnvironmentEnum mirrors agentregistry.EnvironmentProduction /
 // EnvironmentShadow — the only two environments the registry accepts in v1.
 var agentRegistryEnvironmentEnum = []string{"production", "shadow"}
+
+func (s *Server) toolCreateAgent() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_create_agent",
+		mcplib.WithTitleAnnotation("Create Agent Definition"),
+		mcplib.WithDescription(`Register a new agent definition in the agent registry (e.g. issue-investigator, implementer, shepherd). Required once per agent before any version can be published for it. Idempotent to call again with the same name is not guaranteed — check mctl_list_agent_versions first if unsure whether it already exists. Admin-only.`),
+		mcplib.WithString("name",
+			mcplib.Required(),
+			mcplib.Description("Agent name, e.g. issue-investigator, implementer, shepherd, incident-responder, service-agent, mentor"),
+		),
+		mcplib.WithString("description",
+			mcplib.Description("Human-readable description of what this agent does"),
+		),
+		mcplib.WithString("owner",
+			mcplib.Description("Owning repo or team, e.g. mctl-agents"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiPostJSON(ctx, "/api/v1/agents", map[string]interface{}{
+			"name":        stringArg(req, "name"),
+			"description": stringArg(req, "description"),
+			"owner":       stringArg(req, "owner"),
+		})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create agent definition: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolPublishAgentVersion() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_publish_agent_version",
+		mcplib.WithTitleAnnotation("Publish Agent Version"),
+		mcplib.WithDescription(`Publish an immutable version of an agent to the registry. The agent must already have a definition (mctl_create_agent). A published version can then be promoted to an environment with mctl_promote_agent. Admin-only.`),
+		mcplib.WithString("agent_name",
+			mcplib.Required(),
+			mcplib.Description("Agent name, e.g. issue-investigator, implementer, shepherd, incident-responder, service-agent, mentor"),
+		),
+		mcplib.WithString("version",
+			mcplib.Required(),
+			mcplib.Description("Semver-ish version string for this publish, e.g. 1.22.0"),
+		),
+		mcplib.WithString("manifest_json",
+			mcplib.Required(),
+			mcplib.Description("The agent's AgentManifest (agents/_manifests/<agent>/agent.yaml) contents, as JSON or the raw YAML text"),
+		),
+		mcplib.WithString("git_sha",
+			mcplib.Required(),
+			mcplib.Description("mctl-agents commit SHA this version was published from"),
+		),
+		mcplib.WithString("image_repository",
+			mcplib.Required(),
+			mcplib.Description("Container image reference this version runs under, e.g. ghcr.io/mctlhq/mctl-agents:1.22.0"),
+		),
+		mcplib.WithString("image_digest",
+			mcplib.Description("Image digest, if known (sha256:...)"),
+		),
+		mcplib.WithString("prompt_hash",
+			mcplib.Required(),
+			mcplib.Description("Hash identifying the prompt content this version was published with"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		agent := stringArg(req, "agent_name")
+		body, err := s.apiPostJSON(ctx, "/api/v1/agents/"+url.PathEscape(agent)+"/versions", map[string]interface{}{
+			"version":          stringArg(req, "version"),
+			"manifest_json":    stringArg(req, "manifest_json"),
+			"git_sha":          stringArg(req, "git_sha"),
+			"image_repository": stringArg(req, "image_repository"),
+			"image_digest":     stringArg(req, "image_digest"),
+			"prompt_hash":      stringArg(req, "prompt_hash"),
+		})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to publish agent version: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
 
 func (s *Server) toolListAgentVersions() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_agent_versions",
