@@ -293,21 +293,26 @@ func (h *Handlers) RecordAgentExecution(w http.ResponseWriter, r *http.Request) 
 		Phase:              body.Phase,
 	})
 	if err != nil {
+		if errors.Is(err, agentregistry.ErrInvalidEnvironment) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to record agent execution: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, execution)
 }
 
-// ListAgentExecutions handles GET /api/v1/agents/executions?agent=&limit=.
-// Both query parameters are optional — omitting agent lists across every
-// agent; limit defaults to 20, clamped to 100 by the store.
+// ListAgentExecutions handles GET /api/v1/agents/executions?agent=&workflow_id=&limit=.
+// All query parameters are optional and independent — omitting agent/workflow_id
+// lists across every agent/workflow; limit defaults to 20, clamped to 100 by the store.
 func (h *Handlers) ListAgentExecutions(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAgentRegistryAdmin(w, r); !ok {
 		return
 	}
 
 	agent := r.URL.Query().Get("agent")
+	workflowID := r.URL.Query().Get("workflow_id")
 	limit := 0
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -318,7 +323,7 @@ func (h *Handlers) ListAgentExecutions(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 
-	executions, err := h.opts.AgentRegistry.ListExecutions(r.Context(), agent, limit)
+	executions, err := h.opts.AgentRegistry.ListExecutions(r.Context(), agent, workflowID, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list agent executions: "+err.Error())
 		return
