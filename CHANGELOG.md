@@ -1,5 +1,26 @@
 # Changelog
 
+## [4.28.0](https://github.com/mctlhq/mctl-api/compare/4.27.0...4.28.0) (2026-08-05)
+
+
+### Features
+
+* **agent-registry:** add agent_executions durable audit trail (phase 4) ([85ab9ea](https://github.com/mctlhq/mctl-api/commit/85ab9ea6b90a8d3bbdc1ce2b7774c77d8bf03ab3))
+* **agent-registry:** add agent_executions durable audit trail (phase 4) ([b8c3fd0](https://github.com/mctlhq/mctl-api/commit/b8c3fd0440ff8651190c91f792fa3eeb82147d8c))
+* **agents:** agent registry — versions, releases, promote/rollback ([157476e](https://github.com/mctlhq/mctl-api/commit/157476ee80fa8241c40482c27eb1487362acd3ee))
+* **agents:** agent registry — versions, releases, promote/rollback ([933cc05](https://github.com/mctlhq/mctl-api/commit/933cc052e230e09f0044831c8470502fe0636ffd))
+* **mcp:** wire mctl_trigger_issue use_temporal flag (phase 4) ([162f8fc](https://github.com/mctlhq/mctl-api/commit/162f8fc5e71a75dd35146a33b1b19a85b6fbc191))
+* **mcp:** wire mctl_trigger_issue use_temporal flag (phase 4) ([5a19538](https://github.com/mctlhq/mctl-api/commit/5a1953805e016b1e02b7abfa5276044484f2eaaa))
+
+
+### Bug Fixes
+
+* **agents:** make promote/rollback transactional, add handler tests ([d5f2ef2](https://github.com/mctlhq/mctl-api/commit/d5f2ef2a24375410ff1c99243f3cb767deea2263))
+* idempotent execution records, environment validation (PR [#128](https://github.com/mctlhq/mctl-api/issues/128) review) ([19c8dbf](https://github.com/mctlhq/mctl-api/commit/19c8dbf056be0c0e409a5a88784bcc9f0e9109eb))
+* rate-limit dev-loop writes, real auth test coverage, proper error mapping (PR [#129](https://github.com/mctlhq/mctl-api/issues/129) review) ([6b41901](https://github.com/mctlhq/mctl-api/commit/6b41901a5707bd4a01a7d59946c8064130abdf6d))
+* suppress gosec G101 false positive on DevLoopWorkflowType ([3322e03](https://github.com/mctlhq/mctl-api/commit/3322e039b838a80ff773df00ac7e46a46b9845d1))
+* validate phase, cap oversized limit, add target_repo (PR [#128](https://github.com/mctlhq/mctl-api/issues/128) review) ([903da01](https://github.com/mctlhq/mctl-api/commit/903da013ac1b0bbdbc2e4b1b4044a00c526e2319))
+
 ## [4.27.0](https://github.com/mctlhq/mctl-api/compare/4.26.0...4.27.0) (2026-08-01)
 
 
