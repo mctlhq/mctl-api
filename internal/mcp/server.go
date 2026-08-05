@@ -2636,6 +2636,9 @@ func (s *Server) toolListAgentExecutions() (mcplib.Tool, server.ToolHandlerFunc)
 		mcplib.WithString("agent_name",
 			mcplib.Description("Filter to one agent, e.g. issue-investigator, implementer. Omit to list across every agent."),
 		),
+		mcplib.WithString("workflow_id",
+			mcplib.Description("Filter to one Temporal workflow (all its recorded steps), e.g. dev-loop-mctlhq-mctl-telegram-296. Combines with agent_name (AND) when both are set."),
+		),
 		mcplib.WithNumber("limit",
 			mcplib.Description("Max records to return, newest first. Defaults to 20, capped at 100."),
 		),
@@ -2646,6 +2649,9 @@ func (s *Server) toolListAgentExecutions() (mcplib.Tool, server.ToolHandlerFunc)
 		query := url.Values{}
 		if agent, ok := args["agent_name"].(string); ok && agent != "" {
 			query.Set("agent", agent)
+		}
+		if workflowID, ok := args["workflow_id"].(string); ok && workflowID != "" {
+			query.Set("workflow_id", workflowID)
 		}
 		if limit, ok := args["limit"].(float64); ok && limit > 0 {
 			query.Set("limit", fmt.Sprintf("%d", int(limit)))

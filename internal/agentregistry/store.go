@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -98,6 +99,16 @@ CREATE INDEX IF NOT EXISTS agent_promotions_agent_env ON agent_promotions (agent
 -- yet (version/image_ref empty, the CWFT's own baked-in default image
 -- ran) — the whole point is that this table is populated before an agent
 -- is ever registered here, not only after.
+--
+-- UNIQUE(temporal_workflow_id, agent, argo_workflow_name): Temporal
+-- activities have at-least-once execution semantics — record_execution can
+-- run twice for the same step if the ACK back to the worker is lost after
+-- the INSERT committed. Without this, a retry duplicates the row and
+-- inflates step counts / confuses "which agent version produced this PR"
+-- lookups. argo_workflow_name is always non-empty by the time this table
+-- is written (record_execution only ever runs after submit_and_wait
+-- returns a real WorkflowResult), so it's safe as part of the key even
+-- though the column itself allows ''.
 CREATE TABLE IF NOT EXISTS agent_executions (
     id                   SERIAL PRIMARY KEY,
     temporal_workflow_id TEXT NOT NULL,
@@ -107,7 +118,8 @@ CREATE TABLE IF NOT EXISTS agent_executions (
     image_ref            TEXT NOT NULL DEFAULT '',
     argo_workflow_name   TEXT NOT NULL DEFAULT '',
     phase                TEXT NOT NULL,
-    created_at           TIMESTAMPTZ NOT NULL
+    created_at           TIMESTAMPTZ NOT NULL,
+    UNIQUE (temporal_workflow_id, agent, argo_workflow_name)
 );
 CREATE INDEX IF NOT EXISTS agent_executions_agent ON agent_executions (agent, id DESC);
 CREATE INDEX IF NOT EXISTS agent_executions_workflow ON agent_executions (temporal_workflow_id);
@@ -422,12 +434,25 @@ func (s *Store) ListPromotions(ctx context.Context, agent, environment string) (
 // had any registered release still gets recorded, with the CWFT's own
 // default image having been what actually ran.
 func (s *Store) RecordExecution(ctx context.Context, e *AgentExecution) (*AgentExecution, error) {
+	if !validEnvironment(e.Environment) {
+		return nil, ErrInvalidEnvironment
+	}
 	now := time.Now().UTC()
 	result := &AgentExecution{}
+	// ON CONFLICT DO UPDATE (not DO NOTHING): a Temporal activity retry of
+	// the exact same step should win with whatever it just observed (e.g. a
+	// later poll settling on a different terminal phase is not possible in
+	// practice — submit_and_wait only returns once, on a terminal phase —
+	// but idempotent-update is the safer default vs. silently keeping stale
+	// data on the rare retry). created_at is deliberately excluded from the
+	// SET clause so a retry doesn't reset when this step was first recorded.
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO agent_executions
 		   (temporal_workflow_id, agent, environment, version, image_ref, argo_workflow_name, phase, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 ON CONFLICT (temporal_workflow_id, agent, argo_workflow_name) DO UPDATE SET
+		   environment = EXCLUDED.environment, version = EXCLUDED.version,
+		   image_ref = EXCLUDED.image_ref, phase = EXCLUDED.phase
 		 RETURNING id, temporal_workflow_id, agent, environment, version, image_ref, argo_workflow_name, phase, created_at`,
 		e.TemporalWorkflowID, e.Agent, e.Environment, e.Version, e.ImageRef, e.ArgoWorkflowName, e.Phase, now,
 	).Scan(&result.ID, &result.TemporalWorkflowID, &result.Agent, &result.Environment, &result.Version,
@@ -439,22 +464,33 @@ func (s *Store) RecordExecution(ctx context.Context, e *AgentExecution) (*AgentE
 }
 
 // ListExecutions returns the most recent execution records, newest first.
-// agent filters to one agent when non-empty; limit is clamped to (0, 100],
-// defaulting to 20.
-func (s *Store) ListExecutions(ctx context.Context, agent string, limit int) ([]AgentExecution, error) {
+// agent and workflowID each filter when non-empty (independently — passing
+// both ANDs them together); limit is clamped to (0, 100], defaulting to 20.
+func (s *Store) ListExecutions(ctx context.Context, agent, workflowID string, limit int) ([]AgentExecution, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
 	const baseQuery = `SELECT id, temporal_workflow_id, agent, environment, version, image_ref, argo_workflow_name, phase, created_at
 		FROM agent_executions`
 
-	var rows pgx.Rows
-	var err error
+	var conditions []string
+	var args []interface{}
 	if agent != "" {
-		rows, err = s.pool.Query(ctx, baseQuery+` WHERE agent = $1 ORDER BY id DESC LIMIT $2`, agent, limit)
-	} else {
-		rows, err = s.pool.Query(ctx, baseQuery+` ORDER BY id DESC LIMIT $1`, limit)
+		args = append(args, agent)
+		conditions = append(conditions, fmt.Sprintf("agent = $%d", len(args)))
 	}
+	if workflowID != "" {
+		args = append(args, workflowID)
+		conditions = append(conditions, fmt.Sprintf("temporal_workflow_id = $%d", len(args)))
+	}
+	query := baseQuery
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", len(args))
+
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("agentregistry: list executions: %w", err)
 	}

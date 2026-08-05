@@ -1675,6 +1675,13 @@ paths:
           schema:
             type: string
           example: issue-investigator
+        - name: workflow_id
+          in: query
+          required: false
+          description: Filter to one Temporal workflow (all its recorded steps). Combines with agent (AND) when both are set.
+          schema:
+            type: string
+          example: dev-loop-mctlhq-mctl-telegram-296
         - name: limit
           in: query
           required: false

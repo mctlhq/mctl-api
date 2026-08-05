@@ -368,10 +368,20 @@ func TestListAgentExecutions_FiltersByAgent(t *testing.T) {
 	store := newTestAgentRegistryStore(t)
 	h := &Handlers{opts: Options{AgentRegistry: store}}
 
-	for _, agent := range []string{"issue-investigator", "issue-investigator", "implementer"} {
-		body := `{"temporal_workflow_id":"dev-loop-x","agent":"` + agent + `","environment":"production","argo_workflow_name":"wf","phase":"Succeeded"}`
+	seeds := []struct{ agent, argoWorkflow string }{
+		{"issue-investigator", "wf-1"},
+		{"issue-investigator", "wf-2"},
+		{"implementer", "wf-3"},
+	}
+	for _, seed := range seeds {
+		body := `{"temporal_workflow_id":"dev-loop-x","agent":"` + seed.agent +
+			`","environment":"production","argo_workflow_name":"` + seed.argoWorkflow + `","phase":"Succeeded"}`
 		req := adminCtx(httptest.NewRequest("POST", "/api/v1/agents/executions", bytes.NewBufferString(body)))
-		h.RecordAgentExecution(httptest.NewRecorder(), req)
+		rec := httptest.NewRecorder()
+		h.RecordAgentExecution(rec, req)
+		if rec.Code != 201 {
+			t.Fatalf("seed %+v: expected 201, got %d: %s", seed, rec.Code, rec.Body.String())
+		}
 	}
 
 	req := httptest.NewRequest("GET", "/api/v1/agents/executions?agent=issue-investigator", nil)

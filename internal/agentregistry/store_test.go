@@ -361,47 +361,133 @@ func TestRecordExecution_UnregisteredAgentSucceedsWithEmptyVersion(t *testing.T)
 	}
 }
 
-func TestListExecutions_FiltersByAgentAndOrdersNewestFirst(t *testing.T) {
+func TestListExecutions_FiltersByAgentWorkflowAndOrdersNewestFirst(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	for i, phase := range []string{"Succeeded", "Failed", "Succeeded"} {
+	// Three distinct steps for workflow dev-loop-a: two issue-investigator
+	// attempts (distinct argo_workflow_name — a real retry-of-the-whole-step
+	// scenario, not a Temporal activity retry) and one implementer step.
+	for i, argoWorkflow := range []string{"wf-investigator-1", "wf-investigator-2"} {
 		if _, err := s.RecordExecution(ctx, &AgentExecution{
 			TemporalWorkflowID: "dev-loop-a",
 			Agent:              "issue-investigator",
 			Environment:        EnvironmentProduction,
-			ArgoWorkflowName:   "wf-investigator",
-			Phase:              phase,
+			ArgoWorkflowName:   argoWorkflow,
+			Phase:              "Succeeded",
 		}); err != nil {
 			t.Fatalf("record execution %d: %v", i, err)
 		}
 	}
 	if _, err := s.RecordExecution(ctx, &AgentExecution{
-		TemporalWorkflowID: "dev-loop-b",
+		TemporalWorkflowID: "dev-loop-a",
 		Agent:              "implementer",
 		Environment:        EnvironmentProduction,
-		ArgoWorkflowName:   "wf-implementer",
+		ArgoWorkflowName:   "wf-implementer-a",
 		Phase:              "Succeeded",
 	}); err != nil {
-		t.Fatalf("record implementer execution: %v", err)
+		t.Fatalf("record implementer execution for dev-loop-a: %v", err)
+	}
+	// A different workflow entirely.
+	if _, err := s.RecordExecution(ctx, &AgentExecution{
+		TemporalWorkflowID: "dev-loop-b",
+		Agent:              "issue-investigator",
+		Environment:        EnvironmentProduction,
+		ArgoWorkflowName:   "wf-investigator-b",
+		Phase:              "Succeeded",
+	}); err != nil {
+		t.Fatalf("record execution for dev-loop-b: %v", err)
 	}
 
-	filtered, err := s.ListExecutions(ctx, "issue-investigator", 0)
+	byAgent, err := s.ListExecutions(ctx, "issue-investigator", "", 0)
 	if err != nil {
-		t.Fatalf("list executions filtered: %v", err)
+		t.Fatalf("list executions by agent: %v", err)
 	}
-	if len(filtered) != 3 {
-		t.Fatalf("expected 3 issue-investigator executions, got %d", len(filtered))
+	if len(byAgent) != 3 {
+		t.Fatalf("expected 3 issue-investigator executions across both workflows, got %d", len(byAgent))
 	}
-	if filtered[0].Phase != "Succeeded" || filtered[0].ArgoWorkflowName != "wf-investigator" {
-		t.Fatalf("expected newest-first ordering, got phase=%q", filtered[0].Phase)
+	if byAgent[0].ArgoWorkflowName != "wf-investigator-b" {
+		t.Fatalf("expected newest-first ordering, got %q first", byAgent[0].ArgoWorkflowName)
 	}
 
-	all, err := s.ListExecutions(ctx, "", 0)
+	byWorkflow, err := s.ListExecutions(ctx, "", "dev-loop-a", 0)
+	if err != nil {
+		t.Fatalf("list executions by workflow: %v", err)
+	}
+	if len(byWorkflow) != 3 {
+		t.Fatalf("expected 3 steps for dev-loop-a (2 investigate attempts + implement), got %d", len(byWorkflow))
+	}
+
+	byBoth, err := s.ListExecutions(ctx, "implementer", "dev-loop-a", 0)
+	if err != nil {
+		t.Fatalf("list executions by agent+workflow: %v", err)
+	}
+	if len(byBoth) != 1 || byBoth[0].ArgoWorkflowName != "wf-implementer-a" {
+		t.Fatalf("expected exactly the implementer step of dev-loop-a, got %+v", byBoth)
+	}
+
+	all, err := s.ListExecutions(ctx, "", "", 0)
 	if err != nil {
 		t.Fatalf("list executions unfiltered: %v", err)
 	}
 	if len(all) != 4 {
-		t.Fatalf("expected 4 executions across both agents, got %d", len(all))
+		t.Fatalf("expected 4 executions total, got %d", len(all))
+	}
+}
+
+func TestRecordExecution_RetryOfSameStepUpdatesInPlace(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	first, err := s.RecordExecution(ctx, &AgentExecution{
+		TemporalWorkflowID: "dev-loop-a",
+		Agent:              "issue-investigator",
+		Environment:        EnvironmentProduction,
+		ArgoWorkflowName:   "wf-investigator-1",
+		Phase:              "Succeeded",
+	})
+	if err != nil {
+		t.Fatalf("first record: %v", err)
+	}
+
+	// Simulate a Temporal at-least-once retry of the SAME record_execution
+	// activity invocation: identical (temporal_workflow_id, agent,
+	// argo_workflow_name), same phase.
+	retried, err := s.RecordExecution(ctx, &AgentExecution{
+		TemporalWorkflowID: "dev-loop-a",
+		Agent:              "issue-investigator",
+		Environment:        EnvironmentProduction,
+		ArgoWorkflowName:   "wf-investigator-1",
+		Phase:              "Succeeded",
+	})
+	if err != nil {
+		t.Fatalf("retried record: %v", err)
+	}
+	if retried.ID != first.ID {
+		t.Fatalf("expected the retry to update the same row (id %d), got a new id %d", first.ID, retried.ID)
+	}
+
+	all, err := s.ListExecutions(ctx, "", "dev-loop-a", 0)
+	if err != nil {
+		t.Fatalf("list executions: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected the retry to NOT create a duplicate row, got %d rows", len(all))
+	}
+}
+
+func TestRecordExecution_InvalidEnvironmentRejected(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.RecordExecution(ctx, &AgentExecution{
+		TemporalWorkflowID: "dev-loop-a",
+		Agent:              "issue-investigator",
+		Environment:        "staging",
+		ArgoWorkflowName:   "wf-investigator-1",
+		Phase:              "Succeeded",
+	})
+	if !errors.Is(err, ErrInvalidEnvironment) {
+		t.Fatalf("expected ErrInvalidEnvironment, got %v", err)
 	}
 }
