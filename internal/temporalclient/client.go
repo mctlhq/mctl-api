@@ -44,7 +44,7 @@ const (
 	// orchestrator/temporal/workflows/dev_loop.py's DevLoopWorkflow under —
 	// the class name, since that module's @workflow.defn does not override
 	// it with an explicit name.
-	DevLoopWorkflowType = "DevLoopWorkflow"
+	DevLoopWorkflowType = "DevLoopWorkflow" //nolint:gosec // a Temporal workflow type name, not a credential
 	// ApproveSignalName matches DevLoopWorkflow's @workflow.signal method
 	// name (also un-overridden, so it's the method name "approve").
 	ApproveSignalName = "approve"
