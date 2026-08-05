@@ -150,6 +150,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolResolveAgent())
 	srv.AddTool(s.toolPromoteAgent())
 	srv.AddTool(s.toolRollbackAgent())
+	srv.AddTool(s.toolListAgentExecutions())
 
 	// Prompts (explicit skill invocation, e.g. /mctl:platform-skill in Claude Code).
 	srv.AddPrompt(s.promptPlatformSkill())
@@ -2607,6 +2608,43 @@ Takes effect for the next dev-loop run that resolves this agent/environment — 
 		})
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to promote agent: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolListAgentExecutions() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_agent_executions",
+		mcplib.WithTitleAnnotation("List Agent Executions"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`List durable execution records from DevLoopWorkflow runs (dev-workflow control plane, plan phase 4): which agent version actually ran, on which Argo workflow, with what result. Unlike mctl_list_recent_agent_runs (which reflects live/recently-completed Argo state and expires with the workflow object's TTL), these records persist independent of Argo. Admin-only.`),
+		mcplib.WithString("agent_name",
+			mcplib.Description("Filter to one agent, e.g. issue-investigator, implementer. Omit to list across every agent."),
+		),
+		mcplib.WithString("workflow_id",
+			mcplib.Description("Filter to one Temporal workflow (all its recorded steps), e.g. dev-loop-mctlhq-mctl-telegram-296. Combines with agent_name (AND) when both are set."),
+		),
+		mcplib.WithNumber("limit",
+			mcplib.Description("Max records to return, newest first. Defaults to 20, capped at 100."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		path := "/api/v1/agents/executions?"
+		query := url.Values{}
+		if agent, ok := args["agent_name"].(string); ok && agent != "" {
+			query.Set("agent", agent)
+		}
+		if workflowID, ok := args["workflow_id"].(string); ok && workflowID != "" {
+			query.Set("workflow_id", workflowID)
+		}
+		if limit, ok := args["limit"].(float64); ok && limit > 0 {
+			query.Set("limit", fmt.Sprintf("%d", int(limit)))
+		}
+		body, err := s.apiGet(ctx, path+query.Encode())
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list agent executions: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

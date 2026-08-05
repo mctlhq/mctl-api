@@ -229,6 +229,13 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/agents/{name}/versions", h.ListAgentVersions)
 			r.Post("/agents/{name}/releases", h.UpdateAgentRelease)
 			r.Get("/agents/{name}/resolve", h.ResolveAgentRelease)
+			// No collision with the /agents/{name}/... routes above today —
+			// those are all 3 segments, this is 2. If a 2-segment
+			// GET /agents/{name} is ever added, chi's radix tree still
+			// prefers this static "executions" match over it; keep them
+			// adjacent so that stays easy to notice.
+			r.Post("/agents/executions", h.RecordAgentExecution)
+			r.Get("/agents/executions", h.ListAgentExecutions)
 
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)

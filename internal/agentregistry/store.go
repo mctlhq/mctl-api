@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -35,6 +36,7 @@ var (
 	ErrReleaseNotFound    = errors.New("agentregistry: no release for agent/environment")
 	ErrNoRollbackTarget   = errors.New("agentregistry: no prior version to roll back to")
 	ErrInvalidEnvironment = errors.New("agentregistry: invalid environment")
+	ErrInvalidPhase       = errors.New("agentregistry: invalid phase")
 )
 
 const agentRegistrySchema = `
@@ -85,6 +87,49 @@ CREATE TABLE IF NOT EXISTS agent_promotions (
     created_at   TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS agent_promotions_agent_env ON agent_promotions (agent, environment, id DESC);
+
+-- Phase 4 (Temporal dev-loop worker): one row per agent step a
+-- DevLoopWorkflow ran, written by orchestrator/temporal/activities/state.py
+-- after the underlying Argo workflow reaches a terminal phase. Argo
+-- workflow objects expire after ttlStrategy.secondsAfterCompletion (as
+-- little as 24h), so this is the durable record of "which agent version
+-- produced this PR" the plan's phase-4 problem statement calls for.
+--
+-- Deliberately NOT FK-constrained to agent_definitions(name): a workflow
+-- records an execution even when resolve_agent_release found no release
+-- yet (version/image_ref empty, the CWFT's own baked-in default image
+-- ran) — the whole point is that this table is populated before an agent
+-- is ever registered here, not only after.
+--
+-- UNIQUE(temporal_workflow_id, agent, argo_workflow_name): Temporal
+-- activities have at-least-once execution semantics — record_execution can
+-- run twice for the same step if the ACK back to the worker is lost after
+-- the INSERT committed. Without this, a retry duplicates the row and
+-- inflates step counts / confuses "which agent version produced this PR"
+-- lookups. argo_workflow_name is always non-empty by the time this table
+-- is written (record_execution only ever runs after submit_and_wait
+-- returns a real WorkflowResult), so it's safe as part of the key even
+-- though the column itself allows ''.
+CREATE TABLE IF NOT EXISTS agent_executions (
+    id                   SERIAL PRIMARY KEY,
+    temporal_workflow_id TEXT NOT NULL,
+    agent                TEXT NOT NULL,
+    environment          TEXT NOT NULL,
+    version              TEXT NOT NULL DEFAULT '',
+    image_ref            TEXT NOT NULL DEFAULT '',
+    -- Sibling repo (e.g. "mctl-telegram") this step's target-repo inputs
+    -- came from. NOT the exact SHA yet (no CWFT exposes one as an output
+    -- today) -- see orchestrator/temporal/activities/state.py's
+    -- ExecutionRecord docstring on the mctl-agents side for the full
+    -- reproducibility-pinning rationale this is a partial step toward.
+    target_repo          TEXT NOT NULL DEFAULT '',
+    argo_workflow_name   TEXT NOT NULL DEFAULT '',
+    phase                TEXT NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL,
+    UNIQUE (temporal_workflow_id, agent, argo_workflow_name)
+);
+CREATE INDEX IF NOT EXISTS agent_executions_agent ON agent_executions (agent, id DESC);
+CREATE INDEX IF NOT EXISTS agent_executions_workflow ON agent_executions (temporal_workflow_id);
 `
 
 // Store is a PostgreSQL-backed agent registry.
@@ -108,6 +153,19 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 
 func validEnvironment(env string) bool {
 	return env == EnvironmentProduction || env == EnvironmentShadow
+}
+
+// validPhase matches activities/argo.py's TERMINAL_PHASES on the
+// mctl-agents side — record_execution only ever runs after submit_and_wait
+// returns a terminal WorkflowResult, so anything else reaching here is a
+// caller bug, not a legitimate in-progress state to tolerate.
+func validPhase(phase string) bool {
+	switch phase {
+	case "Succeeded", "Failed", "Error":
+		return true
+	default:
+		return false
+	}
 }
 
 // CreateDefinition creates or updates an agent's top-level record.
@@ -389,4 +447,91 @@ func (s *Store) ListPromotions(ctx context.Context, agent, environment string) (
 		promotions = append(promotions, p)
 	}
 	return promotions, nil
+}
+
+// RecordExecution persists one DevLoopWorkflow step's outcome (phase 4).
+// version/image_ref are commonly empty — a step that ran before the agent
+// had any registered release still gets recorded, with the CWFT's own
+// default image having been what actually ran.
+func (s *Store) RecordExecution(ctx context.Context, e *AgentExecution) (*AgentExecution, error) {
+	if !validEnvironment(e.Environment) {
+		return nil, ErrInvalidEnvironment
+	}
+	if !validPhase(e.Phase) {
+		return nil, ErrInvalidPhase
+	}
+	now := time.Now().UTC()
+	result := &AgentExecution{}
+	// ON CONFLICT DO UPDATE (not DO NOTHING): a Temporal activity retry of
+	// the exact same step should win with whatever it just observed (e.g. a
+	// later poll settling on a different terminal phase is not possible in
+	// practice — submit_and_wait only returns once, on a terminal phase —
+	// but idempotent-update is the safer default vs. silently keeping stale
+	// data on the rare retry). created_at is deliberately excluded from the
+	// SET clause so a retry doesn't reset when this step was first recorded.
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO agent_executions
+		   (temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 ON CONFLICT (temporal_workflow_id, agent, argo_workflow_name) DO UPDATE SET
+		   environment = EXCLUDED.environment, version = EXCLUDED.version,
+		   image_ref = EXCLUDED.image_ref, target_repo = EXCLUDED.target_repo, phase = EXCLUDED.phase
+		 RETURNING id, temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase, created_at`,
+		e.TemporalWorkflowID, e.Agent, e.Environment, e.Version, e.ImageRef, e.TargetRepo, e.ArgoWorkflowName, e.Phase, now,
+	).Scan(&result.ID, &result.TemporalWorkflowID, &result.Agent, &result.Environment, &result.Version,
+		&result.ImageRef, &result.TargetRepo, &result.ArgoWorkflowName, &result.Phase, &result.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("agentregistry: record execution: %w", err)
+	}
+	return result, nil
+}
+
+// ListExecutions returns the most recent execution records, newest first.
+// agent and workflowID each filter when non-empty (independently — passing
+// both ANDs them together); limit is capped at 100, defaulting to 20 for
+// any non-positive value (a caller passing e.g. 1000 still gets the
+// advertised maximum instead of silently falling back to the default).
+func (s *Store) ListExecutions(ctx context.Context, agent, workflowID string, limit int) ([]AgentExecution, error) {
+	switch {
+	case limit <= 0:
+		limit = 20
+	case limit > 100:
+		limit = 100
+	}
+	const baseQuery = `SELECT id, temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase, created_at
+		FROM agent_executions`
+
+	var conditions []string
+	var args []interface{}
+	if agent != "" {
+		args = append(args, agent)
+		conditions = append(conditions, fmt.Sprintf("agent = $%d", len(args)))
+	}
+	if workflowID != "" {
+		args = append(args, workflowID)
+		conditions = append(conditions, fmt.Sprintf("temporal_workflow_id = $%d", len(args)))
+	}
+	query := baseQuery
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", len(args))
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("agentregistry: list executions: %w", err)
+	}
+	defer rows.Close()
+
+	var executions []AgentExecution
+	for rows.Next() {
+		var e AgentExecution
+		if err := rows.Scan(&e.ID, &e.TemporalWorkflowID, &e.Agent, &e.Environment, &e.Version,
+			&e.ImageRef, &e.TargetRepo, &e.ArgoWorkflowName, &e.Phase, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("agentregistry: scan execution: %w", err)
+		}
+		executions = append(executions, e)
+	}
+	return executions, rows.Err()
 }
