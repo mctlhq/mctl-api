@@ -71,6 +71,13 @@ type Options struct {
 	// AgentRegistry persists mctl-agents AgentManifest versions/releases to
 	// PostgreSQL (optional — nil disables the agent registry endpoints).
 	AgentRegistry *agentregistry.Store
+	// TemporalClient starts/signals DevLoopWorkflow runs on the dev-workflow
+	// control plane's Temporal deployment (optional — nil disables
+	// mctl_trigger_issue's use_temporal path; callers fall back to the
+	// direct Argo submission they already use today). Typed as the
+	// DevLoopClient interface, not the concrete *temporalclient.Client, so
+	// tests can inject a fake — see interfaces.go.
+	TemporalClient DevLoopClient
 	// OpenClaw controls quota and rate limits on the skill/identity save handlers.
 	// Zero values fall back to defaults (see OpenClawQuotaDefaults).
 	OpenClaw OpenClawQuotaConfig
@@ -237,17 +244,27 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/agents/executions", h.RecordAgentExecution)
 			r.Get("/agents/executions", h.ListAgentExecutions)
 
+			// Write endpoints with real side effects (trigger Argo Workflows,
+			// start/signal a Temporal workflow) — tighter rate limit, shared
+			// so every route in this group inherits it instead of each one
+			// needing its own With(...) (a route added here without it would
+			// silently bypass the limit, same write-cost profile as
+			// /operations/{name}/execute below).
+			r.Group(func(r chi.Router) {
+				r.Use(httprate.Limit(20, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					if user := auth.UserFromContext(r.Context()); user != nil {
+						return "write:" + user.ID, nil
+					}
+					return httprate.KeyByRealIP(r)
+				})))
+				r.Post("/operations/{name}/execute", h.ExecuteOperation)
+				r.Post("/agents/dev-loop/start", h.StartDevLoopWorkflow)
+				r.Post("/agents/dev-loop/{workflow_id}/approve", h.ApproveDevLoopWorkflow)
+			})
+
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)
 			r.Get("/operations/{name}", h.GetOperation)
-
-			// Write endpoints (trigger Argo Workflows) — tighter rate limit.
-			r.With(httprate.Limit(20, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
-				if user := auth.UserFromContext(r.Context()); user != nil {
-					return "write:" + user.ID, nil
-				}
-				return httprate.KeyByRealIP(r)
-			}))).Post("/operations/{name}/execute", h.ExecuteOperation)
 		})
 
 		// MCP Streamable HTTP transport — single endpoint for Claude Desktop, Cursor, etc.

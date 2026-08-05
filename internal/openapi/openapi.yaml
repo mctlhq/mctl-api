@@ -1719,6 +1719,105 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/agents/dev-loop/start:
+    post:
+      summary: Start a durable DevLoopWorkflow for one GitHub issue
+      description: |
+        The use_temporal path for mctl_trigger_issue (plan phase 4): starts
+        DevLoopWorkflow on the shared Temporal deployment instead of
+        submitting the investigate ClusterWorkflowTemplate directly. The
+        workflow itself pins a registry-resolved agent version and submits
+        that same CWFT as its first activity, then durably waits for a
+        signalled approval before running the implementer. Requires the
+        server's Temporal client to be configured. **Admin access required.**
+      tags: [Agent Registry]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [issue_url]
+              properties:
+                issue_url:
+                  type: string
+                  example: https://github.com/mctlhq/mctl-telegram/issues/296
+      responses:
+        '202':
+          description: Workflow started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflow_id:
+                    type: string
+                    example: dev-loop-mctlhq-mctl-telegram-296
+                  run_id:
+                    type: string
+                  message:
+                    type: string
+        '400':
+          description: Missing issue_url, or issue_url is not a well-formed mctlhq GitHub issue URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Temporal client not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/agents/dev-loop/{workflow_id}/approve:
+    post:
+      summary: Signal a running DevLoopWorkflow's approval
+      description: |
+        The durable "human flips it to accepted" step, expressed as a
+        Temporal signal instead of a gitops .status.yaml edit. Unblocks the
+        workflow's wait_condition so it proceeds to the implement step.
+        **Admin access required.**
+      tags: [Agent Registry]
+      parameters:
+        - name: workflow_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: dev-loop-mctlhq-mctl-telegram-296
+      responses:
+        '200':
+          description: Signal delivered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflow_id:
+                    type: string
+                  signalled:
+                    type: string
+                    example: approve
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Temporal client not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
 tags:
   - name: Health
     description: Health and readiness probes

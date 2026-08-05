@@ -67,6 +67,16 @@ type WorkflowExecutor interface {
 	ListCronAgentRuns(ctx context.Context, namespace, cronNamePrefix string, since time.Time) ([]map[string]interface{}, error)
 }
 
+// DevLoopClient is the subset of temporalclient.Client used by the dev-loop
+// handlers. An interface rather than the concrete type so tests can inject a
+// fake and exercise the auth branch in requireTemporalAdmin — with the
+// concrete *temporalclient.Client, a real Temporal frontend (or a heavier
+// SDK mock) would otherwise be needed just to get past the nil-client check.
+type DevLoopClient interface {
+	StartDevLoopWorkflow(ctx context.Context, issueURL string) (workflowID, runID string, err error)
+	SignalApprove(ctx context.Context, workflowID string) error
+}
+
 // AuditLog is the interface for recording and querying audit events.
 // Implemented by audit.Logger (in-memory) and audit.PostgresLogger (persistent).
 type AuditLog = audit.Log
