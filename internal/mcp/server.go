@@ -2401,7 +2401,7 @@ Optional service/slug filters narrow the run scope. There is no force or unbound
 Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
 		mcplib.WithString("service",
 			mcplib.Description("Optional. Filter to one service. Leave empty to consider all services."),
-			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"),
+			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk"),
 		),
 		mcplib.WithString("slug",
 			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
@@ -2440,7 +2440,7 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_re
 			// shepherd PRs); the shepherd must drive those to merge too.
 			// Keep aligned with internal/operations/registry.go entry for
 			// `mctl-agents-shepherd` and with the implementer's enum.
-			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"),
+			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk"),
 		),
 		mcplib.WithString("slug",
 			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
