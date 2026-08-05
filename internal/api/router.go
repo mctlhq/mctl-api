@@ -29,6 +29,7 @@ import (
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/openapi"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/temporalclient"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -71,6 +72,11 @@ type Options struct {
 	// AgentRegistry persists mctl-agents AgentManifest versions/releases to
 	// PostgreSQL (optional — nil disables the agent registry endpoints).
 	AgentRegistry *agentregistry.Store
+	// TemporalClient starts/signals DevLoopWorkflow runs on the dev-workflow
+	// control plane's Temporal deployment (optional — nil disables
+	// mctl_trigger_issue's use_temporal path; callers fall back to the
+	// direct Argo submission they already use today).
+	TemporalClient *temporalclient.Client
 	// OpenClaw controls quota and rate limits on the skill/identity save handlers.
 	// Zero values fall back to defaults (see OpenClawQuotaDefaults).
 	OpenClaw OpenClawQuotaConfig
@@ -235,6 +241,8 @@ func NewRouter(opts Options) http.Handler {
 			// documents the collision was considered, not accidental.
 			r.Post("/agents/executions", h.RecordAgentExecution)
 			r.Get("/agents/executions", h.ListAgentExecutions)
+			r.Post("/agents/dev-loop/start", h.StartDevLoopWorkflow)
+			r.Post("/agents/dev-loop/{workflow_id}/approve", h.ApproveDevLoopWorkflow)
 
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)

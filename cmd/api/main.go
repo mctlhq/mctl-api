@@ -38,6 +38,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/loki"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/temporalclient"
 	"github.com/mctlhq/mctl-api/internal/vault"
 	"github.com/mctlhq/mctl-api/internal/vmetrics"
 )
@@ -163,6 +164,26 @@ func main() {
 		}
 	}
 
+	// Temporal client for DevLoopWorkflow (optional — enabled when
+	// TEMPORAL_ADDRESS is set). Same graceful-degradation pattern as
+	// agentRegistryStore above: mctl_trigger_issue's use_temporal path
+	// simply stays unavailable (503) rather than failing startup, since
+	// today's direct-Argo-submission path is unaffected either way.
+	var temporalCli *temporalclient.Client
+	if temporalAddress := os.Getenv("TEMPORAL_ADDRESS"); temporalAddress != "" {
+		temporalNamespace := os.Getenv("TEMPORAL_NAMESPACE")
+		if temporalNamespace == "" {
+			temporalNamespace = "mctl-agents"
+		}
+		tc, tcErr := temporalclient.New(temporalAddress, temporalNamespace)
+		if tcErr != nil {
+			slog.Warn("temporal client init failed", "error", tcErr)
+		} else {
+			temporalCli = tc
+			defer tc.Close()
+		}
+	}
+
 	executor := operations.NewExecutor()
 
 	// MCP server for SSE transport (embedded in this process).
@@ -258,6 +279,7 @@ func main() {
 		OAuthServer:          oauthServer,
 		AlertStore:           alertStore,
 		AgentRegistry:        agentRegistryStore,
+		TemporalClient:       temporalCli,
 	})
 
 	srv := &http.Server{

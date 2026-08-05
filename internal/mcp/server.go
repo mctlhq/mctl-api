@@ -2478,13 +2478,27 @@ Cost: ~$3 (subscription quota).
 Duration: ~5-10 minutes.
 Result: a new proposal directory committed to mctl-gitops main, plus a comment on the issue.
 
-Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
+Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.
+
+Set use_temporal=true to route through the dev-workflow control plane's Temporal deployment instead (plan phase 4) — a durable DevLoopWorkflow that pins a registry-resolved agent version, then waits for a signalled approval (POST /api/v1/agents/dev-loop/{workflow_id}/approve) before running the implementer, rather than requiring a separate mctl_trigger_implementer call against a gitops .status.yaml flip. Defaults to false (the direct-Argo path this tool has always used) until that slice is proven in production. Requires the server's Temporal client to be configured — returns 503 otherwise.`),
 		mcplib.WithString("issue_url",
 			mcplib.Required(),
 			mcplib.Description("Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123"),
 		),
+		mcplib.WithBoolean("use_temporal",
+			mcplib.Description("Start a durable DevLoopWorkflow on Temporal instead of submitting the investigate CWFT directly. Defaults to false."),
+		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if useTemporal, ok := req.GetArguments()["use_temporal"].(bool); ok && useTemporal {
+			body, err := s.apiPostJSON(ctx, "/api/v1/agents/dev-loop/start", map[string]interface{}{
+				"issue_url": stringArg(req, "issue_url"),
+			})
+			if err != nil {
+				return mcplib.NewToolResultError(fmt.Sprintf("Failed to start dev-loop workflow: %v", err)), nil
+			}
+			return mcplib.NewToolResultText(string(body)), nil
+		}
 		params := extractStringParams(req.GetArguments())
 		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-investigate/execute", params)
 		if err != nil {
