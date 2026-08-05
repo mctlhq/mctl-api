@@ -17,6 +17,7 @@ package agentregistry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 )
@@ -346,6 +347,7 @@ func TestRecordExecution_UnregisteredAgentSucceedsWithEmptyVersion(t *testing.T)
 		TemporalWorkflowID: "dev-loop-mctlhq-mctl-telegram-1",
 		Agent:              "issue-investigator",
 		Environment:        EnvironmentProduction,
+		TargetRepo:         "mctl-telegram",
 		ArgoWorkflowName:   "mctl-agents-investigate-ab12cd34",
 		Phase:              "Succeeded",
 	})
@@ -356,8 +358,57 @@ func TestRecordExecution_UnregisteredAgentSucceedsWithEmptyVersion(t *testing.T)
 		t.Fatalf("expected empty version/image_ref for an unregistered agent, got version=%q image_ref=%q",
 			execution.Version, execution.ImageRef)
 	}
+	if execution.TargetRepo != "mctl-telegram" {
+		t.Fatalf("expected target_repo to round-trip, got %q", execution.TargetRepo)
+	}
 	if execution.ID == 0 {
 		t.Fatal("expected a non-zero generated ID")
+	}
+}
+
+func TestRecordExecution_InvalidPhaseRejected(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.RecordExecution(ctx, &AgentExecution{
+		TemporalWorkflowID: "dev-loop-a",
+		Agent:              "issue-investigator",
+		Environment:        EnvironmentProduction,
+		ArgoWorkflowName:   "wf-investigator-1",
+		Phase:              "Running", // non-terminal — record_execution only ever runs after a terminal phase
+	})
+	if !errors.Is(err, ErrInvalidPhase) {
+		t.Fatalf("expected ErrInvalidPhase, got %v", err)
+	}
+}
+
+func TestListExecutions_OversizedLimitCapsAt100NotDefault20(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// 25 rows: strictly more than the 20-row default, strictly less than
+	// the 100 cap. A limit=1000 request must return all 25 — if the store
+	// wrongly reset an out-of-range limit to the 20-row default instead of
+	// capping at 100, this would come back truncated to 20.
+	const rowCount = 25
+	for i := 0; i < rowCount; i++ {
+		if _, err := s.RecordExecution(ctx, &AgentExecution{
+			TemporalWorkflowID: "dev-loop-a",
+			Agent:              "issue-investigator",
+			Environment:        EnvironmentProduction,
+			ArgoWorkflowName:   fmt.Sprintf("wf-%d", i),
+			Phase:              "Succeeded",
+		}); err != nil {
+			t.Fatalf("record execution %d: %v", i, err)
+		}
+	}
+
+	all, err := s.ListExecutions(ctx, "", "dev-loop-a", 1000)
+	if err != nil {
+		t.Fatalf("list executions: %v", err)
+	}
+	if len(all) != rowCount {
+		t.Fatalf("expected all %d rows with an oversized limit, got %d", rowCount, len(all))
 	}
 }
 

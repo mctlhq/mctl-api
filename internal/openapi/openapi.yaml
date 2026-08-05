@@ -423,6 +423,13 @@ components:
         image_ref:
           type: string
           example: ghcr.io/mctlhq/mctl-agents@sha256:abc123
+        target_repo:
+          type: string
+          description: >-
+            The sibling repo (e.g. mctl-telegram) this step's target-repo
+            inputs came from. Not the exact git SHA yet — no Argo
+            ClusterWorkflowTemplate exposes one as a workflow output today.
+          example: mctl-telegram
         argo_workflow_name:
           type: string
           example: mctl-agents-investigate-ab12cd34
@@ -1636,6 +1643,8 @@ paths:
                 version:
                   type: string
                 image_ref:
+                  type: string
+                target_repo:
                   type: string
                 argo_workflow_name:
                   type: string

@@ -48,6 +48,7 @@ type recordExecutionRequest struct {
 	Environment        string `json:"environment"`
 	Version            string `json:"version,omitempty"`
 	ImageRef           string `json:"image_ref,omitempty"`
+	TargetRepo         string `json:"target_repo,omitempty"`
 	ArgoWorkflowName   string `json:"argo_workflow_name,omitempty"`
 	Phase              string `json:"phase"`
 }
@@ -289,11 +290,12 @@ func (h *Handlers) RecordAgentExecution(w http.ResponseWriter, r *http.Request) 
 		Environment:        body.Environment,
 		Version:            body.Version,
 		ImageRef:           body.ImageRef,
+		TargetRepo:         body.TargetRepo,
 		ArgoWorkflowName:   body.ArgoWorkflowName,
 		Phase:              body.Phase,
 	})
 	if err != nil {
-		if errors.Is(err, agentregistry.ErrInvalidEnvironment) {
+		if errors.Is(err, agentregistry.ErrInvalidEnvironment) || errors.Is(err, agentregistry.ErrInvalidPhase) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}

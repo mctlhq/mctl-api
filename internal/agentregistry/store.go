@@ -36,6 +36,7 @@ var (
 	ErrReleaseNotFound    = errors.New("agentregistry: no release for agent/environment")
 	ErrNoRollbackTarget   = errors.New("agentregistry: no prior version to roll back to")
 	ErrInvalidEnvironment = errors.New("agentregistry: invalid environment")
+	ErrInvalidPhase       = errors.New("agentregistry: invalid phase")
 )
 
 const agentRegistrySchema = `
@@ -116,6 +117,12 @@ CREATE TABLE IF NOT EXISTS agent_executions (
     environment          TEXT NOT NULL,
     version              TEXT NOT NULL DEFAULT '',
     image_ref            TEXT NOT NULL DEFAULT '',
+    -- Sibling repo (e.g. "mctl-telegram") this step's target-repo inputs
+    -- came from. NOT the exact SHA yet (no CWFT exposes one as an output
+    -- today) -- see orchestrator/temporal/activities/state.py's
+    -- ExecutionRecord docstring on the mctl-agents side for the full
+    -- reproducibility-pinning rationale this is a partial step toward.
+    target_repo          TEXT NOT NULL DEFAULT '',
     argo_workflow_name   TEXT NOT NULL DEFAULT '',
     phase                TEXT NOT NULL,
     created_at           TIMESTAMPTZ NOT NULL,
@@ -146,6 +153,19 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 
 func validEnvironment(env string) bool {
 	return env == EnvironmentProduction || env == EnvironmentShadow
+}
+
+// validPhase matches activities/argo.py's TERMINAL_PHASES on the
+// mctl-agents side — record_execution only ever runs after submit_and_wait
+// returns a terminal WorkflowResult, so anything else reaching here is a
+// caller bug, not a legitimate in-progress state to tolerate.
+func validPhase(phase string) bool {
+	switch phase {
+	case "Succeeded", "Failed", "Error":
+		return true
+	default:
+		return false
+	}
 }
 
 // CreateDefinition creates or updates an agent's top-level record.
@@ -437,6 +457,9 @@ func (s *Store) RecordExecution(ctx context.Context, e *AgentExecution) (*AgentE
 	if !validEnvironment(e.Environment) {
 		return nil, ErrInvalidEnvironment
 	}
+	if !validPhase(e.Phase) {
+		return nil, ErrInvalidPhase
+	}
 	now := time.Now().UTC()
 	result := &AgentExecution{}
 	// ON CONFLICT DO UPDATE (not DO NOTHING): a Temporal activity retry of
@@ -448,15 +471,15 @@ func (s *Store) RecordExecution(ctx context.Context, e *AgentExecution) (*AgentE
 	// SET clause so a retry doesn't reset when this step was first recorded.
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO agent_executions
-		   (temporal_workflow_id, agent, environment, version, image_ref, argo_workflow_name, phase, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		   (temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (temporal_workflow_id, agent, argo_workflow_name) DO UPDATE SET
 		   environment = EXCLUDED.environment, version = EXCLUDED.version,
-		   image_ref = EXCLUDED.image_ref, phase = EXCLUDED.phase
-		 RETURNING id, temporal_workflow_id, agent, environment, version, image_ref, argo_workflow_name, phase, created_at`,
-		e.TemporalWorkflowID, e.Agent, e.Environment, e.Version, e.ImageRef, e.ArgoWorkflowName, e.Phase, now,
+		   image_ref = EXCLUDED.image_ref, target_repo = EXCLUDED.target_repo, phase = EXCLUDED.phase
+		 RETURNING id, temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase, created_at`,
+		e.TemporalWorkflowID, e.Agent, e.Environment, e.Version, e.ImageRef, e.TargetRepo, e.ArgoWorkflowName, e.Phase, now,
 	).Scan(&result.ID, &result.TemporalWorkflowID, &result.Agent, &result.Environment, &result.Version,
-		&result.ImageRef, &result.ArgoWorkflowName, &result.Phase, &result.CreatedAt)
+		&result.ImageRef, &result.TargetRepo, &result.ArgoWorkflowName, &result.Phase, &result.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("agentregistry: record execution: %w", err)
 	}
@@ -465,12 +488,17 @@ func (s *Store) RecordExecution(ctx context.Context, e *AgentExecution) (*AgentE
 
 // ListExecutions returns the most recent execution records, newest first.
 // agent and workflowID each filter when non-empty (independently — passing
-// both ANDs them together); limit is clamped to (0, 100], defaulting to 20.
+// both ANDs them together); limit is capped at 100, defaulting to 20 for
+// any non-positive value (a caller passing e.g. 1000 still gets the
+// advertised maximum instead of silently falling back to the default).
 func (s *Store) ListExecutions(ctx context.Context, agent, workflowID string, limit int) ([]AgentExecution, error) {
-	if limit <= 0 || limit > 100 {
+	switch {
+	case limit <= 0:
 		limit = 20
+	case limit > 100:
+		limit = 100
 	}
-	const baseQuery = `SELECT id, temporal_workflow_id, agent, environment, version, image_ref, argo_workflow_name, phase, created_at
+	const baseQuery = `SELECT id, temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase, created_at
 		FROM agent_executions`
 
 	var conditions []string
@@ -500,7 +528,7 @@ func (s *Store) ListExecutions(ctx context.Context, agent, workflowID string, li
 	for rows.Next() {
 		var e AgentExecution
 		if err := rows.Scan(&e.ID, &e.TemporalWorkflowID, &e.Agent, &e.Environment, &e.Version,
-			&e.ImageRef, &e.ArgoWorkflowName, &e.Phase, &e.CreatedAt); err != nil {
+			&e.ImageRef, &e.TargetRepo, &e.ArgoWorkflowName, &e.Phase, &e.CreatedAt); err != nil {
 			return nil, fmt.Errorf("agentregistry: scan execution: %w", err)
 		}
 		executions = append(executions, e)
