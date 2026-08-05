@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.28.1](https://github.com/mctlhq/mctl-api/compare/4.28.0...4.28.1) (2026-08-05)
+
+
+### Bug Fixes
+
+* add mctl-telegram/mctl-design/mctl-pairdesk to implement/shepherd service enum ([2aac485](https://github.com/mctlhq/mctl-api/commit/2aac485e9aa9e0ea90d5b5e0ea85cbb6b9e20053))
+* add mctl-telegram/mctl-design/mctl-pairdesk to implement/shepherd service enum ([abcd2eb](https://github.com/mctlhq/mctl-api/commit/abcd2eb9f56d6998119ec6ee2c0b6342b69ad359))
+
 ## [4.28.0](https://github.com/mctlhq/mctl-api/compare/4.27.0...4.28.0) (2026-08-05)
 
 
