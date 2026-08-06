@@ -28,7 +28,7 @@ func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 	// Update both places together when a service is added/removed there.
 	wantServices := []string{
 		"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal",
-		"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk",
+		"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy",
 	}
 
 	registry := NewRegistry()
