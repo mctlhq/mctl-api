@@ -175,6 +175,30 @@ func TestPublishAgentVersion_DuplicateIs409(t *testing.T) {
 	}
 }
 
+func TestPublishAgentVersion_TaggedImageRepositoryIsRejected(t *testing.T) {
+	store := newTestAgentRegistryStore(t)
+	h := &Handlers{opts: Options{AgentRegistry: store}}
+
+	createReq := httptest.NewRequest("POST", "/api/v1/agents", bytes.NewBufferString(`{"name":"shepherd"}`))
+	createReq = adminCtx(createReq)
+	h.CreateAgentDefinition(httptest.NewRecorder(), createReq)
+
+	cases := []string{
+		`{"version":"1.22.0","manifest_json":"{}","git_sha":"deadbeef","image_repository":"ghcr.io/mctlhq/mctl-agents:1.22.0","prompt_hash":"sha256:x"}`,
+		`{"version":"1.22.0","manifest_json":"{}","git_sha":"deadbeef","image_repository":"ghcr.io/mctlhq/mctl-agents@sha256:deadbeef","prompt_hash":"sha256:x"}`,
+	}
+	for _, body := range cases {
+		req := httptest.NewRequest("POST", "/api/v1/agents/shepherd/versions", bytes.NewBufferString(body))
+		req = withChiParam(req, "name", "shepherd")
+		req = adminCtx(req)
+		rec := httptest.NewRecorder()
+		h.PublishAgentVersion(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for a tagged/digested image_repository, got %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestUpdateAgentRelease_RollbackWithVersionIsRejected(t *testing.T) {
 	store := newTestAgentRegistryStore(t)
 	h := &Handlers{opts: Options{AgentRegistry: store}}

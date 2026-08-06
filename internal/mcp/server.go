@@ -2582,7 +2582,7 @@ func (s *Server) toolPublishAgentVersion() (mcplib.Tool, server.ToolHandlerFunc)
 		),
 		mcplib.WithString("image_repository",
 			mcplib.Required(),
-			mcplib.Description("Container image reference this version runs under, e.g. ghcr.io/mctlhq/mctl-agents:1.22.0"),
+			mcplib.Description("Bare image repository this version runs under — no tag, no digest. The `version` field supplies the tag when the CWFT resolves it. e.g. ghcr.io/mctlhq/mctl-agents"),
 		),
 		mcplib.WithString("image_digest",
 			mcplib.Description("Image digest, if known (sha256:...)"),

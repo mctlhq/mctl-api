@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/agentregistry"
@@ -38,6 +39,25 @@ type publishAgentVersionRequest struct {
 	ImageRepository string `json:"image_repository"`
 	ImageDigest     string `json:"image_digest"`
 	PromptHash      string `json:"prompt_hash"`
+}
+
+// isBareImageRepository reports whether repo carries no embedded tag or
+// digest. orchestrator/temporal/activities/registry.py appends ":{version}"
+// or "@{digest}" itself when it resolves a release into an Argo Workflow
+// parameter — an image_repository that already carries one silently doubles
+// into an invalid image reference (incident 2026-08-06: the mctl-academy
+// smoke test's investigate pod stuck on InvalidImageName with
+// "...:1.22.0:1.22.0", traced back to a published row whose image_repository
+// already included the tag).
+func isBareImageRepository(repo string) bool {
+	if strings.Contains(repo, "@") {
+		return false
+	}
+	last := repo
+	if i := strings.LastIndex(repo, "/"); i != -1 {
+		last = repo[i+1:]
+	}
+	return !strings.Contains(last, ":")
 }
 
 // recordExecutionRequest is what orchestrator/temporal/activities/state.py
@@ -126,6 +146,12 @@ func (h *Handlers) PublishAgentVersion(w http.ResponseWriter, r *http.Request) {
 	if body.Version == "" || body.ManifestJSON == "" || body.GitSHA == "" || body.ImageRepository == "" || body.PromptHash == "" {
 		writeError(w, http.StatusBadRequest,
 			"missing required fields: version, manifest_json, git_sha, image_repository, prompt_hash")
+		return
+	}
+	if !isBareImageRepository(body.ImageRepository) {
+		writeError(w, http.StatusBadRequest,
+			"image_repository must be a bare repository with no tag or digest — the version field "+
+				"supplies the tag when a release is resolved: got "+body.ImageRepository)
 		return
 	}
 
