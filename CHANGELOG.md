@@ -1,5 +1,15 @@
 # Changelog
 
+## [4.29.1](https://github.com/mctlhq/mctl-api/compare/4.29.0...4.29.1) (2026-08-06)
+
+
+### Bug Fixes
+
+* add mctl-academy to implement/shepherd service enum ([cfe4366](https://github.com/mctlhq/mctl-api/commit/cfe43662b9de11bb09b802faeb260a31ceb331da))
+* add mctl-academy to implement/shepherd service enum ([4a5186f](https://github.com/mctlhq/mctl-api/commit/4a5186f2e6c29391a8b8669b08fd0a9fc54b319d))
+* reject image_repository that already carries a tag or digest ([c41464a](https://github.com/mctlhq/mctl-api/commit/c41464a65ecb1d583914ad5fe1fbd1319db300ce))
+* reject image_repository that already carries a tag or digest ([5b4ce12](https://github.com/mctlhq/mctl-api/commit/5b4ce12889444e35ae3f1af5f081f654bce2bdcc))
+
 ## [4.29.0](https://github.com/mctlhq/mctl-api/compare/4.28.1...4.29.0) (2026-08-05)
 
 
