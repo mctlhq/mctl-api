@@ -165,10 +165,43 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		RiskLevel:    string(op.RiskLevel),
 	})
 
-	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"message":   fmt.Sprintf("Operation submitted. Track progress: GET /api/v1/workflows/%s", result.WorkflowName),
 		"operation": opName,
 		"workflow":  result,
-		"message":   fmt.Sprintf("Operation submitted. Track progress: GET /api/v1/workflows/%s", result.WorkflowName),
+	})
+}
+
+// ArgoCompletionPayload represents the notification payload sent by Argo when a workflow completes.
+type ArgoCompletionPayload struct {
+	WorkflowName string `json:"workflow_name"`
+	Phase        string `json:"phase"`
+	FinishedAt   string `json:"finished_at,omitempty"`
+}
+
+// HandleArgoWorkflowComplete receives completion events from Argo Workflows.
+func (h *Handlers) HandleArgoWorkflowComplete(w http.ResponseWriter, r *http.Request) {
+	var payload ArgoCompletionPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json payload: "+err.Error())
+		return
+	}
+
+	if payload.WorkflowName == "" {
+		writeError(w, http.StatusBadRequest, "workflow_name is required")
+		return
+	}
+
+	slog.Info("received argo workflow completion event",
+		"workflow_name", payload.WorkflowName,
+		"phase", payload.Phase,
+		"finished_at", payload.FinishedAt,
+	)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "acknowledged",
+		"workflow_name": payload.WorkflowName,
+		"phase":         payload.Phase,
 	})
 }
 
