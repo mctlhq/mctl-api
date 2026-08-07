@@ -203,10 +203,28 @@ func TestPromptsListExposesPlatformSkill(t *testing.T) {
 		t.Fatalf("failed to unmarshal prompts/list response: %v", err)
 	}
 
-	if len(result.Result.Prompts) != 1 {
-		t.Fatalf("expected 1 prompt, got %d", len(result.Result.Prompts))
+	if len(result.Result.Prompts) != 4 {
+		t.Fatalf("expected 4 prompts, got %d", len(result.Result.Prompts))
 	}
-	prompt := result.Result.Prompts[0]
+	var prompt struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Arguments   []struct {
+			Name     string `json:"name"`
+			Required bool   `json:"required"`
+		} `json:"arguments"`
+	}
+	found := false
+	for _, p := range result.Result.Prompts {
+		if p.Name == "platform-skill" {
+			prompt = p
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected platform-skill prompt in prompts list")
+	}
 	if prompt.Name != "platform-skill" {
 		t.Errorf("prompt name: got %q, want %q", prompt.Name, "platform-skill")
 	}
