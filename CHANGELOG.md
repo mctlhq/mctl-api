@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.31.0](https://github.com/mctlhq/mctl-api/compare/4.30.0...4.31.0) (2026-08-07)
+
+
+### Features
+
+* **docs:** add context7.json configuration for AI search indexer ([a61ccd1](https://github.com/mctlhq/mctl-api/commit/a61ccd113e2d6bf27cba012a0b37bcc3323c65ec))
+* **docs:** add context7.json configuration for AI search indexer ([7a36366](https://github.com/mctlhq/mctl-api/commit/7a36366e0c9bcc9c36385eac3c8def406ce0d3e7))
+
 ## [4.30.0](https://github.com/mctlhq/mctl-api/compare/4.29.1...4.30.0) (2026-08-07)
 
 
