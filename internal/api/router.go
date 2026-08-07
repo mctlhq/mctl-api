@@ -151,6 +151,9 @@ func NewRouter(opts Options) http.Handler {
 	r.Post("/oauth/revoke", h.handleOAuthRevoke)
 	r.Post("/oauth/register", h.handleOAuthRegister)
 
+	// Webhook callbacks (unauthenticated/token-validated)
+	r.Post("/api/v1/workflows/events/argo-complete", h.HandleArgoWorkflowComplete)
+
 	// Authenticated API routes.
 	r.Group(func(r chi.Router) {
 		if opts.AuthMiddleware != nil {
