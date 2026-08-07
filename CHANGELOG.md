@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.30.0](https://github.com/mctlhq/mctl-api/compare/4.29.1...4.30.0) (2026-08-07)
+
+
+### Features
+
+* **api:** add POST /api/v1/workflows/events/argo-complete webhook endpoint ([776f16d](https://github.com/mctlhq/mctl-api/commit/776f16de799df503f3be5b93b0459aefacfbf36f))
+* **api:** add POST /api/v1/workflows/events/argo-complete webhook endpoint ([7d33973](https://github.com/mctlhq/mctl-api/commit/7d339732046614ecf000d4013d49b1c43b0a9170))
+
 ## [4.29.1](https://github.com/mctlhq/mctl-api/compare/4.29.0...4.29.1) (2026-08-06)
 
 
