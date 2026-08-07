@@ -1,0 +1,7 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "mctl-api Control Plane",
+  "description": "Go Control Plane API & MCP server for mctl platform infrastructure management, dual REST/MCP protocols, RBAC, and workflows.",
+  "folders": ["."],
+  "excludeFolders": ["vendor", ".git"]
+}
