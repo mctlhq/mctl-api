@@ -35,6 +35,7 @@ type Server struct {
 	apiURL     string
 	apiToken   string
 	httpClient *http.Client
+	mcpServer  *server.MCPServer
 }
 
 // NewServer creates a new MCP server.
@@ -69,8 +70,14 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		"mctl",
 		"0.1.0",
 		server.WithToolCapabilities(true),
-		server.WithPromptCapabilities(false),
+		server.WithPromptCapabilities(true),
+		server.WithResourceCapabilities(true, false),
 	)
+	s.mcpServer = srv
+
+	// Register Prompts & Resources.
+	s.registerPrompts()
+	s.registerResources()
 
 	// Auth tools.
 	srv.AddTool(s.toolWhoami())
