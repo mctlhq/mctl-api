@@ -1,0 +1,17 @@
+name: Agy PR review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  agy-review:
+    uses: mctlhq/.github/.github/workflows/agy-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      conventions: |
+        Focus on: Go concurrency safety, goroutine leaks, context propagation in I/O operations, error wrapping (`fmt.Errorf`), HTTP response status and helper hygiene (`writeError`/`writeJSON`), triple-token authentication/authorization edge cases in `internal/auth/`, MCP tool definition and schema parity in `internal/mcp/server.go`, Helm chart values/template validity, and missing test coverage for changed behavior.
