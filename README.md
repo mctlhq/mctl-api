@@ -324,12 +324,13 @@ Linting uses golangci-lint with errcheck, govet, staticcheck, gosec, bodyclose, 
 
 ## CI/CD
 
-GitHub Actions workflow (`.github/workflows/build.yml`):
+GitHub Actions:
 
-- **Triggers:** Semver tags (`*.*.*`) and pull requests to `main`
-- **Steps:** Checkout → Go 1.25 setup → golangci-lint → Build + test → Docker build → Push to GHCR → Trivy vulnerability scan → GitOps tag update → Telegram notification
+- **validate.yml** (pull requests): golangci-lint, `go build`, `go test`
+- **security.yml**: govulncheck and a Trivy filesystem scan (CRITICAL, fail closed)
+- **release-please.yml**: tagged releases, GHCR image, gitops bump
 - **Registry:** `ghcr.io/mctlhq/mctl-api`
-- **Dependabot:** Enabled for `go.mod` dependency updates
+- **Dependabot:** weekly `go.mod`, GitHub Actions, and Dockerfile updates
 
 ## Deployment
 
