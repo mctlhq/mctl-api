@@ -132,16 +132,22 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	codeChallenge := q.Get("code_challenge")
 	codeChallengeMethod := q.Get("code_challenge_method")
 
+	// redirect_uri is validated before anything else that could report an error
+	// through it. oauthError answers with a 302 to whatever URI it is handed, so
+	// running the response_type or client_id checks first turned this endpoint
+	// into an open redirect off api.mctl.ai for any unvalidated target. RFC 6749
+	// §4.1.2.1 says as much: when the redirect URI is missing or invalid, report
+	// to the user agent directly and do not redirect.
+	if redirectURI == "" || !o.IsRedirectURIAllowed(redirectURI) {
+		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+		return
+	}
 	if responseType != "code" {
 		oauthError(w, redirectURI, state, "unsupported_response_type", "only response_type=code is supported")
 		return
 	}
 	if clientID == "" {
 		oauthError(w, redirectURI, state, "invalid_request", "client_id is required")
-		return
-	}
-	if redirectURI == "" || !o.IsRedirectURIAllowed(redirectURI) {
-		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
 		return
 	}
 	if state == "" {
