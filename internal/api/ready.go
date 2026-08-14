@@ -18,7 +18,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -57,9 +59,6 @@ func HTTPReadyWithClient(url string, client *http.Client) ReadyCheck {
 }
 
 func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
-	defer cancel()
-
 	type named struct {
 		name  string
 		check ReadyCheck
@@ -71,19 +70,39 @@ func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		{"vault", h.opts.VaultReady},
 	}
 
+	type result struct {
+		status string
+		fail   bool
+	}
+	results := make([]result, len(probes))
+	var wg sync.WaitGroup
+	for i, p := range probes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if p.check == nil {
+				results[i] = result{status: "not_configured"}
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
+			defer cancel()
+			if err := p.check(ctx); err != nil {
+				slog.Warn("readyz probe failed", "check", p.name, "error", err)
+				results[i] = result{status: "unavailable", fail: true}
+				return
+			}
+			results[i] = result{status: "ok"}
+		}()
+	}
+	wg.Wait()
+
 	checks := make(map[string]string, len(probes))
 	ready := true
-	for _, p := range probes {
-		if p.check == nil {
-			checks[p.name] = "not_configured"
-			continue
-		}
-		if err := p.check(ctx); err != nil {
-			checks[p.name] = err.Error()
+	for i, p := range probes {
+		checks[p.name] = results[i].status
+		if results[i].fail {
 			ready = false
-			continue
 		}
-		checks[p.name] = "ok"
 	}
 
 	status := "ready"

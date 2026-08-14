@@ -76,11 +76,38 @@ func TestReadyz_FailedProbeReturns503(t *testing.T) {
 	if body.Status != "not ready" {
 		t.Errorf("status = %q, want not ready", body.Status)
 	}
-	if body.Checks["gitops"] != "never synced" {
-		t.Errorf("gitops = %q, want never synced", body.Checks["gitops"])
+	if body.Checks["gitops"] != "unavailable" {
+		t.Errorf("gitops = %q, want unavailable", body.Checks["gitops"])
 	}
 	if body.Checks["postgres"] != "ok" {
 		t.Errorf("postgres = %q, want ok", body.Checks["postgres"])
+	}
+}
+
+func TestReadyz_SlowProbeDoesNotStarveOthers(t *testing.T) {
+	h := &Handlers{opts: Options{
+		GitopsReady: func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		PostgresReady: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return nil
+		},
+	}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	body := decodeReady(t, rec)
+	if body.Checks["gitops"] != "unavailable" {
+		t.Errorf("gitops = %q, want unavailable", body.Checks["gitops"])
+	}
+	if body.Checks["postgres"] != "ok" {
+		t.Errorf("postgres = %q, want ok (own timeout; must not inherit a sibling's deadline)", body.Checks["postgres"])
 	}
 }
 
