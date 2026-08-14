@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -264,28 +265,59 @@ func main() {
 		SaveRatePerHour:           parseIntEnv("OPENCLAW_SKILLS_SAVE_RATE_PER_HOUR", 0),
 	}
 
+	gitopsReady := func(ctx context.Context) error {
+		if gitReader.LastSync().IsZero() {
+			return fmt.Errorf("never synced")
+		}
+		if _, err := gitReader.ListTenants(); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	var postgresReady mctlapi.ReadyCheck
+	if pinger, ok := auditLog.(interface{ Ping(context.Context) error }); ok {
+		postgresReady = pinger.Ping
+	}
+
+	var dexReady mctlapi.ReadyCheck
+	if dexVerifier != nil {
+		dexReady = mctlapi.HTTPReady(strings.TrimRight(cfg.DexIssuerURL, "/") + "/.well-known/openid-configuration")
+	}
+
+	var vaultReady mctlapi.ReadyCheck
+	if checker, ok := vaultReader.(interface{ Health(context.Context) error }); ok {
+		vaultReady = checker.Health
+	}
+
 	router := mctlapi.NewRouter(mctlapi.Options{
-		Registry:             registry,
-		GitReader:            gitReader,
-		ArgoCD:               argoClient,
-		AuditLog:             auditLog,
-		Executor:             executor,
-		AuthMiddleware:       authMiddleware,
-		MCPServer:            mcpSrv,
-		QuotaReader:          quotaReader,
-		LogQuerier:           logQuerier,
-		WorkflowLogArchive:   workflowLogArchive,
-		VaultReader:          vaultReader,
-		MetricsQuerier:       metricsQuerier,
-		OpenClaw:             openClawQuota,
-		BackstageURL:         cfg.BackstageURL,
-		BackstageToken:       cfg.BackstageToken,
-		BackstageInternalURL: cfg.BackstageInternalURL,
-		AllowedOrigins:       cfg.AllowedOrigins,
-		OAuthServer:          oauthServer,
-		AlertStore:           alertStore,
-		AgentRegistry:        agentRegistryStore,
-		TemporalClient:       devLoopClient,
+		Registry:               registry,
+		GitReader:              gitReader,
+		ArgoCD:                 argoClient,
+		AuditLog:               auditLog,
+		Executor:               executor,
+		AuthMiddleware:         authMiddleware,
+		MCPServer:              mcpSrv,
+		QuotaReader:            quotaReader,
+		LogQuerier:             logQuerier,
+		WorkflowLogArchive:     workflowLogArchive,
+		VaultReader:            vaultReader,
+		MetricsQuerier:         metricsQuerier,
+		OpenClaw:               openClawQuota,
+		BackstageURL:           cfg.BackstageURL,
+		BackstageToken:         cfg.BackstageToken,
+		BackstageInternalURL:   cfg.BackstageInternalURL,
+		AllowedOrigins:         cfg.AllowedOrigins,
+		OAuthServer:            oauthServer,
+		AlertStore:             alertStore,
+		AgentRegistry:          agentRegistryStore,
+		TemporalClient:         devLoopClient,
+		GitopsReady:            gitopsReady,
+		PostgresReady:          postgresReady,
+		DexReady:               dexReady,
+		VaultReady:             vaultReady,
+		ArgoWebhookSecret:      cfg.ArgoWebhookSecret,
+		OAuthRegistrationToken: cfg.OAuthRegistrationToken,
 	})
 
 	srv := &http.Server{
@@ -361,6 +393,8 @@ type config struct {
 	VaultKubernetesRole      string
 	VaultKubernetesAuthPath  string
 	VictoriaMetricsURL       string
+	ArgoWebhookSecret        string
+	OAuthRegistrationToken   string
 }
 
 func loadConfig() config {
@@ -440,6 +474,8 @@ func loadConfig() config {
 		VaultKubernetesRole:      os.Getenv("VAULT_KUBERNETES_ROLE"),
 		VaultKubernetesAuthPath:  os.Getenv("VAULT_KUBERNETES_AUTH_PATH"),
 		VictoriaMetricsURL:       envOr("VICTORIA_METRICS_URL", "http://vmsingle-monitoring-victoria-metrics-k8s-stack.monitoring.svc:8428"),
+		ArgoWebhookSecret:        os.Getenv("ARGO_WEBHOOK_SECRET"),
+		OAuthRegistrationToken:   os.Getenv("OAUTH_REGISTRATION_TOKEN"),
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -79,6 +80,29 @@ func (c *Client) ReadKV(ctx context.Context, path string) (map[string]string, er
 		return nil, fmt.Errorf("decode vault response: %w", err)
 	}
 	return payload.Data.Data, nil
+}
+
+// Health probes Vault's unauthenticated /v1/sys/health. 200 (active), 429
+// (standby), 472 (DR secondary), and 473 (performance standby) all mean the
+// cluster can serve traffic. 501 (uninitialized) and 503 (sealed) fail.
+func (c *Client) Health(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.addr+"/v1/sys/health", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("vault health: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusTooManyRequests, 472, 473:
+		return nil
+	default:
+		return fmt.Errorf("vault health: HTTP %d", resp.StatusCode)
+	}
 }
 
 func (c *Client) doRead(ctx context.Context, url, token string) (*http.Response, error) {

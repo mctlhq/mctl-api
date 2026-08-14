@@ -19,6 +19,17 @@ ingress:
   hosts:
     - host: api.mctl.ai
     - host: api.mctl.me
+  # Public paths only. /metrics is served on the ClusterIP Service for
+  # in-cluster scrapes and is 404 from ingress (X-Forwarded-* guard).
+  paths:
+    - /healthz
+    - /readyz
+    - /openapi.yaml
+    - /docs
+    - /.well-known
+    - /oauth
+    - /api
+    - /mcp
 
 resources:
   requests:

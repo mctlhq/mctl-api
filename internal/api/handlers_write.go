@@ -16,10 +16,15 @@ package api
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -179,10 +184,35 @@ type ArgoCompletionPayload struct {
 	FinishedAt   string `json:"finished_at,omitempty"`
 }
 
+const maxArgoWebhookBytes = 1 << 20 // 1 MiB
+
 // HandleArgoWorkflowComplete receives completion events from Argo Workflows.
+// Authenticated with HMAC-SHA256 of the raw body (header X-MCTL-Signature:
+// sha256=<hex>). Fail-closed when ArgoWebhookSecret is unset so the public
+// spoof/log-injection surface cannot be used.
 func (h *Handlers) HandleArgoWorkflowComplete(w http.ResponseWriter, r *http.Request) {
+	secret := h.opts.ArgoWebhookSecret
+	if secret == "" {
+		writeError(w, http.StatusUnauthorized, "webhook secret not configured")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxArgoWebhookBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
+	if len(body) > maxArgoWebhookBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload too large")
+		return
+	}
+	if !validArgoWebhookHMAC(secret, body, r.Header.Get("X-MCTL-Signature")) {
+		writeError(w, http.StatusUnauthorized, "invalid signature")
+		return
+	}
+
 	var payload ArgoCompletionPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json payload: "+err.Error())
 		return
 	}
@@ -203,6 +233,20 @@ func (h *Handlers) HandleArgoWorkflowComplete(w http.ResponseWriter, r *http.Req
 		"workflow_name": payload.WorkflowName,
 		"phase":         payload.Phase,
 	})
+}
+
+func validArgoWebhookHMAC(secret string, body []byte, header string) bool {
+	const prefix = "sha256="
+	if !strings.HasPrefix(header, prefix) {
+		return false
+	}
+	got, err := hex.DecodeString(strings.TrimPrefix(header, prefix))
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	return hmac.Equal(mac.Sum(nil), got)
 }
 
 // notifyBackstage calls the Backstage tenant API to register the new tenant

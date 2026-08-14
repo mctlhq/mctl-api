@@ -469,12 +469,41 @@ paths:
   /readyz:
     get:
       summary: Readiness check
-      description: Returns 200 if the server is ready to handle traffic. No authentication required.
+      description: |
+        Returns 200 when configured dependencies (gitops, postgres, Dex, Vault)
+        pass their probes. Unconfigured dependencies are reported as
+        `not_configured` and do not fail readiness. No authentication required.
       security: []
       tags: [Health]
       responses:
         '200':
           description: Server is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+                  checks:
+                    type: object
+                    additionalProperties:
+                      type: string
+        '503':
+          description: A configured dependency probe failed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: not ready
+                  checks:
+                    type: object
+                    additionalProperties:
+                      type: string
 
   /openapi.yaml:
     get:

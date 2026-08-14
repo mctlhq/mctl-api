@@ -178,3 +178,33 @@ func (p *failingRetryProvider) GetToken(context.Context) (string, error) {
 }
 
 func (p *failingRetryProvider) Invalidate(string) {}
+
+func TestClient_Health_AcceptsStandby(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sys/health" {
+			t.Errorf("path = %s, want /v1/sys/health", r.URL.Path)
+		}
+		if r.Header.Get("X-Vault-Token") != "" {
+			t.Error("health probe must not send a vault token")
+		}
+		w.WriteHeader(http.StatusTooManyRequests) // 429 standby
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "s.unused")
+	if err := c.Health(context.Background()); err != nil {
+		t.Fatalf("standby health: %v", err)
+	}
+}
+
+func TestClient_Health_FailsSealed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "s.unused")
+	if err := c.Health(context.Background()); err == nil {
+		t.Fatal("expected sealed vault to fail health")
+	}
+}

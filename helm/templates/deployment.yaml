@@ -87,8 +87,10 @@ spec:
             httpGet:
               path: /readyz
               port: {{ .Values.service.port }}
-            initialDelaySeconds: 3
+            initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:

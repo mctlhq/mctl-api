@@ -16,6 +16,7 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -389,6 +390,19 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if token := h.opts.OAuthRegistrationToken; token != "" {
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if got == r.Header.Get("Authorization") || !hmac.Equal([]byte(got), []byte(token)) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error":             "invalid_token",
+				"error_description": "registration requires a valid initial access token",
+			})
+			return
+		}
+	}
+
 	var req struct {
 		ClientName   string   `json:"client_name"`
 		RedirectURIs []string `json:"redirect_uris"`
@@ -411,6 +425,21 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 			"error_description": "redirect_uris is required",
 		})
 		return
+	}
+
+	// Registration must not mint a client for an arbitrary attacker callback.
+	// Empty clientID means only the static allowlist and RFC 8252 loopback
+	// URIs count — not some other client's previously registered URIs.
+	for _, uri := range req.RedirectURIs {
+		if !o.IsRedirectURIAllowed("", uri) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error":             "invalid_redirect_uri",
+				"error_description": "redirect_uri is not allowed",
+			})
+			return
+		}
 	}
 
 	client := o.RegisterClient(req.ClientName, req.RedirectURIs)
