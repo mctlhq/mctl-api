@@ -195,7 +195,9 @@ func isLoopbackRedirectURI(uri string) bool {
 	if err != nil || u.Scheme != "http" {
 		return false
 	}
-	switch u.Hostname() {
+	// Host names are case-insensitive (RFC 3986 §3.2.2) but url.Parse preserves
+	// the case it was given, so "LOCALHOST" would otherwise miss.
+	switch strings.ToLower(u.Hostname()) {
 	case "127.0.0.1", "::1", "localhost":
 		return true
 	default:

@@ -31,6 +31,8 @@ func TestIsRedirectURIAllowedLoopback(t *testing.T) {
 		"http://[::1]:9000/callback",
 		"http://127.0.0.1/callback", // no explicit port
 		"http://localhost:3118/some/other/path",
+		"http://LOCALHOST:3118/callback", // host names are case-insensitive
+		"http://LocalHost:3118/callback",
 	}
 	for _, uri := range allowed {
 		if !s.IsRedirectURIAllowed(uri) {
