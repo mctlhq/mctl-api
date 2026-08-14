@@ -43,6 +43,7 @@ func TestAuthorizeRejectsUnvalidatedRedirectBeforeRedirecting(t *testing.T) {
 		{"missing client_id", "response_type=code&redirect_uri=https://evil.com/cb&state=x"},
 		{"missing state", "response_type=code&client_id=c&redirect_uri=https://evil.com/cb"},
 		{"missing code_challenge", "response_type=code&client_id=c&state=x&redirect_uri=https://evil.com/cb"},
+		{"userinfo loopback", "response_type=token&redirect_uri=http://evil.com@localhost/callback&state=x"},
 	}
 
 	for _, tc := range cases {

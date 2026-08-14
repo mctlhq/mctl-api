@@ -49,6 +49,10 @@ func TestIsRedirectURIAllowedLoopback(t *testing.T) {
 		"http://192.168.1.10:3118/callback",  // private, but not loopback
 		"http://[::2]:9000/callback",         // adjacent to ::1
 		"://malformed",                       // unparseable
+		"http://evil.com@localhost/callback", // userinfo: Go host is localhost
+		"http://user:pass@127.0.0.1/callback",
+		"http://evil.com%5C@localhost/callback", // encoded backslash as userinfo
+		`http://evil.com\@localhost/callback`,   // parser/browser split on '\'
 	}
 	for _, uri := range rejected {
 		if s.IsRedirectURIAllowed(uri) {

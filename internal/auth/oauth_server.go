@@ -191,8 +191,22 @@ func (s *OAuthServer) IsRedirectURIAllowed(uri string) bool {
 // resolves through the host's name resolution and could in principle be
 // pointed elsewhere.
 func isLoopbackRedirectURI(uri string) bool {
+	// A backslash is not a valid URI character. Some user agents treat it as a
+	// path separator while others (historically including Go) treated it as
+	// userinfo, which is the classic allowlist/browser split that turns a
+	// loopback check into an open redirect. Reject before parsing so the two
+	// never get a chance to disagree.
+	if strings.ContainsRune(uri, '\\') {
+		return false
+	}
 	u, err := url.Parse(uri)
 	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	// Userinfo has no place in a loopback callback, and accepting it would let
+	// http://evil.com@localhost/callback pass the host check (Go's host is
+	// localhost; some agents still treat the left of @ as the authority).
+	if u.User != nil {
 		return false
 	}
 	// Host names are case-insensitive (RFC 3986 §3.2.2) but url.Parse preserves
