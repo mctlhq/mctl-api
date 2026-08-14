@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.32.0](https://github.com/mctlhq/mctl-api/compare/4.31.0...4.32.0) (2026-08-14)
+
+
+### Features
+
+* **mcp:** add MCP Prompts and Resources support ([327c8cd](https://github.com/mctlhq/mctl-api/commit/327c8cd29b0b7948e459647eed3747433cb60540))
+* **mcp:** add MCP Prompts and Resources support ([54ebdc3](https://github.com/mctlhq/mctl-api/commit/54ebdc35aa942285c334ac6c6d5ea6636f4be295))
+
+
+### Bug Fixes
+
+* authenticate the custom-domains proxy to Backstage ([d2428b4](https://github.com/mctlhq/mctl-api/commit/d2428b4bbd06d1463b2de4de78a88a44b5f14769))
+* authenticate the custom-domains proxy to Backstage ([b1375f7](https://github.com/mctlhq/mctl-api/commit/b1375f7ceb5fc19132338bfd4de51275c79ff01b))
+* **lint:** index the operations catalog range instead of copying ([2180ff2](https://github.com/mctlhq/mctl-api/commit/2180ff244ffdf66f34f72ec25114680527f6bc49))
+* **lint:** index the operations catalog range instead of copying ([7e41356](https://github.com/mctlhq/mctl-api/commit/7e413564427d972b641f96eead9efa253352a1c5))
+
 ## [4.31.0](https://github.com/mctlhq/mctl-api/compare/4.30.0...4.31.0) (2026-08-07)
 
 
