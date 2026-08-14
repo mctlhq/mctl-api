@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.32.1](https://github.com/mctlhq/mctl-api/compare/4.32.0...4.32.1) (2026-08-14)
+
+
+### Bug Fixes
+
+* **oauth:** accept loopback redirect URIs per RFC 8252 §7.3 ([1ea3f85](https://github.com/mctlhq/mctl-api/commit/1ea3f8523af6e82704381684682a6683562cd998))
+* **oauth:** accept loopback redirect URIs per RFC 8252 §7.3 ([e7f0786](https://github.com/mctlhq/mctl-api/commit/e7f0786d48f8d97ecb70227489dc403cd484cf31))
+* **oauth:** compare loopback host case-insensitively ([bd22918](https://github.com/mctlhq/mctl-api/commit/bd229181cfd9168d683b15dfe86dc42cb90de711))
+* **oauth:** reject userinfo and backslash in loopback redirects ([6cbb888](https://github.com/mctlhq/mctl-api/commit/6cbb888591cabe904a47cde3814bf5bcfd94e19d))
+* **oauth:** scope registered redirect URIs to the client that registered them ([f24b29d](https://github.com/mctlhq/mctl-api/commit/f24b29d6e534de8f66d5d7216dd91cee2989f7c8))
+* **oauth:** validate redirect_uri before any error can redirect to it ([04c5aa8](https://github.com/mctlhq/mctl-api/commit/04c5aa8b4efb5b9fca588cf1f86fc24af745c3c6))
+
 ## [4.32.0](https://github.com/mctlhq/mctl-api/compare/4.31.0...4.32.0) (2026-08-14)
 
 
