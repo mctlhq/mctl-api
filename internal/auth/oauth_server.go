@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -147,6 +148,21 @@ func (s *OAuthServer) IsRedirectURIAllowed(uri string) bool {
 			return true
 		}
 	}
+	// Loopback redirects (RFC 8252 §7.3). A native app — the mctl CLI, Claude
+	// Code — binds an ephemeral port and cannot know it ahead of registration,
+	// so the port must not take part in the comparison and no static allowlist
+	// entry can cover it. Without this, such a client works only until the
+	// pod restarts: the registry below is in-memory, so a restart drops the
+	// registration while the client keeps its cached client_id and never
+	// re-registers, leaving authorize permanently at 400.
+	//
+	// Safe because the code is useless on its own: ExchangeCode verifies PKCE,
+	// so a listener that intercepts a redirect on the user's own machine still
+	// cannot redeem it without the verifier.
+	if isLoopbackRedirectURI(uri) {
+		return true
+	}
+
 	// Check dynamically registered clients.
 	found := false
 	s.clients.Range(func(_, v any) bool {
@@ -160,6 +176,31 @@ func (s *OAuthServer) IsRedirectURIAllowed(uri string) bool {
 		return true
 	})
 	return found
+}
+
+// isLoopbackRedirectURI reports whether uri is a loopback redirect as described
+// by RFC 8252 §7.3 — an http:// URI whose host is the local machine.
+//
+// The port is deliberately not examined: the whole point of the loopback flow is
+// that the app picks a free port at runtime. The scheme is pinned to http
+// because loopback listeners are plain HTTP by design, and https:// on a
+// loopback host would be a sign of something other than this flow.
+//
+// "localhost" is accepted alongside the IP literals for compatibility with
+// clients that use the name — RFC 8252 prefers the literals, since "localhost"
+// resolves through the host's name resolution and could in principle be
+// pointed elsewhere.
+func isLoopbackRedirectURI(uri string) bool {
+	u, err := url.Parse(uri)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	switch u.Hostname() {
+	case "127.0.0.1", "::1", "localhost":
+		return true
+	default:
+		return false
+	}
 }
 
 // GenerateState creates a secure random state value for CSRF protection.
