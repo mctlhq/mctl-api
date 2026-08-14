@@ -134,11 +134,19 @@ func (s *OAuthServer) ResolveGroups(login string) []string {
 	return groups
 }
 
-// IsRedirectURIAllowed returns true if uri is in the static whitelist
-// or was registered by a dynamic client (RFC 7591).
+// IsRedirectURIAllowed returns true if uri is in the static whitelist, is a
+// loopback callback, or was registered by the client identified by clientID.
 // Allowlist entries ending with "/*" are treated as prefix matches
 // (e.g. "https://chatgpt.com/connector/oauth/*" matches any path under that prefix).
-func (s *OAuthServer) IsRedirectURIAllowed(uri string) bool {
+//
+// The clientID scope matters. This used to search every registered client's
+// URIs, so any one registration vouched for a URI on behalf of all of them:
+// with open dynamic registration, an attacker could register a client pointing
+// at their own callback and then start a flow under a privileged client's ID
+// with that callback, and the code would be delivered to them. PKCE is no help
+// there — whoever starts the flow chooses the challenge. Registrations are now
+// only honoured for the client that made them.
+func (s *OAuthServer) IsRedirectURIAllowed(clientID, uri string) bool {
 	for _, allowed := range s.AllowedRedirectURIs {
 		if strings.HasSuffix(allowed, "/*") {
 			if strings.HasPrefix(uri, strings.TrimSuffix(allowed, "*")) {
@@ -163,19 +171,17 @@ func (s *OAuthServer) IsRedirectURIAllowed(uri string) bool {
 		return true
 	}
 
-	// Check dynamically registered clients.
-	found := false
-	s.clients.Range(func(_, v any) bool {
-		c := v.(RegisteredClient)
-		for _, u := range c.RedirectURIs {
-			if u == uri {
-				found = true
-				return false // stop iteration
-			}
+	// Only this client's own registration counts.
+	c, ok := s.GetClient(clientID)
+	if !ok {
+		return false
+	}
+	for _, u := range c.RedirectURIs {
+		if u == uri {
+			return true
 		}
-		return true
-	})
-	return found
+	}
+	return false
 }
 
 // isLoopbackRedirectURI reports whether uri is a loopback redirect as described

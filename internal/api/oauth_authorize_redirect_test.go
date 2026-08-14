@@ -40,7 +40,7 @@ func TestAuthorizeRejectsUnvalidatedRedirectBeforeRedirecting(t *testing.T) {
 		query string
 	}{
 		{"bad response_type", "response_type=token&redirect_uri=https://evil.com/cb&state=x"},
-		{"missing client_id", "response_type=code&redirect_uri=https://evil.com/cb&state=x"},
+		{"missing client_id", "response_type=code&redirect_uri=https://evil.com/cb&state=x"}, // reported directly: no client to scope the URI to
 		{"missing state", "response_type=code&client_id=c&redirect_uri=https://evil.com/cb"},
 		{"missing code_challenge", "response_type=code&client_id=c&state=x&redirect_uri=https://evil.com/cb"},
 		{"userinfo loopback", "response_type=token&redirect_uri=http://evil.com@localhost/callback&state=x"},
@@ -72,7 +72,7 @@ func TestAuthorizeStillReportsErrorsToAllowedRedirect(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	h.handleOAuthAuthorize(rec, httptest.NewRequest(http.MethodGet,
-		"/oauth/authorize?response_type=token&state=x&redirect_uri="+allowed, nil))
+		"/oauth/authorize?response_type=token&client_id=c&state=x&redirect_uri="+allowed, nil))
 
 	loc := rec.Header().Get("Location")
 	if !strings.HasPrefix(loc, allowed) {

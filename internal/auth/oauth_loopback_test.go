@@ -35,7 +35,7 @@ func TestIsRedirectURIAllowedLoopback(t *testing.T) {
 		"http://LocalHost:3118/callback",
 	}
 	for _, uri := range allowed {
-		if !s.IsRedirectURIAllowed(uri) {
+		if !s.IsRedirectURIAllowed("any-client", uri) {
 			t.Errorf("IsRedirectURIAllowed(%q) = false, want true — loopback redirects are port-independent", uri)
 		}
 	}
@@ -55,7 +55,7 @@ func TestIsRedirectURIAllowedLoopback(t *testing.T) {
 		`http://evil.com\@localhost/callback`,   // parser/browser split on '\'
 	}
 	for _, uri := range rejected {
-		if s.IsRedirectURIAllowed(uri) {
+		if s.IsRedirectURIAllowed("any-client", uri) {
 			t.Errorf("IsRedirectURIAllowed(%q) = true, want false", uri)
 		}
 	}
@@ -73,12 +73,38 @@ func TestIsRedirectURIAllowedStaticStillApplies(t *testing.T) {
 		"https://claude.ai/api/mcp/auth_callback",
 		"https://chatgpt.com/connector/oauth/anything/deeper",
 	} {
-		if !s.IsRedirectURIAllowed(uri) {
+		if !s.IsRedirectURIAllowed("any-client", uri) {
 			t.Errorf("IsRedirectURIAllowed(%q) = false, want true", uri)
 		}
 	}
 
-	if s.IsRedirectURIAllowed("https://claude.ai/somewhere/else") {
+	if s.IsRedirectURIAllowed("any-client", "https://claude.ai/somewhere/else") {
 		t.Error("exact-match allowlist entry matched a different path")
+	}
+}
+
+// A registration must only vouch for the client that made it. Dynamic
+// registration is open, so when any registration counted for every client an
+// attacker could register their own callback and then run the flow under a
+// privileged client's ID to have the code delivered to them. PKCE does not
+// close that — the party starting the flow picks the challenge.
+func TestIsRedirectURIAllowedScopesRegistrationToItsClient(t *testing.T) {
+	s := NewOAuthServer("https://api.mctl.ai", "gh", "sec", []byte("k"), nil, nil)
+
+	victim := s.RegisterClient("mctl-cli", []string{"https://cli.example.com/cb"})
+	attacker := s.RegisterClient("attacker", []string{"https://attacker.example.com/cb"})
+
+	if !s.IsRedirectURIAllowed(victim.ClientID, "https://cli.example.com/cb") {
+		t.Error("a client's own registered URI was rejected")
+	}
+	if !s.IsRedirectURIAllowed(attacker.ClientID, "https://attacker.example.com/cb") {
+		t.Error("a client's own registered URI was rejected")
+	}
+
+	if s.IsRedirectURIAllowed(victim.ClientID, "https://attacker.example.com/cb") {
+		t.Error("attacker's registered URI was accepted under the victim's client_id — cross-client redirect")
+	}
+	if s.IsRedirectURIAllowed("never-registered", "https://attacker.example.com/cb") {
+		t.Error("a registered URI was accepted under an unknown client_id")
 	}
 }
