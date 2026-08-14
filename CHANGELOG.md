@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.32.2](https://github.com/mctlhq/mctl-api/compare/4.32.1...4.32.2) (2026-08-14)
+
+
+### Bug Fixes
+
+* **api:** close SOC F12-F14 readiness, metrics, OAuth hardening ([98c0f6e](https://github.com/mctlhq/mctl-api/commit/98c0f6e87ced928972c77fdd23dd4945fd283b9d))
+* **api:** close SOC F12-F14 readiness, metrics, OAuth hardening ([8422446](https://github.com/mctlhq/mctl-api/commit/84224462610ecb5bd10b5a8e800a435944be5fdc))
+* **api:** isolate readyz probes and hide error details ([4d88a7a](https://github.com/mctlhq/mctl-api/commit/4d88a7a970152413059aee89fa5ebad754997851))
+
 ## [4.32.1](https://github.com/mctlhq/mctl-api/compare/4.32.0...4.32.1) (2026-08-14)
 
 
