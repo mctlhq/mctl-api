@@ -132,16 +132,24 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	codeChallenge := q.Get("code_challenge")
 	codeChallengeMethod := q.Get("code_challenge_method")
 
+	// client_id and redirect_uri are both settled before anything else, and both
+	// answer directly rather than through the URI. oauthError replies with a 302
+	// to whatever redirect_uri it is handed, so any check that runs ahead of the
+	// allowlist turns this endpoint into an open redirect off api.mctl.ai — RFC
+	// 6749 §4.1.2.1 is explicit that an invalid redirect URI must be reported to
+	// the user agent instead. client_id has to come first of the two because the
+	// allowlist decision is now scoped to the client, and it cannot report
+	// through the URI either, for the same reason.
+	if clientID == "" {
+		http.Error(w, "client_id is required", http.StatusBadRequest)
+		return
+	}
+	if redirectURI == "" || !o.IsRedirectURIAllowed(clientID, redirectURI) {
+		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+		return
+	}
 	if responseType != "code" {
 		oauthError(w, redirectURI, state, "unsupported_response_type", "only response_type=code is supported")
-		return
-	}
-	if clientID == "" {
-		oauthError(w, redirectURI, state, "invalid_request", "client_id is required")
-		return
-	}
-	if redirectURI == "" || !o.IsRedirectURIAllowed(redirectURI) {
-		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
 		return
 	}
 	if state == "" {
