@@ -81,6 +81,19 @@ type Options struct {
 	// OpenClaw controls quota and rate limits on the skill/identity save handlers.
 	// Zero values fall back to defaults (see OpenClawQuotaDefaults).
 	OpenClaw OpenClawQuotaConfig
+	// GitopsReady / PostgresReady / DexReady / VaultReady are optional
+	// dependency probes for GET /readyz. A nil check is reported as
+	// not_configured and does not fail readiness (tests, local without Vault).
+	GitopsReady   ReadyCheck
+	PostgresReady ReadyCheck
+	DexReady      ReadyCheck
+	VaultReady    ReadyCheck
+	// ArgoWebhookSecret authenticates POST /api/v1/workflows/events/argo-complete.
+	// Fail-closed: an empty secret rejects every callback.
+	ArgoWebhookSecret string
+	// OAuthRegistrationToken, when non-empty, requires Authorization: Bearer
+	// <token> on POST /oauth/register (RFC 7591 initial access token).
+	OAuthRegistrationToken string
 }
 
 // Handlers holds all API handler dependencies.
@@ -107,19 +120,19 @@ func NewRouter(opts Options) http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+	r.Use(securityHeaders())
 	r.Use(corsMiddleware(opts.AllowedOrigins))
 	r.Use(metricsMiddleware())
 
-	// Health checks and metrics (no auth).
+	// Health checks and metrics (no auth). /metrics is cluster-only: ingress
+	// sets X-Forwarded-* and is 404'd; kube probes and vmagent scrape the
+	// Service directly.
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	r.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ready"}`))
-	})
-	r.Handle("/metrics", promhttp.Handler())
+	r.Get("/readyz", h.handleReadyz)
+	r.Handle("/metrics", clusterOnly(promhttp.Handler()))
 
 	// OpenAPI spec — public, no auth required.
 	r.Get("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
@@ -139,17 +152,25 @@ func NewRouter(opts Options) http.Handler {
 		http.Redirect(w, r, target, http.StatusFound)
 	})
 
-	// OAuth 2.0 endpoints — public (no auth middleware), required for Claude.ai connector.
-	r.Get("/.well-known/oauth-authorization-server", h.handleOAuthMeta)
-	// RFC 9728 Protected Resource Metadata — registered at both the root path
-	// and the /mcp-suffixed alias since clients probe either form.
-	r.Get("/.well-known/oauth-protected-resource", h.handleProtectedResourceMeta)
-	r.Get("/.well-known/oauth-protected-resource/mcp", h.handleProtectedResourceMeta)
-	r.Get("/oauth/authorize", h.handleOAuthAuthorize)
-	r.Get("/oauth/github/callback", h.handleOAuthGitHubCallback)
-	r.Post("/oauth/token", h.handleOAuthToken)
-	r.Post("/oauth/revoke", h.handleOAuthRevoke)
-	r.Post("/oauth/register", h.handleOAuthRegister)
+	// OAuth 2.0 endpoints — public (no user auth middleware), required for
+	// Claude.ai connector. Rate-limited per IP because they sit outside the
+	// authenticated group. Registration is tighter: it mints client_ids.
+	r.Group(func(r chi.Router) {
+		r.Use(httprate.Limit(60, 1*time.Minute, httprate.WithKeyFuncs(httprate.KeyByRealIP)))
+		r.Get("/.well-known/oauth-authorization-server", h.handleOAuthMeta)
+		// RFC 9728 Protected Resource Metadata — registered at both the root path
+		// and the /mcp-suffixed alias since clients probe either form.
+		r.Get("/.well-known/oauth-protected-resource", h.handleProtectedResourceMeta)
+		r.Get("/.well-known/oauth-protected-resource/mcp", h.handleProtectedResourceMeta)
+		r.Get("/oauth/authorize", h.handleOAuthAuthorize)
+		r.Get("/oauth/github/callback", h.handleOAuthGitHubCallback)
+		r.Post("/oauth/token", h.handleOAuthToken)
+		r.Post("/oauth/revoke", h.handleOAuthRevoke)
+	})
+	r.Group(func(r chi.Router) {
+		r.Use(httprate.Limit(5, 1*time.Minute, httprate.WithKeyFuncs(httprate.KeyByRealIP)))
+		r.Post("/oauth/register", h.handleOAuthRegister)
+	})
 
 	// Webhook callbacks (unauthenticated/token-validated)
 	r.Post("/api/v1/workflows/events/argo-complete", h.HandleArgoWorkflowComplete)

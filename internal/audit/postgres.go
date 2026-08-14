@@ -60,6 +60,11 @@ func NewPostgresLogger(ctx context.Context, connStr string) (*PostgresLogger, er
 	return &PostgresLogger{pool: pool}, nil
 }
 
+// Ping reports whether the audit database is reachable.
+func (p *PostgresLogger) Ping(ctx context.Context) error {
+	return p.pool.Ping(ctx)
+}
+
 // Log inserts an audit entry into PostgreSQL.
 func (p *PostgresLogger) Log(entry Entry) {
 	if entry.ID == "" {
