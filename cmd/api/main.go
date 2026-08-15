@@ -49,6 +49,23 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
+	// One signal registration for the whole process, established before
+	// anything that can block — the Dex verifier below makes a network call,
+	// and a SIGTERM landing there used to kill the process by default
+	// disposition with nothing logged.
+	//
+	// It has to be a single root rather than one registration per phase: a
+	// second, independent signal.Notify would only ever see a *second* signal,
+	// and Kubernetes sends exactly one SIGTERM before SIGKILL at the end of
+	// terminationGracePeriodSeconds. A signal delivered during startup would
+	// then be recorded nowhere, the process would finish booting and start
+	// serving, and the drain would never run.
+	//
+	// Released explicitly on each of main's three exits rather than by defer:
+	// the gitops failure below calls os.Exit, which does not run deferred
+	// functions (gocritic exitAfterDefer).
+	rootCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+
 	cfg := loadConfig()
 
 	// Initialize components.
@@ -57,13 +74,14 @@ func main() {
 	gitReader, err := gitops.NewReader(cfg.GitOpsRepoURL, cfg.GitOpsBranch, cfg.GitOpsLocalPath, cfg.GitOpsToken, cfg.GitOpsSSHKeyPath)
 	if err != nil {
 		slog.Error("failed to initialize gitops reader", "error", err)
+		stopSignals()
 		os.Exit(1)
 	}
 
 	// Dex JWT verifier (optional — disabled if DEX_ISSUER_URL is unset or unreachable).
 	var dexVerifier *auth.DexVerifier
 	if cfg.DexIssuerURL != "" {
-		dv, dexErr := auth.NewDexVerifier(context.Background(), cfg.DexIssuerURL, cfg.DexClientID)
+		dv, dexErr := auth.NewDexVerifier(rootCtx, cfg.DexIssuerURL, cfg.DexClientID)
 		if dexErr != nil {
 			slog.Warn("dex OIDC init failed — JWT auth disabled", "issuer", cfg.DexIssuerURL, "error", dexErr)
 		} else {
@@ -74,6 +92,21 @@ func main() {
 
 	// Auth middleware: validates GitHub tokens or Dex JWTs.
 	ghValidator := auth.NewGitHubValidator(cfg.AdminUsers)
+
+	// One budget shared by every optional store below, because the stores are
+	// initialised sequentially: with a per-store budget and all four pointed at
+	// the same unreachable AUDIT_DB_URL, each would burn a full ladder in turn
+	// and hold up the listener for four times as long as any single one of them
+	// promises. The deadline is global, so the worst case is what it says it
+	// is, whether one store is configured or four.
+	//
+	// Derived from rootCtx, so a SIGTERM arriving mid-retry cuts the wait short
+	// *and* still drives the shutdown below.
+	//
+	// None of the four constructors retain this context: each uses it for
+	// pgxpool.New and the schema Exec, then keeps only the pool. So it is safe
+	// to release it once the last store is built.
+	initCtx, cancelInit := context.WithTimeout(rootCtx, storeInitBudget)
 
 	// OAuth 2.0 server (optional — disabled if OAUTH_GITHUB_CLIENT_ID is unset).
 	var oauthServer *auth.OAuthServer
@@ -95,9 +128,11 @@ func main() {
 		// When available, refresh tokens survive pod restarts; without it the in-memory
 		// fallback is used (tokens lost on restart — the original band-aid behaviour).
 		if oauthDBURL := postgresURL(envOr("OAUTH_DB_URL", os.Getenv("AUDIT_DB_URL"))); oauthDBURL != "" {
-			rs, rsErr := refreshstore.NewPostgresStore(context.Background(), oauthDBURL)
+			rs, rsErr := initStore(initCtx, "oauth refresh", func(ctx context.Context) (*refreshstore.PostgresStore, error) {
+				return refreshstore.NewPostgresStore(ctx, oauthDBURL)
+			})
 			if rsErr != nil {
-				slog.Warn("oauth refresh store init failed; falling back to in-memory", "error", rsErr)
+				slog.Error("oauth refresh store init failed; falling back to in-memory (refresh tokens will not survive a restart)", "error", rsErr)
 			} else {
 				oauthServer.RefreshStore = rs
 				go func() {
@@ -119,9 +154,11 @@ func main() {
 
 	var auditLog audit.Log
 	if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		pgLog, pgErr := audit.NewPostgresLogger(context.Background(), dbURL)
+		pgLog, pgErr := initStore(initCtx, "audit log", func(ctx context.Context) (*audit.PostgresLogger, error) {
+			return audit.NewPostgresLogger(ctx, dbURL)
+		})
 		if pgErr != nil {
-			slog.Warn("postgres audit log init failed, falling back to in-memory", "error", pgErr)
+			slog.Error("postgres audit log init failed, falling back to in-memory (audit trail will NOT be persisted)", "error", pgErr)
 			auditLog = audit.NewLogger()
 		} else {
 			auditLog = pgLog
@@ -133,16 +170,20 @@ func main() {
 	// Alert store (optional — enabled when ALERT_DB_URL or AUDIT_DB_URL is set).
 	var alertStore *alerts.Store
 	if alertDBURL := postgresURL(os.Getenv("ALERT_DB_URL")); alertDBURL != "" {
-		as, asErr := alerts.NewStore(context.Background(), alertDBURL)
+		as, asErr := initStore(initCtx, "alert", func(ctx context.Context) (*alerts.Store, error) {
+			return alerts.NewStore(ctx, alertDBURL)
+		})
 		if asErr != nil {
-			slog.Warn("alert store init failed", "error", asErr)
+			slog.Error("alert store init failed; alert and incident endpoints will return 503", "error", asErr)
 		} else {
 			alertStore = as
 		}
 	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		as, asErr := alerts.NewStore(context.Background(), dbURL)
+		as, asErr := initStore(initCtx, "alert", func(ctx context.Context) (*alerts.Store, error) {
+			return alerts.NewStore(ctx, dbURL)
+		})
 		if asErr != nil {
-			slog.Warn("alert store init failed (using AUDIT_DB_URL)", "error", asErr)
+			slog.Error("alert store init failed (using AUDIT_DB_URL); alert and incident endpoints will return 503", "error", asErr)
 		} else {
 			alertStore = as
 		}
@@ -151,19 +192,38 @@ func main() {
 	// Agent registry (optional — enabled when AGENT_REGISTRY_DB_URL or AUDIT_DB_URL is set).
 	var agentRegistryStore *agentregistry.Store
 	if agentRegistryDBURL := postgresURL(os.Getenv("AGENT_REGISTRY_DB_URL")); agentRegistryDBURL != "" {
-		ars, arsErr := agentregistry.NewStore(context.Background(), agentRegistryDBURL)
+		ars, arsErr := initStore(initCtx, "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
+			return agentregistry.NewStore(ctx, agentRegistryDBURL)
+		})
 		if arsErr != nil {
-			slog.Warn("agent registry store init failed", "error", arsErr)
+			slog.Error("agent registry store init failed; agent registry endpoints will return 503", "error", arsErr)
 		} else {
 			agentRegistryStore = ars
 		}
 	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		ars, arsErr := agentregistry.NewStore(context.Background(), dbURL)
+		ars, arsErr := initStore(initCtx, "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
+			return agentregistry.NewStore(ctx, dbURL)
+		})
 		if arsErr != nil {
-			slog.Warn("agent registry store init failed (using AUDIT_DB_URL)", "error", arsErr)
+			slog.Error("agent registry store init failed (using AUDIT_DB_URL); agent registry endpoints will return 503", "error", arsErr)
 		} else {
 			agentRegistryStore = ars
 		}
+	}
+
+	// Only the init deadline is released here; rootCtx stays live for the rest
+	// of the process. Releasing the timeout early keeps its timer from firing
+	// against a context nothing is waiting on any more.
+	cancelInit()
+
+	// A signal delivered while a store was retrying has already cancelled
+	// rootCtx. Booting on regardless would mean a pod that was told to stop
+	// starts serving traffic instead, and is then SIGKILLed at the end of the
+	// grace period with no drain — so stop here, before the listener exists.
+	if err := rootCtx.Err(); err != nil {
+		slog.Info("shutdown signalled during startup; exiting before serving", "reason", err)
+		stopSignals()
+		return
 	}
 
 	// Temporal client for DevLoopWorkflow (optional — enabled when
@@ -335,8 +395,9 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start gitops reader refresh loop.
-	ctx, cancel := context.WithCancel(context.Background())
+	// Start gitops reader refresh loop. Derived from rootCtx so the loop stops
+	// on the same signal that starts the drain, rather than running through it.
+	ctx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
 	go gitReader.RefreshLoop(ctx, 60*time.Second)
 
@@ -353,10 +414,14 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown.
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	// Graceful shutdown, driven by the same root registration that guarded
+	// startup — so the FIRST signal drains, whenever it arrives.
+	<-rootCtx.Done()
+
+	// Restore default disposition: a second SIGTERM during a slow drain should
+	// kill the process outright rather than be swallowed by a handler that has
+	// already done its job.
+	stopSignals()
 	slog.Info("shutting down")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -510,6 +575,85 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+const (
+	// One store's ladder: 250ms + 500ms + 1s + 2s + 4s = 7.75s of waiting
+	// across 6 attempts.
+	storeInitAttempts = 6
+
+	// The ceiling on ALL optional store init combined, not on any one store.
+	// The stores are built sequentially, so without a shared deadline four of
+	// them pointed at the same dead database would each run their own ladder
+	// and stall the listener for roughly four times as long.
+	//
+	// 8s leaves a lone store its full ladder while keeping the process
+	// listening before the readiness probe's first check at
+	// initialDelaySeconds: 10 (helm/templates/deployment.yaml), so a degraded
+	// pod still reports ready on schedule instead of looking hung.
+	storeInitBudget = 8 * time.Second
+)
+
+// A var, not a const, only so tests can shrink it — nothing at runtime writes it.
+var storeInitBaseDelay = 250 * time.Millisecond
+
+// initStore opens an optional Postgres-backed store, retrying a failed attempt
+// instead of giving up on the first one.
+//
+// Every one of these stores connects and runs CREATE TABLE IF NOT EXISTS during
+// init, and init happens exactly once, here in main(), within milliseconds of
+// the process starting. A pod whose network is still settling loses that race
+// and gets "connection refused" — after which the store stays nil for the whole
+// life of the pod, because nothing ever tries again, and the warning is printed
+// once at startup so later logs look clean. That is how this service ran with
+// its alert endpoints returning 503, its agent registry disabled and its audit
+// trail in memory rather than on disk (#166): the failure was one lost race,
+// the outage was the absence of a second attempt.
+//
+// Retrying is safe: opening a pool and CREATE TABLE IF NOT EXISTS are both
+// idempotent. Every error is retried, not just connection refusals — telling a
+// transient network error from a permanent one by inspecting the message is
+// exactly the kind of guess that produced the five-month silence, and the cost
+// of being wrong is one bounded delay at startup.
+func initStore[T any](ctx context.Context, name string, newStore func(context.Context) (T, error)) (T, error) {
+	var zero T
+	delay := storeInitBaseDelay
+	for attempt := 1; ; attempt++ {
+		// Checked before the attempt, not only in the wait below: the deadline
+		// is shared with the other stores, so by the time a later one is
+		// reached it may already be spent. Without this the loop would still
+		// run its full count of doomed attempts against a context that can
+		// never succeed — which is the multiplication this budget exists to
+		// prevent, just faster.
+		if err := ctx.Err(); err != nil {
+			return zero, fmt.Errorf("before attempt %d: %w", attempt, err)
+		}
+		store, err := newStore(ctx)
+		if err == nil {
+			if attempt > 1 {
+				slog.Info("store init succeeded on retry", "store", name, "attempts", attempt)
+			}
+			return store, nil
+		}
+		if attempt >= storeInitAttempts {
+			return zero, fmt.Errorf("after %d attempts: %w", attempt, err)
+		}
+		slog.Warn("store init failed, retrying", "store", name, "attempt", attempt, "retry_in", delay, "error", err)
+		// Checked before the select, not only inside it: when both cases are
+		// ready, select picks at random, so an already-cancelled context could
+		// lose to an expired timer and buy one more doomed attempt. Rare, but
+		// nondeterministic — and a test that passes by scheduler luck is worth
+		// less than no test.
+		if err := ctx.Err(); err != nil {
+			return zero, fmt.Errorf("after %d attempts: %w", attempt, err)
+		}
+		select {
+		case <-ctx.Done():
+			return zero, fmt.Errorf("after %d attempts: %w", attempt, ctx.Err())
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
 }
 
 func parseDuration(s string, fallback time.Duration) time.Duration {
