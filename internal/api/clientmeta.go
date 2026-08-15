@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/mctlhq/mctl-api/internal/audit"
@@ -91,7 +92,7 @@ func clientIP(r *http.Request, trusted []*net.IPNet) string {
 	host := remoteHost(r.RemoteAddr)
 	ip := net.ParseIP(host)
 	if ip != nil && isTrustedProxy(ip, trusted) {
-		if xff := firstForwardedIP(r.Header.Get("X-Forwarded-For")); xff != "" {
+		if xff := forwardedClientIP(r.Header.Get("X-Forwarded-For"), trusted); xff != "" {
 			return xff
 		}
 	}
@@ -109,16 +110,22 @@ func remoteHost(remoteAddr string) string {
 	return host
 }
 
-func firstForwardedIP(xff string) string {
+func forwardedClientIP(xff string, trusted []*net.IPNet) string {
 	if xff == "" {
 		return ""
 	}
-	first := strings.TrimSpace(strings.Split(xff, ",")[0])
-	ip := net.ParseIP(first)
-	if ip == nil {
-		return ""
+	parts := strings.Split(xff, ",")
+	// Walk right-to-left: each proxy appends the connecting peer. Traefik is
+	// the only trusted hop, so the rightmost non-trusted IP is the client.
+	// Leftmost entries are attacker-supplied and must not be recorded.
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := net.ParseIP(strings.TrimSpace(parts[i]))
+		if ip == nil || isTrustedProxy(ip, trusted) {
+			continue
+		}
+		return ip.String()
 	}
-	return ip.String()
+	return ""
 }
 
 func isTrustedProxy(ip net.IP, trusted []*net.IPNet) bool {
@@ -132,10 +139,14 @@ func isTrustedProxy(ip net.IP, trusted []*net.IPNet) bool {
 
 func truncateUA(ua string) string {
 	ua = strings.TrimSpace(ua)
-	if len(ua) <= maxUserAgentLen {
-		return ua
+	for len(ua) > maxUserAgentLen {
+		_, size := utf8.DecodeLastRuneInString(ua)
+		if size <= 0 {
+			break
+		}
+		ua = ua[:len(ua)-size]
 	}
-	return ua[:maxUserAgentLen]
+	return ua
 }
 
 func (h *Handlers) logAudit(r *http.Request, entry audit.Entry) {

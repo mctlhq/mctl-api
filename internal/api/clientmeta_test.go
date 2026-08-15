@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/mctlhq/mctl-api/internal/audit"
 )
@@ -56,9 +57,9 @@ func TestClientIP_TrustsXFFFromTraefik(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit", nil)
 	req.RemoteAddr = "10.42.4.181:443"
-	req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.42.4.181")
+	req.Header.Set("X-Forwarded-For", "6.6.6.6, 203.0.113.9")
 	if got := clientIP(req, trusted); got != "203.0.113.9" {
-		t.Fatalf("got %q, want client 203.0.113.9", got)
+		t.Fatalf("got %q, want client 203.0.113.9 (rightmost, ignoring spoofed leftmost)", got)
 	}
 }
 
@@ -106,6 +107,12 @@ func TestTruncateUA(t *testing.T) {
 	long := strings.Repeat("a", maxUserAgentLen+20)
 	if got := truncateUA(long); len(got) != maxUserAgentLen {
 		t.Fatalf("len=%d", len(got))
+	}
+	// Multi-byte tail must not be split mid-rune.
+	mb := strings.Repeat("a", maxUserAgentLen-1) + "é"
+	got := truncateUA(mb)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated UA is invalid UTF-8: %q", got)
 	}
 }
 

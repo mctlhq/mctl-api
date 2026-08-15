@@ -34,7 +34,7 @@ func TestEnforceTLS_Empty(t *testing.T) {
 
 func TestEnforceTLS_AllowInsecure(t *testing.T) {
 	t.Setenv("ALLOW_INSECURE_DB", "1")
-	in := "postgresql://u:p@db:5432/mctl-api?sslmode=disable"
+	in := "postgresql://u@db:5432/mctl-api?sslmode=disable"
 	got, err := EnforceTLS(in)
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +47,7 @@ func TestEnforceTLS_AllowInsecure(t *testing.T) {
 func TestEnforceTLS_DisableBecomesRequire(t *testing.T) {
 	t.Setenv("ALLOW_INSECURE_DB", "")
 	t.Setenv("PGSSLROOTCERT", "")
-	in := "postgresql://u:p@shared-pg-rw.platform-db.svc:5432/mctl-api?sslmode=disable"
+	in := "postgresql://u@shared-pg-rw.platform-db.svc:5432/mctl-api?sslmode=disable"
 	got, err := EnforceTLS(in)
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestEnforceTLS_DisableBecomesRequire(t *testing.T) {
 func TestEnforceTLS_MissingModeBecomesRequire(t *testing.T) {
 	t.Setenv("ALLOW_INSECURE_DB", "")
 	t.Setenv("PGSSLROOTCERT", "")
-	got, err := EnforceTLS("postgresql://u:p@db:5432/mctl-api")
+	got, err := EnforceTLS("postgresql://u@db:5432/mctl-api")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestEnforceTLS_LeavesRequireAndVerify(t *testing.T) {
 	t.Setenv("ALLOW_INSECURE_DB", "")
 	t.Setenv("PGSSLROOTCERT", "")
 	for _, mode := range []string{"require", "verify-ca", "verify-full"} {
-		in := "postgresql://u:p@db:5432/mctl-api?sslmode=" + mode
+		in := "postgresql://u@db:5432/mctl-api?sslmode=" + mode
 		got, err := EnforceTLS(in)
 		if err != nil {
 			t.Fatal(err)
@@ -110,7 +110,7 @@ func TestEnforceTLS_VerifyFullWhenCAPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PGSSLROOTCERT", ca)
-	got, err := EnforceTLS("postgresql://u:p@db:5432/mctl-api?sslmode=disable")
+	got, err := EnforceTLS("postgresql://u@db:5432/mctl-api?sslmode=disable")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestEnforceTLS_VerifyFullWhenCAPresent(t *testing.T) {
 func TestEnforceTLS_KeyValue(t *testing.T) {
 	t.Setenv("ALLOW_INSECURE_DB", "")
 	t.Setenv("PGSSLROOTCERT", "")
-	got, err := EnforceTLS("host=db user=u password=p dbname=mctl-api sslmode=disable")
+	got, err := EnforceTLS("host=db user=u dbname=mctl-api sslmode=disable")
 	if err != nil {
 		t.Fatal(err)
 	}

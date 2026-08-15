@@ -97,6 +97,9 @@ func applySSLMode(q url.Values) {
 }
 
 func enforceKeyValue(connStr string) (string, error) {
+	// Whitespace split is enough for CNPG-generated DSNs (no quoted
+	// passwords). Quoted libpq values are not parsed here; EnforceTLS
+	// callers must not fall back to the original string on error.
 	parts := strings.Fields(connStr)
 	vals := make(map[string]string, len(parts))
 	order := make([]string, 0, len(parts))
