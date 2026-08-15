@@ -49,6 +49,20 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
+	// One signal registration for the whole process, established before
+	// anything that can block — the Dex verifier below makes a network call,
+	// and a SIGTERM landing there used to kill the process by default
+	// disposition with nothing logged.
+	//
+	// It has to be a single root rather than one registration per phase: a
+	// second, independent signal.Notify would only ever see a *second* signal,
+	// and Kubernetes sends exactly one SIGTERM before SIGKILL at the end of
+	// terminationGracePeriodSeconds. A signal delivered during startup would
+	// then be recorded nowhere, the process would finish booting and start
+	// serving, and the drain would never run.
+	rootCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+
 	cfg := loadConfig()
 
 	// Initialize components.
@@ -63,7 +77,7 @@ func main() {
 	// Dex JWT verifier (optional — disabled if DEX_ISSUER_URL is unset or unreachable).
 	var dexVerifier *auth.DexVerifier
 	if cfg.DexIssuerURL != "" {
-		dv, dexErr := auth.NewDexVerifier(context.Background(), cfg.DexIssuerURL, cfg.DexClientID)
+		dv, dexErr := auth.NewDexVerifier(rootCtx, cfg.DexIssuerURL, cfg.DexClientID)
 		if dexErr != nil {
 			slog.Warn("dex OIDC init failed — JWT auth disabled", "issuer", cfg.DexIssuerURL, "error", dexErr)
 		} else {
@@ -75,25 +89,20 @@ func main() {
 	// Auth middleware: validates GitHub tokens or Dex JWTs.
 	ghValidator := auth.NewGitHubValidator(cfg.AdminUsers)
 
-	// One budget shared by every optional store below, for two reasons.
+	// One budget shared by every optional store below, because the stores are
+	// initialised sequentially: with a per-store budget and all four pointed at
+	// the same unreachable AUDIT_DB_URL, each would burn a full ladder in turn
+	// and hold up the listener for four times as long as any single one of them
+	// promises. The deadline is global, so the worst case is what it says it
+	// is, whether one store is configured or four.
 	//
-	// The stores are initialised sequentially, so a per-store budget would
-	// multiply: with all four pointed at the same unreachable AUDIT_DB_URL
-	// they would each burn a full ladder in turn and hold up the listener for
-	// four times as long as any single one of them promises. The deadline is
-	// global so the worst case is what it says it is, whether one store is
-	// configured or four.
-	//
-	// It is also signal-derived, so a SIGTERM arriving while a store is
-	// retrying against a database that is genuinely down cuts the wait short
-	// instead of being queued behind the whole ladder — the shutdown handler
-	// further down is not reached until init returns.
+	// Derived from rootCtx, so a SIGTERM arriving mid-retry cuts the wait short
+	// *and* still drives the shutdown below.
 	//
 	// None of the four constructors retain this context: each uses it for
-	// pgxpool.New and the schema Exec, then keeps only the pool. So it is
-	// safe to release it once the last store is built.
-	initCtx, stopInitSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	initCtx, cancelInit := context.WithTimeout(initCtx, storeInitBudget)
+	// pgxpool.New and the schema Exec, then keeps only the pool. So it is safe
+	// to release it once the last store is built.
+	initCtx, cancelInit := context.WithTimeout(rootCtx, storeInitBudget)
 
 	// OAuth 2.0 server (optional — disabled if OAUTH_GITHUB_CLIENT_ID is unset).
 	var oauthServer *auth.OAuthServer
@@ -198,11 +207,19 @@ func main() {
 		}
 	}
 
-	// Released here rather than deferred to the end of main: the deadline has
-	// served its purpose, and leaving the signal handler installed would keep
-	// intercepting SIGTERM alongside the shutdown handler registered below.
+	// Only the init deadline is released here; rootCtx stays live for the rest
+	// of the process. Releasing the timeout early keeps its timer from firing
+	// against a context nothing is waiting on any more.
 	cancelInit()
-	stopInitSignals()
+
+	// A signal delivered while a store was retrying has already cancelled
+	// rootCtx. Booting on regardless would mean a pod that was told to stop
+	// starts serving traffic instead, and is then SIGKILLed at the end of the
+	// grace period with no drain — so stop here, before the listener exists.
+	if err := rootCtx.Err(); err != nil {
+		slog.Info("shutdown signalled during startup; exiting before serving", "reason", err)
+		return
+	}
 
 	// Temporal client for DevLoopWorkflow (optional — enabled when
 	// TEMPORAL_ADDRESS is set). Same graceful-degradation pattern as
@@ -373,8 +390,9 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start gitops reader refresh loop.
-	ctx, cancel := context.WithCancel(context.Background())
+	// Start gitops reader refresh loop. Derived from rootCtx so the loop stops
+	// on the same signal that starts the drain, rather than running through it.
+	ctx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
 	go gitReader.RefreshLoop(ctx, 60*time.Second)
 
@@ -391,10 +409,14 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown.
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	// Graceful shutdown, driven by the same root registration that guarded
+	// startup — so the FIRST signal drains, whenever it arrives.
+	<-rootCtx.Done()
+
+	// Restore default disposition: a second SIGTERM during a slow drain should
+	// kill the process outright rather than be swallowed by a handler that has
+	// already done its job.
+	stopSignals()
 	slog.Info("shutting down")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
