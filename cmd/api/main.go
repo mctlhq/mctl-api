@@ -60,8 +60,11 @@ func main() {
 	// terminationGracePeriodSeconds. A signal delivered during startup would
 	// then be recorded nowhere, the process would finish booting and start
 	// serving, and the drain would never run.
+	//
+	// Released explicitly on each of main's three exits rather than by defer:
+	// the gitops failure below calls os.Exit, which does not run deferred
+	// functions (gocritic exitAfterDefer).
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stopSignals()
 
 	cfg := loadConfig()
 
@@ -71,6 +74,7 @@ func main() {
 	gitReader, err := gitops.NewReader(cfg.GitOpsRepoURL, cfg.GitOpsBranch, cfg.GitOpsLocalPath, cfg.GitOpsToken, cfg.GitOpsSSHKeyPath)
 	if err != nil {
 		slog.Error("failed to initialize gitops reader", "error", err)
+		stopSignals()
 		os.Exit(1)
 	}
 
@@ -218,6 +222,7 @@ func main() {
 	// grace period with no drain — so stop here, before the listener exists.
 	if err := rootCtx.Err(); err != nil {
 		slog.Info("shutdown signalled during startup; exiting before serving", "reason", err)
+		stopSignals()
 		return
 	}
 
@@ -634,6 +639,14 @@ func initStore[T any](ctx context.Context, name string, newStore func(context.Co
 			return zero, fmt.Errorf("after %d attempts: %w", attempt, err)
 		}
 		slog.Warn("store init failed, retrying", "store", name, "attempt", attempt, "retry_in", delay, "error", err)
+		// Checked before the select, not only inside it: when both cases are
+		// ready, select picks at random, so an already-cancelled context could
+		// lose to an expired timer and buy one more doomed attempt. Rare, but
+		// nondeterministic — and a test that passes by scheduler luck is worth
+		// less than no test.
+		if err := ctx.Err(); err != nil {
+			return zero, fmt.Errorf("after %d attempts: %w", attempt, err)
+		}
 		select {
 		case <-ctx.Done():
 			return zero, fmt.Errorf("after %d attempts: %w", attempt, ctx.Err())
