@@ -67,6 +67,12 @@ openclaw:
     # Max total identity-file bytes per tenant.
     maxTotalBytes: 512000
 
+# Optional CNPG CA for sslmode=verify-full. When set, ca.crt is mounted at
+# /etc/cnpg/ca.crt and the process upgrades AUDIT_DB_URL to verify-full.
+postgresCA:
+  secretName: ""
+  key: ca.crt
+
 # Name of an existing Secret to mount as envFrom (created by ExternalSecret)
 envFromSecret: ""
 

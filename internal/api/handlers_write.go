@@ -71,7 +71,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	tenantParam := extractTenantParam(op, input)
 	if op.AdminOnly {
 		if !user.IsAdmin() {
-			h.opts.AuditLog.Log(audit.Entry{
+			h.logAudit(r, audit.Entry{
 				UserID:    user.ID,
 				Operation: opName,
 				Status:    "denied",
@@ -96,7 +96,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		if !user.IsAdmin() {
 			existing := filterNonAdmin(user.Groups)
 			if len(existing) > 0 {
-				h.opts.AuditLog.Log(audit.Entry{
+				h.logAudit(r, audit.Entry{
 					UserID:    user.ID,
 					Operation: opName,
 					Status:    "denied",
@@ -111,7 +111,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		// Force creator_user_id from the authenticated session (prevent spoofing).
 		input["creator_user_id"] = user.ID
 	} else if !user.HasTenantAccess(tenantParam) {
-		h.opts.AuditLog.Log(audit.Entry{
+		h.logAudit(r, audit.Entry{
 			UserID:    user.ID,
 			Operation: opName,
 			Status:    "denied",
@@ -149,7 +149,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// Submit the Argo Workflow in the team's namespace (team-{name}).
 	result, err := h.opts.Executor.Submit(r.Context(), op, input, user.ID, tenantParam)
 	if err != nil {
-		h.opts.AuditLog.Log(audit.Entry{
+		h.logAudit(r, audit.Entry{
 			UserID:     user.ID,
 			Operation:  opName,
 			Parameters: auditParams,
@@ -161,7 +161,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.opts.AuditLog.Log(audit.Entry{
+	h.logAudit(r, audit.Entry{
 		UserID:       user.ID,
 		Operation:    opName,
 		Parameters:   auditParams,

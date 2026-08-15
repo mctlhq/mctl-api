@@ -159,6 +159,13 @@ components:
           enum: [low, medium, high]
         message:
           type: string
+        clientIp:
+          type: string
+          description: Client IP. X-Forwarded-For is used only when the peer is a configured Traefik CIDR.
+        userAgent:
+          type: string
+        requestId:
+          type: string
 
     ResourceUsage:
       type: object

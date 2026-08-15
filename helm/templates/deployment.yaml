@@ -101,6 +101,11 @@ spec:
               mountPath: /etc/gitops-ssh
               readOnly: true
             {{- end }}
+            {{- if and .Values.postgresCA .Values.postgresCA.secretName }}
+            - name: cnpg-ca
+              mountPath: /etc/cnpg
+              readOnly: true
+            {{- end }}
       volumes:
         - name: gitops-cache
           emptyDir:
@@ -110,4 +115,13 @@ spec:
           secret:
             secretName: {{ .Values.gitopsSSHSecret }}
             defaultMode: 0400
+        {{- end }}
+        {{- if and .Values.postgresCA .Values.postgresCA.secretName }}
+        - name: cnpg-ca
+          secret:
+            secretName: {{ .Values.postgresCA.secretName }}
+            items:
+              - key: {{ .Values.postgresCA.key | default "ca.crt" }}
+                path: ca.crt
+            defaultMode: 0444
         {{- end }}
