@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.32.4](https://github.com/mctlhq/mctl-api/compare/4.32.3...4.32.4) (2026-08-15)
+
+
+### Bug Fixes
+
+* **api:** drive shutdown from one root signal context ([7af8e96](https://github.com/mctlhq/mctl-api/commit/7af8e966c118b76db49b53542549a4842379593c)), closes [#166](https://github.com/mctlhq/mctl-api/issues/166)
+* **api:** release the signal handler without defer, and check ctx before the wait ([aba2708](https://github.com/mctlhq/mctl-api/commit/aba2708f2a3fafed448aa9299aad67097b0c06e2)), closes [#166](https://github.com/mctlhq/mctl-api/issues/166)
+* **api:** retry optional store init instead of giving up on the first try ([839b3cc](https://github.com/mctlhq/mctl-api/commit/839b3ccc0b309e26b620d521ba2eefdc9b1af7e7))
+* **api:** retry optional store init instead of giving up on the first try ([5affa40](https://github.com/mctlhq/mctl-api/commit/5affa405aa5e9940f5cc79f783b732f1da0420fa)), closes [#166](https://github.com/mctlhq/mctl-api/issues/166)
+* **api:** share one init budget across stores and honour SIGTERM ([bb729f4](https://github.com/mctlhq/mctl-api/commit/bb729f405c68c8a4e9f15e3dda1bd86cdb349ffb)), closes [#166](https://github.com/mctlhq/mctl-api/issues/166)
+
 ## [4.32.3](https://github.com/mctlhq/mctl-api/compare/4.32.2...4.32.3) (2026-08-15)
 
 
