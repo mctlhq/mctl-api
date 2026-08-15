@@ -95,9 +95,11 @@ func main() {
 		// When available, refresh tokens survive pod restarts; without it the in-memory
 		// fallback is used (tokens lost on restart — the original band-aid behaviour).
 		if oauthDBURL := postgresURL(envOr("OAUTH_DB_URL", os.Getenv("AUDIT_DB_URL"))); oauthDBURL != "" {
-			rs, rsErr := refreshstore.NewPostgresStore(context.Background(), oauthDBURL)
+			rs, rsErr := initStore(context.Background(), "oauth refresh", func(ctx context.Context) (*refreshstore.PostgresStore, error) {
+				return refreshstore.NewPostgresStore(ctx, oauthDBURL)
+			})
 			if rsErr != nil {
-				slog.Warn("oauth refresh store init failed; falling back to in-memory", "error", rsErr)
+				slog.Error("oauth refresh store init failed; falling back to in-memory (refresh tokens will not survive a restart)", "error", rsErr)
 			} else {
 				oauthServer.RefreshStore = rs
 				go func() {
@@ -119,9 +121,11 @@ func main() {
 
 	var auditLog audit.Log
 	if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		pgLog, pgErr := audit.NewPostgresLogger(context.Background(), dbURL)
+		pgLog, pgErr := initStore(context.Background(), "audit log", func(ctx context.Context) (*audit.PostgresLogger, error) {
+			return audit.NewPostgresLogger(ctx, dbURL)
+		})
 		if pgErr != nil {
-			slog.Warn("postgres audit log init failed, falling back to in-memory", "error", pgErr)
+			slog.Error("postgres audit log init failed, falling back to in-memory (audit trail will NOT be persisted)", "error", pgErr)
 			auditLog = audit.NewLogger()
 		} else {
 			auditLog = pgLog
@@ -133,16 +137,20 @@ func main() {
 	// Alert store (optional — enabled when ALERT_DB_URL or AUDIT_DB_URL is set).
 	var alertStore *alerts.Store
 	if alertDBURL := postgresURL(os.Getenv("ALERT_DB_URL")); alertDBURL != "" {
-		as, asErr := alerts.NewStore(context.Background(), alertDBURL)
+		as, asErr := initStore(context.Background(), "alert", func(ctx context.Context) (*alerts.Store, error) {
+			return alerts.NewStore(ctx, alertDBURL)
+		})
 		if asErr != nil {
-			slog.Warn("alert store init failed", "error", asErr)
+			slog.Error("alert store init failed; alert and incident endpoints will return 503", "error", asErr)
 		} else {
 			alertStore = as
 		}
 	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		as, asErr := alerts.NewStore(context.Background(), dbURL)
+		as, asErr := initStore(context.Background(), "alert", func(ctx context.Context) (*alerts.Store, error) {
+			return alerts.NewStore(ctx, dbURL)
+		})
 		if asErr != nil {
-			slog.Warn("alert store init failed (using AUDIT_DB_URL)", "error", asErr)
+			slog.Error("alert store init failed (using AUDIT_DB_URL); alert and incident endpoints will return 503", "error", asErr)
 		} else {
 			alertStore = as
 		}
@@ -151,16 +159,20 @@ func main() {
 	// Agent registry (optional — enabled when AGENT_REGISTRY_DB_URL or AUDIT_DB_URL is set).
 	var agentRegistryStore *agentregistry.Store
 	if agentRegistryDBURL := postgresURL(os.Getenv("AGENT_REGISTRY_DB_URL")); agentRegistryDBURL != "" {
-		ars, arsErr := agentregistry.NewStore(context.Background(), agentRegistryDBURL)
+		ars, arsErr := initStore(context.Background(), "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
+			return agentregistry.NewStore(ctx, agentRegistryDBURL)
+		})
 		if arsErr != nil {
-			slog.Warn("agent registry store init failed", "error", arsErr)
+			slog.Error("agent registry store init failed; agent registry endpoints will return 503", "error", arsErr)
 		} else {
 			agentRegistryStore = ars
 		}
 	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		ars, arsErr := agentregistry.NewStore(context.Background(), dbURL)
+		ars, arsErr := initStore(context.Background(), "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
+			return agentregistry.NewStore(ctx, dbURL)
+		})
 		if arsErr != nil {
-			slog.Warn("agent registry store init failed (using AUDIT_DB_URL)", "error", arsErr)
+			slog.Error("agent registry store init failed (using AUDIT_DB_URL); agent registry endpoints will return 503", "error", arsErr)
 		} else {
 			agentRegistryStore = ars
 		}
@@ -510,6 +522,57 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// Bounded so a genuinely unreachable database delays startup by ~7.75s once
+// (250ms + 500ms + 1s + 2s + 4s) rather than holding the process open: that
+// stays well inside the readiness probe's 10s initialDelaySeconds, so a pod
+// that ends up degraded still reports ready on schedule.
+const storeInitAttempts = 6
+
+// A var, not a const, only so tests can shrink it — nothing at runtime writes it.
+var storeInitBaseDelay = 250 * time.Millisecond
+
+// initStore opens an optional Postgres-backed store, retrying a failed attempt
+// instead of giving up on the first one.
+//
+// Every one of these stores connects and runs CREATE TABLE IF NOT EXISTS during
+// init, and init happens exactly once, here in main(), within milliseconds of
+// the process starting. A pod whose network is still settling loses that race
+// and gets "connection refused" — after which the store stays nil for the whole
+// life of the pod, because nothing ever tries again, and the warning is printed
+// once at startup so later logs look clean. That is how this service ran with
+// its alert endpoints returning 503, its agent registry disabled and its audit
+// trail in memory rather than on disk (#166): the failure was one lost race,
+// the outage was the absence of a second attempt.
+//
+// Retrying is safe: opening a pool and CREATE TABLE IF NOT EXISTS are both
+// idempotent. Every error is retried, not just connection refusals — telling a
+// transient network error from a permanent one by inspecting the message is
+// exactly the kind of guess that produced the five-month silence, and the cost
+// of being wrong is one bounded delay at startup.
+func initStore[T any](ctx context.Context, name string, newStore func(context.Context) (T, error)) (T, error) {
+	var zero T
+	delay := storeInitBaseDelay
+	for attempt := 1; ; attempt++ {
+		store, err := newStore(ctx)
+		if err == nil {
+			if attempt > 1 {
+				slog.Info("store init succeeded on retry", "store", name, "attempts", attempt)
+			}
+			return store, nil
+		}
+		if attempt >= storeInitAttempts {
+			return zero, fmt.Errorf("after %d attempts: %w", attempt, err)
+		}
+		slog.Warn("store init failed, retrying", "store", name, "attempt", attempt, "retry_in", delay, "error", err)
+		select {
+		case <-ctx.Done():
+			return zero, fmt.Errorf("after %d attempts: %w", attempt, ctx.Err())
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
 }
 
 func parseDuration(s string, fallback time.Duration) time.Duration {
