@@ -126,6 +126,17 @@ func TestEnforceTLS_VerifyFullWhenCAPresent(t *testing.T) {
 	}
 }
 
+func TestEnforceTLS_ParseErrorOmitsDSN(t *testing.T) {
+	t.Setenv("ALLOW_INSECURE_DB", "")
+	_, err := EnforceTLS("postgresql://u:dummy-pass@[")
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if strings.Contains(err.Error(), "dummy-pass") || strings.Contains(err.Error(), "postgresql://") {
+		t.Fatalf("parse error leaked DSN: %v", err)
+	}
+}
+
 func TestEnforceTLS_KeyValue(t *testing.T) {
 	t.Setenv("ALLOW_INSECURE_DB", "")
 	t.Setenv("PGSSLROOTCERT", "")

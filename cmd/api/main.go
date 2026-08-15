@@ -496,7 +496,7 @@ func postgresURL(raw string) string {
 	}
 	out, err := dburl.EnforceTLS(raw)
 	if err != nil {
-		slog.Error("postgres url tls enforce failed; refusing plaintext fallback", "error", err)
+		slog.Error("postgres url tls enforce failed; refusing plaintext fallback")
 		return ""
 	}
 	if out != raw {

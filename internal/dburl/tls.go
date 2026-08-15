@@ -70,7 +70,7 @@ func fileExists(path string) bool {
 func enforceURL(connStr string) (string, error) {
 	u, err := url.Parse(connStr)
 	if err != nil {
-		return "", fmt.Errorf("dburl: parse: %w", err)
+		return "", fmt.Errorf("dburl: parse failed")
 	}
 	q := u.Query()
 	applySSLMode(q)
@@ -106,7 +106,7 @@ func enforceKeyValue(connStr string) (string, error) {
 	for _, p := range parts {
 		k, v, ok := strings.Cut(p, "=")
 		if !ok {
-			return "", fmt.Errorf("dburl: invalid key=value pair %q", p)
+			return "", fmt.Errorf("dburl: invalid key=value pair")
 		}
 		if _, exists := vals[k]; !exists {
 			order = append(order, k)
