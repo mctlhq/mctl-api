@@ -34,6 +34,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
+	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/loki"
@@ -93,7 +94,7 @@ func main() {
 		// Persistent refresh-token store: prefer OAUTH_DB_URL, fall back to AUDIT_DB_URL.
 		// When available, refresh tokens survive pod restarts; without it the in-memory
 		// fallback is used (tokens lost on restart — the original band-aid behaviour).
-		if oauthDBURL := envOr("OAUTH_DB_URL", os.Getenv("AUDIT_DB_URL")); oauthDBURL != "" {
+		if oauthDBURL := postgresURL(envOr("OAUTH_DB_URL", os.Getenv("AUDIT_DB_URL"))); oauthDBURL != "" {
 			rs, rsErr := refreshstore.NewPostgresStore(context.Background(), oauthDBURL)
 			if rsErr != nil {
 				slog.Warn("oauth refresh store init failed; falling back to in-memory", "error", rsErr)
@@ -117,7 +118,7 @@ func main() {
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
 
 	var auditLog audit.Log
-	if dbURL := os.Getenv("AUDIT_DB_URL"); dbURL != "" {
+	if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
 		pgLog, pgErr := audit.NewPostgresLogger(context.Background(), dbURL)
 		if pgErr != nil {
 			slog.Warn("postgres audit log init failed, falling back to in-memory", "error", pgErr)
@@ -131,14 +132,14 @@ func main() {
 
 	// Alert store (optional — enabled when ALERT_DB_URL or AUDIT_DB_URL is set).
 	var alertStore *alerts.Store
-	if alertDBURL := os.Getenv("ALERT_DB_URL"); alertDBURL != "" {
+	if alertDBURL := postgresURL(os.Getenv("ALERT_DB_URL")); alertDBURL != "" {
 		as, asErr := alerts.NewStore(context.Background(), alertDBURL)
 		if asErr != nil {
 			slog.Warn("alert store init failed", "error", asErr)
 		} else {
 			alertStore = as
 		}
-	} else if dbURL := os.Getenv("AUDIT_DB_URL"); dbURL != "" {
+	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
 		as, asErr := alerts.NewStore(context.Background(), dbURL)
 		if asErr != nil {
 			slog.Warn("alert store init failed (using AUDIT_DB_URL)", "error", asErr)
@@ -149,14 +150,14 @@ func main() {
 
 	// Agent registry (optional — enabled when AGENT_REGISTRY_DB_URL or AUDIT_DB_URL is set).
 	var agentRegistryStore *agentregistry.Store
-	if agentRegistryDBURL := os.Getenv("AGENT_REGISTRY_DB_URL"); agentRegistryDBURL != "" {
+	if agentRegistryDBURL := postgresURL(os.Getenv("AGENT_REGISTRY_DB_URL")); agentRegistryDBURL != "" {
 		ars, arsErr := agentregistry.NewStore(context.Background(), agentRegistryDBURL)
 		if arsErr != nil {
 			slog.Warn("agent registry store init failed", "error", arsErr)
 		} else {
 			agentRegistryStore = ars
 		}
-	} else if dbURL := os.Getenv("AUDIT_DB_URL"); dbURL != "" {
+	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
 		ars, arsErr := agentregistry.NewStore(context.Background(), dbURL)
 		if arsErr != nil {
 			slog.Warn("agent registry store init failed (using AUDIT_DB_URL)", "error", arsErr)
@@ -290,6 +291,11 @@ func main() {
 		vaultReady = checker.Health
 	}
 
+	trustedProxies, tpErr := mctlapi.ParseTrustedProxyCIDRs(cfg.TrustedProxyCIDRs)
+	if tpErr != nil {
+		slog.Warn("TRUSTED_PROXY_CIDRS parse failed; X-Forwarded-For will not be trusted", "error", tpErr)
+	}
+
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Registry:               registry,
 		GitReader:              gitReader,
@@ -318,6 +324,7 @@ func main() {
 		VaultReady:             vaultReady,
 		ArgoWebhookSecret:      cfg.ArgoWebhookSecret,
 		OAuthRegistrationToken: cfg.OAuthRegistrationToken,
+		TrustedProxyCIDRs:      trustedProxies,
 	})
 
 	srv := &http.Server{
@@ -395,6 +402,7 @@ type config struct {
 	VictoriaMetricsURL       string
 	ArgoWebhookSecret        string
 	OAuthRegistrationToken   string
+	TrustedProxyCIDRs        string
 }
 
 func loadConfig() config {
@@ -476,7 +484,25 @@ func loadConfig() config {
 		VictoriaMetricsURL:       envOr("VICTORIA_METRICS_URL", "http://vmsingle-monitoring-victoria-metrics-k8s-stack.monitoring.svc:8428"),
 		ArgoWebhookSecret:        os.Getenv("ARGO_WEBHOOK_SECRET"),
 		OAuthRegistrationToken:   os.Getenv("OAUTH_REGISTRATION_TOKEN"),
+		TrustedProxyCIDRs:        os.Getenv("TRUSTED_PROXY_CIDRS"),
 	}
+}
+
+// postgresURL requires TLS to CNPG unless ALLOW_INSECURE_DB is set.
+// The returned string is never logged — it may contain credentials.
+func postgresURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	out, err := dburl.EnforceTLS(raw)
+	if err != nil {
+		slog.Warn("postgres url tls enforce failed; using original", "error", err)
+		return raw
+	}
+	if out != raw {
+		slog.Info("postgres connection upgraded to require TLS")
+	}
+	return out
 }
 
 func envOr(key, fallback string) string {

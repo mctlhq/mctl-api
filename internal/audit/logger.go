@@ -33,6 +33,9 @@ type Entry struct {
 	Status       string            `json:"status"` // submitted, succeeded, failed
 	RiskLevel    string            `json:"riskLevel"`
 	Message      string            `json:"message,omitempty"`
+	ClientIP     string            `json:"clientIp,omitempty"`
+	UserAgent    string            `json:"userAgent,omitempty"`
+	RequestID    string            `json:"requestId,omitempty"`
 }
 
 // Log is the interface for recording and querying audit events.

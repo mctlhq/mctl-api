@@ -15,6 +15,7 @@
 package api
 
 import (
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -94,6 +95,9 @@ type Options struct {
 	// OAuthRegistrationToken, when non-empty, requires Authorization: Bearer
 	// <token> on POST /oauth/register (RFC 7591 initial access token).
 	OAuthRegistrationToken string
+	// TrustedProxyCIDRs are Traefik (or other ingress) source ranges. X-Forwarded-For
+	// is used for audit client IP only when RemoteAddr is in this list.
+	TrustedProxyCIDRs []*net.IPNet
 }
 
 // Handlers holds all API handler dependencies.
@@ -116,8 +120,10 @@ func NewRouter(opts Options) http.Handler {
 
 	r := chi.NewRouter()
 
-	// Infrastructure middleware (no auth).
+	// Infrastructure middleware (no auth). Capture original RemoteAddr for
+	// audit before chi RealIP rewrites it from X-Forwarded-For.
 	r.Use(middleware.RequestID)
+	r.Use(clientMetaMiddleware(opts.TrustedProxyCIDRs))
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders())

@@ -128,7 +128,9 @@ docker run -p 8080:8080 mctl-api
 | `OAUTH_GITHUB_CLIENT_SECRET` | GitHub OAuth app client secret | — | No |
 | `OAUTH_JWT_SECRET` | JWT signing secret for OAuth tokens | — | No |
 | `OAUTH_ALLOWED_REDIRECT_URIS` | Allowed OAuth redirect URIs | — | No |
-| `AUDIT_DB_URL` | PostgreSQL connection string (falls back to in-memory) | — | No |
+| `AUDIT_DB_URL` | PostgreSQL connection string (falls back to in-memory). `sslmode=disable` is upgraded to `require`, or `verify-full` when a CNPG CA is mounted. | — | No |
+| `TRUSTED_PROXY_CIDRS` | Comma-separated Traefik CIDRs/IPs trusted for `X-Forwarded-For` on audit events | — | No |
+| `ALLOW_INSECURE_DB` | Permit `sslmode=disable` (tests/local only) | — | No |
 | `BACKSTAGE_URL` | Backstage catalog URL | — | No |
 | `BACKSTAGE_TOKEN` | Backstage service token | — | No |
 | `LOKI_URL` | Loki base URL for log queries | — | No |
