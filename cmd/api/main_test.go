@@ -125,22 +125,65 @@ func TestInitStoreStopsOnCancelledContext(t *testing.T) {
 	}
 }
 
-func TestInitStoreBackoffDoublesWithinBudget(t *testing.T) {
-	// 250ms + 500ms + 1s + 2s + 4s across five waits: the comment on
-	// storeInitBaseDelay promises this stays under the readiness probe's 10s
-	// initialDelaySeconds, and a pod that starts late is exactly the failure
-	// this change is meant to avoid re-introducing.
-	total := time.Duration(0)
+func TestStoreInitBudgetBoundsStartup(t *testing.T) {
+	// 250ms + 500ms + 1s + 2s + 4s across five waits — one store's full ladder.
+	ladder := time.Duration(0)
 	delay := storeInitBaseDelay
 	for i := 1; i < storeInitAttempts; i++ {
-		total += delay
+		ladder += delay
 		delay *= 2
 	}
 
-	if want := 7750 * time.Millisecond; total != want {
-		t.Errorf("total backoff = %v, want %v", total, want)
+	if want := 7750 * time.Millisecond; ladder != want {
+		t.Errorf("single-store ladder = %v, want %v", ladder, want)
 	}
-	if total >= 10*time.Second {
-		t.Errorf("total backoff %v must stay under the readiness probe's 10s initial delay", total)
+	// A lone store should still get every attempt it is promised.
+	if storeInitBudget < ladder {
+		t.Errorf("budget %v is shorter than one store's ladder %v", storeInitBudget, ladder)
+	}
+	// The readiness probe's first check (helm/templates/deployment.yaml:
+	// initialDelaySeconds: 10). The budget, not the ladder, is what bounds
+	// startup — four stores are initialised in sequence.
+	if storeInitBudget >= 10*time.Second {
+		t.Errorf("budget %v must stay under the readiness probe's 10s initial delay", storeInitBudget)
+	}
+}
+
+func TestInitStoreSharedDeadlineStopsLaterStores(t *testing.T) {
+	// The regression this guards: with a per-call budget, four stores pointed
+	// at the same dead database each ran a full ladder in turn, so the real
+	// worst case was four times the one advertised. A shared deadline has to
+	// leave the later stores nothing to spend.
+	// Deliberately not shrinkStoreInitDelay's microseconds: the deadline has to
+	// expire *during* the first store's ladder for the test to mean anything.
+	// One ladder here is 1+2+4+8+16 = 31ms, and the budget below is 10ms.
+	original := storeInitBaseDelay
+	storeInitBaseDelay = time.Millisecond
+	t.Cleanup(func() { storeInitBaseDelay = original })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	attempts := 0
+	counting := func(context.Context) (string, error) {
+		attempts++
+		return "", errors.New("connection refused")
+	}
+
+	for _, name := range []string{"oauth refresh", "audit log", "alert", "agent registry"} {
+		if _, err := initStore(ctx, name, counting); err == nil {
+			t.Fatalf("%s: expected an error against a dead database", name)
+		}
+	}
+	elapsed := time.Since(start)
+
+	// Four independent budgets would be four full ladders; one shared deadline
+	// is spent by the first store and the rest fail out immediately.
+	if elapsed > time.Second {
+		t.Errorf("four stores took %v — the deadline is not shared", elapsed)
+	}
+	if attempts >= 4*storeInitAttempts {
+		t.Errorf("attempts = %d — every store ran a full ladder, so each had its own budget", attempts)
 	}
 }

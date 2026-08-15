@@ -75,6 +75,26 @@ func main() {
 	// Auth middleware: validates GitHub tokens or Dex JWTs.
 	ghValidator := auth.NewGitHubValidator(cfg.AdminUsers)
 
+	// One budget shared by every optional store below, for two reasons.
+	//
+	// The stores are initialised sequentially, so a per-store budget would
+	// multiply: with all four pointed at the same unreachable AUDIT_DB_URL
+	// they would each burn a full ladder in turn and hold up the listener for
+	// four times as long as any single one of them promises. The deadline is
+	// global so the worst case is what it says it is, whether one store is
+	// configured or four.
+	//
+	// It is also signal-derived, so a SIGTERM arriving while a store is
+	// retrying against a database that is genuinely down cuts the wait short
+	// instead of being queued behind the whole ladder — the shutdown handler
+	// further down is not reached until init returns.
+	//
+	// None of the four constructors retain this context: each uses it for
+	// pgxpool.New and the schema Exec, then keeps only the pool. So it is
+	// safe to release it once the last store is built.
+	initCtx, stopInitSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	initCtx, cancelInit := context.WithTimeout(initCtx, storeInitBudget)
+
 	// OAuth 2.0 server (optional — disabled if OAUTH_GITHUB_CLIENT_ID is unset).
 	var oauthServer *auth.OAuthServer
 	if cfg.OAuthGitHubClientID != "" && cfg.OAuthJWTSecret != "" {
@@ -95,7 +115,7 @@ func main() {
 		// When available, refresh tokens survive pod restarts; without it the in-memory
 		// fallback is used (tokens lost on restart — the original band-aid behaviour).
 		if oauthDBURL := postgresURL(envOr("OAUTH_DB_URL", os.Getenv("AUDIT_DB_URL"))); oauthDBURL != "" {
-			rs, rsErr := initStore(context.Background(), "oauth refresh", func(ctx context.Context) (*refreshstore.PostgresStore, error) {
+			rs, rsErr := initStore(initCtx, "oauth refresh", func(ctx context.Context) (*refreshstore.PostgresStore, error) {
 				return refreshstore.NewPostgresStore(ctx, oauthDBURL)
 			})
 			if rsErr != nil {
@@ -121,7 +141,7 @@ func main() {
 
 	var auditLog audit.Log
 	if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		pgLog, pgErr := initStore(context.Background(), "audit log", func(ctx context.Context) (*audit.PostgresLogger, error) {
+		pgLog, pgErr := initStore(initCtx, "audit log", func(ctx context.Context) (*audit.PostgresLogger, error) {
 			return audit.NewPostgresLogger(ctx, dbURL)
 		})
 		if pgErr != nil {
@@ -137,7 +157,7 @@ func main() {
 	// Alert store (optional — enabled when ALERT_DB_URL or AUDIT_DB_URL is set).
 	var alertStore *alerts.Store
 	if alertDBURL := postgresURL(os.Getenv("ALERT_DB_URL")); alertDBURL != "" {
-		as, asErr := initStore(context.Background(), "alert", func(ctx context.Context) (*alerts.Store, error) {
+		as, asErr := initStore(initCtx, "alert", func(ctx context.Context) (*alerts.Store, error) {
 			return alerts.NewStore(ctx, alertDBURL)
 		})
 		if asErr != nil {
@@ -146,7 +166,7 @@ func main() {
 			alertStore = as
 		}
 	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		as, asErr := initStore(context.Background(), "alert", func(ctx context.Context) (*alerts.Store, error) {
+		as, asErr := initStore(initCtx, "alert", func(ctx context.Context) (*alerts.Store, error) {
 			return alerts.NewStore(ctx, dbURL)
 		})
 		if asErr != nil {
@@ -159,7 +179,7 @@ func main() {
 	// Agent registry (optional — enabled when AGENT_REGISTRY_DB_URL or AUDIT_DB_URL is set).
 	var agentRegistryStore *agentregistry.Store
 	if agentRegistryDBURL := postgresURL(os.Getenv("AGENT_REGISTRY_DB_URL")); agentRegistryDBURL != "" {
-		ars, arsErr := initStore(context.Background(), "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
+		ars, arsErr := initStore(initCtx, "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
 			return agentregistry.NewStore(ctx, agentRegistryDBURL)
 		})
 		if arsErr != nil {
@@ -168,7 +188,7 @@ func main() {
 			agentRegistryStore = ars
 		}
 	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		ars, arsErr := initStore(context.Background(), "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
+		ars, arsErr := initStore(initCtx, "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
 			return agentregistry.NewStore(ctx, dbURL)
 		})
 		if arsErr != nil {
@@ -177,6 +197,12 @@ func main() {
 			agentRegistryStore = ars
 		}
 	}
+
+	// Released here rather than deferred to the end of main: the deadline has
+	// served its purpose, and leaving the signal handler installed would keep
+	// intercepting SIGTERM alongside the shutdown handler registered below.
+	cancelInit()
+	stopInitSignals()
 
 	// Temporal client for DevLoopWorkflow (optional — enabled when
 	// TEMPORAL_ADDRESS is set). Same graceful-degradation pattern as
@@ -524,11 +550,22 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// Bounded so a genuinely unreachable database delays startup by ~7.75s once
-// (250ms + 500ms + 1s + 2s + 4s) rather than holding the process open: that
-// stays well inside the readiness probe's 10s initialDelaySeconds, so a pod
-// that ends up degraded still reports ready on schedule.
-const storeInitAttempts = 6
+const (
+	// One store's ladder: 250ms + 500ms + 1s + 2s + 4s = 7.75s of waiting
+	// across 6 attempts.
+	storeInitAttempts = 6
+
+	// The ceiling on ALL optional store init combined, not on any one store.
+	// The stores are built sequentially, so without a shared deadline four of
+	// them pointed at the same dead database would each run their own ladder
+	// and stall the listener for roughly four times as long.
+	//
+	// 8s leaves a lone store its full ladder while keeping the process
+	// listening before the readiness probe's first check at
+	// initialDelaySeconds: 10 (helm/templates/deployment.yaml), so a degraded
+	// pod still reports ready on schedule instead of looking hung.
+	storeInitBudget = 8 * time.Second
+)
 
 // A var, not a const, only so tests can shrink it — nothing at runtime writes it.
 var storeInitBaseDelay = 250 * time.Millisecond
@@ -555,6 +592,15 @@ func initStore[T any](ctx context.Context, name string, newStore func(context.Co
 	var zero T
 	delay := storeInitBaseDelay
 	for attempt := 1; ; attempt++ {
+		// Checked before the attempt, not only in the wait below: the deadline
+		// is shared with the other stores, so by the time a later one is
+		// reached it may already be spent. Without this the loop would still
+		// run its full count of doomed attempts against a context that can
+		// never succeed — which is the multiplication this budget exists to
+		// prevent, just faster.
+		if err := ctx.Err(); err != nil {
+			return zero, fmt.Errorf("before attempt %d: %w", attempt, err)
+		}
 		store, err := newStore(ctx)
 		if err == nil {
 			if attempt > 1 {
