@@ -1,5 +1,15 @@
 # Changelog
 
+## [4.32.3](https://github.com/mctlhq/mctl-api/compare/4.32.2...4.32.3) (2026-08-15)
+
+
+### Bug Fixes
+
+* **api:** omit DSN from TLS parse errors ([ac52260](https://github.com/mctlhq/mctl-api/commit/ac52260428d9deaedc65abcdb3adc5e68ff8d876))
+* **api:** require CNPG TLS and record audit IP/UA ([97bbb69](https://github.com/mctlhq/mctl-api/commit/97bbb695b5c2ac0573073c504cabbd2798979e65))
+* **api:** require CNPG TLS and record audit IP/UA ([c6f33fe](https://github.com/mctlhq/mctl-api/commit/c6f33feb49a7a97c360e2eb45f0affa27550a4bb))
+* **api:** take rightmost XFF hop and refuse TLS parse fallback ([0ee216d](https://github.com/mctlhq/mctl-api/commit/0ee216d0053aa00b8093ae56a5136f8a3ecf4cd7))
+
 ## [4.32.2](https://github.com/mctlhq/mctl-api/compare/4.32.1...4.32.2) (2026-08-14)
 
 
