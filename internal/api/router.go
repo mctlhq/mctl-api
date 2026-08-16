@@ -174,7 +174,17 @@ func NewRouter(opts Options) http.Handler {
 		r.Post("/oauth/revoke", h.handleOAuthRevoke)
 	})
 	r.Group(func(r chi.Router) {
-		r.Use(httprate.Limit(5, 1*time.Minute, httprate.WithKeyFuncs(httprate.KeyByRealIP)))
+		// Keyed by IP, so every process of one desktop MCP client shares the
+		// budget. That broke the Antigravity CLI at the previous limit of 5:
+		// it fans out across ~8 processes that each run their own dynamic
+		// registration on start, and the whole cold start therefore 429'd
+		// every time, with no path to a token at all.
+		//
+		// The low limit was carrying the memory bound as well, since the
+		// registration map was unbounded. That is now capped and evicting
+		// (OAuthServer.MaxRegisteredClients), so this can be sized for real
+		// client behaviour and still stay far below what abuse would need.
+		r.Use(httprate.Limit(30, 1*time.Minute, httprate.WithKeyFuncs(httprate.KeyByRealIP)))
 		r.Post("/oauth/register", h.handleOAuthRegister)
 	})
 

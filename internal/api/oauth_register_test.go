@@ -177,13 +177,23 @@ func TestOAuthRegister_RequiresInitialTokenWhenConfigured(t *testing.T) {
 func TestOAuthRegister_RateLimit(t *testing.T) {
 	router := NewRouter(Options{OAuthServer: newTestOAuth()})
 	body := `{"client_name":"cli","redirect_uris":["http://127.0.0.1:9/callback"]}`
+
+	// A desktop MCP client that fans out across processes registers once per
+	// process on a cold start, and they all share one IP. Ten in a burst must
+	// go through, or the client can never reach a token — that is exactly how
+	// the Antigravity CLI failed against the previous limit of 5.
+	for i := 0; i < 10; i++ {
+		if rec := postRegister(router, body, ""); rec.Code != http.StatusCreated {
+			t.Fatalf("burst registration %d: status = %d, want 201", i+1, rec.Code)
+		}
+	}
+
 	var last int
-	for i := 0; i < 6; i++ {
-		rec := postRegister(router, body, "")
-		last = rec.Code
+	for i := 0; i < 40; i++ {
+		last = postRegister(router, body, "").Code
 	}
 	if last != http.StatusTooManyRequests {
-		t.Fatalf("6th register status = %d, want 429", last)
+		t.Fatalf("sustained registration status = %d, want 429 — the endpoint is unauthenticated and must still throttle", last)
 	}
 }
 

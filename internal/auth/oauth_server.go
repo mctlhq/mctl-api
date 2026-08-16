@@ -64,10 +64,25 @@ type OAuthServer struct {
 	// refresh tokens survive pod restarts. Inject via main.go after construction.
 	RefreshStore refreshstore.Store
 
+	// MaxRegisteredClients caps how many RFC 7591 dynamic registrations are
+	// held at once. /oauth/register is unauthenticated, so without a ceiling
+	// the map grows for the lifetime of the process — and it grows during
+	// ordinary use, not just under attack: an MCP client that fans out across
+	// several processes registers a separate client per process on every
+	// start. When the cap is reached the oldest entry is evicted. 0 selects
+	// defaultMaxRegisteredClients.
+	MaxRegisteredClients int
+
 	codes         authCodeStore
 	refreshTokens refreshTokenStore
-	clients       sync.Map // clientID → RegisteredClient (RFC 7591)
+	clientsMu     sync.Mutex
+	clients       map[string]RegisteredClient // clientID → client (RFC 7591)
 }
+
+// defaultMaxRegisteredClients bounds the dynamic-registration map when
+// MaxRegisteredClients is unset. Matches the ceiling mctl-telegram applies to
+// the same endpoint.
+const defaultMaxRegisteredClients = 1000
 
 // RegisteredClient stores a dynamically registered OAuth client (RFC 7591).
 type RegisteredClient struct {
@@ -89,17 +104,54 @@ func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) Registe
 		RedirectURIs: redirectURIs,
 		CreatedAt:    time.Now(),
 	}
-	s.clients.Store(clientID, client)
+
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	if s.clients == nil {
+		s.clients = make(map[string]RegisteredClient)
+	}
+	max := s.MaxRegisteredClients
+	if max <= 0 {
+		max = defaultMaxRegisteredClients
+	}
+	for len(s.clients) >= max {
+		// Evict by registration time. Anything still in flight was registered
+		// seconds ago, so at a cap of this size the victim is always a stale
+		// entry unless the map is being deliberately churned — and in that
+		// case dropping registrations beats growing without bound.
+		var oldestID string
+		var oldestAt time.Time
+		for id, c := range s.clients {
+			if oldestID == "" || c.CreatedAt.Before(oldestAt) {
+				oldestID, oldestAt = id, c.CreatedAt
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(s.clients, oldestID)
+	}
+	s.clients[clientID] = client
 	return client
 }
 
 // GetClient returns a registered client by ID, or false if not found.
 func (s *OAuthServer) GetClient(clientID string) (RegisteredClient, bool) {
-	v, ok := s.clients.Load(clientID)
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	c, ok := s.clients[clientID]
 	if !ok {
 		return RegisteredClient{}, false
 	}
-	return v.(RegisteredClient), true
+	return c, true
+}
+
+// RegisteredClientCount reports how many dynamic registrations are held.
+// Exported for tests and for operational visibility into the cap.
+func (s *OAuthServer) RegisteredClientCount() int {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	return len(s.clients)
 }
 
 // NewOAuthServer creates a ready-to-use OAuthServer with sensible defaults.
