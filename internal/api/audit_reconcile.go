@@ -120,7 +120,10 @@ func (r *auditReconciler) reconcileOnce(ctx context.Context) {
 }
 
 func (r *auditReconciler) reconcileBatch(ctx context.Context, pending []audit.Entry, closed, gone *int) {
-	for _, e := range pending {
+	// Indexed rather than ranged by value: audit.Entry is 192 bytes and this
+	// loop runs over every pending row on every tick (gocritic rangeValCopy).
+	for i := range pending {
+		e := &pending[i]
 		select {
 		case <-ctx.Done():
 			return
@@ -134,7 +137,7 @@ func (r *auditReconciler) reconcileBatch(ctx context.Context, pending []audit.En
 			// alone rather than guess.
 			continue
 		}
-		ns := operations.WorkflowNamespace(op.WorkflowTemplate, auditEntryTenant(&e))
+		ns := operations.WorkflowNamespace(op.WorkflowTemplate, auditEntryTenant(e))
 		if ns == "" {
 			continue
 		}
