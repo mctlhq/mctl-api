@@ -63,22 +63,46 @@ func TestGetClient_ExpiredRegistrationReadsAsAbsent(t *testing.T) {
 // The cap alone cannot bound staleness: a client that registers once per
 // process on every start fills the map with dead entries, and eviction then
 // discards live registrations to make room for them.
-func TestRegisterClient_ExpiredEvictedBeforeLiveOnes(t *testing.T) {
+func TestRegisterClient_SweepsExpiredBeforeConsultingCap(t *testing.T) {
 	s := newExpiryTestServer(time.Hour)
-	s.MaxRegisteredClients = 3
+	s.MaxRegisteredClients = 2
 
-	stale := s.RegisterClient("stale", []string{"http://127.0.0.1:1/cb"})
-	s.age(t, stale.ClientID, 2*time.Hour)
-	live := s.RegisterClient("live", []string{"http://127.0.0.1:2/cb"})
+	c1 := s.RegisterClient("c1", []string{"http://127.0.0.1:1/cb"})
+	c2 := s.RegisterClient("c2", []string{"http://127.0.0.1:2/cb"})
+	s.age(t, c1.ClientID, 2*time.Hour)
+	s.age(t, c2.ClientID, 2*time.Hour)
 
-	// Registering again must reclaim the stale slot, not the live one.
-	s.RegisterClient("new", []string{"http://127.0.0.1:3/cb"})
+	s.RegisterClient("fresh", []string{"http://127.0.0.1:3/cb"})
 
-	if _, ok := s.GetClient(stale.ClientID); ok {
-		t.Error("stale registration survived")
+	// Count, not GetClient: GetClient expires on read, so asking it about an
+	// aged entry answers "gone" whether or not RegisterClient ever swept, and
+	// an assertion built on it passes with the sweep deleted.
+	//
+	// The count separates the two behaviours. Sweep first: both aged entries
+	// go, leaving 1. Cap only: the loop runs while len >= 2, so it evicts a
+	// single oldest entry and stops, leaving 2. Both entries are aged
+	// identically so that cap-eviction — which picks the oldest — cannot
+	// stand in for the sweep and mask its absence.
+	if got := s.RegisteredClientCount(); got != 1 {
+		t.Errorf("client count = %d, want 1 — expired entries must be swept before the cap is consulted", got)
 	}
-	if _, ok := s.GetClient(live.ClientID); !ok {
-		t.Error("live registration was evicted while a stale one remained")
+}
+
+// The sweep must not reclaim entries that are merely old-ish but still valid.
+func TestRegisterClient_CapEvictionStillAppliesToLiveEntries(t *testing.T) {
+	s := newExpiryTestServer(time.Hour)
+	s.MaxRegisteredClients = 2
+
+	oldest := s.RegisterClient("oldest", []string{"http://127.0.0.1:1/cb"})
+	s.age(t, oldest.ClientID, 30*time.Minute) // aged, not expired
+	s.RegisterClient("middle", []string{"http://127.0.0.1:2/cb"})
+	s.RegisterClient("newest", []string{"http://127.0.0.1:3/cb"})
+
+	if got := s.RegisteredClientCount(); got != 2 {
+		t.Errorf("client count = %d, want it held at the cap of 2", got)
+	}
+	if _, ok := s.GetClient(oldest.ClientID); ok {
+		t.Error("cap eviction should have dropped the oldest live entry")
 	}
 }
 
