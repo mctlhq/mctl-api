@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
@@ -432,11 +433,22 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	// URIs count — not some other client's previously registered URIs.
 	for _, uri := range req.RedirectURIs {
 		if !o.IsRedirectURIAllowed("", uri) {
+			// Name the offending URI. A bare "redirect_uri is not allowed"
+			// tells an operator nothing about which entry to add when a new
+			// MCP client fails to register, and the DCR request body is not
+			// recoverable afterwards — the only way to find out was to
+			// intercept the client's own traffic. The value is the caller's
+			// own input echoed into a JSON body, so this leaks nothing about
+			// the allowlist itself; bound it so an oversized submission
+			// cannot inflate the response or the log line.
+			shown := truncateRedirectURI(uri)
+			slog.Warn("OAuth client registration rejected: redirect_uri not allowed",
+				"redirect_uri", shown, "client_name", req.ClientName)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error":             "invalid_redirect_uri",
-				"error_description": "redirect_uri is not allowed",
+				"error_description": fmt.Sprintf("redirect_uri %q is not allowed", shown),
 			})
 			return
 		}
@@ -528,6 +540,30 @@ func oauthError(w http.ResponseWriter, redirectURI, state, errCode, errDesc stri
 	target.RawQuery = q.Encode()
 	w.Header().Set("Location", target.String())
 	w.WriteHeader(http.StatusFound)
+}
+
+// maxShownRedirectURILen bounds how much of a rejected redirect_uri is echoed
+// back to the caller and written to the log. RFC 7591 puts no limit on
+// redirect_uris, so an unbounded echo would let a single request write an
+// arbitrarily large log line.
+const maxShownRedirectURILen = 512
+
+// truncateRedirectURI clips uri to maxShownRedirectURILen on a rune boundary,
+// so a multi-byte sequence is never cut in half and the result stays valid
+// UTF-8 for both JSON encoding and the log.
+func truncateRedirectURI(uri string) string {
+	if len(uri) <= maxShownRedirectURILen {
+		return uri
+	}
+	uri = uri[:maxShownRedirectURILen]
+	for len(uri) > 0 && !utf8.ValidString(uri) {
+		_, size := utf8.DecodeLastRuneInString(uri)
+		if size <= 0 {
+			break
+		}
+		uri = uri[:len(uri)-size]
+	}
+	return uri + "..."
 }
 
 func tokenError(w http.ResponseWriter, errCode, errDesc string) {

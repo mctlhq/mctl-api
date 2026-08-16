@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
@@ -36,6 +37,50 @@ func TestOAuthRegister_RejectsUnallowlistedRedirect(t *testing.T) {
 	}
 	if body["error"] != "invalid_redirect_uri" {
 		t.Errorf("error = %q, want invalid_redirect_uri", body["error"])
+	}
+	// The description must name the offending URI: it is the only signal an
+	// operator gets about which allowlist entry a new MCP client needs, and
+	// the DCR request body is gone by the time anyone investigates.
+	if !strings.Contains(body["error_description"], "https://evil.com/cb") {
+		t.Errorf("error_description = %q, want it to name the rejected redirect_uri", body["error_description"])
+	}
+}
+
+func TestOAuthRegister_TruncatesOversizedRejectedRedirect(t *testing.T) {
+	router := NewRouter(Options{OAuthServer: newTestOAuth()})
+	long := "https://evil.com/" + strings.Repeat("a", maxShownRedirectURILen*3)
+	rec := postRegister(router, `{"client_name":"evil","redirect_uris":["`+long+`"]}`, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	// Bounded so one request cannot inflate the response or the log line,
+	// but still long enough to identify the client that sent it.
+	if len(body["error_description"]) > maxShownRedirectURILen+64 {
+		t.Errorf("error_description length = %d, want it bounded near %d", len(body["error_description"]), maxShownRedirectURILen)
+	}
+	if !strings.Contains(body["error_description"], "https://evil.com/") {
+		t.Errorf("error_description = %q, want the leading portion of the URI retained", body["error_description"])
+	}
+}
+
+func TestTruncateRedirectURI(t *testing.T) {
+	short := "https://antigravity.google/oauth/callback"
+	if got := truncateRedirectURI(short); got != short {
+		t.Errorf("truncateRedirectURI(short) = %q, want it unchanged", got)
+	}
+	// Multi-byte runes straddling the cut must not be split in half, or the
+	// result is invalid UTF-8 and json.Encode silently replaces bytes.
+	multibyte := "https://evil.com/" + strings.Repeat("д", maxShownRedirectURILen)
+	got := truncateRedirectURI(multibyte)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncateRedirectURI produced invalid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("truncateRedirectURI(long) = %q, want a truncation marker", got)
 	}
 }
 
