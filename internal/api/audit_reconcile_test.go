@@ -194,8 +194,9 @@ func TestReconcileSkipsWhenNamespaceUnknown(t *testing.T) {
 	}
 }
 
-// The batch cap must not starve old rows: a backlog larger than the batch has
-// to drain from the oldest end, or the stuck rows are never examined at all.
+// Oldest-first: the queue drains from the old end, because an old submitted row
+// is the one most likely to be genuinely stuck. With batch=1 the pass pages
+// through all three, in age order.
 func TestReconcileDrainsOldestFirst(t *testing.T) {
 	log := audit.NewLogger()
 	submit(t, log, "wf-oldest", "labs", 48*time.Hour)
@@ -210,11 +211,14 @@ func TestReconcileDrainsOldestFirst(t *testing.T) {
 
 	r.reconcileOnce(context.Background())
 
-	if len(getter.calls) != 1 || getter.calls[0] != "labs/wf-oldest" {
-		t.Fatalf("lookups = %v, want the oldest row only", getter.calls)
+	want := []string{"labs/wf-oldest", "labs/wf-middle", "labs/wf-newest"}
+	if len(getter.calls) != len(want) {
+		t.Fatalf("lookups = %v, want %v", getter.calls, want)
 	}
-	if got := log.GetByWorkflow("wf-newest"); got.Status != "submitted" {
-		t.Errorf("newest row = %q, should not have been reached with batch=1", got.Status)
+	for i := range want {
+		if getter.calls[i] != want[i] {
+			t.Fatalf("lookups = %v, want %v (oldest first)", getter.calls, want)
+		}
 	}
 }
 
@@ -249,5 +253,59 @@ func TestReconcileIgnoresAlreadyTerminalRows(t *testing.T) {
 	}
 	if got := log.GetByWorkflow("wf-done"); got.Status != "succeeded" {
 		t.Errorf("status = %q, want it to stay %q", got.Status, "succeeded")
+	}
+}
+
+// Head-of-line blocking: rows that cannot be resolved yet stay among the oldest
+// forever. Without paging past them, a batch-sized clump of stuck rows would
+// occupy every pass and no newer completed workflow would ever be closed.
+func TestReconcilePagesPastUnresolvableRows(t *testing.T) {
+	log := audit.NewLogger()
+	// Two old rows that never resolve: still Running in Argo.
+	submit(t, log, "wf-stuck-1", "labs", 48*time.Hour)
+	submit(t, log, "wf-stuck-2", "labs", 47*time.Hour)
+	// One newer row that is finished and should be closed this pass.
+	submit(t, log, "wf-finished", "labs", time.Minute)
+
+	getter := &fakeStatusGetter{phase: map[string]string{
+		"wf-stuck-1":  "Running",
+		"wf-stuck-2":  "Running",
+		"wf-finished": "Succeeded",
+	}}
+	r := newTestReconciler(log, getter)
+	r.batch = 2 // both stuck rows fill the first page exactly
+
+	r.reconcileOnce(context.Background())
+
+	if got := log.GetByWorkflow("wf-finished"); got.Status != "succeeded" {
+		t.Errorf("newer finished row = %q, want %q — the pass never got past the stuck rows",
+			got.Status, "succeeded")
+	}
+	for _, w := range []string{"wf-stuck-1", "wf-stuck-2"} {
+		if got := log.GetByWorkflow(w); got.Status != "submitted" {
+			t.Errorf("%s = %q, want it left at \"submitted\"", w, got.Status)
+		}
+	}
+}
+
+// maxPerPass has to bound the paging, or a large backlog turns one tick into an
+// unbounded walk.
+func TestReconcileRespectsMaxPerPass(t *testing.T) {
+	log := audit.NewLogger()
+	phases := map[string]string{}
+	for i := 0; i < 10; i++ {
+		name := "wf-" + string(rune('a'+i))
+		submit(t, log, name, "labs", time.Duration(100-i)*time.Hour/10)
+		phases[name] = "Running"
+	}
+	getter := &fakeStatusGetter{phase: phases}
+	r := newTestReconciler(log, getter)
+	r.batch = 2
+	r.maxPerPass = 4
+
+	r.reconcileOnce(context.Background())
+
+	if len(getter.calls) != 4 {
+		t.Errorf("examined %d rows, want maxPerPass=4", len(getter.calls))
 	}
 }

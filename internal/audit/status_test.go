@@ -66,15 +66,15 @@ func TestLoggerListByStatus(t *testing.T) {
 	l.Log(Entry{WorkflowName: "wf-open", Status: "submitted"})
 	l.Log(Entry{WorkflowName: "wf-done", Status: "succeeded"})
 
-	got := l.ListByStatus("submitted", time.Hour, 10)
+	got := l.ListByStatus("submitted", time.Hour, 10, time.Time{})
 	if len(got) != 1 || got[0].WorkflowName != "wf-open" {
 		t.Fatalf("ListByStatus = %+v, want just wf-open", got)
 	}
 
-	if n := len(l.ListByStatus("submitted", time.Nanosecond, 10)); n != 0 {
+	if n := len(l.ListByStatus("submitted", time.Nanosecond, 10, time.Time{})); n != 0 {
 		t.Errorf("maxAge ignored: got %d entries, want 0", n)
 	}
-	if n := len(l.ListByStatus("submitted", time.Hour, 0)); n != 0 {
+	if n := len(l.ListByStatus("submitted", time.Hour, 0, time.Time{})); n != 0 {
 		t.Errorf("limit ignored: got %d entries, want 0", n)
 	}
 }
@@ -89,5 +89,29 @@ func TestIsTerminal(t *testing.T) {
 		if IsTerminal(s) {
 			t.Errorf("IsTerminal(%q) = true", s)
 		}
+	}
+}
+
+// The cursor is what lets the reconciler page past rows it cannot resolve yet.
+func TestLoggerListByStatusCursor(t *testing.T) {
+	l := NewLogger()
+	base := time.Now().UTC().Add(-time.Hour)
+	for i, name := range []string{"wf-a", "wf-b", "wf-c"} {
+		l.Log(Entry{WorkflowName: name, Status: "submitted", Timestamp: base.Add(time.Duration(i) * time.Minute)})
+	}
+
+	first := l.ListByStatus("submitted", 2*time.Hour, 1, time.Time{})
+	if len(first) != 1 || first[0].WorkflowName != "wf-a" {
+		t.Fatalf("first page = %+v, want wf-a", first)
+	}
+
+	second := l.ListByStatus("submitted", 2*time.Hour, 1, first[0].Timestamp)
+	if len(second) != 1 || second[0].WorkflowName != "wf-b" {
+		t.Fatalf("second page = %+v, want wf-b — the cursor did not advance", second)
+	}
+
+	last := l.ListByStatus("submitted", 2*time.Hour, 10, second[0].Timestamp)
+	if len(last) != 1 || last[0].WorkflowName != "wf-c" {
+		t.Fatalf("third page = %+v, want just wf-c", last)
 	}
 }

@@ -51,11 +51,17 @@ type Log interface {
 	// (returning false) when no row matches or the row is already terminal,
 	// which is what makes a redelivered webhook safe.
 	UpdateStatus(workflowName, status, message string) bool
-	// ListByStatus returns entries in the given status, OLDEST first, limited
-	// to those newer than maxAge. This is a work queue, not a feed: newest-first
-	// would let a sustained backlog larger than the caller's limit starve the
-	// oldest rows forever, which are exactly the ones most likely to be stuck.
-	ListByStatus(status string, maxAge time.Duration, limit int) []Entry
+	// ListByStatus returns entries in the given status, OLDEST first, limited to
+	// those newer than maxAge and strictly newer than after (a cursor; pass the
+	// zero time to start from the beginning).
+	//
+	// Oldest-first because this is a work queue, not a feed: newest-first would
+	// let a backlog larger than the caller's limit starve the oldest rows, which
+	// are the ones most likely to be stuck. The cursor is what stops that fix
+	// from creating the opposite problem — rows that cannot yet be resolved stay
+	// oldest forever, so without paging past them they would fill every batch
+	// and no newer row would ever be examined.
+	ListByStatus(status string, maxAge time.Duration, limit int, after time.Time) []Entry
 }
 
 // TerminalStatuses are the audit statuses that will never change again.
@@ -163,7 +169,7 @@ func (l *Logger) UpdateStatus(workflowName, status, message string) bool {
 }
 
 // ListByStatus returns entries in the given status, oldest first.
-func (l *Logger) ListByStatus(status string, maxAge time.Duration, limit int) []Entry {
+func (l *Logger) ListByStatus(status string, maxAge time.Duration, limit int, after time.Time) []Entry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	cutoff := time.Now().UTC().Add(-maxAge)
@@ -171,6 +177,9 @@ func (l *Logger) ListByStatus(status string, maxAge time.Duration, limit int) []
 	for i := 0; i < len(l.entries) && len(out) < limit; i++ {
 		e := l.entries[i]
 		if e.Status != status || e.Timestamp.Before(cutoff) {
+			continue
+		}
+		if !after.IsZero() && !e.Timestamp.After(after) {
 			continue
 		}
 		out = append(out, e)

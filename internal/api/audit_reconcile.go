@@ -43,8 +43,12 @@ type auditReconciler struct {
 	// lookback bounds how far back to consider rows; older ones are past any
 	// hope of resolution and would be rescanned forever.
 	lookback time.Duration
-	// batch caps rows examined per pass.
+	// batch is the page size for each ListByStatus call.
 	batch int
+	// maxPerPass bounds a whole pass. reconcileOnce pages through the backlog
+	// with a timestamp cursor so unresolvable rows cannot occupy every batch
+	// forever, but the paging still has to terminate.
+	maxPerPass int
 	// gcGrace is how long after submission a missing workflow object is treated
 	// as garbage-collected rather than not-yet-created. Argo's ttlStrategy uses
 	// secondsAfterFailure: 259200 (72h), so anything older than that with no
@@ -64,6 +68,7 @@ func newAuditReconciler(log audit.Log, exec workflowStatusGetter, registry *oper
 		interval:      3 * time.Minute,
 		lookback:      7 * 24 * time.Hour,
 		batch:         200,
+		maxPerPass:    2000,
 		gcGrace:       72 * time.Hour,
 		lookupTimeout: 10 * time.Second,
 	}
@@ -88,12 +93,33 @@ func (r *auditReconciler) Run(ctx context.Context) {
 }
 
 func (r *auditReconciler) reconcileOnce(ctx context.Context) {
-	pending := r.log.ListByStatus("submitted", r.lookback, r.batch)
-	if len(pending) == 0 {
-		return
+	var closed, gone, examined int
+	var cursor time.Time
+
+	// Paged, because a row that cannot be resolved yet — still Running, missing
+	// but inside the GC grace window, or unreachable — is left untouched and so
+	// stays among the oldest. Re-reading the same first page every pass would
+	// let a few hundred such rows block every newer one indefinitely.
+	for examined < r.maxPerPass {
+		pending := r.log.ListByStatus("submitted", r.lookback, r.batch, cursor)
+		if len(pending) == 0 {
+			break
+		}
+		cursor = pending[len(pending)-1].Timestamp
+		examined += len(pending)
+		r.reconcileBatch(ctx, pending, &closed, &gone)
+		if len(pending) < r.batch {
+			break
+		}
 	}
 
-	var closed, gone int
+	if closed > 0 || gone > 0 {
+		slog.Info("audit reconcile pass complete",
+			"examined", examined, "closed", closed, "expired", gone)
+	}
+}
+
+func (r *auditReconciler) reconcileBatch(ctx context.Context, pending []audit.Entry, closed, gone *int) {
 	for _, e := range pending {
 		select {
 		case <-ctx.Done():
@@ -120,7 +146,7 @@ func (r *auditReconciler) reconcileOnce(ctx context.Context) {
 			if apierrors.IsNotFound(err) && time.Since(e.Timestamp) > r.gcGrace {
 				if r.log.UpdateStatus(e.WorkflowName, "expired",
 					"workflow object was garbage-collected before its outcome was recorded") {
-					gone++
+					*gone++
 				}
 			}
 			if !apierrors.IsNotFound(err) {
@@ -154,13 +180,8 @@ func (r *auditReconciler) reconcileOnce(ctx context.Context) {
 			}
 		}
 		if r.log.UpdateStatus(e.WorkflowName, opStatus, msg) {
-			closed++
+			*closed++
 		}
-	}
-
-	if closed > 0 || gone > 0 {
-		slog.Info("audit reconcile pass complete",
-			"examined", len(pending), "closed", closed, "expired", gone)
 	}
 }
 
