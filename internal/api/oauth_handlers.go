@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
@@ -370,9 +371,30 @@ func (h *Handlers) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
-	if err := r.ParseForm(); err == nil {
-		o.RevokeRefreshToken(r.FormValue("token"), r.FormValue("client_id"))
+	// A body that will not parse — oversized, or malformed encoding — must not
+	// reach the 200 below. RFC 7009 §2.2 returns 200 for an *invalid token*
+	// (the end state the caller wanted is already true), but an *invalid
+	// request* is an error per RFC 6749 §5.2. Swallowing the parse error
+	// conflated the two: a caller revoking a compromised token got 200 while
+	// nothing was revoked, and would stop treating the token as live exactly
+	// when it still is.
+	if err := r.ParseForm(); err != nil {
+		tokenError(w, "invalid_request", "malformed or oversized revocation request")
+		return
 	}
+	// `token` is REQUIRED (RFC 7009 §2.1), and its absence is a different
+	// thing from a token the server does not recognise. An unrecognised value
+	// is a 200 — nothing is live, which is what the caller wanted. A missing
+	// parameter revokes nothing at all, so answering 200 to it repeats the
+	// false assurance the parse check above exists to prevent. This is the
+	// shape a client hits by sending a JSON body: ParseForm succeeds on it
+	// without extracting anything, so the error is otherwise invisible.
+	token := r.FormValue("token")
+	if token == "" {
+		tokenError(w, "invalid_request", "token parameter is required")
+		return
+	}
+	o.RevokeRefreshToken(token, r.FormValue("client_id"))
 	// Per RFC 7009, a successful revocation always returns 200.
 	w.WriteHeader(http.StatusOK)
 }
@@ -390,6 +412,11 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// RFC 7591 §3.2 requires no-store on registration responses; the body
+	// carries freshly minted client credentials. Set once here so every exit
+	// path below inherits it, matching /oauth/token and /oauth/revoke.
+	w.Header().Set("Cache-Control", "no-store")
+
 	if token := h.opts.OAuthRegistrationToken; token != "" {
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if got == r.Header.Get("Authorization") || !hmac.Equal([]byte(got), []byte(token)) {
@@ -402,6 +429,11 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// /oauth/token and /oauth/revoke already cap their bodies; registration did
+	// not, so a single request could stream an unbounded JSON document into the
+	// decoder. The 5/min/IP rate limit throttles how often, not how large.
+	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
 
 	var req struct {
 		ClientName   string   `json:"client_name"`
@@ -432,11 +464,22 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	// URIs count — not some other client's previously registered URIs.
 	for _, uri := range req.RedirectURIs {
 		if !o.IsRedirectURIAllowed("", uri) {
+			// Name the offending URI. A bare "redirect_uri is not allowed"
+			// tells an operator nothing about which entry to add when a new
+			// MCP client fails to register, and the DCR request body is not
+			// recoverable afterwards — the only way to find out was to
+			// intercept the client's own traffic. The value is the caller's
+			// own input echoed into a JSON body, so this leaks nothing about
+			// the allowlist itself; bound it so an oversized submission
+			// cannot inflate the response or the log line.
+			shown := truncateEchoedValue(uri)
+			slog.Warn("OAuth client registration rejected: redirect_uri not allowed",
+				"redirect_uri", shown, "client_name", truncateEchoedValue(req.ClientName))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error":             "invalid_redirect_uri",
-				"error_description": "redirect_uri is not allowed",
+				"error_description": fmt.Sprintf("redirect_uri %q is not allowed", shown),
 			})
 			return
 		}
@@ -444,7 +487,16 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 
 	client := o.RegisterClient(req.ClientName, req.RedirectURIs)
 
-	slog.Info("OAuth client registered", "client_id", client.ClientID, "client_name", client.ClientName, "redirect_uris", client.RedirectURIs)
+	// Bounded on the success path too: neither client_name nor the redirect
+	// URIs are length-validated before registration succeeds, so leaving them
+	// raw here would reintroduce on success the oversized log line the
+	// rejection path now avoids. A loopback URI passes the allowlist with an
+	// arbitrary path, so redirect_uris is attacker-influenced even on success.
+	loggedURIs := make([]string, 0, len(client.RedirectURIs))
+	for _, uri := range client.RedirectURIs {
+		loggedURIs = append(loggedURIs, truncateEchoedValue(uri))
+	}
+	slog.Info("OAuth client registered", "client_id", client.ClientID, "client_name", truncateEchoedValue(client.ClientName), "redirect_uris", loggedURIs)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -528,6 +580,33 @@ func oauthError(w http.ResponseWriter, redirectURI, state, errCode, errDesc stri
 	target.RawQuery = q.Encode()
 	w.Header().Set("Location", target.String())
 	w.WriteHeader(http.StatusFound)
+}
+
+// maxEchoedValueLen bounds how much of a caller-supplied value (a rejected
+// redirect_uri, a client_name) is echoed back or written to the log. RFC 7591
+// bounds neither field, so an unbounded echo would let a single request write
+// an arbitrarily large log line.
+const maxEchoedValueLen = 512
+
+// truncateEchoedValue clips s to maxEchoedValueLen on a rune boundary, so a
+// multi-byte sequence is never cut in half.
+//
+// The boundary is found by walking back to the nearest rune start, which
+// moves at most three bytes and looks only at the bytes around the cut. An
+// earlier version instead re-tested the whole prefix with utf8.ValidString
+// and stripped a rune at a time until it passed: on input carrying an invalid
+// byte anywhere before the cut that condition never became true, so it ate the
+// entire string and logged nothing but the ellipsis — erasing the one detail
+// the caller needed precisely when the input was malformed.
+func truncateEchoedValue(s string) string {
+	if len(s) <= maxEchoedValueLen {
+		return s
+	}
+	cut := maxEchoedValueLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
 
 func tokenError(w http.ResponseWriter, errCode, errDesc string) {
