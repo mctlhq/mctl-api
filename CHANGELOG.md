@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.32.6](https://github.com/mctlhq/mctl-api/compare/4.32.5...4.32.6) (2026-08-16)
+
+
+### Bug Fixes
+
+* **audit:** drain oldest-first, bound each lookup, test the reconciler ([d514d43](https://github.com/mctlhq/mctl-api/commit/d514d43a1a09b039b2a6db90527659e0a0a1ba12))
+* **audit:** keep the terminal guard at the top level of the UPDATE ([ea96cf2](https://github.com/mctlhq/mctl-api/commit/ea96cf2e069b8b589d2f0764fa0145d925696aec))
+* **audit:** page the reconciler queue, scope UpdateStatus to one row, index it ([fa0a152](https://github.com/mctlhq/mctl-api/commit/fa0a1520ce8090bec88e9b00594071fb00e6e4e8))
+* **audit:** record what actually happened, not just what was submitted ([525b528](https://github.com/mctlhq/mctl-api/commit/525b52839250877cf38eefd2aec9442f37348349))
+* **audit:** record what actually happened, not just what was submitted ([f940638](https://github.com/mctlhq/mctl-api/commit/f9406386e4b8f5cf9c8151644ddea714677af433))
+* **oauth:** bound access-token TTL and expire stale DCR registrations ([f3d635d](https://github.com/mctlhq/mctl-api/commit/f3d635df8e1470e815e872ec3e29f175be0cba67))
+* **oauth:** bound access-token TTL and expire stale DCR registrations ([f9fa393](https://github.com/mctlhq/mctl-api/commit/f9fa39320cfbb86da11893cec1cded7bec21d66e))
+* **tenant:** default internet egress to closed, and let MCP set it ([bf3a44f](https://github.com/mctlhq/mctl-api/commit/bf3a44f8926100a5d55ee40b5b249d25eb5a0c5a))
+* **tenant:** default internet egress to closed, and let MCP set it ([6cc17bb](https://github.com/mctlhq/mctl-api/commit/6cc17bb6dfb20a9b78e5267a9fbc2711d97a19ba))
+* **whoami:** stop hiding the admins namespace ([6784cce](https://github.com/mctlhq/mctl-api/commit/6784cce5177660dbd57ba0240dba8c12a20ce00a))
+* **whoami:** stop hiding the admins namespace ([3a1832b](https://github.com/mctlhq/mctl-api/commit/3a1832b78a47478901d960cf253aa439ffcd5718))
+
 ## [4.32.5](https://github.com/mctlhq/mctl-api/compare/4.32.4...4.32.5) (2026-08-16)
 
 
