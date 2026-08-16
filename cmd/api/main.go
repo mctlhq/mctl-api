@@ -401,6 +401,12 @@ func main() {
 	defer cancel()
 	go gitReader.RefreshLoop(ctx, 60*time.Second)
 
+	// Close out audit rows the Argo completion webhook cannot reach. The hook's
+	// HMAC secret exists only in the argo-workflows namespace, so operations
+	// that run in a tenant namespace (deploy-service, provision-database,
+	// retire-service, previews, scaling, rollbacks) never send one.
+	go mctlapi.StartAuditReconciler(ctx, auditLog, executor, registry)
+
 	// Start server.
 	go func() {
 		slog.Info("mctl-api starting",

@@ -228,6 +228,31 @@ func (h *Handlers) HandleArgoWorkflowComplete(w http.ResponseWriter, r *http.Req
 		"finished_at", payload.FinishedAt,
 	)
 
+	// Close out the audit row. Until this existed, every operation stayed
+	// "submitted" forever — the status was written on submit and nothing ever
+	// wrote it again, so the audit log recorded intent but never outcome.
+	if h.opts.AuditLog != nil {
+		if status := operations.PhaseToOpStatus(payload.Phase); audit.IsTerminal(status) {
+			// Only annotate failures. The payload carries no error detail, so on
+			// success there is nothing to say that "succeeded" doesn't already
+			// say, and an empty message leaves any existing one intact.
+			var msg string
+			if status != "succeeded" {
+				msg = fmt.Sprintf("argo workflow phase %s", payload.Phase)
+				if payload.FinishedAt != "" {
+					msg += " at " + payload.FinishedAt
+				}
+			}
+			if h.opts.AuditLog.UpdateStatus(payload.WorkflowName, status, msg) {
+				slog.Info("audit status closed by argo webhook",
+					"workflow_name", payload.WorkflowName, "status", status)
+			}
+		}
+	}
+
+	// Always acknowledge, including when no row matched. Cron workflows have no
+	// audit entry at all, and a 4xx here would only add noise to the Argo exit
+	// hook, which cannot act on it anyway.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":        "acknowledged",
 		"workflow_name": payload.WorkflowName,
