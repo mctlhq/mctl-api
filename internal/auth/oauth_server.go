@@ -85,6 +85,13 @@ type OAuthServer struct {
 const defaultMaxRegisteredClients = 1000
 
 // RegisteredClient stores a dynamically registered OAuth client (RFC 7591).
+//
+// This is the internal record, not the wire type. The registration response
+// is assembled field by field in handleOAuthRegister, which is where the RFC
+// 7591 §3.2.1 shape is decided — notably client_id_issued_at, which must be
+// integer seconds and is emitted as CreatedAt.Unix() there. These struct tags
+// are vestigial: nothing marshals this type. They are kept only because the
+// field names would otherwise read as unexplained.
 type RegisteredClient struct {
 	ClientID     string    `json:"client_id"`
 	ClientName   string    `json:"client_name,omitempty"`
@@ -95,6 +102,10 @@ type RegisteredClient struct {
 // RegisterClient stores a dynamically registered client and returns the assigned client_id.
 func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) RegisteredClient {
 	b := make([]byte, 16)
+	// crypto/rand.Read cannot report failure on the Go version this module
+	// requires: since Go 1.24 it is documented never to return an error and
+	// panics instead if the system source is broken. Handling the error here
+	// would be unreachable code; the discard is deliberate, not an oversight.
 	_, _ = rand.Read(b)
 	clientID := base64.RawURLEncoding.EncodeToString(b)
 

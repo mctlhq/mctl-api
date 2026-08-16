@@ -125,6 +125,30 @@ func TestOAuthRegister_RejectsOversizedBody(t *testing.T) {
 	}
 }
 
+// TestOAuthRegister_IssuedAtIsUnixSeconds pins RFC 7591 §3.2.1:
+// client_id_issued_at is integer seconds since the epoch, not a timestamp
+// string. The internal record holds a time.Time with a vestigial json tag, so
+// reading the struct alone suggests this is emitted as RFC 3339 — it is not,
+// and a strict client would fail to deserialize if it ever became so.
+func TestOAuthRegister_IssuedAtIsUnixSeconds(t *testing.T) {
+	router := NewRouter(Options{OAuthServer: newTestOAuth()})
+	rec := postRegister(router, `{"client_name":"cli","redirect_uris":["http://127.0.0.1:1234/callback"]}`, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	issued, ok := body["client_id_issued_at"].(float64)
+	if !ok {
+		t.Fatalf("client_id_issued_at = %#v, want a JSON number", body["client_id_issued_at"])
+	}
+	if issued <= 0 {
+		t.Errorf("client_id_issued_at = %v, want a positive epoch value", issued)
+	}
+}
+
 func TestOAuthRegister_SetsNoStore(t *testing.T) {
 	router := NewRouter(Options{OAuthServer: newTestOAuth()})
 	rec := postRegister(router, `{"client_name":"cli","redirect_uris":["http://127.0.0.1:1234/callback"]}`, "")
