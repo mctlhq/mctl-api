@@ -123,8 +123,15 @@ func (r *auditReconciler) reconcileOnce(ctx context.Context) {
 					gone++
 				}
 			}
-			// Any other error, or a NotFound inside the grace period (the
-			// workflow may simply not be created yet), is left for the next pass.
+			if !apierrors.IsNotFound(err) {
+				// Left for the next pass either way, but log it: without this an
+				// operator cannot tell "stuck because Argo is unreachable or
+				// denying us" from "not resolved yet".
+				slog.Warn("audit reconcile: workflow lookup failed",
+					"workflow", e.WorkflowName, "namespace", ns, "error", err)
+			}
+			// A NotFound inside the grace period means the workflow may simply
+			// not be created yet, so it is left alone without noise.
 			continue
 		}
 
