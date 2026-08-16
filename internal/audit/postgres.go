@@ -212,13 +212,16 @@ func (p *PostgresLogger) UpdateStatus(workflowName, status, message string) bool
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// The terminal set is built from TerminalStatuses rather than written out,
+	// so the SQL guard cannot drift from what IsTerminal believes. A drift here
+	// would let redelivery reopen a row the Go layer already considers closed.
 	tag, err := p.pool.Exec(ctx,
 		`UPDATE audit_events
 		    SET status = $2,
 		        message = CASE WHEN $3 = '' THEN message ELSE $3 END
 		  WHERE workflow = $1
-		    AND status NOT IN ('succeeded', 'failed', 'error', 'expired')`,
-		workflowName, status, message)
+		    AND NOT (status = ANY($4))`,
+		workflowName, status, message, TerminalStatuses)
 	if err != nil {
 		slog.Error("audit postgres: update status failed", "workflow", workflowName, "error", err)
 		return false
@@ -226,7 +229,8 @@ func (p *PostgresLogger) UpdateStatus(workflowName, status, message string) bool
 	return tag.RowsAffected() > 0
 }
 
-// ListByStatus returns audit entries in the given status, newest first.
+// ListByStatus returns audit entries in the given status, oldest first — see
+// the interface doc for why the reconciler must drain from the old end.
 func (p *PostgresLogger) ListByStatus(status string, maxAge time.Duration, limit int) []Entry {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -235,7 +239,7 @@ func (p *PostgresLogger) ListByStatus(status string, maxAge time.Duration, limit
 		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id
 		   FROM audit_events
 		  WHERE status = $1 AND workflow <> '' AND timestamp > $2
-		  ORDER BY timestamp DESC
+		  ORDER BY timestamp ASC
 		  LIMIT $3`,
 		status, time.Now().UTC().Add(-maxAge), limit)
 	if err != nil {

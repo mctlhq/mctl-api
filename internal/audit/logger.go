@@ -51,8 +51,10 @@ type Log interface {
 	// (returning false) when no row matches or the row is already terminal,
 	// which is what makes a redelivered webhook safe.
 	UpdateStatus(workflowName, status, message string) bool
-	// ListByStatus returns entries in the given status, newest first, limited
-	// to those newer than maxAge. Used by the reconciler to find work.
+	// ListByStatus returns entries in the given status, OLDEST first, limited
+	// to those newer than maxAge. This is a work queue, not a feed: newest-first
+	// would let a sustained backlog larger than the caller's limit starve the
+	// oldest rows forever, which are exactly the ones most likely to be stuck.
 	ListByStatus(status string, maxAge time.Duration, limit int) []Entry
 }
 
@@ -91,7 +93,12 @@ func (l *Logger) Log(entry Entry) {
 	if entry.ID == "" {
 		entry.ID = uuid.NewString()
 	}
-	entry.Timestamp = time.Now().UTC()
+	// A caller-supplied timestamp is honoured. Everything in production leaves
+	// it zero and gets "now"; tests that exercise age-dependent behaviour
+	// (reconcile lookback, GC grace) set it rather than reaching into internals.
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
 	l.entries = append(l.entries, entry)
 
 	slog.Info("audit",
@@ -155,13 +162,13 @@ func (l *Logger) UpdateStatus(workflowName, status, message string) bool {
 	return false
 }
 
-// ListByStatus returns entries in the given status, newest first.
+// ListByStatus returns entries in the given status, oldest first.
 func (l *Logger) ListByStatus(status string, maxAge time.Duration, limit int) []Entry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	cutoff := time.Now().UTC().Add(-maxAge)
 	out := make([]Entry, 0, limit)
-	for i := len(l.entries) - 1; i >= 0 && len(out) < limit; i-- {
+	for i := 0; i < len(l.entries) && len(out) < limit; i++ {
 		e := l.entries[i]
 		if e.Status != status || e.Timestamp.Before(cutoff) {
 			continue

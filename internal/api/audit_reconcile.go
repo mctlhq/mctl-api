@@ -26,9 +26,16 @@ import (
 // break the authentication: any tenant workload could then read it and forge
 // completion events for other tenants' workflows. So the second path reads
 // Argo directly instead, using mctl-api's own RBAC.
+// workflowStatusGetter is the slice of operations.Executor the reconciler
+// needs. Narrow, so reconcileOnce's branching can be tested without a
+// Kubernetes API.
+type workflowStatusGetter interface {
+	GetWorkflowStatus(ctx context.Context, namespace, name string) (map[string]interface{}, error)
+}
+
 type auditReconciler struct {
 	log      audit.Log
-	exec     *operations.Executor
+	exec     workflowStatusGetter
 	registry *operations.Registry
 
 	// interval between passes.
@@ -43,17 +50,22 @@ type auditReconciler struct {
 	// secondsAfterFailure: 259200 (72h), so anything older than that with no
 	// object is gone for good.
 	gcGrace time.Duration
+	// lookupTimeout bounds each workflow lookup. Without it a single slow or
+	// unreachable Argo read blocks the whole pass on the process-lifetime
+	// context, and neither rest.Config nor the caller sets a client timeout.
+	lookupTimeout time.Duration
 }
 
-func newAuditReconciler(log audit.Log, exec *operations.Executor, registry *operations.Registry) *auditReconciler {
+func newAuditReconciler(log audit.Log, exec workflowStatusGetter, registry *operations.Registry) *auditReconciler {
 	return &auditReconciler{
-		log:      log,
-		exec:     exec,
-		registry: registry,
-		interval: 3 * time.Minute,
-		lookback: 7 * 24 * time.Hour,
-		batch:    200,
-		gcGrace:  72 * time.Hour,
+		log:           log,
+		exec:          exec,
+		registry:      registry,
+		interval:      3 * time.Minute,
+		lookback:      7 * 24 * time.Hour,
+		batch:         200,
+		gcGrace:       72 * time.Hour,
+		lookupTimeout: 10 * time.Second,
 	}
 }
 
@@ -101,7 +113,9 @@ func (r *auditReconciler) reconcileOnce(ctx context.Context) {
 			continue
 		}
 
-		status, err := r.exec.GetWorkflowStatus(ctx, ns, e.WorkflowName)
+		lookupCtx, cancel := context.WithTimeout(ctx, r.lookupTimeout)
+		status, err := r.exec.GetWorkflowStatus(lookupCtx, ns, e.WorkflowName)
+		cancel()
 		if err != nil {
 			if apierrors.IsNotFound(err) && time.Since(e.Timestamp) > r.gcGrace {
 				if r.log.UpdateStatus(e.WorkflowName, "expired",
@@ -146,5 +160,9 @@ func (r *auditReconciler) reconcileOnce(ctx context.Context) {
 // StartAuditReconciler runs the reconciler until ctx is cancelled. Exported so
 // cmd/api can start it without exposing the type.
 func StartAuditReconciler(ctx context.Context, log audit.Log, exec *operations.Executor, registry *operations.Registry) {
+	if exec == nil {
+		slog.Info("audit reconciler disabled: no executor")
+		return
+	}
 	newAuditReconciler(log, exec, registry).Run(ctx)
 }
