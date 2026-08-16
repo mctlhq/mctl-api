@@ -371,9 +371,18 @@ func (h *Handlers) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
-	if err := r.ParseForm(); err == nil {
-		o.RevokeRefreshToken(r.FormValue("token"), r.FormValue("client_id"))
+	// A body that will not parse — oversized, or malformed encoding — must not
+	// reach the 200 below. RFC 7009 §2.2 returns 200 for an *invalid token*
+	// (the end state the caller wanted is already true), but an *invalid
+	// request* is an error per RFC 6749 §5.2. Swallowing the parse error
+	// conflated the two: a caller revoking a compromised token got 200 while
+	// nothing was revoked, and would stop treating the token as live exactly
+	// when it still is.
+	if err := r.ParseForm(); err != nil {
+		tokenError(w, "invalid_request", "malformed or oversized revocation request")
+		return
 	}
+	o.RevokeRefreshToken(r.FormValue("token"), r.FormValue("client_id"))
 	// Per RFC 7009, a successful revocation always returns 200.
 	w.WriteHeader(http.StatusOK)
 }
@@ -466,10 +475,16 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 
 	client := o.RegisterClient(req.ClientName, req.RedirectURIs)
 
-	// Bounded on the success path too: client_name is never length-validated
-	// before registration succeeds, so leaving it raw here would reintroduce
-	// on success the oversized log line the rejection path now avoids.
-	slog.Info("OAuth client registered", "client_id", client.ClientID, "client_name", truncateEchoedValue(client.ClientName), "redirect_uris", client.RedirectURIs)
+	// Bounded on the success path too: neither client_name nor the redirect
+	// URIs are length-validated before registration succeeds, so leaving them
+	// raw here would reintroduce on success the oversized log line the
+	// rejection path now avoids. A loopback URI passes the allowlist with an
+	// arbitrary path, so redirect_uris is attacker-influenced even on success.
+	loggedURIs := make([]string, 0, len(client.RedirectURIs))
+	for _, uri := range client.RedirectURIs {
+		loggedURIs = append(loggedURIs, truncateEchoedValue(uri))
+	}
+	slog.Info("OAuth client registered", "client_id", client.ClientID, "client_name", truncateEchoedValue(client.ClientName), "redirect_uris", loggedURIs)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
