@@ -125,6 +125,30 @@ func TestOAuthRegister_RejectsOversizedBody(t *testing.T) {
 	}
 }
 
+// TestOAuthRegister_IssuedAtIsUnixSeconds pins RFC 7591 §3.2.1:
+// client_id_issued_at is integer seconds since the epoch, not a timestamp
+// string. The internal record holds a time.Time with a vestigial json tag, so
+// reading the struct alone suggests this is emitted as RFC 3339 — it is not,
+// and a strict client would fail to deserialize if it ever became so.
+func TestOAuthRegister_IssuedAtIsUnixSeconds(t *testing.T) {
+	router := NewRouter(Options{OAuthServer: newTestOAuth()})
+	rec := postRegister(router, `{"client_name":"cli","redirect_uris":["http://127.0.0.1:1234/callback"]}`, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	issued, ok := body["client_id_issued_at"].(float64)
+	if !ok {
+		t.Fatalf("client_id_issued_at = %#v, want a JSON number", body["client_id_issued_at"])
+	}
+	if issued <= 0 {
+		t.Errorf("client_id_issued_at = %v, want a positive epoch value", issued)
+	}
+}
+
 func TestOAuthRegister_SetsNoStore(t *testing.T) {
 	router := NewRouter(Options{OAuthServer: newTestOAuth()})
 	rec := postRegister(router, `{"client_name":"cli","redirect_uris":["http://127.0.0.1:1234/callback"]}`, "")
@@ -177,13 +201,23 @@ func TestOAuthRegister_RequiresInitialTokenWhenConfigured(t *testing.T) {
 func TestOAuthRegister_RateLimit(t *testing.T) {
 	router := NewRouter(Options{OAuthServer: newTestOAuth()})
 	body := `{"client_name":"cli","redirect_uris":["http://127.0.0.1:9/callback"]}`
+
+	// A desktop MCP client that fans out across processes registers once per
+	// process on a cold start, and they all share one IP. Ten in a burst must
+	// go through, or the client can never reach a token — that is exactly how
+	// the Antigravity CLI failed against the previous limit of 5.
+	for i := 0; i < 10; i++ {
+		if rec := postRegister(router, body, ""); rec.Code != http.StatusCreated {
+			t.Fatalf("burst registration %d: status = %d, want 201", i+1, rec.Code)
+		}
+	}
+
 	var last int
-	for i := 0; i < 6; i++ {
-		rec := postRegister(router, body, "")
-		last = rec.Code
+	for i := 0; i < 40; i++ {
+		last = postRegister(router, body, "").Code
 	}
 	if last != http.StatusTooManyRequests {
-		t.Fatalf("6th register status = %d, want 429", last)
+		t.Fatalf("sustained registration status = %d, want 429 — the endpoint is unauthenticated and must still throttle", last)
 	}
 }
 
