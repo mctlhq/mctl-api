@@ -197,7 +197,14 @@ var builtinOperations = []Operation{
 			{Name: "quota_memory_req", Type: "string", Default: "1280Mi", Description: "Memory request quota"},
 			{Name: "quota_memory_lim", Type: "string", Default: "4Gi", Description: "Memory limit quota"},
 			{Name: "quota_pods", Type: "string", Default: "10", Description: "Maximum pods"},
-			{Name: "allow_internet_egress", Type: "string", Default: "true", Description: "Allow outbound internet", Enum: []string{"true", "false"}},
+			// Closed by default, matching the tenant chart's
+			// networking.allowInternetEgress (false) and the create-tenant
+			// WorkflowTemplate's own default. mctl-api was the one component
+			// still defaulting to "true", so every MCP-created tenant got open
+			// egress regardless of intent. Argo Workflow pods keep internet
+			// access unconditionally via allow-workflow-internet-egress, so
+			// builds and deploys work either way.
+			{Name: "allow_internet_egress", Type: "string", Default: "false", Description: "Allow outbound internet egress from tenant pods (default: false)", Enum: []string{"true", "false"}},
 			{Name: "contact_email", Type: "string", Description: "Team contact email"},
 			{Name: "creator_user_id", Type: "string", Description: "GitHub user ID of the workspace creator"},
 		},
