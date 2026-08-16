@@ -67,6 +67,11 @@ func main() {
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
 	cfg := loadConfig()
+	if err := cfg.validate(); err != nil {
+		slog.Error("invalid configuration", "error", err)
+		stopSignals()
+		os.Exit(1)
+	}
 
 	// Initialize components.
 	registry := operations.NewRegistry()
@@ -660,6 +665,40 @@ func initStore[T any](ctx context.Context, name string, newStore func(context.Co
 		}
 		delay *= 2
 	}
+}
+
+// maxOAuthTokenTTL is the ceiling on OAUTH_TOKEN_TTL. An access token is what
+// an attacker keeps when one leaks, and its TTL is the only thing bounding how
+// long they keep it — this endpoint has no revocation for access tokens, so
+// there is no way to cut a leak short other than waiting it out. 24h leaves
+// room for a deployment that wants a working day without a renewal; it is not
+// an endorsement of values near it. Clients renew silently with the
+// refresh_token grant, so a long access token buys nothing.
+//
+// The sibling service learned this the expensive way: mctl-telegram had no
+// ceiling here either, a deployment set 8760h, and the resulting year-long
+// admin-scoped token leaked and could not be revoked without rotating the
+// signing key for every user at once.
+const maxOAuthTokenTTL = 24 * time.Hour
+
+// validate rejects configuration that would produce a working but unsafe
+// server. Called from main immediately after loadConfig; loadConfig itself
+// stays total so it remains usable from tests.
+func (c config) validate() error {
+	// Only enforced when the OAuth server is actually constructed — the same
+	// gate main uses at the NewOAuthServer call. OAUTH_TOKEN_TTL governs
+	// nothing on a deployment that never issues tokens, and refusing to start
+	// the whole API over a leftover env var that cannot affect anything is out
+	// of proportion to the mistake. The value is still rejected the moment
+	// OAuth is switched on, which is a deliberate change and exactly when the
+	// operator wants to hear about it.
+	oauthEnabled := c.OAuthGitHubClientID != "" && c.OAuthJWTSecret != ""
+	if oauthEnabled && c.OAuthTokenTTL > maxOAuthTokenTTL {
+		return fmt.Errorf("OAUTH_TOKEN_TTL must not exceed %v, got %v — clients renew "+
+			"silently with the refresh_token grant, and access tokens cannot be revoked, "+
+			"so a longer lifetime only widens the window on a leak", maxOAuthTokenTTL, c.OAuthTokenTTL)
+	}
+	return nil
 }
 
 func parseDuration(s string, fallback time.Duration) time.Duration {

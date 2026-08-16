@@ -187,3 +187,72 @@ func TestInitStoreSharedDeadlineStopsLaterStores(t *testing.T) {
 		t.Errorf("attempts = %d — every store ran a full ladder, so each had its own budget", attempts)
 	}
 }
+
+// TestConfigValidate covers the startup-rejecting behaviour added alongside
+// the OAUTH_TOKEN_TTL ceiling. This path can only fail closed, so its
+// boundaries need pinning: one minute either side of the ceiling changes
+// whether the process starts at all.
+func TestConfigValidate(t *testing.T) {
+	const (
+		ghID   = "gh-client-id"
+		secret = "jwt-secret"
+	)
+	tests := []struct {
+		name    string
+		cfg     config
+		wantErr bool
+	}{
+		{
+			name:    "default 1h is accepted",
+			cfg:     config{OAuthGitHubClientID: ghID, OAuthJWTSecret: secret, OAuthTokenTTL: time.Hour},
+			wantErr: false,
+		},
+		{
+			name:    "exactly at the ceiling is accepted",
+			cfg:     config{OAuthGitHubClientID: ghID, OAuthJWTSecret: secret, OAuthTokenTTL: maxOAuthTokenTTL},
+			wantErr: false,
+		},
+		{
+			name:    "one nanosecond over the ceiling is rejected",
+			cfg:     config{OAuthGitHubClientID: ghID, OAuthJWTSecret: secret, OAuthTokenTTL: maxOAuthTokenTTL + 1},
+			wantErr: true,
+		},
+		{
+			name:    "the year-long value that shipped in the sibling service is rejected",
+			cfg:     config{OAuthGitHubClientID: ghID, OAuthJWTSecret: secret, OAuthTokenTTL: 8760 * time.Hour},
+			wantErr: true,
+		},
+		{
+			// A leftover env var cannot affect a deployment that issues no
+			// tokens; crashing the whole API over it would be out of
+			// proportion to the mistake.
+			name:    "over the ceiling is ignored when OAuth is disabled",
+			cfg:     config{OAuthTokenTTL: 8760 * time.Hour},
+			wantErr: false,
+		},
+		{
+			name:    "half-configured OAuth does not enforce the ceiling",
+			cfg:     config{OAuthGitHubClientID: ghID, OAuthTokenTTL: 8760 * time.Hour},
+			wantErr: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.validate()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("validate() accepted OAuthTokenTTL=%v, want an error", tc.cfg.OAuthTokenTTL)
+				}
+				// A startup failure that does not name the variable is
+				// indistinguishable from any other configuration problem.
+				if !strings.Contains(err.Error(), "OAUTH_TOKEN_TTL") {
+					t.Errorf("error = %q, want it to name OAUTH_TOKEN_TTL", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("validate() error = %v, want nil", err)
+			}
+		})
+	}
+}
