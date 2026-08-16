@@ -679,7 +679,15 @@ const maxOAuthTokenTTL = 24 * time.Hour
 // server. Called from main immediately after loadConfig; loadConfig itself
 // stays total so it remains usable from tests.
 func (c config) validate() error {
-	if c.OAuthTokenTTL > maxOAuthTokenTTL {
+	// Only enforced when the OAuth server is actually constructed — the same
+	// gate main uses at the NewOAuthServer call. OAUTH_TOKEN_TTL governs
+	// nothing on a deployment that never issues tokens, and refusing to start
+	// the whole API over a leftover env var that cannot affect anything is out
+	// of proportion to the mistake. The value is still rejected the moment
+	// OAuth is switched on, which is a deliberate change and exactly when the
+	// operator wants to hear about it.
+	oauthEnabled := c.OAuthGitHubClientID != "" && c.OAuthJWTSecret != ""
+	if oauthEnabled && c.OAuthTokenTTL > maxOAuthTokenTTL {
 		return fmt.Errorf("OAUTH_TOKEN_TTL must not exceed %v, got %v — clients renew "+
 			"silently with the refresh_token grant, and access tokens cannot be revoked, "+
 			"so a longer lifetime only widens the window on a leak", maxOAuthTokenTTL, c.OAuthTokenTTL)
