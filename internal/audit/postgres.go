@@ -227,6 +227,17 @@ func (p *PostgresLogger) UpdateStatus(workflowName, status, message string) bool
 	// unlikely, but "close every historical run that shares this name" is not a
 	// behaviour worth leaving to chance in an audit table.
 	//
+	// The terminal guard is repeated at the top level on purpose, and is not
+	// redundant with the copy inside the subquery. That subquery is
+	// uncorrelated, so Postgres evaluates it once as an InitPlan and caches the
+	// id. When the webhook and the reconciler race the same row, both can
+	// select it while it is still submitted; the loser wakes from the lock wait
+	// and EvalPlanQual re-checks only the top-level predicate. With the guard
+	// living solely in the subquery, `id IN (<cached id>)` still matches and
+	// the loser overwrites a row the winner already closed — a stale `failed`
+	// landing on top of `succeeded`. The top-level copy is what is re-evaluated,
+	// so it is what actually makes the update idempotent.
+	//
 	// The terminal set is built from TerminalStatuses rather than written out,
 	// so the SQL guard cannot drift from what IsTerminal believes. A drift here
 	// would let redelivery reopen a row the Go layer already considers closed.
@@ -239,7 +250,8 @@ func (p *PostgresLogger) UpdateStatus(workflowName, status, message string) bool
 		         WHERE workflow = $1 AND NOT (status = ANY($4))
 		         ORDER BY timestamp DESC
 		         LIMIT 1
-		  )`,
+		  )
+		    AND NOT (status = ANY($4))`,
 		workflowName, status, message, TerminalStatuses)
 	if err != nil {
 		slog.Error("audit postgres: update status failed", "workflow", workflowName, "error", err)

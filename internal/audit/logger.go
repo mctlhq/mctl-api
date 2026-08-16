@@ -179,6 +179,14 @@ func (l *Logger) ListByStatus(status string, maxAge time.Duration, limit int, af
 		if e.Status != status || e.Timestamp.Before(cutoff) {
 			continue
 		}
+		// Strict comparison. If a page boundary lands mid-tie — several rows
+		// sharing the cursor's exact timestamp — the tied remainder is skipped
+		// for the rest of this pass, because they are not strictly greater.
+		// Accepted: nothing is lost, the next reconcileOnce restarts the cursor
+		// at the zero time and re-lists from the beginning, so the cost is one
+		// 3-minute cycle. A (timestamp, id) compound cursor would remove even
+		// that, at the price of threading a second cursor field through the
+		// interface for a delay nobody can observe.
 		if !after.IsZero() && !e.Timestamp.After(after) {
 			continue
 		}
