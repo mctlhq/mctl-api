@@ -73,6 +73,21 @@ type OAuthServer struct {
 	// defaultMaxRegisteredClients.
 	MaxRegisteredClients int
 
+	// ClientRegistrationTTL bounds how long a dynamic registration is kept.
+	// The cap above bounds memory; this bounds *staleness*, which the cap
+	// cannot: an MCP client that registers once per process on every start
+	// leaves entries behind forever, so without an age limit the map fills
+	// with dead registrations and eviction starts discarding live ones to
+	// make room for them. 0 selects defaultClientRegistrationTTL; negative
+	// disables expiry.
+	//
+	// Expiring a registration is close to harmless here, which is why this is
+	// safe to add: /oauth/register only ever accepts redirect URIs that are
+	// already on the static allowlist or are RFC 8252 loopback, so an expired
+	// client's URIs remain acceptable on their own merits. What it loses is
+	// the per-client scoping, and re-registering restores that.
+	ClientRegistrationTTL time.Duration
+
 	codes         authCodeStore
 	refreshTokens refreshTokenStore
 	clientsMu     sync.Mutex
@@ -83,6 +98,32 @@ type OAuthServer struct {
 // MaxRegisteredClients is unset. Matches the ceiling mctl-telegram applies to
 // the same endpoint.
 const defaultMaxRegisteredClients = 1000
+
+// defaultClientRegistrationTTL bounds the age of a dynamic registration when
+// ClientRegistrationTTL is unset. 24h matches the ceiling mctl-telegram
+// applies to the same endpoint, and comfortably outlasts any single
+// authorization flow — a client that still needs its registration a day later
+// can re-register, which is one unauthenticated POST.
+const defaultClientRegistrationTTL = 24 * time.Hour
+
+// clientRegistrationTTL resolves the configured value, honouring a negative
+// duration as "never expire".
+func (s *OAuthServer) clientRegistrationTTL() time.Duration {
+	if s.ClientRegistrationTTL == 0 {
+		return defaultClientRegistrationTTL
+	}
+	return s.ClientRegistrationTTL
+}
+
+// clientExpired reports whether c is older than the configured TTL. Callers
+// must hold clientsMu.
+func (s *OAuthServer) clientExpired(c RegisteredClient, now time.Time) bool {
+	ttl := s.clientRegistrationTTL()
+	if ttl < 0 {
+		return false
+	}
+	return now.Sub(c.CreatedAt) > ttl
+}
 
 // RegisteredClient stores a dynamically registered OAuth client (RFC 7591).
 //
@@ -121,6 +162,15 @@ func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) Registe
 	if s.clients == nil {
 		s.clients = make(map[string]RegisteredClient)
 	}
+	// Drop expired entries before consulting the cap, so a map full of dead
+	// registrations does not force the eviction of live ones.
+	now := time.Now()
+	for id, c := range s.clients {
+		if s.clientExpired(c, now) {
+			delete(s.clients, id)
+		}
+	}
+
 	max := s.MaxRegisteredClients
 	if max <= 0 {
 		max = defaultMaxRegisteredClients
@@ -154,6 +204,14 @@ func (s *OAuthServer) GetClient(clientID string) (RegisteredClient, bool) {
 	if !ok {
 		return RegisteredClient{}, false
 	}
+	// An expired registration must read as absent rather than waiting for the
+	// next RegisterClient to sweep it: otherwise expiry would depend on
+	// unrelated traffic, and a quiet server would honour registrations
+	// indefinitely.
+	if s.clientExpired(c, time.Now()) {
+		delete(s.clients, clientID)
+		return RegisteredClient{}, false
+	}
 	return c, true
 }
 
@@ -173,9 +231,17 @@ func NewOAuthServer(baseURL, ghClientID, ghClientSecret string, jwtSecret []byte
 		GitHubClientSecret:  ghClientSecret,
 		JWTSecret:           jwtSecret,
 		AllowedRedirectURIs: allowedRedirectURIs,
-		AccessTokenTTL:      7 * 24 * time.Hour,
-		RefreshTokenTTL:     30 * 24 * time.Hour,
-		GitHubValidator:     ghValidator,
+		// 1h, was 7*24h. Nothing in production read that 7-day default —
+		// main.go overwrites it from OAUTH_TOKEN_TTL, whose own default is 1h,
+		// and IssueJWT falls back to 1h when the field is zero. So the
+		// constructor was the only place claiming a week, and it claimed it to
+		// every caller that did not know to override: tests, and any future
+		// wiring. A default that disagrees with both the configured value and
+		// the fallback is a trap, and the safe direction for a credential
+		// lifetime is the short one.
+		AccessTokenTTL:  1 * time.Hour,
+		RefreshTokenTTL: 30 * 24 * time.Hour,
+		GitHubValidator: ghValidator,
 	}
 	s.codes.init()
 	s.refreshTokens.init()
