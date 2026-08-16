@@ -232,7 +232,7 @@ func (e *Executor) ListCronAgentRuns(ctx context.Context, namespace, cronNamePre
 		items = append(items, map[string]interface{}{
 			"workflowName": name,
 			"operation":    cronName,
-			"status":       phaseToOpStatus(phase),
+			"status":       PhaseToOpStatus(phase),
 			"user":         "cron",
 			"timestamp":    creationTimestamp,
 			"riskLevel":    "low",
@@ -243,11 +243,11 @@ func (e *Executor) ListCronAgentRuns(ctx context.Context, namespace, cronNamePre
 	return items, nil
 }
 
-// phaseToOpStatus maps Argo's workflow.status.phase to the same
+// PhaseToOpStatus maps Argo's workflow.status.phase to the same
 // status vocabulary the audit log uses ("submitted" / "succeeded" /
 // "failed" / "error"), so audit + cron entries can be merged in the
 // handler without the caller second-guessing two formats.
-func phaseToOpStatus(phase string) string {
+func PhaseToOpStatus(phase string) string {
 	switch phase {
 	case "Pending", "Running":
 		return "submitted"

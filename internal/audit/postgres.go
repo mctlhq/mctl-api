@@ -62,6 +62,16 @@ func NewPostgresLogger(ctx context.Context, connStr string) (*PostgresLogger, er
 		pool.Close()
 		return nil, fmt.Errorf("audit postgres: create schema: %w", err)
 	}
+	// Separate Exec, and deliberately not part of `schema`: CONCURRENTLY cannot
+	// run inside a transaction, and pgx wraps a multi-statement Exec in an
+	// implicit one. Partial because most denied/failed rows have no workflow.
+	// A failure here costs an index, not a startup — GetByWorkflow, UpdateStatus
+	// and the reconciler all still work, just with a sequential scan.
+	if _, err := pool.Exec(ctx,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_events_workflow
+		 ON audit_events (workflow) WHERE workflow <> ''`); err != nil {
+		slog.Warn("audit postgres: could not create workflow index", "error", err)
+	}
 	slog.Info("audit postgres logger initialized")
 	return &PostgresLogger{pool: pool}, nil
 }
@@ -181,4 +191,67 @@ func scanAuditEntry(scan func(dest ...any) error) (Entry, error) {
 		_ = json.Unmarshal(params, &e.Parameters)
 	}
 	return e, nil
+}
+
+// UpdateStatus closes out a non-terminal audit row for workflowName.
+//
+// This is an UPDATE in place rather than a second "completion" row on purpose:
+// GetByWorkflow reads ORDER BY timestamp DESC LIMIT 1, so a completion row —
+// which carries no params — would become the newest match and break the tenant
+// lookup that authorizes GET /workflows/{name}/logs for non-admins. Updating
+// in place also keeps the original submission timestamp, so ordering in
+// ListWorkflows and ListAudit stays "by time submitted".
+//
+// The status guard makes redelivery a no-op: a webhook that arrives twice, or
+// races the reconciler, updates zero rows the second time.
+func (p *PostgresLogger) UpdateStatus(workflowName, status, message string) bool {
+	if workflowName == "" || status == "" {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tag, err := p.pool.Exec(ctx,
+		`UPDATE audit_events
+		    SET status = $2,
+		        message = CASE WHEN $3 = '' THEN message ELSE $3 END
+		  WHERE workflow = $1
+		    AND status NOT IN ('succeeded', 'failed', 'error', 'expired')`,
+		workflowName, status, message)
+	if err != nil {
+		slog.Error("audit postgres: update status failed", "workflow", workflowName, "error", err)
+		return false
+	}
+	return tag.RowsAffected() > 0
+}
+
+// ListByStatus returns audit entries in the given status, newest first.
+func (p *PostgresLogger) ListByStatus(status string, maxAge time.Duration, limit int) []Entry {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rows, err := p.pool.Query(ctx,
+		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id
+		   FROM audit_events
+		  WHERE status = $1 AND workflow <> '' AND timestamp > $2
+		  ORDER BY timestamp DESC
+		  LIMIT $3`,
+		status, time.Now().UTC().Add(-maxAge), limit)
+	if err != nil {
+		slog.Error("audit postgres: list by status failed", "status", status, "error", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var entries []Entry
+	for rows.Next() {
+		e, err := scanAuditEntry(rows.Scan)
+		if err != nil {
+			slog.Error("audit postgres: scan failed", "error", err)
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries
 }

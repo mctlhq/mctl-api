@@ -30,12 +30,16 @@ type Entry struct {
 	Operation    string            `json:"operation"`
 	Parameters   map[string]string `json:"parameters"`
 	WorkflowName string            `json:"workflowName,omitempty"`
-	Status       string            `json:"status"` // submitted, succeeded, failed
-	RiskLevel    string            `json:"riskLevel"`
-	Message      string            `json:"message,omitempty"`
-	ClientIP     string            `json:"clientIp,omitempty"`
-	UserAgent    string            `json:"userAgent,omitempty"`
-	RequestID    string            `json:"requestId,omitempty"`
+	// Status is "submitted" on insert and is closed out later by the Argo
+	// completion webhook or the reconciler: succeeded, failed, error, or
+	// expired when the workflow object was garbage-collected before either
+	// could observe its outcome.
+	Status    string `json:"status"`
+	RiskLevel string `json:"riskLevel"`
+	Message   string `json:"message,omitempty"`
+	ClientIP  string `json:"clientIp,omitempty"`
+	UserAgent string `json:"userAgent,omitempty"`
+	RequestID string `json:"requestId,omitempty"`
 }
 
 // Log is the interface for recording and querying audit events.
@@ -43,6 +47,26 @@ type Log interface {
 	Log(entry Entry)
 	List(limit int) []Entry
 	GetByWorkflow(name string) *Entry
+	// UpdateStatus moves an entry out of a non-terminal status. It is a no-op
+	// (returning false) when no row matches or the row is already terminal,
+	// which is what makes a redelivered webhook safe.
+	UpdateStatus(workflowName, status, message string) bool
+	// ListByStatus returns entries in the given status, newest first, limited
+	// to those newer than maxAge. Used by the reconciler to find work.
+	ListByStatus(status string, maxAge time.Duration, limit int) []Entry
+}
+
+// TerminalStatuses are the audit statuses that will never change again.
+var TerminalStatuses = []string{"succeeded", "failed", "error", "expired"}
+
+// IsTerminal reports whether an audit status is final.
+func IsTerminal(status string) bool {
+	for _, s := range TerminalStatuses {
+		if s == status {
+			return true
+		}
+	}
+	return false
 }
 
 // Logger stores audit entries. In production, this writes to PostgreSQL.
@@ -108,4 +132,41 @@ func (l *Logger) GetByWorkflow(workflowName string) *Entry {
 		}
 	}
 	return nil
+}
+
+// UpdateStatus closes out the newest non-terminal entry for workflowName.
+func (l *Logger) UpdateStatus(workflowName, status, message string) bool {
+	if workflowName == "" {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i := len(l.entries) - 1; i >= 0; i-- {
+		e := &l.entries[i]
+		if e.WorkflowName != workflowName || IsTerminal(e.Status) {
+			continue
+		}
+		e.Status = status
+		if message != "" {
+			e.Message = message
+		}
+		return true
+	}
+	return false
+}
+
+// ListByStatus returns entries in the given status, newest first.
+func (l *Logger) ListByStatus(status string, maxAge time.Duration, limit int) []Entry {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	cutoff := time.Now().UTC().Add(-maxAge)
+	out := make([]Entry, 0, limit)
+	for i := len(l.entries) - 1; i >= 0 && len(out) < limit; i-- {
+		e := l.entries[i]
+		if e.Status != status || e.Timestamp.Before(cutoff) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
