@@ -466,7 +466,10 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 
 	client := o.RegisterClient(req.ClientName, req.RedirectURIs)
 
-	slog.Info("OAuth client registered", "client_id", client.ClientID, "client_name", client.ClientName, "redirect_uris", client.RedirectURIs)
+	// Bounded on the success path too: client_name is never length-validated
+	// before registration succeeds, so leaving it raw here would reintroduce
+	// on success the oversized log line the rejection path now avoids.
+	slog.Info("OAuth client registered", "client_id", client.ClientID, "client_name", truncateEchoedValue(client.ClientName), "redirect_uris", client.RedirectURIs)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
