@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.32.5](https://github.com/mctlhq/mctl-api/compare/4.32.4...4.32.5) (2026-08-16)
+
+
+### Bug Fixes
+
+* **oauth:** bound client_name on the registration success log too ([ca41c90](https://github.com/mctlhq/mctl-api/commit/ca41c903b996efd0be0c53692d4991ff7a1befcc))
+* **oauth:** bound the DCR client registry and raise the register limit ([bc0c066](https://github.com/mctlhq/mctl-api/commit/bc0c066d68db0db8f2cbd919e82959f2bfefe672))
+* **oauth:** bound the DCR client registry and raise the register limit ([217e225](https://github.com/mctlhq/mctl-api/commit/217e225c7210e454eaade4ccd0b5725bf229f343))
+* **oauth:** do not answer 200 to a revocation that never happened ([82d75fd](https://github.com/mctlhq/mctl-api/commit/82d75fd1279fb9a7d74902ceee8b4bea2cdc34bf))
+* **oauth:** harden registration body, truncation and cache headers ([7439573](https://github.com/mctlhq/mctl-api/commit/74395737f02821a98536e2087675e6abb85697a3))
+* **oauth:** name the rejected redirect_uri on failed registration ([6a7f7bc](https://github.com/mctlhq/mctl-api/commit/6a7f7bca32697ba86966091bd717d066789e5b76))
+* **oauth:** name the rejected redirect_uri on failed registration ([f5e1437](https://github.com/mctlhq/mctl-api/commit/f5e14377ae7c488f5aca134c53eefb0b355d167a))
+* **oauth:** reject a revocation request that carries no token ([2ef473e](https://github.com/mctlhq/mctl-api/commit/2ef473e282a3b62ca9c97ded0ab59ae0675735f8))
+
 ## [4.32.4](https://github.com/mctlhq/mctl-api/compare/4.32.3...4.32.4) (2026-08-15)
 
 
