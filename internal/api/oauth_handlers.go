@@ -391,6 +391,11 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// RFC 7591 §3.2 requires no-store on registration responses; the body
+	// carries freshly minted client credentials. Set once here so every exit
+	// path below inherits it, matching /oauth/token and /oauth/revoke.
+	w.Header().Set("Cache-Control", "no-store")
+
 	if token := h.opts.OAuthRegistrationToken; token != "" {
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if got == r.Header.Get("Authorization") || !hmac.Equal([]byte(got), []byte(token)) {
@@ -403,6 +408,11 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// /oauth/token and /oauth/revoke already cap their bodies; registration did
+	// not, so a single request could stream an unbounded JSON document into the
+	// decoder. The 5/min/IP rate limit throttles how often, not how large.
+	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
 
 	var req struct {
 		ClientName   string   `json:"client_name"`
@@ -441,9 +451,9 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 			// own input echoed into a JSON body, so this leaks nothing about
 			// the allowlist itself; bound it so an oversized submission
 			// cannot inflate the response or the log line.
-			shown := truncateRedirectURI(uri)
+			shown := truncateEchoedValue(uri)
 			slog.Warn("OAuth client registration rejected: redirect_uri not allowed",
-				"redirect_uri", shown, "client_name", req.ClientName)
+				"redirect_uri", shown, "client_name", truncateEchoedValue(req.ClientName))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{
@@ -542,28 +552,31 @@ func oauthError(w http.ResponseWriter, redirectURI, state, errCode, errDesc stri
 	w.WriteHeader(http.StatusFound)
 }
 
-// maxShownRedirectURILen bounds how much of a rejected redirect_uri is echoed
-// back to the caller and written to the log. RFC 7591 puts no limit on
-// redirect_uris, so an unbounded echo would let a single request write an
-// arbitrarily large log line.
-const maxShownRedirectURILen = 512
+// maxEchoedValueLen bounds how much of a caller-supplied value (a rejected
+// redirect_uri, a client_name) is echoed back or written to the log. RFC 7591
+// bounds neither field, so an unbounded echo would let a single request write
+// an arbitrarily large log line.
+const maxEchoedValueLen = 512
 
-// truncateRedirectURI clips uri to maxShownRedirectURILen on a rune boundary,
-// so a multi-byte sequence is never cut in half and the result stays valid
-// UTF-8 for both JSON encoding and the log.
-func truncateRedirectURI(uri string) string {
-	if len(uri) <= maxShownRedirectURILen {
-		return uri
+// truncateEchoedValue clips s to maxEchoedValueLen on a rune boundary, so a
+// multi-byte sequence is never cut in half.
+//
+// The boundary is found by walking back to the nearest rune start, which
+// moves at most three bytes and looks only at the bytes around the cut. An
+// earlier version instead re-tested the whole prefix with utf8.ValidString
+// and stripped a rune at a time until it passed: on input carrying an invalid
+// byte anywhere before the cut that condition never became true, so it ate the
+// entire string and logged nothing but the ellipsis — erasing the one detail
+// the caller needed precisely when the input was malformed.
+func truncateEchoedValue(s string) string {
+	if len(s) <= maxEchoedValueLen {
+		return s
 	}
-	uri = uri[:maxShownRedirectURILen]
-	for len(uri) > 0 && !utf8.ValidString(uri) {
-		_, size := utf8.DecodeLastRuneInString(uri)
-		if size <= 0 {
-			break
-		}
-		uri = uri[:len(uri)-size]
+	cut := maxEchoedValueLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-	return uri + "..."
+	return s[:cut] + "..."
 }
 
 func tokenError(w http.ResponseWriter, errCode, errDesc string) {
