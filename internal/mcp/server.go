@@ -527,6 +527,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		// and ValidateInput matches against the registry's string enum, so a
 		// boolean here would be silently discarded and the default applied.
 		mcplib.WithString("allow_internet_egress",
+			mcplib.Enum("true", "false"),
 			mcplib.Description(`Allow outbound internet egress from this workspace's pods: "true" or "false" (default: "false")`),
 		),
 		mcplib.WithString("contact_email",

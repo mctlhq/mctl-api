@@ -58,3 +58,34 @@ func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateTenantDefaultsToClosedEgress pins the security-relevant default.
+// ApplyDefaults fills in anything the caller omits, and MCP callers omitted
+// this parameter entirely until it was added to the tool schema, so this
+// single value decided the network posture of every workspace created through
+// the agent path. It must stay "false" to match helm-charts/tenant/values.yaml
+// (allowInternetEgress: false), wft-create-tenant.yaml and the Backstage
+// scaffolder template.
+func TestCreateTenantDefaultsToClosedEgress(t *testing.T) {
+	reg := NewRegistry()
+	op, ok := reg.Get("create-tenant")
+	if !ok {
+		t.Fatal("create-tenant operation not found in registry")
+	}
+
+	input := map[string]string{"tenant_name": "example"}
+	filled := reg.ApplyDefaults(op, input)
+
+	if got := filled["allow_internet_egress"]; got != "false" {
+		t.Errorf("allow_internet_egress default = %q, want \"false\" (open egress must be opt-in)", got)
+	}
+
+	// An explicit opt-in must still survive ApplyDefaults.
+	optIn := reg.ApplyDefaults(op, map[string]string{
+		"tenant_name":           "example",
+		"allow_internet_egress": "true",
+	})
+	if got := optIn["allow_internet_egress"]; got != "true" {
+		t.Errorf("explicit allow_internet_egress overridden: got %q, want \"true\"", got)
+	}
+}
