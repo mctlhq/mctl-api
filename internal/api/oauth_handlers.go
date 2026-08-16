@@ -382,7 +382,19 @@ func (h *Handlers) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 		tokenError(w, "invalid_request", "malformed or oversized revocation request")
 		return
 	}
-	o.RevokeRefreshToken(r.FormValue("token"), r.FormValue("client_id"))
+	// `token` is REQUIRED (RFC 7009 §2.1), and its absence is a different
+	// thing from a token the server does not recognise. An unrecognised value
+	// is a 200 — nothing is live, which is what the caller wanted. A missing
+	// parameter revokes nothing at all, so answering 200 to it repeats the
+	// false assurance the parse check above exists to prevent. This is the
+	// shape a client hits by sending a JSON body: ParseForm succeeds on it
+	// without extracting anything, so the error is otherwise invisible.
+	token := r.FormValue("token")
+	if token == "" {
+		tokenError(w, "invalid_request", "token parameter is required")
+		return
+	}
+	o.RevokeRefreshToken(token, r.FormValue("client_id"))
 	// Per RFC 7009, a successful revocation always returns 200.
 	w.WriteHeader(http.StatusOK)
 }

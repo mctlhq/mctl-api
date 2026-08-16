@@ -56,6 +56,47 @@ func TestOAuthRevoke_RejectsOversizedBody(t *testing.T) {
 	}
 }
 
+// TestOAuthRevoke_RejectsMissingToken covers the other half of the same
+// hazard: the body parses fine but carries no token, so nothing is revoked.
+// A 200 here is the same false assurance as answering 200 to an unparseable
+// body — the caller stops treating a live token as live.
+func TestOAuthRevoke_RejectsMissingToken(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"no token parameter", "client_id=cli"},
+		{"empty token value", "token=&client_id=cli"},
+		{"empty body", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := NewRouter(Options{OAuthServer: newTestOAuth()})
+			rec := postRevoke(router, tc.body)
+			if rec.Code == http.StatusOK {
+				t.Fatal("revocation with no token answered 200 without revoking anything")
+			}
+			var body map[string]string
+			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["error"] != "invalid_request" {
+				t.Errorf("error = %q, want invalid_request", body["error"])
+			}
+		})
+	}
+}
+
+// A JSON body is the realistic way to hit the case above: ParseForm returns
+// no error on it yet extracts nothing, so the mistake is otherwise silent.
+func TestOAuthRevoke_RejectsJSONBody(t *testing.T) {
+	router := NewRouter(Options{OAuthServer: newTestOAuth()})
+	req := httptest.NewRequest(http.MethodPost, "/oauth/revoke", strings.NewReader(`{"token":"abc"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "192.0.2.1:1234"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatal("JSON-bodied revocation answered 200 while extracting no token")
+	}
+}
+
 func TestOAuthRevoke_AcceptsWellFormedRequest(t *testing.T) {
 	router := NewRouter(Options{OAuthServer: newTestOAuth()})
 	// An unknown token is still a 200 per RFC 7009 §2.2 — the end state the
