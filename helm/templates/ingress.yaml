@@ -1,4 +1,8 @@
 {{- if .Values.ingress.enabled }}
+{{- $paths := .Values.ingress.paths }}
+{{- if not $paths }}
+{{- $paths = list "/healthz" "/readyz" "/openapi.yaml" "/docs" "/.well-known" "/oauth" "/api" "/mcp" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -22,12 +26,14 @@ spec:
     - host: {{ .host }}
       http:
         paths:
-          - path: /
+          {{- range $paths }}
+          - path: {{ . }}
             pathType: Prefix
             backend:
               service:
                 name: {{ $.Chart.Name }}
                 port:
                   number: {{ $.Values.service.port }}
+          {{- end }}
     {{- end }}
 {{- end }}

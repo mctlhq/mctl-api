@@ -488,7 +488,11 @@ func (s *Server) toolCreateTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 
 This provisions:
 - Kubernetes namespace with resource quotas
-- Network policies (intra-namespace + configurable egress)
+- Network policies: intra-namespace traffic is allowed; outbound internet
+  egress is DENIED unless allow_internet_egress is set to "true". Argo
+  Workflow pods get internet access regardless, so builds and deploys work
+  either way — set the flag only when the workspace's own pods must reach
+  external APIs.
 - Vault secret scope for the team
 - ArgoCD RBAC (team members can view/sync their apps)
 - SSO access to Argo Workflows UI
@@ -506,14 +510,25 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		mcplib.WithString("description",
 			mcplib.Description("Team description"),
 		),
+		// Defaults below are quoted from the operations registry
+		// (internal/operations/registry.go, create-tenant). Keep them in sync —
+		// cpu_req/memory_req previously advertised "1" and "2Gi" here while the
+		// registry applied 500m and 1280Mi.
 		mcplib.WithString("quota_cpu_req",
-			mcplib.Description("CPU request quota (default: 1)"),
+			mcplib.Description("CPU request quota (default: 500m)"),
 		),
 		mcplib.WithString("quota_memory_req",
-			mcplib.Description("Memory request quota (default: 2Gi)"),
+			mcplib.Description("Memory request quota (default: 1280Mi)"),
 		),
 		mcplib.WithString("quota_pods",
 			mcplib.Description("Maximum pods (default: 10)"),
+		),
+		// String, not boolean: extractStringParams drops non-string arguments
+		// and ValidateInput matches against the registry's string enum, so a
+		// boolean here would be silently discarded and the default applied.
+		mcplib.WithString("allow_internet_egress",
+			mcplib.Enum("true", "false"),
+			mcplib.Description(`Allow outbound internet egress from this workspace's pods: "true" or "false" (default: "false")`),
 		),
 		mcplib.WithString("contact_email",
 			mcplib.Description("Team contact email"),

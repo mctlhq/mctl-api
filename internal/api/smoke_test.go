@@ -365,6 +365,10 @@ func TestSmoke_HealthChecks(t *testing.T) {
 	t.Run("readyz returns 200", func(t *testing.T) {
 		w := get(t, router, "/readyz")
 		assertStatus(t, w, http.StatusOK)
+		body := decodeJSON(t, w)
+		if body["status"] != "ready" {
+			t.Errorf("status = %v, want ready", body["status"])
+		}
 	})
 }
 

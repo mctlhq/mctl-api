@@ -1,5 +1,94 @@
 # Changelog
 
+## [4.32.6](https://github.com/mctlhq/mctl-api/compare/4.32.5...4.32.6) (2026-08-16)
+
+
+### Bug Fixes
+
+* **audit:** drain oldest-first, bound each lookup, test the reconciler ([d514d43](https://github.com/mctlhq/mctl-api/commit/d514d43a1a09b039b2a6db90527659e0a0a1ba12))
+* **audit:** keep the terminal guard at the top level of the UPDATE ([ea96cf2](https://github.com/mctlhq/mctl-api/commit/ea96cf2e069b8b589d2f0764fa0145d925696aec))
+* **audit:** page the reconciler queue, scope UpdateStatus to one row, index it ([fa0a152](https://github.com/mctlhq/mctl-api/commit/fa0a1520ce8090bec88e9b00594071fb00e6e4e8))
+* **audit:** record what actually happened, not just what was submitted ([525b528](https://github.com/mctlhq/mctl-api/commit/525b52839250877cf38eefd2aec9442f37348349))
+* **audit:** record what actually happened, not just what was submitted ([f940638](https://github.com/mctlhq/mctl-api/commit/f9406386e4b8f5cf9c8151644ddea714677af433))
+* **oauth:** bound access-token TTL and expire stale DCR registrations ([f3d635d](https://github.com/mctlhq/mctl-api/commit/f3d635df8e1470e815e872ec3e29f175be0cba67))
+* **oauth:** bound access-token TTL and expire stale DCR registrations ([f9fa393](https://github.com/mctlhq/mctl-api/commit/f9fa39320cfbb86da11893cec1cded7bec21d66e))
+* **tenant:** default internet egress to closed, and let MCP set it ([bf3a44f](https://github.com/mctlhq/mctl-api/commit/bf3a44f8926100a5d55ee40b5b249d25eb5a0c5a))
+* **tenant:** default internet egress to closed, and let MCP set it ([6cc17bb](https://github.com/mctlhq/mctl-api/commit/6cc17bb6dfb20a9b78e5267a9fbc2711d97a19ba))
+* **whoami:** stop hiding the admins namespace ([6784cce](https://github.com/mctlhq/mctl-api/commit/6784cce5177660dbd57ba0240dba8c12a20ce00a))
+* **whoami:** stop hiding the admins namespace ([3a1832b](https://github.com/mctlhq/mctl-api/commit/3a1832b78a47478901d960cf253aa439ffcd5718))
+
+## [4.32.5](https://github.com/mctlhq/mctl-api/compare/4.32.4...4.32.5) (2026-08-16)
+
+
+### Bug Fixes
+
+* **oauth:** bound client_name on the registration success log too ([ca41c90](https://github.com/mctlhq/mctl-api/commit/ca41c903b996efd0be0c53692d4991ff7a1befcc))
+* **oauth:** bound the DCR client registry and raise the register limit ([bc0c066](https://github.com/mctlhq/mctl-api/commit/bc0c066d68db0db8f2cbd919e82959f2bfefe672))
+* **oauth:** bound the DCR client registry and raise the register limit ([217e225](https://github.com/mctlhq/mctl-api/commit/217e225c7210e454eaade4ccd0b5725bf229f343))
+* **oauth:** do not answer 200 to a revocation that never happened ([82d75fd](https://github.com/mctlhq/mctl-api/commit/82d75fd1279fb9a7d74902ceee8b4bea2cdc34bf))
+* **oauth:** harden registration body, truncation and cache headers ([7439573](https://github.com/mctlhq/mctl-api/commit/74395737f02821a98536e2087675e6abb85697a3))
+* **oauth:** name the rejected redirect_uri on failed registration ([6a7f7bc](https://github.com/mctlhq/mctl-api/commit/6a7f7bca32697ba86966091bd717d066789e5b76))
+* **oauth:** name the rejected redirect_uri on failed registration ([f5e1437](https://github.com/mctlhq/mctl-api/commit/f5e14377ae7c488f5aca134c53eefb0b355d167a))
+* **oauth:** reject a revocation request that carries no token ([2ef473e](https://github.com/mctlhq/mctl-api/commit/2ef473e282a3b62ca9c97ded0ab59ae0675735f8))
+
+## [4.32.4](https://github.com/mctlhq/mctl-api/compare/4.32.3...4.32.4) (2026-08-15)
+
+
+### Bug Fixes
+
+* **api:** drive shutdown from one root signal context ([7af8e96](https://github.com/mctlhq/mctl-api/commit/7af8e966c118b76db49b53542549a4842379593c)), closes [#166](https://github.com/mctlhq/mctl-api/issues/166)
+* **api:** release the signal handler without defer, and check ctx before the wait ([aba2708](https://github.com/mctlhq/mctl-api/commit/aba2708f2a3fafed448aa9299aad67097b0c06e2)), closes [#166](https://github.com/mctlhq/mctl-api/issues/166)
+* **api:** retry optional store init instead of giving up on the first try ([839b3cc](https://github.com/mctlhq/mctl-api/commit/839b3ccc0b309e26b620d521ba2eefdc9b1af7e7))
+* **api:** retry optional store init instead of giving up on the first try ([5affa40](https://github.com/mctlhq/mctl-api/commit/5affa405aa5e9940f5cc79f783b732f1da0420fa)), closes [#166](https://github.com/mctlhq/mctl-api/issues/166)
+* **api:** share one init budget across stores and honour SIGTERM ([bb729f4](https://github.com/mctlhq/mctl-api/commit/bb729f405c68c8a4e9f15e3dda1bd86cdb349ffb)), closes [#166](https://github.com/mctlhq/mctl-api/issues/166)
+
+## [4.32.3](https://github.com/mctlhq/mctl-api/compare/4.32.2...4.32.3) (2026-08-15)
+
+
+### Bug Fixes
+
+* **api:** omit DSN from TLS parse errors ([ac52260](https://github.com/mctlhq/mctl-api/commit/ac52260428d9deaedc65abcdb3adc5e68ff8d876))
+* **api:** require CNPG TLS and record audit IP/UA ([97bbb69](https://github.com/mctlhq/mctl-api/commit/97bbb695b5c2ac0573073c504cabbd2798979e65))
+* **api:** require CNPG TLS and record audit IP/UA ([c6f33fe](https://github.com/mctlhq/mctl-api/commit/c6f33feb49a7a97c360e2eb45f0affa27550a4bb))
+* **api:** take rightmost XFF hop and refuse TLS parse fallback ([0ee216d](https://github.com/mctlhq/mctl-api/commit/0ee216d0053aa00b8093ae56a5136f8a3ecf4cd7))
+
+## [4.32.2](https://github.com/mctlhq/mctl-api/compare/4.32.1...4.32.2) (2026-08-14)
+
+
+### Bug Fixes
+
+* **api:** close SOC F12-F14 readiness, metrics, OAuth hardening ([98c0f6e](https://github.com/mctlhq/mctl-api/commit/98c0f6e87ced928972c77fdd23dd4945fd283b9d))
+* **api:** close SOC F12-F14 readiness, metrics, OAuth hardening ([8422446](https://github.com/mctlhq/mctl-api/commit/84224462610ecb5bd10b5a8e800a435944be5fdc))
+* **api:** isolate readyz probes and hide error details ([4d88a7a](https://github.com/mctlhq/mctl-api/commit/4d88a7a970152413059aee89fa5ebad754997851))
+
+## [4.32.1](https://github.com/mctlhq/mctl-api/compare/4.32.0...4.32.1) (2026-08-14)
+
+
+### Bug Fixes
+
+* **oauth:** accept loopback redirect URIs per RFC 8252 §7.3 ([1ea3f85](https://github.com/mctlhq/mctl-api/commit/1ea3f8523af6e82704381684682a6683562cd998))
+* **oauth:** accept loopback redirect URIs per RFC 8252 §7.3 ([e7f0786](https://github.com/mctlhq/mctl-api/commit/e7f0786d48f8d97ecb70227489dc403cd484cf31))
+* **oauth:** compare loopback host case-insensitively ([bd22918](https://github.com/mctlhq/mctl-api/commit/bd229181cfd9168d683b15dfe86dc42cb90de711))
+* **oauth:** reject userinfo and backslash in loopback redirects ([6cbb888](https://github.com/mctlhq/mctl-api/commit/6cbb888591cabe904a47cde3814bf5bcfd94e19d))
+* **oauth:** scope registered redirect URIs to the client that registered them ([f24b29d](https://github.com/mctlhq/mctl-api/commit/f24b29d6e534de8f66d5d7216dd91cee2989f7c8))
+* **oauth:** validate redirect_uri before any error can redirect to it ([04c5aa8](https://github.com/mctlhq/mctl-api/commit/04c5aa8b4efb5b9fca588cf1f86fc24af745c3c6))
+
+## [4.32.0](https://github.com/mctlhq/mctl-api/compare/4.31.0...4.32.0) (2026-08-14)
+
+
+### Features
+
+* **mcp:** add MCP Prompts and Resources support ([327c8cd](https://github.com/mctlhq/mctl-api/commit/327c8cd29b0b7948e459647eed3747433cb60540))
+* **mcp:** add MCP Prompts and Resources support ([54ebdc3](https://github.com/mctlhq/mctl-api/commit/54ebdc35aa942285c334ac6c6d5ea6636f4be295))
+
+
+### Bug Fixes
+
+* authenticate the custom-domains proxy to Backstage ([d2428b4](https://github.com/mctlhq/mctl-api/commit/d2428b4bbd06d1463b2de4de78a88a44b5f14769))
+* authenticate the custom-domains proxy to Backstage ([b1375f7](https://github.com/mctlhq/mctl-api/commit/b1375f7ceb5fc19132338bfd4de51275c79ff01b))
+* **lint:** index the operations catalog range instead of copying ([2180ff2](https://github.com/mctlhq/mctl-api/commit/2180ff244ffdf66f34f72ec25114680527f6bc49))
+* **lint:** index the operations catalog range instead of copying ([7e41356](https://github.com/mctlhq/mctl-api/commit/7e413564427d972b641f96eead9efa253352a1c5))
+
 ## [4.31.0](https://github.com/mctlhq/mctl-api/compare/4.30.0...4.31.0) (2026-08-07)
 
 

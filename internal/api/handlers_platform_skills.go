@@ -196,7 +196,7 @@ func (h *Handlers) submitTenantSkillBindingChange(w http.ResponseWriter, r *http
 	}
 	result, err := h.opts.Executor.Submit(r.Context(), op, params, user.ID, "platform")
 	if err != nil {
-		h.opts.AuditLog.Log(audit.Entry{
+		h.logAudit(r, audit.Entry{
 			UserID:     user.ID,
 			Operation:  opName,
 			Parameters: params,
@@ -207,7 +207,7 @@ func (h *Handlers) submitTenantSkillBindingChange(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, "failed to submit workflow: "+err.Error())
 		return
 	}
-	h.opts.AuditLog.Log(audit.Entry{
+	h.logAudit(r, audit.Entry{
 		UserID:       user.ID,
 		Operation:    opName,
 		Parameters:   params,
@@ -285,7 +285,7 @@ func (h *Handlers) PublishPlatformSkill(w http.ResponseWriter, r *http.Request) 
 	auditParams := map[string]string{"skill_name": req.Name, "actor": user.ID}
 	result, err := h.opts.Executor.Submit(r.Context(), op, params, user.ID, "platform")
 	if err != nil {
-		h.opts.AuditLog.Log(audit.Entry{
+		h.logAudit(r, audit.Entry{
 			UserID:     user.ID,
 			Operation:  "platform-skill-publish",
 			Parameters: auditParams,
@@ -296,7 +296,7 @@ func (h *Handlers) PublishPlatformSkill(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to submit workflow: "+err.Error())
 		return
 	}
-	h.opts.AuditLog.Log(audit.Entry{
+	h.logAudit(r, audit.Entry{
 		UserID:       user.ID,
 		Operation:    "platform-skill-publish",
 		Parameters:   auditParams,
@@ -339,7 +339,7 @@ func (h *Handlers) DeprecatePlatformSkill(w http.ResponseWriter, r *http.Request
 	}
 	result, err := h.opts.Executor.Submit(r.Context(), op, params, user.ID, "platform")
 	if err != nil {
-		h.opts.AuditLog.Log(audit.Entry{
+		h.logAudit(r, audit.Entry{
 			UserID:     user.ID,
 			Operation:  "platform-skill-deprecate",
 			Parameters: params,
@@ -350,7 +350,7 @@ func (h *Handlers) DeprecatePlatformSkill(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to submit workflow: "+err.Error())
 		return
 	}
-	h.opts.AuditLog.Log(audit.Entry{
+	h.logAudit(r, audit.Entry{
 		UserID:       user.ID,
 		Operation:    "platform-skill-deprecate",
 		Parameters:   params,
