@@ -298,3 +298,38 @@ func TestPromptPlatformSkill_ForwardsAPIError(t *testing.T) {
 		t.Fatal("expected error for forbidden skill, got nil")
 	}
 }
+
+// TestToolCreateTenant_ExposesEveryOperationParameter is the create-tenant
+// counterpart of the deploy-service guard above. It exists because
+// allow_internet_egress was declared in the registry but absent from this
+// tool's schema, so every MCP-created tenant silently took the registry
+// default — which was "true", i.e. open internet egress, contradicting the
+// tenant chart's documented closed-by-default policy.
+func TestToolCreateTenant_ExposesEveryOperationParameter(t *testing.T) {
+	srv := NewServer("http://localhost:8080", "")
+	tool, _ := srv.toolCreateTenant()
+
+	reg := operations.NewRegistry()
+	op, ok := reg.Get("create-tenant")
+	if !ok {
+		t.Fatal("create-tenant operation not found in registry")
+	}
+
+	// Parameters the handler or caller supplies out of band rather than the
+	// MCP client. creator_user_id is stamped from the authenticated identity;
+	// the *_lim quotas are derived platform-side from the *_req values.
+	internal := map[string]bool{
+		"creator_user_id":  true,
+		"quota_cpu_lim":    true,
+		"quota_memory_lim": true,
+	}
+
+	for _, p := range op.Parameters {
+		if internal[p.Name] {
+			continue
+		}
+		if _, exposed := tool.InputSchema.Properties[p.Name]; !exposed {
+			t.Errorf("operation parameter %q is not exposed on the mctl_create_tenant MCP tool schema", p.Name)
+		}
+	}
+}

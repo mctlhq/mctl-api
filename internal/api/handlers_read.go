@@ -44,14 +44,18 @@ func (h *Handlers) Whoami(w http.ResponseWriter, r *http.Request) {
 
 	groups := uniquePreserveOrder(user.Groups)
 
-	// Build list of accessible Argo Workflow namespaces.
-	var namespaces []string
-	for _, g := range groups {
-		if g == "admins" {
-			continue
-		}
-		namespaces = append(namespaces, g)
-	}
+	// Accessible Argo Workflow namespaces. "admins" used to be filtered out
+	// here on the theory that it names a role rather than a tenant, but the
+	// admins namespace does exist — it is a real tenant in
+	// platform-gitops/tenants/admins and it runs mctl-agents-worker and the
+	// mctl-api workflows. Hiding it made whoami under-report where an admin
+	// can actually submit work.
+	//
+	// This field is informational: nothing authorizes against it. Access
+	// checks read user.Groups directly (auth.User.IsAdmin, HasTenantAccess),
+	// and the "one team per user" rule for create-tenant is enforced
+	// separately by filterNonAdmin in handlers_write.go.
+	namespaces := groups
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"id":         user.ID,

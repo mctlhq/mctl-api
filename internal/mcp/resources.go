@@ -63,7 +63,11 @@ func (s *Server) registerResources() {
 		ops := reg.List()
 
 		text := "# Registered Platform Operations Catalog\n\n"
-		for _, op := range ops {
+		// Indexed rather than `for _, op := range ops`: Operation is 144 bytes
+		// and copying it per iteration is what golangci-lint's gocritic
+		// rangeValCopy flags. Only three string fields are read here.
+		for i := range ops {
+			op := &ops[i]
 			text += "- **" + op.Name + "** (" + string(op.RiskLevel) + "): " + op.Description + "\n"
 		}
 

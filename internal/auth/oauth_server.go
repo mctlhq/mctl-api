@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -63,12 +64,75 @@ type OAuthServer struct {
 	// refresh tokens survive pod restarts. Inject via main.go after construction.
 	RefreshStore refreshstore.Store
 
+	// MaxRegisteredClients caps how many RFC 7591 dynamic registrations are
+	// held at once. /oauth/register is unauthenticated, so without a ceiling
+	// the map grows for the lifetime of the process — and it grows during
+	// ordinary use, not just under attack: an MCP client that fans out across
+	// several processes registers a separate client per process on every
+	// start. When the cap is reached the oldest entry is evicted. 0 selects
+	// defaultMaxRegisteredClients.
+	MaxRegisteredClients int
+
+	// ClientRegistrationTTL bounds how long a dynamic registration is kept.
+	// The cap above bounds memory; this bounds *staleness*, which the cap
+	// cannot: an MCP client that registers once per process on every start
+	// leaves entries behind forever, so without an age limit the map fills
+	// with dead registrations and eviction starts discarding live ones to
+	// make room for them. 0 selects defaultClientRegistrationTTL; negative
+	// disables expiry.
+	//
+	// Expiring a registration is close to harmless here, which is why this is
+	// safe to add: /oauth/register only ever accepts redirect URIs that are
+	// already on the static allowlist or are RFC 8252 loopback, so an expired
+	// client's URIs remain acceptable on their own merits. What it loses is
+	// the per-client scoping, and re-registering restores that.
+	ClientRegistrationTTL time.Duration
+
 	codes         authCodeStore
 	refreshTokens refreshTokenStore
-	clients       sync.Map // clientID → RegisteredClient (RFC 7591)
+	clientsMu     sync.Mutex
+	clients       map[string]RegisteredClient // clientID → client (RFC 7591)
+}
+
+// defaultMaxRegisteredClients bounds the dynamic-registration map when
+// MaxRegisteredClients is unset. Matches the ceiling mctl-telegram applies to
+// the same endpoint.
+const defaultMaxRegisteredClients = 1000
+
+// defaultClientRegistrationTTL bounds the age of a dynamic registration when
+// ClientRegistrationTTL is unset. 24h matches the ceiling mctl-telegram
+// applies to the same endpoint, and comfortably outlasts any single
+// authorization flow — a client that still needs its registration a day later
+// can re-register, which is one unauthenticated POST.
+const defaultClientRegistrationTTL = 24 * time.Hour
+
+// clientRegistrationTTL resolves the configured value, honouring a negative
+// duration as "never expire".
+func (s *OAuthServer) clientRegistrationTTL() time.Duration {
+	if s.ClientRegistrationTTL == 0 {
+		return defaultClientRegistrationTTL
+	}
+	return s.ClientRegistrationTTL
+}
+
+// clientExpired reports whether c is older than the configured TTL. Callers
+// must hold clientsMu.
+func (s *OAuthServer) clientExpired(c RegisteredClient, now time.Time) bool {
+	ttl := s.clientRegistrationTTL()
+	if ttl < 0 {
+		return false
+	}
+	return now.Sub(c.CreatedAt) > ttl
 }
 
 // RegisteredClient stores a dynamically registered OAuth client (RFC 7591).
+//
+// This is the internal record, not the wire type. The registration response
+// is assembled field by field in handleOAuthRegister, which is where the RFC
+// 7591 §3.2.1 shape is decided — notably client_id_issued_at, which must be
+// integer seconds and is emitted as CreatedAt.Unix() there. These struct tags
+// are vestigial: nothing marshals this type. They are kept only because the
+// field names would otherwise read as unexplained.
 type RegisteredClient struct {
 	ClientID     string    `json:"client_id"`
 	ClientName   string    `json:"client_name,omitempty"`
@@ -79,6 +143,10 @@ type RegisteredClient struct {
 // RegisterClient stores a dynamically registered client and returns the assigned client_id.
 func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) RegisteredClient {
 	b := make([]byte, 16)
+	// crypto/rand.Read cannot report failure on the Go version this module
+	// requires: since Go 1.24 it is documented never to return an error and
+	// panics instead if the system source is broken. Handling the error here
+	// would be unreachable code; the discard is deliberate, not an oversight.
 	_, _ = rand.Read(b)
 	clientID := base64.RawURLEncoding.EncodeToString(b)
 
@@ -88,17 +156,71 @@ func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) Registe
 		RedirectURIs: redirectURIs,
 		CreatedAt:    time.Now(),
 	}
-	s.clients.Store(clientID, client)
+
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	if s.clients == nil {
+		s.clients = make(map[string]RegisteredClient)
+	}
+	// Drop expired entries before consulting the cap, so a map full of dead
+	// registrations does not force the eviction of live ones.
+	now := time.Now()
+	for id, c := range s.clients {
+		if s.clientExpired(c, now) {
+			delete(s.clients, id)
+		}
+	}
+
+	max := s.MaxRegisteredClients
+	if max <= 0 {
+		max = defaultMaxRegisteredClients
+	}
+	for len(s.clients) >= max {
+		// Evict by registration time. Anything still in flight was registered
+		// seconds ago, so at a cap of this size the victim is always a stale
+		// entry unless the map is being deliberately churned — and in that
+		// case dropping registrations beats growing without bound.
+		var oldestID string
+		var oldestAt time.Time
+		for id, c := range s.clients {
+			if oldestID == "" || c.CreatedAt.Before(oldestAt) {
+				oldestID, oldestAt = id, c.CreatedAt
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(s.clients, oldestID)
+	}
+	s.clients[clientID] = client
 	return client
 }
 
 // GetClient returns a registered client by ID, or false if not found.
 func (s *OAuthServer) GetClient(clientID string) (RegisteredClient, bool) {
-	v, ok := s.clients.Load(clientID)
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	c, ok := s.clients[clientID]
 	if !ok {
 		return RegisteredClient{}, false
 	}
-	return v.(RegisteredClient), true
+	// An expired registration must read as absent rather than waiting for the
+	// next RegisterClient to sweep it: otherwise expiry would depend on
+	// unrelated traffic, and a quiet server would honour registrations
+	// indefinitely.
+	if s.clientExpired(c, time.Now()) {
+		delete(s.clients, clientID)
+		return RegisteredClient{}, false
+	}
+	return c, true
+}
+
+// RegisteredClientCount reports how many dynamic registrations are held.
+// Exported for tests and for operational visibility into the cap.
+func (s *OAuthServer) RegisteredClientCount() int {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	return len(s.clients)
 }
 
 // NewOAuthServer creates a ready-to-use OAuthServer with sensible defaults.
@@ -109,9 +231,17 @@ func NewOAuthServer(baseURL, ghClientID, ghClientSecret string, jwtSecret []byte
 		GitHubClientSecret:  ghClientSecret,
 		JWTSecret:           jwtSecret,
 		AllowedRedirectURIs: allowedRedirectURIs,
-		AccessTokenTTL:      7 * 24 * time.Hour,
-		RefreshTokenTTL:     30 * 24 * time.Hour,
-		GitHubValidator:     ghValidator,
+		// 1h, was 7*24h. Nothing in production read that 7-day default —
+		// main.go overwrites it from OAUTH_TOKEN_TTL, whose own default is 1h,
+		// and IssueJWT falls back to 1h when the field is zero. So the
+		// constructor was the only place claiming a week, and it claimed it to
+		// every caller that did not know to override: tests, and any future
+		// wiring. A default that disagrees with both the configured value and
+		// the fallback is a trap, and the safe direction for a credential
+		// lifetime is the short one.
+		AccessTokenTTL:  1 * time.Hour,
+		RefreshTokenTTL: 30 * 24 * time.Hour,
+		GitHubValidator: ghValidator,
 	}
 	s.codes.init()
 	s.refreshTokens.init()
@@ -133,11 +263,19 @@ func (s *OAuthServer) ResolveGroups(login string) []string {
 	return groups
 }
 
-// IsRedirectURIAllowed returns true if uri is in the static whitelist
-// or was registered by a dynamic client (RFC 7591).
+// IsRedirectURIAllowed returns true if uri is in the static whitelist, is a
+// loopback callback, or was registered by the client identified by clientID.
 // Allowlist entries ending with "/*" are treated as prefix matches
 // (e.g. "https://chatgpt.com/connector/oauth/*" matches any path under that prefix).
-func (s *OAuthServer) IsRedirectURIAllowed(uri string) bool {
+//
+// The clientID scope matters. This used to search every registered client's
+// URIs, so any one registration vouched for a URI on behalf of all of them:
+// with open dynamic registration, an attacker could register a client pointing
+// at their own callback and then start a flow under a privileged client's ID
+// with that callback, and the code would be delivered to them. PKCE is no help
+// there — whoever starts the flow chooses the challenge. Registrations are now
+// only honoured for the client that made them.
+func (s *OAuthServer) IsRedirectURIAllowed(clientID, uri string) bool {
 	for _, allowed := range s.AllowedRedirectURIs {
 		if strings.HasSuffix(allowed, "/*") {
 			if strings.HasPrefix(uri, strings.TrimSuffix(allowed, "*")) {
@@ -147,19 +285,73 @@ func (s *OAuthServer) IsRedirectURIAllowed(uri string) bool {
 			return true
 		}
 	}
-	// Check dynamically registered clients.
-	found := false
-	s.clients.Range(func(_, v any) bool {
-		c := v.(RegisteredClient)
-		for _, u := range c.RedirectURIs {
-			if u == uri {
-				found = true
-				return false // stop iteration
-			}
-		}
+	// Loopback redirects (RFC 8252 §7.3). A native app — the mctl CLI, Claude
+	// Code — binds an ephemeral port and cannot know it ahead of registration,
+	// so the port must not take part in the comparison and no static allowlist
+	// entry can cover it. Without this, such a client works only until the
+	// pod restarts: the registry below is in-memory, so a restart drops the
+	// registration while the client keeps its cached client_id and never
+	// re-registers, leaving authorize permanently at 400.
+	//
+	// Safe because the code is useless on its own: ExchangeCode verifies PKCE,
+	// so a listener that intercepts a redirect on the user's own machine still
+	// cannot redeem it without the verifier.
+	if isLoopbackRedirectURI(uri) {
 		return true
-	})
-	return found
+	}
+
+	// Only this client's own registration counts.
+	c, ok := s.GetClient(clientID)
+	if !ok {
+		return false
+	}
+	for _, u := range c.RedirectURIs {
+		if u == uri {
+			return true
+		}
+	}
+	return false
+}
+
+// isLoopbackRedirectURI reports whether uri is a loopback redirect as described
+// by RFC 8252 §7.3 — an http:// URI whose host is the local machine.
+//
+// The port is deliberately not examined: the whole point of the loopback flow is
+// that the app picks a free port at runtime. The scheme is pinned to http
+// because loopback listeners are plain HTTP by design, and https:// on a
+// loopback host would be a sign of something other than this flow.
+//
+// "localhost" is accepted alongside the IP literals for compatibility with
+// clients that use the name — RFC 8252 prefers the literals, since "localhost"
+// resolves through the host's name resolution and could in principle be
+// pointed elsewhere.
+func isLoopbackRedirectURI(uri string) bool {
+	// A backslash is not a valid URI character. Some user agents treat it as a
+	// path separator while others (historically including Go) treated it as
+	// userinfo, which is the classic allowlist/browser split that turns a
+	// loopback check into an open redirect. Reject before parsing so the two
+	// never get a chance to disagree.
+	if strings.ContainsRune(uri, '\\') {
+		return false
+	}
+	u, err := url.Parse(uri)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	// Userinfo has no place in a loopback callback, and accepting it would let
+	// http://evil.com@localhost/callback pass the host check (Go's host is
+	// localhost; some agents still treat the left of @ as the authority).
+	if u.User != nil {
+		return false
+	}
+	// Host names are case-insensitive (RFC 3986 §3.2.2) but url.Parse preserves
+	// the case it was given, so "LOCALHOST" would otherwise miss.
+	switch strings.ToLower(u.Hostname()) {
+	case "127.0.0.1", "::1", "localhost":
+		return true
+	default:
+		return false
+	}
 }
 
 // GenerateState creates a secure random state value for CSRF protection.

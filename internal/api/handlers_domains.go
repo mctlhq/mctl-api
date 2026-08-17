@@ -30,6 +30,17 @@ import (
 
 var backstageDomainsClient = &http.Client{Timeout: 15 * time.Second}
 
+// authorizeBackstage attaches the service credentials the custom-domains plugin
+// requires. mctl-portal 951d450 dropped the unauthenticated policy from
+// /domains* to close a domain-hijack vector, so every proxied call below comes
+// back 401 "Missing credentials" without this header. Per-team authorization is
+// still enforced here via user.HasTenantAccess before we ever reach Backstage.
+func (h *Handlers) authorizeBackstage(req *http.Request) {
+	if h.opts.BackstageToken != "" {
+		req.Header.Set("Authorization", "Bearer "+h.opts.BackstageToken)
+	}
+}
+
 // ListDomains proxies to Backstage custom-domains plugin.
 // GET /api/v1/domains?team=X&service=Y
 func (h *Handlers) ListDomains(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +67,14 @@ func (h *Handlers) ListDomains(w http.ResponseWriter, r *http.Request) {
 		upstream += "&service=" + url.QueryEscape(service)
 	}
 
-	resp, err := backstageDomainsClient.Get(upstream)
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstream, nil)
+	if err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	h.authorizeBackstage(upReq)
+
+	resp, err := backstageDomainsClient.Do(upReq)
 	if err != nil {
 		slog.Error("failed to proxy domains list to backstage", "error", err)
 		http.Error(w, `{"error":"backstage unavailable"}`, http.StatusBadGateway)
@@ -118,6 +136,7 @@ func (h *Handlers) AddDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upReq.Header.Set("Content-Type", "application/json")
+	h.authorizeBackstage(upReq)
 
 	resp, err := backstageDomainsClient.Do(upReq)
 	if err != nil {
@@ -151,6 +170,8 @@ func (h *Handlers) VerifyDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.authorizeBackstage(upReq)
+
 	resp, err := backstageDomainsClient.Do(upReq)
 	if err != nil {
 		slog.Error("failed to verify domain", "error", err)
@@ -182,6 +203,8 @@ func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
+
+	h.authorizeBackstage(upReq)
 
 	resp, err := backstageDomainsClient.Do(upReq)
 	if err != nil {
