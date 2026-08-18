@@ -15,13 +15,17 @@
 package api
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/httprate"
 	"github.com/mctlhq/mctl-api/internal/audit"
 )
 
@@ -122,4 +126,80 @@ func mustIP(s string) net.IP {
 		panic("invalid IP " + s)
 	}
 	return ip
+}
+
+// buildLimitedRouter mirrors the real wiring: clientMetaMiddleware resolves the
+// IP, then a per-IP rate limit keys off it. Used to prove the limit cannot be
+// escaped by varying X-Forwarded-For.
+func buildLimitedRouter(trusted []*net.IPNet, limit int) http.Handler {
+	r := chi.NewRouter()
+	r.Use(clientMetaMiddleware(trusted))
+	r.Use(httprate.Limit(limit, time.Minute, httprate.WithKeyFuncs(keyByTrustedIP)))
+	r.Get("/probe", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	return r
+}
+
+// A client behind no trusted proxy must not be able to mint a fresh rate-limit
+// bucket per request by rotating X-Forwarded-For. This is the regression test
+// for httprate.KeyByRealIP: with that key func (plus chi middleware.RealIP)
+// every request below lands in its own bucket and none of them 429s.
+func TestRateLimit_SpoofedXFFCannotEscapeBucket(t *testing.T) {
+	h := buildLimitedRouter(nil, 2)
+	codes := make([]int, 0, 4)
+	for i := 0; i < 4; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+		req.RemoteAddr = "203.0.113.7:5555"
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("1.2.3.%d", i))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		codes = append(codes, w.Code)
+	}
+	if codes[0] != http.StatusOK || codes[1] != http.StatusOK {
+		t.Fatalf("first two requests should pass, got %v", codes)
+	}
+	if codes[2] != http.StatusTooManyRequests || codes[3] != http.StatusTooManyRequests {
+		t.Fatalf("rotating X-Forwarded-For escaped the rate limit: got %v", codes)
+	}
+}
+
+// The mirror case: two genuinely different clients arriving through a trusted
+// proxy must get separate buckets, so the fix does not over-throttle.
+func TestRateLimit_TrustedProxySeparatesClients(t *testing.T) {
+	trusted, err := ParseTrustedProxyCIDRs("10.42.0.0/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := buildLimitedRouter(trusted, 1)
+	get := func(xff string) int {
+		req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+		req.RemoteAddr = "10.42.4.181:443"
+		req.Header.Set("X-Forwarded-For", xff)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+	if c := get("198.51.100.1"); c != http.StatusOK {
+		t.Fatalf("client A first request: got %d", c)
+	}
+	if c := get("198.51.100.2"); c != http.StatusOK {
+		t.Fatalf("client B must have its own bucket: got %d", c)
+	}
+	if c := get("198.51.100.1"); c != http.StatusTooManyRequests {
+		t.Fatalf("client A second request should be limited: got %d", c)
+	}
+}
+
+// Without clientMetaMiddleware in the chain the key falls back to the transport
+// peer, not "" — otherwise every such request would share one bucket.
+func TestKeyByTrustedIP_FallsBackToPeer(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+	req.RemoteAddr = "192.0.2.44:9999"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	got, err := keyByTrustedIP(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "192.0.2.44" {
+		t.Fatalf("fallback should be the transport peer, got %q", got)
+	}
 }

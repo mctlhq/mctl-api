@@ -120,11 +120,13 @@ func NewRouter(opts Options) http.Handler {
 
 	r := chi.NewRouter()
 
-	// Infrastructure middleware (no auth). Capture original RemoteAddr for
-	// audit before chi RealIP rewrites it from X-Forwarded-For.
+	// Infrastructure middleware (no auth). clientMetaMiddleware resolves the
+	// client IP once, honouring X-Forwarded-For only from TrustedProxyCIDRs;
+	// audit entries and rate-limit keys both read it back from the context.
+	// chi's middleware.RealIP is deliberately absent — it rewrites RemoteAddr
+	// from an attacker-supplied header and now has no consumer here.
 	r.Use(middleware.RequestID)
 	r.Use(clientMetaMiddleware(opts.TrustedProxyCIDRs))
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders())
 	r.Use(corsMiddleware(opts.AllowedOrigins))
@@ -162,7 +164,7 @@ func NewRouter(opts Options) http.Handler {
 	// Claude.ai connector. Rate-limited per IP because they sit outside the
 	// authenticated group. Registration is tighter: it mints client_ids.
 	r.Group(func(r chi.Router) {
-		r.Use(httprate.Limit(60, 1*time.Minute, httprate.WithKeyFuncs(httprate.KeyByRealIP)))
+		r.Use(httprate.Limit(60, 1*time.Minute, httprate.WithKeyFuncs(keyByTrustedIP)))
 		r.Get("/.well-known/oauth-authorization-server", h.handleOAuthMeta)
 		// RFC 9728 Protected Resource Metadata — registered at both the root path
 		// and the /mcp-suffixed alias since clients probe either form.
@@ -184,7 +186,7 @@ func NewRouter(opts Options) http.Handler {
 		// registration map was unbounded. That is now capped and evicting
 		// (OAuthServer.MaxRegisteredClients), so this can be sized for real
 		// client behaviour and still stay far below what abuse would need.
-		r.Use(httprate.Limit(30, 1*time.Minute, httprate.WithKeyFuncs(httprate.KeyByRealIP)))
+		r.Use(httprate.Limit(30, 1*time.Minute, httprate.WithKeyFuncs(keyByTrustedIP)))
 		r.Post("/oauth/register", h.handleOAuthRegister)
 	})
 
@@ -203,7 +205,7 @@ func NewRouter(opts Options) http.Handler {
 			if user := auth.UserFromContext(r.Context()); user != nil {
 				return "user:" + user.ID, nil
 			}
-			return httprate.KeyByRealIP(r)
+			return keyByTrustedIP(r)
 		})))
 
 		r.Route("/api/v1", func(r chi.Router) {
@@ -295,7 +297,7 @@ func NewRouter(opts Options) http.Handler {
 					if user := auth.UserFromContext(r.Context()); user != nil {
 						return "write:" + user.ID, nil
 					}
-					return httprate.KeyByRealIP(r)
+					return keyByTrustedIP(r)
 				})))
 				r.Post("/operations/{name}/execute", h.ExecuteOperation)
 				r.Post("/agents/dev-loop/start", h.StartDevLoopWorkflow)

@@ -81,11 +81,30 @@ func clientMetaMiddleware(trusted []*net.IPNet) func(http.Handler) http.Handler 
 	}
 }
 
-// ClientMetaFromContext returns the meta captured before chi RealIP rewrites
-// RemoteAddr from untrusted X-Forwarded-For headers.
+// ClientMetaFromContext returns the meta resolved by clientMetaMiddleware:
+// the client IP, taken from X-Forwarded-For only when the transport peer is a
+// trusted proxy, plus the user agent and request ID.
 func ClientMetaFromContext(ctx context.Context) (ClientMeta, bool) {
 	m, ok := ctx.Value(clientMetaKey{}).(ClientMeta)
 	return m, ok
+}
+
+// keyByTrustedIP keys rate limits by the IP captured before chi's RealIP
+// rewrite and validated against TrustedProxyCIDRs.
+//
+// It replaces httprate.KeyByRealIP, which reads r.RemoteAddr — the field
+// RealIP fills from the leftmost X-Forwarded-For entry. That entry is supplied
+// by the client, not by the ingress, so any caller could mint a fresh rate
+// limit bucket per request simply by varying the header, defeating the limit
+// entirely on the unauthenticated OAuth routes.
+func keyByTrustedIP(r *http.Request) (string, error) {
+	if m, ok := ClientMetaFromContext(r.Context()); ok && m.IP != "" {
+		return m.IP, nil
+	}
+	// clientMetaMiddleware did not run — a route mounted outside the chain, or
+	// a unit test. Fall back to the transport peer rather than "", which would
+	// collapse every such request into a single shared bucket.
+	return remoteHost(r.RemoteAddr), nil
 }
 
 func clientIP(r *http.Request, trusted []*net.IPNet) string {
