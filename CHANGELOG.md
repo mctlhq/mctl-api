@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.32.7](https://github.com/mctlhq/mctl-api/compare/4.32.6...4.32.7) (2026-08-19)
+
+
+### Bug Fixes
+
+* **api:** key rate limits by the trusted client IP, not a spoofable header ([e06061a](https://github.com/mctlhq/mctl-api/commit/e06061afc12023d6ca734c417a8b4ca3f410166b))
+* **api:** key rate limits by the trusted client IP, not a spoofable header ([e777525](https://github.com/mctlhq/mctl-api/commit/e777525cc3e739420dcffca70bff431c6066de9f))
+
 ## [4.32.6](https://github.com/mctlhq/mctl-api/compare/4.32.5...4.32.6) (2026-08-16)
 
 
