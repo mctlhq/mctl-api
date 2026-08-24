@@ -67,7 +67,7 @@ Types:
    - `fix/auth-token-validation`
 3. Make your changes, following the code style and commit conventions above.
 4. Push your branch and open a **pull request** against `main`.
-5. PRs are merged via **squash merge**.
+5. PRs are merged with a **merge commit** (`gh pr merge --merge --delete-branch`), never squash. The feature branch must stay visible in the git graph.
 
 ## Questions?
 
