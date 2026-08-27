@@ -145,6 +145,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	// mctl-agents triggers (admin-only platform-scoped pipeline).
 	srv.AddTool(s.toolTriggerAgentsRun())
 	srv.AddTool(s.toolTriggerMentorOnly())
+	srv.AddTool(s.toolTriggerPlatformReport())
 	srv.AddTool(s.toolTriggerSingleService())
 	srv.AddTool(s.toolTriggerIncidentResponder())
 	srv.AddTool(s.toolTriggerImplementer())
@@ -2306,12 +2307,13 @@ func requireConfirm(args map[string]any, subject string) *mcplib.CallToolResult 
 }
 
 // ─── mctl-agents triggers ─────────────────────────────────────────────
-// Six admin-only tools that drive the mctl-agents pipeline (proactive
+// Admin-only tools that drive the mctl-agents pipeline (proactive
 // platform R&D — researcher → analyst → spec-writer per service, plus a
-// mentor weekly digest, plus a Tier 2 implementer that opens PRs from
-// accepted proposals, plus a Tier 3 shepherd that drives those PRs to
-// merge). Three of them submit the same Argo ClusterWorkflowTemplate
-// `mctl-agents-run` with different `mode` parameters;
+// mentor weekly digest, plus a weekly operational platform-health report,
+// plus a Tier 2 implementer that opens PRs from accepted proposals, plus
+// a Tier 3 shepherd that drives those PRs to merge). Several of them
+// submit the same Argo ClusterWorkflowTemplate `mctl-agents-run` with
+// different `mode` parameters;
 // `mctl_trigger_implementer` submits the separate `mctl-agents-implement`
 // template (RiskMedium — opens PRs in sibling repos);
 // `mctl_trigger_shepherd` submits the separate `mctl-agents-shepherd`
@@ -2321,7 +2323,7 @@ func requireConfirm(args map[string]any, subject string) *mcplib.CallToolResult 
 func (s *Server) toolTriggerAgentsRun() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_agents_run",
 		mcplib.WithTitleAnnotation("Run mctl-agents (full)"),
-		mcplib.WithDescription(`Trigger a full mctl-agents run — every service-agent (researcher → analyst → spec-writer in parallel) followed by the mentor weekly digest. Same as the weekly Saturday 00:00 UTC cron, on demand.
+		mcplib.WithDescription(`Trigger a full mctl-agents run — every service-agent (researcher → analyst → spec-writer in parallel) followed by the mentor weekly digest and the platform-health report. Same as the weekly Saturday 00:00 UTC cron, on demand.
 
 Cost: ~$10 against the Claude Pro/Max subscription (no Console billing).
 Duration: ~15 minutes.
@@ -2354,6 +2356,29 @@ Admin-only. Returns workflow_name.`),
 		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-mentor-only/execute", map[string]string{})
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger mentor: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolTriggerPlatformReport() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_trigger_platform_report",
+		mcplib.WithTitleAnnotation("Run weekly platform health report"),
+		mcplib.WithDescription(`Trigger the platform reporter — reads live mctl MCP state (whoami, tenants, services, resource usage, incidents, recent operations, agent runs) and writes a weekly operational health report.
+
+Skips the expensive service-agent rotation and the mentor proposal digest. Same writer as the Saturday 00:00 UTC full pipeline's last step, on demand.
+
+Cost: ~$1.
+Duration: ~2 minutes.
+Result: platform-gitops/agents-state/_platform-reporter/health/<YYYY-WNN>.md is written in mctl-gitops main.
+
+Admin-only. Returns workflow_name.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-platform-report/execute", map[string]string{})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger platform report: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

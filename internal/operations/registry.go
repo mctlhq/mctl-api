@@ -445,12 +445,12 @@ var builtinOperations = []Operation{
 		},
 	},
 	// ─── mctl-agents triggers ─────────────────────────────────────────────
-	// Six platform-scoped (AdminOnly) operations that submit Workflows in
+	// Platform-scoped (AdminOnly) operations that submit Workflows in
 	// the argo-workflows namespace (mctl-gitops repo holds the CWFTs):
 	//   - mctl-agents-run / mctl-agents-mentor-only / mctl-agents-single-service /
-	//     mctl-agents-incidents all reference the SAME `mctl-agents-run`
-	//     ClusterWorkflowTemplate; only the `mode` (and optional `service`)
-	//     parameter changes.
+	//     mctl-agents-incidents / mctl-agents-platform-report all reference the
+	//     SAME `mctl-agents-run` ClusterWorkflowTemplate; only the `mode`
+	//     (and optional `service`) parameter changes.
 	//   - mctl-agents-implement (Tier 2) references its own
 	//     `mctl-agents-implement` ClusterWorkflowTemplate — it opens PRs in
 	//     sibling repos, so it carries RiskMedium instead of RiskLow.
@@ -464,7 +464,7 @@ var builtinOperations = []Operation{
 	{
 		Name:             "mctl-agents-run",
 		DisplayName:      "Run mctl-agents (full pipeline)",
-		Description:      "Trigger the full mctl-agents pipeline: every service-agent (researcher → analyst → spec-writer in parallel) followed by the mentor weekly digest. Same as the daily 06:00 UTC cron. Cost: ~$10 (subscription quota). Duration: ~15 min. Result lands as a chore(agents) commit in mctl-gitops main under platform-gitops/agents-state/.",
+		Description:      "Trigger the full mctl-agents pipeline: every service-agent (researcher → analyst → spec-writer in parallel) followed by the mentor weekly digest and the platform-health report. Same as the weekly Saturday 00:00 UTC cron. Cost: ~$10 (subscription quota). Duration: ~15 min. Result lands as a chore(agents) commit in mctl-gitops main under platform-gitops/agents-state/.",
 		WorkflowTemplate: "mctl-agents-run",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
@@ -487,6 +487,20 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "mentor-only", Description: "Run mode (locked to 'mentor-only')", Enum: []string{"mentor-only"}},
 			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for mentor-only mode"},
+		},
+	},
+	{
+		Name:             "mctl-agents-platform-report",
+		DisplayName:      "Run mctl-agents (platform health report)",
+		Description:      "Trigger the platform reporter — reads live mctl MCP state (tenants, services, incidents, resource usage) and writes a weekly operational health report. Skips service-agent rotation and the mentor digest. Same writer as the Saturday full pipeline's last step, on demand. Cost: ~$1. Duration: ~2 min. Updates _platform-reporter/health/ in mctl-gitops main.",
+		WorkflowTemplate: "mctl-agents-run",
+		RiskLevel:        RiskLow,
+		RequiresConfirm:  false,
+		AdminOnly:        true,
+		ModifiesPaths:    []string{"platform-gitops/agents-state/_platform-reporter/health/"},
+		Parameters: []ParameterDef{
+			{Name: "mode", Type: "string", Required: false, Default: "platform-report", Description: "Run mode (locked to 'platform-report')", Enum: []string{"platform-report"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for platform-report mode"},
 		},
 	},
 	{
