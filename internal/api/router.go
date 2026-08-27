@@ -200,13 +200,18 @@ func NewRouter(opts Options) http.Handler {
 		}
 		r.Use(middleware.Timeout(30 * 1000000000)) // 30s
 
-		// Global rate limit: 100 requests/minute per user (fallback to per-IP).
-		r.Use(httprate.Limit(100, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
+		// Loopback is skipped so MCP's in-process REST to localhost:8080 does
+		// not double-count against the same bucket as POST /mcp. Chi RealIP is
+		// not used on this group; Traefik cannot spoof RemoteAddr as loopback.
+		// The write 20/min group below does NOT skip loopback — MCP deploys
+		// must still be throttled.
+		r.Use(skipLoopbackRateLimit(httprate.Limit(300, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 			if user := auth.UserFromContext(r.Context()); user != nil {
 				return "user:" + user.ID, nil
 			}
 			return keyByTrustedIP(r)
-		})))
+		}))))
 
 		r.Route("/api/v1", func(r chi.Router) {
 			// Auth endpoints.
@@ -322,6 +327,33 @@ func NewRouter(opts Options) http.Handler {
 	})
 
 	return r
+}
+
+// isLoopbackRemote reports whether the transport peer is IPv4 or IPv6
+// localhost. The skip is keyed on RemoteAddr (via SplitHostPort), not
+// X-Forwarded-For: an attacker in front of Traefik cannot make RemoteAddr
+// look like 127.0.0.1 or ::1.
+func isLoopbackRemote(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return host == "127.0.0.1" || host == "::1"
+}
+
+// skipLoopbackRateLimit wraps a rate-limit middleware so loopback peers are
+// not counted. Use only on the global authenticated limiter.
+func skipLoopbackRateLimit(limitMW func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		limited := limitMW(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isLoopbackRemote(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			limited.ServeHTTP(w, r)
+		})
+	}
 }
 
 var (

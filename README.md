@@ -35,7 +35,7 @@ REST API (/api/v1/*)  ◄── Backstage / CLI / HTTP clients
 | Auth | GitHub token resolution, Dex/OIDC JWT, OAuth 2.0 PKCE |
 | Database | PostgreSQL via pgx v5.9 (audit logs) |
 | Kubernetes | client-go v0.32 (quota reader) |
-| Rate Limiting | httprate v0.15 (100 req/min read, 20 req/min write) |
+| Rate Limiting | httprate v0.15 (300 req/min authenticated including POST /mcp, loopback MCP-internal REST excluded from that cap, 20 req/min write) |
 | Container Registry | ghcr.io/mctlhq/mctl-api |
 | Linting | golangci-lint (errcheck, govet, staticcheck, gosec, bodyclose) |
 
