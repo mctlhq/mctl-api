@@ -231,6 +231,25 @@ func TestVerifyDomainOwnTeamSuccess(t *testing.T) {
 	}
 }
 
+func TestVerifyDomainExplicitTeamLookupFailureBadGateway(t *testing.T) {
+	srv, seen := domainsBackstageWithFailures(t, nil, map[string]bool{"labs": true})
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, BackstageToken: "t"}}
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/abc/verify?team=labs", nil),
+		&auth.User{ID: "u1", Groups: []string{"labs"}}), "id", "abc")
+	rec := httptest.NewRecorder()
+	h.VerifyDomain(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%q", rec.Code, rec.Body.String())
+	}
+	// 1 list call for the explicit team, which fails; unlike the
+	// group-iteration path there is no fallback team to try.
+	if len(*seen) != 1 {
+		t.Fatalf("expected exactly 1 upstream call (the failed list), got %d", len(*seen))
+	}
+}
+
 func TestDeleteDomainNoTeamResolvedViaGroups(t *testing.T) {
 	srv, seen := domainsBackstage(t, map[string][]string{
 		"labs":  {"other"},
