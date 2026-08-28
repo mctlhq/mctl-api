@@ -16,6 +16,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -152,8 +153,112 @@ func (h *Handlers) AddDomain(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+// backstageDomainIDs fetches the ids of every custom domain registered for a
+// team, so callers can check `id` membership without trusting the URL alone.
+func (h *Handlers) backstageDomainIDs(ctx context.Context, baseURL, team string) (map[string]struct{}, error) {
+	upstream := fmt.Sprintf("%s/api/custom-domains/domains?team=%s", baseURL, url.QueryEscape(team))
+
+	upReq, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build backstage list request: %w", err)
+	}
+	h.authorizeBackstage(upReq)
+
+	resp, err := backstageDomainsClient.Do(upReq)
+	if err != nil {
+		return nil, fmt.Errorf("backstage unavailable: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("backstage returned status %d listing domains for team %q", resp.StatusCode, team)
+	}
+
+	var decoded struct {
+		Domains []struct {
+			ID string `json:"id"`
+		} `json:"domains"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return nil, fmt.Errorf("decode backstage domains response: %w", err)
+	}
+
+	ids := make(map[string]struct{}, len(decoded.Domains))
+	for _, d := range decoded.Domains {
+		ids[d.ID] = struct{}{}
+	}
+	return ids, nil
+}
+
+// authorizeDomainMutation enforces RBAC for VerifyDomain/DeleteDomain, the
+// two single-domain mutating endpoints that identify their target only by
+// `id` in the URL. Unlike ListDomains/AddDomain, a nil user fails closed
+// here (401) instead of skipping the check.
+//
+// If the caller supplies ?team=, HasTenantAccess is checked directly against
+// it and a 404 is returned when `id` isn't in that team's domain list (so we
+// never leak which team owns an id the caller can't access). If team is
+// omitted, ownership is resolved by checking `id` against each tenant the
+// caller belongs to; a 404 is returned if none of them own it. Admins skip
+// straight through.
+func (h *Handlers) authorizeDomainMutation(w http.ResponseWriter, r *http.Request, baseURL, id string) bool {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return false
+	}
+	if user.IsAdmin() {
+		return true
+	}
+
+	ctx := r.Context()
+
+	if team := r.URL.Query().Get("team"); team != "" {
+		if !user.HasTenantAccess(team) {
+			writeError(w, http.StatusForbidden, "access denied to team")
+			return false
+		}
+		ids, err := h.backstageDomainIDs(ctx, baseURL, team)
+		if err != nil {
+			slog.Error("failed to list domains from backstage", "error", err, "team", team)
+			writeError(w, http.StatusBadGateway, "backstage unavailable")
+			return false
+		}
+		if _, ok := ids[id]; !ok {
+			writeError(w, http.StatusNotFound, "domain not found")
+			return false
+		}
+		return true
+	}
+
+	lookupFailed := false
+	for _, group := range user.Groups {
+		if group == "admins" {
+			continue
+		}
+		ids, err := h.backstageDomainIDs(ctx, baseURL, group)
+		if err != nil {
+			slog.Error("failed to list domains from backstage", "error", err, "team", group)
+			lookupFailed = true
+			continue
+		}
+		if _, ok := ids[id]; ok {
+			return true
+		}
+	}
+
+	if lookupFailed {
+		writeError(w, http.StatusBadGateway, "backstage unavailable")
+		return false
+	}
+
+	writeError(w, http.StatusNotFound, "domain not found")
+	return false
+}
+
 // VerifyDomain triggers DNS verification for a domain.
-// POST /api/v1/domains/:id/verify
+// POST /api/v1/domains/:id/verify?team=X (team optional, resolved via the
+// caller's groups when omitted)
 func (h *Handlers) VerifyDomain(w http.ResponseWriter, r *http.Request) {
 	baseURL := h.opts.BackstageInternalURL
 	if baseURL == "" {
@@ -162,6 +267,10 @@ func (h *Handlers) VerifyDomain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := chi.URLParam(r, "id")
+	if !h.authorizeDomainMutation(w, r, baseURL, id) {
+		return
+	}
+
 	upstream := fmt.Sprintf("%s/api/custom-domains/domains/%s/verify", baseURL, url.PathEscape(id))
 
 	upReq, err := http.NewRequestWithContext(r.Context(), "POST", upstream, nil)
@@ -187,7 +296,8 @@ func (h *Handlers) VerifyDomain(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteDomain removes a custom domain.
-// DELETE /api/v1/domains/:id
+// DELETE /api/v1/domains/:id?team=X (team optional, resolved via the
+// caller's groups when omitted)
 func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 	baseURL := h.opts.BackstageInternalURL
 	if baseURL == "" {
@@ -196,6 +306,10 @@ func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := chi.URLParam(r, "id")
+	if !h.authorizeDomainMutation(w, r, baseURL, id) {
+		return
+	}
+
 	upstream := fmt.Sprintf("%s/api/custom-domains/domains/%s", baseURL, url.PathEscape(id))
 
 	upReq, err := http.NewRequestWithContext(r.Context(), "DELETE", upstream, nil)
