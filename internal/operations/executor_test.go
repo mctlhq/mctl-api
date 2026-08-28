@@ -20,6 +20,8 @@ func TestWorkflowNamespace(t *testing.T) {
 		{"tenant lifecycle create", "create-tenant", "acme", "argo-workflows"},
 		{"tenant lifecycle delete (direct)", "delete-tenant", "acme", "argo-workflows"},
 		{"tenant lifecycle delete (safe)", "delete-tenant-safe", "acme", "argo-workflows"},
+		{"add custom domain runs centrally", "add-custom-domain", "acme", "argo-workflows"},
+		{"remove custom domain runs centrally", "remove-custom-domain", "acme", "argo-workflows"},
 		{"skill save runs centrally", "openclaw-skill-save", "acme", "argo-workflows"},
 		{"skill delete runs centrally", "openclaw-skill-delete", "acme", "argo-workflows"},
 		{"mctl-agents-run runs centrally", "mctl-agents-run", "acme", "argo-workflows"},
