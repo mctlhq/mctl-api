@@ -88,6 +88,15 @@ func NewExecutor() *Executor {
 func WorkflowNamespace(workflowTemplate, team string) string {
 	switch workflowTemplate {
 	case "create-tenant", "delete-tenant", "delete-tenant-safe",
+		// add/remove-custom-domain moved out of tenant namespaces
+		// (2026-08-29): they need the Backstage workflow token, and
+		// replicating that platform credential into tenant namespaces
+		// would let any tenant read it (tenant SAs can get secrets) and
+		// impersonate the workflow tier against the auth-gated
+		// custom-domains routes (mctl-portal#89, mctl-gitops#933). Both
+		// workflows only mount platform-level secrets (deploy key,
+		// backstage-workflow-token) that live in argo-workflows.
+		"add-custom-domain", "remove-custom-domain",
 		"openclaw-skill-save", "openclaw-skill-delete",
 		"openclaw-identity-save", "openclaw-identity-delete",
 		"platform-skill-publish", "platform-skill-deprecate",
