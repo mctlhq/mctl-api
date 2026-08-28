@@ -1558,7 +1558,7 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 
 		var results []string
 		for _, d := range resp.Domains {
-			vBody, vErr := s.apiPost(ctx, "/api/v1/domains/"+d.ID+"/verify", nil)
+			vBody, vErr := s.apiPost(ctx, "/api/v1/domains/"+d.ID+"/verify?team="+url.QueryEscape(team), nil)
 			if vErr != nil {
 				results = append(results, fmt.Sprintf("%s: verification failed: %v", d.Domain, vErr))
 			} else {
