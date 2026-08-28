@@ -141,21 +141,37 @@ func withURLParam(req *http.Request, key, value string) *http.Request {
 // recorded for assertions on upstream call count.
 func domainsBackstage(t *testing.T, byTeam map[string][]string) (*httptest.Server, *[]*http.Request) {
 	t.Helper()
+	return domainsBackstageWithFailures(t, byTeam, nil)
+}
+
+// domainsBackstageWithFailures behaves like domainsBackstage, except that a
+// GET .../domains?team=X list call for a team present in failTeams gets a
+// 500 instead of the normal 200 JSON body, so tests can exercise the
+// per-group fallback-on-error behavior in authorizeDomainMutation.
+func domainsBackstageWithFailures(t *testing.T, byTeam map[string][]string, failTeams map[string]bool) (*httptest.Server, *[]*http.Request) {
+	t.Helper()
 	var seen []*http.Request
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Clone(r.Context()))
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/domains") {
-			ids := byTeam[r.URL.Query().Get("team")]
+			team := r.URL.Query().Get("team")
+			if failTeams[team] {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			ids := byTeam[team]
 			domains := make([]map[string]string, len(ids))
 			for i, id := range ids {
 				domains[i] = map[string]string{"id": id}
 			}
 			body, _ := json.Marshal(map[string]any{"domains": domains})
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(body)
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
 	t.Cleanup(srv.Close)
@@ -250,6 +266,46 @@ func TestDeleteDomainNoTeamNotFound(t *testing.T) {
 	}
 	if len(*seen) != 1 {
 		t.Fatalf("expected exactly 1 upstream call (the list), got %d", len(*seen))
+	}
+}
+
+func TestDeleteDomainNoTeamContinuesPastFailedGroupLookup(t *testing.T) {
+	srv, seen := domainsBackstageWithFailures(t,
+		map[string][]string{"infra": {"abc"}},
+		map[string]bool{"labs": true},
+	)
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, BackstageToken: "t"}}
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/abc", nil),
+		&auth.User{ID: "u1", Groups: []string{"labs", "infra"}}), "id", "abc")
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	// 2 list calls (labs fails, then infra where "abc" is found) + 1 delete call.
+	if len(*seen) != 3 {
+		t.Fatalf("expected 3 upstream calls (2 lists + delete), got %d", len(*seen))
+	}
+}
+
+func TestDeleteDomainNoTeamAllGroupLookupsFailBadGateway(t *testing.T) {
+	srv, seen := domainsBackstageWithFailures(t, nil,
+		map[string]bool{"labs": true, "infra": true},
+	)
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, BackstageToken: "t"}}
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/abc", nil),
+		&auth.User{ID: "u1", Groups: []string{"labs", "infra"}}), "id", "abc")
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%q", rec.Code, rec.Body.String())
+	}
+	if len(*seen) != 2 {
+		t.Fatalf("expected 2 upstream calls (both failed lists), got %d", len(*seen))
 	}
 }
 

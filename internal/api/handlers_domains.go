@@ -204,7 +204,7 @@ func (h *Handlers) backstageDomainIDs(ctx context.Context, baseURL, team string)
 func (h *Handlers) authorizeDomainMutation(w http.ResponseWriter, r *http.Request, baseURL, id string) bool {
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
-		http.Error(w, `{"error":"authentication required"}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "authentication required")
 		return false
 	}
 	if user.IsAdmin() {
@@ -215,22 +215,23 @@ func (h *Handlers) authorizeDomainMutation(w http.ResponseWriter, r *http.Reques
 
 	if team := r.URL.Query().Get("team"); team != "" {
 		if !user.HasTenantAccess(team) {
-			http.Error(w, `{"error":"access denied to team"}`, http.StatusForbidden)
+			writeError(w, http.StatusForbidden, "access denied to team")
 			return false
 		}
 		ids, err := h.backstageDomainIDs(ctx, baseURL, team)
 		if err != nil {
 			slog.Error("failed to list domains from backstage", "error", err, "team", team)
-			http.Error(w, `{"error":"backstage unavailable"}`, http.StatusBadGateway)
+			writeError(w, http.StatusBadGateway, "backstage unavailable")
 			return false
 		}
 		if _, ok := ids[id]; !ok {
-			http.Error(w, `{"error":"domain not found"}`, http.StatusNotFound)
+			writeError(w, http.StatusNotFound, "domain not found")
 			return false
 		}
 		return true
 	}
 
+	lookupFailed := false
 	for _, group := range user.Groups {
 		if group == "admins" {
 			continue
@@ -238,15 +239,20 @@ func (h *Handlers) authorizeDomainMutation(w http.ResponseWriter, r *http.Reques
 		ids, err := h.backstageDomainIDs(ctx, baseURL, group)
 		if err != nil {
 			slog.Error("failed to list domains from backstage", "error", err, "team", group)
-			http.Error(w, `{"error":"backstage unavailable"}`, http.StatusBadGateway)
-			return false
+			lookupFailed = true
+			continue
 		}
 		if _, ok := ids[id]; ok {
 			return true
 		}
 	}
 
-	http.Error(w, `{"error":"domain not found"}`, http.StatusNotFound)
+	if lookupFailed {
+		writeError(w, http.StatusBadGateway, "backstage unavailable")
+		return false
+	}
+
+	writeError(w, http.StatusNotFound, "domain not found")
 	return false
 }
 
