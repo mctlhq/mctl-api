@@ -22,7 +22,7 @@ jobs:
       # by non-human actor", and since branch protection requires an
       # approving review, dependabot PRs then sit unmergeable until a
       # maintainer triggers a review by hand.
-      allowed-bots: "mctl-claude-remote,github-actions,dependabot"
+      allowed-bots: "mctl-claude-remote,github-actions,dependabot,mctl-agents"
       sensitive-paths: '^internal/(auth|crypto|db|mcp|telegram)/'
       conventions: |
         Follow the conventions in this repository's CLAUDE.md (Go style,
