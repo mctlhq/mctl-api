@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.33.1](https://github.com/mctlhq/mctl-api/compare/4.33.0...4.33.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **dev-loop:** carry approver payload through the approve endpoint ([1da0497](https://github.com/mctlhq/mctl-api/commit/1da0497cf2e678540e7c8c00d7cc8bc717931b48))
+* **dev-loop:** carry approver payload through the approve endpoint ([96cd32a](https://github.com/mctlhq/mctl-api/commit/96cd32ada14062d640473c3adc9140bec457583e)), closes [#209](https://github.com/mctlhq/mctl-api/issues/209)
+
 ## [4.33.0](https://github.com/mctlhq/mctl-api/compare/4.32.8...4.33.0) (2026-08-29)
 
 
