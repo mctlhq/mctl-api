@@ -1361,7 +1361,7 @@ If the GitHub App is not installed on your account, visit: https://github.com/ap
 			mcplib.Description("Team name to sync repos for"),
 		),
 		mcplib.WithString("user",
-			mcplib.Description("GitHub username (defaults to authenticated user)"),
+			mcplib.Description("Deprecated: accepted for backward compatibility only and ignored server-side. The server always uses the authenticated caller's identity."),
 		),
 	)
 

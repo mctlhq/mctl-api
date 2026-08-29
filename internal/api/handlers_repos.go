@@ -111,7 +111,9 @@ func (h *Handlers) GetRepoInstallURL(w http.ResponseWriter, r *http.Request) {
 }
 
 // SyncRepos triggers a repo sync for a team via Backstage's github-app-connect plugin.
-// POST /api/v1/repos/sync  body: {"team": "admins", "user": "mashkovd"}
+// POST /api/v1/repos/sync  body: {"team": "admins"}
+// The syncing identity always comes from the authenticated caller
+// (auth.UserFromContext); it is never read from the request body.
 func (h *Handlers) SyncRepos(w http.ResponseWriter, r *http.Request) {
 	baseURL := h.opts.BackstageInternalURL
 	if baseURL == "" {
@@ -120,10 +122,13 @@ func (h *Handlers) SyncRepos(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
 
 	var req struct {
 		Team string `json:"team"`
-		User string `json:"user"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
@@ -133,21 +138,13 @@ func (h *Handlers) SyncRepos(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"missing required field: team"}`, http.StatusBadRequest)
 		return
 	}
-	// Default to the authenticated user's GitHub login.
-	if req.User == "" && user != nil {
-		req.User = user.ID
-	}
-	if req.User == "" {
-		http.Error(w, `{"error":"missing required field: user"}`, http.StatusBadRequest)
-		return
-	}
-	if user != nil && !user.HasTenantAccess(req.Team) {
+	if !user.HasTenantAccess(req.Team) {
 		http.Error(w, `{"error":"access denied to team"}`, http.StatusForbidden)
 		return
 	}
 
 	upstream := fmt.Sprintf("%s/api/github-app-connect/repos/sync?team=%s&user=%s",
-		baseURL, url.QueryEscape(req.Team), url.QueryEscape(req.User))
+		baseURL, url.QueryEscape(req.Team), url.QueryEscape(user.ID))
 
 	upReq, err := http.NewRequestWithContext(r.Context(), "POST", upstream, nil)
 	if err != nil {
