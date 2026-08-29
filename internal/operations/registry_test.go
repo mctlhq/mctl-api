@@ -32,7 +32,10 @@ func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 	}
 
 	registry := NewRegistry()
-	for _, opName := range []string{"mctl-agents-implement", "mctl-agents-shepherd"} {
+	// mctl-agents-approve duplicates the same enum (mctl-agents-investigate
+	// takes an issue_url instead of a service param, so it has no enum to
+	// drift).
+	for _, opName := range []string{"mctl-agents-implement", "mctl-agents-shepherd", "mctl-agents-approve"} {
 		op, ok := registry.Get(opName)
 		if !ok {
 			t.Fatalf("operation %q not found in registry", opName)

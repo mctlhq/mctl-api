@@ -85,6 +85,7 @@ func NewExecutor() *Executor {
 // mctl-agents-implement (Tier 2) shares the same secrets and runs in the same ns.
 // mctl-agents-shepherd (Tier 3) likewise reuses the argo-workflows secrets.
 // mctl-agents-investigate (issue-driven entry) reuses them as well.
+// mctl-agents-approve (proposal flip) needs the deploy key + gitops mutex there.
 func WorkflowNamespace(workflowTemplate, team string) string {
 	switch workflowTemplate {
 	case "create-tenant", "delete-tenant", "delete-tenant-safe",
@@ -104,7 +105,11 @@ func WorkflowNamespace(workflowTemplate, team string) string {
 		"mctl-agents-run",
 		"mctl-agents-implement",
 		"mctl-agents-shepherd",
-		"mctl-agents-investigate":
+		"mctl-agents-investigate",
+		// approve flips a proposal's .status.yaml via gitops commit — it
+		// needs the same argo-workflows-namespace deploy key and the
+		// mctl-gitops-main-writes mutex as its siblings above.
+		"mctl-agents-approve":
 		return "argo-workflows"
 	}
 	return team
