@@ -1845,6 +1845,15 @@ paths:
                     type: string
                     description: Temporal execution status short name
                     example: Running
+                  shepherd_in_loop:
+                    type: boolean
+                    description: |
+                      Whether this execution runs its own in-loop shepherd
+                      ticks. False for a Running workflow that started before
+                      mctl-agents shipped the `shepherd-in-loop` patch, and
+                      whenever the query cannot be answered — in both cases
+                      the shepherd cron stays responsible for the proposal.
+                    example: true
         '403':
           description: Admin access required
           content:
