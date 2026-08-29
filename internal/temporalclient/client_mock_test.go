@@ -195,3 +195,68 @@ func TestDescribeDevLoop_UnknownWorkflowIsDetectableViaIsNotFound(t *testing.T) 
 		t.Fatalf("expected IsNotFound(err), got %v", err)
 	}
 }
+
+// fakeEncodedValue is a minimal converter.EncodedValue for query results —
+// the SDK ships no exported constructor for tests.
+type fakeEncodedValue struct {
+	val bool
+	err error
+}
+
+func (f *fakeEncodedValue) HasValue() bool { return f.err == nil }
+func (f *fakeEncodedValue) Get(target interface{}) error {
+	if f.err != nil {
+		return f.err
+	}
+	if p, ok := target.(*bool); ok {
+		*p = f.val
+	}
+	return nil
+}
+
+func TestQueryShepherdInLoop_ReturnsWorkflowAnswer(t *testing.T) {
+	mockClient := new(mocks.Client)
+	mockClient.On("QueryWorkflow", mock.Anything, "dev-loop-mctlhq-mctl-telegram-1", "", ShepherdInLoopQueryName).
+		Return(&fakeEncodedValue{val: true}, nil)
+
+	c := &Client{temporal: mockClient}
+	inLoop, err := c.QueryShepherdInLoop(context.Background(), "dev-loop-mctlhq-mctl-telegram-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !inLoop {
+		t.Fatal("expected the workflow's true answer to be returned")
+	}
+}
+
+// A worker too old to define the handler fails the query; the caller must
+// see the error (and report shepherd_in_loop=false) rather than a silent true.
+func TestQueryShepherdInLoop_UnknownQueryTypeIsAnError(t *testing.T) {
+	mockClient := new(mocks.Client)
+	mockClient.On("QueryWorkflow", mock.Anything, "dev-loop-x", "", ShepherdInLoopQueryName).
+		Return(nil, serviceerror.NewInvalidArgument("unknown queryType shepherd_in_loop"))
+
+	c := &Client{temporal: mockClient}
+	inLoop, err := c.QueryShepherdInLoop(context.Background(), "dev-loop-x")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if inLoop {
+		t.Fatal("a failed query must not report the workflow as shepherding")
+	}
+}
+
+func TestQueryShepherdInLoop_UndecodableResultIsAnError(t *testing.T) {
+	mockClient := new(mocks.Client)
+	mockClient.On("QueryWorkflow", mock.Anything, "dev-loop-x", "", ShepherdInLoopQueryName).
+		Return(&fakeEncodedValue{err: errors.New("payload is not a bool")}, nil)
+
+	c := &Client{temporal: mockClient}
+	inLoop, err := c.QueryShepherdInLoop(context.Background(), "dev-loop-x")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if inLoop {
+		t.Fatal("an undecodable result must not report the workflow as shepherding")
+	}
+}

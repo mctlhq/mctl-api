@@ -15,15 +15,23 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 )
+
+// shepherdQueryTimeout bounds the best-effort shepherd_in_loop query so a
+// worker outage degrades to "false" quickly instead of holding the HTTP
+// request open until the API-wide 30s timeout.
+const shepherdQueryTimeout = 3 * time.Second
 
 // requireTemporalAdmin mirrors requireAgentRegistryAdmin: configured,
 // authenticated, admin. The dev-loop trigger path is a separate optional
@@ -166,8 +174,31 @@ func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "failed to describe workflow: "+err.Error())
 		return
 	}
+	// Only a Running execution can be shepherding anything, and a query
+	// against a finished one would fail anyway. A query failure is not an
+	// error for the caller: an old worker without the handler, or a
+	// transient blip, both mean "assume it does not tick", which leaves the
+	// shepherd cron responsible — the pre-#213 behaviour.
+	// The query gets its own short deadline, not the request's: Temporal
+	// blocks a QueryWorkflow until a worker on that task queue answers, so
+	// during a worker outage the request context's only bound is the 30s
+	// API timeout — the caller would be timing out (or already gone) before
+	// the false fallback reached it, exactly when the cron most needs to
+	// take over.
+	shepherdInLoop := false
+	if status == "Running" {
+		qctx, cancel := context.WithTimeout(r.Context(), shepherdQueryTimeout)
+		inLoop, qerr := h.opts.TemporalClient.QueryShepherdInLoop(qctx, workflowID)
+		cancel()
+		if qerr != nil {
+			slog.Debug("dev-loop shepherd_in_loop query failed; reporting false",
+				"workflow_id", workflowID, "error", qerr)
+		}
+		shepherdInLoop = inLoop
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"workflow_id": workflowID,
-		"status":      status,
+		"workflow_id":      workflowID,
+		"status":           status,
+		"shepherd_in_loop": shepherdInLoop,
 	})
 }

@@ -169,6 +169,29 @@ func (c *Client) DescribeDevLoop(ctx context.Context, workflowID string) (string
 	}
 }
 
+// ShepherdInLoopQueryName is DevLoopWorkflow's query handler reporting
+// whether THIS execution runs its own in-loop shepherd ticks. It answers
+// false on an execution that started before mctl-agents shipped the
+// `shepherd-in-loop` patch: such a run is Running but will never tick, so
+// the shepherd cron must keep sweeping its proposal (mctl-agents#213).
+const ShepherdInLoopQueryName = "shepherd_in_loop"
+
+// QueryShepherdInLoop asks the workflow itself rather than inferring from
+// its status. A worker too old to define the handler fails the query; the
+// caller treats any failure as false, which degrades to "the cron keeps
+// shepherding this proposal" — the pre-#213 behaviour.
+func (c *Client) QueryShepherdInLoop(ctx context.Context, workflowID string) (bool, error) {
+	value, err := c.temporal.QueryWorkflow(ctx, workflowID, "", ShepherdInLoopQueryName)
+	if err != nil {
+		return false, fmt.Errorf("temporalclient: query %s on %s: %w", ShepherdInLoopQueryName, workflowID, err)
+	}
+	var inLoop bool
+	if err := value.Get(&inLoop); err != nil {
+		return false, fmt.Errorf("temporalclient: decode %s on %s: %w", ShepherdInLoopQueryName, workflowID, err)
+	}
+	return inLoop, nil
+}
+
 // IsNotFound reports whether err is (or wraps) Temporal's NotFound service
 // error — the case SignalApprove hits when workflowID doesn't correspond to
 // any workflow (never started, or already past retention). Callers use this

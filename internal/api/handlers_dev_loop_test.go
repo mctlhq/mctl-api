@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
@@ -41,6 +42,10 @@ type fakeDevLoopClient struct {
 	describeErr           error
 	describeStatus        string
 	lastDescribedWorkflow string
+	shepherdInLoop        bool
+	shepherdInLoopErr     error
+	shepherdQueries       int
+	shepherdBlocks        bool
 }
 
 func (f *fakeDevLoopClient) StartDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
@@ -65,6 +70,19 @@ func (f *fakeDevLoopClient) DescribeDevLoop(ctx context.Context, workflowID stri
 		return "Running", nil
 	}
 	return f.describeStatus, nil
+}
+
+func (f *fakeDevLoopClient) QueryShepherdInLoop(ctx context.Context, workflowID string) (bool, error) {
+	f.shepherdQueries++
+	if f.shepherdBlocks {
+		// Stand in for Temporal blocking until a worker answers.
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	if f.shepherdInLoopErr != nil {
+		return false, f.shepherdInLoopErr
+	}
+	return f.shepherdInLoop, nil
 }
 
 func TestStartDevLoopWorkflow_NotConfigured(t *testing.T) {
@@ -296,12 +314,12 @@ func TestGetDevLoopWorkflow_Success(t *testing.T) {
 	if fake.lastDescribedWorkflow != "dev-loop-mctlhq-mctl-telegram-1" {
 		t.Fatalf("expected DescribeDevLoop with the workflow_id, got %q", fake.lastDescribedWorkflow)
 	}
-	var body map[string]string
+	var body map[string]interface{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("invalid JSON response: %v", err)
 	}
 	if body["status"] != "Running" {
-		t.Fatalf("expected status Running, got %q", body["status"])
+		t.Fatalf("expected status Running, got %v", body["status"])
 	}
 }
 
@@ -316,6 +334,72 @@ func TestGetDevLoopWorkflow_UnknownWorkflowIs404(t *testing.T) {
 	h.GetDevLoopWorkflow(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetDevLoopWorkflow_ReportsShepherdInLoop(t *testing.T) {
+	fake := &fakeDevLoopClient{describeStatus: "Running", shepherdInLoop: true}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/dev-loop/dev-loop-x", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-x")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.GetDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	if body["shepherd_in_loop"] != true {
+		t.Fatalf("expected shepherd_in_loop true, got %v", body["shepherd_in_loop"])
+	}
+}
+
+// A worker too old to define the query handler must read as "does not tick",
+// so the shepherd cron keeps sweeping that proposal (mctl-agents#213).
+func TestGetDevLoopWorkflow_QueryFailureReportsNotInLoop(t *testing.T) {
+	fake := &fakeDevLoopClient{describeStatus: "Running", shepherdInLoopErr: fmt.Errorf("unknown queryType %q", "shepherd_in_loop")}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/dev-loop/dev-loop-x", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-x")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.GetDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a failed query must not fail the read; got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	if body["shepherd_in_loop"] != false {
+		t.Fatalf("expected shepherd_in_loop false, got %v", body["shepherd_in_loop"])
+	}
+}
+
+// Querying a finished execution would fail anyway — don't spend the RPC.
+func TestGetDevLoopWorkflow_NoQueryWhenNotRunning(t *testing.T) {
+	fake := &fakeDevLoopClient{describeStatus: "Completed", shepherdInLoop: true}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/dev-loop/dev-loop-x", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-x")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.GetDevLoopWorkflow(rec, req)
+	if fake.shepherdQueries != 0 {
+		t.Fatalf("expected no query for a %s workflow, got %d", fake.describeStatus, fake.shepherdQueries)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	if body["shepherd_in_loop"] != false {
+		t.Fatalf("expected shepherd_in_loop false, got %v", body["shepherd_in_loop"])
 	}
 }
 
@@ -341,5 +425,40 @@ func TestGetDevLoopWorkflow_RequiresAuth(t *testing.T) {
 	h.GetDevLoopWorkflow(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without auth, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Temporal blocks a query until a worker on the task queue answers. During a
+// worker outage that must degrade to false on the handler's own short
+// deadline, not hang until the API-wide timeout (Codex P1 on #216).
+func TestGetDevLoopWorkflow_BlockedQueryStillAnswers(t *testing.T) {
+	fake := &fakeDevLoopClient{describeStatus: "Running", shepherdBlocks: true}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/dev-loop/dev-loop-x", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-x")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		h.GetDevLoopWorkflow(rec, req)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(shepherdQueryTimeout + 5*time.Second):
+		t.Fatal("handler did not return; the query is not bounded by its own deadline")
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	if body["shepherd_in_loop"] != false {
+		t.Fatalf("expected shepherd_in_loop false, got %v", body["shepherd_in_loop"])
 	}
 }
