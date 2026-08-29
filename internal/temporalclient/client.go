@@ -125,9 +125,15 @@ func (c *Client) StartDevLoopWorkflow(ctx context.Context, issueURL string) (wor
 // SignalApprove signals an already-running DevLoopWorkflow's approve
 // handler — the durable "human flips it to accepted" step the plan
 // describes, expressed as a Temporal signal instead of a gitops
-// .status.yaml edit.
-func (c *Client) SignalApprove(ctx context.Context, workflowID string) error {
-	if err := c.temporal.SignalWorkflow(ctx, workflowID, "", ApproveSignalName, nil); err != nil {
+// .status.yaml edit. payload carries approver provenance
+// ({"approver": ..., "reason": ...}); nil/empty sends a bare signal,
+// which the workflow's defensive approve() parser also accepts.
+func (c *Client) SignalApprove(ctx context.Context, workflowID string, payload map[string]string) error {
+	var arg interface{}
+	if len(payload) > 0 {
+		arg = payload
+	}
+	if err := c.temporal.SignalWorkflow(ctx, workflowID, "", ApproveSignalName, arg); err != nil {
 		return fmt.Errorf("temporalclient: signal approve on %s: %w", workflowID, err)
 	}
 	return nil

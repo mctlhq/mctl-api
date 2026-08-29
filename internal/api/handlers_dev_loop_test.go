@@ -35,6 +35,7 @@ type fakeDevLoopClient struct {
 	workflowID, runID    string
 	approveErr           error
 	lastApprovedWorkflow string
+	lastApprovePayload   map[string]string
 }
 
 func (f *fakeDevLoopClient) StartDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
@@ -44,8 +45,9 @@ func (f *fakeDevLoopClient) StartDevLoopWorkflow(ctx context.Context, issueURL s
 	return f.workflowID, f.runID, nil
 }
 
-func (f *fakeDevLoopClient) SignalApprove(ctx context.Context, workflowID string) error {
+func (f *fakeDevLoopClient) SignalApprove(ctx context.Context, workflowID string, payload map[string]string) error {
 	f.lastApprovedWorkflow = workflowID
+	f.lastApprovePayload = payload
 	return f.approveErr
 }
 
@@ -217,5 +219,48 @@ func TestApproveDevLoopWorkflow_Success(t *testing.T) {
 	}
 	if fake.lastApprovedWorkflow != "dev-loop-mctlhq-mctl-telegram-1" {
 		t.Fatalf("expected SignalApprove to be called with the workflow_id, got %q", fake.lastApprovedWorkflow)
+	}
+	// No body → approver defaults to the authenticated caller (adminCtx = "tester").
+	if got := fake.lastApprovePayload["approver"]; got != "tester" {
+		t.Fatalf("expected approver to default to the caller, got %q", got)
+	}
+}
+
+func TestApproveDevLoopWorkflow_ExplicitApproverAndReasonPassthrough(t *testing.T) {
+	fake := &fakeDevLoopClient{}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve",
+		bytes.NewBufferString(`{"approver":"mashkovd","reason":"looks good"}`))
+	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.ApproveDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := fake.lastApprovePayload["approver"]; got != "mashkovd" {
+		t.Fatalf("expected explicit approver to win, got %q", got)
+	}
+	if got := fake.lastApprovePayload["reason"]; got != "looks good" {
+		t.Fatalf("expected reason passthrough, got %q", got)
+	}
+}
+
+func TestApproveDevLoopWorkflow_MalformedBodyIs400(t *testing.T) {
+	fake := &fakeDevLoopClient{}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve",
+		bytes.NewBufferString(`{"approver":`))
+	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.ApproveDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if fake.lastApprovedWorkflow != "" {
+		t.Fatal("SignalApprove must not be called on malformed input")
 	}
 }

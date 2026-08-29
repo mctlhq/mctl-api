@@ -74,7 +74,7 @@ type WorkflowExecutor interface {
 // SDK mock) would otherwise be needed just to get past the nil-client check.
 type DevLoopClient interface {
 	StartDevLoopWorkflow(ctx context.Context, issueURL string) (workflowID, runID string, err error)
-	SignalApprove(ctx context.Context, workflowID string) error
+	SignalApprove(ctx context.Context, workflowID string, payload map[string]string) error
 }
 
 // AuditLog is the interface for recording and querying audit events.
