@@ -17,6 +17,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -91,11 +92,20 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+type approveDevLoopRequest struct {
+	Approver string `json:"approver"`
+	Reason   string `json:"reason"`
+}
+
 // ApproveDevLoopWorkflow handles POST /api/v1/agents/dev-loop/{workflow_id}/approve
 // — the durable "human flips it to accepted" step, expressed as a Temporal
-// signal instead of a gitops .status.yaml edit.
+// signal instead of a gitops .status.yaml edit. The optional JSON body
+// {approver?, reason?} rides on the signal; approver defaults to the
+// authenticated caller so the gitops approval block records who flipped it
+// (same provenance rule as the mctl-agents-approve operation).
 func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireTemporalAdmin(w, r); !ok {
+	user, ok := h.requireTemporalAdmin(w, r)
+	if !ok {
 		return
 	}
 
@@ -104,7 +114,21 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "missing workflow_id path parameter")
 		return
 	}
-	if err := h.opts.TemporalClient.SignalApprove(r.Context(), workflowID); err != nil {
+
+	var body approveDevLoopRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Approver == "" {
+		body.Approver = user.ID
+	}
+	payload := map[string]string{"approver": body.Approver}
+	if body.Reason != "" {
+		payload["reason"] = body.Reason
+	}
+
+	if err := h.opts.TemporalClient.SignalApprove(r.Context(), workflowID, payload); err != nil {
 		if temporalclient.IsNotFound(err) {
 			writeError(w, http.StatusNotFound, "workflow not found: "+workflowID)
 			return

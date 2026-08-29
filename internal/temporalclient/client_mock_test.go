@@ -114,7 +114,20 @@ func TestSignalApprove_SignalsCorrectWorkflowAndSignalName(t *testing.T) {
 		Return(nil)
 
 	c := &Client{temporal: mockClient}
-	if err := c.SignalApprove(context.Background(), "dev-loop-mctlhq-mctl-telegram-296"); err != nil {
+	if err := c.SignalApprove(context.Background(), "dev-loop-mctlhq-mctl-telegram-296", nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mockClient.AssertExpectations(t)
+}
+
+func TestSignalApprove_PayloadRidesOnTheSignal(t *testing.T) {
+	payload := map[string]string{"approver": "mashkovd", "reason": "looks good"}
+	mockClient := new(mocks.Client)
+	mockClient.On("SignalWorkflow", mock.Anything, "dev-loop-mctlhq-mctl-telegram-296", "", ApproveSignalName, payload).
+		Return(nil)
+
+	c := &Client{temporal: mockClient}
+	if err := c.SignalApprove(context.Background(), "dev-loop-mctlhq-mctl-telegram-296", payload); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	mockClient.AssertExpectations(t)
@@ -126,7 +139,7 @@ func TestSignalApprove_UnknownWorkflowIsDetectableViaIsNotFound(t *testing.T) {
 		Return(serviceerror.NewNotFound("workflow not found"))
 
 	c := &Client{temporal: mockClient}
-	err := c.SignalApprove(context.Background(), "dev-loop-mctlhq-mctl-telegram-999")
+	err := c.SignalApprove(context.Background(), "dev-loop-mctlhq-mctl-telegram-999", nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -141,7 +154,7 @@ func TestSignalApprove_OtherFailuresAreNotIsNotFound(t *testing.T) {
 		Return(serviceerror.NewUnavailable("temporal frontend unreachable"))
 
 	c := &Client{temporal: mockClient}
-	err := c.SignalApprove(context.Background(), "dev-loop-mctlhq-mctl-telegram-1")
+	err := c.SignalApprove(context.Background(), "dev-loop-mctlhq-mctl-telegram-1", nil)
 	if IsNotFound(err) {
 		t.Fatal("an Unavailable error must not be mistaken for NotFound")
 	}
