@@ -1819,7 +1819,9 @@ paths:
         The durable "human flips it to accepted" step, expressed as a
         Temporal signal instead of a gitops .status.yaml edit. Unblocks the
         workflow's wait_condition so it proceeds to the implement step.
-        **Admin access required.**
+        The optional body carries approval provenance; `approver` defaults
+        to the authenticated caller and is recorded in the proposal's
+        gitops approval block. **Admin access required.**
       tags: [Agent Registry]
       parameters:
         - name: workflow_id
@@ -1828,6 +1830,20 @@ paths:
           schema:
             type: string
           example: dev-loop-mctlhq-mctl-telegram-296
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                approver:
+                  type: string
+                  description: Identity recorded as approved_by. Defaults to the authenticated caller.
+                  example: mashkovd
+                reason:
+                  type: string
+                  description: Optional free-form approval note.
       responses:
         '200':
           description: Signal delivered
@@ -1841,6 +1857,12 @@ paths:
                   signalled:
                     type: string
                     example: approve
+        '400':
+          description: Malformed JSON body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '403':
           description: Admin access required
           content:
