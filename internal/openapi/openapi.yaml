@@ -975,6 +975,10 @@ paths:
                   type: string
                 user:
                   type: string
+                  deprecated: true
+                  description: >-
+                    Ignored server-side. The authenticated caller's identity
+                    is always used.
       responses:
         '200':
           description: Sync result
