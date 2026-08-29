@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.33.0](https://github.com/mctlhq/mctl-api/compare/4.32.8...4.33.0) (2026-08-29)
+
+
+### Features
+
+* **operations:** add mctl-agents-approve operation ([f7ad4a9](https://github.com/mctlhq/mctl-api/commit/f7ad4a947c7d6faf1ef72560fe59dbedd2d934fa))
+
+
+### Bug Fixes
+
+* **api:** default mctl-agents-approve approver to the authenticated caller ([c49f931](https://github.com/mctlhq/mctl-api/commit/c49f931171be5ddff052453f32a097d0bd25215d))
+* **operations:** route mctl-agents-approve to argo-workflows namespace ([c2be9a7](https://github.com/mctlhq/mctl-api/commit/c2be9a730031e3be6d193921830ae99b42f59918))
+
 ## [4.32.8](https://github.com/mctlhq/mctl-api/compare/4.32.7...4.32.8) (2026-08-28)
 
 
