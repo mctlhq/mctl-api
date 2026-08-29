@@ -1,5 +1,15 @@
 # Changelog
 
+## [4.32.8](https://github.com/mctlhq/mctl-api/compare/4.32.7...4.32.8) (2026-08-28)
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-196-add-hastenantaccess-rbac-to-verifydomain ([7a10747](https://github.com/mctlhq/mctl-api/commit/7a107471ddb79c6135992c2c5b9126e77881cedd))
+* **agents:** address P1/P2 codex findings on issue-196-add-hastenantaccess-rbac-to-verifydomain ([ef97f95](https://github.com/mctlhq/mctl-api/commit/ef97f9513345e1df641413e513cfd5d8b5e26a67))
+* **api:** enforce RBAC on domain verify/delete endpoints ([5160703](https://github.com/mctlhq/mctl-api/commit/5160703a1123f98daacecf962c2a4b927610f2ce))
+* **operations:** run add/remove-custom-domain in argo-workflows namespace ([9277405](https://github.com/mctlhq/mctl-api/commit/92774051b2fc1d57c5eab33aaa75aafaf45d0a89))
+
 ## [4.32.7](https://github.com/mctlhq/mctl-api/compare/4.32.6...4.32.7) (2026-08-19)
 
 
