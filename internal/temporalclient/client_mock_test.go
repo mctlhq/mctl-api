@@ -22,6 +22,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
+	workflowpb "go.temporal.io/api/workflow/v1"
+	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/mocks"
 )
@@ -157,5 +159,39 @@ func TestSignalApprove_OtherFailuresAreNotIsNotFound(t *testing.T) {
 	err := c.SignalApprove(context.Background(), "dev-loop-mctlhq-mctl-telegram-1", nil)
 	if IsNotFound(err) {
 		t.Fatal("an Unavailable error must not be mistaken for NotFound")
+	}
+}
+
+func TestDescribeDevLoop_MapsStatusToShortName(t *testing.T) {
+	mockClient := new(mocks.Client)
+	mockClient.On("DescribeWorkflowExecution", mock.Anything, "dev-loop-mctlhq-mctl-telegram-1", "").
+		Return(&workflowservice.DescribeWorkflowExecutionResponse{
+			WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{
+				Status: enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+			},
+		}, nil)
+
+	c := &Client{temporal: mockClient}
+	status, err := c.DescribeDevLoop(context.Background(), "dev-loop-mctlhq-mctl-telegram-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != "Running" {
+		t.Fatalf("expected Running, got %q", status)
+	}
+}
+
+func TestDescribeDevLoop_UnknownWorkflowIsDetectableViaIsNotFound(t *testing.T) {
+	mockClient := new(mocks.Client)
+	mockClient.On("DescribeWorkflowExecution", mock.Anything, "dev-loop-x", "").
+		Return(nil, serviceerror.NewNotFound("workflow not found"))
+
+	c := &Client{temporal: mockClient}
+	_, err := c.DescribeDevLoop(context.Background(), "dev-loop-x")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !IsNotFound(err) {
+		t.Fatalf("expected IsNotFound(err), got %v", err)
 	}
 }

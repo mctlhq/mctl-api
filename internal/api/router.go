@@ -302,6 +302,7 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/operations/{name}/execute", h.ExecuteOperation)
 				r.Post("/agents/dev-loop/start", h.StartDevLoopWorkflow)
 				r.Post("/agents/dev-loop/{workflow_id}/approve", h.ApproveDevLoopWorkflow)
+				r.Get("/agents/dev-loop/{workflow_id}", h.GetDevLoopWorkflow)
 			})
 
 			// Operation registry (metadata only).

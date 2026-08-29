@@ -17,6 +17,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -31,11 +33,14 @@ import (
 // client against a mocked client.Client; these tests only need to verify
 // the HTTP-layer wiring (auth, status-code mapping, request validation).
 type fakeDevLoopClient struct {
-	startErr             error
-	workflowID, runID    string
-	approveErr           error
-	lastApprovedWorkflow string
-	lastApprovePayload   map[string]string
+	startErr              error
+	workflowID, runID     string
+	approveErr            error
+	lastApprovedWorkflow  string
+	lastApprovePayload    map[string]string
+	describeErr           error
+	describeStatus        string
+	lastDescribedWorkflow string
 }
 
 func (f *fakeDevLoopClient) StartDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
@@ -49,6 +54,17 @@ func (f *fakeDevLoopClient) SignalApprove(ctx context.Context, workflowID string
 	f.lastApprovedWorkflow = workflowID
 	f.lastApprovePayload = payload
 	return f.approveErr
+}
+
+func (f *fakeDevLoopClient) DescribeDevLoop(ctx context.Context, workflowID string) (string, error) {
+	f.lastDescribedWorkflow = workflowID
+	if f.describeErr != nil {
+		return "", f.describeErr
+	}
+	if f.describeStatus == "" {
+		return "Running", nil
+	}
+	return f.describeStatus, nil
 }
 
 func TestStartDevLoopWorkflow_NotConfigured(t *testing.T) {
@@ -262,5 +278,54 @@ func TestApproveDevLoopWorkflow_MalformedBodyIs400(t *testing.T) {
 	}
 	if fake.lastApprovedWorkflow != "" {
 		t.Fatal("SignalApprove must not be called on malformed input")
+	}
+}
+
+func TestGetDevLoopWorkflow_Success(t *testing.T) {
+	fake := &fakeDevLoopClient{describeStatus: "Running"}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.GetDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if fake.lastDescribedWorkflow != "dev-loop-mctlhq-mctl-telegram-1" {
+		t.Fatalf("expected DescribeDevLoop with the workflow_id, got %q", fake.lastDescribedWorkflow)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	if body["status"] != "Running" {
+		t.Fatalf("expected status Running, got %q", body["status"])
+	}
+}
+
+func TestGetDevLoopWorkflow_UnknownWorkflowIs404(t *testing.T) {
+	fake := &fakeDevLoopClient{describeErr: fmt.Errorf("wrapped: %w", serviceerror.NewNotFound("nope"))}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/dev-loop/dev-loop-x/", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-x")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.GetDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetDevLoopWorkflow_RequiresAuth(t *testing.T) {
+	h := &Handlers{opts: Options{TemporalClient: &fakeDevLoopClient{}}}
+	req := httptest.NewRequest("GET", "/api/v1/agents/dev-loop/dev-loop-x", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-x")
+	rec := httptest.NewRecorder()
+	h.GetDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

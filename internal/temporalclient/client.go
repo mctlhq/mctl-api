@@ -139,6 +139,36 @@ func (c *Client) SignalApprove(ctx context.Context, workflowID string, payload m
 	return nil
 }
 
+// DescribeDevLoop returns the execution status of the DevLoopWorkflow with
+// the given workflow ID — the liveness read the shepherd sweeper uses to
+// skip proposals a live DevLoop already drives (mctl-agents#213). The
+// status string is Temporal's WORKFLOW_EXECUTION_STATUS_* short name, e.g.
+// "Running", "Completed", "Failed", "TimedOut", "Terminated".
+func (c *Client) DescribeDevLoop(ctx context.Context, workflowID string) (string, error) {
+	resp, err := c.temporal.DescribeWorkflowExecution(ctx, workflowID, "")
+	if err != nil {
+		return "", fmt.Errorf("temporalclient: describe %s: %w", workflowID, err)
+	}
+	switch resp.GetWorkflowExecutionInfo().GetStatus() {
+	case enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING:
+		return "Running", nil
+	case enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED:
+		return "Completed", nil
+	case enumspb.WORKFLOW_EXECUTION_STATUS_FAILED:
+		return "Failed", nil
+	case enumspb.WORKFLOW_EXECUTION_STATUS_CANCELED:
+		return "Canceled", nil
+	case enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED:
+		return "Terminated", nil
+	case enumspb.WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW:
+		return "ContinuedAsNew", nil
+	case enumspb.WORKFLOW_EXECUTION_STATUS_TIMED_OUT:
+		return "TimedOut", nil
+	default:
+		return "Unknown", nil
+	}
+}
+
 // IsNotFound reports whether err is (or wraps) Temporal's NotFound service
 // error — the case SignalApprove hits when workflowID doesn't correspond to
 // any workflow (never started, or already past retention). Callers use this
