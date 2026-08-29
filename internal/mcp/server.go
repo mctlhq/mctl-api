@@ -2496,7 +2496,7 @@ func (s *Server) toolTriggerIssue() (mcplib.Tool, server.ToolHandlerFunc) {
 
 Given a GitHub issue URL under the mctlhq org, the investigator reads the issue, clones the target repo read-only to ground the design in real code, and writes requirements.md / design.md / tasks.md plus a .status.yaml (status=proposed) under platform-gitops/agents-state/<service>/proposals/<slug>/. It then comments the proposal link back on the issue.
 
-The proposal stops at status=proposed and awaits human approval — review the spec and flip .status.yaml to 'accepted' before the Tier 2 implementer (mctl_trigger_implementer) picks it up. No PR is opened by this step.
+The proposal stops at status=proposed and awaits human approval — review the spec, then approve it (the dev-loop approve signal, or the mctl-agents-approve operation, flips .status.yaml to 'accepted') before the Tier 2 implementer (mctl_trigger_implementer) picks it up. No PR is opened by this step.
 
 Cost: ~$3 (subscription quota).
 Duration: ~5-10 minutes.

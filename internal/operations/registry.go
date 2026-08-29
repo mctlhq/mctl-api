@@ -586,7 +586,7 @@ var builtinOperations = []Operation{
 		// `mctl-agents-investigate` ClusterWorkflowTemplate.
 		Name:             "mctl-agents-investigate",
 		DisplayName:      "Run mctl-agents issue-investigator",
-		Description:      "Issue-driven entry point: take a GitHub issue URL and turn it into a spec-driven proposal (requirements/design/tasks.md) under platform-gitops/agents-state/<service>/proposals/<slug>/ with .status.yaml status=proposed. The investigator reads the issue, clones the target repo read-only to ground the design in real code, and comments the proposal link back on the issue. The proposal then awaits human approval (flip .status.yaml to accepted) before the Tier 2 implementer picks it up. Admin-only. Cost: ~$3 (subscription quota). Duration: ~5-10 min. Updates mctl-gitops main with the new proposal directory.",
+		Description:      "Issue-driven entry point: take a GitHub issue URL and turn it into a spec-driven proposal (requirements/design/tasks.md) under platform-gitops/agents-state/<service>/proposals/<slug>/ with .status.yaml status=proposed. The investigator reads the issue, clones the target repo read-only to ground the design in real code, and comments the proposal link back on the issue. The proposal then awaits human approval (the dev-loop approve signal, or the mctl-agents-approve operation, flips .status.yaml to accepted) before the Tier 2 implementer picks it up. Admin-only. Cost: ~$3 (subscription quota). Duration: ~5-10 min. Updates mctl-gitops main with the new proposal directory.",
 		WorkflowTemplate: "mctl-agents-investigate",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
@@ -594,6 +594,29 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/"},
 		Parameters: []ParameterDef{
 			{Name: "issue_url", Type: "string", Required: true, Description: "Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123", Pattern: `^https://github\.com/mctlhq/[A-Za-z0-9_.-]+/issues/[0-9]+$`},
+		},
+	},
+	{
+		// Approve step — flips exactly one proposal's .status.yaml from
+		// proposed to accepted as an Argo-executed gitops commit under the
+		// mctl-gitops-main-writes mutex (mctlhq/mctl-agents#150). Submitted
+		// by the Temporal DevLoopWorkflow after its approve() signal; also
+		// usable directly for a manual approve. Idempotent: approving an
+		// already-accepted proposal is a successful no-op. RiskMedium — the
+		// flip authorizes the Tier 2 implementer to spend a model attempt
+		// and open a PR for that proposal.
+		Name:             "mctl-agents-approve",
+		DisplayName:      "Approve mctl-agents proposal",
+		Description:      "Approve one proposal: flip platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml from proposed to accepted via a gitops commit, recording the approver identity. This is the automated form of the old manual .status.yaml edit; the Tier 2 implementer only picks up accepted proposals. Idempotent on already-accepted proposals; any other status fails. Admin-only. Cost: none (no model). Duration: <1 min.",
+		WorkflowTemplate: "mctl-agents-approve",
+		RiskLevel:        RiskMedium,
+		RequiresConfirm:  false,
+		AdminOnly:        true,
+		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml"},
+		Parameters: []ParameterDef{
+			{Name: "service", Type: "string", Required: true, Description: "Service owning the proposal.", Enum: []string{"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy"}},
+			{Name: "slug", Type: "string", Required: true, Description: "Proposal slug (directory name under proposals/), e.g. issue-42-fix-foo.", Pattern: "^[a-z0-9][a-z0-9-]{0,120}$"},
+			{Name: "approver", Type: "string", Required: false, Default: "unknown", Description: "Identity of whoever approved (recorded in .status.yaml and the commit message)."},
 		},
 	},
 	{

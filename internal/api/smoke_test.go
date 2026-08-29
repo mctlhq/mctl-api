@@ -768,6 +768,38 @@ func TestSmoke_CreateTenantRBAC(t *testing.T) {
 	})
 }
 
+func TestSmoke_AgentsApproveApproverIdentity(t *testing.T) {
+	router, executor := newTestRouter(t)
+
+	t.Run("approver defaults to the authenticated caller", func(t *testing.T) {
+		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
+			"service": "mctl-web",
+			"slug":    "issue-1-fix-foo",
+		}, adminUser)
+		assertStatus(t, w, http.StatusAccepted)
+		params := executor.submittedParams[len(executor.submittedParams)-1]
+		if params["approver"] != adminUser.ID {
+			t.Errorf("approver = %q, want authenticated caller %q", params["approver"], adminUser.ID)
+		}
+	})
+
+	t.Run("explicit approver wins over the caller default", func(t *testing.T) {
+		// The Temporal DevLoop worker submits with its service identity and
+		// carries the human approver from the signal payload — an explicit
+		// value must survive.
+		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
+			"service":  "mctl-web",
+			"slug":     "issue-2-fix-bar",
+			"approver": "human-operator",
+		}, adminUser)
+		assertStatus(t, w, http.StatusAccepted)
+		params := executor.submittedParams[len(executor.submittedParams)-1]
+		if params["approver"] != "human-operator" {
+			t.Errorf("approver = %q, want explicit %q", params["approver"], "human-operator")
+		}
+	})
+}
+
 func TestSmoke_Auth(t *testing.T) {
 	t.Run("unauthenticated request returns 401 when AUTH_REQUIRED=true", func(t *testing.T) {
 		t.Setenv("AUTH_REQUIRED", "true")
