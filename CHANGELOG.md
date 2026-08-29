@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.35.0](https://github.com/mctlhq/mctl-api/compare/4.34.0...4.35.0) (2026-08-29)
+
+
+### Features
+
+* **dev-loop:** report whether a DevLoop shepherds its own PR ([8922ede](https://github.com/mctlhq/mctl-api/commit/8922ede1c9253574e18234fe15e2ca24bf146299))
+
+
+### Bug Fixes
+
+* **dev-loop:** bound the shepherd query and unit-test the client ([979c89f](https://github.com/mctlhq/mctl-api/commit/979c89f0d20690663256d46ab409ed406e8e1a9a))
+
 ## [4.34.0](https://github.com/mctlhq/mctl-api/compare/4.33.1...4.34.0) (2026-08-29)
 
 
