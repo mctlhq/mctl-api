@@ -319,6 +319,20 @@ func TestGetDevLoopWorkflow_UnknownWorkflowIs404(t *testing.T) {
 	}
 }
 
+func TestGetDevLoopWorkflow_TemporalFailureIs502(t *testing.T) {
+	fake := &fakeDevLoopClient{describeErr: serviceerror.NewUnavailable("temporal frontend unreachable")}
+	h := &Handlers{opts: Options{TemporalClient: fake}}
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/dev-loop/dev-loop-x", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-x")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.GetDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 for a Temporal RPC failure (not a missing workflow), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGetDevLoopWorkflow_RequiresAuth(t *testing.T) {
 	h := &Handlers{opts: Options{TemporalClient: &fakeDevLoopClient{}}}
 	req := httptest.NewRequest("GET", "/api/v1/agents/dev-loop/dev-loop-x", nil)

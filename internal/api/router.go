@@ -302,8 +302,14 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/operations/{name}/execute", h.ExecuteOperation)
 				r.Post("/agents/dev-loop/start", h.StartDevLoopWorkflow)
 				r.Post("/agents/dev-loop/{workflow_id}/approve", h.ApproveDevLoopWorkflow)
-				r.Get("/agents/dev-loop/{workflow_id}", h.GetDevLoopWorkflow)
 			})
+
+			// Liveness read for one DevLoopWorkflow. Deliberately OUTSIDE the
+			// write group above: it has no side effects, and the shepherd
+			// sweeper calls it once per actionable proposal per tick (#213),
+			// which would eat the 20/min write budget shared with
+			// /operations/{name}/execute and starve real writes.
+			r.Get("/agents/dev-loop/{workflow_id}", h.GetDevLoopWorkflow)
 
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)
