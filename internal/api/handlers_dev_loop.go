@@ -141,3 +141,33 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 		"signalled":   "approve",
 	})
 }
+
+// GetDevLoopWorkflow handles GET /api/v1/agents/dev-loop/{workflow_id} —
+// a liveness read: the shepherd cron's sweeper skips proposals whose
+// DevLoopWorkflow is still Running (it drives its own review loop, see
+// mctl-agents#213), and this is the only Temporal surface the sweeper —
+// which deliberately holds no Temporal client — can reach.
+func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireTemporalAdmin(w, r); !ok {
+		return
+	}
+
+	workflowID := chi.URLParam(r, "workflow_id")
+	if workflowID == "" {
+		writeError(w, http.StatusBadRequest, "missing workflow_id path parameter")
+		return
+	}
+	status, err := h.opts.TemporalClient.DescribeDevLoop(r.Context(), workflowID)
+	if err != nil {
+		if temporalclient.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "workflow not found: "+workflowID)
+			return
+		}
+		writeError(w, http.StatusBadGateway, "failed to describe workflow: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"workflow_id": workflowID,
+		"status":      status,
+	})
+}

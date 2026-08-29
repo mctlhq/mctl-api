@@ -75,6 +75,7 @@ type WorkflowExecutor interface {
 type DevLoopClient interface {
 	StartDevLoopWorkflow(ctx context.Context, issueURL string) (workflowID, runID string, err error)
 	SignalApprove(ctx context.Context, workflowID string, payload map[string]string) error
+	DescribeDevLoop(ctx context.Context, workflowID string) (status string, err error)
 }
 
 // AuditLog is the interface for recording and querying audit events.
