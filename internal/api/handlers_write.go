@@ -129,6 +129,16 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// mctl-agents-approve records approval provenance in gitops: default the
+	// approver to the authenticated caller instead of the registry's
+	// "unknown" (codex P2 on PR #207). An explicit approver still wins —
+	// the Temporal DevLoop path submits with the worker's service identity
+	// and carries the human approver from its signal payload — and the
+	// audit log below always records user.ID regardless.
+	if opName == "mctl-agents-approve" && input["approver"] == "" {
+		input["approver"] = user.ID
+	}
+
 	// Apply defaults then validate.
 	input = h.opts.Registry.ApplyDefaults(op, input)
 	if errs := h.opts.Registry.ValidateInput(op, input); len(errs) > 0 {
