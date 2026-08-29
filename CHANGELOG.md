@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.34.0](https://github.com/mctlhq/mctl-api/compare/4.33.1...4.34.0) (2026-08-29)
+
+
+### Features
+
+* **dev-loop:** describe endpoint for workflow liveness ([d6aca27](https://github.com/mctlhq/mctl-api/commit/d6aca27c4cb690c826494051a6e78acf14125e15))
+
+
+### Bug Fixes
+
+* **api:** issue-197-syncrepos-use-authenticated-user-ignore ([c819c38](https://github.com/mctlhq/mctl-api/commit/c819c38232fd29a51f32ab7306601f109766df55))
+* **dev-loop:** move describe route out of the write rate-limit group ([2b9ec48](https://github.com/mctlhq/mctl-api/commit/2b9ec48ce4bf1626ba37725f8e202a283be86e61))
+
 ## [4.33.1](https://github.com/mctlhq/mctl-api/compare/4.33.0...4.33.1) (2026-08-29)
 
 
