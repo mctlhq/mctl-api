@@ -304,9 +304,16 @@ func buildSSHCommand(sshKeyPath, knownHostsPath string) string {
 //
 // If r.knownHostsPath is explicitly set, it is returned verbatim. Otherwise
 // the embedded default (GitHub's published host keys) is materialized to a
-// fixed path under os.TempDir(), skipping the write if a byte-identical
-// file already exists there, and the resolved path is cached on the Reader
-// so subsequent syncs do not rewrite it.
+// fixed path under os.TempDir(), and the resolved path is cached on the
+// Reader so subsequent syncs do not rewrite it.
+//
+// The file is only ever created via O_CREATE|O_EXCL, so a pre-existing
+// path (in particular a symlink planted by another local user sharing
+// os.TempDir()) is never opened for writing. If the path already exists,
+// it is used only when Lstat confirms it is a regular file (not a
+// symlink) whose contents already match the embedded default; otherwise
+// resolution fails closed rather than truncating/overwriting whatever the
+// path points at.
 func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 	if r.knownHostsPath != "" {
 		return r.knownHostsPath, nil
@@ -316,12 +323,33 @@ func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 	}
 
 	path := filepath.Join(os.TempDir(), "mctl-api-github-known-hosts")
-	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, githubKnownHosts) { //nolint:gosec // fixed, well-known path
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		defer f.Close()
+		if _, err := f.Write(githubKnownHosts); err != nil {
+			return "", fmt.Errorf("writing embedded known_hosts to %s: %w", path, err)
+		}
 		r.resolvedKnownHostsPath = path
 		return path, nil
 	}
-	if err := os.WriteFile(path, githubKnownHosts, 0o600); err != nil {
-		return "", fmt.Errorf("writing embedded known_hosts to %s: %w", path, err)
+	if !errors.Is(err, fs.ErrExist) {
+		return "", fmt.Errorf("creating known_hosts at %s: %w", path, err)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("checking known_hosts path %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("refusing to use known_hosts path %s: not a regular file", path)
+	}
+	existing, err := os.ReadFile(path) //nolint:gosec // fixed, well-known path, verified regular file above
+	if err != nil {
+		return "", fmt.Errorf("reading existing known_hosts at %s: %w", path, err)
+	}
+	if !bytes.Equal(existing, githubKnownHosts) {
+		return "", fmt.Errorf("known_hosts at %s exists with unexpected content and will not be overwritten", path)
 	}
 	r.resolvedKnownHostsPath = path
 	return path, nil
