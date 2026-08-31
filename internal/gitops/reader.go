@@ -35,13 +35,21 @@ import (
 // Reader provides read access to the GitOps mono-repo state.
 // It clones the repo locally and refreshes periodically.
 type Reader struct {
-	repoURL    string
-	branch     string
-	localPath  string
-	token      string // GitHub token for HTTPS auth (optional)
-	sshKeyPath string // Path to SSH private key (optional, takes precedence over token)
-	mu         sync.RWMutex
-	lastSync   time.Time
+	repoURL        string
+	branch         string
+	localPath      string
+	token          string // GitHub token for HTTPS auth (optional)
+	sshKeyPath     string // Path to SSH private key (optional, takes precedence over token)
+	knownHostsPath string // Path to a known_hosts file for SSH host-key pinning (optional; empty means "use the shipped embedded default, materialized lazily")
+	mu             sync.RWMutex
+	lastSync       time.Time
+
+	// resolvedKnownHostsPath caches the on-disk path of the materialized
+	// embedded default known_hosts file, computed lazily on first SSH-mode
+	// refresh so the constructor and the HTTPS/token path never touch the
+	// filesystem for it. Guarded by mu, which refresh() already holds for
+	// its entire duration.
+	resolvedKnownHostsPath string
 }
 
 // Tenant represents a workspace read from the GitOps repo.
@@ -174,15 +182,20 @@ type PlatformSkillPolicy struct {
 // token is an optional GitHub token for HTTPS auth.
 // sshKeyPath is an optional path to an SSH private key for SSH auth.
 // If sshKeyPath is set, it takes precedence and the repo URL should be SSH format.
-func NewReader(repoURL, branch, localPath, token, sshKeyPath string) (*Reader, error) {
-	r := &Reader{
-		repoURL:    repoURL,
-		branch:     branch,
-		localPath:  localPath,
-		token:      token,
-		sshKeyPath: sshKeyPath,
+// knownHostsPath is an optional path to a known_hosts file used to verify the
+// SSH host key when sshKeyPath is set. If empty, a known_hosts file
+// populated with GitHub's published host keys is materialized lazily on the
+// first SSH-mode refresh. NewReader performs no filesystem I/O — it only
+// stores knownHostsPath verbatim.
+func NewReader(repoURL, branch, localPath, token, sshKeyPath, knownHostsPath string) *Reader {
+	return &Reader{
+		repoURL:        repoURL,
+		branch:         branch,
+		localPath:      localPath,
+		token:          token,
+		sshKeyPath:     sshKeyPath,
+		knownHostsPath: knownHostsPath,
 	}
-	return r, nil
 }
 
 // RefreshLoop periodically refreshes the local repo clone.
@@ -216,10 +229,14 @@ func (r *Reader) refresh() error {
 
 	switch {
 	case r.sshKeyPath != "":
-		// SSH auth: use key file, accept-new trusts on first connect (TOFU)
+		// SSH auth: use key file, verify the host key against a pinned
+		// known_hosts file (fail closed — no trust-on-first-use).
 		cloneURL = r.repoURL
-		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=accept-new", r.sshKeyPath)
-		sshEnv = []string{"GIT_SSH_COMMAND=" + sshCmd}
+		knownHostsPath, err := r.resolveKnownHostsPathLocked()
+		if err != nil {
+			return fmt.Errorf("resolving known_hosts path: %w", err)
+		}
+		sshEnv = []string{"GIT_SSH_COMMAND=" + buildSSHCommand(r.sshKeyPath, knownHostsPath)}
 	case r.token != "":
 		// HTTPS auth: inject token into URL
 		if u, err := url.Parse(r.repoURL); err == nil {
@@ -268,6 +285,46 @@ func (r *Reader) refresh() error {
 		slog.Info("gitops refreshed", "branch", r.branch, "path", r.localPath, "lastSync", r.lastSync)
 	}
 	return nil
+}
+
+// buildSSHCommand builds the GIT_SSH_COMMAND value used for SSH-based
+// clone/fetch. It always pins host-key verification (StrictHostKeyChecking
+// yes) against the given known_hosts file — there is no trust-on-first-use
+// fallback of any kind.
+func buildSSHCommand(sshKeyPath, knownHostsPath string) string {
+	return fmt.Sprintf(
+		"ssh -i %s -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%s",
+		sshKeyPath, knownHostsPath,
+	)
+}
+
+// resolveKnownHostsPathLocked returns the known_hosts path to use for SSH
+// host-key verification. Callers must hold r.mu (refresh() already does,
+// for its full duration).
+//
+// If r.knownHostsPath is explicitly set, it is returned verbatim. Otherwise
+// the embedded default (GitHub's published host keys) is materialized to a
+// fixed path under os.TempDir(), skipping the write if a byte-identical
+// file already exists there, and the resolved path is cached on the Reader
+// so subsequent syncs do not rewrite it.
+func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
+	if r.knownHostsPath != "" {
+		return r.knownHostsPath, nil
+	}
+	if r.resolvedKnownHostsPath != "" {
+		return r.resolvedKnownHostsPath, nil
+	}
+
+	path := filepath.Join(os.TempDir(), "mctl-api-github-known-hosts")
+	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, githubKnownHosts) { //nolint:gosec // fixed, well-known path
+		r.resolvedKnownHostsPath = path
+		return path, nil
+	}
+	if err := os.WriteFile(path, githubKnownHosts, 0o600); err != nil {
+		return "", fmt.Errorf("writing embedded known_hosts to %s: %w", path, err)
+	}
+	r.resolvedKnownHostsPath = path
+	return path, nil
 }
 
 func (r *Reader) runGit(extraEnv []string, args ...string) error {

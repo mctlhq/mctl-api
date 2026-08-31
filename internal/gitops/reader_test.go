@@ -16,13 +16,20 @@ package gitops
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func setupTempRepo(t *testing.T) (string, *Reader) {
@@ -629,5 +636,292 @@ runtimes: [mcp]
 
 	if _, err := r.ListPlatformSkills(); err == nil || !strings.Contains(err.Error(), "must match") {
 		t.Fatalf("expected name mismatch error, got %v", err)
+	}
+}
+
+// --- SSH host-key pinning (issue-198) ---
+//
+// The tests below exercise the SSH branch of refresh(): they never run
+// against real GitHub. sshFixtureServer is a minimal in-process SSH server
+// bound to 127.0.0.1 on an ephemeral port that presents a fixed host key
+// and completes only the SSH transport-layer handshake — it does not
+// implement git-upload-pack. That is sufficient: git/ssh abort at host-key
+// verification before any git protocol exchange when the presented key
+// doesn't match known_hosts, which is exactly the failure T2 asserts.
+
+// TestBuildSSHCommand_PinsHostKeyChecking is a cheap regression guard for
+// the GIT_SSH_COMMAND flags: it must enforce strict host-key checking
+// against an explicit known_hosts file and must never fall back to
+// trust-on-first-use. The forbidden flag value is split across two string
+// literals below so this test file itself does not contain the literal
+// substring being guarded against.
+func TestBuildSSHCommand_PinsHostKeyChecking(t *testing.T) {
+	cmd := buildSSHCommand("/path/to/deploy-key", "/path/to/known_hosts")
+	if !strings.Contains(cmd, "StrictHostKeyChecking=yes") {
+		t.Errorf("ssh command missing StrictHostKeyChecking=yes: %q", cmd)
+	}
+	if !strings.Contains(cmd, "UserKnownHostsFile=/path/to/known_hosts") {
+		t.Errorf("ssh command missing UserKnownHostsFile: %q", cmd)
+	}
+	forbiddenTOFUFlag := "accept" + "-new"
+	if strings.Contains(cmd, forbiddenTOFUFlag) {
+		t.Errorf("ssh command must never fall back to trust-on-first-use: %q", cmd)
+	}
+}
+
+// TestNewReader_NoFilesystemWriteWhenKnownHostsPathEmpty asserts the
+// constructor performs no I/O: with knownHostsPath == "", the lazily
+// materialized default known_hosts file must not exist immediately after
+// construction. TMPDIR is pointed at a fresh directory to isolate the
+// target path from anything else running in this environment.
+func TestNewReader_NoFilesystemWriteWhenKnownHostsPathEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
+
+	r := NewReader("git@github.com:mctlhq/mctl-gitops.git", "main", t.TempDir(), "", "/some/deploy-key", "")
+	if r.knownHostsPath != "" {
+		t.Fatalf("knownHostsPath should be stored verbatim as empty, got %q", r.knownHostsPath)
+	}
+
+	target := filepath.Join(os.TempDir(), "mctl-api-github-known-hosts")
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("NewReader must not materialize the known_hosts file (no I/O in the constructor); stat err=%v", err)
+	}
+}
+
+// TestResolveKnownHostsPathLocked_MaterializesAndCaches covers the lazy
+// materializer used by the SSH branch of refresh(): it writes the embedded
+// default with mode 0600, and a second call against a fresh Reader pointed
+// at the same TMPDIR must not rewrite an already byte-identical file.
+func TestResolveKnownHostsPathLocked_MaterializesAndCaches(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
+
+	r1 := &Reader{}
+	path, err := r1.resolveKnownHostsPathLocked()
+	if err != nil {
+		t.Fatalf("resolveKnownHostsPathLocked: %v", err)
+	}
+	wantPath := filepath.Join(tmpDir, "mctl-api-github-known-hosts")
+	if path != wantPath {
+		t.Fatalf("resolved path = %q, want %q", path, wantPath)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading materialized file: %v", err)
+	}
+	if !bytes.Equal(got, githubKnownHosts) {
+		t.Fatalf("materialized content does not match the embedded default")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v, want 0600", info.Mode().Perm())
+	}
+
+	// A second call, from a Reader with no in-memory cache, against a
+	// byte-identical file already on disk must not rewrite it.
+	time.Sleep(10 * time.Millisecond)
+	r2 := &Reader{}
+	path2, err := r2.resolveKnownHostsPathLocked()
+	if err != nil {
+		t.Fatalf("second resolveKnownHostsPathLocked: %v", err)
+	}
+	if path2 != path {
+		t.Fatalf("second resolved path = %q, want %q", path2, path)
+	}
+	info2, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after second call: %v", err)
+	}
+	if !info2.ModTime().Equal(info.ModTime()) {
+		t.Fatalf("materializer rewrote a byte-identical file (mtime changed)")
+	}
+}
+
+// sshFixtureServer is a minimal in-process SSH server for testing host-key
+// verification. It binds loopback only, on an ephemeral port, and never
+// reaches the real network.
+type sshFixtureServer struct {
+	listener net.Listener
+	pubKey   ssh.PublicKey
+	host     string
+	port     string
+}
+
+func startSSHFixtureServer(t *testing.T) *sshFixtureServer {
+	t.Helper()
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generating fixture host key: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("wrapping fixture host key: %v", err)
+	}
+
+	config := &ssh.ServerConfig{NoClientAuth: true}
+	config.AddHostKey(signer)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening on 127.0.0.1:0: %v", err)
+	}
+	host, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("splitting fixture listener address: %v", err)
+	}
+
+	srv := &sshFixtureServer{listener: ln, pubKey: signer.PublicKey(), host: host, port: port}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // listener closed
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				// Complete (or fail) the SSH transport handshake. A client
+				// that rejects our host key disconnects before this
+				// returns successfully; we don't care about that outcome
+				// here, only that a key was offered for the client to
+				// verify. A client that accepts it gets a channel-open
+				// rejection, since this fixture does not implement
+				// git-upload-pack.
+				sc, chans, reqs, err := ssh.NewServerConn(c, config)
+				if err != nil {
+					return
+				}
+				defer sc.Close()
+				go ssh.DiscardRequests(reqs)
+				for newCh := range chans {
+					_ = newCh.Reject(ssh.Prohibited, "fixture server does not implement git-upload-pack")
+				}
+			}(conn)
+		}
+	}()
+
+	t.Cleanup(func() { _ = ln.Close() })
+	return srv
+}
+
+// knownHostsLine returns a known_hosts entry for this server's real host key.
+func (s *sshFixtureServer) knownHostsLine() string {
+	return fmt.Sprintf("[%s]:%s %s", s.host, s.port, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.pubKey))))
+}
+
+// wrongKnownHostsLine returns a known_hosts entry for the same host:port
+// but with a freshly generated, unrelated key — simulating an attacker (or
+// a rotated/wrong host) presenting a key that does not match what's pinned.
+func (s *sshFixtureServer) wrongKnownHostsLine(t *testing.T) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generating decoy key: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("wrapping decoy key: %v", err)
+	}
+	return fmt.Sprintf("[%s]:%s %s", s.host, s.port, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))))
+}
+
+// sshURL returns a ssh:// clone URL pointing at this fixture server.
+func (s *sshFixtureServer) sshURL() string {
+	return fmt.Sprintf("ssh://git@%s:%s/fixture-repo.git", s.host, s.port)
+}
+
+// generateTestClientKey creates a throwaway ed25519 keypair for use as the
+// -i argument to ssh; the fixture server accepts any/no client auth, so its
+// content is irrelevant beyond being a well-formed, correctly permissioned
+// private key file that ssh will accept without complaint.
+func generateTestClientKey(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "id_ed25519")
+	cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", keyPath, "-q") //nolint:gosec // fixed test arguments
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v\n%s", err, out)
+	}
+	return keyPath
+}
+
+func writeKnownHostsFixture(t *testing.T, line string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "known_hosts")
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatalf("writing known_hosts fixture: %v", err)
+	}
+	return path
+}
+
+// TestRefresh_SSHHostKeyMismatch_FailsClosed is the acceptance-criteria
+// test the issue explicitly asks for: a mismatched host key must fail the
+// clone closed, with an error identifying host-key verification as the
+// cause, and must leave localPath unpopulated.
+func TestRefresh_SSHHostKeyMismatch_FailsClosed(t *testing.T) {
+	srv := startSSHFixtureServer(t)
+	keyPath := generateTestClientKey(t)
+	knownHosts := writeKnownHostsFixture(t, srv.wrongKnownHostsLine(t))
+	localPath := filepath.Join(t.TempDir(), "cache")
+
+	r := &Reader{
+		repoURL:        srv.sshURL(),
+		branch:         "main",
+		localPath:      localPath,
+		sshKeyPath:     keyPath,
+		knownHostsPath: knownHosts,
+	}
+
+	err := r.refresh()
+	if err == nil {
+		t.Fatal("expected refresh to fail closed on a mismatched host key, got nil error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "Host key verification failed") && !strings.Contains(msg, "REMOTE HOST IDENTIFICATION HAS CHANGED") {
+		t.Fatalf("expected a host-key verification failure, got: %v", err)
+	}
+	if _, statErr := os.Stat(localPath); !os.IsNotExist(statErr) {
+		t.Fatalf("localPath must not be populated after a host-key verification failure, stat err=%v", statErr)
+	}
+}
+
+// TestRefresh_SSHHostKeyMatch_PassesHostKeyVerification is the positive
+// counterpart to the test above: pinning the fixture server's real host key
+// must let the SSH transport get past host-key verification. This fixture
+// does not implement git-upload-pack, so refresh() is still expected to
+// fail overall — the assertion is on the *absence* of a host-key-failure
+// error class, not end-to-end clone success.
+func TestRefresh_SSHHostKeyMatch_PassesHostKeyVerification(t *testing.T) {
+	srv := startSSHFixtureServer(t)
+	keyPath := generateTestClientKey(t)
+	knownHosts := writeKnownHostsFixture(t, srv.knownHostsLine())
+	localPath := filepath.Join(t.TempDir(), "cache")
+
+	r := &Reader{
+		repoURL:        srv.sshURL(),
+		branch:         "main",
+		localPath:      localPath,
+		sshKeyPath:     keyPath,
+		knownHostsPath: knownHosts,
+	}
+
+	err := r.refresh()
+	if err == nil {
+		// An even stronger pass: host-key checking was clearly not the
+		// blocker. Full git-upload-pack faking is out of scope for this
+		// fixture.
+		return
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "Host key verification failed") || strings.Contains(msg, "REMOTE HOST IDENTIFICATION HAS CHANGED") {
+		t.Fatalf("expected the clone to get past host-key verification with the correct pinned key, got a host-key failure: %v", err)
 	}
 }
