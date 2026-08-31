@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -698,54 +697,40 @@ func TestBuildSSHCommand_QuotesPaths(t *testing.T) {
 }
 
 // TestNewReader_NoFilesystemWriteWhenKnownHostsPathEmpty asserts the
-// constructor performs no I/O: with knownHostsPath == "", the lazily
-// materialized default known_hosts file must not exist immediately after
-// construction.
+// constructor performs no I/O: with knownHostsPath == "", nothing is
+// materialized until the SSH branch of refresh() asks for it. TMPDIR is
+// pointed at a fresh directory so any write would be visible there.
 func TestNewReader_NoFilesystemWriteWhenKnownHostsPathEmpty(t *testing.T) {
-	localPath := filepath.Join(t.TempDir(), "repo")
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
 
-	r := NewReader("git@github.com:mctlhq/mctl-gitops.git", "main", localPath, "", "/some/deploy-key", "")
+	r := NewReader("git@github.com:mctlhq/mctl-gitops.git", "main", t.TempDir(), "", "/some/deploy-key", "")
 	if r.knownHostsPath != "" {
 		t.Fatalf("knownHostsPath should be stored verbatim as empty, got %q", r.knownHostsPath)
 	}
 
-	target := filepath.Join(localPath+".known-hosts", "known_hosts")
-	if _, err := os.Stat(target); !os.IsNotExist(err) {
-		t.Fatalf("NewReader must not materialize the known_hosts file (no I/O in the constructor); stat err=%v", err)
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("reading temp dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("NewReader must not touch the filesystem; temp dir has %d entries", len(entries))
 	}
 }
 
-// TestResolveKnownHostsPathLocked_MaterializesAndCaches covers the lazy
-// materializer used by the SSH branch of refresh(): it writes the embedded
-// default with mode 0600 inside an owner-only (0700) sibling directory of
-// localPath, and a second call against a fresh Reader pointed at the same
-// localPath must not rewrite an already byte-identical file.
-func TestResolveKnownHostsPathLocked_MaterializesAndCaches(t *testing.T) {
-	localPath := filepath.Join(t.TempDir(), "repo")
-	dir := localPath + ".known-hosts"
+// TestResolveKnownHostsPathLocked_MaterializesFreshAndCaches covers the lazy
+// materializer used by the SSH branch of refresh(): content, mode, and the
+// per-Reader cache.
+func TestResolveKnownHostsPathLocked_MaterializesFreshAndCaches(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
 
-	r1 := &Reader{localPath: localPath}
-	path, err := r1.resolveKnownHostsPathLocked()
+	r := &Reader{}
+	path, err := r.resolveKnownHostsPathLocked()
 	if err != nil {
 		t.Fatalf("resolveKnownHostsPathLocked: %v", err)
 	}
-	wantPath := filepath.Join(dir, "known_hosts")
-	if path != wantPath {
-		t.Fatalf("resolved path = %q, want %q", path, wantPath)
-	}
 
-	dirInfo, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("stat dir: %v", err)
-	}
-	if !dirInfo.IsDir() {
-		t.Fatalf("%s is not a directory", dir)
-	}
-	if dirInfo.Mode().Perm() != 0o700 {
-		t.Fatalf("dir mode = %v, want 0700", dirInfo.Mode().Perm())
-	}
-
-	//nolint:gosec // path is resolveKnownHostsPathLocked's output under t.TempDir()
+	//nolint:gosec // path is resolveKnownHostsPathLocked's own output, under t.TempDir()
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading materialized file: %v", err)
@@ -759,114 +744,99 @@ func TestResolveKnownHostsPathLocked_MaterializesAndCaches(t *testing.T) {
 		t.Fatalf("stat: %v", err)
 	}
 	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v, want 0600", info.Mode().Perm())
+		t.Fatalf("file mode = %v, want 0600", info.Mode().Perm())
 	}
 
-	// A second call, from a Reader with no in-memory cache, against a
-	// byte-identical file already on disk must not rewrite it.
-	time.Sleep(10 * time.Millisecond)
-	r2 := &Reader{localPath: localPath}
-	path2, err := r2.resolveKnownHostsPathLocked()
+	path2, err := r.resolveKnownHostsPathLocked()
 	if err != nil {
 		t.Fatalf("second resolveKnownHostsPathLocked: %v", err)
 	}
 	if path2 != path {
-		t.Fatalf("second resolved path = %q, want %q", path2, path)
-	}
-	info2, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat after second call: %v", err)
-	}
-	if !info2.ModTime().Equal(info.ModTime()) {
-		t.Fatalf("materializer rewrote a byte-identical file (mtime changed)")
+		t.Fatalf("resolved path not cached: %q then %q", path, path2)
 	}
 }
 
-// TestResolveKnownHostsPathLocked_RejectsGroupWorldWritableReuse covers the
-// finding-#2 fix: a pre-existing file at the resolved path with
-// byte-identical content must still be rejected for reuse if it carries
-// group/world permission bits, since a local attacker who could plant it
-// (the embedded known_hosts content is public) might intend to swap in a
-// malicious host key once it's cached and trusted.
-func TestResolveKnownHostsPathLocked_RejectsGroupWorldWritableReuse(t *testing.T) {
+// TestResolveKnownHostsPathLocked_NeverReusesAnExistingFile is the security
+// property the whole design turns on. A predictable path lets another local
+// user pre-create the file — as a symlink, or byte-identical but
+// group-writable — and keep write access to the exact file ssh reads, so
+// they can swap in their own host key after verification is set up. The
+// resolver therefore creates a fresh randomized file every time and never
+// adopts one that is already there.
+func TestResolveKnownHostsPathLocked_NeverReusesAnExistingFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
+
+	// Same localPath, so a localPath-derived scheme would collide here.
 	localPath := filepath.Join(t.TempDir(), "repo")
-	dir := localPath + ".known-hosts"
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatalf("pre-creating known_hosts dir fixture: %v", err)
-	}
-	path := filepath.Join(dir, "known_hosts")
-	// 0644 is the subject of this test, not an oversight: it stands in for
-	// a file an attacker left group/world-writable, and the assertion below
-	// is that resolveKnownHostsPathLocked refuses it. gosec flags both the
-	// permissive WriteFile (G306) and the equivalent Chmod (G302), so the
-	// rule is suppressed here rather than worked around.
-	//nolint:gosec // permissive mode is the fixture's purpose
-	if err := os.WriteFile(path, githubKnownHosts, 0o644); err != nil {
-		t.Fatalf("pre-creating known_hosts fixture: %v", err)
+	r1 := &Reader{localPath: localPath}
+	first, err := r1.resolveKnownHostsPathLocked()
+	if err != nil {
+		t.Fatalf("first resolveKnownHostsPathLocked: %v", err)
 	}
 
-	r := &Reader{localPath: localPath}
-	if _, err := r.resolveKnownHostsPathLocked(); err == nil {
-		t.Fatalf("resolveKnownHostsPathLocked: expected error for group/world-readable pre-existing file, got nil")
-	} else if !strings.Contains(err.Error(), "not owner-only") {
-		t.Fatalf("resolveKnownHostsPathLocked: expected permission-bits error, got: %v", err)
+	r2 := &Reader{localPath: localPath}
+	second, err := r2.resolveKnownHostsPathLocked()
+	if err != nil {
+		t.Fatalf("second resolveKnownHostsPathLocked: %v", err)
 	}
-	if r.resolvedKnownHostsPath != "" {
-		t.Fatalf("resolvedKnownHostsPath must not be cached on failure, got %q", r.resolvedKnownHostsPath)
+	if second == first {
+		t.Fatalf("resolver reused an existing path %q; it must never adopt a file it did not just create", first)
+	}
+
+	// Neither path may be derivable in advance from localPath alone.
+	for _, p := range []string{first, second} {
+		if strings.HasPrefix(p, localPath) {
+			t.Fatalf("resolved path %q is derived from localPath, making it predictable", p)
+		}
 	}
 }
 
-// TestResolveKnownHostsPathLocked_RejectsSymlinkedKnownHostsDir covers the
-// directory-level symlink-plant defense described in the finding-#1 fix: if
-// the known_hosts directory path is itself a symlink (planted by another
-// local user before this Reader ever ran), resolution must fail closed
-// instead of following it into wherever it points.
-func TestResolveKnownHostsPathLocked_RejectsSymlinkedKnownHostsDir(t *testing.T) {
-	root := t.TempDir()
-	localPath := filepath.Join(root, "repo")
-	dir := localPath + ".known-hosts"
-	elsewhere := filepath.Join(root, "elsewhere")
-	if err := os.Mkdir(elsewhere, 0o700); err != nil {
-		t.Fatalf("creating symlink target: %v", err)
-	}
-	if err := os.Symlink(elsewhere, dir); err != nil {
-		t.Fatalf("planting symlink fixture: %v", err)
-	}
+// TestResolveKnownHostsPathLocked_IndependentOfLocalPathParent guards the
+// second review finding: localPath's parent is not guaranteed writable by
+// this process (here /data is an emptyDir owned by root while the container
+// runs as uid 1000), so materialization must not depend on creating anything
+// beside it.
+func TestResolveKnownHostsPathLocked_IndependentOfLocalPathParent(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
 
-	r := &Reader{localPath: localPath}
-	if _, err := r.resolveKnownHostsPathLocked(); err == nil {
-		t.Fatalf("resolveKnownHostsPathLocked: expected error for symlinked known_hosts directory, got nil")
-	} else if !strings.Contains(err.Error(), "not a directory") {
-		t.Fatalf("resolveKnownHostsPathLocked: expected not-a-directory error, got: %v", err)
+	// A localPath whose parent does not exist at all: nothing can be
+	// created next to it, yet resolution must still succeed.
+	r := &Reader{localPath: filepath.Join(t.TempDir(), "no-such-parent", "repo")}
+	path, err := r.resolveKnownHostsPathLocked()
+	if err != nil {
+		t.Fatalf("resolveKnownHostsPathLocked must not depend on localPath's parent: %v", err)
 	}
-	if r.resolvedKnownHostsPath != "" {
-		t.Fatalf("resolvedKnownHostsPath must not be cached on failure, got %q", r.resolvedKnownHostsPath)
+	//nolint:gosec // path is resolveKnownHostsPathLocked's own output, under t.TempDir()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading materialized file: %v", err)
+	}
+	if !bytes.Equal(got, githubKnownHosts) {
+		t.Fatalf("materialized content does not match the embedded default")
 	}
 }
 
-// TestResolveKnownHostsPathLocked_SiblingDirSurvivesTrailingSlash pins the
-// property the sibling-directory comment depends on: the known_hosts dir
-// must never land inside localPath. Nested, the initial `git clone` would
-// refuse a non-empty target and `git clean -fd` would wipe it on every
-// later refresh — so a configured GITOPS_LOCAL_PATH with a trailing slash
-// must not silently produce that layout.
-func TestResolveKnownHostsPathLocked_SiblingDirSurvivesTrailingSlash(t *testing.T) {
-	base := t.TempDir()
-	localPath := filepath.Join(base, "cache")
+// TestResolveKnownHostsPathLocked_ExplicitPathWins asserts the test and
+// local-dev seam: an explicit path is used verbatim, with no write.
+func TestResolveKnownHostsPathLocked_ExplicitPathWins(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
 
-	for _, configured := range []string{localPath, localPath + "/"} {
-		r := &Reader{localPath: configured}
-		path, err := r.resolveKnownHostsPathLocked()
-		if err != nil {
-			t.Fatalf("resolveKnownHostsPathLocked(%q): %v", configured, err)
-		}
-		dir := filepath.Dir(path)
-		if dir == localPath || strings.HasPrefix(dir, localPath+string(filepath.Separator)) {
-			t.Fatalf("known_hosts dir %q is nested inside localPath %q (configured as %q)", dir, localPath, configured)
-		}
-		if dir != localPath+".known-hosts" {
-			t.Fatalf("known_hosts dir = %q, want the sibling %q (configured as %q)", dir, localPath+".known-hosts", configured)
-		}
+	r := &Reader{knownHostsPath: "/explicit/known_hosts"}
+	path, err := r.resolveKnownHostsPathLocked()
+	if err != nil {
+		t.Fatalf("resolveKnownHostsPathLocked: %v", err)
+	}
+	if path != "/explicit/known_hosts" {
+		t.Fatalf("explicit path = %q, want it verbatim", path)
+	}
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("reading temp dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("an explicit knownHostsPath must not materialize anything; temp dir has %d entries", len(entries))
 	}
 }
 
