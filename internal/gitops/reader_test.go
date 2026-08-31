@@ -707,6 +707,7 @@ func TestResolveKnownHostsPathLocked_MaterializesAndCaches(t *testing.T) {
 		t.Fatalf("resolved path = %q, want %q", path, wantPath)
 	}
 
+	//nolint:gosec // path is resolveKnownHostsPathLocked's output under t.TempDir()
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading materialized file: %v", err)
@@ -786,7 +787,7 @@ func startSSHFixtureServer(t *testing.T) *sshFixtureServer {
 				return // listener closed
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer c.Close() //nolint:errcheck
 				// Complete (or fail) the SSH transport handshake. A client
 				// that rejects our host key disconnects before this
 				// returns successfully; we don't care about that outcome
@@ -798,7 +799,7 @@ func startSSHFixtureServer(t *testing.T) *sshFixtureServer {
 				if err != nil {
 					return
 				}
-				defer sc.Close()
+				defer sc.Close() //nolint:errcheck
 				go ssh.DiscardRequests(reqs)
 				for newCh := range chans {
 					_ = newCh.Reject(ssh.Prohibited, "fixture server does not implement git-upload-pack")
