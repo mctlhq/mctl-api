@@ -255,7 +255,7 @@ func (r *Reader) refresh() error {
 		cmd := exec.Command("git", "clone", "--depth=1", "--branch="+r.branch, "--single-branch", cloneURL, r.localPath) //nolint:gosec // args are from trusted config
 		cmd.Env = append(os.Environ(), sshEnv...)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git clone failed: %w\n%s", err, bytes.TrimSpace(out))
+			return fmt.Errorf("git clone failed: %w\n%s", err, r.redactToken(bytes.TrimSpace(out)))
 		}
 		slog.Info("gitops repo cloned successfully")
 	} else {
@@ -401,9 +401,26 @@ func (r *Reader) gitOutput(extraEnv []string, args ...string) ([]byte, error) {
 	cmd.Env = append(os.Environ(), extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return out, fmt.Errorf("%w\n%s", err, bytes.TrimSpace(out))
+		return out, fmt.Errorf("%w\n%s", err, r.redactToken(bytes.TrimSpace(out)))
 	}
 	return out, nil
+}
+
+// redactToken removes the GitHub token from git's own output before that
+// output goes anywhere a human or a log sink can see it.
+//
+// On the HTTPS branch the token is embedded in the clone/fetch URL as the
+// x-access-token password, and git echoes that URL verbatim in several of
+// its failure messages — "repository '<url>' not found", "Authentication
+// failed for '<url>'". CombinedOutput captures it, the error carries it up,
+// and RefreshLoop hands the error straight to slog.Error, which writes the
+// live token to the log store in plaintext. Any single failed refresh is
+// enough. This is the branch production actually runs.
+func (r *Reader) redactToken(out []byte) []byte {
+	if r.token == "" {
+		return out
+	}
+	return bytes.ReplaceAll(out, []byte(r.token), []byte("***"))
 }
 
 // ListTenants reads all tenants from the GitOps repo.

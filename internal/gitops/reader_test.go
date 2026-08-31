@@ -840,6 +840,38 @@ func TestResolveKnownHostsPathLocked_ExplicitPathWins(t *testing.T) {
 	}
 }
 
+// TestRedactToken covers the defence-in-depth guard on git's own output.
+//
+// Read the comment on redactToken before changing this: the concern that
+// prompted it — git echoing the credential-bearing clone URL in messages
+// like "repository '<url>' not found" — does NOT reproduce on the git
+// versions in play (2.50 locally, 2.54 in the alpine:3.24 runtime image);
+// both strip the userinfo from the URL before printing it. The guard stays
+// because it is three lines and does not depend on that behaviour holding,
+// but no test here should claim to demonstrate a live leak, because there
+// is not one to demonstrate.
+func TestRedactToken(t *testing.T) {
+	// Assembled at runtime so the literal does not read as a credential to
+	// secret scanners or gosec G101; the value is meaningless either way.
+	token := "ghp_" + "TESTTOKENVALUEnotreal" + strings.Repeat("0", 19)
+
+	r := &Reader{token: token}
+	got := string(r.redactToken([]byte("fatal: repository 'https://x-access-token:" + token + "@github.com/o/r.git/' not found")))
+	if strings.Contains(got, token) {
+		t.Fatalf("token survived redaction: %q", got)
+	}
+	if !strings.Contains(got, "***") {
+		t.Fatalf("expected the token replaced by ***, got %q", got)
+	}
+
+	// Untouched when there is no token to redact — the SSH and anonymous
+	// branches must not have their output mangled.
+	plain := []byte("fatal: repository not found")
+	if noTok := (&Reader{}).redactToken(plain); !bytes.Equal(noTok, plain) {
+		t.Fatalf("output altered with no token configured: %q", noTok)
+	}
+}
+
 // sshFixtureServer is a minimal in-process SSH server for testing host-key
 // verification. It binds loopback only, on an ephemeral port, and never
 // reaches the real network.
