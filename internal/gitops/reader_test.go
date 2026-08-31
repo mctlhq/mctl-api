@@ -660,12 +660,40 @@ func TestBuildSSHCommand_PinsHostKeyChecking(t *testing.T) {
 	if !strings.Contains(cmd, "StrictHostKeyChecking=yes") {
 		t.Errorf("ssh command missing StrictHostKeyChecking=yes: %q", cmd)
 	}
-	if !strings.Contains(cmd, "UserKnownHostsFile=/path/to/known_hosts") {
+	if !strings.Contains(cmd, "UserKnownHostsFile='/path/to/known_hosts'") {
 		t.Errorf("ssh command missing UserKnownHostsFile: %q", cmd)
+	}
+	// UserKnownHostsFile only replaces ~/.ssh/known_hosts; without this,
+	// /etc/ssh/ssh_known_hosts remains a valid second source of truth.
+	if !strings.Contains(cmd, "GlobalKnownHostsFile=/dev/null") {
+		t.Errorf("ssh command must neutralise the global known_hosts file: %q", cmd)
 	}
 	forbiddenTOFUFlag := "accept" + "-new"
 	if strings.Contains(cmd, forbiddenTOFUFlag) {
 		t.Errorf("ssh command must never fall back to trust-on-first-use: %q", cmd)
+	}
+}
+
+// TestBuildSSHCommand_QuotesPaths guards the shell-word construction: git
+// hands GIT_SSH_COMMAND to a shell, so an unquoted path containing a space
+// would silently split into two arguments, and anything more exotic would
+// be interpreted rather than used as a path.
+func TestBuildSSHCommand_QuotesPaths(t *testing.T) {
+	cmd := buildSSHCommand("/keys/deploy key", "/hosts/known hosts")
+	if !strings.Contains(cmd, "-i '/keys/deploy key'") {
+		t.Errorf("key path not quoted as a single shell word: %q", cmd)
+	}
+	if !strings.Contains(cmd, "UserKnownHostsFile='/hosts/known hosts'") {
+		t.Errorf("known_hosts path not quoted as a single shell word: %q", cmd)
+	}
+
+	// A single quote must not terminate the quoted word.
+	if got, want := shellQuote("/a'b"), `'/a'\''b'`; got != want {
+		t.Errorf("shellQuote = %s, want %s", got, want)
+	}
+	// A command substitution must survive as literal text.
+	if got := shellQuote("/x$(touch /tmp/pwned)y"); got != `'/x$(touch /tmp/pwned)y'` {
+		t.Errorf("shellQuote must not interpret the path: %s", got)
 	}
 }
 

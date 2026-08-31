@@ -292,11 +292,31 @@ func (r *Reader) refresh() error {
 // clone/fetch. It always pins host-key verification (StrictHostKeyChecking
 // yes) against the given known_hosts file — there is no trust-on-first-use
 // fallback of any kind.
+//
+// GlobalKnownHostsFile is neutralised on purpose: UserKnownHostsFile only
+// replaces ~/.ssh/known_hosts, while OpenSSH keeps consulting
+// /etc/ssh/ssh_known_hosts as well, even under StrictHostKeyChecking=yes. A
+// github.com entry that ever lands in the base image would then satisfy
+// verification without the pinned file being involved — exactly the trust
+// path this pinning exists to close. With both set, the embedded keys are
+// the sole source of truth.
+//
+// git runs GIT_SSH_COMMAND through a shell, so both paths are single-quoted.
+// They come from operator-set env vars today, the same trust level as the
+// other exec arguments here, but quoting is what makes a path containing a
+// space work at all and keeps that trust assumption from being load-bearing.
 func buildSSHCommand(sshKeyPath, knownHostsPath string) string {
 	return fmt.Sprintf(
-		"ssh -i %s -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%s",
-		sshKeyPath, knownHostsPath,
+		"ssh -i %s -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%s -o GlobalKnownHostsFile=/dev/null",
+		shellQuote(sshKeyPath), shellQuote(knownHostsPath),
 	)
+}
+
+// shellQuote renders s as a single shell word. Embedded single quotes are
+// closed, escaped and reopened — the standard POSIX idiom — so any byte
+// sequence survives intact and nothing in the path is interpreted.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // resolveKnownHostsPathLocked returns the known_hosts path to use for SSH
