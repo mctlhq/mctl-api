@@ -838,6 +838,32 @@ func TestResolveKnownHostsPathLocked_RejectsSymlinkedKnownHostsDir(t *testing.T)
 	}
 }
 
+// TestResolveKnownHostsPathLocked_SiblingDirSurvivesTrailingSlash pins the
+// property the sibling-directory comment depends on: the known_hosts dir
+// must never land inside localPath. Nested, the initial `git clone` would
+// refuse a non-empty target and `git clean -fd` would wipe it on every
+// later refresh — so a configured GITOPS_LOCAL_PATH with a trailing slash
+// must not silently produce that layout.
+func TestResolveKnownHostsPathLocked_SiblingDirSurvivesTrailingSlash(t *testing.T) {
+	base := t.TempDir()
+	localPath := filepath.Join(base, "cache")
+
+	for _, configured := range []string{localPath, localPath + "/"} {
+		r := &Reader{localPath: configured}
+		path, err := r.resolveKnownHostsPathLocked()
+		if err != nil {
+			t.Fatalf("resolveKnownHostsPathLocked(%q): %v", configured, err)
+		}
+		dir := filepath.Dir(path)
+		if dir == localPath || strings.HasPrefix(dir, localPath+string(filepath.Separator)) {
+			t.Fatalf("known_hosts dir %q is nested inside localPath %q (configured as %q)", dir, localPath, configured)
+		}
+		if dir != localPath+".known-hosts" {
+			t.Fatalf("known_hosts dir = %q, want the sibling %q (configured as %q)", dir, localPath+".known-hosts", configured)
+		}
+	}
+}
+
 // sshFixtureServer is a minimal in-process SSH server for testing host-key
 // verification. It binds loopback only, on an ephemeral port, and never
 // reaches the real network.

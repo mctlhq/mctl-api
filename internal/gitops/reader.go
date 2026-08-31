@@ -357,7 +357,11 @@ func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 		return r.resolvedKnownHostsPath, nil
 	}
 
-	dir := r.localPath + ".known-hosts"
+	// filepath.Clean first: a configured GITOPS_LOCAL_PATH with a trailing
+	// slash ("/data/mctl-gitops/") would otherwise concatenate into
+	// "/data/mctl-gitops/.known-hosts" — nested inside the working tree,
+	// which is exactly what the sibling requirement above exists to avoid.
+	dir := filepath.Clean(r.localPath) + ".known-hosts"
 	if err := ensurePrivateDirLocked(dir); err != nil {
 		return "", err
 	}
@@ -365,8 +369,12 @@ func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
-		defer f.Close()
-		if _, err := f.Write(githubKnownHosts); err != nil {
+		// Close is checked, not deferred away: if Write succeeds but the
+		// flush on Close fails (ENOSPC, EIO), the file on disk can be
+		// short. Caching the path in that case would hand ssh a truncated
+		// known_hosts and call it successfully materialized — a partial
+		// pin is not a pin.
+		if err := writeAndClose(f, githubKnownHosts); err != nil {
 			return "", fmt.Errorf("writing embedded known_hosts to %s: %w", path, err)
 		}
 		r.resolvedKnownHostsPath = path
@@ -434,6 +442,15 @@ func verifyOwnedPrivateLocked(path string, info fs.FileInfo) error {
 		return fmt.Errorf("refusing to use %s: permissions %v are not owner-only", path, info.Mode().Perm())
 	}
 	return nil
+}
+
+// writeAndClose writes b to f and closes it, reporting either failure. The
+// close error matters as much as the write error here: it is where a
+// buffered write actually reaches the disk.
+func writeAndClose(f *os.File, b []byte) error {
+	_, writeErr := f.Write(b)
+	closeErr := f.Close()
+	return errors.Join(writeErr, closeErr)
 }
 
 func (r *Reader) runGit(extraEnv []string, args ...string) error {
