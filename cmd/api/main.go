@@ -61,9 +61,8 @@ func main() {
 	// then be recorded nowhere, the process would finish booting and start
 	// serving, and the drain would never run.
 	//
-	// Released explicitly on each of main's three exits rather than by defer:
-	// the gitops failure below calls os.Exit, which does not run deferred
-	// functions (gocritic exitAfterDefer).
+	// Released explicitly on each of main's early exits rather than by defer:
+	// os.Exit does not run deferred functions (gocritic exitAfterDefer).
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
 	cfg := loadConfig()
@@ -76,12 +75,7 @@ func main() {
 	// Initialize components.
 	registry := operations.NewRegistry()
 
-	gitReader, err := gitops.NewReader(cfg.GitOpsRepoURL, cfg.GitOpsBranch, cfg.GitOpsLocalPath, cfg.GitOpsToken, cfg.GitOpsSSHKeyPath)
-	if err != nil {
-		slog.Error("failed to initialize gitops reader", "error", err)
-		stopSignals()
-		os.Exit(1)
-	}
+	gitReader := gitops.NewReader(cfg.GitOpsRepoURL, cfg.GitOpsBranch, cfg.GitOpsLocalPath, cfg.GitOpsToken, cfg.GitOpsSSHKeyPath, cfg.GitOpsSSHKnownHostsPath)
 
 	// Dex JWT verifier (optional — disabled if DEX_ISSUER_URL is unset or unreachable).
 	var dexVerifier *auth.DexVerifier
@@ -443,19 +437,20 @@ func main() {
 }
 
 type config struct {
-	Port                 string
-	GitOpsRepoURL        string
-	GitOpsBranch         string
-	GitOpsLocalPath      string
-	GitOpsToken          string // GitHub token for HTTPS auth (optional)
-	GitOpsSSHKeyPath     string // Path to SSH key for SSH auth (optional, takes precedence)
-	ArgoCDURL            string
-	ArgoCDToken          string
-	GitHubOrg            string
-	AdminUsers           []string
-	BackstageURL         string
-	BackstageToken       string
-	BackstageInternalURL string
+	Port                    string
+	GitOpsRepoURL           string
+	GitOpsBranch            string
+	GitOpsLocalPath         string
+	GitOpsToken             string // GitHub token for HTTPS auth (optional)
+	GitOpsSSHKeyPath        string // Path to SSH key for SSH auth (optional, takes precedence)
+	GitOpsSSHKnownHostsPath string // Path to a known_hosts file for SSH host-key pinning (optional; empty uses the shipped default)
+	ArgoCDURL               string
+	ArgoCDToken             string
+	GitHubOrg               string
+	AdminUsers              []string
+	BackstageURL            string
+	BackstageToken          string
+	BackstageInternalURL    string
 	// Dex OIDC issuer for JWT validation (dual-token auth alongside GitHub tokens).
 	DexIssuerURL string
 	// DexClientID is the expected audience for Dex JWTs. If empty, audience check is skipped.
@@ -536,6 +531,7 @@ func loadConfig() config {
 		GitOpsLocalPath:          envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-gitops"),
 		GitOpsToken:              envOr("GITOPS_REPO_TOKEN", os.Getenv("GITHUB_TOKEN")),
 		GitOpsSSHKeyPath:         os.Getenv("GITOPS_SSH_KEY_PATH"),
+		GitOpsSSHKnownHostsPath:  os.Getenv("GITOPS_SSH_KNOWN_HOSTS_PATH"),
 		ArgoCDURL:                envOr("ARGOCD_URL", "https://ops.mctl.ai"),
 		ArgoCDToken:              os.Getenv("ARGOCD_TOKEN"),
 		GitHubOrg:                envOr("GITHUB_ORG", "mctlhq"),

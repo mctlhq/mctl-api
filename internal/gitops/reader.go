@@ -35,13 +35,21 @@ import (
 // Reader provides read access to the GitOps mono-repo state.
 // It clones the repo locally and refreshes periodically.
 type Reader struct {
-	repoURL    string
-	branch     string
-	localPath  string
-	token      string // GitHub token for HTTPS auth (optional)
-	sshKeyPath string // Path to SSH private key (optional, takes precedence over token)
-	mu         sync.RWMutex
-	lastSync   time.Time
+	repoURL        string
+	branch         string
+	localPath      string
+	token          string // GitHub token for HTTPS auth (optional)
+	sshKeyPath     string // Path to SSH private key (optional, takes precedence over token)
+	knownHostsPath string // Path to a known_hosts file for SSH host-key pinning (optional; empty means "use the shipped embedded default, materialized lazily")
+	mu             sync.RWMutex
+	lastSync       time.Time
+
+	// resolvedKnownHostsPath caches the on-disk path of the materialized
+	// embedded default known_hosts file, computed lazily on first SSH-mode
+	// refresh so the constructor and the HTTPS/token path never touch the
+	// filesystem for it. Guarded by mu, which refresh() already holds for
+	// its entire duration.
+	resolvedKnownHostsPath string
 }
 
 // Tenant represents a workspace read from the GitOps repo.
@@ -174,15 +182,20 @@ type PlatformSkillPolicy struct {
 // token is an optional GitHub token for HTTPS auth.
 // sshKeyPath is an optional path to an SSH private key for SSH auth.
 // If sshKeyPath is set, it takes precedence and the repo URL should be SSH format.
-func NewReader(repoURL, branch, localPath, token, sshKeyPath string) (*Reader, error) {
-	r := &Reader{
-		repoURL:    repoURL,
-		branch:     branch,
-		localPath:  localPath,
-		token:      token,
-		sshKeyPath: sshKeyPath,
+// knownHostsPath is an optional path to a known_hosts file used to verify the
+// SSH host key when sshKeyPath is set. If empty, a known_hosts file
+// populated with GitHub's published host keys is materialized lazily on the
+// first SSH-mode refresh. NewReader performs no filesystem I/O — it only
+// stores knownHostsPath verbatim.
+func NewReader(repoURL, branch, localPath, token, sshKeyPath, knownHostsPath string) *Reader {
+	return &Reader{
+		repoURL:        repoURL,
+		branch:         branch,
+		localPath:      localPath,
+		token:          token,
+		sshKeyPath:     sshKeyPath,
+		knownHostsPath: knownHostsPath,
 	}
-	return r, nil
 }
 
 // RefreshLoop periodically refreshes the local repo clone.
@@ -216,10 +229,14 @@ func (r *Reader) refresh() error {
 
 	switch {
 	case r.sshKeyPath != "":
-		// SSH auth: use key file, accept-new trusts on first connect (TOFU)
+		// SSH auth: use key file, verify the host key against a pinned
+		// known_hosts file (fail closed — no trust-on-first-use).
 		cloneURL = r.repoURL
-		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=accept-new", r.sshKeyPath)
-		sshEnv = []string{"GIT_SSH_COMMAND=" + sshCmd}
+		knownHostsPath, err := r.resolveKnownHostsPathLocked()
+		if err != nil {
+			return fmt.Errorf("resolving known_hosts path: %w", err)
+		}
+		sshEnv = []string{"GIT_SSH_COMMAND=" + buildSSHCommand(r.sshKeyPath, knownHostsPath)}
 	case r.token != "":
 		// HTTPS auth: inject token into URL
 		if u, err := url.Parse(r.repoURL); err == nil {
@@ -268,6 +285,109 @@ func (r *Reader) refresh() error {
 		slog.Info("gitops refreshed", "branch", r.branch, "path", r.localPath, "lastSync", r.lastSync)
 	}
 	return nil
+}
+
+// buildSSHCommand builds the GIT_SSH_COMMAND value used for SSH-based
+// clone/fetch. It always pins host-key verification (StrictHostKeyChecking
+// yes) against the given known_hosts file — there is no trust-on-first-use
+// fallback of any kind.
+//
+// GlobalKnownHostsFile is neutralised on purpose: UserKnownHostsFile only
+// replaces ~/.ssh/known_hosts, while OpenSSH keeps consulting
+// /etc/ssh/ssh_known_hosts as well, even under StrictHostKeyChecking=yes. A
+// github.com entry that ever lands in the base image would then satisfy
+// verification without the pinned file being involved — exactly the trust
+// path this pinning exists to close. With both set, the embedded keys are
+// the sole source of truth.
+//
+// git runs GIT_SSH_COMMAND through a shell, so both paths are single-quoted.
+// They come from operator-set env vars today, the same trust level as the
+// other exec arguments here, but quoting is what makes a path containing a
+// space work at all and keeps that trust assumption from being load-bearing.
+func buildSSHCommand(sshKeyPath, knownHostsPath string) string {
+	return fmt.Sprintf(
+		"ssh -i %s -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%s -o GlobalKnownHostsFile=/dev/null",
+		shellQuote(sshKeyPath), shellQuote(knownHostsPath),
+	)
+}
+
+// shellQuote renders s as a single shell word. Embedded single quotes are
+// closed, escaped and reopened — the standard POSIX idiom — so any byte
+// sequence survives intact and nothing in the path is interpreted.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// resolveKnownHostsPathLocked returns the known_hosts path to use for SSH
+// host-key verification. Callers must hold r.mu (refresh() already does,
+// for its full duration).
+//
+// If r.knownHostsPath is explicitly set, it is returned verbatim. Otherwise
+// the embedded default (GitHub's published host keys) is written to a fresh
+// file created by os.CreateTemp, and the resolved path is cached on the
+// Reader so subsequent syncs reuse it without touching disk again.
+//
+// Two things this deliberately does NOT do, each learned from a review round
+// on the PR that introduced it:
+//
+//   - It does not use a fixed, predictable name in a shared directory. Any
+//     other local user could pre-create that name — as a symlink, or as a
+//     byte-identical regular file with permissive modes — and thereby keep
+//     write access to the very file `ssh -o UserKnownHostsFile=` reads,
+//     swapping in their own host key later. Neither O_EXCL nor a content
+//     comparison closes that: writing never chmods a file that already
+//     exists.
+//   - It does not create a directory next to localPath. localPath's parent
+//     is not guaranteed writable by this process — in this deployment /data
+//     is an emptyDir owned by root while the container runs as uid 1000 —
+//     and a Mkdir failure there would permanently break gitops sync on the
+//     SSH path.
+//
+// os.CreateTemp satisfies both: TMPDIR is writable by definition, and the
+// name is randomized and created O_EXCL at 0600, so there is nothing to
+// pre-create and nothing pre-existing to trust. Because every path is fresh,
+// the resolver never reads a file it did not just write, which also removes
+// the failure mode where a partially written file wedges every later refresh
+// with "exists with unexpected content".
+//
+// The file is not removed on shutdown, so a process that restarts many times
+// leaves one small file per run in TMPDIR. That is the accepted cost of not
+// trusting anything already on disk.
+func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
+	if r.knownHostsPath != "" {
+		return r.knownHostsPath, nil
+	}
+	if r.resolvedKnownHostsPath != "" {
+		return r.resolvedKnownHostsPath, nil
+	}
+
+	f, err := os.CreateTemp("", "mctl-api-known-hosts-*")
+	if err != nil {
+		return "", fmt.Errorf("creating known_hosts file: %w", err)
+	}
+	path := f.Name()
+
+	// Close is checked, not deferred away: if Write succeeds but the flush
+	// on Close fails (ENOSPC, EIO), the file on disk can be short. Caching
+	// the path then would hand ssh a truncated known_hosts and call it
+	// successfully materialized — a partial pin is not a pin. The stray
+	// file is removed so nothing later mistakes it for a good one.
+	if err := writeAndClose(f, githubKnownHosts); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("writing embedded known_hosts to %s: %w", path, err)
+	}
+
+	r.resolvedKnownHostsPath = path
+	return path, nil
+}
+
+// writeAndClose writes b to f and closes it, reporting either failure. The
+// close error matters as much as the write error here: it is where a
+// buffered write actually reaches the disk.
+func writeAndClose(f *os.File, b []byte) error {
+	_, writeErr := f.Write(b)
+	closeErr := f.Close()
+	return errors.Join(writeErr, closeErr)
 }
 
 func (r *Reader) runGit(extraEnv []string, args ...string) error {
