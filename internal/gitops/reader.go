@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -311,9 +312,15 @@ func buildSSHCommand(sshKeyPath, knownHostsPath string) string {
 // path (in particular a symlink planted by another local user sharing
 // os.TempDir()) is never opened for writing. If the path already exists,
 // it is used only when Lstat confirms it is a regular file (not a
-// symlink) whose contents already match the embedded default; otherwise
-// resolution fails closed rather than truncating/overwriting whatever the
-// path points at.
+// symlink) whose contents already match the embedded default, it is
+// owned by this process's effective UID, and it carries no group/world
+// permission bits; otherwise resolution fails closed rather than trusting
+// (or truncating/overwriting) whatever the path points at. The ownership
+// and permission checks matter even though the embedded content is
+// public: without them a local attacker sharing os.TempDir() could
+// pre-create the file with matching content to get it cached, then swap
+// in a malicious host key later, which every subsequent refresh() would
+// silently pick up.
 func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 	if r.knownHostsPath != "" {
 		return r.knownHostsPath, nil
@@ -350,6 +357,16 @@ func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 	}
 	if !bytes.Equal(existing, githubKnownHosts) {
 		return "", fmt.Errorf("known_hosts at %s exists with unexpected content and will not be overwritten", path)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("checking known_hosts owner at %s: unsupported platform stat", path)
+	}
+	if stat.Uid != uint32(os.Geteuid()) {
+		return "", fmt.Errorf("refusing to use known_hosts path %s: owned by uid %d, not the current effective uid %d", path, stat.Uid, os.Geteuid())
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("refusing to use known_hosts path %s: permissions %v are not owner-only", path, info.Mode().Perm())
 	}
 	r.resolvedKnownHostsPath = path
 	return path, nil

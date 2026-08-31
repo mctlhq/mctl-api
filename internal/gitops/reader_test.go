@@ -744,6 +744,32 @@ func TestResolveKnownHostsPathLocked_MaterializesAndCaches(t *testing.T) {
 	}
 }
 
+// TestResolveKnownHostsPathLocked_RejectsGroupWorldWritableReuse covers the
+// finding-#3 fix: a pre-existing file at the fixed path with byte-identical
+// content must still be rejected for reuse if it carries group/world
+// permission bits, since a local attacker sharing os.TempDir() could have
+// pre-created it (the embedded known_hosts content is public) intending to
+// swap in a malicious host key once it's cached and trusted.
+func TestResolveKnownHostsPathLocked_RejectsGroupWorldWritableReuse(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
+
+	path := filepath.Join(tmpDir, "mctl-api-github-known-hosts")
+	if err := os.WriteFile(path, githubKnownHosts, 0o644); err != nil {
+		t.Fatalf("pre-creating known_hosts fixture: %v", err)
+	}
+
+	r := &Reader{}
+	if _, err := r.resolveKnownHostsPathLocked(); err == nil {
+		t.Fatalf("resolveKnownHostsPathLocked: expected error for group/world-readable pre-existing file, got nil")
+	} else if !strings.Contains(err.Error(), "not owner-only") {
+		t.Fatalf("resolveKnownHostsPathLocked: expected permission-bits error, got: %v", err)
+	}
+	if r.resolvedKnownHostsPath != "" {
+		t.Fatalf("resolvedKnownHostsPath must not be cached on failure, got %q", r.resolvedKnownHostsPath)
+	}
+}
+
 // sshFixtureServer is a minimal in-process SSH server for testing host-key
 // verification. It binds loopback only, on an ephemeral port, and never
 // reaches the real network.
