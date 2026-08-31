@@ -795,6 +795,12 @@ func TestResolveKnownHostsPathLocked_RejectsGroupWorldWritableReuse(t *testing.T
 		t.Fatalf("pre-creating known_hosts dir fixture: %v", err)
 	}
 	path := filepath.Join(dir, "known_hosts")
+	// 0644 is the subject of this test, not an oversight: it stands in for
+	// a file an attacker left group/world-writable, and the assertion below
+	// is that resolveKnownHostsPathLocked refuses it. gosec flags both the
+	// permissive WriteFile (G306) and the equivalent Chmod (G302), so the
+	// rule is suppressed here rather than worked around.
+	//nolint:gosec // permissive mode is the fixture's purpose
 	if err := os.WriteFile(path, githubKnownHosts, 0o644); err != nil {
 		t.Fatalf("pre-creating known_hosts fixture: %v", err)
 	}

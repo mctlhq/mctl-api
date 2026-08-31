@@ -367,6 +367,7 @@ func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 	}
 	path := filepath.Join(dir, "known_hosts")
 
+	//nolint:gosec // path is built from localPath, inside the owner-only dir verified above
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
 		// Close is checked, not deferred away: if Write succeeds but the
@@ -435,8 +436,11 @@ func verifyOwnedPrivateLocked(path string, info fs.FileInfo) error {
 	if !ok {
 		return fmt.Errorf("checking owner of %s: unsupported platform stat", path)
 	}
-	if stat.Uid != uint32(os.Geteuid()) {
-		return fmt.Errorf("refusing to use %s: owned by uid %d, not the current effective uid %d", path, stat.Uid, os.Geteuid())
+	// Compare as int64 rather than converting Geteuid() to uint32: the
+	// conversion is a lint-flagged narrowing, and widening both sides is
+	// exact for every value either can hold.
+	if euid := os.Geteuid(); int64(stat.Uid) != int64(euid) {
+		return fmt.Errorf("refusing to use %s: owned by uid %d, not the current effective uid %d", path, stat.Uid, euid)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("refusing to use %s: permissions %v are not owner-only", path, info.Mode().Perm())
