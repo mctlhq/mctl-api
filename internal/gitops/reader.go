@@ -304,23 +304,31 @@ func buildSSHCommand(sshKeyPath, knownHostsPath string) string {
 // for its full duration).
 //
 // If r.knownHostsPath is explicitly set, it is returned verbatim. Otherwise
-// the embedded default (GitHub's published host keys) is materialized to a
-// fixed path under os.TempDir(), and the resolved path is cached on the
-// Reader so subsequent syncs do not rewrite it.
+// the embedded default (GitHub's published host keys) is materialized
+// under a Reader-owned directory derived from localPath, and the resolved
+// path is cached on the Reader so subsequent syncs do not rewrite it.
 //
-// The file is only ever created via O_CREATE|O_EXCL, so a pre-existing
-// path (in particular a symlink planted by another local user sharing
-// os.TempDir()) is never opened for writing. If the path already exists,
-// it is used only when Lstat confirms it is a regular file (not a
-// symlink) whose contents already match the embedded default, it is
-// owned by this process's effective UID, and it carries no group/world
-// permission bits; otherwise resolution fails closed rather than trusting
-// (or truncating/overwriting) whatever the path points at. The ownership
-// and permission checks matter even though the embedded content is
-// public: without them a local attacker sharing os.TempDir() could
-// pre-create the file with matching content to get it cached, then swap
-// in a malicious host key later, which every subsequent refresh() would
-// silently pick up.
+// That directory is deliberately a *sibling* of localPath (localPath +
+// ".known-hosts"), never nested inside it: localPath is the git working
+// tree that refresh() clones/fetches into, and `git clone` refuses a
+// non-empty target directory while `git clean -fd` (run on every
+// subsequent refresh()) deletes untracked files, so anything placed inside
+// localPath itself would either break the initial clone or be silently
+// wiped on the next sync.
+//
+// Unlike a fixed path under a shared location such as os.TempDir(), this
+// directory is created with 0700 (owner-only) permissions, so a local
+// attacker sharing the same host cannot even create sibling entries inside
+// it to race us. Both the directory and, inside it, the known_hosts file
+// are only ever created via os.Mkdir / O_CREATE|O_EXCL, so a pre-existing
+// path (in particular a symlink planted before this Reader ever ran) is
+// never followed or opened for writing. If either already exists (e.g.
+// from a previous refresh() within this same process), it is reused only
+// after Lstat confirms it is a real directory/regular file (not a
+// symlink), owned by this process's effective UID, and carrying no
+// group/world permission bits — and, for the file, that its contents
+// already byte-match the embedded default. Any failed check is fatal
+// (fail closed) rather than a silent overwrite.
 func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 	if r.knownHostsPath != "" {
 		return r.knownHostsPath, nil
@@ -329,7 +337,11 @@ func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 		return r.resolvedKnownHostsPath, nil
 	}
 
-	path := filepath.Join(os.TempDir(), "mctl-api-github-known-hosts")
+	dir := r.localPath + ".known-hosts"
+	if err := ensurePrivateDirLocked(dir); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "known_hosts")
 
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
@@ -351,25 +363,57 @@ func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("refusing to use known_hosts path %s: not a regular file", path)
 	}
-	existing, err := os.ReadFile(path) //nolint:gosec // fixed, well-known path, verified regular file above
+	existing, err := os.ReadFile(path) //nolint:gosec // owner-only parent dir, verified regular file above
 	if err != nil {
 		return "", fmt.Errorf("reading existing known_hosts at %s: %w", path, err)
 	}
 	if !bytes.Equal(existing, githubKnownHosts) {
 		return "", fmt.Errorf("known_hosts at %s exists with unexpected content and will not be overwritten", path)
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return "", fmt.Errorf("checking known_hosts owner at %s: unsupported platform stat", path)
-	}
-	if stat.Uid != uint32(os.Geteuid()) {
-		return "", fmt.Errorf("refusing to use known_hosts path %s: owned by uid %d, not the current effective uid %d", path, stat.Uid, os.Geteuid())
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("refusing to use known_hosts path %s: permissions %v are not owner-only", path, info.Mode().Perm())
+	if err := verifyOwnedPrivateLocked(path, info); err != nil {
+		return "", err
 	}
 	r.resolvedKnownHostsPath = path
 	return path, nil
+}
+
+// ensurePrivateDirLocked creates dir as an owner-only (0700) directory if
+// it does not already exist. If it does exist, it must be a real directory
+// (not a symlink, which would indicate a pre-plant attack), owned by this
+// process's effective UID, with no group/world permission bits — otherwise
+// resolution fails closed rather than trusting or reusing it.
+func ensurePrivateDirLocked(dir string) error {
+	if err := os.Mkdir(dir, 0o700); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("creating known_hosts directory %s: %w", dir, err)
+	}
+
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("checking known_hosts directory %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("refusing to use known_hosts directory %s: not a directory", dir)
+	}
+	return verifyOwnedPrivateLocked(dir, info)
+}
+
+// verifyOwnedPrivateLocked checks that path (already Lstat'd into info by
+// the caller) is owned by this process's effective UID and carries no
+// group/world permission bits.
+func verifyOwnedPrivateLocked(path string, info fs.FileInfo) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("checking owner of %s: unsupported platform stat", path)
+	}
+	if stat.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("refusing to use %s: owned by uid %d, not the current effective uid %d", path, stat.Uid, os.Geteuid())
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("refusing to use %s: permissions %v are not owner-only", path, info.Mode().Perm())
+	}
+	return nil
 }
 
 func (r *Reader) runGit(extraEnv []string, args ...string) error {
