@@ -29,6 +29,18 @@ import (
 // backstageReposProxy is a shared HTTP client for proxying repo requests to Backstage.
 var backstageReposClient = &http.Client{Timeout: 15 * time.Second}
 
+// authorizeGithubAppConnect attaches the service credentials the
+// github-app-connect plugin now requires. mctl-portal#79 dropped that
+// plugin's unauthenticated allowlist, so every proxied call below comes back
+// 401 without this header. Structurally identical to authorizeBackstage in
+// handlers_domains.go, but reads a distinct token so the two plugins'
+// credentials can be rotated and scoped independently.
+func (h *Handlers) authorizeGithubAppConnect(req *http.Request) {
+	if h.opts.BackstageGithubAppConnectToken != "" {
+		req.Header.Set("Authorization", "Bearer "+h.opts.BackstageGithubAppConnectToken)
+	}
+}
+
 // ListRepos proxies to Backstage's github-app-connect plugin to list repos for a team.
 // GET /api/v1/repos?team=<teamName>
 func (h *Handlers) ListRepos(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +62,14 @@ func (h *Handlers) ListRepos(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstream := fmt.Sprintf("%s/api/github-app-connect/repos?team=%s", baseURL, url.QueryEscape(team))
-	resp, err := backstageReposClient.Get(upstream)
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstream, nil)
+	if err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	h.authorizeGithubAppConnect(upReq)
+
+	resp, err := backstageReposClient.Do(upReq)
 	if err != nil {
 		slog.Error("failed to proxy repos list to backstage", "error", err, "team", team)
 		http.Error(w, `{"error":"backstage unavailable"}`, http.StatusBadGateway)
@@ -96,7 +115,14 @@ func (h *Handlers) GetRepoInstallURL(w http.ResponseWriter, r *http.Request) {
 
 	upstream := fmt.Sprintf("%s/api/github-app-connect/install-url?team=%s&service=%s&repo=%s",
 		baseURL, url.QueryEscape(team), url.QueryEscape(service), url.QueryEscape(repo))
-	resp, err := backstageReposClient.Get(upstream)
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstream, nil)
+	if err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	h.authorizeGithubAppConnect(upReq)
+
+	resp, err := backstageReposClient.Do(upReq)
 	if err != nil {
 		slog.Error("failed to proxy install-url to backstage", "error", err, "team", team, "repo", repo)
 		http.Error(w, `{"error":"backstage unavailable"}`, http.StatusBadGateway)
@@ -151,6 +177,8 @@ func (h *Handlers) SyncRepos(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
+	h.authorizeGithubAppConnect(upReq)
+
 	resp, err := backstageReposClient.Do(upReq)
 	if err != nil {
 		slog.Error("failed to proxy repos sync to backstage", "error", err, "team", req.Team)
