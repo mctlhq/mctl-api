@@ -1,5 +1,32 @@
 # Changelog
 
+## [4.36.0](https://github.com/mctlhq/mctl-api/compare/4.35.0...4.36.0) (2026-09-01)
+
+
+### Features
+
+* **agents:** issue-198-pin-github-ssh-host-keys-in-gitops-reade ([b10792e](https://github.com/mctlhq/mctl-api/commit/b10792ecd05cbff08f9ad4734c85b2df01f5a2d0))
+* **agents:** issue-199-go-1-26-6-toolchain-bump-dockerfile-dige ([9cf454e](https://github.com/mctlhq/mctl-api/commit/9cf454efae62e9086fcc4b1be6a43017042a1e92))
+* **agents:** issue-212-repos-sync-proxy-sends-no-credentials-to ([84fb2e7](https://github.com/mctlhq/mctl-api/commit/84fb2e7f0c402ab4faf96566519aca6fa96f7ee0))
+* **agents:** issue-212-repos-sync-proxy-sends-no-credentials-to ([1bd6674](https://github.com/mctlhq/mctl-api/commit/1bd66747faba1944a793e7af03f1b856d038fba0))
+* **operations:** add the mctl-agents-reconcile operation ([20db091](https://github.com/mctlhq/mctl-api/commit/20db091172b9a9b2eb4dcf55ea8ef0e0e53d9dfb))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-198-pin-github-ssh-host-keys-in-gitops-reade ([8af233d](https://github.com/mctlhq/mctl-api/commit/8af233d5f6f62838db30015f75782797d61ee16b))
+* **agents:** address P1/P2 codex findings on issue-198-pin-github-ssh-host-keys-in-gitops-reade ([2d48279](https://github.com/mctlhq/mctl-api/commit/2d482797a2e128534dc8fbe4dc0064de0179b5cd))
+* **agents:** address P1/P2 codex findings on issue-198-pin-github-ssh-host-keys-in-gitops-reade ([761dd5a](https://github.com/mctlhq/mctl-api/commit/761dd5a0b46f7b6cb4f4c311f3ff180f7475ba22))
+* **agents:** issue-198-pin-github-ssh-host-keys-in-gitops-reade ([5555b94](https://github.com/mctlhq/mctl-api/commit/5555b946b0f9c5d0028cca1b836e68aabb529529))
+* **deps:** bump golang.org/x/crypto to v0.55.0 for CVE-2026-56854 ([58aec9d](https://github.com/mctlhq/mctl-api/commit/58aec9de3f3373ef6fd872270600e547a8d3ab7a))
+* **gitops:** check the known_hosts close error; clean localPath before deriving the sibling dir ([bf4cc58](https://github.com/mctlhq/mctl-api/commit/bf4cc58e460462cdc949464b64a9a4afc852a67a))
+* **gitops:** materialize known_hosts with CreateTemp, dropping the trust apparatus ([cb8daed](https://github.com/mctlhq/mctl-api/commit/cb8daedaeabb8b695e41ddb86040edb5ffd07e2c))
+* **gitops:** neutralise the global known_hosts and quote the SSH paths ([af36064](https://github.com/mctlhq/mctl-api/commit/af360647f8a0790d7349e1ea82c89931328c4270))
+* **gitops:** redact the percent-encoded token too, not just the raw bytes ([908b957](https://github.com/mctlhq/mctl-api/commit/908b9572e599a97d724fb72d9dfd534433d97087))
+* **gitops:** redact the returned output slice, not just the error text ([de19be4](https://github.com/mctlhq/mctl-api/commit/de19be472db562dea5dc0738e94f1d3c4b68a27a))
+* **gitops:** redact the token from git's output as defence in depth ([0d8dad5](https://github.com/mctlhq/mctl-api/commit/0d8dad5636f590eaa482e4720df361dd102e43b8))
+* **operations:** route mctl-agents-reconcile to the argo-workflows namespace ([6d4efca](https://github.com/mctlhq/mctl-api/commit/6d4efcabf3b545d94d64eb2f924901ed76721b47))
+
 ## [4.35.0](https://github.com/mctlhq/mctl-api/compare/4.34.0...4.35.0) (2026-08-29)
 
 
