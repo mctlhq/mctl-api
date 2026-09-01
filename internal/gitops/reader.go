@@ -416,11 +416,26 @@ func (r *Reader) gitOutput(extraEnv []string, args ...string) ([]byte, error) {
 // and RefreshLoop hands the error straight to slog.Error, which writes the
 // live token to the log store in plaintext. Any single failed refresh is
 // enough. This is the branch production actually runs.
+// Both forms are redacted. The token reaches git inside a URL built by
+// url.UserPassword, which percent-encodes anything unsafe in userinfo — so
+// what git echoes back is the *encoded* token, and matching only the raw
+// bytes would sail straight past it. Current GitHub token formats
+// (ghp_/gho_/github_pat_) are alphanumeric plus underscore and encode to
+// themselves, which is exactly why this gap is invisible until the day a
+// token format changes or a different forge is added. A redactor with a
+// known blind spot is worth less than no redactor, because it is trusted.
 func (r *Reader) redactToken(out []byte) []byte {
 	if r.token == "" {
 		return out
 	}
-	return bytes.ReplaceAll(out, []byte(r.token), []byte("***"))
+	out = bytes.ReplaceAll(out, []byte(r.token), []byte("***"))
+	if encoded := url.UserPassword("x", r.token).String(); len(encoded) > 2 {
+		// Strip the "x:" prefix to leave just the encoded password.
+		if enc := encoded[2:]; enc != r.token {
+			out = bytes.ReplaceAll(out, []byte(enc), []byte("***"))
+		}
+	}
+	return out
 }
 
 // ListTenants reads all tenants from the GitOps repo.
