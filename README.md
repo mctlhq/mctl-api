@@ -132,7 +132,8 @@ docker run -p 8080:8080 mctl-api
 | `TRUSTED_PROXY_CIDRS` | Comma-separated Traefik CIDRs/IPs trusted for `X-Forwarded-For` on audit events | — | No |
 | `ALLOW_INSECURE_DB` | Permit `sslmode=disable` (tests/local only) | — | No |
 | `BACKSTAGE_URL` | Backstage catalog URL | — | No |
-| `BACKSTAGE_TOKEN` | Backstage service token | — | No |
+| `BACKSTAGE_TOKEN` | Backstage service token, scoped to the `custom-domains` plugin | — | No |
+| `BACKSTAGE_GITHUB_APP_CONNECT_TOKEN` | Backstage service token, scoped to the `github-app-connect` plugin (repos list/sync/install-url) | — | No |
 | `LOKI_URL` | Loki base URL for log queries | — | No |
 
 ## API / Endpoints

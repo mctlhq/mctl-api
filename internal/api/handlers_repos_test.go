@@ -129,3 +129,103 @@ func TestSyncReposMissingTeamBadRequest(t *testing.T) {
 		t.Fatalf("expected zero upstream calls for a missing team, got %d", len(*seen))
 	}
 }
+
+// Backstage's github-app-connect plugin now rejects unauthenticated calls
+// (mctl-portal#79), so ListRepos, GetRepoInstallURL, and SyncRepos must all
+// attach the BackstageGithubAppConnectToken credential when it is configured.
+func TestReposProxiesSendBearerToken(t *testing.T) {
+	cases := []struct {
+		name    string
+		request *http.Request
+		invoke  func(h *Handlers, w http.ResponseWriter, r *http.Request)
+	}{
+		{
+			name:    "list",
+			request: httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=labs", nil),
+			invoke:  func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.ListRepos(w, r) },
+		},
+		{
+			name:    "install-url",
+			request: httptest.NewRequest(http.MethodGet, "/api/v1/repos/install-url?team=labs&repo=mctlhq/labs-app", nil),
+			invoke:  func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.GetRepoInstallURL(w, r) },
+		},
+		{
+			name: "sync",
+			request: withUser(
+				httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)),
+				&auth.User{ID: "u1", Groups: []string{"labs"}},
+			),
+			invoke: func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.SyncRepos(w, r) },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, seen := captureBackstage(t)
+			h := &Handlers{opts: Options{
+				BackstageInternalURL:           srv.URL,
+				BackstageGithubAppConnectToken: "test-token",
+			}}
+
+			rec := httptest.NewRecorder()
+			tc.invoke(h, rec, tc.request)
+
+			if len(*seen) != 1 {
+				t.Fatalf("expected exactly 1 upstream call, got %d (status %d, body %q)",
+					len(*seen), rec.Code, rec.Body.String())
+			}
+			if got := (*seen)[0].Header.Get("Authorization"); got != "Bearer test-token" {
+				t.Errorf("upstream Authorization = %q, want %q — Backstage rejects anonymous github-app-connect calls",
+					got, "Bearer test-token")
+			}
+		})
+	}
+}
+
+// An unset BackstageGithubAppConnectToken must not produce a malformed
+// "Bearer " header; Backstage should reject the call on its own terms
+// rather than on a header we invented.
+func TestReposProxiesOmitAuthWhenTokenUnset(t *testing.T) {
+	cases := []struct {
+		name    string
+		request *http.Request
+		invoke  func(h *Handlers, w http.ResponseWriter, r *http.Request)
+	}{
+		{
+			name:    "list",
+			request: httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=labs", nil),
+			invoke:  func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.ListRepos(w, r) },
+		},
+		{
+			name:    "install-url",
+			request: httptest.NewRequest(http.MethodGet, "/api/v1/repos/install-url?team=labs&repo=mctlhq/labs-app", nil),
+			invoke:  func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.GetRepoInstallURL(w, r) },
+		},
+		{
+			name: "sync",
+			request: withUser(
+				httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)),
+				&auth.User{ID: "u1", Groups: []string{"labs"}},
+			),
+			invoke: func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.SyncRepos(w, r) },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, seen := captureBackstage(t)
+			h := &Handlers{opts: Options{BackstageInternalURL: srv.URL}}
+
+			rec := httptest.NewRecorder()
+			tc.invoke(h, rec, tc.request)
+
+			if len(*seen) != 1 {
+				t.Fatalf("expected exactly 1 upstream call, got %d (status %d, body %q)",
+					len(*seen), rec.Code, rec.Body.String())
+			}
+			if _, ok := (*seen)[0].Header["Authorization"]; ok {
+				t.Error("Authorization header set despite an empty BackstageGithubAppConnectToken")
+			}
+		})
+	}
+}

@@ -15,6 +15,7 @@
 package api
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -61,6 +62,13 @@ type Options struct {
 	// BackstageInternalURL is the cluster-internal URL for Backstage (e.g. http://backstage.backstage.svc:7007).
 	// Used for proxying repo operations to the github-app-connect plugin.
 	BackstageInternalURL string
+	// BackstageGithubAppConnectToken authorizes calls to Backstage's
+	// github-app-connect plugin (repos list/sync/install-url). Deliberately
+	// distinct from BackstageToken (custom-domains only) so the two
+	// credentials have independent blast radii and rotation schedules. When
+	// empty, proxied requests carry no Authorization header (matches
+	// authorizeBackstage's no-op-when-unset behavior).
+	BackstageGithubAppConnectToken string
 	// AllowedOrigins is the list of origins permitted by CORS.
 	// If empty, no Access-Control-Allow-Origin header is set (deny all cross-origin).
 	AllowedOrigins []string
@@ -116,6 +124,11 @@ func NewRouter(opts Options) http.Handler {
 		opts:                opts,
 		openClawQuota:       quota,
 		openClawRateLimiter: newSaveRateLimiter(quota.SaveRatePerHour),
+	}
+
+	if opts.BackstageGithubAppConnectToken == "" {
+		slog.Warn("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN is unset; repos list/sync/install-url will proxy to backstage without credentials",
+			"routes", "GET /api/v1/repos, GET /api/v1/repos/install-url, POST /api/v1/repos/sync")
 	}
 
 	r := chi.NewRouter()
