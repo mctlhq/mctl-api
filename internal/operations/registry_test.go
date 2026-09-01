@@ -32,10 +32,10 @@ func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 	}
 
 	registry := NewRegistry()
-	// mctl-agents-approve duplicates the same enum (mctl-agents-investigate
-	// takes an issue_url instead of a service param, so it has no enum to
-	// drift).
-	for _, opName := range []string{"mctl-agents-implement", "mctl-agents-shepherd", "mctl-agents-approve"} {
+	// mctl-agents-approve and mctl-agents-reconcile duplicate the same enum
+	// (mctl-agents-investigate takes an issue_url instead of a service param,
+	// so it has no enum to drift).
+	for _, opName := range []string{"mctl-agents-implement", "mctl-agents-shepherd", "mctl-agents-approve", "mctl-agents-reconcile"} {
 		op, ok := registry.Get(opName)
 		if !ok {
 			t.Fatalf("operation %q not found in registry", opName)
@@ -90,5 +90,46 @@ func TestCreateTenantDefaultsToClosedEgress(t *testing.T) {
 	})
 	if got := optIn["allow_internet_egress"]; got != "true" {
 		t.Errorf("explicit allow_internet_egress overridden: got %q, want \"true\"", got)
+	}
+}
+
+// TestReconcileDefaultsToWriting pins the reconcile sweep's dry_run default.
+//
+// The direction that matters is the quiet one. With dry_run defaulting to
+// "true", every caller that omits the parameter — including Temporal's
+// ReconcileWorkflow — would get a sweep that reads everything, decides
+// everything, reports success, and writes nothing. That is exactly the
+// failure mctlhq/mctl-agents#270 was: a reconcile pass indistinguishable
+// from a working one, silently projecting nothing for four weeks. A wrong
+// default here would reintroduce it from the API side.
+func TestReconcileDefaultsToWriting(t *testing.T) {
+	registry := NewRegistry()
+	op, ok := registry.Get("mctl-agents-reconcile")
+	if !ok {
+		t.Fatal("operation \"mctl-agents-reconcile\" not found in registry")
+	}
+	if op.WorkflowTemplate != "mctl-agents-reconcile" {
+		t.Errorf("WorkflowTemplate = %q, want %q — the CWFT that owns the "+
+			"gitops commit", op.WorkflowTemplate, "mctl-agents-reconcile")
+	}
+	if !op.AdminOnly {
+		t.Error("reconcile must stay AdminOnly: it commits to gitops main")
+	}
+	var dryRun *ParameterDef
+	for i := range op.Parameters {
+		if op.Parameters[i].Name == "dry_run" {
+			dryRun = &op.Parameters[i]
+			break
+		}
+	}
+	if dryRun == nil {
+		t.Fatal("operation has no 'dry_run' parameter")
+	}
+	if dryRun.Default != "false" {
+		t.Errorf("dry_run default = %q, want \"false\": a sweep that writes "+
+			"nothing by default is the #270 failure mode again", dryRun.Default)
+	}
+	if dryRun.Required {
+		t.Error("dry_run must stay optional so callers can omit it")
 	}
 }
