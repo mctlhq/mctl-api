@@ -19,12 +19,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      # Pinned to v1.7.0 (not @latest): now that this job is fail-closed, an
+      # unpinned scanner release could turn every PR red with no change on
+      # our side. The vulnerability database still floats at run time.
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
       - name: govulncheck
-        # Report-only: current Go patch lines (1.26 / 1.24) still flag stdlib
-        # findings that need a toolchain bump, which is out of scope for this
-        # scan-bootstrap. Trivy remains fail-closed on unfixed CRITICAL.
-        continue-on-error: true
         run: govulncheck ./...
 
   trivy:
