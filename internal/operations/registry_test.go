@@ -132,4 +132,25 @@ func TestReconcileDefaultsToWriting(t *testing.T) {
 	if dryRun.Required {
 		t.Error("dry_run must stay optional so callers can omit it")
 	}
+
+	// The declared default is only half the claim. What actually reaches the
+	// workflow is whatever ApplyDefaults produces for a caller that omitted
+	// the parameter — ReconcileWorkflow being exactly such a caller. A
+	// regression in how omitted parameters are merged would leave the struct
+	// field above untouched and still hand Argo a no-op sweep, so assert the
+	// applied value the way TestCreateTenantDefaultsToClosedEgress does for
+	// the egress default (agy P2 on mctl-api#234).
+	filled := registry.ApplyDefaults(op, map[string]string{})
+	if got := filled["dry_run"]; got != "false" {
+		t.Errorf("ApplyDefaults gave dry_run = %q for a caller that omitted "+
+			"it, want \"false\" — the sweep would read everything, report "+
+			"success and write nothing", got)
+	}
+
+	// An explicit dry run must survive: the operator asking to see decisions
+	// without writing is the whole reason the parameter exists.
+	explicit := registry.ApplyDefaults(op, map[string]string{"dry_run": "true"})
+	if got := explicit["dry_run"]; got != "true" {
+		t.Errorf("explicit dry_run overridden: got %q, want \"true\"", got)
+	}
 }
