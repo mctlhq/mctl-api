@@ -400,8 +400,15 @@ func (r *Reader) gitOutput(extraEnv []string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", fullArgs...) //nolint:gosec // args are from trusted config
 	cmd.Env = append(os.Environ(), extraEnv...)
 	out, err := cmd.CombinedOutput()
+	// Redact the slice itself, not just the error string built from it.
+	// Redacting only inside fmt.Errorf makes the guarantee depend on every
+	// caller agreeing to ignore the []byte on the error path — true of both
+	// callers today, but nothing enforces it, and a future caller that logs
+	// the returned output would reintroduce exactly the leak this function
+	// exists to prevent. Redacting once, here, makes it structural.
+	out = r.redactToken(out)
 	if err != nil {
-		return out, fmt.Errorf("%w\n%s", err, r.redactToken(bytes.TrimSpace(out)))
+		return out, fmt.Errorf("%w\n%s", err, bytes.TrimSpace(out))
 	}
 	return out, nil
 }
