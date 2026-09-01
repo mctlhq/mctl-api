@@ -109,7 +109,14 @@ func WorkflowNamespace(workflowTemplate, team string) string {
 		// approve flips a proposal's .status.yaml via gitops commit — it
 		// needs the same argo-workflows-namespace deploy key and the
 		// mctl-gitops-main-writes mutex as its siblings above.
-		"mctl-agents-approve":
+		"mctl-agents-approve",
+		// reconcile writes the same .status.yaml files from the same
+		// clone-and-push shape, so it needs that deploy key and that
+		// mutex too. Omitting it here returns the team verbatim
+		// ("platform" for an AdminOnly op with no team_name), which is
+		// not a namespace that exists — the operation would be declared
+		// and unusable (claude P1 on #234).
+		"mctl-agents-reconcile":
 		return "argo-workflows"
 	}
 	return team

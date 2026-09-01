@@ -28,6 +28,11 @@ func TestWorkflowNamespace(t *testing.T) {
 		{"mctl-agents-implement runs centrally", "mctl-agents-implement", "acme", "argo-workflows"},
 		{"mctl-agents-shepherd runs centrally", "mctl-agents-shepherd", "acme", "argo-workflows"},
 		{"mctl-agents-approve runs centrally", "mctl-agents-approve", "acme", "argo-workflows"},
+		{"mctl-agents-reconcile runs centrally", "mctl-agents-reconcile", "acme", "argo-workflows"},
+		// The real caller is AdminOnly with no team_name, so the handler
+		// passes the "platform" sentinel. Returning it verbatim would send
+		// the submit to a namespace that does not exist.
+		{"mctl-agents-reconcile ignores the platform sentinel", "mctl-agents-reconcile", "platform", "argo-workflows"},
 		{"service deploy runs in team ns", "deploy-service", "acme", "acme"},
 		{"retire service runs in team ns", "retire-service", "acme", "acme"},
 		{"unknown template falls back to team ns", "anything-else", "acme", "acme"},

@@ -620,6 +620,37 @@ var builtinOperations = []Operation{
 		},
 	},
 	{
+		// Reconcile sweep — projects authoritative GitHub PR state back onto
+		// .status.yaml for every non-terminal proposal, as an Argo-executed
+		// gitops commit under the mctl-gitops-main-writes mutex. The CWFT is
+		// self-sufficient (clone-gitops -> run_shepherd --reconcile ->
+		// commit-and-push), so callers pass no findings: it re-reads state in
+		// the pod that actually has the clone.
+		//
+		// Exists so Temporal's ReconcileWorkflow can act on the drift it
+		// detects instead of only logging it (mctlhq/mctl-agents#270). The
+		// worker has no gitops checkout and no deploy key by design, so every
+		// write it wants has to come back through here.
+		//
+		// RiskMedium, not RiskLow: this is not purely a projection. For a
+		// proposal whose .status.yaml lost its `pr` field, reconcile_one
+		// runs the implementer's preflight and may OPEN the canonical PR for
+		// an already-pushed branch (allow_pr_create=not dry_run). It never
+		// runs a model, never merges, and never force-retries.
+		Name:             "mctl-agents-reconcile",
+		DisplayName:      "Run mctl-agents reconcile sweep",
+		Description:      "Reconcile pass: read canonical GitHub PR state for every non-terminal proposal and project it onto platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml (merged PR -> merged, closed-unmerged -> rejected, conflicted open PR -> needs-triage). Discovers canonical feat/agents-* PRs even when .status.yaml lost its pr field, and may open that one PR for a branch a prior attempt pushed before dying. Never runs a model, applies code fixes, or merges. Optionally filter by service; dry_run=true prints every decision and writes nothing. Admin-only. Cost: none (no model). Duration: ~3-5 min for a full sweep.",
+		WorkflowTemplate: "mctl-agents-reconcile",
+		RiskLevel:        RiskMedium,
+		RequiresConfirm:  false,
+		AdminOnly:        true,
+		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch> (PR creation only, for an already-pushed branch)"},
+		Parameters: []ParameterDef{
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Reconcile only this service. Leave empty to sweep every service.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy"}},
+			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to print every would-be flip without writing .status.yaml or opening any PR. Default 'false'.", Enum: []string{"true", "false"}},
+		},
+	},
+	{
 		Name:             "openclaw-identity-delete",
 		DisplayName:      "Remove OpenClaw Identity File from GitOps",
 		Description:      "Remove a single identity override (AGENTS.md / SOUL.md / IDENTITY.md / USER.md / TOOLS.md) from the gitops backup. Idempotent — succeeds with a no-op if the file is already absent. The tenant reverts to the image-shipped default at the next sidecar reconcile.",
