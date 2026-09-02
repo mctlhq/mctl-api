@@ -124,7 +124,8 @@ func TestStartDevLoopWorkflow_RequiresAuth(t *testing.T) {
 }
 
 func TestStartDevLoopWorkflow_MissingIssueURL(t *testing.T) {
-	h := &Handlers{opts: Options{TemporalClient: &fakeDevLoopClient{}}}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: &fakeDevLoopClient{}, AuditLog: logger}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{}`))
 	req = adminCtx(req)
@@ -133,11 +134,15 @@ func TestStartDevLoopWorkflow_MissingIssueURL(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for a missing issue_url, got %d: %s", rec.Code, rec.Body.String())
 	}
+	if entries := logger.List(10); len(entries) != 0 {
+		t.Fatalf("expected no audit entry for a missing issue_url, got %+v", entries)
+	}
 }
 
 func TestStartDevLoopWorkflow_InvalidIssueURLIs400(t *testing.T) {
 	fake := &fakeDevLoopClient{startErr: temporalclient.ErrInvalidIssueURL}
-	h := &Handlers{opts: Options{TemporalClient: fake}}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"not-a-url"}`))
 	req = adminCtx(req)
@@ -146,11 +151,15 @@ func TestStartDevLoopWorkflow_InvalidIssueURLIs400(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for ErrInvalidIssueURL, got %d: %s", rec.Code, rec.Body.String())
 	}
+	if entries := logger.List(10); len(entries) != 0 {
+		t.Fatalf("expected no audit entry for ErrInvalidIssueURL, got %+v", entries)
+	}
 }
 
 func TestStartDevLoopWorkflow_TemporalFailureIs502(t *testing.T) {
 	fake := &fakeDevLoopClient{startErr: serviceerror.NewUnavailable("temporal frontend unreachable")}
-	h := &Handlers{opts: Options{TemporalClient: fake}}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
 	req = adminCtx(req)
@@ -159,11 +168,29 @@ func TestStartDevLoopWorkflow_TemporalFailureIs502(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 for a Temporal RPC failure (not caller input), got %d: %s", rec.Code, rec.Body.String())
 	}
+	entries := logger.List(10)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one audit entry, got %d: %+v", len(entries), entries)
+	}
+	entry := entries[0]
+	if entry.Operation != "dev-loop-start" {
+		t.Errorf("expected Operation=dev-loop-start, got %q", entry.Operation)
+	}
+	if entry.Status != "failed" {
+		t.Errorf("expected Status=failed, got %q", entry.Status)
+	}
+	if entry.WorkflowName != "" {
+		t.Errorf("expected empty WorkflowName on a failed start, got %q", entry.WorkflowName)
+	}
+	if entry.Parameters["issue_url"] != "https://github.com/mctlhq/mctl-telegram/issues/1" {
+		t.Errorf("expected Parameters[issue_url] to match the request, got %q", entry.Parameters["issue_url"])
+	}
 }
 
 func TestStartDevLoopWorkflow_Success(t *testing.T) {
 	fake := &fakeDevLoopClient{workflowID: "dev-loop-mctlhq-mctl-telegram-1", runID: "run-1"}
-	h := &Handlers{opts: Options{TemporalClient: fake}}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
 	req = adminCtx(req)
@@ -171,6 +198,23 @@ func TestStartDevLoopWorkflow_Success(t *testing.T) {
 	h.StartDevLoopWorkflow(rec, req)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	entries := logger.List(10)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one audit entry, got %d: %+v", len(entries), entries)
+	}
+	entry := entries[0]
+	if entry.Operation != "dev-loop-start" {
+		t.Errorf("expected Operation=dev-loop-start, got %q", entry.Operation)
+	}
+	if entry.Status != "succeeded" {
+		t.Errorf("expected Status=succeeded, got %q", entry.Status)
+	}
+	if entry.WorkflowName != fake.workflowID {
+		t.Errorf("expected WorkflowName=%q, got %q", fake.workflowID, entry.WorkflowName)
+	}
+	if entry.Parameters["issue_url"] != "https://github.com/mctlhq/mctl-telegram/issues/1" {
+		t.Errorf("expected Parameters[issue_url] to match the request, got %q", entry.Parameters["issue_url"])
 	}
 }
 
