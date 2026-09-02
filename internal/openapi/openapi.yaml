@@ -23,8 +23,9 @@ info:
 
     ## Rate Limits
 
-    - Read endpoints: **100 requests/minute** per authenticated user
-    - Write endpoints (`/execute`): **20 requests/minute** per authenticated user
+    - Authenticated routes (including `POST /mcp`): **300 requests/minute** per authenticated user
+    - Loopback MCP-internal REST (`127.0.0.1`, `::1`) is excluded from that cap so in-process REST does not double-count with `POST /mcp`
+    - Write endpoints (`/operations/*/execute` and related): **20 requests/minute** per authenticated user. Loopback is not excluded from the write cap.
 
     ## MCP Integration
 
