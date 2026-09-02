@@ -166,8 +166,8 @@ func TestAllToolsHaveTitleAnnotation(t *testing.T) {
 		t.Fatalf("failed to unmarshal tools/list response: %v", err)
 	}
 
-	if len(result.Result.Tools) != 71 {
-		t.Errorf("expected 71 tools, got %d", len(result.Result.Tools))
+	if len(result.Result.Tools) != 73 {
+		t.Errorf("expected 73 tools, got %d", len(result.Result.Tools))
 	}
 
 	for _, tool := range result.Result.Tools {
@@ -475,5 +475,293 @@ func TestToolApproveDevLoop_SurfacesErrorsWithoutPanic(t *testing.T) {
 				t.Fatalf("expected a tool-level error result for HTTP %d, got %+v", code, result)
 			}
 		})
+	}
+}
+
+// callToolTriggerReconcile builds a CallToolRequest for toolTriggerReconcile
+// with the given arguments and runs its handler.
+func callToolTriggerReconcile(t *testing.T, apiURL string, args map[string]any) (*mcplib.CallToolResult, error) {
+	t.Helper()
+	srv := NewServer(apiURL, "test-token")
+	_, handler := srv.toolTriggerReconcile()
+	return handler(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "mctl_trigger_reconcile",
+			Arguments: args,
+		},
+	})
+}
+
+func TestToolTriggerReconcile_PostsToReconcileExecutePath(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workflow_name":"mctl-agents-reconcile-abc123"}`))
+	}))
+	defer backend.Close()
+
+	result, err := callToolTriggerReconcile(t, backend.URL, map[string]any{
+		"service": "mctl-api",
+		"dry_run": "true",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("expected POST, got %s", gotMethod)
+	}
+	if gotPath != "/api/v1/operations/mctl-agents-reconcile/execute" {
+		t.Errorf("path: got %q", gotPath)
+	}
+	if gotBody["service"] != "mctl-api" {
+		t.Errorf("body service: got %v", gotBody["service"])
+	}
+	if gotBody["dry_run"] != "true" {
+		t.Errorf("body dry_run: got %v", gotBody["dry_run"])
+	}
+}
+
+func TestToolTriggerReconcile_OmitsAbsentArgs(t *testing.T) {
+	var gotBody map[string]string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	_, err := callToolTriggerReconcile(t, backend.URL, map[string]any{})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if _, ok := gotBody["service"]; ok {
+		t.Errorf("expected no service key when not supplied, got %v", gotBody["service"])
+	}
+	if _, ok := gotBody["dry_run"]; ok {
+		t.Errorf("expected no dry_run key when not supplied, got %v", gotBody["dry_run"])
+	}
+}
+
+func TestToolTriggerReconcile_SurfacesErrorsWithoutPanic(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusBadGateway, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(`{"error":"stub failure"}`))
+			}))
+			defer backend.Close()
+
+			result, err := callToolTriggerReconcile(t, backend.URL, map[string]any{})
+			if err != nil {
+				t.Fatalf("handler must not return a Go error, got: %v", err)
+			}
+			if result == nil || !result.IsError {
+				t.Fatalf("expected a tool-level error result for HTTP %d, got %+v", code, result)
+			}
+		})
+	}
+}
+
+// callToolTriggerApprove builds a CallToolRequest for toolTriggerApprove with
+// the given arguments and runs its handler.
+func callToolTriggerApprove(t *testing.T, apiURL string, args map[string]any) (*mcplib.CallToolResult, error) {
+	t.Helper()
+	srv := NewServer(apiURL, "test-token")
+	_, handler := srv.toolTriggerApprove()
+	return handler(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "mctl_trigger_approve",
+			Arguments: args,
+		},
+	})
+}
+
+func TestToolTriggerApprove_PostsToApproveExecutePath(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workflow_name":"mctl-agents-approve-abc123"}`))
+	}))
+	defer backend.Close()
+
+	result, err := callToolTriggerApprove(t, backend.URL, map[string]any{
+		"service":  "mctl-api",
+		"slug":     "issue-42-fix-foo",
+		"approver": "mashkovd",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("expected POST, got %s", gotMethod)
+	}
+	if gotPath != "/api/v1/operations/mctl-agents-approve/execute" {
+		t.Errorf("path: got %q", gotPath)
+	}
+	if gotBody["service"] != "mctl-api" {
+		t.Errorf("body service: got %v", gotBody["service"])
+	}
+	if gotBody["slug"] != "issue-42-fix-foo" {
+		t.Errorf("body slug: got %v", gotBody["slug"])
+	}
+	if gotBody["approver"] != "mashkovd" {
+		t.Errorf("body approver: got %v", gotBody["approver"])
+	}
+}
+
+// TestToolTriggerApprove_DoesNotHardcodeApprover guards the tool from
+// defaulting or overriding the approver client-side: that defaulting is
+// server-side per handlers_write.go's ExecuteOperation (input["approver"] =
+// user.ID when empty), so the MCP layer must pass through exactly what the
+// caller supplied, including nothing.
+func TestToolTriggerApprove_DoesNotHardcodeApprover(t *testing.T) {
+	var gotBody map[string]string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	_, err := callToolTriggerApprove(t, backend.URL, map[string]any{
+		"service": "mctl-api",
+		"slug":    "issue-42-fix-foo",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if _, ok := gotBody["approver"]; ok {
+		t.Errorf("expected no approver key when not supplied client-side, got %v", gotBody["approver"])
+	}
+}
+
+func TestToolTriggerApprove_SurfacesErrorsWithoutPanic(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusBadGateway, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(`{"error":"stub failure"}`))
+			}))
+			defer backend.Close()
+
+			result, err := callToolTriggerApprove(t, backend.URL, map[string]any{
+				"service": "mctl-api",
+				"slug":    "issue-42-fix-foo",
+			})
+			if err != nil {
+				t.Fatalf("handler must not return a Go error, got: %v", err)
+			}
+			if result == nil || !result.IsError {
+				t.Fatalf("expected a tool-level error result for HTTP %d, got %+v", code, result)
+			}
+		})
+	}
+}
+
+// mcpExemptOperations lists non-HandlerOnly operations.Registry entries that
+// are deliberately not exposed as MCP tools, with the reason recorded
+// inline. HandlerOnly is the primary opt-out mechanism (see its doc comment
+// in registry.go); this is the secondary, explicit opt-out the design calls
+// for when a non-HandlerOnly operation still isn't meant to be MCP-facing.
+var mcpExemptOperations = map[string]string{
+	"smoke-test": "internal CI-only end-to-end operation exercised by the platform's own test suite, not an operator/agent-facing action",
+}
+
+// operationToTool maps every operations.Registry entry with HandlerOnly ==
+// false (and not present in mcpExemptOperations) to the MCP tool name that
+// submits it. This is the registry-to-MCP parity fixture:
+// TestMCPToolsCoverEveryNonHandlerOnlyOperation fails loudly, naming the
+// operation, if a registry entry is missing from this map or if the mapped
+// tool name isn't actually registered.
+var operationToTool = map[string]string{
+	"deploy-service":             "mctl_deploy_service",
+	"create-tenant":              "mctl_create_tenant",
+	"provision-database":         "mctl_provision_database",
+	"retire-service":             "mctl_retire_service",
+	"delete-tenant":              "mctl_delete_tenant",
+	"rollback-service":           "mctl_rollback_service",
+	"preview-deploy":             "mctl_create_preview",
+	"preview-delete":             "mctl_delete_preview",
+	"add-custom-domain":          "mctl_add_custom_domain",
+	"remove-custom-domain":       "mctl_remove_custom_domain",
+	"mctl-agents-run":            "mctl_trigger_agents_run",
+	"mctl-agents-mentor-only":    "mctl_trigger_mentor_only",
+	"mctl-agents-single-service": "mctl_trigger_single_service",
+	"mctl-agents-incidents":      "mctl_trigger_incident_responder",
+	"mctl-agents-implement":      "mctl_trigger_implementer",
+	"mctl-agents-shepherd":       "mctl_trigger_shepherd",
+	"mctl-agents-investigate":    "mctl_trigger_issue",
+	"mctl-agents-approve":        "mctl_trigger_approve",
+	"mctl-agents-reconcile":      "mctl_trigger_reconcile",
+}
+
+// TestMCPToolsCoverEveryNonHandlerOnlyOperation is the registry-to-MCP
+// parity guard: it fails if any operations.Registry entry with
+// HandlerOnly == false (and not explicitly exempted via
+// mcpExemptOperations) has no corresponding registered MCP tool. This is
+// the systemic guard the issue asks for, so the next operation added to
+// registry.go cannot silently ship without MCP coverage the way
+// mctl-agents-approve and mctl-agents-reconcile did.
+func TestMCPToolsCoverEveryNonHandlerOnlyOperation(t *testing.T) {
+	reg := operations.NewRegistry()
+	srv := NewServer("http://localhost:8080", "")
+	mcpSrv := srv.NewMCPServer()
+
+	req := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	resp := mcpSrv.HandleMessage(context.Background(), req)
+
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal response: %v", err)
+	}
+
+	var result struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("failed to unmarshal tools/list response: %v", err)
+	}
+
+	liveTools := make(map[string]bool, len(result.Result.Tools))
+	for _, tool := range result.Result.Tools {
+		liveTools[tool.Name] = true
+	}
+
+	for _, op := range reg.List() {
+		if op.HandlerOnly {
+			continue
+		}
+		if reason, exempt := mcpExemptOperations[op.Name]; exempt {
+			t.Logf("skipping %q: exempt from MCP coverage (%s)", op.Name, reason)
+			continue
+		}
+		toolName, mapped := operationToTool[op.Name]
+		if !mapped {
+			t.Errorf("registry operation %q has no MCP tool mapping in operationToTool (and/or no matching tool registered)", op.Name)
+			continue
+		}
+		if !liveTools[toolName] {
+			t.Errorf("registry operation %q maps to tool %q, but no such tool is registered in NewMCPServer()", op.Name, toolName)
+		}
 	}
 }
