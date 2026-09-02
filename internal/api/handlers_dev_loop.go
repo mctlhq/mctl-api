@@ -24,7 +24,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 )
 
@@ -136,14 +138,46 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 		payload["reason"] = body.Reason
 	}
 
+	auditParams := map[string]string{"approver": body.Approver}
+	if body.Reason != "" {
+		auditParams["reason"] = body.Reason
+	}
+
 	if err := h.opts.TemporalClient.SignalApprove(r.Context(), workflowID, payload); err != nil {
 		if temporalclient.IsNotFound(err) {
+			h.logAudit(r, audit.Entry{
+				UserID:       user.ID,
+				Operation:    "dev-loop-approve",
+				Parameters:   auditParams,
+				WorkflowName: workflowID,
+				Status:       "failed",
+				RiskLevel:    string(operations.RiskMedium),
+				Message:      "workflow not found",
+			})
 			writeError(w, http.StatusNotFound, "workflow not found: "+workflowID)
 			return
 		}
+		h.logAudit(r, audit.Entry{
+			UserID:       user.ID,
+			Operation:    "dev-loop-approve",
+			Parameters:   auditParams,
+			WorkflowName: workflowID,
+			Status:       "failed",
+			RiskLevel:    string(operations.RiskMedium),
+			Message:      "signal failed: " + err.Error(),
+		})
 		writeError(w, http.StatusBadGateway, "failed to signal approval: "+err.Error())
 		return
 	}
+
+	h.logAudit(r, audit.Entry{
+		UserID:       user.ID,
+		Operation:    "dev-loop-approve",
+		Parameters:   auditParams,
+		WorkflowName: workflowID,
+		Status:       "succeeded",
+		RiskLevel:    string(operations.RiskMedium),
+	})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"workflow_id": workflowID,
 		"signalled":   "approve",

@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -164,8 +166,8 @@ func TestAllToolsHaveTitleAnnotation(t *testing.T) {
 		t.Fatalf("failed to unmarshal tools/list response: %v", err)
 	}
 
-	if len(result.Result.Tools) != 70 {
-		t.Errorf("expected 70 tools, got %d", len(result.Result.Tools))
+	if len(result.Result.Tools) != 71 {
+		t.Errorf("expected 71 tools, got %d", len(result.Result.Tools))
 	}
 
 	for _, tool := range result.Result.Tools {
@@ -331,5 +333,147 @@ func TestToolCreateTenant_ExposesEveryOperationParameter(t *testing.T) {
 		if _, exposed := tool.InputSchema.Properties[p.Name]; !exposed {
 			t.Errorf("operation parameter %q is not exposed on the mctl_create_tenant MCP tool schema", p.Name)
 		}
+	}
+}
+
+// callToolApproveDevLoop builds a CallToolRequest for toolApproveDevLoop with
+// the given arguments and runs its handler.
+func callToolApproveDevLoop(t *testing.T, apiURL string, args map[string]any) (*mcplib.CallToolResult, error) {
+	t.Helper()
+	srv := NewServer(apiURL, "test-token")
+	_, handler := srv.toolApproveDevLoop()
+	return handler(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "mctl_approve_dev_loop",
+			Arguments: args,
+		},
+	})
+}
+
+func TestToolApproveDevLoop_PostsToDevLoopApprovePath(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]interface{}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workflow_id":"dev-loop-mctlhq-mctl-telegram-296","signalled":"approve"}`))
+	}))
+	defer backend.Close()
+
+	result, err := callToolApproveDevLoop(t, backend.URL, map[string]any{
+		"workflow_id": "dev-loop-mctlhq-mctl-telegram-296",
+		"approver":    "mashkovd",
+		"reason":      "looks good",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("expected POST, got %s", gotMethod)
+	}
+	wantPath := "/api/v1/agents/dev-loop/" + url.PathEscape("dev-loop-mctlhq-mctl-telegram-296") + "/approve"
+	if gotPath != wantPath {
+		t.Errorf("path: got %q, want %q", gotPath, wantPath)
+	}
+	if gotBody["approver"] != "mashkovd" {
+		t.Errorf("body approver: got %v", gotBody["approver"])
+	}
+	if gotBody["reason"] != "looks good" {
+		t.Errorf("body reason: got %v", gotBody["reason"])
+	}
+}
+
+func TestToolApproveDevLoop_EscapesWorkflowID(t *testing.T) {
+	var gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	workflowID := "dev-loop/mctlhq/mctl-telegram 296"
+	_, err := callToolApproveDevLoop(t, backend.URL, map[string]any{"workflow_id": workflowID})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	wantPath := "/api/v1/agents/dev-loop/" + url.PathEscape(workflowID) + "/approve"
+	if gotPath != wantPath {
+		t.Errorf("escaped path: got %q, want %q", gotPath, wantPath)
+	}
+}
+
+func TestToolApproveDevLoop_OmitsEmptyOptionalArgs(t *testing.T) {
+	var gotBody map[string]interface{}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	_, err := callToolApproveDevLoop(t, backend.URL, map[string]any{
+		"workflow_id": "dev-loop-mctlhq-mctl-telegram-1",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if _, ok := gotBody["approver"]; ok {
+		t.Errorf("expected no approver key when not supplied, got %v", gotBody["approver"])
+	}
+	if _, ok := gotBody["reason"]; ok {
+		t.Errorf("expected no reason key when not supplied, got %v", gotBody["reason"])
+	}
+}
+
+// TestToolApproveDevLoop_NeverHitsOperationsExecute is the MCP-layer
+// counterpart of the issue's "does not call standalone mctl-agents-approve or
+// implementer execution" acceptance criterion: this tool must always go
+// through the dev-loop signal route, never the operations-execute route.
+func TestToolApproveDevLoop_NeverHitsOperationsExecute(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/api/v1/operations/") {
+			t.Errorf("unexpected request to operations-execute path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	_, err := callToolApproveDevLoop(t, backend.URL, map[string]any{
+		"workflow_id": "dev-loop-mctlhq-mctl-telegram-1",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+}
+
+func TestToolApproveDevLoop_SurfacesErrorsWithoutPanic(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusBadGateway, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(`{"error":"stub failure"}`))
+			}))
+			defer backend.Close()
+
+			result, err := callToolApproveDevLoop(t, backend.URL, map[string]any{
+				"workflow_id": "dev-loop-mctlhq-mctl-telegram-1",
+			})
+			if err != nil {
+				t.Fatalf("handler must not return a Go error, got: %v", err)
+			}
+			if result == nil || !result.IsError {
+				t.Fatalf("expected a tool-level error result for HTTP %d, got %+v", code, result)
+			}
+		})
 	}
 }

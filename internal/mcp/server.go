@@ -150,6 +150,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerImplementer())
 	srv.AddTool(s.toolTriggerShepherd())
 	srv.AddTool(s.toolTriggerIssue())
+	srv.AddTool(s.toolApproveDevLoop())
 	srv.AddTool(s.toolListRecentAgentRuns())
 
 	// Agent registry (mctl-agents AgentManifest versions/releases).
@@ -2529,6 +2530,48 @@ Set use_temporal=true to route through the dev-workflow control plane's Temporal
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger issue-investigator: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolApproveDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_approve_dev_loop",
+		mcplib.WithTitleAnnotation("Approve a DevLoopWorkflow"),
+		// Not destructive: it unblocks a workflow that is itself scoped and
+		// reviewable — it does not delete or overwrite anything.
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription(`Send the durable Temporal "approve" signal to an EXISTING DevLoopWorkflow execution.
+
+This calls the same handler/path as the REST endpoint (POST /api/v1/agents/dev-loop/{workflow_id}/approve) and the Temporal CLI signal — it does NOT start a new workflow, and it does NOT edit a proposal's .status.yaml directly.
+
+This is distinct from the standalone mctl-agents-approve REST operation, which directly mutates a proposal's .status.yaml outside DevLoop's ownership (the gitops-file path used when a proposal was not started via use_temporal on mctl_trigger_issue). Use this tool only for workflow_ids returned by mctl_trigger_issue with use_temporal=true or by mctl_get_workflow_status for a dev-loop-* workflow.
+
+Admin-only. Requires the server's Temporal client to be configured — returns 503 otherwise.`),
+		mcplib.WithString("workflow_id",
+			mcplib.Required(),
+			mcplib.Description("The DevLoopWorkflow's Temporal workflow ID, e.g. dev-loop-mctlhq-mctl-telegram-296."),
+		),
+		mcplib.WithString("approver",
+			mcplib.Description("Optional. Identity to record as the approver. Defaults to the authenticated caller if omitted."),
+		),
+		mcplib.WithString("reason",
+			mcplib.Description("Optional. Free-text reason for the approval, recorded on the signal payload."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		workflowID := stringArg(req, "workflow_id")
+		body := map[string]interface{}{}
+		if approver := stringArg(req, "approver"); approver != "" {
+			body["approver"] = approver
+		}
+		if reason := stringArg(req, "reason"); reason != "" {
+			body["reason"] = reason
+		}
+		respBody, err := s.apiPostJSON(ctx, "/api/v1/agents/dev-loop/"+url.PathEscape(workflowID)+"/approve", body)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to approve dev-loop workflow: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(respBody)), nil
 	}
 	return tool, handler
 }

@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 	"go.temporal.io/api/serviceerror"
@@ -199,7 +201,8 @@ func TestApproveDevLoopWorkflow_RequiresAuth(t *testing.T) {
 }
 
 func TestApproveDevLoopWorkflow_MissingWorkflowID(t *testing.T) {
-	h := &Handlers{opts: Options{TemporalClient: &fakeDevLoopClient{}}}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: &fakeDevLoopClient{}, AuditLog: logger}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop//approve", nil)
 	req = withChiParam(req, "workflow_id", "")
@@ -209,11 +212,15 @@ func TestApproveDevLoopWorkflow_MissingWorkflowID(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for an empty workflow_id, got %d: %s", rec.Code, rec.Body.String())
 	}
+	if entries := logger.List(10); len(entries) != 0 {
+		t.Fatalf("expected no audit entry for a missing workflow_id, got %+v", entries)
+	}
 }
 
 func TestApproveDevLoopWorkflow_UnknownWorkflowIs404(t *testing.T) {
 	fake := &fakeDevLoopClient{approveErr: serviceerror.NewNotFound("workflow not found")}
-	h := &Handlers{opts: Options{TemporalClient: fake}}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-999/approve", nil)
 	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-999")
@@ -223,11 +230,25 @@ func TestApproveDevLoopWorkflow_UnknownWorkflowIs404(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for an unknown workflow_id, got %d: %s", rec.Code, rec.Body.String())
 	}
+	entries := logger.List(10)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one audit entry, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Status != "failed" {
+		t.Errorf("expected Status=failed, got %q", entries[0].Status)
+	}
+	if entries[0].Operation != "dev-loop-approve" {
+		t.Errorf("expected Operation=dev-loop-approve, got %q", entries[0].Operation)
+	}
+	if !strings.Contains(entries[0].Message, "not found") {
+		t.Errorf("expected message to mention 'not found', got %q", entries[0].Message)
+	}
 }
 
 func TestApproveDevLoopWorkflow_TemporalFailureIs502(t *testing.T) {
 	fake := &fakeDevLoopClient{approveErr: serviceerror.NewUnavailable("temporal frontend unreachable")}
-	h := &Handlers{opts: Options{TemporalClient: fake}}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve", nil)
 	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
@@ -237,11 +258,19 @@ func TestApproveDevLoopWorkflow_TemporalFailureIs502(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 for a Temporal RPC failure, got %d: %s", rec.Code, rec.Body.String())
 	}
+	entries := logger.List(10)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one audit entry, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Status != "failed" {
+		t.Errorf("expected Status=failed, got %q", entries[0].Status)
+	}
 }
 
 func TestApproveDevLoopWorkflow_Success(t *testing.T) {
 	fake := &fakeDevLoopClient{}
-	h := &Handlers{opts: Options{TemporalClient: fake}}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve", nil)
 	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
@@ -258,11 +287,29 @@ func TestApproveDevLoopWorkflow_Success(t *testing.T) {
 	if got := fake.lastApprovePayload["approver"]; got != "tester" {
 		t.Fatalf("expected approver to default to the caller, got %q", got)
 	}
+	entries := logger.List(10)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one audit entry, got %d: %+v", len(entries), entries)
+	}
+	entry := entries[0]
+	if entry.Operation != "dev-loop-approve" {
+		t.Errorf("expected Operation=dev-loop-approve, got %q", entry.Operation)
+	}
+	if entry.WorkflowName != "dev-loop-mctlhq-mctl-telegram-1" {
+		t.Errorf("expected WorkflowName=dev-loop-mctlhq-mctl-telegram-1, got %q", entry.WorkflowName)
+	}
+	if entry.Status != "succeeded" {
+		t.Errorf("expected Status=succeeded, got %q", entry.Status)
+	}
+	if entry.Parameters["approver"] != "tester" {
+		t.Errorf("expected Parameters[approver]=tester, got %q", entry.Parameters["approver"])
+	}
 }
 
 func TestApproveDevLoopWorkflow_ExplicitApproverAndReasonPassthrough(t *testing.T) {
 	fake := &fakeDevLoopClient{}
-	h := &Handlers{opts: Options{TemporalClient: fake}}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve",
 		bytes.NewBufferString(`{"approver":"mashkovd","reason":"looks good"}`))
@@ -279,11 +326,22 @@ func TestApproveDevLoopWorkflow_ExplicitApproverAndReasonPassthrough(t *testing.
 	if got := fake.lastApprovePayload["reason"]; got != "looks good" {
 		t.Fatalf("expected reason passthrough, got %q", got)
 	}
+	entries := logger.List(10)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one audit entry, got %d: %+v", len(entries), entries)
+	}
+	if got := entries[0].Parameters["approver"]; got != "mashkovd" {
+		t.Errorf("expected Parameters[approver]=mashkovd, got %q", got)
+	}
+	if got := entries[0].Parameters["reason"]; got != "looks good" {
+		t.Errorf("expected Parameters[reason]=looks good, got %q", got)
+	}
 }
 
 func TestApproveDevLoopWorkflow_MalformedBodyIs400(t *testing.T) {
 	fake := &fakeDevLoopClient{}
-	h := &Handlers{opts: Options{TemporalClient: fake}}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve",
 		bytes.NewBufferString(`{"approver":`))
@@ -296,6 +354,9 @@ func TestApproveDevLoopWorkflow_MalformedBodyIs400(t *testing.T) {
 	}
 	if fake.lastApprovedWorkflow != "" {
 		t.Fatal("SignalApprove must not be called on malformed input")
+	}
+	if entries := logger.List(10); len(entries) != 0 {
+		t.Fatalf("expected no audit entry for a malformed body, got %+v", entries)
 	}
 }
 
