@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.37.0](https://github.com/mctlhq/mctl-api/compare/4.36.0...4.37.0) (2026-09-02)
+
+
+### Features
+
+* **agents:** issue-228-feat-agents-expose-durable-devloop-appro ([c0f2f56](https://github.com/mctlhq/mctl-api/commit/c0f2f56091fcaa5d4b28f8b6529e1a4bb9d08ff3))
+* **agents:** issue-228-feat-agents-expose-durable-devloop-appro ([3dee7e9](https://github.com/mctlhq/mctl-api/commit/3dee7e98bc8b56c0508dc426b434b3139d8bef28))
+
 ## [4.36.0](https://github.com/mctlhq/mctl-api/compare/4.35.0...4.36.0) (2026-09-01)
 
 
