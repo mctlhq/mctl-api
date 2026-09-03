@@ -772,3 +772,132 @@ func TestMCPToolsCoverEveryNonHandlerOnlyOperation(t *testing.T) {
 		}
 	}
 }
+
+// callToolTriggerIssue builds a CallToolRequest for toolTriggerIssue with
+// the given arguments and runs its handler.
+func callToolTriggerIssue(t *testing.T, apiURL string, args map[string]any) (*mcplib.CallToolResult, error) {
+	t.Helper()
+	srv := NewServer(apiURL, "test-token")
+	_, handler := srv.toolTriggerIssue()
+	return handler(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "mctl_trigger_issue",
+			Arguments: args,
+		},
+	})
+}
+
+// TestToolTriggerIssue_UseTemporalTruePostsToDevLoopStart pins the
+// use_temporal=true routing branch of toolTriggerIssue: it must POST the
+// dev-loop/start JSON body and must never hit the legacy operations-execute
+// path, mirroring TestToolApproveDevLoop_PostsToDevLoopApprovePath /
+// TestToolApproveDevLoop_NeverHitsOperationsExecute for the sibling tool.
+func TestToolTriggerIssue_UseTemporalTruePostsToDevLoopStart(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]interface{}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/api/v1/operations/") {
+			t.Errorf("unexpected request to operations-execute path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workflow_id":"dev-loop-mctlhq-mctl-telegram-1","run_id":"run-1"}`))
+	}))
+	defer backend.Close()
+
+	issueURL := "https://github.com/mctlhq/mctl-telegram/issues/1"
+	result, err := callToolTriggerIssue(t, backend.URL, map[string]any{
+		"issue_url":    issueURL,
+		"use_temporal": true,
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("expected POST, got %s", gotMethod)
+	}
+	if gotPath != "/api/v1/agents/dev-loop/start" {
+		t.Errorf("path: got %q, want /api/v1/agents/dev-loop/start", gotPath)
+	}
+	if gotBody["issue_url"] != issueURL {
+		t.Errorf("body issue_url: got %v, want %q", gotBody["issue_url"], issueURL)
+	}
+}
+
+// TestToolTriggerIssue_UseTemporalAbsentPostsToOperationsExecute covers the
+// default routing when use_temporal is omitted entirely from the args map.
+func TestToolTriggerIssue_UseTemporalAbsentPostsToOperationsExecute(t *testing.T) {
+	var gotMethod, gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/agents/dev-loop/start" {
+			t.Errorf("unexpected request to dev-loop/start path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workflow_name":"mctl-agents-investigate-1"}`))
+	}))
+	defer backend.Close()
+
+	result, err := callToolTriggerIssue(t, backend.URL, map[string]any{
+		"issue_url": "https://github.com/mctlhq/mctl-telegram/issues/1",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("expected POST, got %s", gotMethod)
+	}
+	if gotPath != "/api/v1/operations/mctl-agents-investigate/execute" {
+		t.Errorf("path: got %q, want /api/v1/operations/mctl-agents-investigate/execute", gotPath)
+	}
+}
+
+// TestToolTriggerIssue_UseTemporalFalsePostsToOperationsExecute is the
+// explicit-false counterpart to the absent-key case above: the issue calls
+// out that a test covering only "true" would miss a branch that fires
+// unconditionally, so both directions are asserted separately.
+func TestToolTriggerIssue_UseTemporalFalsePostsToOperationsExecute(t *testing.T) {
+	var gotMethod, gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/agents/dev-loop/start" {
+			t.Errorf("unexpected request to dev-loop/start path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workflow_name":"mctl-agents-investigate-1"}`))
+	}))
+	defer backend.Close()
+
+	result, err := callToolTriggerIssue(t, backend.URL, map[string]any{
+		"issue_url":    "https://github.com/mctlhq/mctl-telegram/issues/1",
+		"use_temporal": false,
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("expected POST, got %s", gotMethod)
+	}
+	if gotPath != "/api/v1/operations/mctl-agents-investigate/execute" {
+		t.Errorf("path: got %q, want /api/v1/operations/mctl-agents-investigate/execute", gotPath)
+	}
+}

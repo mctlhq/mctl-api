@@ -67,7 +67,8 @@ type startDevLoopRequest struct {
 // directly; the workflow itself pins a registry-resolved version and
 // submits that same CWFT as its first activity.
 func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireTemporalAdmin(w, r); !ok {
+	user, ok := h.requireTemporalAdmin(w, r)
+	if !ok {
 		return
 	}
 
@@ -81,6 +82,8 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	auditParams := map[string]string{"issue_url": body.IssueURL}
+
 	workflowID, runID, err := h.opts.TemporalClient.StartDevLoopWorkflow(r.Context(), body.IssueURL)
 	if err != nil {
 		// ErrInvalidIssueURL is caller input (a malformed issue_url) — real
@@ -92,9 +95,25 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusBadRequest, "invalid issue_url: "+err.Error())
 			return
 		}
+		h.logAudit(r, audit.Entry{
+			UserID:     user.ID,
+			Operation:  "dev-loop-start",
+			Parameters: auditParams,
+			Status:     "failed",
+			RiskLevel:  string(operations.RiskMedium),
+			Message:    "failed to start dev-loop workflow: " + err.Error(),
+		})
 		writeError(w, http.StatusBadGateway, "failed to start dev-loop workflow: "+err.Error())
 		return
 	}
+	h.logAudit(r, audit.Entry{
+		UserID:       user.ID,
+		Operation:    "dev-loop-start",
+		Parameters:   auditParams,
+		WorkflowName: workflowID,
+		Status:       "succeeded",
+		RiskLevel:    string(operations.RiskMedium),
+	})
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
 		"workflow_id": workflowID,
 		"run_id":      runID,
