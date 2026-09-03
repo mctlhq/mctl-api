@@ -362,9 +362,13 @@ func TestToolApproveDevLoop_PostsToDevLoopApprovePath(t *testing.T) {
 	}))
 	defer backend.Close()
 
+	// "approver" is passed deliberately although the tool no longer declares
+	// it: the assertion below is that such a value never reaches the request
+	// body. The approver is the authenticated caller, established server-side
+	// (gitops#986).
 	result, err := callToolApproveDevLoop(t, backend.URL, map[string]any{
 		"workflow_id": "dev-loop-mctlhq-mctl-telegram-296",
-		"approver":    "mashkovd",
+		"approver":    "someone-else",
 		"reason":      "looks good",
 	})
 	if err != nil {
@@ -380,8 +384,8 @@ func TestToolApproveDevLoop_PostsToDevLoopApprovePath(t *testing.T) {
 	if gotPath != wantPath {
 		t.Errorf("path: got %q, want %q", gotPath, wantPath)
 	}
-	if gotBody["approver"] != "mashkovd" {
-		t.Errorf("body approver: got %v", gotBody["approver"])
+	if _, ok := gotBody["approver"]; ok {
+		t.Errorf("a caller-supplied approver reached the request body: %v", gotBody["approver"])
 	}
 	if gotBody["reason"] != "looks good" {
 		t.Errorf("body reason: got %v", gotBody["reason"])
@@ -619,6 +623,9 @@ func TestToolTriggerApprove_PostsToApproveExecutePath(t *testing.T) {
 	if gotBody["slug"] != "issue-42-fix-foo" {
 		t.Errorf("body slug: got %v", gotBody["slug"])
 	}
+	// This is the gitops mctl-agents-approve path, which still takes an
+	// explicit approver — unlike mctl_approve_dev_loop, where the approver
+	// now comes from the credential (gitops#986).
 	if gotBody["approver"] != "mashkovd" {
 		t.Errorf("body approver: got %v", gotBody["approver"])
 	}

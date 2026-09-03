@@ -306,13 +306,38 @@ func TestApproveDevLoopWorkflow_Success(t *testing.T) {
 	}
 }
 
-func TestApproveDevLoopWorkflow_ExplicitApproverAndReasonPassthrough(t *testing.T) {
+// The approver is a fact about who called, not a claim in the body. A request
+// that names someone else is rejected outright rather than having the field
+// quietly ignored — a caller that believes it is recording an approval under
+// a colleague's name must be told it is not.
+func TestApproveDevLoopWorkflow_ExplicitDifferentApproverIs400(t *testing.T) {
 	fake := &fakeDevLoopClient{}
 	logger := audit.NewLogger()
 	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve",
-		bytes.NewBufferString(`{"approver":"mashkovd","reason":"looks good"}`))
+		bytes.NewBufferString(`{"approver":"someone-else","reason":"looks good"}`))
+	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.ApproveDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a body-supplied approver, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if fake.lastApprovePayload != nil {
+		t.Fatalf("a rejected approval must not signal Temporal, got payload %+v", fake.lastApprovePayload)
+	}
+}
+
+// The signalled approver is always the authenticated caller, and `reason`
+// still rides along.
+func TestApproveDevLoopWorkflow_ApproverComesFromCredential(t *testing.T) {
+	fake := &fakeDevLoopClient{}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve",
+		bytes.NewBufferString(`{"reason":"looks good"}`))
 	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
 	req = adminCtx(req)
 	rec := httptest.NewRecorder()
@@ -320,8 +345,10 @@ func TestApproveDevLoopWorkflow_ExplicitApproverAndReasonPassthrough(t *testing.
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if got := fake.lastApprovePayload["approver"]; got != "mashkovd" {
-		t.Fatalf("expected explicit approver to win, got %q", got)
+	// adminCtx authenticates as "tester".
+	const want = "tester"
+	if got := fake.lastApprovePayload["approver"]; got != want {
+		t.Fatalf("approver: got %q, want the authenticated caller %q", got, want)
 	}
 	if got := fake.lastApprovePayload["reason"]; got != "looks good" {
 		t.Fatalf("expected reason passthrough, got %q", got)
@@ -330,8 +357,8 @@ func TestApproveDevLoopWorkflow_ExplicitApproverAndReasonPassthrough(t *testing.
 	if len(entries) != 1 {
 		t.Fatalf("expected exactly one audit entry, got %d: %+v", len(entries), entries)
 	}
-	if got := entries[0].Parameters["approver"]; got != "mashkovd" {
-		t.Errorf("expected Parameters[approver]=mashkovd, got %q", got)
+	if got := entries[0].Parameters["approver"]; got != want {
+		t.Errorf("audit Parameters[approver] = %q, want %q", got, want)
 	}
 	if got := entries[0].Parameters["reason"]; got != "looks good" {
 		t.Errorf("expected Parameters[reason]=looks good, got %q", got)
