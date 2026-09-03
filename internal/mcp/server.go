@@ -2637,9 +2637,9 @@ Admin-only. Requires the server's Temporal client to be configured — returns 5
 			mcplib.Required(),
 			mcplib.Description("The DevLoopWorkflow's Temporal workflow ID, e.g. dev-loop-mctlhq-mctl-telegram-296."),
 		),
-		mcplib.WithString("approver",
-			mcplib.Description("Optional. Identity to record as the approver. Defaults to the authenticated caller if omitted."),
-		),
+		// No `approver` argument on purpose: the approver is the authenticated
+		// caller, established by the credential this call is made with, and
+		// the endpoint rejects a body that tries to set it (gitops#986).
 		mcplib.WithString("reason",
 			mcplib.Description("Optional. Free-text reason for the approval, recorded on the signal payload."),
 		),
@@ -2647,9 +2647,6 @@ Admin-only. Requires the server's Temporal client to be configured — returns 5
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		workflowID := stringArg(req, "workflow_id")
 		body := map[string]interface{}{}
-		if approver := stringArg(req, "approver"); approver != "" {
-			body["approver"] = approver
-		}
 		if reason := stringArg(req, "reason"); reason != "" {
 			body["reason"] = reason
 		}

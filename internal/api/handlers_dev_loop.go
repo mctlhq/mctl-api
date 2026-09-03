@@ -103,6 +103,10 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 }
 
 type approveDevLoopRequest struct {
+	// Approver is accepted only so an explicit value can be REJECTED rather
+	// than silently ignored. The approver is taken from the caller's verified
+	// identity; see ApproveDevLoopWorkflow. Dropping the field instead would
+	// let a caller that still sends one believe it was honoured.
 	Approver string `json:"approver"`
 	Reason   string `json:"reason"`
 }
@@ -110,9 +114,19 @@ type approveDevLoopRequest struct {
 // ApproveDevLoopWorkflow handles POST /api/v1/agents/dev-loop/{workflow_id}/approve
 // — the durable "human flips it to accepted" step, expressed as a Temporal
 // signal instead of a gitops .status.yaml edit. The optional JSON body
-// {approver?, reason?} rides on the signal; approver defaults to the
-// authenticated caller so the gitops approval block records who flipped it
-// (same provenance rule as the mctl-agents-approve operation).
+// {reason?} rides on the signal.
+//
+// This is the one place in the pipeline where a human actually performs the
+// act of approving: an authenticated HTTP call. So the approver is taken from
+// the caller's verified identity and nowhere else. It used to merely DEFAULT
+// to that identity, which made `approved_by` in the gitops proposal a
+// self-asserted string — any authenticated admin could record the approval
+// under a colleague's name, and nothing downstream could tell the difference
+// (gitops#986).
+//
+// A request that still carries an `approver` is rejected rather than having
+// the field quietly ignored: a caller that believes it is setting the
+// approver must be told it is not.
 func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.requireTemporalAdmin(w, r)
 	if !ok {
@@ -130,15 +144,24 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	if body.Approver == "" {
-		body.Approver = user.ID
+	if body.Approver != "" && body.Approver != user.ID {
+		writeError(w, http.StatusBadRequest,
+			"approver is not an input: it is taken from the authenticated caller. Remove the field from the request body.")
+		return
 	}
-	payload := map[string]string{"approver": body.Approver}
+	// Deliberately not stamping an "approver_verified" flag onto the signal
+	// yet: nothing downstream reads one, and a field no consumer checks is
+	// documentation pretending to be enforcement. The remaining half of
+	// gitops#986 — having the implement step enforce
+	// control.requires_human_approval — is where that carrier belongs, added
+	// together with the code that reads it.
+	approver := user.ID
+	payload := map[string]string{"approver": approver}
 	if body.Reason != "" {
 		payload["reason"] = body.Reason
 	}
 
-	auditParams := map[string]string{"approver": body.Approver}
+	auditParams := map[string]string{"approver": approver}
 	if body.Reason != "" {
 		auditParams["reason"] = body.Reason
 	}

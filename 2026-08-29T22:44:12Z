@@ -1,0 +1,430 @@
+[2026-08-29T22:44:12Z] watcher start repo=mctlhq/mctl-agents 230 pr=/tmp/review-watch-mctl-agents 230--r2.result pid=gh: Nogh: Not Found (HTTPgh: Nogh: Not Found (HTTP 404)
+[2026-08-29T22:44:14Z] baseline trigger_ts={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+} trigger_id={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "40[2026-08-29T22:44:19Z] tick 1: reviews={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 issue_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 agy_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 reaction=
+/tmp/review-watch.sh: line 39: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+[2026-08-29T22:47:22Z] tick 2: reviews={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 issue_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 agy_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 reaction=
+/tmp/review-watch.sh: line 39: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+[2026-08-29T22:50:28Z] tick 3: reviews={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 issue_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 agy_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 reaction=
+/tmp/review-watch.sh: line 39: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+[2026-08-29T22:53:30Z] tick 4: reviews={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 issue_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 agy_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 reaction=
+/tmp/review-watch.sh: line 39: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+[2026-08-29T22:56:32Z] tick 5: reviews={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 issue_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 agy_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 reaction=
+/tmp/review-watch.sh: line 39: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+[2026-08-29T22:59:35Z] tick 6: reviews={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 issue_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 agy_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 reaction=
+/tmp/review-watch.sh: line 39: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+[2026-08-29T23:02:37Z] tick 7: reviews={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 issue_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 agy_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 reaction=
+/tmp/review-watch.sh: line 39: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+[2026-08-29T23:05:39Z] tick 8: reviews={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 issue_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 agy_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 reaction=
+/tmp/review-watch.sh: line 39: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+[2026-08-29T23:08:40Z] tick 9: reviews={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 issue_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 agy_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 reaction=
+/tmp/review-watch.sh: line 39: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+[2026-08-29T23:11:42Z] tick 10: reviews={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 issue_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 agy_comments={
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0 reaction=
+/tmp/review-watch.sh: line 39: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+/tmp/review-watch.sh: line 45: [: {
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}0: integer expression expected
+[2026-08-29T23:11:43Z] timeout
+meout
