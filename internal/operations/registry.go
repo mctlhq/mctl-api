@@ -14,7 +14,10 @@
 
 package operations
 
-import "regexp"
+import (
+	"regexp"
+	"sort"
+)
 
 // Registry holds all available platform operations mapped to Argo WorkflowTemplates.
 type Registry struct {
@@ -119,6 +122,43 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 		}
 	}
 	return errors
+}
+
+// StripUndeclared removes every key that the operation does not declare as a
+// parameter, returning the filtered input and the names it dropped (sorted, so
+// the log line is stable).
+//
+// ValidateInput only iterates op.Parameters, so an *undeclared* key was never
+// validated — and Executor.Submit forwards the whole map to Argo as workflow
+// parameters. Any workflow parameter that the template declares but the
+// registry does not therefore became settable by any caller of the generic
+// /operations/{name}/execute path. That is how config_patch — a raw yq
+// expression evaluated against values.yaml by tpl-git-commit, and intended
+// only to be built server-side by the OpenClaw handler — was reachable from an
+// arbitrary request body (gitops#997).
+//
+// Filtering here rather than at each call site keeps the property true for
+// every operation, including ones added later: the generic path can only ever
+// submit parameters the registry describes. Handlers that build their params
+// server-side and call Executor.Submit directly (handlers_openclaw.go) are
+// deliberately unaffected — they are the legitimate producers of the
+// undeclared-but-real workflow parameters.
+func (r *Registry) StripUndeclared(op Operation, input map[string]string) (map[string]string, []string) {
+	declared := make(map[string]struct{}, len(op.Parameters))
+	for _, p := range op.Parameters {
+		declared[p.Name] = struct{}{}
+	}
+	result := make(map[string]string, len(input))
+	var dropped []string
+	for k, v := range input {
+		if _, ok := declared[k]; ok {
+			result[k] = v
+			continue
+		}
+		dropped = append(dropped, k)
+	}
+	sort.Strings(dropped)
+	return result, dropped
 }
 
 // ApplyDefaults fills in default values for missing parameters.
