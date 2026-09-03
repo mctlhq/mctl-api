@@ -149,6 +149,8 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerIncidentResponder())
 	srv.AddTool(s.toolTriggerImplementer())
 	srv.AddTool(s.toolTriggerShepherd())
+	srv.AddTool(s.toolTriggerReconcile())
+	srv.AddTool(s.toolTriggerApprove())
 	srv.AddTool(s.toolTriggerIssue())
 	srv.AddTool(s.toolApproveDevLoop())
 	srv.AddTool(s.toolListRecentAgentRuns())
@@ -2480,6 +2482,90 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_re
 		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-shepherd/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger shepherd: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolTriggerReconcile() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_trigger_reconcile",
+		mcplib.WithTitleAnnotation("Run mctl-agents reconcile sweep"),
+		// Not purely read-only: for a proposal whose .status.yaml lost its
+		// pr field, reconcile may OPEN the canonical PR for an
+		// already-pushed branch (allow_pr_create=not dry_run). It never
+		// runs a model or merges, but it can create a PR, matching why
+		// toolTriggerShepherd and toolTriggerImplementer both set this hint.
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Reconcile pass: read canonical GitHub PR state for every non-terminal proposal and project it onto platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml (merged PR -> merged, closed-unmerged -> rejected, conflicted open PR -> needs-triage).
+
+Discovers canonical feat/agents-* PRs even when .status.yaml lost its pr field, and may open that one PR for a branch a prior attempt pushed before dying. Never runs a model, applies code fixes, or merges.
+
+Cost: none (no model).
+Duration: ~3-5 minutes for a full sweep.
+Result: updated .status.yaml entries in mctl-gitops main, and possibly one newly opened PR per proposal missing its pr field.
+
+Optional service filter narrows the sweep; dry_run=true prints every decision and writes nothing.
+
+Admin-only.`),
+		mcplib.WithString("service",
+			mcplib.Description("Optional. Reconcile only this service. Leave empty to sweep every service."),
+			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy"),
+		),
+		mcplib.WithString("dry_run",
+			mcplib.Description("Set to 'true' to print every would-be flip without writing .status.yaml or opening any PR. Default 'false'."),
+			mcplib.Enum("true", "false"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-reconcile/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger reconcile: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolTriggerApprove() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_trigger_approve",
+		mcplib.WithTitleAnnotation("Approve mctl-agents proposal"),
+		// Destructive: authorizes the Tier 2 implementer to spend a model
+		// attempt and open a PR for the approved proposal, same class as
+		// toolTriggerImplementer and toolTriggerShepherd.
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Approve one proposal: flip platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml from proposed to accepted via a gitops commit, recording the approver identity.
+
+This is the automated form of the old manual .status.yaml edit; the Tier 2 implementer only picks up accepted proposals. Idempotent on already-accepted proposals; any other status fails.
+
+This is distinct from mctl_approve_dev_loop, which signals a running Temporal DevLoopWorkflow (POST /api/v1/agents/dev-loop/{workflow_id}/approve) instead of touching .status.yaml directly. If the proposal was started via use_temporal on mctl_trigger_issue (i.e. it has a live DevLoopWorkflow), use mctl_approve_dev_loop instead — calling this operation directly would race the DevLoop's own eventual approve call, though it is safely idempotent if it lands on an already-accepted proposal.
+
+The approver parameter is optional: if omitted, the server defaults it to the authenticated caller's identity.
+
+Cost: none (no model).
+Duration: <1 minute.
+Result: .status.yaml for the one named proposal flips to accepted in mctl-gitops main.
+
+Admin-only.`),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Service owning the proposal."),
+			mcplib.Enum("mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy"),
+		),
+		mcplib.WithString("slug",
+			mcplib.Required(),
+			mcplib.Description("Proposal slug (directory name under proposals/), e.g. issue-42-fix-foo."),
+		),
+		mcplib.WithString("approver",
+			mcplib.Description("Optional. Identity of whoever approved (recorded in .status.yaml and the commit message). Defaults to the authenticated caller's identity if omitted."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		params := extractStringParams(req.GetArguments())
+		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-approve/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger approve: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}
