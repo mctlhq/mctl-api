@@ -64,6 +64,28 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Drop anything the operation does not declare, before RBAC reads the
+	// input and before it reaches Argo — but AFTER the authentication check,
+	// so an unauthenticated caller cannot spend the server's CPU sorting keys
+	// or fill the log with parameter names of its own choosing (agy P2).
+	//
+	// An undeclared key skipped validation
+	// entirely (ValidateInput only walks op.Parameters) and was still
+	// forwarded verbatim as a workflow parameter, which let a caller set
+	// config_patch — a raw yq expression run against values.yaml by
+	// tpl-git-commit — from the request body (gitops#997).
+	//
+	// Dropped rather than rejected: a 400 here would fail closed on any live
+	// caller that happens to send an extra field. The MCP tool surface was
+	// audited against the registry when this landed and sends no undeclared
+	// parameter through this path, so the log line below is expected to stay
+	// silent; if it does, this can be tightened to a rejection.
+	input, dropped := h.opts.Registry.StripUndeclared(op, input)
+	if len(dropped) > 0 {
+		slog.Warn("ignoring undeclared operation parameters",
+			"operation", opName, "parameters", strings.Join(dropped, ", "))
+	}
+
 	// AdminOnly platform-scoped ops (e.g. mctl-agents triggers) skip the
 	// tenant-access check — they have no team_name parameter and are
 	// gated only by admin group membership. The Executor labels them with
