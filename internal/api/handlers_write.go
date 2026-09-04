@@ -58,8 +58,18 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	// Drop anything the operation does not declare, before RBAC reads the
-	// input and before it reaches Argo. An undeclared key skipped validation
+	// input and before it reaches Argo — but AFTER the authentication check,
+	// so an unauthenticated caller cannot spend the server's CPU sorting keys
+	// or fill the log with parameter names of its own choosing (agy P2).
+	//
+	// An undeclared key skipped validation
 	// entirely (ValidateInput only walks op.Parameters) and was still
 	// forwarded verbatim as a workflow parameter, which let a caller set
 	// config_patch — a raw yq expression run against values.yaml by
@@ -74,12 +84,6 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	if len(dropped) > 0 {
 		slog.Warn("ignoring undeclared operation parameters",
 			"operation", opName, "parameters", strings.Join(dropped, ", "))
-	}
-
-	user := auth.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
 	}
 
 	// AdminOnly platform-scoped ops (e.g. mctl-agents triggers) skip the

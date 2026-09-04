@@ -1,7 +1,10 @@
 package api_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -65,5 +68,27 @@ func TestExecuteOperation_FilterRunsBeforeDefaults(t *testing.T) {
 	}
 	if params["port"] != "8080" {
 		t.Errorf("declared default was not applied: port = %q, want %q", params["port"], "8080")
+	}
+}
+
+// The filter runs after authentication, so an unauthenticated caller cannot
+// spend CPU sorting keys or choose what gets written to the log (agy P2).
+func TestExecuteOperation_UndeclaredParamsAreNotProcessedBeforeAuth(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	router, exec := newTestRouter(t)
+
+	body, _ := json.Marshal(map[string]string{
+		"action": "onboard", "team_name": "tests", "config_patch": `.image.tag = "pwned"`,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/operations/deploy-service/execute", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req) // no user in context
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if len(exec.submittedParams) != 0 {
+		t.Errorf("an unauthenticated request reached the executor: %v", exec.submittedParams)
 	}
 }
