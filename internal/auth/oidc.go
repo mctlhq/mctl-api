@@ -39,6 +39,22 @@ const (
 type User struct {
 	ID     string   `json:"id"`
 	Groups []string `json:"groups"` // tenant names this user belongs to
+
+	// service records that this principal was authenticated by the service
+	// token, and is deliberately UNEXPORTED: it is proof of how the caller
+	// authenticated, not a claim anyone can make. Deriving that from
+	// ID == ServiceUserID instead would hand the service principal's
+	// privileges to a human whose GitHub login or Dex username happened to be
+	// "mctl-agent" (claude P2 on gitops#986). Only NewServiceUser sets it, and
+	// User is never unmarshalled from JSON, so it cannot be forged.
+	service bool
+}
+
+// NewServiceUser builds the platform-internal service principal. Exported so
+// tests can construct the same principal the middleware does, rather than
+// approximating it with a matching ID.
+func NewServiceUser() *User {
+	return &User{ID: ServiceUserID, Groups: []string{"admins"}, service: true}
 }
 
 // IsAdmin checks if the user is a platform admin.
@@ -165,16 +181,24 @@ func jwtIssuer(token string) string {
 	return claims.Issuer
 }
 
+// ServiceUserID is the identity of the platform-internal service principal
+// minted by MCTL_AGENT_SERVICE_TOKEN. Named rather than repeated as a literal
+// because handlers distinguish it from a human caller: it is the one
+// principal allowed to relay an approver it did not itself authenticate
+// (gitops#986).
+const ServiceUserID = "mctl-agent"
+
+// IsService reports whether this principal authenticated with the service
+// token, rather than being a person who merely shares its name.
+func (u *User) IsService() bool { return u.service }
+
 // staticServiceUser returns a platform-internal service principal when the
 // bearer token matches a configured service token. This bypasses GitHub/Dex
 // validation for trusted in-cluster automation such as mctl-agent.
 func staticServiceUser(token string) *User {
 	serviceToken := strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN"))
 	if serviceToken != "" && token == serviceToken {
-		return &User{
-			ID:     "mctl-agent",
-			Groups: []string{"admins"},
-		}
+		return NewServiceUser()
 	}
 	return nil
 }
