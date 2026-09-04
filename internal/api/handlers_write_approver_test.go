@@ -1,7 +1,9 @@
 package api_test
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -73,7 +75,7 @@ func TestApprove_NamingYourselfIsAccepted(t *testing.T) {
 // and it is allowed for this principal alone.
 func TestApprove_ServicePrincipalMayRelayAHumanApprover(t *testing.T) {
 	router, exec := newTestRouter(t)
-	worker := &auth.User{ID: auth.ServiceUserID, Groups: []string{"admins"}}
+	worker := auth.NewServiceUser()
 
 	code, params := approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-4", "approver": "mashkovd",
@@ -91,7 +93,7 @@ func TestApprove_ServicePrincipalMayRelayAHumanApprover(t *testing.T) {
 // identity, and the implementer refuses an approval naming nobody.
 func TestApprove_NoApproverIsDefaultedToUnknown(t *testing.T) {
 	router, exec := newTestRouter(t)
-	worker := &auth.User{ID: auth.ServiceUserID, Groups: []string{"admins"}}
+	worker := auth.NewServiceUser()
 
 	_, params := approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-5",
@@ -104,4 +106,54 @@ func TestApprove_NoApproverIsDefaultedToUnknown(t *testing.T) {
 	if params["approver"] != auth.ServiceUserID {
 		t.Errorf("approver = %q, want %q", params["approver"], auth.ServiceUserID)
 	}
+}
+
+// A human whose GitHub login or Dex username happens to be "mctl-agent" must
+// not inherit the service principal's relay privilege. IsService() is proof of
+// how the caller authenticated, not a claim about their name (claude P2).
+func TestApprove_AHumanNamedLikeTheServiceMayNotRelay(t *testing.T) {
+	router, exec := newTestRouter(t)
+	impostor := &auth.User{ID: auth.ServiceUserID, Groups: []string{"admins"}}
+
+	code, params := approveParams(t, router, exec, map[string]string{
+		"service": "mctl-web", "slug": "issue-6", "approver": "mashkovd",
+	}, impostor)
+
+	if *code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 — only a token-authenticated service principal may relay", *code)
+	}
+	if params != nil {
+		t.Errorf("a workflow was submitted for an impostor: %v", params)
+	}
+}
+
+// The denial must leave a record: it returns before Submit, so the audit entry
+// written on the success path never happens here.
+func TestApprove_ASpoofAttemptIsAudited(t *testing.T) {
+	router, exec := newTestRouter(t)
+	_, _ = approveParams(t, router, exec, map[string]string{
+		"service": "mctl-web", "slug": "issue-7", "approver": "someone-else",
+	}, adminUser)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit", nil)
+	req = req.WithContext(auth.WithUser(req.Context(), adminUser))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	var payload struct {
+		Entries []struct {
+			Operation string `json:"operation"`
+			Status    string `json:"status"`
+			UserID    string `json:"userId"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decoding audit list: %v (body %s)", err, rec.Body.String())
+	}
+	for _, e := range payload.Entries {
+		if e.Operation == "mctl-agents-approve" && e.Status == "denied" && e.UserID == adminUser.ID {
+			return
+		}
+	}
+	t.Errorf("no denied audit entry for the spoof attempt; body: %s", rec.Body.String())
 }

@@ -791,7 +791,7 @@ func TestSmoke_AgentsApproveApproverIdentity(t *testing.T) {
 		// approval to a colleague (gitops#986); the relay is now the service
 		// principal's alone, so the request is made as the worker actually
 		// makes it.
-		worker := &auth.User{ID: auth.ServiceUserID, Groups: []string{"admins"}}
+		worker := auth.NewServiceUser()
 		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
 			"service":  "mctl-web",
 			"slug":     "issue-2-fix-bar",

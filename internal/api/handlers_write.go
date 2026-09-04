@@ -153,6 +153,18 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			if input["approver"] != "" && input["approver"] != user.ID {
+				// Audited like the other denials in this handler. An attempt
+				// to attribute an approval to a colleague is exactly the event
+				// worth having a record of, and this path returns before
+				// Submit, so without this it would leave none (claude P2).
+				h.logAudit(r, audit.Entry{
+					UserID:    user.ID,
+					Operation: opName,
+					Status:    "denied",
+					RiskLevel: string(op.RiskLevel),
+					Message: fmt.Sprintf("user %q tried to record %q as the approver",
+						user.ID, input["approver"]),
+				})
 				writeError(w, http.StatusBadRequest,
 					"approver is not an input: it is taken from the authenticated caller. Remove the field from the request body.")
 				return
