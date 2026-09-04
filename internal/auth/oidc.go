@@ -165,6 +165,17 @@ func jwtIssuer(token string) string {
 	return claims.Issuer
 }
 
+// ServiceUserID is the identity of the platform-internal service principal
+// minted by MCTL_AGENT_SERVICE_TOKEN. Named rather than repeated as a literal
+// because handlers distinguish it from a human caller: it is the one
+// principal allowed to relay an approver it did not itself authenticate
+// (gitops#986).
+const ServiceUserID = "mctl-agent"
+
+// IsService reports whether this is the in-cluster automation principal
+// rather than a person.
+func (u *User) IsService() bool { return u.ID == ServiceUserID }
+
 // staticServiceUser returns a platform-internal service principal when the
 // bearer token matches a configured service token. This bypasses GitHub/Dex
 // validation for trusted in-cluster automation such as mctl-agent.
@@ -172,7 +183,7 @@ func staticServiceUser(token string) *User {
 	serviceToken := strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN"))
 	if serviceToken != "" && token == serviceToken {
 		return &User{
-			ID:     "mctl-agent",
+			ID:     ServiceUserID,
 			Groups: []string{"admins"},
 		}
 	}

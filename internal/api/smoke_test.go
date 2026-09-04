@@ -783,20 +783,34 @@ func TestSmoke_AgentsApproveApproverIdentity(t *testing.T) {
 		}
 	})
 
-	t.Run("explicit approver wins over the caller default", func(t *testing.T) {
+	t.Run("the service principal may relay an explicit approver", func(t *testing.T) {
 		// The Temporal DevLoop worker submits with its service identity and
 		// carries the human approver from the signal payload — an explicit
-		// value must survive.
+		// value must survive. This subtest used to make that request as a
+		// plain admin, which is what let ANY authenticated admin attribute an
+		// approval to a colleague (gitops#986); the relay is now the service
+		// principal's alone, so the request is made as the worker actually
+		// makes it.
+		worker := &auth.User{ID: auth.ServiceUserID, Groups: []string{"admins"}}
 		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
 			"service":  "mctl-web",
 			"slug":     "issue-2-fix-bar",
 			"approver": "human-operator",
-		}, adminUser)
+		}, worker)
 		assertStatus(t, w, http.StatusAccepted)
 		params := executor.submittedParams[len(executor.submittedParams)-1]
 		if params["approver"] != "human-operator" {
 			t.Errorf("approver = %q, want explicit %q", params["approver"], "human-operator")
 		}
+	})
+
+	t.Run("a human naming someone else is refused", func(t *testing.T) {
+		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
+			"service":  "mctl-web",
+			"slug":     "issue-3-fix-baz",
+			"approver": "human-operator",
+		}, adminUser)
+		assertStatus(t, w, http.StatusBadRequest)
 	})
 }
 

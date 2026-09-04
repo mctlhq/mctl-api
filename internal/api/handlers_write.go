@@ -129,14 +129,36 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// mctl-agents-approve records approval provenance in gitops: default the
-	// approver to the authenticated caller instead of the registry's
-	// "unknown" (codex P2 on PR #207). An explicit approver still wins —
-	// the Temporal DevLoop path submits with the worker's service identity
-	// and carries the human approver from its signal payload — and the
-	// audit log below always records user.ID regardless.
-	if opName == "mctl-agents-approve" && input["approver"] == "" {
-		input["approver"] = user.ID
+	// mctl-agents-approve records approval provenance in gitops — it is the
+	// thing that writes approved_by into .status.yaml and into the commit
+	// message. The approver is therefore a fact about who called, not a field
+	// the caller fills in (gitops#986).
+	//
+	// Previously the caller's identity was only a DEFAULT and "an explicit
+	// approver still wins", so any authenticated admin could POST
+	// {"approver":"someone-else"} and attribute an approval to a colleague.
+	//
+	// The one caller that legitimately names someone else is the Temporal
+	// worker: it submits under the mctl-agent service principal while
+	// relaying the human approver from its signal payload, which the dev-loop
+	// approve endpoint took from ITS authenticated caller. So the relay is
+	// allowed for that principal alone, and asserted by nobody else.
+	//
+	// The audit log below records user.ID either way, so the relayed value
+	// never displaces the record of who actually made the request.
+	if opName == "mctl-agents-approve" {
+		if user.IsService() {
+			if input["approver"] == "" {
+				input["approver"] = user.ID
+			}
+		} else {
+			if input["approver"] != "" && input["approver"] != user.ID {
+				writeError(w, http.StatusBadRequest,
+					"approver is not an input: it is taken from the authenticated caller. Remove the field from the request body.")
+				return
+			}
+			input["approver"] = user.ID
+		}
 	}
 
 	// Apply defaults then validate.

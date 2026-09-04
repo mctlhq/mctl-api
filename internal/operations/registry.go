@@ -616,7 +616,11 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "service", Type: "string", Required: true, Description: "Service owning the proposal.", Enum: []string{"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy"}},
 			{Name: "slug", Type: "string", Required: true, Description: "Proposal slug (directory name under proposals/), e.g. issue-42-fix-foo.", Pattern: "^[a-z0-9][a-z0-9-]{0,120}$"},
-			{Name: "approver", Type: "string", Required: false, Default: "unknown", Description: "Identity of whoever approved (recorded in .status.yaml and the commit message)."},
+			// No Default: "unknown" is not an identity, and a field that manufactures
+			// one is worse than an absent field — the implementer refuses an approval
+			// naming nobody (gitops#986). Human callers never reach the default anyway:
+			// the handler overwrites this with the authenticated caller.
+			{Name: "approver", Type: "string", Required: false, Description: "Identity of whoever approved (recorded in .status.yaml and the commit message). Taken from the authenticated caller; only the mctl-agent service principal may relay someone else's."},
 		},
 	},
 	{
