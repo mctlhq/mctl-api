@@ -1,5 +1,27 @@
 # Changelog
 
+## [4.38.0](https://github.com/mctlhq/mctl-api/compare/4.37.0...4.38.0) (2026-09-04)
+
+
+### Features
+
+* **agents:** issue-235-feat-mcp-mctl-agents-reconcile-and-appro ([48b97f9](https://github.com/mctlhq/mctl-api/commit/48b97f9b89298df3a68764c3871ee968eddfb00a))
+* **agents:** issue-238-two-verified-gaps-from-agy-s-review-of-2 ([9ea3ee2](https://github.com/mctlhq/mctl-api/commit/9ea3ee2a94c4364909b8b57dd0b5885d6290ef26))
+* **mcp:** add mctl_trigger_reconcile and mctl_trigger_approve tools ([04fec23](https://github.com/mctlhq/mctl-api/commit/04fec232f7923fde259809eb90ebbe667249905e))
+
+
+### Bug Fixes
+
+* **agents:** the dev-loop approver is a fact about the caller, not a body field ([33685a0](https://github.com/mctlhq/mctl-api/commit/33685a034c6864a478e794f87c344d018249891d))
+* **api:** filter undeclared parameters after authentication, not before ([5c5156b](https://github.com/mctlhq/mctl-api/commit/5c5156b369a9bbf9d48da66b2be16a2908f09ee2))
+* **api:** make IsService proof of authentication, and audit the denial ([0f974ae](https://github.com/mctlhq/mctl-api/commit/0f974aeb3faf53eee3db75e3782676799eddfbd6))
+* **api:** stop forwarding undeclared parameters to Argo ([83d1c70](https://github.com/mctlhq/mctl-api/commit/83d1c7008707a5dd3b93d9ac31dae5123bb21981))
+* **api:** stop forwarding undeclared parameters to Argo ([e3d57c7](https://github.com/mctlhq/mctl-api/commit/e3d57c70ef5ac3805eef3cddf11c450db78b160d))
+* **api:** the approve operation's approver is the caller, not a body field ([912b691](https://github.com/mctlhq/mctl-api/commit/912b691ab3675acea6b78f46840ca1b57278c2f4))
+* **api:** the approve operation's approver is the caller, not a body field ([069b53a](https://github.com/mctlhq/mctl-api/commit/069b53a499541a846ac7334c99fdbddfe41ff6c7))
+* **release:** open release PRs with an App token, not GITHUB_TOKEN ([2eff0ff](https://github.com/mctlhq/mctl-api/commit/2eff0ffe1dcad22c1c3b8f6ec42f222228fc7acb))
+* **release:** open release PRs with an App token, not GITHUB_TOKEN ([00fdf8d](https://github.com/mctlhq/mctl-api/commit/00fdf8d391bee1b2bed6e3bc12734279446328e9))
+
 ## [4.37.0](https://github.com/mctlhq/mctl-api/compare/4.36.0...4.37.0) (2026-09-02)
 
 
