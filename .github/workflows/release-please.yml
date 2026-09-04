@@ -17,9 +17,33 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      # release-please has to open the release PR as somebody. The default
+      # GITHUB_TOKEN cannot: "Allow GitHub Actions to create and approve pull
+      # requests" is off at the org level, and on mctl-telegram every push to
+      # main after 0.59.0 failed with "GitHub Actions is not permitted to
+      # create or approve pull requests" until mctl-telegram#498 -- seven
+      # releases' worth of commits with no release PR and nothing deployed.
+      # This repo only kept working because a release PR was already open
+      # (updating one is allowed; creating one is not). Minting a token from
+      # the mctl-agents App (contents + pull-requests write on every mctlhq
+      # repo) sidesteps the setting without turning it back on, and a PR
+      # opened with an App token also raises pull_request events, so the
+      # release PR gets normal CI instead of the default token's silent one.
+      - name: Generate release token
+        id: release-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.AGENTS_APP_ID }}
+          private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
+          owner: mctlhq
+          repositories: mctl-api
+          permission-contents: write
+          permission-pull-requests: write
+
       - uses: googleapis/release-please-action@v5
         id: release
         with:
+          token: ${{ steps.release-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
