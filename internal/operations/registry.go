@@ -190,7 +190,7 @@ var builtinOperations = []Operation{
 	{
 		Name:             "deploy-service",
 		DisplayName:      "Release Service",
-		Description:      "Deploy a new service or update an existing one. Builds Docker image from source, stores secrets in Vault, commits Helm values to the GitOps repo, and triggers ArgoCD sync. Repo MUST contain a Dockerfile at the configured `dockerfile_path`. For first-time onboarding of a brand-new repo, see https://docs.mctl.ai/guides/scaffolding for Node/Python/Go/static templates and the canonical CI auto-deploy job.",
+		Description:      "Deploy a new service or update an existing one. Builds Docker image from source, stores secrets in Vault, commits Helm values to the GitOps repo, and triggers ArgoCD sync. Repo MUST contain a Dockerfile at the configured `dockerfile_path`. For first-time onboarding of a brand-new repo, see https://docs.mctl.ai/guides/scaffolding for Node/Python/Go/static templates and the canonical CI auto-deploy job. WARNING: Ensure health endpoints (/healthz, /readyz) bypass authentication middleware, otherwise Kubernetes liveness/readiness probes will fail with 401 Unauthorized and the pod will crashloop.",
 		WorkflowTemplate: "deploy-service",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
