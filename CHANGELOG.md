@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.39.0](https://github.com/mctlhq/mctl-api/compare/4.38.0...4.39.0) (2026-09-06)
+
+
+### Features
+
+* add auth bypass warning to deploy-service description ([de0678d](https://github.com/mctlhq/mctl-api/commit/de0678d05c999b6094d95d6702f9f4aad5d2c0c4))
+* **operations:** add auth bypass warning to deploy-service description ([fd09d42](https://github.com/mctlhq/mctl-api/commit/fd09d4211b21895a94ad6fce5054a84914c55aab))
+
 ## [4.38.0](https://github.com/mctlhq/mctl-api/compare/4.37.0...4.38.0) (2026-09-04)
 
 
