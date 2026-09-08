@@ -1436,6 +1436,13 @@ Steps:
 Before calling this, tell the user to create a CNAME record:
   {domain} CNAME → {team}-{service}.{platform_domain}
 
+This is for a tenant's OWN domain (api.mycompany.com). A hostname inside the
+platform domain — anything ending in .mctl.ai, and the bare root — is rejected
+by the workflow. Those are operator changes: add the host to ingress.hosts and
+to the matching ingress.tls[].hosts entry in
+platform-gitops/services/{team}/{service}/values.yaml and open a PR, the way
+tg.mctl.ai and ui.mctl.ai are declared.
+
 Returns the registered domain info. Use mctl_verify_domain to check DNS status.`),
 		mcplib.WithString("team",
 			mcplib.Required(),
