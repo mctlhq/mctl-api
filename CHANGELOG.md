@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.39.0](https://github.com/mctlhq/mctl-api/compare/4.38.0...4.39.0) (2026-09-08)
+
+
+### Features
+
+* add auth bypass warning to deploy-service description ([de0678d](https://github.com/mctlhq/mctl-api/commit/de0678d05c999b6094d95d6702f9f4aad5d2c0c4))
+* **mcp:** expose read-only dev-loop status as mctl_get_dev_loop ([50ebb9d](https://github.com/mctlhq/mctl-api/commit/50ebb9dbb9824d679ba7a1d00de461574545e3b1))
+* **mcp:** expose read-only dev-loop status as mctl_get_dev_loop ([6107411](https://github.com/mctlhq/mctl-api/commit/6107411e0e525eac7e2135f67ae0fb5b08732f7b)), closes [#244](https://github.com/mctlhq/mctl-api/issues/244)
+* **operations:** add auth bypass warning to deploy-service description ([fd09d42](https://github.com/mctlhq/mctl-api/commit/fd09d4211b21895a94ad6fce5054a84914c55aab))
+
+
+### Bug Fixes
+
+* **mcp:** address claude-review P3s on mctl_get_dev_loop ([b60ccab](https://github.com/mctlhq/mctl-api/commit/b60ccab42b36fad31c2201fc8c86fb5cc705e4f0))
+
 ## [4.38.0](https://github.com/mctlhq/mctl-api/compare/4.37.0...4.38.0) (2026-09-04)
 
 
