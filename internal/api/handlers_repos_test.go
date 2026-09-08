@@ -23,6 +23,24 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
+// captureBackstage stands in for the Backstage plugin and records what the
+// handler sent upstream. Lives here (not handlers_domains_test.go, its
+// original home) because the domains handlers moved to their own
+// Postgres-backed store and no longer proxy to Backstage; this repos-sync
+// test is the last caller left that still needs a Backstage stand-in.
+func captureBackstage(t *testing.T) (*httptest.Server, *[]*http.Request) {
+	t.Helper()
+	var seen []*http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Clone(r.Context()))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"domains":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &seen
+}
+
 // SyncRepos must always attribute the sync to the authenticated caller
 // (auth.UserFromContext), never to a "user" value supplied in the request
 // body -- a caller-supplied user field would let any authenticated caller
