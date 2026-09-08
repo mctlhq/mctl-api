@@ -601,9 +601,10 @@ func TestE2E_Domains(t *testing.T) {
 	c := newClient(t)
 
 	// GET /api/v1/domains?team=admins — route must exist (not 404 from chi router).
-	// Returns 200 (plugin installed), 404 (plugin not yet deployed in Backstage),
-	// 502 (Backstage unreachable), or 503 (BackstageInternalURL unconfigured).
-	// Any of these means the route is registered and the handler ran.
+	// mctl-api owns this registry directly now (internal/domains), so a
+	// healthy deployment returns 200; 503 means DOMAINS_DB_URL/AUDIT_DB_URL
+	// isn't configured in this environment. Either means the route is
+	// registered and the handler ran.
 	status, body := c.get(t, "/api/v1/domains?team=admins")
 	if status == 405 || status == 0 {
 		// 405 = method not allowed (routing issue), 0 = connection error

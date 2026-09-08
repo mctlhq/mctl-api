@@ -132,8 +132,11 @@ docker run -p 8080:8080 mctl-api
 | `TRUSTED_PROXY_CIDRS` | Comma-separated Traefik CIDRs/IPs trusted for `X-Forwarded-For` on audit events | — | No |
 | `ALLOW_INSECURE_DB` | Permit `sslmode=disable` (tests/local only) | — | No |
 | `BACKSTAGE_URL` | Backstage catalog URL | — | No |
-| `BACKSTAGE_TOKEN` | Backstage service token, scoped to the `custom-domains` plugin | — | No |
+| `BACKSTAGE_TOKEN` | Backstage service token, used only for tenant catalog sync (`notifyBackstage`) — no longer used by `/api/v1/domains*`, which is mctl-api's own registry | — | No |
 | `BACKSTAGE_GITHUB_APP_CONNECT_TOKEN` | Backstage service token, scoped to the `github-app-connect` plugin (repos list/sync/install-url) | — | No |
+| `DOMAINS_DB_URL` | PostgreSQL connection string for the custom domains registry (falls back to `AUDIT_DB_URL`). Without either, `/api/v1/domains*` returns 503. | — | No |
+| `PLATFORM_DOMAIN` | The platform's own domain. Hostnames equal to or ending in `.<PLATFORM_DOMAIN>` are rejected by `POST /api/v1/domains` — those stay GitOps-only via `ingress.hosts`. | `mctl.ai` | No |
+| `DNS_RESOLVER_ADDR` | `host:port` of the recursive resolver used to verify custom domain TXT/CNAME records | `1.1.1.1:53` | No |
 | `LOKI_URL` | Loki base URL for log queries | — | No |
 
 ## API / Endpoints

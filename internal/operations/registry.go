@@ -348,7 +348,7 @@ var builtinOperations = []Operation{
 	{
 		Name:             "add-custom-domain",
 		DisplayName:      "Add Custom Domain",
-		Description:      "Add a verified custom domain to a service. Validates DNS (CNAME must point to the auto-generated domain), updates ingress configuration, and provisions TLS certificate via HTTP-01 challenge. For a tenant's own domain only: a hostname inside the platform domain is rejected by the workflow and belongs in the service's ingress.hosts in GitOps.",
+		Description:      "Add a verified custom domain to a service. Validates ownership via a TXT challenge (_mctl-challenge.<domain>), which keeps working behind proxies like Cloudflare that rewrite CNAME/A answers but not TXT; an unproxied CNAME to the auto-generated domain is also accepted as a fast path. Updates ingress configuration and provisions TLS certificate via HTTP-01 challenge. For a tenant's own domain only: a hostname inside the platform domain is rejected by the workflow and belongs in the service's ingress.hosts in GitOps.",
 		WorkflowTemplate: "add-custom-domain",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,

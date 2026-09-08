@@ -1427,23 +1427,31 @@ func (s *Server) toolAddCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 The service must already be deployed (it gets an auto-generated domain: {team}-{service}.{platform_domain}).
 
 Steps:
-1. Registers domain in the platform database
+1. Registers the domain in mctl-api's own domain registry, returning a TXT
+   ownership challenge (challenge_record, challenge_value) and the CNAME
+   target for the fast path.
 2. Triggers the add-custom-domain workflow which:
-   - Verifies DNS: domain must have a CNAME pointing to {team}-{service}.{platform_domain}
+   - Verifies ownership via a TXT record (works even behind Cloudflare
+     proxying, which never rewrites TXT the way it rewrites A/CNAME); an
+     unproxied CNAME straight to {team}-{service}.{platform_domain} is
+     accepted as a fast-path alternative
    - Updates service ingress configuration
    - Provisions TLS certificate via HTTP-01 challenge
 
-Before calling this, tell the user to create a CNAME record:
-  {domain} CNAME → {team}-{service}.{platform_domain}
+After calling this, tell the user to create the TXT record printed in the
+response:
+  {challenge_record} TXT "{challenge_value}"
+(or, if not behind a proxy, a CNAME: {domain} CNAME → {team}-{service}.{platform_domain})
 
 This is for a tenant's OWN domain (api.mycompany.com). A hostname inside the
 platform domain — anything ending in .mctl.ai, and the bare root — is rejected
-by the workflow. Those are operator changes: add the host to ingress.hosts and
-to the matching ingress.tls[].hosts entry in
+immediately with a 400. Those are operator changes: add the host to
+ingress.hosts and to the matching ingress.tls[].hosts entry in
 platform-gitops/services/{team}/{service}/values.yaml and open a PR, the way
 tg.mctl.ai and ui.mctl.ai are declared.
 
-Returns the registered domain info. Use mctl_verify_domain to check DNS status.`),
+Returns the registered domain info, including the TXT challenge to create.
+Use mctl_verify_domain to check DNS status.`),
 		mcplib.WithString("team",
 			mcplib.Required(),
 			mcplib.Description("Team name"),
@@ -1465,7 +1473,7 @@ Returns the registered domain info. Use mctl_verify_domain to check DNS status.`
 			"service": args["service"].(string),
 			"domain":  args["domain"].(string),
 		}
-		// Register domain in Backstage DB
+		// Register domain in mctl-api's own domain registry.
 		body, err := s.apiPost(ctx, "/api/v1/domains", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to register domain: %v", err)), nil
@@ -1534,7 +1542,7 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_verify_domain",
 		mcplib.WithTitleAnnotation("Verify Domain DNS"),
 		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDescription("Check if a custom domain's DNS is correctly configured. Verifies that the CNAME record points to the expected {team}-{service}.{platform_domain} target."),
+		mcplib.WithDescription("Check if a custom domain's DNS is correctly configured. Verifies the TXT ownership challenge (_mctl-challenge.<domain>) that mctl_add_custom_domain returned; also accepts an unproxied CNAME straight to {team}-{service}.{platform_domain} as a fast path. TXT is checked first because Cloudflare and similar proxies rewrite A/CNAME answers but never the TXT record."),
 		mcplib.WithString("team",
 			mcplib.Required(),
 			mcplib.Description("Team name"),
