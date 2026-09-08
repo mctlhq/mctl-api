@@ -2676,7 +2676,7 @@ func (s *Server) toolGetDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
 
 Wraps GET /api/v1/agents/dev-loop/{workflow_id} (mctl-api#244) — no side effects, unlike mctl_approve_dev_loop or mctl_trigger_issue with use_temporal=true. Use this BEFORE deciding how to approve a proposal: a hand-edited .status.yaml is invisible to a workflow already parked on the approve signal (wait_condition has no timeout, so the loop then waits forever), and re-signalling approve on an already-accepted proposal is not a safe probe either — the standalone mctl-agents-approve operation treats it as an idempotent no-op and can send an already-approved proposal straight into the implementer.
 
-Returns: workflow_id, status (Temporal's short execution status — "Running", "Completed", "Failed", "Canceled", "Terminated", "ContinuedAsNew", or "Unknown"), and shepherd_in_loop (whether this specific execution ticks its own PR shepherd; only meaningful while status is "Running").
+Returns: workflow_id, status (Temporal's short execution status — "Running", "Completed", "Failed", "Canceled", "Terminated", "ContinuedAsNew", "TimedOut", or "Unknown"), and shepherd_in_loop (whether this specific execution ticks its own PR shepherd; only meaningful while status is "Running").
 
 This does not distinguish which step a Running execution is on (investigating vs. parked at approval vs. implementing) — it answers "is a loop alive for this issue", not "what is it doing right now". A 404 means no DevLoopWorkflow was ever started for this workflow_id (or it aged out of retention) — the proposal, if one exists, predates use_temporal and its .status.yaml can be edited directly.
 
@@ -2689,8 +2689,8 @@ Admin-only. Requires the server's Temporal client to be configured — returns 5
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		workflowID := stringArg(req, "workflow_id")
-		issueURL := stringArg(req, "issue_url")
+		workflowID := strings.TrimSpace(stringArg(req, "workflow_id"))
+		issueURL := strings.TrimSpace(stringArg(req, "issue_url"))
 		switch {
 		case workflowID != "" && issueURL != "":
 			return mcplib.NewToolResultError("provide workflow_id or issue_url, not both"), nil

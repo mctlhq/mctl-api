@@ -524,6 +524,27 @@ func TestToolGetDevLoop_GetsDevLoopPath(t *testing.T) {
 	}
 }
 
+func TestToolGetDevLoop_TrimsWhitespaceFromArguments(t *testing.T) {
+	var gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	_, err := callToolGetDevLoop(t, backend.URL, map[string]any{
+		"issue_url": "  https://github.com/mctlhq/mctl-telegram/issues/296\n",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	wantPath := "/api/v1/agents/dev-loop/" + url.PathEscape("dev-loop-mctlhq-mctl-telegram-296")
+	if gotPath != wantPath {
+		t.Errorf("path: got %q, want %q", gotPath, wantPath)
+	}
+}
+
 func TestToolGetDevLoop_DerivesWorkflowIDFromIssueURL(t *testing.T) {
 	var gotPath string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
