@@ -157,6 +157,53 @@ func TestAddDomain_NonMemberForbidden(t *testing.T) {
 	}
 }
 
+func TestNormalizeHostname(t *testing.T) {
+	cases := map[string]string{
+		"api.mctl.ai.":         "api.mctl.ai",
+		"  API.MCTL.AI  ":      "api.mctl.ai",
+		"api.mctl.ai":          "api.mctl.ai",
+		"api.example.com....":  "api.example.com...",
+		"":                     "",
+		"\tapi.example.com.\n": "api.example.com",
+	}
+	for in, want := range cases {
+		if got := normalizeHostname(in); got != want {
+			t.Errorf("normalizeHostname(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestValidateHostname(t *testing.T) {
+	valid := []string{
+		"api.example.com",
+		"a.b",
+		"xn--exmple-cua.com",
+		strings.Repeat("a", 63) + ".com",
+	}
+	for _, domain := range valid {
+		if err := validateHostname(domain); err != nil {
+			t.Errorf("validateHostname(%q): expected no error, got %v", domain, err)
+		}
+	}
+
+	invalid := []string{
+		"foo bar.com",   // space
+		"*.example.com", // wildcard
+		"nodot",         // no dot
+		"a/../b.com",    // path traversal characters
+		"-leadinghyphen.com",
+		"trailinghyphen-.com",
+		"line\nbreak.com",                 // newline
+		strings.Repeat("a", 254) + ".com", // too long overall
+		strings.Repeat("a", 64) + ".com",  // label too long
+	}
+	for _, domain := range invalid {
+		if err := validateHostname(domain); err == nil {
+			t.Errorf("validateHostname(%q): expected an error, got none", domain)
+		}
+	}
+}
+
 func TestAddDomain_PlatformDomainRejected(t *testing.T) {
 	store := newTestDomainStore(t)
 	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
@@ -181,6 +228,41 @@ func TestAddDomain_PlatformDomainRoot_Rejected(t *testing.T) {
 
 	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"web","domain":"mctl.ai"}`)),
+		&auth.User{ID: "u1", Groups: []string{"labs"}})
+	rec := httptest.NewRecorder()
+	h.AddDomain(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAddDomain_PlatformDomainTrailingDotRejected pins the fix for a real
+// bypass: "api.mctl.ai." is the same DNS name as "api.mctl.ai" but, before
+// normalizeHostname stripped the trailing dot, matched neither
+// isPlatformDomain comparison — letting a tenant self-register a hostname
+// inside the platform domain, exactly what the guard exists to prevent.
+func TestAddDomain_PlatformDomainTrailingDotRejected(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"web","domain":"api.mctl.ai."}`)),
+		&auth.User{ID: "u1", Groups: []string{"labs"}})
+	rec := httptest.NewRecorder()
+	h.AddDomain(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAddDomain_InvalidHostnameRejected(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"web","domain":"foo bar"}`)),
 		&auth.User{ID: "u1", Groups: []string{"labs"}})
 	rec := httptest.NewRecorder()
 	h.AddDomain(rec, req)
@@ -382,6 +464,31 @@ func TestVerifyDomainByName_NegativeVerdictIsNotAnError(t *testing.T) {
 	}
 	if result.ExpectedRecord == "" || result.ExpectedValue == "" || result.Reason == "" {
 		t.Fatalf("expected reason/expected_record/expected_value to be populated, got %+v", result)
+	}
+}
+
+// TestVerifyDomainByName_TrimsTeamAndServiceWhitespace pins the fix for an
+// asymmetric-normalization 404: AddDomain has always trimmed team/service,
+// but VerifyDomainByName compared the looked-up row's (trimmed) team/service
+// against the request's raw values, so a payload with incidental whitespace
+// (e.g. copy-pasted from a form) 404'd instead of matching the row it had
+// just created.
+func TestVerifyDomainByName_TrimsTeamAndServiceWhitespace(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
+
+	h.AddDomain(httptest.NewRecorder(), withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"verify-whitespace.example.com"}`)),
+		&auth.User{ID: "u1", Groups: []string{"labs"}}))
+
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/verify",
+		strings.NewReader(`{"team":"labs ","service":" svc","domain":"verify-whitespace.example.com"}`)),
+		&auth.User{ID: "u1", Groups: []string{"labs"}})
+	rec := httptest.NewRecorder()
+	h.VerifyDomainByName(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (whitespace in team/service must not 404 a domain that exists); body=%q", rec.Code, rec.Body.String())
 	}
 }
 

@@ -190,6 +190,45 @@ func TestSetStatusAndMarkVerified(t *testing.T) {
 	}
 }
 
+// TestMarkVerifiedDoesNotDemoteActive pins the fix for a regression
+// mctl_verify_domain would otherwise reintroduce on every routine check: it
+// re-verifies every domain returned for a team/service, so an unconditional
+// MarkVerified would silently demote an already-active row back to
+// "verified" (and clear last_error) each time.
+func TestMarkVerifiedDoesNotDemoteActive(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	created, err := s.Create(ctx, newDomain("labs", "svc-a", "active.example.com"))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.SetStatus(ctx, created.ID, StatusActive, ""); err != nil {
+		t.Fatalf("set status active: %v", err)
+	}
+
+	if err := s.MarkVerified(ctx, created.ID); err != nil {
+		t.Fatalf("mark verified on an active row must not error: %v", err)
+	}
+
+	stillActive, err := s.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("get after re-verify: %v", err)
+	}
+	if stillActive.Status != StatusActive {
+		t.Fatalf("expected status to stay %q after re-verify, got %q", StatusActive, stillActive.Status)
+	}
+}
+
+func TestMarkVerifiedUnknownIDIsNotFound(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.MarkVerified(ctx, "does-not-exist"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for unknown id, got %v", err)
+	}
+}
+
 func TestDelete(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

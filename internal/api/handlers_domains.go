@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -83,6 +84,43 @@ func platformDomainRejection(team, service, domain, platformDomain string) strin
 			"platform-gitops/services/%s/%s/values.yaml instead",
 		domain, platformDomain, team, service,
 	)
+}
+
+// normalizeHostname lowercases, trims surrounding whitespace, and strips a
+// trailing dot (the root-label separator in a fully-qualified DNS name).
+// Without stripping it, "api.mctl.ai." is the same DNS name as
+// "api.mctl.ai" but matches neither isPlatformDomain comparison, and
+// custom_domains_domain's uniqueness index would treat the two spellings as
+// different rows a different team could separately claim.
+func normalizeHostname(domain string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+}
+
+// hostnameLabelPattern matches one DNS label: 1-63 lowercase alphanumerics
+// or hyphens, no leading or trailing hyphen.
+var hostnameLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// validateHostname rejects a domain value before it can reach the
+// add-custom-domain workflow and, from there, ingress.hosts /
+// ingress.tls[].hosts in a GitOps values.yaml. Backstage previously owned
+// this value and mctl-api merely forwarded it; now mctl-api is the system
+// of record, so the same syntax checks a DNS name must satisfy belong here.
+func validateHostname(domain string) error {
+	if len(domain) > 253 {
+		return fmt.Errorf("domain %q exceeds the maximum hostname length of 253 characters", domain)
+	}
+	if !strings.Contains(domain, ".") {
+		return fmt.Errorf("domain %q must contain at least one dot", domain)
+	}
+	if strings.Contains(domain, "*") {
+		return fmt.Errorf("domain %q must not contain a wildcard", domain)
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if !hostnameLabelPattern.MatchString(label) {
+			return fmt.Errorf("domain %q contains an invalid label %q: labels must be 1-63 lowercase alphanumerics or hyphens, with no leading or trailing hyphen", domain, label)
+		}
+	}
+	return nil
 }
 
 // newVerificationToken mints a 32-byte random hex token used in the TXT
@@ -154,13 +192,17 @@ func (h *Handlers) AddDomain(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Team = strings.TrimSpace(req.Team)
 	req.Service = strings.TrimSpace(req.Service)
-	req.Domain = strings.ToLower(strings.TrimSpace(req.Domain))
+	req.Domain = normalizeHostname(req.Domain)
 	if req.Team == "" || req.Service == "" || req.Domain == "" {
 		writeError(w, http.StatusBadRequest, "missing required fields: team, service, domain")
 		return
 	}
 	if !user.HasTenantAccess(req.Team) {
 		writeError(w, http.StatusForbidden, "access denied to team")
+		return
+	}
+	if err := validateHostname(req.Domain); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if h.isPlatformDomain(req.Domain) {
@@ -293,6 +335,9 @@ func (h *Handlers) VerifyDomainByName(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	req.Team = strings.TrimSpace(req.Team)
+	req.Service = strings.TrimSpace(req.Service)
+	req.Domain = normalizeHostname(req.Domain)
 	if req.Team == "" || req.Service == "" || req.Domain == "" {
 		writeError(w, http.StatusBadRequest, "missing required fields: team, service, domain")
 		return
@@ -302,7 +347,7 @@ func (h *Handlers) VerifyDomainByName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d, err := h.opts.DomainStore.GetByDomain(r.Context(), strings.ToLower(strings.TrimSpace(req.Domain)))
+	d, err := h.opts.DomainStore.GetByDomain(r.Context(), req.Domain)
 	if err != nil {
 		if errors.Is(err, domains.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "domain not found")

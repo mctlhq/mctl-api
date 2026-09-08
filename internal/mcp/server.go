@@ -1422,26 +1422,22 @@ func (s *Server) toolListDomains() (mcplib.Tool, server.ToolHandlerFunc) {
 func (s *Server) toolAddCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_add_custom_domain",
 		mcplib.WithTitleAnnotation("Add Custom Domain"),
-		mcplib.WithDescription(`Add a custom domain to a service.
+		mcplib.WithDescription(`Register a custom domain for a service. This step ONLY registers — it does NOT touch ingress or DNS yet, and does NOT trigger the add-custom-domain workflow.
 
 The service must already be deployed (it gets an auto-generated domain: {team}-{service}.{platform_domain}).
 
-Steps:
-1. Registers the domain in mctl-api's own domain registry, returning a TXT
-   ownership challenge (challenge_record, challenge_value) and the CNAME
-   target for the fast path.
-2. Triggers the add-custom-domain workflow which:
-   - Verifies ownership via a TXT record (works even behind Cloudflare
-     proxying, which never rewrites TXT the way it rewrites A/CNAME); an
-     unproxied CNAME straight to {team}-{service}.{platform_domain} is
-     accepted as a fast-path alternative
-   - Updates service ingress configuration
-   - Provisions TLS certificate via HTTP-01 challenge
-
-After calling this, tell the user to create the TXT record printed in the
+Returns a TXT ownership challenge (challenge_record, challenge_value) and the
+CNAME target for the fast path. The challenge is minted by THIS call, so it
+cannot exist beforehand — tell the user to create it only after seeing this
 response:
   {challenge_record} TXT "{challenge_value}"
 (or, if not behind a proxy, a CNAME: {domain} CNAME → {team}-{service}.{platform_domain})
+
+Once the record exists, call mctl_verify_domain: a successful verification is
+what triggers the add-custom-domain workflow (ingress update + TLS
+certificate via HTTP-01). Triggering that workflow right after this call —
+before the record can possibly exist — would fail verification on every
+first registration.
 
 This is for a tenant's OWN domain (api.mycompany.com). A hostname inside the
 platform domain — anything ending in .mctl.ai, and the bare root — is rejected
@@ -1451,7 +1447,7 @@ platform-gitops/services/{team}/{service}/values.yaml and open a PR, the way
 tg.mctl.ai and ui.mctl.ai are declared.
 
 Returns the registered domain info, including the TXT challenge to create.
-Use mctl_verify_domain to check DNS status.`),
+Use mctl_verify_domain next.`),
 		mcplib.WithString("team",
 			mcplib.Required(),
 			mcplib.Description("Team name"),
@@ -1473,23 +1469,15 @@ Use mctl_verify_domain to check DNS status.`),
 			"service": args["service"].(string),
 			"domain":  args["domain"].(string),
 		}
-		// Register domain in mctl-api's own domain registry.
+		// Register domain in mctl-api's own domain registry. The
+		// add-custom-domain workflow is deliberately NOT triggered here —
+		// see toolVerifyDomain, which triggers it once the TXT/CNAME check
+		// this call's challenge depends on actually passes.
 		body, err := s.apiPost(ctx, "/api/v1/domains", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to register domain: %v", err)), nil
 		}
-
-		// Trigger the add-custom-domain workflow
-		wfParams := map[string]string{
-			"team_name":    params["team"],
-			"service_name": params["service"],
-			"domain":       params["domain"],
-		}
-		wfBody, err := s.apiPost(ctx, "/api/v1/operations/add-custom-domain/execute", wfParams)
-		if err != nil {
-			return mcplib.NewToolResultText(fmt.Sprintf("Domain registered but workflow failed: %v\nRegistration: %s", err, string(body))), nil
-		}
-		return mcplib.NewToolResultText(fmt.Sprintf("Domain registered:\n%s\n\nWorkflow triggered:\n%s", string(body), string(wfBody))), nil
+		return mcplib.NewToolResultText(string(body)), nil
 	}
 
 	return tool, handler
@@ -1541,8 +1529,11 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_verify_domain",
 		mcplib.WithTitleAnnotation("Verify Domain DNS"),
-		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDescription("Check if a custom domain's DNS is correctly configured. Verifies the TXT ownership challenge (_mctl-challenge.<domain>) that mctl_add_custom_domain returned; also accepts an unproxied CNAME straight to {team}-{service}.{platform_domain} as a fast path. TXT is checked first because Cloudflare and similar proxies rewrite A/CNAME answers but never the TXT record."),
+		// Not read-only: a successful check persists status/verified_at
+		// (MarkVerified) and, per this handler, triggers the
+		// add-custom-domain workflow — an MCP client must not treat this as
+		// side-effect-free.
+		mcplib.WithDescription("Check if a custom domain's DNS is correctly configured, and — on success — trigger the add-custom-domain workflow (ingress update + TLS certificate). Verifies the TXT ownership challenge (_mctl-challenge.<domain>) that mctl_add_custom_domain returned; also accepts an unproxied CNAME straight to {team}-{service}.{platform_domain} as a fast path. TXT is checked first because Cloudflare and similar proxies rewrite A/CNAME answers but never the TXT record. This is the step that starts the workflow — mctl_add_custom_domain itself only registers and does not trigger it, since the challenge this call verifies cannot exist before that registration returns."),
 		mcplib.WithString("team",
 			mcplib.Required(),
 			mcplib.Description("Team name"),
@@ -1579,9 +1570,26 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 			vBody, vErr := s.apiPost(ctx, "/api/v1/domains/"+d.ID+"/verify?team="+url.QueryEscape(team), nil)
 			if vErr != nil {
 				results = append(results, fmt.Sprintf("%s: verification failed: %v", d.Domain, vErr))
-			} else {
-				results = append(results, fmt.Sprintf("%s: %s", d.Domain, string(vBody)))
+				continue
 			}
+			var vResult struct {
+				Verified bool `json:"verified"`
+			}
+			if json.Unmarshal(vBody, &vResult) == nil && vResult.Verified { //nolint:nilerr
+				wfParams := map[string]string{
+					"team_name":    team,
+					"service_name": service,
+					"domain":       d.Domain,
+				}
+				wfBody, wfErr := s.apiPost(ctx, "/api/v1/operations/add-custom-domain/execute", wfParams)
+				if wfErr != nil {
+					results = append(results, fmt.Sprintf("%s: %s\nworkflow trigger failed: %v", d.Domain, string(vBody), wfErr))
+				} else {
+					results = append(results, fmt.Sprintf("%s: %s\nworkflow triggered: %s", d.Domain, string(vBody), string(wfBody)))
+				}
+				continue
+			}
+			results = append(results, fmt.Sprintf("%s: %s", d.Domain, string(vBody)))
 		}
 		return mcplib.NewToolResultText(strings.Join(results, "\n")), nil
 	}

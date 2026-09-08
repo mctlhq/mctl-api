@@ -31,15 +31,15 @@ const (
 
 // Domain is a single custom-domain registration row.
 type Domain struct {
-	ID                 string     `json:"id"`
-	Team               string     `json:"team"`
-	Service            string     `json:"service"`
-	Domain             string     `json:"domain"`
-	Status             string     `json:"status"`
-	VerificationToken  string     `json:"-"`
-	CreatedBy          string     `json:"created_by"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
-	VerifiedAt         *time.Time `json:"verified_at,omitempty"`
-	LastError          string     `json:"last_error,omitempty"`
+	ID                string     `json:"id"`
+	Team              string     `json:"team"`
+	Service           string     `json:"service"`
+	Domain            string     `json:"domain"`
+	Status            string     `json:"status"`
+	VerificationToken string     `json:"-"`
+	CreatedBy         string     `json:"created_by"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	VerifiedAt        *time.Time `json:"verified_at,omitempty"`
+	LastError         string     `json:"last_error,omitempty"`
 }

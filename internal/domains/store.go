@@ -143,10 +143,12 @@ func (s *Store) ListByTeam(ctx context.Context, team, service string) ([]Domain,
 			&d.ID, &d.Team, &d.Service, &d.Domain, &d.Status, &d.VerificationToken,
 			&d.CreatedBy, &d.CreatedAt, &d.UpdatedAt, &d.VerifiedAt, &d.LastError,
 		); err != nil {
-			slog.Error("domains store: scan failed", "error", err)
-			continue
+			return nil, fmt.Errorf("domains store: list: scan: %w", err)
 		}
 		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("domains store: list: iterate: %w", err)
 	}
 	return out, nil
 }
@@ -205,17 +207,31 @@ func (s *Store) SetStatus(ctx context.Context, id, status, lastError string) err
 	return nil
 }
 
-// MarkVerified marks a domain verified (DNS ownership proven).
+// MarkVerified marks a domain verified (DNS ownership proven). A row already
+// promoted to StatusActive by the add-custom-domain workflow's status
+// callback is left alone: mctl_verify_domain re-verifies every domain
+// returned for a team/service on each call, so an unconditional write here
+// would demote every already-active domain back to "verified" (and clear
+// last_error) on the next routine status check.
 func (s *Store) MarkVerified(ctx context.Context, id string) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE custom_domains SET status=$2, verified_at=now(), updated_at=now(), last_error='' WHERE id=$1`,
-		id, StatusVerified,
+		`UPDATE custom_domains SET status=$2, verified_at=now(), updated_at=now(), last_error=''
+		 WHERE id=$1 AND status <> $3`,
+		id, StatusVerified, StatusActive,
 	)
 	if err != nil {
 		return fmt.Errorf("domains store: mark verified: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		// Zero rows matches two cases the caller must be able to tell apart:
+		// the id doesn't exist (ErrNotFound), or it exists but is already
+		// StatusActive (a no-op, not an error).
+		if _, err := s.Get(ctx, id); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("domains store: mark verified: check existing status: %w", err)
+		}
 	}
 	return nil
 }
