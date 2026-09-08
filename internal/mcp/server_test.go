@@ -166,8 +166,8 @@ func TestAllToolsHaveTitleAnnotation(t *testing.T) {
 		t.Fatalf("failed to unmarshal tools/list response: %v", err)
 	}
 
-	if len(result.Result.Tools) != 73 {
-		t.Errorf("expected 73 tools, got %d", len(result.Result.Tools))
+	if len(result.Result.Tools) != 74 {
+		t.Errorf("expected 74 tools, got %d", len(result.Result.Tools))
 	}
 
 	for _, tool := range result.Result.Tools {
@@ -470,6 +470,149 @@ func TestToolApproveDevLoop_SurfacesErrorsWithoutPanic(t *testing.T) {
 			defer backend.Close()
 
 			result, err := callToolApproveDevLoop(t, backend.URL, map[string]any{
+				"workflow_id": "dev-loop-mctlhq-mctl-telegram-1",
+			})
+			if err != nil {
+				t.Fatalf("handler must not return a Go error, got: %v", err)
+			}
+			if result == nil || !result.IsError {
+				t.Fatalf("expected a tool-level error result for HTTP %d, got %+v", code, result)
+			}
+		})
+	}
+}
+
+// callToolGetDevLoop builds a CallToolRequest for toolGetDevLoop with the
+// given arguments and runs its handler.
+func callToolGetDevLoop(t *testing.T, apiURL string, args map[string]any) (*mcplib.CallToolResult, error) {
+	t.Helper()
+	srv := NewServer(apiURL, "test-token")
+	_, handler := srv.toolGetDevLoop()
+	return handler(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "mctl_get_dev_loop",
+			Arguments: args,
+		},
+	})
+}
+
+func TestToolGetDevLoop_GetsDevLoopPath(t *testing.T) {
+	var gotMethod, gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workflow_id":"dev-loop-mctlhq-mctl-telegram-296","status":"Running","shepherd_in_loop":false}`))
+	}))
+	defer backend.Close()
+
+	result, err := callToolGetDevLoop(t, backend.URL, map[string]any{
+		"workflow_id": "dev-loop-mctlhq-mctl-telegram-296",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if gotMethod != http.MethodGet {
+		t.Errorf("expected GET, got %s", gotMethod)
+	}
+	wantPath := "/api/v1/agents/dev-loop/" + url.PathEscape("dev-loop-mctlhq-mctl-telegram-296")
+	if gotPath != wantPath {
+		t.Errorf("path: got %q, want %q", gotPath, wantPath)
+	}
+}
+
+func TestToolGetDevLoop_TrimsWhitespaceFromArguments(t *testing.T) {
+	var gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	_, err := callToolGetDevLoop(t, backend.URL, map[string]any{
+		"issue_url": "  https://github.com/mctlhq/mctl-telegram/issues/296\n",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	wantPath := "/api/v1/agents/dev-loop/" + url.PathEscape("dev-loop-mctlhq-mctl-telegram-296")
+	if gotPath != wantPath {
+		t.Errorf("path: got %q, want %q", gotPath, wantPath)
+	}
+}
+
+func TestToolGetDevLoop_DerivesWorkflowIDFromIssueURL(t *testing.T) {
+	var gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	_, err := callToolGetDevLoop(t, backend.URL, map[string]any{
+		"issue_url": "https://github.com/mctlhq/mctl-telegram/issues/296",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	wantPath := "/api/v1/agents/dev-loop/" + url.PathEscape("dev-loop-mctlhq-mctl-telegram-296")
+	if gotPath != wantPath {
+		t.Errorf("path: got %q, want %q", gotPath, wantPath)
+	}
+}
+
+func TestToolGetDevLoop_RejectsInvalidIssueURL(t *testing.T) {
+	result, err := callToolGetDevLoop(t, "http://unused.invalid", map[string]any{
+		"issue_url": "https://example.com/not-a-github-issue",
+	})
+	if err != nil {
+		t.Fatalf("handler must not return a Go error, got: %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("expected a tool-level error result for an invalid issue_url, got %+v", result)
+	}
+}
+
+func TestToolGetDevLoop_RequiresExactlyOneOfWorkflowIDOrIssueURL(t *testing.T) {
+	t.Run("neither", func(t *testing.T) {
+		result, err := callToolGetDevLoop(t, "http://unused.invalid", map[string]any{})
+		if err != nil {
+			t.Fatalf("handler must not return a Go error, got: %v", err)
+		}
+		if result == nil || !result.IsError {
+			t.Fatalf("expected a tool-level error result when neither argument is given, got %+v", result)
+		}
+	})
+	t.Run("both", func(t *testing.T) {
+		result, err := callToolGetDevLoop(t, "http://unused.invalid", map[string]any{
+			"workflow_id": "dev-loop-mctlhq-mctl-telegram-296",
+			"issue_url":   "https://github.com/mctlhq/mctl-telegram/issues/296",
+		})
+		if err != nil {
+			t.Fatalf("handler must not return a Go error, got: %v", err)
+		}
+		if result == nil || !result.IsError {
+			t.Fatalf("expected a tool-level error result when both arguments are given, got %+v", result)
+		}
+	})
+}
+
+func TestToolGetDevLoop_SurfacesErrorsWithoutPanic(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusBadGateway, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(`{"error":"stub failure"}`))
+			}))
+			defer backend.Close()
+
+			result, err := callToolGetDevLoop(t, backend.URL, map[string]any{
 				"workflow_id": "dev-loop-mctlhq-mctl-telegram-1",
 			})
 			if err != nil {
