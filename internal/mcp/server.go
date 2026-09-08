@@ -28,6 +28,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/temporalclient"
 )
 
 // Server is the MCP server that exposes platform operations as AI tools.
@@ -153,6 +154,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerApprove())
 	srv.AddTool(s.toolTriggerIssue())
 	srv.AddTool(s.toolApproveDevLoop())
+	srv.AddTool(s.toolGetDevLoop())
 	srv.AddTool(s.toolListRecentAgentRuns())
 
 	// Agent registry (mctl-agents AgentManifest versions/releases).
@@ -2662,6 +2664,50 @@ Admin-only. Requires the server's Temporal client to be configured — returns 5
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to approve dev-loop workflow: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(respBody)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolGetDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_dev_loop",
+		mcplib.WithTitleAnnotation("Describe a DevLoopWorkflow"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Read-only liveness check for a DevLoopWorkflow: is there a live loop for this issue, and is it still running?
+
+Wraps GET /api/v1/agents/dev-loop/{workflow_id} (mctl-api#244) — no side effects, unlike mctl_approve_dev_loop or mctl_trigger_issue with use_temporal=true. Use this BEFORE deciding how to approve a proposal: a hand-edited .status.yaml is invisible to a workflow already parked on the approve signal (wait_condition has no timeout, so the loop then waits forever), and re-signalling approve on an already-accepted proposal is not a safe probe either — the standalone mctl-agents-approve operation treats it as an idempotent no-op and can send an already-approved proposal straight into the implementer.
+
+Returns: workflow_id, status (Temporal's short execution status — "Running", "Completed", "Failed", "Canceled", "Terminated", "ContinuedAsNew", or "Unknown"), and shepherd_in_loop (whether this specific execution ticks its own PR shepherd; only meaningful while status is "Running").
+
+This does not distinguish which step a Running execution is on (investigating vs. parked at approval vs. implementing) — it answers "is a loop alive for this issue", not "what is it doing right now". A 404 means no DevLoopWorkflow was ever started for this workflow_id (or it aged out of retention) — the proposal, if one exists, predates use_temporal and its .status.yaml can be edited directly.
+
+Admin-only. Requires the server's Temporal client to be configured — returns 503 otherwise.`),
+		mcplib.WithString("workflow_id",
+			mcplib.Description("The DevLoopWorkflow's Temporal workflow ID, e.g. dev-loop-mctlhq-mctl-telegram-296. Provide this or issue_url, not both."),
+		),
+		mcplib.WithString("issue_url",
+			mcplib.Description("Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123 — the workflow_id is derived from it (dev-loop-mctlhq-{repo}-{issue}). Provide this or workflow_id, not both."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		workflowID := stringArg(req, "workflow_id")
+		issueURL := stringArg(req, "issue_url")
+		switch {
+		case workflowID != "" && issueURL != "":
+			return mcplib.NewToolResultError("provide workflow_id or issue_url, not both"), nil
+		case workflowID == "" && issueURL == "":
+			return mcplib.NewToolResultError("missing required argument: workflow_id or issue_url"), nil
+		case issueURL != "":
+			derived, err := temporalclient.WorkflowIDForIssueURL(issueURL)
+			if err != nil {
+				return mcplib.NewToolResultError(fmt.Sprintf("invalid issue_url: %v", err)), nil
+			}
+			workflowID = derived
+		}
+		body, err := s.apiGet(ctx, "/api/v1/agents/dev-loop/"+url.PathEscape(workflowID))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to describe dev-loop workflow: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
 	}
 	return tool, handler
 }
