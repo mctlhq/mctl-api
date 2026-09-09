@@ -523,11 +523,15 @@ func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 // submission itself fails, so the caller (DeleteDomain) can keep the row
 // rather than delete a domain whose ingress was never actually cleaned up.
 func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Request, d *domains.Domain) (workflowName string, skipped bool, err error) {
-	// A row that never reached StatusVerified/StatusActive never passed DNS
-	// verification, so add-custom-domain never ran and there is no ingress
-	// host or TLS entry to remove — submitting remove-custom-domain here
-	// would be a gitops-mutating workflow run with nothing to do.
-	if d.Status != domains.StatusActive && d.Status != domains.StatusVerified {
+	// A row still in StatusPending never passed DNS verification, so
+	// add-custom-domain never ran and there is no ingress host or TLS entry
+	// to remove — submitting remove-custom-domain here would be a
+	// gitops-mutating workflow run with nothing to do. StatusFailed is
+	// deliberately included alongside StatusActive/StatusVerified: a failed
+	// row is exactly the case most likely to carry a partial ingress/TLS
+	// commit from an add-custom-domain attempt that got partway through
+	// before failing, so it still needs teardown to clean that up.
+	if d.Status != domains.StatusActive && d.Status != domains.StatusVerified && d.Status != domains.StatusFailed {
 		return "", true, nil
 	}
 
