@@ -614,6 +614,73 @@ func TestDeleteDomain_OwnTeamSucceeds(t *testing.T) {
 	}
 }
 
+// cnameResolver always answers LookupCNAME with target, so Verify succeeds
+// via the CNAME fast path regardless of the (randomly generated) TXT
+// verification token — unlike the TXT path, the CNAME target is
+// deterministic ({team}-{service}.{platform_domain}), so a stub can match it
+// without reaching into the store for the token.
+type cnameResolver struct{ target string }
+
+func (r cnameResolver) LookupTXT(context.Context, string) ([]string, error) {
+	return nil, errNoRecord
+}
+func (r cnameResolver) LookupCNAME(context.Context, string) (string, error) {
+	return r.target, nil
+}
+
+// TestVerifyDomain_PositiveVerdictMarksVerified fills the gap agy flagged on
+// mctl-api#264: every other handler test wires a negativeResolver, so the
+// handler's own positive path — VerifyDomain calling through to
+// h.opts.DomainStore.MarkVerified and persisting the result — was untested
+// end-to-end (the equivalent pre-rewrite test, TestVerifyDomainOwnTeamSuccess,
+// was removed and never replaced when the Backstage proxy was rewritten in
+// 48e5984). Covers a non-admin user verifying their own team's domain, by id.
+func TestVerifyDomain_PositiveVerdictMarksVerified(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		DomainVerifier: domains.NewVerifierWithResolver(cnameResolver{target: "labs-svc.mctl.ai"}),
+	}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"verify-positive.example.com"}`)),
+		&auth.User{ID: "u1", Groups: []string{"labs"}}))
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+	if id == "" {
+		t.Fatalf("expected a domain id in the add response, got %q", addRec.Body.String())
+	}
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/"+id+"/verify?team=labs", nil),
+		&auth.User{ID: "u1", Groups: []string{"labs"}}), "id", id)
+	rec := httptest.NewRecorder()
+	h.VerifyDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	var result domains.Result
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode verify response: %v", err)
+	}
+	if !result.Verified || result.Method != domains.MethodCNAME {
+		t.Fatalf("expected a verified CNAME result, got %+v", result)
+	}
+
+	stored, err := store.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get after verify: %v", err)
+	}
+	if stored.Status != domains.StatusVerified || stored.VerifiedAt == nil {
+		t.Fatalf("expected MarkVerified to have persisted status=verified with verified_at set, got %+v", stored)
+	}
+}
+
 func TestVerifyDomainAdminBypassesOwnershipCheck(t *testing.T) {
 	store := newTestDomainStore(t)
 	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
