@@ -1261,6 +1261,49 @@ func TestDeleteDomain_SkipsTeardownForPendingRow(t *testing.T) {
 	}
 }
 
+// TestDeleteDomain_FailedRowStillSubmitsTeardown pins that StatusFailed is
+// NOT included in the pending-only skip: unlike StatusPending, a failed row
+// can only be reached via UpdateDomainStatus (the add-custom-domain
+// workflow's own service-principal-only callback), which means the
+// workflow already started and, per its own ordering, already committed
+// ingress.hosts/ingress.tls to gitops before the HTTP-01 issuance step most
+// likely to fail. Deleting such a row without submitting teardown would
+// orphan that commit.
+func TestDeleteDomain_FailedRowStillSubmitsTeardown(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"delete-failed.example.com"}`)), owner))
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+	if err := store.SetStatus(context.Background(), id, domains.StatusFailed, "cert issuance timed out"); err != nil {
+		t.Fatalf("set status failed: %v", err)
+	}
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+id, nil), owner), "id", id)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	if len(exec.submitted) != 1 {
+		t.Fatalf("expected exactly one workflow submission for a failed row, got %d", len(exec.submitted))
+	}
+}
+
 // TestDeleteDomain_NilExecutorSkipsCleanup mirrors
 // TestDeleteDomain_OwnTeamSucceeds but with no executor configured, and
 // additionally asserts on the new ingress_cleanup response field.
