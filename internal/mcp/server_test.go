@@ -1179,3 +1179,103 @@ func TestToolVerifyDomain_TriggersWorkflowOnFreshVerification(t *testing.T) {
 		t.Errorf("expected the add-custom-domain workflow to be triggered for a freshly-verified pending domain")
 	}
 }
+
+// callToolRemoveCustomDomain builds a CallToolRequest for
+// toolRemoveCustomDomain with the given arguments and runs its handler.
+func callToolRemoveCustomDomain(t *testing.T, apiURL string, args map[string]any) (*mcplib.CallToolResult, error) {
+	t.Helper()
+	srv := NewServer(apiURL, "test-token")
+	_, handler := srv.toolRemoveCustomDomain()
+	return handler(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "mctl_remove_custom_domain",
+			Arguments: args,
+		},
+	})
+}
+
+// TestRemoveCustomDomain_DeletesRegistryRow pins the fix that repoints
+// mctl_remove_custom_domain at the registry: when the domain is found in
+// the team/service's registered domains, the tool must issue
+// DELETE /api/v1/domains/{id} — which itself triggers ingress/TLS cleanup
+// server-side (handlers_domains.go's DeleteDomain) — instead of the
+// operations execute path.
+func TestRemoveCustomDomain_DeletesRegistryRow(t *testing.T) {
+	var gotMethod, gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/domains":
+			_, _ = w.Write([]byte(`{"domains":[{"id":"d1","domain":"api.example.com","status":"pending"}]}`))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/domains/"):
+			gotMethod = r.Method
+			gotPath = r.URL.Path
+			_, _ = w.Write([]byte(`{"status":"deleted","ingress_cleanup":"workflow-submitted","workflow_name":"remove-custom-domain-abc123"}`))
+		case strings.Contains(r.URL.Path, "/operations/remove-custom-domain/execute"):
+			t.Errorf("unexpected fallback to the operations execute path for a registered domain: %s", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	result, err := callToolRemoveCustomDomain(t, backend.URL, map[string]any{
+		"team":    "labs",
+		"service": "svc",
+		"domain":  "api.example.com",
+		"confirm": "yes",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Errorf("expected DELETE, got %q", gotMethod)
+	}
+	if gotPath != "/api/v1/domains/d1" {
+		t.Errorf("path: got %q, want /api/v1/domains/d1", gotPath)
+	}
+}
+
+// TestRemoveCustomDomain_FallsBackForUnregisteredHostname pins the legacy
+// fallback: when the domains list has no matching row (or is empty), the
+// tool must still fall back to the operations execute path so a
+// pre-registry hostname keeps working.
+func TestRemoveCustomDomain_FallsBackForUnregisteredHostname(t *testing.T) {
+	var triggered bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/domains":
+			_, _ = w.Write([]byte(`{"domains":[]}`))
+		case r.Method == http.MethodDelete:
+			t.Errorf("unexpected DELETE for an unregistered hostname: %s", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		case strings.Contains(r.URL.Path, "/operations/remove-custom-domain/execute"):
+			triggered = true
+			_, _ = w.Write([]byte(`{"workflow_name":"remove-custom-domain-legacy123"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	result, err := callToolRemoveCustomDomain(t, backend.URL, map[string]any{
+		"team":    "labs",
+		"service": "svc",
+		"domain":  "legacy.example.com",
+		"confirm": "yes",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if !triggered {
+		t.Errorf("expected a fallback to the operations execute path for an unregistered hostname")
+	}
+}

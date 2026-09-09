@@ -1490,7 +1490,7 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 	tool := mcplib.NewTool("mctl_remove_custom_domain",
 		mcplib.WithTitleAnnotation("Remove Custom Domain"),
 		mcplib.WithDestructiveHintAnnotation(true),
-		mcplib.WithDescription("Remove a custom domain from a service. This removes it from the ingress configuration and database. The auto-generated {team}-{service}.{platform_domain} domain is not affected."),
+		mcplib.WithDescription("Remove a custom domain from a service. If the domain is registered in mctl-api's domain registry (added via mctl_add_custom_domain), this deletes that registry row — DELETE /api/v1/domains/{id} — which itself triggers the remove-custom-domain workflow to clean up the ingress host and TLS certificate entry before the row disappears. If the hostname is not found in the registry (e.g. a legacy domain added before the registry existed), this falls back to triggering the remove-custom-domain workflow directly, same as before. The auto-generated {team}-{service}.{platform_domain} domain is not affected either way."),
 		mcplib.WithString("team",
 			mcplib.Required(),
 			mcplib.Description("Team name"),
@@ -1513,11 +1513,48 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 		if r := requireConfirm(args, fmt.Sprintf("remove custom domain %q from %q/%q", args["domain"], args["team"], args["service"])); r != nil {
 			return r, nil
 		}
-		// Trigger the remove-custom-domain workflow
+		team, _ := args["team"].(string)
+		service, _ := args["service"].(string)
+		domain, _ := args["domain"].(string)
+
+		// Prefer deleting the registered row: DELETE /api/v1/domains/{id}
+		// both removes the registry row and (per handlers_domains.go's
+		// DeleteDomain) triggers the remove-custom-domain workflow itself,
+		// so this is the same teardown the direct workflow POST below
+		// achieves, plus the row cleanup. Look the row up by listing this
+		// team/service's domains and matching the hostname, since this tool
+		// is only given the hostname, not the row id.
+		listPath := "/api/v1/domains?team=" + url.QueryEscape(team) + "&service=" + url.QueryEscape(service)
+		listBody, listErr := s.apiGet(ctx, listPath)
+		if listErr == nil {
+			var listResp struct {
+				Domains []struct {
+					ID     string `json:"id"`
+					Domain string `json:"domain"`
+				} `json:"domains"`
+			}
+			wantDomain := strings.TrimSuffix(domain, ".")
+			if json.Unmarshal(listBody, &listResp) == nil { //nolint:nilerr
+				for _, d := range listResp.Domains {
+					if strings.EqualFold(strings.TrimSuffix(d.Domain, "."), wantDomain) {
+						delBody, delErr := s.apiDelete(ctx, "/api/v1/domains/"+d.ID+"?team="+url.QueryEscape(team))
+						if delErr != nil {
+							return mcplib.NewToolResultError(fmt.Sprintf("Failed to remove domain: %v", delErr)), nil
+						}
+						return mcplib.NewToolResultText(string(delBody)), nil
+					}
+				}
+			}
+		}
+
+		// Fallback: no matching registry row (a legacy hostname predating
+		// the registry, or the list call itself failed) — trigger the
+		// workflow directly, same as this tool always did before the
+		// registry existed.
 		wfParams := map[string]string{
-			"team_name":    args["team"].(string),
-			"service_name": args["service"].(string),
-			"domain":       args["domain"].(string),
+			"team_name":    team,
+			"service_name": service,
+			"domain":       domain,
 		}
 		body, err := s.apiPost(ctx, "/api/v1/operations/remove-custom-domain/execute", wfParams)
 		if err != nil {

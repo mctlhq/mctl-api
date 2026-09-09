@@ -15,17 +15,20 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/domains"
 )
@@ -48,13 +51,26 @@ type domainResponse struct {
 	CNAMETarget     string `json:"cname_target,omitempty"`
 }
 
+// domainResponseFor builds the response for a domain row, adding the TXT
+// challenge and CNAME target a caller needs to finish registration.
+// ChallengeRecord/ChallengeValue are only populated for a row still in
+// StatusPending or StatusFailed: a row that has already reached
+// StatusVerified or StatusActive has already proved ownership, so echoing
+// its challenge back is misleading — it invites a caller to (re-)publish a
+// TXT record that verification no longer needs, or to believe a stale
+// pending state that has since moved on. CNAMETarget stays populated
+// regardless of status: it is not a proof-of-ownership artifact like the
+// challenge, just the fast-path target a caller may still want to know.
 func (h *Handlers) domainResponseFor(d *domains.Domain) domainResponse {
-	return domainResponse{
-		Domain:          d,
-		ChallengeRecord: domains.ChallengeRecord(d.Domain),
-		ChallengeValue:  domains.ChallengeValue(d.VerificationToken),
-		CNAMETarget:     h.cnameTarget(d.Team, d.Service),
+	resp := domainResponse{
+		Domain:      d,
+		CNAMETarget: h.cnameTarget(d.Team, d.Service),
 	}
+	if d.Status == domains.StatusPending || d.Status == domains.StatusFailed {
+		resp.ChallengeRecord = domains.ChallengeRecord(d.Domain)
+		resp.ChallengeValue = domains.ChallengeValue(d.VerificationToken)
+	}
+	return resp
 }
 
 func (h *Handlers) cnameTarget(team, service string) string {
@@ -98,6 +114,18 @@ func platformDomainRejection(team, service, domain, platformDomain string) strin
 // different rows a different team could separately claim.
 func normalizeHostname(domain string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+}
+
+// normalizeIdentifier lowercases and trims a team or service name before it
+// reaches the tenant-access check, the store, or a CNAME target
+// construction. Team/service names are not DNS names (no trailing-dot
+// root-label concern), but they do end up compared against
+// gitops-normalized values (tenant/service names are lowercase by
+// convention) and interpolated into cnameTarget, so an unnormalized
+// "Labs"/"labs" pair must not be allowed to register or verify as if they
+// were different identities.
+func normalizeIdentifier(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // hostnameLabelPattern matches one DNS label: 1-63 lowercase alphanumerics
@@ -203,8 +231,8 @@ func (h *Handlers) AddDomain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	req.Team = strings.TrimSpace(req.Team)
-	req.Service = strings.TrimSpace(req.Service)
+	req.Team = normalizeIdentifier(req.Team)
+	req.Service = normalizeIdentifier(req.Service)
 	req.Domain = normalizeHostname(req.Domain)
 	if req.Team == "" || req.Service == "" || req.Domain == "" {
 		writeError(w, http.StatusBadRequest, "missing required fields: team, service, domain")
@@ -348,8 +376,8 @@ func (h *Handlers) VerifyDomainByName(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	req.Team = strings.TrimSpace(req.Team)
-	req.Service = strings.TrimSpace(req.Service)
+	req.Team = normalizeIdentifier(req.Team)
+	req.Service = normalizeIdentifier(req.Service)
 	req.Domain = normalizeHostname(req.Domain)
 	if req.Team == "" || req.Service == "" || req.Domain == "" {
 		writeError(w, http.StatusBadRequest, "missing required fields: team, service, domain")
@@ -369,7 +397,12 @@ func (h *Handlers) VerifyDomainByName(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to look up domain")
 		return
 	}
-	if d.Team != req.Team || d.Service != req.Service {
+	// Compared case-insensitively so a legacy row stored with mixed-case
+	// team/service (from before AddDomain normalized on write) stays
+	// reachable by a caller sending normalized values. Still 404, never
+	// 403: an id/name mismatch must not disclose whether a differently-cased
+	// row exists.
+	if !strings.EqualFold(d.Team, req.Team) || !strings.EqualFold(d.Service, req.Service) {
 		writeError(w, http.StatusNotFound, "domain not found")
 		return
 	}
@@ -405,6 +438,17 @@ func (h *Handlers) verifyAndRespond(w http.ResponseWriter, r *http.Request, d *d
 
 // DeleteDomain removes a custom domain.
 // DELETE /api/v1/domains/:id?team=X (team optional)
+//
+// Teardown contract: before the row is deleted, this triggers the
+// remove-custom-domain workflow so ingress hosts and the TLS certificate
+// entry actually get cleaned up — deleting only the registry row would
+// leave a dangling ingress rule with no domains row left to reconcile it
+// against. If the workflow submission fails, the row is kept (not deleted)
+// so the caller can retry rather than lose the only record of what still
+// needs cleanup. If no Executor/Registry is configured (e.g. local/test),
+// cleanup is skipped and the row is deleted anyway — this mirrors every
+// other domains handler's already-optional-dependency behavior rather than
+// making delete newly unavailable in those environments.
 func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 	if h.opts.DomainStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "domains registry not configured")
@@ -417,6 +461,12 @@ func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	workflowName, skipped, err := h.triggerRemoveCustomDomain(r.Context(), r, d)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to submit ingress cleanup: "+err.Error())
+		return
+	}
+
 	if err := h.opts.DomainStore.Delete(r.Context(), d.ID); err != nil {
 		if errors.Is(err, domains.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "domain not found")
@@ -426,7 +476,69 @@ func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	if skipped {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "ingress_cleanup": "skipped"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "ingress_cleanup": "workflow-submitted", "workflow_name": workflowName})
+}
+
+// triggerRemoveCustomDomain submits the remove-custom-domain workflow for d
+// so ingress/TLS teardown actually happens once the registry row is gone.
+// Returns skipped=true (not an error) when the workflow executor or
+// operations registry is not configured — that is an expected local/test
+// state, not a caller-facing failure. An error is only returned when
+// submission itself fails, so the caller (DeleteDomain) can keep the row
+// rather than delete a domain whose ingress was never actually cleaned up.
+func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Request, d *domains.Domain) (workflowName string, skipped bool, err error) {
+	if h.opts.Executor == nil || h.opts.Registry == nil {
+		slog.Warn("skipping remove-custom-domain workflow: executor or operations registry not configured",
+			"team", d.Team, "service", d.Service, "domain", d.Domain)
+		return "", true, nil
+	}
+
+	op, ok := h.opts.Registry.Get("remove-custom-domain")
+	if !ok {
+		slog.Warn("skipping remove-custom-domain workflow: operation not found in registry",
+			"team", d.Team, "service", d.Service, "domain", d.Domain)
+		return "", true, nil
+	}
+
+	user := auth.UserFromContext(ctx)
+	userID := ""
+	if user != nil {
+		userID = user.ID
+	}
+
+	params := map[string]string{
+		"team_name":    d.Team,
+		"service_name": d.Service,
+		"domain":       d.Domain,
+	}
+
+	result, submitErr := h.opts.Executor.Submit(ctx, op, params, userID, d.Team)
+	if submitErr != nil {
+		h.logAudit(r, audit.Entry{
+			UserID:     userID,
+			Operation:  "remove-custom-domain",
+			Parameters: params,
+			Status:     "failed",
+			RiskLevel:  string(op.RiskLevel),
+			Message:    "submit failed: " + submitErr.Error(),
+		})
+		return "", false, fmt.Errorf("submit remove-custom-domain workflow: %w", submitErr)
+	}
+
+	h.logAudit(r, audit.Entry{
+		UserID:       userID,
+		Operation:    "remove-custom-domain",
+		Parameters:   params,
+		WorkflowName: result.WorkflowName,
+		Status:       "submitted",
+		RiskLevel:    string(op.RiskLevel),
+	})
+
+	return result.WorkflowName, false, nil
 }
 
 // UpdateDomainStatus accepts the add-custom-domain workflow's status
