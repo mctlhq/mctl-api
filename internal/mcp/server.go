@@ -27,6 +27,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
@@ -1559,6 +1560,7 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 			Domains []struct {
 				ID     string `json:"id"`
 				Domain string `json:"domain"`
+				Status string `json:"status"`
 			} `json:"domains"`
 		}
 		if json.Unmarshal(body, &resp) != nil || len(resp.Domains) == 0 { //nolint:nilerr
@@ -1575,7 +1577,14 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 			var vResult struct {
 				Verified bool `json:"verified"`
 			}
-			if json.Unmarshal(vBody, &vResult) == nil && vResult.Verified { //nolint:nilerr
+			// Only a domain not already domains.StatusActive can still need
+			// the workflow: an active row's TXT record stays published (it
+			// is never torn down), so it verifies true on every subsequent
+			// call. Without this check a routine status poll across a
+			// team/service re-triggers add-custom-domain — a GitOps commit
+			// and a cert-manager reissue — for every already-active domain,
+			// every time.
+			if json.Unmarshal(vBody, &vResult) == nil && vResult.Verified && d.Status != domains.StatusActive { //nolint:nilerr
 				wfParams := map[string]string{
 					"team_name":    team,
 					"service_name": service,

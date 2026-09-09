@@ -136,7 +136,10 @@ func (s *Store) ListByTeam(ctx context.Context, team, service string) ([]Domain,
 	}
 	defer rows.Close()
 
-	var out []Domain
+	// Non-nil even when empty: the caller serializes this as JSON, and the
+	// Backstage proxy this store replaced always returned "domains":[] —
+	// never null — for a team with no rows.
+	out := []Domain{}
 	for rows.Next() {
 		var d Domain
 		if err := rows.Scan(

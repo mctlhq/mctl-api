@@ -124,6 +124,26 @@ func TestListByTeam(t *testing.T) {
 	}
 }
 
+// TestListByTeam_EmptyTeamReturnsEmptySliceNotNil pins the fix for a
+// contract change: the Backstage proxy this store replaced always returned
+// "domains":[] — never null — for a team with no rows, and a nil slice
+// serializes to JSON null.
+func TestListByTeam_EmptyTeamReturnsEmptySliceNotNil(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	list, err := s.ListByTeam(ctx, "no-such-team", "")
+	if err != nil {
+		t.Fatalf("list for empty team: %v", err)
+	}
+	if list == nil {
+		t.Fatalf("expected a non-nil empty slice, got nil")
+	}
+	if len(list) != 0 {
+		t.Fatalf("expected an empty result, got %+v", list)
+	}
+}
+
 func TestGetAndGetByDomain(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

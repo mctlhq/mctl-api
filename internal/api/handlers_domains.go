@@ -62,8 +62,12 @@ func (h *Handlers) cnameTarget(team, service string) string {
 }
 
 func (h *Handlers) platformDomain() string {
+	// Normalized the same way a request's domain is: isPlatformDomain only
+	// lowercases the host it's comparing against, so an uppercase or
+	// trailing-dot PLATFORM_DOMAIN would otherwise silently disable the
+	// guard it exists to enforce.
 	if h.opts.PlatformDomain != "" {
-		return h.opts.PlatformDomain
+		return normalizeHostname(h.opts.PlatformDomain)
 	}
 	return "mctl.ai"
 }
