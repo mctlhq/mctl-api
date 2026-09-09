@@ -311,6 +311,15 @@ func (h *Handlers) AddDomain(w http.ResponseWriter, r *http.Request) {
 // than 403s, so it never discloses which team owns it. If the caller passed
 // an explicit ?team=, that team must itself be one the caller has access to
 // (403 otherwise) before a mismatch against the domain's real team 404s.
+// The no-?team= fall-through below normalizes d.Team before the access
+// check for the same reason: a legacy mixed-case row (from before
+// AddDomain normalized on write) must resolve identically whether or not
+// ?team= is supplied, matching the ?team= branch above, which already uses
+// strings.EqualFold for the same comparison. This is a deliberate behavior
+// widening — a row stored as Team: "Labs" now resolves for a caller in
+// group "labs" with or without ?team=, where it previously 404'd without
+// it — but it cannot grant access beyond a caller's own groups: only the
+// 404-vs-200 outcome changes, never a 403 disclosure.
 func (h *Handlers) resolveDomainForMutation(w http.ResponseWriter, r *http.Request, id string) (*domains.Domain, bool) {
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
@@ -352,7 +361,7 @@ func (h *Handlers) resolveDomainForMutation(w http.ResponseWriter, r *http.Reque
 		return d, true
 	}
 
-	if !user.HasTenantAccess(d.Team) {
+	if !user.HasTenantAccess(normalizeIdentifier(d.Team)) {
 		writeError(w, http.StatusNotFound, "domain not found")
 		return nil, false
 	}
@@ -461,6 +470,18 @@ func (h *Handlers) verifyAndRespond(w http.ResponseWriter, r *http.Request, d *d
 	writeJSON(w, http.StatusOK, result)
 }
 
+// cleanupOutcome is the value reported as ingress_cleanup in DeleteDomain's
+// response. It distinguishes "nothing needed cleaning" from the two ways
+// cleanup could not run - only one of which is benign.
+type cleanupOutcome string
+
+const (
+	cleanupSubmitted     cleanupOutcome = "workflow-submitted"
+	cleanupNotRequired   cleanupOutcome = "not-required"  // status gate: no ingress ever existed
+	cleanupUnavailable   cleanupOutcome = "unavailable"   // no Executor/Registry (local/test)
+	cleanupMisconfigured cleanupOutcome = "misconfigured" // op absent from the registry: real ingress may be orphaned
+)
+
 // DeleteDomain removes a custom domain.
 // DELETE /api/v1/domains/:id?team=X (team optional)
 //
@@ -471,9 +492,12 @@ func (h *Handlers) verifyAndRespond(w http.ResponseWriter, r *http.Request, d *d
 // against. If the workflow submission fails, the row is kept (not deleted)
 // so the caller can retry rather than lose the only record of what still
 // needs cleanup. If no Executor/Registry is configured (e.g. local/test),
-// cleanup is skipped and the row is deleted anyway — this mirrors every
-// other domains handler's already-optional-dependency behavior rather than
-// making delete newly unavailable in those environments.
+// or if the operation is missing from the registry, cleanup does not run
+// and the row is deleted anyway — this mirrors every other domains
+// handler's already-optional-dependency behavior rather than making delete
+// newly unavailable in those environments. The response's ingress_cleanup
+// field distinguishes these outcomes (see cleanupOutcome) instead of
+// collapsing them into one ambiguous "skipped" value.
 //
 // The inverse ordering is NOT specially handled: if the workflow submits
 // successfully but the store Delete below then fails, ingress has already
@@ -492,7 +516,7 @@ func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	workflowName, skipped, err := h.triggerRemoveCustomDomain(r.Context(), r, d)
+	workflowName, outcome, err := h.triggerRemoveCustomDomain(r.Context(), r, d)
 	if err != nil {
 		slog.Error("failed to submit remove-custom-domain workflow", "team", d.Team, "service", d.Service, "domain", d.Domain, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to submit ingress cleanup")
@@ -508,21 +532,26 @@ func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if skipped {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "ingress_cleanup": "skipped"})
-		return
+	resp := map[string]string{"status": "deleted", "ingress_cleanup": string(outcome)}
+	if outcome == cleanupSubmitted {
+		resp["workflow_name"] = workflowName
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "ingress_cleanup": "workflow-submitted", "workflow_name": workflowName})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // triggerRemoveCustomDomain submits the remove-custom-domain workflow for d
 // so ingress/TLS teardown actually happens once the registry row is gone.
-// Returns skipped=true (not an error) when the workflow executor or
-// operations registry is not configured — that is an expected local/test
-// state, not a caller-facing failure. An error is only returned when
-// submission itself fails, so the caller (DeleteDomain) can keep the row
-// rather than delete a domain whose ingress was never actually cleaned up.
-func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Request, d *domains.Domain) (workflowName string, skipped bool, err error) {
+// Returns a cleanupOutcome other than cleanupSubmitted (not an error) when
+// teardown does not run: cleanupNotRequired for the status gate (a genuine
+// no-op, no ingress ever existed), cleanupUnavailable when the workflow
+// executor or operations registry is not configured (an expected
+// local/test state), and cleanupMisconfigured when the operation is absent
+// from the registry (a production misconfiguration under which a real
+// ingress host and TLS entry may be left behind). An error is only
+// returned when submission itself fails, so the caller (DeleteDomain) can
+// keep the row rather than delete a domain whose ingress was never
+// actually cleaned up.
+func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Request, d *domains.Domain) (workflowName string, outcome cleanupOutcome, err error) {
 	// A row still in StatusPending never passed DNS verification, so
 	// add-custom-domain never ran and there is no ingress host or TLS entry
 	// to remove — submitting remove-custom-domain here would be a
@@ -532,20 +561,20 @@ func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Reques
 	// commit from an add-custom-domain attempt that got partway through
 	// before failing, so it still needs teardown to clean that up.
 	if d.Status != domains.StatusActive && d.Status != domains.StatusVerified && d.Status != domains.StatusFailed {
-		return "", true, nil
+		return "", cleanupNotRequired, nil
 	}
 
 	if h.opts.Executor == nil || h.opts.Registry == nil {
 		slog.Warn("skipping remove-custom-domain workflow: executor or operations registry not configured",
 			"team", d.Team, "service", d.Service, "domain", d.Domain)
-		return "", true, nil
+		return "", cleanupUnavailable, nil
 	}
 
 	op, ok := h.opts.Registry.Get("remove-custom-domain")
 	if !ok {
-		slog.Warn("skipping remove-custom-domain workflow: operation not found in registry",
+		slog.Error("skipping remove-custom-domain workflow: operation not found in registry; real ingress and TLS entries may be left behind",
 			"team", d.Team, "service", d.Service, "domain", d.Domain)
-		return "", true, nil
+		return "", cleanupMisconfigured, nil
 	}
 
 	user := auth.UserFromContext(ctx)
@@ -561,10 +590,15 @@ func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Reques
 	// below on every delete attempt and become permanently undeletable
 	// through the API — while a genuinely malicious value (e.g. containing
 	// "/" or "..") still fails the pattern after lowercasing, so this keeps
-	// the security property the validation exists for.
+	// the security property the validation exists for. team is also passed
+	// as Submit's fifth argument below (the mctl.ai/team workflow label) so
+	// the label agrees with team_name in params instead of carrying the
+	// row's raw, possibly differently-cased, team value.
+	team := normalizeIdentifier(d.Team)
+	service := normalizeIdentifier(d.Service)
 	params := map[string]string{
-		"team_name":    normalizeIdentifier(d.Team),
-		"service_name": normalizeIdentifier(d.Service),
+		"team_name":    team,
+		"service_name": service,
 		"domain":       d.Domain,
 	}
 
@@ -578,10 +612,10 @@ func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Reques
 	// pattern (team_name/service_name: ^[a-z0-9][a-z0-9-]{0,30}$) exists to
 	// reject at every other entry point.
 	if errs := h.opts.Registry.ValidateInput(op, params); len(errs) > 0 {
-		return "", false, fmt.Errorf("invalid remove-custom-domain parameters: %s", strings.Join(errs, "; "))
+		return "", "", fmt.Errorf("invalid remove-custom-domain parameters: %s", strings.Join(errs, "; "))
 	}
 
-	result, submitErr := h.opts.Executor.Submit(ctx, op, params, userID, d.Team)
+	result, submitErr := h.opts.Executor.Submit(ctx, op, params, userID, team)
 	if submitErr != nil {
 		h.logAudit(r, audit.Entry{
 			UserID:     userID,
@@ -591,7 +625,7 @@ func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Reques
 			RiskLevel:  string(op.RiskLevel),
 			Message:    "submit failed: " + submitErr.Error(),
 		})
-		return "", false, fmt.Errorf("submit remove-custom-domain workflow: %w", submitErr)
+		return "", "", fmt.Errorf("submit remove-custom-domain workflow: %w", submitErr)
 	}
 
 	h.logAudit(r, audit.Entry{
@@ -603,7 +637,7 @@ func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Reques
 		RiskLevel:    string(op.RiskLevel),
 	})
 
-	return result.WorkflowName, false, nil
+	return result.WorkflowName, cleanupSubmitted, nil
 }
 
 // UpdateDomainStatus accepts the add-custom-domain workflow's status

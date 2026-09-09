@@ -938,7 +938,13 @@ func TestListDomains_OmitsChallengeForActive(t *testing.T) {
 // reuse.
 type fakeDomainExecutor struct {
 	submitted []map[string]string
-	err       error
+	// submittedTeams records the namespace/team argument passed to Submit —
+	// separate from submitted's params so callers can assert on it directly
+	// (params only carries team_name/service_name/domain, and Submit's own
+	// namespace/team argument is otherwise discarded by this fake other than
+	// being echoed into SubmitResult.Namespace).
+	submittedTeams []string
+	err            error
 	// onSubmit, if set, runs synchronously inside Submit before it returns —
 	// used to assert on state (e.g. that the row still exists) at the exact
 	// moment of submission, not just before/after DeleteDomain returns.
@@ -957,6 +963,7 @@ func (f *fakeDomainExecutor) Submit(_ context.Context, _ operations.Operation, p
 		cp[k] = v
 	}
 	f.submitted = append(f.submitted, cp)
+	f.submittedTeams = append(f.submittedTeams, namespace)
 	return &operations.SubmitResult{WorkflowName: "test-remove-custom-domain-workflow", Namespace: namespace}, nil
 }
 
@@ -1215,10 +1222,13 @@ func TestDeleteDomain_LegacyMixedCaseServiceStillDeletes(t *testing.T) {
 	}
 }
 
-// TestDeleteDomain_SkipsTeardownForPendingRow pins the fix for a row that
-// never reached StatusVerified/StatusActive: it never passed DNS
+// TestDeleteDomain_SkipsTeardownForPendingRow pins the status gate: only a
+// row that is neither active, verified, nor failed skips teardown. A
+// freshly-added row defaults to pending, which never passed DNS
 // verification, so add-custom-domain never ran and there is no ingress to
 // remove. Deleting it must not submit remove-custom-domain at all.
+// StatusFailed is deliberately NOT part of this skip — see
+// TestDeleteDomain_FailedRowStillSubmitsTeardown below.
 func TestDeleteDomain_SkipsTeardownForPendingRow(t *testing.T) {
 	store := newTestDomainStore(t)
 	exec := &fakeDomainExecutor{}
@@ -1256,8 +1266,8 @@ func TestDeleteDomain_SkipsTeardownForPendingRow(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode delete response: %v", err)
 	}
-	if resp["ingress_cleanup"] != "skipped" {
-		t.Errorf("ingress_cleanup = %q, want skipped", resp["ingress_cleanup"])
+	if resp["ingress_cleanup"] != "not-required" {
+		t.Errorf("ingress_cleanup = %q, want not-required", resp["ingress_cleanup"])
 	}
 }
 
@@ -1302,6 +1312,21 @@ func TestDeleteDomain_FailedRowStillSubmitsTeardown(t *testing.T) {
 	if len(exec.submitted) != 1 {
 		t.Fatalf("expected exactly one workflow submission for a failed row, got %d", len(exec.submitted))
 	}
+	got := exec.submitted[0]
+	if got["team_name"] != "labs" || got["service_name"] != "svc" || got["domain"] != "delete-failed.example.com" {
+		t.Errorf("submitted params = %v, want team_name=labs service_name=svc domain=delete-failed.example.com", got)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode delete response: %v", err)
+	}
+	if resp["ingress_cleanup"] != "workflow-submitted" {
+		t.Errorf("ingress_cleanup = %q, want workflow-submitted", resp["ingress_cleanup"])
+	}
+	if resp["workflow_name"] == "" {
+		t.Errorf("expected workflow_name in the delete response, got %v", resp)
+	}
 }
 
 // TestDeleteDomain_NilExecutorSkipsCleanup mirrors
@@ -1332,8 +1357,178 @@ func TestDeleteDomain_NilExecutorSkipsCleanup(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode delete response: %v", err)
 	}
-	if resp["ingress_cleanup"] != "skipped" {
-		t.Errorf("ingress_cleanup = %q, want %q", resp["ingress_cleanup"], "skipped")
+	if resp["ingress_cleanup"] != "unavailable" {
+		t.Errorf("ingress_cleanup = %q, want %q", resp["ingress_cleanup"], "unavailable")
+	}
+}
+
+// TestDeleteDomain_MissingOperationIsMisconfigured pins the third
+// disambiguated cleanup outcome: when Executor/Registry ARE configured but
+// the operations registry lacks a remove-custom-domain entry (a production
+// misconfiguration under which real ingress/TLS can be left behind), the
+// delete still succeeds, zero submissions are made, and ingress_cleanup
+// reports "misconfigured" rather than the ambiguous "skipped".
+func TestDeleteDomain_MissingOperationIsMisconfigured(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistryWithout("remove-custom-domain"),
+	}}
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"delete-misconfigured.example.com"}`)), owner))
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+	if err := store.SetStatus(context.Background(), id, domains.StatusActive, ""); err != nil {
+		t.Fatalf("set status active: %v", err)
+	}
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+id, nil), owner), "id", id)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	if len(exec.submitted) != 0 {
+		t.Fatalf("expected zero workflow submissions when the operation is missing from the registry, got %+v", exec.submitted)
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode delete response: %v", err)
+	}
+	if resp["ingress_cleanup"] != "misconfigured" {
+		t.Errorf("ingress_cleanup = %q, want misconfigured", resp["ingress_cleanup"])
+	}
+}
+
+// TestDeleteDomain_NormalizesSubmitTeamArgument pins item 1: the team
+// argument passed to Executor.Submit (the mctl.ai/team workflow label) must
+// be normalized the same way params["team_name"] already is, so a legacy
+// mixed-case row does not produce a label that disagrees with its own
+// workflow parameters.
+func TestDeleteDomain_NormalizesSubmitTeamArgument(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+
+	created, err := store.Create(context.Background(), &domains.Domain{
+		ID:                uuid.New().String(),
+		Team:              "Labs",
+		Service:           "svc",
+		Domain:            "normalizes-submit-team.example.com",
+		Status:            domains.StatusPending,
+		VerificationToken: "test-token",
+		CreatedBy:         "u1",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := store.SetStatus(context.Background(), created.ID, domains.StatusActive, ""); err != nil {
+		t.Fatalf("set status active: %v", err)
+	}
+
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID+"?team=labs", nil), owner), "id", created.ID)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	if len(exec.submittedTeams) != 1 || exec.submittedTeams[0] != "labs" {
+		t.Fatalf("submittedTeams = %v, want exactly one entry \"labs\"", exec.submittedTeams)
+	}
+	if len(exec.submitted) != 1 || exec.submitted[0]["team_name"] != "labs" {
+		t.Fatalf("submitted[0] = %v, want team_name=labs", exec.submitted)
+	}
+}
+
+// TestDeleteDomain_MixedCaseRowWithoutTeamParamResolves pins item 2: the
+// no-?team= fall-through in resolveDomainForMutation must normalize the
+// row's team before the access check, so a legacy mixed-case row resolves
+// identically whether or not ?team= is supplied. The negative twin proves
+// this does not widen access beyond the caller's own groups.
+func TestDeleteDomain_MixedCaseRowWithoutTeamParamResolves(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+
+	created, err := store.Create(context.Background(), &domains.Domain{
+		ID:                uuid.New().String(),
+		Team:              "Labs",
+		Service:           "svc",
+		Domain:            "mixed-no-team-param.example.com",
+		Status:            domains.StatusPending,
+		VerificationToken: "test-token",
+		CreatedBy:         "u1",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID, nil), owner), "id", created.ID)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a caller in the row's own group without ?team=; body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDeleteDomain_MixedCaseRowWithoutTeamParamOtherGroupStill404s is the
+// negative twin of TestDeleteDomain_MixedCaseRowWithoutTeamParamResolves:
+// normalizing d.Team before the access check must not grant a caller in an
+// unrelated group access to the row.
+func TestDeleteDomain_MixedCaseRowWithoutTeamParamOtherGroupStill404s(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+
+	created, err := store.Create(context.Background(), &domains.Domain{
+		ID:                uuid.New().String(),
+		Team:              "Labs",
+		Service:           "svc",
+		Domain:            "mixed-no-team-param-other.example.com",
+		Status:            domains.StatusPending,
+		VerificationToken: "test-token",
+		CreatedBy:         "u1",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	outsider := &auth.User{ID: "u2", Groups: []string{"other"}}
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID, nil), outsider), "id", created.ID)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for a caller outside the row's group; body=%q", rec.Code, rec.Body.String())
 	}
 }
 

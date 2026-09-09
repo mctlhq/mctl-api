@@ -172,6 +172,44 @@ func TestListByTeam_EmptyTeamReturnsEmptySliceNotNil(t *testing.T) {
 	}
 }
 
+// TestListByTeam_MixedCaseStoredRow exercises the lower() comparison
+// against a genuinely mixed-case stored row — inserted directly via Create,
+// bypassing AddDomain's normalization, the same technique
+// TestCreate_LegacyMixedCaseRowIsIdempotentNotConflict uses. A caller
+// spelling the team/service in canonical lowercase must still find a row
+// that predates AddDomain's own lowercasing.
+func TestListByTeam_MixedCaseStoredRow(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.Create(ctx, newDomain("Labs", "Svc", "mixed-list.example.com")); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	filtered, err := s.ListByTeam(ctx, "labs", "svc")
+	if err != nil {
+		t.Fatalf("list by team+service: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].Domain != "mixed-list.example.com" {
+		t.Fatalf("expected exactly mixed-list.example.com, got %+v", filtered)
+	}
+
+	all, err := s.ListByTeam(ctx, "labs", "")
+	if err != nil {
+		t.Fatalf("list by team only: %v", err)
+	}
+	found := false
+	for _, d := range all {
+		if d.Domain == "mixed-list.example.com" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected mixed-list.example.com in ListByTeam(\"labs\", \"\"), got %+v", all)
+	}
+}
+
 func TestGetAndGetByDomain(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

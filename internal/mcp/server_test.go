@@ -1322,3 +1322,60 @@ func TestRemoveCustomDomain_NotesUnparseableList(t *testing.T) {
 		t.Errorf("expected a note about the unusable list, got %q", text.Text)
 	}
 }
+
+// TestRemoveCustomDomain_NotesFailedList covers the other half of
+// doRequest's error surface next to TestRemoveCustomDomain_NotesUnparseableList:
+// a list call that fails outright (a non-2xx response, converted to a
+// non-nil error by doRequest) must fall back to the operations execute path
+// and include the same "could not consult the domains registry" note —
+// not silently take the "no matching row" path a genuine empty list would.
+func TestRemoveCustomDomain_NotesFailedList(t *testing.T) {
+	var deleteCalled bool
+	var executeCalled bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/domains":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"boom"}`))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/domains/"):
+			deleteCalled = true
+			w.WriteHeader(http.StatusInternalServerError)
+		case strings.Contains(r.URL.Path, "/operations/remove-custom-domain/execute"):
+			executeCalled = true
+			_, _ = w.Write([]byte(`{"workflow_name":"remove-custom-domain-legacy789"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	result, err := callToolRemoveCustomDomain(t, backend.URL, map[string]any{
+		"team":    "labs",
+		"service": "svc",
+		"domain":  "legacy.example.com",
+		"confirm": "yes",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if deleteCalled {
+		t.Errorf("expected the DELETE path to never be called when the list call fails outright")
+	}
+	if !executeCalled {
+		t.Errorf("expected a fallback to the operations execute path when the list call fails outright")
+	}
+	if len(result.Content) == 0 {
+		t.Fatalf("expected content in the result, got none")
+	}
+	text, ok := result.Content[0].(mcplib.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(text.Text, "could not consult the domains registry") {
+		t.Errorf("expected a note about the failed list call, got %q", text.Text)
+	}
+}
