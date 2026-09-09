@@ -93,6 +93,34 @@ func TestCreate_CrossTeamConflict(t *testing.T) {
 	}
 }
 
+// TestCreate_LegacyMixedCaseRowIsIdempotentNotConflict pins the fix for a
+// case the case-insensitivity pass elsewhere in the package missed: this is
+// the one lookup Create's own idempotent-reregistration path performs, and
+// AddDomain always lowercases team/service on the way in now, so an exact
+// comparison against a legacy mixed-case row would 409 every
+// re-registration by the row's own team, forever, instead of returning the
+// existing row.
+func TestCreate_LegacyMixedCaseRowIsIdempotentNotConflict(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	legacy := newDomain("Labs", "Svc", "legacy-reregister.example.com")
+	created, err := s.Create(ctx, legacy)
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+
+	// Same hostname, same team/service — but lowercased, the way AddDomain
+	// normalizes a real caller's input before ever reaching Create.
+	again, err := s.Create(ctx, newDomain("labs", "svc", "legacy-reregister.example.com"))
+	if err != nil {
+		t.Fatalf("re-registration by the same team must not error, got: %v", err)
+	}
+	if again.ID != created.ID {
+		t.Fatalf("expected the existing row back (id %q), got a different id %q", created.ID, again.ID)
+	}
+}
+
 func TestListByTeam(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

@@ -23,11 +23,14 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/domains"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
 // mctl-api is the system of record for custom domains: internal/domains, a
@@ -678,6 +681,659 @@ func TestVerifyDomain_PositiveVerdictMarksVerified(t *testing.T) {
 	}
 	if stored.Status != domains.StatusVerified || stored.VerifiedAt == nil {
 		t.Fatalf("expected MarkVerified to have persisted status=verified with verified_at set, got %+v", stored)
+	}
+}
+
+// txtResolver always answers LookupTXT with a captured value, mirroring
+// cnameResolver's shape but for the TXT path — used to feed a real
+// challenge_value (captured from an AddDomain response) back through
+// verification rather than a value the test invented independently.
+type txtResolver struct{ value string }
+
+func (r txtResolver) LookupTXT(context.Context, string) ([]string, error) {
+	return []string{r.value}, nil
+}
+func (r txtResolver) LookupCNAME(context.Context, string) (string, error) {
+	return "", errNoRecord
+}
+
+// TestVerifyDomain_TXTPathMarksVerified covers the TXT verification path by
+// id, feeding the challenge_value AddDomain actually minted back through a
+// txtResolver stub — the CNAME-based positive-path test
+// (TestVerifyDomain_PositiveVerdictMarksVerified) does not exercise the TXT
+// branch of Verify at all.
+func TestVerifyDomain_TXTPathMarksVerified(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	user := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"verify-txt.example.com"}`)), user))
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+	challengeValue, _ := created["challenge_value"].(string)
+	if id == "" || challengeValue == "" {
+		t.Fatalf("expected id and challenge_value in add response, got %q", addRec.Body.String())
+	}
+
+	h.opts.DomainVerifier = domains.NewVerifierWithResolver(txtResolver{value: challengeValue})
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/"+id+"/verify?team=labs", nil), user), "id", id)
+	rec := httptest.NewRecorder()
+	h.VerifyDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	var result domains.Result
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode verify response: %v", err)
+	}
+	if !result.Verified || result.Method != domains.MethodTXT {
+		t.Fatalf("expected a verified TXT result, got %+v", result)
+	}
+
+	stored, err := store.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get after verify: %v", err)
+	}
+	if stored.Status != domains.StatusVerified || stored.VerifiedAt == nil {
+		t.Fatalf("expected status=verified with verified_at set, got %+v", stored)
+	}
+}
+
+// TestVerifyDomainByName_HappyPathMarksVerified is the by-name equivalent of
+// TestVerifyDomain_TXTPathMarksVerified, driven through VerifyDomainByName
+// instead of VerifyDomain.
+func TestVerifyDomainByName_HappyPathMarksVerified(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	user := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"verify-byname-txt.example.com"}`)), user))
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	challengeValue, _ := created["challenge_value"].(string)
+	if challengeValue == "" {
+		t.Fatalf("expected challenge_value in add response, got %q", addRec.Body.String())
+	}
+
+	h.opts.DomainVerifier = domains.NewVerifierWithResolver(txtResolver{value: challengeValue})
+
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/verify",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"verify-byname-txt.example.com"}`)), user)
+	rec := httptest.NewRecorder()
+	h.VerifyDomainByName(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	var result domains.Result
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode verify response: %v", err)
+	}
+	if !result.Verified || result.Method != domains.MethodTXT {
+		t.Fatalf("expected a verified TXT result, got %+v", result)
+	}
+
+	stored, err := store.GetByDomain(context.Background(), "verify-byname-txt.example.com")
+	if err != nil {
+		t.Fatalf("get by domain after verify: %v", err)
+	}
+	if stored.Status != domains.StatusVerified || stored.VerifiedAt == nil {
+		t.Fatalf("expected status=verified with verified_at set, got %+v", stored)
+	}
+}
+
+// TestVerifyDomainByName_ServiceMismatchNotFound pins that a real service
+// mismatch (not just case) still 404s, which the switch to EqualFold in the
+// ownership gate must not have relaxed.
+func TestVerifyDomainByName_ServiceMismatchNotFound(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
+	user := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	h.AddDomain(httptest.NewRecorder(), withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"service-mismatch.example.com"}`)), user))
+
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/verify",
+		strings.NewReader(`{"team":"labs","service":"other","domain":"service-mismatch.example.com"}`)), user)
+	rec := httptest.NewRecorder()
+	h.VerifyDomainByName(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestVerifyDomainByName_MixedCaseTeamServiceStillMatches pins the EqualFold
+// ownership-gate fix: a domain registered with mixed-case team/service must
+// still be reachable by verify-by-name using lowercase values.
+func TestVerifyDomainByName_MixedCaseTeamServiceStillMatches(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
+	user := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"Labs","service":"SVC","domain":"mixed-case.example.com"}`)), user))
+	if addRec.Code != http.StatusCreated {
+		t.Fatalf("add status = %d, want 201; body=%q", addRec.Code, addRec.Body.String())
+	}
+
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/verify",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"mixed-case.example.com"}`)), user)
+	rec := httptest.NewRecorder()
+	h.VerifyDomainByName(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (mixed-case team/service must still match); body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestListDomains_IncludesChallengeForPending decodes the list response into
+// a generic map (not strings.Contains) so it asserts on actual JSON keys
+// rather than substring presence somewhere in the body.
+func TestListDomains_IncludesChallengeForPending(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	h.AddDomain(httptest.NewRecorder(), withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"list-pending.example.com"}`)), owner))
+
+	rec := httptest.NewRecorder()
+	h.ListDomains(rec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/domains?team=labs", nil), owner))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string][]map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	var found map[string]any
+	for _, d := range resp["domains"] {
+		if d["domain"] == "list-pending.example.com" {
+			found = d
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected list-pending.example.com in response, got %q", rec.Body.String())
+	}
+	for _, key := range []string{"challenge_record", "challenge_value", "cname_target"} {
+		if _, ok := found[key]; !ok {
+			t.Errorf("expected key %q present for a pending domain, got %v", key, found)
+		}
+	}
+}
+
+// TestListDomains_OmitsChallengeForActive pins domainResponseFor's honesty
+// fix: an active row's challenge fields must be absent (not just empty), and
+// cname_target must still be present.
+func TestListDomains_OmitsChallengeForActive(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"list-active.example.com"}`)), owner))
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+
+	patchReq := withURLParam(withUser(httptest.NewRequest(http.MethodPatch, "/api/v1/domains/"+id,
+		strings.NewReader(`{"status":"active"}`)), auth.NewServiceUser()), "id", id)
+	patchRec := httptest.NewRecorder()
+	h.UpdateDomainStatus(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch status = %d, want 200; body=%q", patchRec.Code, patchRec.Body.String())
+	}
+
+	rec := httptest.NewRecorder()
+	h.ListDomains(rec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/domains?team=labs", nil), owner))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string][]map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	var found map[string]any
+	for _, d := range resp["domains"] {
+		if d["domain"] == "list-active.example.com" {
+			found = d
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected list-active.example.com in response, got %q", rec.Body.String())
+	}
+	for _, key := range []string{"challenge_record", "challenge_value"} {
+		if _, ok := found[key]; ok {
+			t.Errorf("expected key %q absent for an active domain, got %v", key, found)
+		}
+	}
+	if _, ok := found["cname_target"]; !ok {
+		t.Errorf("expected cname_target present for an active domain, got %v", found)
+	}
+}
+
+// fakeDomainExecutor is a minimal WorkflowExecutor double for exercising
+// DeleteDomain's ingress-cleanup trigger. The package api test files (unlike
+// smoke_test.go's separate api_test package) have no shared fake executor to
+// reuse.
+type fakeDomainExecutor struct {
+	submitted []map[string]string
+	err       error
+	// onSubmit, if set, runs synchronously inside Submit before it returns —
+	// used to assert on state (e.g. that the row still exists) at the exact
+	// moment of submission, not just before/after DeleteDomain returns.
+	onSubmit func(params map[string]string)
+}
+
+func (f *fakeDomainExecutor) Submit(_ context.Context, _ operations.Operation, params map[string]string, _, namespace string) (*operations.SubmitResult, error) {
+	if f.onSubmit != nil {
+		f.onSubmit(params)
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	cp := make(map[string]string, len(params))
+	for k, v := range params {
+		cp[k] = v
+	}
+	f.submitted = append(f.submitted, cp)
+	return &operations.SubmitResult{WorkflowName: "test-remove-custom-domain-workflow", Namespace: namespace}, nil
+}
+
+func (f *fakeDomainExecutor) GetWorkflowStatus(context.Context, string, string) (map[string]interface{}, error) {
+	return nil, nil
+}
+
+func (f *fakeDomainExecutor) ListCronAgentRuns(context.Context, string, string, time.Time) ([]map[string]interface{}, error) {
+	return nil, nil
+}
+
+// TestDeleteDomain_TriggersRemoveCustomDomain pins the delete/ingress
+// convergence fix: deleting a row must submit remove-custom-domain with the
+// row's own team/service/domain, and the submission must happen while the
+// row still exists (checked from inside Submit itself, not just around the
+// DeleteDomain call).
+func TestDeleteDomain_TriggersRemoveCustomDomain(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"delete-triggers.example.com"}`)), owner))
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+	if id == "" {
+		t.Fatalf("expected an id in the add response, got %q", addRec.Body.String())
+	}
+	// Teardown is only submitted for a row that reached active/verified
+	// (see TestDeleteDomain_SkipsTeardownForPendingRow) — a freshly-added
+	// row defaults to pending, so promote it to exercise the submission
+	// path this test is actually about.
+	if err := store.SetStatus(context.Background(), id, domains.StatusActive, ""); err != nil {
+		t.Fatalf("set status active: %v", err)
+	}
+
+	exec.onSubmit = func(map[string]string) {
+		if _, err := store.Get(context.Background(), id); err != nil {
+			t.Errorf("expected the row to still exist when Submit is called, got %v", err)
+		}
+	}
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+id, nil), owner), "id", id)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	if len(exec.submitted) != 1 {
+		t.Fatalf("expected exactly one workflow submission, got %d", len(exec.submitted))
+	}
+	got := exec.submitted[0]
+	if got["team_name"] != "labs" || got["service_name"] != "svc" || got["domain"] != "delete-triggers.example.com" {
+		t.Errorf("submitted params = %v, want team_name=labs service_name=svc domain=delete-triggers.example.com", got)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode delete response: %v", err)
+	}
+	if resp["workflow_name"] == "" {
+		t.Errorf("expected workflow_name in the delete response, got %v", resp)
+	}
+
+	if _, err := store.Get(context.Background(), id); !errors.Is(err, domains.ErrNotFound) {
+		t.Fatalf("expected the row to be gone after a successful submission, got err=%v", err)
+	}
+}
+
+// TestDeleteDomain_SubmitFailureKeepsRow pins that a failed ingress-cleanup
+// submission must not delete the row — otherwise the only record of what
+// still needs manual cleanup is lost.
+func TestDeleteDomain_SubmitFailureKeepsRow(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{err: errors.New("submit failed")}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"delete-submit-fail.example.com"}`)), owner))
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+	if err := store.SetStatus(context.Background(), id, domains.StatusActive, ""); err != nil {
+		t.Fatalf("set status active: %v", err)
+	}
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+id, nil), owner), "id", id)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%q", rec.Code, rec.Body.String())
+	}
+
+	if _, err := store.Get(context.Background(), id); err != nil {
+		t.Fatalf("expected the row to still exist after a failed submission, got %v", err)
+	}
+}
+
+// TestDeleteDomain_InvalidServiceNeverReachesSubmit pins the P1 fix:
+// triggerRemoveCustomDomain must validate team/service against the
+// registry's declared pattern before calling Executor.Submit, the same way
+// every other Submit call site does. Simulates a row that predates
+// AddDomain's own team/service pattern validation (or was inserted some
+// other way) by writing directly through the store, bypassing the handler.
+func TestDeleteDomain_InvalidServiceNeverReachesSubmit(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+
+	created, err := store.Create(context.Background(), &domains.Domain{
+		ID:                uuid.New().String(),
+		Team:              "labs",
+		Service:           "../../../platform-gitops/services/other-team/api",
+		Domain:            "path-traversal.example.com",
+		Status:            domains.StatusActive,
+		VerificationToken: "test-token",
+		CreatedBy:         "u1",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID, nil), owner), "id", created.ID)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%q", rec.Code, rec.Body.String())
+	}
+	if len(exec.submitted) != 0 {
+		t.Fatalf("expected zero workflow submissions for an out-of-pattern service, got %+v", exec.submitted)
+	}
+	if _, err := store.Get(context.Background(), created.ID); err != nil {
+		t.Fatalf("expected the row to still exist after a rejected submission, got %v", err)
+	}
+}
+
+// TestDomainLifecycle_MixedCaseTeamRoundTrips pins the P2 fix: AddDomain
+// lowercases team/service on write, so a caller spelling the team "Labs"
+// must still be able to list and delete that same row later — before the
+// fix, ListDomains and resolveDomainForMutation compared the raw ?team=
+// param case-sensitively against the (already-lowercased) stored value,
+// making the row invisible to list and 404-ing on delete.
+func TestDomainLifecycle_MixedCaseTeamRoundTrips(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	// Group membership is always canonical lowercase in practice (GitHub/Dex
+	// group names); the mixed case being pinned here is in what the CALLER
+	// types in the request body/query, not in group membership itself.
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"Labs","service":"Svc","domain":"mixed-case.example.com"}`)), owner))
+	if addRec.Code != http.StatusCreated {
+		t.Fatalf("add status = %d, want 201; body=%q", addRec.Code, addRec.Body.String())
+	}
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+
+	listRec := httptest.NewRecorder()
+	h.ListDomains(listRec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/domains?team=Labs", nil), owner))
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want 200; body=%q", listRec.Code, listRec.Body.String())
+	}
+	if !strings.Contains(listRec.Body.String(), "mixed-case.example.com") {
+		t.Fatalf("expected mixed-case.example.com in list response for team=Labs, got %q", listRec.Body.String())
+	}
+
+	delReq := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+id+"?team=Labs", nil), owner), "id", id)
+	delRec := httptest.NewRecorder()
+	h.DeleteDomain(delRec, delReq)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200; body=%q", delRec.Code, delRec.Body.String())
+	}
+}
+
+// TestDeleteDomain_LegacyMixedCaseServiceStillDeletes pins the fix for a
+// regression the P1 validation fix (Registry.ValidateInput before Submit)
+// introduced: AddDomain only started lowercasing team/service in this same
+// change, so a row that predates it can still hold mixed-case values.
+// Validating those verbatim against the registry's lowercase-only pattern
+// would fail on every delete attempt and make such a row permanently
+// undeletable through the API. Writes directly through the store (bypassing
+// AddDomain's normalization) to simulate that pre-existing row.
+func TestDeleteDomain_LegacyMixedCaseServiceStillDeletes(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+
+	created, err := store.Create(context.Background(), &domains.Domain{
+		ID:                uuid.New().String(),
+		Team:              "Labs",
+		Service:           "Svc",
+		Domain:            "legacy-mixed-case.example.com",
+		Status:            domains.StatusActive,
+		VerificationToken: "test-token",
+		CreatedBy:         "u1",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// ?team=labs, not the row's own "Labs" spelling: this exercises
+	// resolveDomainForMutation's EqualFold comparison against a caller who
+	// (correctly) doesn't know this particular row predates normalization.
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID+"?team=labs", nil), owner), "id", created.ID)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	if len(exec.submitted) != 1 {
+		t.Fatalf("expected exactly one workflow submission, got %d", len(exec.submitted))
+	}
+	got := exec.submitted[0]
+	if got["team_name"] != "labs" || got["service_name"] != "svc" {
+		t.Errorf("submitted params = %v, want lowercased team_name=labs service_name=svc", got)
+	}
+}
+
+// TestDeleteDomain_SkipsTeardownForPendingRow pins the fix for a row that
+// never reached StatusVerified/StatusActive: it never passed DNS
+// verification, so add-custom-domain never ran and there is no ingress to
+// remove. Deleting it must not submit remove-custom-domain at all.
+func TestDeleteDomain_SkipsTeardownForPendingRow(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"delete-pending.example.com"}`)), owner))
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+	if created["status"] != domains.StatusPending {
+		t.Fatalf("expected a freshly-added row to be pending, got %v", created["status"])
+	}
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+id, nil), owner), "id", id)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	if len(exec.submitted) != 0 {
+		t.Fatalf("expected zero workflow submissions for a pending row, got %+v", exec.submitted)
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode delete response: %v", err)
+	}
+	if resp["ingress_cleanup"] != "skipped" {
+		t.Errorf("ingress_cleanup = %q, want skipped", resp["ingress_cleanup"])
+	}
+}
+
+// TestDeleteDomain_FailedRowStillSubmitsTeardown pins that StatusFailed is
+// NOT included in the pending-only skip: unlike StatusPending, a failed row
+// can only be reached via UpdateDomainStatus (the add-custom-domain
+// workflow's own service-principal-only callback), which means the
+// workflow already started and, per its own ordering, already committed
+// ingress.hosts/ingress.tls to gitops before the HTTP-01 issuance step most
+// likely to fail. Deleting such a row without submitting teardown would
+// orphan that commit.
+func TestDeleteDomain_FailedRowStillSubmitsTeardown(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"delete-failed.example.com"}`)), owner))
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+	if err := store.SetStatus(context.Background(), id, domains.StatusFailed, "cert issuance timed out"); err != nil {
+		t.Fatalf("set status failed: %v", err)
+	}
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+id, nil), owner), "id", id)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	if len(exec.submitted) != 1 {
+		t.Fatalf("expected exactly one workflow submission for a failed row, got %d", len(exec.submitted))
+	}
+}
+
+// TestDeleteDomain_NilExecutorSkipsCleanup mirrors
+// TestDeleteDomain_OwnTeamSucceeds but with no executor configured, and
+// additionally asserts on the new ingress_cleanup response field.
+func TestDeleteDomain_NilExecutorSkipsCleanup(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"delete-skip.example.com"}`)), owner))
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+id, nil), owner), "id", id)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode delete response: %v", err)
+	}
+	if resp["ingress_cleanup"] != "skipped" {
+		t.Errorf("ingress_cleanup = %q, want %q", resp["ingress_cleanup"], "skipped")
 	}
 }
 

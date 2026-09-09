@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -107,7 +108,14 @@ func (s *Store) Create(ctx context.Context, d *Domain) (*Domain, error) {
 			if getErr != nil {
 				return nil, fmt.Errorf("domains store: create: domain %q already exists: %w", d.Domain, getErr)
 			}
-			if existing.Team != d.Team || existing.Service != d.Service {
+			// EqualFold, not exact: AddDomain lowercases team/service on
+			// write, but a row that predates that normalization (the
+			// column is plain TEXT, never migrated) can still hold its
+			// original casing. Comparing exactly would 409 every
+			// re-registration attempt by the row's own team forever,
+			// since the caller's value is always lowercased before this
+			// point while existing.Team/Service may not be.
+			if !strings.EqualFold(existing.Team, d.Team) || !strings.EqualFold(existing.Service, d.Service) {
 				return nil, ErrDomainConflict
 			}
 			return existing, nil
@@ -119,13 +127,19 @@ func (s *Store) Create(ctx context.Context, d *Domain) (*Domain, error) {
 
 // ListByTeam returns every domain registered for team, optionally filtered
 // by service.
+// ListByTeam compares team/service case-insensitively (lower() on both
+// sides). AddDomain lowercases new registrations, but rows created before
+// that normalization landed (or via any future direct-store write) may
+// still hold their original casing, and there is no migration rewriting
+// them — a caller spelling the team differently than a legacy row was
+// stored must still find it.
 func (s *Store) ListByTeam(ctx context.Context, team, service string) ([]Domain, error) {
 	query := `SELECT id, team, service, domain, status, verification_token,
 	          created_by, created_at, updated_at, verified_at, last_error
-	          FROM custom_domains WHERE team=$1`
+	          FROM custom_domains WHERE lower(team)=lower($1)`
 	args := []interface{}{team}
 	if service != "" {
-		query += " AND service=$2"
+		query += " AND lower(service)=lower($2)"
 		args = append(args, service)
 	}
 	query += " ORDER BY created_at DESC"

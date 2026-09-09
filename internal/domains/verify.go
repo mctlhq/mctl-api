@@ -119,8 +119,13 @@ func (v *Verifier) Verify(ctx context.Context, d Domain, cnameTarget string) (Re
 
 	// Fast path: an unproxied CNAME pointing straight at the platform ingress
 	// is accepted as proof of control without requiring the TXT record.
+	// Compared case-insensitively: DNS names are case-insensitive by
+	// definition (RFC 4343), and a resolver is free to echo back whatever
+	// case the query used, or the case a zone operator happened to type into
+	// a record — neither says anything about ownership, so a case mismatch
+	// alone must never turn a legitimate CNAME into a failed verification.
 	cname, err := v.resolver.LookupCNAME(ctx, d.Domain)
-	if err == nil && strings.TrimSuffix(cname, ".") == strings.TrimSuffix(cnameTarget, ".") {
+	if err == nil && strings.EqualFold(strings.TrimSuffix(cname, "."), strings.TrimSuffix(cnameTarget, ".")) {
 		result.Verified = true
 		result.Method = MethodCNAME
 		return result, nil

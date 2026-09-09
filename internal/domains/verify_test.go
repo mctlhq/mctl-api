@@ -122,6 +122,29 @@ func TestVerify_CloudflareProxiedWithTXT(t *testing.T) {
 	}
 }
 
+// TestVerify_CNAMEFastPath_CaseInsensitive pins the fix for a false negative:
+// DNS names are case-insensitive, and a resolver is free to echo back
+// whatever case a zone operator typed into the CNAME record, so an
+// otherwise-correct CNAME must not fail verification just because its
+// answer's case differs from cnameTarget's.
+func TestVerify_CNAMEFastPath_CaseInsensitive(t *testing.T) {
+	d := Domain{Domain: "genai-leader.example.com", VerificationToken: "abc123"}
+	resolver := &stubResolver{
+		cname: map[string]string{
+			d.Domain: "LABS-SVC.MCTL.AI.",
+		},
+	}
+	v := NewVerifierWithResolver(resolver)
+
+	result, err := v.Verify(context.Background(), d, "labs-svc.mctl.ai")
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !result.Verified || result.Method != MethodCNAME {
+		t.Fatalf("expected a case-insensitive CNAME match to succeed, got %+v", result)
+	}
+}
+
 func TestVerify_NeitherTXTNorCNAME(t *testing.T) {
 	d := Domain{Domain: "genai-leader.example.com", VerificationToken: "abc123"}
 	v := NewVerifierWithResolver(&stubResolver{})
