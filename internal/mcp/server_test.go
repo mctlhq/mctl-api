@@ -1279,3 +1279,46 @@ func TestRemoveCustomDomain_FallsBackForUnregisteredHostname(t *testing.T) {
 		t.Errorf("expected a fallback to the operations execute path for an unregistered hostname")
 	}
 }
+
+// TestRemoveCustomDomain_NotesUnparseableList pins the fix for the gap next
+// to TestRemoveCustomDomain_FallsBackForUnregisteredHostname: a *successful*
+// list call (listErr == nil) whose body doesn't parse into the expected
+// shape must still fall back and still say so in the result text — not
+// silently take the same path as a genuine "no matching row".
+func TestRemoveCustomDomain_NotesUnparseableList(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/domains":
+			_, _ = w.Write([]byte(`not json`))
+		case strings.Contains(r.URL.Path, "/operations/remove-custom-domain/execute"):
+			_, _ = w.Write([]byte(`{"workflow_name":"remove-custom-domain-legacy456"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	result, err := callToolRemoveCustomDomain(t, backend.URL, map[string]any{
+		"team":    "labs",
+		"service": "svc",
+		"domain":  "legacy.example.com",
+		"confirm": "yes",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if len(result.Content) == 0 {
+		t.Fatalf("expected content in the result, got none")
+	}
+	text, ok := result.Content[0].(mcplib.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(text.Text, "could not consult the domains registry") {
+		t.Errorf("expected a note about the unusable list, got %q", text.Text)
+	}
+}

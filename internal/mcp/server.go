@@ -1526,6 +1526,13 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 		// is only given the hostname, not the row id.
 		listPath := "/api/v1/domains?team=" + url.QueryEscape(team) + "&service=" + url.QueryEscape(service)
 		listBody, listErr := s.apiGet(ctx, listPath)
+		// listWarn carries forward EITHER failure mode that makes the list
+		// unusable — the call itself failing, or a 200 whose body doesn't
+		// parse into the expected shape — so the fallback note below covers
+		// both, not just listErr. A successful-but-unparseable list is
+		// otherwise indistinguishable from "no matching row" and silently
+		// takes the same fallback path as a genuine miss.
+		listWarn := listErr
 		if listErr == nil {
 			var listResp struct {
 				Domains []struct {
@@ -1533,8 +1540,10 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 					Domain string `json:"domain"`
 				} `json:"domains"`
 			}
-			wantDomain := strings.TrimSuffix(domain, ".")
-			if json.Unmarshal(listBody, &listResp) == nil { //nolint:nilerr
+			if err := json.Unmarshal(listBody, &listResp); err != nil {
+				listWarn = fmt.Errorf("parse domains list: %w", err)
+			} else {
+				wantDomain := strings.TrimSuffix(domain, ".")
 				for _, d := range listResp.Domains {
 					if strings.EqualFold(strings.TrimSuffix(d.Domain, "."), wantDomain) {
 						delBody, delErr := s.apiDelete(ctx, "/api/v1/domains/"+d.ID+"?team="+url.QueryEscape(team))
@@ -1548,13 +1557,13 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 		}
 
 		// Fallback: no matching registry row (a legacy hostname predating
-		// the registry, or the list call itself failed) — trigger the
-		// workflow directly, same as this tool always did before the
-		// registry existed. A transient list failure is indistinguishable
-		// here from a genuine "not registered", so a listErr is called out
-		// explicitly: otherwise a transient 500 (or an access issue on this
-		// team) silently takes the legacy-fallback path, tears down
-		// ingress, and leaves a real registry row behind pointing at a
+		// the registry, or the list was unusable per listWarn) — trigger
+		// the workflow directly, same as this tool always did before the
+		// registry existed. An unusable list is indistinguishable here from
+		// a genuine "not registered", so listWarn is called out explicitly:
+		// otherwise a transient 500 (or an access issue on this team, or an
+		// unparseable body) silently takes the legacy-fallback path, tears
+		// down ingress, and leaves a real registry row behind pointing at a
 		// domain that no longer resolves.
 		wfParams := map[string]string{
 			"team_name":    team,
@@ -1565,8 +1574,8 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to remove domain: %v", err)), nil
 		}
-		if listErr != nil {
-			return mcplib.NewToolResultText(fmt.Sprintf("%s\n\nNote: could not list the domains registry to check for a row to clean up (%v) — this triggered the removal workflow directly without confirming whether a registry row exists for this hostname.", string(body), listErr)), nil
+		if listWarn != nil {
+			return mcplib.NewToolResultText(fmt.Sprintf("%s\n\nNote: could not consult the domains registry to check for a row to clean up (%v) — this triggered the removal workflow directly without confirming whether a registry row exists for this hostname.", string(body), listWarn)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

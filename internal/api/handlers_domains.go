@@ -332,15 +332,20 @@ func (h *Handlers) resolveDomainForMutation(w http.ResponseWriter, r *http.Reque
 		return d, true
 	}
 
-	// Normalized the same way AddDomain stores it: d.Team is always
-	// lowercase, so an un-normalized "Acme" query param would otherwise
-	// never match a row that registered and lists correctly as "acme".
+	// Normalizing the param matches how a real caller's tenant membership is
+	// always spelled (canonical lowercase group names), so HasTenantAccess
+	// below sees the same casing regardless of how this ?team= happens to
+	// be typed.
 	if team := normalizeIdentifier(r.URL.Query().Get("team")); team != "" {
 		if !user.HasTenantAccess(team) {
 			writeError(w, http.StatusForbidden, "access denied to team")
 			return nil, false
 		}
-		if d.Team != team {
+		// EqualFold, not exact: d.Team may still hold its original casing
+		// for a row that predates AddDomain's own normalization (see
+		// ListByTeam's case-insensitive lookup for the same reason), and
+		// VerifyDomainByName already compares this way for that reason.
+		if !strings.EqualFold(d.Team, team) {
 			writeError(w, http.StatusNotFound, "domain not found")
 			return nil, false
 		}
@@ -518,6 +523,14 @@ func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 // submission itself fails, so the caller (DeleteDomain) can keep the row
 // rather than delete a domain whose ingress was never actually cleaned up.
 func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Request, d *domains.Domain) (workflowName string, skipped bool, err error) {
+	// A row that never reached StatusVerified/StatusActive never passed DNS
+	// verification, so add-custom-domain never ran and there is no ingress
+	// host or TLS entry to remove — submitting remove-custom-domain here
+	// would be a gitops-mutating workflow run with nothing to do.
+	if d.Status != domains.StatusActive && d.Status != domains.StatusVerified {
+		return "", true, nil
+	}
+
 	if h.opts.Executor == nil || h.opts.Registry == nil {
 		slog.Warn("skipping remove-custom-domain workflow: executor or operations registry not configured",
 			"team", d.Team, "service", d.Service, "domain", d.Domain)
@@ -537,9 +550,17 @@ func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Reques
 		userID = user.ID
 	}
 
+	// Normalized, not verbatim: AddDomain only started lowercasing
+	// team/service in this same change, so a row that predates it (or was
+	// written some other way) can still hold its original casing. Without
+	// normalizing here, such a row would fail ValidateInput's pattern check
+	// below on every delete attempt and become permanently undeletable
+	// through the API — while a genuinely malicious value (e.g. containing
+	// "/" or "..") still fails the pattern after lowercasing, so this keeps
+	// the security property the validation exists for.
 	params := map[string]string{
-		"team_name":    d.Team,
-		"service_name": d.Service,
+		"team_name":    normalizeIdentifier(d.Team),
+		"service_name": normalizeIdentifier(d.Service),
 		"domain":       d.Domain,
 	}
 
