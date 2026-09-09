@@ -168,7 +168,16 @@ func (h *Handlers) ListDomains(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"domains": list})
+	// Mapped through domainResponseFor, not written as raw []domains.Domain:
+	// the TXT challenge is the whole point of a pending row, and list is the
+	// natural "what do I still have to create" endpoint for a caller who
+	// lost the response from AddDomain. make(..., 0, ...) keeps the
+	// non-null-when-empty shape ListByTeam already guarantees.
+	out := make([]domainResponse, 0, len(list))
+	for i := range list {
+		out = append(out, h.domainResponseFor(&list[i]))
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"domains": out})
 }
 
 // AddDomain registers a custom domain in mctl-api's own store.

@@ -257,6 +257,28 @@ func TestAddDomain_PlatformDomainTrailingDotRejected(t *testing.T) {
 	}
 }
 
+// TestAddDomain_UnnormalizedPlatformDomainConfigStillGuards pins the fix for
+// platformDomain(): isPlatformDomain only lowercases the request host, so an
+// uppercase or trailing-dot PLATFORM_DOMAIN previously matched neither
+// comparison and silently let a tenant self-register inside the platform
+// domain. Every other handler test already constructs Options with an
+// already-normalized "mctl.ai", so this is the only test that would fail if
+// platformDomain() stopped normalizing.
+func TestAddDomain_UnnormalizedPlatformDomainConfigStillGuards(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "MCTL.AI."}}
+
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"web","domain":"api.mctl.ai"}`)),
+		&auth.User{ID: "u1", Groups: []string{"labs"}})
+	rec := httptest.NewRecorder()
+	h.AddDomain(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (unnormalized PLATFORM_DOMAIN must still guard); body=%q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAddDomain_InvalidHostnameRejected(t *testing.T) {
 	store := newTestDomainStore(t)
 	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}

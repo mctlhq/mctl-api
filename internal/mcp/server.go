@@ -1584,6 +1584,21 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 			// team/service re-triggers add-custom-domain — a GitOps commit
 			// and a cert-manager reissue — for every already-active domain,
 			// every time.
+			//
+			// active is not the only repeat case, though: while the
+			// workflow is running (the window between MarkVerified setting
+			// StatusVerified and the workflow's own PATCH callback moving it
+			// to StatusActive — minutes, not seconds, for a GitOps commit +
+			// Argo sync + HTTP-01 issuance), a second verify call in that
+			// window still sees StatusVerified, verifies true again, and
+			// re-triggers. Accepted for now: skipping StatusVerified too
+			// would also block the one case that legitimately needs a
+			// retry — a domain stuck at StatusVerified because the
+			// workflow trigger itself failed (the wfErr branch below).
+			// Closing this properly needs a way to tell "already triggered,
+			// awaiting callback" apart from "trigger failed, needs retry" —
+			// a distinct in-progress status or a trigger timestamp on the
+			// row — which is more than this fix is scoped to do.
 			if json.Unmarshal(vBody, &vResult) == nil && vResult.Verified && d.Status != domains.StatusActive { //nolint:nilerr
 				wfParams := map[string]string{
 					"team_name":    team,
