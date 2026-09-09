@@ -1550,7 +1550,12 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 		// Fallback: no matching registry row (a legacy hostname predating
 		// the registry, or the list call itself failed) — trigger the
 		// workflow directly, same as this tool always did before the
-		// registry existed.
+		// registry existed. A transient list failure is indistinguishable
+		// here from a genuine "not registered", so a listErr is called out
+		// explicitly: otherwise a transient 500 (or an access issue on this
+		// team) silently takes the legacy-fallback path, tears down
+		// ingress, and leaves a real registry row behind pointing at a
+		// domain that no longer resolves.
 		wfParams := map[string]string{
 			"team_name":    team,
 			"service_name": service,
@@ -1559,6 +1564,9 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 		body, err := s.apiPost(ctx, "/api/v1/operations/remove-custom-domain/execute", wfParams)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to remove domain: %v", err)), nil
+		}
+		if listErr != nil {
+			return mcplib.NewToolResultText(fmt.Sprintf("%s\n\nNote: could not list the domains registry to check for a row to clean up (%v) — this triggered the removal workflow directly without confirming whether a registry row exists for this hostname.", string(body), listErr)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

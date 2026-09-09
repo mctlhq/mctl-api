@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/domains"
@@ -1062,6 +1063,93 @@ func TestDeleteDomain_SubmitFailureKeepsRow(t *testing.T) {
 
 	if _, err := store.Get(context.Background(), id); err != nil {
 		t.Fatalf("expected the row to still exist after a failed submission, got %v", err)
+	}
+}
+
+// TestDeleteDomain_InvalidServiceNeverReachesSubmit pins the P1 fix:
+// triggerRemoveCustomDomain must validate team/service against the
+// registry's declared pattern before calling Executor.Submit, the same way
+// every other Submit call site does. Simulates a row that predates
+// AddDomain's own team/service pattern validation (or was inserted some
+// other way) by writing directly through the store, bypassing the handler.
+func TestDeleteDomain_InvalidServiceNeverReachesSubmit(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+
+	created, err := store.Create(context.Background(), &domains.Domain{
+		ID:                uuid.New().String(),
+		Team:              "labs",
+		Service:           "../../../platform-gitops/services/other-team/api",
+		Domain:            "path-traversal.example.com",
+		VerificationToken: "test-token",
+		CreatedBy:         "u1",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID, nil), owner), "id", created.ID)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%q", rec.Code, rec.Body.String())
+	}
+	if len(exec.submitted) != 0 {
+		t.Fatalf("expected zero workflow submissions for an out-of-pattern service, got %+v", exec.submitted)
+	}
+	if _, err := store.Get(context.Background(), created.ID); err != nil {
+		t.Fatalf("expected the row to still exist after a rejected submission, got %v", err)
+	}
+}
+
+// TestDomainLifecycle_MixedCaseTeamRoundTrips pins the P2 fix: AddDomain
+// lowercases team/service on write, so a caller spelling the team "Labs"
+// must still be able to list and delete that same row later — before the
+// fix, ListDomains and resolveDomainForMutation compared the raw ?team=
+// param case-sensitively against the (already-lowercased) stored value,
+// making the row invisible to list and 404-ing on delete.
+func TestDomainLifecycle_MixedCaseTeamRoundTrips(t *testing.T) {
+	store := newTestDomainStore(t)
+	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	// Group membership is always canonical lowercase in practice (GitHub/Dex
+	// group names); the mixed case being pinned here is in what the CALLER
+	// types in the request body/query, not in group membership itself.
+	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"Labs","service":"Svc","domain":"mixed-case.example.com"}`)), owner))
+	if addRec.Code != http.StatusCreated {
+		t.Fatalf("add status = %d, want 201; body=%q", addRec.Code, addRec.Body.String())
+	}
+	var created map[string]interface{}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	id, _ := created["id"].(string)
+
+	listRec := httptest.NewRecorder()
+	h.ListDomains(listRec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/domains?team=Labs", nil), owner))
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want 200; body=%q", listRec.Code, listRec.Body.String())
+	}
+	if !strings.Contains(listRec.Body.String(), "mixed-case.example.com") {
+		t.Fatalf("expected mixed-case.example.com in list response for team=Labs, got %q", listRec.Body.String())
+	}
+
+	delReq := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+id+"?team=Labs", nil), owner), "id", id)
+	delRec := httptest.NewRecorder()
+	h.DeleteDomain(delRec, delReq)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200; body=%q", delRec.Code, delRec.Body.String())
 	}
 }
 

@@ -132,6 +132,15 @@ func normalizeIdentifier(s string) string {
 // or hyphens, no leading or trailing hyphen.
 var hostnameLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
+// teamServicePattern matches the same team_name/service_name pattern the
+// operations registry declares for add-custom-domain and
+// remove-custom-domain (internal/operations/registry.go). The store column
+// is plain TEXT with no such constraint, so without checking it here a
+// value that would never pass Registry.ValidateInput at Submit time (e.g.
+// containing "/" or "..") could otherwise be stored by AddDomain and only
+// surface as a submit failure much later, at delete.
+var teamServicePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}$`)
+
 // validateHostname rejects a domain value before it can reach the
 // add-custom-domain workflow and, from there, ingress.hosts /
 // ingress.tls[].hosts in a GitOps values.yaml. Backstage previously owned
@@ -179,7 +188,11 @@ func (h *Handlers) ListDomains(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	team := r.URL.Query().Get("team")
+	// Normalized the same way AddDomain/VerifyDomainByName store team/service:
+	// without this, a caller spelling the team "Acme" gets an empty list for
+	// a row that was stored (lowercased) as "acme" — ListByTeam's SQL
+	// compares team=$1 case-sensitively.
+	team := normalizeIdentifier(r.URL.Query().Get("team"))
 	if team == "" {
 		writeError(w, http.StatusBadRequest, "missing required param: team")
 		return
@@ -189,7 +202,7 @@ func (h *Handlers) ListDomains(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	service := r.URL.Query().Get("service")
+	service := normalizeIdentifier(r.URL.Query().Get("service"))
 	list, err := h.opts.DomainStore.ListByTeam(r.Context(), team, service)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list domains")
@@ -236,6 +249,10 @@ func (h *Handlers) AddDomain(w http.ResponseWriter, r *http.Request) {
 	req.Domain = normalizeHostname(req.Domain)
 	if req.Team == "" || req.Service == "" || req.Domain == "" {
 		writeError(w, http.StatusBadRequest, "missing required fields: team, service, domain")
+		return
+	}
+	if !teamServicePattern.MatchString(req.Team) || !teamServicePattern.MatchString(req.Service) {
+		writeError(w, http.StatusBadRequest, "team and service must match ^[a-z0-9][a-z0-9-]{0,30}$")
 		return
 	}
 	if !user.HasTenantAccess(req.Team) {
@@ -315,7 +332,10 @@ func (h *Handlers) resolveDomainForMutation(w http.ResponseWriter, r *http.Reque
 		return d, true
 	}
 
-	if team := r.URL.Query().Get("team"); team != "" {
+	// Normalized the same way AddDomain stores it: d.Team is always
+	// lowercase, so an un-normalized "Acme" query param would otherwise
+	// never match a row that registered and lists correctly as "acme".
+	if team := normalizeIdentifier(r.URL.Query().Get("team")); team != "" {
 		if !user.HasTenantAccess(team) {
 			writeError(w, http.StatusForbidden, "access denied to team")
 			return nil, false
@@ -449,6 +469,12 @@ func (h *Handlers) verifyAndRespond(w http.ResponseWriter, r *http.Request, d *d
 // cleanup is skipped and the row is deleted anyway — this mirrors every
 // other domains handler's already-optional-dependency behavior rather than
 // making delete newly unavailable in those environments.
+//
+// The inverse ordering is NOT specially handled: if the workflow submits
+// successfully but the store Delete below then fails, ingress has already
+// been torn down while the row survives — stale, still pointing at a
+// hostname that no longer resolves through the platform. A retried DELETE
+// re-submits the (idempotent) workflow and clears the row on that attempt.
 func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 	if h.opts.DomainStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "domains registry not configured")
@@ -463,7 +489,8 @@ func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 
 	workflowName, skipped, err := h.triggerRemoveCustomDomain(r.Context(), r, d)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to submit ingress cleanup: "+err.Error())
+		slog.Error("failed to submit remove-custom-domain workflow", "team", d.Team, "service", d.Service, "domain", d.Domain, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to submit ingress cleanup")
 		return
 	}
 
@@ -514,6 +541,19 @@ func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Reques
 		"team_name":    d.Team,
 		"service_name": d.Service,
 		"domain":       d.Domain,
+	}
+
+	// Every other Submit call site (ExecuteOperation in handlers_write.go,
+	// the openclaw handlers) validates against the registry's declared
+	// parameter patterns first. AddDomain only checks team/service are
+	// non-empty — the store column is plain TEXT — so without this check a
+	// caller-supplied service like "../../../platform-gitops/services/other-team/api"
+	// would reach Submit verbatim and interpolate into
+	// remove-custom-domain's ModifiesPaths, the exact input the registry
+	// pattern (team_name/service_name: ^[a-z0-9][a-z0-9-]{0,30}$) exists to
+	// reject at every other entry point.
+	if errs := h.opts.Registry.ValidateInput(op, params); len(errs) > 0 {
+		return "", false, fmt.Errorf("invalid remove-custom-domain parameters: %s", strings.Join(errs, "; "))
 	}
 
 	result, submitErr := h.opts.Executor.Submit(ctx, op, params, userID, d.Team)
