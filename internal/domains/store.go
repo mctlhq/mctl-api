@@ -68,6 +68,19 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("domains store: create schema: %w", err)
 	}
+	// Separate Exec, not part of domainSchema: ListByTeam compares
+	// lower(team)/lower(service), which cannot use custom_domains_team
+	// (team, service) above. Mirrors internal/audit/postgres.go's precedent
+	// of adding an index to an already-deployed table outside the schema
+	// Exec, so a failure here costs an index (a sequential scan on list),
+	// not mctl-api's startup. Non-CONCURRENTLY is fine here (unlike
+	// audit's CONCURRENTLY indexes): the table is tiny and the index is
+	// built once at startup, so the brief write lock is not observable.
+	if _, err := pool.Exec(ctx,
+		`CREATE INDEX IF NOT EXISTS custom_domains_team_lower
+		 ON custom_domains (lower(team), lower(service))`); err != nil {
+		slog.Warn("domains store: could not create custom_domains_team_lower index", "error", err)
+	}
 	slog.Info("domains store initialized")
 	return &Store{pool: pool}, nil
 }

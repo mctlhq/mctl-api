@@ -76,6 +76,20 @@ func NewRegistry() *Registry {
 	return r
 }
 
+// NewRegistryWithout builds the full registry and removes the named
+// operations from it. Exists for tests that simulate an operation missing
+// from the registry (e.g. a production misconfiguration where a
+// ClusterWorkflowTemplate mapping was never deployed) — callers outside
+// this package have no other way to construct a Registry lacking an
+// otherwise-builtin operation, since ops is unexported.
+func NewRegistryWithout(names ...string) *Registry {
+	r := NewRegistry()
+	for _, n := range names {
+		delete(r.ops, n)
+	}
+	return r
+}
+
 // Get returns an operation by name.
 func (r *Registry) Get(name string) (Operation, bool) {
 	op, ok := r.ops[name]
