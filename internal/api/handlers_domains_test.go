@@ -1345,6 +1345,9 @@ func TestDeleteDomain_NilExecutorSkipsCleanup(t *testing.T) {
 		t.Fatalf("decode add response: %v", err)
 	}
 	id, _ := created["id"].(string)
+	if err := store.SetStatus(context.Background(), id, domains.StatusActive, ""); err != nil {
+		t.Fatalf("set status active: %v", err)
+	}
 
 	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+id, nil), owner), "id", id)
 	rec := httptest.NewRecorder()
