@@ -1044,3 +1044,138 @@ func TestToolTriggerIssue_UseTemporalFalsePostsToOperationsExecute(t *testing.T)
 		t.Errorf("path: got %q, want /api/v1/operations/mctl-agents-investigate/execute", gotPath)
 	}
 }
+
+// callToolAddCustomDomain builds a CallToolRequest for toolAddCustomDomain
+// with the given arguments and runs its handler.
+func callToolAddCustomDomain(t *testing.T, apiURL string, args map[string]any) (*mcplib.CallToolResult, error) {
+	t.Helper()
+	srv := NewServer(apiURL, "test-token")
+	_, handler := srv.toolAddCustomDomain()
+	return handler(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "mctl_add_custom_domain",
+			Arguments: args,
+		},
+	})
+}
+
+// TestToolAddCustomDomain_NeverTriggersWorkflow pins the fix for a real
+// ordering bug: the TXT challenge this call mints cannot exist yet, so
+// triggering add-custom-domain in the same call was guaranteed to fail
+// verification on every first registration. Registration and the workflow
+// trigger must stay two separate calls (see
+// TestToolVerifyDomain_TriggersWorkflowOnFreshVerification).
+func TestToolAddCustomDomain_NeverTriggersWorkflow(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/operations/add-custom-domain/execute") {
+			t.Errorf("unexpected request to add-custom-domain workflow path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if r.URL.Path != "/api/v1/domains" {
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"domain":"api.example.com","status":"pending","challenge_record":"_mctl-challenge.api.example.com","challenge_value":"mctl-domain-verification=xyz"}`))
+	}))
+	defer backend.Close()
+
+	result, err := callToolAddCustomDomain(t, backend.URL, map[string]any{
+		"team":    "labs",
+		"service": "svc",
+		"domain":  "api.example.com",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+}
+
+// callToolVerifyDomain builds a CallToolRequest for toolVerifyDomain with
+// the given arguments and runs its handler.
+func callToolVerifyDomain(t *testing.T, apiURL string, args map[string]any) (*mcplib.CallToolResult, error) {
+	t.Helper()
+	srv := NewServer(apiURL, "test-token")
+	_, handler := srv.toolVerifyDomain()
+	return handler(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "mctl_verify_domain",
+			Arguments: args,
+		},
+	})
+}
+
+// TestToolVerifyDomain_SkipsWorkflowTriggerForAlreadyActiveDomain pins the
+// fix for claude-review/agy's independently-flagged P2 on mctl-api#264: an
+// active domain's TXT record stays published (it is never torn down), so it
+// verifies true on every subsequent call. Without checking status, a
+// routine mctl_verify_domain call re-triggers add-custom-domain — a GitOps
+// commit and a cert-manager reissue — for every already-active domain,
+// every time.
+func TestToolVerifyDomain_SkipsWorkflowTriggerForAlreadyActiveDomain(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/domains":
+			_, _ = w.Write([]byte(`{"domains":[{"id":"d1","domain":"api.example.com","status":"active"}]}`))
+		case strings.HasPrefix(r.URL.Path, "/api/v1/domains/d1/verify"):
+			_, _ = w.Write([]byte(`{"verified":true,"method":"txt"}`))
+		case strings.Contains(r.URL.Path, "/operations/add-custom-domain/execute"):
+			t.Errorf("unexpected workflow trigger for an already-active domain: %s", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	result, err := callToolVerifyDomain(t, backend.URL, map[string]any{
+		"team":    "labs",
+		"service": "svc",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+}
+
+// TestToolVerifyDomain_TriggersWorkflowOnFreshVerification is the positive
+// counterpart: a domain that verifies true and is NOT already active must
+// still trigger the workflow — this is the only place that now happens
+// (see TestToolAddCustomDomain_NeverTriggersWorkflow).
+func TestToolVerifyDomain_TriggersWorkflowOnFreshVerification(t *testing.T) {
+	var triggered bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/domains":
+			_, _ = w.Write([]byte(`{"domains":[{"id":"d1","domain":"api.example.com","status":"pending"}]}`))
+		case strings.HasPrefix(r.URL.Path, "/api/v1/domains/d1/verify"):
+			_, _ = w.Write([]byte(`{"verified":true,"method":"txt"}`))
+		case strings.Contains(r.URL.Path, "/operations/add-custom-domain/execute"):
+			triggered = true
+			_, _ = w.Write([]byte(`{"workflow_name":"add-custom-domain-abc123"}`))
+		default:
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	result, err := callToolVerifyDomain(t, backend.URL, map[string]any{
+		"team":    "labs",
+		"service": "svc",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if !triggered {
+		t.Errorf("expected the add-custom-domain workflow to be triggered for a freshly-verified pending domain")
+	}
+}

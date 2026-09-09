@@ -32,9 +32,9 @@ var backstageReposClient = &http.Client{Timeout: 15 * time.Second}
 // authorizeGithubAppConnect attaches the service credentials the
 // github-app-connect plugin now requires. mctl-portal#79 dropped that
 // plugin's unauthenticated allowlist, so every proxied call below comes back
-// 401 without this header. Structurally identical to authorizeBackstage in
-// handlers_domains.go, but reads a distinct token so the two plugins'
-// credentials can be rotated and scoped independently.
+// 401 without this header. Custom domains (handlers_domains.go) no longer
+// proxy to Backstage at all — mctl-api owns that registry directly — so this
+// token is scoped to github-app-connect only and rotates independently.
 func (h *Handlers) authorizeGithubAppConnect(req *http.Request) {
 	if h.opts.BackstageGithubAppConnectToken != "" {
 		req.Header.Set("Authorization", "Bearer "+h.opts.BackstageGithubAppConnectToken)

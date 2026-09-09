@@ -35,6 +35,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/dburl"
+	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/loki"
@@ -210,6 +211,31 @@ func main() {
 		}
 	}
 
+	// Custom domains registry (optional — enabled when DOMAINS_DB_URL or
+	// AUDIT_DB_URL is set). mctl-api owns this table directly; it no longer
+	// proxies to Backstage's custom-domains plugin.
+	var domainStore *domains.Store
+	if domainsDBURL := postgresURL(os.Getenv("DOMAINS_DB_URL")); domainsDBURL != "" {
+		ds, dsErr := initStore(initCtx, "domains", func(ctx context.Context) (*domains.Store, error) {
+			return domains.NewStore(ctx, domainsDBURL)
+		})
+		if dsErr != nil {
+			slog.Error("domains store init failed; /api/v1/domains* will return 503", "error", dsErr)
+		} else {
+			domainStore = ds
+		}
+	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
+		ds, dsErr := initStore(initCtx, "domains", func(ctx context.Context) (*domains.Store, error) {
+			return domains.NewStore(ctx, dbURL)
+		})
+		if dsErr != nil {
+			slog.Error("domains store init failed (using AUDIT_DB_URL); /api/v1/domains* will return 503", "error", dsErr)
+		} else {
+			domainStore = ds
+		}
+	}
+	domainVerifier := domains.NewVerifier(cfg.DNSResolverAddr)
+
 	// Only the init deadline is released here; rootCtx stays live for the rest
 	// of the process. Releasing the timeout early keeps its timer from firing
 	// against a context nothing is waiting on any more.
@@ -377,6 +403,9 @@ func main() {
 		OAuthServer:                    oauthServer,
 		AlertStore:                     alertStore,
 		AgentRegistry:                  agentRegistryStore,
+		DomainStore:                    domainStore,
+		DomainVerifier:                 domainVerifier,
+		PlatformDomain:                 cfg.PlatformDomain,
 		TemporalClient:                 devLoopClient,
 		GitopsReady:                    gitopsReady,
 		PostgresReady:                  postgresReady,
@@ -454,10 +483,18 @@ type config struct {
 	BackstageInternalURL    string
 	// BackstageGithubAppConnectToken authorizes calls to Backstage's
 	// github-app-connect plugin (repos list/sync/install-url), scoped
-	// separately from BackstageToken (which is restricted to the
-	// custom-domains plugin) so the two credentials can be rotated and
-	// leaked independently of each other.
+	// separately from BackstageToken (which now only authorizes
+	// notifyBackstage's tenant catalog sync) so the two credentials can be
+	// rotated and leaked independently of each other.
 	BackstageGithubAppConnectToken string
+	// PlatformDomain is the platform's own domain (e.g. "mctl.ai"). Custom
+	// domain registration rejects any hostname equal to or ending in
+	// "."+PlatformDomain — those stay GitOps-only via ingress.hosts.
+	PlatformDomain string
+	// DNSResolverAddr is the host:port of the recursive resolver used to
+	// verify custom domain TXT/CNAME records. Defaults to a public resolver
+	// so results do not depend on cluster split-horizon DNS.
+	DNSResolverAddr string
 	// Dex OIDC issuer for JWT validation (dual-token auth alongside GitHub tokens).
 	DexIssuerURL string
 	// DexClientID is the expected audience for Dex JWTs. If empty, audience check is skipped.
@@ -546,6 +583,8 @@ func loadConfig() config {
 		BackstageURL:                   os.Getenv("BACKSTAGE_URL"),
 		BackstageToken:                 os.Getenv("BACKSTAGE_TOKEN"),
 		BackstageInternalURL:           envOr("BACKSTAGE_INTERNAL_URL", "http://backstage.backstage.svc.cluster.local:7007"),
+		PlatformDomain:                 envOr("PLATFORM_DOMAIN", "mctl.ai"),
+		DNSResolverAddr:                envOr("DNS_RESOLVER_ADDR", "1.1.1.1:53"),
 		BackstageGithubAppConnectToken: os.Getenv("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN"),
 		DexIssuerURL:                   envOr("DEX_ISSUER_URL", "https://ops.mctl.ai/api/dex"),
 		DexClientID:                    os.Getenv("DEX_CLIENT_ID"),

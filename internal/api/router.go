@@ -28,6 +28,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/agentregistry"
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/domains"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/openapi"
 	"github.com/mctlhq/mctl-api/internal/operations"
@@ -57,17 +58,21 @@ type Options struct {
 	// MetricsQuerier fetches historical runtime usage for right-sizing decisions (optional).
 	MetricsQuerier MetricsQuerier
 	// Optional Backstage integration for immediate catalog sync.
-	BackstageURL   string
+	BackstageURL string
+	// BackstageToken authorizes notifyBackstage's tenant catalog sync POST
+	// only (handlers_write.go). Custom domains no longer use it — mctl-api
+	// is the system of record for those (internal/domains), not a Backstage
+	// proxy.
 	BackstageToken string
 	// BackstageInternalURL is the cluster-internal URL for Backstage (e.g. http://backstage.backstage.svc:7007).
 	// Used for proxying repo operations to the github-app-connect plugin.
 	BackstageInternalURL string
 	// BackstageGithubAppConnectToken authorizes calls to Backstage's
 	// github-app-connect plugin (repos list/sync/install-url). Deliberately
-	// distinct from BackstageToken (custom-domains only) so the two
-	// credentials have independent blast radii and rotation schedules. When
-	// empty, proxied requests carry no Authorization header (matches
-	// authorizeBackstage's no-op-when-unset behavior).
+	// distinct from BackstageToken so the two credentials have independent
+	// blast radii and rotation schedules. When empty, proxied requests carry
+	// no Authorization header (matches authorizeGithubAppConnect's
+	// no-op-when-unset behavior).
 	BackstageGithubAppConnectToken string
 	// AllowedOrigins is the list of origins permitted by CORS.
 	// If empty, no Access-Control-Allow-Origin header is set (deny all cross-origin).
@@ -77,6 +82,19 @@ type Options struct {
 	OAuthServer *auth.OAuthServer
 	// AlertStore persists incident alerts to PostgreSQL (optional — nil disables incident endpoints).
 	AlertStore *alerts.Store
+	// DomainStore persists custom domain registrations to PostgreSQL
+	// (optional — nil makes every /api/v1/domains* route return 503).
+	// mctl-api is the system of record here; it no longer proxies to the
+	// Backstage custom-domains plugin (that write route requires a Backstage
+	// user principal none of mctl-api's callers can produce).
+	DomainStore *domains.Store
+	// DomainVerifier resolves TXT/CNAME records to prove custom domain
+	// ownership (optional — nil makes /domains/*verify return 503).
+	DomainVerifier *domains.Verifier
+	// PlatformDomain is the platform's own domain (e.g. "mctl.ai"). Hostnames
+	// equal to or ending in "."+PlatformDomain are rejected by AddDomain —
+	// those stay GitOps-only via ingress.hosts. Defaults to "mctl.ai" when empty.
+	PlatformDomain string
 	// AgentRegistry persists mctl-agents AgentManifest versions/releases to
 	// PostgreSQL (optional — nil disables the agent registry endpoints).
 	AgentRegistry *agentregistry.Store
@@ -129,6 +147,11 @@ func NewRouter(opts Options) http.Handler {
 	if opts.BackstageGithubAppConnectToken == "" {
 		slog.Warn("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN is unset; repos list/sync/install-url will proxy to backstage without credentials",
 			"routes", "GET /api/v1/repos, GET /api/v1/repos/install-url, POST /api/v1/repos/sync")
+	}
+
+	if opts.DomainStore == nil {
+		slog.Warn("domains registry not configured (set DOMAINS_DB_URL or AUDIT_DB_URL); /api/v1/domains* will return 503",
+			"routes", "GET/POST /api/v1/domains, POST /api/v1/domains/verify, POST /api/v1/domains/{id}/verify, DELETE/PATCH /api/v1/domains/{id}")
 	}
 
 	r := chi.NewRouter()
@@ -274,11 +297,16 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/openclaw/{team}/identity", h.SaveOpenClawIdentity)
 			r.Delete("/openclaw/{team}/identity/{name}", h.DeleteOpenClawIdentity)
 
-			// Custom domains (proxied to Backstage custom-domains plugin).
+			// Custom domains (mctl-api's own PostgreSQL-backed registry —
+			// see internal/domains). No chi conflict between the two verify
+			// routes: /domains/verify is two segments, /domains/{id}/verify
+			// is three.
 			r.Get("/domains", h.ListDomains)
 			r.Post("/domains", h.AddDomain)
+			r.Post("/domains/verify", h.VerifyDomainByName)
 			r.Post("/domains/{id}/verify", h.VerifyDomain)
 			r.Delete("/domains/{id}", h.DeleteDomain)
+			r.Patch("/domains/{id}", h.UpdateDomainStatus)
 
 			// Incident endpoints (alert store).
 			r.Get("/incidents/summary", h.IncidentSummary)
