@@ -35,6 +35,22 @@ file="$here/docs/portal-allowlist.json"
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 portal=$(jq -r .portal "$file"); server=$(jq -r .server "$file")
+
+# The invariant -- an enabled tool is one recorded read-only -- lives in
+# the Go test, because the record is Go source. This path publishes what
+# is on disk, so it consults the same test first: an edit that has not
+# passed the guard is not applied, whether it is uncommitted or merely
+# not yet through CI. Both checks are cheap next to a PUT that changes
+# what a shared surface exposes.
+if ! git -C "$here" diff --quiet -- docs/portal-allowlist.json; then
+  echo "docs/portal-allowlist.json has uncommitted changes; commit them (and let the guard test run) before applying" >&2; exit 1
+fi
+if command -v go >/dev/null; then
+  ( cd "$here" && go test ./internal/mcp/ -run 'TestPortalAllowlist_CoversEveryRegisteredTool' -count=1 >/dev/null ) \
+    || { echo "internal/mcp/portal_allowlist_test.go fails for the current file; refusing to apply" >&2; exit 1; }
+else
+  echo "go is not installed here, so the guard test cannot run; refusing to apply from a host that cannot verify the file" >&2; exit 1
+fi
 base="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/access/ai-controls/mcp"
 
 # curl config on a file descriptor: the Authorization header is not an argument.
