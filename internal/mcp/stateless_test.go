@@ -55,8 +55,12 @@ func TestStreamableHTTPHandler_IsStateless(t *testing.T) {
 	// contain the word error must not fail a test about sessions. The body
 	// may be SSE-framed; the JSON is the last data: line.
 	body := string(raw)
-	if i := strings.LastIndex(body, "data: "); i >= 0 {
-		body = strings.TrimSpace(body[i+len("data: "):])
+	// SSE frames a data line at the start of a line; anchor there rather
+	// than searching the payload, which is every tool description.
+	for _, ln := range strings.Split(body, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(ln), "data: "); ok {
+			body = v
+		}
 	}
 	var env struct {
 		Result *struct {
@@ -89,8 +93,8 @@ func TestStreamableHTTPHandler_IsStateless(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp.Body.Close() //nolint:errcheck
-		if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotFound {
-			t.Errorf("%s /mcp without a session: status %d; the transport is demanding a session", method, resp.StatusCode)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("%s /mcp without a session: status %d, want 200 (measured on mcp-go v1.0.0; a change here means the router comment is stale too)", method, resp.StatusCode)
 		}
 	}
 }
