@@ -105,6 +105,7 @@ func TestPreregisteredClient_ShapeRules(t *testing.T) {
 		want string
 	}{
 		{"empty id", "", []string{"https://x.test/cb"}, "client_id is required"},
+		{"padded id", " c", []string{"https://x.test/cb"}, "whitespace"},
 		{"no redirect", "c", nil, "at least one redirect_uri"},
 		{"relative", "c", []string{"/cb"}, "not an absolute URL"},
 		{"http non-loopback", "c", []string{"http://x.test/cb"}, "scheme"},

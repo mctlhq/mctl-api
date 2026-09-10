@@ -171,6 +171,12 @@ func (s *OAuthServer) AddPreregisteredClient(clientID, clientName string, redire
 	if strings.TrimSpace(clientID) == "" {
 		return errors.New("pre-registered client: client_id is required")
 	}
+	// The id is a map key compared byte for byte at every lookup, so padding
+	// would seed a client that only resolves when the counterpart sends the
+	// same padding -- one that silently never works.
+	if clientID != strings.TrimSpace(clientID) {
+		return fmt.Errorf("pre-registered client %q: client_id has leading or trailing whitespace", clientID)
+	}
 	if len(redirectURIs) == 0 {
 		return fmt.Errorf("pre-registered client %q: at least one redirect_uri is required", clientID)
 	}

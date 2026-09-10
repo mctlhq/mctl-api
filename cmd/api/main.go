@@ -762,7 +762,8 @@ func (c config) validate() error {
 	// of proportion to the mistake. The value is still rejected the moment
 	// OAuth is switched on, which is a deliberate change and exactly when the
 	// operator wants to hear about it.
-	// OAUTH_PREREGISTERED_CLIENTS is checked whether or not OAuth is enabled:
+	//
+	// OAUTH_PREREGISTERED_CLIENTS is the other way round, checked whether or not OAuth is enabled:
 	// the README promises a malformed value refuses startup, and a value that
 	// is read but never looked at would make that promise conditional on a
 	// second variable the operator may not be thinking about.
