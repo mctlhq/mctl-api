@@ -78,7 +78,10 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		"0.1.0",
 		server.WithToolCapabilities(true),
 		server.WithPromptCapabilities(true),
-		server.WithResourceCapabilities(true, false),
+		// No subscribe: under the stateless transport there is no session to
+		// deliver notifications/resources/updated to, so the capability would
+		// be advertised and undeliverable.
+		server.WithResourceCapabilities(false, false),
 	)
 	s.mcpServer = srv
 
@@ -808,6 +811,7 @@ Requires owner role on the team. Per-skill content cap: 100 KB. Per-tenant caps:
 func (s *Server) toolDeleteOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_delete_openclaw_skill",
 		mcplib.WithTitleAnnotation("Remove OpenClaw Skill"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`Removes a skill from the tenant's OpenClaw agent.
 
@@ -912,6 +916,7 @@ func (s *Server) toolEnableTenantSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 func (s *Server) toolDisableTenantSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_disable_tenant_skill",
 		mcplib.WithTitleAnnotation("Disable Tenant Skill"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription("Admin-only. Disable a platform skill for a tenant through a GitOps workflow."),
 		mcplib.WithString("tenant", mcplib.Required(), mcplib.Description("Tenant name")),
@@ -974,6 +979,7 @@ func (s *Server) toolPublishPlatformSkill() (mcplib.Tool, server.ToolHandlerFunc
 func (s *Server) toolDeprecatePlatformSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_deprecate_platform_skill",
 		mcplib.WithTitleAnnotation("Deprecate Platform Skill"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription("Admin-only. Mark a platform-wide skill deprecated through a GitOps workflow."),
 		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name")),
@@ -1085,6 +1091,7 @@ Requires owner role on the team. Per-file content cap: 100 KB. Write rate limit:
 func (s *Server) toolDeleteOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_delete_openclaw_identity",
 		mcplib.WithTitleAnnotation("Remove OpenClaw Identity Override"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`Removes an identity override from the tenant's OpenClaw agent.
 
@@ -1228,6 +1235,7 @@ func (s *Server) toolListRecentOperations() (mcplib.Tool, server.ToolHandlerFunc
 func (s *Server) toolRetireService() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_retire_service",
 		mcplib.WithTitleAnnotation("Retire Service"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`DESTRUCTIVE: Remove a service from the platform permanently.
 
@@ -1269,6 +1277,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 func (s *Server) toolDeleteTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_delete_tenant",
 		mcplib.WithTitleAnnotation("Delete Workspace"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`DESTRUCTIVE: Delete a team workspace and all its platform resources permanently.
 
@@ -1339,8 +1348,9 @@ For repos outside GitHub App scope, store a PAT in Vault (see mctl_deploy_servic
 func (s *Server) toolGrantRepoAccess() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_grant_repo_access",
 		mcplib.WithTitleAnnotation("Grant Repo Access"),
-		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Generate a GitHub App installation URL to grant the platform access to a repository.
 
 Use this when mctl_list_repos returns no repos, or when a specific private repo is not yet accessible.
@@ -1551,6 +1561,7 @@ Use mctl_verify_domain next.`),
 func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_remove_custom_domain",
 		mcplib.WithTitleAnnotation("Remove Custom Domain"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription("Remove a custom domain from a service. If the domain is registered in mctl-api's domain registry (added via mctl_add_custom_domain), this deletes that registry row — DELETE /api/v1/domains/{id} — which itself triggers the remove-custom-domain workflow to clean up the ingress host and TLS certificate entry before the row disappears. If the hostname is not found in the registry (e.g. a legacy domain added before the registry existed), this falls back to triggering the remove-custom-domain workflow directly, same as before. The auto-generated {team}-{service}.{platform_domain} domain is not affected either way."),
 		mcplib.WithString("team",
@@ -1850,6 +1861,7 @@ Returns workflow_name and preview_id. Poll mctl_get_workflow_status to track pro
 func (s *Server) toolDeletePreview() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_delete_preview",
 		mcplib.WithTitleAnnotation("Delete Preview"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription("Remove a preview environment and all its Kubernetes resources immediately."),
 		mcplib.WithString("team_name",
@@ -2619,6 +2631,7 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_re
 func (s *Server) toolTriggerImplementer() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_implementer",
 		mcplib.WithTitleAnnotation("Run mctl-agents Tier 2 implementer"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`Trigger Tier 2 implementer for at most one accepted proposal. Before any model call it queries GitHub for the deterministic feat/agents-<slug> branch and canonical PR. Existing open/merged/closed results are reconciled without spending model quota. Only when no prior result exists does it run the sub-agent, push the branch, and open a PR.
 
@@ -2653,6 +2666,7 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_re
 func (s *Server) toolTriggerShepherd() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_shepherd",
 		mcplib.WithTitleAnnotation("Run mctl-agents Tier 3 PR shepherd"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`Trigger Tier 3 PR shepherd to drive an existing implementer-PR through codex review fix loops to merge.
 
@@ -2701,6 +2715,7 @@ func (s *Server) toolTriggerReconcile() (mcplib.Tool, server.ToolHandlerFunc) {
 		// already-pushed branch (allow_pr_create=not dry_run). It never
 		// runs a model or merges, but it can create a PR, matching why
 		// toolTriggerShepherd and toolTriggerImplementer both set this hint.
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`Reconcile pass: read canonical GitHub PR state for every non-terminal proposal and project it onto platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml (merged PR -> merged, closed-unmerged -> rejected, conflicted open PR -> needs-triage).
 
@@ -2739,6 +2754,7 @@ func (s *Server) toolTriggerApprove() (mcplib.Tool, server.ToolHandlerFunc) {
 		// Destructive: authorizes the Tier 2 implementer to spend a model
 		// attempt and open a PR for the approved proposal, same class as
 		// toolTriggerImplementer and toolTriggerShepherd.
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`Approve one proposal: flip platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml from proposed to accepted via a gitops commit, recording the approver identity.
 
@@ -2783,6 +2799,7 @@ func (s *Server) toolTriggerIssue() (mcplib.Tool, server.ToolHandlerFunc) {
 		// Not destructive: the investigator only writes a proposal and posts
 		// an issue comment. It opens no PR and merges nothing — the proposal
 		// stops at status=proposed for human approval.
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Trigger the mctl-agents issue-investigator to turn a GitHub issue into a spec-driven proposal.
 
@@ -2830,6 +2847,7 @@ func (s *Server) toolApproveDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Approve a DevLoopWorkflow"),
 		// Not destructive: it unblocks a workflow that is itself scoped and
 		// reviewable — it does not delete or overwrite anything.
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Send the durable Temporal "approve" signal to an EXISTING DevLoopWorkflow execution.
 
@@ -3073,6 +3091,7 @@ This is the read path the dev-loop pipeline pins a version from at the start of 
 func (s *Server) toolPromoteAgent() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_promote_agent",
 		mcplib.WithTitleAnnotation("Promote Agent Version"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`Promote a published agent version to an environment (production or shadow).
 
@@ -3157,6 +3176,7 @@ func (s *Server) toolListAgentExecutions() (mcplib.Tool, server.ToolHandlerFunc)
 func (s *Server) toolRollbackAgent() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_rollback_agent",
 		mcplib.WithTitleAnnotation("Rollback Agent Release"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithDescription(`Roll an agent's release in an environment back to the version it had immediately before the current one.
 
