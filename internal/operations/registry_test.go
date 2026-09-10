@@ -23,12 +23,13 @@ import "testing"
 // SERVICES check, produced a real proposal) but rejected by this operation's
 // service enum with a 400 — the enum here had never been updated when
 // mctl-telegram/mctl-design/mctl-pairdesk were added on the mctl-agents side.
+// The same failure recurred for "portfolio" (mctl-api#281).
 func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 	// Mirrors config/settings.py's SERVICES list in mctlhq/mctl-agents.
 	// Update both places together when a service is added/removed there.
 	wantServices := []string{
 		"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal",
-		"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy",
+		"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "portfolio",
 	}
 
 	registry := NewRegistry()
@@ -59,6 +60,25 @@ func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 				t.Errorf("operation %q's service enum is missing %q (mctl-agents SERVICES entry)", opName, svc)
 			}
 		}
+	}
+}
+
+// TestApproveAcceptsPortfolioService exercises the exact code path that
+// produced the 400 for portfolio (mctl-api#281): ValidateInput on
+// mctl-agents-approve with service="portfolio" must return no errors.
+func TestApproveAcceptsPortfolioService(t *testing.T) {
+	registry := NewRegistry()
+	op, ok := registry.Get("mctl-agents-approve")
+	if !ok {
+		t.Fatal("mctl-agents-approve operation not found in registry")
+	}
+
+	errs := registry.ValidateInput(op, map[string]string{
+		"service": "portfolio",
+		"slug":    "issue-281-add-portfolio",
+	})
+	if len(errs) != 0 {
+		t.Errorf("ValidateInput(mctl-agents-approve, service=portfolio) returned unexpected errors: %v", errs)
 	}
 }
 
