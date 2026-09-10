@@ -61,8 +61,11 @@ func TestNewMCPServer_ToolCount(t *testing.T) {
 	if mcpSrv == nil {
 		t.Fatal("NewMCPServer returned nil")
 	}
-	// Verify the server was created without panicking (tool registration is validated at startup).
-	// We can't easily count tools without reflection, but we can ensure the server is non-nil.
+	// ListTools (mcp-go >= v1) makes the count exact; the classification of
+	// each tool is held by annotations_test.go.
+	if got := len(mcpSrv.ListTools()); got != len(recordedHints) {
+		t.Fatalf("NewMCPServer registered %d tools, recordedHints has %d", got, len(recordedHints))
+	}
 }
 
 func TestToolDescriptions_NotEmpty(t *testing.T) {
