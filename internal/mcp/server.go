@@ -813,6 +813,7 @@ func (s *Server) toolDeleteOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc)
 		mcplib.WithTitleAnnotation("Remove OpenClaw Skill"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Removes a skill from the tenant's OpenClaw agent.
 
 Deletes platform-gitops/services/{team}/openclaw/skills/{skill_name}.md. ArgoCD removes the key from the {team}-openclaw-skills ConfigMap; the pod-side sidecar prunes the workspace file. The skill disappears from the running agent within ~1-2 minutes of commit.
@@ -918,6 +919,7 @@ func (s *Server) toolDisableTenantSkill() (mcplib.Tool, server.ToolHandlerFunc) 
 		mcplib.WithTitleAnnotation("Disable Tenant Skill"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription("Admin-only. Disable a platform skill for a tenant through a GitOps workflow."),
 		mcplib.WithString("tenant", mcplib.Required(), mcplib.Description("Tenant name")),
 		mcplib.WithString("skill", mcplib.Required(), mcplib.Description("Skill name")),
@@ -981,6 +983,7 @@ func (s *Server) toolDeprecatePlatformSkill() (mcplib.Tool, server.ToolHandlerFu
 		mcplib.WithTitleAnnotation("Deprecate Platform Skill"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription("Admin-only. Mark a platform-wide skill deprecated through a GitOps workflow."),
 		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name")),
 	)
@@ -1093,6 +1096,7 @@ func (s *Server) toolDeleteOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFu
 		mcplib.WithTitleAnnotation("Remove OpenClaw Identity Override"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Removes an identity override from the tenant's OpenClaw agent.
 
 Deletes platform-gitops/services/{team}/openclaw/identity/{file_name}. ArgoCD removes the key from the {team}-openclaw-identity ConfigMap; the pod-side sidecar prunes the override and the agent falls back to the image-shipped default file within ~1-2 minutes of commit.
@@ -1237,6 +1241,7 @@ func (s *Server) toolRetireService() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Retire Service"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`DESTRUCTIVE: Remove a service from the platform permanently.
 
 Deletes GitOps manifests, Vault secrets, ArgoCD Application, and all Kubernetes resources.
@@ -1279,6 +1284,7 @@ func (s *Server) toolDeleteTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Delete Workspace"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`DESTRUCTIVE: Delete a team workspace and all its platform resources permanently.
 
 Retires all services in the workspace first, then removes the Kubernetes namespace,
@@ -1563,6 +1569,7 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 		mcplib.WithTitleAnnotation("Remove Custom Domain"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription("Remove a custom domain from a service. If the domain is registered in mctl-api's domain registry (added via mctl_add_custom_domain), this deletes that registry row — DELETE /api/v1/domains/{id} — which itself triggers the remove-custom-domain workflow to clean up the ingress host and TLS certificate entry before the row disappears. If the hostname is not found in the registry (e.g. a legacy domain added before the registry existed), this falls back to triggering the remove-custom-domain workflow directly, same as before. The auto-generated {team}-{service}.{platform_domain} domain is not affected either way."),
 		mcplib.WithString("team",
 			mcplib.Required(),
@@ -1863,6 +1870,7 @@ func (s *Server) toolDeletePreview() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Delete Preview"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription("Remove a preview environment and all its Kubernetes resources immediately."),
 		mcplib.WithString("team_name",
 			mcplib.Required(),
@@ -2633,6 +2641,7 @@ func (s *Server) toolTriggerImplementer() (mcplib.Tool, server.ToolHandlerFunc) 
 		mcplib.WithTitleAnnotation("Run mctl-agents Tier 2 implementer"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Trigger Tier 2 implementer for at most one accepted proposal. Before any model call it queries GitHub for the deterministic feat/agents-<slug> branch and canonical PR. Existing open/merged/closed results are reconciled without spending model quota. Only when no prior result exists does it run the sub-agent, push the branch, and open a PR.
 
 Failures and no-commit results move to needs-triage and are not retried automatically. Retry requires an operator-reviewed GitOps change moving that one proposal back to accepted.
@@ -2668,6 +2677,7 @@ func (s *Server) toolTriggerShepherd() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Run mctl-agents Tier 3 PR shepherd"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Trigger Tier 3 PR shepherd to drive an existing implementer-PR through codex review fix loops to merge.
 
 The shepherd reads .status.yaml entries with status in {implementing, review-fixing}, evaluates decide() against the linked PR's codex review state, and may invoke the implementer with --review-feedback or merge the PR with --match-head-commit.
@@ -2717,6 +2727,7 @@ func (s *Server) toolTriggerReconcile() (mcplib.Tool, server.ToolHandlerFunc) {
 		// toolTriggerShepherd and toolTriggerImplementer both set this hint.
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Reconcile pass: read canonical GitHub PR state for every non-terminal proposal and project it onto platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml (merged PR -> merged, closed-unmerged -> rejected, conflicted open PR -> needs-triage).
 
 Discovers canonical feat/agents-* PRs even when .status.yaml lost its pr field, and may open that one PR for a branch a prior attempt pushed before dying. Never runs a model, applies code fixes, or merges.
@@ -2756,6 +2767,7 @@ func (s *Server) toolTriggerApprove() (mcplib.Tool, server.ToolHandlerFunc) {
 		// toolTriggerImplementer and toolTriggerShepherd.
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Approve one proposal: flip platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml from proposed to accepted via a gitops commit, recording the approver identity.
 
 This is the automated form of the old manual .status.yaml edit; the Tier 2 implementer only picks up accepted proposals. Idempotent on already-accepted proposals; any other status fails.
@@ -2801,6 +2813,7 @@ func (s *Server) toolTriggerIssue() (mcplib.Tool, server.ToolHandlerFunc) {
 		// stops at status=proposed for human approval.
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Trigger the mctl-agents issue-investigator to turn a GitHub issue into a spec-driven proposal.
 
 Given a GitHub issue URL under the mctlhq org, the investigator reads the issue, clones the target repo read-only to ground the design in real code, and writes requirements.md / design.md / tasks.md plus a .status.yaml (status=proposed) under platform-gitops/agents-state/<service>/proposals/<slug>/. It then comments the proposal link back on the issue.
@@ -2849,6 +2862,7 @@ func (s *Server) toolApproveDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
 		// reviewable — it does not delete or overwrite anything.
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Send the durable Temporal "approve" signal to an EXISTING DevLoopWorkflow execution.
 
 This calls the same handler/path as the REST endpoint (POST /api/v1/agents/dev-loop/{workflow_id}/approve) and the Temporal CLI signal — it does NOT start a new workflow, and it does NOT edit a proposal's .status.yaml directly.
@@ -3093,6 +3107,7 @@ func (s *Server) toolPromoteAgent() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Promote Agent Version"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Promote a published agent version to an environment (production or shadow).
 
 Takes effect for the next dev-loop run that resolves this agent/environment — in-flight runs keep whatever version they already pinned. Use mctl_list_agent_versions to find a version first. Records a promotion audit row. Admin-only.`),
@@ -3178,6 +3193,7 @@ func (s *Server) toolRollbackAgent() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Rollback Agent Release"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Roll an agent's release in an environment back to the version it had immediately before the current one.
 
 Reads the most recent promotion audit row for this agent/environment and reverts to its from_version — no gitops PR, no redeploy. Fails if there is no prior promotion to roll back to. Admin-only.`),

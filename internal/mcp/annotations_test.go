@@ -12,6 +12,7 @@ import (
 type hints struct {
 	readOnly    bool
 	destructive bool
+	idempotent  bool
 }
 
 // recordedHints is the record the portal allowlist is derived from
@@ -21,80 +22,80 @@ type hints struct {
 // runtime set must equal it exactly: no tool missing, none unrecorded, none
 // with a different profile.
 var recordedHints = map[string]hints{
-	"mctl_acknowledge_incident":               {readOnly: false, destructive: false},
-	"mctl_add_custom_domain":                  {readOnly: false, destructive: false},
-	"mctl_apply_openclaw_resource_profile":    {readOnly: false, destructive: false},
-	"mctl_approve_dev_loop":                   {readOnly: false, destructive: false},
-	"mctl_create_agent":                       {readOnly: false, destructive: false},
-	"mctl_create_preview":                     {readOnly: false, destructive: false},
-	"mctl_create_tenant":                      {readOnly: false, destructive: false},
-	"mctl_delete_openclaw_identity":           {readOnly: false, destructive: true},
-	"mctl_delete_openclaw_skill":              {readOnly: false, destructive: true},
-	"mctl_delete_preview":                     {readOnly: false, destructive: true},
-	"mctl_delete_tenant":                      {readOnly: false, destructive: true},
-	"mctl_deploy_openclaw":                    {readOnly: false, destructive: false},
-	"mctl_deploy_service":                     {readOnly: false, destructive: false},
-	"mctl_deprecate_platform_skill":           {readOnly: false, destructive: true},
-	"mctl_disable_tenant_skill":               {readOnly: false, destructive: true},
-	"mctl_enable_tenant_skill":                {readOnly: false, destructive: false},
-	"mctl_get_dev_loop":                       {readOnly: true, destructive: false},
-	"mctl_get_incident":                       {readOnly: true, destructive: false},
-	"mctl_get_openclaw_sizing_recommendation": {readOnly: true, destructive: false},
-	"mctl_get_operation":                      {readOnly: true, destructive: false},
-	"mctl_get_resource_usage":                 {readOnly: true, destructive: false},
-	"mctl_get_service_config":                 {readOnly: true, destructive: false},
-	"mctl_get_service_logs":                   {readOnly: true, destructive: false},
-	"mctl_get_service_status":                 {readOnly: true, destructive: false},
-	"mctl_get_tenant":                         {readOnly: true, destructive: false},
-	"mctl_get_workflow_logs":                  {readOnly: true, destructive: false},
-	"mctl_get_workflow_status":                {readOnly: true, destructive: false},
-	"mctl_grant_repo_access":                  {readOnly: false, destructive: false},
-	"mctl_incident_summary":                   {readOnly: true, destructive: false},
-	"mctl_list_agent_executions":              {readOnly: true, destructive: false},
-	"mctl_list_agent_versions":                {readOnly: true, destructive: false},
-	"mctl_list_domains":                       {readOnly: true, destructive: false},
-	"mctl_list_incidents":                     {readOnly: true, destructive: false},
-	"mctl_list_openclaw_identity":             {readOnly: true, destructive: false},
-	"mctl_list_openclaw_skills":               {readOnly: true, destructive: false},
-	"mctl_list_operations":                    {readOnly: true, destructive: false},
-	"mctl_list_platform_skills":               {readOnly: true, destructive: false},
-	"mctl_list_previews":                      {readOnly: true, destructive: false},
-	"mctl_list_recent_agent_runs":             {readOnly: true, destructive: false},
-	"mctl_list_recent_operations":             {readOnly: true, destructive: false},
-	"mctl_list_repos":                         {readOnly: true, destructive: false},
-	"mctl_list_services":                      {readOnly: true, destructive: false},
-	"mctl_list_tenant_skill_bindings":         {readOnly: true, destructive: false},
-	"mctl_list_tenants":                       {readOnly: true, destructive: false},
-	"mctl_list_workflows":                     {readOnly: true, destructive: false},
-	"mctl_promote_agent":                      {readOnly: false, destructive: true},
-	"mctl_provision_database":                 {readOnly: false, destructive: false},
-	"mctl_publish_agent_version":              {readOnly: false, destructive: false},
-	"mctl_publish_platform_skill":             {readOnly: false, destructive: false},
-	"mctl_read_openclaw_identity":             {readOnly: true, destructive: false},
-	"mctl_read_openclaw_skill":                {readOnly: true, destructive: false},
-	"mctl_read_platform_skill":                {readOnly: true, destructive: false},
-	"mctl_remove_custom_domain":               {readOnly: false, destructive: true},
-	"mctl_resolve_agent":                      {readOnly: true, destructive: false},
-	"mctl_resolve_incident":                   {readOnly: false, destructive: false},
-	"mctl_resume_openclaw_deploy":             {readOnly: false, destructive: false},
-	"mctl_retire_service":                     {readOnly: false, destructive: true},
-	"mctl_rollback_agent":                     {readOnly: false, destructive: true},
-	"mctl_rollback_service":                   {readOnly: false, destructive: true},
-	"mctl_save_openclaw_identity":             {readOnly: false, destructive: false},
-	"mctl_save_openclaw_skill":                {readOnly: false, destructive: false},
-	"mctl_scale_service":                      {readOnly: false, destructive: false},
-	"mctl_sync_repos":                         {readOnly: false, destructive: false},
-	"mctl_trigger_agents_run":                 {readOnly: false, destructive: false},
-	"mctl_trigger_approve":                    {readOnly: false, destructive: true},
-	"mctl_trigger_implementer":                {readOnly: false, destructive: true},
-	"mctl_trigger_incident_responder":         {readOnly: false, destructive: false},
-	"mctl_trigger_issue":                      {readOnly: false, destructive: false},
-	"mctl_trigger_mentor_only":                {readOnly: false, destructive: false},
-	"mctl_trigger_reconcile":                  {readOnly: false, destructive: true},
-	"mctl_trigger_shepherd":                   {readOnly: false, destructive: true},
-	"mctl_trigger_single_service":             {readOnly: false, destructive: false},
-	"mctl_verify_domain":                      {readOnly: false, destructive: false},
-	"mctl_whoami":                             {readOnly: true, destructive: false},
+	"mctl_acknowledge_incident":               {readOnly: false, destructive: false, idempotent: true},
+	"mctl_add_custom_domain":                  {readOnly: false, destructive: false, idempotent: true},
+	"mctl_apply_openclaw_resource_profile":    {readOnly: false, destructive: false, idempotent: true},
+	"mctl_approve_dev_loop":                   {readOnly: false, destructive: false, idempotent: false},
+	"mctl_create_agent":                       {readOnly: false, destructive: false, idempotent: false},
+	"mctl_create_preview":                     {readOnly: false, destructive: false, idempotent: false},
+	"mctl_create_tenant":                      {readOnly: false, destructive: false, idempotent: false},
+	"mctl_delete_openclaw_identity":           {readOnly: false, destructive: true, idempotent: true},
+	"mctl_delete_openclaw_skill":              {readOnly: false, destructive: true, idempotent: true},
+	"mctl_delete_preview":                     {readOnly: false, destructive: true, idempotent: false},
+	"mctl_delete_tenant":                      {readOnly: false, destructive: true, idempotent: false},
+	"mctl_deploy_openclaw":                    {readOnly: false, destructive: false, idempotent: false},
+	"mctl_deploy_service":                     {readOnly: false, destructive: false, idempotent: false},
+	"mctl_deprecate_platform_skill":           {readOnly: false, destructive: true, idempotent: false},
+	"mctl_disable_tenant_skill":               {readOnly: false, destructive: true, idempotent: false},
+	"mctl_enable_tenant_skill":                {readOnly: false, destructive: false, idempotent: true},
+	"mctl_get_dev_loop":                       {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_incident":                       {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_openclaw_sizing_recommendation": {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_operation":                      {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_resource_usage":                 {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_service_config":                 {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_service_logs":                   {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_service_status":                 {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_tenant":                         {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_workflow_logs":                  {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_workflow_status":                {readOnly: true, destructive: false, idempotent: false},
+	"mctl_grant_repo_access":                  {readOnly: false, destructive: false, idempotent: true},
+	"mctl_incident_summary":                   {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_agent_executions":              {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_agent_versions":                {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_domains":                       {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_incidents":                     {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_openclaw_identity":             {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_openclaw_skills":               {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_operations":                    {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_platform_skills":               {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_previews":                      {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_recent_agent_runs":             {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_recent_operations":             {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_repos":                         {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_services":                      {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_tenant_skill_bindings":         {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_tenants":                       {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_workflows":                     {readOnly: true, destructive: false, idempotent: false},
+	"mctl_promote_agent":                      {readOnly: false, destructive: true, idempotent: false},
+	"mctl_provision_database":                 {readOnly: false, destructive: false, idempotent: false},
+	"mctl_publish_agent_version":              {readOnly: false, destructive: false, idempotent: false},
+	"mctl_publish_platform_skill":             {readOnly: false, destructive: false, idempotent: true},
+	"mctl_read_openclaw_identity":             {readOnly: true, destructive: false, idempotent: false},
+	"mctl_read_openclaw_skill":                {readOnly: true, destructive: false, idempotent: false},
+	"mctl_read_platform_skill":                {readOnly: true, destructive: false, idempotent: false},
+	"mctl_remove_custom_domain":               {readOnly: false, destructive: true, idempotent: false},
+	"mctl_resolve_agent":                      {readOnly: true, destructive: false, idempotent: false},
+	"mctl_resolve_incident":                   {readOnly: false, destructive: false, idempotent: true},
+	"mctl_resume_openclaw_deploy":             {readOnly: false, destructive: false, idempotent: false},
+	"mctl_retire_service":                     {readOnly: false, destructive: true, idempotent: false},
+	"mctl_rollback_agent":                     {readOnly: false, destructive: true, idempotent: false},
+	"mctl_rollback_service":                   {readOnly: false, destructive: true, idempotent: false},
+	"mctl_save_openclaw_identity":             {readOnly: false, destructive: false, idempotent: true},
+	"mctl_save_openclaw_skill":                {readOnly: false, destructive: false, idempotent: true},
+	"mctl_scale_service":                      {readOnly: false, destructive: false, idempotent: true},
+	"mctl_sync_repos":                         {readOnly: false, destructive: false, idempotent: true},
+	"mctl_trigger_agents_run":                 {readOnly: false, destructive: false, idempotent: false},
+	"mctl_trigger_approve":                    {readOnly: false, destructive: true, idempotent: true},
+	"mctl_trigger_implementer":                {readOnly: false, destructive: true, idempotent: false},
+	"mctl_trigger_incident_responder":         {readOnly: false, destructive: false, idempotent: false},
+	"mctl_trigger_issue":                      {readOnly: false, destructive: false, idempotent: false},
+	"mctl_trigger_mentor_only":                {readOnly: false, destructive: false, idempotent: false},
+	"mctl_trigger_reconcile":                  {readOnly: false, destructive: true, idempotent: false},
+	"mctl_trigger_shepherd":                   {readOnly: false, destructive: true, idempotent: false},
+	"mctl_trigger_single_service":             {readOnly: false, destructive: false, idempotent: false},
+	"mctl_verify_domain":                      {readOnly: false, destructive: false, idempotent: false},
+	"mctl_whoami":                             {readOnly: true, destructive: false, idempotent: false},
 }
 
 // TestEveryToolMatchesTheRecordedHints holds the registered tools to the
@@ -108,7 +109,11 @@ func TestEveryToolMatchesTheRecordedHints(t *testing.T) {
 	var problems []string
 	for name, st := range tools {
 		a := st.Tool.Annotations
-		got := hints{readOnly: a.ReadOnlyHint != nil && *a.ReadOnlyHint, destructive: a.DestructiveHint != nil && *a.DestructiveHint}
+		got := hints{
+			readOnly:    a.ReadOnlyHint != nil && *a.ReadOnlyHint,
+			destructive: a.DestructiveHint != nil && *a.DestructiveHint,
+			idempotent:  a.IdempotentHint != nil && *a.IdempotentHint,
+		}
 		want, ok := recordedHints[name]
 		switch {
 		case !ok:
@@ -131,7 +136,7 @@ func TestEveryToolMatchesTheRecordedHints(t *testing.T) {
 }
 
 func describe(h hints) string {
-	return "readOnly=" + boolString(h.readOnly) + " destructive=" + boolString(h.destructive)
+	return "readOnly=" + boolString(h.readOnly) + " destructive=" + boolString(h.destructive) + " idempotent=" + boolString(h.idempotent)
 }
 
 func boolString(b bool) string {
@@ -142,6 +147,8 @@ func boolString(b bool) string {
 }
 
 // TestEveryToolDeclaresBothHintsInSource is the half the runtime cannot see.
+// Every tool names readOnly and destructive; every mutating tool also names
+// idempotent.
 // mcp-go fills an absent hint with a default (readOnly=false,
 // destructive=true), so a tool that declares nothing still carries a
 // well-formed profile at runtime and would satisfy the table above if that
@@ -172,6 +179,11 @@ func TestEveryToolDeclaresBothHintsInSource(t *testing.T) {
 		}
 		if !strings.Contains(block, "WithDestructiveHintAnnotation(") {
 			missing = append(missing, m[1]+": no destructiveHint")
+		}
+		// A mutating tool says whether a repeat is a no-op; for a read-only
+		// tool the question does not arise and the hint is left unstated.
+		if strings.Contains(block, "WithReadOnlyHintAnnotation(false)") && !strings.Contains(block, "WithIdempotentHintAnnotation(") {
+			missing = append(missing, m[1]+": mutating without idempotentHint")
 		}
 	}
 	if seen != len(recordedHints) {
