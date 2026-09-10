@@ -864,6 +864,108 @@ var operationToTool = map[string]string{
 	"mctl-agents-reconcile":      "mctl_trigger_reconcile",
 }
 
+// serviceEnumOperationToTool maps the four DevLoop operations whose
+// `service` parameter carries an Enum to the MCP tool that mirrors it.
+// mctl-agents-single-service is intentionally excluded (a deliberately
+// shorter, unrelated list of eight rotating service-agent targets) and
+// mctl-agents-incidents is intentionally excluded (its `service` parameter
+// has no Enum at all) — see TestServiceEnumsMatchRegistry.
+var serviceEnumOperationToTool = map[string]string{
+	"mctl-agents-implement": "mctl_trigger_implementer",
+	"mctl-agents-shepherd":  "mctl_trigger_shepherd",
+	"mctl-agents-approve":   "mctl_trigger_approve",
+	"mctl-agents-reconcile": "mctl_trigger_reconcile",
+}
+
+// TestServiceEnumsMatchRegistry is the registry-to-MCP enum parity guard
+// mctl-api#281 asks for: for each of the four DevLoop operation/tool pairs,
+// the live MCP tool schema's `service` enum must equal the registry's
+// ParameterDef.Enum exactly, value-for-value and in the same order. Order
+// matters here because both lists are maintained by hand in lockstep with an
+// append-at-the-end convention; exact equality is the only check that also
+// catches a different value being appended to each side. Without this test,
+// a value (e.g. "portfolio") added to only one of the eight sites (four
+// registry.go entries, four server.go tool constructors) drifts silently:
+// the registry.go copy of TestImplementAndShepherdServiceEnumCoversMctlAgentsServices
+// only checks the registry side, and nothing previously compared it against
+// the MCP schema the model/client actually sees.
+func TestServiceEnumsMatchRegistry(t *testing.T) {
+	reg := operations.NewRegistry()
+	srv := NewServer("http://localhost:8080", "")
+	mcpSrv := srv.NewMCPServer()
+
+	req := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	resp := mcpSrv.HandleMessage(context.Background(), req)
+
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal response: %v", err)
+	}
+
+	var result struct {
+		Result struct {
+			Tools []struct {
+				Name        string `json:"name"`
+				InputSchema struct {
+					Properties map[string]struct {
+						Enum []string `json:"enum"`
+					} `json:"properties"`
+				} `json:"inputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("failed to unmarshal tools/list response: %v", err)
+	}
+
+	toolByName := make(map[string]int, len(result.Result.Tools))
+	for i, tool := range result.Result.Tools {
+		toolByName[tool.Name] = i
+	}
+
+	for opName, toolName := range serviceEnumOperationToTool {
+		op, ok := reg.Get(opName)
+		if !ok {
+			t.Errorf("operation %q not found in registry", opName)
+			continue
+		}
+		var wantEnum []string
+		for _, p := range op.Parameters {
+			if p.Name == "service" {
+				wantEnum = p.Enum
+				break
+			}
+		}
+		if wantEnum == nil {
+			t.Errorf("operation %q has no 'service' parameter enum", opName)
+			continue
+		}
+
+		idx, mapped := toolByName[toolName]
+		if !mapped {
+			t.Errorf("tool %q (for operation %q) not found in tools/list", toolName, opName)
+			continue
+		}
+		serviceProp, ok := result.Result.Tools[idx].InputSchema.Properties["service"]
+		if !ok {
+			t.Errorf("tool %q has no 'service' property in its input schema", toolName)
+			continue
+		}
+		gotEnum := serviceProp.Enum
+
+		if len(gotEnum) != len(wantEnum) {
+			t.Errorf("tool %q service enum (len %d) != registry operation %q service enum (len %d)\n  tool:     %v\n  registry: %v", toolName, len(gotEnum), opName, len(wantEnum), gotEnum, wantEnum)
+			continue
+		}
+		for i := range wantEnum {
+			if gotEnum[i] != wantEnum[i] {
+				t.Errorf("tool %q service enum differs from registry operation %q at index %d: tool=%q registry=%q\n  tool:     %v\n  registry: %v", toolName, opName, i, gotEnum[i], wantEnum[i], gotEnum, wantEnum)
+				break
+			}
+		}
+	}
+}
+
 // TestMCPToolsCoverEveryNonHandlerOnlyOperation is the registry-to-MCP
 // parity guard: it fails if any operations.Registry entry with
 // HandlerOnly == false (and not explicitly exempted via
