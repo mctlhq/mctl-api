@@ -92,6 +92,14 @@ type OAuthServer struct {
 	refreshTokens refreshTokenStore
 	clientsMu     sync.Mutex
 	clients       map[string]RegisteredClient // clientID → client (RFC 7591)
+	// static holds pre-registered public clients (OAUTH_PREREGISTERED_CLIENTS).
+	// They are outside the dynamic registry on purpose: no TTL, no eviction
+	// under MaxRegisteredClients, no dependence on this process having seen a
+	// registration. A counterpart that cannot perform RFC 7591 registration
+	// -- the Cloudflare MCP portal, whose manual OAuth stores one client id
+	// per upstream -- needs an id that is still valid after a pod restart,
+	// which the dynamic registry, being in-memory, cannot promise.
+	static map[string]RegisteredClient
 }
 
 // defaultMaxRegisteredClients bounds the dynamic-registration map when
@@ -140,6 +148,79 @@ type RegisteredClient struct {
 	CreatedAt    time.Time `json:"client_id_issued_at,omitempty"`
 }
 
+// AddPreregisteredClient seeds a static public client. It is the narrower
+// counterpart of AllowedRedirectURIs: an exact registration trusts one
+// callback for exactly one client_id, where widening the global allowlist
+// would loosen redirect acceptance for every dynamically registered client.
+//
+// The same shape rules IsRedirectURIAllowed relies on apply here, at
+// startup, so a misconfiguration is a refused boot rather than a client that
+// silently never works: absolute URL, https (or http on a loopback host per
+// RFC 8252), no fragment, no userinfo. There is no client_secret: the server
+// is public-client only, PKCE is the proof, and no field could change that.
+func (s *OAuthServer) AddPreregisteredClient(clientID, clientName string, redirectURIs []string) error {
+	if strings.TrimSpace(clientID) == "" {
+		return errors.New("pre-registered client: client_id is required")
+	}
+	if len(redirectURIs) == 0 {
+		return fmt.Errorf("pre-registered client %q: at least one redirect_uri is required", clientID)
+	}
+	seen := make(map[string]struct{}, len(redirectURIs))
+	for _, raw := range redirectURIs {
+		if strings.ContainsRune(raw, '\\') {
+			return fmt.Errorf("pre-registered client %q: redirect_uri must not contain a backslash", clientID)
+		}
+		u, err := url.Parse(raw)
+		if err != nil || !u.IsAbs() || u.Host == "" {
+			return fmt.Errorf("pre-registered client %q: redirect_uri %q is not an absolute URL", clientID, raw)
+		}
+		if u.User != nil {
+			return fmt.Errorf("pre-registered client %q: redirect_uri must not contain userinfo", clientID)
+		}
+		if u.Fragment != "" || strings.Contains(raw, "#") {
+			return fmt.Errorf("pre-registered client %q: redirect_uri must not contain a fragment", clientID)
+		}
+		if u.Scheme != "https" && !isLoopbackRedirectURI(raw) {
+			return fmt.Errorf("pre-registered client %q: redirect_uri scheme %q is not allowed (https, or http on a loopback host)", clientID, u.Scheme)
+		}
+		if _, dup := seen[raw]; dup {
+			return fmt.Errorf("pre-registered client %q: redirect_uri %q listed twice", clientID, raw)
+		}
+		seen[raw] = struct{}{}
+	}
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	if s.static == nil {
+		s.static = make(map[string]RegisteredClient)
+	}
+	if _, dup := s.static[clientID]; dup {
+		return fmt.Errorf("pre-registered client %q: duplicate client_id", clientID)
+	}
+	s.static[clientID] = RegisteredClient{
+		ClientID:     clientID,
+		ClientName:   clientName,
+		RedirectURIs: append([]string(nil), redirectURIs...),
+		// Zero CreatedAt marks the record as static; nothing reads it for
+		// expiry because GetClient never subjects static entries to the TTL.
+	}
+	return nil
+}
+
+// PreregisteredClientCount reports how many static clients are seeded.
+func (s *OAuthServer) PreregisteredClientCount() int {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	return len(s.static)
+}
+
+// isStatic reports whether clientID names a pre-registered client.
+func (s *OAuthServer) isStatic(clientID string) bool {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	_, ok := s.static[clientID]
+	return ok
+}
+
 // RegisterClient stores a dynamically registered client and returns the assigned client_id.
 func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) RegisteredClient {
 	b := make([]byte, 16)
@@ -149,6 +230,13 @@ func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) Registe
 	// would be unreachable code; the discard is deliberate, not an oversight.
 	_, _ = rand.Read(b)
 	clientID := base64.RawURLEncoding.EncodeToString(b)
+	// A 128-bit random id colliding with a static one is not a realistic
+	// event, but the consequence -- a dynamic registration shadowing a
+	// pre-registered client -- is bad enough to rule out rather than accept.
+	for s.isStatic(clientID) {
+		_, _ = rand.Read(b)
+		clientID = base64.RawURLEncoding.EncodeToString(b)
+	}
 
 	client := RegisteredClient{
 		ClientID:     clientID,
@@ -200,6 +288,9 @@ func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) Registe
 func (s *OAuthServer) GetClient(clientID string) (RegisteredClient, bool) {
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
+	if c, ok := s.static[clientID]; ok {
+		return c, true
+	}
 	c, ok := s.clients[clientID]
 	if !ok {
 		return RegisteredClient{}, false

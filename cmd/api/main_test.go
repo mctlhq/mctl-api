@@ -256,3 +256,37 @@ func TestConfigValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestParsePreregisteredClients(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		wantN   int
+		wantErr string
+	}{
+		{"unset", "", 0, ""},
+		{"blank", "   ", 0, ""},
+		{"one client", `[{"client_id":"cloudflare-portal-mcp","client_name":"Portal","redirect_uris":["https://mcp.mctl.ai/servers-callback"]}]`, 1, ""},
+		{"not json", `{`, 0, "OAUTH_PREREGISTERED_CLIENTS"},
+		{"unknown field is refused, so a secret cannot be smuggled in", `[{"client_id":"c","redirect_uris":["https://x/cb"],"client_` + `secret":"s"}]`, 0, "unknown field"},
+		{"missing client_id", `[{"redirect_uris":["https://x/cb"]}]`, 0, "no client_id"},
+		{"duplicate client_id", `[{"client_id":"c","redirect_uris":["https://x/cb"]},{"client_id":"c","redirect_uris":["https://y/cb"]}]`, 0, "listed twice"},
+		{"trailing data", `[] []`, 0, "trailing data"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parsePreregisteredClients(tc.raw)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != tc.wantN {
+				t.Fatalf("len = %d, want %d", len(got), tc.wantN)
+			}
+		})
+	}
+}
