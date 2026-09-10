@@ -1,5 +1,37 @@
 # Changelog
 
+## [4.40.0](https://github.com/mctlhq/mctl-api/compare/4.39.0...4.40.0) (2026-09-10)
+
+
+### Features
+
+* **agents:** issue-262-custom-domains-post-api-v1-domains-alway ([e81215b](https://github.com/mctlhq/mctl-api/commit/e81215bacf90debd7e803c2c923dbebf8fab80bd))
+* **agents:** issue-268-custom-domains-5-non-blocking-review-fin ([eca288e](https://github.com/mctlhq/mctl-api/commit/eca288e9ed9888bf42c1e6d537ec154ff7e3f28a))
+* **agents:** issue-270-custom-domains-7-non-blocking-review-fin ([b6dac55](https://github.com/mctlhq/mctl-api/commit/b6dac55526d220e31ba2017a031c20cd4571839a))
+* **auth:** pre-registered public OAuth clients for counterparts that cannot re-register ([d080935](https://github.com/mctlhq/mctl-api/commit/d080935ac7e13776d75ea126a0e805ca7ed7c4c7))
+* **auth:** pre-registered public OAuth clients for counterparts that cannot re-register ([2318e68](https://github.com/mctlhq/mctl-api/commit/2318e6806764c5e93810998c8382d7482f1f1f4a))
+* **mcp:** modern MCP transport and a complete tool classification ([1f7a856](https://github.com/mctlhq/mctl-api/commit/1f7a856c09ee30c0e4655ecf2f8a998d05906979))
+* **mcp:** modern MCP transport and a complete tool classification ([193b9cd](https://github.com/mctlhq/mctl-api/commit/193b9cd6a8606ae68442aaf6c6e7cd74c466f621))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-268-custom-domains-5-non-blocking-review-fin ([8167bdf](https://github.com/mctlhq/mctl-api/commit/8167bdf060ab6ed48b246464f6dd8872d4ec9098))
+* **auth:** refuse a padded static client_id; separate the two validate rationales ([559851a](https://github.com/mctlhq/mctl-api/commit/559851a2c13198eec3980954ed80651eb5829dd4))
+* **auth:** shape rules run at config validation; the collision test forces the collision ([bff1971](https://github.com/mctlhq/mctl-api/commit/bff197186af0f36445587a12ae885259fe4cbc32))
+* **auth:** static clients trust only their own callbacks; validate the client list unconditionally ([0e6c9fe](https://github.com/mctlhq/mctl-api/commit/0e6c9fe899f8e955f5752525fbc9622e9b9238d9))
+* **domains:** address claude-review P2/P3 findings on custom-domains registry ([b82f993](https://github.com/mctlhq/mctl-api/commit/b82f99374bc96adf1219e81b58cdca1383108537))
+* **domains:** address second-round claude-review/agy findings ([fbedcf8](https://github.com/mctlhq/mctl-api/commit/fbedcf8ec362c2e21c5080e6c39b766e0d17cab2))
+* **domains:** close 7 non-blocking review findings from [#269](https://github.com/mctlhq/mctl-api/issues/269) ([8197c53](https://github.com/mctlhq/mctl-api/commit/8197c532f785d77fcea2a5f47216e1fbabf40532))
+* **domains:** close five non-blocking review findings on mctl-api[#264](https://github.com/mctlhq/mctl-api/issues/264) ([d1a50c9](https://github.com/mctlhq/mctl-api/commit/d1a50c91e6ee998a82a4d995755c64cc8a3f5dba))
+* **domains:** close out remaining P3s on mctl-api[#264](https://github.com/mctlhq/mctl-api/issues/264) ([c51f616](https://github.com/mctlhq/mctl-api/commit/c51f616c9ceef3a82cc973da0de3c5be7ace0419))
+* **domains:** correct TestDeleteDomain_NilExecutorSkipsCleanup status setup ([926436a](https://github.com/mctlhq/mctl-api/commit/926436aba0ca956b989c00d691ada15d671cb511))
+* **domains:** fix legacy-row lockout from the P1 fix, gate teardown on status ([ac34d18](https://github.com/mctlhq/mctl-api/commit/ac34d1814c9857d7d60e2ec83aad95ec6174a9f8))
+* **domains:** use EqualFold in Store.Create's conflict check ([71ec25b](https://github.com/mctlhq/mctl-api/commit/71ec25b23091e948bb7604f7afeab2fdd43f62e0))
+* **domains:** validate service before Submit, fix case-sensitivity regression ([519c31c](https://github.com/mctlhq/mctl-api/commit/519c31c1c148036bd6a0e91484c1a2f44599addb))
+* **mcp:** every tool declares both hints in source; the record is exact; stateless transport is tested ([6c6a6b3](https://github.com/mctlhq/mctl-api/commit/6c6a6b369922e87d213b05744eac9389b906e8ff))
+* **mcp:** record and declare idempotentHint on mutating tools; envelope-based stateless test ([d31f754](https://github.com/mctlhq/mctl-api/commit/d31f75437873a468f5c0b26cb9a7fd0088d2b2d8))
+
 ## [4.39.0](https://github.com/mctlhq/mctl-api/compare/4.38.0...4.39.0) (2026-09-08)
 
 
