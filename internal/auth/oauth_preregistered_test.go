@@ -129,19 +129,27 @@ func TestPreregisteredClient_ShapeRules(t *testing.T) {
 	}
 }
 
-// TestPreregisteredClient_DynamicRegistrationCannotShadow: a dynamic
-// registration never lands on a static id.
+// TestPreregisteredClient_DynamicRegistrationCannotShadow forces the
+// collision that 128 random bits would never produce on their own: the id
+// source hands out the static id first, and the registry must skip it. A
+// version of RegisterClient without the retry loop assigns "static" to the
+// dynamic client and fails here.
 func TestPreregisteredClient_DynamicRegistrationCannotShadow(t *testing.T) {
 	s := newPreregServer(t)
-	if err := s.AddPreregisteredClient("static", "", []string{"https://x.test/cb"}); err != nil {
-		t.Fatal(err)
+	if err := s.AddPreregisteredClient("static", "Portal", []string{"https://mcp.mctl.ai/servers-callback"}); err != nil {
+		t.Fatalf("seed: %v", err)
 	}
-	for i := 0; i < 50; i++ {
-		if c := s.RegisterClient("dyn", []string{"https://d.test/cb"}); c.ClientID == "static" {
-			t.Fatal("dynamic registration shadowed the static client")
-		}
+	ids := []string{"static", "static", "fresh"}
+	s.newClientID = func() string { id := ids[0]; ids = ids[1:]; return id }
+	c := s.RegisterClient("dyn", []string{"https://d.test/cb"})
+	if c.ClientID != "fresh" {
+		t.Fatalf("dynamic registration got id %q, want the first id that is not static", c.ClientID)
 	}
-	if got, _ := s.GetClient("static"); got.RedirectURIs[0] != "https://x.test/cb" {
-		t.Fatalf("static record altered: %+v", got)
+	if len(ids) != 0 {
+		t.Fatalf("id source was consulted %d times fewer than the collisions required", len(ids))
+	}
+	got, _ := s.GetClient("static")
+	if got.ClientName != "Portal" {
+		t.Fatalf("static client was shadowed: %+v", got)
 	}
 }

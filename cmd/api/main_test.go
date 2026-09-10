@@ -247,6 +247,14 @@ func TestConfigValidate(t *testing.T) {
 			wantVar: "OAUTH_PREREGISTERED_CLIENTS",
 		},
 		{
+			// Shape rules, not only decoding: the registry's own checks run
+			// against a throwaway server so this boot refuses, not the next.
+			name:    "OAUTH_PREREGISTERED_CLIENTS with a relative callback is refused with OAuth disabled",
+			cfg:     config{OAuthPreregisteredClientsRaw: `[{"client_id":"c","redirect_uris":["/cb"]}]`},
+			wantErr: true,
+			wantVar: "OAUTH_PREREGISTERED_CLIENTS",
+		},
+		{
 			name:    "well-formed OAUTH_PREREGISTERED_CLIENTS is accepted with OAuth disabled",
 			cfg:     config{OAuthPreregisteredClientsRaw: `[{"client_id":"c","redirect_uris":["https://x/cb"]}]`},
 			wantErr: false,
@@ -295,6 +303,7 @@ func TestParsePreregisteredClients(t *testing.T) {
 		// dec.More would answer false to a leading "]" and let this through.
 		{"trailing data starting with a closing bracket", `[{"client_id":"c","redirect_uris":["https://x/cb"]}] ]`, 0, "trailing data"},
 		{"trailing garbage", `[] x`, 0, "trailing data"},
+		{"null is refused rather than read as none", `null`, 0, "null is not a client list"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parsePreregisteredClients(tc.raw)

@@ -42,6 +42,9 @@ var ErrServerError = errors.New("server_error")
 // It acts as a public-client OAuth server backed by GitHub for user authentication.
 // Access tokens are short-lived JWTs signed with HMAC-SHA256.
 type OAuthServer struct {
+	// newClientID overrides the random id source for dynamic registrations.
+	// Nil in production; tests set it to force a collision with a static id.
+	newClientID func() string
 	// BaseURL is the public base URL of this server, e.g. "https://api.mctl.ai".
 	BaseURL string
 	// GitHubClientID / GitHubClientSecret are the GitHub OAuth App credentials.
@@ -159,6 +162,11 @@ type RegisteredClient struct {
 // silently never works: absolute URL, https (or http on a loopback host per
 // RFC 8252), no fragment, no userinfo. There is no client_secret: the server
 // is public-client only, PKCE is the proof, and no field could change that.
+//
+// A loopback entry is accepted but matched with its port: a static client
+// trusts exactly what it lists and never the port-agnostic loopback rule,
+// so a native app that binds an ephemeral port cannot be pre-registered and
+// has to use dynamic registration instead.
 func (s *OAuthServer) AddPreregisteredClient(clientID, clientName string, redirectURIs []string) error {
 	if strings.TrimSpace(clientID) == "" {
 		return errors.New("pre-registered client: client_id is required")
@@ -221,6 +229,21 @@ func (s *OAuthServer) PreregisteredClientCount() int {
 	return len(s.static)
 }
 
+// mintClientID returns a fresh dynamic client id: 128 random bits, or
+// whatever newClientID yields when a test has set it.
+func (s *OAuthServer) mintClientID() string {
+	if s.newClientID != nil {
+		return s.newClientID()
+	}
+	b := make([]byte, 16)
+	// crypto/rand.Read cannot report failure on the Go version this module
+	// requires: since Go 1.24 it is documented never to return an error and
+	// panics instead if the system source is broken. Handling the error here
+	// would be unreachable code; the discard is deliberate, not an oversight.
+	_, _ = rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
 // isStatic reports whether clientID names a pre-registered client.
 func (s *OAuthServer) isStatic(clientID string) bool {
 	_, ok := s.staticRedirectURIs(clientID)
@@ -241,19 +264,12 @@ func (s *OAuthServer) staticRedirectURIs(clientID string) ([]string, bool) {
 
 // RegisterClient stores a dynamically registered client and returns the assigned client_id.
 func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) RegisteredClient {
-	b := make([]byte, 16)
-	// crypto/rand.Read cannot report failure on the Go version this module
-	// requires: since Go 1.24 it is documented never to return an error and
-	// panics instead if the system source is broken. Handling the error here
-	// would be unreachable code; the discard is deliberate, not an oversight.
-	_, _ = rand.Read(b)
-	clientID := base64.RawURLEncoding.EncodeToString(b)
+	clientID := s.mintClientID()
 	// A 128-bit random id colliding with a static one is not a realistic
 	// event, but the consequence -- a dynamic registration shadowing a
 	// pre-registered client -- is bad enough to rule out rather than accept.
 	for s.isStatic(clientID) {
-		_, _ = rand.Read(b)
-		clientID = base64.RawURLEncoding.EncodeToString(b)
+		clientID = s.mintClientID()
 	}
 
 	client := RegisteredClient{

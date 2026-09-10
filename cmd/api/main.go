@@ -766,8 +766,18 @@ func (c config) validate() error {
 	// the README promises a malformed value refuses startup, and a value that
 	// is read but never looked at would make that promise conditional on a
 	// second variable the operator may not be thinking about.
-	if _, err := parsePreregisteredClients(c.OAuthPreregisteredClientsRaw); err != nil {
+	pre, err := parsePreregisteredClients(c.OAuthPreregisteredClientsRaw)
+	if err != nil {
 		return err
+	}
+	// The shape rules live with the registry; run them here against a
+	// throwaway server so a bad callback refuses this boot, not the one after
+	// OAuth is switched on.
+	var probe auth.OAuthServer
+	for _, p := range pre {
+		if err := probe.AddPreregisteredClient(p.ClientID, p.ClientName, p.RedirectURIs); err != nil {
+			return fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
+		}
 	}
 	oauthEnabled := c.OAuthGitHubClientID != "" && c.OAuthJWTSecret != ""
 	if oauthEnabled && c.OAuthTokenTTL > maxOAuthTokenTTL {
@@ -824,6 +834,11 @@ func parsePreregisteredClients(raw string) ([]preregisteredClient, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
+	}
+	if raw == "null" {
+		// Decodes to a nil slice and would read as "no clients"; it is far
+		// more likely a templating accident than a decision.
+		return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: null is not a client list (unset the variable for none)")
 	}
 	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.DisallowUnknownFields()
