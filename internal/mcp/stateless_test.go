@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,7 +33,7 @@ func TestStreamableHTTPHandler_IsStateless(t *testing.T) {
 	}
 
 	init := post(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`)
-	defer init.Body.Close()
+	defer init.Body.Close() //nolint:errcheck
 	if init.StatusCode != http.StatusOK {
 		t.Fatalf("initialize: status %d", init.StatusCode)
 	}
@@ -41,13 +42,15 @@ func TestStreamableHTTPHandler_IsStateless(t *testing.T) {
 	}
 
 	list := post(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
-	defer list.Body.Close()
+	defer list.Body.Close() //nolint:errcheck
 	if list.StatusCode != http.StatusOK {
 		t.Fatalf("tools/list without a session: status %d", list.StatusCode)
 	}
-	buf := make([]byte, 1<<16)
-	n, _ := list.Body.Read(buf)
-	if body := string(buf[:n]); !strings.Contains(body, `"tools"`) || strings.Contains(body, `"error"`) {
+	raw, err := io.ReadAll(list.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := string(raw); !strings.Contains(body, `"tools"`) || strings.Contains(body, `"error"`) {
 		t.Fatalf("tools/list without a session was not served: %.200s", body)
 	}
 }

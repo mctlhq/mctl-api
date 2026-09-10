@@ -152,7 +152,7 @@ func TestEveryToolDeclaresBothHintsInSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nameRe := regexp.MustCompile(`NewTool\("([a-z_]+)"`)
+	nameRe := regexp.MustCompile(`NewTool\("([a-z0-9_]+)"`)
 	parts := strings.Split(string(src), "mcplib.NewTool(")
 	var missing []string
 	seen := 0
