@@ -56,12 +56,15 @@ func TestStreamableHTTPHandler_IsStateless(t *testing.T) {
 	// may be SSE-framed; the JSON is the last data: line.
 	body := string(raw)
 	// SSE frames a data line at the start of a line; anchor there rather
-	// than searching the payload, which is every tool description.
+	// than searching the payload, which is every tool description. Last
+	// data line wins, raw body is the fallback for a plain JSON response.
+	payload := body
 	for _, ln := range strings.Split(body, "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(ln), "data: "); ok {
-			body = v
+			payload = v
 		}
 	}
+	body = payload
 	var env struct {
 		Result *struct {
 			Tools []struct{ Name string } `json:"tools"`

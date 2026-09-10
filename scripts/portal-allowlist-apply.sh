@@ -13,12 +13,18 @@
 # the target server's mapping rewritten. Nested read-only fields on the
 # server elements go back out as they came; the API accepted a PUT of the
 # full GET body when this was verified, and rejects loudly if that changes.
-# Nothing else is projected away, so a field Cloudflare adds later survives
-# an apply untouched.
+# Nothing else on the server element is projected away, so a field
+# Cloudflare adds there later survives an apply untouched. The per-tool
+# entries are the exception, on purpose: updated_tools is rewritten as
+# exactly {name, enabled} from the file, which is the source of truth for
+# the whole per-tool record, so any per-tool field the portal stores
+# alongside enabled is dropped on every apply.
 #
-# The token never appears on a command line: curl reads it from a config
-# handed over a file descriptor, so it is in neither the process table nor
-# the shell history. Same discipline as mcpprobe's --token-env.
+# The token is never a curl argument: curl reads it from a config written
+# by a builtin over a file descriptor, so it does not appear in the process
+# table. It still lives in this process's environment; feed it from a
+# secret store or `read -rs` rather than typing it on the command line,
+# which an interactive shell records.
 set -euo pipefail
 
 case "${1:-}" in
@@ -38,13 +44,15 @@ portal=$(jq -r .portal "$file"); server=$(jq -r .server "$file")
 
 # The invariant -- an enabled tool is one recorded read-only -- lives in
 # the Go test, because the record is Go source. This path publishes what
-# is on disk, so it consults the same test first: an edit that has not
-# passed the guard is not applied, whether it is uncommitted or merely
-# not yet through CI. Both checks are cheap next to a PUT that changes
-# what a shared surface exposes.
-if ! git -C "$here" diff --quiet -- docs/portal-allowlist.json; then
-  echo "docs/portal-allowlist.json has uncommitted changes; commit them (and let the guard test run) before applying" >&2; exit 1
+# is on disk, so it consults the same test first, and it refuses a file
+# that differs from HEAD (staged or not: `diff HEAD` sees both), so what
+# is applied is always a committed, reviewable revision. Neither check
+# knows whether that commit is on main; review-before-publish is the
+# operator's discipline, this only removes the working-tree shortcut.
+if ! git -C "$here" diff --quiet HEAD -- docs/portal-allowlist.json; then
+  echo "docs/portal-allowlist.json differs from HEAD (staged or unstaged); commit it before applying" >&2; exit 1
 fi
+[ "$portal" = mcp ] && [ "$server" = api ] || { echo "$file targets portal=$portal server=$server; expected mcp/api" >&2; exit 1; }
 if command -v go >/dev/null; then
   ( cd "$here" && go test ./internal/mcp/ -run 'TestPortalAllowlist_CoversEveryRegisteredTool' -count=1 >/dev/null ) \
     || { echo "internal/mcp/portal_allowlist_test.go fails for the current file; refusing to apply" >&2; exit 1; }
