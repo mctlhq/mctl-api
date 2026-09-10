@@ -201,6 +201,8 @@ func TestConfigValidate(t *testing.T) {
 		name    string
 		cfg     config
 		wantErr bool
+		// wantVar is the variable the error must name; defaults to OAUTH_TOKEN_TTL.
+		wantVar string
 	}{
 		{
 			name:    "default 1h is accepted",
@@ -235,6 +237,28 @@ func TestConfigValidate(t *testing.T) {
 			cfg:     config{OAuthGitHubClientID: ghID, OAuthTokenTTL: 8760 * time.Hour},
 			wantErr: false,
 		},
+		{
+			// Unlike the TTL ceiling, a malformed client list is refused
+			// even when OAuth is off: the README promises the refusal without
+			// a caveat, and nothing about the value becomes valid later.
+			name:    "malformed OAUTH_PREREGISTERED_CLIENTS is refused with OAuth disabled",
+			cfg:     config{OAuthPreregisteredClientsRaw: `[{"client_id":"c","redirect_uris":["https://x/cb"],"client_` + `secret":"s"}]`},
+			wantErr: true,
+			wantVar: "OAUTH_PREREGISTERED_CLIENTS",
+		},
+		{
+			// Shape rules, not only decoding: the registry's own checks run
+			// against a throwaway server so this boot refuses, not the next.
+			name:    "OAUTH_PREREGISTERED_CLIENTS with a relative callback is refused with OAuth disabled",
+			cfg:     config{OAuthPreregisteredClientsRaw: `[{"client_id":"c","redirect_uris":["/cb"]}]`},
+			wantErr: true,
+			wantVar: "OAUTH_PREREGISTERED_CLIENTS",
+		},
+		{
+			name:    "well-formed OAUTH_PREREGISTERED_CLIENTS is accepted with OAuth disabled",
+			cfg:     config{OAuthPreregisteredClientsRaw: `[{"client_id":"c","redirect_uris":["https://x/cb"]}]`},
+			wantErr: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -245,13 +269,55 @@ func TestConfigValidate(t *testing.T) {
 				}
 				// A startup failure that does not name the variable is
 				// indistinguishable from any other configuration problem.
-				if !strings.Contains(err.Error(), "OAUTH_TOKEN_TTL") {
-					t.Errorf("error = %q, want it to name OAUTH_TOKEN_TTL", err)
+				want := tc.wantVar
+				if want == "" {
+					want = "OAUTH_TOKEN_TTL"
+				}
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to name %s", err, want)
 				}
 				return
 			}
 			if err != nil {
 				t.Errorf("validate() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestParsePreregisteredClients(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		wantN   int
+		wantErr string
+	}{
+		{"unset", "", 0, ""},
+		{"blank", "   ", 0, ""},
+		{"one client", `[{"client_id":"cloudflare-portal-mcp","client_name":"Portal","redirect_uris":["https://mcp.mctl.ai/servers-callback"]}]`, 1, ""},
+		{"not json", `{`, 0, "OAUTH_PREREGISTERED_CLIENTS"},
+		{"unknown field is refused, so a secret cannot be smuggled in", `[{"client_id":"c","redirect_uris":["https://x/cb"],"client_` + `secret":"s"}]`, 0, "unknown field"},
+		{"missing client_id", `[{"redirect_uris":["https://x/cb"]}]`, 0, "no client_id"},
+		{"duplicate client_id", `[{"client_id":"c","redirect_uris":["https://x/cb"]},{"client_id":"c","redirect_uris":["https://y/cb"]}]`, 0, "listed twice"},
+		{"trailing data", `[] []`, 0, "trailing data"},
+		// dec.More would answer false to a leading "]" and let this through.
+		{"trailing data starting with a closing bracket", `[{"client_id":"c","redirect_uris":["https://x/cb"]}] ]`, 0, "trailing data"},
+		{"trailing garbage", `[] x`, 0, "trailing data"},
+		{"null is refused rather than read as none", `null`, 0, "null is not a client list"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parsePreregisteredClients(tc.raw)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != tc.wantN {
+				t.Fatalf("len = %d, want %d", len(got), tc.wantN)
 			}
 		})
 	}

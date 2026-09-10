@@ -16,7 +16,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -122,7 +124,27 @@ func main() {
 		oauthServer.TenantResolver = gitReader
 		oauthServer.AccessTokenTTL = cfg.OAuthTokenTTL
 		oauthServer.RefreshTokenTTL = cfg.OAuthRefreshTokenTTL
-		slog.Info("OAuth 2.0 server enabled", "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL)
+		// Static public clients for counterparts that cannot register
+		// dynamically (the Cloudflare MCP portal). Seeded before the first
+		// request and never evicted, so the client id a portal stored keeps
+		// working across pod restarts, which the in-memory DCR registry
+		// cannot promise. A bad value is a refused boot, like any other
+		// invalid configuration above; the value itself was already parsed
+		// by config.validate, so this decode cannot fail.
+		pre, err := parsePreregisteredClients(cfg.OAuthPreregisteredClientsRaw)
+		if err != nil {
+			slog.Error("invalid configuration", "error", err)
+			stopSignals()
+			os.Exit(1)
+		}
+		for _, c := range pre {
+			if err := oauthServer.AddPreregisteredClient(c.ClientID, c.ClientName, c.RedirectURIs); err != nil {
+				slog.Error("invalid configuration", "error", fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err))
+				stopSignals()
+				os.Exit(1)
+			}
+		}
+		slog.Info("OAuth 2.0 server enabled", "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL, "preregistered_clients", oauthServer.PreregisteredClientCount())
 
 		// Persistent refresh-token store: prefer OAUTH_DB_URL, fall back to AUDIT_DB_URL.
 		// When available, refresh tokens survive pod restarts; without it the in-memory
@@ -508,16 +530,20 @@ type config struct {
 	OAuthGitHubClientSecret  string
 	OAuthJWTSecret           string
 	OAuthAllowedRedirectURIs []string
-	OAuthTokenTTL            time.Duration
-	OAuthRefreshTokenTTL     time.Duration
-	VaultAddr                string
-	VaultToken               string
-	VaultKubernetesRole      string
-	VaultKubernetesAuthPath  string
-	VictoriaMetricsURL       string
-	ArgoWebhookSecret        string
-	OAuthRegistrationToken   string
-	TrustedProxyCIDRs        string
+	// OAuthPreregisteredClientsRaw is the OAUTH_PREREGISTERED_CLIENTS value as
+	// read; it is parsed by parsePreregisteredClients at startup and a
+	// malformed value refuses the boot rather than silently seeding nothing.
+	OAuthPreregisteredClientsRaw string
+	OAuthTokenTTL                time.Duration
+	OAuthRefreshTokenTTL         time.Duration
+	VaultAddr                    string
+	VaultToken                   string
+	VaultKubernetesRole          string
+	VaultKubernetesAuthPath      string
+	VictoriaMetricsURL           string
+	ArgoWebhookSecret            string
+	OAuthRegistrationToken       string
+	TrustedProxyCIDRs            string
 }
 
 func loadConfig() config {
@@ -594,6 +620,7 @@ func loadConfig() config {
 		OAuthGitHubClientSecret:        os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
 		OAuthJWTSecret:                 os.Getenv("OAUTH_JWT_SECRET"),
 		OAuthAllowedRedirectURIs:       oauthRedirectURIs,
+		OAuthPreregisteredClientsRaw:   os.Getenv("OAUTH_PREREGISTERED_CLIENTS"),
 		OAuthTokenTTL:                  parseDuration(os.Getenv("OAUTH_TOKEN_TTL"), time.Hour),
 		OAuthRefreshTokenTTL:           parseDuration(os.Getenv("OAUTH_REFRESH_TOKEN_TTL"), 30*24*time.Hour),
 		VaultAddr:                      os.Getenv("VAULT_ADDR"),
@@ -735,6 +762,24 @@ func (c config) validate() error {
 	// of proportion to the mistake. The value is still rejected the moment
 	// OAuth is switched on, which is a deliberate change and exactly when the
 	// operator wants to hear about it.
+	//
+	// OAUTH_PREREGISTERED_CLIENTS is the other way round, checked whether or not OAuth is enabled:
+	// the README promises a malformed value refuses startup, and a value that
+	// is read but never looked at would make that promise conditional on a
+	// second variable the operator may not be thinking about.
+	pre, err := parsePreregisteredClients(c.OAuthPreregisteredClientsRaw)
+	if err != nil {
+		return err
+	}
+	// The shape rules live with the registry; run them here against a
+	// throwaway server so a bad callback refuses this boot, not the one after
+	// OAuth is switched on.
+	var probe auth.OAuthServer
+	for _, p := range pre {
+		if err := probe.AddPreregisteredClient(p.ClientID, p.ClientName, p.RedirectURIs); err != nil {
+			return fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
+		}
+	}
 	oauthEnabled := c.OAuthGitHubClientID != "" && c.OAuthJWTSecret != ""
 	if oauthEnabled && c.OAuthTokenTTL > maxOAuthTokenTTL {
 		return fmt.Errorf("OAUTH_TOKEN_TTL must not exceed %v, got %v — clients renew "+
@@ -768,4 +813,55 @@ func parseIntEnv(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// preregisteredClient is one entry of OAUTH_PREREGISTERED_CLIENTS.
+//
+// There is deliberately no secret field. The server is public-client only:
+// the token endpoint authenticates a client by PKCE, never by a credential,
+// and the decoder below rejects any key it does not know -- so a value that
+// tries to carry one refuses the boot instead of being ignored.
+type preregisteredClient struct {
+	ClientID     string   `json:"client_id"`
+	ClientName   string   `json:"client_name,omitempty"`
+	RedirectURIs []string `json:"redirect_uris"`
+}
+
+// parsePreregisteredClients decodes the JSON array in OAUTH_PREREGISTERED_CLIENTS.
+// Unset or blank means no static clients. Shape validation of each entry --
+// scheme, fragment, userinfo, duplicates -- happens in AddPreregisteredClient,
+// which is where the rules are defined; this function only owns the decoding.
+func parsePreregisteredClients(raw string) ([]preregisteredClient, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if raw == "null" {
+		// Decodes to a nil slice and would read as "no clients"; it is far
+		// more likely a templating accident than a decision.
+		return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: null is not a client list (unset the variable for none)")
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var out []preregisteredClient
+	if err := dec.Decode(&out); err != nil {
+		return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
+	}
+	// Anything after the array is a mistake. dec.More is the wrong probe here:
+	// it answers "is there another element", so trailing text that starts
+	// with a closing bracket reads as "no" and would be accepted.
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: trailing data after the JSON array")
+	}
+	seen := make(map[string]struct{}, len(out))
+	for _, c := range out {
+		if c.ClientID == "" {
+			return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: an entry has no client_id")
+		}
+		if _, dup := seen[c.ClientID]; dup {
+			return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: client_id %q listed twice", c.ClientID)
+		}
+		seen[c.ClientID] = struct{}{}
+	}
+	return out, nil
 }
