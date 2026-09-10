@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.41.0](https://github.com/mctlhq/mctl-api/compare/4.40.0...4.41.0) (2026-09-10)
+
+
+### Features
+
+* **agents:** issue-281-add-portfolio-to-the-devloop-service-enu ([5ba4347](https://github.com/mctlhq/mctl-api/commit/5ba43478ea37e7fac6d72dd63bd00381fc8d4a51))
+* **agents:** issue-281-add-portfolio-to-the-devloop-service-enu ([ae061bc](https://github.com/mctlhq/mctl-api/commit/ae061bc34eba2ee34bb5385a5939ade68ff0f336))
+* **mcp:** portal allowlist as data with a drift guard and an apply script ([e276647](https://github.com/mctlhq/mctl-api/commit/e27664709ffd550a59353887f60b0d546aa30459))
+* **mcp:** portal allowlist as data with a drift guard and an apply script ([7d47c6d](https://github.com/mctlhq/mctl-api/commit/7d47c6dba5a4ccbbf70e47c87f9f61a0e558dcc3))
+
+
+### Bug Fixes
+
+* **scripts:** compare the allowlist against HEAD, validate its target, narrow the token claim ([082b64b](https://github.com/mctlhq/mctl-api/commit/082b64bf9d578bd0c89bcda8306078d33fb629e3))
+* **scripts:** the apply refuses a file the guard test has not passed ([ed22206](https://github.com/mctlhq/mctl-api/commit/ed22206667897ae1e900daed090e53d4333c6a65))
+
 ## [4.40.0](https://github.com/mctlhq/mctl-api/compare/4.39.0...4.40.0) (2026-09-10)
 
 
