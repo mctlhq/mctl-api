@@ -363,8 +363,12 @@ func NewRouter(opts Options) http.Handler {
 		})
 
 		// MCP Streamable HTTP transport — single endpoint for Claude Desktop, Cursor, etc.
-		// POST /mcp  → send request (can return streaming SSE response)
-		// GET  /mcp  → open persistent listen stream (optional, for server-initiated messages)
+		// The transport is stateless (mctlhq/mctl-api#276): no Mcp-Session-Id is
+		// minted or required. GET and DELETE stay routed and are answered by the
+		// transport itself -- a listen stream bound to no session, and a DELETE
+		// that has nothing to terminate -- so method semantics live in one place.
+		// POST /mcp  → send request (can return a streaming SSE response)
+		// GET  /mcp  → listen stream (no session binding under stateless mode)
 		// Auth: Authorization: Bearer <token> on every request.
 		if opts.MCPServer != nil {
 			mcpH := opts.MCPServer.NewStreamableHTTPHandler()
