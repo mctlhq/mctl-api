@@ -39,10 +39,13 @@ func TestPreregisteredClient_SurvivesEvictionAndTTL(t *testing.T) {
 
 // TestPreregisteredClient_RedirectIsExact: the registered callback and only
 // the registered callback. Near-misses that a lenient comparison would let
-// through are refused, and the global allowlist plays no part.
+// through are refused, and neither the global allowlist nor the loopback
+// rule can lend a static client a callback it never registered -- that is
+// the isolation the documentation promises, so it is pinned with both rules
+// deliberately switched on.
 func TestPreregisteredClient_RedirectIsExact(t *testing.T) {
 	s := newPreregServer(t)
-	s.AllowedRedirectURIs = nil
+	s.AllowedRedirectURIs = []string{"https://elsewhere.example/cb", "https://chatgpt.com/connector/oauth/*"}
 	const cb = "https://mcp.mctl.ai/servers-callback"
 	if err := s.AddPreregisteredClient("cloudflare-portal-mcp", "", []string{cb}); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -60,6 +63,36 @@ func TestPreregisteredClient_RedirectIsExact(t *testing.T) {
 	}
 	if s.IsRedirectURIAllowed("someone-else", cb) {
 		t.Error("another client_id borrowed the registration")
+	}
+	for _, borrowed := range []string{
+		"https://elsewhere.example/cb",          // exact global entry
+		"https://chatgpt.com/connector/oauth/x", // global prefix entry
+		"http://127.0.0.1:43123/callback",       // loopback rule
+		"http://localhost:6274/oauth/callback",  // loopback rule, named host
+	} {
+		if s.IsRedirectURIAllowed("cloudflare-portal-mcp", borrowed) {
+			t.Errorf("static client borrowed %q from a rule that must not apply to it", borrowed)
+		}
+	}
+	// The general rules still hold for everyone else.
+	if !s.IsRedirectURIAllowed("some-dynamic-client", "https://elsewhere.example/cb") {
+		t.Error("global allowlist stopped applying to non-static clients")
+	}
+}
+
+// TestPreregisteredClient_RefusesAnIdADynamicClientHolds: GetClient prefers
+// the static registry, so seeding over a live dynamic id would re-point that
+// client at another redirect set. The method is exported and must refuse it
+// rather than rely on being called first.
+func TestPreregisteredClient_RefusesAnIdADynamicClientHolds(t *testing.T) {
+	s := newPreregServer(t)
+	dyn := s.RegisterClient("dyn", []string{"https://dyn.example/cb"})
+	err := s.AddPreregisteredClient(dyn.ClientID, "", []string{"https://mcp.mctl.ai/servers-callback"})
+	if err == nil || !strings.Contains(err.Error(), "dynamic registration") {
+		t.Fatalf("err = %v, want refusal naming the dynamic registration", err)
+	}
+	if c, _ := s.GetClient(dyn.ClientID); len(c.RedirectURIs) != 1 || c.RedirectURIs[0] != "https://dyn.example/cb" {
+		t.Fatalf("dynamic registration was altered: %+v", c)
 	}
 }
 

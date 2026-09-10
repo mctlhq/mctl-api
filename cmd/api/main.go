@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -128,7 +129,8 @@ func main() {
 		// request and never evicted, so the client id a portal stored keeps
 		// working across pod restarts, which the in-memory DCR registry
 		// cannot promise. A bad value is a refused boot, like any other
-		// invalid configuration above.
+		// invalid configuration above; the value itself was already parsed
+		// by config.validate, so this decode cannot fail.
 		pre, err := parsePreregisteredClients(cfg.OAuthPreregisteredClientsRaw)
 		if err != nil {
 			slog.Error("invalid configuration", "error", err)
@@ -760,6 +762,13 @@ func (c config) validate() error {
 	// of proportion to the mistake. The value is still rejected the moment
 	// OAuth is switched on, which is a deliberate change and exactly when the
 	// operator wants to hear about it.
+	// OAUTH_PREREGISTERED_CLIENTS is checked whether or not OAuth is enabled:
+	// the README promises a malformed value refuses startup, and a value that
+	// is read but never looked at would make that promise conditional on a
+	// second variable the operator may not be thinking about.
+	if _, err := parsePreregisteredClients(c.OAuthPreregisteredClientsRaw); err != nil {
+		return err
+	}
 	oauthEnabled := c.OAuthGitHubClientID != "" && c.OAuthJWTSecret != ""
 	if oauthEnabled && c.OAuthTokenTTL > maxOAuthTokenTTL {
 		return fmt.Errorf("OAUTH_TOKEN_TTL must not exceed %v, got %v — clients renew "+
@@ -822,7 +831,10 @@ func parsePreregisteredClients(raw string) ([]preregisteredClient, error) {
 	if err := dec.Decode(&out); err != nil {
 		return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
 	}
-	if dec.More() {
+	// Anything after the array is a mistake. dec.More is the wrong probe here:
+	// it answers "is there another element", so trailing text that starts
+	// with a closing bracket reads as "no" and would be accepted.
+	if _, err := dec.Token(); err != io.EOF {
 		return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: trailing data after the JSON array")
 	}
 	seen := make(map[string]struct{}, len(out))

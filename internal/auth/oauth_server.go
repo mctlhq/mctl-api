@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -196,6 +197,13 @@ func (s *OAuthServer) AddPreregisteredClient(clientID, clientName string, redire
 	if _, dup := s.static[clientID]; dup {
 		return fmt.Errorf("pre-registered client %q: duplicate client_id", clientID)
 	}
+	// GetClient consults the static registry first, so seeding an id that a
+	// dynamic registration already holds would silently re-point that client
+	// at a different redirect set. Refused whether or not that can happen in
+	// the startup order main uses today; the method is exported.
+	if _, taken := s.clients[clientID]; taken {
+		return fmt.Errorf("pre-registered client %q: client_id already held by a dynamic registration", clientID)
+	}
 	s.static[clientID] = RegisteredClient{
 		ClientID:     clientID,
 		ClientName:   clientName,
@@ -215,10 +223,20 @@ func (s *OAuthServer) PreregisteredClientCount() int {
 
 // isStatic reports whether clientID names a pre-registered client.
 func (s *OAuthServer) isStatic(clientID string) bool {
+	_, ok := s.staticRedirectURIs(clientID)
+	return ok
+}
+
+// staticRedirectURIs returns the callbacks a pre-registered client trusts,
+// and false when clientID is not a static client.
+func (s *OAuthServer) staticRedirectURIs(clientID string) ([]string, bool) {
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
-	_, ok := s.static[clientID]
-	return ok
+	c, ok := s.static[clientID]
+	if !ok {
+		return nil, false
+	}
+	return c.RedirectURIs, true
 }
 
 // RegisterClient stores a dynamically registered client and returns the assigned client_id.
@@ -367,6 +385,14 @@ func (s *OAuthServer) ResolveGroups(login string) []string {
 // there — whoever starts the flow chooses the challenge. Registrations are now
 // only honoured for the client that made them.
 func (s *OAuthServer) IsRedirectURIAllowed(clientID, uri string) bool {
+	// A pre-registered client trusts the callbacks it lists and nothing else:
+	// not the global allowlist, not the loopback rule. That is the property
+	// static registration exists to give -- onboarding one counterpart must
+	// not let its id be used with a callback it never registered -- so it is
+	// decided here, before either general rule can answer for it.
+	if uris, ok := s.staticRedirectURIs(clientID); ok {
+		return slices.Contains(uris, uri)
+	}
 	for _, allowed := range s.AllowedRedirectURIs {
 		if strings.HasSuffix(allowed, "/*") {
 			if strings.HasPrefix(uri, strings.TrimSuffix(allowed, "*")) {

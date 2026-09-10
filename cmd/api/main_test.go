@@ -201,6 +201,8 @@ func TestConfigValidate(t *testing.T) {
 		name    string
 		cfg     config
 		wantErr bool
+		// wantVar is the variable the error must name; defaults to OAUTH_TOKEN_TTL.
+		wantVar string
 	}{
 		{
 			name:    "default 1h is accepted",
@@ -235,6 +237,20 @@ func TestConfigValidate(t *testing.T) {
 			cfg:     config{OAuthGitHubClientID: ghID, OAuthTokenTTL: 8760 * time.Hour},
 			wantErr: false,
 		},
+		{
+			// Unlike the TTL ceiling, a malformed client list is refused
+			// even when OAuth is off: the README promises the refusal without
+			// a caveat, and nothing about the value becomes valid later.
+			name:    "malformed OAUTH_PREREGISTERED_CLIENTS is refused with OAuth disabled",
+			cfg:     config{OAuthPreregisteredClientsRaw: `[{"client_id":"c","redirect_uris":["https://x/cb"],"client_` + `secret":"s"}]`},
+			wantErr: true,
+			wantVar: "OAUTH_PREREGISTERED_CLIENTS",
+		},
+		{
+			name:    "well-formed OAUTH_PREREGISTERED_CLIENTS is accepted with OAuth disabled",
+			cfg:     config{OAuthPreregisteredClientsRaw: `[{"client_id":"c","redirect_uris":["https://x/cb"]}]`},
+			wantErr: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -245,8 +261,12 @@ func TestConfigValidate(t *testing.T) {
 				}
 				// A startup failure that does not name the variable is
 				// indistinguishable from any other configuration problem.
-				if !strings.Contains(err.Error(), "OAUTH_TOKEN_TTL") {
-					t.Errorf("error = %q, want it to name OAUTH_TOKEN_TTL", err)
+				want := tc.wantVar
+				if want == "" {
+					want = "OAUTH_TOKEN_TTL"
+				}
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to name %s", err, want)
 				}
 				return
 			}
@@ -272,6 +292,9 @@ func TestParsePreregisteredClients(t *testing.T) {
 		{"missing client_id", `[{"redirect_uris":["https://x/cb"]}]`, 0, "no client_id"},
 		{"duplicate client_id", `[{"client_id":"c","redirect_uris":["https://x/cb"]},{"client_id":"c","redirect_uris":["https://y/cb"]}]`, 0, "listed twice"},
 		{"trailing data", `[] []`, 0, "trailing data"},
+		// dec.More would answer false to a leading "]" and let this through.
+		{"trailing data starting with a closing bracket", `[{"client_id":"c","redirect_uris":["https://x/cb"]}] ]`, 0, "trailing data"},
+		{"trailing garbage", `[] x`, 0, "trailing data"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parsePreregisteredClients(tc.raw)
