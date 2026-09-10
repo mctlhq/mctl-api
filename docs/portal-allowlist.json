@@ -1,0 +1,337 @@
+{
+  "$comment": "Source of truth for the Cloudflare MCP portal mapping of server `api` on portal `mcp` (mctlhq/.github#35, mctlhq/mctl-api#276). Every tool this server registers must appear here with an explicit decision; internal/mcp/portal_allowlist_test.go fails the build otherwise. An enabled tool must be recorded readOnly in internal/mcp/annotations_test.go AND carry a `reason` saying what it exposes and why that is acceptable on the private aggregate: readOnlyHint is a side-effect hint, not a privacy classification, and the log and incident tools return application text. Apply with scripts/portal-allowlist-apply.sh.",
+  "portal": "mcp",
+  "server": "api",
+  "default_disabled": true,
+  "tools": [
+    {
+      "name": "mctl_acknowledge_incident",
+      "enabled": false
+    },
+    {
+      "name": "mctl_add_custom_domain",
+      "enabled": false
+    },
+    {
+      "name": "mctl_apply_openclaw_resource_profile",
+      "enabled": false
+    },
+    {
+      "name": "mctl_approve_dev_loop",
+      "enabled": false
+    },
+    {
+      "name": "mctl_create_agent",
+      "enabled": false
+    },
+    {
+      "name": "mctl_create_preview",
+      "enabled": false
+    },
+    {
+      "name": "mctl_create_tenant",
+      "enabled": false
+    },
+    {
+      "name": "mctl_delete_openclaw_identity",
+      "enabled": false
+    },
+    {
+      "name": "mctl_delete_openclaw_skill",
+      "enabled": false
+    },
+    {
+      "name": "mctl_delete_preview",
+      "enabled": false
+    },
+    {
+      "name": "mctl_delete_tenant",
+      "enabled": false
+    },
+    {
+      "name": "mctl_deploy_openclaw",
+      "enabled": false
+    },
+    {
+      "name": "mctl_deploy_service",
+      "enabled": false
+    },
+    {
+      "name": "mctl_deprecate_platform_skill",
+      "enabled": false
+    },
+    {
+      "name": "mctl_disable_tenant_skill",
+      "enabled": false
+    },
+    {
+      "name": "mctl_enable_tenant_skill",
+      "enabled": false
+    },
+    {
+      "name": "mctl_get_dev_loop",
+      "enabled": true,
+      "reason": "Liveness of one DevLoop workflow by id: status and phase only, no code, no secrets; the upstream refuses ids outside the caller's tenants."
+    },
+    {
+      "name": "mctl_get_incident",
+      "enabled": true,
+      "reason": "Incident record with collected evidence (log excerpts, analysis, PR links); tenant-scoped by the upstream. Excerpts can carry application log text, acceptable on a private admin-only aggregate."
+    },
+    {
+      "name": "mctl_get_openclaw_sizing_recommendation",
+      "enabled": true,
+      "reason": "Aggregated VictoriaMetrics resource history and a recommended profile for one OpenClaw service; numbers only, tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_get_operation",
+      "enabled": true,
+      "reason": "Schema of one platform operation: parameter names, types, defaults and risk level. Catalogue metadata with no tenant data."
+    },
+    {
+      "name": "mctl_get_resource_usage",
+      "enabled": true,
+      "reason": "CPU, memory and pod quota usage for a team workspace; capacity figures only, tenant-scoped by the upstream."
+    },
+    {
+      "name": "mctl_get_service_config",
+      "enabled": true,
+      "reason": "Service configuration as recorded in GitOps: image tag, host, port, component type, database flag. No secret values; tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_get_service_logs",
+      "enabled": true,
+      "reason": "Raw recent log lines from Loki for a service the caller may read. Logs can contain application data; the upstream enforces tenant scope and the portal is private to admins and pilot members, so the exposure equals what the caller already has."
+    },
+    {
+      "name": "mctl_get_service_status",
+      "enabled": true,
+      "reason": "ArgoCD sync and health state plus the service's recorded configuration; operational metadata, tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_get_tenant",
+      "enabled": true,
+      "reason": "Team workspace details: members, quotas, deployed services. Member logins are platform identities the caller can already see; tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_get_workflow_logs",
+      "enabled": true,
+      "reason": "Argo Workflow step logs from the archive for a workflow the caller may read. Same class as service logs: may carry build output; tenant-scoped upstream, private portal."
+    },
+    {
+      "name": "mctl_get_workflow_status",
+      "enabled": true,
+      "reason": "Status and step summary of one Argo Workflow run; operational metadata, tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_grant_repo_access",
+      "enabled": false
+    },
+    {
+      "name": "mctl_incident_summary",
+      "enabled": true,
+      "reason": "Aggregate counts of active incidents by status, severity and type; no incident bodies, no tenant data."
+    },
+    {
+      "name": "mctl_list_agent_executions",
+      "enabled": true,
+      "reason": "Durable execution records of DevLoop runs: agent version, workflow id, result. Pipeline metadata; tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_list_agent_versions",
+      "enabled": true,
+      "reason": "Published versions of an mctl-agents agent with manifest, git SHA, image reference and prompt hash; release metadata, no tenant data."
+    },
+    {
+      "name": "mctl_list_domains",
+      "enabled": true,
+      "reason": "Custom and generated domains for a team or service with verification status; hostnames only, tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_list_incidents",
+      "enabled": true,
+      "reason": "Incident list with status, severity and one-line summary; summaries are alert titles, tenant-filtered by the upstream."
+    },
+    {
+      "name": "mctl_list_openclaw_identity",
+      "enabled": true,
+      "reason": "File names of a team's OpenClaw identity overrides in GitOps; names only, tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_list_openclaw_skills",
+      "enabled": true,
+      "reason": "File names of a team's OpenClaw skills in GitOps; names only, tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_list_operations",
+      "enabled": true,
+      "reason": "Catalogue of platform operations with parameters and risk levels; discovery metadata, no tenant data."
+    },
+    {
+      "name": "mctl_list_platform_skills",
+      "enabled": true,
+      "reason": "Platform-wide skills visible to the caller after visibility and binding filters; catalogue metadata the upstream already scopes."
+    },
+    {
+      "name": "mctl_list_previews",
+      "enabled": true,
+      "reason": "Preview environments of a team with health and sync state; namespace names and status, tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_list_recent_agent_runs",
+      "enabled": true,
+      "reason": "Last ten mctl-agents triggers: operation, mode, service, status, who triggered; operator activity metadata, admin-scoped by the upstream."
+    },
+    {
+      "name": "mctl_list_recent_operations",
+      "enabled": true,
+      "reason": "Recent audit-log entries: who ran which operation when and the workflow it started. Operator activity the caller may already see; upstream-scoped."
+    },
+    {
+      "name": "mctl_list_repos",
+      "enabled": true,
+      "reason": "GitHub repositories the team's App installations expose for deployment; repository names and visibility, tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_list_services",
+      "enabled": true,
+      "reason": "Deployed services with team, image tag, host and database flag; operational metadata, tenant-filtered by the upstream."
+    },
+    {
+      "name": "mctl_list_tenant_skill_bindings",
+      "enabled": true,
+      "reason": "Skill bindings per tenant; admins see all, members their own — the upstream applies that filter, the tool exposes only binding names."
+    },
+    {
+      "name": "mctl_list_tenants",
+      "enabled": true,
+      "reason": "All team workspaces with quotas and member counts; admin-only at the upstream, which refuses non-admins (measured through the portal)."
+    },
+    {
+      "name": "mctl_list_workflows",
+      "enabled": true,
+      "reason": "Recent Argo Workflow runs for a team's namespace: names, status, timestamps; tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_promote_agent",
+      "enabled": false
+    },
+    {
+      "name": "mctl_provision_database",
+      "enabled": false
+    },
+    {
+      "name": "mctl_publish_agent_version",
+      "enabled": false
+    },
+    {
+      "name": "mctl_publish_platform_skill",
+      "enabled": false
+    },
+    {
+      "name": "mctl_read_openclaw_identity",
+      "enabled": true,
+      "reason": "Raw content of one identity override file (AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md) from the team's GitOps directory; prompt text the team authored, tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_read_openclaw_skill",
+      "enabled": true,
+      "reason": "Raw content of one OpenClaw skill file from the team's GitOps directory; team-authored text, tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_read_platform_skill",
+      "enabled": true,
+      "reason": "Content of a platform-wide skill from the GitOps catalogue, subject to the caller's visibility; catalogue text, no tenant data."
+    },
+    {
+      "name": "mctl_remove_custom_domain",
+      "enabled": false
+    },
+    {
+      "name": "mctl_resolve_agent",
+      "enabled": true,
+      "reason": "Which agent version is released to an environment; release pointer only, no tenant data."
+    },
+    {
+      "name": "mctl_resolve_incident",
+      "enabled": false
+    },
+    {
+      "name": "mctl_resume_openclaw_deploy",
+      "enabled": false
+    },
+    {
+      "name": "mctl_retire_service",
+      "enabled": false
+    },
+    {
+      "name": "mctl_rollback_agent",
+      "enabled": false
+    },
+    {
+      "name": "mctl_rollback_service",
+      "enabled": false
+    },
+    {
+      "name": "mctl_save_openclaw_identity",
+      "enabled": false
+    },
+    {
+      "name": "mctl_save_openclaw_skill",
+      "enabled": false
+    },
+    {
+      "name": "mctl_scale_service",
+      "enabled": false
+    },
+    {
+      "name": "mctl_sync_repos",
+      "enabled": false
+    },
+    {
+      "name": "mctl_trigger_agents_run",
+      "enabled": false
+    },
+    {
+      "name": "mctl_trigger_approve",
+      "enabled": false
+    },
+    {
+      "name": "mctl_trigger_implementer",
+      "enabled": false
+    },
+    {
+      "name": "mctl_trigger_incident_responder",
+      "enabled": false
+    },
+    {
+      "name": "mctl_trigger_issue",
+      "enabled": false
+    },
+    {
+      "name": "mctl_trigger_mentor_only",
+      "enabled": false
+    },
+    {
+      "name": "mctl_trigger_reconcile",
+      "enabled": false
+    },
+    {
+      "name": "mctl_trigger_shepherd",
+      "enabled": false
+    },
+    {
+      "name": "mctl_trigger_single_service",
+      "enabled": false
+    },
+    {
+      "name": "mctl_verify_domain",
+      "enabled": false
+    },
+    {
+      "name": "mctl_whoami",
+      "enabled": true,
+      "reason": "Returns only the caller's own user id, admin flag, teams and namespaces — the identity probe the aggregate portal's A≠B check calls; nothing about anyone else."
+    }
+  ]
+}

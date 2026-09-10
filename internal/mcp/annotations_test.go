@@ -20,7 +20,10 @@ type hints struct {
 // it declares. It is data on purpose -- a change to any tool's classification
 // is a visible diff here, never a side effect of editing a tool -- and the
 // runtime set must equal it exactly: no tool missing, none unrecorded, none
-// with a different profile.
+// with a different profile. openWorldHint is deliberately left at the spec
+// default (true): every handler here proxies to the mctl API or GitOps, so
+// none is a closed-world tool, and the portal allowlist reasons from
+// readOnlyHint alone.
 var recordedHints = map[string]hints{
 	"mctl_acknowledge_incident":               {readOnly: false, destructive: false, idempotent: true},
 	"mctl_add_custom_domain":                  {readOnly: false, destructive: false, idempotent: true},

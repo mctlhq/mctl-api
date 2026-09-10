@@ -380,3 +380,18 @@ Tags use **no `v` prefix**. Every push to `main` also builds a `latest` image fo
 ## License
 
 Apache 2.0
+
+## Portal tool allowlist
+
+`api.mctl.ai/mcp` is one upstream of the private aggregate portal `mcp.mctl.ai` (mctlhq/.github#35). The portal exposes a tool only when its mapping carries an explicit `enabled: true` for it and hides one it has an entry for with `enabled: false`; the mapping is kept at `default_disabled: true` plus an explicit entry for every tool. `docs/portal-allowlist.json` is the source of truth; `internal/mcp/portal_allowlist_test.go` fails the build when the set of registered tools differs from the file, when an enabled tool is not recorded read-only in `internal/mcp/annotations_test.go`, or when an enabled tool carries no `reason`. After a release that changes the tool set, the operator re-applies the file (CI holds no Cloudflare credential):
+
+```
+read -rs CLOUDFLARE_API_TOKEN && export CLOUDFLARE_API_TOKEN   # not on the command line: the shell would record it
+export CLOUDFLARE_ACCOUNT_ID=…
+scripts/portal-allowlist-apply.sh --dry-run
+scripts/portal-allowlist-apply.sh
+```
+
+The script refuses a file that differs from `HEAD` and runs the guard test before it touches the API, so what is applied is a committed revision the build has judged.
+
+A portal access token carries the tool set as of its issuance; re-issue tokens after an apply.
