@@ -59,6 +59,11 @@ func NewServer(apiURL, apiToken string) *Server {
 func (s *Server) NewStreamableHTTPHandler() http.Handler {
 	return server.NewStreamableHTTPServer(
 		s.NewMCPServer(),
+		// Stateless: no Mcp-Session-Id is minted or required. Behind the
+		// aggregate portal this server is one of several fan-in targets and
+		// must not depend on a request returning to the process that answered
+		// the previous one (mctlhq/mctl-api#276).
+		server.WithStateLess(true),
 		server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
 			// Forward the request context (contains auth user + raw token set by middleware).
 			return r.Context()
@@ -179,6 +184,7 @@ func (s *Server) toolWhoami() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_whoami",
 		mcplib.WithTitleAnnotation("Check Identity"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Check your current authentication status on the mctl platform.
 
 Returns your user ID, team memberships, admin status, and accessible namespaces.
@@ -214,6 +220,7 @@ func (s *Server) toolListTenants() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_tenants",
 		mcplib.WithTitleAnnotation("List Workspaces"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("List all team workspaces on the platform with their resource quotas and member counts. Requires admin access."),
 	)
 
@@ -232,6 +239,7 @@ func (s *Server) toolListServices() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_services",
 		mcplib.WithTitleAnnotation("List Services"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("List deployed services on the platform. Shows service name, team, image tag, host, and database status. Optionally filter by team name."),
 		mcplib.WithString("team",
 			mcplib.Description("Filter by team name (optional). If omitted, lists all services."),
@@ -258,6 +266,7 @@ func (s *Server) toolGetServiceStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_service_status",
 		mcplib.WithTitleAnnotation("Get Service Status"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("Get detailed status of a service including ArgoCD sync state, health status, and service configuration. Use this to check if a service is healthy and up-to-date."),
 		mcplib.WithString("team",
 			mcplib.Required(),
@@ -287,6 +296,7 @@ func (s *Server) toolGetWorkflowStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_workflow_status",
 		mcplib.WithTitleAnnotation("Get Workflow Status"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("Get status and logs of an Argo Workflow run. Use this after triggering an operation (deploy, create tenant, etc.) to check if it completed successfully. Also works for cron-driven runs (mctl-agents-issue-poll, -implement, -run, -shepherd, ...) that never appear in the audit log — admins get a live Kubernetes lookup as a fallback."),
 		mcplib.WithString("workflow_name",
 			mcplib.Required(),
@@ -311,6 +321,7 @@ func (s *Server) toolGetResourceUsage() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_resource_usage",
 		mcplib.WithTitleAnnotation("Get Resource Usage"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("Get resource quota usage for a team workspace: CPU, memory, pods used vs allocated. Use this to check if a team is running low on resources."),
 		mcplib.WithString("team",
 			mcplib.Required(),
@@ -336,6 +347,9 @@ func (s *Server) toolGetResourceUsage() (mcplib.Tool, server.ToolHandlerFunc) {
 func (s *Server) toolDeployService() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_deploy_service",
 		mcplib.WithTitleAnnotation("Deploy Service"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Deploy a service to the platform.
 
 Actions:
@@ -490,6 +504,9 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 func (s *Server) toolCreateTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_create_tenant",
 		mcplib.WithTitleAnnotation("Create Workspace"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Create a new team workspace on the platform.
 
 This provisions:
@@ -556,6 +573,9 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 func (s *Server) toolDeployOpenClaw() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_deploy_openclaw",
 		mcplib.WithTitleAnnotation("Start OpenClaw Onboarding"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Prepare a self-service OpenClaw deployment for a team.
 
 This does not deploy immediately. It performs preflight checks, returns a secure Telegram bot-token intake URL,
@@ -596,6 +616,9 @@ Use this for Claude-assisted OpenClaw onboarding instead of raw deploy-service.`
 func (s *Server) toolResumeOpenClawDeploy() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_resume_openclaw_deploy",
 		mcplib.WithTitleAnnotation("Resume OpenClaw Onboarding"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Resume OpenClaw onboarding after the Telegram bot token has been saved through the secure browser form.
 
 This provisions the database if needed and submits the normal deploy-service workflow using the hardened openclaw template.
@@ -635,6 +658,7 @@ func (s *Server) toolGetOpenClawSizingRecommendation() (mcplib.Tool, server.Tool
 	tool := mcplib.NewTool("mctl_get_openclaw_sizing_recommendation",
 		mcplib.WithTitleAnnotation("Get OpenClaw Sizing Recommendation"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("Read VictoriaMetrics history for an OpenClaw service and return the recommended resource profile."),
 		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
 		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
@@ -664,6 +688,9 @@ func (s *Server) toolGetOpenClawSizingRecommendation() (mcplib.Tool, server.Tool
 func (s *Server) toolApplyOpenClawResourceProfile() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_apply_openclaw_resource_profile",
 		mcplib.WithTitleAnnotation("Apply OpenClaw Resource Profile"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription("Apply one of the named OpenClaw runtime profiles by patching the service values through GitOps."),
 		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
 		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
@@ -696,6 +723,7 @@ func (s *Server) toolListOpenClawSkills() (mcplib.Tool, server.ToolHandlerFunc) 
 	tool := mcplib.NewTool("mctl_list_openclaw_skills",
 		mcplib.WithTitleAnnotation("List OpenClaw Skills"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`List OpenClaw skills managed in gitops for a team.
 
 Reads platform-gitops/services/{team}/openclaw/skills/*.md. These files drive the per-tenant {team}-openclaw-skills ConfigMap; ArgoCD plus a pod-side sidecar fan them out into the live agent workspace within ~1-2 minutes of commit.
@@ -720,6 +748,7 @@ func (s *Server) toolReadOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_read_openclaw_skill",
 		mcplib.WithTitleAnnotation("Read OpenClaw Skill"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Return the raw content of a single skill from gitops.
 
 Reads platform-gitops/services/{team}/openclaw/skills/{skill_name}.md. This is the source of truth that feeds the tenant's openclaw-skills ConfigMap and, via the sidecar fan-out, the running agent's workspace.
@@ -745,6 +774,9 @@ Requires owner role on the team.`),
 func (s *Server) toolSaveOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_save_openclaw_skill",
 		mcplib.WithTitleAnnotation("Save OpenClaw Skill"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Saves a skill to the tenant's OpenClaw agent.
 
 Commits to gitops at platform-gitops/services/{team}/openclaw/skills/{skill_name}.md; ArgoCD syncs a per-tenant {team}-openclaw-skills ConfigMap which a pod-side sidecar fans out into the live workspace. New skills become available in the running agent within ~1-2 minutes of commit.
@@ -805,6 +837,7 @@ func (s *Server) toolListPlatformSkills() (mcplib.Tool, server.ToolHandlerFunc) 
 	tool := mcplib.NewTool("mctl_list_platform_skills",
 		mcplib.WithTitleAnnotation("List Platform Skills"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("List platform-wide skills available to the current user after visibility, status, and tenant binding filters."),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -821,6 +854,7 @@ func (s *Server) toolReadPlatformSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_read_platform_skill",
 		mcplib.WithTitleAnnotation("Read Platform Skill"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("Read a platform-wide skill from the GitOps catalog if the current user has access."),
 		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name")),
 	)
@@ -839,6 +873,7 @@ func (s *Server) toolListTenantSkillBindings() (mcplib.Tool, server.ToolHandlerF
 	tool := mcplib.NewTool("mctl_list_tenant_skill_bindings",
 		mcplib.WithTitleAnnotation("List Tenant Skill Bindings"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("List platform skill bindings for tenants. Admins see all bindings; tenant members see their own."),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -854,6 +889,9 @@ func (s *Server) toolListTenantSkillBindings() (mcplib.Tool, server.ToolHandlerF
 func (s *Server) toolEnableTenantSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_enable_tenant_skill",
 		mcplib.WithTitleAnnotation("Enable Tenant Skill"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription("Admin-only. Enable an active tenant-visible platform skill for a tenant through a GitOps workflow."),
 		mcplib.WithString("tenant", mcplib.Required(), mcplib.Description("Tenant name")),
 		mcplib.WithString("skill", mcplib.Required(), mcplib.Description("Skill name")),
@@ -895,6 +933,9 @@ func (s *Server) toolDisableTenantSkill() (mcplib.Tool, server.ToolHandlerFunc) 
 func (s *Server) toolPublishPlatformSkill() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_publish_platform_skill",
 		mcplib.WithTitleAnnotation("Publish Platform Skill"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription("Admin-only. Publish or update a platform-wide skill through a GitOps workflow."),
 		mcplib.WithString("name", mcplib.Required(), mcplib.Description("Skill name")),
 		mcplib.WithString("title", mcplib.Required(), mcplib.Description("Human-readable title")),
@@ -957,6 +998,7 @@ func (s *Server) toolListOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc
 	tool := mcplib.NewTool("mctl_list_openclaw_identity",
 		mcplib.WithTitleAnnotation("List OpenClaw Identity Overrides"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`List OpenClaw identity override files managed in gitops for a team.
 
 Reads platform-gitops/services/{team}/openclaw/identity/*.md. These files drive the per-tenant {team}-openclaw-identity ConfigMap; ArgoCD plus a pod-side sidecar fan them out into the live agent workspace within ~1-2 minutes of commit. An empty list means the tenant is on the image-shipped defaults.
@@ -981,6 +1023,7 @@ func (s *Server) toolReadOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc
 	tool := mcplib.NewTool("mctl_read_openclaw_identity",
 		mcplib.WithTitleAnnotation("Read OpenClaw Identity Override"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Return the raw content of a single identity override file from gitops.
 
 Reads platform-gitops/services/{team}/openclaw/identity/{file_name}. file_name must be one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md — any other value returns 400. Returns 404 if the tenant has not saved an override for that filename (agent is using the image default).
@@ -1006,6 +1049,9 @@ Requires owner role on the team.`),
 func (s *Server) toolSaveOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_save_openclaw_identity",
 		mcplib.WithTitleAnnotation("Save OpenClaw Identity Override"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Saves an identity override to the tenant's OpenClaw agent.
 
 Commits to gitops at platform-gitops/services/{team}/openclaw/identity/{file_name}; ArgoCD syncs a per-tenant {team}-openclaw-identity ConfigMap which a pod-side sidecar fans out into the live workspace, overriding the image-shipped default. Changes become visible in the running agent within ~1-2 minutes of commit.
@@ -1069,6 +1115,9 @@ Requires owner role on the team.`),
 func (s *Server) toolProvisionDatabase() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_provision_database",
 		mcplib.WithTitleAnnotation("Provision Database"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Provision a PostgreSQL database on the shared CNPG cluster.
 
 This creates:
@@ -1106,6 +1155,7 @@ func (s *Server) toolGetTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_tenant",
 		mcplib.WithTitleAnnotation("Get Workspace Details"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("Get details of a specific team workspace: members, quotas, and deployed services."),
 		mcplib.WithString("name",
 			mcplib.Required(),
@@ -1130,6 +1180,7 @@ func (s *Server) toolGetServiceConfig() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_service_config",
 		mcplib.WithTitleAnnotation("Get Service Config"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("Get full configuration of a service from the GitOps repo: image tag, host, port, component type, and database status. Use this when you need full details beyond what list_services provides."),
 		mcplib.WithString("team",
 			mcplib.Required(),
@@ -1159,6 +1210,7 @@ func (s *Server) toolListRecentOperations() (mcplib.Tool, server.ToolHandlerFunc
 	tool := mcplib.NewTool("mctl_list_recent_operations",
 		mcplib.WithTitleAnnotation("Recent Activity"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("List the most recent platform operations from the audit log (up to 50 entries). Shows who ran what operation, when, and what workflow was triggered. Useful for reviewing recent activity before making changes."),
 	)
 
@@ -1256,6 +1308,7 @@ func (s *Server) toolListRepos() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_repos",
 		mcplib.WithTitleAnnotation("List Repositories"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`List GitHub repositories available to a team for deployment.
 
 Shows repos from GitHub App installations registered for the team.
@@ -1286,6 +1339,8 @@ For repos outside GitHub App scope, store a PAT in Vault (see mctl_deploy_servic
 func (s *Server) toolGrantRepoAccess() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_grant_repo_access",
 		mcplib.WithTitleAnnotation("Grant Repo Access"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Generate a GitHub App installation URL to grant the platform access to a repository.
 
 Use this when mctl_list_repos returns no repos, or when a specific private repo is not yet accessible.
@@ -1353,6 +1408,9 @@ copy-paste templates and onboard checklist at https://docs.mctl.ai/guides/scaffo
 func (s *Server) toolSyncRepos() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_sync_repos",
 		mcplib.WithTitleAnnotation("Sync Repositories"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Discover and register GitHub repositories for a team.
 
 Scans GitHub App installations accessible to the user and registers found repos for the team.
@@ -1394,6 +1452,7 @@ func (s *Server) toolListDomains() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_domains",
 		mcplib.WithTitleAnnotation("List Domains"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("List custom domains for a team or specific service. Shows domain, auto-generated domain ({team}-{service}.{platform_domain}), status (pending/verified/active), and verification timestamp."),
 		mcplib.WithString("team",
 			mcplib.Required(),
@@ -1425,6 +1484,9 @@ func (s *Server) toolListDomains() (mcplib.Tool, server.ToolHandlerFunc) {
 func (s *Server) toolAddCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_add_custom_domain",
 		mcplib.WithTitleAnnotation("Add Custom Domain"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Register a custom domain for a service. This step ONLY registers — it does NOT touch ingress or DNS yet, and does NOT trigger the add-custom-domain workflow.
 
 The service must already be deployed (it gets an auto-generated domain: {team}-{service}.{platform_domain}).
@@ -1586,6 +1648,9 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_verify_domain",
 		mcplib.WithTitleAnnotation("Verify Domain DNS"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		// Not read-only: a successful check persists status/verified_at
 		// (MarkVerified) and, per this handler, triggers the
 		// add-custom-domain workflow — an MCP client must not treat this as
@@ -1680,6 +1745,9 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 func (s *Server) toolRollbackService() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_rollback_service",
 		mcplib.WithTitleAnnotation("Rollback Service"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Roll back a service to a previously deployed image tag.
 
 Updates image.tag in the GitOps values.yaml and triggers an ArgoCD sync.
@@ -1723,6 +1791,9 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 func (s *Server) toolCreatePreview() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_create_preview",
 		mcplib.WithTitleAnnotation("Create Preview"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Deploy an ephemeral preview environment for a service.
 
 Two modes:
@@ -1819,6 +1890,7 @@ func (s *Server) toolGetServiceLogs() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_service_logs",
 		mcplib.WithTitleAnnotation("Get Service Logs"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Fetch recent log lines for a service from Loki.
 
 Returns log lines sorted by timestamp (most recent first).
@@ -1877,6 +1949,7 @@ func (s *Server) toolGetWorkflowLogs() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_workflow_logs",
 		mcplib.WithTitleAnnotation("Get Workflow Step Logs"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Fetch Argo Workflow step logs from the workflow log archive.
 
 Use this for workflow/job failures. mctl_get_service_logs cannot reach these:
@@ -1938,6 +2011,7 @@ func (s *Server) toolListWorkflows() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_workflows",
 		mcplib.WithTitleAnnotation("List Workflows"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`List recent Argo Workflow runs for a team.
 
 Shows workflows that were submitted for the team's namespace (team-{name}).
@@ -1968,6 +2042,7 @@ func (s *Server) toolListOperations() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_operations",
 		mcplib.WithTitleAnnotation("List Operations"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("List all available platform operations with their parameters, risk levels, and descriptions. Use this to discover what actions are available on the platform."),
 	)
 
@@ -1986,6 +2061,7 @@ func (s *Server) toolGetOperation() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_operation",
 		mcplib.WithTitleAnnotation("Get Operation Details"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription("Get detailed schema of a specific platform operation: all parameters with types, defaults, validation patterns, and risk level. Use this to understand exactly what an operation requires before executing it."),
 		mcplib.WithString("name",
 			mcplib.Required(),
@@ -2009,6 +2085,9 @@ func (s *Server) toolGetOperation() (mcplib.Tool, server.ToolHandlerFunc) {
 func (s *Server) toolScaleService() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_scale_service",
 		mcplib.WithTitleAnnotation("Scale Service"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Scale a service by updating its autoscaling configuration.
 
 Enables or disables HPA autoscaling and sets min/max replica counts and CPU threshold.
@@ -2056,6 +2135,7 @@ func (s *Server) toolListPreviews() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_previews",
 		mcplib.WithTitleAnnotation("List Previews"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`List active preview environments for a team.
 
 Shows all preview ArgoCD applications with their health status, sync state, and namespace.
@@ -2094,6 +2174,7 @@ func (s *Server) toolListIncidents() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_incidents",
 		mcplib.WithTitleAnnotation("List Incidents"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`List platform incidents (alerts from AlertManager, GitHub Actions failures, polling).
 
 Returns incidents with their status, severity, and summary. Filter by team, service, status, or severity.
@@ -2158,6 +2239,7 @@ func (s *Server) toolGetIncident() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_incident",
 		mcplib.WithTitleAnnotation("Get Incident Detail"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Get full details of an incident including evidence, analysis, and PR information.
 
 Accepts a full incident ID or an 8-character prefix (as shown in Telegram notifications).
@@ -2183,6 +2265,8 @@ Returns the incident with all collected evidence (logs, alerts, workflow data).`
 func (s *Server) toolIncidentSummary() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_incident_summary",
 		mcplib.WithTitleAnnotation("Incident Summary"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Get aggregate counts of active incidents by status, severity, and type.
 
 Useful for a quick overview of platform health. Excludes resolved and suppressed incidents.`),
@@ -2202,6 +2286,9 @@ Useful for a quick overview of platform health. Excludes resolved and suppressed
 func (s *Server) toolAcknowledgeIncident() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_acknowledge_incident",
 		mcplib.WithTitleAnnotation("Acknowledge Incident"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Mark an incident as acknowledged/reviewed.
 
 Records the current user as the acknowledger. Use this when you've reviewed an incident
@@ -2227,6 +2314,9 @@ and want to signal that someone is aware of it.`),
 func (s *Server) toolResolveIncident() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_resolve_incident",
 		mcplib.WithTitleAnnotation("Resolve Incident"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Mark an incident as resolved.
 
 Optionally provide a reason for the resolution. This closes the incident and records
@@ -2427,6 +2517,9 @@ func requireConfirm(args map[string]any, subject string) *mcplib.CallToolResult 
 func (s *Server) toolTriggerAgentsRun() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_agents_run",
 		mcplib.WithTitleAnnotation("Run mctl-agents (full)"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Trigger a full mctl-agents run — every service-agent (researcher → analyst → spec-writer in parallel) followed by the mentor weekly digest. Same as the weekly Saturday 00:00 UTC cron, on demand.
 
 Cost: ~$10 against the Claude Pro/Max subscription (no Console billing).
@@ -2448,6 +2541,9 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status(workflow_name) 
 func (s *Server) toolTriggerMentorOnly() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_mentor_only",
 		mcplib.WithTitleAnnotation("Run mctl-agents (mentor only)"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Trigger mentor only — re-aggregates the existing per-service proposals into a fresh weekly digest. Skips the expensive service-agent runs. Useful after manually triaging proposals when you want the digest to reflect updated state.
 
 Cost: ~$1.
@@ -2469,6 +2565,9 @@ Admin-only. Returns workflow_name.`),
 func (s *Server) toolTriggerSingleService() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_single_service",
 		mcplib.WithTitleAnnotation("Run mctl-agents (single service)"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Trigger one service-agent only (no mentor). Useful after a large change in a specific repo when you want fresh proposals for that service without paying for a full pipeline run.
 
 Cost: ~$1.50.
@@ -2496,6 +2595,9 @@ Admin-only. Returns workflow_name.`),
 func (s *Server) toolTriggerIncidentResponder() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_incident_responder",
 		mcplib.WithTitleAnnotation("Run mctl-agents incident responder"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Trigger the incident responder: diagnose TypeGeneric incidents stuck in status=analyzing (older than 30 minutes) and write auto-accepted proposals for the Tier 2 implementer, then resolve the incident. Same as the every-30-minute cron (15,45 * * * * UTC), on demand.
 
 Cost: ~$2 (subscription quota), max 5 incidents per run.
@@ -2766,6 +2868,7 @@ func (s *Server) toolGetDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_dev_loop",
 		mcplib.WithTitleAnnotation("Describe a DevLoopWorkflow"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Read-only liveness check for a DevLoopWorkflow: is there a live loop for this issue, and is it still running?
 
 Wraps GET /api/v1/agents/dev-loop/{workflow_id} (mctl-api#244) — no side effects, unlike mctl_approve_dev_loop or mctl_trigger_issue with use_temporal=true. Use this BEFORE deciding how to approve a proposal: a hand-edited .status.yaml is invisible to a workflow already parked on the approve signal (wait_condition has no timeout, so the loop then waits forever), and re-signalling approve on an already-accepted proposal is not a safe probe either — the standalone mctl-agents-approve operation treats it as an idempotent no-op and can send an already-approved proposal straight into the implementer.
@@ -2810,6 +2913,7 @@ func (s *Server) toolListRecentAgentRuns() (mcplib.Tool, server.ToolHandlerFunc)
 	tool := mcplib.NewTool("mctl_list_recent_agent_runs",
 		mcplib.WithTitleAnnotation("Recent mctl-agents runs"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`List the most recent mctl-agents triggers (up to 10): scheduled cron runs and operator-initiated submissions, merged and sorted newest-first. Each item includes operation, mode, service (for single-service runs), status, who triggered it (user id or "cron"), timestamp, and a "source" field of "cron" or "operator" so the caller can distinguish autonomous schedule firings from manual triggers. Admin-only.`),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -2829,6 +2933,9 @@ var agentRegistryEnvironmentEnum = []string{"production", "shadow"}
 func (s *Server) toolCreateAgent() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_create_agent",
 		mcplib.WithTitleAnnotation("Create Agent Definition"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Register a new agent definition in the agent registry (e.g. issue-investigator, implementer, shepherd). Required once per agent before any version can be published for it. Idempotent to call again with the same name is not guaranteed — check mctl_list_agent_versions first if unsure whether it already exists. Admin-only.`),
 		mcplib.WithString("name",
 			mcplib.Required(),
@@ -2858,6 +2965,9 @@ func (s *Server) toolCreateAgent() (mcplib.Tool, server.ToolHandlerFunc) {
 func (s *Server) toolPublishAgentVersion() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_publish_agent_version",
 		mcplib.WithTitleAnnotation("Publish Agent Version"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Publish an immutable version of an agent to the registry. The agent must already have a definition (mctl_create_agent). A published version can then be promoted to an environment with mctl_promote_agent. Admin-only.`),
 		mcplib.WithString("agent_name",
 			mcplib.Required(),
@@ -2909,6 +3019,7 @@ func (s *Server) toolListAgentVersions() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_list_agent_versions",
 		mcplib.WithTitleAnnotation("List Agent Versions"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`List every published version of an mctl-agents agent (e.g. issue-investigator, implementer, shepherd), newest first.
 
 Each version is immutable and carries the manifest, git SHA, image reference, and prompt hash it was published with. Use this to find a version to pass to mctl_promote_agent. Admin-only.`),
@@ -2932,6 +3043,7 @@ func (s *Server) toolResolveAgent() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_resolve_agent",
 		mcplib.WithTitleAnnotation("Resolve Agent Release"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Resolve which version of an agent is currently released to an environment.
 
 This is the read path the dev-loop pipeline pins a version from at the start of a run. Returns 404 if no version has ever been promoted to that agent/environment pair. Admin-only.`),
@@ -3008,6 +3120,7 @@ func (s *Server) toolListAgentExecutions() (mcplib.Tool, server.ToolHandlerFunc)
 	tool := mcplib.NewTool("mctl_list_agent_executions",
 		mcplib.WithTitleAnnotation("List Agent Executions"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`List durable execution records from DevLoopWorkflow runs (dev-workflow control plane, plan phase 4): which agent version actually ran, on which Argo workflow, with what result. Unlike mctl_list_recent_agent_runs (which reflects live/recently-completed Argo state and expires with the workflow object's TTL), these records persist independent of Argo. Admin-only.`),
 		mcplib.WithString("agent_name",
 			mcplib.Description("Filter to one agent, e.g. issue-investigator, implementer. Omit to list across every agent."),
