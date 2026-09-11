@@ -26,19 +26,16 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// topLevelJSONKeys parses specJSON as a JSON object and returns the set of
-// its top-level keys, used to check for required policy-ceiling fields
-// without imposing a Go struct shape on the caller's spec.
-func topLevelJSONKeys(specJSON string) (map[string]struct{}, error) {
+// topLevelJSONFields parses specJSON as a JSON object and returns its
+// top-level keys mapped to their raw values, used to check for required
+// policy-ceiling fields without imposing a Go struct shape on the caller's
+// spec.
+func topLevelJSONFields(specJSON string) (map[string]json.RawMessage, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(specJSON), &raw); err != nil {
 		return nil, fmt.Errorf("spec_json must be a JSON object: %w", err)
 	}
-	keys := make(map[string]struct{}, len(raw))
-	for k := range raw {
-		keys[k] = struct{}{}
-	}
-	return keys, nil
+	return raw, nil
 }
 
 // missingRequiredFields is a small helper shared by the two publish paths:
@@ -58,13 +55,16 @@ func missingRequiredFields(fields map[string]string) []string {
 // validateProfileSpec reports every field in RequiredProfilePolicyFields that
 // is absent (or explicitly null) from specJSON's top level.
 func validateProfileSpec(specJSON string) ([]string, error) {
-	fields, err := topLevelJSONKeys(specJSON)
+	fields, err := topLevelJSONFields(specJSON)
 	if err != nil {
 		return nil, err
 	}
 	var missing []string
 	for _, required := range RequiredProfilePolicyFields {
-		if _, ok := fields[required]; !ok {
+		raw, ok := fields[required]
+		// An explicit JSON null carries no usable value, so it must be
+		// treated the same as the key being absent entirely.
+		if !ok || strings.TrimSpace(string(raw)) == "null" {
 			missing = append(missing, required)
 		}
 	}
@@ -81,7 +81,7 @@ func (s *Store) PublishDefinitionVersion(ctx context.Context, d *DefinitionVersi
 		"sourceManifest.contentHash": d.SourceManifest.ContentHash,
 	})
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("agentregistry: publish definition version: missing required fields: %s", strings.Join(missing, ", "))
+		return nil, fmt.Errorf("agentregistry: publish definition version: %w: %s", ErrMissingRequiredFields, strings.Join(missing, ", "))
 	}
 	if _, err := ParseRange(d.ProfileRange); err != nil {
 		return nil, fmt.Errorf("agentregistry: publish definition version: profile_range: %w", err)
@@ -158,7 +158,10 @@ func (s *Store) PublishProfileVersion(ctx context.Context, p *ProfileVersion) (*
 		"sourceManifest.contentHash": p.SourceManifest.ContentHash,
 	})
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("agentregistry: publish profile version: missing required fields: %s", strings.Join(missing, ", "))
+		return nil, fmt.Errorf("agentregistry: publish profile version: %w: %s", ErrMissingRequiredFields, strings.Join(missing, ", "))
+	}
+	if _, err := ParseVersion(p.Version); err != nil {
+		return nil, fmt.Errorf("agentregistry: publish profile version: version: %w", err)
 	}
 	policyMissing, err := validateProfileSpec(p.SpecJSON)
 	if err != nil {
@@ -235,9 +238,15 @@ func validLifecycleTransition(from, to string) bool {
 // lifecycle. The immutable spec_json and provenance columns are left
 // untouched — only the lifecycle* columns change.
 func (s *Store) SetDefinitionVersionLifecycle(ctx context.Context, agent, version, to, reason, actor string) (*DefinitionVersion, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("agentregistry: set definition lifecycle: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	var current string
-	if err := s.pool.QueryRow(ctx,
-		`SELECT lifecycle FROM agent_definition_versions WHERE agent = $1 AND version = $2`,
+	if err := tx.QueryRow(ctx,
+		`SELECT lifecycle FROM agent_definition_versions WHERE agent = $1 AND version = $2 FOR UPDATE`,
 		agent, version,
 	).Scan(&current); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -251,7 +260,7 @@ func (s *Store) SetDefinitionVersionLifecycle(ctx context.Context, agent, versio
 
 	now := time.Now().UTC()
 	stored := &DefinitionVersion{}
-	err := s.pool.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`UPDATE agent_definition_versions
 		 SET lifecycle = $3, lifecycle_reason = $4, lifecycle_at = $5, lifecycle_by = $6
 		 WHERE agent = $1 AND version = $2
@@ -261,9 +270,11 @@ func (s *Store) SetDefinitionVersionLifecycle(ctx context.Context, agent, versio
 	).Scan(&stored.ID, &stored.Agent, &stored.Version, &stored.APIVersion, &stored.SpecJSON, &stored.Owner,
 		&stored.SourceManifest.Repo, &stored.SourceManifest.Path, &stored.SourceManifest.GitSHA, &stored.SourceManifest.ContentHash,
 		&stored.ProfileRange, &stored.Lifecycle, &stored.LifecycleReason, &stored.LifecycleAt, &stored.LifecycleBy,
-		&stored.CreatedAt, &stored.CreatedBy)
-	if err != nil {
+		&stored.CreatedAt, &stored.CreatedBy); err != nil {
 		return nil, fmt.Errorf("agentregistry: set definition lifecycle: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("agentregistry: set definition lifecycle: commit: %w", err)
 	}
 	return stored, nil
 }
@@ -271,9 +282,15 @@ func (s *Store) SetDefinitionVersionLifecycle(ctx context.Context, agent, versio
 // SetProfileVersionLifecycle transitions one profile version's lifecycle,
 // same rules as SetDefinitionVersionLifecycle.
 func (s *Store) SetProfileVersionLifecycle(ctx context.Context, profile, version, to, reason, actor string) (*ProfileVersion, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("agentregistry: set profile lifecycle: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	var current string
-	if err := s.pool.QueryRow(ctx,
-		`SELECT lifecycle FROM agent_profile_versions WHERE profile = $1 AND version = $2`,
+	if err := tx.QueryRow(ctx,
+		`SELECT lifecycle FROM agent_profile_versions WHERE profile = $1 AND version = $2 FOR UPDATE`,
 		profile, version,
 	).Scan(&current); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -287,7 +304,7 @@ func (s *Store) SetProfileVersionLifecycle(ctx context.Context, profile, version
 
 	now := time.Now().UTC()
 	stored := &ProfileVersion{}
-	err := s.pool.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`UPDATE agent_profile_versions
 		 SET lifecycle = $3, lifecycle_reason = $4, lifecycle_at = $5, lifecycle_by = $6
 		 WHERE profile = $1 AND version = $2
@@ -296,9 +313,11 @@ func (s *Store) SetProfileVersionLifecycle(ctx context.Context, profile, version
 		profile, version, to, reason, now, actor,
 	).Scan(&stored.ID, &stored.Profile, &stored.Version, &stored.SpecJSON, &stored.Owner,
 		&stored.SourceManifest.Repo, &stored.SourceManifest.Path, &stored.SourceManifest.GitSHA, &stored.SourceManifest.ContentHash,
-		&stored.Lifecycle, &stored.LifecycleReason, &stored.LifecycleAt, &stored.LifecycleBy, &stored.CreatedAt, &stored.CreatedBy)
-	if err != nil {
+		&stored.Lifecycle, &stored.LifecycleReason, &stored.LifecycleAt, &stored.LifecycleBy, &stored.CreatedAt, &stored.CreatedBy); err != nil {
 		return nil, fmt.Errorf("agentregistry: set profile lifecycle: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("agentregistry: set profile lifecycle: commit: %w", err)
 	}
 	return stored, nil
 }
@@ -343,18 +362,30 @@ func loadProfileVersionForShare(ctx context.Context, tx pgx.Tx, profile, version
 	return p, nil
 }
 
-// validateBindingPair runs the lifecycle and compatibility checks shared by
-// CreateBinding and RollbackBinding: both named versions must be published,
-// and the profile version must satisfy the definition's declared range.
+// validateBindingPair runs the lifecycle and compatibility checks for
+// CreateBinding: both named versions must be published (neither deprecated
+// nor disabled), and the profile version must satisfy the definition's
+// declared range.
 func validateBindingPair(def *DefinitionVersion, prof *ProfileVersion) error {
 	if def.Lifecycle == LifecycleDeprecated {
 		return fmt.Errorf("%w: definition %s@%s", ErrVersionDeprecated, def.Agent, def.Version)
 	}
-	if def.Lifecycle == LifecycleDisabled {
-		return fmt.Errorf("%w: definition %s@%s", ErrVersionDisabled, def.Agent, def.Version)
-	}
 	if prof.Lifecycle == LifecycleDeprecated {
 		return fmt.Errorf("%w: profile %s@%s", ErrVersionDeprecated, prof.Profile, prof.Version)
+	}
+	return validateBindingPairNotDisabled(def, prof)
+}
+
+// validateBindingPairNotDisabled runs the subset of validateBindingPair's
+// checks that RollbackBinding needs: a rollback target may legitimately have
+// become deprecated since it was the active binding (that is the expected
+// "go back to an older, possibly-deprecated-by-now version" emergency path —
+// see docs/agent-platform-registry.md's "Rolling back" section), but it must
+// never restore a pair where either version has since become disabled, and
+// the pair must still satisfy the declared compatibility range.
+func validateBindingPairNotDisabled(def *DefinitionVersion, prof *ProfileVersion) error {
+	if def.Lifecycle == LifecycleDisabled {
+		return fmt.Errorf("%w: definition %s@%s", ErrVersionDisabled, def.Agent, def.Version)
 	}
 	if prof.Lifecycle == LifecycleDisabled {
 		return fmt.Errorf("%w: profile %s@%s", ErrVersionDisabled, prof.Profile, prof.Version)
@@ -552,7 +583,9 @@ func (s *Store) RollbackBinding(ctx context.Context, agent, environment string, 
 	if err != nil {
 		return nil, err
 	}
-	if err := validateBindingPair(def, prof); err != nil {
+	// Unlike CreateBinding, a rollback target being deprecated is expected
+	// and allowed — see validateBindingPairNotDisabled's doc comment.
+	if err := validateBindingPairNotDisabled(def, prof); err != nil {
 		return nil, err
 	}
 

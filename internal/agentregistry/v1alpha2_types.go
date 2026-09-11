@@ -54,6 +54,7 @@ var (
 	ErrInvalidRange               = errors.New("agentregistry: invalid compatibility range")
 	ErrInvalidLifecycleTransition = errors.New("agentregistry: invalid lifecycle transition")
 	ErrMissingPolicyFields        = errors.New("agentregistry: execution profile is missing required policy fields")
+	ErrMissingRequiredFields      = errors.New("agentregistry: missing required fields")
 )
 
 // RequiredProfilePolicyFields names the fields an ExecutionProfile's
