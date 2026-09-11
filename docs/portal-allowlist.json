@@ -21,6 +21,10 @@
       "enabled": false
     },
     {
+      "name": "mctl_bind_agent_release",
+      "enabled": false
+    },
+    {
       "name": "mctl_create_agent",
       "enabled": false
     },
@@ -66,6 +70,10 @@
     },
     {
       "name": "mctl_enable_tenant_skill",
+      "enabled": false
+    },
+    {
+      "name": "mctl_get_agent",
       "enabled": false
     },
     {
@@ -141,6 +149,10 @@
       "name": "mctl_list_agent_versions",
       "enabled": true,
       "reason": "Published versions of an mctl-agents agent with manifest, git SHA, image reference and prompt hash; release metadata, no tenant data."
+    },
+    {
+      "name": "mctl_list_agents",
+      "enabled": false
     },
     {
       "name": "mctl_list_domains",
@@ -221,6 +233,14 @@
       "enabled": false
     },
     {
+      "name": "mctl_publish_agent_definition_version",
+      "enabled": false
+    },
+    {
+      "name": "mctl_publish_agent_profile_version",
+      "enabled": false
+    },
+    {
       "name": "mctl_publish_agent_version",
       "enabled": false
     },
@@ -269,6 +289,10 @@
       "enabled": false
     },
     {
+      "name": "mctl_rollback_agent_binding",
+      "enabled": false
+    },
+    {
       "name": "mctl_rollback_service",
       "enabled": false
     },
@@ -282,6 +306,10 @@
     },
     {
       "name": "mctl_scale_service",
+      "enabled": false
+    },
+    {
+      "name": "mctl_set_agent_version_lifecycle",
       "enabled": false
     },
     {
