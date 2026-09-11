@@ -25,6 +25,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -113,6 +114,8 @@ func writeAgentPlatformError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusUnprocessableEntity, "fixture_not_promotable", err.Error(), nil)
 	case errors.Is(err, agentregistry.ErrMissingPolicyFields):
 		writeErrorCode(w, http.StatusBadRequest, "missing_policy_fields", err.Error(), nil)
+	case errors.Is(err, agentregistry.ErrMissingRequiredFields):
+		writeErrorCode(w, http.StatusBadRequest, "missing_required_fields", err.Error(), nil)
 	case errors.Is(err, agentregistry.ErrInvalidRange):
 		writeErrorCode(w, http.StatusBadRequest, "invalid_range", err.Error(), nil)
 	case errors.Is(err, agentregistry.ErrInvalidLifecycleTransition):
@@ -188,13 +191,17 @@ func (h *Handlers) PublishDefinitionVersion(w http.ResponseWriter, r *http.Reque
 		CreatedBy:      user.ID,
 	})
 	if err != nil {
-		if errors.Is(err, agentregistry.ErrVersionConflict) || errors.Is(err, agentregistry.ErrDefinitionNotFound) || errors.Is(err, agentregistry.ErrInvalidRange) {
+		if errors.Is(err, agentregistry.ErrVersionConflict) || errors.Is(err, agentregistry.ErrDefinitionNotFound) ||
+			errors.Is(err, agentregistry.ErrInvalidRange) || errors.Is(err, agentregistry.ErrMissingRequiredFields) {
 			writeAgentPlatformError(w, err)
 			return
 		}
-		// Missing required field errors from the store are plain (unwrapped)
-		// messages naming every missing field — see missingRequiredFields.
-		writeError(w, http.StatusBadRequest, err.Error())
+		// Anything else (dropped connection, pool timeout, context
+		// cancellation, a malformed-input error from Postgres, ...) is not a
+		// client input problem — log it and return a generic 500 instead of
+		// leaking the raw underlying error text to the caller.
+		slog.Error("publish definition version failed", "agent", agent, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to publish definition version")
 		return
 	}
 	writeJSON(w, http.StatusCreated, stored)
@@ -275,11 +282,16 @@ func (h *Handlers) PublishProfileVersion(w http.ResponseWriter, r *http.Request)
 		CreatedBy:      user.ID,
 	})
 	if err != nil {
-		if errors.Is(err, agentregistry.ErrVersionConflict) || errors.Is(err, agentregistry.ErrMissingPolicyFields) {
+		if errors.Is(err, agentregistry.ErrVersionConflict) || errors.Is(err, agentregistry.ErrMissingPolicyFields) ||
+			errors.Is(err, agentregistry.ErrInvalidRange) || errors.Is(err, agentregistry.ErrMissingRequiredFields) {
 			writeAgentPlatformError(w, err)
 			return
 		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		// See the identical fallback in PublishDefinitionVersion above: only
+		// positively-identified client input problems get a 400; everything
+		// else is a generic 500 with the real error logged server-side.
+		slog.Error("publish profile version failed", "profile", profile, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to publish profile version")
 		return
 	}
 	writeJSON(w, http.StatusCreated, stored)
