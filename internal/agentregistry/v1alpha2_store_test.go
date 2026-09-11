@@ -453,6 +453,24 @@ func TestBindingHistory_AppendOnlyAndRollback(t *testing.T) {
 		t.Fatalf("expected resolve to return revision 3, got %d", resolved.Revision)
 	}
 
+	// Deprecating (not disabling) revision 2's definition must NOT block
+	// rolling back to it: RollbackBinding intentionally uses
+	// validateBindingPairNotDisabled instead of CreateBinding's stricter
+	// validateBindingPair, so a deprecated pair is still restorable.
+	if _, err := s.SetDefinitionVersionLifecycle(ctx, "issue-investigator", "2.0.0", LifecycleDeprecated, "", "tester"); err != nil {
+		t.Fatalf("deprecate definition 2.0.0: %v", err)
+	}
+	rolledBackDeprecated, err := s.RollbackBinding(ctx, "issue-investigator", EnvironmentShadow, 2, "restore deprecated pair", "tester")
+	if err != nil {
+		t.Fatalf("expected rollback to a deprecated pair to succeed, got error: %v", err)
+	}
+	if rolledBackDeprecated.DefinitionVersion != "2.0.0" || rolledBackDeprecated.ProfileVersion != "2.0.0" {
+		t.Fatalf("expected rollback to repeat revision 2's pair, got %+v", rolledBackDeprecated)
+	}
+	if rolledBackDeprecated.RollbackOf == nil || *rolledBackDeprecated.RollbackOf != bindB.ID {
+		t.Fatalf("expected rollback_of to point at revision 2's id (%d), got %v", bindB.ID, rolledBackDeprecated.RollbackOf)
+	}
+
 	// Disable revision 1's profile, then rollback to it must be rejected.
 	if _, err := s.SetProfileVersionLifecycle(ctx, "standard-investigate", "1.0.0", LifecycleDisabled, "", "tester"); err != nil {
 		t.Fatalf("disable profile 1.0.0: %v", err)
