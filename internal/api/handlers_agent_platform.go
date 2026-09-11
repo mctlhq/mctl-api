@@ -180,6 +180,10 @@ func (h *Handlers) PublishDefinitionVersion(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "missing required fields: version, spec")
 		return
 	}
+	if !json.Valid([]byte(body.Spec)) {
+		writeError(w, http.StatusBadRequest, "spec must be valid JSON")
+		return
+	}
 
 	stored, err := h.opts.AgentRegistry.PublishDefinitionVersion(r.Context(), &agentregistry.DefinitionVersion{
 		Agent:          agent,
@@ -270,6 +274,10 @@ func (h *Handlers) PublishProfileVersion(w http.ResponseWriter, r *http.Request)
 	}
 	if body.Version == "" || body.Spec == "" {
 		writeError(w, http.StatusBadRequest, "missing required fields: version, spec")
+		return
+	}
+	if !json.Valid([]byte(body.Spec)) {
+		writeError(w, http.StatusBadRequest, "spec must be valid JSON")
 		return
 	}
 
