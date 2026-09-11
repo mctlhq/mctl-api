@@ -95,6 +95,12 @@ type AgentPromotion struct {
 // 4) — written by orchestrator/temporal/activities/state.py after the
 // underlying Argo workflow reaches a terminal phase. Version/ImageRef are
 // empty when the step ran before this agent had any registered release.
+//
+// DefinitionVersion/Profile/ProfileVersion/BindingRevision are the v1alpha2
+// execution-identity fields (all optional, all default empty/NULL): a
+// DevLoopWorkflow that resolved through a ReleaseBinding records the exact
+// pair and revision it ran with, alongside the existing v1 fields. An
+// existing caller sending only the v1 fields is unaffected.
 type AgentExecution struct {
 	ID                 int       `json:"id"`
 	TemporalWorkflowID string    `json:"temporal_workflow_id"`
@@ -105,5 +111,9 @@ type AgentExecution struct {
 	TargetRepo         string    `json:"target_repo,omitempty"`
 	ArgoWorkflowName   string    `json:"argo_workflow_name,omitempty"`
 	Phase              string    `json:"phase"`
+	DefinitionVersion  string    `json:"definition_version,omitempty"`
+	Profile            string    `json:"profile,omitempty"`
+	ProfileVersion     string    `json:"profile_version,omitempty"`
+	BindingRevision    *int      `json:"binding_revision,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 }

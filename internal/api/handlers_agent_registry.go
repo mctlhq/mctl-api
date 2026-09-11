@@ -71,6 +71,13 @@ type recordExecutionRequest struct {
 	TargetRepo         string `json:"target_repo,omitempty"`
 	ArgoWorkflowName   string `json:"argo_workflow_name,omitempty"`
 	Phase              string `json:"phase"`
+	// v1alpha2 execution identity — all optional. Omitting them keeps this
+	// endpoint byte-compatible with orchestrator/temporal/activities/state.py
+	// callers that have not migrated.
+	DefinitionVersion string `json:"definition_version,omitempty"`
+	Profile           string `json:"profile,omitempty"`
+	ProfileVersion    string `json:"profile_version,omitempty"`
+	BindingRevision   *int   `json:"binding_revision,omitempty"`
 }
 
 // agentReleaseRequest drives both promotion and rollback through one
@@ -319,6 +326,10 @@ func (h *Handlers) RecordAgentExecution(w http.ResponseWriter, r *http.Request) 
 		TargetRepo:         body.TargetRepo,
 		ArgoWorkflowName:   body.ArgoWorkflowName,
 		Phase:              body.Phase,
+		DefinitionVersion:  body.DefinitionVersion,
+		Profile:            body.Profile,
+		ProfileVersion:     body.ProfileVersion,
+		BindingRevision:    body.BindingRevision,
 	})
 	if err != nil {
 		if errors.Is(err, agentregistry.ErrInvalidEnvironment) || errors.Is(err, agentregistry.ErrInvalidPhase) {
