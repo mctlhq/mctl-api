@@ -58,6 +58,11 @@ CREATE TABLE IF NOT EXISTS lifecycle_ownership (
     handoff_from_type    TEXT NOT NULL DEFAULT '',
     handoff_from_id      TEXT NOT NULL DEFAULT '',
     handoff_started_at   TIMESTAMPTZ,
+    -- released_at/released_reason record when and why this ownership ENDED,
+    -- for BOTH released and terminal. state is the discriminator between them:
+    -- released means the work remains and somebody else may take it, terminal
+    -- means the phase is finished. Reading released_at alone cannot tell them
+    -- apart, and nothing should try.
     released_at          TIMESTAMPTZ,
     released_reason      TEXT NOT NULL DEFAULT '',
     temporal_workflow_id TEXT NOT NULL DEFAULT '',
@@ -108,7 +113,16 @@ const acquireUpsertSQL = `INSERT INTO lifecycle_ownership (` + ownershipColumns 
 			   entity_version = EXCLUDED.entity_version,
 			   owner_type = EXCLUDED.owner_type,
 			   owner_id = EXCLUDED.owner_id,
-			   epoch = EXCLUDED.epoch,
+			   -- The DATABASE computes the next epoch, not the caller.
+			   -- EXCLUDED.epoch would be a value derived from a read that may
+			   -- already be stale: a caller stalled across
+			   -- released@3 -> active@4 -> released@4 still matches the WHERE
+			   -- above and would re-write epoch 4, un-fencing the previous
+			   -- owner's executors. Serializing writers hides that, which is
+			   -- exactly why it must not be left to them — the comment on
+			   -- Acquire claims correctness survives the lock being removed,
+			   -- and this is what makes that claim true rather than lucky.
+			   epoch = lifecycle_ownership.epoch + 1,
 			   state = EXCLUDED.state,
 			   acquired_at = EXCLUDED.acquired_at,
 			   last_seen_at = EXCLUDED.last_seen_at,
@@ -240,19 +254,27 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 				if req.Entity.Version != "" {
 					version = req.Entity.Version
 				}
+				// temporal_workflow_id is refreshed too: this path exists for
+				// the pod restart and workflow retry, which is precisely when
+				// the correlation id changes.
+				workflowID := existing.TemporalWorkflowID
+				if req.TemporalWorkflowID != "" {
+					workflowID = req.TemporalWorkflowID
+				}
 				refreshed, err := scanOne(tx.QueryRow(ctx,
 					`UPDATE lifecycle_ownership
-					   SET last_seen_at = $1, entity_version = $2, updated_at = $1
-					 WHERE entity_kind = $3 AND entity_id = $4 AND phase = $5
+					   SET last_seen_at = $1, entity_version = $2,
+					       temporal_workflow_id = $3, updated_at = $1
+					 WHERE entity_kind = $4 AND entity_id = $5 AND phase = $6
 					 RETURNING `+ownershipColumns,
-					now, version, req.Entity.Kind, req.Entity.ID, req.Phase))
+					now, version, workflowID, req.Entity.Kind, req.Entity.ID, req.Phase))
 				if err != nil {
 					return fmt.Errorf("lifecycle: acquire: refresh: %w", err)
 				}
 				out = refreshed
 				return nil
 			}
-			if err := insertEvent(ctx, tx, req.Entity, req.Phase, EventOwnerDenied,
+			if err := insertEvent(ctx, tx, existing.Entity, req.Phase, EventOwnerDenied,
 				existing.Epoch, req.Owner, "already owned by "+existing.Owner.Type+"/"+existing.Owner.ID, now); err != nil {
 				return err
 			}
@@ -260,14 +282,13 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 			return ErrOwnedByOther
 		}
 
-		epoch := 1
-		if existing != nil {
-			epoch = existing.Epoch + 1
-		}
+		// Only used by the INSERT branch. The DO UPDATE branch derives the
+		// next epoch from the stored row, so a stale read cannot set it.
+		const freshEpoch = 1
 
 		row := tx.QueryRow(ctx, acquireUpsertSQL,
 			req.Entity.Kind, req.Entity.ID, req.Phase, req.Entity.Version,
-			req.Owner.Type, req.Owner.ID, epoch, StateActive, now, now, now,
+			req.Owner.Type, req.Owner.ID, freshEpoch, StateActive, now, now, now,
 			"acquired", req.ProposalRef, req.PolicyRef,
 			req.TemporalWorkflowID, now, now)
 		acquired, err := scanOne(row)
@@ -288,7 +309,7 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 				out = current
 				return nil
 			}
-			if eerr := insertEvent(ctx, tx, req.Entity, req.Phase, EventOwnerDenied,
+			if eerr := insertEvent(ctx, tx, current.Entity, req.Phase, EventOwnerDenied,
 				current.Epoch, req.Owner, "lost acquire race to "+current.Owner.Type+"/"+current.Owner.ID, now); eerr != nil {
 				return eerr
 			}
@@ -353,7 +374,13 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 		out = updated
 		return nil
 	})
-	return out, err
+	if err != nil {
+		// A commit failure means the row may not exist as described, so the
+		// caller must not be handed one. Acquire already draws this line for
+		// its denial path; the rest of the write methods now match it.
+		return nil, err
+	}
+	return out, nil
 }
 
 // HandoffStart marks an explicit, durable intent to pass ownership on.
@@ -393,7 +420,10 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 		out = updated
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // HandoffComplete is called by the INCOMING owner. It bumps the epoch, which
@@ -445,7 +475,10 @@ func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase str
 		out = updated
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Release gives up ownership without the entity being finished — the work
@@ -487,7 +520,10 @@ func (s *Store) finish(ctx context.Context, entity EntityRef, phase string, owne
 		out = updated
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Get returns the ownership record for one (entity, phase).
@@ -541,8 +577,11 @@ type ListFilter struct {
 	Kind  string
 	Phase string
 	State string
-	Owner string
-	Limit int
+	// OwnerType filters on the owner's TYPE (shepherd, pr-steward, ...), not
+	// on a specific owner id. Named for what it matches: the previous name
+	// `Owner` read as though it would accept "dev-loop-mctlhq-mctl-web-7".
+	OwnerType string
+	Limit     int
 }
 
 // List returns ownership records matching filter, newest update first.
@@ -559,7 +598,7 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]*Ownership, error) {
 		   AND ($4 = '' OR owner_type = $4)
 		 ORDER BY updated_at DESC
 		 LIMIT $5`,
-		f.Kind, f.Phase, f.State, f.Owner, limit)
+		f.Kind, f.Phase, f.State, f.OwnerType, limit)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: list: %w", err)
 	}
@@ -732,4 +771,96 @@ func scanRow(row scannable) (*Ownership, error) {
 		o.HandoffFrom = &Owner{Type: handoffFromType, ID: handoffFromID}
 	}
 	return o, nil
+}
+
+// Recover takes ownership from an owner that is DEAD, and only from one.
+//
+// This is the operation that makes IsDead mean something. Without it the
+// package computes careful positive evidence that an owner has crashed and
+// then has no way to act on it: Acquire refuses any active row at any age, and
+// every other exit from active requires the owner's own identity and epoch. A
+// crashed worker would hold its entity forever — the inverse of the failure
+// this package was built to fix, and just as bad.
+//
+// Three properties keep it from becoming a way to steal work:
+//
+//  1. Liveness is re-checked SERVER-SIDE, under the advisory lock, against the
+//     phase's bound. A caller may not assert that an owner is dead; it may only
+//     ask for the question to be re-asked. Letting the asker decide would put
+//     the takeover in the hands of whoever wants to act.
+//  2. Only liveness counts. An owner that is alive but has effected nothing is
+//     stuck, not dead, and stays its own — handing a stuck entity to another
+//     machine produces a second stuck machine.
+//  3. expectedEpoch, when non-zero, pins the decision to the record the caller
+//     actually looked at, so a recovery based on a stale read fails rather than
+//     lands.
+//
+// The epoch increments, which fences the dead owner's executors if the process
+// ever comes back.
+func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, newOwner Owner, expectedEpoch int, evidence string) (*Ownership, error) {
+	if err := validate(entity, phase); err != nil {
+		return nil, err
+	}
+	if newOwner.Type == "" || newOwner.ID == "" {
+		return nil, fmt.Errorf("lifecycle: recover: owner type and id are required")
+	}
+	if evidence == "" {
+		// A takeover with no recorded reason is the one mutation here that is
+		// hardest to reconstruct afterwards.
+		return nil, fmt.Errorf("lifecycle: recover: evidence is required")
+	}
+
+	var out *Ownership
+	err := s.inTx(ctx, entity, phase, func(tx pgx.Tx) error {
+		now := time.Now().UTC()
+		current, err := scanOne(tx.QueryRow(ctx,
+			`SELECT `+ownershipColumns+` FROM lifecycle_ownership
+			 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
+			entity.Kind, entity.ID, phase))
+		if err != nil {
+			return err
+		}
+		if expectedEpoch != 0 && current.Epoch != expectedEpoch {
+			return fmt.Errorf("%w: current epoch is %d, caller has %d",
+				ErrEpochMismatch, current.Epoch, expectedEpoch)
+		}
+		if current.State != StateActive && current.State != StateHandingOff {
+			// Released and terminal need no recovery — Acquire already takes
+			// them, and routing that through here would blur "this owner died"
+			// with "this owner finished".
+			return fmt.Errorf("%w: record is %s; use Acquire", ErrNotOwner, current.State)
+		}
+		if !current.IsDead(now) {
+			return fmt.Errorf("%w: last seen %s", ErrOwnerAlive, current.LastSeenAt.Format(time.RFC3339))
+		}
+
+		recovered, err := scanOne(tx.QueryRow(ctx,
+			`UPDATE lifecycle_ownership
+			   SET owner_type = $1, owner_id = $2, epoch = epoch + 1, state = $3,
+			       acquired_at = $4, last_seen_at = $4, last_progress_at = $4,
+			       progress_evidence = $5,
+			       handoff_from_type = owner_type, handoff_from_id = owner_id,
+			       handoff_to_type = '', handoff_to_id = '', handoff_started_at = NULL,
+			       released_at = NULL, released_reason = '', updated_at = $4
+			 WHERE entity_kind = $6 AND entity_id = $7 AND phase = $8 AND epoch = $9
+			 RETURNING `+ownershipColumns,
+			newOwner.Type, newOwner.ID, StateActive, now, "recovered: "+evidence,
+			entity.Kind, entity.ID, phase, current.Epoch))
+		if err != nil {
+			return fmt.Errorf("lifecycle: recover: %w", err)
+		}
+		if err := insertEvent(ctx, tx, recovered.Entity, phase, EventRecovered,
+			recovered.Epoch, newOwner,
+			fmt.Sprintf("from %s/%s (dead, last seen %s): %s",
+				current.Owner.Type, current.Owner.ID,
+				current.LastSeenAt.Format(time.RFC3339), evidence), now); err != nil {
+			return err
+		}
+		out = recovered
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }

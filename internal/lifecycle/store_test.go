@@ -506,7 +506,7 @@ func TestListFilters(t *testing.T) {
 	if n := countMine(ListFilter{Kind: KindPullRequest, Phase: PhaseReviewRemediation, State: StateActive}); n != 1 {
 		t.Fatalf("state filter: want 1, got %d", n)
 	}
-	if n := countMine(ListFilter{Kind: KindPullRequest, Phase: PhaseReviewRemediation, Owner: OwnerShepherd}); n != 1 {
+	if n := countMine(ListFilter{Kind: KindPullRequest, Phase: PhaseReviewRemediation, OwnerType: OwnerShepherd}); n != 1 {
 		t.Fatalf("owner filter: want 1, got %d", n)
 	}
 	if n := countMine(ListFilter{Kind: KindDevLoopProposal, Phase: PhaseImplement}); n != 0 {
@@ -746,4 +746,152 @@ func TestEventsCarryTheStoredVersion(t *testing.T) {
 		return
 	}
 	t.Fatalf("no progress event recorded")
+}
+
+// TestRecoverOnlyTakesFromADeadOwner is what makes IsDead mean something.
+// Without Recover the package computes careful positive evidence that an owner
+// crashed and then cannot act on it, so a crashed worker holds its entity
+// forever — the inverse of the failure this package exists to fix.
+func TestRecoverOnlyTakesFromADeadOwner(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "recover")
+	crashed := devloop("wf-crashed")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: crashed})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	// A live owner is not recoverable, whatever the caller believes. The
+	// client may not assert death; the server re-checks it.
+	if _, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "I think it died"); !errors.Is(err, ErrOwnerAlive) {
+		t.Fatalf("recover from a live owner must be refused, got %v", err)
+	}
+
+	// Age it past the liveness bound, directly in the table — the only way to
+	// simulate a crash without waiting 10 hours.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE lifecycle_ownership SET last_seen_at = $1
+		 WHERE entity_kind = $2 AND entity_id = $3 AND phase = $4`,
+		time.Now().UTC().Add(-11*time.Hour), entity.Kind, entity.ID, PhaseReviewRemediation,
+	); err != nil {
+		t.Fatalf("age the row: %v", err)
+	}
+
+	// A stale expectedEpoch must fail rather than land.
+	if _, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch+7, "x"); !errors.Is(err, ErrEpochMismatch) {
+		t.Fatalf("recover with a stale epoch must fail, got %v", err)
+	}
+	// A takeover with no recorded reason is the hardest mutation here to
+	// reconstruct afterwards, so it is refused.
+	if _, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, ""); err == nil {
+		t.Fatalf("recover without evidence must be refused")
+	}
+
+	recovered, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "unseen for 11h")
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if recovered.Owner != shepherd || recovered.State != StateActive {
+		t.Fatalf("recover did not transfer ownership: %+v", recovered)
+	}
+	// The epoch must advance, or the dead owner's executors are un-fenced if
+	// its process ever comes back.
+	if recovered.Epoch != got.Epoch+1 {
+		t.Fatalf("recover did not bump the epoch: %d -> %d", got.Epoch, recovered.Epoch)
+	}
+	if recovered.HandoffFrom == nil || *recovered.HandoffFrom != crashed {
+		t.Fatalf("recover lost the lineage: %+v", recovered.HandoffFrom)
+	}
+	if _, err := s.RecordProgress(ctx, entity, PhaseReviewRemediation, crashed, got.Epoch, "back from the dead"); err == nil {
+		t.Fatalf("the recovered-from owner could still act")
+	}
+
+	events, err := s.Events(ctx, entity, PhaseReviewRemediation, 20)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	for _, e := range events {
+		if e.Event == EventRecovered {
+			return
+		}
+	}
+	t.Fatalf("no recovered event written; a takeover must leave evidence")
+}
+
+// TestRecoverRefusesAStuckButLivingOwner pins the distinction the whole
+// liveness/progress split exists for. Stuck is not dead: handing a stuck entity
+// to another machine produces a second stuck machine and an epoch bump.
+func TestRecoverRefusesAStuckButLivingOwner(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "stuck-not-dead")
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	// Ticking happily, achieving nothing for days — a PR waiting on review.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE lifecycle_ownership SET last_progress_at = $1
+		 WHERE entity_kind = $2 AND entity_id = $3 AND phase = $4`,
+		time.Now().UTC().Add(-72*time.Hour), entity.Kind, entity.ID, PhaseReviewRemediation,
+	); err != nil {
+		t.Fatalf("age progress: %v", err)
+	}
+
+	current, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	now := time.Now().UTC()
+	if !current.IsStuck(now) {
+		t.Fatalf("72h without progress should read as stuck")
+	}
+	if current.IsDead(now) {
+		t.Fatalf("a ticking owner must never read as dead")
+	}
+	if _, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "looks idle"); !errors.Is(err, ErrOwnerAlive) {
+		t.Fatalf("a stuck owner must not be recoverable, got %v", err)
+	}
+}
+
+// TestEpochIsComputedByTheDatabase pins that the next epoch comes from the
+// stored row rather than from a value the caller derived from a read that may
+// already be stale. Serializing writers hides the difference, which is exactly
+// why it must not be left to them.
+func TestEpochIsComputedByTheDatabase(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "epoch-monotonic")
+
+	owner := devloop("wf-1")
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.Release(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, "done"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	// Drive the epoch up underneath, the way a competing writer would.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE lifecycle_ownership SET epoch = 41
+		 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
+		entity.Kind, entity.ID, PhaseReviewRemediation,
+	); err != nil {
+		t.Fatalf("bump epoch: %v", err)
+	}
+
+	// A fresh acquire must continue from the STORED epoch, not from anything
+	// the caller computed before that bump.
+	next, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: shepherd})
+	if err != nil {
+		t.Fatalf("acquire after bump: %v", err)
+	}
+	if next.Epoch != 42 {
+		t.Fatalf("epoch did not come from the database: want 42, got %d", next.Epoch)
+	}
 }

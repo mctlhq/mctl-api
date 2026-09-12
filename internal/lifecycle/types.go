@@ -22,9 +22,9 @@
 //
 // It is also deliberately NOT a scheduler. There is no timer, no queue, no
 // due_at and no background sweep; nothing here calls GitHub, Argo or Temporal.
-// Staleness is DERIVED on read by the caller's existing tick (see
-// Ownership.IsStale) rather than materialised by a sweep, because materialising
-// it is precisely what would turn this into one.
+// Liveness and progress are DERIVED on read by the caller's existing tick (see
+// Ownership.IsDead and Ownership.IsStuck) rather than materialised by a sweep,
+// because materialising either is precisely what would turn this into one.
 //
 // See mctl-agents/docs/adr/010-lifecycle-ownership-contract.md.
 package lifecycle
@@ -86,6 +86,7 @@ const (
 	EventHandoffCompleted = "handoff-completed"
 	EventOwnerReleased    = "owner-released"
 	EventOwnerTerminal    = "owner-terminal"
+	EventRecovered        = "recovered"
 )
 
 // bounds are per (kind, phase), and there are TWO of them because there are two
@@ -306,4 +307,14 @@ var (
 	// ErrNoHandoff means HandoffComplete was called on a record that is not
 	// handing off.
 	ErrNoHandoff = errors.New("lifecycle: no handoff in progress")
+
+	// ErrOwnerAlive means Recover was asked to take ownership from an owner
+	// that is still within its liveness bound.
+	//
+	// A client may not assert that an owner is dead; it may only ask the
+	// server to re-evaluate it, and this is the server refusing. Letting a
+	// caller declare death would put the takeover decision back in the hands
+	// of whoever wants to act, which is the shape of the failure this package
+	// exists to remove.
+	ErrOwnerAlive = errors.New("lifecycle: current owner is still alive")
 )
