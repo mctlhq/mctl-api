@@ -1584,8 +1584,14 @@ func TestProgressUpdateRefusesTheStateItDidNotRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the statement refused the state the row really has: %v", err)
 	}
-	if !ok.LastProgressAt.Equal(now) {
-		t.Fatalf("progress was not recorded: %s", ok.LastProgressAt)
+	// Not Equal(now): Postgres stores timestamptz to the microsecond, and
+	// time.Now() is microsecond-resolution on macOS but nanosecond on Linux,
+	// so an exact comparison against a value that has been through the
+	// database passes locally and fails in CI. Every other time assertion in
+	// this file compares two round-tripped values, which is why this is the
+	// only one that hit it.
+	if ok.LastProgressAt.Sub(now).Abs() > time.Second {
+		t.Fatalf("progress was recorded at %s, want ~%s", ok.LastProgressAt, now)
 	}
 }
 
