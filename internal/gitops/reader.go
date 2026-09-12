@@ -275,6 +275,45 @@ func (r *Reader) refresh() error {
 		cloneURL = r.repoURL
 	}
 
+	// Scrub the credential out of remote.origin.url. Registered as a defer,
+	// before the clone/fetch below, so "no credential on disk when refresh
+	// returns" holds on EVERY return path.
+	//
+	// Position matters and got this wrong twice, each time as a different
+	// early exit: first the strip lived only in the clone branch, so a
+	// container dying before it came back to an existing .git, took the fetch
+	// branch from then on, and never scrubbed; then, moved after the block, a
+	// failing fetch/reset/checkout returned before reaching it. Both are the
+	// same shape, and a defer closes the shape rather than the two instances.
+	//
+	// Ordering: refresh() registers `defer r.mu.Unlock()` first and defers run
+	// LIFO, so this runs while the lock is still held.
+	//
+	// Why at all: git clone persists the URL it was handed, and on the HTTPS
+	// branch that URL carries the token as userinfo -- so a clone leaves a
+	// plaintext copy on the cache volume, which is an emptyDir and survives a
+	// container restart. Verified present on the running pod before this was
+	// added; not a theoretical leak. Nothing reads the stored URL back (clone
+	// and fetch both pass cloneURL explicitly), so scrubbing has no other
+	// effect.
+	//
+	// Failure to scrub is logged, not returned: it must not turn a working
+	// refresh into a failed one, nor mask the real error on a path already
+	// failing. The condition to act on is "a credential is on disk", not "the
+	// repo is broken".
+	if r.token != "" {
+		defer func() {
+			// Nothing to scrub if no repository was produced.
+			if _, err := os.Stat(filepath.Join(r.localPath, ".git")); err != nil {
+				return
+			}
+			if err := r.runGit(sshEnv, "remote", "set-url", "origin", r.repoURL); err != nil {
+				slog.Error("could not strip the credential from remote.origin.url; a plaintext token may remain in .git/config on the cache volume",
+					"path", filepath.Join(r.localPath, ".git", "config"), "error", err)
+			}
+		}()
+	}
+
 	gitDir := filepath.Join(r.localPath, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		slog.Info("cloning gitops repo", "url", r.repoURL, "branch", r.branch, "path", r.localPath)
@@ -296,39 +335,6 @@ func (r *Reader) refresh() error {
 		}
 		if err := r.runGit(sshEnv, "clean", "-fd"); err != nil {
 			return fmt.Errorf("git clean failed: %w", err)
-		}
-	}
-
-	// Strip the credential out of remote.origin.url, on EVERY refresh rather
-	// than only after the clone that wrote it.
-	//
-	// git clone persists the URL it was handed, and on the HTTPS branch that
-	// URL carries the token as userinfo -- so a clone leaves a plaintext copy
-	// on the cache volume, where it outlives the rotation that replaced it.
-	// Verified present on the running pod before this was added; not a
-	// theoretical leak.
-	//
-	// Doing it only in the clone branch would leave a window, raised in
-	// review: the cache is an emptyDir, which survives a container restart
-	// because it belongs to the Pod. A container that dies between the clone
-	// and the strip comes back to a .git that already exists, takes the fetch
-	// branch from then on, and never scrubs anything -- so the token would sit
-	// there for the life of the Pod. Running it unconditionally closes that,
-	// and costs one idempotent git call per refresh.
-	//
-	// Nothing reads the stored URL back: clone and fetch both pass cloneURL
-	// explicitly. So this has no behavioural effect beyond the one intended --
-	// anything that later gains read access to this volume (a debug ephemeral
-	// container, a core dump, a handler that walks the cache) finds no
-	// credential.
-	//
-	// Failure is not fatal: the repository is usable and the service can
-	// serve from it. Log loudly instead, because the condition to fix is "a
-	// credential is on disk", not "the repo is broken".
-	if r.token != "" {
-		if err := r.runGit(sshEnv, "remote", "set-url", "origin", r.repoURL); err != nil {
-			slog.Error("could not strip the credential from remote.origin.url; a plaintext token may remain in .git/config on the cache volume",
-				"path", filepath.Join(r.localPath, ".git", "config"), "error", err)
 		}
 	}
 

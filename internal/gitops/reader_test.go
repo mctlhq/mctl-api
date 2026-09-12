@@ -1297,3 +1297,64 @@ func TestRefresh_StripsACredentialLeftByAnEarlierCrash(t *testing.T) {
 		t.Error("the fetch branch left a credential a previous crash had written into .git/config")
 	}
 }
+
+// TestRefresh_ScrubsEvenWhenTheFetchFails covers the last early-exit path.
+//
+// A credential left on disk by an earlier crash must not survive just because
+// the network is down: if fetch/reset/checkout returns an error, the scrub has
+// to have happened anyway. Otherwise the leak persists for exactly as long as
+// the outage, which is when nobody is looking at .git/config.
+func TestRefresh_ScrubsEvenWhenTheFetchFails(t *testing.T) {
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin")
+	if err := os.MkdirAll(origin, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...) //nolint:gosec // fixed test arguments
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(origin, "init", "-q", "-b", "main", ".")
+	if err := os.WriteFile(filepath.Join(origin, "a.txt"), []byte("hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(origin, "add", ".")
+	run(origin, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "init")
+
+	const token = "ghs_" + "outageLeftoverValue"
+	cache := filepath.Join(tmp, "cache")
+	run(tmp, "clone", "-q", "--depth=1", "--branch", "main",
+		"file://x-access-token:"+token+"@"+origin, cache)
+
+	cfgPath := filepath.Join(cache, ".git", "config")
+	before, err := os.ReadFile(cfgPath) //nolint:gosec // a path this test just built from t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(before, []byte(token)) {
+		t.Fatal("fixture is wrong: the pre-existing clone does not carry the credential")
+	}
+
+	// Make the fetch fail the way an outage does, by removing the origin.
+	if err := os.RemoveAll(origin); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewReader("file://"+origin, "main", cache,
+		func() (string, error) { return token, nil }, "", "")
+	if err := r.refresh(); err == nil {
+		t.Fatal("expected the refresh to fail with the origin gone; the test would prove nothing otherwise")
+	}
+
+	after, err := os.ReadFile(cfgPath) //nolint:gosec // a path this test just built from t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(after, []byte(token)) {
+		t.Error("a failing refresh returned without scrubbing the credential from .git/config")
+	}
+}
