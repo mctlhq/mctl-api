@@ -2030,21 +2030,50 @@ func TestReacquireTellsAStaleReaderToRetryNotThatItLost(t *testing.T) {
 				t.Fatalf("want ErrStaleRead on a %s row, got %v", tc.want, err)
 			}
 
-			// The other direction, with owner and epoch varied SEPARATELY.
-			// Changing both together cannot tell which clause answered, which
-			// is how the epoch clause survived here carrying the very defect
-			// this function exists to remove.
+			// The other direction, with state, owner and epoch varied ONE AT
+			// A TIME. Changing several together cannot tell which clause
+			// answered, which is twice now how a clause survived here carrying
+			// the very defect this function exists to remove.
+
+			// A HOLDING row that names somebody else: the only genuine loss.
 			stolen := *latest
+			stolen.State = StateActive
 			stolen.Owner = shepherd
 			stolen.Epoch = got.Epoch + 1
 			if err := reacquireMissSentinel(got, &stolen); !errors.Is(err, ErrOwnedByOther) {
-				t.Fatalf("want ErrOwnedByOther when the row really moved, got %v", err)
+				t.Fatalf("want ErrOwnedByOther when a held row really moved, got %v", err)
+			}
+			// Same, at the SAME epoch — unreachable today, since every write
+			// that moves the owner bumps the epoch, but the owner is the clause
+			// that decides and it has to be the one that fires.
+			usurped := *latest
+			usurped.State = StateActive
+			usurped.Owner = shepherd
+			if err := reacquireMissSentinel(got, &usurped); !errors.Is(err, ErrOwnedByOther) {
+				t.Fatalf("want ErrOwnedByOther when the owner changed, got %v", err)
+			}
+
+			// An ABSORBING row that names somebody else. Reachable by a plain
+			// sequence — wf-1 Releases, shepherd Acquires, shepherd Releases —
+			// and it is a row NO actor holds, which Acquire may take. This is
+			// the case the owner-first ordering got wrong.
+			finished := *latest
+			finished.State = StateReleased
+			finished.Owner = shepherd
+			finished.Epoch = got.Epoch + 1
+			err = reacquireMissSentinel(got, &finished)
+			if errors.Is(err, ErrOwnedByOther) {
+				t.Fatalf("a released row no actor holds was reported as held by another: %v", err)
+			}
+			if !errors.Is(err, ErrStaleRead) {
+				t.Fatalf("want ErrStaleRead for a finished row, got %v", err)
 			}
 
 			// Same owner, moved epoch: wf-1 stalls, its workflow Releases, a
 			// new run re-Acquires through the takeover path. Nobody else ever
 			// held it, so this is a retry, not a loss.
 			recycled := *latest
+			recycled.State = StateActive
 			recycled.Epoch = got.Epoch + 1
 			err = reacquireMissSentinel(got, &recycled)
 			if errors.Is(err, ErrOwnedByOther) {
@@ -2054,14 +2083,24 @@ func TestReacquireTellsAStaleReaderToRetryNotThatItLost(t *testing.T) {
 			if !errors.Is(err, ErrStaleRead) {
 				t.Fatalf("want ErrStaleRead for a recycled epoch, got %v", err)
 			}
+			if !strings.Contains(err.Error(), "epoch moved to") {
+				t.Fatalf("the error does not say the epoch moved: %v", err)
+			}
 
-			// Moved owner, SAME epoch — not reachable today, since every write
-			// that moves the owner bumps the epoch, but it is the clause that
-			// decides and it must be the one that fires.
-			usurped := *latest
-			usurped.Owner = shepherd
-			if err := reacquireMissSentinel(got, &usurped); !errors.Is(err, ErrOwnedByOther) {
-				t.Fatalf("want ErrOwnedByOther when the owner changed, got %v", err)
+			// Nothing changed at all. The row changed and changed back, or
+			// something outside this package wrote it — and the answer must not
+			// invent a transition, which is what the sibling classifier's own
+			// test forbids.
+			same := *latest
+			same.State = StateActive
+			same.Owner = got.Owner
+			same.Epoch = got.Epoch
+			err = reacquireMissSentinel(got, &same)
+			if !errors.Is(err, ErrStaleRead) {
+				t.Fatalf("want ErrStaleRead when nothing explains the miss, got %v", err)
+			}
+			if strings.Contains(err.Error(), "became") || strings.Contains(err.Error(), "moved") {
+				t.Fatalf("the catch-all claimed a transition it cannot know: %v", err)
 			}
 		})
 	}

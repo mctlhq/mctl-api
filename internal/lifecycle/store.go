@@ -1153,33 +1153,54 @@ func (s *Store) inTx(ctx context.Context, entity EntityRef, phase string, fn fun
 // passes whatever this returns. Calling it directly is the only way to show it
 // distinguishes anything.
 func reacquireMissSentinel(existing, current *Ownership) error {
+	// The ABSORBING class first, BEFORE the owner.
+	//
+	// The owner test cannot come first, because an owner change coincides with
+	// the row having finished by a plain sequence: wf-1 reads its active row
+	// and stalls; wf-1 Releases; shepherd Acquires through the takeover path;
+	// shepherd Releases. The re-read returns {released, shepherd, epoch 2} —
+	// a row NO actor holds, and one TestReleasedOwnershipCanBeRetakenAtANewEpoch
+	// pins as takeable — and answering ErrOwnedByOther there tells a caller
+	// obeying the contract to stand down on a free record.
+	//
+	// This is the same argument the rejection of raceLostOn a few lines above
+	// makes: its absorbing-state arm answers ErrNotOwner because RecordProgress,
+	// HandoffStart and finish may not drive a finished record. Acquire is the
+	// one operation that MAY take one, so for Acquire the absorbing class is
+	// not a loss at all — it is the retry succeeding.
+	if current.State != StateActive && current.State != StateHandingOff {
+		return fmt.Errorf("%w: it became %s while the re-acquire was in flight",
+			ErrStaleRead, current.State)
+	}
+	// Still held, and by somebody else. The only genuine loss.
+	//
+	// The OWNER clause alone, not `owner != || epoch !=`. Collapsing the two
+	// repeated this defect one disjunct over: same owner with a moved epoch is
+	// an ordinary sequence — wf-1 stalls, its workflow Releases, a new run
+	// Acquires through the takeover path, owner still wf-1 at epoch 5 — and the
+	// caller was told a different actor held a row naming itself. Checking only
+	// the owner is also more honest about the mechanism: every write that moves
+	// the owner bumps the epoch with it, so the epoch clause could never add a
+	// genuine loss, only false ones.
 	if current.Owner != existing.Owner {
 		return ErrOwnedByOther
 	}
-	// The OWNER clause alone, not `owner != || epoch !=`.
-	//
-	// Collapsing the two repeated the defect this function was written to fix,
-	// one disjunct over. Same owner with a moved epoch is an ordinary
-	// sequence: wf-1 reads its own active row at epoch 4 and stalls, its
-	// workflow ends and Releases, a new run Acquires through the takeover path
-	// — active, epoch 5, owner still wf-1. The stalled refresh misses on the
-	// epoch, and the caller is told "a DIFFERENT healthy actor holds this...
-	// the caller must not mutate" while being handed a row naming itself.
-	//
-	// Checking only the owner is also more honest about the mechanism: every
-	// write that moves the owner bumps the epoch with it, so the epoch clause
-	// could never add a genuine loss — only false ones.
-	//
-	// Everything else is ErrStaleRead, because for Acquire it means RETRY, not
-	// stand down, and a retry genuinely succeeds: a released or terminal row is
-	// takeable through acquireUpsertSQL, and a handing-off one or a moved epoch
-	// is this same branch again with the values the row now has.
+	// Everything below is ErrStaleRead, because for Acquire it means RETRY, not
+	// stand down, and a retry genuinely succeeds by taking this same branch at
+	// the values the row now has.
 	if current.Epoch != existing.Epoch {
 		return fmt.Errorf("%w: the epoch moved to %d while the re-acquire was in flight",
 			ErrStaleRead, current.Epoch)
 	}
-	return fmt.Errorf("%w: it became %s while the re-acquire was in flight",
-		ErrStaleRead, current.State)
+	if current.State != existing.State {
+		return fmt.Errorf("%w: it moved from %s to %s while the re-acquire was in flight",
+			ErrStaleRead, existing.State, current.State)
+	}
+	// Every predicate reads as satisfied, so the row changed and changed back,
+	// or something outside this package wrote it. Claiming a transition here
+	// would be inventing one — the same thing raceLostOn's catch-all refuses to
+	// do, and which that classifier's test forbids explicitly.
+	return fmt.Errorf("%w: it changed while the re-acquire was in flight", ErrStaleRead)
 }
 
 // raceLostOn says which predicate a guarded UPDATE failed on, by re-reading.
