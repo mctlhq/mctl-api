@@ -544,7 +544,7 @@ func main() {
 // compromise of write access to every repository that installation covers,
 // and mctl-api and mctl-agents now share a failure domain — a revoked key
 // or a removed installation takes out both. See mctlhq/mctl-api#307.
-const githubAppTokenFileEnv = "GITHUB_APP_TOKEN_FILE"
+const githubAppTokenFileEnv = "GITHUB_APP_TOKEN_FILE" //nolint:gosec // G101: the name of an environment variable, not a credential — the value it points at is read from the file it names
 
 // gitOpsTokenSource picks the credential for the HTTPS clone.
 //

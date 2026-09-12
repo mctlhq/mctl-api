@@ -75,7 +75,7 @@ func File(path string) Source {
 		return nil
 	}
 	return func() (string, error) {
-		b, err := os.ReadFile(path)
+		b, err := os.ReadFile(path) //nolint:gosec // G304: path comes from the deployment's own configuration (GITHUB_APP_TOKEN_FILE, set by the chart), never from a request
 		if err != nil {
 			return "", fmt.Errorf("reading github token from %s: %w", path, err)
 		}
