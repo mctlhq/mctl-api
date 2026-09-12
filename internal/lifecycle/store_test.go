@@ -2030,14 +2030,38 @@ func TestReacquireTellsAStaleReaderToRetryNotThatItLost(t *testing.T) {
 				t.Fatalf("want ErrStaleRead on a %s row, got %v", tc.want, err)
 			}
 
-			// The other direction: a row that really did move to somebody else
-			// still answers ErrOwnedByOther, which is the case the sentinel was
-			// chosen for.
+			// The other direction, with owner and epoch varied SEPARATELY.
+			// Changing both together cannot tell which clause answered, which
+			// is how the epoch clause survived here carrying the very defect
+			// this function exists to remove.
 			stolen := *latest
 			stolen.Owner = shepherd
 			stolen.Epoch = got.Epoch + 1
 			if err := reacquireMissSentinel(got, &stolen); !errors.Is(err, ErrOwnedByOther) {
 				t.Fatalf("want ErrOwnedByOther when the row really moved, got %v", err)
+			}
+
+			// Same owner, moved epoch: wf-1 stalls, its workflow Releases, a
+			// new run re-Acquires through the takeover path. Nobody else ever
+			// held it, so this is a retry, not a loss.
+			recycled := *latest
+			recycled.Epoch = got.Epoch + 1
+			err = reacquireMissSentinel(got, &recycled)
+			if errors.Is(err, ErrOwnedByOther) {
+				t.Fatalf("a row still naming this owner at a new epoch was reported as held "+
+					"by another actor: %v", err)
+			}
+			if !errors.Is(err, ErrStaleRead) {
+				t.Fatalf("want ErrStaleRead for a recycled epoch, got %v", err)
+			}
+
+			// Moved owner, SAME epoch — not reachable today, since every write
+			// that moves the owner bumps the epoch, but it is the clause that
+			// decides and it must be the one that fires.
+			usurped := *latest
+			usurped.Owner = shepherd
+			if err := reacquireMissSentinel(got, &usurped); !errors.Is(err, ErrOwnedByOther) {
+				t.Fatalf("want ErrOwnedByOther when the owner changed, got %v", err)
 			}
 		})
 	}

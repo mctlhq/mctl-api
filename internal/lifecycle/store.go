@@ -1153,14 +1153,31 @@ func (s *Store) inTx(ctx context.Context, entity EntityRef, phase string, fn fun
 // passes whatever this returns. Calling it directly is the only way to show it
 // distinguishes anything.
 func reacquireMissSentinel(existing, current *Ownership) error {
-	if current.Owner != existing.Owner || current.Epoch != existing.Epoch {
+	if current.Owner != existing.Owner {
 		return ErrOwnedByOther
 	}
-	// Owner and epoch unchanged, so the only predicate left is the state — and
-	// for Acquire every state change means RETRY, not stand down. A retry
-	// genuinely succeeds: a released or terminal row is takeable through
-	// acquireUpsertSQL, and a handing-off one is this same branch again with
-	// the state it now has.
+	// The OWNER clause alone, not `owner != || epoch !=`.
+	//
+	// Collapsing the two repeated the defect this function was written to fix,
+	// one disjunct over. Same owner with a moved epoch is an ordinary
+	// sequence: wf-1 reads its own active row at epoch 4 and stalls, its
+	// workflow ends and Releases, a new run Acquires through the takeover path
+	// — active, epoch 5, owner still wf-1. The stalled refresh misses on the
+	// epoch, and the caller is told "a DIFFERENT healthy actor holds this...
+	// the caller must not mutate" while being handed a row naming itself.
+	//
+	// Checking only the owner is also more honest about the mechanism: every
+	// write that moves the owner bumps the epoch with it, so the epoch clause
+	// could never add a genuine loss — only false ones.
+	//
+	// Everything else is ErrStaleRead, because for Acquire it means RETRY, not
+	// stand down, and a retry genuinely succeeds: a released or terminal row is
+	// takeable through acquireUpsertSQL, and a handing-off one or a moved epoch
+	// is this same branch again with the values the row now has.
+	if current.Epoch != existing.Epoch {
+		return fmt.Errorf("%w: the epoch moved to %d while the re-acquire was in flight",
+			ErrStaleRead, current.Epoch)
+	}
 	return fmt.Errorf("%w: it became %s while the re-acquire was in flight",
 		ErrStaleRead, current.State)
 }
