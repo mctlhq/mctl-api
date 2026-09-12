@@ -1952,3 +1952,183 @@ func TestHandoffCompleteCannotLandOnAFinishedOrRetargetedRow(t *testing.T) {
 		t.Fatalf("a completed handoff kept a release timestamp: %v", ok.ReleasedAt)
 	}
 }
+
+// TestReacquireTellsAStaleReaderToRetryNotThatItLost pins the sentinel on the
+// re-acquire's no-row path, which the state predicate made reachable by two
+// new routes.
+//
+// ErrOwnedByOther was exhaustive there until state joined the WHERE: only the
+// owner or the epoch could make the statement miss, and both mean somebody
+// else has it. HandoffStart and finish now miss it WITHOUT moving either, so a
+// caller whose own Release committed between its read and its write was told
+// "a DIFFERENT healthy actor holds this... the caller must not mutate" — which
+// is what types.go promises that sentinel means — and handed back a row naming
+// ITSELF. A caller obeying the contract stands down on a record a plain retry
+// of Acquire would take.
+//
+// The interleaving cannot be produced through Acquire, because inTx holds the
+// advisory lock across the read and the write, so the classification is driven
+// with the row in the state the interleaving would have left it in.
+func TestReacquireTellsAStaleReaderToRetryNotThatItLost(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	owner := devloop("wf-1")
+
+	// The state each out-of-band writer leaves behind, at the SAME owner and
+	// epoch — which is what makes the old sentinel wrong.
+	for _, tc := range []struct {
+		name  string
+		leave func(t *testing.T, e EntityRef, epoch int)
+		want  string
+	}{
+		{"released by its own owner", func(t *testing.T, e EntityRef, epoch int) {
+			if _, err := s.Release(ctx, e, PhaseReviewRemediation, owner, epoch, "done"); err != nil {
+				t.Fatalf("release: %v", err)
+			}
+		}, StateReleased},
+		{"terminal", func(t *testing.T, e EntityRef, epoch int) {
+			if _, err := s.Terminal(ctx, e, PhaseReviewRemediation, owner, epoch, "merged"); err != nil {
+				t.Fatalf("terminal: %v", err)
+			}
+		}, StateTerminal},
+		{"handing off", func(t *testing.T, e EntityRef, epoch int) {
+			if _, err := s.HandoffStart(ctx, e, PhaseReviewRemediation, owner, epoch,
+				shepherd, "leaving"); err != nil {
+				t.Fatalf("handoff start: %v", err)
+			}
+		}, StateHandingOff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entity := pr(prefix, "reacquire-stale-"+tc.want)
+			got, err := s.Acquire(ctx, AcquireRequest{
+				Entity: entity, Phase: PhaseReviewRemediation, Owner: owner,
+			})
+			if err != nil {
+				t.Fatalf("acquire: %v", err)
+			}
+			tc.leave(t, entity, got.Epoch)
+
+			// What the interleaving would have left behind, classified by the
+			// production function. Not driven through Acquire: under the lock
+			// the row is READ in its new state, so a released one takes the
+			// acquireUpsertSQL takeover path and an end-to-end call succeeds
+			// whatever this returns — which is exactly how a wrong sentinel
+			// survived here.
+			latest, err := s.Get(ctx, entity, PhaseReviewRemediation)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if latest.State != tc.want {
+				t.Fatalf("setup left %s, want %s", latest.State, tc.want)
+			}
+			err = reacquireMissSentinel(got, latest)
+			if errors.Is(err, ErrOwnedByOther) {
+				t.Fatalf("a %s row naming this very owner was reported as held by another actor",
+					tc.want)
+			}
+			if !errors.Is(err, ErrStaleRead) {
+				t.Fatalf("want ErrStaleRead on a %s row, got %v", tc.want, err)
+			}
+
+			// The other direction: a row that really did move to somebody else
+			// still answers ErrOwnedByOther, which is the case the sentinel was
+			// chosen for.
+			stolen := *latest
+			stolen.Owner = shepherd
+			stolen.Epoch = got.Epoch + 1
+			if err := reacquireMissSentinel(got, &stolen); !errors.Is(err, ErrOwnedByOther) {
+				t.Fatalf("want ErrOwnedByOther when the row really moved, got %v", err)
+			}
+		})
+	}
+}
+
+// TestRaceLostOnNamesWhichPredicateFailed drives the classifier directly.
+//
+// It is unreachable through the API by construction — inTx holds the advisory
+// lock across every read and its write, which is the whole reason the
+// statements it serves are package constants — so a direct test is the only
+// one there can be. Without it the four arms are indistinguishable from one
+// arm that always returns the same thing.
+func TestRaceLostOnNamesWhichPredicateFailed(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	owner := devloop("wf-1")
+
+	call := func(t *testing.T, e EntityRef, epoch int, pinned string) error {
+		t.Helper()
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		return raceLostOn(ctx, tx, e, PhaseReviewRemediation, epoch, pinned, "the write")
+	}
+
+	// 1. Epoch moved: the caller lost the record and must stop.
+	moved := pr(prefix, "race-epoch")
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: moved, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.Release(ctx, moved, PhaseReviewRemediation, owner, got.Epoch, "done"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if _, err := s.Acquire(ctx, AcquireRequest{Entity: moved, Phase: PhaseReviewRemediation, Owner: shepherd}); err != nil {
+		t.Fatalf("takeover: %v", err)
+	}
+	if err := call(t, moved, got.Epoch, StateActive); !errors.Is(err, ErrEpochMismatch) {
+		t.Fatalf("want ErrEpochMismatch, got %v", err)
+	}
+
+	// 2. The record reached an absorbing state at the same epoch.
+	done := pr(prefix, "race-absorbing")
+	got2, err := s.Acquire(ctx, AcquireRequest{Entity: done, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.Terminal(ctx, done, PhaseReviewRemediation, owner, got2.Epoch, "merged"); err != nil {
+		t.Fatalf("terminal: %v", err)
+	}
+	if err := call(t, done, got2.Epoch, StateActive); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("want ErrNotOwner for an absorbing record, got %v", err)
+	}
+
+	// 3. Still holding, but not in the state the caller derived from: retry.
+	shifted := pr(prefix, "race-pinned")
+	got3, err := s.Acquire(ctx, AcquireRequest{Entity: shifted, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, shifted, PhaseReviewRemediation, owner, got3.Epoch,
+		shepherd, "leaving"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	err = call(t, shifted, got3.Epoch, StateActive)
+	if !errors.Is(err, ErrStaleRead) {
+		t.Fatalf("want ErrStaleRead for a state the caller did not read, got %v", err)
+	}
+	// The MESSAGE is what separates this arm from the catch-all below: both
+	// answer ErrStaleRead, so asserting only the sentinel lets this arm be
+	// deleted with the test green. Naming both states is the arm's entire
+	// contribution — it is what an operator reading the failure needs.
+	if !strings.Contains(err.Error(), StateActive) || !strings.Contains(err.Error(), StateHandingOff) {
+		t.Fatalf("the error does not say which state it moved from and to: %v", err)
+	}
+
+	// 4. Every predicate reads as satisfied — the row changed and changed
+	//    back, or something outside this package wrote it. Still refuse, and
+	//    say so differently: there is no from/to to report.
+	err = call(t, shifted, got3.Epoch, StateHandingOff)
+	if !errors.Is(err, ErrStaleRead) {
+		t.Fatalf("want ErrStaleRead when nothing explains the miss, got %v", err)
+	}
+	if strings.Contains(err.Error(), "moved from") {
+		t.Fatalf("the catch-all claimed a transition it cannot know: %v", err)
+	}
+
+	// 5. A row that is gone entirely is reported as gone, not misclassified.
+	if err := call(t, pr(prefix, "race-absent"), 1, StateActive); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound for a deleted row, got %v", err)
+	}
+}

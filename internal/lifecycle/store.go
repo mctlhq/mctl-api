@@ -297,23 +297,23 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 				// Pinned to the row this branch decided about — the only
 				// write in the package that was not.
 				//
-				// HandoffComplete moves owner and epoch without touching the
-				// state is pinned for the same reason progressUpdateSQL pins
-				// it: `seen` a dozen lines above is DERIVED from the state
-				// this branch read, so a different state would have produced a
-				// different value. A HandoffStart landing between the read and
-				// the write otherwise lets seen = now unfreeze a handing-off
-				// row — the identical sequence progressUpdateSQL cites. And a
-				// Terminal at the same epoch and owner moves neither, so
+				// OWNER and EPOCH, because HandoffComplete moves both without
+				// touching the key, so it gets underneath: wf-1 reads its own
+				// handing-off row at epoch 4 with last_seen_at frozen at T0,
+				// stalls, the steward completes the handoff, and wf-1's UPDATE
+				// then lands on the STEWARD's row writing wf-1's correlation
+				// and, because the freeze makes `seen` a past timestamp,
+				// actively AGEING a live owner until it satisfies IsDead.
+				//
+				// STATE, for the same reason progressUpdateSQL pins it: `seen`
+				// a dozen lines above is DERIVED from the state this branch
+				// read, so a different state would have produced a different
+				// value. A HandoffStart landing between the read and the write
+				// otherwise lets seen = now unfreeze a handing-off row — the
+				// identical sequence progressUpdateSQL cites. And a Terminal at
+				// the same epoch and owner moves neither of the other two, so
 				// without this a stray re-acquire writes to a record currentFor
 				// refuses every other write to.
-				//
-				// key, so it gets underneath: wf-1 reads its own handing-off
-				// row at epoch 4 with last_seen_at frozen at T0, stalls, the
-				// steward completes the handoff, and wf-1's UPDATE then lands
-				// on the STEWARD's row writing wf-1's correlation and, because
-				// the freeze makes `seen` a past timestamp, actively AGEING a
-				// live owner until it satisfies IsDead.
 				refreshed, err := scanOne(tx.QueryRow(ctx,
 					reacquireRefreshSQL,
 
@@ -322,9 +322,36 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 					existing.Epoch, existing.Owner.Type, existing.Owner.ID,
 					existing.State))
 				if errors.Is(err, ErrNotFound) {
-					// Ownership moved between the read and the write. Re-read
-					// so the caller is told who holds it now rather than that
-					// the row vanished.
+					// Re-read, so the caller is told who holds it now rather
+					// than that the row vanished — and so the SENTINEL matches
+					// what actually happened.
+					//
+					// ErrOwnedByOther was exhaustive here until state joined
+					// the WHERE: only the owner or the epoch could make this
+					// statement miss, and both mean somebody else has it. The
+					// state predicate adds two writers that miss it WITHOUT
+					// moving either — HandoffStart (active -> handing-off) and
+					// finish (-> released/terminal), both at the same owner and
+					// epoch. A caller whose own Release commits between its
+					// read and its write would otherwise be told "a DIFFERENT
+					// healthy actor holds this... the caller must not mutate",
+					// which is what types.go promises that sentinel means, and
+					// handed back a row naming ITSELF — standing down on a free
+					// record a plain retry of Acquire would take.
+					//
+					// ErrStaleRead says the one thing this caller needs to
+					// hear: ownership has not moved, so retry — and a retry of
+					// Acquire genuinely succeeds, because a released or
+					// terminal row is takeable through acquireUpsertSQL and a
+					// handing-off one is this same branch again with the state
+					// it now has.
+					//
+					// NOT raceLostOn, deliberately, even though this is the
+					// shape it was written for. Its absorbing-state case
+					// answers ErrNotOwner, which is right for RecordProgress,
+					// HandoffStart and finish — none of them may drive a
+					// finished record — and wrong here, because Acquire is
+					// exactly the operation that MAY take one.
 					current, rerr := scanOne(tx.QueryRow(ctx,
 						`SELECT `+ownershipColumns+` FROM lifecycle_ownership
 						 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
@@ -333,7 +360,7 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 						return rerr
 					}
 					out = current
-					return ErrOwnedByOther
+					return reacquireMissSentinel(existing, current)
 				}
 				if err != nil {
 					return fmt.Errorf("lifecycle: acquire: refresh: %w", err)
@@ -1114,6 +1141,28 @@ func (s *Store) inTx(ctx context.Context, entity EntityRef, phase string, fn fun
 		return fmt.Errorf("lifecycle: commit: %w", err)
 	}
 	return nil
+}
+
+// reacquireMissSentinel says what the re-acquire's no-row path means.
+//
+// A function, not three lines inside the closure, for the same reason the
+// statements around it are package constants: inTx holds the advisory lock
+// across the read and the write, so the interleaving that reaches this path
+// cannot be produced through Acquire — and a released row is read as released
+// and takes the acquireUpsertSQL takeover path instead, so an end-to-end test
+// passes whatever this returns. Calling it directly is the only way to show it
+// distinguishes anything.
+func reacquireMissSentinel(existing, current *Ownership) error {
+	if current.Owner != existing.Owner || current.Epoch != existing.Epoch {
+		return ErrOwnedByOther
+	}
+	// Owner and epoch unchanged, so the only predicate left is the state — and
+	// for Acquire every state change means RETRY, not stand down. A retry
+	// genuinely succeeds: a released or terminal row is takeable through
+	// acquireUpsertSQL, and a handing-off one is this same branch again with
+	// the state it now has.
+	return fmt.Errorf("%w: it became %s while the re-acquire was in flight",
+		ErrStaleRead, current.State)
 }
 
 // raceLostOn says which predicate a guarded UPDATE failed on, by re-reading.
