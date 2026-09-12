@@ -687,6 +687,28 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 			if rerr != nil {
 				return rerr
 			}
+			// The idempotency question FIRST, the way finishedBy and
+			// handoffAlreadyCompleted ask it on their own no-row paths. The
+			// retarget arm below compares against the target that was READ and
+			// never against the one being ANNOUNCED, so without this a
+			// duplicate of THIS very call — Temporal fires its retry on the
+			// first attempt's timeout, so the duplicate runs concurrently
+			// rather than after it — misses on the handoff_to predicate, sees
+			// a target different from the one it read, and is told an actor
+			// retargeted away from it while the row is exactly what it asked
+			// for. That is verbatim the defect already fixed for finish and
+			// for HandoffComplete, in the one write that had no no-row branch
+			// until this round.
+			//
+			// The retry keeps the FIRST attempt's clock, like both siblings:
+			// finishedBy keeps the first completion time, and
+			// handoffAlreadyCompleted returns the row as first written.
+			if latest.Epoch == epoch && latest.Owner == owner &&
+				latest.State == StateHandingOff &&
+				sameHandoffTarget(latest.HandoffTo, &to) {
+				out = latest
+				return nil
+			}
 			if latest.Epoch == epoch && latest.State == current.State &&
 				!sameHandoffTarget(latest.HandoffTo, current.HandoffTo) {
 				return fmt.Errorf("%w: the handoff was retargeted while this one "+

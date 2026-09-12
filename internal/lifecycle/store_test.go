@@ -2875,3 +2875,99 @@ func TestEventsClampAlsoCapsRatherThanDefaults(t *testing.T) {
 		t.Fatalf("an unset limit did not take the default page: %d events", len(small))
 	}
 }
+
+// TestAnOverlappingDuplicateHandoffStartSucceeds is the retarget arm's other
+// direction, and the third instance of the rule 277842b established: ask the
+// idempotency question again on the statement's own no-row path.
+//
+// The retarget arm compares `latest.HandoffTo` against the target that was
+// READ and never against the one being ANNOUNCED. Temporal fires its retry on
+// the first attempt's timeout, so a duplicate runs CONCURRENTLY rather than
+// after — it lands, the stalled original misses on the handoff_to predicate,
+// sees a target different from the one it read, and is told an actor
+// retargeted away from it while the row is exactly what it asked for.
+//
+// Same harness as its sibling, with the blocker announcing the SAME target the
+// stalled call is announcing rather than a different one.
+func TestAnOverlappingDuplicateHandoffStartSucceeds(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "handoff-duplicate")
+	outgoing := devloop("wf-1")
+	first := Owner{Type: OwnerPRSteward, ID: "cron"}
+	second := Owner{Type: OwnerPRSteward, ID: "steward"}
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	begun, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, first, "exiting")
+	if err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+
+	// The duplicate that wins: the SAME announcement, from a connection that
+	// takes no advisory lock and holds the row.
+	winner, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin winner: %v", err)
+	}
+	defer func() { _ = winner.Rollback(ctx) }()
+	landed, err := scanOne(winner.QueryRow(ctx, handoffStartUpdateSQL,
+		StateHandingOff, second.Type, second.ID, time.Now().UTC(), begun.LastSeenAt, time.Now().UTC(),
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, StateHandingOff,
+		first.Type, first.ID))
+	if err != nil {
+		t.Fatalf("winner announcement: %v", err)
+	}
+
+	type result struct {
+		own *Ownership
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		own, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, second, "declare")
+		done <- result{own, err}
+	}()
+	select {
+	case r := <-done:
+		t.Fatalf("the duplicate never blocked on the row lock: %+v %v", r.own, r.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := winner.Commit(ctx); err != nil {
+		t.Fatalf("commit winner: %v", err)
+	}
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("a HandoffStart that lost the race to an identical overlapping "+
+				"HandoffStart was told it failed: %v", r.err)
+		}
+		if r.own.HandoffTo == nil || *r.own.HandoffTo != second {
+			t.Fatalf("the duplicate returned a different target: %+v", r.own.HandoffTo)
+		}
+		// The FIRST attempt's clock survives, like finishedBy's completion
+		// time and handoffAlreadyCompleted's record.
+		if !r.own.HandoffStartedAt.Equal(*landed.HandoffStartedAt) {
+			t.Fatalf("the duplicate restarted the handoff clock: %v -> %v",
+				*landed.HandoffStartedAt, *r.own.HandoffStartedAt)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the duplicate never returned after the winner committed")
+	}
+
+	// And no second event: an append-only table with no retention must not
+	// gain a row per retry.
+	var events int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM lifecycle_events
+		 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3 AND event = $4`,
+		entity.Kind, entity.ID, PhaseReviewRemediation, EventHandoffStarted).Scan(&events); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if events != 1 {
+		t.Fatalf("the duplicate appended %d handoff-started events, want 1", events)
+	}
+}
