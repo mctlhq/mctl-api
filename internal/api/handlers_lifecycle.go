@@ -17,6 +17,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -148,7 +149,14 @@ func writeLifecycleError(w http.ResponseWriter, err error, current *lifecycle.Ow
 	case errors.Is(err, lifecycle.ErrNotFound):
 		writeError(w, http.StatusNotFound, "no ownership record for this entity phase")
 	default:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		// The raw error does NOT go to the client. A pgx failure carries the
+		// host, the database name, the SQLSTATE and sometimes the statement,
+		// and every sentinel above is already an explicit, safe answer — so
+		// anything reaching here is by definition something the caller cannot
+		// act on and should not see. Logged in full server-side, where an
+		// operator needs it.
+		slog.Error("lifecycle store error", "error", err)
+		writeError(w, http.StatusInternalServerError, "lifecycle store error")
 	}
 }
 
@@ -359,6 +367,17 @@ func (h *Handlers) RecordLifecycleProgress(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "evidence is required: say what changed")
 		return
 	}
+	if !requireEpoch(w, body) {
+		return
+	}
+	if body.Evidence == "" {
+		// The same guard LifecycleClient.progress raises on: evidence is the
+		// field that says the work MOVED, and an empty one is filtered out of
+		// the store's payload rather than refused, so the row would record a
+		// progress tick that says nothing.
+		writeError(w, http.StatusBadRequest, "evidence is required: say what changed")
+		return
+	}
 	got, err := h.opts.Lifecycle.RecordProgress(r.Context(), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence)
 	if err != nil {
 		writeLifecycleError(w, err, nil)
@@ -374,6 +393,9 @@ func (h *Handlers) StartLifecycleHandoff(w http.ResponseWriter, r *http.Request)
 	}
 	body, ok := decodeLifecycleWrite(w, r)
 	if !ok {
+		return
+	}
+	if !requireEpoch(w, body) {
 		return
 	}
 	if body.ToOwnerType == "" || body.ToOwnerID == "" {
@@ -421,6 +443,26 @@ func (h *Handlers) ReleaseLifecycleOwnership(w http.ResponseWriter, r *http.Requ
 // nothing should pick it up.
 func (h *Handlers) TerminateLifecycleOwnership(w http.ResponseWriter, r *http.Request) {
 	h.finishLifecycle(w, r, true)
+}
+
+// requireEpoch refuses a write that carries no fencing generation.
+//
+// Not a 500, which is what agy's report predicted — the store answers
+// ErrEpochMismatch and this maps to 412. But 412 means "ownership moved
+// underneath you, re-read", and re-reading is exactly what does not help a
+// caller that simply omitted the field: it will read the same epoch it failed
+// to send. A 400 naming the field is the answer it can act on.
+//
+// Recover got this check first, on the same reasoning, and the other three
+// write families did not — which is where every defect in this change has
+// been.
+func requireEpoch(w http.ResponseWriter, body lifecycleWriteRequest) bool {
+	if body.Epoch <= 0 {
+		writeError(w, http.StatusBadRequest,
+			"epoch is required: a write against an existing claim must name the generation it holds")
+		return false
+	}
+	return true
 }
 
 // ownerOptions carries the INCOMING owner's own correlation onto a row it is
@@ -487,8 +529,7 @@ func (h *Handlers) RecoverLifecycleOwnership(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "evidence is required: say why this owner is being taken over")
 		return
 	}
-	if body.Epoch <= 0 {
-		writeError(w, http.StatusBadRequest, "epoch is required: recovery is a takeover of a specific generation")
+	if !requireEpoch(w, body) {
 		return
 	}
 	got, err := h.opts.Lifecycle.Recover(
@@ -508,6 +549,9 @@ func (h *Handlers) finishLifecycle(w http.ResponseWriter, r *http.Request, termi
 	}
 	body, ok := decodeLifecycleWrite(w, r)
 	if !ok {
+		return
+	}
+	if !requireEpoch(w, body) {
 		return
 	}
 	var (

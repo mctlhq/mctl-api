@@ -649,3 +649,150 @@ func TestLifecycleRecoverRejectsMissingPreconditionsWith400(t *testing.T) {
 		}
 	}
 }
+
+// TestLifecycleStoreErrorsAreNotLeakedToTheClient closes an information leak.
+//
+// The default arm returned `err.Error()` verbatim, and a pgx failure carries
+// the host, the database name, the SQLSTATE and sometimes the statement. Every
+// sentinel above it is already an explicit, safe answer, so anything reaching
+// the default is by definition something the caller cannot act on and should
+// not see. (Found by agy.)
+func TestLifecycleStoreErrorsAreNotLeakedToTheClient(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeLifecycleError(rec, fmt.Errorf(
+		"failed to connect to `host=db.internal user=mctl database=mctl_api`: "+
+			"dial error (connection refused)"), nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d", rec.Code)
+	}
+	for _, secret := range []string{"db.internal", "user=mctl", "dial error"} {
+		if strings.Contains(rec.Body.String(), secret) {
+			t.Fatalf("the response leaked %q: %s", secret, rec.Body)
+		}
+	}
+}
+
+// TestLifecycleWritesRequireAnEpoch pins the precondition on every write
+// against an existing claim, not only on recover.
+//
+// Without it the store answers ErrEpochMismatch and this maps to 412 — which
+// means "ownership moved underneath you, re-read", and re-reading is exactly
+// what does not help a caller that omitted the field: it will read the same
+// epoch it failed to send. (Found by agy, whose report predicted a 500; the
+// observed answer was a 412, which is a different wrong instruction rather
+// than a server fault.)
+func TestLifecycleWritesRequireAnEpoch(t *testing.T) {
+	store, prefix := newTestLifecycleStore(t)
+	h := &Handlers{opts: Options{Lifecycle: store}}
+	id := prefix + "-epoch-required"
+	if rec := lifecyclePost(t, h, h.AcquireLifecycleOwnership, map[string]any{
+		"kind": "pull-request", "id": id, "phase": "review-remediation",
+		"owner_type": "devloop-workflow", "owner_id": "wf-1",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("acquire: %d %s", rec.Code, rec.Body)
+	}
+
+	for name, fn := range map[string]http.HandlerFunc{
+		"progress":      h.RecordLifecycleProgress,
+		"release":       h.ReleaseLifecycleOwnership,
+		"terminal":      h.TerminateLifecycleOwnership,
+		"handoff/start": h.StartLifecycleHandoff,
+		"recover":       h.RecoverLifecycleOwnership,
+	} {
+		rec := lifecyclePost(t, h, fn, map[string]any{
+			"kind": "pull-request", "id": id, "phase": "review-remediation",
+			"owner_type": "devloop-workflow", "owner_id": "wf-1",
+			"evidence": "pushed", "reason": "done",
+			"to_owner_type": "pr-steward", "to_owner_id": "steward",
+		})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s with no epoch: want 400, got %d %s", name, rec.Code, rec.Body)
+		}
+	}
+}
+
+// TestLifecycleWriteSuccessPaths covers the 200s. The suite tested these
+// handlers only through their failure modes, so an argument passed to the
+// wrong store parameter, or a response that failed to serialise, would have
+// gone undetected. (Found by agy.)
+func TestLifecycleWriteSuccessPaths(t *testing.T) {
+	store, prefix := newTestLifecycleStore(t)
+	h := &Handlers{opts: Options{Lifecycle: store}}
+	id := prefix + "-success"
+	base := map[string]any{
+		"kind": "pull-request", "id": id, "phase": "review-remediation",
+		"owner_type": "devloop-workflow", "owner_id": "wf-1",
+	}
+
+	if rec := lifecyclePost(t, h, h.AcquireLifecycleOwnership, base); rec.Code != http.StatusOK {
+		t.Fatalf("acquire: %d %s", rec.Code, rec.Body)
+	}
+
+	progress := map[string]any{"epoch": 1, "evidence": "pushed sha-b", "version": "sha-b"}
+	for k, v := range base {
+		progress[k] = v
+	}
+	rec := lifecyclePost(t, h, h.RecordLifecycleProgress, progress)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("progress: %d %s", rec.Code, rec.Body)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The arguments reached the store in the right places, which is what a
+	// success-path test is actually for.
+	if got["progress_evidence"] != "pushed sha-b" {
+		t.Fatalf("evidence did not land: %v", got["progress_evidence"])
+	}
+	entity, _ := got["entity"].(map[string]any)
+	if entity["version"] != "sha-b" {
+		t.Fatalf("version did not land: %v", entity)
+	}
+
+	// The event trail records it, and the read endpoint can show it.
+	req := adminCtx(httptest.NewRequest("GET",
+		"/api/v1/lifecycle/events?kind=pull-request&id="+id+"&phase=review-remediation", nil))
+	rec = httptest.NewRecorder()
+	h.ListLifecycleEvents(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("events: %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "acquired") {
+		t.Fatalf("the acquire is not in the event trail: %s", rec.Body)
+	}
+
+	release := map[string]any{"epoch": 1, "reason": "handing back"}
+	for k, v := range base {
+		release[k] = v
+	}
+	rec = lifecyclePost(t, h, h.ReleaseLifecycleOwnership, release)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("release: %d %s", rec.Code, rec.Body)
+	}
+	got = map[string]any{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["state"] != "released" {
+		t.Fatalf("release did not land: %v", got["state"])
+	}
+
+	// Terminal on a fresh row, since released is absorbing.
+	term := map[string]any{
+		"kind": "pull-request", "id": id + "-t", "phase": "review-remediation",
+		"owner_type": "devloop-workflow", "owner_id": "wf-1",
+	}
+	if rec := lifecyclePost(t, h, h.AcquireLifecycleOwnership, term); rec.Code != http.StatusOK {
+		t.Fatalf("acquire for terminal: %d %s", rec.Code, rec.Body)
+	}
+	term["epoch"] = 1
+	term["reason"] = "merged"
+	rec = lifecyclePost(t, h, h.TerminateLifecycleOwnership, term)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("terminal: %d %s", rec.Code, rec.Body)
+	}
+	got = map[string]any{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["state"] != "terminal" {
+		t.Fatalf("terminal did not land: %v", got["state"])
+	}
+}
