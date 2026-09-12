@@ -20,7 +20,7 @@ func TestRedactTokenCoversPercentEncodedForm(t *testing.T) {
 	gitOutput := []byte("fatal: Authentication failed for " +
 		"'https://x-access-token:abc%2Fdef+ghi=jkl@github.com/mctlhq/mctl-gitops/'")
 
-	got := string(r.redactToken(gitOutput))
+	got := string(r.redactTokenLocked(gitOutput))
 	if strings.Contains(got, "abc%2Fdef") {
 		t.Fatalf("percent-encoded token survived redaction: %s", got)
 	}
@@ -31,7 +31,7 @@ func TestRedactTokenCoversPercentEncodedForm(t *testing.T) {
 
 func TestRedactTokenStillCoversRawForm(t *testing.T) {
 	r := &Reader{token: "ghp_exampleTokenValue123"}
-	got := string(r.redactToken([]byte("fatal: could not read Password for ghp_exampleTokenValue123")))
+	got := string(r.redactTokenLocked([]byte("fatal: could not read Password for ghp_exampleTokenValue123")))
 	if strings.Contains(got, "ghp_exampleTokenValue123") {
 		t.Fatalf("raw token survived redaction: %s", got)
 	}
@@ -67,7 +67,7 @@ func TestGitOutputRedactsTheReturnedSliceNotJustTheError(t *testing.T) {
 func TestRedactTokenNoopWhenUnset(t *testing.T) {
 	r := &Reader{}
 	in := "fatal: repository not found"
-	if got := string(r.redactToken([]byte(in))); got != in {
+	if got := string(r.redactTokenLocked([]byte(in))); got != in {
 		t.Fatalf("output changed with no token set: %q", got)
 	}
 }

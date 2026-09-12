@@ -842,7 +842,7 @@ func TestResolveKnownHostsPathLocked_ExplicitPathWins(t *testing.T) {
 
 // TestRedactToken covers the defence-in-depth guard on git's own output.
 //
-// Read the comment on redactToken before changing this: the concern that
+// Read the comment on redactTokenLocked before changing this: the concern that
 // prompted it — git echoing the credential-bearing clone URL in messages
 // like "repository '<url>' not found" — does NOT reproduce on the git
 // versions in play (2.50 locally, 2.54 in the alpine:3.24 runtime image);
@@ -856,7 +856,7 @@ func TestRedactToken(t *testing.T) {
 	token := "ghp_" + "TESTTOKENVALUEnotreal" + strings.Repeat("0", 19)
 
 	r := &Reader{token: token}
-	got := string(r.redactToken([]byte("fatal: repository 'https://x-access-token:" + token + "@github.com/o/r.git/' not found")))
+	got := string(r.redactTokenLocked([]byte("fatal: repository 'https://x-access-token:" + token + "@github.com/o/r.git/' not found")))
 	if strings.Contains(got, token) {
 		t.Fatalf("token survived redaction: %q", got)
 	}
@@ -867,7 +867,7 @@ func TestRedactToken(t *testing.T) {
 	// Untouched when there is no token to redact — the SSH and anonymous
 	// branches must not have their output mangled.
 	plain := []byte("fatal: repository not found")
-	if noTok := (&Reader{}).redactToken(plain); !bytes.Equal(noTok, plain) {
+	if noTok := (&Reader{}).redactTokenLocked(plain); !bytes.Equal(noTok, plain) {
 		t.Fatalf("output altered with no token configured: %q", noTok)
 	}
 }
@@ -1087,13 +1087,13 @@ func TestRefresh_ResolvesTheCredentialPerCall(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("second refresh consulted the source %d times total, want 2 — the value was captured", calls)
 	}
-	// redactToken reads r.token, so this is also what keeps the log redactor
+	// redactTokenLocked reads r.token, so this is also what keeps the log redactor
 	// pointed at the credential actually in use for this refresh.
 	if r.token != "rotated-2" {
 		t.Fatalf("token is %q after the second refresh, want rotated-2", r.token)
 	}
-	if got := string(r.redactToken([]byte("failed to fetch rotated-2 from origin"))); strings.Contains(got, "rotated-2") {
-		t.Errorf("redactToken left the current token in the output: %q", got)
+	if got := string(r.redactTokenLocked([]byte("failed to fetch rotated-2 from origin"))); strings.Contains(got, "rotated-2") {
+		t.Errorf("redactTokenLocked left the current token in the output: %q", got)
 	}
 }
 

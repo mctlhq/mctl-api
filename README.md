@@ -116,7 +116,9 @@ docker run -p 8080:8080 mctl-api
 | `GITOPS_LOCAL_PATH` | Local cache path for gitops clone | `/tmp/mctl-gitops` | No |
 | `GITHUB_APP_TOKEN_FILE` | Path to a mounted GitHub App installation token. Takes precedence over `GITOPS_REPO_TOKEN` and `GITOPS_ACTIONS_TOKEN`, and is re-read per use so a rotation is picked up without a restart. | — | No |
 | `GITOPS_REPO_TOKEN` | GitHub token for HTTPS clone. Fallback when `GITHUB_APP_TOKEN_FILE` is unset; read once at startup, so only for credentials that do not rotate. | — | No |
-| `GITOPS_SSH_KEY_PATH` | SSH key path for git clone | — | No |
+| `GITOPS_ACTIONS_TOKEN` | GitHub token that starts `workflow_dispatch` runs in mctl-gitops. Fallback when `GITHUB_APP_TOKEN_FILE` is unset; read once at startup. | — | No |
+| `GITHUB_TOKEN` | Last-resort fallback for the clone, after `GITHUB_APP_TOKEN_FILE` and `GITOPS_REPO_TOKEN`. | — | No |
+| `GITOPS_SSH_KEY_PATH` | SSH key path for git clone. Takes precedence over every token above. | — | No |
 | `ARGOCD_URL` | ArgoCD API endpoint | `https://ops.mctl.ai` | No |
 | `ARGOCD_TOKEN` | ArgoCD auth token (from Vault) | — | Yes |
 | `ARGO_WORKFLOWS_NAMESPACE` | Kubernetes namespace for workflows | `argo-workflows` | No |

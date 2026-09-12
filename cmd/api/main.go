@@ -81,6 +81,8 @@ func main() {
 	// Initialize components.
 	registry := operations.NewRegistry()
 
+	checkCredentialSource("gitops-clone", cfg.GitOpsToken)
+	checkCredentialSource("actions-dispatch", cfg.GitOpsActionsToken)
 	gitReader := gitops.NewReader(cfg.GitOpsRepoURL, cfg.GitOpsBranch, cfg.GitOpsLocalPath, cfg.GitOpsToken, cfg.GitOpsSSHKeyPath, cfg.GitOpsSSHKnownHostsPath)
 
 	// Dex JWT verifier (optional — disabled if DEX_ISSUER_URL is unset or unreachable).
@@ -535,8 +537,20 @@ func main() {
 //
 // One file serves both credentials below because one App installation backs
 // both: mctl-agents (id 4450852), which already reaches mctlhq/mctl-gitops.
-// That is a deliberate trade, taken with the alternative measured: the
-// installation carries contents:write across 25 repositories, where the
+// Both grants were measured on the live installation before wiring this,
+// because a file that wins over an explicitly configured GITOPS_ACTIONS_TOKEN
+// must be known to do the job that variable was doing:
+//
+//	POST .../git/refs                              -> 422 (contents:write)
+//	POST .../workflows/<absent>.yml/dispatches     -> 404 (actions:write)
+//
+// A 422 or 404 there means the permission check passed and only the object was
+// missing; the narrow PAT returns 403 to both, which is the control that makes
+// those readings mean something. Do not take a 200 on a GET as evidence of
+// either — reachability is not grant.
+//
+// The contents:write half is a deliberate trade, taken with the alternative
+// measured: the installation carries it across 25 repositories, where the
 // clone alone needs contents:read on one. A dedicated App would have kept
 // the narrower grant; sharing this one avoids standing up a second App and
 // its key rotation, and it is what the operator chose. The consequence to
@@ -545,6 +559,25 @@ func main() {
 // and mctl-api and mctl-agents now share a failure domain — a revoked key
 // or a removed installation takes out both. See mctlhq/mctl-api#307.
 const githubAppTokenFileEnv = "GITHUB_APP_TOKEN_FILE" //nolint:gosec // G101: the name of an environment variable, not a credential — the value it points at is read from the file it names
+
+// checkCredentialSource resolves a source once at startup so a wrong path or
+// wrong file mode is diagnosed by name, instead of as a Ready probe that never
+// passes and a per-tick refresh error.
+//
+// It logs rather than exiting. A read failure here is usually a deployment
+// mistake, but it can also be a volume that has not been projected yet, and
+// crash-looping a process that would have recovered on the next tick trades a
+// clear message for an outage. The startup line is the diagnosis; the retry is
+// still the behaviour.
+func checkCredentialSource(name string, s ghtoken.Source) {
+	if s == nil {
+		return
+	}
+	if _, err := s(); err != nil {
+		slog.Error("configured GitHub credential could not be read at startup; the pod will keep retrying but will not work until this is fixed",
+			"credential", name, "file", os.Getenv(githubAppTokenFileEnv), "err", err)
+	}
+}
 
 // gitOpsTokenSource picks the credential for the HTTPS clone.
 //
@@ -577,12 +610,20 @@ type config struct {
 	// lives 60 minutes and is re-minted every 30, so it must be re-read, not
 	// captured at startup. See internal/ghtoken.
 	GitOpsToken ghtoken.Source
-	// GitOpsActionsToken starts workflow_dispatch runs in mctl-gitops. A
-	// SEPARATE credential from GitOpsToken on purpose: that one clones over
-	// HTTPS and needs contents:read, while this one needs actions:write and
-	// nothing else. Reusing the clone token would silently widen it from
-	// "can read the repository" to "can start any workflow in it", which is
-	// not a change anyone would notice in a values file.
+	// GitOpsActionsToken starts workflow_dispatch runs in mctl-gitops.
+	//
+	// It WAS a separate credential from GitOpsToken on purpose: that one
+	// clones over HTTPS and needs contents:read, while this one needs
+	// actions:write and nothing else, and sharing would widen "can read the
+	// repository" into "can start any workflow in it" without anyone noticing
+	// in a values file.
+	//
+	// Under GITHUB_APP_TOKEN_FILE they are the same value: one installation
+	// backs both, so setting githubAppTokenSecret in a values file is exactly
+	// the widening that warning described. That is now a known trade rather
+	// than an accident — the reasoning and the measurements are on
+	// githubAppTokenFileEnv above. The separation still holds on the
+	// environment-variable fallback.
 	GitOpsActionsToken      ghtoken.Source
 	GitOpsSSHKeyPath        string // Path to SSH key for SSH auth (optional, takes precedence)
 	GitOpsSSHKnownHostsPath string // Path to a known_hosts file for SSH host-key pinning (optional; empty uses the shipped default)

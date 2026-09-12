@@ -233,7 +233,7 @@ func (r *Reader) refresh() error {
 	defer r.mu.Unlock()
 
 	// Resolve the credential once, here, and store it for the duration of this
-	// refresh. Everything downstream — the clone URL below and redactToken,
+	// refresh. Everything downstream — the clone URL below and redactTokenLocked,
 	// which strips the token out of git's own output — then reads the same
 	// r.token. Threading a source through both instead would let them
 	// disagree across a rotation, and the way that failure shows up is a live
@@ -281,7 +281,7 @@ func (r *Reader) refresh() error {
 		cmd := exec.Command("git", "clone", "--depth=1", "--branch="+r.branch, "--single-branch", cloneURL, r.localPath) //nolint:gosec // args are from trusted config
 		cmd.Env = append(os.Environ(), sshEnv...)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git clone failed: %w\n%s", err, r.redactToken(bytes.TrimSpace(out)))
+			return fmt.Errorf("git clone failed: %w\n%s", err, r.redactTokenLocked(bytes.TrimSpace(out)))
 		}
 		slog.Info("gitops repo cloned successfully")
 	} else {
@@ -432,14 +432,14 @@ func (r *Reader) gitOutput(extraEnv []string, args ...string) ([]byte, error) {
 	// callers today, but nothing enforces it, and a future caller that logs
 	// the returned output would reintroduce exactly the leak this function
 	// exists to prevent. Redacting once, here, makes it structural.
-	out = r.redactToken(out)
+	out = r.redactTokenLocked(out)
 	if err != nil {
 		return out, fmt.Errorf("%w\n%s", err, bytes.TrimSpace(out))
 	}
 	return out, nil
 }
 
-// redactToken removes the GitHub token from git's own output before that
+// redactTokenLocked removes the GitHub token from git's own output before that
 // output goes anywhere a human or a log sink can see it.
 //
 // On the HTTPS branch the token is embedded in the clone/fetch URL as the
@@ -457,7 +457,12 @@ func (r *Reader) gitOutput(extraEnv []string, args ...string) ([]byte, error) {
 // themselves, which is exactly why this gap is invisible until the day a
 // token format changes or a different forge is added. A redactor with a
 // known blind spot is worth less than no redactor, because it is trusted.
-func (r *Reader) redactToken(out []byte) []byte {
+// The Locked suffix is load-bearing: r.token was write-once in NewReader
+// until the credential became a source, and is now assigned at the top of
+// every refresh(). Callers must hold r.mu — refresh() holds it for its whole
+// duration, which covers every call today. Redacting from RefreshLoop's error
+// handler, outside the lock, would be a data race on a live credential.
+func (r *Reader) redactTokenLocked(out []byte) []byte {
 	if r.token == "" {
 		return out
 	}

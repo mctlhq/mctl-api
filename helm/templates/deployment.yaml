@@ -125,6 +125,14 @@ spec:
         - name: gitops-ssh
           secret:
             secretName: {{ .Values.gitopsSSHSecret }}
+            # NOTE: same root:root problem as github-app-token above — at 0400
+            # this lands unreadable by uid 1000. It has stayed invisible only
+            # because gitopsSSHSecret is "" and production takes the HTTPS
+            # branch. It deliberately does NOT get the 0444 fix: ssh(1) refuses
+            # a private key that is group- or world-readable, so this one needs
+            # securityContext.fsGroup on the pod instead — a change with a
+            # wider blast radius than this chart has needed so far. Tracked in
+            # mctlhq/mctl-api#307; fix it before anyone sets this value.
             defaultMode: 0400
         {{- end }}
         {{- if .Values.githubAppTokenSecret }}
@@ -136,7 +144,17 @@ spec:
         - name: github-app-token
           secret:
             secretName: {{ .Values.githubAppTokenSecret }}
-            defaultMode: 0400
+            # 0444, not 0400. Kubelet writes secret volume files as root:root
+            # unless the pod sets securityContext.fsGroup, and this chart sets
+            # no securityContext at all while the image runs as uid 1000
+            # (Dockerfile: adduser -u 1000, USER app:app). At 0400 the file
+            # lands -r-------- root root and every read returns EACCES — and
+            # because the credential source is bound once at startup and does
+            # not fall through, the pod would never go Ready rather than
+            # degrading. Same reasoning as postgresCA below, which is 0444 for
+            # exactly this. The file is a bearer token inside the pod's own
+            # mount namespace, read by the one process in the container.
+            defaultMode: 0444
             items:
               - key: {{ .Values.githubAppTokenKey | default "token" }}
                 path: token

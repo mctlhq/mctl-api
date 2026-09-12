@@ -45,6 +45,16 @@ import (
 // fact, not a request that went wrong.
 var ErrNotConfigured = errors.New("github actions dispatch not configured")
 
+// ErrCredentialUnavailable is returned when the credential is configured but
+// cannot be read — a missing, unreadable or empty token file.
+//
+// Separate from ErrNotConfigured because the operator response differs, and
+// separate from a transport error because nothing was sent. Callers map it to
+// 503 rather than 502: 502 means the far side refused, and GitHub was never
+// involved. Same reasoning as resolving before building the request at all —
+// do not let a fault on this side read as a fault on GitHub's.
+var ErrCredentialUnavailable = errors.New("github credential unavailable")
+
 // DefaultBaseURL is github.com's REST API. Overridable so tests can point at
 // an httptest server without a network.
 const DefaultBaseURL = "https://api.github.com"
@@ -107,7 +117,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, owner, repo, workflowFile, re
 	// reporting GitHub's 401 as though the request had been wrong.
 	token, err := d.Token()
 	if err != nil {
-		return fmt.Errorf("resolving dispatch credential: %w", err)
+		return fmt.Errorf("%w: %w", ErrCredentialUnavailable, err)
 	}
 	if token == "" {
 		return ErrNotConfigured

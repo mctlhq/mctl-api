@@ -185,6 +185,16 @@ func TestDispatch_UnreadableSourceFailsBeforeTheRequest(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("want the source error wrapped, got %v", err)
 	}
+	// And carrying the sentinel, so the handler answers 503 rather than the
+	// 502 that means "GitHub refused" — nothing was sent to GitHub at all.
+	if !errors.Is(err, ErrCredentialUnavailable) {
+		t.Fatalf("want ErrCredentialUnavailable, got %v", err)
+	}
+	// Not the other sentinel: "configured but unreadable" is a different
+	// operator problem from "not configured".
+	if errors.Is(err, ErrNotConfigured) {
+		t.Error("an unreadable credential must not report as unconfigured")
+	}
 	if hits != 0 {
 		t.Fatalf("request reached the server %d times; it must not be sent at all", hits)
 	}
