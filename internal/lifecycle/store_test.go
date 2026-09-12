@@ -1339,3 +1339,181 @@ func TestHandoffCompleteRecordsTheIncomingOwnersCorrelation(t *testing.T) {
 		t.Fatalf("outgoing owner's correlation survived: %+v", cleared)
 	}
 }
+
+// TestReacquireCannotLandOnSomebodyElsesRow closes the one write that carried
+// no epoch predicate, which both reviewers found independently.
+//
+// HandoffComplete moves owner and epoch without touching the key, so it gets
+// underneath the re-acquire: wf-1 reads its own handing-off row with
+// last_seen_at frozen at T0, the steward completes the handoff, and wf-1's
+// UPDATE then lands on the steward's row. Worse than a stale overwrite —
+// because the freeze makes `seen` a PAST timestamp, it actively AGES a live
+// owner until it satisfies IsDead and Recover fences its executors.
+func TestReacquireCannotLandOnSomebodyElsesRow(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "reacquire-cas")
+	outgoing := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, shepherd, "exiting"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	handed, err := s.HandoffComplete(ctx, entity, PhaseReviewRemediation, shepherd,
+		WithWorkflowID("wf-steward"))
+	if err != nil {
+		t.Fatalf("handoff complete: %v", err)
+	}
+
+	// Through the API the previous owner already loses at the read: the row
+	// names the steward now, so Acquire takes the owned-by-other branch and
+	// never reaches the refresh. inTx also serialises, so nothing can
+	// interleave in-process. The predicate therefore has to be tested where it
+	// lives — with the PRODUCTION statement, run as the stalled owner would.
+	lost, err := s.Acquire(ctx, AcquireRequest{
+		Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing,
+		TemporalWorkflowID: "wf-1",
+	})
+	if !errors.Is(err, ErrOwnedByOther) {
+		t.Fatalf("the previous owner's re-acquire landed: %v", err)
+	}
+	if lost == nil || lost.Owner != shepherd {
+		t.Fatalf("the loser was not told who won: %+v", lost)
+	}
+
+	stale := time.Now().UTC().Add(-3 * time.Hour)
+	stolen, err := scanOne(s.pool.QueryRow(ctx, reacquireRefreshSQL,
+		stale, "sha-from-wf-1", "wf-1", time.Now().UTC(),
+		entity.Kind, entity.ID, PhaseReviewRemediation,
+		got.Epoch, outgoing.Type, outgoing.ID,
+	))
+	if err == nil {
+		t.Fatalf("a stalled owner's refresh landed on %+v", stolen.Owner)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound (no row matched the WHERE), got %v", err)
+	}
+
+	final, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if final.Owner != shepherd || final.Epoch != handed.Epoch {
+		t.Fatalf("the row moved under the new owner: %+v", final)
+	}
+	if final.TemporalWorkflowID != "wf-steward" {
+		t.Fatalf("the row explains the current owner with the previous one's correlation: %q",
+			final.TemporalWorkflowID)
+	}
+	// And the new owner was not aged backwards.
+	if !final.LastSeenAt.Equal(handed.LastSeenAt) {
+		t.Fatalf("a live owner was aged by somebody else's retry: %v -> %v",
+			handed.LastSeenAt, final.LastSeenAt)
+	}
+}
+
+// TestHandoffCompleteIsIdempotent covers the exact shape a retry produces: the
+// work succeeded and the response was lost.
+func TestHandoffCompleteIsIdempotent(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "handoff-idempotent")
+	outgoing := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, shepherd, "exiting"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	first, err := s.HandoffComplete(ctx, entity, PhaseReviewRemediation, shepherd)
+	if err != nil {
+		t.Fatalf("handoff complete: %v", err)
+	}
+
+	// The response was dropped; the activity runs again.
+	again, err := s.HandoffComplete(ctx, entity, PhaseReviewRemediation, shepherd)
+	if err != nil {
+		t.Fatalf("a retried handoff must not fail: %v", err)
+	}
+	if again.Epoch != first.Epoch {
+		t.Fatalf("the retry bumped the epoch again: %d -> %d", first.Epoch, again.Epoch)
+	}
+	// A DIFFERENT actor retrying is still refused — idempotency is for the
+	// caller that already won, not for anyone who asks twice.
+	if _, err := s.HandoffComplete(ctx, entity, PhaseReviewRemediation, devloop("wf-2")); !errors.Is(err, ErrNoHandoff) {
+		t.Fatalf("an unrelated actor completed a finished handoff: %v", err)
+	}
+}
+
+// TestRetargetingAHandoffDoesNotRefreshLiveness is the remaining path by which
+// a handing-off owner could have kept its own clock alive.
+func TestRetargetingAHandoffDoesNotRefreshLiveness(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "handoff-retarget")
+	outgoing := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	first, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch,
+		Owner{Type: OwnerPRSteward, ID: "steward"}, "exiting")
+	if err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	redirected, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch,
+		shepherd, "redirecting")
+	if err != nil {
+		t.Fatalf("retarget: %v", err)
+	}
+	// The handoff clock restarts, because redirecting is a real decision.
+	if !redirected.HandoffStartedAt.After(*first.HandoffStartedAt) {
+		t.Fatalf("a handoff to a new target did not start its own clock")
+	}
+	// Liveness does NOT, because redirecting says nothing about whether the
+	// outgoing owner is healthy.
+	if !redirected.LastSeenAt.Equal(first.LastSeenAt) {
+		t.Fatalf("retargeting refreshed the outgoing owner's liveness: %v -> %v",
+			first.LastSeenAt, redirected.LastSeenAt)
+	}
+}
+
+// TestReannouncingAHandoffWritesNoDuplicateEvent keeps a polled handoff from
+// filling an append-only table with identical rows.
+func TestReannouncingAHandoffWritesNoDuplicateEvent(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "handoff-events")
+	outgoing := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	for range 4 {
+		if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, shepherd, "exiting"); err != nil {
+			t.Fatalf("handoff start: %v", err)
+		}
+	}
+	events, err := s.Events(ctx, entity, PhaseReviewRemediation, 50)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	started := 0
+	for _, e := range events {
+		if e.Event == EventHandoffStarted {
+			started++
+		}
+	}
+	if started != 1 {
+		t.Fatalf("a polled handoff wrote %d handoff-started events", started)
+	}
+}

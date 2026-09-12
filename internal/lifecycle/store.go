@@ -102,6 +102,22 @@ const ownershipColumns = `entity_kind, entity_id, phase, entity_version,
 	handoff_started_at, released_at, released_reason, temporal_workflow_id,
 	created_at, updated_at`
 
+// reacquireRefreshSQL is the idempotent re-acquire's write.
+//
+// A package-level constant for the same reason acquireUpsertSQL and
+// recoverUpdateSQL are: its epoch/owner predicate cannot be exercised through
+// Acquire, because inTx holds the advisory lock across the read and the write
+// so nothing can interleave in-process, and the branch is only reached when the
+// row already names the caller. Testing the statement directly is the only way
+// to show the predicate is load-bearing rather than decorative — and this was
+// the one write in the package that had no such predicate at all.
+const reacquireRefreshSQL = `UPDATE lifecycle_ownership
+					   SET last_seen_at = $1, entity_version = $2,
+					       temporal_workflow_id = $3, updated_at = $4
+					 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7
+					   AND epoch = $8 AND owner_type = $9 AND owner_id = $10
+					 RETURNING ` + ownershipColumns
+
 // acquireUpsertSQL is the statement that makes exclusivity a property of the
 // database. It is a package-level constant, not an inline literal, so the test
 // that proves the guard executes THIS statement rather than a copy of it —
@@ -277,13 +293,36 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 				if req.TemporalWorkflowID != "" {
 					workflowID = req.TemporalWorkflowID
 				}
+				// Pinned to the row this branch decided about — the only
+				// write in the package that was not.
+				//
+				// HandoffComplete moves owner and epoch without touching the
+				// key, so it gets underneath: wf-1 reads its own handing-off
+				// row at epoch 4 with last_seen_at frozen at T0, stalls, the
+				// steward completes the handoff, and wf-1's UPDATE then lands
+				// on the STEWARD's row writing wf-1's correlation and, because
+				// the freeze makes `seen` a past timestamp, actively AGEING a
+				// live owner until it satisfies IsDead.
 				refreshed, err := scanOne(tx.QueryRow(ctx,
-					`UPDATE lifecycle_ownership
-					   SET last_seen_at = $1, entity_version = $2,
-					       temporal_workflow_id = $3, updated_at = $4
-					 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7
-					 RETURNING `+ownershipColumns,
-					seen, version, workflowID, now, req.Entity.Kind, req.Entity.ID, req.Phase))
+					reacquireRefreshSQL,
+
+					seen, version, workflowID, now,
+					req.Entity.Kind, req.Entity.ID, req.Phase,
+					existing.Epoch, existing.Owner.Type, existing.Owner.ID))
+				if errors.Is(err, ErrNotFound) {
+					// Ownership moved between the read and the write. Re-read
+					// so the caller is told who holds it now rather than that
+					// the row vanished.
+					current, rerr := scanOne(tx.QueryRow(ctx,
+						`SELECT `+ownershipColumns+` FROM lifecycle_ownership
+						 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
+						req.Entity.Kind, req.Entity.ID, req.Phase))
+					if rerr != nil {
+						return rerr
+					}
+					out = current
+					return ErrOwnedByOther
+				}
 				if err != nil {
 					return fmt.Errorf("lifecycle: acquire: refresh: %w", err)
 				}
@@ -449,11 +488,20 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 		// clocks. Re-announcing to a DIFFERENT target is a new handoff and
 		// starts them, because that is a decision the owner actually made.
 		started, seen := now, now
-		if current.State == StateHandingOff && current.HandoffTo != nil && *current.HandoffTo == to {
-			if current.HandoffStartedAt != nil {
+		if current.State == StateHandingOff {
+			// Liveness stays frozen for ANY call made while handing off,
+			// including a retarget: redirecting the handoff is a decision
+			// about the target, not evidence that the outgoing owner is
+			// healthy, and leaving it unfrozen would be the remaining way for
+			// a handing-off owner to refresh its own clock forever.
+			seen = current.LastSeenAt
+			if current.HandoffTo != nil && *current.HandoffTo == to && current.HandoffStartedAt != nil {
+				// Re-announcing the SAME target is a no-op on the handoff
+				// clock too. A DIFFERENT target is a new decision and starts
+				// its own, or a redirected handoff would be judged against the
+				// clock of the one it replaced.
 				started = *current.HandoffStartedAt
 			}
-			seen = current.LastSeenAt
 		}
 		updated, err := scanOne(tx.QueryRow(ctx,
 			`UPDATE lifecycle_ownership
@@ -466,9 +514,16 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 		if err != nil {
 			return fmt.Errorf("lifecycle: handoff start: %w", err)
 		}
-		if err := insertEvent(ctx, tx, updated.Entity, phase, EventHandoffStarted, epoch, owner,
-			"to "+to.Type+"/"+to.ID+": "+reason, now); err != nil {
-			return err
+		// Only on a real transition. A polled handoff re-announcing the same
+		// target every tick would otherwise write one identical row per tick
+		// into an append-only table that has no retention.
+		reannounced := current.State == StateHandingOff &&
+			current.HandoffTo != nil && *current.HandoffTo == to
+		if !reannounced {
+			if err := insertEvent(ctx, tx, updated.Entity, phase, EventHandoffStarted, epoch, owner,
+				"to "+to.Type+"/"+to.ID+": "+reason, now); err != nil {
+				return err
+			}
 		}
 		out = updated
 		return nil
@@ -505,6 +560,15 @@ func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase str
 			entity.Kind, entity.ID, phase))
 		if err != nil {
 			return err
+		}
+		if current.State == StateActive && current.Owner == incoming {
+			// Already completed, and by this caller. A dropped HTTP response
+			// makes a Temporal activity or an Argo pod retry the exact call,
+			// and answering ErrNoHandoff there fails a step whose work had
+			// already succeeded — the one shape retries are guaranteed to
+			// produce. Idempotent, like the re-acquire above it.
+			out = current
+			return nil
 		}
 		if current.State != StateHandingOff || current.HandoffTo == nil {
 			return ErrNoHandoff
@@ -740,9 +804,6 @@ const recoverUpdateSQL = `UPDATE lifecycle_ownership
 // holds it.
 type OwnerOption func(*ownerConfig)
 
-// RecoverOption is the old name, kept so callers that spell it survive.
-type RecoverOption = OwnerOption
-
 type ownerConfig struct {
 	policyRef          string
 	temporalWorkflowID string
@@ -753,16 +814,10 @@ func WithPolicyRef(ref string) OwnerOption {
 	return func(c *ownerConfig) { c.policyRef = ref }
 }
 
-// WithRecoverPolicyRef is the old name.
-var WithRecoverPolicyRef = WithPolicyRef
-
 // WithWorkflowID records the incoming owner's Temporal workflow.
 func WithWorkflowID(id string) OwnerOption {
 	return func(c *ownerConfig) { c.temporalWorkflowID = id }
 }
-
-// WithRecoverWorkflowID is the old name.
-var WithRecoverWorkflowID = WithWorkflowID
 
 // Recover takes ownership from an owner that is DEAD, and only from one.
 //
