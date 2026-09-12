@@ -251,15 +251,16 @@ func TestLifecycleHandlers_ReadModelExposesDerivedState(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.GetLifecycleOwnership(rec, req)
 	var body struct {
-		Stale   bool `json:"stale"`
+		Dead    bool `json:"dead"`
+		Stuck   bool `json:"stuck"`
 		Healthy bool `json:"healthy"`
 		Epoch   int  `json:"epoch"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("body: %v", err)
 	}
-	if body.Stale {
-		t.Fatalf("a just-acquired record must not be stale")
+	if body.Dead || body.Stuck {
+		t.Fatalf("a just-acquired record must be neither dead nor stuck")
 	}
 	if !body.Healthy {
 		t.Fatalf("a just-acquired record must be healthy")

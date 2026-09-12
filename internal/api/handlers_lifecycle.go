@@ -65,18 +65,31 @@ func (h *Handlers) requireLifecycleAdmin(w http.ResponseWriter, r *http.Request)
 	return user, true
 }
 
-// ownershipResponse is the read model. It carries the derived answers
-// (stale/healthy) so every caller computes them the same way, rather than each
-// re-implementing the bound and drifting.
+// ownershipResponse is the read model. It carries the derived answers so every
+// caller computes them the same way rather than each re-implementing the bounds
+// and drifting apart.
+//
+// dead and stuck are separate fields because they license different actions:
+// only `dead` permits another actor to take the entity, while `stuck` means
+// alive but achieving nothing, which calls for a human rather than a second
+// machine that will be equally stuck. A single "stale" flag conflating them is
+// what an earlier version shipped, and it would have had the reconciler
+// thrashing ownership of any PR waiting on human review.
 type ownershipResponse struct {
 	*lifecycle.Ownership
-	Stale   bool `json:"stale"`
+	Dead    bool `json:"dead"`
+	Stuck   bool `json:"stuck"`
 	Healthy bool `json:"healthy"`
 }
 
 func newOwnershipResponse(o *lifecycle.Ownership) ownershipResponse {
 	now := time.Now().UTC()
-	return ownershipResponse{Ownership: o, Stale: o.IsStale(now), Healthy: o.IsHealthy(now)}
+	return ownershipResponse{
+		Ownership: o,
+		Dead:      o.IsDead(now),
+		Stuck:     o.IsStuck(now),
+		Healthy:   o.IsHealthy(now),
+	}
 }
 
 // writeLifecycleError maps store sentinels onto status codes.
