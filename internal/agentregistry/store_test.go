@@ -23,8 +23,9 @@ import (
 )
 
 // newTestStore connects to a real Postgres instance, same convention as
-// alerts.newTestStore: skips when TEST_DATABASE_URL is unset since this repo
-// has no Postgres service in CI.
+// alerts.newTestStore. The skip below fires on a developer laptop, not in CI:
+// the `test` job in .github/workflows/validate.yml runs a postgres:16 service
+// and exports TEST_DATABASE_URL, so these tests do run on every pull request.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	connStr := os.Getenv("TEST_DATABASE_URL")
