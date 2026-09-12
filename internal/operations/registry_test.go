@@ -79,6 +79,25 @@ func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 				t.Errorf("operation %q's service enum is missing %q (mctl-agents SERVICES entry)", opName, svc)
 			}
 		}
+
+		// And the converse. Membership alone is subset-only: it catches a
+		// service added upstream and not mirrored here, and says nothing about
+		// one removed upstream and left behind here. That direction fails
+		// worse, not better -- the enum keeps accepting a service mctl-agents
+		// will refuse, so instead of a 400 at the edge the caller gets a
+		// dispatched workflow that dies in Argo. The empty string is not a
+		// service: it is the "all services" default on the three optional
+		// params, and absent on approve, where service is required.
+		wantSet := make(map[string]bool, len(wantServices))
+		for _, svc := range wantServices {
+			wantSet[svc] = true
+		}
+		for _, v := range serviceParam.Enum {
+			if v == "" || wantSet[v] {
+				continue
+			}
+			t.Errorf("operation %q's service enum carries %q, which is not in mctl-agents SERVICES; a stale entry accepts a service the agent side will reject", opName, v)
+		}
 	}
 }
 
