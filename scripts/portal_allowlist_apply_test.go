@@ -440,19 +440,32 @@ func TestApplyCheck(t *testing.T) {
 			// reaches the network must therefore show its reads in the log
 			// before the absence of a PUT is allowed to mean anything.
 			logBytes, readErr := os.ReadFile(logPath) //nolint:gosec // logPath is built from t.TempDir(), not external input
-			if !tc.wantEmptyLog {
+			if tc.wantEmptyLog {
+				// This case is refused before any HTTP call, and an empty log
+				// is the evidence. But an empty log is also what a recorder
+				// that has stopped working produces, and the two are
+				// indistinguishable by inspection -- which is how the no-write
+				// proof went vacuous on mctlhq/mctl-telegram#634. The emptiness
+				// is therefore only allowed to mean "no call was made" once
+				// probeRecorder has shown, in this same fixture, that a call
+				// would have been recorded.
+				if readErr == nil && len(logBytes) != 0 {
+					t.Fatalf("expected no curl calls at all; call log:\n%s", logBytes)
+				}
+				probeRecorder(t, dir, logPath)
+			} else {
 				if readErr != nil {
 					t.Fatalf("no curl call log at %s; the no-PUT assertion below would be vacuous: %v", logPath, readErr)
 				}
+				// Only the paths that reach both reads show two GETs; the
+				// unsuccessful-envelope case exits after the first one, so what
+				// is required here is every read the path actually attempted.
 				if !strings.Contains(string(logBytes), "GET\t") {
-					t.Fatalf("expected the portal and server reads in the call log, got:\n%s", logBytes)
+					t.Fatalf("expected the reads this path attempts in the call log, got:\n%s", logBytes)
 				}
-			}
-			if readErr == nil && strings.Contains(string(logBytes), "PUT\t") {
-				t.Fatalf("--check recorded a PUT in the call log:\n%s", logBytes)
-			}
-			if tc.wantEmptyLog && readErr == nil && len(logBytes) != 0 {
-				t.Fatalf("expected no curl calls at all; call log:\n%s", logBytes)
+				if strings.Contains(string(logBytes), "PUT\t") {
+					t.Fatalf("--check recorded a PUT in the call log:\n%s", logBytes)
+				}
 			}
 		})
 	}
@@ -550,6 +563,38 @@ func newFixture(t *testing.T, guardName, guardImports, guardBody string) string 
 	git(t, dir, "add", "-A")
 	git(t, dir, "commit", "-qm", "fixture")
 	return dir
+}
+
+// probeRecorder is the positive half of the empty-log proof. A case that must
+// make no HTTP call can only show that by its log staying empty -- and an empty
+// log is exactly what a broken recorder leaves behind too. So after such a case
+// has been asserted empty, this invokes the stub curl once, directly, with the
+// same STUB_CURL_LOG the run used, and requires the line to appear. If it does
+// not, the recorder was dead for the whole case and the emptiness proved
+// nothing; the test says so rather than passing.
+//
+// Without this, disabling the stub's append leaves every wantEmptyLog case
+// green -- the same shape of vacuous guard that mctlhq/mctl-telegram#634 was
+// fixed for on the cases that do reach the network.
+func probeRecorder(t *testing.T, dir, logPath string) {
+	t.Helper()
+
+	before, _ := os.ReadFile(logPath) //nolint:gosec // logPath is built from t.TempDir(), not external input
+
+	//nolint:gosec // the stub and its arguments are fixed by the test
+	probe := exec.Command(filepath.Join(dir, "stub", "curl"), "-X", "GET", "https://probe.invalid/recorder-alive")
+	probe.Env = append(os.Environ(), "STUB_CURL_LOG="+logPath)
+	if out, err := probe.CombinedOutput(); err != nil {
+		t.Fatalf("could not run the stub curl to prove the recorder is alive: %v\n%s", err, out)
+	}
+
+	after, err := os.ReadFile(logPath) //nolint:gosec // logPath is built from t.TempDir(), not external input
+	if err != nil {
+		t.Fatalf("no curl call log at %s after probing the recorder; this case's empty log proved nothing: %v", logPath, err)
+	}
+	if !strings.Contains(string(after), "probe.invalid/recorder-alive") {
+		t.Fatalf("the stub curl did not record a call it certainly made; the recorder is dead, so this case's empty log is not evidence that no call went out.\nbefore:\n%s\nafter:\n%s", before, after)
+	}
 }
 
 // stubCurl answers the two reads the script makes, so a case that passes the
