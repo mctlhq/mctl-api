@@ -106,8 +106,8 @@ func TestDispatchPortalServerAuthApply_DispatchesTheOneWorkflowOnMain(t *testing
 	if fake.owner != "mctlhq" || fake.repo != "mctl-gitops" {
 		t.Errorf("dispatched to %s/%s, want mctlhq/mctl-gitops", fake.owner, fake.repo)
 	}
-	if fake.wf != "portal-server-auth-apply.yml" {
-		t.Errorf("dispatched workflow %q, want portal-server-auth-apply.yml", fake.wf)
+	if fake.wf != "cloudflare-apply.yml" {
+		t.Errorf("dispatched workflow %q, want cloudflare-apply.yml", fake.wf)
 	}
 	// main and nothing else: the workflow's jobs carry
 	// `if: github.ref == 'refs/heads/main'` and the cloudflare-apply
@@ -116,8 +116,16 @@ func TestDispatchPortalServerAuthApply_DispatchesTheOneWorkflowOnMain(t *testing
 	if fake.ref != "main" {
 		t.Errorf("dispatched ref %q, want main", fake.ref)
 	}
-	if len(fake.inputs) != 0 {
-		t.Errorf("sent inputs %v; the workflow takes none and applies the file at HEAD of main", fake.inputs)
+	// The security property of this endpoint, not a detail: cloudflare-apply.yml
+	// applies whichever OpenTofu root its `root` input names -- the Cloudflare
+	// zone and account roots included -- and maps that root to a matching write
+	// credential. The root must therefore come from this package's constant and
+	// never from the caller, who sends no body at all.
+	if got, want := fake.inputs["root"], "infrastructure/cloudflare/portal"; got != want {
+		t.Errorf("dispatched root %q, want %q", got, want)
+	}
+	if len(fake.inputs) != 1 {
+		t.Errorf("sent inputs %v; only the pinned root belongs there", fake.inputs)
 	}
 
 	var body map[string]interface{}

@@ -1821,7 +1821,8 @@ paths:
     post:
       summary: Dispatch the Cloudflare MCP portal server-auth apply workflow
       description: |
-        Starts `portal-server-auth-apply.yml` on `main` in `mctlhq/mctl-gitops`,
+        Starts `cloudflare-apply.yml` on `main` in `mctlhq/mctl-gitops` for the
+        pinned root `infrastructure/cloudflare/portal`,
         which applies the committed OAuth registration — endpoints, client, and
         above all the scope the portal requests — of the Cloudflare MCP portal's
         upstream servers.
@@ -1853,13 +1854,13 @@ paths:
                     example: mctlhq/mctl-gitops
                   workflow:
                     type: string
-                    example: portal-server-auth-apply.yml
+                    example: cloudflare-apply.yml
                   ref:
                     type: string
                     example: main
                   runs_url:
                     type: string
-                    example: https://github.com/mctlhq/mctl-gitops/actions/workflows/portal-server-auth-apply.yml
+                    example: https://github.com/mctlhq/mctl-gitops/actions/workflows/cloudflare-apply.yml
                   message:
                     type: string
         '403':

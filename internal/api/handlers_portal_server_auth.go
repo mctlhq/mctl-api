@@ -34,14 +34,24 @@ import (
 // is reviewable in this diff.
 //
 // portalServerAuthRef is `main` because the workflow refuses to run on
-// anything else (its jobs carry `if: github.ref == 'refs/heads/main'`, and the
-// cloudflare-apply environment's branch policy allows main alone). Sending
-// another ref would produce a run that starts and immediately skips.
+// anything else (its apply job carries `if: github.ref == 'refs/heads/main'`,
+// and the cloudflare-apply environment's branch policy allows main alone).
+// Sending another ref would produce a run that starts and immediately skips.
+//
+// portalServerAuthRoot is a CONSTANT, and that is the whole security argument
+// of this endpoint. cloudflare-apply.yml applies whichever OpenTofu root its
+// `root` input names -- the four Cloudflare zone and account roots included --
+// and it maps that root to a matching write credential. Taking the root from
+// the caller would turn this into "apply any Cloudflare root", with the admin
+// check as the only thing in the way. Pinned here, the blast radius is this
+// one root, and it is reviewable in this diff. The handler accepts no body
+// for the same reason.
 const (
 	portalServerAuthOwner    = "mctlhq"
 	portalServerAuthRepo     = "mctl-gitops"
-	portalServerAuthWorkflow = "portal-server-auth-apply.yml"
+	portalServerAuthWorkflow = "cloudflare-apply.yml"
 	portalServerAuthRef      = "main"
+	portalServerAuthRoot     = "infrastructure/cloudflare/portal"
 )
 
 // portalServerAuthRunsURL is where a caller watches what this started. The
@@ -54,7 +64,7 @@ const portalServerAuthRunsURL = "https://github.com/" + portalServerAuthOwner + 
 // DispatchPortalServerAuthApply handles
 // POST /api/v1/cloudflare/portal/server-auth/apply.
 //
-// It starts mctl-gitops' portal-server-auth-apply.yml, which applies the
+// It starts mctl-gitops' cloudflare-apply.yml on the portal root, which applies the
 // committed OAuth registration (endpoints, client, and above all the scope)
 // of the Cloudflare MCP portal's upstream servers.
 //
@@ -93,7 +103,8 @@ func (h *Handlers) DispatchPortalServerAuthApply(w http.ResponseWriter, r *http.
 	}
 
 	err := h.opts.WorkflowDispatcher.Dispatch(r.Context(),
-		portalServerAuthOwner, portalServerAuthRepo, portalServerAuthWorkflow, portalServerAuthRef, nil)
+		portalServerAuthOwner, portalServerAuthRepo, portalServerAuthWorkflow, portalServerAuthRef,
+		map[string]string{"root": portalServerAuthRoot})
 	if err != nil {
 		// A dispatch that never started is not a 500 on this side: the
 		// request was well-formed and the caller can do nothing differently.
@@ -125,14 +136,14 @@ func (h *Handlers) DispatchPortalServerAuthApply(w http.ResponseWriter, r *http.
 		Parameters: auditParams,
 		Status:     "succeeded",
 		RiskLevel:  string(operations.RiskMedium),
-		Message:    "dispatched portal-server-auth-apply.yml; the apply job still needs environment approval",
+		Message:    "dispatched cloudflare-apply.yml on " + portalServerAuthRoot + "; the apply job still needs environment approval",
 	})
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
 		"repo":     portalServerAuthOwner + "/" + portalServerAuthRepo,
 		"workflow": portalServerAuthWorkflow,
 		"ref":      portalServerAuthRef,
 		"runs_url": portalServerAuthRunsURL,
-		"message": "Dispatched portal-server-auth-apply.yml on main. Nothing has been written to Cloudflare yet: " +
+		"message": "Dispatched cloudflare-apply.yml on main for " + portalServerAuthRoot + ". Nothing has been written to Cloudflare yet: " +
 			"the run's plan job publishes the live-vs-committed comparison, and the apply job waits for a required " +
 			"reviewer on the cloudflare-apply environment. Open the run to read the plan and approve it. " +
 			"After an apply, the upstream must be signed out and back in in the portal — a refresh cannot widen an existing grant.",

@@ -2853,9 +2853,11 @@ Admin-only.`),
 // ─── Cloudflare MCP portal ────────────────────────────────────────────
 // One admin-only tool, and it dispatches rather than applies. The portal's
 // upstream OAuth registration -- endpoints, client, and above all the SCOPE
-// the portal asks each upstream for -- is pinned in mctl-gitops at
-// infrastructure/cloudflare/portal/mcp-portal-server-auth.json and applied by
-// .github/workflows/portal-server-auth-apply.yml there.
+// the portal asks each upstream for -- is described in mctl-gitops as OpenTofu
+// at infrastructure/cloudflare/portal/ and applied by
+// .github/workflows/cloudflare-apply.yml there. The root is pinned on this
+// side: that workflow applies whichever root its input names, so letting a
+// caller choose would make this "apply any Cloudflare root".
 //
 // The Cloudflare write token is an environment secret on that repository's
 // `cloudflare-apply` environment, issued only to a job that requests the
@@ -2880,7 +2882,7 @@ func (s *Server) toolTriggerPortalServerAuthApply() (mcplib.Tool, server.ToolHan
 		// the same committed blob) but not a no-op, and every run costs a
 		// reviewer another approval to dismiss.
 		mcplib.WithIdempotentHintAnnotation(false),
-		mcplib.WithDescription(`Dispatch mctl-gitops' portal-server-auth-apply.yml: apply the committed OAuth registration of the Cloudflare MCP portal's upstream servers (issuer/authorization/token/revocation endpoints, client registration, and the scope the portal requests).
+		mcplib.WithDescription(`Dispatch mctl-gitops' cloudflare-apply.yml on infrastructure/cloudflare/portal: apply the committed OAuth registration of the Cloudflare MCP portal's upstream servers (issuer/authorization/token/revocation endpoints, client registration, and the scope the portal requests).
 
 Nothing is written to Cloudflare by this call. The run's plan job reads the live registration and publishes a per-field comparison against infrastructure/cloudflare/portal/mcp-portal-server-auth.json; the apply job then waits for a required reviewer on the cloudflare-apply environment, and refuses if the live side changed after the approval. Read the plan in the run before approving.
 
