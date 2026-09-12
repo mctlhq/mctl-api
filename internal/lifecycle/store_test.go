@@ -2288,3 +2288,230 @@ func TestFinishIsIdempotentForTheCallerThatAlreadyFinished(t *testing.T) {
 		t.Fatalf("a stale epoch was treated as this caller's completed write")
 	}
 }
+
+// TestFinishIdempotencySurvivesTheAdvisoryLockBeingRemoved pins the half of
+// the idempotency that the pre-write read cannot carry.
+//
+// Two identical Terminal calls that OVERLAP rather than follow one another —
+// and overlap is the COMMON shape, because a Temporal retry fires on the first
+// attempt's timeout rather than on its failure — both read active@4, both pass
+// currentFor, and the loser's finishUpdateSQL matches nothing because the
+// state predicate no longer holds. raceLostOn then re-reads, finds the epoch
+// unchanged and the state absorbing, and answers
+// "record became terminal while the terminal write was in flight" — verbatim
+// the answer the idempotency exists to stop giving.
+//
+// inTx takes the advisory lock before the closure runs, which orders the two
+// reads and hides it. That is exactly the reasoning this file rejects for
+// EXCLUDED.epoch, for Recover's liveness and for all seven WHERE clauses: a
+// claim every write has to honour, not four of seven. So the question is asked
+// again on the statement's own no-row path, and finishedBy is a named function
+// for the same reason reacquireMissSentinel is — the lock makes the
+// interleaving unreachable through the API, so driving it directly is the only
+// way to show it distinguishes anything.
+func TestFinishIdempotencySurvivesTheAdvisoryLockBeingRemoved(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	owner := devloop("wf-1")
+	entity := pr(prefix, "finish-norow")
+
+	got, err := s.Acquire(ctx, AcquireRequest{
+		Entity: entity, Phase: PhaseReviewRemediation, Owner: owner,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	// The winning half of the overlap, written through the very statement the
+	// loser is about to miss on — so the row is in precisely the state the
+	// loser's own write would have produced.
+	if _, err := scanOne(s.pool.QueryRow(ctx, finishUpdateSQL,
+		StateTerminal, time.Now().UTC(), "merged",
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch)); err != nil {
+		t.Fatalf("out-of-band terminal: %v", err)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// The loser's no-row re-read: its own completed write, so success.
+	done, err := s.finishedBy(ctx, tx, entity, PhaseReviewRemediation, owner, got.Epoch, StateTerminal)
+	if err != nil {
+		t.Fatalf("finishedBy: %v", err)
+	}
+	if done == nil {
+		t.Fatal("a Terminal that lost the race to its OWN duplicate was told it lost")
+	}
+	if done.State != StateTerminal || done.Owner != owner || done.Epoch != got.Epoch {
+		t.Fatalf("finishedBy returned a different record: %+v", done)
+	}
+
+	// The other three directions, one field at a time. Varying more than one
+	// at once cannot tell which conjunct answered, which is how a clause
+	// survives a mutation with the suite green.
+	for _, tc := range []struct {
+		name  string
+		owner Owner
+		epoch int
+		state string
+	}{
+		// A Release after a Terminal asks for a different state. This is the
+		// conjunct that keeps Terminal absorbing.
+		{"a different state", owner, got.Epoch, StateReleased},
+		// Somebody else's completed write is not this caller's answer.
+		{"a different owner", devloop("wf-2"), got.Epoch, StateTerminal},
+		// A stale epoch names a generation this caller no longer holds.
+		{"a different epoch", owner, got.Epoch + 1, StateTerminal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.finishedBy(ctx, tx, entity, PhaseReviewRemediation, tc.owner, tc.epoch, tc.state)
+			if err != nil {
+				t.Fatalf("finishedBy: %v", err)
+			}
+			if got != nil {
+				t.Fatalf("finishedBy answered for %s: %+v", tc.name, got)
+			}
+		})
+	}
+}
+
+// TestHandoffCompleteIdempotencySurvivesTheAdvisoryLockBeingRemoved is the
+// same property on the other write that has it.
+//
+// HandoffComplete's idempotent branch is also a pre-write read, so it answers
+// only for a completion that FOLLOWS the original. Two completions in flight
+// at once both read handing-off, and the loser's UPDATE matches nothing
+// because the state predicate no longer holds — and the statement bumps the
+// epoch, so raceLostOn answers ErrEpochMismatch about a handoff that completed
+// exactly as asked.
+func TestHandoffCompleteIdempotencySurvivesTheAdvisoryLockBeingRemoved(t *testing.T) {
+	incoming := Owner{Type: OwnerPRSteward, ID: "steward"}
+	base := &Ownership{State: StateActive, Owner: incoming, Epoch: 5}
+
+	if !handoffAlreadyCompleted(base, incoming, 4) {
+		t.Fatal("a completion that lost the race to its OWN duplicate was told it lost")
+	}
+
+	for _, tc := range []struct {
+		name string
+		row  Ownership
+	}{
+		// Still handing off: nobody completed anything, so this is a real miss.
+		{"still handing off", Ownership{State: StateHandingOff, Owner: incoming, Epoch: 5}},
+		// Completed to somebody else — a retarget that landed, not our write.
+		{"a different incoming owner", Ownership{State: StateActive, Owner: Owner{Type: OwnerPRSteward, ID: "other"}, Epoch: 5}},
+		// The epoch this caller read plus one is the ONLY generation its own
+		// write could have produced; anything further is a later handoff that
+		// happened to land on the same owner.
+		{"a later handoff to the same owner", Ownership{State: StateActive, Owner: incoming, Epoch: 7}},
+		// A finished row is not a completed handoff.
+		{"terminal", Ownership{State: StateTerminal, Owner: incoming, Epoch: 5}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := tc.row
+			if handoffAlreadyCompleted(&row, incoming, 4) {
+				t.Fatalf("answered for %s: %+v", tc.name, row)
+			}
+		})
+	}
+}
+
+// TestAnOverlappingTerminalReachesTheNoRowPathAndSucceeds drives the
+// interleaving itself rather than the predicate, so the CALL SITE is pinned
+// and not only finishedBy.
+//
+// The advisory lock stops two Store calls from overlapping, but nothing stops
+// a writer that does not take it — which is the whole point: the guarantee
+// must not depend on the lock. Under READ COMMITTED an UPDATE that blocks on a
+// concurrently locked row re-evaluates its WHERE against the committed
+// version, so the winner's state change makes the loser's predicate fail and
+// the loser sees zero rows. That is the real production shape, reproduced
+// exactly:
+//
+//	tx2 (no lock)  UPDATE ... terminal        -- holds the row
+//	Terminal()     read: active@1             -- fast path misses
+//	Terminal()     UPDATE ...                 -- blocks on tx2's row lock
+//	tx2            COMMIT
+//	Terminal()     re-evaluates WHERE -> 0 rows, no-row path
+//
+// Without the idempotency on that path the answer is
+// "record became terminal while the terminal write was in flight" for a
+// terminal that landed exactly as asked.
+func TestAnOverlappingTerminalReachesTheNoRowPathAndSucceeds(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	owner := devloop("wf-1")
+	entity := pr(prefix, "finish-overlap")
+
+	got, err := s.Acquire(ctx, AcquireRequest{
+		Entity: entity, Phase: PhaseReviewRemediation, Owner: owner,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	// The winner: the identical write, from a connection that takes no
+	// advisory lock, held open so the loser blocks on the ROW lock.
+	winner, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin winner: %v", err)
+	}
+	defer func() { _ = winner.Rollback(ctx) }()
+	if _, err := scanOne(winner.QueryRow(ctx, finishUpdateSQL,
+		StateTerminal, time.Now().UTC(), "merged",
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch)); err != nil {
+		t.Fatalf("winner terminal: %v", err)
+	}
+
+	type result struct {
+		own *Ownership
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		own, err := s.Terminal(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, "merged")
+		done <- result{own, err}
+	}()
+
+	// Let the loser get past its read and onto the blocked UPDATE. If it has
+	// not blocked yet the test still passes through the fast path, which would
+	// make this a weaker test rather than a flaky one — so assert it really
+	// did block, by requiring that it has NOT finished before the commit.
+	select {
+	case r := <-done:
+		t.Fatalf("the loser never blocked on the row lock: %+v %v", r.own, r.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := winner.Commit(ctx); err != nil {
+		t.Fatalf("commit winner: %v", err)
+	}
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("a Terminal that lost the race to an identical overlapping "+
+				"Terminal was told it failed: %v", r.err)
+		}
+		if r.own.State != StateTerminal || r.own.Owner != owner || r.own.Epoch != got.Epoch {
+			t.Fatalf("the loser returned a different record: %+v", r.own)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the loser never returned after the winner committed")
+	}
+
+	// One event, not two: the loser wrote nothing.
+	var events int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM lifecycle_events
+		 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3 AND event = $4`,
+		entity.Kind, entity.ID, PhaseReviewRemediation, EventOwnerTerminal).Scan(&events); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if events != 0 {
+		t.Fatalf("the loser appended %d events for a write it did not make", events)
+	}
+}

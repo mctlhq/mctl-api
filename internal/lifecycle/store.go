@@ -211,7 +211,7 @@ type AcquireRequest struct {
 
 // Acquire takes durable ownership of (entity, phase).
 //
-// Three outcomes, and the distinction between them is the point of this
+// Four outcomes, and the distinction between them is the point of this
 // package:
 //
 //   - no record, or the last one is released/terminal — the caller becomes
@@ -228,6 +228,11 @@ type AcquireRequest struct {
 //     RECOVERABLE, and Recover is the only operation that takes ownership
 //     from a live record. The actor a handoff NAMES gets the same refusal and
 //     should call HandoffComplete, which is the path written for it.
+//   - the re-acquire's own write matched nothing because the record changed
+//     between the read and the write — ErrStaleRead, from
+//     reacquireMissSentinel. It is the one outcome here whose correct response
+//     is an immediate RETRY rather than standing down: the caller has not lost
+//     the entity, it lost a read.
 //
 // What actually guarantees exclusivity is the CONDITIONAL upsert below:
 // ON CONFLICT ... DO UPDATE ... WHERE the existing row is released/terminal.
@@ -666,6 +671,23 @@ func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase str
 	if err := validate(entity, phase); err != nil {
 		return nil, err
 	}
+	// The INCOMING owner too, as Acquire and Recover already do for theirs. It
+	// is written into owner_type/owner_id, so an empty one would produce a
+	// live record owned by nobody — a row that passes every later guard by
+	// naming the empty owner.
+	//
+	// Stated plainly rather than claimed as a guard: NO test can turn this
+	// red today, and it is not one of the seven CAS clauses. HandoffStart
+	// already refuses an empty target, so no row can name the empty owner in
+	// handoff_to, and handoffCompleteUpdateSQL pins handoff_to against the
+	// incoming binds — an empty incoming therefore matches nothing and is
+	// already refused, one layer further in and with a worse message. This is
+	// a boundary check on an entry point, put here so the three writes that
+	// take an owner answer the same way, and so that a future caller reaching
+	// this one by a different route does not find it the only one missing.
+	if incoming.Type == "" || incoming.ID == "" {
+		return nil, fmt.Errorf("lifecycle: handoff complete: owner type and id are required")
+	}
 	var out *Ownership
 	err := s.inTx(ctx, entity, phase, func(tx pgx.Tx) error {
 		now := time.Now().UTC()
@@ -713,6 +735,10 @@ func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase str
 				return fmt.Errorf("%w: the handoff was retargeted while completion "+
 					"was in flight", ErrNotOwner)
 			}
+			if handoffAlreadyCompleted(latest, incoming, current.Epoch) {
+				out = latest
+				return nil
+			}
 			return raceLostOn(ctx, tx, entity, phase, current.Epoch,
 				StateHandingOff, "handoff completion")
 		}
@@ -742,12 +768,22 @@ const finishUpdateSQL = `UPDATE lifecycle_ownership
 
 // Release gives up ownership without the entity being finished — the work
 // remains, and a reconciler or another actor may take it.
+//
+// Idempotent for the caller's own repeat: a second Release at the same owner
+// and epoch returns the record already written, KEEPING the first call's
+// reason and completion time rather than overwriting them, and appending no
+// second event. It stays absorbing for everyone else — a Release after a
+// Terminal, or either at a different owner or epoch, is still refused.
 func (s *Store) Release(ctx context.Context, entity EntityRef, phase string, owner Owner, epoch int, reason string) (*Ownership, error) {
 	return s.finish(ctx, entity, phase, owner, epoch, StateReleased, EventOwnerReleased, reason)
 }
 
 // Terminal records that this phase is finished — the PR merged or closed, the
 // proposal reached merged/rejected/review-stuck. Nothing should pick it up.
+//
+// Idempotent for the caller's own repeat on the same terms as Release above:
+// the first call's reason and completion time survive, and no second event is
+// appended.
 func (s *Store) Terminal(ctx context.Context, entity EntityRef, phase string, owner Owner, epoch int, reason string) (*Ownership, error) {
 	return s.finish(ctx, entity, phase, owner, epoch, StateTerminal, EventOwnerTerminal, reason)
 }
@@ -784,14 +820,25 @@ func (s *Store) finish(ctx context.Context, entity EntityRef, phase string, owne
 		// pins. Owner and epoch are in it for the same reason they are in every
 		// other guard here — this answers for the caller's own completed write,
 		// nobody else's.
-		done, err := scanOne(tx.QueryRow(ctx,
-			`SELECT `+ownershipColumns+` FROM lifecycle_ownership
-			 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
-			entity.Kind, entity.ID, phase))
+		//
+		// Asked TWICE, and the second time is the one that carries the
+		// guarantee. This read happens BEFORE the write, so it answers only
+		// for a retry that FOLLOWS the original; two identical calls that
+		// OVERLAP — the common shape, since a Temporal retry fires on the
+		// first attempt's timeout rather than on its failure — both read
+		// active@4, both pass currentFor, and the loser's UPDATE matches
+		// nothing. Only inTx's advisory lock orders the two reads, and
+		// "the advisory lock makes it safe" is the reasoning this file
+		// rejects for EXCLUDED.epoch, for Recover's liveness and for all
+		// seven WHERE clauses: a claim every write has to honour, not four
+		// of seven. So the question is asked again on the statement's own
+		// no-row path below, where the CAS is, and this read is a fast path
+		// rather than the guarantee.
+		done, err := s.finishedBy(ctx, tx, entity, phase, owner, epoch, state)
 		if err != nil {
 			return err
 		}
-		if done.State == state && done.Owner == owner && done.Epoch == epoch {
+		if done != nil {
 			out = done
 			return nil
 		}
@@ -801,6 +848,18 @@ func (s *Store) finish(ctx context.Context, entity EntityRef, phase string, owne
 		updated, err := scanOne(tx.QueryRow(ctx, finishUpdateSQL,
 			state, now, reason, entity.Kind, entity.ID, phase, epoch))
 		if errors.Is(err, ErrNotFound) {
+			// The write matched nothing. Before deciding the caller lost a
+			// race, ask whether it lost it to ITSELF: an overlapping duplicate
+			// of this very call leaves the row in exactly the state this one
+			// asked for, at this owner and this epoch.
+			done, derr := s.finishedBy(ctx, tx, entity, phase, owner, epoch, state)
+			if derr != nil {
+				return derr
+			}
+			if done != nil {
+				out = done
+				return nil
+			}
 			return raceLostOn(ctx, tx, entity, phase, epoch, "", "the "+state+" write")
 		}
 		if err != nil {
@@ -816,6 +875,32 @@ func (s *Store) finish(ctx context.Context, entity EntityRef, phase string, owne
 		return nil, err
 	}
 	return out, nil
+}
+
+// finishedBy answers whether the row is ALREADY in the state this call would
+// produce, written by this caller at this epoch — in which case the caller's
+// own write has landed and there is nothing left to do.
+//
+// A nil record with a nil error means "not finished by you"; it is not an
+// error, and every caller must distinguish the two.
+//
+// The triple is exact rather than approximate. finish never moves the epoch,
+// and currentFor forbids a second absorbing transition at the same one, so at
+// most one absorbing state exists per epoch and this cannot match a different
+// write. `state` being in it is what keeps Terminal absorbing: a Release after
+// a Terminal asks for a different state, does not match, and is refused.
+func (s *Store) finishedBy(ctx context.Context, tx pgx.Tx, entity EntityRef, phase string, owner Owner, epoch int, state string) (*Ownership, error) {
+	row, err := scanOne(tx.QueryRow(ctx,
+		`SELECT `+ownershipColumns+` FROM lifecycle_ownership
+		 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
+		entity.Kind, entity.ID, phase))
+	if err != nil {
+		return nil, err
+	}
+	if row.State == state && row.Owner == owner && row.Epoch == epoch {
+		return row, nil
+	}
+	return nil, nil
 }
 
 // Get returns the ownership record for one (entity, phase).
@@ -1177,6 +1262,28 @@ func (s *Store) inTx(ctx context.Context, entity EntityRef, phase string, fn fun
 		return fmt.Errorf("lifecycle: commit: %w", err)
 	}
 	return nil
+}
+
+// handoffAlreadyCompleted says whether the no-row path was lost to an
+// OVERLAPPING duplicate of this same completion rather than to a competitor.
+//
+// A function for the same reason as reacquireMissSentinel below: inTx holds
+// the advisory lock across the read and the write, so the second of two
+// SEQUENTIAL completions reads active-and-mine and answers through the
+// idempotent branch before ever reaching the statement. Only two completions
+// in flight AT ONCE reach here, which the lock makes unreachable through the
+// API — so calling this directly is the only way to show it distinguishes
+// anything. It exists because the guarantee must not depend on the lock: that
+// is the standard this file applies to all seven WHERE clauses.
+//
+// The epoch is pinned to exactly one past the one this caller read, because
+// handoffCompleteUpdateSQL bumps it. Without that a LATER, unrelated handoff
+// that happened to land on the same incoming owner would read as this
+// caller's own write.
+func handoffAlreadyCompleted(latest *Ownership, incoming Owner, fromEpoch int) bool {
+	return latest.State == StateActive &&
+		latest.Owner == incoming &&
+		latest.Epoch == fromEpoch+1
 }
 
 // reacquireMissSentinel says what the re-acquire's no-row path means.
