@@ -209,7 +209,8 @@ type AcquireRequest struct {
 //     ErrOwnedByOther, with that owner returned so the loser learns who won.
 //     That holds at ANY age: a dead owner's row is not acquirable, it is
 //     RECOVERABLE, and Recover is the only operation that takes ownership
-//     from a live record.
+//     from a live record. The actor a handoff NAMES gets the same refusal and
+//     should call HandoffComplete, which is the path written for it.
 //
 // What actually guarantees exclusivity is the CONDITIONAL upsert below:
 // ON CONFLICT ... DO UPDATE ... WHERE the existing row is released/terminal.
@@ -428,16 +429,40 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 	var out *Ownership
 	err := s.inTx(ctx, entity, phase, func(tx pgx.Tx) error {
 		now := time.Now().UTC()
-		if _, err := s.currentFor(ctx, tx, entity, phase, owner, epoch); err != nil {
+		current, err := s.currentFor(ctx, tx, entity, phase, owner, epoch)
+		if err != nil {
 			return err
+		}
+		// The THIRD writer an outgoing owner can reach, and the only one that
+		// would RESET the clocks rather than move them.
+		//
+		// currentFor admits handing-off and this call does not move the epoch,
+		// so the same owner can announce the handoff again on every tick — the
+		// idempotent-retry shape this package supports everywhere else, and the
+		// natural form of a "declare handoff" step under a Temporal retry
+		// policy. Writing handoff_started_at = now there would restart the very
+		// clock the freezes in Acquire and RecordProgress left as the surviving
+		// signal, so no column on the row would remember when the handoff began
+		// and an abandoned one could never be recovered.
+		//
+		// A re-announcement to the SAME target is therefore a no-op on both
+		// clocks. Re-announcing to a DIFFERENT target is a new handoff and
+		// starts them, because that is a decision the owner actually made.
+		started, seen := now, now
+		if current.State == StateHandingOff && current.HandoffTo != nil && *current.HandoffTo == to {
+			if current.HandoffStartedAt != nil {
+				started = *current.HandoffStartedAt
+			}
+			seen = current.LastSeenAt
 		}
 		updated, err := scanOne(tx.QueryRow(ctx,
 			`UPDATE lifecycle_ownership
 			   SET state = $1, handoff_to_type = $2, handoff_to_id = $3,
-			       handoff_started_at = $4, last_seen_at = $4, updated_at = $4
-			 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7 AND epoch = $8
+			       handoff_started_at = $4, last_seen_at = $5, updated_at = $6
+			 WHERE entity_kind = $7 AND entity_id = $8 AND phase = $9 AND epoch = $10
 			 RETURNING `+ownershipColumns,
-			StateHandingOff, to.Type, to.ID, now, entity.Kind, entity.ID, phase, epoch))
+			StateHandingOff, to.Type, to.ID, started, seen, now,
+			entity.Kind, entity.ID, phase, epoch))
 		if err != nil {
 			return fmt.Errorf("lifecycle: handoff start: %w", err)
 		}
@@ -460,11 +485,11 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 //
 // Only the actor the handoff names may complete it; a third party arriving
 // mid-handoff gets ErrNotOwner rather than quietly stealing the row.
-func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase string, incoming Owner, opts ...RecoverOption) (*Ownership, error) {
+func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase string, incoming Owner, opts ...OwnerOption) (*Ownership, error) {
 	// Same options as Recover, for the same reason: clearing the outgoing
 	// owner's correlation without letting the incoming one supply its own
 	// leaves the row explaining nobody.
-	cfg := recoverConfig{}
+	cfg := ownerConfig{}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -706,29 +731,38 @@ const recoverUpdateSQL = `UPDATE lifecycle_ownership
 			   AND state IN ('active', 'handing-off')
 			 RETURNING ` + ownershipColumns
 
-// RecoverOption carries the incoming owner's own correlation fields.
+// OwnerOption carries an incoming owner's own correlation fields.
 //
 // They are options rather than parameters because a reconciler recovering a
 // dead workflow usually has neither, and defaulting them to empty is right:
 // carrying the DEAD owner's temporal_workflow_id and policy_ref forward would
 // leave the row naming a workflow that is gone as the reason the current owner
 // holds it.
-type RecoverOption func(*recoverConfig)
+type OwnerOption func(*ownerConfig)
 
-type recoverConfig struct {
+// RecoverOption is the old name, kept so callers that spell it survive.
+type RecoverOption = OwnerOption
+
+type ownerConfig struct {
 	policyRef          string
 	temporalWorkflowID string
 }
 
-// WithRecoverPolicyRef records which policy put the new owner on this entity.
-func WithRecoverPolicyRef(ref string) RecoverOption {
-	return func(c *recoverConfig) { c.policyRef = ref }
+// WithPolicyRef records which policy put this owner on this entity.
+func WithPolicyRef(ref string) OwnerOption {
+	return func(c *ownerConfig) { c.policyRef = ref }
 }
 
-// WithRecoverWorkflowID records the incoming owner's Temporal workflow.
-func WithRecoverWorkflowID(id string) RecoverOption {
-	return func(c *recoverConfig) { c.temporalWorkflowID = id }
+// WithRecoverPolicyRef is the old name.
+var WithRecoverPolicyRef = WithPolicyRef
+
+// WithWorkflowID records the incoming owner's Temporal workflow.
+func WithWorkflowID(id string) OwnerOption {
+	return func(c *ownerConfig) { c.temporalWorkflowID = id }
 }
+
+// WithRecoverWorkflowID is the old name.
+var WithRecoverWorkflowID = WithWorkflowID
 
 // Recover takes ownership from an owner that is DEAD, and only from one.
 //
@@ -755,8 +789,8 @@ func WithRecoverWorkflowID(id string) RecoverOption {
 //
 // The epoch increments, which fences the dead owner's executors if the process
 // ever comes back.
-func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, newOwner Owner, expectedEpoch int, evidence string, opts ...RecoverOption) (*Ownership, error) {
-	cfg := recoverConfig{}
+func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, newOwner Owner, expectedEpoch int, evidence string, opts ...OwnerOption) (*Ownership, error) {
+	cfg := ownerConfig{}
 	for _, o := range opts {
 		o(&cfg)
 	}

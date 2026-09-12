@@ -1230,3 +1230,112 @@ func TestRecoveryEventNamesTheAbandonedHandoff(t *testing.T) {
 	}
 	t.Fatalf("no recovered event")
 }
+
+// TestReannouncingAHandoffDoesNotRestartTheClock closes the third writer.
+//
+// Acquire and RecordProgress freeze last_seen_at on a handing-off row, which
+// leaves handoff_started_at as the surviving signal that the handoff is old.
+// HandoffStart writes BOTH columns, and currentFor admits handing-off without
+// moving the epoch — so an owner re-announcing the handoff every tick, which is
+// the idempotent-retry shape this package supports everywhere else, would reset
+// the one clock the other two freezes preserved. Nothing on the row would
+// remember when the handoff began.
+func TestReannouncingAHandoffDoesNotRestartTheClock(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "handoff-reannounce")
+	outgoing := devloop("wf-1")
+	target := Owner{Type: OwnerPRSteward, ID: "steward"}
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	first, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, target, "exiting")
+	if err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	if first.HandoffStartedAt == nil {
+		t.Fatalf("handoff_started_at not recorded")
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	again, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, target, "still exiting")
+	if err != nil {
+		t.Fatalf("re-announce: %v", err)
+	}
+	if !again.HandoffStartedAt.Equal(*first.HandoffStartedAt) {
+		t.Fatalf("re-announcing restarted the handoff clock: %v -> %v",
+			*first.HandoffStartedAt, *again.HandoffStartedAt)
+	}
+	if !again.LastSeenAt.Equal(first.LastSeenAt) {
+		t.Fatalf("re-announcing refreshed liveness: %v -> %v", first.LastSeenAt, again.LastSeenAt)
+	}
+
+	// A handoff to a DIFFERENT target is a new decision, so it does start the
+	// clocks — otherwise the freeze would make a redirected handoff
+	// permanently un-recoverable for the wrong reason.
+	time.Sleep(10 * time.Millisecond)
+	redirected, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch,
+		Owner{Type: OwnerShepherd, ID: "cron"}, "redirecting")
+	if err != nil {
+		t.Fatalf("redirect: %v", err)
+	}
+	if !redirected.HandoffStartedAt.After(*first.HandoffStartedAt) {
+		t.Fatalf("a handoff to a new target did not start its own clock")
+	}
+}
+
+// TestHandoffCompleteRecordsTheIncomingOwnersCorrelation pins the capability
+// added alongside the clearing, which nothing exercised.
+func TestHandoffCompleteRecordsTheIncomingOwnersCorrelation(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "handoff-correlation")
+	outgoing := devloop("wf-outgoing")
+
+	got, err := s.Acquire(ctx, AcquireRequest{
+		Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing,
+		PolicyRef: "policy-outgoing", TemporalWorkflowID: "wf-outgoing",
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, shepherd, "exiting"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+
+	done, err := s.HandoffComplete(ctx, entity, PhaseReviewRemediation, shepherd,
+		WithPolicyRef("policy-incoming"), WithWorkflowID("wf-incoming"))
+	if err != nil {
+		t.Fatalf("handoff complete: %v", err)
+	}
+	// The row must explain the CURRENT owner, not the previous one.
+	if done.PolicyRef != "policy-incoming" {
+		t.Fatalf("policy_ref still explains the outgoing owner: %q", done.PolicyRef)
+	}
+	if done.TemporalWorkflowID != "wf-incoming" {
+		t.Fatalf("temporal_workflow_id still names the outgoing workflow: %q", done.TemporalWorkflowID)
+	}
+
+	// And with no options it clears rather than inheriting, which is the
+	// behaviour the options replaced.
+	entity2 := pr(prefix, "handoff-correlation-cleared")
+	got2, err := s.Acquire(ctx, AcquireRequest{
+		Entity: entity2, Phase: PhaseReviewRemediation, Owner: outgoing,
+		PolicyRef: "policy-outgoing", TemporalWorkflowID: "wf-outgoing",
+	})
+	if err != nil {
+		t.Fatalf("acquire 2: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, entity2, PhaseReviewRemediation, outgoing, got2.Epoch, shepherd, "x"); err != nil {
+		t.Fatalf("handoff start 2: %v", err)
+	}
+	cleared, err := s.HandoffComplete(ctx, entity2, PhaseReviewRemediation, shepherd)
+	if err != nil {
+		t.Fatalf("handoff complete 2: %v", err)
+	}
+	if cleared.PolicyRef != "" || cleared.TemporalWorkflowID != "" {
+		t.Fatalf("outgoing owner's correlation survived: %+v", cleared)
+	}
+}
