@@ -1146,14 +1146,32 @@ func TestHandingOffFreezesLiveness(t *testing.T) {
 		t.Fatalf("handoff start: %v", err)
 	}
 
+	// BOTH writers that an outgoing owner can reach must be frozen. Pinning
+	// only one of them is why an earlier mutation of this guard passed: it
+	// unfroze the re-acquire path while RecordProgress still moved the clock.
 	time.Sleep(10 * time.Millisecond)
 	again, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
 	if err != nil {
 		t.Fatalf("re-acquire: %v", err)
 	}
 	if !again.LastSeenAt.Equal(mid.LastSeenAt) {
-		t.Fatalf("polling refreshed liveness during a handoff: %v -> %v", mid.LastSeenAt, again.LastSeenAt)
+		t.Fatalf("re-acquire refreshed liveness during a handoff: %v -> %v", mid.LastSeenAt, again.LastSeenAt)
 	}
+
+	time.Sleep(10 * time.Millisecond)
+	progressed, err := s.RecordProgress(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, "pushed abc123")
+	if err != nil {
+		t.Fatalf("progress: %v", err)
+	}
+	if !progressed.LastSeenAt.Equal(mid.LastSeenAt) {
+		t.Fatalf("recording progress refreshed liveness during a handoff: %v -> %v",
+			mid.LastSeenAt, progressed.LastSeenAt)
+	}
+	// The work still counts — only the liveness clock stops.
+	if !progressed.LastProgressAt.After(mid.LastProgressAt) {
+		t.Fatalf("progress during a handoff was not recorded")
+	}
+	again = progressed
 
 	// And the handoff's own age is what a reconciler reads.
 	if again.HandoffStartedAt == nil {
@@ -1165,4 +1183,50 @@ func TestHandingOffFreezesLiveness(t *testing.T) {
 	if !again.HandoffStalled(again.HandoffStartedAt.Add(11 * time.Hour)) {
 		t.Fatalf("an 11h handoff must be stalled for a 10h bound")
 	}
+}
+
+// TestRecoveryEventNamesTheAbandonedHandoff gives HandoffStalled a consumer.
+// After the liveness freeze an abandoned handoff and a crashed owner both reach
+// IsDead at the same bound, so the event reason is the only place the
+// difference survives — and it is the difference an operator reading back a
+// takeover wants.
+func TestRecoveryEventNamesTheAbandonedHandoff(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "recover-cause")
+	outgoing := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch,
+		Owner{Type: OwnerPRSteward, ID: "steward"}, "exiting"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	stale := time.Now().UTC().Add(-11 * time.Hour)
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE lifecycle_ownership SET last_seen_at = $1, handoff_started_at = $1
+		 WHERE entity_kind = $2 AND entity_id = $3 AND phase = $4`,
+		stale, entity.Kind, entity.ID, PhaseReviewRemediation,
+	); err != nil {
+		t.Fatalf("age the row: %v", err)
+	}
+
+	if _, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "nobody arrived"); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	events, err := s.Events(ctx, entity, PhaseReviewRemediation, 20)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	for _, e := range events {
+		if e.Event == EventRecovered {
+			if !strings.Contains(e.Reason, "abandoned") || !strings.Contains(e.Reason, "steward") {
+				t.Fatalf("the recovery does not say the handoff was abandoned: %q", e.Reason)
+			}
+			return
+		}
+	}
+	t.Fatalf("no recovered event")
 }

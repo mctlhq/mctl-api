@@ -369,13 +369,26 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 		if entity.Version != "" {
 			version = entity.Version
 		}
+		// Same freeze as the idempotent re-acquire, and for the same reason.
+		// currentFor admits handing-off, so without this the outgoing owner
+		// defeats the freeze by recording PROGRESS instead of re-acquiring:
+		// it keeps pushing commits, last_seen_at keeps moving, IsDead stays
+		// false forever, and an abandoned handoff is never recoverable.
+		//
+		// Progress itself is still recorded — the work did happen. Only the
+		// liveness clock stops, because an owner that has declared it is
+		// leaving must not be able to keep the handoff open indefinitely.
+		seen := now
+		if current.State == StateHandingOff {
+			seen = current.LastSeenAt
+		}
 		updated, err := scanOne(tx.QueryRow(ctx,
 			`UPDATE lifecycle_ownership
-			   SET last_progress_at = $1, last_seen_at = $1, progress_evidence = $2,
-			       entity_version = $3, updated_at = $1
-			 WHERE entity_kind = $4 AND entity_id = $5 AND phase = $6 AND epoch = $7
+			   SET last_progress_at = $1, last_seen_at = $2, progress_evidence = $3,
+			       entity_version = $4, updated_at = $1
+			 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7 AND epoch = $8
 			 RETURNING `+ownershipColumns,
-			now, evidence, version, entity.Kind, entity.ID, phase, epoch))
+			now, seen, evidence, version, entity.Kind, entity.ID, phase, epoch))
 		if err != nil {
 			return fmt.Errorf("lifecycle: progress: %w", err)
 		}
@@ -447,7 +460,14 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 //
 // Only the actor the handoff names may complete it; a third party arriving
 // mid-handoff gets ErrNotOwner rather than quietly stealing the row.
-func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase string, incoming Owner) (*Ownership, error) {
+func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase string, incoming Owner, opts ...RecoverOption) (*Ownership, error) {
+	// Same options as Recover, for the same reason: clearing the outgoing
+	// owner's correlation without letting the incoming one supply its own
+	// leaves the row explaining nobody.
+	cfg := recoverConfig{}
+	for _, o := range opts {
+		o(&cfg)
+	}
 	if err := validate(entity, phase); err != nil {
 		return nil, err
 	}
@@ -477,14 +497,15 @@ func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase str
 			       -- are not the incoming one's. Leaving either would make the
 			       -- row explain the current owner with the previous owner's
 			       -- reasons.
-			       temporal_workflow_id = '', policy_ref = '',
+			       temporal_workflow_id = $9, policy_ref = $10,
 			       handoff_from_type = owner_type, handoff_from_id = owner_id,
 			       handoff_to_type = '', handoff_to_id = '',
 			       handoff_started_at = NULL, updated_at = $4
 			 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7 AND epoch = $8
 			 RETURNING `+ownershipColumns,
 			incoming.Type, incoming.ID, StateActive, now,
-			entity.Kind, entity.ID, phase, current.Epoch))
+			entity.Kind, entity.ID, phase, current.Epoch,
+			cfg.temporalWorkflowID, cfg.policyRef))
 		if err != nil {
 			return fmt.Errorf("lifecycle: handoff complete: %w", err)
 		}
@@ -816,7 +837,7 @@ func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, new
 			// predicates failed decides what the caller is told, so re-read
 			// rather than guess: a revived owner and a finished entity are
 			// different situations, and only one of them is ErrOwnerAlive.
-			now, rerr := scanOne(tx.QueryRow(ctx,
+			latest, rerr := scanOne(tx.QueryRow(ctx,
 				`SELECT `+ownershipColumns+` FROM lifecycle_ownership
 				 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
 				entity.Kind, entity.ID, phase))
@@ -824,12 +845,12 @@ func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, new
 				return rerr
 			}
 			switch {
-			case now.State != StateActive && now.State != StateHandingOff:
+			case latest.State != StateActive && latest.State != StateHandingOff:
 				return fmt.Errorf("%w: it reached %s while recovery was in flight",
-					ErrNotOwner, now.State)
-			case now.Epoch != current.Epoch:
+					ErrNotOwner, latest.State)
+			case latest.Epoch != current.Epoch:
 				return fmt.Errorf("%w: ownership moved to epoch %d while recovery was in flight",
-					ErrEpochMismatch, now.Epoch)
+					ErrEpochMismatch, latest.Epoch)
 			default:
 				return fmt.Errorf("%w: it was seen again while recovery was in flight", ErrOwnerAlive)
 			}
@@ -837,10 +858,19 @@ func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, new
 		if err != nil {
 			return fmt.Errorf("lifecycle: recover: %w", err)
 		}
+		// Which condition made it recoverable, not merely that it was. After
+		// the liveness freeze an abandoned handoff and a crashed owner both
+		// reach IsDead at the same bound, so the event is the only place the
+		// difference survives — and it is the difference an operator reading
+		// back a takeover actually wants.
+		cause := "dead"
+		if current.HandoffStalled(now) {
+			cause = "handoff to " + handoffTargetOf(current) + " abandoned"
+		}
 		if err := insertEvent(ctx, tx, recovered.Entity, phase, EventRecovered,
 			recovered.Epoch, newOwner,
-			fmt.Sprintf("from %s/%s (dead, last seen %s): %s",
-				current.Owner.Type, current.Owner.ID,
+			fmt.Sprintf("from %s/%s (%s, last seen %s): %s",
+				current.Owner.Type, current.Owner.ID, cause,
 				current.LastSeenAt.Format(time.RFC3339), evidence), now); err != nil {
 			return err
 		}
@@ -978,4 +1008,13 @@ func scanRow(row scannable) (*Ownership, error) {
 		o.HandoffFrom = &Owner{Type: handoffFromType, ID: handoffFromID}
 	}
 	return o, nil
+}
+
+// handoffTargetOf names the actor an abandoned handoff was waiting for, for
+// the recovery event's reason.
+func handoffTargetOf(o *Ownership) string {
+	if o == nil || o.HandoffTo == nil {
+		return "an unnamed actor"
+	}
+	return o.HandoffTo.Type + "/" + o.HandoffTo.ID
 }
