@@ -40,6 +40,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/k8s"
+	"github.com/mctlhq/mctl-api/internal/lifecycle"
 	"github.com/mctlhq/mctl-api/internal/loki"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
@@ -208,6 +209,27 @@ func main() {
 			slog.Error("alert store init failed (using AUDIT_DB_URL); alert and incident endpoints will return 503", "error", asErr)
 		} else {
 			alertStore = as
+		}
+	}
+
+	// Lifecycle ownership (optional — enabled when LIFECYCLE_DB_URL or
+	// AUDIT_DB_URL is set). A nil store makes the lifecycle endpoints 503,
+	// which callers must treat as "unknown" and never as "unowned": a store
+	// outage that read as "nobody owns this" would license a second actor to
+	// act, which is the failure this whole surface exists to prevent.
+	var lifecycleStore *lifecycle.Store
+	lifecycleDBURL := postgresURL(os.Getenv("LIFECYCLE_DB_URL"))
+	if lifecycleDBURL == "" {
+		lifecycleDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+	}
+	if lifecycleDBURL != "" {
+		ls, lsErr := initStore(initCtx, "lifecycle ownership", func(ctx context.Context) (*lifecycle.Store, error) {
+			return lifecycle.NewStore(ctx, lifecycleDBURL)
+		})
+		if lsErr != nil {
+			slog.Error("lifecycle ownership store init failed; lifecycle endpoints will return 503", "error", lsErr)
+		} else {
+			lifecycleStore = ls
 		}
 	}
 
@@ -426,6 +448,7 @@ func main() {
 		OAuthServer:                    oauthServer,
 		AlertStore:                     alertStore,
 		AgentRegistry:                  agentRegistryStore,
+		Lifecycle:                      lifecycleStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,
