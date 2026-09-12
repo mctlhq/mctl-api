@@ -1388,7 +1388,7 @@ func TestReacquireCannotLandOnSomebodyElsesRow(t *testing.T) {
 	stolen, err := scanOne(s.pool.QueryRow(ctx, reacquireRefreshSQL,
 		stale, "sha-from-wf-1", "wf-1", time.Now().UTC(),
 		entity.Kind, entity.ID, PhaseReviewRemediation,
-		got.Epoch, outgoing.Type, outgoing.ID,
+		got.Epoch, outgoing.Type, outgoing.ID, StateHandingOff,
 	))
 	if err == nil {
 		t.Fatalf("a stalled owner's refresh landed on %+v", stolen.Owner)
@@ -1553,7 +1553,12 @@ func TestProgressUpdateRefusesTheStateItDidNotRead(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 
-	now := time.Now().UTC().Add(time.Hour)
+	// Truncated to the microsecond on the way IN, so the assertion on the way
+	// out can stay exact: timestamptz has microsecond resolution, and
+	// time.Now() is microsecond-resolution on macOS but nanosecond on Linux.
+	// Sizing a tolerance around the difference would admit a full second
+	// against a sub-microsecond truncation; removing the difference does not.
+	now := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
 	// The write a caller that read `active` would issue: seen = now, which is
 	// exactly the refresh the handing-off freeze exists to prevent.
 	revived, err := scanOne(s.pool.QueryRow(ctx, progressUpdateSQL,
@@ -1584,14 +1589,8 @@ func TestProgressUpdateRefusesTheStateItDidNotRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the statement refused the state the row really has: %v", err)
 	}
-	// Not Equal(now): Postgres stores timestamptz to the microsecond, and
-	// time.Now() is microsecond-resolution on macOS but nanosecond on Linux,
-	// so an exact comparison against a value that has been through the
-	// database passes locally and fails in CI. Every other time assertion in
-	// this file compares two round-tripped values, which is why this is the
-	// only one that hit it.
-	if ok.LastProgressAt.Sub(now).Abs() > time.Second {
-		t.Fatalf("progress was recorded at %s, want ~%s", ok.LastProgressAt, now)
+	if !ok.LastProgressAt.Equal(now) {
+		t.Fatalf("progress was recorded at %s, want %s", ok.LastProgressAt, now)
 	}
 }
 
@@ -1733,5 +1732,223 @@ func TestFinishUpdateRefusesAnAbsorbingRecord(t *testing.T) {
 		if ok.State != StateReleased {
 			t.Fatalf("release from %s did not land: %s", state, ok.State)
 		}
+	}
+}
+
+// TestReacquireRefreshCannotUnfreezeAStateItDidNotRead pins the state
+// predicate on reacquireRefreshSQL.
+//
+// The branch that issues it derives `seen` from the state it read: an active
+// row moves last_seen_at, a handing-off one stays frozen. With only epoch and
+// owner in the WHERE, a HandoffStart landing between the read and the write
+// let seen = now unfreeze a handing-off row — the identical sequence
+// progressUpdateSQL pins, arriving at the record through Acquire instead.
+func TestReacquireRefreshCannotUnfreezeAStateItDidNotRead(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "reacquire-state-sql")
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, owner, got.Epoch,
+		shepherd, "leaving"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	frozen, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	now := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
+	// The refresh a caller that read `active` would issue.
+	revived, err := scanOne(s.pool.QueryRow(ctx, reacquireRefreshSQL,
+		now, "sha-b", "wf-1", now,
+		entity.Kind, entity.ID, PhaseReviewRemediation,
+		frozen.Epoch, owner.Type, owner.ID, StateActive))
+	if err == nil {
+		t.Fatalf("a stale active read unfroze a handing-off row to %s", revived.LastSeenAt)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	after, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if !after.LastSeenAt.Equal(frozen.LastSeenAt) {
+		t.Fatalf("liveness moved from %s to %s despite the refused write",
+			frozen.LastSeenAt, after.LastSeenAt)
+	}
+
+	// A finished row is refused too: finish moves neither epoch nor owner, so
+	// without the predicate a stray re-acquire writes to a record currentFor
+	// refuses every other write to.
+	done := pr(prefix, "reacquire-terminal-sql")
+	fresh, err := s.Acquire(ctx, AcquireRequest{Entity: done, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.Terminal(ctx, done, PhaseReviewRemediation, owner, fresh.Epoch, "merged"); err != nil {
+		t.Fatalf("terminal: %v", err)
+	}
+	if _, err := scanOne(s.pool.QueryRow(ctx, reacquireRefreshSQL,
+		now, "sha-b", "wf-1", now,
+		done.Kind, done.ID, PhaseReviewRemediation,
+		fresh.Epoch, owner.Type, owner.ID, StateActive)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a merged entity accepted a re-acquire refresh: %v", err)
+	}
+
+	// Other direction: with the state the row really has, it lands.
+	ok, err := scanOne(s.pool.QueryRow(ctx, reacquireRefreshSQL,
+		frozen.LastSeenAt, "sha-b", "wf-1", now,
+		entity.Kind, entity.ID, PhaseReviewRemediation,
+		frozen.Epoch, owner.Type, owner.ID, StateHandingOff))
+	if err != nil {
+		t.Fatalf("the statement refused the state the row really has: %v", err)
+	}
+	if ok.Entity.Version != "sha-b" {
+		t.Fatalf("the refresh did not land: %+v", ok.Entity)
+	}
+}
+
+// TestHandoffCompleteCannotLandOnAFinishedOrRetargetedRow pins the two
+// predicates on handoffCompleteUpdateSQL.
+//
+// Neither finish nor a retarget moves the epoch, so the epoch alone guarded
+// neither decision this statement makes.
+func TestHandoffCompleteCannotLandOnAFinishedOrRetargetedRow(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	owner := devloop("wf-1")
+	steward := Owner{Type: OwnerPRSteward, ID: "steward-1"}
+
+	// 1. A merged entity must not be resurrected as live work.
+	merged := pr(prefix, "handoff-complete-terminal")
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: merged, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, merged, PhaseReviewRemediation, owner, got.Epoch,
+		steward, "leaving"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	begun, err := s.Get(ctx, merged, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	// Out of band, at the same epoch: the PR merges while the incoming owner
+	// is between its read and its write.
+	if _, err := s.Terminal(ctx, merged, PhaseReviewRemediation, owner, begun.Epoch, "merged"); err != nil {
+		t.Fatalf("terminal: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	resurrected, err := scanOne(s.pool.QueryRow(ctx, handoffCompleteUpdateSQL,
+		steward.Type, steward.ID, StateActive, now,
+		merged.Kind, merged.ID, PhaseReviewRemediation, begun.Epoch,
+		"wf-steward", "", StateHandingOff))
+	if err == nil {
+		t.Fatalf("a merged entity was handed to %+v as live work", resurrected.Owner)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	after, err := s.Get(ctx, merged, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if after.State != StateTerminal {
+		t.Fatalf("record is %s, want it still terminal", after.State)
+	}
+
+	// 2. An actor the handoff no longer names must not complete it.
+	moved := pr(prefix, "handoff-complete-retargeted")
+	got2, err := s.Acquire(ctx, AcquireRequest{Entity: moved, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, moved, PhaseReviewRemediation, owner, got2.Epoch,
+		steward, "leaving"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	aimed, err := s.Get(ctx, moved, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	// Retargeted at the same epoch, which a retarget does not move.
+	if _, err := s.HandoffStart(ctx, moved, PhaseReviewRemediation, owner, aimed.Epoch,
+		shepherd, "redirected"); err != nil {
+		t.Fatalf("retarget: %v", err)
+	}
+	stolen, err := scanOne(s.pool.QueryRow(ctx, handoffCompleteUpdateSQL,
+		steward.Type, steward.ID, StateActive, now,
+		moved.Kind, moved.ID, PhaseReviewRemediation, aimed.Epoch,
+		"wf-steward", "", StateHandingOff))
+	if err == nil {
+		t.Fatalf("an actor the handoff no longer names completed it: %+v", stolen.Owner)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	// Through the API the caller is told which predicate failed.
+	if _, err := s.HandoffComplete(ctx, moved, PhaseReviewRemediation, steward); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("want ErrNotOwner for a retargeted handoff, got %v", err)
+	}
+
+	// 3. state is pinned SEPARATELY, and this is the only case that proves it.
+	//
+	// Every writer today keeps state = handing-off and a non-empty handoff_to
+	// in lockstep — handoffStartUpdateSQL sets both, finish, Recover and this
+	// statement clear both — so in case 1 above the handoff_to predicate alone
+	// already refuses the merged row, and removing `AND state = $11` leaves
+	// that test green. A predicate no test can turn red is not a guard.
+	//
+	// So the invariant is broken deliberately, with a raw write no code path
+	// performs, and the statement is asked to refuse the combination anyway.
+	// That is what the predicate is for: it does not defend against today's
+	// writers, it defends against tomorrow's forgetting to clear handoff_to.
+	desync := pr(prefix, "handoff-complete-desynced")
+	got3, err := s.Acquire(ctx, AcquireRequest{Entity: desync, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, desync, PhaseReviewRemediation, owner, got3.Epoch,
+		steward, "leaving"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	held, err := s.Get(ctx, desync, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE lifecycle_ownership SET state = $1
+		 WHERE entity_kind = $2 AND entity_id = $3 AND phase = $4`,
+		StateTerminal, desync.Kind, desync.ID, PhaseReviewRemediation); err != nil {
+		t.Fatalf("desync: %v", err)
+	}
+	if _, err := scanOne(s.pool.QueryRow(ctx, handoffCompleteUpdateSQL,
+		steward.Type, steward.ID, StateActive, now,
+		desync.Kind, desync.ID, PhaseReviewRemediation, held.Epoch,
+		"wf-steward", "", StateHandingOff)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a terminal row still naming a handoff target was completed: %v", err)
+	}
+
+	// Other direction: the named target still completes, and the completed row
+	// carries no release timestamp.
+	ok, err := scanOne(s.pool.QueryRow(ctx, handoffCompleteUpdateSQL,
+		shepherd.Type, shepherd.ID, StateActive, now,
+		moved.Kind, moved.ID, PhaseReviewRemediation, aimed.Epoch,
+		"wf-cron", "", StateHandingOff))
+	if err != nil {
+		t.Fatalf("the named target was refused: %v", err)
+	}
+	if ok.Owner != shepherd || ok.State != StateActive {
+		t.Fatalf("handoff did not complete: %+v", ok)
+	}
+	if ok.ReleasedAt != nil {
+		t.Fatalf("a completed handoff kept a release timestamp: %v", ok.ReleasedAt)
 	}
 }

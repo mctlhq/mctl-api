@@ -116,6 +116,7 @@ const reacquireRefreshSQL = `UPDATE lifecycle_ownership
 					       temporal_workflow_id = $3, updated_at = $4
 					 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7
 					   AND epoch = $8 AND owner_type = $9 AND owner_id = $10
+					   AND state = $11
 					 RETURNING ` + ownershipColumns
 
 // acquireUpsertSQL is the statement that makes exclusivity a property of the
@@ -297,6 +298,16 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 				// write in the package that was not.
 				//
 				// HandoffComplete moves owner and epoch without touching the
+				// state is pinned for the same reason progressUpdateSQL pins
+				// it: `seen` a dozen lines above is DERIVED from the state
+				// this branch read, so a different state would have produced a
+				// different value. A HandoffStart landing between the read and
+				// the write otherwise lets seen = now unfreeze a handing-off
+				// row — the identical sequence progressUpdateSQL cites. And a
+				// Terminal at the same epoch and owner moves neither, so
+				// without this a stray re-acquire writes to a record currentFor
+				// refuses every other write to.
+				//
 				// key, so it gets underneath: wf-1 reads its own handing-off
 				// row at epoch 4 with last_seen_at frozen at T0, stalls, the
 				// steward completes the handoff, and wf-1's UPDATE then lands
@@ -308,7 +319,8 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 
 					seen, version, workflowID, now,
 					req.Entity.Kind, req.Entity.ID, req.Phase,
-					existing.Epoch, existing.Owner.Type, existing.Owner.ID))
+					existing.Epoch, existing.Owner.Type, existing.Owner.ID,
+					existing.State))
 				if errors.Is(err, ErrNotFound) {
 					// Ownership moved between the read and the write. Re-read
 					// so the caller is told who holds it now rather than that
@@ -573,6 +585,43 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 	return out, nil
 }
 
+// handoffCompleteUpdateSQL is the last of the seven writes to get a predicate
+// over the decision it makes, and it makes two.
+//
+// The epoch alone guarded neither. Neither finish nor a HandoffStart retarget
+// moves the epoch, so both got underneath it:
+//
+//   - a Terminal committing between the read and the write let the incoming
+//     owner write state = active, owner = steward, epoch + 1 over a MERGED
+//     entity — and the old SET did not clear released_at, so the row also kept
+//     a release timestamp it had no business carrying;
+//   - a retarget let an actor the handoff no longer names complete it, which
+//     contradicts the check at the read directly.
+//
+// handoff_to is pinned against $1/$2 rather than new binds because those ARE
+// the incoming owner: the row must still name as its target the actor that is
+// about to become its owner.
+const handoffCompleteUpdateSQL = `UPDATE lifecycle_ownership
+			   SET owner_type = $1, owner_id = $2, epoch = epoch + 1, state = $3,
+			       acquired_at = $4, last_seen_at = $4, last_progress_at = $4,
+			       progress_evidence = 'handoff completed',
+			       -- The outgoing owner's Temporal workflow and policy grant
+			       -- are not the incoming one's. Leaving either would make the
+			       -- row explain the current owner with the previous owner's
+			       -- reasons.
+			       temporal_workflow_id = $9, policy_ref = $10,
+			       handoff_from_type = owner_type, handoff_from_id = owner_id,
+			       handoff_to_type = '', handoff_to_id = '',
+			       handoff_started_at = NULL,
+			       -- A completed handoff is a live record. Carrying a release
+			       -- timestamp into it would make the row describe itself as
+			       -- both owned and given up.
+			       released_at = NULL, released_reason = '', updated_at = $4
+			 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7 AND epoch = $8
+			   AND state = $11
+			   AND handoff_to_type = $1 AND handoff_to_id = $2
+			 RETURNING ` + ownershipColumns
+
 // HandoffComplete is called by the INCOMING owner. It bumps the epoch, which
 // is what fences the outgoing owner's executors: anything still holding the
 // previous epoch is rejected without consulting a clock.
@@ -616,24 +665,30 @@ func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase str
 			return fmt.Errorf("%w: handoff names %s/%s", ErrNotOwner,
 				current.HandoffTo.Type, current.HandoffTo.ID)
 		}
-		updated, err := scanOne(tx.QueryRow(ctx,
-			`UPDATE lifecycle_ownership
-			   SET owner_type = $1, owner_id = $2, epoch = epoch + 1, state = $3,
-			       acquired_at = $4, last_seen_at = $4, last_progress_at = $4,
-			       progress_evidence = 'handoff completed',
-			       -- The outgoing owner's Temporal workflow and policy grant
-			       -- are not the incoming one's. Leaving either would make the
-			       -- row explain the current owner with the previous owner's
-			       -- reasons.
-			       temporal_workflow_id = $9, policy_ref = $10,
-			       handoff_from_type = owner_type, handoff_from_id = owner_id,
-			       handoff_to_type = '', handoff_to_id = '',
-			       handoff_started_at = NULL, updated_at = $4
-			 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7 AND epoch = $8
-			 RETURNING `+ownershipColumns,
+		updated, err := scanOne(tx.QueryRow(ctx, handoffCompleteUpdateSQL,
 			incoming.Type, incoming.ID, StateActive, now,
 			entity.Kind, entity.ID, phase, current.Epoch,
-			cfg.temporalWorkflowID, cfg.policyRef))
+			cfg.temporalWorkflowID, cfg.policyRef, StateHandingOff))
+		if errors.Is(err, ErrNotFound) {
+			// Which of the three predicates failed decides what the caller is
+			// told, so re-read rather than guess. A retarget and a finished
+			// entity are different situations and only one of them is the
+			// caller's own problem.
+			latest, rerr := scanOne(tx.QueryRow(ctx,
+				`SELECT `+ownershipColumns+` FROM lifecycle_ownership
+				 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
+				entity.Kind, entity.ID, phase))
+			if rerr != nil {
+				return rerr
+			}
+			if latest.State == StateHandingOff && latest.Epoch == current.Epoch &&
+				(latest.HandoffTo == nil || *latest.HandoffTo != incoming) {
+				return fmt.Errorf("%w: the handoff was retargeted while completion "+
+					"was in flight", ErrNotOwner)
+			}
+			return raceLostOn(ctx, tx, entity, phase, current.Epoch,
+				StateHandingOff, "handoff completion")
+		}
 		if err != nil {
 			return fmt.Errorf("lifecycle: handoff complete: %w", err)
 		}
