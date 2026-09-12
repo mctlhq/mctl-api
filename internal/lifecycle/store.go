@@ -1320,6 +1320,28 @@ func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, new
 			if rerr != nil {
 				return rerr
 			}
+			// The idempotency question first, as finish, HandoffComplete and
+			// HandoffStart all now ask it on their own no-row paths. Recover
+			// is the last write that did not, and it misses for the same
+			// reason they do: recoverUpdateSQL pins last_seen_at AND the
+			// epoch, and a duplicate of this very call moves both. The
+			// re-read then sees epoch + 1 and answers ErrEpochMismatch about a
+			// takeover that landed exactly as asked.
+			//
+			// A duplicate is not exotic here either. Recover is called by the
+			// reconciler, whose tick is an Argo pod that can be retried, and by
+			// operators through the API — both of which produce the same
+			// request twice.
+			//
+			// Pinned to epoch + 1, like handoffAlreadyCompleted and for the
+			// same reason: exactly one generation could have been produced by
+			// this caller's own write, and a later unrelated takeover that
+			// happened to land on the same owner must not read as ours.
+			if latest.Epoch == current.Epoch+1 && latest.Owner == newOwner &&
+				latest.State == StateActive {
+				out = latest
+				return nil
+			}
 			switch {
 			case latest.State != StateActive && latest.State != StateHandingOff:
 				return fmt.Errorf("%w: it reached %s while recovery was in flight",

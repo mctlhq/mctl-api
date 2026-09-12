@@ -2971,3 +2971,210 @@ func TestAnOverlappingDuplicateHandoffStartSucceeds(t *testing.T) {
 		t.Fatalf("the duplicate appended %d handoff-started events, want 1", events)
 	}
 }
+
+// TestAnOverlappingDuplicateRecoverSucceeds is the last of the writes to get
+// the question 277842b established: on the statement's own no-row path, ask
+// whether the race was lost to THIS caller's own duplicate.
+//
+// Recover misses for the same reason finish and HandoffComplete did, and more
+// certainly: recoverUpdateSQL pins last_seen_at AND the epoch, and a duplicate
+// of this very call moves both. The re-read then answers ErrEpochMismatch
+// about a takeover that landed exactly as asked. A duplicate is ordinary here
+// — Recover is driven by the reconciler, whose tick is a retryable Argo pod,
+// and by operators through the API.
+func TestAnOverlappingDuplicateRecoverSucceeds(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "recover-duplicate")
+	crashed := devloop("wf-crashed")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: crashed})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	// Age it past the liveness bound, the only way to simulate a crash.
+	aged := time.Now().UTC().Add(-11 * time.Hour)
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE lifecycle_ownership SET last_seen_at = $1
+		 WHERE entity_kind = $2 AND entity_id = $3 AND phase = $4`,
+		aged, entity.Kind, entity.ID, PhaseReviewRemediation,
+	); err != nil {
+		t.Fatalf("age the row: %v", err)
+	}
+
+	// The duplicate that wins, through the production statement from a
+	// connection that takes no advisory lock, holding the row.
+	winner, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin winner: %v", err)
+	}
+	defer func() { _ = winner.Rollback(ctx) }()
+	if _, err := scanOne(winner.QueryRow(ctx, recoverUpdateSQL,
+		shepherd.Type, shepherd.ID, StateActive, time.Now().UTC(), "recovered: it died",
+		"", "",
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, aged)); err != nil {
+		t.Fatalf("winner recover: %v", err)
+	}
+
+	type result struct {
+		own *Ownership
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		own, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "it died")
+		done <- result{own, err}
+	}()
+	select {
+	case r := <-done:
+		t.Fatalf("the duplicate never blocked on the row lock: %+v %v", r.own, r.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := winner.Commit(ctx); err != nil {
+		t.Fatalf("commit winner: %v", err)
+	}
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("a Recover that lost the race to an identical overlapping "+
+				"Recover was told it failed: %v", r.err)
+		}
+		if r.own.Owner != shepherd || r.own.Epoch != got.Epoch+1 || r.own.State != StateActive {
+			t.Fatalf("the duplicate returned a different record: %+v", r.own)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the duplicate never returned after the winner committed")
+	}
+
+	// And the audit trail gains one takeover, not two.
+	var events int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM lifecycle_events
+		 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3 AND event = $4`,
+		entity.Kind, entity.ID, PhaseReviewRemediation, EventRecovered).Scan(&events); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if events != 0 {
+		t.Fatalf("the duplicate appended %d recovery events for a write it did not make", events)
+	}
+}
+
+// TestADuplicateRecoverAnswersOnlyForItsOwnWrite is the other direction, one
+// conjunct at a time. Both are load-bearing and neither is provable by the
+// success case: a takeover by SOMEBODY ELSE at the next epoch, and a LATER
+// takeover that happens to land on the same owner, are the two records the
+// caller's own write could not have produced.
+func TestADuplicateRecoverAnswersOnlyForItsOwnWrite(t *testing.T) {
+	aged := func(t *testing.T, s *Store, e EntityRef, at time.Time) {
+		t.Helper()
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE lifecycle_ownership SET last_seen_at = $1
+			 WHERE entity_kind = $2 AND entity_id = $3 AND phase = $4`,
+			at, e.Kind, e.ID, PhaseReviewRemediation,
+		); err != nil {
+			t.Fatalf("age the row: %v", err)
+		}
+	}
+
+	t.Run("a different owner took it", func(t *testing.T) {
+		s, prefix := newTestStore(t)
+		ctx := context.Background()
+		entity := pr(prefix, "recover-other-owner")
+		crashed := devloop("wf-crashed")
+		other := devloop("wf-other")
+
+		got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: crashed})
+		if err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		old := time.Now().UTC().Add(-11 * time.Hour)
+		aged(t, s, entity, old)
+
+		winner, err := s.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = winner.Rollback(ctx) }()
+		if _, err := scanOne(winner.QueryRow(ctx, recoverUpdateSQL,
+			other.Type, other.ID, StateActive, time.Now().UTC(), "recovered: mine",
+			"", "",
+			entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, old)); err != nil {
+			t.Fatalf("winner: %v", err)
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "it died")
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			t.Fatalf("never blocked: %v", err)
+		case <-time.After(300 * time.Millisecond):
+		}
+		if err := winner.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if err := <-done; err == nil {
+			t.Fatal("a takeover by somebody else was reported as this caller's own")
+		} else if !errors.Is(err, ErrEpochMismatch) {
+			t.Fatalf("want ErrEpochMismatch, got %v", err)
+		}
+	})
+
+	t.Run("a later takeover to the same owner", func(t *testing.T) {
+		s, prefix := newTestStore(t)
+		ctx := context.Background()
+		entity := pr(prefix, "recover-later")
+		crashed := devloop("wf-crashed")
+
+		got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: crashed})
+		if err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		old := time.Now().UTC().Add(-11 * time.Hour)
+		aged(t, s, entity, old)
+
+		// TWO takeovers inside one uncommitted transaction, so the stalled
+		// caller's own read is epoch 1 while the row lands at epoch 3 — one
+		// past the only generation its own write could have produced.
+		winner, err := s.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = winner.Rollback(ctx) }()
+		first, err := scanOne(winner.QueryRow(ctx, recoverUpdateSQL,
+			shepherd.Type, shepherd.ID, StateActive, time.Now().UTC(), "recovered: one",
+			"", "",
+			entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, old))
+		if err != nil {
+			t.Fatalf("winner one: %v", err)
+		}
+		if _, err := scanOne(winner.QueryRow(ctx, recoverUpdateSQL,
+			shepherd.Type, shepherd.ID, StateActive, time.Now().UTC(), "recovered: two",
+			"", "",
+			entity.Kind, entity.ID, PhaseReviewRemediation, first.Epoch, first.LastSeenAt)); err != nil {
+			t.Fatalf("winner two: %v", err)
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "it died")
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			t.Fatalf("never blocked: %v", err)
+		case <-time.After(300 * time.Millisecond):
+		}
+		if err := winner.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if err := <-done; err == nil {
+			t.Fatal("a later unrelated takeover was reported as this caller's own")
+		} else if !errors.Is(err, ErrEpochMismatch) {
+			t.Fatalf("want ErrEpochMismatch, got %v", err)
+		}
+	})
+}
