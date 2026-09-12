@@ -149,6 +149,12 @@ func TestIsLoopbackURL(t *testing.T) {
 		{"http://127.0.0.1:8080", true},
 		{"http://127.0.0.53", true},
 		{"http://[::1]:8080", true},
+		// Port-less IPv6 literals: url.Parse keeps the brackets in Host, so a
+		// hand-rolled SplitHostPort leaves "[::1]" and net.ParseIP returns nil.
+		{"http://[::1]", true},
+		{"http://[::1]/mcp", true},
+		{"http://[::ffff:127.0.0.1]", true},
+		{"http://[::1]:8080/mcp", true},
 		{"https://api.mctl.ai", false},
 		{"https://mcp.mctl.ai/mcp", false},
 		{"", false},

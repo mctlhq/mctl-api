@@ -73,16 +73,20 @@ func NewInProcessServer(port, publicURL string) *Server {
 
 // isLoopbackURL reports whether raw parses to a loopback host: "localhost"
 // (case-insensitive) or any IP for which net.ParseIP(host).IsLoopback() is
-// true (127.0.0.0/8, ::1). Unparseable input is treated as non-loopback.
+// true (127.0.0.0/8, ::1, and IPv4-mapped forms such as ::ffff:127.0.0.1).
+// Unparseable input is treated as non-loopback.
 func isLoopbackURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return false
 	}
-	host := u.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
+	// Hostname() strips the port and the brackets around an IPv6 literal.
+	// Splitting by hand instead misses the port-less IPv6 form, which is the
+	// case that matters here: net.SplitHostPort("[::1]") returns an error, so
+	// the brackets survive, and net.ParseIP("[::1]") is nil -- a loopback URL
+	// would then read as public, which is exactly what this guard exists to
+	// prevent.
+	host := u.Hostname()
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
