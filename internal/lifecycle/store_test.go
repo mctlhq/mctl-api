@@ -2195,3 +2195,96 @@ func TestRaceLostOnNamesWhichPredicateFailed(t *testing.T) {
 		t.Fatalf("want ErrNotFound for a deleted row, got %v", err)
 	}
 }
+
+// TestFinishIsIdempotentForTheCallerThatAlreadyFinished pins the last
+// asymmetry in the package: a successful write reporting failure on retry.
+//
+// currentFor refuses an absorbing record, which is right for a stray
+// transition and wrong for the caller's own repeat — and the repeat is the
+// shape HandoffComplete's idempotent branch names as its reason for existing.
+// A dropped HTTP response makes a Temporal activity or an Argo pod send the
+// identical call again, and the answer was "the caller tried to progress, hand
+// off or release a record whose owner is somebody else" about a record the
+// caller holds and has already finished.
+func TestFinishIsIdempotentForTheCallerThatAlreadyFinished(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	owner := devloop("wf-1")
+
+	for _, tc := range []struct {
+		name  string
+		call  func(e EntityRef, epoch int) (*Ownership, error)
+		state string
+		event string
+	}{
+		{"terminal", func(e EntityRef, epoch int) (*Ownership, error) {
+			return s.Terminal(ctx, e, PhaseReviewRemediation, owner, epoch, "merged")
+		}, StateTerminal, EventOwnerTerminal},
+		{"release", func(e EntityRef, epoch int) (*Ownership, error) {
+			return s.Release(ctx, e, PhaseReviewRemediation, owner, epoch, "done")
+		}, StateReleased, EventOwnerReleased},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entity := pr(prefix, "finish-idempotent-"+tc.name)
+			got, err := s.Acquire(ctx, AcquireRequest{
+				Entity: entity, Phase: PhaseReviewRemediation, Owner: owner,
+			})
+			if err != nil {
+				t.Fatalf("acquire: %v", err)
+			}
+			first, err := tc.call(entity, got.Epoch)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+
+			// The retry: identical arguments, as Temporal would send them.
+			again, err := tc.call(entity, got.Epoch)
+			if err != nil {
+				t.Fatalf("a retried %s failed on work that had already succeeded: %v", tc.name, err)
+			}
+			if again.State != tc.state || again.Owner != owner || again.Epoch != got.Epoch {
+				t.Fatalf("the retry returned a different record: %+v", again)
+			}
+			if !again.ReleasedAt.Equal(*first.ReleasedAt) {
+				t.Fatalf("the retry rewrote the completion time: %s -> %s",
+					*first.ReleasedAt, *again.ReleasedAt)
+			}
+
+			// And it is a no-op on the audit trail — an append-only table with
+			// no retention must not gain a row per retry.
+			var events int
+			if err := s.pool.QueryRow(ctx,
+				`SELECT count(*) FROM lifecycle_events
+				 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3 AND event = $4`,
+				entity.Kind, entity.ID, PhaseReviewRemediation, tc.event).Scan(&events); err != nil {
+				t.Fatalf("count events: %v", err)
+			}
+			if events != 1 {
+				t.Fatalf("a retried %s wrote %d events, want 1", tc.name, events)
+			}
+		})
+	}
+
+	// The other direction, and the property this must not weaken: a DIFFERENT
+	// absorbing transition is still refused, because `state` is in the guard.
+	entity := pr(prefix, "finish-idempotent-cross")
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.Terminal(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, "merged"); err != nil {
+		t.Fatalf("terminal: %v", err)
+	}
+	if _, err := s.Release(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, "stray"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("a merged entity was downgraded to released: %v", err)
+	}
+
+	// And somebody else's retry is not the caller's: same state, wrong owner.
+	if _, err := s.Terminal(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "merged"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("another actor was handed this caller's completed write: %v", err)
+	}
+	// Same state and owner, wrong epoch.
+	if _, err := s.Terminal(ctx, entity, PhaseReviewRemediation, owner, got.Epoch+1, "merged"); err == nil {
+		t.Fatalf("a stale epoch was treated as this caller's completed write")
+	}
+}

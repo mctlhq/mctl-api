@@ -759,6 +759,42 @@ func (s *Store) finish(ctx context.Context, entity EntityRef, phase string, owne
 	var out *Ownership
 	err := s.inTx(ctx, entity, phase, func(tx pgx.Tx) error {
 		now := time.Now().UTC()
+		// Already in the state this call would produce, at this caller's own
+		// owner and epoch: answer success rather than ErrNotOwner.
+		//
+		// currentFor refuses an absorbing record, which is right for a stray
+		// transition and wrong for the caller's own retry — and the retry is
+		// the shape HandoffComplete's idempotent branch cites as its reason for
+		// existing: a dropped HTTP response makes a Temporal activity or an
+		// Argo pod repeat the identical call. Without this, Terminal commits,
+		// the response is lost, the retry answers "the caller tried to ... a
+		// record whose owner is somebody else" — about a record the caller
+		// holds and has already finished — and an activity whose work
+		// succeeded fails at the final step of the phase.
+		//
+		// This was the last asymmetry in the package. Acquire is idempotent for
+		// the caller that already won, HandoffStart is a no-op on a
+		// re-announcement, HandoffComplete returns the record it already wrote,
+		// and a re-acquire that raced its own Release is told to retry rather
+		// than to stand down.
+		//
+		// `state` is in the comparison, so it does NOT weaken the absorbing
+		// rule: Terminal then RELEASE asks for a different state, falls through
+		// to currentFor, and is refused exactly as TestTerminalIsAbsorbing
+		// pins. Owner and epoch are in it for the same reason they are in every
+		// other guard here — this answers for the caller's own completed write,
+		// nobody else's.
+		done, err := scanOne(tx.QueryRow(ctx,
+			`SELECT `+ownershipColumns+` FROM lifecycle_ownership
+			 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
+			entity.Kind, entity.ID, phase))
+		if err != nil {
+			return err
+		}
+		if done.State == state && done.Owner == owner && done.Epoch == epoch {
+			out = done
+			return nil
+		}
 		if _, err := s.currentFor(ctx, tx, entity, phase, owner, epoch); err != nil {
 			return err
 		}
