@@ -19,8 +19,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -34,21 +37,88 @@ import (
 
 // Server is the MCP server that exposes platform operations as AI tools.
 type Server struct {
-	apiURL     string
+	apiURL     string // upstream base for REST calls; loopback in-process, by design
+	publicURL  string // caller-facing base URL shown to users; never loopback
 	apiToken   string
 	httpClient *http.Client
 	mcpServer  *server.MCPServer
 }
 
-// NewServer creates a new MCP server.
+// NewServer creates a new MCP server. publicURL defaults to the trimmed
+// apiURL, which is correct for the standalone stdio binary (cmd/mcp/main.go),
+// where apiURL already is the caller-facing address (e.g. https://api.mctl.ai).
+// The in-process server embedded by cmd/api should use NewInProcessServer
+// instead, since there apiURL is a loopback address with a different meaning.
 func NewServer(apiURL, apiToken string) *Server {
+	trimmed := strings.TrimRight(apiURL, "/")
 	return &Server{
-		apiURL:   strings.TrimRight(apiURL, "/"),
-		apiToken: apiToken,
+		apiURL:    trimmed,
+		publicURL: trimmed,
+		apiToken:  apiToken,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// NewInProcessServer builds the Server that cmd/api embeds: REST calls go back
+// over loopback (avoids hairpin routing and public egress issues), while
+// user-facing text names the deployment's public base URL — the OAuth issuer
+// the caller authenticated against (auth.OAuthServer.BaseURL / SELF_URL).
+func NewInProcessServer(port, publicURL string) *Server {
+	s := NewServer("http://localhost:"+port, "")
+	s.publicURL = strings.TrimRight(publicURL, "/")
+	return s
+}
+
+// isLoopbackURL reports whether raw parses to a loopback host: "localhost"
+// (case-insensitive) or any IP for which net.ParseIP(host).IsLoopback() is
+// true (127.0.0.0/8, ::1). Unparseable input is treated as non-loopback.
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := u.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
+
+// displayURL returns the caller-facing base URL to show to users, or "" when
+// no trustworthy public URL is configured (empty or loopback).
+func (s *Server) displayURL() string {
+	if s.publicURL == "" || isLoopbackURL(s.publicURL) {
+		return ""
+	}
+	return s.publicURL
+}
+
+// loopbackFragmentPattern matches a loopback host, with an optional port,
+// that can surface in a transport error's text independently of the upstream
+// URL string itself: Go's dialer sometimes reports the resolved address (e.g.
+// "dial tcp [::1]:8080: ...") even when the URL said "localhost", so a plain
+// substring replace of the configured upstream URL is not always enough to
+// fully redact a loopback failure.
+var loopbackFragmentPattern = regexp.MustCompile(`(?i)(\[::1\]|127(?:\.\d{1,3}){3}|\blocalhost\b)(:\d+)?`)
+
+// redactUpstream strips the internal upstream base URL (and any loopback
+// address fragment that might otherwise leak through, e.g. from a dial error)
+// from an error message rendered to a caller. The full error is still
+// available to operators via server-side slog logging at the call site.
+func (s *Server) redactUpstream(err error) string {
+	if s.apiURL == "" {
+		return err.Error()
+	}
+	msg := strings.ReplaceAll(err.Error(), s.apiURL, "the mctl API")
+	return loopbackFragmentPattern.ReplaceAllString(msg, "the mctl API")
 }
 
 // NewStreamableHTTPHandler returns an HTTP handler that serves the MCP Streamable HTTP transport.
@@ -198,7 +268,8 @@ To switch accounts, disconnect and reconnect the mctl connector in your client s
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		body, err := s.apiGet(ctx, "/api/v1/whoami")
 		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get identity: %v", err)), nil
+			slog.Error("whoami upstream call failed", "error", err)
+			return mcplib.NewToolResultError("Failed to get identity: " + s.redactUpstream(err)), nil
 		}
 
 		var identity struct {
@@ -209,8 +280,11 @@ To switch accounts, disconnect and reconnect the mctl connector in your client s
 		}
 		_ = json.Unmarshal(body, &identity)
 
-		msg := fmt.Sprintf("Authenticated to %s\n\nUser: %s\nAdmin: %v\nTeams: %v\nAccessible namespaces: %v",
-			s.apiURL, identity.ID, identity.IsAdmin, identity.Groups, identity.Namespaces)
+		msg := fmt.Sprintf("User: %s\nAdmin: %v\nTeams: %v\nAccessible namespaces: %v",
+			identity.ID, identity.IsAdmin, identity.Groups, identity.Namespaces)
+		if u := s.displayURL(); u != "" {
+			msg = "Authenticated to " + u + "\n\n" + msg
+		}
 		return mcplib.NewToolResultText(msg), nil
 	}
 
