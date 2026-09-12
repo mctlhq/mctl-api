@@ -103,11 +103,18 @@ func writeLifecycleError(w http.ResponseWriter, err error, current *lifecycle.Ow
 		// 409 with the winner in the body: the loser must learn WHO won, not
 		// merely that it lost, or it cannot distinguish a healthy owner from
 		// a stale one it should escalate.
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":         "entity phase is owned by another actor",
-			"current_owner": ownerOrNil(current),
-			"ownership":     ownershipOrNil(current),
-		})
+		// The keys are OMITTED when the record is unknown, never sent as
+		// null. Every caller but Acquire passes nil here, and
+		// `"current_owner": null` in a conflict body reads as "contended, but
+		// nobody holds it" — which is the single most dangerous wrong answer
+		// this API can give, and the thing the nil-store rule exists to stop.
+		// Absent means "not told"; null would mean "told: nobody".
+		conflict := map[string]any{"error": "entity phase is owned by another actor"}
+		if current != nil {
+			conflict["current_owner"] = current.Owner
+			conflict["ownership"] = newOwnershipResponse(current)
+		}
+		writeJSON(w, http.StatusConflict, conflict)
 	case errors.Is(err, lifecycle.ErrEpochMismatch):
 		// 412, not 409: the caller's precondition failed. Ownership moved
 		// underneath it, which is a different instruction — re-read, do not
@@ -145,24 +152,6 @@ func writeLifecycleError(w http.ResponseWriter, err error, current *lifecycle.Ow
 	}
 }
 
-func ownerOrNil(o *lifecycle.Ownership) any {
-	if o == nil {
-		return nil
-	}
-	return o.Owner
-}
-
-func ownershipOrNil(o *lifecycle.Ownership) any {
-	if o == nil {
-		return nil
-	}
-	return newOwnershipResponse(o)
-}
-
-// --- reads -------------------------------------------------------------
-
-// GetLifecycleOwnership handles GET /api/v1/lifecycle/ownership — one record
-// when kind+id+phase are given, otherwise a filtered list.
 func (h *Handlers) GetLifecycleOwnership(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
 		return
@@ -304,7 +293,15 @@ func (b lifecycleWriteRequest) owner() lifecycle.Owner {
 	return lifecycle.Owner{Type: b.OwnerType, ID: b.OwnerID}
 }
 
+// The cap every other POST family in this package applies, in the one helper
+// all seven writers share. `evidence` and `reason` go straight into Postgres
+// text columns with no length of their own, and at 120 writes/min per
+// principal an unbounded body is a cheap way to push large rows into an
+// append-only event trail that has no retention.
+const lifecycleMaxBodyBytes = 64 * 1024
+
 func decodeLifecycleWrite(w http.ResponseWriter, r *http.Request) (lifecycleWriteRequest, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, lifecycleMaxBodyBytes)
 	var body lifecycleWriteRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"os"
 	"strings"
 	"testing"
@@ -120,6 +121,15 @@ func TestLifecycleHandlers_NilStoreIs503NotEmpty(t *testing.T) {
 		"events":  h.ListLifecycleEvents,
 		"acquire": h.AcquireLifecycleOwnership,
 		"release": h.ReleaseLifecycleOwnership,
+		// The four that mutate ownership and were absent, on the test whose
+		// own comment calls it the one that matters most: a handler that
+		// forgets the nil-store check would have slipped through on exactly
+		// the paths where "no record" is acted on.
+		"progress":         h.RecordLifecycleProgress,
+		"terminal":         h.TerminateLifecycleOwnership,
+		"handoff/start":    h.StartLifecycleHandoff,
+		"handoff/complete": h.CompleteLifecycleHandoff,
+		"recover":          h.RecoverLifecycleOwnership,
 	} {
 		req := adminCtx(httptest.NewRequest("GET", "/api/v1/lifecycle/ownership?kind=pull-request&id=x&phase=review-remediation", nil))
 		rec := httptest.NewRecorder()
@@ -415,5 +425,150 @@ func TestLifecycleRoutesAreRegistered(t *testing.T) {
 		if !found[want] {
 			t.Errorf("route not registered: %s", want)
 		}
+	}
+}
+
+// TestLifecycleHandlers_ReleasingSomeoneElsesRowIs409 pins the boundary rule
+// the PR description leads with, and the one sentinel mapping the status-code
+// test did not cover: a caller may only release or progress a row whose owner
+// is its own identity.
+func TestLifecycleHandlers_ReleasingSomeoneElsesRowIs409(t *testing.T) {
+	store, prefix := newTestLifecycleStore(t)
+	h := &Handlers{opts: Options{Lifecycle: store}}
+	id := prefix + "-not-owner"
+	mine := map[string]any{
+		"kind": "pull-request", "id": id, "phase": "review-remediation",
+		"owner_type": "devloop-workflow", "owner_id": "wf-1",
+	}
+	if rec := lifecyclePost(t, h, h.AcquireLifecycleOwnership, mine); rec.Code != http.StatusOK {
+		t.Fatalf("acquire: %d %s", rec.Code, rec.Body)
+	}
+
+	theirs := map[string]any{
+		"kind": "pull-request", "id": id, "phase": "review-remediation",
+		"owner_type": "pr-steward", "owner_id": "steward",
+		"epoch": 1, "reason": "not mine to give up",
+	}
+	for name, fn := range map[string]http.HandlerFunc{
+		"release":  h.ReleaseLifecycleOwnership,
+		"terminal": h.TerminateLifecycleOwnership,
+		"progress": h.RecordLifecycleProgress,
+	} {
+		body := map[string]any{}
+		for k, v := range theirs {
+			body[k] = v
+		}
+		body["evidence"] = "pushed something"
+		rec := lifecyclePost(t, h, fn, body)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%s of somebody else's row: want 409, got %d %s", name, rec.Code, rec.Body)
+		}
+		// These paths answer ErrNotOwner, not ErrOwnedByOther — the conflict
+		// body is checked directly below, because no handler can produce the
+		// nil-current case through the API today.
+	}
+}
+
+// TestLifecycleHandlers_BatchCapIsEnforced pins the read-side limit, which had
+// no test — so a caller could ask for an unbounded fan-out.
+func TestLifecycleHandlers_BatchCapIsEnforced(t *testing.T) {
+	store, _ := newTestLifecycleStore(t)
+	h := &Handlers{opts: Options{Lifecycle: store}}
+
+	// Repeated `id=`, which is what the handler reads — a comma-separated
+	// `ids=` parses to zero ids and answers an empty 200, which is how the
+	// first version of this test passed against the cap it meant to exercise.
+	url := func(n int) string {
+		q := make([]string, 0, n+2)
+		q = append(q, "kind=pull-request", "phase=review-remediation")
+		for i := range n {
+			q = append(q, "id="+neturl.QueryEscape(fmt.Sprintf("mctlhq/x#%d", i)))
+		}
+		return "/api/v1/lifecycle/ownership/batch?" + strings.Join(q, "&")
+	}
+
+	rec := httptest.NewRecorder()
+	h.BatchGetLifecycleOwnership(rec, adminCtx(httptest.NewRequest("GET", url(501), nil)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("over the batch cap: want 400, got %d %s", rec.Code, rec.Body)
+	}
+
+	// The other direction: at the cap it must still answer, or the limit is a
+	// different number than the one the error names.
+	rec = httptest.NewRecorder()
+	h.BatchGetLifecycleOwnership(rec, adminCtx(httptest.NewRequest("GET", url(500), nil)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("at the batch cap: want 200, got %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestLifecycleConflictBodyOmitsAnUnknownOwner drives writeLifecycleError
+// directly, because no handler reaches this shape today: only Acquire returns
+// ErrOwnedByOther, and it always has the winner to hand. The nil case is one
+// store refactor away from being live, and `"current_owner": null` in a
+// conflict body reads as "contended, but nobody holds it" — the single answer
+// this API most needs never to give. Absent means "not told"; null would mean
+// "told: nobody".
+func TestLifecycleConflictBodyOmitsAnUnknownOwner(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeLifecycleError(rec, lifecycle.ErrOwnedByOther, nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := body["current_owner"]; present {
+		t.Fatalf("an unknown owner was reported as a key: %s", rec.Body)
+	}
+	if _, present := body["ownership"]; present {
+		t.Fatalf("an unknown record was reported as a key: %s", rec.Body)
+	}
+
+	// The other direction: when the winner IS known it must be reported, or
+	// the loser cannot tell a healthy owner from a stale one to escalate.
+	rec = httptest.NewRecorder()
+	writeLifecycleError(rec, lifecycle.ErrOwnedByOther, &lifecycle.Ownership{
+		Owner: lifecycle.Owner{Type: "pr-steward", ID: "cron"},
+		Epoch: 4, State: lifecycle.StateActive,
+	})
+	body = map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	owner, _ := body["current_owner"].(map[string]any)
+	if owner["id"] != "cron" {
+		t.Fatalf("the winner was not reported: %s", rec.Body)
+	}
+}
+
+// TestLifecycleWriteBodyIsCapped pins the limit every other POST family here
+// applies. `evidence` and `reason` go straight into Postgres text columns with
+// no length of their own, and at 120 writes/min an unbounded body is a cheap
+// way to push large rows into an append-only trail with no retention.
+func TestLifecycleWriteBodyIsCapped(t *testing.T) {
+	store, prefix := newTestLifecycleStore(t)
+	h := &Handlers{opts: Options{Lifecycle: store}}
+
+	huge := map[string]any{
+		"kind": "pull-request", "id": prefix + "-huge", "phase": "review-remediation",
+		"owner_type": "devloop-workflow", "owner_id": "wf-1",
+		"reason": strings.Repeat("x", lifecycleMaxBodyBytes+1),
+	}
+	rec := lifecyclePost(t, h, h.AcquireLifecycleOwnership, huge)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("an oversized body: want 400, got %d %s", rec.Code, rec.Body)
+	}
+
+	// The other direction: a body just under the cap must still be accepted,
+	// or the limit is smaller than it says and ordinary evidence is refused.
+	ok := map[string]any{
+		"kind": "pull-request", "id": prefix + "-ok", "phase": "review-remediation",
+		"owner_type": "devloop-workflow", "owner_id": "wf-1",
+		"reason": strings.Repeat("x", 1024),
+	}
+	if rec := lifecyclePost(t, h, h.AcquireLifecycleOwnership, ok); rec.Code != http.StatusOK {
+		t.Fatalf("a body under the cap: want 200, got %d %s", rec.Code, rec.Body)
 	}
 }
