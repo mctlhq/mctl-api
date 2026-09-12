@@ -1517,3 +1517,215 @@ func TestReannouncingAHandoffWritesNoDuplicateEvent(t *testing.T) {
 		t.Fatalf("a polled handoff wrote %d handoff-started events", started)
 	}
 }
+
+// TestProgressUpdateRefusesTheStateItDidNotRead pins the state predicate on
+// progressUpdateSQL, in both directions.
+//
+// RecordProgress derives the liveness freeze from the state it read: an active
+// row moves last_seen_at, a handing-off one must not. With only the epoch in
+// the WHERE, a HandoffStart landing between the read and the write let the
+// freeze be defeated by the write it was meant to stop — the row is now
+// handing-off, but the UPDATE still carries the seen = now computed from the
+// stale active read. Pinning the exact state read makes the derivation part of
+// the compare-and-set.
+//
+// Driven through the statement rather than the API because inTx holds the
+// advisory lock across the read and the write, so nothing can interleave
+// in-process and the predicate is unobservable through RecordProgress.
+func TestProgressUpdateRefusesTheStateItDidNotRead(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "progress-state-sql")
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	// Out of band, at the SAME epoch: the row starts handing off after a
+	// caller has already read it as active.
+	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, owner, got.Epoch,
+		shepherd, "leaving"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	frozen, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	now := time.Now().UTC().Add(time.Hour)
+	// The write a caller that read `active` would issue: seen = now, which is
+	// exactly the refresh the handing-off freeze exists to prevent.
+	revived, err := scanOne(s.pool.QueryRow(ctx, progressUpdateSQL,
+		now, now, "pushed a commit", "sha-b",
+		entity.Kind, entity.ID, PhaseReviewRemediation, frozen.Epoch, StateActive))
+	if err == nil {
+		t.Fatalf("a stale active read refreshed a handing-off row to last_seen_at %s", revived.LastSeenAt)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound (no row matched the WHERE), got %v", err)
+	}
+	// The damage the predicate prevents, checked directly: liveness is still
+	// frozen, so the abandoned handoff still reaches its bound.
+	after, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if !after.LastSeenAt.Equal(frozen.LastSeenAt) {
+		t.Fatalf("liveness moved from %s to %s despite the refused write",
+			frozen.LastSeenAt, after.LastSeenAt)
+	}
+
+	// The other direction: the predicate is not merely always false. The same
+	// statement with the state the row actually has matches and writes.
+	ok, err := scanOne(s.pool.QueryRow(ctx, progressUpdateSQL,
+		now, frozen.LastSeenAt, "pushed a commit", "sha-b",
+		entity.Kind, entity.ID, PhaseReviewRemediation, frozen.Epoch, StateHandingOff))
+	if err != nil {
+		t.Fatalf("the statement refused the state the row really has: %v", err)
+	}
+	if !ok.LastProgressAt.Equal(now) {
+		t.Fatalf("progress was not recorded: %s", ok.LastProgressAt)
+	}
+}
+
+// TestHandoffStartUpdateRefusesTheStateItDidNotRead pins the same predicate on
+// handoffStartUpdateSQL.
+//
+// HandoffStart derives TWO values from the state it read — the liveness freeze
+// and whether the handoff clock restarts. A caller that read `active` computes
+// started = now and seen = now; if the row became handing-off underneath it,
+// landing that write restarts the clock of a handoff already in progress and
+// unfreezes the outgoing owner, which together make an abandoned handoff
+// unrecoverable — the precise failure the freeze was added for.
+func TestHandoffStartUpdateRefusesTheStateItDidNotRead(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "handoff-state-sql")
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, owner, got.Epoch,
+		shepherd, "leaving"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	begun, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if begun.HandoffStartedAt == nil {
+		t.Fatalf("handoff clock was never started")
+	}
+
+	now := time.Now().UTC().Add(time.Hour)
+	restarted, err := scanOne(s.pool.QueryRow(ctx, handoffStartUpdateSQL,
+		StateHandingOff, shepherd.Type, shepherd.ID, now, now, now,
+		entity.Kind, entity.ID, PhaseReviewRemediation, begun.Epoch, StateActive))
+	if err == nil {
+		t.Fatalf("a stale active read restarted the handoff clock to %v", restarted.HandoffStartedAt)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	after, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if !after.HandoffStartedAt.Equal(*begun.HandoffStartedAt) {
+		t.Fatalf("handoff clock restarted from %s to %s despite the refused write",
+			*begun.HandoffStartedAt, *after.HandoffStartedAt)
+	}
+	if !after.LastSeenAt.Equal(begun.LastSeenAt) {
+		t.Fatalf("liveness moved from %s to %s despite the refused write",
+			begun.LastSeenAt, after.LastSeenAt)
+	}
+
+	// Other direction: with the state the row really has, the same statement
+	// lands — this is the legitimate retarget path.
+	other := Owner{Type: OwnerPRSteward, ID: "steward-1"}
+	ok, err := scanOne(s.pool.QueryRow(ctx, handoffStartUpdateSQL,
+		StateHandingOff, other.Type, other.ID, now, begun.LastSeenAt, now,
+		entity.Kind, entity.ID, PhaseReviewRemediation, begun.Epoch, StateHandingOff))
+	if err != nil {
+		t.Fatalf("the statement refused the state the row really has: %v", err)
+	}
+	if ok.HandoffTo == nil || *ok.HandoffTo != other {
+		t.Fatalf("retarget did not land: %+v", ok.HandoffTo)
+	}
+}
+
+// TestFinishUpdateRefusesAnAbsorbingRecord pins the class predicate on
+// finishUpdateSQL.
+//
+// finish is the one write that changes state while touching neither the epoch
+// nor last_seen_at, so it is invisible to every other writer's guard — and it
+// was also the one with no state guard of its own. Terminal followed by a
+// stray retried Release at the same epoch therefore downgraded a finished
+// entity back to released, where a reconciler picks it up again.
+//
+// It pins the CLASS, not an exact state: a concurrent HandoffStart is a
+// legitimate thing to release on top of, and pinning `active` would make that
+// fail spuriously.
+func TestFinishUpdateRefusesAnAbsorbingRecord(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "finish-state-sql")
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.Terminal(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, "merged"); err != nil {
+		t.Fatalf("terminal: %v", err)
+	}
+	done, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	now := time.Now().UTC()
+	downgraded, err := scanOne(s.pool.QueryRow(ctx, finishUpdateSQL,
+		StateReleased, now, "stray retry",
+		entity.Kind, entity.ID, PhaseReviewRemediation, done.Epoch))
+	if err == nil {
+		t.Fatalf("a merged entity was downgraded to %s and is claimable again", downgraded.State)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	after, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if after.State != StateTerminal {
+		t.Fatalf("record is %s, want it still terminal", after.State)
+	}
+
+	// Other direction, on both members of the class the predicate admits.
+	for _, state := range []string{StateActive, StateHandingOff} {
+		live := pr(prefix, "finish-ok-"+state)
+		fresh, err := s.Acquire(ctx, AcquireRequest{Entity: live, Phase: PhaseReviewRemediation, Owner: owner})
+		if err != nil {
+			t.Fatalf("acquire %s: %v", state, err)
+		}
+		if state == StateHandingOff {
+			if _, err := s.HandoffStart(ctx, live, PhaseReviewRemediation, owner, fresh.Epoch,
+				shepherd, "leaving"); err != nil {
+				t.Fatalf("handoff start: %v", err)
+			}
+		}
+		ok, err := scanOne(s.pool.QueryRow(ctx, finishUpdateSQL,
+			StateReleased, now, "done",
+			live.Kind, live.ID, PhaseReviewRemediation, fresh.Epoch))
+		if err != nil {
+			t.Fatalf("the statement refused a %s record: %v", state, err)
+		}
+		if ok.State != StateReleased {
+			t.Fatalf("release from %s did not land: %s", state, ok.State)
+		}
+	}
+}

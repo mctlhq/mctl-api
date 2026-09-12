@@ -315,6 +315,16 @@ var (
 	// one — ownership moved underneath it.
 	ErrEpochMismatch = errors.New("lifecycle: owner epoch is stale")
 
+	// ErrStaleRead means the caller still owns the record at the right epoch,
+	// but its state changed between the read the caller's decision was made
+	// from and the write that decision produced.
+	//
+	// It is distinct from ErrEpochMismatch on purpose. Ownership has NOT
+	// moved — retrying is the right response, and the retry will read the new
+	// state and decide again. An epoch mismatch means the opposite: the
+	// caller has lost the record and must stop.
+	ErrStaleRead = errors.New("lifecycle: the record changed after it was read")
+
 	// ErrNotFound means no ownership record exists for this (entity, phase).
 	ErrNotFound = errors.New("lifecycle: ownership not found")
 

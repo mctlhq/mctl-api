@@ -387,6 +387,41 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 	return out, err
 }
 
+// Why these three statements pin state in the WHERE, and what each pins.
+//
+// recoverUpdateSQL learned this first: an UPDATE guarded only by the epoch is
+// not a compare-and-set over the decision the operation actually made. finish
+// changes state while touching neither epoch nor last_seen_at, so it is
+// invisible to every other writer's guard — which means a Terminal committing
+// between a read and a write slipped past all three of the statements below.
+//
+// The predicate differs by what the statement DERIVED from the state it read:
+//
+//   - RecordProgress and HandoffStart each compute a value from current.State
+//     (the liveness freeze, and the handoff clock). They pin the EXACT state
+//     they read, because a different state would have produced a different
+//     value. Pinning the class would let HandoffStart land between
+//     RecordProgress's read and its write and reintroduce the freeze hole.
+//   - finish derives nothing from state; it only needs currentFor's assertion
+//     that the record is not yet absorbing to still hold at write time. It
+//     pins the CLASS, so a legitimate concurrent HandoffStart does not make a
+//     Release fail spuriously.
+//
+// Package-level constants rather than inline literals for the same reason
+// recoverUpdateSQL is one: inTx holds the advisory lock across the read and
+// the write, so nothing can interleave in-process and the predicate is
+// unobservable through the API. Testing the statement directly is the only
+// way to show it is load-bearing rather than decorative — and the comments at
+// :233-235 and :240-243 claim correctness survives the lock being removed,
+// which is a claim every write has to honour, not four of seven.
+
+const progressUpdateSQL = `UPDATE lifecycle_ownership
+			   SET last_progress_at = $1, last_seen_at = $2, progress_evidence = $3,
+			       entity_version = $4, updated_at = $1
+			 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7 AND epoch = $8
+			   AND state = $9
+			 RETURNING ` + ownershipColumns
+
 // RecordProgress advances last_progress_at, and only the current owner at the
 // current epoch may call it.
 //
@@ -422,13 +457,12 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 		if current.State == StateHandingOff {
 			seen = current.LastSeenAt
 		}
-		updated, err := scanOne(tx.QueryRow(ctx,
-			`UPDATE lifecycle_ownership
-			   SET last_progress_at = $1, last_seen_at = $2, progress_evidence = $3,
-			       entity_version = $4, updated_at = $1
-			 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7 AND epoch = $8
-			 RETURNING `+ownershipColumns,
-			now, seen, evidence, version, entity.Kind, entity.ID, phase, epoch))
+		updated, err := scanOne(tx.QueryRow(ctx, progressUpdateSQL,
+			now, seen, evidence, version,
+			entity.Kind, entity.ID, phase, epoch, current.State))
+		if errors.Is(err, ErrNotFound) {
+			return raceLostOn(ctx, tx, entity, phase, epoch, current.State, "progress")
+		}
 		if err != nil {
 			return fmt.Errorf("lifecycle: progress: %w", err)
 		}
@@ -450,6 +484,13 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 	}
 	return out, nil
 }
+
+const handoffStartUpdateSQL = `UPDATE lifecycle_ownership
+			   SET state = $1, handoff_to_type = $2, handoff_to_id = $3,
+			       handoff_started_at = $4, last_seen_at = $5, updated_at = $6
+			 WHERE entity_kind = $7 AND entity_id = $8 AND phase = $9 AND epoch = $10
+			   AND state = $11
+			 RETURNING ` + ownershipColumns
 
 // HandoffStart marks an explicit, durable intent to pass ownership on.
 //
@@ -503,14 +544,12 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 				started = *current.HandoffStartedAt
 			}
 		}
-		updated, err := scanOne(tx.QueryRow(ctx,
-			`UPDATE lifecycle_ownership
-			   SET state = $1, handoff_to_type = $2, handoff_to_id = $3,
-			       handoff_started_at = $4, last_seen_at = $5, updated_at = $6
-			 WHERE entity_kind = $7 AND entity_id = $8 AND phase = $9 AND epoch = $10
-			 RETURNING `+ownershipColumns,
+		updated, err := scanOne(tx.QueryRow(ctx, handoffStartUpdateSQL,
 			StateHandingOff, to.Type, to.ID, started, seen, now,
-			entity.Kind, entity.ID, phase, epoch))
+			entity.Kind, entity.ID, phase, epoch, current.State))
+		if errors.Is(err, ErrNotFound) {
+			return raceLostOn(ctx, tx, entity, phase, epoch, current.State, "handoff start")
+		}
 		if err != nil {
 			return fmt.Errorf("lifecycle: handoff start: %w", err)
 		}
@@ -611,6 +650,14 @@ func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase str
 	return out, nil
 }
 
+const finishUpdateSQL = `UPDATE lifecycle_ownership
+			   SET state = $1, released_at = $2, released_reason = $3,
+			       handoff_to_type = '', handoff_to_id = '', handoff_started_at = NULL,
+			       updated_at = $2
+			 WHERE entity_kind = $4 AND entity_id = $5 AND phase = $6 AND epoch = $7
+			   AND state IN ('active', 'handing-off')
+			 RETURNING ` + ownershipColumns
+
 // Release gives up ownership without the entity being finished — the work
 // remains, and a reconciler or another actor may take it.
 func (s *Store) Release(ctx context.Context, entity EntityRef, phase string, owner Owner, epoch int, reason string) (*Ownership, error) {
@@ -633,14 +680,11 @@ func (s *Store) finish(ctx context.Context, entity EntityRef, phase string, owne
 		if _, err := s.currentFor(ctx, tx, entity, phase, owner, epoch); err != nil {
 			return err
 		}
-		updated, err := scanOne(tx.QueryRow(ctx,
-			`UPDATE lifecycle_ownership
-			   SET state = $1, released_at = $2, released_reason = $3,
-			       handoff_to_type = '', handoff_to_id = '', handoff_started_at = NULL,
-			       updated_at = $2
-			 WHERE entity_kind = $4 AND entity_id = $5 AND phase = $6 AND epoch = $7
-			 RETURNING `+ownershipColumns,
+		updated, err := scanOne(tx.QueryRow(ctx, finishUpdateSQL,
 			state, now, reason, entity.Kind, entity.ID, phase, epoch))
+		if errors.Is(err, ErrNotFound) {
+			return raceLostOn(ctx, tx, entity, phase, epoch, "", "the "+state+" write")
+		}
 		if err != nil {
 			return fmt.Errorf("lifecycle: %s: %w", state, err)
 		}
@@ -1015,6 +1059,46 @@ func (s *Store) inTx(ctx context.Context, entity EntityRef, phase string, fn fun
 		return fmt.Errorf("lifecycle: commit: %w", err)
 	}
 	return nil
+}
+
+// raceLostOn says which predicate a guarded UPDATE failed on, by re-reading.
+//
+// The three statements above all answer "no row" for several different
+// reasons, and the caller needs to tell them apart: ownership moving on, the
+// record finishing underneath, and an owner that never held it are three
+// situations, not one. Guessing would collapse them, so re-read — the same
+// shape Recover's no-row path uses, and for the same reason.
+//
+// pinnedState is the state the caller derived from and pinned exactly, or ""
+// when the statement pinned only the non-absorbing class. op names the
+// operation for the message.
+func raceLostOn(ctx context.Context, tx pgx.Tx, entity EntityRef, phase string, epoch int, pinnedState, op string) error {
+	latest, err := scanOne(tx.QueryRow(ctx,
+		`SELECT `+ownershipColumns+` FROM lifecycle_ownership
+		 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
+		entity.Kind, entity.ID, phase))
+	if err != nil {
+		// Including ErrNotFound: the row was deleted outright, which is not a
+		// state this package produces but is still the honest answer.
+		return err
+	}
+	switch {
+	case latest.Epoch != epoch:
+		return fmt.Errorf("%w: ownership moved to epoch %d while %s was in flight",
+			ErrEpochMismatch, latest.Epoch, op)
+	case latest.State != StateActive && latest.State != StateHandingOff:
+		return fmt.Errorf("%w: record became %s while %s was in flight",
+			ErrNotOwner, latest.State, op)
+	case pinnedState != "" && latest.State != pinnedState:
+		return fmt.Errorf("%w: record moved from %s to %s while %s was in flight",
+			ErrStaleRead, pinnedState, latest.State, op)
+	default:
+		// Every predicate the statement carries now reads as satisfied, so the
+		// row changed and changed back, or something outside this package
+		// wrote it. Refuse rather than retry: the caller's decision was made
+		// against a read that is no longer demonstrably the one it matched.
+		return fmt.Errorf("%w: it changed while %s was in flight", ErrStaleRead, op)
+	}
 }
 
 // currentFor loads the record and checks the caller is entitled to drive it.
