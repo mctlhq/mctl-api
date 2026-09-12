@@ -66,7 +66,11 @@ const (
 // Owner types. These name actors, not permissions: see the package doc and
 // ADR-010 §6 — ownership grants neither push nor merge authority.
 const (
-	OwnerDevLoopWorkflow = "devloop-workflow"
+	// The suppression below is for a genuine gosec false positive, and an
+	// entertaining one: G101 matches identifiers against a credential pattern
+	// containing "pw", and "ownerdevloopworkflow" contains it across the word
+	// boundary in "...loo(pw)orkflow". The value is an actor name.
+	OwnerDevLoopWorkflow = "devloop-workflow" //nolint:gosec // G101: accidental "pw" substring, not a credential
 	OwnerShepherd        = "shepherd"
 	OwnerPRSteward       = "pr-steward"
 	OwnerReconciler      = "reconciler"
