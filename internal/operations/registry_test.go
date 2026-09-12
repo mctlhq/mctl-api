@@ -27,9 +27,22 @@ import "testing"
 func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 	// Mirrors config/settings.py's SERVICES list in mctlhq/mctl-agents.
 	// Update both places together when a service is added/removed there.
+	//
+	// Note what this can and cannot catch. It is a hand-kept copy, so it fires
+	// only when one enum in THIS repository falls behind the others -- it
+	// cannot notice that mctl-agents has registered a service nobody mirrored
+	// here, because the omission lands in this list too. That is how
+	// "seerrsense" stayed missing from all four enums and this test stayed
+	// green: the investigator ran against seerrsense, the proposal landed, and
+	// mctl-agents-approve rejected service=seerrsense server-side with no
+	// standalone path left to approve it. Catching that class needs the real
+	// SERVICES list, which is in another repository and not reachable from a
+	// unit test; until something fetches it, adding a service means editing
+	// five places here and this list is the fifth, not a check on the other
+	// four.
 	wantServices := []string{
 		"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal",
-		"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "portfolio",
+		"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio",
 	}
 
 	registry := NewRegistry()
