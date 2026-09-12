@@ -1,5 +1,23 @@
 # Changelog
 
+## [4.45.0](https://github.com/mctlhq/mctl-api/compare/4.44.0...4.45.0) (2026-09-12)
+
+
+### Features
+
+* **auth:** read GitHub credentials per use so a rotation is picked up ([d81c924](https://github.com/mctlhq/mctl-api/commit/d81c924d14a24d11a22a1929f389e3429352b751))
+* **auth:** read GitHub credentials per use so a rotation is picked up ([6f7b96a](https://github.com/mctlhq/mctl-api/commit/6f7b96ad0418f5de6a24aa6a89783a75c05e854c))
+
+
+### Bug Fixes
+
+* **auth:** the token mount was unreadable, and the dispatch grant was unverified ([5fb50ea](https://github.com/mctlhq/mctl-api/commit/5fb50eaf012d1d210e31f71592559d42b1520c19)), closes [#307](https://github.com/mctlhq/mctl-api/issues/307)
+* **gitops:** scrub the credential on every refresh, not only after clone ([26cec99](https://github.com/mctlhq/mctl-api/commit/26cec9911a848624f4e98b88bda880bdd5f53b77)), closes [#307](https://github.com/mctlhq/mctl-api/issues/307)
+* **gitops:** scrub via defer, so no return path can skip it ([a665c31](https://github.com/mctlhq/mctl-api/commit/a665c312ffdbf8854ea083344f3d3e04e9b22b6a)), closes [#307](https://github.com/mctlhq/mctl-api/issues/307)
+* **gitops:** stop the clone from writing the credential into .git/config ([325dfeb](https://github.com/mctlhq/mctl-api/commit/325dfeb0ddb926efa939db5a69adb35a76d3bfd6)), closes [#307](https://github.com/mctlhq/mctl-api/issues/307)
+* **lint:** annotate two gosec false positives ([c4c47bb](https://github.com/mctlhq/mctl-api/commit/c4c47bbcac218fd332ce71e23b6b3a6d8688a19d)), closes [#307](https://github.com/mctlhq/mctl-api/issues/307)
+* **lint:** two gosec findings in the new gitops test ([dcd00c4](https://github.com/mctlhq/mctl-api/commit/dcd00c4e631fac7d75883992f0073ac877b1c3f2)), closes [#307](https://github.com/mctlhq/mctl-api/issues/307)
+
 ## [4.44.0](https://github.com/mctlhq/mctl-api/compare/4.43.0...4.44.0) (2026-09-12)
 
 
