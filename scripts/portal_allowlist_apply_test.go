@@ -432,13 +432,17 @@ func TestApplyCheck(t *testing.T) {
 			// proven here by the recorded call log, not by reading the
 			// script.
 			//
-			// The log has to be there for that proof to mean anything. Both
-			// assertions below are gated on a successful read, so a stub that
-			// stopped recording -- STUB_CURL_LOG no longer exported, the
-			// append broken -- would skip them and leave every case passing
-			// with write-prevention silently switched off. A case that
-			// reaches the network must therefore show its reads in the log
-			// before the absence of a PUT is allowed to mean anything.
+			// An absence only counts as evidence once the recorder has been
+			// shown alive, because a stub that stopped recording --
+			// STUB_CURL_LOG no longer exported, the append broken -- leaves
+			// behind exactly what a correctly refused run does. Gating the
+			// assertions on a successful read is what let the proof go vacuous
+			// on mctlhq/mctl-telegram#634. So the two halves each carry their
+			// own positive control: a case that reaches the network must show
+			// the reads it attempted before the absence of a PUT means
+			// anything, and a case that must not reach it must show, via
+			// probeRecorder in the same fixture, that a call would have been
+			// recorded before its empty log means anything.
 			logBytes, readErr := os.ReadFile(logPath) //nolint:gosec // logPath is built from t.TempDir(), not external input
 			if tc.wantEmptyLog {
 				// This case is refused before any HTTP call, and an empty log
@@ -452,7 +456,7 @@ func TestApplyCheck(t *testing.T) {
 				if readErr == nil && len(logBytes) != 0 {
 					t.Fatalf("expected no curl calls at all; call log:\n%s", logBytes)
 				}
-				probeRecorder(t, dir, logPath)
+				probeRecorder(t, dir, logPath, cmd.Env)
 			} else {
 				if readErr != nil {
 					t.Fatalf("no curl call log at %s; the no-PUT assertion below would be vacuous: %v", logPath, readErr)
@@ -576,14 +580,21 @@ func newFixture(t *testing.T, guardName, guardImports, guardBody string) string 
 // Without this, disabling the stub's append leaves every wantEmptyLog case
 // green -- the same shape of vacuous guard that mctlhq/mctl-telegram#634 was
 // fixed for on the cases that do reach the network.
-func probeRecorder(t *testing.T, dir, logPath string) {
+func probeRecorder(t *testing.T, dir, logPath string, runEnv []string) {
 	t.Helper()
 
 	before, _ := os.ReadFile(logPath) //nolint:gosec // logPath is built from t.TempDir(), not external input
 
 	//nolint:gosec // the stub and its arguments are fixed by the test
 	probe := exec.Command(filepath.Join(dir, "stub", "curl"), "-X", "GET", "https://probe.invalid/recorder-alive")
-	probe.Env = append(os.Environ(), "STUB_CURL_LOG="+logPath)
+	// Exactly the environment the run used, rather than a second STUB_CURL_LOG
+	// of our own. Supplying it here would make the probe independent of how the
+	// run was wired, and the "no longer exported" half of the mutation named
+	// above would go uncaught by precisely the cases that have nothing but an
+	// absence to show: the stub would write nowhere for the run and still
+	// record the probe's line off our value. Inheriting sends the probe's line
+	// nowhere too, so the read below fails and the case says so.
+	probe.Env = runEnv
 	if out, err := probe.CombinedOutput(); err != nil {
 		t.Fatalf("could not run the stub curl to prove the recorder is alive: %v\n%s", err, out)
 	}
