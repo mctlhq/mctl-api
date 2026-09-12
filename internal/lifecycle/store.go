@@ -1119,7 +1119,10 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]*Ownership, error) {
 		}
 		out = append(out, o)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("lifecycle: list: iterate: %w", err)
+	}
+	return out, nil
 }
 
 // Events returns the transition history for one (entity, phase), newest first.
@@ -1160,7 +1163,10 @@ func (s *Store) Events(ctx context.Context, entity EntityRef, phase string, limi
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("lifecycle: events: iterate: %w", err)
+	}
+	return out, nil
 }
 
 // recoverUpdateSQL is the compare-and-set that takes ownership from a dead

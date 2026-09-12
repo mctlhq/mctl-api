@@ -3116,7 +3116,13 @@ func TestADuplicateRecoverAnswersOnlyForItsOwnWrite(t *testing.T) {
 		if err := winner.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
-		if err := <-done; err == nil {
+		var rerr error
+		select {
+		case rerr = <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the stalled Recover never returned after the winner committed")
+		}
+		if err := rerr; err == nil {
 			t.Fatal("a takeover by somebody else was reported as this caller's own")
 		} else if !errors.Is(err, ErrEpochMismatch) {
 			t.Fatalf("want ErrEpochMismatch, got %v", err)
@@ -3176,7 +3182,13 @@ func TestADuplicateRecoverAnswersOnlyForItsOwnWrite(t *testing.T) {
 		if err := winner.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
-		if err := <-done; err == nil {
+		var rerr error
+		select {
+		case rerr = <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the stalled Recover never returned after the winner committed")
+		}
+		if err := rerr; err == nil {
 			t.Fatal("a released row was returned as a successful recovery")
 		} else if !errors.Is(err, ErrNotOwner) {
 			t.Fatalf("want ErrNotOwner naming the released state, got %v", err)
@@ -3231,7 +3243,13 @@ func TestADuplicateRecoverAnswersOnlyForItsOwnWrite(t *testing.T) {
 		if err := winner.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
-		if err := <-done; err == nil {
+		var rerr error
+		select {
+		case rerr = <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the stalled Recover never returned after the winner committed")
+		}
+		if err := rerr; err == nil {
 			t.Fatal("a later unrelated takeover was reported as this caller's own")
 		} else if !errors.Is(err, ErrEpochMismatch) {
 			t.Fatalf("want ErrEpochMismatch, got %v", err)
