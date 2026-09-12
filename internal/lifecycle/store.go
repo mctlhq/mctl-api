@@ -269,7 +269,7 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 		if err != nil {
 			return fmt.Errorf("lifecycle: acquire: %w", err)
 		}
-		if err := insertEvent(ctx, tx, req.Entity, req.Phase, EventOwnerAcquired,
+		if err := insertEvent(ctx, tx, acquired.Entity, req.Phase, EventOwnerAcquired,
 			acquired.Epoch, req.Owner, req.PolicyRef, now); err != nil {
 			return err
 		}
@@ -311,7 +311,11 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 		if err != nil {
 			return fmt.Errorf("lifecycle: progress: %w", err)
 		}
-		if err := insertEvent(ctx, tx, entity, phase, EventProgress, epoch, owner, evidence, now); err != nil {
+		// updated.Entity, not the request entity: RecordProgress falls back to
+		// the stored version when the caller omits one, and an event row that
+		// disagreed with the row it describes would make the audit trail worse
+		// than absent.
+		if err := insertEvent(ctx, tx, updated.Entity, phase, EventProgress, epoch, owner, evidence, now); err != nil {
 			return err
 		}
 		out = updated
@@ -347,7 +351,7 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 		if err != nil {
 			return fmt.Errorf("lifecycle: handoff start: %w", err)
 		}
-		if err := insertEvent(ctx, tx, entity, phase, EventHandoffStarted, epoch, owner,
+		if err := insertEvent(ctx, tx, updated.Entity, phase, EventHandoffStarted, epoch, owner,
 			"to "+to.Type+"/"+to.ID+": "+reason, now); err != nil {
 			return err
 		}
@@ -396,7 +400,7 @@ func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase str
 		if err != nil {
 			return fmt.Errorf("lifecycle: handoff complete: %w", err)
 		}
-		if err := insertEvent(ctx, tx, entity, phase, EventHandoffCompleted,
+		if err := insertEvent(ctx, tx, updated.Entity, phase, EventHandoffCompleted,
 			updated.Epoch, incoming, "from "+current.Owner.Type+"/"+current.Owner.ID, now); err != nil {
 			return err
 		}
@@ -436,7 +440,7 @@ func (s *Store) finish(ctx context.Context, entity EntityRef, phase string, owne
 		if err != nil {
 			return fmt.Errorf("lifecycle: %s: %w", state, err)
 		}
-		if err := insertEvent(ctx, tx, entity, phase, event, epoch, owner, reason, now); err != nil {
+		if err := insertEvent(ctx, tx, updated.Entity, phase, event, epoch, owner, reason, now); err != nil {
 			return err
 		}
 		out = updated
@@ -601,6 +605,15 @@ func (s *Store) currentFor(ctx context.Context, tx pgx.Tx, entity EntityRef, pha
 	if current.Owner != owner {
 		return nil, fmt.Errorf("%w: current owner is %s/%s", ErrNotOwner,
 			current.Owner.Type, current.Owner.ID)
+	}
+	// released and terminal are ABSORBING. Owner and epoch both survive a
+	// Terminal() untouched, so without this an actor that terminated a record
+	// could call Release() afterwards — a stray retry, a duplicate signal — and
+	// flip a dead entity back to released, where a reconciler would pick it up
+	// again. Leaving an absorbing state requires Acquire, which bumps the epoch.
+	if current.State != StateActive && current.State != StateHandingOff {
+		return nil, fmt.Errorf("%w: record is %s, which is terminal for its owner",
+			ErrNotOwner, current.State)
 	}
 	if current.Epoch != epoch {
 		return nil, fmt.Errorf("%w: current epoch is %d, caller has %d",

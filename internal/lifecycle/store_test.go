@@ -480,3 +480,91 @@ func TestConditionalUpsertAllowsTakeoverOfAReleasedRow(t *testing.T) {
 		t.Fatalf("takeover did not transfer ownership: %+v", next)
 	}
 }
+
+// TestTerminalIsAbsorbing pins agy's P1 on mctl-api#295: Terminal leaves owner
+// and epoch untouched, so without a state check the SAME actor could call
+// Release afterwards — a stray retry or duplicate signal — and flip a dead
+// entity back to released, where a reconciler would pick it up again.
+func TestTerminalIsAbsorbing(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "absorbing")
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.Terminal(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, "merged"); err != nil {
+		t.Fatalf("terminal: %v", err)
+	}
+
+	// Same owner, same epoch — the only thing standing between this and a
+	// resurrected record is the state check.
+	if _, err := s.Release(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, "stray retry"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("release after terminal must be refused, got %v", err)
+	}
+	if _, err := s.RecordProgress(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, "stray"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("progress after terminal must be refused, got %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, shepherd, "stray"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("handoff after terminal must be refused, got %v", err)
+	}
+
+	final, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if final.State != StateTerminal {
+		t.Fatalf("record left terminal: %q", final.State)
+	}
+
+	// Leaving an absorbing state is possible, but only through Acquire, which
+	// bumps the epoch and so fences anything holding the old one.
+	retaken, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: shepherd})
+	if err != nil {
+		t.Fatalf("acquire after terminal: %v", err)
+	}
+	if retaken.Epoch != got.Epoch+1 {
+		t.Fatalf("epoch did not advance out of terminal: %d -> %d", got.Epoch, retaken.Epoch)
+	}
+}
+
+// TestEventsCarryTheStoredVersion pins agy's P2: RecordProgress falls back to
+// the stored entity version when the caller omits one, and the event row must
+// describe the row it belongs to rather than the (empty) request.
+func TestEventsCarryTheStoredVersion(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "event-version") // Version: "sha-a"
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	// Caller omits the version because nothing changed.
+	versionless := EntityRef{Kind: entity.Kind, ID: entity.ID}
+	if _, err := s.RecordProgress(ctx, versionless, PhaseReviewRemediation, owner, got.Epoch, "pushed fix"); err != nil {
+		t.Fatalf("progress: %v", err)
+	}
+
+	events, err := s.Events(ctx, entity, PhaseReviewRemediation, 10)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	var progress *Event
+	for _, e := range events {
+		if e.Event == EventProgress {
+			progress = e
+			break
+		}
+	}
+	if progress == nil {
+		t.Fatalf("no progress event recorded")
+	}
+	if progress.Entity.Version != "sha-a" {
+		t.Fatalf("event lost the version context: got %q, want %q", progress.Entity.Version, "sha-a")
+	}
+}
