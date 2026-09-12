@@ -519,6 +519,25 @@ func TestListFilters(t *testing.T) {
 	if _, err := s.List(ctx, ListFilter{Limit: 100000}); err != nil {
 		t.Fatalf("oversized limit: %v", err)
 	}
+
+	// An over-cap limit must yield the CAP, not the default. The two were one
+	// branch, so a caller asking for 501 received 100 — less than it asked for
+	// and less than it is allowed, which is the one clamp that can silently
+	// truncate a caller trying to read MORE. Needs more than the default page
+	// to be visible at all, which is why the rows are made here.
+	for i := range 150 {
+		e := pr(prefix, fmt.Sprintf("list-clamp-%03d", i))
+		if _, err := s.Acquire(ctx, AcquireRequest{Entity: e, Phase: PhaseReviewRemediation, Owner: devloop("wf-1")}); err != nil {
+			t.Fatalf("acquire clamp row %d: %v", i, err)
+		}
+	}
+	big, err := s.List(ctx, ListFilter{Limit: 100000})
+	if err != nil {
+		t.Fatalf("oversized limit: %v", err)
+	}
+	if len(big) <= 100 {
+		t.Fatalf("an over-cap limit returned the default page, not the cap: %d rows", len(big))
+	}
 }
 
 // TestUnknownPhaseIsRejectedEverywhere pins that a typo gets ErrUnknownPhase
@@ -1626,9 +1645,13 @@ func TestHandoffStartUpdateRefusesTheStateItDidNotRead(t *testing.T) {
 	}
 
 	now := time.Now().UTC().Add(time.Hour)
+	// The handoff_to binds are the ones a caller that read an ACTIVE row would
+	// carry: acquireUpsertSQL writes empty strings. So only the state clause
+	// can refuse this write, which is what this test is about.
 	restarted, err := scanOne(s.pool.QueryRow(ctx, handoffStartUpdateSQL,
 		StateHandingOff, shepherd.Type, shepherd.ID, now, now, now,
-		entity.Kind, entity.ID, PhaseReviewRemediation, begun.Epoch, StateActive))
+		entity.Kind, entity.ID, PhaseReviewRemediation, begun.Epoch, StateActive,
+		"", ""))
 	if err == nil {
 		t.Fatalf("a stale active read restarted the handoff clock to %v", restarted.HandoffStartedAt)
 	}
@@ -1653,7 +1676,8 @@ func TestHandoffStartUpdateRefusesTheStateItDidNotRead(t *testing.T) {
 	other := Owner{Type: OwnerPRSteward, ID: "steward-1"}
 	ok, err := scanOne(s.pool.QueryRow(ctx, handoffStartUpdateSQL,
 		StateHandingOff, other.Type, other.ID, now, begun.LastSeenAt, now,
-		entity.Kind, entity.ID, PhaseReviewRemediation, begun.Epoch, StateHandingOff))
+		entity.Kind, entity.ID, PhaseReviewRemediation, begun.Epoch, StateHandingOff,
+		shepherd.Type, shepherd.ID))
 	if err != nil {
 		t.Fatalf("the statement refused the state the row really has: %v", err)
 	}
@@ -2513,5 +2537,164 @@ func TestAnOverlappingTerminalReachesTheNoRowPathAndSucceeds(t *testing.T) {
 	}
 	if events != 0 {
 		t.Fatalf("the loser appended %d events for a write it did not make", events)
+	}
+}
+
+// TestAStalledReannouncementCannotRevertARetarget closes the second input
+// handoffStartUpdateSQL derives from and did not pin.
+//
+// The rule the package applies to all seven writes is "pin what the statement
+// DERIVED from the row it read", and for HandoffStart the state is not the
+// only such input: `started` comes from current.HandoffTo and
+// current.HandoffStartedAt. A retarget by the SAME owner moves both while
+// leaving the epoch and the state alone — handing-off stays handing-off — so
+// it is the one writer that gets underneath a predicate of epoch + state.
+//
+// A re-announcement that read the OLD target and stalled would then write it
+// back over an acknowledged, evented retarget, roll handoff_started_at back to
+// the replaced handoff's clock, and suppress its own event because
+// `reannounced` is computed from the same stale read — leaving the row naming
+// one actor and the last event naming another.
+//
+// Driven through the statement directly, because inTx serialises the two
+// writers through the API and the constant is shared for exactly this reason.
+func TestAStalledReannouncementCannotRevertARetarget(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "handoff-retarget-revert")
+	outgoing := devloop("wf-1")
+	first := Owner{Type: OwnerPRSteward, ID: "cron"}
+	second := Owner{Type: OwnerPRSteward, ID: "steward"}
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	started, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, first, "exiting")
+	if err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+
+	// The retarget the stalled re-announcement is about to try to undo. Same
+	// owner, same epoch, same state — nothing the old predicate could see.
+	retargeted, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, second, "redirect")
+	if err != nil {
+		t.Fatalf("retarget: %v", err)
+	}
+	if retargeted.HandoffTo == nil || *retargeted.HandoffTo != second {
+		t.Fatalf("retarget did not take: %+v", retargeted.HandoffTo)
+	}
+
+	// The stalled re-announcement, replayed with the values it read BEFORE the
+	// retarget: the old target, the old clock, the old state.
+	_, err = scanOne(s.pool.QueryRow(ctx, handoffStartUpdateSQL,
+		StateHandingOff, first.Type, first.ID, *started.HandoffStartedAt, started.LastSeenAt, time.Now().UTC(),
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, StateHandingOff,
+		first.Type, first.ID))
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a stalled re-announcement reverted an acknowledged retarget: %v", err)
+	}
+
+	// And the row still names the actor the API and the event trail named.
+	now, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if now.HandoffTo == nil || *now.HandoffTo != second {
+		t.Fatalf("the handoff target moved back: %+v", now.HandoffTo)
+	}
+	if !now.HandoffStartedAt.Equal(*retargeted.HandoffStartedAt) {
+		t.Fatalf("the handoff clock rolled back to the replaced handoff: %v -> %v",
+			*retargeted.HandoffStartedAt, *now.HandoffStartedAt)
+	}
+
+	// The other direction: the predicate must not refuse a genuine
+	// re-announcement, which is the write it sits on top of.
+	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, second, "still exiting"); err != nil {
+		t.Fatalf("a genuine re-announcement was refused: %v", err)
+	}
+	// And so must the first handoff off an ACTIVE row, where the pinned
+	// columns are the empty strings acquireUpsertSQL wrote.
+	fresh := pr(prefix, "handoff-retarget-fresh")
+	f, err := s.Acquire(ctx, AcquireRequest{Entity: fresh, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("acquire fresh: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, fresh, PhaseReviewRemediation, outgoing, f.Epoch, first, "exiting"); err != nil {
+		t.Fatalf("the first handoff off an active row was refused: %v", err)
+	}
+}
+
+// TestAnOverlappingHandoffCompleteReachesTheNoRowPathAndSucceeds pins the
+// CALL SITE of handoffAlreadyCompleted, not only the predicate.
+//
+// finish's equivalent got both a table over finishedBy and a real row-lock
+// interleaving; HandoffComplete's got only the table, so deleting the two
+// lines that wire the helper in left the suite green. Same harness: a
+// connection that takes no advisory lock holds the row, the loser reads
+// handing-off, blocks on the row lock, and after the commit its WHERE no
+// longer matches — and because the statement bumps the epoch, raceLostOn
+// answers ErrEpochMismatch about a handoff that completed exactly as asked.
+func TestAnOverlappingHandoffCompleteReachesTheNoRowPathAndSucceeds(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "handoff-complete-overlap")
+	outgoing := devloop("wf-1")
+	incoming := Owner{Type: OwnerPRSteward, ID: "steward"}
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	begun, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, incoming, "exiting")
+	if err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+
+	// The winner: the identical completion, through the same statement, from a
+	// connection that takes no advisory lock and holds the row.
+	winner, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin winner: %v", err)
+	}
+	defer func() { _ = winner.Rollback(ctx) }()
+	if _, err := scanOne(winner.QueryRow(ctx, handoffCompleteUpdateSQL,
+		incoming.Type, incoming.ID, StateActive, time.Now().UTC(),
+		entity.Kind, entity.ID, PhaseReviewRemediation, begun.Epoch,
+		"", "", StateHandingOff)); err != nil {
+		t.Fatalf("winner completion: %v", err)
+	}
+
+	type result struct {
+		own *Ownership
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		own, err := s.HandoffComplete(ctx, entity, PhaseReviewRemediation, incoming)
+		done <- result{own, err}
+	}()
+
+	select {
+	case r := <-done:
+		t.Fatalf("the loser never blocked on the row lock: %+v %v", r.own, r.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := winner.Commit(ctx); err != nil {
+		t.Fatalf("commit winner: %v", err)
+	}
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("a completion that lost the race to an identical overlapping "+
+				"completion was told it failed: %v", r.err)
+		}
+		if r.own.State != StateActive || r.own.Owner != incoming || r.own.Epoch != begun.Epoch+1 {
+			t.Fatalf("the loser returned a different record: %+v", r.own)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the loser never returned after the winner committed")
 	}
 }

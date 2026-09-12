@@ -529,11 +529,50 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 	return out, nil
 }
 
+// handoffStartUpdateSQL pins BOTH inputs its SET values were derived from.
+//
+// The state clause was the first. The second took a round longer to find,
+// because the rule "pin what the statement derived from the row it read" was
+// written as though state were the only such input. It is not: the caller
+// derives `started` from current.HandoffTo and current.HandoffStartedAt, and a
+// RETARGET by the same owner moves both while leaving the epoch and the state
+// alone — handing-off stays handing-off. So a retarget is the one writer that
+// gets underneath a predicate of epoch + state:
+//
+//  1. wf-1 owns at epoch 4, handing off to shepherd/cron since T0.
+//  2. wf-1 re-announces the same target: reads handoff_to = shepherd/cron,
+//     computes started = T0, and stalls.
+//  3. wf-1 redirects to pr-steward/steward. The row takes T1, the call
+//     returns success, and a handoff-started event naming steward is written.
+//  4. The stalled re-announcement still matches epoch 4 AND handing-off, and
+//     writes shepherd/cron with T0 back over it.
+//
+// The retarget is acknowledged, evented, and then silently reverted: steward —
+// the actor the API and the event trail both named — gets ErrNotOwner from
+// HandoffComplete, and the surviving handoff is judged against the clock of
+// the one it replaced, which is exactly what the re-announce guard exists to
+// prevent. The reverting write also suppresses its own event, because
+// `reannounced` is computed from the same stale read, so the row ends up
+// naming shepherd/cron with the last event saying steward.
+//
+// handoff_started_at needs no clause of its own: it moves in lockstep with
+// handoff_to under every writer here, which is the same lockstep
+// TestHandoffCompleteCannotLandOnAFinishedOrRetargetedRow identified and then
+// deliberately broke with a raw write. last_seen_at needs none either, and for
+// a different reason worth stating: nothing can move it forward on a
+// handing-off row at the same epoch, because all three writers that could
+// reach it freeze it.
+//
+// The binds are the values that were READ (” and ” on an active row, which
+// is what acquireUpsertSQL and finishUpdateSQL write), not the ones being
+// written — this asks "is the row still the one I derived from", not "is it
+// already what I want".
 const handoffStartUpdateSQL = `UPDATE lifecycle_ownership
 			   SET state = $1, handoff_to_type = $2, handoff_to_id = $3,
 			       handoff_started_at = $4, last_seen_at = $5, updated_at = $6
 			 WHERE entity_kind = $7 AND entity_id = $8 AND phase = $9 AND epoch = $10
 			   AND state = $11
+			   AND handoff_to_type = $12 AND handoff_to_id = $13
 			 RETURNING ` + ownershipColumns
 
 // HandoffStart marks an explicit, durable intent to pass ownership on.
@@ -588,9 +627,17 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 				started = *current.HandoffStartedAt
 			}
 		}
+		// The handoff target AS READ, which is what `started` was derived
+		// from. An active row carries empty strings, so this is a real
+		// predicate on every path, not only on the handing-off one.
+		wasTo := Owner{}
+		if current.HandoffTo != nil {
+			wasTo = *current.HandoffTo
+		}
 		updated, err := scanOne(tx.QueryRow(ctx, handoffStartUpdateSQL,
 			StateHandingOff, to.Type, to.ID, started, seen, now,
-			entity.Kind, entity.ID, phase, epoch, current.State))
+			entity.Kind, entity.ID, phase, epoch, current.State,
+			wasTo.Type, wasTo.ID))
 		if errors.Is(err, ErrNotFound) {
 			return raceLostOn(ctx, tx, entity, phase, epoch, current.State, "handoff start")
 		}
@@ -964,8 +1011,17 @@ type ListFilter struct {
 // List returns ownership records matching filter, newest update first.
 func (s *Store) List(ctx context.Context, f ListFilter) ([]*Ownership, error) {
 	limit := f.Limit
-	if limit <= 0 || limit > 500 {
+	// Two different questions, deliberately not one branch. An unset or
+	// nonsensical limit gets the DEFAULT page; an over-large one gets the CAP.
+	// Collapsing them meant a caller asking for 501 received 100 — less than
+	// what it asked for AND less than it is allowed, which is not what a cap
+	// means and is the one clamp that can silently truncate a caller trying to
+	// read more.
+	if limit <= 0 {
 		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+ownershipColumns+` FROM lifecycle_ownership
@@ -996,8 +1052,17 @@ func (s *Store) Events(ctx context.Context, entity EntityRef, phase string, limi
 	if err := validate(entity, phase); err != nil {
 		return nil, err
 	}
-	if limit <= 0 || limit > 500 {
+	// Two different questions, deliberately not one branch. An unset or
+	// nonsensical limit gets the DEFAULT page; an over-large one gets the CAP.
+	// Collapsing them meant a caller asking for 501 received 100 — less than
+	// what it asked for AND less than it is allowed, which is not what a cap
+	// means and is the one clamp that can silently truncate a caller trying to
+	// read more.
+	if limit <= 0 {
 		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, entity_kind, entity_id, phase, event, owner_epoch, entity_version,
