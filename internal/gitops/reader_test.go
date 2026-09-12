@@ -1200,14 +1200,26 @@ func TestRefresh_CloneDoesNotPersistTheCredential(t *testing.T) {
 	// git strips userinfo from the URL it records, so the answer is no. This
 	// keeps it that way, and would also catch a future git that logs the URL
 	// somewhere new.
+	//
+	// Scope, stated exactly: bytes.Contains finds the credential only where
+	// it is stored VERBATIM. Loose objects and packfiles are zlib-deflated
+	// and .git/index is binary, so a credential that ended up inside one
+	// would not be found. That is the right scope rather than a gap — every
+	// place this leak has actually lived is plain text written by git itself
+	// (remote.origin.url, FETCH_HEAD, logs/HEAD), and a token reaching an
+	// object would mean someone committed it, which is a different bug.
 	var found []string
 	err = filepath.WalkDir(filepath.Join(r.localPath, ".git"), func(path string, d fs.DirEntry, err error) error {
+		// A walk error (lstat/ReadDir failed) aborts and fails the test: it
+		// means the scan did not cover what it claims to, and a guard that
+		// can pass by not running is not a guard. Distinct from the read
+		// error below, which is skipped.
 		if err != nil || d.IsDir() {
 			return err
 		}
-		// An unreadable entry is not a leak — skip it rather than failing the
-		// walk. Written as a positive condition so the intent is the code
-		// rather than a swallowed error.
+		// An unreadable FILE is not a leak — skip it. Written as a positive
+		// condition so the intent is in the code rather than a swallowed
+		// error.
 		b, readErr := os.ReadFile(path) //nolint:gosec // walking a directory this test created
 		if readErr == nil && bytes.Contains(b, []byte(token)) {
 			rel, _ := filepath.Rel(r.localPath, path)
