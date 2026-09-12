@@ -114,6 +114,20 @@ func TestDispatch_RejectsRelativePathSegments(t *testing.T) {
 			t.Errorf("workflow %q reached the network instead of the guard: %v", bad, err)
 		}
 	}
+	// A ref with a slash is ordinary -- it rides in the JSON body, not the
+	// path -- and rejecting it would break the dispatcher for most branch
+	// names. Asserted against the guard, not against the network.
+	for _, ref := range []string{"feature/some-branch", "refs/heads/main", "v1.2.3"} {
+		err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "w.yml", ref, nil)
+		if err != nil && strings.Contains(err.Error(), "invalid ref") {
+			t.Errorf("ref %q was rejected by the guard: %v", ref, err)
+		}
+	}
+	if err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "w.yml", "", nil); err == nil ||
+		!strings.Contains(err.Error(), "invalid ref") {
+		t.Errorf("an empty ref was not refused: %v", err)
+	}
+
 	// A dot INSIDE a segment is ordinary and must stay legal, or no workflow
 	// file name and no semver ref would pass.
 	for _, good := range []string{"cloudflare-apply.yml", "v1.2.3", "release-please--branches--main"} {
@@ -138,9 +152,12 @@ func TestDispatch_NoTokenIsErrNotConfigured(t *testing.T) {
 	}
 }
 
-// Every segment is interpolated into a path. Nothing reaches them from a
-// request today, but the check is here rather than at the one caller so a
-// later caller that does forward input cannot walk out of the path.
+// Every value in this table is interpolated into the URL path. Nothing
+// reaches them from a request today, but the check is here rather than at
+// the one caller so a later caller that does forward input cannot walk out
+// of the path. `ref` is deliberately absent: it travels in the JSON body,
+// so "main#frag" is a ref GitHub will reject, not a path escape -- and
+// path-validating it would refuse every branch name with a slash in it.
 func TestDispatch_RejectsSegmentsThatWouldEscapeThePath(t *testing.T) {
 	reached := false
 	d, closeSrv := newTestDispatcher(t, func(w http.ResponseWriter, r *http.Request) {
@@ -153,7 +170,7 @@ func TestDispatch_RejectsSegmentsThatWouldEscapeThePath(t *testing.T) {
 		{"../admin", "mctl-gitops", "w.yml", "main"},
 		{"mctlhq", "mctl-gitops/../other", "w.yml", "main"},
 		{"mctlhq", "mctl-gitops", "w.yml?x=1", "main"},
-		{"mctlhq", "mctl-gitops", "w.yml", "main#frag"},
+		{"mctlhq", "mctl-gitops", "w.yml#frag", "main"},
 		{"", "mctl-gitops", "w.yml", "main"},
 	} {
 		if err := d.Dispatch(context.Background(), bad.owner, bad.repo, bad.wf, bad.ref, nil); err == nil {

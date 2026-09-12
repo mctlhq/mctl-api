@@ -94,10 +94,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, owner, repo, workflowFile, re
 	if d == nil || d.Token == "" {
 		return ErrNotConfigured
 	}
-	// Every segment goes into a path. None of them is caller-supplied today
-	// (the handler pins all four as constants), but a later caller that
-	// forwards user input must not be able to walk out of the path or inject
-	// a query, so the check lives here rather than in the one caller.
+	// Every value below goes into the URL path. None of them is
+	// caller-supplied today (the handler pins all four as constants), but a
+	// later caller that forwards user input must not be able to walk out of
+	// the path or inject a query, so the check lives here rather than in the
+	// one caller.
 	//
 	// An ALLOWLIST, not a denylist. The first version rejected "/?#%" and so
 	// let "." and ".." through -- the two values a traversal actually needs,
@@ -107,12 +108,20 @@ func (d *Dispatcher) Dispatch(ctx context.Context, owner, repo, workflowFile, re
 	// refused. Dots inside a longer name ("cloudflare-apply.yml", "v1.2.3")
 	// stay legal, because it is the WHOLE segment being "." or ".." that
 	// walks the path.
+	// `ref` is NOT in this loop: it travels in the JSON body, not the path,
+	// and a great many legitimate refs contain a slash -- "feature/x",
+	// "refs/heads/main". Validating it as a path segment would reject them
+	// on a false premise, and GitHub validates it anyway. Only its emptiness
+	// is this function's business.
 	for _, seg := range []struct{ name, value string }{
-		{"owner", owner}, {"repo", repo}, {"workflow", workflowFile}, {"ref", ref},
+		{"owner", owner}, {"repo", repo}, {"workflow", workflowFile},
 	} {
 		if !validPathSegment(seg.value) {
 			return fmt.Errorf("invalid %s %q", seg.name, seg.value)
 		}
+	}
+	if ref == "" {
+		return fmt.Errorf("invalid ref %q", ref)
 	}
 
 	body := map[string]interface{}{"ref": ref}
