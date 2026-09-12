@@ -1,5 +1,39 @@
 # Changelog
 
+## [4.43.0](https://github.com/mctlhq/mctl-api/compare/4.42.0...4.43.0) (2026-09-12)
+
+
+### Features
+
+* **agents:** issue-300-portal-allowlist-apply-sh-has-no-check-m ([a95210f](https://github.com/mctlhq/mctl-api/commit/a95210fb97549eed43b05917a6e806f95d5f0ea4))
+* **agents:** issue-300-portal-allowlist-apply-sh-has-no-check-m ([c13642a](https://github.com/mctlhq/mctl-api/commit/c13642a1b8bf7749ebbc045a5cd8307c133b0430))
+* **lifecycle:** add the lifecycle ownership store ([f112c90](https://github.com/mctlhq/mctl-api/commit/f112c902e09c9df31b4c50839bcc4d9ead337da0))
+* **portal:** expose every api tool on the aggregate, mctl's own checks decide ([31135f4](https://github.com/mctlhq/mctl-api/commit/31135f41cde71c101552f6b7b4da292323d5408c))
+
+
+### Bug Fixes
+
+* **lifecycle:** a retarget is the writer that gets under epoch + state ([45ea31c](https://github.com/mctlhq/mctl-api/commit/45ea31c3244f84503cfaa080d752b8bf63b6ebef))
+* **lifecycle:** a successful finish reported failure on retry ([277842b](https://github.com/mctlhq/mctl-api/commit/277842b20752fa94f9428a17f1b9771280f8912b))
+* **lifecycle:** fold the liveness decision into Recover's compare-and-set ([1ef4aca](https://github.com/mctlhq/mctl-api/commit/1ef4aca0c4e86be1bb90e60012766ba37ffc4302))
+* **lifecycle:** freeze handoff liveness in RecordProgress too ([142f725](https://github.com/mctlhq/mctl-api/commit/142f725c4b9a4e90765b9ed40fcbb14c2c74647b))
+* **lifecycle:** HandoffStart must not restart the handoff clock either ([58561b1](https://github.com/mctlhq/mctl-api/commit/58561b1faebc34ee839e27180dfdfaeeffc9514d))
+* **lifecycle:** let the database compute the epoch, and make IsDead actionable ([5a61667](https://github.com/mctlhq/mctl-api/commit/5a6166773bb9ea5b9bb393f860b3cd2f171a5cfd))
+* **lifecycle:** pin the state decision in Recover's CAS too ([a68a319](https://github.com/mctlhq/mctl-api/commit/a68a319b02f0e7a37f451672c19a27c5c36360a9))
+* **lifecycle:** Recover was the last write that never asked if the race was its own ([d562aac](https://github.com/mctlhq/mctl-api/commit/d562aacb1e27b0678648abd57c8f9b6338ce56b3))
+* **lifecycle:** the idempotency was decided on a read taken before the write ([1a28774](https://github.com/mctlhq/mctl-api/commit/1a28774bf1db71965c34726a640a780a456c24cc))
+* **lifecycle:** the idempotent re-acquire was the one write with no CAS ([c6e9bed](https://github.com/mctlhq/mctl-api/commit/c6e9bede627797957a8b67459290aa1c1c2c6240))
+* **lifecycle:** the last two writes get a predicate over the decision they make ([d942b07](https://github.com/mctlhq/mctl-api/commit/d942b071503fcaf2d1d45f5d9cd831f6291f049c))
+* **lifecycle:** the re-acquire's sentinel was chosen for a smaller no-row set ([aa2c1cf](https://github.com/mctlhq/mctl-api/commit/aa2c1cfa0fda5c368b75581426e2f5ce796972be))
+* **lifecycle:** the same argument, one condition short ([0480886](https://github.com/mctlhq/mctl-api/commit/0480886ec3c3ee24629dfa5f6a4db78e39e7e1b9))
+* **lifecycle:** the same defect, one disjunct over ([aec086e](https://github.com/mctlhq/mctl-api/commit/aec086efd4a51b930af08c61359a69ee0e6f7456))
+* **lifecycle:** the third no-row path classified the race but never asked if it was ours ([38a5fcf](https://github.com/mctlhq/mctl-api/commit/38a5fcf18a035e63294f8889fb5666d9ec6fa7b6))
+* **lifecycle:** the three writes that guarded only the epoch now guard state ([ccc7895](https://github.com/mctlhq/mctl-api/commit/ccc789504a047bfe7553b95a761f85c202a6f130))
+* **lifecycle:** two reads promoted into writes, and each other's writer ([0153bad](https://github.com/mctlhq/mctl-api/commit/0153bad6f2049adc4320674a4367181c5b9f1f76))
+* **operations:** register seerrsense in the agents service enums ([4e7c152](https://github.com/mctlhq/mctl-api/commit/4e7c152944ec4904447c1f96242de7b78abae5a6))
+* **operations:** register seerrsense in the agents service enums ([081265e](https://github.com/mctlhq/mctl-api/commit/081265e60d8565b6ef3edb24d2b36f10dea7f372))
+* **portal:** correct the three places that still state the old rule ([334d31a](https://github.com/mctlhq/mctl-api/commit/334d31aed3fdb647cec4337ddd60d561d3fbfbc0))
+
 ## [4.42.0](https://github.com/mctlhq/mctl-api/compare/4.41.0...4.42.0) (2026-09-12)
 
 
