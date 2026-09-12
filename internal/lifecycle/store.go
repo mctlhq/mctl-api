@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS lifecycle_ownership (
     epoch                INTEGER NOT NULL DEFAULT 1,
     state                TEXT NOT NULL,
     acquired_at          TIMESTAMPTZ NOT NULL,
+    last_seen_at         TIMESTAMPTZ NOT NULL,
     last_progress_at     TIMESTAMPTZ NOT NULL,
     progress_evidence    TEXT NOT NULL DEFAULT '',
     proposal_ref         TEXT NOT NULL DEFAULT '',
@@ -69,6 +70,8 @@ CREATE INDEX IF NOT EXISTS lifecycle_ownership_state
   ON lifecycle_ownership (state);
 CREATE INDEX IF NOT EXISTS lifecycle_ownership_progress
   ON lifecycle_ownership (last_progress_at);
+CREATE INDEX IF NOT EXISTS lifecycle_ownership_seen
+  ON lifecycle_ownership (last_seen_at);
 
 CREATE TABLE IF NOT EXISTS lifecycle_events (
     id             BIGSERIAL PRIMARY KEY,
@@ -88,7 +91,7 @@ CREATE INDEX IF NOT EXISTS lifecycle_events_entity
 `
 
 const ownershipColumns = `entity_kind, entity_id, phase, entity_version,
-	owner_type, owner_id, epoch, state, acquired_at, last_progress_at,
+	owner_type, owner_id, epoch, state, acquired_at, last_seen_at, last_progress_at,
 	progress_evidence, proposal_ref, policy_ref,
 	handoff_to_type, handoff_to_id, handoff_from_type, handoff_from_id,
 	handoff_started_at, released_at, released_reason, temporal_workflow_id,
@@ -100,7 +103,7 @@ const ownershipColumns = `entity_kind, entity_id, phase, entity_version,
 // delete the WHERE clause and the test fails, which is the only reason the
 // test is worth having.
 const acquireUpsertSQL = `INSERT INTO lifecycle_ownership (` + ownershipColumns + `)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'','','','',NULL,NULL,'',$14,$15,$16)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'','','','',NULL,NULL,'',$15,$16,$17)
 			 ON CONFLICT (entity_kind, entity_id, phase) DO UPDATE SET
 			   entity_version = EXCLUDED.entity_version,
 			   owner_type = EXCLUDED.owner_type,
@@ -108,6 +111,7 @@ const acquireUpsertSQL = `INSERT INTO lifecycle_ownership (` + ownershipColumns 
 			   epoch = EXCLUDED.epoch,
 			   state = EXCLUDED.state,
 			   acquired_at = EXCLUDED.acquired_at,
+			   last_seen_at = EXCLUDED.last_seen_at,
 			   last_progress_at = EXCLUDED.last_progress_at,
 			   progress_evidence = EXCLUDED.progress_evidence,
 			   proposal_ref = EXCLUDED.proposal_ref,
@@ -120,6 +124,23 @@ const acquireUpsertSQL = `INSERT INTO lifecycle_ownership (` + ownershipColumns 
 			   updated_at = EXCLUDED.updated_at
 			 WHERE lifecycle_ownership.state IN ('released', 'terminal')
 			 RETURNING ` + ownershipColumns
+
+// validate rejects an unknown (kind, phase) pair and an empty id at EVERY
+// entry point, not only at Acquire.
+//
+// Rows can in practice only be created through Acquire, so a typo elsewhere
+// would have surfaced as ErrNotFound — which tells the caller "nobody owns
+// this", the single most dangerous wrong answer this package can give, when
+// the truth is "you asked about something that cannot exist".
+func validate(entity EntityRef, phase string) error {
+	if entity.ID == "" {
+		return fmt.Errorf("%w: entity id is required", ErrUnknownPhase)
+	}
+	if !LegalPhase(entity.Kind, phase) {
+		return fmt.Errorf("%w: %s/%s", ErrUnknownPhase, entity.Kind, phase)
+	}
+	return nil
+}
 
 // Store is a PostgreSQL-backed lifecycle ownership store.
 type Store struct {
@@ -187,8 +208,11 @@ type AcquireRequest struct {
 // exclusivity exercises the upsert's SQL directly rather than hoping a
 // goroutine storm lands inside the window.
 func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, error) {
-	if !LegalPhase(req.Entity.Kind, req.Phase) {
-		return nil, fmt.Errorf("%w: %s/%s", ErrUnknownPhase, req.Entity.Kind, req.Phase)
+	// An empty id would otherwise make every forgetful caller contend over one
+	// shared row keyed on (kind, "", phase) — an ownership record for nothing
+	// in particular, indistinguishable from a real one.
+	if err := validate(req.Entity, req.Phase); err != nil {
+		return nil, err
 	}
 	if req.Owner.Type == "" || req.Owner.ID == "" {
 		return nil, fmt.Errorf("lifecycle: acquire: owner type and id are required")
@@ -207,20 +231,25 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 
 		if existing != nil && (existing.State == StateActive || existing.State == StateHandingOff) {
 			if existing.Owner == req.Owner {
-				// Idempotent re-acquire. Refresh only the observed entity
-				// version; epoch and progress are deliberately untouched —
-				// re-acquiring is not progress.
-				if req.Entity.Version != "" && req.Entity.Version != existing.Entity.Version {
-					if _, err := tx.Exec(ctx,
-						`UPDATE lifecycle_ownership SET entity_version = $1, updated_at = $2
-						 WHERE entity_kind = $3 AND entity_id = $4 AND phase = $5`,
-						req.Entity.Version, now, req.Entity.Kind, req.Entity.ID, req.Phase); err != nil {
-						return fmt.Errorf("lifecycle: acquire: refresh version: %w", err)
-					}
-					existing.Entity.Version = req.Entity.Version
-					existing.UpdatedAt = now
+				// Idempotent re-acquire. It IS a tick, so it refreshes
+				// last_seen_at — the owner has demonstrably not died. It is
+				// NOT progress and does not touch last_progress_at, and it
+				// does not move the epoch: a Temporal activity retry or an
+				// Argo pod restart must not fence its own in-flight work.
+				version := existing.Entity.Version
+				if req.Entity.Version != "" {
+					version = req.Entity.Version
 				}
-				out = existing
+				refreshed, err := scanOne(tx.QueryRow(ctx,
+					`UPDATE lifecycle_ownership
+					   SET last_seen_at = $1, entity_version = $2, updated_at = $1
+					 WHERE entity_kind = $3 AND entity_id = $4 AND phase = $5
+					 RETURNING `+ownershipColumns,
+					now, version, req.Entity.Kind, req.Entity.ID, req.Phase))
+				if err != nil {
+					return fmt.Errorf("lifecycle: acquire: refresh: %w", err)
+				}
+				out = refreshed
 				return nil
 			}
 			if err := insertEvent(ctx, tx, req.Entity, req.Phase, EventOwnerDenied,
@@ -238,7 +267,7 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 
 		row := tx.QueryRow(ctx, acquireUpsertSQL,
 			req.Entity.Kind, req.Entity.ID, req.Phase, req.Entity.Version,
-			req.Owner.Type, req.Owner.ID, epoch, StateActive, now, now,
+			req.Owner.Type, req.Owner.ID, epoch, StateActive, now, now, now,
 			"acquired", req.ProposalRef, req.PolicyRef,
 			req.TemporalWorkflowID, now, now)
 		acquired, err := scanOne(row)
@@ -290,6 +319,9 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 // heartbeat that refreshed the timer would let an owner prove liveness forever
 // while achieving nothing.
 func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase string, owner Owner, epoch int, evidence string) (*Ownership, error) {
+	if err := validate(entity, phase); err != nil {
+		return nil, err
+	}
 	var out *Ownership
 	err := s.inTx(ctx, entity, phase, func(tx pgx.Tx) error {
 		now := time.Now().UTC()
@@ -303,7 +335,7 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 		}
 		updated, err := scanOne(tx.QueryRow(ctx,
 			`UPDATE lifecycle_ownership
-			   SET last_progress_at = $1, progress_evidence = $2,
+			   SET last_progress_at = $1, last_seen_at = $1, progress_evidence = $2,
 			       entity_version = $3, updated_at = $1
 			 WHERE entity_kind = $4 AND entity_id = $5 AND phase = $6 AND epoch = $7
 			 RETURNING `+ownershipColumns,
@@ -332,6 +364,9 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 // gap: something always owns the row, and an incomplete handoff is visible as
 // itself instead of as absence.
 func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string, owner Owner, epoch int, to Owner, reason string) (*Ownership, error) {
+	if err := validate(entity, phase); err != nil {
+		return nil, err
+	}
 	if to.Type == "" || to.ID == "" {
 		return nil, fmt.Errorf("lifecycle: handoff: target owner type and id are required")
 	}
@@ -344,7 +379,7 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 		updated, err := scanOne(tx.QueryRow(ctx,
 			`UPDATE lifecycle_ownership
 			   SET state = $1, handoff_to_type = $2, handoff_to_id = $3,
-			       handoff_started_at = $4, updated_at = $4
+			       handoff_started_at = $4, last_seen_at = $4, updated_at = $4
 			 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7 AND epoch = $8
 			 RETURNING `+ownershipColumns,
 			StateHandingOff, to.Type, to.ID, now, entity.Kind, entity.ID, phase, epoch))
@@ -368,6 +403,9 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 // Only the actor the handoff names may complete it; a third party arriving
 // mid-handoff gets ErrNotOwner rather than quietly stealing the row.
 func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase string, incoming Owner) (*Ownership, error) {
+	if err := validate(entity, phase); err != nil {
+		return nil, err
+	}
 	var out *Ownership
 	err := s.inTx(ctx, entity, phase, func(tx pgx.Tx) error {
 		now := time.Now().UTC()
@@ -388,7 +426,7 @@ func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase str
 		updated, err := scanOne(tx.QueryRow(ctx,
 			`UPDATE lifecycle_ownership
 			   SET owner_type = $1, owner_id = $2, epoch = epoch + 1, state = $3,
-			       acquired_at = $4, last_progress_at = $4,
+			       acquired_at = $4, last_seen_at = $4, last_progress_at = $4,
 			       progress_evidence = 'handoff completed',
 			       handoff_from_type = owner_type, handoff_from_id = owner_id,
 			       handoff_to_type = '', handoff_to_id = '',
@@ -423,6 +461,9 @@ func (s *Store) Terminal(ctx context.Context, entity EntityRef, phase string, ow
 }
 
 func (s *Store) finish(ctx context.Context, entity EntityRef, phase string, owner Owner, epoch int, state, event, reason string) (*Ownership, error) {
+	if err := validate(entity, phase); err != nil {
+		return nil, err
+	}
 	var out *Ownership
 	err := s.inTx(ctx, entity, phase, func(tx pgx.Tx) error {
 		now := time.Now().UTC()
@@ -451,6 +492,9 @@ func (s *Store) finish(ctx context.Context, entity EntityRef, phase string, owne
 
 // Get returns the ownership record for one (entity, phase).
 func (s *Store) Get(ctx context.Context, entity EntityRef, phase string) (*Ownership, error) {
+	if err := validate(entity, phase); err != nil {
+		return nil, err
+	}
 	return scanOne(s.pool.QueryRow(ctx,
 		`SELECT `+ownershipColumns+` FROM lifecycle_ownership
 		 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
@@ -464,6 +508,9 @@ func (s *Store) Get(ctx context.Context, entity EntityRef, phase string) (*Owner
 // a wall-clock budget, and anything the budget did not answer in time was swept
 // anyway — a single batched read needs neither.
 func (s *Store) GetMany(ctx context.Context, kind, phase string, ids []string) (map[string]*Ownership, error) {
+	if !LegalPhase(kind, phase) {
+		return nil, fmt.Errorf("%w: %s/%s", ErrUnknownPhase, kind, phase)
+	}
 	out := make(map[string]*Ownership, len(ids))
 	if len(ids) == 0 {
 		return out, nil
@@ -530,6 +577,9 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]*Ownership, error) {
 
 // Events returns the transition history for one (entity, phase), newest first.
 func (s *Store) Events(ctx context.Context, entity EntityRef, phase string, limit int) ([]*Event, error) {
+	if err := validate(entity, phase); err != nil {
+		return nil, err
+	}
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -563,7 +613,10 @@ func (s *Store) Events(ctx context.Context, entity EntityRef, phase string, limi
 // entity/phase, so a read-then-write cannot interleave with a competing one.
 //
 // The lock key is hashed from the entity/phase triple rather than taken per
-// table, so two different pull requests never serialize against each other.
+// table, so unrelated entities rarely serialize against each other. Rarely,
+// not never: hashtext is 32-bit, so distinct keys can collide and share a
+// lock. That costs a little contention and nothing else — correctness is the
+// conditional upsert's job, not this lock's.
 func (s *Store) inTx(ctx context.Context, entity EntityRef, phase string, fn func(pgx.Tx) error) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -580,6 +633,17 @@ func (s *Store) inTx(ctx context.Context, entity EntityRef, phase string, fn fun
 		return fmt.Errorf("lifecycle: acquire lock: %w", err)
 	}
 	if err := fn(tx); err != nil {
+		// ErrOwnedByOther is a RESULT, not a failure: the caller lost a
+		// contended acquire, and the denial event fn just recorded is the
+		// evidence of that. Rolling back here would discard exactly the row
+		// an operator needs to explain why an actor stood down, so the
+		// transaction is committed and the error returned alongside it.
+		// Every other error is a genuine failure and still rolls back.
+		if errors.Is(err, ErrOwnedByOther) {
+			if cerr := tx.Commit(ctx); cerr != nil {
+				return fmt.Errorf("lifecycle: commit denial: %w", cerr)
+			}
+		}
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -653,7 +717,7 @@ func scanRow(row scannable) (*Ownership, error) {
 	if err := row.Scan(
 		&o.Entity.Kind, &o.Entity.ID, &o.Phase, &o.Entity.Version,
 		&o.Owner.Type, &o.Owner.ID, &o.Epoch, &o.State,
-		&o.AcquiredAt, &o.LastProgressAt, &o.ProgressEvidence,
+		&o.AcquiredAt, &o.LastSeenAt, &o.LastProgressAt, &o.ProgressEvidence,
 		&o.ProposalRef, &o.PolicyRef,
 		&handoffToType, &handoffToID, &handoffFromType, &handoffFromID,
 		&o.HandoffStartedAt, &o.ReleasedAt, &o.ReleasedReason,

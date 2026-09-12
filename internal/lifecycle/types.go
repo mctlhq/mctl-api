@@ -84,34 +84,68 @@ const (
 	EventOwnerTerminal    = "owner-terminal"
 )
 
-// stalenessBounds is the per-(kind, phase) window after which an active owner
-// that has recorded no PROGRESS is reported stale.
+// bounds are per (kind, phase), and there are TWO of them because there are two
+// different questions.
 //
-// review-remediation is 6h. The in-loop shepherd cadence is
-// SHEPHERD_TICK_EVERY_POLLS=8 against a 30-minute poll, so roughly 4h, and the
-// bound has to sit in the gap between ONE missed tick and two: above 4h so a
-// healthy owner is never called stale, below 8h so a dead one is noticed the
-// same working day. 6h is 1.5x the cadence and the only round number in that
-// gap.
+//	liveness — is the owner still there?  Answered by LastSeenAt, which ANY
+//	           tick refreshes, including a poll that found nothing to do.
+//	           Losing this is what licenses another actor to take over.
+//	progress — is the work moving?  Answered by LastProgressAt, which only an
+//	           effected change refreshes. Losing this licenses an ESCALATION
+//	           and never a takeover.
 //
-// implement is 130m, matching the lease run_implementer.py already writes.
-var stalenessBounds = map[string]time.Duration{
-	KindPullRequest + "/" + PhaseReviewRemediation: 6 * time.Hour,
-	KindDevLoopProposal + "/" + PhaseImplement:     130 * time.Minute,
+// An earlier version had one field and one 6h bound, and it was wrong twice.
+//
+// It could not tolerate a missed tick: with progress at T=0 and ticks at T=4h
+// and T=8h, a tick lost to a pod restart leaves the next opportunity at T=8h,
+// but a 6h bound calls the owner stale at T=6h. Surviving one missed tick means
+// exceeding the interval to the tick AFTER it, so 2x cadence — hence 10h.
+//
+// Worse, fixing the number would not have fixed the model. A poll that observes
+// nothing writes no progress, by design. But a PR waiting on human review or a
+// slow CI run produces no state changes for hours, so a perfectly healthy owner
+// was indistinguishable from a crashed one, and the reconciler would have taken
+// the PR away every 6h from an owner doing exactly the right thing — bumping
+// the epoch and fencing it out the moment the review landed. Thrashing caused
+// by the safety mechanism.
+//
+// The rule that produced the single-field design still holds: a heartbeat must
+// not prove useful PROGRESS indefinitely. It no longer has to be honoured by
+// refusing to record liveness at all.
+//
+// implement keeps one effective window at 130m, matching the lease
+// run_implementer.py already writes; the implementer either finishes an attempt
+// or it does not.
+type bound struct {
+	liveness time.Duration
+	progress time.Duration
+}
+
+var bounds = map[string]bound{
+	KindPullRequest + "/" + PhaseReviewRemediation: {liveness: 10 * time.Hour, progress: 48 * time.Hour},
+	KindDevLoopProposal + "/" + PhaseImplement:     {liveness: 130 * time.Minute, progress: 130 * time.Minute},
 }
 
 // LegalPhase reports whether phase is defined for kind. The registry is closed:
 // an unknown pair is rejected at the boundary rather than stored and puzzled
 // over later.
 func LegalPhase(kind, phase string) bool {
-	_, ok := stalenessBounds[kind+"/"+phase]
+	_, ok := bounds[kind+"/"+phase]
 	return ok
 }
 
-// StalenessBound returns the progress window for a legal (kind, phase) pair.
-func StalenessBound(kind, phase string) (time.Duration, bool) {
-	d, ok := stalenessBounds[kind+"/"+phase]
-	return d, ok
+// LivenessBound returns the window after which an owner that has not been seen
+// is considered dead, which is the only condition that licenses a takeover.
+func LivenessBound(kind, phase string) (time.Duration, bool) {
+	b, ok := bounds[kind+"/"+phase]
+	return b.liveness, ok
+}
+
+// ProgressBound returns the window after which an owner that is alive but has
+// effected nothing should be escalated to a human.
+func ProgressBound(kind, phase string) (time.Duration, bool) {
+	b, ok := bounds[kind+"/"+phase]
+	return b.progress, ok
 }
 
 // EntityRef identifies the thing whose lifecycle is being advanced.
@@ -150,10 +184,16 @@ type Ownership struct {
 
 	AcquiredAt time.Time `json:"acquired_at"`
 
+	// LastSeenAt advances on ANY tick, including one that found nothing to do.
+	// It is evidence that the owner exists, and nothing more — which is all a
+	// heartbeat was ever evidence of.
+	LastSeenAt time.Time `json:"last_seen_at"`
+
 	// LastProgressAt advances only when the owner effected a state change.
-	// A poll that observed nothing writes no progress: a heartbeat that
-	// refreshed this would let an owner prove liveness forever while
-	// achieving nothing, which ADR-010 rules out explicitly.
+	// A poll that observed nothing writes no progress, so that a heartbeat
+	// cannot prove useful work indefinitely — but because liveness now has its
+	// own field, that rule no longer makes a healthy owner on a quiet PR look
+	// dead.
 	LastProgressAt   time.Time `json:"last_progress_at"`
 	ProgressEvidence string    `json:"progress_evidence,omitempty"`
 
@@ -180,26 +220,46 @@ type Ownership struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// IsStale reports whether an active owner has recorded no progress within its
-// phase's bound. Derived, never stored.
+// IsDead reports whether an active owner has not been seen within its phase's
+// liveness bound. Derived, never stored.
 //
-// An unknown (kind, phase) pair reports false: refusing to call something stale
-// is the safe direction, because "stale" is what licenses another actor to take
-// over.
-func (o *Ownership) IsStale(now time.Time) bool {
+// This is the ONLY condition that licenses another actor to take ownership.
+//
+// An unknown (kind, phase) pair reports false: refusing to declare an owner
+// dead is the safe direction, because doing so is what lets someone else act.
+func (o *Ownership) IsDead(now time.Time) bool {
 	if o == nil || (o.State != StateActive && o.State != StateHandingOff) {
 		return false
 	}
-	bound, ok := StalenessBound(o.Entity.Kind, o.Phase)
+	b, ok := LivenessBound(o.Entity.Kind, o.Phase)
 	if !ok {
 		return false
 	}
-	return now.Sub(o.LastProgressAt) > bound
+	return now.Sub(o.LastSeenAt) > b
 }
 
-// IsHealthy reports whether this record still entitles its owner to act.
+// IsStuck reports whether an owner is alive but has effected nothing within its
+// phase's progress bound.
+//
+// A stuck owner is ESCALATED, never replaced. Handing a stuck entity to another
+// machine produces a second stuck machine and an epoch bump; the thing that is
+// missing is a human, not a different worker.
+func (o *Ownership) IsStuck(now time.Time) bool {
+	if o == nil || o.State != StateActive || o.IsDead(now) {
+		return false
+	}
+	b, ok := ProgressBound(o.Entity.Kind, o.Phase)
+	if !ok {
+		return false
+	}
+	return now.Sub(o.LastProgressAt) > b
+}
+
+// IsHealthy reports whether this record still entitles its owner to act. A
+// stuck-but-alive owner IS healthy in this sense: it holds the entity
+// legitimately and nobody else may take it.
 func (o *Ownership) IsHealthy(now time.Time) bool {
-	return o != nil && o.State == StateActive && !o.IsStale(now)
+	return o != nil && o.State == StateActive && !o.IsDead(now)
 }
 
 // Event is an append-only record of an ownership transition.

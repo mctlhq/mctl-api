@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -360,43 +361,224 @@ func TestUnknownPhaseIsRejected(t *testing.T) {
 	}
 }
 
-// TestStalenessIsDerivedNotStored pins the rule that nothing sweeps rows to
-// mark them stale — the caller computes it from last_progress_at on read.
-func TestStalenessIsDerivedNotStored(t *testing.T) {
+// TestLivenessAndProgressAreSeparate pins the split that an earlier version of
+// this package got wrong: one field, one bound, and therefore two failures.
+func TestLivenessAndProgressAreSeparate(t *testing.T) {
 	now := time.Now().UTC()
-	o := &Ownership{
-		Entity:         EntityRef{Kind: KindPullRequest},
-		Phase:          PhaseReviewRemediation,
-		State:          StateActive,
-		LastProgressAt: now.Add(-7 * time.Hour),
+	fresh := func() *Ownership {
+		return &Ownership{
+			Entity:         EntityRef{Kind: KindPullRequest},
+			Phase:          PhaseReviewRemediation,
+			State:          StateActive,
+			LastSeenAt:     now,
+			LastProgressAt: now,
+		}
 	}
-	if !o.IsStale(now) {
-		t.Fatalf("7h with no progress should be stale for a 6h bound")
+
+	// THE case the single-bound design broke: a PR waiting on human review.
+	// The owner is ticking and healthy; it has simply had nothing to effect.
+	// It must NOT be takeable, at any age, or the reconciler thrashes
+	// ownership every bound-width and fences the real worker out when the
+	// review finally lands.
+	waiting := fresh()
+	waiting.LastProgressAt = now.Add(-40 * time.Hour)
+	if waiting.IsDead(now) {
+		t.Fatalf("an owner that is ticking must never be dead, whatever progress it has made")
 	}
-	if o.IsHealthy(now) {
-		t.Fatalf("a stale owner is not healthy")
+	if !waiting.IsHealthy(now) {
+		t.Fatalf("a live owner with no progress still holds the entity legitimately")
 	}
-	o.LastProgressAt = now.Add(-5 * time.Hour)
-	if o.IsStale(now) {
-		t.Fatalf("5h is inside the 6h bound and must not be stale")
+
+	// Past the progress bound it is STUCK — escalate to a human, do not
+	// hand it to another machine that will be just as stuck.
+	stuck := fresh()
+	stuck.LastProgressAt = now.Add(-49 * time.Hour)
+	if !stuck.IsStuck(now) {
+		t.Fatalf("49h with no progress should be stuck for a 48h bound")
 	}
-	// A single missed in-loop tick (~4h cadence) must never look stale.
-	o.LastProgressAt = now.Add(-4*time.Hour - time.Minute)
-	if o.IsStale(now) {
-		t.Fatalf("one missed tick must not make a healthy owner look stale")
+	if stuck.IsDead(now) {
+		t.Fatalf("stuck is not dead — it must not license a takeover")
 	}
-	// Unknown pairs refuse to be called stale: "stale" is what licenses
-	// another actor to take over, so the safe direction is false.
-	u := &Ownership{Entity: EntityRef{Kind: "unknown"}, Phase: "nope", State: StateActive}
-	if u.IsStale(now) {
-		t.Fatalf("unknown (kind, phase) must not be reported stale")
+	if !stuck.IsHealthy(now) {
+		t.Fatalf("a stuck-but-alive owner still holds the entity; nobody else may take it")
 	}
-	// Released records are never stale — there is nobody to be stale.
-	o.State = StateReleased
-	o.LastProgressAt = now.Add(-100 * time.Hour)
-	if o.IsStale(now) {
-		t.Fatalf("a released record must not be reported stale")
+
+	// One entirely missed tick. Cadence is ~4h, so the next opportunity is at
+	// 8h; the liveness bound must survive that, which is why it is 10h and not
+	// 6h. This assertion is the one that fails if anyone "simplifies" the
+	// bound back toward the cadence.
+	missed := fresh()
+	missed.LastSeenAt = now.Add(-8*time.Hour - 30*time.Minute)
+	if missed.IsDead(now) {
+		t.Fatalf("one fully missed tick must not make a healthy owner look dead")
 	}
+
+	// Genuinely gone.
+	dead := fresh()
+	dead.LastSeenAt = now.Add(-11 * time.Hour)
+	if !dead.IsDead(now) {
+		t.Fatalf("11h unseen should be dead for a 10h bound")
+	}
+	if dead.IsHealthy(now) {
+		t.Fatalf("a dead owner is not healthy")
+	}
+
+	// Unknown pairs refuse to be declared dead: that is what licenses another
+	// actor to act, so the safe direction is false.
+	u := &Ownership{Entity: EntityRef{Kind: "unknown"}, Phase: "nope", State: StateActive, LastSeenAt: now.Add(-1000 * time.Hour)}
+	if u.IsDead(now) || u.IsStuck(now) {
+		t.Fatalf("unknown (kind, phase) must not be reported dead or stuck")
+	}
+
+	// Released records have nobody to be dead.
+	rel := fresh()
+	rel.State = StateReleased
+	rel.LastSeenAt = now.Add(-1000 * time.Hour)
+	if rel.IsDead(now) || rel.IsStuck(now) {
+		t.Fatalf("a released record must not be reported dead or stuck")
+	}
+}
+
+// TestReacquireRefreshesLivenessNotProgress pins that a tick which re-acquires
+// proves the owner exists without claiming it achieved anything.
+func TestReacquireRefreshesLivenessNotProgress(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "liveness")
+	owner := devloop("wf-1")
+
+	first, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	again, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("re-acquire: %v", err)
+	}
+	if !again.LastSeenAt.After(first.LastSeenAt) {
+		t.Fatalf("re-acquire did not refresh liveness")
+	}
+	if !again.LastProgressAt.Equal(first.LastProgressAt) {
+		t.Fatalf("re-acquire counted as progress")
+	}
+	if again.Epoch != first.Epoch {
+		t.Fatalf("re-acquire moved the epoch %d -> %d", first.Epoch, again.Epoch)
+	}
+}
+
+// TestListFilters covers the one exported method that had no test, including
+// the limit clamp.
+func TestListFilters(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+
+	a := pr(prefix, "list-a")
+	b := pr(prefix, "list-b")
+	if _, err := s.Acquire(ctx, AcquireRequest{Entity: a, Phase: PhaseReviewRemediation, Owner: devloop("wf-1")}); err != nil {
+		t.Fatalf("acquire a: %v", err)
+	}
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: b, Phase: PhaseReviewRemediation, Owner: shepherd})
+	if err != nil {
+		t.Fatalf("acquire b: %v", err)
+	}
+	if _, err := s.Release(ctx, b, PhaseReviewRemediation, shepherd, got.Epoch, "done"); err != nil {
+		t.Fatalf("release b: %v", err)
+	}
+
+	countMine := func(f ListFilter) int {
+		records, err := s.List(ctx, f)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		n := 0
+		for _, o := range records {
+			if strings.HasPrefix(o.Entity.ID, prefix) {
+				n++
+			}
+		}
+		return n
+	}
+
+	if n := countMine(ListFilter{Kind: KindPullRequest, Phase: PhaseReviewRemediation}); n != 2 {
+		t.Fatalf("unfiltered: want 2 of mine, got %d", n)
+	}
+	if n := countMine(ListFilter{Kind: KindPullRequest, Phase: PhaseReviewRemediation, State: StateActive}); n != 1 {
+		t.Fatalf("state filter: want 1, got %d", n)
+	}
+	if n := countMine(ListFilter{Kind: KindPullRequest, Phase: PhaseReviewRemediation, Owner: OwnerShepherd}); n != 1 {
+		t.Fatalf("owner filter: want 1, got %d", n)
+	}
+	if n := countMine(ListFilter{Kind: KindDevLoopProposal, Phase: PhaseImplement}); n != 0 {
+		t.Fatalf("kind filter should exclude everything here, got %d", n)
+	}
+	// Clamp: a nonsense limit must not become an unbounded scan or an error.
+	if _, err := s.List(ctx, ListFilter{Limit: -5}); err != nil {
+		t.Fatalf("negative limit: %v", err)
+	}
+	if _, err := s.List(ctx, ListFilter{Limit: 100000}); err != nil {
+		t.Fatalf("oversized limit: %v", err)
+	}
+}
+
+// TestUnknownPhaseIsRejectedEverywhere pins that a typo gets ErrUnknownPhase
+// and not ErrNotFound. "Nobody owns this" is the most dangerous wrong answer
+// this package can give, so it must never be the answer to a malformed
+// question.
+func TestUnknownPhaseIsRejectedEverywhere(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	bad := EntityRef{Kind: KindPullRequest, ID: prefix + "-typo"}
+	owner := devloop("wf-1")
+
+	checks := map[string]error{}
+	_, checks["get"] = s.Get(ctx, bad, "investigate")
+	_, checks["progress"] = s.RecordProgress(ctx, bad, "investigate", owner, 1, "x")
+	_, checks["handoff-start"] = s.HandoffStart(ctx, bad, "investigate", owner, 1, shepherd, "x")
+	_, checks["handoff-complete"] = s.HandoffComplete(ctx, bad, "investigate", owner)
+	_, checks["release"] = s.Release(ctx, bad, "investigate", owner, 1, "x")
+	_, checks["terminal"] = s.Terminal(ctx, bad, "investigate", owner, 1, "x")
+	_, checks["events"] = s.Events(ctx, bad, "investigate", 10)
+	_, checks["get-many"] = s.GetMany(ctx, KindPullRequest, "investigate", []string{bad.ID})
+
+	for name, err := range checks {
+		if !errors.Is(err, ErrUnknownPhase) {
+			t.Fatalf("%s: want ErrUnknownPhase, got %v", name, err)
+		}
+	}
+
+	// An empty entity id is the same class of mistake.
+	if _, err := s.Get(ctx, EntityRef{Kind: KindPullRequest}, PhaseReviewRemediation); !errors.Is(err, ErrUnknownPhase) {
+		t.Fatalf("empty id: want ErrUnknownPhase, got %v", err)
+	}
+}
+
+// TestDenialEventSurvivesTheLostAcquire pins that losing a contended acquire
+// still leaves evidence. The denial is written inside the transaction that
+// returns ErrOwnedByOther, so a naive rollback-on-any-error would discard
+// exactly the row an operator needs to explain why an actor stood down.
+func TestDenialEventSurvivesTheLostAcquire(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "denial")
+
+	if _, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: devloop("wf-1")}); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: shepherd}); !errors.Is(err, ErrOwnedByOther) {
+		t.Fatalf("want ErrOwnedByOther, got %v", err)
+	}
+
+	events, err := s.Events(ctx, entity, PhaseReviewRemediation, 50)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	for _, e := range events {
+		if e.Event == EventOwnerDenied && e.Actor == shepherd {
+			return
+		}
+	}
+	t.Fatalf("the denial event was not persisted; events: %+v", events)
 }
 
 // TestConditionalUpsertRefusesToOverwriteAnActiveOwner exercises the SQL that
@@ -432,7 +614,7 @@ func TestConditionalUpsertRefusesToOverwriteAnActiveOwner(t *testing.T) {
 	// letting the assertion below pass for the wrong reason.
 	stolen, err := scanOne(s.pool.QueryRow(ctx, acquireUpsertSQL,
 		entity.Kind, entity.ID, PhaseReviewRemediation, entity.Version,
-		OwnerShepherd, "cron", 99, StateActive, now, now,
+		OwnerShepherd, "cron", 99, StateActive, now, now, now,
 		"stolen", "", "", "", now, now,
 	))
 	if err == nil {
