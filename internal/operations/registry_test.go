@@ -44,9 +44,13 @@ func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 	// mctl-agents-approve rejected service=seerrsense server-side with no
 	// standalone path left to approve it. Catching that class needs the real
 	// SERVICES list, which is in another repository and not reachable from a
-	// unit test; until something fetches it, adding a service means editing
-	// five places here and this list is the fifth, not a check on the other
-	// four.
+	// unit test. Until something fetches it, adding a service means editing
+	// nine places here: the four ParameterDef enums in registry.go, their four
+	// mcplib.Enum mirrors in internal/mcp/server.go, and this list. The four
+	// mirrors are backstopped by TestServiceEnumsMatchRegistry, which compares
+	// the two sides value-for-value and in order, so forgetting one of those
+	// still gets you a red build. This list is the one that is not backstopped
+	// by anything -- it is the fifth edit, not a check on the other four.
 	registry := NewRegistry()
 	// mctl-agents-approve and mctl-agents-reconcile duplicate the same enum
 	// (mctl-agents-investigate takes an issue_url instead of a service param,
