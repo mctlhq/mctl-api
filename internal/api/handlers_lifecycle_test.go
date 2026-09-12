@@ -796,3 +796,66 @@ func TestLifecycleWriteSuccessPaths(t *testing.T) {
 		t.Fatalf("terminal did not land: %v", got["state"])
 	}
 }
+
+// TestLifecycleListBranchFiltersAndFormats covers the branch GetLifecycleOwnership
+// takes when no `id` is given, which every other test in this file skipped by
+// always passing one. The filter mapping and the list serialisation had no
+// cover at all. (Found by agy.)
+func TestLifecycleListBranchFiltersAndFormats(t *testing.T) {
+	store, prefix := newTestLifecycleStore(t)
+	h := &Handlers{opts: Options{Lifecycle: store}}
+
+	for _, o := range []struct{ id, ownerType, ownerID string }{
+		{prefix + "-list-a", "devloop-workflow", "wf-1"},
+		{prefix + "-list-b", "pr-steward", "steward"},
+	} {
+		if rec := lifecyclePost(t, h, h.AcquireLifecycleOwnership, map[string]any{
+			"kind": "pull-request", "id": o.id, "phase": "review-remediation",
+			"owner_type": o.ownerType, "owner_id": o.ownerID,
+		}); rec.Code != http.StatusOK {
+			t.Fatalf("acquire %s: %d %s", o.id, rec.Code, rec.Body)
+		}
+	}
+
+	req := adminCtx(httptest.NewRequest("GET",
+		"/api/v1/lifecycle/ownership?kind=pull-request&phase=review-remediation&owner_type=pr-steward", nil))
+	rec := httptest.NewRecorder()
+	h.GetLifecycleOwnership(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body)
+	}
+	var body struct {
+		Ownership []map[string]any `json:"ownership"`
+		Count     int              `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Count != len(body.Ownership) {
+		t.Fatalf("count disagrees with the list: %d vs %d", body.Count, len(body.Ownership))
+	}
+	// The filter is on the owner TYPE, so the devloop row must be excluded and
+	// the steward row present. Scoped to this test's prefix, since the table is
+	// shared under `go test -p 1`.
+	var sawSteward, sawDevloop bool
+	for _, o := range body.Ownership {
+		entity, _ := o["entity"].(map[string]any)
+		id, _ := entity["id"].(string)
+		if !strings.HasPrefix(id, prefix) {
+			continue
+		}
+		owner, _ := o["owner"].(map[string]any)
+		switch owner["type"] {
+		case "pr-steward":
+			sawSteward = true
+		case "devloop-workflow":
+			sawDevloop = true
+		}
+	}
+	if !sawSteward {
+		t.Fatalf("the matching row was not listed: %s", rec.Body)
+	}
+	if sawDevloop {
+		t.Fatalf("owner_type did not filter: %s", rec.Body)
+	}
+}

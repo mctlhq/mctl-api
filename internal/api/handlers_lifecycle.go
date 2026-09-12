@@ -363,19 +363,14 @@ func (h *Handlers) RecordLifecycleProgress(w http.ResponseWriter, r *http.Reques
 	}
 	if body.Evidence == "" {
 		// Refusing an unexplained progress write is the cheapest way to keep
-		// "progress" meaning something a human can audit later.
+		// "progress" meaning something a human can audit later — and it is the
+		// same guard LifecycleClient.progress raises on: an empty evidence is
+		// FILTERED OUT of the store's payload rather than refused, so the row
+		// would record a tick that says nothing.
 		writeError(w, http.StatusBadRequest, "evidence is required: say what changed")
 		return
 	}
 	if !requireEpoch(w, body) {
-		return
-	}
-	if body.Evidence == "" {
-		// The same guard LifecycleClient.progress raises on: evidence is the
-		// field that says the work MOVED, and an empty one is filtered out of
-		// the store's payload rather than refused, so the row would record a
-		// progress tick that says nothing.
-		writeError(w, http.StatusBadRequest, "evidence is required: say what changed")
 		return
 	}
 	got, err := h.opts.Lifecycle.RecordProgress(r.Context(), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence)
