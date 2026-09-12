@@ -207,6 +207,9 @@ type AcquireRequest struct {
 //     rather than a self-inflicted fence.
 //   - a record is active/handing-off and names SOMEBODY ELSE —
 //     ErrOwnedByOther, with that owner returned so the loser learns who won.
+//     That holds at ANY age: a dead owner's row is not acquirable, it is
+//     RECOVERABLE, and Recover is the only operation that takes ownership
+//     from a live record.
 //
 // What actually guarantees exclusivity is the CONDITIONAL upsert below:
 // ON CONFLICT ... DO UPDATE ... WHERE the existing row is released/terminal.
@@ -458,6 +461,10 @@ func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase str
 			   SET owner_type = $1, owner_id = $2, epoch = epoch + 1, state = $3,
 			       acquired_at = $4, last_seen_at = $4, last_progress_at = $4,
 			       progress_evidence = 'handoff completed',
+			       -- The outgoing owner's Temporal workflow is not the
+			       -- incoming one's, and leaving it would make the row name a
+			       -- workflow that no longer drives it as its correlation.
+			       temporal_workflow_id = '',
 			       handoff_from_type = owner_type, handoff_from_id = owner_id,
 			       handoff_to_type = '', handoff_to_id = '',
 			       handoff_started_at = NULL, updated_at = $4
@@ -646,6 +653,168 @@ func (s *Store) Events(ctx context.Context, entity EntityRef, phase string, limi
 	return out, rows.Err()
 }
 
+// recoverUpdateSQL is the compare-and-set that takes ownership from a dead
+// owner. A package-level constant, not an inline literal, so the test that
+// proves the guard executes THIS statement rather than a copy of it — the
+// last_seen_at predicate cannot be exercised through Recover itself, because
+// inTx holds the advisory lock across the read and the write, so nothing can
+// interleave between them in-process. Testing the statement directly is the
+// only way to show the predicate is load-bearing rather than decorative.
+const recoverUpdateSQL = `UPDATE lifecycle_ownership
+			   SET owner_type = $1, owner_id = $2, epoch = epoch + 1, state = $3,
+			       acquired_at = $4, last_seen_at = $4, last_progress_at = $4,
+			       progress_evidence = $5, policy_ref = $6, temporal_workflow_id = $7,
+			       handoff_from_type = owner_type, handoff_from_id = owner_id,
+			       handoff_to_type = '', handoff_to_id = '', handoff_started_at = NULL,
+			       released_at = NULL, released_reason = '', updated_at = $4
+			 WHERE entity_kind = $8 AND entity_id = $9 AND phase = $10
+			   AND epoch = $11 AND last_seen_at = $12
+			 RETURNING ` + ownershipColumns
+
+// RecoverOption carries the incoming owner's own correlation fields.
+//
+// They are options rather than parameters because a reconciler recovering a
+// dead workflow usually has neither, and defaulting them to empty is right:
+// carrying the DEAD owner's temporal_workflow_id and policy_ref forward would
+// leave the row naming a workflow that is gone as the reason the current owner
+// holds it.
+type RecoverOption func(*recoverConfig)
+
+type recoverConfig struct {
+	policyRef          string
+	temporalWorkflowID string
+}
+
+// WithRecoverPolicyRef records which policy put the new owner on this entity.
+func WithRecoverPolicyRef(ref string) RecoverOption {
+	return func(c *recoverConfig) { c.policyRef = ref }
+}
+
+// WithRecoverWorkflowID records the incoming owner's Temporal workflow.
+func WithRecoverWorkflowID(id string) RecoverOption {
+	return func(c *recoverConfig) { c.temporalWorkflowID = id }
+}
+
+// Recover takes ownership from an owner that is DEAD, and only from one.
+//
+// This is the operation that makes IsDead mean something. Without it the
+// package computes careful positive evidence that an owner has crashed and
+// then has no way to act on it: Acquire refuses any active row at any age, and
+// every other exit from active requires the owner's own identity and epoch. A
+// crashed worker would hold its entity forever — the inverse of the failure
+// this package was built to fix, and just as bad.
+//
+// Three properties keep it from becoming a way to steal work:
+//
+//  1. Liveness is re-checked SERVER-SIDE, under the advisory lock, against the
+//     phase's bound. A caller may not assert that an owner is dead; it may only
+//     ask for the question to be re-asked. Letting the asker decide would put
+//     the takeover in the hands of whoever wants to act.
+//  2. Only liveness counts. An owner that is alive but has effected nothing is
+//     stuck, not dead, and stays its own — handing a stuck entity to another
+//     machine produces a second stuck machine.
+//  3. expectedEpoch, when non-zero, pins the decision to the record the caller
+//     actually looked at, so a recovery based on a stale read fails rather than
+//     lands.
+//
+// The epoch increments, which fences the dead owner's executors if the process
+// ever comes back.
+func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, newOwner Owner, expectedEpoch int, evidence string, opts ...RecoverOption) (*Ownership, error) {
+	cfg := recoverConfig{}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	policyRef, temporalWorkflowID := cfg.policyRef, cfg.temporalWorkflowID
+	if err := validate(entity, phase); err != nil {
+		return nil, err
+	}
+	if newOwner.Type == "" || newOwner.ID == "" {
+		return nil, fmt.Errorf("lifecycle: recover: owner type and id are required")
+	}
+	if evidence == "" {
+		// A takeover with no recorded reason is the one mutation here that is
+		// hardest to reconstruct afterwards.
+		return nil, fmt.Errorf("lifecycle: recover: evidence is required")
+	}
+
+	var out *Ownership
+	err := s.inTx(ctx, entity, phase, func(tx pgx.Tx) error {
+		now := time.Now().UTC()
+		current, err := scanOne(tx.QueryRow(ctx,
+			`SELECT `+ownershipColumns+` FROM lifecycle_ownership
+			 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
+			entity.Kind, entity.ID, phase))
+		if err != nil {
+			return err
+		}
+		if expectedEpoch != 0 && current.Epoch != expectedEpoch {
+			return fmt.Errorf("%w: current epoch is %d, caller has %d",
+				ErrEpochMismatch, current.Epoch, expectedEpoch)
+		}
+		// A handing-off row IS recoverable, and the recoverer wins: the named
+		// target never completed the handoff and the outgoing owner is dead,
+		// so honouring the pending handoff would leave the row wedged on an
+		// actor that may never arrive. The abandoned target is recorded in the
+		// recovered event's reason.
+		if current.State != StateActive && current.State != StateHandingOff {
+			// Released and terminal need no recovery — Acquire already takes
+			// them, and routing that through here would blur "this owner died"
+			// with "this owner finished".
+			return fmt.Errorf("%w: record is %s; use Acquire", ErrNotOwner, current.State)
+		}
+		if !current.IsDead(now) {
+			return fmt.Errorf("%w: last seen %s", ErrOwnerAlive, current.LastSeenAt.Format(time.RFC3339))
+		}
+
+		// last_seen_at is in the WHERE, not just the epoch.
+		//
+		// The epoch guard alone is not a compare-and-set over the decision
+		// this operation actually makes. IsDead was evaluated on the row read
+		// above, and the one write that refreshes last_seen_at WITHOUT moving
+		// the epoch is the idempotent re-acquire — which is exactly what a
+		// crashed owner's pod does when it comes back:
+		//
+		//   1. wf-1 owns at epoch 4, unseen 11h. Dead.
+		//   2. A reconciler reads the row, IsDead is true, and stalls.
+		//   3. wf-1 restarts and re-acquires: last_seen_at = now, epoch stays 4.
+		//   4. The reconciler's UPDATE still matches epoch = 4 and takes the
+		//      row from an owner that just proved it is alive.
+		//
+		// inTx serializing writers hides that, which is precisely why it must
+		// not be relied on — the same argument the epoch comment above makes.
+		// Pinning last_seen_at makes the liveness evidence part of the CAS.
+		recovered, err := scanOne(tx.QueryRow(ctx,
+			recoverUpdateSQL,
+
+			newOwner.Type, newOwner.ID, StateActive, now, "recovered: "+evidence,
+			policyRef, temporalWorkflowID,
+			entity.Kind, entity.ID, phase, current.Epoch, current.LastSeenAt))
+		if errors.Is(err, ErrNotFound) {
+			// The row moved between the read and the write, and the only way
+			// it can have done so without changing the epoch is a re-acquire
+			// by the owner we were about to declare dead. That is not "not
+			// found" — it is the owner being alive after all.
+			return fmt.Errorf("%w: it re-acquired while recovery was in flight", ErrOwnerAlive)
+		}
+		if err != nil {
+			return fmt.Errorf("lifecycle: recover: %w", err)
+		}
+		if err := insertEvent(ctx, tx, recovered.Entity, phase, EventRecovered,
+			recovered.Epoch, newOwner,
+			fmt.Sprintf("from %s/%s (dead, last seen %s): %s",
+				current.Owner.Type, current.Owner.ID,
+				current.LastSeenAt.Format(time.RFC3339), evidence), now); err != nil {
+			return err
+		}
+		out = recovered
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // --- internals ---------------------------------------------------------
 
 // inTx runs fn inside a transaction holding the advisory lock for this
@@ -771,96 +940,4 @@ func scanRow(row scannable) (*Ownership, error) {
 		o.HandoffFrom = &Owner{Type: handoffFromType, ID: handoffFromID}
 	}
 	return o, nil
-}
-
-// Recover takes ownership from an owner that is DEAD, and only from one.
-//
-// This is the operation that makes IsDead mean something. Without it the
-// package computes careful positive evidence that an owner has crashed and
-// then has no way to act on it: Acquire refuses any active row at any age, and
-// every other exit from active requires the owner's own identity and epoch. A
-// crashed worker would hold its entity forever — the inverse of the failure
-// this package was built to fix, and just as bad.
-//
-// Three properties keep it from becoming a way to steal work:
-//
-//  1. Liveness is re-checked SERVER-SIDE, under the advisory lock, against the
-//     phase's bound. A caller may not assert that an owner is dead; it may only
-//     ask for the question to be re-asked. Letting the asker decide would put
-//     the takeover in the hands of whoever wants to act.
-//  2. Only liveness counts. An owner that is alive but has effected nothing is
-//     stuck, not dead, and stays its own — handing a stuck entity to another
-//     machine produces a second stuck machine.
-//  3. expectedEpoch, when non-zero, pins the decision to the record the caller
-//     actually looked at, so a recovery based on a stale read fails rather than
-//     lands.
-//
-// The epoch increments, which fences the dead owner's executors if the process
-// ever comes back.
-func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, newOwner Owner, expectedEpoch int, evidence string) (*Ownership, error) {
-	if err := validate(entity, phase); err != nil {
-		return nil, err
-	}
-	if newOwner.Type == "" || newOwner.ID == "" {
-		return nil, fmt.Errorf("lifecycle: recover: owner type and id are required")
-	}
-	if evidence == "" {
-		// A takeover with no recorded reason is the one mutation here that is
-		// hardest to reconstruct afterwards.
-		return nil, fmt.Errorf("lifecycle: recover: evidence is required")
-	}
-
-	var out *Ownership
-	err := s.inTx(ctx, entity, phase, func(tx pgx.Tx) error {
-		now := time.Now().UTC()
-		current, err := scanOne(tx.QueryRow(ctx,
-			`SELECT `+ownershipColumns+` FROM lifecycle_ownership
-			 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
-			entity.Kind, entity.ID, phase))
-		if err != nil {
-			return err
-		}
-		if expectedEpoch != 0 && current.Epoch != expectedEpoch {
-			return fmt.Errorf("%w: current epoch is %d, caller has %d",
-				ErrEpochMismatch, current.Epoch, expectedEpoch)
-		}
-		if current.State != StateActive && current.State != StateHandingOff {
-			// Released and terminal need no recovery — Acquire already takes
-			// them, and routing that through here would blur "this owner died"
-			// with "this owner finished".
-			return fmt.Errorf("%w: record is %s; use Acquire", ErrNotOwner, current.State)
-		}
-		if !current.IsDead(now) {
-			return fmt.Errorf("%w: last seen %s", ErrOwnerAlive, current.LastSeenAt.Format(time.RFC3339))
-		}
-
-		recovered, err := scanOne(tx.QueryRow(ctx,
-			`UPDATE lifecycle_ownership
-			   SET owner_type = $1, owner_id = $2, epoch = epoch + 1, state = $3,
-			       acquired_at = $4, last_seen_at = $4, last_progress_at = $4,
-			       progress_evidence = $5,
-			       handoff_from_type = owner_type, handoff_from_id = owner_id,
-			       handoff_to_type = '', handoff_to_id = '', handoff_started_at = NULL,
-			       released_at = NULL, released_reason = '', updated_at = $4
-			 WHERE entity_kind = $6 AND entity_id = $7 AND phase = $8 AND epoch = $9
-			 RETURNING `+ownershipColumns,
-			newOwner.Type, newOwner.ID, StateActive, now, "recovered: "+evidence,
-			entity.Kind, entity.ID, phase, current.Epoch))
-		if err != nil {
-			return fmt.Errorf("lifecycle: recover: %w", err)
-		}
-		if err := insertEvent(ctx, tx, recovered.Entity, phase, EventRecovered,
-			recovered.Epoch, newOwner,
-			fmt.Sprintf("from %s/%s (dead, last seen %s): %s",
-				current.Owner.Type, current.Owner.ID,
-				current.LastSeenAt.Format(time.RFC3339), evidence), now); err != nil {
-			return err
-		}
-		out = recovered
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }

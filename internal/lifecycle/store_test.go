@@ -895,3 +895,184 @@ func TestEpochIsComputedByTheDatabase(t *testing.T) {
 		t.Fatalf("epoch did not come from the database: want 42, got %d", next.Epoch)
 	}
 }
+
+// TestRecoverPinsTheLivenessEvidenceInItsCAS is the race the epoch guard alone
+// did not cover: the idempotent re-acquire refreshes last_seen_at WITHOUT
+// moving the epoch, which is exactly what a crashed owner's pod does when it
+// restarts.
+//
+//  1. wf-1 owns at epoch N, unseen 11h. Dead.
+//  2. A reconciler reads the row and decides to recover.
+//  3. wf-1 restarts and re-acquires: last_seen_at = now, epoch unchanged.
+//  4. Without last_seen_at in the WHERE, the reconciler's UPDATE still matches
+//     and takes the row from an owner that just proved it is alive.
+func TestRecoverPinsTheLivenessEvidenceInItsCAS(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "recover-cas")
+	crashed := devloop("wf-crashed")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: crashed})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	stale := time.Now().UTC().Add(-11 * time.Hour)
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE lifecycle_ownership SET last_seen_at = $1
+		 WHERE entity_kind = $2 AND entity_id = $3 AND phase = $4`,
+		stale, entity.Kind, entity.ID, PhaseReviewRemediation,
+	); err != nil {
+		t.Fatalf("age the row: %v", err)
+	}
+
+	// Step 3, standing in for the stall: the owner comes back and re-acquires.
+	// Epoch is deliberately unchanged by that path.
+	revived, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: crashed})
+	if err != nil {
+		t.Fatalf("re-acquire: %v", err)
+	}
+	if revived.Epoch != got.Epoch {
+		t.Fatalf("re-acquire moved the epoch, which would mask this race: %d -> %d", got.Epoch, revived.Epoch)
+	}
+
+	// A recovery decided on the pre-restart liveness must now fail. Today it
+	// fails at the IsDead re-check inside the transaction; the WHERE predicate
+	// is what keeps it failing if that check ever moves outside.
+	if _, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "unseen for 11h"); !errors.Is(err, ErrOwnerAlive) {
+		t.Fatalf("recovery must lose to a revived owner, got %v", err)
+	}
+	final, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if final.Owner != crashed {
+		t.Fatalf("the revived owner lost its row to %+v", final.Owner)
+	}
+}
+
+func TestRecoverOnAHandingOffRowLetsTheRecovererWin(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "recover-handoff")
+	dying := devloop("wf-dying")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: dying})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, dying, got.Epoch, Owner{Type: OwnerPRSteward, ID: "steward"}, "exiting"); err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE lifecycle_ownership SET last_seen_at = $1
+		 WHERE entity_kind = $2 AND entity_id = $3 AND phase = $4`,
+		time.Now().UTC().Add(-11*time.Hour), entity.Kind, entity.ID, PhaseReviewRemediation,
+	); err != nil {
+		t.Fatalf("age the row: %v", err)
+	}
+
+	// The owner died mid-handoff and the named target never completed it.
+	// Honouring the pending handoff would wedge the row on an actor that may
+	// never arrive, so the recoverer wins and the handoff is abandoned.
+	recovered, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, 0, "died mid-handoff")
+	if err != nil {
+		t.Fatalf("recover from handing-off: %v", err)
+	}
+	if recovered.Owner != shepherd || recovered.State != StateActive {
+		t.Fatalf("recoverer did not win: %+v", recovered)
+	}
+	if recovered.HandoffTo != nil {
+		t.Fatalf("the abandoned handoff target survived: %+v", recovered.HandoffTo)
+	}
+}
+
+func TestRecoverRefusesAFinishedRow(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "recover-finished")
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.Terminal(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, "merged"); err != nil {
+		t.Fatalf("terminal: %v", err)
+	}
+	// Released and terminal need no recovery — Acquire already takes them, and
+	// routing that through Recover would blur "this owner died" with "this
+	// owner finished".
+	if _, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, 0, "x"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("recover on a terminal row must be refused, got %v", err)
+	}
+}
+
+func TestHandoffCompleteWithoutAHandoff(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "no-handoff")
+
+	if _, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: devloop("wf-1")}); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := s.HandoffComplete(ctx, entity, PhaseReviewRemediation, shepherd); !errors.Is(err, ErrNoHandoff) {
+		t.Fatalf("want ErrNoHandoff on an active row, got %v", err)
+	}
+}
+
+// TestRecoverUpdateRefusesAStaleLivenessRead exercises the predicate directly,
+// because Recover itself cannot.
+//
+// inTx holds the advisory lock across the read and the write, so nothing can
+// interleave between them in-process — which means the test above passes with
+// or without last_seen_at in the WHERE, and is therefore not evidence for it.
+// The predicate is what keeps the IsDead decision inside the compare-and-set
+// if that ordering ever changes, so it is tested where it lives: run the
+// production statement with the liveness value the decision was made on, after
+// the row has moved on, and require it to match nothing.
+func TestRecoverUpdateRefusesAStaleLivenessRead(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "recover-sql")
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	staleSeen := got.LastSeenAt
+
+	// The owner ticks again: last_seen_at moves, the epoch deliberately does
+	// not. This is the restarted-pod case.
+	time.Sleep(5 * time.Millisecond)
+	if _, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner}); err != nil {
+		t.Fatalf("re-acquire: %v", err)
+	}
+
+	now := time.Now().UTC()
+	stolen, err := scanOne(s.pool.QueryRow(ctx, recoverUpdateSQL,
+		OwnerShepherd, "cron", StateActive, now, "recovered: stale read",
+		"", "",
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, staleSeen,
+	))
+	if err == nil {
+		t.Fatalf("a recovery decided on stale liveness took the row: %+v", stolen.Owner)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound (no row matched the WHERE), got %v", err)
+	}
+
+	// And with the CURRENT liveness value it must succeed, or the predicate is
+	// simply blocking recovery outright.
+	current, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if _, err := scanOne(s.pool.QueryRow(ctx, recoverUpdateSQL,
+		OwnerShepherd, "cron", StateActive, now, "recovered: fresh read",
+		"", "",
+		entity.Kind, entity.ID, PhaseReviewRemediation, current.Epoch, current.LastSeenAt,
+	)); err != nil {
+		t.Fatalf("recovery on a fresh liveness read must succeed, got %v", err)
+	}
+}
