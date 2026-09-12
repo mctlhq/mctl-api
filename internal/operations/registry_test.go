@@ -16,6 +16,16 @@ package operations
 
 import "testing"
 
+// wantServices mirrors config/settings.py's SERVICES list in mctlhq/mctl-agents;
+// update both places together when a service is added or removed there.
+// Package-level so the enum-membership test and the ValidateInput test below
+// read the same copy: a service added to one but not the other would otherwise
+// be enumerated as present while never being exercised through validation.
+var wantServices = []string{
+	"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal",
+	"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio",
+}
+
 // TestImplementAndShepherdServiceEnumCoversMctlAgentsServices guards against
 // the enum silently drifting out of sync with mctl-agents' own
 // config/settings.py SERVICES list. Caught live 2026-08-05: mctl-design was
@@ -25,13 +35,22 @@ import "testing"
 // mctl-telegram/mctl-design/mctl-pairdesk were added on the mctl-agents side.
 // The same failure recurred for "portfolio" (mctl-api#281).
 func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
-	// Mirrors config/settings.py's SERVICES list in mctlhq/mctl-agents.
-	// Update both places together when a service is added/removed there.
-	wantServices := []string{
-		"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal",
-		"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "portfolio",
-	}
-
+	// Note what this can and cannot catch. It is a hand-kept copy, so it fires
+	// only when one enum in THIS repository falls behind the others -- it
+	// cannot notice that mctl-agents has registered a service nobody mirrored
+	// here, because the omission lands in this list too. That is how
+	// "seerrsense" stayed missing from all four enums and this test stayed
+	// green: the investigator ran against seerrsense, the proposal landed, and
+	// mctl-agents-approve rejected service=seerrsense server-side with no
+	// standalone path left to approve it. Catching that class needs the real
+	// SERVICES list, which is in another repository and not reachable from a
+	// unit test. Until something fetches it, adding a service means editing
+	// nine places here: the four ParameterDef enums in registry.go, their four
+	// mcplib.Enum mirrors in internal/mcp/server.go, and this list. The four
+	// mirrors are backstopped by TestServiceEnumsMatchRegistry, which compares
+	// the two sides value-for-value and in order, so forgetting one of those
+	// still gets you a red build. This list is the one nothing backstops: it is
+	// a fifth edit alongside the four registry enums, not a check on them.
 	registry := NewRegistry()
 	// mctl-agents-approve and mctl-agents-reconcile duplicate the same enum
 	// (mctl-agents-investigate takes an issue_url instead of a service param,
@@ -60,25 +79,53 @@ func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 				t.Errorf("operation %q's service enum is missing %q (mctl-agents SERVICES entry)", opName, svc)
 			}
 		}
+
+		// And the converse. Membership alone is subset-only: it catches a
+		// service added upstream and not mirrored here, and says nothing about
+		// one removed upstream and left behind here. That direction fails
+		// worse, not better -- the enum keeps accepting a service mctl-agents
+		// will refuse, so instead of a 400 at the edge the caller gets a
+		// dispatched workflow that dies in Argo. The empty string is not a
+		// service: it is the "all services" default on the three optional
+		// params, and absent on approve, where service is required.
+		wantSet := make(map[string]bool, len(wantServices))
+		for _, svc := range wantServices {
+			wantSet[svc] = true
+		}
+		for _, v := range serviceParam.Enum {
+			if v == "" || wantSet[v] {
+				continue
+			}
+			t.Errorf("operation %q's service enum carries %q, which is not in mctl-agents SERVICES; a stale entry accepts a service the agent side will reject", opName, v)
+		}
 	}
 }
 
-// TestApproveAcceptsPortfolioService exercises the exact code path that
-// produced the 400 for portfolio (mctl-api#281): ValidateInput on
-// mctl-agents-approve with service="portfolio" must return no errors.
-func TestApproveAcceptsPortfolioService(t *testing.T) {
+// TestApproveAcceptsEveryMctlAgentsService exercises the exact code path that
+// produced the 400 for portfolio (mctl-api#281) and again for seerrsense: not
+// enum membership, but ValidateInput on mctl-agents-approve, which is what a
+// caller actually hits. Driven off wantServices rather than one literal, so a
+// service added there gets this end-to-end assertion without anyone
+// remembering to write a second test for it -- the earlier single-service
+// version passed throughout the seerrsense outage because "portfolio" was
+// still fine.
+func TestApproveAcceptsEveryMctlAgentsService(t *testing.T) {
 	registry := NewRegistry()
 	op, ok := registry.Get("mctl-agents-approve")
 	if !ok {
 		t.Fatal("mctl-agents-approve operation not found in registry")
 	}
 
-	errs := registry.ValidateInput(op, map[string]string{
-		"service": "portfolio",
-		"slug":    "issue-281-add-portfolio",
-	})
-	if len(errs) != 0 {
-		t.Errorf("ValidateInput(mctl-agents-approve, service=portfolio) returned unexpected errors: %v", errs)
+	for _, svc := range wantServices {
+		t.Run(svc, func(t *testing.T) {
+			errs := registry.ValidateInput(op, map[string]string{
+				"service": svc,
+				"slug":    "issue-1-example-slug",
+			})
+			if len(errs) != 0 {
+				t.Errorf("ValidateInput(mctl-agents-approve, service=%s) returned unexpected errors: %v", svc, errs)
+			}
+		})
 	}
 }
 
