@@ -1128,3 +1128,65 @@ func TestRefresh_SSHModeIgnoresTheCredentialSource(t *testing.T) {
 		t.Fatalf("SSH mode consulted the token source %d times, want 0", calls)
 	}
 }
+
+// TestRefresh_CloneDoesNotPersistTheCredential pins that a successful clone
+// leaves no credential in .git/config.
+//
+// git stores the URL it was handed as remote.origin.url, and on the HTTPS
+// branch that URL carries the token as userinfo — so without the fix a
+// plaintext copy sits on the cache volume, outliving the rotation that
+// replaced it. This was verified present on the running pod, not imagined.
+//
+// The fixture uses a file:// URL with userinfo, which git accepts and
+// persists exactly like an https:// one, so the behaviour under test is the
+// real one without needing an HTTPS server.
+func TestRefresh_CloneDoesNotPersistTheCredential(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "origin")
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...) //nolint:gosec // fixed test arguments
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(origin, "init", "-q", "-b", "main", ".")
+	if err := os.WriteFile(filepath.Join(origin, "a.txt"), []byte("hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(origin, "add", ".")
+	run(origin, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "init")
+
+	const token = "ghs_fixtureTokenValue"
+	r := NewReader("file://"+origin, "main", filepath.Join(t.TempDir(), "cache"),
+		func() (string, error) { return token, nil }, "", "")
+
+	if err := r.refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	cfg, err := os.ReadFile(filepath.Join(r.localPath, ".git", "config"))
+	if err != nil {
+		t.Fatalf("read .git/config: %v", err)
+	}
+	if bytes.Contains(cfg, []byte(token)) {
+		t.Error(".git/config contains the credential in plaintext; the clone URL was not stripped")
+	}
+	if bytes.Contains(cfg, []byte("x-access-token")) {
+		t.Error(".git/config still carries userinfo in remote.origin.url")
+	}
+	// And the remote must still point somewhere usable, so the strip did not
+	// simply break the repository.
+	if !bytes.Contains(cfg, []byte("file://"+origin)) {
+		t.Errorf("remote.origin.url is not the bare repo URL:\n%s", cfg)
+	}
+	// A second refresh must still work — it takes the fetch branch, which
+	// passes the credential explicitly rather than reading it back from the
+	// stripped config.
+	if err := r.refresh(); err != nil {
+		t.Fatalf("second refresh after stripping the credential: %v", err)
+	}
+}

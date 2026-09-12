@@ -575,7 +575,7 @@ func checkCredentialSource(name string, s ghtoken.Source) {
 	}
 	if _, err := s(); err != nil {
 		slog.Error("configured GitHub credential could not be read at startup; the pod will keep retrying but will not work until this is fixed",
-			"credential", name, "file", os.Getenv(githubAppTokenFileEnv), "err", err)
+			"credential", name, "file", os.Getenv(githubAppTokenFileEnv), "error", err)
 	}
 }
 

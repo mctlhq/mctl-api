@@ -283,6 +283,28 @@ func (r *Reader) refresh() error {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git clone failed: %w\n%s", err, r.redactTokenLocked(bytes.TrimSpace(out)))
 		}
+		// git clone persists the URL it was given as remote.origin.url, and
+		// on the HTTPS branch that URL carries the credential as userinfo --
+		// so a successful clone writes a plaintext copy of the token into
+		// .git/config on the cache volume, where it outlives the rotation
+		// that replaced it. Verified present on the running pod before this
+		// was added; it is not a theoretical leak.
+		//
+		// Nothing here reads it back: every fetch below passes cloneURL
+		// explicitly. So the stored URL can be reduced to the bare one with
+		// no behavioural change, and anything that later gains read access to
+		// this volume -- a debug ephemeral container, a core dump, a handler
+		// that walks the cache -- finds no credential.
+		//
+		// Failure here is not fatal: the clone succeeded and the service can
+		// serve from it. Log loudly instead, because the condition to fix is
+		// "a credential is on disk", not "the repo is unusable".
+		if r.token != "" {
+			if err := r.runGit(sshEnv, "remote", "set-url", "origin", r.repoURL); err != nil {
+				slog.Error("could not strip the credential from remote.origin.url; a plaintext token remains in .git/config on the cache volume",
+					"path", filepath.Join(r.localPath, ".git", "config"), "error", err)
+			}
+		}
 		slog.Info("gitops repo cloned successfully")
 	} else {
 		if err := r.runGit(sshEnv, "fetch", "--depth=1", cloneURL, r.branch); err != nil {
