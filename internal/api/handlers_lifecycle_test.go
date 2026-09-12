@@ -572,3 +572,80 @@ func TestLifecycleWriteBodyIsCapped(t *testing.T) {
 		t.Fatalf("a body under the cap: want 200, got %d %s", rec.Code, rec.Body)
 	}
 }
+
+// TestLifecycleHandoffCompleteKeepsTheIncomingOwnersCorrelation pins the
+// options both takeover writes need.
+//
+// handoffCompleteUpdateSQL and recoverUpdateSQL write `temporal_workflow_id`
+// and `policy_ref` UNCONDITIONALLY — the outgoing owner's workflow and grant
+// are not the incoming one's, and leaving either would make the row explain
+// the current owner with the previous owner's reasons. A handler that passes
+// no options therefore BLANKS both, which is the same failure from the other
+// side: a live row explaining nobody.
+func TestLifecycleHandoffCompleteKeepsTheIncomingOwnersCorrelation(t *testing.T) {
+	store, prefix := newTestLifecycleStore(t)
+	h := &Handlers{opts: Options{Lifecycle: store}}
+	id := prefix + "-handoff-correlation"
+
+	if rec := lifecyclePost(t, h, h.AcquireLifecycleOwnership, map[string]any{
+		"kind": "pull-request", "id": id, "phase": "review-remediation",
+		"owner_type": "devloop-workflow", "owner_id": "wf-1",
+		"temporal_workflow_id": "dev-loop-run-1", "policy_ref": "policy-a",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("acquire: %d %s", rec.Code, rec.Body)
+	}
+	if rec := lifecyclePost(t, h, h.StartLifecycleHandoff, map[string]any{
+		"kind": "pull-request", "id": id, "phase": "review-remediation",
+		"owner_type": "devloop-workflow", "owner_id": "wf-1", "epoch": 1,
+		"to_owner_type": "pr-steward", "to_owner_id": "steward",
+		"reason": "exiting",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("handoff start: %d %s", rec.Code, rec.Body)
+	}
+
+	rec := lifecyclePost(t, h, h.CompleteLifecycleHandoff, map[string]any{
+		"kind": "pull-request", "id": id, "phase": "review-remediation",
+		"owner_type": "pr-steward", "owner_id": "steward",
+		"temporal_workflow_id": "steward-run-9", "policy_ref": "policy-b",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handoff complete: %d %s", rec.Code, rec.Body)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["temporal_workflow_id"] != "steward-run-9" {
+		t.Fatalf("the incoming owner's workflow was dropped: %v", got["temporal_workflow_id"])
+	}
+	if got["policy_ref"] != "policy-b" {
+		t.Fatalf("the incoming owner's policy was dropped: %v", got["policy_ref"])
+	}
+}
+
+// TestLifecycleRecoverRejectsMissingPreconditionsWith400 pins the status, not
+// only the refusal. The store refuses a missing evidence or epoch with a plain
+// error, which lands in writeLifecycleError's default arm and becomes a 500 —
+// a caller mistake answered as a server fault, on the endpoint most likely to
+// be driven by hand.
+func TestLifecycleRecoverRejectsMissingPreconditionsWith400(t *testing.T) {
+	store, prefix := newTestLifecycleStore(t)
+	h := &Handlers{opts: Options{Lifecycle: store}}
+	id := prefix + "-recover-preconditions"
+
+	for name, body := range map[string]map[string]any{
+		"no evidence": {
+			"kind": "pull-request", "id": id, "phase": "review-remediation",
+			"owner_type": "shepherd", "owner_id": "cron", "epoch": 1,
+		},
+		"no epoch": {
+			"kind": "pull-request", "id": id, "phase": "review-remediation",
+			"owner_type": "shepherd", "owner_id": "cron", "evidence": "it died",
+		},
+	} {
+		rec := lifecyclePost(t, h, h.RecoverLifecycleOwnership, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: want 400, got %d %s", name, rec.Code, rec.Body)
+		}
+	}
+}

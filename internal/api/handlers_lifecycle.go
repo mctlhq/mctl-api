@@ -400,7 +400,9 @@ func (h *Handlers) CompleteLifecycleHandoff(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	got, err := h.opts.Lifecycle.HandoffComplete(r.Context(), body.entity(), body.Phase, body.owner())
+	got, err := h.opts.Lifecycle.HandoffComplete(
+		r.Context(), body.entity(), body.Phase, body.owner(), ownerOptions(body)...,
+	)
 	if err != nil {
 		writeLifecycleError(w, err, nil)
 		return
@@ -421,6 +423,28 @@ func (h *Handlers) TerminateLifecycleOwnership(w http.ResponseWriter, r *http.Re
 	h.finishLifecycle(w, r, true)
 }
 
+// ownerOptions carries the INCOMING owner's own correlation onto a row it is
+// taking over.
+//
+// Both statements that move ownership to a new actor —
+// handoffCompleteUpdateSQL and recoverUpdateSQL — write
+// `temporal_workflow_id` and `policy_ref` UNCONDITIONALLY, because the
+// outgoing owner's workflow and policy grant are not the incoming one's and
+// leaving either would make the row explain the current owner with the
+// previous owner's reasons. The consequence for a caller that passes no
+// options is that both columns are BLANKED, which is the same failure from
+// the other side: a live row explaining nobody.
+func ownerOptions(body lifecycleWriteRequest) []lifecycle.OwnerOption {
+	opts := []lifecycle.OwnerOption{}
+	if body.PolicyRef != "" {
+		opts = append(opts, lifecycle.WithPolicyRef(body.PolicyRef))
+	}
+	if body.TemporalWorkflowID != "" {
+		opts = append(opts, lifecycle.WithWorkflowID(body.TemporalWorkflowID))
+	}
+	return opts
+}
+
 // RecoverLifecycleOwnership handles
 // POST /api/v1/lifecycle/ownership/recover — take a row whose owner is dead.
 //
@@ -436,10 +460,9 @@ func (h *Handlers) TerminateLifecycleOwnership(w http.ResponseWriter, r *http.Re
 // owner is still within its bound, so a client that merely believes an owner
 // died cannot act on that belief.
 //
-// `evidence` is required by the store, not by this handler: a takeover with
-// no recorded reason is the one mutation here that is hardest to reconstruct
-// afterwards, and the store's own error says so more precisely than a
-// duplicated check would.
+// `evidence` and `epoch` are checked HERE as well as in the store, because the
+// store's refusals are plain errors and a plain error is a 500 — see the
+// comment on the checks themselves.
 func (h *Handlers) RecoverLifecycleOwnership(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
 		return
@@ -448,15 +471,29 @@ func (h *Handlers) RecoverLifecycleOwnership(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	opts := []lifecycle.OwnerOption{}
-	if body.PolicyRef != "" {
-		opts = append(opts, lifecycle.WithPolicyRef(body.PolicyRef))
+	// A takeover with no recorded reason is the one mutation here that is
+	// hardest to reconstruct afterwards, and the epoch is the precondition
+	// that makes it a takeover of a SPECIFIC generation rather than of
+	// whatever the row happens to hold. The store refuses both — with plain
+	// errors, which land in writeLifecycleError's default arm and become a
+	// 500. A caller mistake answered as a server fault backs clients off and
+	// pages an operator, on the endpoint most likely to be driven by hand.
+	//
+	// An earlier version of this comment argued the opposite: that the store's
+	// own message says it more precisely than a duplicated check. It does —
+	// but only after the status code has already told the caller the wrong
+	// thing.
+	if body.Evidence == "" {
+		writeError(w, http.StatusBadRequest, "evidence is required: say why this owner is being taken over")
+		return
 	}
-	if body.TemporalWorkflowID != "" {
-		opts = append(opts, lifecycle.WithWorkflowID(body.TemporalWorkflowID))
+	if body.Epoch <= 0 {
+		writeError(w, http.StatusBadRequest, "epoch is required: recovery is a takeover of a specific generation")
+		return
 	}
 	got, err := h.opts.Lifecycle.Recover(
-		r.Context(), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence, opts...,
+		r.Context(), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence,
+		ownerOptions(body)...,
 	)
 	if err != nil {
 		writeLifecycleError(w, err, nil)
