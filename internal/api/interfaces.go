@@ -79,6 +79,15 @@ type DevLoopClient interface {
 	QueryShepherdInLoop(ctx context.Context, workflowID string) (bool, error)
 }
 
+// WorkflowDispatcher starts a GitHub Actions workflow_dispatch run. An
+// interface rather than the concrete *ghactions.Dispatcher for the same
+// reason DevLoopClient is one: the handler's auth and not-configured branches
+// have to be testable without a network, and a fake is the only way to assert
+// what would have been dispatched.
+type WorkflowDispatcher interface {
+	Dispatch(ctx context.Context, owner, repo, workflowFile, ref string, inputs map[string]string) error
+}
+
 // AuditLog is the interface for recording and querying audit events.
 // Implemented by audit.Logger (in-memory) and audit.PostgresLogger (persistent).
 type AuditLog = audit.Log

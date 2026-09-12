@@ -1817,6 +1817,71 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/cloudflare/portal/server-auth/apply:
+    post:
+      summary: Dispatch the Cloudflare MCP portal server-auth apply workflow
+      description: |
+        Starts `cloudflare-apply.yml` on `main` in `mctlhq/mctl-gitops` for the
+        pinned root `infrastructure/cloudflare/portal`,
+        which applies the committed OAuth registration — endpoints, client, and
+        above all the scope the portal requests — of the Cloudflare MCP portal's
+        upstream servers.
+
+        This endpoint writes nothing to Cloudflare and holds no Cloudflare
+        credential. The write token is an environment secret on that
+        repository's `cloudflare-apply` environment, issued only to a job that
+        requests the environment and only after a required reviewer approves
+        it. So a call here starts a run whose plan job publishes the
+        live-vs-committed comparison and whose apply job then waits for a
+        human. The response carries a link to the workflow's run list rather
+        than a run id: the dispatch API answers 204 with no body, because at
+        that moment the run does not exist yet.
+
+        Takes no parameters. What is applied is the file at HEAD of `main`;
+        changing it is a pull request against that file, not a call here.
+        **Admin access required.**
+      tags: [Operations]
+      responses:
+        '202':
+          description: Workflow dispatched (nothing applied yet — the apply job still needs environment approval)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  repo:
+                    type: string
+                    example: mctlhq/mctl-gitops
+                  workflow:
+                    type: string
+                    example: cloudflare-apply.yml
+                  ref:
+                    type: string
+                    example: main
+                  runs_url:
+                    type: string
+                    example: https://github.com/mctlhq/mctl-gitops/actions/workflows/cloudflare-apply.yml
+                  message:
+                    type: string
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: GitHub refused the dispatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: GitHub workflow dispatch not configured (GITOPS_ACTIONS_TOKEN unset)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/v1/agents/dev-loop/{workflow_id}:
     get:
       summary: Describe a DevLoopWorkflow's execution status

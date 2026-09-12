@@ -17,6 +17,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -169,8 +170,8 @@ func TestAllToolsHaveTitleAnnotation(t *testing.T) {
 		t.Fatalf("failed to unmarshal tools/list response: %v", err)
 	}
 
-	if len(result.Result.Tools) != 74 {
-		t.Errorf("expected 74 tools, got %d", len(result.Result.Tools))
+	if len(result.Result.Tools) != 75 {
+		t.Errorf("expected 75 tools, got %d", len(result.Result.Tools))
 	}
 
 	for _, tool := range result.Result.Tools {
@@ -1482,5 +1483,44 @@ func TestRemoveCustomDomain_NotesFailedList(t *testing.T) {
 	}
 	if !strings.Contains(text.Text, "could not consult the domains registry") {
 		t.Errorf("expected a note about the failed list call, got %q", text.Text)
+	}
+}
+
+// The tool is a thin wrapper, and "thin" is exactly what makes it worth
+// pinning: the only thing it contributes is the endpoint it posts to and the
+// fact that it sends no caller-supplied parameters. agy raised this on #304 --
+// the tool count had been updated while nothing exercised the handler.
+func TestToolTriggerPortalServerAuthApply_PostsToTheEndpoint(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"runs_url":"https://example.test/runs","root":"infrastructure/cloudflare/portal"}`))
+	}))
+	defer backend.Close()
+
+	srv := NewServer(backend.URL, "test-token")
+	_, handler := srv.toolTriggerPortalServerAuthApply()
+
+	result, err := handler(context.Background(), mcplib.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("handler reported a tool error: %+v", result.Content)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method %q, want POST", gotMethod)
+	}
+	if want := "/api/v1/cloudflare/portal/server-auth/apply"; gotPath != want {
+		t.Errorf("path %q, want %q", gotPath, want)
+	}
+	// No caller-supplied parameters reach the API: the root is pinned on the
+	// server side, and a body carrying anything else would mean the tool had
+	// grown a way to choose what gets applied.
+	if s := strings.TrimSpace(string(gotBody)); s != "{}" && s != "" && s != "null" {
+		t.Errorf("body %q, want an empty object", s)
 	}
 }

@@ -38,6 +38,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/domains"
+	"github.com/mctlhq/mctl-api/internal/ghactions"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/lifecycle"
@@ -306,6 +307,20 @@ func main() {
 	// *temporalclient.Client pointer to an interface-typed field would
 	// produce a non-nil interface wrapping a nil pointer — requireTemporalAdmin's
 	// `h.opts.TemporalClient == nil` check would then wrongly see "configured".
+	// GitHub Actions dispatcher (optional — enabled when GITOPS_ACTIONS_TOKEN
+	// is set). Same nil-interface discipline as devLoopClient below: the
+	// field is left as its zero value when unconfigured, because assigning a
+	// nil *ghactions.Dispatcher to an interface-typed field would produce a
+	// non-nil interface wrapping a nil pointer and the handler's
+	// "not configured" branch would never fire.
+	var workflowDispatcher mctlapi.WorkflowDispatcher
+	if cfg.GitOpsActionsToken != "" {
+		workflowDispatcher = ghactions.New(cfg.GitOpsActionsToken)
+	} else {
+		slog.Warn("GITOPS_ACTIONS_TOKEN is unset; the Cloudflare portal server-auth apply cannot be dispatched",
+			"route", "POST /api/v1/cloudflare/portal/server-auth/apply")
+	}
+
 	var devLoopClient mctlapi.DevLoopClient
 	if temporalAddress := os.Getenv("TEMPORAL_ADDRESS"); temporalAddress != "" {
 		temporalNamespace := os.Getenv("TEMPORAL_NAMESPACE")
@@ -453,6 +468,7 @@ func main() {
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,
 		TemporalClient:                 devLoopClient,
+		WorkflowDispatcher:             workflowDispatcher,
 		GitopsReady:                    gitopsReady,
 		PostgresReady:                  postgresReady,
 		DexReady:                       dexReady,
@@ -513,11 +529,18 @@ func main() {
 }
 
 type config struct {
-	Port                    string
-	GitOpsRepoURL           string
-	GitOpsBranch            string
-	GitOpsLocalPath         string
-	GitOpsToken             string // GitHub token for HTTPS auth (optional)
+	Port            string
+	GitOpsRepoURL   string
+	GitOpsBranch    string
+	GitOpsLocalPath string
+	GitOpsToken     string // GitHub token for HTTPS auth (optional)
+	// GitOpsActionsToken starts workflow_dispatch runs in mctl-gitops. A
+	// SEPARATE credential from GitOpsToken on purpose: that one clones over
+	// HTTPS and needs contents:read, while this one needs actions:write and
+	// nothing else. Reusing the clone token would silently widen it from
+	// "can read the repository" to "can start any workflow in it", which is
+	// not a change anyone would notice in a values file.
+	GitOpsActionsToken      string
 	GitOpsSSHKeyPath        string // Path to SSH key for SSH auth (optional, takes precedence)
 	GitOpsSSHKnownHostsPath string // Path to a known_hosts file for SSH host-key pinning (optional; empty uses the shipped default)
 	ArgoCDURL               string
@@ -624,6 +647,7 @@ func loadConfig() config {
 		GitOpsBranch:                   envOr("GITOPS_BRANCH", "main"),
 		GitOpsLocalPath:                envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-gitops"),
 		GitOpsToken:                    envOr("GITOPS_REPO_TOKEN", os.Getenv("GITHUB_TOKEN")),
+		GitOpsActionsToken:             os.Getenv("GITOPS_ACTIONS_TOKEN"),
 		GitOpsSSHKeyPath:               os.Getenv("GITOPS_SSH_KEY_PATH"),
 		GitOpsSSHKnownHostsPath:        os.Getenv("GITOPS_SSH_KNOWN_HOSTS_PATH"),
 		ArgoCDURL:                      envOr("ARGOCD_URL", "https://ops.mctl.ai"),
