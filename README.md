@@ -180,6 +180,36 @@ curl -H "Authorization: Bearer $(gh auth token)" \
      https://api.mctl.ai/api/v1/operations/deploy-service/execute
 ```
 
+### Agent Registry
+
+The agent registry (`internal/agentregistry`) has two layers on the same
+Postgres-backed store:
+
+- **v1 — image/release**: `POST /api/v1/agents/{name}/versions`,
+  `POST /api/v1/agents/{name}/releases`,
+  `GET /api/v1/agents/{name}/resolve?environment=` — versions a single agent
+  image/release (`agent_versions` + `agent_releases`). Unchanged by the
+  v1alpha2 layer below.
+- **v1alpha2 — definition/profile/binding**: `GET /api/v1/agents`,
+  `GET /api/v1/agents/{name}`,
+  `POST /api/v1/agents/{name}/definition-versions`,
+  `POST /api/v1/agent-profiles/{profile}/versions`,
+  `POST /api/v1/agents/{name}/bindings`,
+  `GET /api/v1/agents/{name}/bindings/resolve`,
+  `POST /api/v1/agents/{name}/bindings/rollback` — immutable
+  `AgentDefinition` and `ExecutionProfile` versions plus an append-only
+  `ReleaseBinding` ledger per `(agent, environment)`, per ADR 007. See
+  [`docs/agent-platform-registry.md`](docs/agent-platform-registry.md) for
+  the full contract (compatibility-range grammar, error codes, gitops
+  reconciliation).
+
+Both layers are admin-only and share the seven v1 MCP tools plus seven new
+v1alpha2 tools (`mctl_publish_agent_definition_version`,
+`mctl_publish_agent_profile_version`, `mctl_set_agent_version_lifecycle`,
+`mctl_bind_agent_release`, `mctl_rollback_agent_binding`,
+`mctl_list_agents`, `mctl_get_agent`); `mctl_resolve_agent` gained an
+optional `api_version` argument selecting between the two layers.
+
 ### OpenAPI Documentation
 
 | URL | Description |

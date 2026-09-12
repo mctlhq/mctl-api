@@ -324,13 +324,36 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/agents/{name}/versions", h.ListAgentVersions)
 			r.Post("/agents/{name}/releases", h.UpdateAgentRelease)
 			r.Get("/agents/{name}/resolve", h.ResolveAgentRelease)
-			// No collision with the /agents/{name}/... routes above today —
-			// those are all 3 segments, this is 2. If a 2-segment
-			// GET /agents/{name} is ever added, chi's radix tree still
-			// prefers this static "executions" match over it; keep them
-			// adjacent so that stays easy to notice.
+			// GET /agents/executions is 2 segments, same as the v1alpha2
+			// GET /agents/{name} registered below — chi's radix tree prefers
+			// this static "executions" match over the dynamic one; keep them
+			// adjacent so that stays easy to notice. internal/api/router_test.go
+			// pins it.
 			r.Post("/agents/executions", h.RecordAgentExecution)
 			r.Get("/agents/executions", h.ListAgentExecutions)
+
+			// v1alpha2 agent-platform layer (ADR 007): immutable
+			// AgentDefinition/ExecutionProfile versions plus append-only
+			// ReleaseBinding revisions per (agent, environment). Extends the
+			// same *agentregistry.Store as the v1 routes above — see
+			// internal/api/handlers_agent_platform.go and
+			// docs/agent-platform-registry.md. Admin-only, same as v1.
+			r.Get("/agents", h.ListAgents)
+			r.Get("/agents/{name}", h.GetAgent)
+			r.Post("/agents/{name}/definition-versions", h.PublishDefinitionVersion)
+			r.Get("/agents/{name}/definition-versions", h.ListDefinitionVersions)
+			r.Post("/agents/{name}/definition-versions/{version}/lifecycle", h.SetDefinitionVersionLifecycle)
+			r.Post("/agent-profiles/{profile}/versions", h.PublishProfileVersion)
+			r.Get("/agent-profiles/{profile}/versions", h.ListProfileVersions)
+			r.Post("/agent-profiles/{profile}/versions/{version}/lifecycle", h.SetProfileVersionLifecycle)
+			r.Post("/agents/{name}/bindings", h.CreateBinding)
+			r.Get("/agents/{name}/bindings", h.ListBindings)
+			// "resolve" and "rollback" are static 4th-segment matches that
+			// win over the dynamic GET .../bindings/{revision} below, same
+			// static-beats-dynamic precedence as /agents/executions above.
+			r.Get("/agents/{name}/bindings/resolve", h.ResolveBinding)
+			r.Post("/agents/{name}/bindings/rollback", h.RollbackBinding)
+			r.Get("/agents/{name}/bindings/{revision}", h.GetBinding)
 
 			// Write endpoints with real side effects (trigger Argo Workflows,
 			// start/signal a Temporal workflow) — tighter rate limit, shared

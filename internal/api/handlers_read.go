@@ -856,3 +856,16 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
+
+// writeErrorCode is writeError's sibling for callers that need a
+// machine-readable error code alongside the message — the v1alpha2 agent
+// platform handlers use it so orchestrator/resolver.py and gitops CI can
+// branch on `code` instead of parsing `error` text. writeError itself is
+// untouched: no existing response body changes shape.
+func writeErrorCode(w http.ResponseWriter, status int, code, message string, details map[string]interface{}) {
+	body := map[string]interface{}{"error": message, "code": code}
+	if details != nil {
+		body["details"] = details
+	}
+	writeJSON(w, status, body)
+}

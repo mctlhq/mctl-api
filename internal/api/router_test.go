@@ -19,6 +19,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // NewRouter must log exactly one startup warning when
@@ -52,6 +54,32 @@ func TestNewRouterSilentWhenGithubAppConnectTokenSet(t *testing.T) {
 	}
 	if strings.Contains(out, "secret-token") {
 		t.Fatal("token value must never be logged")
+	}
+}
+
+// T11 (tasks.md): GET /api/v1/agents/executions is a static 2-segment route
+// registered alongside the v1alpha2 GET /api/v1/agents/{name} dynamic
+// 2-segment route added by this proposal. chi's radix tree must keep
+// preferring the static match — router.go's route-registration comment
+// warns about exactly this — so ListAgentExecutions, not GetAgent, is what
+// actually serves that path. chi.Router.Find resolves the pattern without
+// invoking either handler, so this does not need a configured registry.
+func TestAgentsExecutionsStaticRouteBeatsDynamicGetAgent(t *testing.T) {
+	router, ok := NewRouter(Options{}).(chi.Router)
+	if !ok {
+		t.Fatal("NewRouter did not return a chi.Router")
+	}
+
+	rctx := chi.NewRouteContext()
+	pattern := router.Find(rctx, "GET", "/api/v1/agents/executions")
+	if pattern != "/api/v1/agents/executions" {
+		t.Fatalf("expected GET /api/v1/agents/executions to resolve to the static route, got pattern %q", pattern)
+	}
+
+	rctx = chi.NewRouteContext()
+	pattern = router.Find(rctx, "GET", "/api/v1/agents/mentor")
+	if pattern != "/api/v1/agents/{name}" {
+		t.Fatalf("expected GET /api/v1/agents/{name} to resolve to the dynamic GetAgent route for a non-'executions' name, got pattern %q", pattern)
 	}
 }
 

@@ -259,6 +259,17 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolRollbackAgent())
 	srv.AddTool(s.toolListAgentExecutions())
 
+	// v1alpha2 agent-platform layer (ADR 007): immutable definition/profile
+	// versions plus append-only ReleaseBinding revisions. See
+	// docs/agent-platform-registry.md.
+	srv.AddTool(s.toolPublishAgentDefinitionVersion())
+	srv.AddTool(s.toolPublishAgentProfileVersion())
+	srv.AddTool(s.toolSetAgentVersionLifecycle())
+	srv.AddTool(s.toolBindAgentRelease())
+	srv.AddTool(s.toolRollbackAgentBinding())
+	srv.AddTool(s.toolListAgents())
+	srv.AddTool(s.toolGetAgent())
+
 	// Prompts (explicit skill invocation, e.g. /mctl:platform-skill in Claude Code).
 	srv.AddPrompt(s.promptPlatformSkill())
 
@@ -3159,6 +3170,10 @@ Each version is immutable and carries the manifest, git SHA, image reference, an
 	return tool, handler
 }
 
+// agentPlatformAPIVersionEnum selects between the v1 agent_releases resolve
+// path and the v1alpha2 ReleaseBinding resolve path in toolResolveAgent.
+var agentPlatformAPIVersionEnum = []string{"v1", "v1alpha2"}
+
 func (s *Server) toolResolveAgent() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_resolve_agent",
 		mcplib.WithTitleAnnotation("Resolve Agent Release"),
@@ -3166,20 +3181,61 @@ func (s *Server) toolResolveAgent() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Resolve which version of an agent is currently released to an environment.
 
-This is the read path the dev-loop pipeline pins a version from at the start of a run. Returns 404 if no version has ever been promoted to that agent/environment pair. Admin-only.`),
+This is the read path the dev-loop pipeline pins a version from at the start of a run. Returns 404 if no version has ever been promoted to that agent/environment pair. Admin-only.
+
+api_version defaults to "v1" (the agent_versions/agent_releases resolve path — byte-identical to before this argument existed). Pass api_version="v1alpha2" to resolve through the ReleaseBinding layer instead: either the active binding for agent_name+environment, or an explicit pin via definition_version+profile (optionally profile_version — the highest published compatible version is used if omitted).`),
 		mcplib.WithString("agent_name",
 			mcplib.Required(),
 			mcplib.Description("Agent name, e.g. issue-investigator, implementer, shepherd, incident-responder, service-agent, mentor"),
 		),
 		mcplib.WithString("environment",
-			mcplib.Required(),
 			mcplib.Enum(agentRegistryEnvironmentEnum...),
-			mcplib.Description("Environment to resolve"),
+			mcplib.Description("Environment to resolve. Required for api_version=v1, or for api_version=v1alpha2 when definition_version is not given."),
+		),
+		mcplib.WithString("api_version",
+			mcplib.Enum(agentPlatformAPIVersionEnum...),
+			mcplib.Description("Which resolve contract to use: v1 (agent_versions/agent_releases, default) or v1alpha2 (ReleaseBinding). Omit for the default v1 behaviour."),
+		),
+		mcplib.WithString("definition_version",
+			mcplib.Description("v1alpha2 only: an explicit AgentDefinition version to resolve, instead of the active binding for environment. Requires profile."),
+		),
+		mcplib.WithString("profile",
+			mcplib.Description("v1alpha2 only: the ExecutionProfile name to pair with definition_version for an explicit pin."),
+		),
+		mcplib.WithString("profile_version",
+			mcplib.Description("v1alpha2 only: an explicit ExecutionProfile version for the pin. If omitted, the highest published version compatible with the definition's declared range is used."),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		agent := stringArg(req, "agent_name")
 		environment := stringArg(req, "environment")
+		apiVersion := stringArg(req, "api_version")
+
+		if apiVersion == "v1alpha2" {
+			definitionVersion := stringArg(req, "definition_version")
+			profile := stringArg(req, "profile")
+			profileVersion := stringArg(req, "profile_version")
+
+			query := url.Values{}
+			if definitionVersion != "" {
+				query.Set("definition_version", definitionVersion)
+				query.Set("profile", profile)
+				if profileVersion != "" {
+					query.Set("profile_version", profileVersion)
+				}
+			} else {
+				query.Set("environment", environment)
+			}
+			path := "/api/v1/agents/" + url.PathEscape(agent) + "/bindings/resolve?" + query.Encode()
+			body, err := s.apiGet(ctx, path)
+			if err != nil {
+				return mcplib.NewToolResultError(fmt.Sprintf("Failed to resolve agent binding: %v", err)), nil
+			}
+			return mcplib.NewToolResultText(string(body)), nil
+		}
+
+		// Default: byte-identical to the tool's behaviour before api_version
+		// existed.
 		path := "/api/v1/agents/" + url.PathEscape(agent) + "/resolve?environment=" + url.QueryEscape(environment)
 		body, err := s.apiGet(ctx, path)
 		if err != nil {
@@ -3314,6 +3370,368 @@ Reads the most recent promotion audit row for this agent/environment and reverts
 		})
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to roll back agent: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+// ─── v1alpha2 agent platform (ADR 007) ───────────────────────────────────
+// Seven tools for the immutable AgentDefinition/ExecutionProfile version
+// layer and the append-only ReleaseBinding ledger. See
+// docs/agent-platform-registry.md for the full contract; toolResolveAgent
+// above is the eighth touch point (extended, not duplicated).
+
+func (s *Server) toolPublishAgentDefinitionVersion() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_publish_agent_definition_version",
+		mcplib.WithTitleAnnotation("Publish Agent Definition Version"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`Publish an immutable v1alpha2 AgentDefinition version: the full definition spec, its source manifest provenance (repo/path/gitSha/contentHash), and the ExecutionProfile compatibility range it declares. The agent must already have a definition (mctl_create_agent). (agent_name, version) is a once-only key — republishing the same pair is rejected with a conflict. Admin-only.`),
+		mcplib.WithString("agent_name",
+			mcplib.Required(),
+			mcplib.Description("Agent name, e.g. issue-investigator, implementer, shepherd, incident-responder, service-agent, mentor"),
+		),
+		mcplib.WithString("version",
+			mcplib.Required(),
+			mcplib.Description("Semver-ish version string for this definition publish, e.g. 1.4.0"),
+		),
+		mcplib.WithString("spec",
+			mcplib.Required(),
+			mcplib.Description("The full v1alpha2 AgentDefinition spec, as JSON"),
+		),
+		mcplib.WithString("owner",
+			mcplib.Required(),
+			mcplib.Description("Owning repo or team, e.g. mctl-agents"),
+		),
+		mcplib.WithString("source_repo",
+			mcplib.Description("Repo this version was published from"),
+		),
+		mcplib.WithString("source_path",
+			mcplib.Description("Path within source_repo to the manifest this version was published from"),
+		),
+		mcplib.WithString("source_git_sha",
+			mcplib.Required(),
+			mcplib.Description("Commit SHA this version was published from"),
+		),
+		mcplib.WithString("source_content_hash",
+			mcplib.Required(),
+			mcplib.Description("Content hash of the spec at publish time"),
+		),
+		mcplib.WithString("profile_range",
+			mcplib.Required(),
+			mcplib.Description("Declared ExecutionProfile compatibility range, e.g. \">=2.0.0 <3.0.0\""),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		agent := stringArg(req, "agent_name")
+		body, err := s.apiPostJSON(ctx, "/api/v1/agents/"+url.PathEscape(agent)+"/definition-versions", map[string]interface{}{
+			"version": stringArg(req, "version"),
+			"spec":    stringArg(req, "spec"),
+			"owner":   stringArg(req, "owner"),
+			"source_manifest": map[string]interface{}{
+				"repo":         stringArg(req, "source_repo"),
+				"path":         stringArg(req, "source_path"),
+				"git_sha":      stringArg(req, "source_git_sha"),
+				"content_hash": stringArg(req, "source_content_hash"),
+			},
+			"profile_range": stringArg(req, "profile_range"),
+		})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to publish agent definition version: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolPublishAgentProfileVersion() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_publish_agent_profile_version",
+		mcplib.WithTitleAnnotation("Publish Agent Execution Profile Version"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`Publish an immutable ExecutionProfile version: its full policy spec, provenance, and required policy-ceiling fields. Profile names are a global key space, not namespaced per agent. (profile_name, version) is a once-only key. Admin-only.`),
+		mcplib.WithString("profile_name",
+			mcplib.Required(),
+			mcplib.Description("Execution profile name, e.g. standard-investigate"),
+		),
+		mcplib.WithString("version",
+			mcplib.Required(),
+			mcplib.Description("Semver-ish version string for this profile publish, e.g. 2.1.0"),
+		),
+		mcplib.WithString("spec",
+			mcplib.Required(),
+			mcplib.Description("The full ExecutionProfile spec, as JSON, including every required policy-ceiling field"),
+		),
+		mcplib.WithString("owner",
+			mcplib.Required(),
+			mcplib.Description("Owning repo or team, e.g. mctl-agents"),
+		),
+		mcplib.WithString("source_repo",
+			mcplib.Description("Repo this version was published from"),
+		),
+		mcplib.WithString("source_path",
+			mcplib.Description("Path within source_repo to the manifest this version was published from"),
+		),
+		mcplib.WithString("source_git_sha",
+			mcplib.Required(),
+			mcplib.Description("Commit SHA this version was published from"),
+		),
+		mcplib.WithString("source_content_hash",
+			mcplib.Required(),
+			mcplib.Description("Content hash of the spec at publish time"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		profile := stringArg(req, "profile_name")
+		body, err := s.apiPostJSON(ctx, "/api/v1/agent-profiles/"+url.PathEscape(profile)+"/versions", map[string]interface{}{
+			"version": stringArg(req, "version"),
+			"spec":    stringArg(req, "spec"),
+			"owner":   stringArg(req, "owner"),
+			"source_manifest": map[string]interface{}{
+				"repo":         stringArg(req, "source_repo"),
+				"path":         stringArg(req, "source_path"),
+				"git_sha":      stringArg(req, "source_git_sha"),
+				"content_hash": stringArg(req, "source_content_hash"),
+			},
+		})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to publish agent profile version: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+// agentPlatformLifecycleEnum is the target states a definition/profile
+// version's lifecycle may transition to. "published" is never a valid
+// target — it is only ever the initial state a publish call sets.
+var agentPlatformLifecycleEnum = []string{"deprecated", "disabled"}
+
+// agentPlatformKindEnum selects which version kind
+// mctl_set_agent_version_lifecycle transitions.
+var agentPlatformKindEnum = []string{"definition", "profile"}
+
+func (s *Server) toolSetAgentVersionLifecycle() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_set_agent_version_lifecycle",
+		mcplib.WithTitleAnnotation("Set Agent Version Lifecycle"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`Transition a published AgentDefinition or ExecutionProfile version to deprecated or disabled. Only published -> deprecated, published -> disabled and deprecated -> disabled are valid; any other transition is rejected. The immutable spec is left untouched — only the lifecycle state, actor and reason change. A disabled version can no longer be bound (or restored by rollback). Admin-only.`),
+		mcplib.WithString("kind",
+			mcplib.Required(),
+			mcplib.Enum(agentPlatformKindEnum...),
+			mcplib.Description("Which version kind to transition: definition or profile"),
+		),
+		mcplib.WithString("name",
+			mcplib.Required(),
+			mcplib.Description("Agent name (kind=definition) or execution profile name (kind=profile)"),
+		),
+		mcplib.WithString("version",
+			mcplib.Required(),
+			mcplib.Description("The exact published version to transition"),
+		),
+		mcplib.WithString("lifecycle",
+			mcplib.Required(),
+			mcplib.Enum(agentPlatformLifecycleEnum...),
+			mcplib.Description("Target lifecycle state"),
+		),
+		mcplib.WithString("reason",
+			mcplib.Description("Why this transition is happening, recorded on the version"),
+		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("transition %s %q@%q to lifecycle %q", args["kind"], args["name"], args["version"], args["lifecycle"])); r != nil {
+			return r, nil
+		}
+		kind := stringArg(req, "kind")
+		name := stringArg(req, "name")
+		version := stringArg(req, "version")
+		payload := map[string]interface{}{
+			"lifecycle": stringArg(req, "lifecycle"),
+			"reason":    stringArg(req, "reason"),
+		}
+		var path string
+		if kind == "profile" {
+			path = "/api/v1/agent-profiles/" + url.PathEscape(name) + "/versions/" + url.PathEscape(version) + "/lifecycle"
+		} else {
+			path = "/api/v1/agents/" + url.PathEscape(name) + "/definition-versions/" + url.PathEscape(version) + "/lifecycle"
+		}
+		body, err := s.apiPostJSON(ctx, path, payload)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to set version lifecycle: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolBindAgentRelease() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_bind_agent_release",
+		mcplib.WithTitleAnnotation("Bind Agent Release (v1alpha2)"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`Append a new ReleaseBinding revision binding a compatible AgentDefinition version and ExecutionProfile version to (agent, environment). Append-only: this never overwrites, it always adds a new revision, and the active binding for a pair is always the highest revision. Rejected with 422 if the profile version does not satisfy the definition's declared compatibility range, if either version is deprecated/disabled, or if binding_source is compatibility-fixture (non-promotable — use registry). Admin-only.`),
+		mcplib.WithString("agent_name",
+			mcplib.Required(),
+			mcplib.Description("Agent name, e.g. issue-investigator"),
+		),
+		mcplib.WithString("environment",
+			mcplib.Required(),
+			mcplib.Enum(agentRegistryEnvironmentEnum...),
+			mcplib.Description("Environment to bind into"),
+		),
+		mcplib.WithString("definition_version",
+			mcplib.Required(),
+			mcplib.Description("Published AgentDefinition version to bind"),
+		),
+		mcplib.WithString("profile_name",
+			mcplib.Required(),
+			mcplib.Description("Execution profile name to bind"),
+		),
+		mcplib.WithString("profile_version",
+			mcplib.Required(),
+			mcplib.Description("Published ExecutionProfile version to bind — must satisfy the definition's declared compatibility range"),
+		),
+		mcplib.WithString("binding_source",
+			mcplib.Enum("registry", "manual", "compatibility-fixture"),
+			mcplib.Description("Provenance of this binding. Defaults to \"registry\" if omitted. \"compatibility-fixture\" is always rejected — it is non-promotable by design."),
+		),
+		mcplib.WithString("intent_repo",
+			mcplib.Description("gitops repo this binding's intent came from, if bindingSource=registry"),
+		),
+		mcplib.WithString("intent_path",
+			mcplib.Description("Path to the ReleaseBindingIntent file, if bindingSource=registry"),
+		),
+		mcplib.WithString("intent_git_sha",
+			mcplib.Description("Merge commit SHA the intent was reconciled from, if bindingSource=registry"),
+		),
+		mcplib.WithString("reason",
+			mcplib.Description("Why this binding is being created, recorded on the revision"),
+		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("bind agent %q to definition %q + profile %q@%q in environment %q",
+			args["agent_name"], args["definition_version"], args["profile_name"], args["profile_version"], args["environment"])); r != nil {
+			return r, nil
+		}
+		agent := stringArg(req, "agent_name")
+		payload := map[string]interface{}{
+			"environment":        stringArg(req, "environment"),
+			"definition_version": stringArg(req, "definition_version"),
+			"profile":            stringArg(req, "profile_name"),
+			"profile_version":    stringArg(req, "profile_version"),
+			"binding_source":     stringArg(req, "binding_source"),
+			"reason":             stringArg(req, "reason"),
+		}
+		if repo, path, sha := stringArg(req, "intent_repo"), stringArg(req, "intent_path"), stringArg(req, "intent_git_sha"); repo != "" || path != "" || sha != "" {
+			payload["intent"] = map[string]interface{}{
+				"repo":    repo,
+				"path":    path,
+				"git_sha": sha,
+			}
+		}
+		body, err := s.apiPostJSON(ctx, "/api/v1/agents/"+url.PathEscape(agent)+"/bindings", payload)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to bind agent release: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolRollbackAgentBinding() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_rollback_agent_binding",
+		mcplib.WithTitleAnnotation("Rollback Agent Binding (v1alpha2)"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`Roll (agent, environment) back to an exact prior ReleaseBinding revision. Appends a new revision that copies the target revision's definition/profile pair and sets rollbackOf to the revision it restored — never a guess at "one step back". Rejected with 422 if the target revision's definition or profile version has since become disabled. Admin-only.`),
+		mcplib.WithString("agent_name",
+			mcplib.Required(),
+			mcplib.Description("Agent name, e.g. issue-investigator"),
+		),
+		mcplib.WithString("environment",
+			mcplib.Required(),
+			mcplib.Enum(agentRegistryEnvironmentEnum...),
+			mcplib.Description("Environment to roll back"),
+		),
+		mcplib.WithNumber("revision",
+			mcplib.Required(),
+			mcplib.Description("The exact prior binding revision number to restore"),
+		),
+		mcplib.WithString("reason",
+			mcplib.Description("Why this rollback is happening, recorded on the new revision"),
+		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("roll back agent %q in environment %q to binding revision %v", args["agent_name"], args["environment"], args["revision"])); r != nil {
+			return r, nil
+		}
+		agent := stringArg(req, "agent_name")
+		revision, _ := args["revision"].(float64)
+		body, err := s.apiPostJSON(ctx, "/api/v1/agents/"+url.PathEscape(agent)+"/bindings/rollback", map[string]interface{}{
+			"environment": stringArg(req, "environment"),
+			"revision":    int(revision),
+			"reason":      stringArg(req, "reason"),
+		})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to roll back agent binding: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolListAgents() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_agents",
+		mcplib.WithTitleAnnotation("List Agents"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription(`List every registered agent in the registry: owner, v1 version count, v1alpha2 definition-version count, and the active v1alpha2 binding revision per environment. Admin-only.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiGet(ctx, "/api/v1/agents")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list agents: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolGetAgent() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_agent",
+		mcplib.WithTitleAnnotation("Get Agent"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription(`Get one agent's full catalog entry: owner, every v1 version and v1alpha2 definition version (with per-version lifecycle), and the active v1alpha2 binding per environment. Admin-only.`),
+		mcplib.WithString("agent_name",
+			mcplib.Required(),
+			mcplib.Description("Agent name, e.g. issue-investigator, implementer, shepherd, incident-responder, service-agent, mentor"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		agent := stringArg(req, "agent_name")
+		body, err := s.apiGet(ctx, "/api/v1/agents/"+url.PathEscape(agent))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get agent: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

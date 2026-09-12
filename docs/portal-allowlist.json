@@ -25,6 +25,10 @@
       "reason": "Signals approval into a running DevLoopWorkflow, releasing an agent to act on a repository. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
+      "name": "mctl_bind_agent_release",
+      "enabled": false
+    },
+    {
       "name": "mctl_create_agent",
       "enabled": true,
       "reason": "Creates an agent record, adding a new actor that can later be published and run. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
@@ -83,6 +87,10 @@
       "name": "mctl_enable_tenant_skill",
       "enabled": true,
       "reason": "Binds a platform skill to a tenant, granting its agent a new capability. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
+    },
+    {
+      "name": "mctl_get_agent",
+      "enabled": false
     },
     {
       "name": "mctl_get_dev_loop",
@@ -158,6 +166,10 @@
       "name": "mctl_list_agent_versions",
       "enabled": true,
       "reason": "Published versions of an mctl-agents agent with manifest, git SHA, image reference and prompt hash; release metadata, no tenant data."
+    },
+    {
+      "name": "mctl_list_agents",
+      "enabled": false
     },
     {
       "name": "mctl_list_domains",
@@ -240,6 +252,14 @@
       "reason": "Provisions a database for a service and wires its credentials; creates persistent state. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
+      "name": "mctl_publish_agent_definition_version",
+      "enabled": false
+    },
+    {
+      "name": "mctl_publish_agent_profile_version",
+      "enabled": false
+    },
+    {
       "name": "mctl_publish_agent_version",
       "enabled": true,
       "reason": "Publishes an agent version, making it resolvable and runnable by tenants. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
@@ -295,6 +315,10 @@
       "reason": "Rolls an agent back to a prior version, changing what tenants run. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
+      "name": "mctl_rollback_agent_binding",
+      "enabled": false
+    },
+    {
       "name": "mctl_rollback_service",
       "enabled": true,
       "reason": "Rolls a service back to a prior image tag, changing production. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
@@ -313,6 +337,10 @@
       "name": "mctl_scale_service",
       "enabled": true,
       "reason": "Changes a service's replica count, consuming or releasing cluster capacity. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
+    },
+    {
+      "name": "mctl_set_agent_version_lifecycle",
+      "enabled": false
     },
     {
       "name": "mctl_sync_repos",
