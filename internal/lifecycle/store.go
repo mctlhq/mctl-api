@@ -253,6 +253,18 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 				// NOT progress and does not touch last_progress_at, and it
 				// does not move the epoch: a Temporal activity retry or an
 				// Argo pod restart must not fence its own in-flight work.
+				//
+				// Except while HANDING OFF. An owner in that state has said it
+				// is leaving; if the incoming owner never completes, the only
+				// thing that can notice is the handoff going stale, and an
+				// outgoing owner that keeps polling would refresh last_seen_at
+				// forever and hide it. So liveness is frozen at the moment the
+				// handoff started, and HandoffStartedAt is what the reconciler
+				// reads (mctlhq/mctl-agents#353).
+				seen := now
+				if existing.State == StateHandingOff {
+					seen = existing.LastSeenAt
+				}
 				version := existing.Entity.Version
 				if req.Entity.Version != "" {
 					version = req.Entity.Version
@@ -267,10 +279,10 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 				refreshed, err := scanOne(tx.QueryRow(ctx,
 					`UPDATE lifecycle_ownership
 					   SET last_seen_at = $1, entity_version = $2,
-					       temporal_workflow_id = $3, updated_at = $1
-					 WHERE entity_kind = $4 AND entity_id = $5 AND phase = $6
+					       temporal_workflow_id = $3, updated_at = $4
+					 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7
 					 RETURNING `+ownershipColumns,
-					now, version, workflowID, req.Entity.Kind, req.Entity.ID, req.Phase))
+					seen, version, workflowID, now, req.Entity.Kind, req.Entity.ID, req.Phase))
 				if err != nil {
 					return fmt.Errorf("lifecycle: acquire: refresh: %w", err)
 				}
@@ -461,10 +473,11 @@ func (s *Store) HandoffComplete(ctx context.Context, entity EntityRef, phase str
 			   SET owner_type = $1, owner_id = $2, epoch = epoch + 1, state = $3,
 			       acquired_at = $4, last_seen_at = $4, last_progress_at = $4,
 			       progress_evidence = 'handoff completed',
-			       -- The outgoing owner's Temporal workflow is not the
-			       -- incoming one's, and leaving it would make the row name a
-			       -- workflow that no longer drives it as its correlation.
-			       temporal_workflow_id = '',
+			       -- The outgoing owner's Temporal workflow and policy grant
+			       -- are not the incoming one's. Leaving either would make the
+			       -- row explain the current owner with the previous owner's
+			       -- reasons.
+			       temporal_workflow_id = '', policy_ref = '',
 			       handoff_from_type = owner_type, handoff_from_id = owner_id,
 			       handoff_to_type = '', handoff_to_id = '',
 			       handoff_started_at = NULL, updated_at = $4
@@ -669,6 +682,7 @@ const recoverUpdateSQL = `UPDATE lifecycle_ownership
 			       released_at = NULL, released_reason = '', updated_at = $4
 			 WHERE entity_kind = $8 AND entity_id = $9 AND phase = $10
 			   AND epoch = $11 AND last_seen_at = $12
+			   AND state IN ('active', 'handing-off')
 			 RETURNING ` + ownershipColumns
 
 // RecoverOption carries the incoming owner's own correlation fields.
@@ -713,9 +727,10 @@ func WithRecoverWorkflowID(id string) RecoverOption {
 //  2. Only liveness counts. An owner that is alive but has effected nothing is
 //     stuck, not dead, and stays its own — handing a stuck entity to another
 //     machine produces a second stuck machine.
-//  3. expectedEpoch, when non-zero, pins the decision to the record the caller
-//     actually looked at, so a recovery based on a stale read fails rather than
-//     lands.
+//  3. expectedEpoch pins the decision to the record the caller actually read,
+//     so a recovery based on a stale read fails rather than lands. It is
+//     required: a caller that never read the row has no business declaring
+//     its owner dead.
 //
 // The epoch increments, which fences the dead owner's executors if the process
 // ever comes back.
@@ -736,6 +751,13 @@ func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, new
 		// hardest to reconstruct afterwards.
 		return nil, fmt.Errorf("lifecycle: recover: evidence is required")
 	}
+	if expectedEpoch <= 0 {
+		// Required, not optional. The doc above lists pinning the decision to
+		// the record the caller actually read as one of three properties that
+		// keep this from being a way to steal work, and accepting 0 silently
+		// removed it — a caller that never read the row could recover it.
+		return nil, fmt.Errorf("lifecycle: recover: expectedEpoch is required")
+	}
 
 	var out *Ownership
 	err := s.inTx(ctx, entity, phase, func(tx pgx.Tx) error {
@@ -747,7 +769,7 @@ func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, new
 		if err != nil {
 			return err
 		}
-		if expectedEpoch != 0 && current.Epoch != expectedEpoch {
+		if current.Epoch != expectedEpoch {
 			return fmt.Errorf("%w: current epoch is %d, caller has %d",
 				ErrEpochMismatch, current.Epoch, expectedEpoch)
 		}
@@ -790,11 +812,27 @@ func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, new
 			policyRef, temporalWorkflowID,
 			entity.Kind, entity.ID, phase, current.Epoch, current.LastSeenAt))
 		if errors.Is(err, ErrNotFound) {
-			// The row moved between the read and the write, and the only way
-			// it can have done so without changing the epoch is a re-acquire
-			// by the owner we were about to declare dead. That is not "not
-			// found" — it is the owner being alive after all.
-			return fmt.Errorf("%w: it re-acquired while recovery was in flight", ErrOwnerAlive)
+			// The row moved between the read and the write. Which of the three
+			// predicates failed decides what the caller is told, so re-read
+			// rather than guess: a revived owner and a finished entity are
+			// different situations, and only one of them is ErrOwnerAlive.
+			now, rerr := scanOne(tx.QueryRow(ctx,
+				`SELECT `+ownershipColumns+` FROM lifecycle_ownership
+				 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
+				entity.Kind, entity.ID, phase))
+			if rerr != nil {
+				return rerr
+			}
+			switch {
+			case now.State != StateActive && now.State != StateHandingOff:
+				return fmt.Errorf("%w: it reached %s while recovery was in flight",
+					ErrNotOwner, now.State)
+			case now.Epoch != current.Epoch:
+				return fmt.Errorf("%w: ownership moved to epoch %d while recovery was in flight",
+					ErrEpochMismatch, now.Epoch)
+			default:
+				return fmt.Errorf("%w: it was seen again while recovery was in flight", ErrOwnerAlive)
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("lifecycle: recover: %w", err)

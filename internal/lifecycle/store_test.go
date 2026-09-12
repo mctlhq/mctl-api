@@ -974,7 +974,7 @@ func TestRecoverOnAHandingOffRowLetsTheRecovererWin(t *testing.T) {
 	// The owner died mid-handoff and the named target never completed it.
 	// Honouring the pending handoff would wedge the row on an actor that may
 	// never arrive, so the recoverer wins and the handoff is abandoned.
-	recovered, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, 0, "died mid-handoff")
+	recovered, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "died mid-handoff")
 	if err != nil {
 		t.Fatalf("recover from handing-off: %v", err)
 	}
@@ -1002,7 +1002,7 @@ func TestRecoverRefusesAFinishedRow(t *testing.T) {
 	// Released and terminal need no recovery — Acquire already takes them, and
 	// routing that through Recover would blur "this owner died" with "this
 	// owner finished".
-	if _, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, 0, "x"); !errors.Is(err, ErrNotOwner) {
+	if _, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "x"); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("recover on a terminal row must be refused, got %v", err)
 	}
 }
@@ -1074,5 +1074,95 @@ func TestRecoverUpdateRefusesAStaleLivenessRead(t *testing.T) {
 		entity.Kind, entity.ID, PhaseReviewRemediation, current.Epoch, current.LastSeenAt,
 	)); err != nil {
 		t.Fatalf("recovery on a fresh liveness read must succeed, got %v", err)
+	}
+}
+
+// TestRecoverUpdateRefusesAFinishedRow closes the gap the liveness predicate
+// alone left open. finish() changes `state` while touching neither `epoch` nor
+// `last_seen_at`, so those two predicates cannot see it:
+//
+//  1. wf-1 owns at epoch N, unseen 11h. Dead.
+//  2. A reconciler reads the row — active, IsDead — and stalls.
+//  3. wf-1's process comes back and calls Terminal("merged").
+//  4. Without `state` in the WHERE, the reconciler's UPDATE still matches and
+//     hands a FINISHED entity to a new owner as live work.
+//
+// That is the resurrection TestTerminalIsAbsorbing pins for currentFor, through
+// the one operation that does not go via currentFor — and worse, because a
+// merged PR would get driven again.
+func TestRecoverUpdateRefusesAFinishedRow(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "recover-finished-sql")
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	// Step 3, out of band: the row finishes without epoch or last_seen_at moving.
+	if _, err := s.Terminal(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, "merged"); err != nil {
+		t.Fatalf("terminal: %v", err)
+	}
+	finished, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	now := time.Now().UTC()
+	resurrected, err := scanOne(s.pool.QueryRow(ctx, recoverUpdateSQL,
+		OwnerShepherd, "cron", StateActive, now, "recovered: stale state",
+		"", "",
+		entity.Kind, entity.ID, PhaseReviewRemediation, finished.Epoch, finished.LastSeenAt,
+	))
+	if err == nil {
+		t.Fatalf("a finished entity was handed to %+v as live work", resurrected.Owner)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound (no row matched the WHERE), got %v", err)
+	}
+
+	// And through the API the caller is told WHICH predicate failed: a
+	// finished record is not a revived owner.
+	if _, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, finished.Epoch, "x"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("want ErrNotOwner for a finished row, got %v", err)
+	}
+}
+
+// TestHandingOffFreezesLiveness pins that an outgoing owner cannot hold an
+// abandoned handoff open by continuing to poll.
+func TestHandingOffFreezesLiveness(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "handoff-freeze")
+	outgoing := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	mid, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, shepherd, "exiting")
+	if err != nil {
+		t.Fatalf("handoff start: %v", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	again, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: outgoing})
+	if err != nil {
+		t.Fatalf("re-acquire: %v", err)
+	}
+	if !again.LastSeenAt.Equal(mid.LastSeenAt) {
+		t.Fatalf("polling refreshed liveness during a handoff: %v -> %v", mid.LastSeenAt, again.LastSeenAt)
+	}
+
+	// And the handoff's own age is what a reconciler reads.
+	if again.HandoffStartedAt == nil {
+		t.Fatalf("handoff_started_at is not recorded")
+	}
+	if again.HandoffStalled(again.HandoffStartedAt.Add(time.Minute)) {
+		t.Fatalf("a minute-old handoff must not be stalled")
+	}
+	if !again.HandoffStalled(again.HandoffStartedAt.Add(11 * time.Hour)) {
+		t.Fatalf("an 11h handoff must be stalled for a 10h bound")
 	}
 }

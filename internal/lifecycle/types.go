@@ -267,6 +267,23 @@ func (o *Ownership) IsHealthy(now time.Time) bool {
 	return o != nil && o.State == StateActive && !o.IsDead(now)
 }
 
+// HandoffStalled reports whether a handoff was started and never completed
+// within the phase's liveness bound.
+//
+// This is the signal the frozen last_seen_at makes possible: an owner that
+// declares a handoff and keeps polling would otherwise refresh its own liveness
+// forever, and an incoming owner that never arrives would be invisible.
+func (o *Ownership) HandoffStalled(now time.Time) bool {
+	if o == nil || o.State != StateHandingOff || o.HandoffStartedAt == nil {
+		return false
+	}
+	b, ok := LivenessBound(o.Entity.Kind, o.Phase)
+	if !ok {
+		return false
+	}
+	return now.Sub(*o.HandoffStartedAt) > b
+}
+
 // Event is an append-only record of an ownership transition.
 type Event struct {
 	ID         int64     `json:"id"`
