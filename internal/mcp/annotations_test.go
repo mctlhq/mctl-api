@@ -94,6 +94,7 @@ var recordedHints = map[string]hints{
 	"mctl_trigger_incident_responder":         {readOnly: false, destructive: false, idempotent: false},
 	"mctl_trigger_issue":                      {readOnly: false, destructive: false, idempotent: false},
 	"mctl_trigger_mentor_only":                {readOnly: false, destructive: false, idempotent: false},
+	"mctl_trigger_portal_server_auth_apply":   {readOnly: false, destructive: false, idempotent: false},
 	"mctl_trigger_reconcile":                  {readOnly: false, destructive: true, idempotent: false},
 	"mctl_trigger_shepherd":                   {readOnly: false, destructive: true, idempotent: false},
 	"mctl_trigger_single_service":             {readOnly: false, destructive: false, idempotent: false},

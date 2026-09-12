@@ -105,6 +105,13 @@ type Options struct {
 	// DevLoopClient interface, not the concrete *temporalclient.Client, so
 	// tests can inject a fake — see interfaces.go.
 	TemporalClient DevLoopClient
+	// WorkflowDispatcher starts GitHub Actions workflow_dispatch runs
+	// (optional — nil makes POST /api/v1/cloudflare/portal/server-auth/apply
+	// return 503). Deliberately a dispatcher and not a Cloudflare client: the
+	// credential that writes to Cloudflare lives in a mctl-gitops environment
+	// secret behind a required reviewer, so this process can ask for that
+	// apply without ever being able to perform it.
+	WorkflowDispatcher WorkflowDispatcher
 	// OpenClaw controls quota and rate limits on the skill/identity save handlers.
 	// Zero values fall back to defaults (see OpenClawQuotaDefaults).
 	OpenClaw OpenClawQuotaConfig
@@ -348,6 +355,11 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/operations/{name}/execute", h.ExecuteOperation)
 				r.Post("/agents/dev-loop/start", h.StartDevLoopWorkflow)
 				r.Post("/agents/dev-loop/{workflow_id}/approve", h.ApproveDevLoopWorkflow)
+				// Starts a mctl-gitops workflow, not a platform workflow, and
+				// belongs in this group for the same reason the two above do:
+				// it costs a write on the far side and shares the 20/min
+				// budget rather than getting an exemption.
+				r.Post("/cloudflare/portal/server-auth/apply", h.DispatchPortalServerAuthApply)
 			})
 
 			// Liveness read for one DevLoopWorkflow. Deliberately OUTSIDE the

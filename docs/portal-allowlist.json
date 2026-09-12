@@ -350,6 +350,11 @@
       "reason": "Starts a mentor-only agent pass, which comments on work in the repository. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
+      "name": "mctl_trigger_portal_server_auth_apply",
+      "enabled": true,
+      "reason": "Starts the mctl-gitops workflow that applies the committed OAuth registration -- above all the scope -- of the MCP portal's own upstream servers; it holds no Cloudflare credential and the write still needs a required reviewer on a protected environment, so a caller here can ask for that apply but cannot perform it. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
+    },
+    {
       "name": "mctl_trigger_reconcile",
       "enabled": true,
       "reason": "Starts a reconcile pass that may move workflow and proposal state. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."

@@ -250,6 +250,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolGetDevLoop())
 	srv.AddTool(s.toolListRecentAgentRuns())
 
+	// Cloudflare MCP portal (dispatch only — no Cloudflare credential here).
+	srv.AddTool(s.toolTriggerPortalServerAuthApply())
+
 	// Agent registry (mctl-agents AgentManifest versions/releases).
 	srv.AddTool(s.toolCreateAgent())
 	srv.AddTool(s.toolPublishAgentVersion())
@@ -2841,6 +2844,58 @@ Admin-only.`),
 		body, err := s.apiPost(ctx, "/api/v1/operations/mctl-agents-reconcile/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to trigger reconcile: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+// ─── Cloudflare MCP portal ────────────────────────────────────────────
+// One admin-only tool, and it dispatches rather than applies. The portal's
+// upstream OAuth registration -- endpoints, client, and above all the SCOPE
+// the portal asks each upstream for -- is pinned in mctl-gitops at
+// infrastructure/cloudflare/portal/mcp-portal-server-auth.json and applied by
+// .github/workflows/portal-server-auth-apply.yml there.
+//
+// The Cloudflare write token is an environment secret on that repository's
+// `cloudflare-apply` environment, issued only to a job that requests the
+// environment and only after a required reviewer approves it. mctl-api holds
+// no Cloudflare credential and this tool does not give it one: it starts the
+// run, a human reads the plan the run publishes, and a human approves the
+// write. Calling this tool cannot change Cloudflare on its own, which is the
+// property that makes it safe to expose at all.
+
+func (s *Server) toolTriggerPortalServerAuthApply() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_trigger_portal_server_auth_apply",
+		mcplib.WithTitleAnnotation("Apply Cloudflare MCP portal server auth"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		// Not destructive: this call writes nothing anywhere. It queues a
+		// GitHub Actions run whose first job only reads Cloudflare and
+		// publishes a comparison, and whose second job cannot start until a
+		// human approves it on a protected environment. Same classification
+		// as mctl_trigger_agents_run, and for the same reason -- what it
+		// starts is gated, not what it does.
+		mcplib.WithDestructiveHintAnnotation(false),
+		// Each call starts another run. Harmless (the apply is a rewrite of
+		// the same committed blob) but not a no-op, and every run costs a
+		// reviewer another approval to dismiss.
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`Dispatch mctl-gitops' portal-server-auth-apply.yml: apply the committed OAuth registration of the Cloudflare MCP portal's upstream servers (issuer/authorization/token/revocation endpoints, client registration, and the scope the portal requests).
+
+Nothing is written to Cloudflare by this call. The run's plan job reads the live registration and publishes a per-field comparison against infrastructure/cloudflare/portal/mcp-portal-server-auth.json; the apply job then waits for a required reviewer on the cloudflare-apply environment, and refuses if the live side changed after the approval. Read the plan in the run before approving.
+
+Use it when the committed file has changed (a scope was widened or narrowed) or when the nightly drift check reported that the live registration no longer matches it. To change WHAT is applied, open a pull request against that file — this tool only applies what is already on main.
+
+After an apply, the upstream must be signed out and back in in the portal: a refresh is intersected with the family's original grant, so a new scope does not reach a live session.
+
+Admin-only. Returns a link to the workflow's run list — the dispatch API returns no run id, because at that moment the run does not exist yet.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		// No parameters, and no body: the workflow takes no inputs, and what
+		// it applies is the file at HEAD of main.
+		body, err := s.apiPost(ctx, "/api/v1/cloudflare/portal/server-auth/apply", map[string]string{})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to dispatch portal server-auth apply: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}
