@@ -36,6 +36,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/mctlhq/mctl-api/internal/ghtoken"
 )
 
 // ErrNotConfigured is returned when no token is set. Callers turn it into a
@@ -43,13 +45,28 @@ import (
 // fact, not a request that went wrong.
 var ErrNotConfigured = errors.New("github actions dispatch not configured")
 
+// ErrCredentialUnavailable is returned when the credential is configured but
+// cannot be read — a missing, unreadable or empty token file.
+//
+// Separate from ErrNotConfigured because the operator response differs, and
+// separate from a transport error because nothing was sent. Callers map it to
+// 503 rather than 502: 502 means the far side refused, and GitHub was never
+// involved. Same reasoning as resolving before building the request at all —
+// do not let a fault on this side read as a fault on GitHub's.
+var ErrCredentialUnavailable = errors.New("github credential unavailable")
+
 // DefaultBaseURL is github.com's REST API. Overridable so tests can point at
 // an httptest server without a network.
 const DefaultBaseURL = "https://api.github.com"
 
 // Dispatcher starts workflow_dispatch runs.
 type Dispatcher struct {
-	Token   string
+	// Token is consulted per dispatch rather than captured once. The
+	// credential behind it is a GitHub App installation token that lives 60
+	// minutes and is re-minted every 30, so a Dispatcher holding a string
+	// would start answering 401 within the hour of its own construction. See
+	// internal/ghtoken.
+	Token   ghtoken.Source
 	BaseURL string
 	HTTP    *http.Client
 }
@@ -57,7 +74,7 @@ type Dispatcher struct {
 // New returns a Dispatcher with a bounded client. A dispatch is a single
 // small POST; 15s is generous for it and short enough that a GitHub outage
 // does not hold an API request open to the caller's own timeout.
-func New(token string) *Dispatcher {
+func New(token ghtoken.Source) *Dispatcher {
 	return &Dispatcher{
 		Token:   token,
 		BaseURL: DefaultBaseURL,
@@ -92,7 +109,17 @@ func validPathSegment(v string) bool {
 // "the newest run" would be a guess: a scheduled run or a second dispatcher
 // can land between the POST and the poll.
 func (d *Dispatcher) Dispatch(ctx context.Context, owner, repo, workflowFile, ref string, inputs map[string]string) error {
-	if d == nil || d.Token == "" {
+	if d == nil || d.Token == nil {
+		return ErrNotConfigured
+	}
+	// Resolved before anything else is built, so a credential that cannot be
+	// read fails the dispatch outright instead of sending an empty bearer and
+	// reporting GitHub's 401 as though the request had been wrong.
+	token, err := d.Token()
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrCredentialUnavailable, err)
+	}
+	if token == "" {
 		return ErrNotConfigured
 	}
 	// Every value below goes into the URL path. None of them is
@@ -140,7 +167,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, owner, repo, workflowFile, re
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+d.Token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("Content-Type", "application/json")

@@ -81,3 +81,15 @@ envFromSecret: ""
 # The secret must have a key named "ssh-privatekey".
 gitopsSSHSecret: ""
 envFromExtraSecret: ""
+
+# Optional: mount a GitHub App installation token as a file.
+#
+# If set, mounts the Secret at /var/run/secrets/github/token and sets
+# GITHUB_APP_TOKEN_FILE, which the clone and the workflow dispatcher both
+# re-read per use. Installation tokens live 60 minutes and the platform
+# re-mints them every 30, so this must stay a file mount -- delivering the same
+# value through envFromSecret would pin it at container start and it would
+# expire in place.
+githubAppTokenSecret: ""
+# Key inside that Secret holding the token. Defaults to "token".
+githubAppTokenKey: ""

@@ -704,7 +704,7 @@ func TestNewReader_NoFilesystemWriteWhenKnownHostsPathEmpty(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("TMPDIR", tmpDir)
 
-	r := NewReader("git@github.com:mctlhq/mctl-gitops.git", "main", t.TempDir(), "", "/some/deploy-key", "")
+	r := NewReader("git@github.com:mctlhq/mctl-gitops.git", "main", t.TempDir(), nil, "/some/deploy-key", "")
 	if r.knownHostsPath != "" {
 		t.Fatalf("knownHostsPath should be stored verbatim as empty, got %q", r.knownHostsPath)
 	}
@@ -842,7 +842,7 @@ func TestResolveKnownHostsPathLocked_ExplicitPathWins(t *testing.T) {
 
 // TestRedactToken covers the defence-in-depth guard on git's own output.
 //
-// Read the comment on redactToken before changing this: the concern that
+// Read the comment on redactTokenLocked before changing this: the concern that
 // prompted it — git echoing the credential-bearing clone URL in messages
 // like "repository '<url>' not found" — does NOT reproduce on the git
 // versions in play (2.50 locally, 2.54 in the alpine:3.24 runtime image);
@@ -856,7 +856,7 @@ func TestRedactToken(t *testing.T) {
 	token := "ghp_" + "TESTTOKENVALUEnotreal" + strings.Repeat("0", 19)
 
 	r := &Reader{token: token}
-	got := string(r.redactToken([]byte("fatal: repository 'https://x-access-token:" + token + "@github.com/o/r.git/' not found")))
+	got := string(r.redactTokenLocked([]byte("fatal: repository 'https://x-access-token:" + token + "@github.com/o/r.git/' not found")))
 	if strings.Contains(got, token) {
 		t.Fatalf("token survived redaction: %q", got)
 	}
@@ -867,7 +867,7 @@ func TestRedactToken(t *testing.T) {
 	// Untouched when there is no token to redact — the SSH and anonymous
 	// branches must not have their output mangled.
 	plain := []byte("fatal: repository not found")
-	if noTok := (&Reader{}).redactToken(plain); !bytes.Equal(noTok, plain) {
+	if noTok := (&Reader{}).redactTokenLocked(plain); !bytes.Equal(noTok, plain) {
 		t.Fatalf("output altered with no token configured: %q", noTok)
 	}
 }
@@ -1052,5 +1052,309 @@ func TestRefresh_SSHHostKeyMatch_PassesHostKeyVerification(t *testing.T) {
 	msg := err.Error()
 	if strings.Contains(msg, "Host key verification failed") || strings.Contains(msg, "REMOTE HOST IDENTIFICATION HAS CHANGED") {
 		t.Fatalf("expected the clone to get past host-key verification with the correct pinned key, got a host-key failure: %v", err)
+	}
+}
+
+// TestRefresh_ResolvesTheCredentialPerCall pins that the clone credential is
+// re-read on every refresh rather than captured in NewReader.
+//
+// This is the whole reason the parameter is a source. A GitHub App
+// installation token lives 60 minutes and is re-minted every 30; a Reader that
+// captured the value would clone happily for an hour and then fail on every
+// refresh after, with nothing in the configuration having changed.
+func TestRefresh_ResolvesTheCredentialPerCall(t *testing.T) {
+	var calls int
+	r := NewReader(
+		"https://github.invalid/mctlhq/does-not-exist.git", "main", t.TempDir(),
+		func() (string, error) {
+			calls++
+			return fmt.Sprintf("rotated-%d", calls), nil
+		},
+		"", "",
+	)
+
+	// The clone itself fails — the host does not resolve — which is fine:
+	// what is under test is what happened before git ran.
+	_ = r.refresh()
+	if calls != 1 {
+		t.Fatalf("first refresh consulted the source %d times, want 1", calls)
+	}
+	if r.token != "rotated-1" {
+		t.Fatalf("token is %q after the first refresh, want rotated-1", r.token)
+	}
+
+	_ = r.refresh()
+	if calls != 2 {
+		t.Fatalf("second refresh consulted the source %d times total, want 2 — the value was captured", calls)
+	}
+	// redactTokenLocked reads r.token, so this is also what keeps the log redactor
+	// pointed at the credential actually in use for this refresh.
+	if r.token != "rotated-2" {
+		t.Fatalf("token is %q after the second refresh, want rotated-2", r.token)
+	}
+	if got := string(r.redactTokenLocked([]byte("failed to fetch rotated-2 from origin"))); strings.Contains(got, "rotated-2") {
+		t.Errorf("redactTokenLocked left the current token in the output: %q", got)
+	}
+}
+
+// TestRefresh_UnreadableCredentialFailsBeforeGit pins that a credential which
+// cannot be read stops the refresh, rather than falling through to an
+// unauthenticated clone whose failure names the wrong cause.
+func TestRefresh_UnreadableCredentialFailsBeforeGit(t *testing.T) {
+	dir := t.TempDir()
+	boom := errors.New("token file is gone")
+	r := NewReader("https://github.invalid/mctlhq/does-not-exist.git", "main", dir,
+		func() (string, error) { return "", boom }, "", "")
+
+	err := r.refresh()
+	if !errors.Is(err, boom) {
+		t.Fatalf("want the source error wrapped, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".git")); statErr == nil {
+		t.Error("git ran despite an unreadable credential")
+	}
+}
+
+// TestRefresh_SSHModeIgnoresTheCredentialSource pins that a deployment on SSH
+// auth is not made to depend on a token file it has no use for.
+func TestRefresh_SSHModeIgnoresTheCredentialSource(t *testing.T) {
+	var calls int
+	r := NewReader("git@github.com:mctlhq/mctl-gitops.git", "main", t.TempDir(),
+		func() (string, error) { calls++; return "", errors.New("must not be called") },
+		"/some/deploy-key", "")
+
+	_ = r.refresh()
+	if calls != 0 {
+		t.Fatalf("SSH mode consulted the token source %d times, want 0", calls)
+	}
+}
+
+// TestRefresh_CloneDoesNotPersistTheCredential pins that a successful clone
+// leaves no credential in .git/config.
+//
+// git stores the URL it was handed as remote.origin.url, and on the HTTPS
+// branch that URL carries the token as userinfo — so without the fix a
+// plaintext copy sits on the cache volume, outliving the rotation that
+// replaced it. This was verified present on the running pod, not imagined.
+//
+// The fixture uses a file:// URL with userinfo, which git accepts and
+// persists exactly like an https:// one, so the behaviour under test is the
+// real one without needing an HTTPS server.
+func TestRefresh_CloneDoesNotPersistTheCredential(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "origin")
+	if err := os.MkdirAll(origin, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...) //nolint:gosec // fixed test arguments
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(origin, "init", "-q", "-b", "main", ".")
+	if err := os.WriteFile(filepath.Join(origin, "a.txt"), []byte("hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(origin, "add", ".")
+	run(origin, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "init")
+
+	// Split the prefix the way TestRedactToken does, so gosec's G101
+	// prefix heuristic never fires and no suppression is needed here.
+	const token = "ghs_" + "fixtureTokenValue"
+	r := NewReader("file://"+origin, "main", filepath.Join(t.TempDir(), "cache"),
+		func() (string, error) { return token, nil }, "", "")
+
+	if err := r.refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	cfg, err := os.ReadFile(filepath.Join(r.localPath, ".git", "config"))
+	if err != nil {
+		t.Fatalf("read .git/config: %v", err)
+	}
+	if bytes.Contains(cfg, []byte(token)) {
+		t.Error(".git/config contains the credential in plaintext; the clone URL was not stripped")
+	}
+	if bytes.Contains(cfg, []byte("x-access-token")) {
+		t.Error(".git/config still carries userinfo in remote.origin.url")
+	}
+	// And the remote must still point somewhere usable, so the strip did not
+	// simply break the repository.
+	if !bytes.Contains(cfg, []byte("file://"+origin)) {
+		t.Errorf("remote.origin.url is not the bare repo URL:\n%s", cfg)
+	}
+	// A second refresh must still work — it takes the fetch branch, which
+	// passes the credential explicitly rather than reading it back from the
+	// stripped config.
+	if err := r.refresh(); err != nil {
+		t.Fatalf("second refresh after stripping the credential: %v", err)
+	}
+
+	// And after that fetch, nothing anywhere under .git may hold the
+	// credential. This is broader than .git/config on purpose: the fetch
+	// branch still passes a URL with userinfo, and the question of whether
+	// git writes that verbatim somewhere — FETCH_HEAD is the usual suspect —
+	// was raised in review and answered by measurement rather than argument.
+	// git strips userinfo from the URL it records, so the answer is no. This
+	// keeps it that way, and would also catch a future git that logs the URL
+	// somewhere new.
+	//
+	// Scope, stated exactly: bytes.Contains finds the credential only where
+	// it is stored VERBATIM. Loose objects and packfiles are zlib-deflated
+	// and .git/index is binary, so a credential that ended up inside one
+	// would not be found. That is the right scope rather than a gap — every
+	// place this leak has actually lived is plain text written by git itself
+	// (remote.origin.url, FETCH_HEAD, logs/HEAD), and a token reaching an
+	// object would mean someone committed it, which is a different bug.
+	var found []string
+	err = filepath.WalkDir(filepath.Join(r.localPath, ".git"), func(path string, d fs.DirEntry, err error) error {
+		// A walk error (lstat/ReadDir failed) aborts and fails the test: it
+		// means the scan did not cover what it claims to, and a guard that
+		// can pass by not running is not a guard. Distinct from the read
+		// error below, which is skipped.
+		if err != nil || d.IsDir() {
+			return err
+		}
+		// An unreadable FILE is not a leak — skip it. Written as a positive
+		// condition so the intent is in the code rather than a swallowed
+		// error.
+		b, readErr := os.ReadFile(path) //nolint:gosec // walking a directory this test created
+		if readErr == nil && bytes.Contains(b, []byte(token)) {
+			rel, _ := filepath.Rel(r.localPath, path)
+			found = append(found, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk .git: %v", err)
+	}
+	if len(found) > 0 {
+		t.Errorf("the credential is on disk under .git after a fetch, in: %v", found)
+	}
+}
+
+// TestRefresh_StripsACredentialLeftByAnEarlierCrash covers the window a clone-
+// only strip would leave open.
+//
+// The cache is an emptyDir, which belongs to the Pod and survives a container
+// restart. So a container that dies between `git clone` and the strip comes
+// back to a .git that already exists, takes the fetch branch from then on, and
+// under a clone-only strip would never scrub anything — leaving the token in
+// .git/config for the life of the Pod.
+//
+// The fixture reproduces that state directly rather than trying to kill a
+// process mid-refresh: a repository cloned WITH userinfo still in
+// remote.origin.url, which is exactly what the crash leaves behind.
+func TestRefresh_StripsACredentialLeftByAnEarlierCrash(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "origin")
+	if err := os.MkdirAll(origin, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...) //nolint:gosec // fixed test arguments
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(origin, "init", "-q", "-b", "main", ".")
+	if err := os.WriteFile(filepath.Join(origin, "a.txt"), []byte("hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(origin, "add", ".")
+	run(origin, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "init")
+
+	const token = "ghs_" + "crashLeftoverValue"
+	cache := filepath.Join(t.TempDir(), "cache")
+
+	// The state a crash between clone and strip leaves on the volume.
+	run(filepath.Dir(cache), "clone", "-q", "--depth=1", "--branch", "main",
+		"file://x-access-token:"+token+"@"+origin, cache)
+	cfg, err := os.ReadFile(filepath.Join(cache, ".git", "config")) //nolint:gosec // a path this test just built from t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(cfg, []byte(token)) {
+		t.Fatal("fixture is wrong: the pre-existing clone does not carry the credential, so this test would pass vacuously")
+	}
+
+	// A refresh on that existing .git takes the fetch branch, never the clone
+	// branch — and must still scrub it.
+	r := NewReader("file://"+origin, "main", cache,
+		func() (string, error) { return token, nil }, "", "")
+	if err := r.refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	cfg, err = os.ReadFile(filepath.Join(cache, ".git", "config")) //nolint:gosec // a path this test just built from t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(cfg, []byte(token)) {
+		t.Error("the fetch branch left a credential a previous crash had written into .git/config")
+	}
+}
+
+// TestRefresh_ScrubsEvenWhenTheFetchFails covers the last early-exit path.
+//
+// A credential left on disk by an earlier crash must not survive just because
+// the network is down: if fetch/reset/checkout returns an error, the scrub has
+// to have happened anyway. Otherwise the leak persists for exactly as long as
+// the outage, which is when nobody is looking at .git/config.
+func TestRefresh_ScrubsEvenWhenTheFetchFails(t *testing.T) {
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin")
+	if err := os.MkdirAll(origin, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...) //nolint:gosec // fixed test arguments
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(origin, "init", "-q", "-b", "main", ".")
+	if err := os.WriteFile(filepath.Join(origin, "a.txt"), []byte("hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(origin, "add", ".")
+	run(origin, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "init")
+
+	const token = "ghs_" + "outageLeftoverValue"
+	cache := filepath.Join(tmp, "cache")
+	run(tmp, "clone", "-q", "--depth=1", "--branch", "main",
+		"file://x-access-token:"+token+"@"+origin, cache)
+
+	cfgPath := filepath.Join(cache, ".git", "config")
+	before, err := os.ReadFile(cfgPath) //nolint:gosec // a path this test just built from t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(before, []byte(token)) {
+		t.Fatal("fixture is wrong: the pre-existing clone does not carry the credential")
+	}
+
+	// Make the fetch fail the way an outage does, by removing the origin.
+	if err := os.RemoveAll(origin); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewReader("file://"+origin, "main", cache,
+		func() (string, error) { return token, nil }, "", "")
+	if err := r.refresh(); err == nil {
+		t.Fatal("expected the refresh to fail with the origin gone; the test would prove nothing otherwise")
+	}
+
+	after, err := os.ReadFile(cfgPath) //nolint:gosec // a path this test just built from t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(after, []byte(token)) {
+		t.Error("a failing refresh returned without scrubbing the credential from .git/config")
 	}
 }

@@ -121,7 +121,10 @@ func (h *Handlers) DispatchPortalServerAuthApply(w http.ResponseWriter, r *http.
 		// request was well-formed and the caller can do nothing differently.
 		// 502 says the far side refused, which is what happened.
 		status := http.StatusBadGateway
-		if errors.Is(err, ghactions.ErrNotConfigured) {
+		// ErrCredentialUnavailable joins ErrNotConfigured on 503: both mean
+		// this side could not make the call, and neither reached GitHub. Only
+		// a real refusal from GitHub earns the 502.
+		if errors.Is(err, ghactions.ErrNotConfigured) || errors.Is(err, ghactions.ErrCredentialUnavailable) {
 			status = http.StatusServiceUnavailable
 		}
 		slog.Error("failed to dispatch portal server-auth apply", "error", err, "user", user.ID)

@@ -47,6 +47,12 @@ spec:
             - name: GITOPS_SSH_KEY_PATH
               value: /etc/gitops-ssh/ssh-privatekey
             {{- end }}
+            {{- if .Values.githubAppTokenSecret }}
+            # The path, not the token. Naming the file is what lets the
+            # process re-read it after a rotation.
+            - name: GITHUB_APP_TOKEN_FILE
+              value: /var/run/secrets/github/token
+            {{- end }}
             {{- with .Values.openclaw }}
             {{- with .skills }}
             {{- if .maxPerSkillBytes }}
@@ -101,6 +107,11 @@ spec:
               mountPath: /etc/gitops-ssh
               readOnly: true
             {{- end }}
+            {{- if .Values.githubAppTokenSecret }}
+            - name: github-app-token
+              mountPath: /var/run/secrets/github
+              readOnly: true
+            {{- end }}
             {{- if and .Values.postgresCA .Values.postgresCA.secretName }}
             - name: cnpg-ca
               mountPath: /etc/cnpg
@@ -114,7 +125,39 @@ spec:
         - name: gitops-ssh
           secret:
             secretName: {{ .Values.gitopsSSHSecret }}
+            # NOTE: same root:root problem as github-app-token above — at 0400
+            # this lands unreadable by uid 1000. It has stayed invisible only
+            # because gitopsSSHSecret is "" and production takes the HTTPS
+            # branch. It deliberately does NOT get the 0444 fix: ssh(1) refuses
+            # a private key that is group- or world-readable, so this one needs
+            # securityContext.fsGroup on the pod instead — a change with a
+            # wider blast radius than this chart has needed so far. Tracked in
+            # mctlhq/mctl-api#307; fix it before anyone sets this value.
             defaultMode: 0400
+        {{- end }}
+        {{- if .Values.githubAppTokenSecret }}
+        # A volume, not envFrom, and that is the entire point: this Secret is
+        # re-synced every 30 minutes with a freshly minted installation token,
+        # and environment variables are fixed when the container starts. An
+        # envFrom consumer would serve an expired token within the hour. The
+        # projected file changes in place and the process re-reads it.
+        - name: github-app-token
+          secret:
+            secretName: {{ .Values.githubAppTokenSecret }}
+            # 0444, not 0400. Kubelet writes secret volume files as root:root
+            # unless the pod sets securityContext.fsGroup, and this chart sets
+            # no securityContext at all while the image runs as uid 1000
+            # (Dockerfile: adduser -u 1000, USER app:app). At 0400 the file
+            # lands -r-------- root root and every read returns EACCES — and
+            # because the credential source is bound once at startup and does
+            # not fall through, the pod would never go Ready rather than
+            # degrading. Same reasoning as postgresCA below, which is 0444 for
+            # exactly this. The file is a bearer token inside the pod's own
+            # mount namespace, read by the one process in the container.
+            defaultMode: 0444
+            items:
+              - key: {{ .Values.githubAppTokenKey | default "token" }}
+                path: token
         {{- end }}
         {{- if and .Values.postgresCA .Values.postgresCA.secretName }}
         - name: cnpg-ca

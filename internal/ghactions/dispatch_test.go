@@ -18,17 +18,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/mctlhq/mctl-api/internal/ghtoken"
 )
 
 func newTestDispatcher(t *testing.T, handler http.HandlerFunc) (*Dispatcher, func()) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
-	return &Dispatcher{Token: "t0ken", BaseURL: srv.URL, HTTP: srv.Client()}, srv.Close
+	return &Dispatcher{Token: ghtoken.Static("t0ken"), BaseURL: srv.URL, HTTP: srv.Client()}, srv.Close
 }
 
 func TestDispatch_SendsTheDocumentedRequest(t *testing.T) {
@@ -80,7 +83,7 @@ func TestDispatch_InputsReachTheRequestBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := &Dispatcher{Token: "t0ken", BaseURL: srv.URL}
+	d := &Dispatcher{Token: ghtoken.Static("t0ken"), BaseURL: srv.URL}
 	err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "cloudflare-apply.yml", "main",
 		map[string]string{"root": "infrastructure/cloudflare/portal"})
 	if err != nil {
@@ -103,7 +106,7 @@ func TestDispatch_RejectsRelativePathSegments(t *testing.T) {
 	// pass even with the guard removed -- caught by mutation: restoring the
 	// old denylist left this test green. The assertion is on the validation
 	// error specifically.
-	d := &Dispatcher{Token: "t0ken", BaseURL: "http://127.0.0.1:1"}
+	d := &Dispatcher{Token: ghtoken.Static("t0ken"), BaseURL: "http://127.0.0.1:1"}
 	for _, bad := range []string{"..", ".", "", "a/b", "a?b", "a#b", "a%2e", "a b", "a..b/../c"} {
 		err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", bad, "main", nil)
 		if err == nil {
@@ -149,6 +152,82 @@ func TestDispatch_NoTokenIsErrNotConfigured(t *testing.T) {
 	var nilD *Dispatcher
 	if err := nilD.Dispatch(context.Background(), "o", "r", "w.yml", "main", nil); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("nil dispatcher: want ErrNotConfigured, got %v", err)
+	}
+	// A source that exists but yields nothing is still "not configured" —
+	// otherwise the dispatch would go out with an empty bearer and come back
+	// as GitHub's 401, which reads like a bad request rather than a missing
+	// deployment dependency.
+	empty := &Dispatcher{Token: func() (string, error) { return "", nil }, BaseURL: "http://127.0.0.1:1"}
+	if err := empty.Dispatch(context.Background(), "o", "r", "w.yml", "main", nil); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("empty source: want ErrNotConfigured, got %v", err)
+	}
+}
+
+// TestDispatch_UnreadableSourceFailsBeforeTheRequest pins that a credential
+// which cannot be read stops the dispatch rather than being sent as an empty
+// bearer. The server would see the request otherwise, and a rotation that
+// briefly loses the file would look like an authentication problem at GitHub.
+func TestDispatch_UnreadableSourceFailsBeforeTheRequest(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	boom := errors.New("token file is gone")
+	d := &Dispatcher{
+		Token:   func() (string, error) { return "", boom },
+		BaseURL: srv.URL,
+		HTTP:    srv.Client(),
+	}
+	err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "w.yml", "main", nil)
+	if !errors.Is(err, boom) {
+		t.Fatalf("want the source error wrapped, got %v", err)
+	}
+	// And carrying the sentinel, so the handler answers 503 rather than the
+	// 502 that means "GitHub refused" — nothing was sent to GitHub at all.
+	if !errors.Is(err, ErrCredentialUnavailable) {
+		t.Fatalf("want ErrCredentialUnavailable, got %v", err)
+	}
+	// Not the other sentinel: "configured but unreadable" is a different
+	// operator problem from "not configured".
+	if errors.Is(err, ErrNotConfigured) {
+		t.Error("an unreadable credential must not report as unconfigured")
+	}
+	if hits != 0 {
+		t.Fatalf("request reached the server %d times; it must not be sent at all", hits)
+	}
+}
+
+// TestDispatch_SourceIsConsultedPerCall is the property the whole change
+// exists for: an installation token that rotates between two dispatches must
+// be picked up without restarting the process.
+func TestDispatch_SourceIsConsultedPerCall(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	var n int
+	d := &Dispatcher{
+		Token: func() (string, error) {
+			n++
+			return fmt.Sprintf("rotated-%d", n), nil
+		},
+		BaseURL: srv.URL,
+		HTTP:    srv.Client(),
+	}
+	for i := 0; i < 2; i++ {
+		if err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "w.yml", "main", nil); err != nil {
+			t.Fatalf("dispatch %d: %v", i, err)
+		}
+	}
+	want := []string{"Bearer rotated-1", "Bearer rotated-2"}
+	if len(seen) != 2 || seen[0] != want[0] || seen[1] != want[1] {
+		t.Fatalf("token was captured, not re-read: got %v want %v", seen, want)
 	}
 }
 

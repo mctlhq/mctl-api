@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -189,5 +190,28 @@ func TestDispatchPortalServerAuthApply_ErrNotConfiguredIs503(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 for ErrNotConfigured, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDispatchPortalServerAuthApply_ErrCredentialUnavailableIs503 pins the
+// other "this side could not make the call" case.
+//
+// The wrapped form is what Dispatch actually returns, so the test uses it
+// rather than the bare sentinel: a mapping written against the sentinel alone
+// would pass here and still send 502 in production. 502 means GitHub refused,
+// and when the token file is missing GitHub was never asked.
+// TestDispatchPortalServerAuthApply_GitHubRefusalIs502 above is the control
+// that keeps this from passing on a handler that answered 503 to everything.
+func TestDispatchPortalServerAuthApply_ErrCredentialUnavailableIs503(t *testing.T) {
+	wrapped := fmt.Errorf("%w: %w", ghactions.ErrCredentialUnavailable, errors.New("open /var/run/secrets/github/token: permission denied"))
+	fake := &fakeDispatcher{err: wrapped}
+	h := &Handlers{opts: Options{WorkflowDispatcher: fake, AuditLog: audit.NewLogger()}}
+
+	req := adminCtx(httptest.NewRequest("POST", "/api/v1/cloudflare/portal/server-auth/apply", nil))
+	rec := httptest.NewRecorder()
+	h.DispatchPortalServerAuthApply(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for an unreadable credential, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

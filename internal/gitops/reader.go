@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/mctlhq/mctl-api/internal/ghtoken"
 )
 
 // Reader provides read access to the GitOps mono-repo state.
@@ -38,9 +40,10 @@ type Reader struct {
 	repoURL        string
 	branch         string
 	localPath      string
-	token          string // GitHub token for HTTPS auth (optional)
-	sshKeyPath     string // Path to SSH private key (optional, takes precedence over token)
-	knownHostsPath string // Path to a known_hosts file for SSH host-key pinning (optional; empty means "use the shipped embedded default, materialized lazily")
+	tokenSource    ghtoken.Source // GitHub credential for HTTPS auth (optional), consulted per refresh
+	token          string         // the credential this refresh is using; resolved from tokenSource under mu at the top of refresh()
+	sshKeyPath     string         // Path to SSH private key (optional, takes precedence over token)
+	knownHostsPath string         // Path to a known_hosts file for SSH host-key pinning (optional; empty means "use the shipped embedded default, materialized lazily")
 	mu             sync.RWMutex
 	lastSync       time.Time
 
@@ -179,7 +182,12 @@ type PlatformSkillPolicy struct {
 }
 
 // NewReader creates a new gitops reader.
-// token is an optional GitHub token for HTTPS auth.
+// token is an optional GitHub credential for HTTPS auth. It is a source, not a
+// value, because the credential behind it is a GitHub App installation token
+// that lives 60 minutes and is re-minted every 30 — a Reader holding a string
+// would clone happily for an hour and then fail forever. It is resolved once
+// per refresh, so the clone URL and the log redactor always agree on the value
+// actually in use.
 // sshKeyPath is an optional path to an SSH private key for SSH auth.
 // If sshKeyPath is set, it takes precedence and the repo URL should be SSH format.
 // knownHostsPath is an optional path to a known_hosts file used to verify the
@@ -187,12 +195,12 @@ type PlatformSkillPolicy struct {
 // populated with GitHub's published host keys is materialized lazily on the
 // first SSH-mode refresh. NewReader performs no filesystem I/O — it only
 // stores knownHostsPath verbatim.
-func NewReader(repoURL, branch, localPath, token, sshKeyPath, knownHostsPath string) *Reader {
+func NewReader(repoURL, branch, localPath string, token ghtoken.Source, sshKeyPath, knownHostsPath string) *Reader {
 	return &Reader{
 		repoURL:        repoURL,
 		branch:         branch,
 		localPath:      localPath,
-		token:          token,
+		tokenSource:    token,
 		sshKeyPath:     sshKeyPath,
 		knownHostsPath: knownHostsPath,
 	}
@@ -224,6 +232,24 @@ func (r *Reader) refresh() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Resolve the credential once, here, and store it for the duration of this
+	// refresh. Everything downstream — the clone URL below and redactTokenLocked,
+	// which strips the token out of git's own output — then reads the same
+	// r.token. Threading a source through both instead would let them
+	// disagree across a rotation, and the way that failure shows up is a live
+	// token in the log store.
+	//
+	// SSH mode does not consult the source at all: sshKeyPath wins the switch
+	// below, so a deployment on SSH auth is not made to depend on a token file
+	// it has no use for.
+	if r.sshKeyPath == "" {
+		token, err := ghtoken.Resolve(r.tokenSource)
+		if err != nil {
+			return fmt.Errorf("resolving gitops credential: %w", err)
+		}
+		r.token = token
+	}
+
 	var cloneURL string
 	var sshEnv []string
 
@@ -249,13 +275,52 @@ func (r *Reader) refresh() error {
 		cloneURL = r.repoURL
 	}
 
+	// Scrub the credential out of remote.origin.url. Registered as a defer,
+	// before the clone/fetch below, so "no credential on disk when refresh
+	// returns" holds on EVERY return path.
+	//
+	// Position matters and got this wrong twice, each time as a different
+	// early exit: first the strip lived only in the clone branch, so a
+	// container dying before it came back to an existing .git, took the fetch
+	// branch from then on, and never scrubbed; then, moved after the block, a
+	// failing fetch/reset/checkout returned before reaching it. Both are the
+	// same shape, and a defer closes the shape rather than the two instances.
+	//
+	// Ordering: refresh() registers `defer r.mu.Unlock()` first and defers run
+	// LIFO, so this runs while the lock is still held.
+	//
+	// Why at all: git clone persists the URL it was handed, and on the HTTPS
+	// branch that URL carries the token as userinfo -- so a clone leaves a
+	// plaintext copy on the cache volume, which is an emptyDir and survives a
+	// container restart. Verified present on the running pod before this was
+	// added; not a theoretical leak. Nothing reads the stored URL back (clone
+	// and fetch both pass cloneURL explicitly), so scrubbing has no other
+	// effect.
+	//
+	// Failure to scrub is logged, not returned: it must not turn a working
+	// refresh into a failed one, nor mask the real error on a path already
+	// failing. The condition to act on is "a credential is on disk", not "the
+	// repo is broken".
+	if r.token != "" {
+		defer func() {
+			// Nothing to scrub if no repository was produced.
+			if _, err := os.Stat(filepath.Join(r.localPath, ".git")); err != nil {
+				return
+			}
+			if err := r.runGit(sshEnv, "remote", "set-url", "origin", r.repoURL); err != nil {
+				slog.Error("could not strip the credential from remote.origin.url; a plaintext token may remain in .git/config on the cache volume",
+					"path", filepath.Join(r.localPath, ".git", "config"), "error", err)
+			}
+		}()
+	}
+
 	gitDir := filepath.Join(r.localPath, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		slog.Info("cloning gitops repo", "url", r.repoURL, "branch", r.branch, "path", r.localPath)
 		cmd := exec.Command("git", "clone", "--depth=1", "--branch="+r.branch, "--single-branch", cloneURL, r.localPath) //nolint:gosec // args are from trusted config
 		cmd.Env = append(os.Environ(), sshEnv...)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git clone failed: %w\n%s", err, r.redactToken(bytes.TrimSpace(out)))
+			return fmt.Errorf("git clone failed: %w\n%s", err, r.redactTokenLocked(bytes.TrimSpace(out)))
 		}
 		slog.Info("gitops repo cloned successfully")
 	} else {
@@ -406,14 +471,14 @@ func (r *Reader) gitOutput(extraEnv []string, args ...string) ([]byte, error) {
 	// callers today, but nothing enforces it, and a future caller that logs
 	// the returned output would reintroduce exactly the leak this function
 	// exists to prevent. Redacting once, here, makes it structural.
-	out = r.redactToken(out)
+	out = r.redactTokenLocked(out)
 	if err != nil {
 		return out, fmt.Errorf("%w\n%s", err, bytes.TrimSpace(out))
 	}
 	return out, nil
 }
 
-// redactToken removes the GitHub token from git's own output before that
+// redactTokenLocked removes the GitHub token from git's own output before that
 // output goes anywhere a human or a log sink can see it.
 //
 // On the HTTPS branch the token is embedded in the clone/fetch URL as the
@@ -431,7 +496,12 @@ func (r *Reader) gitOutput(extraEnv []string, args ...string) ([]byte, error) {
 // themselves, which is exactly why this gap is invisible until the day a
 // token format changes or a different forge is added. A redactor with a
 // known blind spot is worth less than no redactor, because it is trusted.
-func (r *Reader) redactToken(out []byte) []byte {
+// The Locked suffix is load-bearing: r.token was write-once in NewReader
+// until the credential became a source, and is now assigned at the top of
+// every refresh(). Callers must hold r.mu — refresh() holds it for its whole
+// duration, which covers every call today. Redacting from RefreshLoop's error
+// handler, outside the lock, would be a data race on a live credential.
+func (r *Reader) redactTokenLocked(out []byte) []byte {
 	if r.token == "" {
 		return out
 	}
