@@ -303,8 +303,9 @@ func main() {
 
 	// MCP server for SSE transport (embedded in this process).
 	// Tools make REST calls back to this server using the caller's token (forwarded via context).
-	// Use localhost to avoid hairpin routing and public egress issues.
-	mcpSrv := mctlmcp.NewServer("http://localhost:"+cfg.Port, "")
+	// Use localhost to avoid hairpin routing and public egress issues; the
+	// caller-facing text mctl_whoami shows comes from publicBaseURL below.
+	mcpSrv := mctlmcp.NewInProcessServer(cfg.Port, publicBaseURL(cfg, oauthServer))
 
 	// Kubernetes quota client (optional — fails gracefully outside cluster).
 	var quotaReader mctlapi.QuotaReader
@@ -649,6 +650,18 @@ func postgresURL(raw string) string {
 		slog.Info("postgres connection upgraded to require TLS")
 	}
 	return out
+}
+
+// publicBaseURL is the caller-facing base URL shown by mctl_whoami. When the
+// OAuth server is enabled it IS the issuer the caller's token was verified
+// against -- read it from there rather than re-deriving it from config, so the
+// two cannot name different deployments. With OAuth disabled there is no
+// issuer, and cfg.SelfURL is the only public URL the process knows.
+func publicBaseURL(cfg config, oauth *auth.OAuthServer) string {
+	if oauth != nil && oauth.BaseURL != "" {
+		return oauth.BaseURL
+	}
+	return cfg.SelfURL
 }
 
 func envOr(key, fallback string) string {
