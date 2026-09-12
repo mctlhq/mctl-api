@@ -155,6 +155,14 @@ func TestIsLoopbackURL(t *testing.T) {
 		{"http://[::1]/mcp", true},
 		{"http://[::ffff:127.0.0.1]", true},
 		{"http://[::1]:8080/mcp", true},
+		// Scheme-less authority forms: url.Parse reads "localhost:8080" as
+		// scheme+opaque and rejects "127.0.0.1:8080", so neither yields a host
+		// without being re-parsed as an authority.
+		{"localhost:8080", true},
+		{"127.0.0.1:8080", true},
+		{"[::1]:8080", true},
+		{"localhost", true},
+		{"api.mctl.ai", false},
 		{"https://api.mctl.ai", false},
 		{"https://mcp.mctl.ai/mcp", false},
 		{"", false},
@@ -177,6 +185,9 @@ func TestToolWhoami_FallbackRendering_NoPublicURL(t *testing.T) {
 	}{
 		{"empty public URL", ""},
 		{"loopback public URL", "http://localhost:8080"},
+		{"scheme-less loopback public URL", "localhost:8080"},
+		{"scheme-less IPv4 loopback public URL", "127.0.0.1:8080"},
+		{"port-less IPv6 loopback public URL", "http://[::1]"},
 	}
 
 	for _, tc := range tests {

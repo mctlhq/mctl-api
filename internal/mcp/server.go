@@ -71,22 +71,32 @@ func NewInProcessServer(port, publicURL string) *Server {
 	return s
 }
 
+// urlHost extracts the host from raw, with the port and any IPv6 brackets
+// stripped. It accepts both a full URL ("http://[::1]:8080/mcp") and the
+// scheme-less authority forms a misconfigured SELF_URL can take
+// ("localhost:8080", "127.0.0.1:8080", "[::1]:8080"): url.Parse reads the
+// first of those as scheme "localhost" with opaque "8080" and rejects the
+// second outright, so neither yields a host on its own. Re-parsing with a
+// leading "//" forces the authority interpretation. Returns "" when no host
+// can be recovered.
+func urlHost(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		if h := u.Hostname(); h != "" {
+			return h
+		}
+	}
+	if u, err := url.Parse("//" + raw); err == nil {
+		return u.Hostname()
+	}
+	return ""
+}
+
 // isLoopbackURL reports whether raw parses to a loopback host: "localhost"
 // (case-insensitive) or any IP for which net.ParseIP(host).IsLoopback() is
 // true (127.0.0.0/8, ::1, and IPv4-mapped forms such as ::ffff:127.0.0.1).
 // Unparseable input is treated as non-loopback.
 func isLoopbackURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	// Hostname() strips the port and the brackets around an IPv6 literal.
-	// Splitting by hand instead misses the port-less IPv6 form, which is the
-	// case that matters here: net.SplitHostPort("[::1]") returns an error, so
-	// the brackets survive, and net.ParseIP("[::1]") is nil -- a loopback URL
-	// would then read as public, which is exactly what this guard exists to
-	// prevent.
-	host := u.Hostname()
+	host := urlHost(raw)
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
