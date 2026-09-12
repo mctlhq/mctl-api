@@ -16,15 +16,8 @@ package operations
 
 import "testing"
 
-// TestImplementAndShepherdServiceEnumCoversMctlAgentsServices guards against
-// the enum silently drifting out of sync with mctl-agents' own
-// config/settings.py SERVICES list. Caught live 2026-08-05: mctl-design was
-// a fully valid implementer target (accepted by run_issue_investigator.py's
-// SERVICES check, produced a real proposal) but rejected by this operation's
-// service enum with a 400 — the enum here had never been updated when
-// mctl-telegram/mctl-design/mctl-pairdesk were added on the mctl-agents side.
-// The same failure recurred for "portfolio" (mctl-api#281).
-// wantServices mirrors config/settings.py's SERVICES list in mctlhq/mctl-agents.
+// wantServices mirrors config/settings.py's SERVICES list in mctlhq/mctl-agents;
+// update both places together when a service is added or removed there.
 // Package-level so the enum-membership test and the ValidateInput test below
 // read the same copy: a service added to one but not the other would otherwise
 // be enumerated as present while never being exercised through validation.
@@ -33,10 +26,15 @@ var wantServices = []string{
 	"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio",
 }
 
+// TestImplementAndShepherdServiceEnumCoversMctlAgentsServices guards against
+// the enum silently drifting out of sync with mctl-agents' own
+// config/settings.py SERVICES list. Caught live 2026-08-05: mctl-design was
+// a fully valid implementer target (accepted by run_issue_investigator.py's
+// SERVICES check, produced a real proposal) but rejected by this operation's
+// service enum with a 400 — the enum here had never been updated when
+// mctl-telegram/mctl-design/mctl-pairdesk were added on the mctl-agents side.
+// The same failure recurred for "portfolio" (mctl-api#281).
 func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
-	// Mirrors config/settings.py's SERVICES list in mctlhq/mctl-agents.
-	// Update both places together when a service is added/removed there.
-	//
 	// Note what this can and cannot catch. It is a hand-kept copy, so it fires
 	// only when one enum in THIS repository falls behind the others -- it
 	// cannot notice that mctl-agents has registered a service nobody mirrored
