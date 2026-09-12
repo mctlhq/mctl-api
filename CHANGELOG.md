@@ -1,5 +1,26 @@
 # Changelog
 
+## [4.44.0](https://github.com/mctlhq/mctl-api/compare/4.43.0...4.44.0) (2026-09-12)
+
+
+### Features
+
+* **lifecycle:** expose ownership over HTTP with an explicit auth boundary ([e7aee63](https://github.com/mctlhq/mctl-api/commit/e7aee6386a6b63aba521a22384cf3fa68e146934))
+* **lifecycle:** ownership over HTTP with an explicit auth boundary ([18a61d0](https://github.com/mctlhq/mctl-api/commit/18a61d0bda5503eafb7a8fadcdfab0bb90a0e6a4))
+* **mcp:** dispatch the portal server-auth apply without holding the token ([5c91490](https://github.com/mctlhq/mctl-api/commit/5c9149038f8f89764d2fc065cd47d7832e07c0c1))
+
+
+### Bug Fixes
+
+* **ghactions:** ref is a body field, not a path segment ([aa26d99](https://github.com/mctlhq/mctl-api/commit/aa26d995e5f28174c358d90ebd4bc34d9b653c5f))
+* **lifecycle:** a retryable sentinel answered 500, and recovery had no route ([7a82acb](https://github.com/mctlhq/mctl-api/commit/7a82acbfa0eae432f311df0dcda79aedd7365cf1))
+* **lifecycle:** expose dead and stuck separately in the read model ([43b8206](https://github.com/mctlhq/mctl-api/commit/43b820652234aa2733f45c4f4381f07c8bd3f839))
+* **lifecycle:** remove a duplicate guard I added, and cover the list branch ([b95c69f](https://github.com/mctlhq/mctl-api/commit/b95c69f53f146c2122f3b7b626b5701cbcc4555b))
+* **lifecycle:** the 500 leaked the store's error, and only recover checked its epoch ([ee01ba1](https://github.com/mctlhq/mctl-api/commit/ee01ba11777149073eb677ea16d7ecfb86df5993))
+* **lifecycle:** the handoff dropped the incoming owner's correlation ([d4645e1](https://github.com/mctlhq/mctl-api/commit/d4645e1c68be5ea517d5553b025094f1195e4759))
+* **lifecycle:** the list filter matches an owner TYPE, not an owner ([7b42e8b](https://github.com/mctlhq/mctl-api/commit/7b42e8b65d7ce049c1d531f5024ffd0fddbd499d))
+* **lifecycle:** three P3s, and two of the guards needed driving directly ([9395810](https://github.com/mctlhq/mctl-api/commit/93958100fac0f568227d0eb9b6163f213639081c))
+
 ## [4.43.0](https://github.com/mctlhq/mctl-api/compare/4.42.0...4.43.0) (2026-09-12)
 
 
