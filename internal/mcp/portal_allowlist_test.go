@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -11,6 +12,9 @@ import (
 // Cloudflare portal mapping for server `api` is applied from; this test is
 // what keeps the file honest (counterpart of mctlhq/mctl-telegram#609).
 type portalAllowlist struct {
+	// Comment is the file's own statement of the rule, checked below so it
+	// cannot drift away from what the test enforces.
+	Comment         string `json:"$comment"`
 	Portal          string `json:"portal"`
 	Server          string `json:"server"`
 	DefaultDisabled bool   `json:"default_disabled"`
@@ -30,6 +34,13 @@ type portalAllowlist struct {
 // minReasonLen is a floor on the privacy decision, not a quality bar: it
 // rejects a placeholder, not a short sentence.
 const minReasonLen = 40
+
+// sharedProvenance is the sentence every mutating entry carries to record the
+// decision. It is six times minReasonLen on its own, so measuring the whole
+// reason against the floor would accept a future entry that is boilerplate and
+// nothing else. The floor applies to what is left after removing it: the part
+// that says what THIS tool exposes or changes.
+const sharedProvenance = "Enabled on the shared portal by owner decision 2026-09-12"
 
 // mutatingOnPortal names the tools that change platform state and are
 // nevertheless exposed on the shared portal, by owner decision 2026-09-12
@@ -116,6 +127,13 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	if list.Portal != "mcp" || list.Server != "api" {
 		t.Fatalf("allowlist targets portal=%q server=%q, want mcp/api", list.Portal, list.Server)
 	}
+	// The file's own $comment is what a reader consults first, so it must not
+	// describe a rule the guard no longer enforces. Until this PR it said
+	// "must be recorded readOnly", which was false for more than half the
+	// entries below it and nothing failed.
+	if !strings.Contains(list.Comment, "mutatingOnPortal") {
+		t.Error(`the "$comment" does not mention mutatingOnPortal: it is the file's own statement of the rule, and the rule now runs through that map`)
+	}
 	if !list.DefaultDisabled {
 		t.Fatal("default_disabled must be true: it is the half of the configuration that hides a tool the list does not know about")
 	}
@@ -136,8 +154,12 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 			continue
 		}
 		listed[tool.Name] = *tool.Enabled
-		if *tool.Enabled && len(tool.Reason) < minReasonLen {
-			t.Errorf("%s: enabled but reason is %d chars (minimum %d): say what the tool exposes and why that is acceptable on a shared surface", tool.Name, len(tool.Reason), minReasonLen)
+		specific := tool.Reason
+		if i := strings.Index(specific, sharedProvenance); i >= 0 {
+			specific = specific[:i]
+		}
+		if *tool.Enabled && len(strings.TrimSpace(specific)) < minReasonLen {
+			t.Errorf("%s: enabled, but the part of the reason that is specific to this tool is %d chars (minimum %d, the shared provenance sentence does not count): say what this tool exposes or changes and why that is acceptable on a shared surface", tool.Name, len(strings.TrimSpace(specific)), minReasonLen)
 		}
 	}
 
@@ -177,12 +199,20 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	// disables, or that turns out to be read-only leaves a live exemption
 	// behind something nobody is looking at any more.
 	var staleVouch []string
-	for name := range mutatingOnPortal {
+	for name, why := range mutatingOnPortal {
+		if strings.TrimSpace(why) == "" {
+			staleVouch = append(staleVouch, name+" (no reason given; the key alone is not the decision)")
+		}
 		if _, ok := registered[name]; !ok {
 			staleVouch = append(staleVouch, name+" (no longer registered)")
 			continue
 		}
-		if !listed[name] {
+		enabled, inFile := listed[name]
+		if !inFile {
+			staleVouch = append(staleVouch, name+" (absent from the file)")
+			continue
+		}
+		if !enabled {
 			staleVouch = append(staleVouch, name+" (disabled in the file)")
 			continue
 		}

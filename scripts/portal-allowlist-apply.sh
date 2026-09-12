@@ -42,8 +42,9 @@ command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 portal=$(jq -r .portal "$file"); server=$(jq -r .server "$file")
 
-# The invariant -- an enabled tool is one recorded read-only -- lives in
-# the Go test, because the record is Go source. This path publishes what
+# The invariant -- an enabled tool carries a reason, and a mutating one is
+# additionally named in mutatingOnPortal -- lives in the Go test, because
+# the record it checks against is Go source. This path publishes what
 # is on disk, so it consults the same test first, and it refuses a file
 # that differs from HEAD (staged or not: `diff HEAD` sees both), so what
 # is applied is always a committed, reviewable revision. Neither check
