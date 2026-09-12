@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.42.0](https://github.com/mctlhq/mctl-api/compare/4.41.0...4.42.0) (2026-09-12)
+
+
+### Features
+
+* **agents:** issue-227-architecture-work-context-define-canonic ([55b3b43](https://github.com/mctlhq/mctl-api/commit/55b3b43f6d981e48d37a9fdacc034969afd28019))
+* **agents:** issue-296-mctl-whoami-reports-the-internal-loopbac ([88da85b](https://github.com/mctlhq/mctl-api/commit/88da85bcfe3be5d2361b9731314dbd361cc46e4d))
+
+
+### Bug Fixes
+
+* **mcp:** recognise port-less IPv6 loopback literals in isLoopbackURL ([f0b4c07](https://github.com/mctlhq/mctl-api/commit/f0b4c07faa3943662ac8696cd0fb86d2496b99a9))
+* **mcp:** stop mctl_whoami from reporting the internal loopback address ([5c42310](https://github.com/mctlhq/mctl-api/commit/5c42310300619f53da333ff071fd93bafed2a06f))
+* **mcp:** treat a scheme-less SELF_URL as a host, not as a scheme ([a882ce8](https://github.com/mctlhq/mctl-api/commit/a882ce84cb1134c57b50b8910ef093cc753ae204))
+
 ## [4.41.0](https://github.com/mctlhq/mctl-api/compare/4.40.0...4.41.0) (2026-09-10)
 
 
