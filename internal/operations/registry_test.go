@@ -49,8 +49,8 @@ func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 	// mcplib.Enum mirrors in internal/mcp/server.go, and this list. The four
 	// mirrors are backstopped by TestServiceEnumsMatchRegistry, which compares
 	// the two sides value-for-value and in order, so forgetting one of those
-	// still gets you a red build. This list is the one that is not backstopped
-	// by anything -- it is the fifth edit, not a check on the other four.
+	// still gets you a red build. This list is the one nothing backstops: it is
+	// a fifth edit alongside the four registry enums, not a check on them.
 	registry := NewRegistry()
 	// mctl-agents-approve and mctl-agents-reconcile duplicate the same enum
 	// (mctl-agents-investigate takes an issue_url instead of a service param,
