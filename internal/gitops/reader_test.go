@@ -1142,7 +1142,7 @@ func TestRefresh_SSHModeIgnoresTheCredentialSource(t *testing.T) {
 // real one without needing an HTTPS server.
 func TestRefresh_CloneDoesNotPersistTheCredential(t *testing.T) {
 	origin := filepath.Join(t.TempDir(), "origin")
-	if err := os.MkdirAll(origin, 0o755); err != nil {
+	if err := os.MkdirAll(origin, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	run := func(dir string, args ...string) {
@@ -1160,7 +1160,7 @@ func TestRefresh_CloneDoesNotPersistTheCredential(t *testing.T) {
 	run(origin, "add", ".")
 	run(origin, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "init")
 
-	const token = "ghs_fixtureTokenValue"
+	const token = "ghs_fixtureTokenValue" //nolint:gosec // G101: a fixture string, not a credential — the test asserts it is absent from .git/config
 	r := NewReader("file://"+origin, "main", filepath.Join(t.TempDir(), "cache"),
 		func() (string, error) { return token, nil }, "", "")
 
