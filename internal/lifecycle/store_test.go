@@ -736,17 +736,14 @@ func TestEventsCarryTheStoredVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("events: %v", err)
 	}
-	var progress *Event
 	for _, e := range events {
-		if e.Event == EventProgress {
-			progress = e
-			break
+		if e.Event != EventProgress {
+			continue
 		}
+		if e.Entity.Version != "sha-a" {
+			t.Fatalf("event lost the version context: got %q, want %q", e.Entity.Version, "sha-a")
+		}
+		return
 	}
-	if progress == nil {
-		t.Fatalf("no progress event recorded")
-	}
-	if progress.Entity.Version != "sha-a" {
-		t.Fatalf("event lost the version context: got %q, want %q", progress.Entity.Version, "sha-a")
-	}
+	t.Fatalf("no progress event recorded")
 }
