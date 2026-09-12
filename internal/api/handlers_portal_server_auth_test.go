@@ -33,17 +33,15 @@ import (
 // parameters, so "which workflow on which ref did this start" is a property
 // of the handler's constants and nothing else would catch a typo in them.
 type fakeDispatcher struct {
-	err                       error
-	calls                     int
-	owner, repo, wf, ref      string
-	inputs                    map[string]string
-	lastCtxDeadlineWasPresent bool
+	err                  error
+	calls                int
+	owner, repo, wf, ref string
+	inputs               map[string]string
 }
 
 func (f *fakeDispatcher) Dispatch(ctx context.Context, owner, repo, workflowFile, ref string, inputs map[string]string) error {
 	f.calls++
 	f.owner, f.repo, f.wf, f.ref, f.inputs = owner, repo, workflowFile, ref, inputs
-	_, f.lastCtxDeadlineWasPresent = ctx.Deadline()
 	return f.err
 }
 

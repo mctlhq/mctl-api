@@ -78,10 +78,6 @@ const portalServerAuthRunsURL = "https://github.com/" + portalServerAuthOwner + 
 // portal scope on its own would have to get past a person to do it, and that
 // property is why the dispatch lives here instead of a Cloudflare client.
 func (h *Handlers) DispatchPortalServerAuthApply(w http.ResponseWriter, r *http.Request) {
-	if h.opts.WorkflowDispatcher == nil {
-		writeError(w, http.StatusServiceUnavailable, "GitHub workflow dispatch not configured (set GITOPS_ACTIONS_TOKEN)")
-		return
-	}
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "authentication required")
@@ -96,6 +92,16 @@ func (h *Handlers) DispatchPortalServerAuthApply(w http.ResponseWriter, r *http.
 	// is the file at HEAD of main, and the script refuses anything else — so
 	// there is nothing a caller could say here that would change the outcome,
 	// and accepting a body would only invite the belief that there is.
+	// After authn and authz, deliberately. Whether this deployment holds a
+	// dispatch credential is a fact about the service's configuration, and an
+	// anonymous caller has no business learning it -- ordered first, a 503
+	// told them. Nothing is lost by checking late: no dispatch has happened
+	// either way.
+	if h.opts.WorkflowDispatcher == nil {
+		writeError(w, http.StatusServiceUnavailable, "GitHub workflow dispatch not configured (set GITOPS_ACTIONS_TOKEN)")
+		return
+	}
+
 	// The root belongs in the record as much as the workflow does:
 	// cloudflare-apply.yml applies whichever root it is handed, so "which
 	// root" is the whole meaning of this dispatch. An audit entry naming only

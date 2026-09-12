@@ -15,9 +15,10 @@
 // Package ghactions dispatches GitHub Actions workflows.
 //
 // It exists so that mctl-api can ask a workflow to run without holding the
-// credential that workflow uses. The first caller is the Cloudflare MCP
-// portal's server-auth apply (mctl-gitops portal-server-auth-apply.yml): the
-// Cloudflare write token is an environment secret on that repository's
+// credential that workflow uses. The first caller applies the Cloudflare MCP
+// portal's OpenTofu root (mctl-gitops cloudflare-apply.yml, with the root
+// pinned by the caller): the Cloudflare write token is an environment secret
+// on that repository's
 // `cloudflare-apply` environment, issued only to a job that requests the
 // environment and only after a human reviewer approves it. mctl-api holds a
 // GitHub token that can start the run and nothing else, so the approval — and
@@ -64,14 +65,6 @@ func New(token string) *Dispatcher {
 	}
 }
 
-// Dispatch starts workflowFile on ref in owner/repo.
-//
-// The API answers 204 with an empty body and no run id — there is no way to
-// learn which run this call created, because at 204 the run does not exist
-// yet. That is why this returns no identifier and callers hand back a link to
-// the workflow's run list instead of pretending to a specific run. Polling for
-// "the newest run" would be a guess: a scheduled run or a second dispatcher
-// can land between the POST and the poll.
 // validPathSegment reports whether a value is safe to interpolate into a URL
 // path: non-empty, not a relative-path element, and built only from characters
 // GitHub uses in owners, repositories, workflow file names and refs.
@@ -90,6 +83,14 @@ func validPathSegment(v string) bool {
 	return true
 }
 
+// Dispatch starts workflowFile on ref in owner/repo.
+//
+// The API answers 204 with an empty body and no run id — there is no way to
+// learn which run this call created, because at 204 the run does not exist
+// yet. That is why this returns no identifier and callers hand back a link to
+// the workflow's run list instead of pretending to a specific run. Polling for
+// "the newest run" would be a guess: a scheduled run or a second dispatcher
+// can land between the POST and the poll.
 func (d *Dispatcher) Dispatch(ctx context.Context, owner, repo, workflowFile, ref string, inputs map[string]string) error {
 	if d == nil || d.Token == "" {
 		return ErrNotConfigured
