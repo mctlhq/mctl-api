@@ -1333,10 +1333,30 @@ func (s *Store) Recover(ctx context.Context, entity EntityRef, phase string, new
 			// operators through the API — both of which produce the same
 			// request twice.
 			//
-			// Pinned to epoch + 1, like handoffAlreadyCompleted and for the
-			// same reason: exactly one generation could have been produced by
-			// this caller's own write, and a later unrelated takeover that
-			// happened to land on the same owner must not read as ours.
+			// Pinned to epoch + 1, like handoffAlreadyCompleted, so a LATER
+			// unrelated takeover that happened to land on the same owner
+			// cannot read as ours.
+			//
+			// What this establishes is the POSTCONDITION, not authorship: three
+			// statements can produce (epoch+1, newOwner, active) —
+			// recoverUpdateSQL, handoffCompleteUpdateSQL when the incoming
+			// owner IS newOwner, and acquireUpsertSQL when newOwner takes a row
+			// its dying owner released at the same epoch. The second is
+			// reachable on the very path this arm runs on: a stalled handoff
+			// whose named target is the actor being recovered to. The caller
+			// does hold the row at the returned epoch either way, which is what
+			// it asked for — but no `recovered` event exists, the supplied
+			// evidence is discarded, and WithPolicyRef/WithWorkflowID are not
+			// applied. Narrowing it further (handoff_from naming the previous
+			// owner, which only the two takeover statements set) is
+			// mctl-api#302.
+			//
+			// StateActive is load-bearing and not decoration: a duplicate
+			// recovery lands at epoch+1 and that owner may then Release at the
+			// new epoch. Without it this arm returns a RELEASED row as a
+			// successful recovery, and the caller's next RecordProgress is
+			// refused by currentFor's absorbing check having just been told it
+			// owns the entity. With it the switch answers honestly.
 			if latest.Epoch == current.Epoch+1 && latest.Owner == newOwner &&
 				latest.State == StateActive {
 				out = latest

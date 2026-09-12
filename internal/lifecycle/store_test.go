@@ -3123,6 +3123,66 @@ func TestADuplicateRecoverAnswersOnlyForItsOwnWrite(t *testing.T) {
 		}
 	})
 
+	t.Run("the duplicate's owner then released it", func(t *testing.T) {
+		// The third conjunct, StateActive, which the first version of this
+		// test could not turn red — and the commit that added it claimed each
+		// conjunct was proved separately. Without it the arm answers success
+		// with a RELEASED row, and the caller's next RecordProgress is refused
+		// by currentFor's absorbing check having just been told it owns the
+		// entity.
+		s, prefix := newTestStore(t)
+		ctx := context.Background()
+		entity := pr(prefix, "recover-then-released")
+		crashed := devloop("wf-crashed")
+
+		got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: crashed})
+		if err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		old := time.Now().UTC().Add(-11 * time.Hour)
+		aged(t, s, entity, old)
+
+		// The duplicate lands AND its owner then releases, both inside one
+		// uncommitted transaction, so the stalled caller's read is still the
+		// pre-recovery row.
+		winner, err := s.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = winner.Rollback(ctx) }()
+		taken, err := scanOne(winner.QueryRow(ctx, recoverUpdateSQL,
+			shepherd.Type, shepherd.ID, StateActive, time.Now().UTC(), "recovered: mine",
+			"", "",
+			entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, old))
+		if err != nil {
+			t.Fatalf("winner recover: %v", err)
+		}
+		if _, err := scanOne(winner.QueryRow(ctx, finishUpdateSQL,
+			StateReleased, time.Now().UTC(), "handing back",
+			entity.Kind, entity.ID, PhaseReviewRemediation, taken.Epoch)); err != nil {
+			t.Fatalf("winner release: %v", err)
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := s.Recover(ctx, entity, PhaseReviewRemediation, shepherd, got.Epoch, "it died")
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			t.Fatalf("never blocked: %v", err)
+		case <-time.After(300 * time.Millisecond):
+		}
+		if err := winner.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if err := <-done; err == nil {
+			t.Fatal("a released row was returned as a successful recovery")
+		} else if !errors.Is(err, ErrNotOwner) {
+			t.Fatalf("want ErrNotOwner naming the released state, got %v", err)
+		}
+	})
+
 	t.Run("a later takeover to the same owner", func(t *testing.T) {
 		s, prefix := newTestStore(t)
 		ctx := context.Background()
