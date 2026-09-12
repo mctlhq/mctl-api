@@ -26,7 +26,7 @@
 // Ownership.IsStale) rather than materialised by a sweep, because materialising
 // it is precisely what would turn this into one.
 //
-// See mctl-agents/docs/adr/009-lifecycle-ownership-contract.md.
+// See mctl-agents/docs/adr/010-lifecycle-ownership-contract.md.
 package lifecycle
 
 import (
@@ -64,7 +64,7 @@ const (
 )
 
 // Owner types. These name actors, not permissions: see the package doc and
-// ADR-009 §6 — ownership grants neither push nor merge authority.
+// ADR-010 §6 — ownership grants neither push nor merge authority.
 const (
 	OwnerDevLoopWorkflow = "devloop-workflow"
 	OwnerShepherd        = "shepherd"
@@ -87,9 +87,12 @@ const (
 // stalenessBounds is the per-(kind, phase) window after which an active owner
 // that has recorded no PROGRESS is reported stale.
 //
-// review-remediation is 6h: four times the in-loop shepherd cadence, which is
-// SHEPHERD_TICK_EVERY_POLLS=8 against a 30-minute poll (~4h). A single missed
-// tick must not make a healthy owner look stale.
+// review-remediation is 6h. The in-loop shepherd cadence is
+// SHEPHERD_TICK_EVERY_POLLS=8 against a 30-minute poll, so roughly 4h, and the
+// bound has to sit in the gap between ONE missed tick and two: above 4h so a
+// healthy owner is never called stale, below 8h so a dead one is noticed the
+// same working day. 6h is 1.5x the cadence and the only round number in that
+// gap.
 //
 // implement is 130m, matching the lease run_implementer.py already writes.
 var stalenessBounds = map[string]time.Duration{
@@ -150,7 +153,7 @@ type Ownership struct {
 	// LastProgressAt advances only when the owner effected a state change.
 	// A poll that observed nothing writes no progress: a heartbeat that
 	// refreshed this would let an owner prove liveness forever while
-	// achieving nothing, which ADR-009 rules out explicitly.
+	// achieving nothing, which ADR-010 rules out explicitly.
 	LastProgressAt   time.Time `json:"last_progress_at"`
 	ProgressEvidence string    `json:"progress_evidence,omitempty"`
 

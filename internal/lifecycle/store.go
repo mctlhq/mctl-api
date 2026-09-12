@@ -31,7 +31,7 @@ import (
 //
 // The UNIQUE constraint on (entity_kind, entity_id, phase) is the whole
 // invariant "at most one owner per entity phase", enforced by the database
-// rather than by the code that writes to it. ADR-009 sketched a PARTIAL unique
+// rather than by the code that writes to it. ADR-010 sketched a PARTIAL unique
 // index over the active states; one row per key that transitions in place is
 // strictly stronger, keeps the handoff lineage on the row it describes, and
 // makes a read unambiguous without an ORDER BY. Recorded here rather than left
