@@ -1234,3 +1234,66 @@ func TestRefresh_CloneDoesNotPersistTheCredential(t *testing.T) {
 		t.Errorf("the credential is on disk under .git after a fetch, in: %v", found)
 	}
 }
+
+// TestRefresh_StripsACredentialLeftByAnEarlierCrash covers the window a clone-
+// only strip would leave open.
+//
+// The cache is an emptyDir, which belongs to the Pod and survives a container
+// restart. So a container that dies between `git clone` and the strip comes
+// back to a .git that already exists, takes the fetch branch from then on, and
+// under a clone-only strip would never scrub anything — leaving the token in
+// .git/config for the life of the Pod.
+//
+// The fixture reproduces that state directly rather than trying to kill a
+// process mid-refresh: a repository cloned WITH userinfo still in
+// remote.origin.url, which is exactly what the crash leaves behind.
+func TestRefresh_StripsACredentialLeftByAnEarlierCrash(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "origin")
+	if err := os.MkdirAll(origin, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...) //nolint:gosec // fixed test arguments
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(origin, "init", "-q", "-b", "main", ".")
+	if err := os.WriteFile(filepath.Join(origin, "a.txt"), []byte("hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(origin, "add", ".")
+	run(origin, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "init")
+
+	const token = "ghs_" + "crashLeftoverValue"
+	cache := filepath.Join(t.TempDir(), "cache")
+
+	// The state a crash between clone and strip leaves on the volume.
+	run(filepath.Dir(cache), "clone", "-q", "--depth=1", "--branch", "main",
+		"file://x-access-token:"+token+"@"+origin, cache)
+	cfg, err := os.ReadFile(filepath.Join(cache, ".git", "config")) //nolint:gosec // a path this test just built from t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(cfg, []byte(token)) {
+		t.Fatal("fixture is wrong: the pre-existing clone does not carry the credential, so this test would pass vacuously")
+	}
+
+	// A refresh on that existing .git takes the fetch branch, never the clone
+	// branch — and must still scrub it.
+	r := NewReader("file://"+origin, "main", cache,
+		func() (string, error) { return token, nil }, "", "")
+	if err := r.refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	cfg, err = os.ReadFile(filepath.Join(cache, ".git", "config")) //nolint:gosec // a path this test just built from t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(cfg, []byte(token)) {
+		t.Error("the fetch branch left a credential a previous crash had written into .git/config")
+	}
+}
