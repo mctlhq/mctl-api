@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/mctlhq/mctl-api/internal/ghtoken"
 )
 
 // Reader provides read access to the GitOps mono-repo state.
@@ -38,9 +40,10 @@ type Reader struct {
 	repoURL        string
 	branch         string
 	localPath      string
-	token          string // GitHub token for HTTPS auth (optional)
-	sshKeyPath     string // Path to SSH private key (optional, takes precedence over token)
-	knownHostsPath string // Path to a known_hosts file for SSH host-key pinning (optional; empty means "use the shipped embedded default, materialized lazily")
+	tokenSource    ghtoken.Source // GitHub credential for HTTPS auth (optional), consulted per refresh
+	token          string         // the credential this refresh is using; resolved from tokenSource under mu at the top of refresh()
+	sshKeyPath     string         // Path to SSH private key (optional, takes precedence over token)
+	knownHostsPath string         // Path to a known_hosts file for SSH host-key pinning (optional; empty means "use the shipped embedded default, materialized lazily")
 	mu             sync.RWMutex
 	lastSync       time.Time
 
@@ -179,7 +182,12 @@ type PlatformSkillPolicy struct {
 }
 
 // NewReader creates a new gitops reader.
-// token is an optional GitHub token for HTTPS auth.
+// token is an optional GitHub credential for HTTPS auth. It is a source, not a
+// value, because the credential behind it is a GitHub App installation token
+// that lives 60 minutes and is re-minted every 30 — a Reader holding a string
+// would clone happily for an hour and then fail forever. It is resolved once
+// per refresh, so the clone URL and the log redactor always agree on the value
+// actually in use.
 // sshKeyPath is an optional path to an SSH private key for SSH auth.
 // If sshKeyPath is set, it takes precedence and the repo URL should be SSH format.
 // knownHostsPath is an optional path to a known_hosts file used to verify the
@@ -187,12 +195,12 @@ type PlatformSkillPolicy struct {
 // populated with GitHub's published host keys is materialized lazily on the
 // first SSH-mode refresh. NewReader performs no filesystem I/O — it only
 // stores knownHostsPath verbatim.
-func NewReader(repoURL, branch, localPath, token, sshKeyPath, knownHostsPath string) *Reader {
+func NewReader(repoURL, branch, localPath string, token ghtoken.Source, sshKeyPath, knownHostsPath string) *Reader {
 	return &Reader{
 		repoURL:        repoURL,
 		branch:         branch,
 		localPath:      localPath,
-		token:          token,
+		tokenSource:    token,
 		sshKeyPath:     sshKeyPath,
 		knownHostsPath: knownHostsPath,
 	}
@@ -223,6 +231,24 @@ func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
 func (r *Reader) refresh() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Resolve the credential once, here, and store it for the duration of this
+	// refresh. Everything downstream — the clone URL below and redactToken,
+	// which strips the token out of git's own output — then reads the same
+	// r.token. Threading a source through both instead would let them
+	// disagree across a rotation, and the way that failure shows up is a live
+	// token in the log store.
+	//
+	// SSH mode does not consult the source at all: sshKeyPath wins the switch
+	// below, so a deployment on SSH auth is not made to depend on a token file
+	// it has no use for.
+	if r.sshKeyPath == "" {
+		token, err := ghtoken.Resolve(r.tokenSource)
+		if err != nil {
+			return fmt.Errorf("resolving gitops credential: %w", err)
+		}
+		r.token = token
+	}
 
 	var cloneURL string
 	var sshEnv []string

@@ -47,6 +47,12 @@ spec:
             - name: GITOPS_SSH_KEY_PATH
               value: /etc/gitops-ssh/ssh-privatekey
             {{- end }}
+            {{- if .Values.githubAppTokenSecret }}
+            # The path, not the token. Naming the file is what lets the
+            # process re-read it after a rotation.
+            - name: GITHUB_APP_TOKEN_FILE
+              value: /var/run/secrets/github/token
+            {{- end }}
             {{- with .Values.openclaw }}
             {{- with .skills }}
             {{- if .maxPerSkillBytes }}
@@ -101,6 +107,11 @@ spec:
               mountPath: /etc/gitops-ssh
               readOnly: true
             {{- end }}
+            {{- if .Values.githubAppTokenSecret }}
+            - name: github-app-token
+              mountPath: /var/run/secrets/github
+              readOnly: true
+            {{- end }}
             {{- if and .Values.postgresCA .Values.postgresCA.secretName }}
             - name: cnpg-ca
               mountPath: /etc/cnpg
@@ -115,6 +126,20 @@ spec:
           secret:
             secretName: {{ .Values.gitopsSSHSecret }}
             defaultMode: 0400
+        {{- end }}
+        {{- if .Values.githubAppTokenSecret }}
+        # A volume, not envFrom, and that is the entire point: this Secret is
+        # re-synced every 30 minutes with a freshly minted installation token,
+        # and environment variables are fixed when the container starts. An
+        # envFrom consumer would serve an expired token within the hour. The
+        # projected file changes in place and the process re-reads it.
+        - name: github-app-token
+          secret:
+            secretName: {{ .Values.githubAppTokenSecret }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.githubAppTokenKey | default "token" }}
+                path: token
         {{- end }}
         {{- if and .Values.postgresCA .Values.postgresCA.secretName }}
         - name: cnpg-ca

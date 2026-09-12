@@ -114,7 +114,8 @@ docker run -p 8080:8080 mctl-api
 | `GITOPS_REPO_URL` | GitOps repository URL | `https://github.com/mctlhq/mctl-gitops.git` | No |
 | `GITOPS_BRANCH` | GitOps branch | `main` | No |
 | `GITOPS_LOCAL_PATH` | Local cache path for gitops clone | `/tmp/mctl-gitops` | No |
-| `GITOPS_REPO_TOKEN` | GitHub token for HTTPS clone | — | No |
+| `GITHUB_APP_TOKEN_FILE` | Path to a mounted GitHub App installation token. Takes precedence over `GITOPS_REPO_TOKEN` and `GITOPS_ACTIONS_TOKEN`, and is re-read per use so a rotation is picked up without a restart. | — | No |
+| `GITOPS_REPO_TOKEN` | GitHub token for HTTPS clone. Fallback when `GITHUB_APP_TOKEN_FILE` is unset; read once at startup, so only for credentials that do not rotate. | — | No |
 | `GITOPS_SSH_KEY_PATH` | SSH key path for git clone | — | No |
 | `ARGOCD_URL` | ArgoCD API endpoint | `https://ops.mctl.ai` | No |
 | `ARGOCD_TOKEN` | ArgoCD auth token (from Vault) | — | Yes |

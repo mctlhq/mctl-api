@@ -39,6 +39,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/ghactions"
+	"github.com/mctlhq/mctl-api/internal/ghtoken"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/lifecycle"
@@ -314,10 +315,11 @@ func main() {
 	// non-nil interface wrapping a nil pointer and the handler's
 	// "not configured" branch would never fire.
 	var workflowDispatcher mctlapi.WorkflowDispatcher
-	if cfg.GitOpsActionsToken != "" {
+	if cfg.GitOpsActionsToken != nil {
 		workflowDispatcher = ghactions.New(cfg.GitOpsActionsToken)
 	} else {
-		slog.Warn("GITOPS_ACTIONS_TOKEN is unset; the Cloudflare portal server-auth apply cannot be dispatched",
+		slog.Warn("no dispatch credential configured; the Cloudflare portal server-auth apply cannot be dispatched",
+			"want", "GITHUB_APP_TOKEN_FILE or GITOPS_ACTIONS_TOKEN",
 			"route", "POST /api/v1/cloudflare/portal/server-auth/apply")
 	}
 
@@ -528,19 +530,60 @@ func main() {
 	}
 }
 
+// githubAppTokenFileEnv names the file holding a GitHub App installation
+// token, mounted from the Secret that rotate-github-app-tokens re-syncs.
+//
+// One file serves both credentials below because one App installation backs
+// both: mctl-agents (id 4450852), which already reaches mctlhq/mctl-gitops.
+// That is a deliberate trade, taken with the alternative measured: the
+// installation carries contents:write across 25 repositories, where the
+// clone alone needs contents:read on one. A dedicated App would have kept
+// the narrower grant; sharing this one avoids standing up a second App and
+// its key rotation, and it is what the operator chose. The consequence to
+// remember when reading an incident: a compromise of this process is a
+// compromise of write access to every repository that installation covers,
+// and mctl-api and mctl-agents now share a failure domain — a revoked key
+// or a removed installation takes out both. See mctlhq/mctl-api#307.
+const githubAppTokenFileEnv = "GITHUB_APP_TOKEN_FILE"
+
+// gitOpsTokenSource picks the credential for the HTTPS clone.
+//
+// The mounted file wins when present. The environment variables remain as the
+// fallback for local runs and for the interim fine-grained PAT provisioned in
+// mctlhq/mctl-gitops#1229, which does not rotate and so is safe to read once.
+func gitOpsTokenSource() ghtoken.Source {
+	return ghtoken.FirstOf(
+		ghtoken.File(os.Getenv(githubAppTokenFileEnv)),
+		ghtoken.Static(os.Getenv("GITOPS_REPO_TOKEN")),
+		ghtoken.Static(os.Getenv("GITHUB_TOKEN")),
+	)
+}
+
+// actionsTokenSource picks the credential that starts workflow_dispatch runs.
+func actionsTokenSource() ghtoken.Source {
+	return ghtoken.FirstOf(
+		ghtoken.File(os.Getenv(githubAppTokenFileEnv)),
+		ghtoken.Static(os.Getenv("GITOPS_ACTIONS_TOKEN")),
+	)
+}
+
 type config struct {
 	Port            string
 	GitOpsRepoURL   string
 	GitOpsBranch    string
 	GitOpsLocalPath string
-	GitOpsToken     string // GitHub token for HTTPS auth (optional)
+	// GitOpsToken is the credential for the HTTPS clone. A source rather than
+	// a string: when it comes from a GitHub App installation token the value
+	// lives 60 minutes and is re-minted every 30, so it must be re-read, not
+	// captured at startup. See internal/ghtoken.
+	GitOpsToken ghtoken.Source
 	// GitOpsActionsToken starts workflow_dispatch runs in mctl-gitops. A
 	// SEPARATE credential from GitOpsToken on purpose: that one clones over
 	// HTTPS and needs contents:read, while this one needs actions:write and
 	// nothing else. Reusing the clone token would silently widen it from
 	// "can read the repository" to "can start any workflow in it", which is
 	// not a change anyone would notice in a values file.
-	GitOpsActionsToken      string
+	GitOpsActionsToken      ghtoken.Source
 	GitOpsSSHKeyPath        string // Path to SSH key for SSH auth (optional, takes precedence)
 	GitOpsSSHKnownHostsPath string // Path to a known_hosts file for SSH host-key pinning (optional; empty uses the shipped default)
 	ArgoCDURL               string
@@ -646,8 +689,8 @@ func loadConfig() config {
 		GitOpsRepoURL:                  envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-gitops.git"),
 		GitOpsBranch:                   envOr("GITOPS_BRANCH", "main"),
 		GitOpsLocalPath:                envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-gitops"),
-		GitOpsToken:                    envOr("GITOPS_REPO_TOKEN", os.Getenv("GITHUB_TOKEN")),
-		GitOpsActionsToken:             os.Getenv("GITOPS_ACTIONS_TOKEN"),
+		GitOpsToken:                    gitOpsTokenSource(),
+		GitOpsActionsToken:             actionsTokenSource(),
 		GitOpsSSHKeyPath:               os.Getenv("GITOPS_SSH_KEY_PATH"),
 		GitOpsSSHKnownHostsPath:        os.Getenv("GITOPS_SSH_KNOWN_HOSTS_PATH"),
 		ArgoCDURL:                      envOr("ARGOCD_URL", "https://ops.mctl.ai"),

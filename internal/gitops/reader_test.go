@@ -704,7 +704,7 @@ func TestNewReader_NoFilesystemWriteWhenKnownHostsPathEmpty(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("TMPDIR", tmpDir)
 
-	r := NewReader("git@github.com:mctlhq/mctl-gitops.git", "main", t.TempDir(), "", "/some/deploy-key", "")
+	r := NewReader("git@github.com:mctlhq/mctl-gitops.git", "main", t.TempDir(), nil, "/some/deploy-key", "")
 	if r.knownHostsPath != "" {
 		t.Fatalf("knownHostsPath should be stored verbatim as empty, got %q", r.knownHostsPath)
 	}
@@ -1052,5 +1052,79 @@ func TestRefresh_SSHHostKeyMatch_PassesHostKeyVerification(t *testing.T) {
 	msg := err.Error()
 	if strings.Contains(msg, "Host key verification failed") || strings.Contains(msg, "REMOTE HOST IDENTIFICATION HAS CHANGED") {
 		t.Fatalf("expected the clone to get past host-key verification with the correct pinned key, got a host-key failure: %v", err)
+	}
+}
+
+// TestRefresh_ResolvesTheCredentialPerCall pins that the clone credential is
+// re-read on every refresh rather than captured in NewReader.
+//
+// This is the whole reason the parameter is a source. A GitHub App
+// installation token lives 60 minutes and is re-minted every 30; a Reader that
+// captured the value would clone happily for an hour and then fail on every
+// refresh after, with nothing in the configuration having changed.
+func TestRefresh_ResolvesTheCredentialPerCall(t *testing.T) {
+	var calls int
+	r := NewReader(
+		"https://github.invalid/mctlhq/does-not-exist.git", "main", t.TempDir(),
+		func() (string, error) {
+			calls++
+			return fmt.Sprintf("rotated-%d", calls), nil
+		},
+		"", "",
+	)
+
+	// The clone itself fails — the host does not resolve — which is fine:
+	// what is under test is what happened before git ran.
+	_ = r.refresh()
+	if calls != 1 {
+		t.Fatalf("first refresh consulted the source %d times, want 1", calls)
+	}
+	if r.token != "rotated-1" {
+		t.Fatalf("token is %q after the first refresh, want rotated-1", r.token)
+	}
+
+	_ = r.refresh()
+	if calls != 2 {
+		t.Fatalf("second refresh consulted the source %d times total, want 2 — the value was captured", calls)
+	}
+	// redactToken reads r.token, so this is also what keeps the log redactor
+	// pointed at the credential actually in use for this refresh.
+	if r.token != "rotated-2" {
+		t.Fatalf("token is %q after the second refresh, want rotated-2", r.token)
+	}
+	if got := string(r.redactToken([]byte("failed to fetch rotated-2 from origin"))); strings.Contains(got, "rotated-2") {
+		t.Errorf("redactToken left the current token in the output: %q", got)
+	}
+}
+
+// TestRefresh_UnreadableCredentialFailsBeforeGit pins that a credential which
+// cannot be read stops the refresh, rather than falling through to an
+// unauthenticated clone whose failure names the wrong cause.
+func TestRefresh_UnreadableCredentialFailsBeforeGit(t *testing.T) {
+	dir := t.TempDir()
+	boom := errors.New("token file is gone")
+	r := NewReader("https://github.invalid/mctlhq/does-not-exist.git", "main", dir,
+		func() (string, error) { return "", boom }, "", "")
+
+	err := r.refresh()
+	if !errors.Is(err, boom) {
+		t.Fatalf("want the source error wrapped, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".git")); statErr == nil {
+		t.Error("git ran despite an unreadable credential")
+	}
+}
+
+// TestRefresh_SSHModeIgnoresTheCredentialSource pins that a deployment on SSH
+// auth is not made to depend on a token file it has no use for.
+func TestRefresh_SSHModeIgnoresTheCredentialSource(t *testing.T) {
+	var calls int
+	r := NewReader("git@github.com:mctlhq/mctl-gitops.git", "main", t.TempDir(),
+		func() (string, error) { calls++; return "", errors.New("must not be called") },
+		"/some/deploy-key", "")
+
+	_ = r.refresh()
+	if calls != 0 {
+		t.Fatalf("SSH mode consulted the token source %d times, want 0", calls)
 	}
 }
