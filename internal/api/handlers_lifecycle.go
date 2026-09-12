@@ -165,7 +165,16 @@ func (h *Handlers) GetLifecycleOwnership(w http.ResponseWriter, r *http.Request)
 
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	records, err := h.opts.Lifecycle.List(r.Context(), lifecycle.ListFilter{
-		Kind: kind, Phase: phase, State: q.Get("state"), Owner: q.Get("owner"), Limit: limit,
+		// `owner_type`, not `owner`: the filter matches an owner TYPE
+		// (shepherd, pr-steward, devloop-workflow), never a specific owner id.
+		// The store renamed its field for exactly that reason, and a query
+		// parameter called `owner` would invite `?owner=dev-loop-...-7` and
+		// silently return every row of that type instead.
+		Kind:      kind,
+		Phase:     phase,
+		State:     q.Get("state"),
+		OwnerType: q.Get("owner_type"),
+		Limit:     limit,
 	})
 	if err != nil {
 		writeLifecycleError(w, err, nil)
