@@ -22,9 +22,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -267,5 +269,151 @@ func TestLifecycleHandlers_ReadModelExposesDerivedState(t *testing.T) {
 	}
 	if body.Epoch != 1 {
 		t.Fatalf("epoch not exposed: %d", body.Epoch)
+	}
+}
+
+// TestLifecycleHandlers_RecoverTakesADeadRowAndRefusesALiveOne closes the hole
+// the first review round found: without this route the API could reach the
+// zero-owner state and never leave it.
+//
+// Acquire refuses an ACTIVE record regardless of liveness — deliberately, on
+// the store's own argument that a dead owner's row is not acquirable but
+// recoverable — so Recover is the only operation that moves ownership off a
+// live record, and it was neither routed nor handled.
+func TestLifecycleHandlers_RecoverTakesADeadRowAndRefusesALiveOne(t *testing.T) {
+	store, prefix := newTestLifecycleStore(t)
+	h := &Handlers{opts: Options{Lifecycle: store}}
+	id := prefix + "-recover"
+	claim := map[string]any{
+		"kind": "pull-request", "id": id, "phase": "review-remediation",
+		"owner_type": "devloop-workflow", "owner_id": "wf-1",
+	}
+	if rec := lifecyclePost(t, h, h.AcquireLifecycleOwnership, claim); rec.Code != http.StatusOK {
+		t.Fatalf("acquire: %d %s", rec.Code, rec.Body)
+	}
+
+	takeover := map[string]any{
+		"kind": "pull-request", "id": id, "phase": "review-remediation",
+		"owner_type": "shepherd", "owner_id": "cron",
+		"epoch": 1, "evidence": "the workflow stopped being seen",
+	}
+
+	// A LIVE owner is not recoverable, whatever the caller believes. The
+	// liveness check is the server's, re-derived against the database clock.
+	rec := lifecyclePost(t, h, h.RecoverLifecycleOwnership, takeover)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("recover from a live owner: want 409, got %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "still") && !strings.Contains(rec.Body.String(), "alive") {
+		t.Fatalf("the 409 does not say the owner is alive: %s", rec.Body)
+	}
+
+	// Age it past the liveness bound, the only way to simulate a crash.
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx,
+		`UPDATE lifecycle_ownership SET last_seen_at = $1
+		 WHERE entity_kind = 'pull-request' AND entity_id = $2 AND phase = 'review-remediation'`,
+		time.Now().UTC().Add(-11*time.Hour), id,
+	); err != nil {
+		t.Fatalf("age the row: %v", err)
+	}
+
+	rec = lifecyclePost(t, h, h.RecoverLifecycleOwnership, takeover)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("recover from a dead owner: want 200, got %d %s", rec.Code, rec.Body)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	owner, _ := got["owner"].(map[string]any)
+	if owner["id"] != "cron" {
+		t.Fatalf("the row was not taken over: %v", got)
+	}
+	// The epoch moved, or the previous owner is not fenced out.
+	if epoch, _ := got["epoch"].(float64); epoch != 2 {
+		t.Fatalf("recovery did not move the epoch: %v", got["epoch"])
+	}
+}
+
+// TestLifecycleHandlers_StaleReadIsRetryableNotAServerError pins the sentinel
+// whose whole meaning is "ask again".
+//
+// It fell through writeLifecycleError's default arm to a 500, which clients
+// back off from and which pages an operator — the exact inverse of what the
+// store means by it. Reachable from Acquire, RecordProgress, HandoffStart and
+// finish under ordinary contention.
+func TestLifecycleHandlers_StaleReadIsRetryableNotAServerError(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeLifecycleError(rec, fmt.Errorf("%w: it changed while the write was in flight",
+		lifecycle.ErrStaleRead), nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("ErrStaleRead: want 409, got %d %s", rec.Code, rec.Body)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["retryable"] != true {
+		t.Fatalf("a stale read must be marked retryable: %v", body)
+	}
+
+	// The other direction: a 409 that means STAND DOWN must not carry it, or
+	// the flag says nothing. ErrNotOwner and ErrOwnedByOther share the status.
+	for _, err := range []error{lifecycle.ErrNotOwner, lifecycle.ErrOwnedByOther, lifecycle.ErrOwnerAlive} {
+		rec := httptest.NewRecorder()
+		writeLifecycleError(rec, err, nil)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%v: want 409, got %d", err, rec.Code)
+		}
+		var body map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if body["retryable"] == true {
+			t.Fatalf("%v must not be marked retryable: %v", err, body)
+		}
+	}
+}
+
+// TestLifecycleRoutesAreRegistered pins the ROUTES, not only the handlers.
+//
+// Every other test in this file calls the handler function directly, so
+// deleting a route line left the suite green while the endpoint did not exist.
+// That is how `recover` came to be listed in the PR description and absent
+// from the router.
+func TestLifecycleRoutesAreRegistered(t *testing.T) {
+	router, ok := NewRouter(Options{}).(chi.Routes)
+	if !ok {
+		t.Fatal("the router does not expose its routes")
+	}
+	found := map[string]bool{}
+	if err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		found[method+" "+strings.TrimSuffix(route, "/")] = true
+		return nil
+	}); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	for _, want := range []string{
+		"POST /api/v1/lifecycle/ownership/acquire",
+		"POST /api/v1/lifecycle/ownership/progress",
+		"POST /api/v1/lifecycle/ownership/release",
+		"POST /api/v1/lifecycle/ownership/terminal",
+		"POST /api/v1/lifecycle/ownership/handoff/start",
+		"POST /api/v1/lifecycle/ownership/handoff/complete",
+		// The one the first review round found missing. Without it a dead
+		// owner's row can never be taken over through this API, because
+		// Acquire refuses an active record regardless of liveness.
+		"POST /api/v1/lifecycle/ownership/recover",
+		"GET /api/v1/lifecycle/ownership",
+		"GET /api/v1/lifecycle/ownership/batch",
+		"GET /api/v1/lifecycle/events",
+	} {
+		if !found[want] {
+			t.Errorf("route not registered: %s", want)
+		}
 	}
 }

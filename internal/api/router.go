@@ -396,6 +396,10 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/lifecycle/ownership/handoff/complete", h.CompleteLifecycleHandoff)
 				r.Post("/lifecycle/ownership/release", h.ReleaseLifecycleOwnership)
 				r.Post("/lifecycle/ownership/terminal", h.TerminateLifecycleOwnership)
+				// Recovery is a WRITE like the rest and sits in the same
+				// admin group: it moves ownership off a live record, which
+				// no other endpoint here can do.
+				r.Post("/lifecycle/ownership/recover", h.RecoverLifecycleOwnership)
 			})
 
 			// Operation registry (metadata only).

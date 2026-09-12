@@ -117,6 +117,27 @@ func writeLifecycleError(w http.ResponseWriter, err error, current *lifecycle.Ow
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, lifecycle.ErrUnknownPhase):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, lifecycle.ErrStaleRead):
+		// 409, and the one sentinel in this package whose correct response is
+		// an immediate RETRY rather than standing down: the caller still owns
+		// the record at the right epoch, and only its READ went stale. The
+		// default arm turned that into a 500 — which clients back off from and
+		// which pages an operator — inverting the one answer that means "ask
+		// again". Reachable from Acquire, RecordProgress, HandoffStart and
+		// finish under ordinary contention, so it is not a corner.
+		//
+		// `retryable` is in the body rather than left to the status: a 409 on
+		// its own is what ErrNotOwner and ErrNoHandoff also carry, and those
+		// mean the opposite.
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":     err.Error(),
+			"retryable": true,
+		})
+	case errors.Is(err, lifecycle.ErrOwnerAlive):
+		// 409: the caller asked to recover a row whose owner is still within
+		// its liveness bound. Not a precondition failure — nothing about the
+		// caller's read was stale — and not a server error.
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, lifecycle.ErrNotFound):
 		writeError(w, http.StatusNotFound, "no ownership record for this entity phase")
 	default:
@@ -401,6 +422,50 @@ func (h *Handlers) ReleaseLifecycleOwnership(w http.ResponseWriter, r *http.Requ
 // nothing should pick it up.
 func (h *Handlers) TerminateLifecycleOwnership(w http.ResponseWriter, r *http.Request) {
 	h.finishLifecycle(w, r, true)
+}
+
+// RecoverLifecycleOwnership handles
+// POST /api/v1/lifecycle/ownership/recover — take a row whose owner is dead.
+//
+// Without this route the API has no way to move ownership off a crashed
+// actor at all: Acquire refuses an active record regardless of liveness,
+// deliberately ("a dead owner's row is not acquirable, it is RECOVERABLE"),
+// and Recover is the only operation that takes from a live record. A store
+// exposed over HTTP with no recovery path can reach the zero-owner state and
+// never leave it, which is the failure this epic exists to remove.
+//
+// The liveness check is NOT the caller's to make. Recover re-derives it
+// server-side against the database clock and answers ErrOwnerAlive when the
+// owner is still within its bound, so a client that merely believes an owner
+// died cannot act on that belief.
+//
+// `evidence` is required by the store, not by this handler: a takeover with
+// no recorded reason is the one mutation here that is hardest to reconstruct
+// afterwards, and the store's own error says so more precisely than a
+// duplicated check would.
+func (h *Handlers) RecoverLifecycleOwnership(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
+		return
+	}
+	body, ok := decodeLifecycleWrite(w, r)
+	if !ok {
+		return
+	}
+	opts := []lifecycle.OwnerOption{}
+	if body.PolicyRef != "" {
+		opts = append(opts, lifecycle.WithPolicyRef(body.PolicyRef))
+	}
+	if body.TemporalWorkflowID != "" {
+		opts = append(opts, lifecycle.WithWorkflowID(body.TemporalWorkflowID))
+	}
+	got, err := h.opts.Lifecycle.Recover(
+		r.Context(), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence, opts...,
+	)
+	if err != nil {
+		writeLifecycleError(w, err, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, newOwnershipResponse(got))
 }
 
 func (h *Handlers) finishLifecycle(w http.ResponseWriter, r *http.Request, terminal bool) {
