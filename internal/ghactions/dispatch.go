@@ -72,6 +72,24 @@ func New(token string) *Dispatcher {
 // the workflow's run list instead of pretending to a specific run. Polling for
 // "the newest run" would be a guess: a scheduled run or a second dispatcher
 // can land between the POST and the poll.
+// validPathSegment reports whether a value is safe to interpolate into a URL
+// path: non-empty, not a relative-path element, and built only from characters
+// GitHub uses in owners, repositories, workflow file names and refs.
+func validPathSegment(v string) bool {
+	if v == "" || v == "." || v == ".." {
+		return false
+	}
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (d *Dispatcher) Dispatch(ctx context.Context, owner, repo, workflowFile, ref string, inputs map[string]string) error {
 	if d == nil || d.Token == "" {
 		return ErrNotConfigured
@@ -80,10 +98,19 @@ func (d *Dispatcher) Dispatch(ctx context.Context, owner, repo, workflowFile, re
 	// (the handler pins all four as constants), but a later caller that
 	// forwards user input must not be able to walk out of the path or inject
 	// a query, so the check lives here rather than in the one caller.
+	//
+	// An ALLOWLIST, not a denylist. The first version rejected "/?#%" and so
+	// let "." and ".." through -- the two values a traversal actually needs,
+	// and the ones its own comment promised to stop. A segment here may hold
+	// letters, digits, and the punctuation GitHub allows in a repository,
+	// workflow file or ref name; anything else, including a bare dot, is
+	// refused. Dots inside a longer name ("cloudflare-apply.yml", "v1.2.3")
+	// stay legal, because it is the WHOLE segment being "." or ".." that
+	// walks the path.
 	for _, seg := range []struct{ name, value string }{
 		{"owner", owner}, {"repo", repo}, {"workflow", workflowFile}, {"ref", ref},
 	} {
-		if seg.value == "" || strings.ContainsAny(seg.value, "/?#%") {
+		if !validPathSegment(seg.value) {
 			return fmt.Errorf("invalid %s %q", seg.name, seg.value)
 		}
 	}

@@ -2884,17 +2884,19 @@ func (s *Server) toolTriggerPortalServerAuthApply() (mcplib.Tool, server.ToolHan
 		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Dispatch mctl-gitops' cloudflare-apply.yml on infrastructure/cloudflare/portal: apply the committed OAuth registration of the Cloudflare MCP portal's upstream servers (issuer/authorization/token/revocation endpoints, client registration, and the scope the portal requests).
 
-Nothing is written to Cloudflare by this call. The run's plan job reads the live registration and publishes a per-field comparison against infrastructure/cloudflare/portal/mcp-portal-server-auth.json; the apply job then waits for a required reviewer on the cloudflare-apply environment, and refuses if the live side changed after the approval. Read the plan in the run before approving.
+Nothing is written to Cloudflare by this call. The run's plan job publishes an OpenTofu plan for infrastructure/cloudflare/portal; the apply job then waits for a required reviewer on the cloudflare-apply environment. Read the plan in the run before approving.
 
-Use it when the committed file has changed (a scope was widened or narrowed) or when the nightly drift check reported that the live registration no longer matches it. To change WHAT is applied, open a pull request against that file — this tool only applies what is already on main.
+Use it when the committed configuration has changed (a scope was widened or narrowed) or when the nightly drift check reported that the live registration no longer matches it. To change WHAT is applied, open a pull request against infrastructure/cloudflare/portal/mcp-servers.tf — this tool only applies what is already on main.
 
 After an apply, the upstream must be signed out and back in in the portal: a refresh is intersected with the family's original grant, so a new scope does not reach a live session.
 
 Admin-only. Returns a link to the workflow's run list — the dispatch API returns no run id, because at that moment the run does not exist yet.`),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		// No parameters, and no body: the workflow takes no inputs, and what
-		// it applies is the file at HEAD of main.
+		// No parameters and no body from the caller. The one input the
+		// workflow does take -- which OpenTofu root to apply -- is pinned
+		// server-side, because cloudflare-apply.yml will apply whichever root
+		// it is given, the Cloudflare zone roots included.
 		body, err := s.apiPost(ctx, "/api/v1/cloudflare/portal/server-auth/apply", map[string]string{})
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to dispatch portal server-auth apply: %v", err)), nil

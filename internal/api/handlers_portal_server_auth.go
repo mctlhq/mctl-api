@@ -96,10 +96,15 @@ func (h *Handlers) DispatchPortalServerAuthApply(w http.ResponseWriter, r *http.
 	// is the file at HEAD of main, and the script refuses anything else — so
 	// there is nothing a caller could say here that would change the outcome,
 	// and accepting a body would only invite the belief that there is.
+	// The root belongs in the record as much as the workflow does:
+	// cloudflare-apply.yml applies whichever root it is handed, so "which
+	// root" is the whole meaning of this dispatch. An audit entry naming only
+	// the workflow would read the same for an apply of any Cloudflare root.
 	auditParams := map[string]string{
 		"repo":     portalServerAuthOwner + "/" + portalServerAuthRepo,
 		"workflow": portalServerAuthWorkflow,
 		"ref":      portalServerAuthRef,
+		"root":     portalServerAuthRoot,
 	}
 
 	err := h.opts.WorkflowDispatcher.Dispatch(r.Context(),
@@ -142,6 +147,10 @@ func (h *Handlers) DispatchPortalServerAuthApply(w http.ResponseWriter, r *http.
 		"repo":     portalServerAuthOwner + "/" + portalServerAuthRepo,
 		"workflow": portalServerAuthWorkflow,
 		"ref":      portalServerAuthRef,
+		// Named for the same reason it is in the audit entry: the workflow is
+		// shared across every Cloudflare root, so the root is what says which
+		// one this call started.
+		"root":     portalServerAuthRoot,
 		"runs_url": portalServerAuthRunsURL,
 		"message": "Dispatched cloudflare-apply.yml on main for " + portalServerAuthRoot + ". Nothing has been written to Cloudflare yet: " +
 			"the run's plan job publishes the live-vs-committed comparison, and the apply job waits for a required " +

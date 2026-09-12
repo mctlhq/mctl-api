@@ -44,10 +44,10 @@ func TestDispatch_SendsTheDocumentedRequest(t *testing.T) {
 	})
 	defer closeSrv()
 
-	if err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "portal-server-auth-apply.yml", "main", nil); err != nil {
+	if err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "cloudflare-apply.yml", "main", nil); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	if want := "/repos/mctlhq/mctl-gitops/actions/workflows/portal-server-auth-apply.yml/dispatches"; gotPath != want {
+	if want := "/repos/mctlhq/mctl-gitops/actions/workflows/cloudflare-apply.yml/dispatches"; gotPath != want {
 		t.Errorf("path %q, want %q", gotPath, want)
 	}
 	if gotAuth != "Bearer t0ken" {
@@ -63,6 +63,64 @@ func TestDispatch_SendsTheDocumentedRequest(t *testing.T) {
 	// the workflow does not declare, and this workflow declares none.
 	if _, ok := gotBody["inputs"]; ok {
 		t.Errorf("body carries an inputs key for a call that passed none: %v", gotBody)
+	}
+}
+
+// The handler's own test asserts inputs against a FAKE dispatcher, so it
+// passes even if Dispatch silently dropped them. This is the same claim
+// against the real HTTP body -- and it is not a formality: the root is what
+// tells cloudflare-apply.yml which OpenTofu root to apply. A dropped input on
+// a workflow that defaulted `root` would start an apply against a different
+// Cloudflare root and still answer 202.
+func TestDispatch_InputsReachTheRequestBody(t *testing.T) {
+	var gotBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	d := &Dispatcher{Token: "t0ken", BaseURL: srv.URL}
+	err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "cloudflare-apply.yml", "main",
+		map[string]string{"root": "infrastructure/cloudflare/portal"})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	inputs, ok := gotBody["inputs"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("body carries no inputs object: %v", gotBody)
+	}
+	if got := inputs["root"]; got != "infrastructure/cloudflare/portal" {
+		t.Errorf("inputs.root = %v, want infrastructure/cloudflare/portal", got)
+	}
+}
+
+// The guard is an allowlist because the denylist it replaced ("/?#%") let
+// through exactly the two values a traversal needs.
+func TestDispatch_RejectsRelativePathSegments(t *testing.T) {
+	// BaseURL points at a closed port, so anything that gets PAST the guard
+	// fails with a connection error. Asserting "some error" would therefore
+	// pass even with the guard removed -- caught by mutation: restoring the
+	// old denylist left this test green. The assertion is on the validation
+	// error specifically.
+	d := &Dispatcher{Token: "t0ken", BaseURL: "http://127.0.0.1:1"}
+	for _, bad := range []string{"..", ".", "", "a/b", "a?b", "a#b", "a%2e", "a b", "a..b/../c"} {
+		err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", bad, "main", nil)
+		if err == nil {
+			t.Errorf("workflow %q was accepted", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "invalid workflow") {
+			t.Errorf("workflow %q reached the network instead of the guard: %v", bad, err)
+		}
+	}
+	// A dot INSIDE a segment is ordinary and must stay legal, or no workflow
+	// file name and no semver ref would pass.
+	for _, good := range []string{"cloudflare-apply.yml", "v1.2.3", "release-please--branches--main"} {
+		err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", good, "main", nil)
+		if err != nil && strings.Contains(err.Error(), "invalid") {
+			t.Errorf("workflow %q was rejected by the guard: %v", good, err)
+		}
 	}
 }
 
@@ -117,7 +175,7 @@ func TestDispatch_404NamesBothCauses(t *testing.T) {
 	})
 	defer closeSrv()
 
-	err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "portal-server-auth-apply.yml", "main", nil)
+	err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "cloudflare-apply.yml", "main", nil)
 	if err == nil {
 		t.Fatal("expected an error for 404")
 	}
@@ -133,7 +191,7 @@ func TestDispatch_OtherStatusIsAnError(t *testing.T) {
 	})
 	defer closeSrv()
 
-	err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "portal-server-auth-apply.yml", "main", nil)
+	err := d.Dispatch(context.Background(), "mctlhq", "mctl-gitops", "cloudflare-apply.yml", "main", nil)
 	if err == nil || !strings.Contains(err.Error(), "422") {
 		t.Fatalf("want an error naming 422, got %v", err)
 	}
