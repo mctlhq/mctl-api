@@ -29,6 +29,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/domains"
+	"github.com/mctlhq/mctl-api/internal/lifecycle"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/openapi"
 	"github.com/mctlhq/mctl-api/internal/operations"
@@ -98,6 +99,10 @@ type Options struct {
 	// AgentRegistry persists mctl-agents AgentManifest versions/releases to
 	// PostgreSQL (optional — nil disables the agent registry endpoints).
 	AgentRegistry *agentregistry.Store
+	// Lifecycle records which actor owns advancing an entity through a
+	// lifecycle phase (optional — nil makes the lifecycle endpoints 503,
+	// which callers treat as "unknown", never as "unowned").
+	Lifecycle *lifecycle.Store
 	// TemporalClient starts/signals DevLoopWorkflow runs on the dev-workflow
 	// control plane's Temporal deployment (optional — nil disables
 	// mctl_trigger_issue's use_temporal path; callers fall back to the
@@ -356,6 +361,42 @@ func NewRouter(opts Options) http.Handler {
 			// which would eat the 20/min write budget shared with
 			// /operations/{name}/execute and starve real writes.
 			r.Get("/agents/dev-loop/{workflow_id}", h.GetDevLoopWorkflow)
+
+			// Lifecycle ownership READS. Deliberately OUTSIDE the write
+			// group above, for the same reason the dev-loop liveness read
+			// is: the shepherd calls these once per sweep and an operator
+			// calls them while diagnosing, so putting them on the 20/min
+			// write budget shared with /operations/{name}/execute would
+			// starve real writes.
+			r.Get("/lifecycle/ownership", h.GetLifecycleOwnership)
+			r.Get("/lifecycle/ownership/batch", h.BatchGetLifecycleOwnership)
+			r.Get("/lifecycle/events", h.ListLifecycleEvents)
+
+			// Lifecycle ownership WRITES — their own group and their own
+			// budget.
+			//
+			// These are not the same cost profile as the 20/min group: those
+			// trigger Argo workflows and Temporal executions, while these are
+			// a single short Postgres transaction. But they are far more
+			// frequent — every DevLoop acquires, records progress per
+			// effective tick, and releases — so sharing the 20/min bucket
+			// would mean ownership bookkeeping starving the workflow triggers
+			// it exists to coordinate. 120/min is roughly the ceiling implied
+			// by the reconciler cadence with headroom for a bootstrap sweep.
+			r.Group(func(r chi.Router) {
+				r.Use(httprate.Limit(120, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					if user := auth.UserFromContext(r.Context()); user != nil {
+						return "lifecycle:" + user.ID, nil
+					}
+					return keyByTrustedIP(r)
+				})))
+				r.Post("/lifecycle/ownership/acquire", h.AcquireLifecycleOwnership)
+				r.Post("/lifecycle/ownership/progress", h.RecordLifecycleProgress)
+				r.Post("/lifecycle/ownership/handoff/start", h.StartLifecycleHandoff)
+				r.Post("/lifecycle/ownership/handoff/complete", h.CompleteLifecycleHandoff)
+				r.Post("/lifecycle/ownership/release", h.ReleaseLifecycleOwnership)
+				r.Post("/lifecycle/ownership/terminal", h.TerminateLifecycleOwnership)
+			})
 
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)
