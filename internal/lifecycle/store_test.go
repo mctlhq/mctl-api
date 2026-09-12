@@ -2608,9 +2608,66 @@ func TestAStalledReannouncementCannotRevertARetarget(t *testing.T) {
 			*retargeted.HandoffStartedAt, *now.HandoffStartedAt)
 	}
 
+	// And the API says WHICH thing happened, rather than falling through to
+	// raceLostOn's catch-all. That matters beyond the message: ErrStaleRead
+	// means retry, and a retry of the stalled re-announcement reads the new
+	// target, takes the retarget branch, and performs the revert as a fresh
+	// retarget — evented and with a new clock, but still the outcome the
+	// predicate was added to prevent, recommended by the sentinel.
+	// Driven through the real interleaving, because through the API the
+	// re-announcement re-reads inside its own transaction and sees the new
+	// target, so it is an ordinary retarget. Under READ COMMITTED a blocked
+	// UPDATE re-evaluates its WHERE against the committed version, so a
+	// connection that takes no advisory lock and holds the row reproduces the
+	// stall exactly.
+	blocker, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	third := Owner{Type: OwnerPRSteward, ID: "third"}
+	if _, err := scanOne(blocker.QueryRow(ctx, handoffStartUpdateSQL,
+		StateHandingOff, third.Type, third.ID, time.Now().UTC(), now.LastSeenAt, time.Now().UTC(),
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, StateHandingOff,
+		second.Type, second.ID)); err != nil {
+		_ = blocker.Rollback(ctx)
+		t.Fatalf("blocker retarget: %v", err)
+	}
+
+	stalled := make(chan error, 1)
+	go func() {
+		_, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, second, "stalled")
+		stalled <- err
+	}()
+	select {
+	case err := <-stalled:
+		_ = blocker.Rollback(ctx)
+		t.Fatalf("the stalled re-announcement never blocked: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatalf("commit blocker: %v", err)
+	}
+	select {
+	case err := <-stalled:
+		if err == nil {
+			t.Fatal("a stalled re-announcement reverted a retarget through the API")
+		}
+		// ErrStaleRead MEANS retry, and a retry reads the new target and
+		// performs the revert as a fresh retarget — evented and with a new
+		// clock, but still the outcome the predicate was added to prevent.
+		if errors.Is(err, ErrStaleRead) {
+			t.Fatalf("a retarget was reported as a stale read, which means retry: %v", err)
+		}
+		if !errors.Is(err, ErrNotOwner) || !strings.Contains(err.Error(), "retargeted") {
+			t.Fatalf("want a named retarget refusal, got %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stalled re-announcement never returned")
+	}
+
 	// The other direction: the predicate must not refuse a genuine
 	// re-announcement, which is the write it sits on top of.
-	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, second, "still exiting"); err != nil {
+	if _, err := s.HandoffStart(ctx, entity, PhaseReviewRemediation, outgoing, got.Epoch, third, "still exiting"); err != nil {
 		t.Fatalf("a genuine re-announcement was refused: %v", err)
 	}
 	// And so must the first handoff off an ACTIVE row, where the pinned
@@ -2696,5 +2753,125 @@ func TestAnOverlappingHandoffCompleteReachesTheNoRowPathAndSucceeds(t *testing.T
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the loser never returned after the winner committed")
+	}
+}
+
+// TestACarriedForwardVersionCannotRevertANewerOne pins the last two derived
+// inputs: entity_version and temporal_workflow_id.
+//
+// Both were Go-side fallbacks ONTO the stored value — a read promoted into a
+// write — and neither statement pinned the column. The writer that gets
+// underneath is the other statement of the pair: progressUpdateSQL writes
+// entity_version while moving none of epoch, owner or state, so a stalled
+// re-acquire that had read sha-a puts it back over sha-b. The row then
+// disagrees with its own latest event, which is exactly what
+// TestEventsCarryTheStoredVersion exists to prevent — and it runs BACKWARDS,
+// so it does not heal on the next tick.
+//
+// The fix is the one the epoch already had: the carry-forward is the
+// DATABASE's (COALESCE/NULLIF), so the stored value is never read into the
+// caller and cannot be written back stale.
+func TestACarriedForwardVersionCannotRevertANewerOne(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	owner := devloop("wf-1")
+	entity := pr(prefix, "version-carry")
+
+	got, err := s.Acquire(ctx, AcquireRequest{
+		Entity: entity, Phase: PhaseReviewRemediation, Owner: owner,
+		TemporalWorkflowID: "wf-run-1",
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if got.Entity.Version != "sha-a" {
+		t.Fatalf("setup: want sha-a, got %q", got.Entity.Version)
+	}
+
+	// The newer version, written out of band through the production statement
+	// — the other half of the pair, which moves neither epoch nor state.
+	now := time.Now().UTC()
+	if _, err := scanOne(s.pool.QueryRow(ctx, progressUpdateSQL,
+		now, now, "pushed sha-b", "sha-b",
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, StateActive)); err != nil {
+		t.Fatalf("out-of-band progress: %v", err)
+	}
+
+	// The stalled re-acquire, replayed with what it read BEFORE: no version of
+	// its own, so it used to carry sha-a forward.
+	refreshed, err := scanOne(s.pool.QueryRow(ctx, reacquireRefreshSQL,
+		now, "", "", now,
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch,
+		owner.Type, owner.ID, StateActive))
+	if err != nil {
+		t.Fatalf("re-acquire refresh: %v", err)
+	}
+	if refreshed.Entity.Version != "sha-b" {
+		t.Fatalf("a stalled re-acquire reverted the version to %q", refreshed.Entity.Version)
+	}
+	if refreshed.TemporalWorkflowID != "wf-run-1" {
+		t.Fatalf("an empty correlation id cleared the stored one: %q", refreshed.TemporalWorkflowID)
+	}
+
+	// The other direction: a value that IS supplied must still be written, or
+	// the carry-forward has become a freeze. This is the pod-restart case the
+	// re-acquire exists for.
+	replaced, err := scanOne(s.pool.QueryRow(ctx, reacquireRefreshSQL,
+		now, "sha-c", "wf-run-2", now,
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch,
+		owner.Type, owner.ID, StateActive))
+	if err != nil {
+		t.Fatalf("re-acquire refresh with values: %v", err)
+	}
+	if replaced.Entity.Version != "sha-c" || replaced.TemporalWorkflowID != "wf-run-2" {
+		t.Fatalf("a supplied version or correlation id was ignored: %+v", replaced)
+	}
+
+	// And the same both ways through progressUpdateSQL, which carries the
+	// version forward on the identical argument.
+	kept, err := scanOne(s.pool.QueryRow(ctx, progressUpdateSQL,
+		now, now, "still working", "",
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, StateActive))
+	if err != nil {
+		t.Fatalf("progress with no version: %v", err)
+	}
+	if kept.Entity.Version != "sha-c" {
+		t.Fatalf("a progress write with no version cleared the stored one: %q", kept.Entity.Version)
+	}
+}
+
+// TestEventsClampAlsoCapsRatherThanDefaults covers the half of the clamp split
+// that had no test. Two identical branches with one test between them is the
+// shape that let the handoff_to predicate ship unpinned for a round.
+func TestEventsClampAlsoCapsRatherThanDefaults(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	owner := devloop("wf-1")
+	entity := pr(prefix, "events-clamp")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	// One event per progress write, so more than the default page of 100.
+	for i := range 120 {
+		if _, err := s.RecordProgress(ctx, entity, PhaseReviewRemediation, owner, got.Epoch,
+			fmt.Sprintf("tick %d", i)); err != nil {
+			t.Fatalf("progress %d: %v", i, err)
+		}
+	}
+	big, err := s.Events(ctx, entity, PhaseReviewRemediation, 100000)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if len(big) <= 100 {
+		t.Fatalf("an over-cap limit returned the default page, not the cap: %d events", len(big))
+	}
+	small, err := s.Events(ctx, entity, PhaseReviewRemediation, 0)
+	if err != nil {
+		t.Fatalf("events default: %v", err)
+	}
+	if len(small) != 100 {
+		t.Fatalf("an unset limit did not take the default page: %d events", len(small))
 	}
 }

@@ -111,9 +111,38 @@ const ownershipColumns = `entity_kind, entity_id, phase, entity_version,
 // row already names the caller. Testing the statement directly is the only way
 // to show the predicate is load-bearing rather than decorative — and this was
 // the one write in the package that had no such predicate at all.
+// The two carried-forward columns fall back IN THE STATEMENT, the way the
+// epoch already does with `epoch = lifecycle_ownership.epoch + 1`. Reading
+// them in Go and writing the value back promoted a READ into a WRITE, and
+// nothing pinned either column — so the other statement of this pair got
+// underneath: progressUpdateSQL writes entity_version while moving none of
+// epoch, owner or state.
+//
+//  1. wf-1 owns at epoch 4, active, entity_version = sha-a. It ticks, calls
+//     Acquire with no version, reads sha-a, and stalls.
+//  2. wf-1's other step records progress carrying sha-b. The row takes sha-b
+//     and a progress event naming sha-b is appended.
+//  3. The stalled refresh matches epoch, owner and state, and writes sha-a
+//     back.
+//
+// The row then says sha-a while its own latest event says sha-b — exactly the
+// disagreement TestEventsCarryTheStoredVersion exists to prevent, produced by
+// the write that argument was made to protect. And it runs BACKWARDS, so it
+// does not heal: the next progress that omits a version reads sha-a and writes
+// it again. Two overlapping re-acquires do the same to temporal_workflow_id,
+// where the one carrying no id clears a correlation the other just recorded —
+// on the path whose whole purpose is the pod restart, which is when that id
+// changes.
+//
+// COALESCE/NULLIF makes the carry-forward the DATABASE's, so the stored value
+// is never read into the caller and can never be written back stale. That is
+// strictly better than pinning the columns: a predicate would refuse the write
+// outright, where this simply leaves the newer value alone.
 const reacquireRefreshSQL = `UPDATE lifecycle_ownership
-					   SET last_seen_at = $1, entity_version = $2,
-					       temporal_workflow_id = $3, updated_at = $4
+					   SET last_seen_at = $1,
+					       entity_version = COALESCE(NULLIF($2, ''), lifecycle_ownership.entity_version),
+					       temporal_workflow_id = COALESCE(NULLIF($3, ''), lifecycle_ownership.temporal_workflow_id),
+					       updated_at = $4
 					 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7
 					   AND epoch = $8 AND owner_type = $9 AND owner_id = $10
 					   AND state = $11
@@ -288,17 +317,15 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 				if existing.State == StateHandingOff {
 					seen = existing.LastSeenAt
 				}
-				version := existing.Entity.Version
-				if req.Entity.Version != "" {
-					version = req.Entity.Version
-				}
-				// temporal_workflow_id is refreshed too: this path exists for
-				// the pod restart and workflow retry, which is precisely when
-				// the correlation id changes.
-				workflowID := existing.TemporalWorkflowID
-				if req.TemporalWorkflowID != "" {
-					workflowID = req.TemporalWorkflowID
-				}
+				// entity_version and temporal_workflow_id are passed
+				// through AS GIVEN — empty means "leave what is stored", and
+				// the statement itself does that with COALESCE/NULLIF. The Go
+				// fallback that used to sit here read the stored value and
+				// wrote it back, which is how a stalled refresh could revert a
+				// newer version recorded by progressUpdateSQL; see the header
+				// above reacquireRefreshSQL. temporal_workflow_id IS refreshed
+				// when one is supplied: this path exists for the pod restart
+				// and workflow retry, which is precisely when it changes.
 				// Pinned to the row this branch decided about — the only
 				// write in the package that was not.
 				//
@@ -322,7 +349,7 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 				refreshed, err := scanOne(tx.QueryRow(ctx,
 					reacquireRefreshSQL,
 
-					seen, version, workflowID, now,
+					seen, req.Entity.Version, req.TemporalWorkflowID, now,
 					req.Entity.Kind, req.Entity.ID, req.Phase,
 					existing.Epoch, existing.Owner.Type, existing.Owner.ID,
 					existing.State))
@@ -459,9 +486,14 @@ func (s *Store) Acquire(ctx context.Context, req AcquireRequest) (*Ownership, er
 // :233-235 and :240-243 claim correctness survives the lock being removed,
 // which is a claim every write has to honour, not four of seven.
 
+// entity_version falls back in the statement for the same reason it does in
+// reacquireRefreshSQL, and against the same writer: the re-acquire refreshes
+// entity_version while moving none of epoch or state, so a stalled progress
+// write that read the stored version would put an older one back over it.
 const progressUpdateSQL = `UPDATE lifecycle_ownership
 			   SET last_progress_at = $1, last_seen_at = $2, progress_evidence = $3,
-			       entity_version = $4, updated_at = $1
+			       entity_version = COALESCE(NULLIF($4, ''), lifecycle_ownership.entity_version),
+			       updated_at = $1
 			 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7 AND epoch = $8
 			   AND state = $9
 			 RETURNING ` + ownershipColumns
@@ -484,10 +516,6 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 		if err != nil {
 			return err
 		}
-		version := current.Entity.Version
-		if entity.Version != "" {
-			version = entity.Version
-		}
 		// Same freeze as the idempotent re-acquire, and for the same reason.
 		// currentFor admits handing-off, so without this the outgoing owner
 		// defeats the freeze by recording PROGRESS instead of re-acquiring:
@@ -502,7 +530,7 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 			seen = current.LastSeenAt
 		}
 		updated, err := scanOne(tx.QueryRow(ctx, progressUpdateSQL,
-			now, seen, evidence, version,
+			now, seen, evidence, entity.Version,
 			entity.Kind, entity.ID, phase, epoch, current.State))
 		if errors.Is(err, ErrNotFound) {
 			return raceLostOn(ctx, tx, entity, phase, epoch, current.State, "progress")
@@ -563,10 +591,10 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 // handing-off row at the same epoch, because all three writers that could
 // reach it freeze it.
 //
-// The binds are the values that were READ (” and ” on an active row, which
-// is what acquireUpsertSQL and finishUpdateSQL write), not the ones being
-// written — this asks "is the row still the one I derived from", not "is it
-// already what I want".
+// The binds are the values that were READ (the empty pair on an active row,
+// which is what acquireUpsertSQL and finishUpdateSQL write), not the ones
+// being written — this asks "is the row still the one I derived from", not "is
+// it already what I want".
 const handoffStartUpdateSQL = `UPDATE lifecycle_ownership
 			   SET state = $1, handoff_to_type = $2, handoff_to_id = $3,
 			       handoff_started_at = $4, last_seen_at = $5, updated_at = $6
@@ -639,6 +667,31 @@ func (s *Store) HandoffStart(ctx context.Context, entity EntityRef, phase string
 			entity.Kind, entity.ID, phase, epoch, current.State,
 			wasTo.Type, wasTo.ID))
 		if errors.Is(err, ErrNotFound) {
+			// raceLostOn cannot see handoff_to, and a retarget moves neither
+			// the epoch nor the state — so it would fall through to the
+			// catch-all and answer ErrStaleRead, which MEANS retry. A retry of
+			// the stalled re-announcement reads the new target, takes the
+			// `to != current.HandoffTo` branch, and performs the revert as a
+			// fresh retarget: evented and with a new clock, so milder than the
+			// silent one, but still the outcome the predicate was added to
+			// prevent — now recommended by the sentinel.
+			//
+			// So name it here, the way handoffCompleteUpdateSQL's no-row path
+			// names its own. ErrNotOwner, not ErrStaleRead: the caller's
+			// decision was about a target that is no longer the row's, and
+			// re-issuing the same call is exactly what it must not do.
+			latest, rerr := scanOne(tx.QueryRow(ctx,
+				`SELECT `+ownershipColumns+` FROM lifecycle_ownership
+				 WHERE entity_kind = $1 AND entity_id = $2 AND phase = $3`,
+				entity.Kind, entity.ID, phase))
+			if rerr != nil {
+				return rerr
+			}
+			if latest.Epoch == epoch && latest.State == current.State &&
+				!sameHandoffTarget(latest.HandoffTo, current.HandoffTo) {
+				return fmt.Errorf("%w: the handoff was retargeted while this one "+
+					"was in flight", ErrNotOwner)
+			}
 			return raceLostOn(ctx, tx, entity, phase, epoch, current.State, "handoff start")
 		}
 		if err != nil {
@@ -1327,6 +1380,16 @@ func (s *Store) inTx(ctx context.Context, entity EntityRef, phase string, fn fun
 		return fmt.Errorf("lifecycle: commit: %w", err)
 	}
 	return nil
+}
+
+// sameHandoffTarget compares two optional handoff targets, treating "no
+// target" as a value rather than as an absence — an active row genuinely has
+// none, and that is what a first handoff derives from.
+func sameHandoffTarget(a, b *Owner) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // handoffAlreadyCompleted says whether the no-row path was lost to an
