@@ -24,8 +24,9 @@ import (
 )
 
 // newTestStore connects to a real Postgres instance, mirroring
-// internal/alerts/store_test.go's harness. Skips when TEST_DATABASE_URL is
-// unset — this repo has no Postgres service in CI.
+// internal/alerts/store_test.go's harness. The skip fires on a developer
+// laptop, not in CI: the `test` job in .github/workflows/validate.yml runs a
+// postgres:16 service and exports TEST_DATABASE_URL.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	connStr := os.Getenv("TEST_DATABASE_URL")
