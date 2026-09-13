@@ -160,24 +160,64 @@ func writeLifecycleError(w http.ResponseWriter, err error, current *lifecycle.Ow
 	}
 }
 
-func (h *Handlers) GetLifecycleOwnership(w http.ResponseWriter, r *http.Request) {
+// GetLifecycleOwnershipRecord handles GET /api/v1/lifecycle/ownership/record —
+// the ownership of ONE entity phase, returned as a bare record.
+//
+// Split off from the list read (#302 item 7). One path answered with a bare
+// object when `?id` was set and with an {"ownership":[...],"count":N} envelope
+// when it was not, which made the response SHAPE a function of a query
+// parameter: every client had to decide which of two types it was parsing
+// before it could read the answer, and a caller that forgot `?id` got a
+// well-formed envelope rather than an error. They are two different questions —
+// "who owns this entity" and "what does the store hold" — with different
+// arguments, so they are now two paths.
+//
+// Entity ids carry `/` and `#` (`mctlhq/mctl-web#99`), so the selector stays in
+// the query string rather than becoming path segments.
+func (h *Handlers) GetLifecycleOwnershipRecord(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
 		return
 	}
 	q := r.URL.Query()
 	kind, id, phase := q.Get("kind"), q.Get("id"), q.Get("phase")
+	if id == "" {
+		// Not a redirect to the list read: an absent `id` here means the
+		// caller built the request wrong, and answering it with every row of
+		// the store is how the old shared path hid that mistake.
+		writeError(w, http.StatusBadRequest, "id is required; list reads use GET /api/v1/lifecycle/ownership")
+		return
+	}
+	if kind == "" || phase == "" {
+		writeError(w, http.StatusBadRequest, "id requires kind and phase")
+		return
+	}
+	o, err := h.opts.Lifecycle.Get(r.Context(), lifecycle.EntityRef{Kind: kind, ID: id}, phase)
+	if err != nil {
+		writeLifecycleError(w, err, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, newOwnershipResponse(o))
+}
 
-	if id != "" {
-		if kind == "" || phase == "" {
-			writeError(w, http.StatusBadRequest, "id requires kind and phase")
-			return
-		}
-		o, err := h.opts.Lifecycle.Get(r.Context(), lifecycle.EntityRef{Kind: kind, ID: id}, phase)
-		if err != nil {
-			writeLifecycleError(w, err, nil)
-			return
-		}
-		writeJSON(w, http.StatusOK, newOwnershipResponse(o))
+// GetLifecycleOwnership handles GET /api/v1/lifecycle/ownership — what the
+// store holds, filtered. The single-record read moved to
+// GET /api/v1/lifecycle/ownership/record; `?id` here is deprecated and still
+// delegates for one release so a client in flight does not break mid-rollout.
+func (h *Handlers) GetLifecycleOwnership(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
+		return
+	}
+	q := r.URL.Query()
+	kind, phase := q.Get("kind"), q.Get("phase")
+
+	if q.Get("id") != "" {
+		// DEPRECATED. Logged rather than rejected, because rejecting here
+		// would break any caller deployed against the previous release; the
+		// 400 lands once the callers are known to be past it. The warning is
+		// how we find out whether any still exist.
+		slog.Warn("deprecated ?id on GET /api/v1/lifecycle/ownership; use /api/v1/lifecycle/ownership/record",
+			"kind", kind, "phase", phase)
+		h.GetLifecycleOwnershipRecord(w, r)
 		return
 	}
 

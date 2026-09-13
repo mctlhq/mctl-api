@@ -419,6 +419,9 @@ func TestLifecycleRoutesAreRegistered(t *testing.T) {
 		// Acquire refuses an active record regardless of liveness.
 		"POST /api/v1/lifecycle/ownership/recover",
 		"GET /api/v1/lifecycle/ownership",
+		// The single-record read, split off the list path so the response
+		// shape stops depending on whether `?id` was supplied (#302).
+		"GET /api/v1/lifecycle/ownership/record",
 		"GET /api/v1/lifecycle/ownership/batch",
 		"GET /api/v1/lifecycle/events",
 	} {
@@ -857,5 +860,87 @@ func TestLifecycleListBranchFiltersAndFormats(t *testing.T) {
 	}
 	if sawDevloop {
 		t.Fatalf("owner_type did not filter: %s", rec.Body)
+	}
+}
+
+// TestLifecycleRecordPathReturnsABareRecord pins the split from #302 item 7.
+//
+// The two reads answered from one path with two different types, so a client
+// had to know which arguments it had sent before it could parse the reply. The
+// record path answers with a bare record and nothing else; the list path
+// answers with an envelope and nothing else.
+func TestLifecycleRecordPathReturnsABareRecord(t *testing.T) {
+	store, prefix := newTestLifecycleStore(t)
+	h := &Handlers{opts: Options{Lifecycle: store}}
+
+	id := prefix + "-record"
+	if rec := lifecyclePost(t, h, h.AcquireLifecycleOwnership, map[string]any{
+		"kind": "pull-request", "id": id, "phase": "review-remediation",
+		"owner_type": "devloop-workflow", "owner_id": "wf-record",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("acquire: %d %s", rec.Code, rec.Body)
+	}
+
+	get := func(path string, fn http.HandlerFunc) *httptest.ResponseRecorder {
+		req := adminCtx(httptest.NewRequest("GET", path, nil))
+		rec := httptest.NewRecorder()
+		fn(rec, req)
+		return rec
+	}
+
+	q := "kind=pull-request&phase=review-remediation&id=" + neturl.QueryEscape(id)
+	rec := get("/api/v1/lifecycle/ownership/record?"+q, h.GetLifecycleOwnershipRecord)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("record read: %d %s", rec.Code, rec.Body)
+	}
+	var bare map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &bare); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// A bare record, not an envelope: the two keys the list shape is made of
+	// must be absent, or the split did not happen.
+	if _, wrapped := bare["ownership"]; wrapped {
+		t.Fatalf("the record path returned the list envelope: %s", rec.Body)
+	}
+	if _, counted := bare["count"]; counted {
+		t.Fatalf("the record path returned a count: %s", rec.Body)
+	}
+	entity, _ := bare["entity"].(map[string]any)
+	if got, _ := entity["id"].(string); got != id {
+		t.Fatalf("record is for the wrong entity: %q want %q", got, id)
+	}
+
+	// `?id` on the list path still answers, identically, for one release: a
+	// client deployed against the previous version must not break mid-rollout.
+	// This assertion is deleted together with the delegation.
+	deprecated := get("/api/v1/lifecycle/ownership?"+q, h.GetLifecycleOwnership)
+	if deprecated.Code != http.StatusOK {
+		t.Fatalf("deprecated ?id read: %d %s", deprecated.Code, deprecated.Body)
+	}
+	if deprecated.Body.String() != rec.Body.String() {
+		t.Fatalf("the deprecated path answers differently:\n new: %s\n old: %s", rec.Body, deprecated.Body)
+	}
+}
+
+// TestLifecycleRecordPathRejectsIncompleteSelectors keeps the record path from
+// degrading into the list read. An `id` with no kind or phase does not identify
+// an entity phase, and an absent `id` is a malformed request rather than a
+// request for everything — which is exactly what the shared path used to
+// silently answer it with.
+func TestLifecycleRecordPathRejectsIncompleteSelectors(t *testing.T) {
+	h := &Handlers{opts: Options{Lifecycle: &lifecycle.Store{}}}
+	for _, tc := range []struct{ name, query string }{
+		{"no id at all", "kind=pull-request&phase=review-remediation"},
+		{"id without kind", "phase=review-remediation&id=x%231"},
+		{"id without phase", "kind=pull-request&id=x%231"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := adminCtx(httptest.NewRequest("GET", "/api/v1/lifecycle/ownership/record?"+tc.query, nil))
+			rec := httptest.NewRecorder()
+			h.GetLifecycleOwnershipRecord(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("got %d %s, want 400", rec.Code, rec.Body)
+			}
+		})
 	}
 }
