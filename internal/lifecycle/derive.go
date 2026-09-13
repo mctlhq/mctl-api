@@ -42,12 +42,35 @@ const (
 // (130 m for a proposal, 10 h for a pull request) otherwise has to know the
 // bounds table by heart to read either one.
 type Derived struct {
-	Status               string `json:"status"`
-	HandoffStalled       bool   `json:"handoff_stalled"`
-	SecondsSinceSeen     int64  `json:"seconds_since_seen"`
-	SecondsSinceProgress int64  `json:"seconds_since_progress"`
-	LivenessBoundSeconds int64  `json:"liveness_bound_seconds"`
-	ProgressBoundSeconds int64  `json:"progress_bound_seconds"`
+	Status string `json:"status"`
+
+	// Dead is the takeover predicate, carried SEPARATELY from Status because
+	// Status cannot answer it.
+	//
+	// Status reports the most specific thing true of a record, and
+	// handoff-stalled is more specific than dead — but a handing-off row past
+	// its liveness bound is BOTH, and it is the `dead` half that decides
+	// whether anybody may take it (ADR-010 §4; IsDead covers handing-off rows
+	// too). A consumer reading only Status would have to re-derive this, and
+	// the first consumer that did got it wrong in the opposite direction.
+	Dead bool `json:"dead"`
+
+	// Held is whether this record withholds the entity from other actors.
+	// The inverse of "somebody may take this", and the input to Classify.
+	Held bool `json:"held"`
+
+	HandoffStalled bool `json:"handoff_stalled"`
+
+	SecondsSinceSeen     int64 `json:"seconds_since_seen"`
+	SecondsSinceProgress int64 `json:"seconds_since_progress"`
+
+	// BoundsKnown is false when the (kind, phase) pair has no entry in the
+	// bounds table. Without it a missing bound and a zero bound serialise
+	// identically, and "we do not know the window" would read as "the window
+	// is zero", i.e. everything is instantly dead.
+	BoundsKnown          bool  `json:"bounds_known"`
+	LivenessBoundSeconds int64 `json:"liveness_bound_seconds"`
+	ProgressBoundSeconds int64 `json:"progress_bound_seconds"`
 }
 
 // Derive computes the read-side view of one record.
@@ -71,16 +94,27 @@ func Derive(o *Ownership, now time.Time) Derived {
 		return Derived{Status: StatusUnknown}
 	}
 
-	liveness, _ := LivenessBound(o.Entity.Kind, o.Phase)
+	liveness, known := LivenessBound(o.Entity.Kind, o.Phase)
 	progress, _ := ProgressBound(o.Entity.Kind, o.Phase)
 
 	d := Derived{
+		Dead:                 o.IsDead(now),
 		HandoffStalled:       o.HandoffStalled(now),
 		SecondsSinceSeen:     int64(now.Sub(o.LastSeenAt).Seconds()),
 		SecondsSinceProgress: int64(now.Sub(o.LastProgressAt).Seconds()),
+		BoundsKnown:          known,
 		LivenessBoundSeconds: int64(liveness.Seconds()),
 		ProgressBoundSeconds: int64(progress.Seconds()),
 	}
+	// Held is computed from the TAKEOVER predicate, never from Status.
+	//
+	// Status ranks handoff-stalled and handing-off above dead, because they are
+	// the more specific description. But a handing-off row past its liveness
+	// bound is dead, and Store.Recover will grant a takeover of it — so reading
+	// "held" off the status string reports the entity as withheld when the
+	// store would in fact hand it to somebody else. That is the reading that
+	// turns the one dangerous divergence class into `agree`.
+	d.Held = (o.State == StateActive || o.State == StateHandingOff) && !d.Dead
 
 	switch {
 	case o.State == StateTerminal:

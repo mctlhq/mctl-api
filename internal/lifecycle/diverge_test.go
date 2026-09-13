@@ -34,19 +34,36 @@ func TestClassifyTable(t *testing.T) {
 		o := rec(state, seenAgo, time.Minute, now)
 		return o
 	}
+	stuckDevloop := func() *Ownership {
+		// Seen recently, but nothing effected inside the 48 h progress bound.
+		o := rec(StateActive, time.Minute, 60*time.Hour, now)
+		return o
+	}
 	steward := func(state string, seenAgo time.Duration) *Ownership {
 		o := rec(state, seenAgo, time.Minute, now)
 		o.Owner = Owner{Type: OwnerPRSteward, ID: "pr-steward:mctlhq/mctl-web"}
 		return o
 	}
+	// last_seen_at is FROZEN on a handing-off row: handoffStartUpdateSQL pins
+	// it, and the store's own comment states that nothing can move it forward
+	// at the same epoch because all three writers that could reach it freeze
+	// it. So LastSeenAt newer than HandoffStartedAt is a clock ordering the
+	// store never produces, and a fixture built that way pins an expectation
+	// for a row that cannot exist.
 	handingOff := func() *Ownership {
-		o := devloop(StateHandingOff, time.Minute)
 		started := now.Add(-time.Minute)
+		o := devloop(StateHandingOff, time.Minute)
+		o.LastSeenAt = started
 		o.HandoffStartedAt = &started
 		return o
 	}
+	// Stalled AND, necessarily, dead: the freeze means a handoff that has been
+	// open past the liveness bound has a last_seen_at at least that old.
+	// Store.Recover grants a takeover of it, so it withholds the entity from
+	// nobody — which is why it must not classify as agreement.
 	handoffStalled := func() *Ownership {
 		o := devloop(StateHandingOff, time.Minute)
+		o.LastSeenAt = stalled
 		o.HandoffStartedAt = &stalled
 		return o
 	}
@@ -64,8 +81,24 @@ func TestClassifyTable(t *testing.T) {
 		{"devloop healthy / legacy free", devloop(StateActive, time.Minute), true, LegacyFree, DivergeStoreForbids, false},
 		{"devloop handing off / legacy owned", handingOff(), true, LegacyOwned, DivergeAgree, false},
 		{"devloop handing off / legacy free", handingOff(), true, LegacyFree, DivergeStoreForbids, false},
-		{"devloop handoff stalled / legacy owned", handoffStalled(), true, LegacyOwned, DivergeAgree, false},
-		{"devloop handoff stalled / legacy free", handoffStalled(), true, LegacyFree, DivergeStoreForbids, false},
+		{
+			// The P1 case. Status says handoff-stalled, which ranks above
+			// dead, but the row IS dead and Recover would hand the entity to
+			// somebody else — so against a live DevLoopWorkflow this is the
+			// dangerous class, not agreement.
+			"devloop handoff stalled (therefore dead) / legacy owned",
+			handoffStalled(), true, LegacyOwned, DivergeStorePermits, true,
+		},
+		{"devloop handoff stalled (therefore dead) / legacy free", handoffStalled(), true, LegacyFree, DivergeAgree, false},
+
+		{
+			// `stuck` is one of the held statuses and had no row. A stuck
+			// owner is alive and holds the entity legitimately: ADR-010 §4
+			// escalates it to a human rather than replacing it.
+			"devloop stuck / legacy owned",
+			stuckDevloop(), true, LegacyOwned, DivergeAgree, false,
+		},
+		{"devloop stuck / legacy free", stuckDevloop(), true, LegacyFree, DivergeStoreForbids, false},
 
 		// -- store holds a live owner of a DIFFERENT type ---------------------
 		{"steward healthy / legacy owned", steward(StateActive, time.Minute), true, LegacyOwned, DivergeOwnerMismatch, false},
@@ -107,12 +140,29 @@ func TestClassifyTable(t *testing.T) {
 // this flag starts firing on a case nobody triaged as stop-the-rollout.
 func TestOnlyOneClassIsDangerous(t *testing.T) {
 	now := time.Now()
+	stalled := now.Add(-20 * time.Hour)
+	fresh := now.Add(-time.Minute)
+	handingOff := rec(StateHandingOff, time.Minute, time.Minute, now)
+	handingOff.LastSeenAt = fresh
+	handingOff.HandoffStartedAt = &fresh
+	handoffStalled := rec(StateHandingOff, time.Minute, time.Minute, now)
+	handoffStalled.LastSeenAt = stalled
+	handoffStalled.HandoffStartedAt = &stalled
+	steward := rec(StateActive, time.Minute, time.Minute, now)
+	steward.Owner = Owner{Type: OwnerPRSteward, ID: "pr-steward:mctlhq/mctl-web"}
+
 	dangerous := map[string]bool{}
 	for _, legacy := range []LegacyAnswer{LegacyOwned, LegacyFree, LegacyUnknown} {
 		for _, o := range []*Ownership{
 			nil,
 			rec(StateActive, time.Minute, time.Minute, now),
+			// stuck: alive, nothing effected inside the progress bound.
+			rec(StateActive, time.Minute, 60*time.Hour, now),
+			// dead.
 			rec(StateActive, 20*time.Hour, time.Minute, now),
+			handingOff,
+			handoffStalled,
+			steward,
 			rec(StateReleased, time.Minute, time.Minute, now),
 			rec(StateTerminal, time.Minute, time.Minute, now),
 		} {

@@ -103,12 +103,15 @@ func Classify(o *Ownership, storeReadable bool, legacy LegacyAnswer, now time.Ti
 	d := Derive(o, now)
 	// "Held" is the question that matters, and it is narrower than "a row
 	// exists": a released, terminal or dead owner does not withhold the entity
-	// from anybody. `dead` is deliberately on this side of the line — ADR-010
-	// §4 makes it the ONE condition that licenses takeover.
-	held := o != nil && (d.Status == StatusHealthy ||
-		d.Status == StatusStuck ||
-		d.Status == StatusHandingOff ||
-		d.Status == StatusHandoffStalled)
+	// from anybody. `dead` is deliberately on the not-held side — ADR-010 §4
+	// makes it the ONE condition that licenses takeover.
+	//
+	// Derive computes it from the takeover predicate rather than from the
+	// status string, and the difference is not cosmetic: a handing-off row
+	// past its liveness bound reports as `handoff-stalled` (the more specific
+	// status) while being dead and recoverable, so classifying off the status
+	// reported it as withheld and turned the one dangerous class into `agree`.
+	held := d.Held
 
 	switch {
 	case held && legacy == LegacyOwned:

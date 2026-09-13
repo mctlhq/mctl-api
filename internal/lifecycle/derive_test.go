@@ -133,3 +133,52 @@ func TestDeriveOnAnUnknownPhaseDoesNotClaimDeath(t *testing.T) {
 		t.Fatalf("an unknown phase reported a bound: %+v", d)
 	}
 }
+
+// TestDeriveHeldIsTheTakeoverPredicateNotTheStatus pins the distinction a
+// consumer got wrong: Status reports the most SPECIFIC thing true of a record,
+// and that is not the same question as "may somebody else take this".
+//
+// A handing-off row past its liveness bound reports `handoff-stalled`, because
+// that is more specific than `dead` and more useful to an operator. It is also
+// dead, and Store.Recover will grant a takeover of it. Reading "held" off the
+// status string therefore reports the entity as withheld while the store is
+// prepared to hand it to somebody else.
+func TestDeriveHeldIsTheTakeoverPredicateNotTheStatus(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	stalledAt := now.Add(-20 * time.Hour)
+
+	o := rec(StateHandingOff, time.Minute, time.Minute, now)
+	// last_seen_at is FROZEN on a handing-off row — handoffStartUpdateSQL pins
+	// it and every writer that could reach the row freezes it — so a handoff
+	// open past the bound necessarily has a last_seen_at at least that old.
+	// A fixture with a fresher last_seen_at describes a row the store cannot
+	// produce.
+	o.LastSeenAt = stalledAt
+	o.HandoffStartedAt = &stalledAt
+
+	d := Derive(o, now)
+	if d.Status != StatusHandoffStalled {
+		t.Fatalf("Status = %q, want %q", d.Status, StatusHandoffStalled)
+	}
+	if !d.Dead {
+		t.Fatal("a handoff open past the liveness bound is not reported dead")
+	}
+	if d.Held {
+		t.Fatal("a dead handing-off row is reported as withholding the entity, " +
+			"while Recover would grant a takeover of it")
+	}
+}
+
+func TestDeriveDistinguishesAMissingBoundFromAZeroBound(t *testing.T) {
+	now := time.Now()
+	known := Derive(rec(StateActive, time.Minute, time.Minute, now), now)
+	if !known.BoundsKnown {
+		t.Fatal("a known phase reports BoundsKnown false")
+	}
+	o := rec(StateActive, time.Minute, time.Minute, now)
+	o.Phase = "no-such-phase"
+	if unknown := Derive(o, now); unknown.BoundsKnown {
+		t.Fatal("an unknown phase reports its zero bounds as known, so " +
+			"\"we do not know the window\" reads as \"the window is zero\"")
+	}
+}
