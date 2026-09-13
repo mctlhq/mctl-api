@@ -23,7 +23,7 @@ import "testing"
 // be enumerated as present while never being exercised through validation.
 var wantServices = []string{
 	"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal",
-	"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio",
+	"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github",
 }
 
 // TestImplementAndShepherdServiceEnumCoversMctlAgentsServices guards against
