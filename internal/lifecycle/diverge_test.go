@@ -39,6 +39,11 @@ func TestClassifyTable(t *testing.T) {
 		o := rec(StateActive, time.Minute, 60*time.Hour, now)
 		return o
 	}
+	stuckSteward := func() *Ownership {
+		o := rec(StateActive, time.Minute, 60*time.Hour, now)
+		o.Owner = Owner{Type: OwnerPRSteward, ID: "pr-steward:mctlhq/mctl-web"}
+		return o
+	}
 	steward := func(state string, seenAgo time.Duration) *Ownership {
 		o := rec(state, seenAgo, time.Minute, now)
 		o.Owner = Owner{Type: OwnerPRSteward, ID: "pr-steward:mctlhq/mctl-web"}
@@ -99,6 +104,15 @@ func TestClassifyTable(t *testing.T) {
 			stuckDevloop(), true, LegacyOwned, DivergeAgree, false,
 		},
 		{"devloop stuck / legacy free", stuckDevloop(), true, LegacyFree, DivergeStoreForbids, false},
+		{
+			// Stuck AND a non-DevLoop owner: the two held-but-not-healthy
+			// dimensions crossed. Both stand down and disagree about who
+			// holds it, exactly as for a healthy steward row — stuck changes
+			// the remedy (escalate, not replace), never the holder.
+			"steward stuck / legacy owned",
+			stuckSteward(), true, LegacyOwned, DivergeOwnerMismatch, false,
+		},
+		{"steward stuck / legacy free", stuckSteward(), true, LegacyFree, DivergeStoreForbids, false},
 
 		// -- store holds a live owner of a DIFFERENT type ---------------------
 		{"steward healthy / legacy owned", steward(StateActive, time.Minute), true, LegacyOwned, DivergeOwnerMismatch, false},
@@ -150,6 +164,8 @@ func TestOnlyOneClassIsDangerous(t *testing.T) {
 	handoffStalled.HandoffStartedAt = &stalled
 	steward := rec(StateActive, time.Minute, time.Minute, now)
 	steward.Owner = Owner{Type: OwnerPRSteward, ID: "pr-steward:mctlhq/mctl-web"}
+	stuckSteward := rec(StateActive, time.Minute, 60*time.Hour, now)
+	stuckSteward.Owner = Owner{Type: OwnerPRSteward, ID: "pr-steward:mctlhq/mctl-web"}
 
 	dangerous := map[string]bool{}
 	for _, legacy := range []LegacyAnswer{LegacyOwned, LegacyFree, LegacyUnknown} {
@@ -163,6 +179,7 @@ func TestOnlyOneClassIsDangerous(t *testing.T) {
 			handingOff,
 			handoffStalled,
 			steward,
+			stuckSteward,
 			rec(StateReleased, time.Minute, time.Minute, now),
 			rec(StateTerminal, time.Minute, time.Minute, now),
 		} {
