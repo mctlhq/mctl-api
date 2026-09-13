@@ -381,6 +381,10 @@ func NewRouter(opts Options) http.Handler {
 			// write budget shared with /operations/{name}/execute would
 			// starve real writes.
 			r.Get("/lifecycle/ownership", h.GetLifecycleOwnership)
+			// One entity phase, as a bare record. Separate path, not a
+			// query parameter on the line above: the shape of the answer
+			// must not depend on whether an argument was supplied (#302).
+			r.Get("/lifecycle/ownership/record", h.GetLifecycleOwnershipRecord)
 			r.Get("/lifecycle/ownership/batch", h.BatchGetLifecycleOwnership)
 			r.Get("/lifecycle/events", h.ListLifecycleEvents)
 
