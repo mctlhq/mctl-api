@@ -214,9 +214,17 @@ func (h *Handlers) GetLifecycleOwnership(w http.ResponseWriter, r *http.Request)
 		// DEPRECATED. Logged rather than rejected, because rejecting here
 		// would break any caller deployed against the previous release; the
 		// 400 lands once the callers are known to be past it. The warning is
-		// how we find out whether any still exist.
+		// how we find out whether any still exist — so it carries the `id`
+		// too: the point is to identify WHICH caller and entity still take
+		// this path, and a warning naming only the kind and phase confirms
+		// that somebody did without saying who.
 		slog.Warn("deprecated ?id on GET /api/v1/lifecycle/ownership; use /api/v1/lifecycle/ownership/record",
-			"kind", kind, "phase", phase)
+			"kind", kind, "phase", phase, "id", q.Get("id"))
+		// The delegate re-runs requireLifecycleAdmin for the same request.
+		// Deliberate: it is a pure read of the request context with no side
+		// effects, and splitting an unexported no-auth variant out to save it
+		// would put a handler in this file that answers without checking —
+		// one careless route registration away from being reachable.
 		h.GetLifecycleOwnershipRecord(w, r)
 		return
 	}
