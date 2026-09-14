@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.48.0](https://github.com/mctlhq/mctl-api/compare/4.47.0...4.48.0) (2026-09-14)
+
+
+### Features
+
+* **lifecycle:** reject the deprecated ?id on the list path ([825c250](https://github.com/mctlhq/mctl-api/commit/825c250a64b24631cca6193f88b83c1749d15ae4))
+
+
+### Bug Fixes
+
+* **lifecycle:** reject an id that was supplied, whatever its value ([6332456](https://github.com/mctlhq/mctl-api/commit/63324568b23ee61a457990e3fdc5140336b4b28c))
+* **lifecycle:** update the third test the rejection breaks ([114a250](https://github.com/mctlhq/mctl-api/commit/114a250bd7335d11f26e4efa8b42c0d09c467caa))
+
 ## [4.47.0](https://github.com/mctlhq/mctl-api/compare/4.46.0...4.47.0) (2026-09-14)
 
 
