@@ -639,8 +639,19 @@ func TestLifecycleTool_AnUndeterminedStatusIsUnknown(t *testing.T) {
 		env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
 			"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
 		}))
-		if got := env.Records[0].Legacy.Answer; got != legacyAnswerUnknown {
-			t.Errorf("%s answered %q, want %q", describe, got, legacyAnswerUnknown)
+		got := env.Records[0]
+		if got.Legacy.Answer != legacyAnswerUnknown {
+			t.Errorf("%s answered %q, want %q", describe, got.Legacy.Answer, legacyAnswerUnknown)
+		}
+		// `available` and the class matter as much as the answer: available
+		// would say the question was put and got an answer, and the class is
+		// what the soak counts.
+		if got.Legacy.Available {
+			t.Errorf("%s reported available=true", describe)
+		}
+		if got.Divergence.Class != lifecycle.DivergeLegacyUnknown {
+			t.Errorf("%s classified %q, want %q", describe, got.Divergence.Class,
+				lifecycle.DivergeLegacyUnknown)
 		}
 	}
 }
@@ -670,10 +681,10 @@ func TestLifecycleTool_ListModeCapsTheEventsRead(t *testing.T) {
 	}
 }
 
-// A row with a stored workflow id needs no proposal ref: temporal_workflow_id
-// is a column. Rows answered legacy-unknown are rows the comparison did not
-// cover, and this tool exists to measure a rate.
-func TestLifecycleTool_PrefersTheStoredWorkflowID(t *testing.T) {
+// A row with no proposal ref but a DevLoop-shaped stored id can still be
+// probed. Rows answered legacy-unknown are rows the comparison did not cover,
+// and this tool exists to measure a rate.
+func TestLifecycleTool_FallsBackToTheStoredWorkflowID(t *testing.T) {
 	rec := `{
 		"entity":{"kind":"pull-request","id":"mctlhq/mctl-web#42"},
 		"phase":"review-remediation",
@@ -703,4 +714,81 @@ func TestLifecycleTool_PrefersTheStoredWorkflowID(t *testing.T) {
 	if env.Records[0].Legacy.Answer != legacyAnswerOwned {
 		t.Errorf("legacy answer: got %q", env.Records[0].Legacy.Answer)
 	}
+}
+
+// temporal_workflow_id records the OWNER's workflow, whatever that owner is —
+// a pr-steward or shepherd row carries its own, and DescribeDevLoop does not
+// check the type. Two consequences, both tested here.
+func TestLifecycleTool_DoesNotProbeANonDevLoopWorkflowID(t *testing.T) {
+	t.Run("a non-DevLoop stored id is not a legacy answer", func(t *testing.T) {
+		rec := `{
+			"entity":{"kind":"pull-request","id":"mctlhq/mctl-web#42"},
+			"phase":"review-remediation",
+			"owner":{"type":"pr-steward","id":"pr-steward:mctlhq/mctl-web"},
+			"state":"active","temporal_workflow_id":"wf-steward",
+			"dead":false,"stuck":false,"healthy":true,
+			"derived":{"status":"healthy","dead":false,"held":true}
+		}`
+		probed := false
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/api/v1/lifecycle/ownership/record" {
+				_, _ = w.Write([]byte(rec))
+				return
+			}
+			probed = true
+			// A finished steward workflow. Probed, it would read "free".
+			_, _ = w.Write([]byte(`{"status":"Completed"}`))
+		}))
+		defer backend.Close()
+
+		env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+			"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
+		}))
+		if probed {
+			t.Error("described a workflow that is not a DevLoop; the legacy question is about a DevLoop")
+		}
+		if got := env.Records[0].Legacy.Answer; got != legacyAnswerUnknown {
+			t.Errorf("legacy answer: got %q, want %q", got, legacyAnswerUnknown)
+		}
+	})
+
+	t.Run("proposal_ref wins over a stored id", func(t *testing.T) {
+		// The row that made the ordering load-bearing: a steward owner with
+		// its own workflow id AND a proposal ref naming the real DevLoop.
+		// Probing the stored id first reported `agree` where the truth is the
+		// dangerous class.
+		rec := `{
+			"entity":{"kind":"pull-request","id":"mctlhq/mctl-web#42"},
+			"phase":"review-remediation",
+			"owner":{"type":"pr-steward","id":"pr-steward:mctlhq/mctl-web"},
+			"state":"released","proposal_ref":"mctl-web/issue-7-a-thing",
+			"temporal_workflow_id":"wf-steward",
+			"dead":false,"stuck":false,"healthy":false,
+			"derived":{"status":"released","dead":false,"held":false}
+		}`
+		var describedPath string
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/api/v1/lifecycle/ownership/record" {
+				_, _ = w.Write([]byte(rec))
+				return
+			}
+			describedPath = r.URL.Path
+			_, _ = w.Write([]byte(`{"status":"Running","shepherd_in_loop":true,"shepherd_in_loop_known":true}`))
+		}))
+		defer backend.Close()
+
+		env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+			"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
+		}))
+		if !strings.HasSuffix(describedPath, "dev-loop-mctlhq-mctl-web-7") {
+			t.Errorf("described %q; proposal_ref must win over the stored owner workflow", describedPath)
+		}
+		d := env.Records[0].Divergence
+		if d.Class != lifecycle.DivergeStorePermits || !d.Dangerous {
+			t.Errorf("class %q (dangerous=%t); probing the stored id would report agree here",
+				d.Class, d.Dangerous)
+		}
+	})
 }

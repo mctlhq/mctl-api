@@ -638,6 +638,14 @@ func TestGetDevLoopWorkflow_KnownSeparatesAnAnswerFromAFallback(t *testing.T) {
 			fake:       &fakeDevLoopClient{describeStatus: "Completed"},
 			wantInLoop: false, wantKnown: true,
 		},
+		{
+			// DescribeDevLoop's own default arm: it could not determine the
+			// status. Nothing was determined, so nothing is known -- the false
+			// here is not derived from anything.
+			name:       "an undetermined execution status knows nothing",
+			fake:       &fakeDevLoopClient{describeStatus: "Unknown"},
+			wantInLoop: false, wantKnown: false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := &Handlers{opts: Options{TemporalClient: tc.fake}}

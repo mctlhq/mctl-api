@@ -213,9 +213,13 @@ Admin-only. include_legacy defaults to true and costs one dev-loop describe call
 			// it is still returned, with its legacy block saying why it is
 			// empty. Dropping records instead would make a list read's length
 			// depend on an option that is supposed to add detail to it.
-			probeLegacy := includeLegacy && i < lifecycleLegacyFanoutCap
-			probeEvents := includeEvents && i < lifecycleEventsFanoutCap
-			if (includeLegacy && !probeLegacy) || (includeEvents && !probeEvents) {
+			probes := lifecycleProbes{
+				WantLegacy: includeLegacy,
+				WantEvents: includeEvents,
+				RunLegacy:  includeLegacy && i < lifecycleLegacyFanoutCap,
+				RunEvents:  includeEvents && i < lifecycleEventsFanoutCap,
+			}
+			if (probes.WantLegacy && !probes.RunLegacy) || (probes.WantEvents && !probes.RunEvents) {
 				// A SEPARATE flag from `truncated`, which means "the store may
 				// hold more rows than these". A paginating consumer reading
 				// one bit for both questions would request a next page that
@@ -223,8 +227,7 @@ Admin-only. include_legacy defaults to true and costs one dev-loop describe call
 				// pagination.
 				fanoutCapped = true
 			}
-			out = append(out, s.lifecycleRecordFor(
-				ctx, &records[i], probeLegacy, includeLegacy, probeEvents, includeEvents))
+			out = append(out, s.lifecycleRecordFor(ctx, &records[i], probes))
 		}
 
 		envelope := map[string]any{
@@ -346,9 +349,20 @@ func effectiveListLimit(req mcplib.CallToolRequest) int {
 }
 
 // lifecycleRecordFor assembles one envelope entry.
+// lifecycleProbes says, per record, what was asked for and what this call is
+// still allowed to do about it. Four adjacent bools in two interleaved pairs
+// at a call site is an argument order nobody can read back.
+type lifecycleProbes struct {
+	// WantLegacy/WantEvents: the caller asked for it.
+	WantLegacy bool
+	WantEvents bool
+	// RunLegacy/RunEvents: this record is still inside the fan-out cap.
+	RunLegacy bool
+	RunEvents bool
+}
+
 func (s *Server) lifecycleRecordFor(
-	ctx context.Context, rec *apiOwnershipRecord,
-	probeLegacy, includeLegacy, probeEvents, includeEvents bool,
+	ctx context.Context, rec *apiOwnershipRecord, probes lifecycleProbes,
 ) lifecycleRecord {
 	owned := rec.Ownership
 	// The derived view comes from the server so there is ONE derivation, but
@@ -374,9 +388,9 @@ func (s *Server) lifecycleRecordFor(
 	}
 
 	switch {
-	case !includeLegacy:
+	case !probes.WantLegacy:
 		out.Legacy = lifecycleLegacy{Answer: legacyAnswerUnknown, Reason: "include_legacy=false"}
-	case !probeLegacy:
+	case !probes.RunLegacy:
 		out.Legacy = lifecycleLegacy{
 			Answer: legacyAnswerUnknown,
 			Reason: fmt.Sprintf("legacy probe capped at %d records per call", lifecycleLegacyFanoutCap),
@@ -391,9 +405,9 @@ func (s *Server) lifecycleRecordFor(
 	out.Divergence = lifecycle.ClassifyDerived(&owned, derived, true, legacyAnswerToEnum(out.Legacy.Answer))
 
 	switch {
-	case includeEvents && probeEvents:
+	case probes.WantEvents && probes.RunEvents:
 		out.Events = s.lifecycleEventsFor(ctx, owned)
-	case includeEvents:
+	case probes.WantEvents:
 		out.Events.Reason = fmt.Sprintf(
 			"events read capped at %d records per call", lifecycleEventsFanoutCap)
 	}
@@ -406,23 +420,49 @@ func (s *Server) lifecycleRecordFor(
 // whole point: every path that means "we could not tell" answers UNKNOWN here,
 // where the shepherd's bool answers False and thereby says "nobody owns this".
 func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) lifecycleLegacy {
-	// The STORED id first. temporal_workflow_id is a column, written on acquire
-	// and refreshed on re-acquire, so a row that carries one can be probed
-	// without reconstructing anything -- including a row with no proposal_ref,
-	// which would otherwise answer unknown and simply not be covered by the
-	// comparison this tool exists to measure.
+	// proposal_ref FIRST, and the order is load-bearing.
+	//
+	// temporal_workflow_id records the OWNER's workflow, whatever that owner
+	// is: a pr-steward or shepherd row carries its own, and DescribeDevLoop
+	// does not check the type. Probing it answers about the wrong execution —
+	// a finished steward workflow reads "free" — and, checked first, it
+	// preempts the reconstruction that names the DevLoop the legacy question
+	// is actually about, turning a dangerous divergence into `agree`.
+	//
+	// The stored id is a FALLBACK for a row with no proposal ref, and only
+	// when it is shaped like a DevLoop id. That prefix is the only thing on
+	// the record that says which kind of workflow it names.
+	if ref := strings.TrimSpace(o.ProposalRef); ref != "" {
+		workflowID, err := temporalclient.WorkflowIDForProposalRef(ref)
+		return s.lifecycleLegacyFromDerivation(ctx, ref, workflowID, err)
+	}
 	if stored := strings.TrimSpace(o.TemporalWorkflowID); stored != "" {
+		if !strings.HasPrefix(stored, devLoopWorkflowIDPrefix) {
+			return lifecycleLegacy{
+				Answer:     legacyAnswerUnknown,
+				WorkflowID: stored,
+				Reason: fmt.Sprintf(
+					"temporal_workflow_id %q is not a DevLoopWorkflow id; the legacy question is about a DevLoop",
+					stored),
+			}
+		}
 		return s.lifecycleDescribeLegacy(ctx, stored)
 	}
-	if strings.TrimSpace(o.ProposalRef) == "" {
-		// Not "no DevLoop": no way to ask. Neither a stored workflow id nor a
-		// proposal ref to derive one from.
-		return lifecycleLegacy{
-			Answer: legacyAnswerUnknown,
-			Reason: "record carries neither temporal_workflow_id nor proposal_ref",
-		}
+	// Not "no DevLoop": no way to ask. Neither a proposal ref to derive an id
+	// from nor a stored one to fall back on.
+	return lifecycleLegacy{
+		Answer: legacyAnswerUnknown,
+		Reason: "record carries neither proposal_ref nor temporal_workflow_id",
 	}
-	workflowID, err := temporalclient.WorkflowIDForProposalRef(o.ProposalRef)
+}
+
+// devLoopWorkflowIDPrefix is what WorkflowIDForProposalRef builds. The only
+// thing on a stored id that says which kind of workflow it names.
+const devLoopWorkflowIDPrefix = "dev-loop-"
+
+func (s *Server) lifecycleLegacyFromDerivation(
+	ctx context.Context, proposalRef, workflowID string, err error,
+) lifecycleLegacy {
 	switch {
 	case errors.Is(err, temporalclient.ErrNoDevLoopForProposalRef):
 		// A slug with no issue-<N>- prefix (incident-*, anything pre-Temporal)
@@ -430,7 +470,7 @@ func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) 
 		return lifecycleLegacy{
 			Available: true,
 			Answer:    legacyAnswerFree,
-			Reason:    fmt.Sprintf("proposal_ref %q names no DevLoopWorkflow", o.ProposalRef),
+			Reason:    fmt.Sprintf("proposal_ref %q names no DevLoopWorkflow", proposalRef),
 		}
 	case err != nil:
 		// A ref this code could not read. NOT "no DevLoop": the question was

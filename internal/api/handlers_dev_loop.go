@@ -277,7 +277,14 @@ func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 	// would make a consumer that follows this field report UNKNOWN for every
 	// finished DevLoopWorkflow, which is the same absent/negative collapse
 	// this field exists to remove.
-	shepherdInLoopKnown := true
+	//
+	// `status != "Unknown"` rather than an unconditional true: DescribeDevLoop
+	// returns "Unknown" from its own default arm for an execution status it
+	// could not determine, so a read that determined nothing would otherwise
+	// answer known=true about a false it derived from nothing. The old
+	// `status == "Running"` covered that case by accident; this covers it on
+	// purpose.
+	shepherdInLoopKnown := status != "Unknown"
 	if status == "Running" {
 		qctx, cancel := context.WithTimeout(r.Context(), shepherdQueryTimeout)
 		inLoop, qerr := h.opts.TemporalClient.QueryShepherdInLoop(qctx, workflowID)
