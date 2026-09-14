@@ -108,6 +108,25 @@ func ClassifyDerived(o *Ownership, d Derived, storeReadable bool, legacy LegacyA
 	if !storeReadable {
 		return Divergence{Class: DivergeStoreUnknown}
 	}
+	if o == nil {
+		// Classify reaches the same place via Derive(nil), whose Held is
+		// false. Stated explicitly here because this entry point takes `o` and
+		// `d` INDEPENDENTLY: `d` arrives from JSON off the wire rather than
+		// from Derive, so nothing enforces that the two describe the same
+		// record, and a Derived{Held: true} beside a nil record would reach
+		// o.Owner below. A nil record holds nothing, whatever `d` claims.
+		if legacy == LegacyOwned {
+			return Divergence{
+				Class:     DivergeStorePermits,
+				Dangerous: true,
+				Detail:    "store holds no record while a DevLoopWorkflow is driving the entity",
+			}
+		}
+		if legacy == LegacyUnknown {
+			return Divergence{Class: DivergeLegacyUnknown}
+		}
+		return Divergence{Class: DivergeAgree}
+	}
 	if legacy == LegacyUnknown {
 		return Divergence{Class: DivergeLegacyUnknown}
 	}

@@ -20,8 +20,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 
@@ -41,7 +43,7 @@ type lifecycleEnvelope struct {
 		Derived    lifecycle.Derived    `json:"derived"`
 		Legacy     lifecycleLegacy      `json:"legacy"`
 		Divergence lifecycle.Divergence `json:"divergence"`
-		Events     []json.RawMessage    `json:"events"`
+		Events     lifecycleEvents      `json:"events"`
 	} `json:"records"`
 }
 
@@ -335,15 +337,19 @@ func TestLifecycleTool_EventsAreAlwaysAnArray(t *testing.T) {
 	off := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
 		"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
 	}))
-	if off.Records[0].Events == nil {
-		t.Error("events is null with include_events off; it must be an empty array")
+	if off.Records[0].Events.Items == nil {
+		t.Error("events.items is null with include_events off; it must be an empty array")
+	}
+	if off.Records[0].Events.Available {
+		t.Error("events.available is true without include_events")
 	}
 	on := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
 		"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
 		"include_events": "true",
 	}))
-	if len(on.Records[0].Events) != 1 {
-		t.Errorf("events: got %d, want 1", len(on.Records[0].Events))
+	if !on.Records[0].Events.Available || len(on.Records[0].Events.Items) != 1 {
+		t.Errorf("events: available=%t, %d items; want available with 1",
+			on.Records[0].Events.Available, len(on.Records[0].Events.Items))
 	}
 }
 
@@ -382,5 +388,235 @@ func TestLifecycleTool_RejectsIDAndPRURLTogether(t *testing.T) {
 	})
 	if !result.IsError {
 		t.Fatal("id and pr_url together were accepted")
+	}
+}
+
+// --- list mode ---------------------------------------------------------
+
+// listBackend answers the list route with n records and counts describe calls.
+func listBackend(t *testing.T, n int) (*httptest.Server, *int) {
+	t.Helper()
+	records := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		records = append(records, ownershipJSON(
+			fmt.Sprintf("mctlhq/mctl-web#%d", i), "shepherd", "shepherd:mctl-web",
+			"active", fmt.Sprintf("mctl-web/issue-%d-a-thing", i), true, lifecycle.StatusHealthy))
+	}
+	describes := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/lifecycle/ownership" {
+			_, _ = w.Write([]byte(`{"ownership":[` + strings.Join(records, ",") + `],"count":` +
+				strconv.Itoa(n) + `}`))
+			return
+		}
+		describes++
+		_, _ = w.Write([]byte(`{"status":"Running","shepherd_in_loop":true,"shepherd_in_loop_known":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &describes
+}
+
+// The cap bounds the PROBE, not the result: an operator listing a long store
+// still gets every record, and the ones past the cap say why their legacy
+// block is empty. A cap that has never fired is a cap nobody has watched.
+func TestLifecycleTool_ListModeCapsTheLegacyProbeNotTheRecords(t *testing.T) {
+	n := lifecycleLegacyFanoutCap + 1
+	backend, describes := listBackend(t, n)
+
+	env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation",
+	}))
+	if env.Mode != "list" {
+		t.Fatalf("mode: got %q, want list", env.Mode)
+	}
+	if env.Count != n || len(env.Records) != n {
+		t.Fatalf("count %d, records %d; want %d of each", env.Count, len(env.Records), n)
+	}
+	if *describes != lifecycleLegacyFanoutCap {
+		t.Errorf("legacy probe ran %d times, want %d", *describes, lifecycleLegacyFanoutCap)
+	}
+	if !env.Records[lifecycleLegacyFanoutCap-1].Legacy.Available {
+		t.Error("the last probed record has no legacy answer")
+	}
+	capped := env.Records[lifecycleLegacyFanoutCap].Legacy
+	if capped.Answer != legacyAnswerUnknown || !strings.Contains(capped.Reason, "capped") {
+		t.Errorf("the record past the cap: answer %q, reason %q", capped.Answer, capped.Reason)
+	}
+	if !env.Truncated {
+		t.Error("truncated is false while the legacy probe was capped")
+	}
+}
+
+// The STORE truncates too, and used to do so invisibly: List defaults to 100
+// rows. A full page reported as complete tells the operator this is everything
+// the store holds.
+func TestLifecycleTool_AFullPageReportsTruncated(t *testing.T) {
+	backend, _ := listBackend(t, 3)
+	env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation",
+		"limit": "3", "include_legacy": "false",
+	}))
+	if !env.Truncated {
+		t.Error("a page as long as the limit reported truncated=false")
+	}
+
+	short := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation",
+		"limit": "4", "include_legacy": "false",
+	}))
+	if short.Truncated {
+		t.Error("a short page reported truncated=true")
+	}
+}
+
+// --- answers that must not be fabricated -------------------------------
+
+// An mctl-api that does not serve `derived` must not make every held record
+// look like the one dangerous class. The zero value is held=false, and
+// held=false beside a legacy answer of `owned` IS store-permits-old-forbids.
+func TestLifecycleTool_ARecordWithoutDerivedIsDerivedLocally(t *testing.T) {
+	// No "derived" key at all, and a record that is plainly held: active, with
+	// a fresh last_seen_at inside the 10h liveness bound for this phase.
+	seen := time.Now().UTC().Format(time.RFC3339Nano)
+	rec := fmt.Sprintf(`{
+		"entity":{"kind":"pull-request","id":"mctlhq/mctl-web#42"},
+		"phase":"review-remediation",
+		"owner":{"type":"devloop-workflow","id":"dev-loop-mctlhq-mctl-web-7"},
+		"state":"active","proposal_ref":"mctl-web/issue-7-a-thing",
+		"last_seen_at":%q,"last_progress_at":%q,
+		"dead":false,"stuck":false,"healthy":true
+	}`, seen, seen)
+	backend, _ := backendFor(t, rec, `{"status":"Running","shepherd_in_loop":true}`, http.StatusOK)
+
+	env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
+	}))
+	got := env.Records[0]
+	if got.Derived.Status != lifecycle.StatusHealthy {
+		t.Errorf("derived.status: got %q, want %q -- an empty status is not in the closed vocabulary",
+			got.Derived.Status, lifecycle.StatusHealthy)
+	}
+	if !got.Derived.Held {
+		t.Error("derived.held is false for an active, live record")
+	}
+	if got.Divergence.Class != lifecycle.DivergeAgree || got.Divergence.Dangerous {
+		t.Errorf("class %q (dangerous=%t); a missing derived block fabricated a divergence",
+			got.Divergence.Class, got.Divergence.Dangerous)
+	}
+}
+
+// chi answers a MISSING ROUTE with 404 and plain text. Reading that as "the
+// store holds nothing" makes an mctl-api without the route indistinguishable
+// from an empty store -- which is the post-deploy check itself.
+func TestLifecycleTool_AMissingRouteIsNotAnEmptyStore(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("404 page not found\n"))
+	}))
+	defer backend.Close()
+
+	result := callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
+	})
+	if !result.IsError {
+		t.Fatalf("a routing 404 was reported as an empty store: %s", resultText(t, result))
+	}
+}
+
+// WorkflowIDForProposalRef fails two ways, and only one of them is an answer.
+func TestLifecycleTool_AnUnreadableProposalRefIsUnknownNotFree(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		proposalRef string
+		wantAnswer  string
+	}{
+		{name: "no service part", proposalRef: "issue-7-a-thing", wantAnswer: legacyAnswerUnknown},
+		{name: "empty slug", proposalRef: "mctl-web/", wantAnswer: legacyAnswerUnknown},
+		{name: "never had a DevLoop", proposalRef: "mctl-web/incident-1", wantAnswer: legacyAnswerFree},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := ownershipJSON("mctlhq/mctl-web#42", "shepherd", "shepherd:mctl-web",
+				"active", tc.proposalRef, true, lifecycle.StatusHealthy)
+			backend, _ := backendFor(t, rec, `{}`, http.StatusOK)
+			env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+				"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
+			}))
+			if got := env.Records[0].Legacy.Answer; got != tc.wantAnswer {
+				t.Errorf("legacy answer: got %q, want %q", got, tc.wantAnswer)
+			}
+		})
+	}
+}
+
+// mctl-api reports shepherd_in_loop=false both for a live execution declining
+// to shepherd and for a query it could not complete. Only the second is an
+// absence, and only shepherd_in_loop_known can tell them apart.
+func TestLifecycleTool_AFailedShepherdQueryIsUnknownNotFree(t *testing.T) {
+	rec := ownershipJSON("mctlhq/mctl-web#42", "shepherd", "shepherd:mctl-web",
+		"active", "mctl-web/issue-7-a-thing", true, lifecycle.StatusHealthy)
+
+	backend, _ := backendFor(t, rec,
+		`{"status":"Running","shepherd_in_loop":false,"shepherd_in_loop_known":false}`, http.StatusOK)
+	env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
+	}))
+	if got := env.Records[0].Legacy.Answer; got != legacyAnswerUnknown {
+		t.Errorf("a failed query answered %q; a worker outage is not a legacy answer", got)
+	}
+
+	known, _ := backendFor(t, rec,
+		`{"status":"Running","shepherd_in_loop":false,"shepherd_in_loop_known":true}`, http.StatusOK)
+	env = decodeEnvelope(t, callLifecycleTool(t, known.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
+	}))
+	if got := env.Records[0].Legacy.Answer; got != legacyAnswerFree {
+		t.Errorf("a completed query reporting false answered %q, want %q", got, legacyAnswerFree)
+	}
+}
+
+// A pull request URL determines the kind; a contradictory one is a mistake, not
+// a lookup that happens to find nothing.
+func TestLifecycleTool_RejectsAKindThatContradictsPRURL(t *testing.T) {
+	backend, _ := backendFor(t, `{}`, `{}`, http.StatusOK)
+	result := callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "devloop-proposal", "phase": "review-remediation",
+		"pr_url": "https://github.com/mctlhq/mctl-web/pull/42",
+	})
+	if !result.IsError {
+		t.Fatal("a contradictory kind was accepted")
+	}
+}
+
+func TestLifecycleTool_FailedEventsReadSaysSo(t *testing.T) {
+	rec := ownershipJSON("mctlhq/mctl-web#42", "shepherd", "shepherd:mctl-web",
+		"active", "mctl-web/issue-7-a-thing", true, lifecycle.StatusHealthy)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/lifecycle/ownership/record":
+			_, _ = w.Write([]byte(rec))
+		case "/api/v1/lifecycle/events":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"lifecycle store error"}`))
+		default:
+			_, _ = w.Write([]byte(`{"status":"Completed"}`))
+		}
+	}))
+	defer backend.Close()
+
+	env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
+		"include_events": "true",
+	}))
+	events := env.Records[0].Events
+	if events.Available {
+		t.Error("a failed events read reported available=true")
+	}
+	if events.Reason == "" {
+		t.Error("an empty history and an unread one are the same JSON without a reason")
+	}
+	if events.Items == nil {
+		t.Error("events.items is null")
 	}
 }

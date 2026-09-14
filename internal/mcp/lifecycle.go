@@ -17,6 +17,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -88,7 +89,21 @@ type lifecycleRecord struct {
 	Derived    lifecycle.Derived    `json:"derived"`
 	Legacy     lifecycleLegacy      `json:"legacy"`
 	Divergence lifecycle.Divergence `json:"divergence"`
-	Events     []json.RawMessage    `json:"events"`
+	Events     lifecycleEvents      `json:"events"`
+}
+
+// lifecycleEvents is the transition history, and whether it was obtained.
+//
+// An empty list from a record with no transitions and an empty list from a
+// failed read are the same JSON, and they mean opposite things to the one
+// reader who asks for events at all: somebody reconstructing a lost acquire
+// after the fact. So the list carries its own availability, the same way
+// `legacy` does -- reading events must not fail the ownership read, which is
+// not in tension with saying it did not happen.
+type lifecycleEvents struct {
+	Available bool              `json:"available"`
+	Reason    string            `json:"reason,omitempty"`
+	Items     []json.RawMessage `json:"items"`
 }
 
 func (s *Server) toolGetLifecycleOwnership() (mcplib.Tool, server.ToolHandlerFunc) {
@@ -101,6 +116,8 @@ func (s *Server) toolGetLifecycleOwnership() (mcplib.Tool, server.ToolHandlerFun
 Two modes, one response shape. Give `+"`id`"+` (or `+"`pr_url`"+`) with `+"`kind`"+` and `+"`phase`"+` to read ONE entity; give none of them to list what the store holds, optionally filtered by `+"`state`"+` and `+"`owner_type`"+`. `+"`records`"+` is always an array — length 0 or 1 in record mode — so a caller never has to decide which of two types it is parsing before it can read the answer.
 
 Each record carries: ownership (the stored row), derived (status, held, dead, and the liveness/progress bounds the status was measured against), legacy (whether a live DevLoopWorkflow is driving the same entity), divergence (how the two compare), and events when include_events=true.
+
+The legacy and events blocks each carry their own "available" flag plus a "reason". An empty history, or a legacy answer with available=false, is something this tool could not obtain — never something it measured. That distinction matters most to the caller reconstructing what happened after the fact, which is the only caller who asks for events at all.
 
 READ THE STATUS VOCABULARY BEFORE ACTING ON IT. It is closed: healthy, stuck, dead, handing-off, handoff-stalled, released, terminal, unknown. Only "dead" licenses another actor to TAKE the entity (ADR-010 §4). "stuck" means alive but achieving nothing — that calls for a human, not for a second machine that will be equally stuck. "held" is the takeover predicate and is carried separately from status on purpose: a handing-off row past its liveness bound reports the more specific status handoff-stalled while being dead and recoverable, so reading takeover off the status string gets it backwards.
 
@@ -157,9 +174,15 @@ Admin-only. include_legacy defaults to true and costs one dev-loop describe call
 				return mcplib.NewToolResultError(fmt.Sprintf("invalid pr_url: %v", err)), nil
 			}
 			id = derivedID
-			if kind == "" {
-				kind = lifecycle.KindPullRequest
+			// A pull request URL determines the kind. Silently querying a
+			// contradictory one would answer "no record" for a lookup that was
+			// never going to match -- an empty result reported as a fact.
+			if kind != "" && kind != lifecycle.KindPullRequest {
+				return mcplib.NewToolResultError(fmt.Sprintf(
+					"pr_url implies kind %q, but kind=%q was given; drop one",
+					lifecycle.KindPullRequest, kind)), nil
 			}
+			kind = lifecycle.KindPullRequest
 		}
 
 		mode := "list"
@@ -240,7 +263,13 @@ func (s *Server) lifecycleFetch(
 	}
 
 	switch {
-	case status == http.StatusNotFound && mode == "record":
+	case status == http.StatusNotFound && mode == "record" && isAPIErrorBody(body):
+		// Gated on the body being the API's own {"error": ...} envelope: chi
+		// answers a MISSING ROUTE with the same 404 and the plain text "404
+		// page not found". This package can be pointed at any apiURL, so
+		// against an mctl-api predating /lifecycle/ownership/record an
+		// unguarded arm would report count: 0 — indistinguishable from "the
+		// store holds nothing", which is the post-deploy check itself.
 		// A real answer: the store holds nothing for this entity phase. Empty
 		// array, not an error — and emphatically not the same as the 503 below.
 		return nil, false, nil
@@ -263,7 +292,36 @@ func (s *Server) lifecycleFetch(
 	if err := json.Unmarshal(body, &listed); err != nil {
 		return nil, false, mcplib.NewToolResultError(fmt.Sprintf("Failed to parse lifecycle ownership list: %v", err))
 	}
-	return listed.Ownership, false, nil
+	// The STORE truncates too, and used to do it invisibly here: Store.List
+	// applies a default limit of 100 when the caller sends none and clamps
+	// anything above 500. Reporting `truncated: false` while returning 100 of
+	// 250 rows tells the operator this is everything the store holds -- and
+	// `count` cannot stand in for it, since 100-of-100 and 100-of-400 produce
+	// an identical envelope.
+	//
+	// A full page is REPORTED as truncated even when it happens to be the last
+	// one. That over-reports exactly one case, the page boundary, and never
+	// under-reports -- the safe direction for a field whose whole job is to
+	// say "there may be more".
+	return listed.Ownership, len(listed.Ownership) >= effectiveListLimit(req), nil
+}
+
+// effectiveListLimit mirrors lifecycle.Store.List's own bounds
+// (internal/lifecycle/store.go): absent or unparseable means 100, and anything
+// above 500 is clamped there.
+func effectiveListLimit(req mcplib.CallToolRequest) int {
+	const (
+		defaultLimit = 100
+		maxLimit     = 500
+	)
+	n, err := strconv.Atoi(strings.TrimSpace(stringArg(req, "limit")))
+	if err != nil || n <= 0 {
+		return defaultLimit
+	}
+	if n > maxLimit {
+		return maxLimit
+	}
+	return n
 }
 
 // lifecycleRecordFor assembles one envelope entry.
@@ -271,10 +329,26 @@ func (s *Server) lifecycleRecordFor(
 	ctx context.Context, rec *apiOwnershipRecord, probe, includeLegacy, includeEvents bool,
 ) lifecycleRecord {
 	owned := rec.Ownership
+	// The derived view comes from the server so there is ONE derivation, but
+	// an empty Status means the response carried no `derived` block at all --
+	// an mctl-api older than the one that added it, which this package can be
+	// pointed at (cmd/mcp/main.go takes an arbitrary apiURL). The zero value
+	// is not a neutral default here: held=false plus a legacy answer of
+	// `owned` classifies as the dangerous store-permits-old-forbids, so
+	// trusting it would FABRICATE the stop-the-rollout class for every held
+	// record. Status is the sentinel because Derive never returns it empty.
+	//
+	// Deriving locally is exact rather than a guess: this binary carries the
+	// same Derive and the same bounds table the server uses, and the record
+	// carries every input it needs.
+	derived := rec.Derived
+	if derived.Status == "" {
+		derived = lifecycle.Derive(&owned, time.Now().UTC())
+	}
 	out := lifecycleRecord{
 		Ownership: &owned,
-		Derived:   rec.Derived,
-		Events:    []json.RawMessage{},
+		Derived:   derived,
+		Events:    lifecycleEvents{Items: []json.RawMessage{}},
 	}
 
 	switch {
@@ -292,7 +366,7 @@ func (s *Server) lifecycleRecordFor(
 	// The store answered — this record is proof of it — so storeReadable is
 	// true here by construction. An unreachable store never reaches this
 	// function: it fails the fetch above and the tool returns the API's 503.
-	out.Divergence = lifecycle.ClassifyDerived(&owned, rec.Derived, true, legacyAnswerToEnum(out.Legacy.Answer))
+	out.Divergence = lifecycle.ClassifyDerived(&owned, derived, true, legacyAnswerToEnum(out.Legacy.Answer))
 
 	if includeEvents {
 		out.Events = s.lifecycleEventsFor(ctx, owned)
@@ -313,7 +387,8 @@ func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) 
 		return lifecycleLegacy{Answer: legacyAnswerUnknown, Reason: "record carries no proposal_ref"}
 	}
 	workflowID, err := temporalclient.WorkflowIDForProposalRef(o.ProposalRef)
-	if err != nil {
+	switch {
+	case errors.Is(err, temporalclient.ErrNoDevLoopForProposalRef):
 		// A slug with no issue-<N>- prefix (incident-*, anything pre-Temporal)
 		// never had a DevLoopWorkflow. That is an answer, not a failure.
 		return lifecycleLegacy{
@@ -321,6 +396,11 @@ func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) 
 			Answer:    legacyAnswerFree,
 			Reason:    fmt.Sprintf("proposal_ref %q names no DevLoopWorkflow", o.ProposalRef),
 		}
+	case err != nil:
+		// A ref this code could not read. NOT "no DevLoop": the question was
+		// never put, and answering `free` here would classify a genuinely
+		// unowned-and-driven entity as agreement.
+		return lifecycleLegacy{Answer: legacyAnswerUnknown, Reason: err.Error()}
 	}
 
 	body, status, err := s.apiGetStatus(ctx, "/api/v1/agents/dev-loop/"+url.PathEscape(workflowID))
@@ -344,8 +424,13 @@ func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) 
 	}
 
 	var described struct {
-		Status         string `json:"status"`
-		ShepherdInLoop *bool  `json:"shepherd_in_loop"`
+		Status string `json:"status"`
+		// Both fields are pointers so an absent key is distinguishable from
+		// false. `shepherd_in_loop` alone cannot answer: mctl-api reports
+		// false both for a live execution declining to shepherd and for a
+		// query it could not complete, and those mean opposite things here.
+		ShepherdInLoop      *bool `json:"shepherd_in_loop"`
+		ShepherdInLoopKnown *bool `json:"shepherd_in_loop_known"`
 	}
 	if err := json.Unmarshal(body, &described); err != nil {
 		return lifecycleLegacy{
@@ -367,6 +452,13 @@ func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) 
 		out.Available = false
 		out.Answer = legacyAnswerUnknown
 		out.Reason = "running, but the describe route did not report shepherd_in_loop"
+	case described.ShepherdInLoopKnown != nil && !*described.ShepherdInLoopKnown:
+		// The route reported false as a FALLBACK: its query to the workflow
+		// did not complete (an old worker without the handler, a worker
+		// outage, a timeout). The value is false and the answer is unknown.
+		out.Available = false
+		out.Answer = legacyAnswerUnknown
+		out.Reason = "running, but the shepherd_in_loop query did not complete"
 	case *described.ShepherdInLoop:
 		out.Answer = legacyAnswerOwned
 	default:
@@ -376,25 +468,35 @@ func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) 
 	return out
 }
 
-func (s *Server) lifecycleEventsFor(ctx context.Context, o lifecycle.Ownership) []json.RawMessage {
+func (s *Server) lifecycleEventsFor(ctx context.Context, o lifecycle.Ownership) lifecycleEvents {
 	q := url.Values{}
 	q.Set("kind", o.Entity.Kind)
 	q.Set("id", o.Entity.ID)
 	q.Set("phase", o.Phase)
 	q.Set("limit", strconv.Itoa(lifecycleEventsDefaultLimit))
-	body, status, err := s.apiGetStatus(ctx, "/api/v1/lifecycle/events?"+q.Encode())
-	if err != nil || status >= 400 {
+	empty := func(reason string) lifecycleEvents {
 		// Events are detail, never the answer: a failure to read them must not
-		// fail the ownership read that the caller actually asked for.
-		return []json.RawMessage{}
+		// fail the ownership read the caller actually asked for -- but it must
+		// say so, or an empty history and an unread one are the same JSON.
+		return lifecycleEvents{Reason: reason, Items: []json.RawMessage{}}
+	}
+	body, status, err := s.apiGetStatus(ctx, "/api/v1/lifecycle/events?"+q.Encode())
+	if err != nil {
+		return empty(fmt.Sprintf("events read failed: %v", err))
+	}
+	if status >= 400 {
+		return empty(fmt.Sprintf("events read returned %d", status))
 	}
 	var listed struct {
 		Events []json.RawMessage `json:"events"`
 	}
-	if err := json.Unmarshal(body, &listed); err != nil || listed.Events == nil {
-		return []json.RawMessage{}
+	if err := json.Unmarshal(body, &listed); err != nil {
+		return empty(fmt.Sprintf("events response unreadable: %v", err))
 	}
-	return listed.Events
+	if listed.Events == nil {
+		listed.Events = []json.RawMessage{}
+	}
+	return lifecycleEvents{Available: true, Items: listed.Events}
 }
 
 func legacyAnswerToEnum(answer string) lifecycle.LegacyAnswer {
@@ -439,3 +541,11 @@ func entityIDForPullRequestURL(prURL string) (string, error) {
 // second org here would refuse a read that the store can perfectly well answer.
 var pullRequestURLPattern = regexp.MustCompile(
 	`^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)/?$`)
+
+// isAPIErrorBody reports whether a body is the API's {"error": "..."} envelope.
+func isAPIErrorBody(body []byte) bool {
+	var envelope struct {
+		Error string `json:"error"`
+	}
+	return json.Unmarshal(body, &envelope) == nil && envelope.Error != ""
+}

@@ -38,13 +38,20 @@ import (
 // for everything else StartDevLoopWorkflow can return.
 var ErrInvalidIssueURL = errors.New("temporalclient: not a well-formed mctlhq GitHub issue URL")
 
-// ErrInvalidProposalRef marks a proposal_ref that names no DevLoopWorkflow.
-// Separate from ErrInvalidIssueURL because it is not a malformed input: a
-// proposal whose slug carries no `issue-<N>-` prefix (incident-*, and
-// everything from before the Temporal migration) NEVER had a DevLoop, and a
-// caller asking about one is owed "there is no such workflow", not "you
-// typed it wrong".
-var ErrInvalidProposalRef = errors.New("temporalclient: proposal ref names no DevLoopWorkflow")
+// ErrNoDevLoopForProposalRef marks a well-formed proposal_ref whose slug
+// carries no `issue-<N>-` prefix — incident-*, and everything from before the
+// Temporal migration. Those proposals NEVER had a DevLoopWorkflow, so this is
+// an ANSWER: a caller comparing mechanisms may record "no live DevLoop" on it.
+var ErrNoDevLoopForProposalRef = errors.New("temporalclient: proposal ref names no DevLoopWorkflow")
+
+// ErrMalformedProposalRef marks a proposal_ref this code could not read at all
+// — no service part, an empty service, an empty slug.
+//
+// Separate from the sentinel above, and the separation is the point: both
+// mean "no workflow id", but only one of them means "no workflow". Reporting
+// an unreadable ref as "nobody is driving this entity" is the fold this whole
+// contract exists to undo, and it fails in the unsafe direction.
+var ErrMalformedProposalRef = errors.New("temporalclient: malformed proposal ref")
 
 const (
 	// TaskQueue must match orchestrator/temporal/worker.py's TASK_QUEUE.
@@ -123,17 +130,17 @@ func WorkflowIDForIssueURL(issueURL string) (string, error) {
 // today, and a wrong owner would only produce a NotFound — which this caller
 // already reads as "no live DevLoop".
 //
-// Returns ErrInvalidProposalRef for a ref with no service part, an empty slug,
-// or a slug without the `issue-<N>-` prefix. That last case is not an error in
-// the caller's world: it means the proposal genuinely never had a DevLoop.
+// The two failure sentinels are NOT interchangeable and callers must tell them
+// apart: ErrNoDevLoopForProposalRef is an answer ("this proposal never had
+// one"), ErrMalformedProposalRef is an absence ("this ref could not be read").
 func WorkflowIDForProposalRef(proposalRef string) (string, error) {
 	service, slug, ok := strings.Cut(proposalRef, "/")
 	if !ok || service == "" || slug == "" {
-		return "", fmt.Errorf("%w: %q", ErrInvalidProposalRef, proposalRef)
+		return "", fmt.Errorf("%w: %q", ErrMalformedProposalRef, proposalRef)
 	}
 	m := proposalSlugPattern.FindStringSubmatch(slug)
 	if m == nil {
-		return "", fmt.Errorf("%w: %q", ErrInvalidProposalRef, proposalRef)
+		return "", fmt.Errorf("%w: %q", ErrNoDevLoopForProposalRef, proposalRef)
 	}
 	return fmt.Sprintf("dev-loop-mctlhq-%s-%s", service, m[1]), nil
 }

@@ -594,3 +594,67 @@ func TestGetDevLoopWorkflow_BlockedQueryStillAnswers(t *testing.T) {
 		t.Fatalf("expected shepherd_in_loop false, got %v", body["shepherd_in_loop"])
 	}
 }
+
+// TestGetDevLoopWorkflow_KnownSeparatesAnAnswerFromAFallback pins the field
+// that makes the false above readable.
+//
+// `shepherd_in_loop: false` is the same JSON for a live execution that declines
+// to shepherd and for a query that never completed, and the two mean opposite
+// things. For the sweep they are interchangeable — both leave the cron
+// responsible, which is the fail-open — but a caller COMPARING this answer
+// against the ownership store may not fold them together: "could not ask"
+// counted as "nobody is driving it" manufactures the one divergence class that
+// licenses two machines to drive one pull request.
+func TestGetDevLoopWorkflow_KnownSeparatesAnAnswerFromAFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		fake       *fakeDevLoopClient
+		wantInLoop bool
+		wantKnown  bool
+	}{
+		{
+			name:       "running and shepherding",
+			fake:       &fakeDevLoopClient{describeStatus: "Running", shepherdInLoop: true},
+			wantInLoop: true, wantKnown: true,
+		},
+		{
+			name:       "running and declining to shepherd is an answer",
+			fake:       &fakeDevLoopClient{describeStatus: "Running", shepherdInLoop: false},
+			wantInLoop: false, wantKnown: true,
+		},
+		{
+			name: "a failed query is not an answer",
+			fake: &fakeDevLoopClient{
+				describeStatus:    "Running",
+				shepherdInLoopErr: fmt.Errorf("unknown queryType %q", "shepherd_in_loop"),
+			},
+			wantInLoop: false, wantKnown: false,
+		},
+		{
+			name:       "a finished execution was never asked",
+			fake:       &fakeDevLoopClient{describeStatus: "Completed"},
+			wantInLoop: false, wantKnown: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handlers{opts: Options{TemporalClient: tc.fake}}
+			req := httptest.NewRequest("GET", "/api/v1/agents/dev-loop/dev-loop-x", nil)
+			req = withChiParam(req, "workflow_id", "dev-loop-x")
+			req = adminCtx(req)
+			rec := httptest.NewRecorder()
+			h.GetDevLoopWorkflow(rec, req)
+
+			var body map[string]interface{}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("invalid JSON response: %v", err)
+			}
+			if body["shepherd_in_loop"] != tc.wantInLoop {
+				t.Errorf("shepherd_in_loop: got %v, want %v", body["shepherd_in_loop"], tc.wantInLoop)
+			}
+			if body["shepherd_in_loop_known"] != tc.wantKnown {
+				t.Errorf("shepherd_in_loop_known: got %v, want %v",
+					body["shepherd_in_loop_known"], tc.wantKnown)
+			}
+		})
+	}
+}
