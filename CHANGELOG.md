@@ -1,5 +1,23 @@
 # Changelog
 
+## [4.46.0](https://github.com/mctlhq/mctl-api/compare/4.45.0...4.46.0) (2026-09-13)
+
+
+### Features
+
+* **lifecycle:** derive read-side status and classify divergence ([8b04d4d](https://github.com/mctlhq/mctl-api/commit/8b04d4dfa4c3e807f19a64482b3524898f0519e3))
+* **lifecycle:** derive read-side status and classify divergence ([0b352ac](https://github.com/mctlhq/mctl-api/commit/0b352ac4841fd1285087fed35a2cc43ef10ac852))
+* **mcp:** accept .github in the mctl-agents service enums ([36f868c](https://github.com/mctlhq/mctl-api/commit/36f868c3a4fdd0f349b3baef33fdc7ad25ab2969))
+* **mcp:** accept .github in the mctl-agents service enums ([35e2452](https://github.com/mctlhq/mctl-api/commit/35e24520e4dba942cca015ef6cc6556a03c3d71d))
+
+
+### Bug Fixes
+
+* **lifecycle:** base held on the takeover predicate, not the status ([bcb6c9a](https://github.com/mctlhq/mctl-api/commit/bcb6c9a3d6e55963189bcdafb62d438c65129faf))
+* **lifecycle:** name the entity in the deprecation warning ([545f7d2](https://github.com/mctlhq/mctl-api/commit/545f7d2f25590d4d624e890bd20381e9d272b535))
+* **lifecycle:** split the single-record read onto its own path ([f881ea3](https://github.com/mctlhq/mctl-api/commit/f881ea328520f4ad0f0aca05e17913bff43d38ee))
+* **lifecycle:** split the single-record read onto its own path ([43da04f](https://github.com/mctlhq/mctl-api/commit/43da04f3ece3f0da47e7e3b394ade65f3dcc302e))
+
 ## [4.45.0](https://github.com/mctlhq/mctl-api/compare/4.44.0...4.45.0) (2026-09-12)
 
 
