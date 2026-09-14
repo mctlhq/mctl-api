@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.47.0](https://github.com/mctlhq/mctl-api/compare/4.46.0...4.47.0) (2026-09-14)
+
+
+### Features
+
+* **lifecycle:** add mctl_get_lifecycle_ownership ([c106492](https://github.com/mctlhq/mctl-api/commit/c106492ede05563b4dffca74b5c0c18cf598a923))
+* **lifecycle:** add mctl_get_lifecycle_ownership ([1064b2c](https://github.com/mctlhq/mctl-api/commit/1064b2ccc406a2735e86d4d3a8b98f49160bdb00))
+
+
+### Bug Fixes
+
+* **lifecycle:** ask about the DevLoop id the record holds, not a guessed one ([2465ea4](https://github.com/mctlhq/mctl-api/commit/2465ea4680c1383919f7ee39a91b2a405b76a8b5))
+* **lifecycle:** ask about the DevLoop, not about the owner's workflow ([5c81de2](https://github.com/mctlhq/mctl-api/commit/5c81de2f438a2a40f194e09c263c531aac1004ad))
+* **lifecycle:** close the last four places an absence read as an answer ([0135005](https://github.com/mctlhq/mctl-api/commit/01350050bc83758e56979f08fc5a1020e7f6f9ac))
+* **lifecycle:** stop the read surface fabricating answers it did not obtain ([e1f726a](https://github.com/mctlhq/mctl-api/commit/e1f726aaf07e92ea73d73d6214e7f495223ec517))
+
 ## [4.46.0](https://github.com/mctlhq/mctl-api/compare/4.45.0...4.46.0) (2026-09-13)
 
 
