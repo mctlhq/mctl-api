@@ -631,9 +631,12 @@ func TestGetDevLoopWorkflow_KnownSeparatesAnAnswerFromAFallback(t *testing.T) {
 			wantInLoop: false, wantKnown: false,
 		},
 		{
-			name:       "a finished execution was never asked",
+			// Known, not unknown: a Completed workflow definitively is not
+			// ticking a shepherd, and that false is derived from the status
+			// rather than from a query that failed.
+			name:       "a finished execution answers from its status",
 			fake:       &fakeDevLoopClient{describeStatus: "Completed"},
-			wantInLoop: false, wantKnown: false,
+			wantInLoop: false, wantKnown: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

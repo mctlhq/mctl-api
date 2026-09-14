@@ -38,9 +38,15 @@ import (
 // The probe is one HTTP call per record against the dev-loop describe route,
 // issued serially, and an operator listing the store is not asking to wait
 // through fifty of them. Beyond the cap the records are still returned, with
-// their legacy block unavailable and `truncated` set — a partial answer that
-// says it is partial, rather than a complete one that took a minute.
+// their legacy block unavailable and `fanout_capped` set — a partial answer
+// that says it is partial, rather than a complete one that took a minute.
 const lifecycleLegacyFanoutCap = 10
+
+// lifecycleEventsFanoutCap bounds the events read for the same reason as the
+// legacy cap above, and it was missing for longer: at the store's default page
+// of 100 rows that is 100 serial reads and up to 2,000 events in one tool
+// result, and at limit=500 it is five times that.
+const lifecycleEventsFanoutCap = 10
 
 // lifecycleEventsDefaultLimit bounds an `include_events` read per record.
 const lifecycleEventsDefaultLimit = 20
@@ -127,7 +133,9 @@ The divergence class store-permits-old-forbids is the only dangerous one: the st
 
 This tool grants no authority. Ownership says who is responsible; it never says what they are permitted to do, and it confers no GitHub merge or approval rights.
 
-Admin-only. include_legacy defaults to true and costs one dev-loop describe call per record, capped at `+strconv.Itoa(lifecycleLegacyFanoutCap)+` records in list mode (beyond that the remaining records come back with legacy unavailable and truncated=true).`),
+Two truncation fields, because they answer different questions: "truncated" says the STORE may hold more rows than these, while "fanout_capped" says every record is here but the per-record probes stopped after the first few. One bit for both would send a paginating caller after a page that does not exist.
+
+Admin-only. include_legacy defaults to true and costs one dev-loop describe call per record; include_events costs another read per record. Both are capped in list mode — `+strconv.Itoa(lifecycleLegacyFanoutCap)+` records for the legacy probe, `+strconv.Itoa(lifecycleEventsFanoutCap)+` for events. Records past a cap are still returned, with that block unavailable and a reason saying so, and fanout_capped set.`),
 		mcplib.WithString("kind",
 			mcplib.Description(`Entity kind, e.g. "pull-request" or "proposal". Required with id or pr_url.`),
 		),
@@ -198,17 +206,25 @@ Admin-only. include_legacy defaults to true and costs one dev-loop describe call
 			return errResult, nil
 		}
 
+		fanoutCapped := false
 		out := make([]lifecycleRecord, 0, len(records))
 		for i := range records {
 			// The cap applies to the PROBE, not to the records: a record past
 			// it is still returned, with its legacy block saying why it is
 			// empty. Dropping records instead would make a list read's length
 			// depend on an option that is supposed to add detail to it.
-			probe := includeLegacy && i < lifecycleLegacyFanoutCap
-			if includeLegacy && i >= lifecycleLegacyFanoutCap {
-				truncated = true
+			probeLegacy := includeLegacy && i < lifecycleLegacyFanoutCap
+			probeEvents := includeEvents && i < lifecycleEventsFanoutCap
+			if (includeLegacy && !probeLegacy) || (includeEvents && !probeEvents) {
+				// A SEPARATE flag from `truncated`, which means "the store may
+				// hold more rows than these". A paginating consumer reading
+				// one bit for both questions would request a next page that
+				// does not exist, with no signal that the flag was never about
+				// pagination.
+				fanoutCapped = true
 			}
-			out = append(out, s.lifecycleRecordFor(ctx, &records[i], probe, includeLegacy, includeEvents))
+			out = append(out, s.lifecycleRecordFor(
+				ctx, &records[i], probeLegacy, includeLegacy, probeEvents, includeEvents))
 		}
 
 		envelope := map[string]any{
@@ -219,10 +235,15 @@ Admin-only. include_legacy defaults to true and costs one dev-loop describe call
 				"owner_type": strings.TrimSpace(stringArg(req, "owner_type")),
 				"limit":      strings.TrimSpace(stringArg(req, "limit")),
 			},
-			"count":     len(out),
-			"records":   out,
-			"truncated": truncated,
-			"as_of":     time.Now().UTC().Format(time.RFC3339),
+			"count":   len(out),
+			"records": out,
+			// Two different questions, two fields. `truncated` is about the
+			// STORE: there may be more rows than these. `fanout_capped` is
+			// about THIS response: every record is here, but the per-record
+			// probes stopped after the first few.
+			"truncated":     truncated,
+			"fanout_capped": fanoutCapped,
+			"as_of":         time.Now().UTC().Format(time.RFC3339),
 		}
 		body, err := json.Marshal(envelope)
 		if err != nil {
@@ -326,7 +347,8 @@ func effectiveListLimit(req mcplib.CallToolRequest) int {
 
 // lifecycleRecordFor assembles one envelope entry.
 func (s *Server) lifecycleRecordFor(
-	ctx context.Context, rec *apiOwnershipRecord, probe, includeLegacy, includeEvents bool,
+	ctx context.Context, rec *apiOwnershipRecord,
+	probeLegacy, includeLegacy, probeEvents, includeEvents bool,
 ) lifecycleRecord {
 	owned := rec.Ownership
 	// The derived view comes from the server so there is ONE derivation, but
@@ -354,7 +376,7 @@ func (s *Server) lifecycleRecordFor(
 	switch {
 	case !includeLegacy:
 		out.Legacy = lifecycleLegacy{Answer: legacyAnswerUnknown, Reason: "include_legacy=false"}
-	case !probe:
+	case !probeLegacy:
 		out.Legacy = lifecycleLegacy{
 			Answer: legacyAnswerUnknown,
 			Reason: fmt.Sprintf("legacy probe capped at %d records per call", lifecycleLegacyFanoutCap),
@@ -368,8 +390,12 @@ func (s *Server) lifecycleRecordFor(
 	// function: it fails the fetch above and the tool returns the API's 503.
 	out.Divergence = lifecycle.ClassifyDerived(&owned, derived, true, legacyAnswerToEnum(out.Legacy.Answer))
 
-	if includeEvents {
+	switch {
+	case includeEvents && probeEvents:
 		out.Events = s.lifecycleEventsFor(ctx, owned)
+	case includeEvents:
+		out.Events.Reason = fmt.Sprintf(
+			"events read capped at %d records per call", lifecycleEventsFanoutCap)
 	}
 	return out
 }
@@ -380,11 +406,21 @@ func (s *Server) lifecycleRecordFor(
 // whole point: every path that means "we could not tell" answers UNKNOWN here,
 // where the shepherd's bool answers False and thereby says "nobody owns this".
 func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) lifecycleLegacy {
+	// The STORED id first. temporal_workflow_id is a column, written on acquire
+	// and refreshed on re-acquire, so a row that carries one can be probed
+	// without reconstructing anything -- including a row with no proposal_ref,
+	// which would otherwise answer unknown and simply not be covered by the
+	// comparison this tool exists to measure.
+	if stored := strings.TrimSpace(o.TemporalWorkflowID); stored != "" {
+		return s.lifecycleDescribeLegacy(ctx, stored)
+	}
 	if strings.TrimSpace(o.ProposalRef) == "" {
-		// Not "no DevLoop": no way to ask. A pull request row written by
-		// something other than the DevLoop carries no proposal ref, and the
-		// workflow id is not reconstructible from anything else on the record.
-		return lifecycleLegacy{Answer: legacyAnswerUnknown, Reason: "record carries no proposal_ref"}
+		// Not "no DevLoop": no way to ask. Neither a stored workflow id nor a
+		// proposal ref to derive one from.
+		return lifecycleLegacy{
+			Answer: legacyAnswerUnknown,
+			Reason: "record carries neither temporal_workflow_id nor proposal_ref",
+		}
 	}
 	workflowID, err := temporalclient.WorkflowIDForProposalRef(o.ProposalRef)
 	switch {
@@ -403,6 +439,16 @@ func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) 
 		return lifecycleLegacy{Answer: legacyAnswerUnknown, Reason: err.Error()}
 	}
 
+	return s.lifecycleDescribeLegacy(ctx, workflowID)
+}
+
+// devLoopStatusUnknown is DescribeDevLoop's answer for an execution status it
+// could not determine. Not a status of the workflow — a statement about the
+// read.
+const devLoopStatusUnknown = "Unknown"
+
+// lifecycleDescribeLegacy asks the dev-loop describe route about one workflow.
+func (s *Server) lifecycleDescribeLegacy(ctx context.Context, workflowID string) lifecycleLegacy {
 	body, status, err := s.apiGetStatus(ctx, "/api/v1/agents/dev-loop/"+url.PathEscape(workflowID))
 	if err != nil {
 		return lifecycleLegacy{
@@ -424,7 +470,12 @@ func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) 
 	}
 
 	var described struct {
-		Status string `json:"status"`
+		// A pointer for the same reason the two below are: DescribeDevLoop
+		// answers "Unknown" for an execution status it could not determine,
+		// and a body with no status key at all is a route that answered
+		// something else entirely. An open `!= "Running"` default reported
+		// both as a measured "no live DevLoop".
+		Status *string `json:"status"`
 		// Both fields are pointers so an absent key is distinguishable from
 		// false. `shepherd_in_loop` alone cannot answer: mctl-api reports
 		// false both for a live execution declining to shepherd and for a
@@ -441,10 +492,21 @@ func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) 
 
 	out := lifecycleLegacy{
 		Available: true, WorkflowID: workflowID,
-		Status: described.Status, ShepherdInLoop: described.ShepherdInLoop,
+		ShepherdInLoop: described.ShepherdInLoop,
+	}
+	if described.Status != nil {
+		out.Status = *described.Status
 	}
 	switch {
-	case described.Status != "Running":
+	case described.Status == nil || *described.Status == devLoopStatusUnknown:
+		// "Unknown" is DescribeDevLoop's own "could not determine the
+		// execution status", and an absent key is a route that answered
+		// something else. Neither is a statement about whether a DevLoop is
+		// driving the entity.
+		out.Available = false
+		out.Answer = legacyAnswerUnknown
+		out.Reason = "the describe route did not report an execution status"
+	case *described.Status != "Running":
 		out.Answer = legacyAnswerFree
 	case described.ShepherdInLoop == nil:
 		// An mctl-api too old to serve the field. Running is not the same as

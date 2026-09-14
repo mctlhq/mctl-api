@@ -24,7 +24,7 @@ import (
 // Credentials and clock from AWS's published Signature Version 4 examples
 // for Amazon S3. These are documentation fixtures, not real secrets.
 const (
-	awsExampleAccessKey = "AKIAIOSFODNN7EXAMPLE"                   //nolint:gosec // published AWS doc fixture, not a real credential
+	awsExampleAccessKey = "AKIAIOSFODNN7EXAMPLE"                     //nolint:gosec // published AWS doc fixture, not a real credential
 	awsExampleSecretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" //nolint:gosec // published AWS doc fixture, not a real credential
 	awsExampleHost      = "examplebucket.s3.amazonaws.com"
 )

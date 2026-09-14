@@ -271,7 +271,13 @@ func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 	// ask" into "nobody is driving it" manufactures exactly the divergence
 	// class that licenses two machines to drive one pull request.
 	shepherdInLoop := false
-	shepherdInLoopKnown := status == "Running"
+	// Known unless a query was put and failed. A finished execution is NOT an
+	// unknown: false there is derived from the status -- a Completed workflow
+	// definitively is not ticking a shepherd -- and reporting it as unknown
+	// would make a consumer that follows this field report UNKNOWN for every
+	// finished DevLoopWorkflow, which is the same absent/negative collapse
+	// this field exists to remove.
+	shepherdInLoopKnown := true
 	if status == "Running" {
 		qctx, cancel := context.WithTimeout(r.Context(), shepherdQueryTimeout)
 		inLoop, qerr := h.opts.TemporalClient.QueryShepherdInLoop(qctx, workflowID)

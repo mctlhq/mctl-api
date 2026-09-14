@@ -34,11 +34,12 @@ import (
 // reused from the handler so a change to the response shape shows up as a
 // failing test rather than as two structs moving together.
 type lifecycleEnvelope struct {
-	Mode      string `json:"mode"`
-	Count     int    `json:"count"`
-	Truncated bool   `json:"truncated"`
-	AsOf      string `json:"as_of"`
-	Records   []struct {
+	Mode         string `json:"mode"`
+	Count        int    `json:"count"`
+	Truncated    bool   `json:"truncated"`
+	FanoutCapped bool   `json:"fanout_capped"`
+	AsOf         string `json:"as_of"`
+	Records      []struct {
 		Ownership  map[string]any       `json:"ownership"`
 		Derived    lifecycle.Derived    `json:"derived"`
 		Legacy     lifecycleLegacy      `json:"legacy"`
@@ -443,8 +444,14 @@ func TestLifecycleTool_ListModeCapsTheLegacyProbeNotTheRecords(t *testing.T) {
 	if capped.Answer != legacyAnswerUnknown || !strings.Contains(capped.Reason, "capped") {
 		t.Errorf("the record past the cap: answer %q, reason %q", capped.Answer, capped.Reason)
 	}
-	if !env.Truncated {
-		t.Error("truncated is false while the legacy probe was capped")
+	if !env.FanoutCapped {
+		t.Error("fanout_capped is false while the legacy probe was capped")
+	}
+	// NOT `truncated`: that one answers a different question -- whether the
+	// STORE holds more rows than these. A paginating consumer reading one bit
+	// for both would request a page that does not exist.
+	if env.Truncated {
+		t.Error("a capped fan-out set truncated, which is about the store's page")
 	}
 }
 
@@ -618,5 +625,82 @@ func TestLifecycleTool_FailedEventsReadSaysSo(t *testing.T) {
 	}
 	if events.Items == nil {
 		t.Error("events.items is null")
+	}
+}
+
+// An execution status the describe route could not determine is not a
+// statement about whether a DevLoop is driving the entity.
+func TestLifecycleTool_AnUndeterminedStatusIsUnknown(t *testing.T) {
+	rec := ownershipJSON("mctlhq/mctl-web#42", "shepherd", "shepherd:mctl-web",
+		"active", "mctl-web/issue-7-a-thing", true, lifecycle.StatusHealthy)
+
+	for _, describe := range []string{`{"status":"Unknown"}`, `{"workflow_id":"x"}`} {
+		backend, _ := backendFor(t, rec, describe, http.StatusOK)
+		env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+			"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
+		}))
+		if got := env.Records[0].Legacy.Answer; got != legacyAnswerUnknown {
+			t.Errorf("%s answered %q, want %q", describe, got, legacyAnswerUnknown)
+		}
+	}
+}
+
+// The events read is capped for the same reason the legacy probe is: at the
+// store's default page that would be 100 serial reads in one tool call.
+func TestLifecycleTool_ListModeCapsTheEventsRead(t *testing.T) {
+	n := lifecycleEventsFanoutCap + 1
+	backend, _ := listBackend(t, n)
+
+	env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation",
+		"include_events": "true", "include_legacy": "false",
+	}))
+	if len(env.Records) != n {
+		t.Fatalf("records: got %d, want %d", len(env.Records), n)
+	}
+	if !env.Records[lifecycleEventsFanoutCap-1].Events.Available {
+		t.Error("the last probed record has no events")
+	}
+	capped := env.Records[lifecycleEventsFanoutCap].Events
+	if capped.Available || !strings.Contains(capped.Reason, "capped") {
+		t.Errorf("the record past the cap: available=%t, reason %q", capped.Available, capped.Reason)
+	}
+	if !env.FanoutCapped {
+		t.Error("fanout_capped is false while the events read was capped")
+	}
+}
+
+// A row with a stored workflow id needs no proposal ref: temporal_workflow_id
+// is a column. Rows answered legacy-unknown are rows the comparison did not
+// cover, and this tool exists to measure a rate.
+func TestLifecycleTool_PrefersTheStoredWorkflowID(t *testing.T) {
+	rec := `{
+		"entity":{"kind":"pull-request","id":"mctlhq/mctl-web#42"},
+		"phase":"review-remediation",
+		"owner":{"type":"shepherd","id":"shepherd:mctl-web"},
+		"state":"active","temporal_workflow_id":"dev-loop-mctlhq-mctl-web-99",
+		"dead":false,"stuck":false,"healthy":true,
+		"derived":{"status":"healthy","dead":false,"held":true}
+	}`
+	var describedPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/lifecycle/ownership/record" {
+			_, _ = w.Write([]byte(rec))
+			return
+		}
+		describedPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"status":"Running","shepherd_in_loop":true,"shepherd_in_loop_known":true}`))
+	}))
+	defer backend.Close()
+
+	env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
+	}))
+	if !strings.HasSuffix(describedPath, "dev-loop-mctlhq-mctl-web-99") {
+		t.Errorf("described %q; the stored temporal_workflow_id was not used", describedPath)
+	}
+	if env.Records[0].Legacy.Answer != legacyAnswerOwned {
+		t.Errorf("legacy answer: got %q", env.Records[0].Legacy.Answer)
 	}
 }
