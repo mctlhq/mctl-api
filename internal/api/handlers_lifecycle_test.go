@@ -1094,14 +1094,40 @@ func TestLifecycleHandlers_ListPathRejectsID(t *testing.T) {
 func TestLifecycleHandlers_BatchStillTakesRepeatedID(t *testing.T) {
 	h := &Handlers{opts: Options{Lifecycle: &lifecycle.Store{}}}
 
-	req := adminCtx(httptest.NewRequest("GET",
-		"/api/v1/lifecycle/ownership/batch?kind=pull-request&phase=review-remediation", nil))
-	rec := httptest.NewRecorder()
-	h.BatchGetLifecycleOwnership(rec, req)
+	call := func(query string) *httptest.ResponseRecorder {
+		req := adminCtx(httptest.NewRequest("GET",
+			"/api/v1/lifecycle/ownership/batch?"+query, nil))
+		rec := httptest.NewRecorder()
+		h.BatchGetLifecycleOwnership(rec, req)
+		return rec
+	}
 
-	// No ids: an empty envelope, not the list path's 400. Reaching this arm at
-	// all is the assertion — the rejection above lives on a different handler.
-	if rec.Code != http.StatusOK {
+	base := "kind=pull-request&phase=review-remediation"
+
+	// No ids: an empty envelope, not the list path's 400.
+	if rec := call(base); rec.Code != http.StatusOK {
 		t.Fatalf("batch with no ids: want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// REPEATED ids, which is the semantic this test is named for and did not
+	// previously exercise at all: it sent none, so it proved only that the
+	// handler exists.
+	//
+	// 501 of them, because that is the one repeated-id path that answers
+	// without touching the store. It is a real assertion about parsing: to
+	// answer "at most 500" the handler had to read `q["id"]` as a LIST — a
+	// presence check like the list path's would have rejected the first one.
+	var repeated strings.Builder
+	repeated.WriteString(base)
+	for i := 0; i < 501; i++ {
+		fmt.Fprintf(&repeated, "&id=mctlhq/mctl-web%%23%d", i)
+	}
+	rec := call(repeated.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("batch with 501 ids: want 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "500") {
+		t.Errorf("the 400 is not the batch cap — the list-path rejection may have caught it: %s",
+			rec.Body.String())
 	}
 }
