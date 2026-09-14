@@ -81,6 +81,21 @@ type ownershipResponse struct {
 	Dead    bool `json:"dead"`
 	Stuck   bool `json:"stuck"`
 	Healthy bool `json:"healthy"`
+
+	// Derived carries the full read-side view, Derive's `held` and `status`
+	// above all. Without it every consumer that needs "does this record
+	// withhold the entity" has to re-derive the takeover predicate from
+	// `dead`/`state` on its own, and derive.go:53-55 records that the first
+	// consumer to try got it wrong in the opposite direction — in the
+	// direction that turns the one dangerous divergence class into `agree`.
+	// The shadow compare on the shepherd's Python side is the second such
+	// consumer, and it reads this instead of reimplementing it.
+	//
+	// `dead` appears both here and above. The duplication is deliberate: the
+	// three flat booleans are what the Python client's Ownership.from_payload
+	// already parses, and removing them to tidy this up would break every
+	// deployed reader for a field they can also get one level down.
+	Derived lifecycle.Derived `json:"derived"`
 }
 
 func newOwnershipResponse(o *lifecycle.Ownership) ownershipResponse {
@@ -90,6 +105,7 @@ func newOwnershipResponse(o *lifecycle.Ownership) ownershipResponse {
 		Dead:      o.IsDead(now),
 		Stuck:     o.IsStuck(now),
 		Healthy:   o.IsHealthy(now),
+		Derived:   lifecycle.Derive(o, now),
 	}
 }
 

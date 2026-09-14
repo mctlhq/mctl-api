@@ -248,6 +248,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerIssue())
 	srv.AddTool(s.toolApproveDevLoop())
 	srv.AddTool(s.toolGetDevLoop())
+	srv.AddTool(s.toolGetLifecycleOwnership())
 	srv.AddTool(s.toolListRecentAgentRuns())
 
 	// Cloudflare MCP portal (dispatch only — no Cloudflare credential here).
@@ -2523,6 +2524,34 @@ func (s *Server) apiGet(ctx context.Context, path string) ([]byte, error) {
 	return s.doRequest(req, s.effectiveToken(ctx))
 }
 
+// apiGetStatus is apiGet for a caller that must react to the STATUS rather
+// than to an error string. doRequest collapses every >=400 into an error
+// carrying the API's message and nothing else, which is right for tools that
+// only report a failure — but the lifecycle read has to tell 503 ("the store
+// did not answer; ownership is UNKNOWN") from 404 ("the store answered: it
+// holds no record"), and those two are one sentence apart in the body and a
+// whole decision apart in meaning.
+func (s *Server) apiGetStatus(ctx context.Context, path string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", s.apiURL+path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if token := s.effectiveToken(ctx); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("reading response: %w", err)
+	}
+	return body, resp.StatusCode, nil
+}
+
 func (s *Server) apiPost(ctx context.Context, path string, body map[string]string) ([]byte, error) {
 	return s.apiPostJSON(ctx, path, body)
 }
@@ -3052,7 +3081,9 @@ func (s *Server) toolGetDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
 
 Wraps GET /api/v1/agents/dev-loop/{workflow_id} (mctl-api#244) — no side effects, unlike mctl_approve_dev_loop or mctl_trigger_issue with use_temporal=true. Use this BEFORE deciding how to approve a proposal: a hand-edited .status.yaml is invisible to a workflow already parked on the approve signal (wait_condition has no timeout, so the loop then waits forever), and re-signalling approve on an already-accepted proposal is not a safe probe either — the standalone mctl-agents-approve operation treats it as an idempotent no-op and can send an already-approved proposal straight into the implementer.
 
-Returns: workflow_id, status (Temporal's short execution status — "Running", "Completed", "Failed", "Canceled", "Terminated", "ContinuedAsNew", "TimedOut", or "Unknown"), and shepherd_in_loop (whether this specific execution ticks its own PR shepherd; only meaningful while status is "Running").
+Returns: workflow_id, status (Temporal's short execution status — "Running", "Completed", "Failed", "Canceled", "Terminated", "ContinuedAsNew", "TimedOut", or "Unknown"), shepherd_in_loop (whether this specific execution ticks its own PR shepherd; only meaningful while status is "Running"), and shepherd_in_loop_known.
+
+Read shepherd_in_loop_known before acting on shepherd_in_loop=false. While status is "Running", that false means either a live execution declining to shepherd or a query that did not complete (an old worker, an outage, a timeout); shepherd_in_loop_known=false is the second — the value is false and the answer is unknown. For a finished execution the false is derived from the status and known is true: a Completed workflow definitively is not ticking a shepherd. When status is "Unknown" — this route's own answer for an execution status it could not determine — known is false: nothing was determined, so the false is derived from nothing. For deciding whether the cron should sweep the distinction does not matter; for comparing this answer against anything else it does.
 
 This does not distinguish which step a Running execution is on (investigating vs. parked at approval vs. implementing) — it answers "is a loop alive for this issue", not "what is it doing right now". A 404 means no DevLoopWorkflow was ever started for this workflow_id (or it aged out of retention) — the proposal, if one exists, predates use_temporal and its .status.yaml can be edited directly.
 

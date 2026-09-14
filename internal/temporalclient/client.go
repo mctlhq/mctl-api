@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
@@ -36,6 +37,21 @@ import (
 // use errors.Is against this to pick an HTTP status: 400 for this, 502/503
 // for everything else StartDevLoopWorkflow can return.
 var ErrInvalidIssueURL = errors.New("temporalclient: not a well-formed mctlhq GitHub issue URL")
+
+// ErrNoDevLoopForProposalRef marks a well-formed proposal_ref whose slug
+// carries no `issue-<N>-` prefix — incident-*, and everything from before the
+// Temporal migration. Those proposals NEVER had a DevLoopWorkflow, so this is
+// an ANSWER: a caller comparing mechanisms may record "no live DevLoop" on it.
+var ErrNoDevLoopForProposalRef = errors.New("temporalclient: proposal ref names no DevLoopWorkflow")
+
+// ErrMalformedProposalRef marks a proposal_ref this code could not read at all
+// — no service part, an empty service, an empty slug.
+//
+// Separate from the sentinel above, and the separation is the point: both
+// mean "no workflow id", but only one of them means "no workflow". Reporting
+// an unreadable ref as "nobody is driving this entity" is the fold this whole
+// contract exists to undo, and it fails in the unsafe direction.
+var ErrMalformedProposalRef = errors.New("temporalclient: malformed proposal ref")
 
 const (
 	// TaskQueue must match orchestrator/temporal/worker.py's TASK_QUEUE.
@@ -51,6 +67,11 @@ const (
 )
 
 var issueURLPattern = regexp.MustCompile(`^https://github\.com/mctlhq/([A-Za-z0-9_.-]+)/issues/([0-9]+)$`)
+
+// proposalSlugPattern mirrors run_shepherd.py's `re.match(r"issue-(\d+)-", slug)`
+// — a PREFIX match, trailing hyphen included, so `issue-42-add-a-thing` matches
+// and `issue-42` alone does not.
+var proposalSlugPattern = regexp.MustCompile(`^issue-([0-9]+)-`)
 
 // Client wraps the Temporal SDK client with just the operations mctl-api
 // needs: start a DevLoopWorkflow, signal its approval.
@@ -94,6 +115,34 @@ func WorkflowIDForIssueURL(issueURL string) (string, error) {
 	}
 	repo, issueNumber := m[1], m[2]
 	return fmt.Sprintf("dev-loop-mctlhq-%s-%s", repo, issueNumber), nil
+}
+
+// WorkflowIDForProposalRef derives a DevLoopWorkflow id from the
+// `proposal_ref` a lifecycle ownership record carries.
+//
+// DevLoopWorkflow writes `proposal_ref = f"{service}/{slug}"` on every acquire
+// (orchestrator/temporal/workflows/dev_loop.py), which is the whole reason the
+// legacy answer needs no extra input: the workflow id is reconstructible from
+// the stored record alone, with no GitHub call and no second index.
+//
+// The owner is hardcoded `mctlhq` for the same reason run_shepherd.py hardcodes
+// it: a proposal ref carries no repo owner, every proposal lives under this org
+// today, and a wrong owner would only produce a NotFound — which this caller
+// already reads as "no live DevLoop".
+//
+// The two failure sentinels are NOT interchangeable and callers must tell them
+// apart: ErrNoDevLoopForProposalRef is an answer ("this proposal never had
+// one"), ErrMalformedProposalRef is an absence ("this ref could not be read").
+func WorkflowIDForProposalRef(proposalRef string) (string, error) {
+	service, slug, ok := strings.Cut(proposalRef, "/")
+	if !ok || service == "" || slug == "" {
+		return "", fmt.Errorf("%w: %q", ErrMalformedProposalRef, proposalRef)
+	}
+	m := proposalSlugPattern.FindStringSubmatch(slug)
+	if m == nil {
+		return "", fmt.Errorf("%w: %q", ErrNoDevLoopForProposalRef, proposalRef)
+	}
+	return fmt.Sprintf("dev-loop-mctlhq-%s-%s", service, m[1]), nil
 }
 
 // StartDevLoopWorkflow starts a DevLoopWorkflow run for one issue, or on a

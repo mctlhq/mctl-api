@@ -261,7 +261,30 @@ func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 	// API timeout — the caller would be timing out (or already gone) before
 	// the false fallback reached it, exactly when the cron most needs to
 	// take over.
+	//
+	// `shepherd_in_loop_known` carries whether that false is an ANSWER or a
+	// fallback. The two are the same value on the wire and mean opposite
+	// things: a live execution declining to shepherd is a fact, while a failed
+	// query is an absence. A caller deciding whether to sweep may treat them
+	// alike -- that is the fail-open above -- but a caller COMPARING this
+	// answer against the ownership store may not, because folding "could not
+	// ask" into "nobody is driving it" manufactures exactly the divergence
+	// class that licenses two machines to drive one pull request.
 	shepherdInLoop := false
+	// Known unless a query was put and failed. A finished execution is NOT an
+	// unknown: false there is derived from the status -- a Completed workflow
+	// definitively is not ticking a shepherd -- and reporting it as unknown
+	// would make a consumer that follows this field report UNKNOWN for every
+	// finished DevLoopWorkflow, which is the same absent/negative collapse
+	// this field exists to remove.
+	//
+	// `status != "Unknown"` rather than an unconditional true: DescribeDevLoop
+	// returns "Unknown" from its own default arm for an execution status it
+	// could not determine, so a read that determined nothing would otherwise
+	// answer known=true about a false it derived from nothing. The old
+	// `status == "Running"` covered that case by accident; this covers it on
+	// purpose.
+	shepherdInLoopKnown := status != "Unknown"
 	if status == "Running" {
 		qctx, cancel := context.WithTimeout(r.Context(), shepherdQueryTimeout)
 		inLoop, qerr := h.opts.TemporalClient.QueryShepherdInLoop(qctx, workflowID)
@@ -269,12 +292,16 @@ func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 		if qerr != nil {
 			slog.Debug("dev-loop shepherd_in_loop query failed; reporting false",
 				"workflow_id", workflowID, "error", qerr)
+			shepherdInLoopKnown = false
 		}
 		shepherdInLoop = inLoop
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"workflow_id":      workflowID,
-		"status":           status,
-		"shepherd_in_loop": shepherdInLoop,
+		"workflow_id": workflowID,
+		"status":      status,
+		// Unchanged in value and meaning for every existing caller: the
+		// shepherd's own probe reads `is True` and nothing else.
+		"shepherd_in_loop":       shepherdInLoop,
+		"shepherd_in_loop_known": shepherdInLoopKnown,
 	})
 }

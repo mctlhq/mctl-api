@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -43,6 +44,7 @@ var recordedHints = map[string]hints{
 	"mctl_enable_tenant_skill":                {readOnly: false, destructive: false, idempotent: true},
 	"mctl_get_dev_loop":                       {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_incident":                       {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_lifecycle_ownership":            {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_openclaw_sizing_recommendation": {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_operation":                      {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_resource_usage":                 {readOnly: true, destructive: false, idempotent: false},
@@ -159,9 +161,26 @@ func boolString(b bool) string {
 // default happened to match. The declaration has to be checked where it is
 // made: every mcplib.NewTool call in server.go names both hints.
 func TestEveryToolDeclaresBothHintsInSource(t *testing.T) {
-	src, err := os.ReadFile("server.go")
+	// EVERY non-test source file in the package, not server.go alone. A guard
+	// that reads one named file passes by not looking: the first tool defined
+	// in a new file would be unchecked, and the count below -- the only thing
+	// that would have noticed -- would fail with a message pointing at
+	// server.go, which is the one place the tool is not.
+	sources, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
+	}
+	var src []byte
+	for _, name := range sources {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(name) //nolint:gosec // a package-local source file
+		if err != nil {
+			t.Fatal(err)
+		}
+		src = append(src, b...)
+		src = append(src, '\n')
 	}
 	nameRe := regexp.MustCompile(`NewTool\("([a-z0-9_]+)"`)
 	parts := strings.Split(string(src), "mcplib.NewTool(")
@@ -191,7 +210,7 @@ func TestEveryToolDeclaresBothHintsInSource(t *testing.T) {
 		}
 	}
 	if seen != len(recordedHints) {
-		t.Errorf("found %d NewTool calls in server.go, the record has %d", seen, len(recordedHints))
+		t.Errorf("found %d NewTool calls in the package sources, the record has %d", seen, len(recordedHints))
 	}
 	sort.Strings(missing)
 	if len(missing) > 0 {
@@ -204,7 +223,8 @@ func TestEveryToolDeclaresBothHintsInSource(t *testing.T) {
 // spelled out so the allowlist can be copied rather than derived.
 func TestReadOnlyToolsAreTheRecordedSet(t *testing.T) {
 	want := []string{
-		"mctl_get_dev_loop", "mctl_get_incident", "mctl_get_openclaw_sizing_recommendation", "mctl_get_operation",
+		"mctl_get_dev_loop", "mctl_get_incident", "mctl_get_lifecycle_ownership",
+		"mctl_get_openclaw_sizing_recommendation", "mctl_get_operation",
 		"mctl_get_resource_usage", "mctl_get_service_config", "mctl_get_service_logs", "mctl_get_service_status",
 		"mctl_get_tenant", "mctl_get_workflow_logs", "mctl_get_workflow_status", "mctl_incident_summary",
 		"mctl_list_agent_executions", "mctl_list_agent_versions", "mctl_list_domains", "mctl_list_incidents",
