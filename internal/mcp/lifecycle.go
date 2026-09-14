@@ -458,7 +458,7 @@ func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) 
 
 // devLoopWorkflowIDPrefix is what WorkflowIDForProposalRef builds. The only
 // thing on a stored id that says which kind of workflow it names.
-const devLoopWorkflowIDPrefix = "dev-loop-"
+const devLoopWorkflowIDPrefix = "dev-loop-" //nolint:gosec // G101 matches ID+literal; a Temporal workflow id prefix, not a credential
 
 func (s *Server) lifecycleLegacyFromDerivation(
 	ctx context.Context, proposalRef, workflowID string, err error,
