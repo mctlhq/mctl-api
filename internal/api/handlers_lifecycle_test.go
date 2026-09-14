@@ -157,9 +157,10 @@ func TestLifecycleHandlers_StatusCodeMapping(t *testing.T) {
 	}
 
 	// Reading a record that does not exist is 404, distinct from the 503 above.
-	req := adminCtx(httptest.NewRequest("GET", "/api/v1/lifecycle/ownership?kind=pull-request&id="+id+"&phase=review-remediation", nil))
+	// Through /record: the list path stopped accepting `?id` with #302 item 7.
+	req := adminCtx(httptest.NewRequest("GET", "/api/v1/lifecycle/ownership/record?kind=pull-request&id="+id+"&phase=review-remediation", nil))
 	rec := httptest.NewRecorder()
-	h.GetLifecycleOwnership(rec, req)
+	h.GetLifecycleOwnershipRecord(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("missing record: want 404, got %d", rec.Code)
 	}
@@ -259,9 +260,9 @@ func TestLifecycleHandlers_ReadModelExposesDerivedState(t *testing.T) {
 		t.Fatalf("acquire: %d", rec.Code)
 	}
 
-	req := adminCtx(httptest.NewRequest("GET", "/api/v1/lifecycle/ownership?kind=pull-request&id="+id+"&phase=review-remediation", nil))
+	req := adminCtx(httptest.NewRequest("GET", "/api/v1/lifecycle/ownership/record?kind=pull-request&id="+id+"&phase=review-remediation", nil))
 	rec := httptest.NewRecorder()
-	h.GetLifecycleOwnership(rec, req)
+	h.GetLifecycleOwnershipRecord(rec, req)
 	var body struct {
 		Dead    bool `json:"dead"`
 		Stuck   bool `json:"stuck"`
@@ -1040,4 +1041,50 @@ func TestOwnershipResponse_CarriesTheDerivedView(t *testing.T) {
 			t.Error("derived.held is true for a dead handoff; this is the record whose status reads as withheld while the store would hand it to somebody else")
 		}
 	})
+}
+
+// TestLifecycleHandlers_ListPathRejectsID closes #302 item 7.
+//
+// The grace window existed so a client deployed against the previous release
+// did not break mid-rollout. It is over: mctl-agents 1.45.0 reads /record.
+//
+// A 400 rather than a permanent delegate, because the shape of an answer must
+// not depend on whether an argument was supplied — leaving the old path
+// working indefinitely keeps exactly that reachable.
+//
+// Needs no database: every assertion here is about routing and arguments, and
+// the handler rejects before it touches the store.
+func TestLifecycleHandlers_ListPathRejectsID(t *testing.T) {
+	h := &Handlers{opts: Options{Lifecycle: &lifecycle.Store{}}}
+
+	req := adminCtx(httptest.NewRequest("GET",
+		"/api/v1/lifecycle/ownership?kind=pull-request&id=mctlhq/mctl-web%2342&phase=review-remediation", nil))
+	rec := httptest.NewRecorder()
+	h.GetLifecycleOwnership(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("?id on the list path: want 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// The message has to name the path to use. An error that says only "not
+	// supported" makes the caller go read the routes.
+	if !strings.Contains(rec.Body.String(), "/api/v1/lifecycle/ownership/record") {
+		t.Errorf("the 400 does not name the replacement path: %s", rec.Body.String())
+	}
+}
+
+// The repeated `?id=` on /batch is a different question with different
+// semantics, and must not be caught by the rejection above.
+func TestLifecycleHandlers_BatchStillTakesRepeatedID(t *testing.T) {
+	h := &Handlers{opts: Options{Lifecycle: &lifecycle.Store{}}}
+
+	req := adminCtx(httptest.NewRequest("GET",
+		"/api/v1/lifecycle/ownership/batch?kind=pull-request&phase=review-remediation", nil))
+	rec := httptest.NewRecorder()
+	h.BatchGetLifecycleOwnership(rec, req)
+
+	// No ids: an empty envelope, not the list path's 400. Reaching this arm at
+	// all is the assertion — the rejection above lives on a different handler.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch with no ids: want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
 }

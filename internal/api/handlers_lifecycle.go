@@ -227,21 +227,26 @@ func (h *Handlers) GetLifecycleOwnership(w http.ResponseWriter, r *http.Request)
 	kind, phase := q.Get("kind"), q.Get("phase")
 
 	if q.Get("id") != "" {
-		// DEPRECATED. Logged rather than rejected, because rejecting here
-		// would break any caller deployed against the previous release; the
-		// 400 lands once the callers are known to be past it. The warning is
-		// how we find out whether any still exist — so it carries the `id`
-		// too: the point is to identify WHICH caller and entity still take
-		// this path, and a warning naming only the kind and phase confirms
-		// that somebody did without saying who.
-		slog.Warn("deprecated ?id on GET /api/v1/lifecycle/ownership; use /api/v1/lifecycle/ownership/record",
+		// The grace window is over (#302 item 7). `?id` here delegated for one
+		// release so a client deployed against the previous one did not break
+		// mid-rollout; mctl-agents 1.45.0 is deployed and reads /record, and
+		// no caller in the workspace takes this path any more.
+		//
+		// A 400 rather than a silent delegate, because the shape of an answer
+		// must not depend on whether an argument was supplied: that is the
+		// defect the split removed one layer down, and leaving the old path
+		// working indefinitely keeps it reachable.
+		//
+		// The message names the path to use. An error that says only "not
+		// supported" makes the caller go read the routes; this one is the
+		// smallest thing that turns a broken call into a fixed one.
+		//
+		// NOT to be confused with the repeated `?id=` on /batch, which is a
+		// different question with different semantics and is unaffected.
+		slog.Warn("rejected deprecated ?id on GET /api/v1/lifecycle/ownership",
 			"kind", kind, "phase", phase, "id", q.Get("id"))
-		// The delegate re-runs requireLifecycleAdmin for the same request.
-		// Deliberate: it is a pure read of the request context with no side
-		// effects, and splitting an unexported no-auth variant out to save it
-		// would put a handler in this file that answers without checking —
-		// one careless route registration away from being reachable.
-		h.GetLifecycleOwnershipRecord(w, r)
+		writeError(w, http.StatusBadRequest,
+			"id is not supported here; read one entity with GET /api/v1/lifecycle/ownership/record")
 		return
 	}
 
