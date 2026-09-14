@@ -14,7 +14,10 @@
 
 package temporalclient
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestWorkflowIDForIssueURL(t *testing.T) {
 	cases := []struct {
@@ -54,6 +57,51 @@ func TestWorkflowIDForIssueURL(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("WorkflowIDForIssueURL(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkflowIDForProposalRef(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "the shape DevLoopWorkflow writes", in: "mctl-web/issue-7-add-a-thing", want: "dev-loop-mctlhq-mctl-web-7"},
+		{name: "multi-digit issue", in: "mctl-telegram/issue-296-x", want: "dev-loop-mctlhq-mctl-telegram-296"},
+		{name: "a dotted service name", in: ".github/issue-57-epic", want: "dev-loop-mctlhq-.github-57"},
+		// A PREFIX match, trailing hyphen included -- exactly what
+		// run_shepherd.py's re.match(r"issue-(\d+)-", slug) accepts, so the two
+		// sides cannot disagree about which proposals ever had a DevLoop.
+		{name: "issue number with no trailing hyphen", in: "mctl-web/issue-7", wantErr: true},
+		{name: "an incident slug never had a DevLoop", in: "mctl-web/incident-2026-09-01", wantErr: true},
+		{name: "no service part", in: "issue-7-a-thing", wantErr: true},
+		{name: "empty slug", in: "mctl-web/", wantErr: true},
+		{name: "empty service", in: "/issue-7-a-thing", wantErr: true},
+		{name: "empty ref", in: "", wantErr: true},
+		// The prefix is anchored: a slug that merely CONTAINS issue-<N>- must
+		// not resolve, or a proposal named after another one would silently
+		// answer about that other one's workflow.
+		{name: "prefix is anchored", in: "mctl-web/reverts-issue-7-a-thing", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := WorkflowIDForProposalRef(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got %q", got)
+				}
+				if !errors.Is(err, ErrInvalidProposalRef) {
+					t.Errorf("error does not wrap ErrInvalidProposalRef: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
 	}

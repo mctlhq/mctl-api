@@ -248,6 +248,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerIssue())
 	srv.AddTool(s.toolApproveDevLoop())
 	srv.AddTool(s.toolGetDevLoop())
+	srv.AddTool(s.toolGetLifecycleOwnership())
 	srv.AddTool(s.toolListRecentAgentRuns())
 
 	// Cloudflare MCP portal (dispatch only — no Cloudflare credential here).
@@ -2521,6 +2522,34 @@ func (s *Server) apiGet(ctx context.Context, path string) ([]byte, error) {
 		return nil, err
 	}
 	return s.doRequest(req, s.effectiveToken(ctx))
+}
+
+// apiGetStatus is apiGet for a caller that must react to the STATUS rather
+// than to an error string. doRequest collapses every >=400 into an error
+// carrying the API's message and nothing else, which is right for tools that
+// only report a failure — but the lifecycle read has to tell 503 ("the store
+// did not answer; ownership is UNKNOWN") from 404 ("the store answered: it
+// holds no record"), and those two are one sentence apart in the body and a
+// whole decision apart in meaning.
+func (s *Server) apiGetStatus(ctx context.Context, path string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", s.apiURL+path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if token := s.effectiveToken(ctx); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("reading response: %w", err)
+	}
+	return body, resp.StatusCode, nil
 }
 
 func (s *Server) apiPost(ctx context.Context, path string, body map[string]string) ([]byte, error) {

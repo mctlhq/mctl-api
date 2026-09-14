@@ -93,6 +93,18 @@ type Divergence struct {
 // being unreachable, which the caller signals with storeReadable=false and
 // which never reaches this function as a nil record.
 func Classify(o *Ownership, storeReadable bool, legacy LegacyAnswer, now time.Time) Divergence {
+	return ClassifyDerived(o, Derive(o, now), storeReadable, legacy)
+}
+
+// ClassifyDerived is Classify for a caller that ALREADY has the derived view —
+// the read surface, which serves `derived` in its response and would otherwise
+// derive the same record twice, a few milliseconds apart, on either side of one
+// request. Two derivations of one record can disagree: `dead` is a comparison
+// against a clock, so a record sitting on its liveness bound can be alive in the
+// body and dead in the divergence class of the same answer.
+//
+// Classify remains the entry point for callers that hold only a record.
+func ClassifyDerived(o *Ownership, d Derived, storeReadable bool, legacy LegacyAnswer) Divergence {
 	if !storeReadable {
 		return Divergence{Class: DivergeStoreUnknown}
 	}
@@ -100,7 +112,6 @@ func Classify(o *Ownership, storeReadable bool, legacy LegacyAnswer, now time.Ti
 		return Divergence{Class: DivergeLegacyUnknown}
 	}
 
-	d := Derive(o, now)
 	// "Held" is the question that matters, and it is narrower than "a row
 	// exists": a released, terminal or dead owner does not withhold the entity
 	// from anybody. `dead` is deliberately on the not-held side — ADR-010 §4

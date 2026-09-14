@@ -95,6 +95,11 @@
       "reason": "Incident record with collected evidence (log excerpts, analysis, PR links); tenant-scoped by the upstream. Excerpts can carry application log text, acceptable on a private admin-only aggregate."
     },
     {
+      "name": "mctl_get_lifecycle_ownership",
+      "enabled": true,
+      "reason": "Read-only view of the lifecycle ownership store: who is responsible for an entity phase, whether that owner is alive, and whether the store agrees with the old DevLoopWorkflow check. It exposes internal repo/PR identifiers and owner ids, no credentials, and grants no authority -- ownership says who is responsible, never what they may do. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication and admin check are the access control -- the portal only decides visibility."
+    },
+    {
       "name": "mctl_get_openclaw_sizing_recommendation",
       "enabled": true,
       "reason": "Aggregated VictoriaMetrics resource history and a recommended profile for one OpenClaw service; numbers only, tenant-scoped upstream."

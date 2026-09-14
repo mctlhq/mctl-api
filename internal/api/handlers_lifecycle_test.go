@@ -944,3 +944,100 @@ func TestLifecycleRecordPathRejectsIncompleteSelectors(t *testing.T) {
 		})
 	}
 }
+
+// TestOwnershipResponse_CarriesTheDerivedView pins the field the shepherd's
+// shadow compare reads.
+//
+// `held` is the takeover predicate, and derive.go carries it separately from
+// `status` because the status string cannot answer it: a handing-off row past
+// its liveness bound reports the more specific `handoff-stalled` while being
+// dead and recoverable. Without `held` on the wire, the Python side has to
+// re-derive that from `state` and `dead` -- and the first consumer that
+// re-derived it got it wrong in the direction that turns the one dangerous
+// divergence class into `agree`. This test is why it does not have to.
+//
+// Needs no database: the read model is a pure function of a record.
+func TestOwnershipResponse_CarriesTheDerivedView(t *testing.T) {
+	now := time.Now().UTC()
+	base := func() *lifecycle.Ownership {
+		return &lifecycle.Ownership{
+			Entity:         lifecycle.EntityRef{Kind: lifecycle.KindPullRequest, ID: "mctlhq/mctl-web#42"},
+			Phase:          lifecycle.PhaseReviewRemediation,
+			Owner:          lifecycle.Owner{Type: lifecycle.OwnerDevLoopWorkflow, ID: "wf-1"},
+			State:          lifecycle.StateActive,
+			LastSeenAt:     now,
+			LastProgressAt: now,
+		}
+	}
+
+	t.Run("a live record is held and healthy", func(t *testing.T) {
+		body, err := json.Marshal(newOwnershipResponse(base()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			Dead    bool `json:"dead"`
+			Derived struct {
+				Status      string `json:"status"`
+				Held        bool   `json:"held"`
+				Dead        bool   `json:"dead"`
+				BoundsKnown bool   `json:"bounds_known"`
+			} `json:"derived"`
+		}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("body: %v\n%s", err, body)
+		}
+		if got.Derived.Status != lifecycle.StatusHealthy {
+			t.Errorf("derived.status: got %q, want %q", got.Derived.Status, lifecycle.StatusHealthy)
+		}
+		if !got.Derived.Held {
+			t.Error("derived.held is false for an active, live record")
+		}
+		if !got.Derived.BoundsKnown {
+			t.Error("derived.bounds_known is false; the status was measured against a window the caller cannot see")
+		}
+		// The flat booleans stay: the deployed Python client parses them, and
+		// removing them to tidy up would break every reader for a field they
+		// can also reach one level down.
+		if got.Dead != got.Derived.Dead {
+			t.Errorf("the flat `dead` (%t) and derived.dead (%t) disagree", got.Dead, got.Derived.Dead)
+		}
+	})
+
+	t.Run("a stalled handoff is not held", func(t *testing.T) {
+		o := base()
+		o.State = lifecycle.StateHandingOff
+		// Past the 10h liveness bound for this (kind, phase), on both clocks:
+		// the frozen last_seen_at makes the row dead, and the handoff start
+		// makes it stalled. Both are needed -- that is exactly the record whose
+		// status and takeover predicate disagree.
+		started := now.Add(-24 * time.Hour)
+		o.HandoffStartedAt = &started
+		o.LastSeenAt = started
+		o.LastProgressAt = started
+
+		body, err := json.Marshal(newOwnershipResponse(o))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			Derived struct {
+				Status string `json:"status"`
+				Held   bool   `json:"held"`
+				Dead   bool   `json:"dead"`
+			} `json:"derived"`
+		}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("body: %v", err)
+		}
+		if got.Derived.Status != lifecycle.StatusHandoffStalled {
+			t.Errorf("derived.status: got %q, want %q", got.Derived.Status, lifecycle.StatusHandoffStalled)
+		}
+		if !got.Derived.Dead {
+			t.Error("derived.dead is false for a handing-off row past its liveness bound")
+		}
+		if got.Derived.Held {
+			t.Error("derived.held is true for a dead handoff; this is the record whose status reads as withheld while the store would hand it to somebody else")
+		}
+	})
+}
