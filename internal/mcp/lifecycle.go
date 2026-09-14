@@ -348,7 +348,6 @@ func effectiveListLimit(req mcplib.CallToolRequest) int {
 	return n
 }
 
-// lifecycleRecordFor assembles one envelope entry.
 // lifecycleProbes says, per record, what was asked for and what this call is
 // still allowed to do about it. Four adjacent bools in two interleaved pairs
 // at a call site is an argument order nobody can read back.
@@ -361,6 +360,7 @@ type lifecycleProbes struct {
 	RunEvents bool
 }
 
+// lifecycleRecordFor assembles one envelope entry.
 func (s *Server) lifecycleRecordFor(
 	ctx context.Context, rec *apiOwnershipRecord, probes lifecycleProbes,
 ) lifecycleRecord {
@@ -420,36 +420,45 @@ func (s *Server) lifecycleRecordFor(
 // whole point: every path that means "we could not tell" answers UNKNOWN here,
 // where the shepherd's bool answers False and thereby says "nobody owns this".
 func (s *Server) lifecycleLegacyFor(ctx context.Context, o lifecycle.Ownership) lifecycleLegacy {
-	// proposal_ref FIRST, and the order is load-bearing.
+	// A DEVLOOP-SHAPED stored id first, then reconstruction. Both halves of
+	// that order are load-bearing.
 	//
 	// temporal_workflow_id records the OWNER's workflow, whatever that owner
-	// is: a pr-steward or shepherd row carries its own, and DescribeDevLoop
-	// does not check the type. Probing it answers about the wrong execution —
-	// a finished steward workflow reads "free" — and, checked first, it
-	// preempts the reconstruction that names the DevLoop the legacy question
-	// is actually about, turning a dangerous divergence into `agree`.
+	// is — a pr-steward or shepherd row carries its own, and DescribeDevLoop
+	// does not check the type. So it is only usable when it is shaped like a
+	// DevLoop id; that prefix is the only thing on the record saying which
+	// kind of workflow it names. Probing an unshaped one answers about the
+	// wrong execution: a finished steward workflow reads "free".
 	//
-	// The stored id is a FALLBACK for a row with no proposal ref, and only
-	// when it is shaped like a DevLoop id. That prefix is the only thing on
-	// the record that says which kind of workflow it names.
+	// But when the shape matches, the DevLoopWorkflow wrote it, and it names
+	// the real execution. WorkflowIDForProposalRef is a DERIVATION over two
+	// hardcoded assumptions — owner `mctlhq`, and the service half equal to
+	// the repo name. Where they do not hold it names no execution at all, and
+	// a 404 there becomes a definite "no live DevLoop" obtained by asking
+	// about a guessed id while the record held the real one. Beside a
+	// not-held row that is `agree`: the dangerous class going quiet from the
+	// other direction.
+	stored := strings.TrimSpace(o.TemporalWorkflowID)
+	if strings.HasPrefix(stored, devLoopWorkflowIDPrefix) {
+		return s.lifecycleDescribeLegacy(ctx, stored)
+	}
 	if ref := strings.TrimSpace(o.ProposalRef); ref != "" {
 		workflowID, err := temporalclient.WorkflowIDForProposalRef(ref)
 		return s.lifecycleLegacyFromDerivation(ctx, ref, workflowID, err)
 	}
-	if stored := strings.TrimSpace(o.TemporalWorkflowID); stored != "" {
-		if !strings.HasPrefix(stored, devLoopWorkflowIDPrefix) {
-			return lifecycleLegacy{
-				Answer:     legacyAnswerUnknown,
-				WorkflowID: stored,
-				Reason: fmt.Sprintf(
-					"temporal_workflow_id %q is not a DevLoopWorkflow id; the legacy question is about a DevLoop",
-					stored),
-			}
+	if stored != "" {
+		// A stored id that is not a DevLoop's, and no ref to derive one from.
+		// The id is named in the REASON and not in `workflow_id`: that field
+		// everywhere else means "the workflow this answer is about", and this
+		// is the one we deliberately did not ask.
+		return lifecycleLegacy{
+			Answer: legacyAnswerUnknown,
+			Reason: fmt.Sprintf(
+				"temporal_workflow_id %q is not a DevLoopWorkflow id, and the record carries no proposal_ref",
+				stored),
 		}
-		return s.lifecycleDescribeLegacy(ctx, stored)
 	}
-	// Not "no DevLoop": no way to ask. Neither a proposal ref to derive an id
-	// from nor a stored one to fall back on.
+	// Not "no DevLoop": no way to ask.
 	return lifecycleLegacy{
 		Answer: legacyAnswerUnknown,
 		Reason: "record carries neither proposal_ref nor temporal_workflow_id",

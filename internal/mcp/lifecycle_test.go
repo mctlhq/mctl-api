@@ -792,3 +792,75 @@ func TestLifecycleTool_DoesNotProbeANonDevLoopWorkflowID(t *testing.T) {
 		}
 	})
 }
+
+// A DevLoop-shaped stored id beside a proposal_ref: the row neither of the
+// tests above has, and the one the ordering is for.
+//
+// WorkflowIDForProposalRef is a DERIVATION over two hardcoded assumptions —
+// owner mctlhq, and the service half equal to the repo name. Where they do not
+// hold it names no execution, and a 404 there becomes a definite "no live
+// DevLoop" obtained by asking about a guessed id while the record held the
+// real one.
+func TestLifecycleTool_ADevLoopShapedStoredIDWinsOverReconstruction(t *testing.T) {
+	rec := `{
+		"entity":{"kind":"pull-request","id":"someone/a-fork#42"},
+		"phase":"review-remediation",
+		"owner":{"type":"devloop-workflow","id":"dev-loop-mctlhq-other-name-99"},
+		"state":"active",
+		"proposal_ref":"a-service/issue-7-a-thing",
+		"temporal_workflow_id":"dev-loop-mctlhq-other-name-99",
+		"dead":false,"stuck":false,"healthy":true,
+		"derived":{"status":"healthy","dead":false,"held":true}
+	}`
+	var describedPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/lifecycle/ownership/record" {
+			_, _ = w.Write([]byte(rec))
+			return
+		}
+		describedPath = r.URL.Path
+		// The derived id names no execution; only the stored one does.
+		if strings.HasSuffix(r.URL.Path, "dev-loop-mctlhq-other-name-99") {
+			_, _ = w.Write([]byte(`{"status":"Running","shepherd_in_loop":true,"shepherd_in_loop_known":true}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"workflow not found"}`))
+	}))
+	defer backend.Close()
+
+	env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation", "id": "someone/a-fork#42",
+	}))
+	if !strings.HasSuffix(describedPath, "dev-loop-mctlhq-other-name-99") {
+		t.Errorf("described %q; the stored DevLoop id must win over a guessed one", describedPath)
+	}
+	if got := env.Records[0].Legacy.Answer; got != legacyAnswerOwned {
+		t.Errorf("legacy answer %q; the reconstruction's 404 was reported as a measured free", got)
+	}
+}
+
+// The one deliberately not asked about must not appear in a field that
+// everywhere else names the workflow the answer is about.
+func TestLifecycleTool_DoesNotNameAWorkflowItDidNotProbe(t *testing.T) {
+	rec := `{
+		"entity":{"kind":"pull-request","id":"mctlhq/mctl-web#42"},
+		"phase":"review-remediation",
+		"owner":{"type":"pr-steward","id":"pr-steward:mctlhq/mctl-web"},
+		"state":"active","temporal_workflow_id":"wf-steward",
+		"dead":false,"stuck":false,"healthy":true,
+		"derived":{"status":"healthy","dead":false,"held":true}
+	}`
+	backend, _ := backendFor(t, rec, `{}`, http.StatusOK)
+	env := decodeEnvelope(t, callLifecycleTool(t, backend.URL, map[string]any{
+		"kind": "pull-request", "phase": "review-remediation", "id": "mctlhq/mctl-web#42",
+	}))
+	legacy := env.Records[0].Legacy
+	if legacy.WorkflowID != "" {
+		t.Errorf("workflow_id is %q for a workflow that was not probed", legacy.WorkflowID)
+	}
+	if !strings.Contains(legacy.Reason, "wf-steward") {
+		t.Errorf("the reason does not name the id it declined to probe: %q", legacy.Reason)
+	}
+}
