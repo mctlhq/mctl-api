@@ -216,9 +216,11 @@ func (h *Handlers) GetLifecycleOwnershipRecord(w http.ResponseWriter, r *http.Re
 }
 
 // GetLifecycleOwnership handles GET /api/v1/lifecycle/ownership — what the
-// store holds, filtered. The single-record read moved to
-// GET /api/v1/lifecycle/ownership/record; `?id` here is deprecated and still
-// delegates for one release so a client in flight does not break mid-rollout.
+// store holds, filtered. The single-record read lives at
+// GET /api/v1/lifecycle/ownership/record; `?id` here is REJECTED with a 400
+// naming that path. It delegated for one release so a client in flight did not
+// break mid-rollout (#302 item 7); that window closed once mctl-agents 1.45.0
+// was deployed and reading /record.
 func (h *Handlers) GetLifecycleOwnership(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
 		return

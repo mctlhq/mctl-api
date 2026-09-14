@@ -911,15 +911,15 @@ func TestLifecycleRecordPathReturnsABareRecord(t *testing.T) {
 		t.Fatalf("record is for the wrong entity: %q want %q", got, id)
 	}
 
-	// `?id` on the list path still answers, identically, for one release: a
-	// client deployed against the previous version must not break mid-rollout.
-	// This assertion is deleted together with the delegation.
+	// The delegation is gone, and so is the assertion that pinned it — the
+	// comment here used to say exactly that this block goes with it. `?id` on
+	// the list path is now a 400 naming /record, which
+	// TestLifecycleHandlers_ListPathRejectsID covers without a database; this
+	// one asserts only that the rejection reaches the same handler the real
+	// route does.
 	deprecated := get("/api/v1/lifecycle/ownership?"+q, h.GetLifecycleOwnership)
-	if deprecated.Code != http.StatusOK {
-		t.Fatalf("deprecated ?id read: %d %s", deprecated.Code, deprecated.Body)
-	}
-	if deprecated.Body.String() != rec.Body.String() {
-		t.Fatalf("the deprecated path answers differently:\n new: %s\n old: %s", rec.Body, deprecated.Body)
+	if deprecated.Code != http.StatusBadRequest {
+		t.Fatalf("deprecated ?id read: want 400, got %d %s", deprecated.Code, deprecated.Body)
 	}
 }
 
