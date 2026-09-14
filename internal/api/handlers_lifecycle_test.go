@@ -1070,6 +1070,23 @@ func TestLifecycleHandlers_ListPathRejectsID(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "/api/v1/lifecycle/ownership/record") {
 		t.Errorf("the 400 does not name the replacement path: %s", rec.Body.String())
 	}
+
+	// An id that was SUPPLIED, whatever its value. `?id=` answering the list
+	// envelope would make the shape depend on how the argument was spelled,
+	// which is the defect one case smaller; `?id=&id=x` is the same thing with
+	// the empty value first, where Get() returns "" for a caller that plainly
+	// named an entity.
+	for _, query := range []string{
+		"kind=pull-request&phase=review-remediation&id=",
+		"kind=pull-request&phase=review-remediation&id=&id=mctlhq/mctl-web%2342",
+	} {
+		req := adminCtx(httptest.NewRequest("GET", "/api/v1/lifecycle/ownership?"+query, nil))
+		rec := httptest.NewRecorder()
+		h.GetLifecycleOwnership(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%q: want 400, got %d %s", query, rec.Code, rec.Body.String())
+		}
+	}
 }
 
 // The repeated `?id=` on /batch is a different question with different

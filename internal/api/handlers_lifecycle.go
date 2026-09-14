@@ -228,7 +228,13 @@ func (h *Handlers) GetLifecycleOwnership(w http.ResponseWriter, r *http.Request)
 	q := r.URL.Query()
 	kind, phase := q.Get("kind"), q.Get("phase")
 
-	if q.Get("id") != "" {
+	// PRESENCE, not a non-empty value. `?id=` is an id that was supplied, and
+	// the whole point of the rejection is that the shape of the answer must not
+	// depend on whether the argument was supplied — answering the list envelope
+	// to a request that named `id` reintroduces exactly that, one case smaller.
+	// It also catches `?id=&id=x`, where Get returns the first (empty) value
+	// while the caller plainly meant an entity.
+	if _, supplied := q["id"]; supplied {
 		// The grace window is over (#302 item 7). `?id` here delegated for one
 		// release so a client deployed against the previous one did not break
 		// mid-rollout; mctl-agents 1.45.0 is deployed and reads /record, and
