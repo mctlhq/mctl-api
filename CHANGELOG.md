@@ -1,5 +1,24 @@
 # Changelog
 
+## [4.49.0](https://github.com/mctlhq/mctl-api/compare/4.48.0...4.49.0) (2026-09-17)
+
+
+### Features
+
+* **events:** GitHub pull request webhook producer ([9e67ad8](https://github.com/mctlhq/mctl-api/commit/9e67ad8c27e9c299c9c01cd98a137dadc8bb80d7))
+* **events:** GitHub pull request webhook producer ([19d1d22](https://github.com/mctlhq/mctl-api/commit/19d1d223088742b9b27f9ffb2dc917bf76b407db)), closes [#323](https://github.com/mctlhq/mctl-api/issues/323)
+
+
+### Bug Fixes
+
+* **events:** bind the cancel callback to its own connection; test splitCSV ([48813f4](https://github.com/mctlhq/mctl-api/commit/48813f479dc3a4b2e4d39f2e60037dc50429a4e2))
+* **events:** bound best-effort audit, coalesce lease retries, document env ([d37b9dd](https://github.com/mctlhq/mctl-api/commit/d37b9dd55b2e80a6cbb02be35460ac0c063625df))
+* **events:** bound relay database calls and Valkey bulk replies ([fd9f0ec](https://github.com/mctlhq/mctl-api/commit/fd9f0ec5ed13fbbd4515c6521f0054104181770b))
+* **events:** context-aware Valkey client, safe truncation, hermetic metrics ([316cef4](https://github.com/mctlhq/mctl-api/commit/316cef491ef919dfd6a51b4848a7cd7dbabe625c))
+* **events:** guard stale failure marks; document the GitHub webhook ([c85079c](https://github.com/mctlhq/mctl-api/commit/c85079c628170483938e5d45890195eb1a34a749))
+* **events:** keep relay ownership during a batch and reject partial events ([d5c0c85](https://github.com/mctlhq/mctl-api/commit/d5c0c850e1008fb25ab9c94651745fff1f5ef4f6))
+* **events:** single relay publisher across replicas, honest backoff and timeouts ([94ee4ac](https://github.com/mctlhq/mctl-api/commit/94ee4ac3789ea67b0be1794877c2f3d453058757))
+
 ## [4.48.0](https://github.com/mctlhq/mctl-api/compare/4.47.0...4.48.0) (2026-09-14)
 
 
