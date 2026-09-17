@@ -25,6 +25,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
@@ -147,7 +148,7 @@ type fakePub struct {
 	failErr error
 }
 
-func (p *fakePub) XAdd(stream string, maxLen int, fields ...string) (string, error) {
+func (p *fakePub) XAdd(_ context.Context, stream string, maxLen int, fields ...string) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.failOn != "" && stream == p.failOn {
@@ -264,7 +265,7 @@ func fakeValkey(t *testing.T, handle func(args []string) string) string {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				r := bufio.NewReader(c)
 				for {
 					line, err := r.ReadString('\n')
@@ -272,7 +273,9 @@ func fakeValkey(t *testing.T, handle func(args []string) string) string {
 						return
 					}
 					var n int
-					fmt.Sscanf(line, "*%d", &n)
+					if _, err := fmt.Sscanf(line, "*%d", &n); err != nil {
+						return
+					}
 					args := make([]string, n)
 					for i := range args {
 						_, _ = r.ReadString('\n')
@@ -310,7 +313,7 @@ func TestClient_AuthThenXAdd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	id, err := c.XAdd(DefaultStream, 10000, "envelope", `{"a":1}`)
+	id, err := c.XAdd(context.Background(), DefaultStream, 10000, "envelope", `{"a":1}`)
 	if err != nil || id != "1789626542319-0" {
 		t.Fatalf("xadd = %q, %v", id, err)
 	}
@@ -331,7 +334,7 @@ func TestClient_ServerErrorIsTypedAndPasswordNeverInURL(t *testing.T) {
 	})
 	c, _ := NewClient(url, "pw", time.Second)
 	defer c.Close()
-	_, err := c.XAdd("mctl:events:telegram", 10, "envelope", "{}")
+	_, err := c.XAdd(context.Background(), "mctl:events:telegram", 10, "envelope", "{}")
 	var se *ServerError
 	if !errors.As(err, &se) || !strings.HasPrefix(se.Msg, "NOPERM") {
 		t.Fatalf("err = %v, want NOPERM ServerError", err)
@@ -352,7 +355,75 @@ func TestClient_RealValkey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if _, err := c.XAdd("mctl:events:github", 100, "envelope", `{"probe":true}`); err != nil {
+	if _, err := c.XAdd(context.Background(), "mctl:events:github", 100, "envelope", `{"probe":true}`); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClient_URLWithoutUserinfo(t *testing.T) {
+	c, err := NewClient("redis://valkey.platform-events.svc:6379/0", "", time.Second)
+	if err != nil || c.username != "" {
+		t.Fatalf("client = %+v, err = %v; want no username and no panic", c, err)
+	}
+}
+
+func TestClient_CancelledContextStopsABlockedCall(t *testing.T) {
+	url := fakeValkey(t, func(args []string) string {
+		if args[0] == "AUTH" {
+			return "+OK\r\n"
+		}
+		time.Sleep(3 * time.Second) // never answers in time
+		return "+OK\r\n"
+	})
+	c, _ := NewClient(url, "pw", 10*time.Second)
+	defer c.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	start := time.Now()
+	if _, err := c.XAdd(ctx, DefaultStream, 10, "envelope", "{}"); err == nil {
+		t.Fatal("want an error from the cancelled call")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("cancelled call took %v; the context must unblock it", elapsed)
+	}
+}
+
+func TestTruncateUTF8_NeverSplitsARune(t *testing.T) {
+	s := strings.Repeat("a", 499) + "ж" // the 2-byte rune straddles byte 500
+	got := truncateUTF8(s, 500)
+	if !utf8.ValidString(got) || len(got) > 500 {
+		t.Fatalf("truncated to %d bytes, valid=%v", len(got), utf8.ValidString(got))
+	}
+}
+
+func TestRelay_RunPublishesOnNotifyAndStopsOnCancel(t *testing.T) {
+	st, pub := newFakes(0)
+	r := NewRelay(st, pub, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+
+	st.mu.Lock()
+	st.rows = append(st.rows, OutboxRow{ID: 1, EventID: "github:late", Stream: DefaultStream, Envelope: "{}", CreatedAt: time.Now()})
+	st.mu.Unlock()
+	r.Notify()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st.mu.Lock()
+		_, ok := st.published[1]
+		st.mu.Unlock()
+		if ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Notify did not publish the new row")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel")
 	}
 }

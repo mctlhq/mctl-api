@@ -114,17 +114,21 @@ func (o *Outbox) PendingOutbox(ctx context.Context, limit int) ([]OutboxRow, err
 func (o *Outbox) MarkOutboxPublished(ctx context.Context, id int64, at time.Time) error {
 	_, err := o.pool.Exec(ctx,
 		`UPDATE event_outbox SET published_at = $1, attempts = attempts + 1, last_error = '' WHERE id = $2`, at, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("event outbox: mark published: %w", err)
+	}
+	return nil
 }
 
 // MarkOutboxFailed records a failed attempt; the row stays pending.
 func (o *Outbox) MarkOutboxFailed(ctx context.Context, id int64, reason string) error {
-	if len(reason) > 500 {
-		reason = reason[:500]
-	}
+	reason = truncateUTF8(reason, 500)
 	_, err := o.pool.Exec(ctx,
 		`UPDATE event_outbox SET attempts = attempts + 1, last_error = $1 WHERE id = $2`, reason, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("event outbox: mark failed: %w", err)
+	}
+	return nil
 }
 
 // PurgePublishedOutbox deletes rows published before the cutoff.
@@ -132,7 +136,7 @@ func (o *Outbox) PurgePublishedOutbox(ctx context.Context, before time.Time) (in
 	tag, err := o.pool.Exec(ctx,
 		`DELETE FROM event_outbox WHERE published_at IS NOT NULL AND published_at < $1`, before)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("event outbox: purge: %w", err)
 	}
 	return tag.RowsAffected(), nil
 }
@@ -140,6 +144,8 @@ func (o *Outbox) PurgePublishedOutbox(ctx context.Context, before time.Time) (in
 // OutboxBacklog counts unpublished rows.
 func (o *Outbox) OutboxBacklog(ctx context.Context) (int64, error) {
 	var n int64
-	err := o.pool.QueryRow(ctx, `SELECT COUNT(*) FROM event_outbox WHERE published_at IS NULL`).Scan(&n)
-	return n, err
+	if err := o.pool.QueryRow(ctx, `SELECT COUNT(*) FROM event_outbox WHERE published_at IS NULL`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("event outbox: backlog: %w", err)
+	}
+	return n, nil
 }
