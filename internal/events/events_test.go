@@ -162,14 +162,19 @@ type fakeStore struct {
 	failures  map[int64]string
 	markErr   error
 
-	leaseHolder string
-	leaseUntil  time.Time
-	acquires    int
+	leaseHolder  string
+	leaseUntil   time.Time
+	acquires     int
+	blockPending bool // PendingOutbox waits for its context, like a stalled pool
 
 	releaseBounded, releaseLive bool
 }
 
-func (f *fakeStore) PendingOutbox(_ context.Context, limit int) ([]OutboxRow, error) {
+func (f *fakeStore) PendingOutbox(ctx context.Context, limit int) ([]OutboxRow, error) {
+	if f.blockPending {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []OutboxRow
@@ -716,5 +721,39 @@ func TestRelay_RunPublishesOnNotifyAndStopsOnCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+func TestRelay_StalledDatabaseFailsThePassInsteadOfHanging(t *testing.T) {
+	st, pub := newFakes(1)
+	st.blockPending = true
+	r := NewRelay(st, pub, false)
+	r.storeTimeout = 50 * time.Millisecond
+	done := make(chan error, 1)
+	go func() { done <- r.Drain(context.Background()) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("drain = %v, want a deadline error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled database query held the drain")
+	}
+}
+
+func TestClient_OversizedBulkReplyIsRejected(t *testing.T) {
+	url := fakeValkey(t, func(args []string) string {
+		if args[0] == "XADD" {
+			return "$9223372036854775807\r\n"
+		}
+		return "+OK\r\n"
+	})
+	c, err := NewClient(url, "pw", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.XAdd(context.Background(), "s", 10, "k", "v"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("xadd = %v, want an oversized-reply error", err)
 	}
 }
