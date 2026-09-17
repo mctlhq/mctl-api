@@ -164,6 +164,7 @@ type fakeStore struct {
 
 	leaseHolder string
 	leaseUntil  time.Time
+	acquires    int
 
 	releaseBounded, releaseLive bool
 }
@@ -197,6 +198,7 @@ func (f *fakeStore) MarkOutboxFailed(_ context.Context, id int64, reason string)
 func (f *fakeStore) AcquireOutboxLease(_ context.Context, holder string, now time.Time, ttl time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.acquires++
 	if f.leaseHolder != "" && f.leaseHolder != holder && now.Before(f.leaseUntil) {
 		return false, nil
 	}
@@ -467,6 +469,45 @@ func TestRelay_NotifyDoesNotCutBackoffShort(t *testing.T) {
 	defer pub.mu.Unlock()
 	if pub.attempts != 1 {
 		t.Fatalf("xadd attempts during backoff = %d, want 1", pub.attempts)
+	}
+}
+
+func TestRelay_FailingAuditDoesNotHoldDeliveryBack(t *testing.T) {
+	st, pub := newFakes(5)
+	pub.failOn, pub.failErr = AuditStream, errors.New("audit stream unavailable")
+	r := NewRelay(st, pub, false)
+	if err := r.Drain(context.Background()); err != nil {
+		t.Fatalf("drain = %v, want nil: audit is best effort", err)
+	}
+	if len(st.published) != 5 {
+		t.Fatalf("published %d rows, want 5", len(st.published))
+	}
+	// One audit attempt, then the pass stops paying for a failing trail.
+	if pub.attempts != 6 {
+		t.Fatalf("xadd attempts = %d, want 5 events + 1 audit", pub.attempts)
+	}
+}
+
+func TestRelay_NotifyDoesNotRetryAHeldLeaseEarly(t *testing.T) {
+	st, pub := newFakes(1)
+	st.leaseHolder, st.leaseUntil = "other-replica", time.Now().Add(time.Hour)
+	r := NewRelay(st, pub, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	// Another replica owns the outbox: new ingests inside the 1s lease retry
+	// must not make this replica contend for the lease again.
+	end := time.Now().Add(700 * time.Millisecond)
+	for time.Now().Before(end) {
+		r.Notify()
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.acquires != 1 {
+		t.Fatalf("lease acquire attempts while held elsewhere = %d, want 1", st.acquires)
 	}
 }
 
