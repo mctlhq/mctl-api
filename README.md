@@ -139,6 +139,11 @@ docker run -p 8080:8080 mctl-api
 | `BACKSTAGE_TOKEN` | Backstage service token, used only for tenant catalog sync (`notifyBackstage`) — no longer used by `/api/v1/domains*`, which is mctl-api's own registry | — | No |
 | `BACKSTAGE_GITHUB_APP_CONNECT_TOKEN` | Backstage service token, scoped to the `github-app-connect` plugin (repos list/sync/install-url) | — | No |
 | `DOMAINS_DB_URL` | PostgreSQL connection string for the custom domains registry (falls back to `AUDIT_DB_URL`). Without either, `/api/v1/domains*` returns 503. | — | No |
+| `GITHUB_WEBHOOK_SECRET` | HMAC secret for `POST /api/v1/webhooks/github` (`X-Hub-Signature-256`). Unset: the webhook answers 401. Pull request events are queued as reference-only envelopes for Claude Remote (mctlhq/.github#87). | — | No |
+| `GITHUB_WEBHOOK_OWNERS` | Comma-separated repository owners whose webhook events are queued; others are ignored. | `mctlhq` | No |
+| `EVENTS_VALKEY_URL` | `redis://user@host:port/db` of the platform Valkey, using the producer's ACL user. Needed together with a database: when the secret is set but Valkey or the outbox database is not configured, the webhook answers 503. | — | No |
+| `EVENTS_VALKEY_PASSWORD` | Password of that ACL user. A URL naming a user without a password is rejected. | — | No |
+| `EVENTS_DB_URL` | PostgreSQL connection string for the event outbox (falls back to `AUDIT_DB_URL`). | — | No |
 | `PLATFORM_DOMAIN` | The platform's own domain. Hostnames equal to or ending in `.<PLATFORM_DOMAIN>` are rejected by `POST /api/v1/domains` — those stay GitOps-only via `ingress.hosts`. | `mctl.ai` | No |
 | `DNS_RESOLVER_ADDR` | `host:port` of the recursive resolver used to verify custom domain TXT/CNAME records | `1.1.1.1:53` | No |
 | `LOKI_URL` | Loki base URL for log queries | — | No |

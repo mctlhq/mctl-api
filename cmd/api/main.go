@@ -38,6 +38,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/domains"
+	"github.com/mctlhq/mctl-api/internal/events"
 	"github.com/mctlhq/mctl-api/internal/ghactions"
 	"github.com/mctlhq/mctl-api/internal/ghtoken"
 	"github.com/mctlhq/mctl-api/internal/gitops"
@@ -238,6 +239,38 @@ func main() {
 	}
 
 	// Agent registry (optional — enabled when AGENT_REGISTRY_DB_URL or AUDIT_DB_URL is set).
+	// Inbound events for Claude Remote (mctlhq/.github#87): GitHub pull request
+	// webhooks are accepted into a Postgres outbox and relayed to platform
+	// Valkey Streams. Enabled only when the webhook secret, the Valkey URL and a
+	// database are all configured; otherwise the webhook answers 401/503.
+	var githubEventOutbox *events.Outbox
+	var githubEventRelay *events.Relay
+	if cfg.GitHubWebhookSecret != "" && cfg.EventsValkeyURL != "" {
+		eventsDBURL := postgresURL(os.Getenv("EVENTS_DB_URL"))
+		if eventsDBURL == "" {
+			eventsDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+		}
+		valkey, vkErr := events.NewClient(cfg.EventsValkeyURL, cfg.EventsValkeyPassword, 5*time.Second)
+		switch {
+		case vkErr != nil:
+			slog.Error("events valkey config invalid; github webhook will return 503", "error", vkErr)
+		case eventsDBURL == "":
+			slog.Error("no EVENTS_DB_URL or AUDIT_DB_URL; github webhook will return 503")
+		default:
+			ob, obErr := initStore(initCtx, "event outbox", func(ctx context.Context) (*events.Outbox, error) {
+				return events.NewOutbox(ctx, eventsDBURL)
+			})
+			if obErr != nil {
+				slog.Error("event outbox init failed; github webhook will return 503", "error", obErr)
+			} else {
+				githubEventOutbox = ob
+				githubEventRelay = events.NewRelay(ob, valkey, true)
+				go githubEventRelay.Run(rootCtx)
+				slog.Info("github event outbox enabled", "stream", events.DefaultStream)
+			}
+		}
+	}
+
 	var agentRegistryStore *agentregistry.Store
 	if agentRegistryDBURL := postgresURL(os.Getenv("AGENT_REGISTRY_DB_URL")); agentRegistryDBURL != "" {
 		ars, arsErr := initStore(initCtx, "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
@@ -478,6 +511,10 @@ func main() {
 		DexReady:                       dexReady,
 		VaultReady:                     vaultReady,
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
+		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,
+		GitHubWebhookOwners:            cfg.GitHubWebhookOwners,
+		GitHubEventOutbox:              githubEventOutboxOption(githubEventOutbox),
+		GitHubEventNotify:              githubEventNotify(githubEventRelay),
 		OAuthRegistrationToken:         cfg.OAuthRegistrationToken,
 		TrustedProxyCIDRs:              trustedProxies,
 	})
@@ -673,6 +710,10 @@ type config struct {
 	VaultKubernetesAuthPath      string
 	VictoriaMetricsURL           string
 	ArgoWebhookSecret            string
+	GitHubWebhookSecret          string
+	GitHubWebhookOwners          []string
+	EventsValkeyURL              string
+	EventsValkeyPassword         string
 	OAuthRegistrationToken       string
 	TrustedProxyCIDRs            string
 }
@@ -761,6 +802,10 @@ func loadConfig() config {
 		VaultKubernetesAuthPath:        os.Getenv("VAULT_KUBERNETES_AUTH_PATH"),
 		VictoriaMetricsURL:             envOr("VICTORIA_METRICS_URL", "http://vmsingle-monitoring-victoria-metrics-k8s-stack.monitoring.svc:8428"),
 		ArgoWebhookSecret:              os.Getenv("ARGO_WEBHOOK_SECRET"),
+		GitHubWebhookSecret:            os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		GitHubWebhookOwners:            splitCSV(envOr("GITHUB_WEBHOOK_OWNERS", "mctlhq")),
+		EventsValkeyURL:                os.Getenv("EVENTS_VALKEY_URL"),
+		EventsValkeyPassword:           os.Getenv("EVENTS_VALKEY_PASSWORD"),
 		OAuthRegistrationToken:         os.Getenv("OAUTH_REGISTRATION_TOKEN"),
 		TrustedProxyCIDRs:              os.Getenv("TRUSTED_PROXY_CIDRS"),
 	}
@@ -1008,4 +1053,31 @@ func parsePreregisteredClients(raw string) ([]preregisteredClient, error) {
 		seen[c.ClientID] = struct{}{}
 	}
 	return out, nil
+}
+
+// githubEventOutboxOption keeps a nil *events.Outbox from becoming a non-nil
+// interface value, which the webhook handler would then call.
+func githubEventOutboxOption(o *events.Outbox) mctlapi.GitHubEventOutbox {
+	if o == nil {
+		return nil
+	}
+	return o
+}
+
+func githubEventNotify(r *events.Relay) func() {
+	if r == nil {
+		return nil
+	}
+	return r.Notify
+}
+
+// splitCSV splits a comma-separated list, dropping blanks.
+func splitCSV(v string) []string {
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

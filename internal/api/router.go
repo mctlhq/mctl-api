@@ -130,6 +130,16 @@ type Options struct {
 	// ArgoWebhookSecret authenticates POST /api/v1/workflows/events/argo-complete.
 	// Fail-closed: an empty secret rejects every callback.
 	ArgoWebhookSecret string
+	// GitHubWebhookSecret authenticates POST /api/v1/webhooks/github
+	// (X-Hub-Signature-256). Fail-closed: empty rejects every delivery.
+	GitHubWebhookSecret string
+	// GitHubWebhookOwners lists repository owners whose pull request events
+	// are published; anything else is acknowledged and ignored.
+	GitHubWebhookOwners []string
+	// GitHubEventOutbox durably accepts envelopes (nil answers 503).
+	GitHubEventOutbox GitHubEventOutbox
+	// GitHubEventNotify wakes the outbox relay after an insert (optional).
+	GitHubEventNotify func()
 	// OAuthRegistrationToken, when non-empty, requires Authorization: Bearer
 	// <token> on POST /oauth/register (RFC 7591 initial access token).
 	OAuthRegistrationToken string
@@ -240,6 +250,7 @@ func NewRouter(opts Options) http.Handler {
 
 	// Webhook callbacks (unauthenticated/token-validated)
 	r.Post("/api/v1/workflows/events/argo-complete", h.HandleArgoWorkflowComplete)
+	r.Post("/api/v1/webhooks/github", h.HandleGitHubWebhook)
 
 	// Authenticated API routes.
 	r.Group(func(r chi.Router) {
