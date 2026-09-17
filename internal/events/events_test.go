@@ -64,8 +64,15 @@ func TestOutbox_Postgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer o.Close()
-	t.Cleanup(func() { _, _ = o.pool.Exec(ctx, "DELETE FROM event_outbox WHERE event_id LIKE 'github:pgtest-%'") })
+	// One cleanup, delete then close: a deferred Close would run before any
+	// t.Cleanup and leave rows behind that break the next run's first enqueue.
+	t.Cleanup(func() {
+		_, _ = o.pool.Exec(ctx, "DELETE FROM event_outbox WHERE event_id LIKE 'github:pgtest-%'")
+		_, _ = o.pool.Exec(ctx, "DELETE FROM event_outbox_lease")
+		o.Close()
+	})
+	_, _ = o.pool.Exec(ctx, "DELETE FROM event_outbox_lease")
+	exerciseOutboxLease(ctx, t, o)
 	env, err := BuildEnvelope(PullRequestFacts{Event: "pull_request", Action: "opened",
 		DeliveryID: "pgtest-1", Repository: "mctlhq/mctl-api", Number: 7})
 	if err != nil {
@@ -102,6 +109,46 @@ func TestOutbox_Postgres(t *testing.T) {
 	}
 }
 
+func exerciseOutboxLease(ctx context.Context, t *testing.T, s *Outbox) {
+	t.Helper()
+	now := time.Now()
+	acquire := func(holder string, at time.Time) bool {
+		t.Helper()
+		ok, err := s.AcquireOutboxLease(ctx, holder, at, time.Minute)
+		if err != nil {
+			t.Fatalf("acquire %s: %v", holder, err)
+		}
+		return ok
+	}
+	if !acquire("a", now) {
+		t.Fatal("a could not take a free lease")
+	}
+	if acquire("b", now.Add(30*time.Second)) {
+		t.Fatal("b took a lease a still holds")
+	}
+	if !acquire("a", now.Add(30*time.Second)) {
+		t.Fatal("a could not renew its own lease")
+	}
+	if acquire("b", now.Add(80*time.Second)) {
+		t.Fatal("b took the lease before a's renewal expired")
+	}
+	if !acquire("b", now.Add(2*time.Minute)) {
+		t.Fatal("b could not take an expired lease")
+	}
+	if err := s.ReleaseOutboxLease(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if acquire("a", now.Add(2*time.Minute)) {
+		t.Fatal("a released a lease it no longer held")
+	}
+	if err := s.ReleaseOutboxLease(ctx, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if !acquire("a", now.Add(2*time.Minute)) {
+		t.Fatal("a could not take a released lease")
+	}
+}
+
 // --- relay -------------------------------------------------------------------
 
 type fakeStore struct {
@@ -110,6 +157,9 @@ type fakeStore struct {
 	published map[int64]time.Time
 	failures  map[int64]string
 	markErr   error
+
+	leaseHolder string
+	leaseUntil  time.Time
 }
 
 func (f *fakeStore) PendingOutbox(_ context.Context, limit int) ([]OutboxRow, error) {
@@ -138,17 +188,41 @@ func (f *fakeStore) MarkOutboxFailed(_ context.Context, id int64, reason string)
 	f.failures[id] = reason
 	return nil
 }
+func (f *fakeStore) AcquireOutboxLease(_ context.Context, holder string, now time.Time, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.leaseHolder != "" && f.leaseHolder != holder && now.Before(f.leaseUntil) {
+		return false, nil
+	}
+	f.leaseHolder, f.leaseUntil = holder, now.Add(ttl)
+	return true, nil
+}
+func (f *fakeStore) ReleaseOutboxLease(_ context.Context, holder string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.leaseHolder == holder {
+		f.leaseHolder = ""
+	}
+	return nil
+}
 func (f *fakeStore) PurgePublishedOutbox(context.Context, time.Time) (int64, error) { return 0, nil }
 func (f *fakeStore) OutboxBacklog(context.Context) (int64, error)                   { return 0, nil }
 
 type fakePub struct {
-	mu      sync.Mutex
-	calls   [][]string
-	failOn  string
-	failErr error
+	mu       sync.Mutex
+	calls    [][]string
+	failOn   string
+	failErr  error
+	attempts int
+	delay    time.Duration
 }
 
 func (p *fakePub) XAdd(_ context.Context, stream string, maxLen int, fields ...string) (string, error) {
+	p.mu.Lock()
+	p.attempts++
+	delay := p.delay
+	p.mu.Unlock()
+	time.Sleep(delay)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.failOn != "" && stream == p.failOn {
@@ -247,6 +321,84 @@ func TestRelay_UnmarkedPublishIsRetriedNotLost(t *testing.T) {
 	if n != 2 || len(st.published) != 1 {
 		t.Fatalf("xadd=%d marked=%d, want 2 and 1", n, len(st.published))
 	}
+	// The first, unmarked XADD still counts as an attempt.
+	if _, ok := st.failures[1]; !ok {
+		t.Fatal("the published-but-unmarked attempt was not recorded")
+	}
+}
+
+func TestRelay_LeaseHeldElsewherePublishesNothing(t *testing.T) {
+	st, pub := newFakes(2)
+	st.leaseHolder, st.leaseUntil = "other-replica", time.Now().Add(time.Minute)
+	r := NewRelay(st, pub, false)
+	if err := r.Drain(context.Background()); !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("drain = %v, want ErrLeaseHeld", err)
+	}
+	if len(pub.calls) != 0 || st.leaseHolder != "other-replica" {
+		t.Fatalf("published %d entries, lease=%q; want nothing and the lease untouched", len(pub.calls), st.leaseHolder)
+	}
+}
+
+func TestRelay_TwoReplicasPublishEachRowOnce(t *testing.T) {
+	st, pub := newFakes(20)
+	pub.delay = time.Millisecond
+	a, b := NewRelay(st, pub, false), NewRelay(st, pub, false)
+	var wg sync.WaitGroup
+	for _, r := range []*Relay{a, b} {
+		wg.Add(1)
+		go func(r *Relay) {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				if err := r.Drain(context.Background()); err == nil {
+					st.mu.Lock()
+					done := len(st.published) == 20
+					st.mu.Unlock()
+					if done {
+						return
+					}
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}(r)
+	}
+	wg.Wait()
+	seen := map[string]int{}
+	for _, c := range pub.calls {
+		if c[0] == DefaultStream {
+			seen[c[2]]++
+		}
+	}
+	if len(seen) != 20 {
+		t.Fatalf("published %d distinct rows, want 20", len(seen))
+	}
+	for env, n := range seen {
+		if n != 1 {
+			t.Fatalf("%s published %d times across replicas", env, n)
+		}
+	}
+}
+
+func TestRelay_NotifyDoesNotCutBackoffShort(t *testing.T) {
+	st, pub := newFakes(1)
+	pub.failOn, pub.failErr = DefaultStream, errors.New("valkey down")
+	r := NewRelay(st, pub, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	// The first drain fails at once and arms a 1s backoff; a burst of new
+	// ingests inside that second must not trigger more attempts.
+	end := time.Now().Add(700 * time.Millisecond)
+	for time.Now().Before(end) {
+		r.Notify()
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	pub.mu.Lock()
+	defer pub.mu.Unlock()
+	if pub.attempts != 1 {
+		t.Fatalf("xadd attempts during backoff = %d, want 1", pub.attempts)
+	}
 }
 
 // --- RESP client against an in-process server ---------------------------------
@@ -288,6 +440,29 @@ func fakeValkey(t *testing.T, handle func(args []string) string) string {
 		}
 	}()
 	return "redis://github-producer@" + ln.Addr().String() + "/0"
+}
+
+func TestClient_TimeoutBoundsReconnectAndCommandTogether(t *testing.T) {
+	url := fakeValkey(t, func(args []string) string {
+		// Each step alone fits the timeout; together they do not.
+		time.Sleep(300 * time.Millisecond)
+		if args[0] == "AUTH" || args[0] == "SELECT" {
+			return "+OK\r\n"
+		}
+		return "$3\r\n1-0\r\n"
+	})
+	c, err := NewClient(url, "pw", 500*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	start := time.Now()
+	if _, err := c.XAdd(context.Background(), DefaultStream, 10, "envelope", "{}"); err == nil {
+		t.Fatal("xadd succeeded after exceeding the client timeout")
+	}
+	if took := time.Since(start); took > 800*time.Millisecond {
+		t.Fatalf("call took %v, want it bounded by the 500ms timeout", took)
+	}
 }
 
 func TestClient_AuthThenXAdd(t *testing.T) {
@@ -357,6 +532,12 @@ func TestClient_RealValkey(t *testing.T) {
 	defer c.Close()
 	if _, err := c.XAdd(context.Background(), "mctl:events:github", 100, "envelope", `{"probe":true}`); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClient_UserWithoutPasswordIsRejected(t *testing.T) {
+	if _, err := NewClient("redis://github-producer@127.0.0.1:6379/0", "", time.Second); err == nil {
+		t.Fatal("a named ACL user without a password was accepted")
 	}
 }
 

@@ -20,15 +20,19 @@ import (
 )
 
 func TestSplitCSV(t *testing.T) {
-	cases := map[string][]string{
-		"":                 nil,
-		"mctlhq":           {"mctlhq"},
-		" mctlhq , other ": {"mctlhq", "other"},
-		",,a,,":            {"a"},
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"mctlhq", []string{"mctlhq"}},
+		{" mctlhq , other ", []string{"mctlhq", "other"}},
+		{",,a,,", []string{"a"}},
 	}
-	for in, want := range cases {
-		if got := splitCSV(in); !reflect.DeepEqual(got, want) {
-			t.Errorf("splitCSV(%q) = %#v, want %#v", in, got, want)
+	for _, c := range cases {
+		if got := splitCSV(c.in); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("splitCSV(%q) = %#v, want %#v", c.in, got, c.want)
 		}
 	}
+
 }

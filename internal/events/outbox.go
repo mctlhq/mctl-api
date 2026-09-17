@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS event_outbox (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS event_outbox_event_id ON event_outbox (event_id);
 CREATE INDEX IF NOT EXISTS event_outbox_unpublished ON event_outbox (id) WHERE published_at IS NULL;
+CREATE TABLE IF NOT EXISTS event_outbox_lease (
+    name       TEXT PRIMARY KEY,
+    holder     TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL
+);
 `
 
 // OutboxRow is one envelope awaiting publication.
@@ -85,6 +90,35 @@ func (o *Outbox) Enqueue(ctx context.Context, env Envelope, stream string) (inse
 		return false, fmt.Errorf("event outbox: insert: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+const outboxLeaseName = "relay"
+
+// AcquireOutboxLease takes or renews the relay lease for holder. It succeeds
+// when the lease is free, expired or already held by holder, and reports false
+// while another replica holds it.
+func (o *Outbox) AcquireOutboxLease(ctx context.Context, holder string, now time.Time, ttl time.Duration) (bool, error) {
+	if holder == "" || ttl <= 0 {
+		return false, errors.New("lease needs a holder and a positive ttl")
+	}
+	tag, err := o.pool.Exec(ctx,
+		`INSERT INTO event_outbox_lease (name, holder, expires_at) VALUES ($1, $2, $3)
+		 ON CONFLICT (name) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at
+		 WHERE event_outbox_lease.holder = excluded.holder OR event_outbox_lease.expires_at < $4`,
+		outboxLeaseName, holder, now.Add(ttl), now)
+	if err != nil {
+		return false, fmt.Errorf("event outbox: acquire lease: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ReleaseOutboxLease gives the lease up if holder still owns it.
+func (o *Outbox) ReleaseOutboxLease(ctx context.Context, holder string) error {
+	if _, err := o.pool.Exec(ctx,
+		`DELETE FROM event_outbox_lease WHERE name = $1 AND holder = $2`, outboxLeaseName, holder); err != nil {
+		return fmt.Errorf("event outbox: release lease: %w", err)
+	}
+	return nil
 }
 
 // PendingOutbox returns unpublished rows, oldest first.
