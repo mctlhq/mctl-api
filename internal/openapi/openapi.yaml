@@ -537,6 +537,57 @@ paths:
         '302':
           description: Redirect to Swagger UI
 
+  /api/v1/webhooks/github:
+    post:
+      summary: GitHub webhook receiver
+      description: |
+        Receives GitHub `pull_request` (opened, reopened, synchronize, ready_for_review, closed) and
+        `pull_request_review` (submitted) deliveries and queues a reference-only
+        `mctl.events/v1` envelope for Claude Remote (mctlhq/.github#87). No bearer
+        token: the request is authenticated by `X-Hub-Signature-256`, an HMAC-SHA256
+        of the raw body with `GITHUB_WEBHOOK_SECRET`. The body is capped at 1 MiB.
+        A redelivery with the same `X-GitHub-Delivery` is accepted but not queued again.
+      security: []
+      tags: [Webhooks]
+      parameters:
+        - {name: X-GitHub-Event, in: header, required: true, schema: {type: string}}
+        - {name: X-GitHub-Delivery, in: header, required: true, schema: {type: string}}
+        - {name: X-Hub-Signature-256, in: header, required: true, schema: {type: string, example: 'sha256=<hex>'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: The GitHub webhook payload; only reference fields are read.
+      responses:
+        '200':
+          description: '`ping` event acknowledged with `{"status": "pong"}`'
+        '202':
+          description: Delivery accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [queued, duplicate, ignored]
+                  event_id:
+                    type: string
+                    description: Envelope id, `github:<delivery id>`; present when queued or duplicate
+                  reason:
+                    type: string
+                    description: Why an ignored delivery was not queued
+        '400':
+          description: Malformed payload or delivery id
+        '401':
+          description: Missing or invalid signature, or no secret configured
+        '413':
+          description: Body larger than 1 MiB
+        '503':
+          description: Event outbox unavailable; GitHub keeps the delivery marked failed
+
   /api/v1/tenants:
     get:
       summary: List all team workspaces
@@ -2008,6 +2059,8 @@ tags:
     description: Health and readiness probes
   - name: Docs
     description: API documentation endpoints
+  - name: Webhooks
+    description: Signed inbound webhooks
   - name: Tenants
     description: Team workspace management
   - name: Services

@@ -159,7 +159,8 @@ func (o *Outbox) MarkOutboxPublished(ctx context.Context, id int64, at time.Time
 func (o *Outbox) MarkOutboxFailed(ctx context.Context, id int64, reason string) error {
 	reason = truncateUTF8(reason, 500)
 	_, err := o.pool.Exec(ctx,
-		`UPDATE event_outbox SET attempts = attempts + 1, last_error = $1 WHERE id = $2`, reason, id)
+		`UPDATE event_outbox SET attempts = attempts + 1, last_error = $1
+		  WHERE id = $2 AND published_at IS NULL`, reason, id)
 	if err != nil {
 		return fmt.Errorf("event outbox: mark failed: %w", err)
 	}

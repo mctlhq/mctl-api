@@ -108,6 +108,16 @@ func TestOutbox_Postgres(t *testing.T) {
 	if err := o.MarkOutboxPublished(ctx, mine.ID, now); err != nil {
 		t.Fatal(err)
 	}
+	// A relay that lost its lease mid-publish must not record a failure on a
+	// row another replica already published.
+	if err := o.MarkOutboxFailed(ctx, mine.ID, "stale relay"); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	var lastError string
+	if err := o.pool.QueryRow(ctx, "SELECT attempts, COALESCE(last_error, '') FROM event_outbox WHERE id = $1", mine.ID).Scan(&attempts, &lastError); err != nil || lastError == "stale relay" {
+		t.Fatalf("published row attempts=%d last_error=%q err=%v; a stale failure overwrote it", attempts, lastError, err)
+	}
 	if n, err := o.PurgePublishedOutbox(ctx, now.Add(time.Minute)); err != nil || n < 1 {
 		t.Fatalf("purge = %d, %v", n, err)
 	}
@@ -653,6 +663,12 @@ func TestClient_RealValkey(t *testing.T) {
 func TestClient_UserWithoutPasswordIsRejected(t *testing.T) {
 	if _, err := NewClient("redis://github-producer@127.0.0.1:6379/0", "", time.Second); err == nil {
 		t.Fatal("a named ACL user without a password was accepted")
+	}
+}
+
+func TestClient_NegativeDatabaseIsRejected(t *testing.T) {
+	if _, err := NewClient("redis://valkey.platform-events.svc:6379/-1", "", time.Second); err == nil {
+		t.Fatal("a negative database index was accepted")
 	}
 }
 
