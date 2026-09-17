@@ -23,17 +23,23 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-api/internal/events"
 )
 
 type fakeGitHubOutbox struct {
-	mu   sync.Mutex
-	envs map[string]events.Envelope
-	err  error
+	mu    sync.Mutex
+	envs  map[string]events.Envelope
+	err   error
+	block bool // wait for the context, like a pool that cannot connect
 }
 
-func (f *fakeGitHubOutbox) Enqueue(_ context.Context, env events.Envelope, stream string) (bool, error) {
+func (f *fakeGitHubOutbox) Enqueue(ctx context.Context, env events.Envelope, stream string) (bool, error) {
+	if f.block {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
@@ -181,6 +187,43 @@ func TestGitHubWebhook_ReviewSubmitted(t *testing.T) {
 	env := outbox.envs["github:d-review"]
 	if env.Type != "github.pull_request_review.submitted" || env.OccurredAt != "2026-09-17T09:00:00Z" {
 		t.Fatalf("envelope = %+v", env)
+	}
+}
+
+func TestGitHubWebhook_ReviewWithoutSubmissionTimeIsMalformed(t *testing.T) {
+	outbox := &fakeGitHubOutbox{envs: map[string]events.Envelope{}}
+	router := githubRouter(outbox, nil)
+	body := strings.Replace(prSynchronize, `"synchronize"`, `"submitted"`, 1)
+	for name, b := range map[string]string{
+		"no review":       body,
+		"no submitted_at": strings.Replace(body, `"sender"`, `"review": {"state": "approved"}, "sender"`, 1),
+	} {
+		rec := postGitHub(router, "pull_request_review", "d-review-bad", b, argoSig(ghSecret, b))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status %d, want 400", name, rec.Code)
+		}
+	}
+	if len(outbox.envs) != 0 {
+		t.Fatalf("malformed review queued: %+v", outbox.envs)
+	}
+}
+
+func TestGitHubWebhook_HungOutboxAnswers503(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits for the enqueue timeout")
+	}
+	router := githubRouter(&fakeGitHubOutbox{envs: map[string]events.Envelope{}, block: true}, nil)
+	done := make(chan int, 1)
+	go func() {
+		done <- postGitHub(router, "pull_request", "d-hung", prSynchronize, argoSig(ghSecret, prSynchronize)).Code
+	}()
+	select {
+	case code := <-done:
+		if code != http.StatusServiceUnavailable {
+			t.Fatalf("status %d, want 503", code)
+		}
+	case <-time.After(githubEnqueueTimeout + 5*time.Second):
+		t.Fatal("a hung outbox held the delivery past the enqueue timeout")
 	}
 }
 

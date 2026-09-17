@@ -105,9 +105,12 @@ func BuildEnvelope(f PullRequestFacts) (Envelope, error) {
 		"repository": f.Repository,
 		"number":     strconv.Itoa(f.Number),
 	}
-	if sha.MatchString(f.HeadSHA) {
-		subject["head_sha"] = f.HeadSHA
+	if !sha.MatchString(f.HeadSHA) {
+		// The head is what identifies the revision the event is about; an
+		// event without it would be accepted but not actionable.
+		return Envelope{}, fmt.Errorf("invalid head sha %q", f.HeadSHA)
 	}
+	subject["head_sha"] = f.HeadSHA
 	occurred := f.OccurredAt
 	if occurred.IsZero() {
 		occurred = time.Now()

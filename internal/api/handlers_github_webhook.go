@@ -29,6 +29,9 @@ import (
 	"github.com/mctlhq/mctl-api/internal/events"
 )
 
+// githubEnqueueTimeout bounds the outbox insert of one webhook delivery.
+const githubEnqueueTimeout = 5 * time.Second
+
 // GitHubEventOutbox durably accepts an envelope before the webhook is answered.
 type GitHubEventOutbox interface {
 	Enqueue(ctx context.Context, env events.Envelope, stream string) (inserted bool, err error)
@@ -119,13 +122,19 @@ func (h *Handlers) HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		HeadSHA:    payload.PullRequest.Head.SHA,
 		OccurredAt: payload.PullRequest.UpdatedAt,
 	}
-	if payload.Review != nil && !payload.Review.SubmittedAt.IsZero() {
-		facts.OccurredAt = payload.Review.SubmittedAt
-	}
 	if (event == "pull_request" && !events.PullRequestActions[payload.Action]) ||
 		(event == "pull_request_review" && payload.Action != "submitted") {
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "ignored", "reason": "action not published"})
 		return
+	}
+	if event == "pull_request_review" {
+		// The event is the review, so its time is the submission time; a
+		// submitted review without one is malformed, not a PR update.
+		if payload.Review == nil || payload.Review.SubmittedAt.IsZero() {
+			writeError(w, http.StatusBadRequest, "review.submitted_at is required")
+			return
+		}
+		facts.OccurredAt = payload.Review.SubmittedAt
 	}
 	env, err := events.BuildEnvelope(facts)
 	if err != nil {
@@ -136,7 +145,11 @@ func (h *Handlers) HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "event outbox not configured")
 		return
 	}
-	inserted, err := h.opts.GitHubEventOutbox.Enqueue(r.Context(), env, events.DefaultStream)
+	// This route sits outside the timeout middleware; bound the database call
+	// so an unreachable outbox answers 503 instead of holding the delivery.
+	enqueueCtx, cancel := context.WithTimeout(r.Context(), githubEnqueueTimeout)
+	defer cancel()
+	inserted, err := h.opts.GitHubEventOutbox.Enqueue(enqueueCtx, env, events.DefaultStream)
 	if err != nil {
 		slog.Error("github webhook: event outbox enqueue failed", "event_id", env.ID, "error", err)
 		writeError(w, http.StatusServiceUnavailable, "event outbox unavailable")

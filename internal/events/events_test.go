@@ -30,15 +30,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
+const testSHA = "3e737a5d7c1f0f8f5c9a2b64a1e0d9c2b7f41a0e"
+
 func TestBuildEnvelope_Validation(t *testing.T) {
 	ok := PullRequestFacts{Event: "pull_request", Action: "opened", DeliveryID: "abc-1",
-		Repository: "mctlhq/mctl-api", Number: 1, HeadSHA: "not-a-sha"}
+		Repository: "mctlhq/mctl-api", Number: 1, HeadSHA: testSHA}
 	env, err := BuildEnvelope(ok)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, has := env.Subject["head_sha"]; has {
-		t.Fatal("a malformed head sha must be dropped, not passed on")
+	if env.Subject["head_sha"] != testSHA {
+		t.Fatalf("head_sha = %q", env.Subject["head_sha"])
 	}
 	for name, f := range map[string]PullRequestFacts{
 		"action":   {Event: "pull_request", Action: "labeled", DeliveryID: "a", Repository: "o/r", Number: 1},
@@ -46,6 +48,8 @@ func TestBuildEnvelope_Validation(t *testing.T) {
 		"delivery": {Event: "pull_request", Action: "opened", DeliveryID: "a b", Repository: "o/r", Number: 1},
 		"repo":     {Event: "pull_request", Action: "opened", DeliveryID: "a", Repository: "o/r/x", Number: 1},
 		"number":   {Event: "pull_request", Action: "opened", DeliveryID: "a", Repository: "o/r", Number: 0},
+		"bad sha":  {Event: "pull_request", Action: "opened", DeliveryID: "a", Repository: "o/r", Number: 1, HeadSHA: "not-a-sha"},
+		"no sha":   {Event: "pull_request", Action: "opened", DeliveryID: "a", Repository: "o/r", Number: 1},
 	} {
 		if _, err := BuildEnvelope(f); err == nil {
 			t.Fatalf("%s: want an error", name)
@@ -74,7 +78,7 @@ func TestOutbox_Postgres(t *testing.T) {
 	_, _ = o.pool.Exec(ctx, "DELETE FROM event_outbox_lease")
 	exerciseOutboxLease(ctx, t, o)
 	env, err := BuildEnvelope(PullRequestFacts{Event: "pull_request", Action: "opened",
-		DeliveryID: "pgtest-1", Repository: "mctlhq/mctl-api", Number: 7})
+		DeliveryID: "pgtest-1", Repository: "mctlhq/mctl-api", Number: 7, HeadSHA: testSHA})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +164,8 @@ type fakeStore struct {
 
 	leaseHolder string
 	leaseUntil  time.Time
+
+	releaseBounded, releaseLive bool
 }
 
 func (f *fakeStore) PendingOutbox(_ context.Context, limit int) ([]OutboxRow, error) {
@@ -197,9 +203,11 @@ func (f *fakeStore) AcquireOutboxLease(_ context.Context, holder string, now tim
 	f.leaseHolder, f.leaseUntil = holder, now.Add(ttl)
 	return true, nil
 }
-func (f *fakeStore) ReleaseOutboxLease(_ context.Context, holder string) error {
+func (f *fakeStore) ReleaseOutboxLease(ctx context.Context, holder string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	_, f.releaseBounded = ctx.Deadline()
+	f.releaseLive = ctx.Err() == nil
 	if f.leaseHolder == holder {
 		f.leaseHolder = ""
 	}
@@ -215,6 +223,7 @@ type fakePub struct {
 	failErr  error
 	attempts int
 	delay    time.Duration
+	onXAdd   func(stream string) // runs before the append is recorded
 }
 
 func (p *fakePub) XAdd(_ context.Context, stream string, maxLen int, fields ...string) (string, error) {
@@ -223,6 +232,9 @@ func (p *fakePub) XAdd(_ context.Context, stream string, maxLen int, fields ...s
 	delay := p.delay
 	p.mu.Unlock()
 	time.Sleep(delay)
+	if p.onXAdd != nil {
+		p.onXAdd(stream)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.failOn != "" && stream == p.failOn {
@@ -324,6 +336,63 @@ func TestRelay_UnmarkedPublishIsRetriedNotLost(t *testing.T) {
 	// The first, unmarked XADD still counts as an attempt.
 	if _, ok := st.failures[1]; !ok {
 		t.Fatal("the published-but-unmarked attempt was not recorded")
+	}
+}
+
+func TestRelay_LeaseReleaseOutlivesShutdownButIsBounded(t *testing.T) {
+	st, pub := newFakes(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // shutdown already under way
+	_ = NewRelay(st, pub, false).Drain(ctx)
+	if !st.releaseLive {
+		t.Fatal("lease release ran with the cancelled shutdown context and could not hand over")
+	}
+	if !st.releaseBounded {
+		t.Fatal("lease release has no deadline; an unreachable database would block shutdown")
+	}
+}
+
+func TestRelay_LostLeaseStopsPublishingMidBatch(t *testing.T) {
+	st, pub := newFakes(5)
+	r := NewRelay(st, pub, false)
+	clock := time.Now()
+	r.now = func() time.Time { return clock }
+	appended := 0
+	pub.onXAdd = func(stream string) {
+		if stream == AuditStream {
+			return
+		}
+		appended++
+		// Each publish is slow; after the second, this replica's lease has
+		// expired and another replica takes it.
+		clock = clock.Add(leaseTTL / 2)
+		if appended == 2 {
+			st.mu.Lock()
+			st.leaseHolder, st.leaseUntil = "other-replica", clock.Add(time.Hour)
+			st.mu.Unlock()
+		}
+	}
+	if err := r.Drain(context.Background()); !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("drain = %v, want ErrLeaseHeld once ownership is lost", err)
+	}
+	if appended != 2 {
+		t.Fatalf("published %d rows, want 2: nothing after the lease was lost", appended)
+	}
+}
+
+func TestRelay_PublishIsAuditedEvenWhenTheMarkFails(t *testing.T) {
+	st, pub := newFakes(1)
+	st.markErr = errors.New("db down")
+	r := NewRelay(st, pub, false)
+	_ = r.Drain(context.Background())
+	audited := 0
+	for _, c := range pub.calls {
+		if c[0] == AuditStream {
+			audited++
+		}
+	}
+	if audited != 1 {
+		t.Fatalf("audit entries = %d, want 1 for the append that happened", audited)
 	}
 }
 
