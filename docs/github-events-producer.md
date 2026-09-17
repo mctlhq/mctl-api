@@ -1,5 +1,10 @@
 # GitHub webhook → events producer
 
+**Use this when** a pull request did not wake a session and you need to know
+whether the event was ever produced, when you are reading a `202`/`401`/`503`
+in GitHub's delivery log, or before changing anything about the org webhook or
+the outbox.
+
 How a pull request on GitHub becomes an event a running Claude session can be
 woken by, what is deliberately *not* carried along the way, and how to tell
 which half of the path is broken when nothing arrives.
@@ -56,10 +61,16 @@ diffs and review text are not decoded into anything that outlives the request.
 }
 ```
 
-The id is GitHub's own delivery guid, prefixed. That choice is what makes
-redelivery safe end to end: the same delivery replayed from GitHub's UI
-produces the same id, the outbox rejects it as a duplicate, and the session is
-not woken twice.
+The id is GitHub's own delivery guid, prefixed. **Scope of what that
+guarantees:** GitHub redelivers the *same delivery* under the same delivery
+identifier, so using the guid as the event id makes redelivery idempotent
+within this producer contract — a replay from the hook's delivery log produces
+the same id, the outbox answers `duplicate`, and nothing new is published.
+
+It says nothing about two *different* deliveries. A second push that produces
+another `synchronize` for the same PR and even the same head SHA is a new
+delivery with a new guid, and is a new event by design. Deduplication of
+semantically similar events is the consumer's routing policy, not this id.
 
 An event without a head SHA is rejected rather than queued: the head is what
 identifies the revision the event is about, so an event without it would be
@@ -68,6 +79,12 @@ when it wakes, so a stale event is harmless — it hydrates what is true now, no
 what was true at delivery.
 
 ## Why 202 comes after the database write
+
+**A `202` here means durable acceptance, not downstream delivery.** It says the
+envelope is committed to the outbox and will be published; it does not say the
+relay has done an `XADD`, and certainly not that a session received or handled
+anything. The `published` and `delivered` records in the audit trail are what
+say that.
 
 GitHub does not retry a failed delivery by itself. A `202` for an event that
 was subsequently lost would be invisible; a `5xx` is visible in the hook's
@@ -121,5 +138,6 @@ Work the path in order; each step distinguishes one half from the other.
    adapter's side; that path is documented in `mctl-claude-remote`,
    `docs/events-operations.md`.
 
-Redelivering from GitHub's UI is safe at any point: the delivery guid makes it
-idempotent.
+Redelivering from GitHub's UI is safe at any point: it carries the original
+delivery guid, so the outbox recognises it and answers `duplicate` rather than
+producing a second event.
