@@ -142,7 +142,13 @@ func (o *Outbox) PendingOutbox(ctx context.Context, limit int) ([]OutboxRow, err
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	// Never hand back a partial batch alongside an error: a caller that
+	// publishes what it got would skip the rows the failed iteration never
+	// reached, and the relay must not leave holes in a stream it orders by id.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("event outbox: rows: %w", err)
+	}
+	return out, nil
 }
 
 // MarkOutboxPublished records a successful XADD.

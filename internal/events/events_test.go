@@ -178,6 +178,10 @@ type fakeStore struct {
 	blockPending bool // PendingOutbox waits for its context, like a stalled pool
 
 	releaseBounded, releaseLive bool
+
+	pendingErr  error // returned by PendingOutbox alongside whatever rows it found
+	purges      int
+	backlogCall int
 }
 
 func (f *fakeStore) PendingOutbox(ctx context.Context, limit int) ([]OutboxRow, error) {
@@ -193,7 +197,7 @@ func (f *fakeStore) PendingOutbox(ctx context.Context, limit int) ([]OutboxRow, 
 			out = append(out, r)
 		}
 	}
-	return out, nil
+	return out, f.pendingErr
 }
 func (f *fakeStore) MarkOutboxPublished(_ context.Context, id int64, at time.Time) error {
 	f.mu.Lock()
@@ -230,8 +234,23 @@ func (f *fakeStore) ReleaseOutboxLease(ctx context.Context, holder string) error
 	}
 	return nil
 }
-func (f *fakeStore) PurgePublishedOutbox(context.Context, time.Time) (int64, error) { return 0, nil }
-func (f *fakeStore) OutboxBacklog(context.Context) (int64, error)                   { return 0, nil }
+func (f *fakeStore) PurgePublishedOutbox(context.Context, time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.purges++
+	return 0, nil
+}
+func (f *fakeStore) OutboxBacklog(context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.backlogCall++
+	return int64(len(f.rows) - len(f.published)), nil
+}
+func (f *fakeStore) counts() (purges, backlog int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.purges, f.backlogCall
+}
 
 type fakePub struct {
 	mu       sync.Mutex
@@ -240,6 +259,7 @@ type fakePub struct {
 	failErr  error
 	attempts int
 	delay    time.Duration
+	closes   int
 	onXAdd   func(stream string) // runs before the append is recorded
 }
 
@@ -260,7 +280,21 @@ func (p *fakePub) XAdd(_ context.Context, stream string, maxLen int, fields ...s
 	p.calls = append(p.calls, append([]string{stream}, fields...))
 	return "1-0", nil
 }
-func (p *fakePub) Close() {}
+func (p *fakePub) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closes++
+}
+func (p *fakePub) closed() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closes
+}
+func (p *fakePub) tries() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.attempts
+}
 
 func newFakes(n int) (*fakeStore, *fakePub) {
 	st := &fakeStore{published: map[int64]time.Time{}, failures: map[int64]string{}}
@@ -771,5 +805,110 @@ func TestClient_OversizedBulkReplyIsRejected(t *testing.T) {
 	defer c.Close()
 	if _, err := c.XAdd(context.Background(), "s", 10, "k", "v"); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("xadd = %v, want an oversized-reply error", err)
+	}
+}
+
+// addRow appends a pending row while the relay is running.
+func (f *fakeStore) addRow(id int64, envelope string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rows = append(f.rows, OutboxRow{ID: id, EventID: fmt.Sprintf("github:delivery-%d", id),
+		Stream: DefaultStream, Envelope: envelope, CreatedAt: time.Now()})
+}
+
+// waitFor polls cond until it holds or the deadline passes.
+func waitFor(t *testing.T, within time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for %s", within, what)
+}
+
+// A failed scan must not hand the relay the rows the iteration did reach:
+// publishing those would skip the ones it never got to, and the stream is
+// ordered by outbox id.
+func TestRelay_DrainPublishesNothingWhenPendingFails(t *testing.T) {
+	st, pub := newFakes(3)
+	st.pendingErr = errors.New("connection reset by peer")
+	r := NewRelay(st, pub, false)
+	err := r.Drain(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("Drain err = %v, want the store error", err)
+	}
+	if n := pub.tries(); n != 0 {
+		t.Fatalf("XAdd attempts = %d, want 0: a partial batch was published", n)
+	}
+}
+
+// Run drains on Notify rather than waiting out the 30s safety timer, and
+// releases the publisher when its context is cancelled.
+func TestRelay_RunDrainsOnNotifyAndClosesOnCancel(t *testing.T) {
+	st, pub := newFakes(1)
+	r := NewRelay(st, pub, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+
+	waitFor(t, 2*time.Second, "the first drain", func() bool { return pub.tries() > 0 })
+	first := pub.tries()
+
+	st.addRow(2, `{"n":2}`)
+	r.Notify()
+	// safetyInterval is 30s, so anything this quick can only be the wakeup.
+	waitFor(t, 2*time.Second, "the notify-driven drain", func() bool { return pub.tries() > first })
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after its context was cancelled")
+	}
+	if n := pub.closed(); n != 1 {
+		t.Fatalf("publisher Close calls = %d, want 1", n)
+	}
+}
+
+// After a publish failure Run holds its backoff: a burst of new rows must not
+// hammer a Valkey that is already down. The first pass also refreshes the
+// backlog gauge and runs the retention purge.
+func TestRelay_RunHoldsBackoffAndKeepsHousekeeping(t *testing.T) {
+	st, pub := newFakes(1)
+	pub.failOn, pub.failErr = DefaultStream, errors.New("valkey down")
+	r := NewRelay(st, pub, false)
+	frozen := time.Date(2026, 9, 18, 6, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return frozen } // retryAt stays ahead of now
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+
+	waitFor(t, 2*time.Second, "the failing drain", func() bool { return pub.tries() > 0 })
+	waitFor(t, 2*time.Second, "housekeeping", func() bool {
+		purges, backlog := st.counts()
+		return purges > 0 && backlog > 0
+	})
+	after := pub.tries()
+
+	for i := 0; i < 20; i++ {
+		st.addRow(int64(100+i), `{"n":0}`)
+		r.Notify()
+	}
+	// The backoff is 1s; nothing may be retried inside it.
+	time.Sleep(300 * time.Millisecond)
+	if n := pub.tries(); n != after {
+		t.Fatalf("XAdd attempts = %d, want %d: Notify cut the backoff short", n, after)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after its context was cancelled")
 	}
 }
