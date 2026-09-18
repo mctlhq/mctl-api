@@ -66,9 +66,21 @@ type PostgresStore struct {
 // retries on its next scheduled refresh or when the user next touches the
 // connector, which is minutes later. Outside the window the replay is read as
 // reuse and the WHOLE family is revoked, so every client on that family gets
-// `invalid_grant` and the user is told to re-authenticate — observed live on
-// 2026-09-17 (family 9f57b332, login mashkovd, twelve replays in two bursts
-// ten minutes apart, all of them the same already-rotated token).
+// `invalid_grant` and the user is told to re-authenticate.
+//
+// What the 2026-09-17 incident establishes precisely, and what it does not:
+// family 9f57b332 (login mashkovd) took twelve replays of one already-rotated
+// token in two bursts ten minutes apart, which shows the blast radius — one
+// late replay logs out every client on the family. It does NOT establish that
+// 2m would have saved it: the log does not carry the rotation time of the
+// token that first burst replayed, and every replay after the first hits the
+// revoked family anyway. So this window is sized against client retry
+// cadence, which is the thing it has to cover, not against that log.
+//
+// The signal to retune against is already emitted: compare the rate of the
+// `oauth refresh token grace-window replay` INFO to the `reuse detected` WARN.
+// Replays still being read as reuse mean the window is short for the clients
+// in play; grace replays with no reuse mean it is doing its job.
 //
 // 2m is chosen against the failure it prevents rather than the one it admits.
 // A widened window does NOT weaken reuse detection into a free replay: the

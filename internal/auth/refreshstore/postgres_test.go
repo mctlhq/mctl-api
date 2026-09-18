@@ -461,6 +461,15 @@ func TestGCRemovesOldRevokedRows(t *testing.T) {
 // only case it is for, while still paying its full cost: the replay lands
 // outside the window, is read as reuse, and the whole family is revoked, which
 // logs every client on it out (2026-09-17, family 9f57b332).
+//
+// This is a TYPO-GUARD on the default, not coverage of the grace path. It
+// asserts a property of a literal, so it catches the one regression that
+// actually happened — someone typing the old 30s back — and nothing else: it
+// would still pass if the window were read from elsewhere, if
+// withShortGraceWindow leaked past a test, or if rotateTx stopped reaching the
+// grace branch at all. The behavioural coverage for those lives in the
+// rotateTx grace tests above, which drive the var rather than this const.
+// Do not read this test's presence as evidence that the 2m value is tested.
 func TestDefaultRotationGraceWindow_CoversAClientRetryCycle(t *testing.T) {
 	if defaultRotationGraceWindow < time.Minute {
 		t.Errorf("defaultRotationGraceWindow = %s, want at least 1m: see the comment on rotationGraceWindow", defaultRotationGraceWindow)

@@ -85,15 +85,25 @@ func TestHandleOAuthToken_FailureLogsClientIdentity(t *testing.T) {
 	registered := srv.RegisterClient("Claude", []string{"https://claude.ai/api/mcp/auth_callback"})
 	h := &Handlers{opts: Options{OAuthServer: srv}}
 
+	anonymous := srv.RegisterClient("", []string{"https://claude.ai/api/mcp/auth_callback"})
+	// One IP can reach this endpoint at 60 req/min without registering
+	// anything, so an unbounded client_id would be a log-volume amplifier.
+	oversized := strings.Repeat("a", maxEchoedValueLen*3)
+
 	cases := []struct {
 		name           string
 		clientID       string
+		wantClientID   string
 		wantClientName string
 	}{
-		{"registered client", registered.ClientID, "Claude"},
+		{"registered client", registered.ClientID, registered.ClientID, "Claude"},
 		// An aged-out or never-registered id is not a gap in the signal: it
 		// is the signal for that case, so it is asserted rather than skipped.
-		{"unknown client", "no-such-client", "unregistered"},
+		{"unknown client", "no-such-client", "no-such-client", "unregistered"},
+		// client_name is optional in RFC 7591, so "registered but anonymous"
+		// is a third state and must not read as "unregistered".
+		{"registered without a name", anonymous.ClientID, anonymous.ClientID, "unnamed"},
+		{"oversized client_id is clipped", oversized, truncateEchoedValue(oversized), "unregistered"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -138,8 +148,11 @@ func TestHandleOAuthToken_FailureLogsClientIdentity(t *testing.T) {
 			if !found {
 				t.Fatalf("no %q log line; got:\n%s", "token exchange failed", buf.String())
 			}
-			if line.ClientID != c.clientID {
-				t.Errorf("client_id = %q, want %q", line.ClientID, c.clientID)
+			if line.ClientID != c.wantClientID {
+				t.Errorf("client_id = %q, want %q", line.ClientID, c.wantClientID)
+			}
+			if len(line.ClientID) > maxEchoedValueLen+len("...") {
+				t.Errorf("client_id is %d bytes, want at most %d: the echo must stay bounded", len(line.ClientID), maxEchoedValueLen+len("..."))
 			}
 			if line.ClientName != c.wantClientName {
 				t.Errorf("client_name = %q, want %q", line.ClientName, c.wantClientName)

@@ -342,14 +342,31 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		// signal for that case rather than a gap in it. Neither field is a
 		// secret: this server is public-client only, PKCE is the proof, and
 		// the client_id travels in the clear on every authorize request.
+		// Three distinct states, kept distinct: no registry entry at all
+		// ("unregistered" — including a dynamic registration that has aged
+		// out), a registration that carries no name (RFC 7591 §2 makes
+		// client_name optional and RegisterClient stores the empty string as
+		// given), and a named client. Collapsing the first two would make a
+		// log burst harder to read for no gain.
 		clientName := "unregistered"
 		if c, ok := o.GetClient(clientID); ok {
-			clientName = c.ClientName
+			clientName = "unnamed"
+			if c.ClientName != "" {
+				clientName = c.ClientName
+			}
 		}
+		// Both values are caller-controlled and length-bounded by nothing but
+		// the 16 KiB body cap: clientID is a raw form value that never has to
+		// match the registry to reach this line, and client_name is not
+		// length-validated at registration either (see handleOAuthRegister).
+		// This endpoint is unauthenticated at 60 req/min/IP, so an unbounded
+		// echo would let one IP write ~1 MB/min of WARN lines. Hence
+		// truncateEchoedValue, which is what maxEchoedValueLen exists for and
+		// what both registration paths already use.
 		slog.Warn("token exchange failed",
 			"grant_type", grantType,
-			"client_id", clientID,
-			"client_name", clientName,
+			"client_id", truncateEchoedValue(clientID),
+			"client_name", truncateEchoedValue(clientName),
 			"error", err)
 		if errors.Is(err, auth.ErrServerError) {
 			w.Header().Set("Content-Type", "application/json")
