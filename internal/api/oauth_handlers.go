@@ -331,7 +331,51 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		slog.Warn("token exchange failed", "grant_type", grantType, "error", err)
+		// client_id and client_name are the two fields that make a failed
+		// exchange actionable, and neither was logged: the refresh-store WARN
+		// that precedes a reuse revocation carries the client_id but no name,
+		// and every other failure arm carried nothing at all, so a burst of
+		// `invalid_grant` said only that SOMEBODY's refresh had died. The name
+		// comes from the registry, which holds dynamic registrations for
+		// ClientRegistrationTTL (24h by default) — a client whose registration
+		// has since aged out is indistinguishable from one that never
+		// registered, and that is itself the signal for the case rather than a
+		// gap in it. Neither field is a
+		// secret: this server is public-client only, PKCE is the proof, and
+		// the client_id travels in the clear on every authorize request.
+		// Three distinct states, kept distinct: no registry entry at all
+		// (including a dynamic registration that has aged out), a
+		// registration that carries no name (RFC 7591 §2 makes client_name
+		// optional and RegisterClient stores the empty string as given), and
+		// a named client. They are encoded OUT OF BAND, in client_registered,
+		// rather than as sentinel strings inside client_name: /oauth/register
+		// is unauthenticated and stores name verbatim, so a client may
+		// register itself AS "unregistered" or "unnamed" and forge exactly the
+		// state the sentinel was meant to denote. client_registered is
+		// derived here from the registry lookup and cannot be chosen by the
+		// caller, so the three states stay:
+		//   client_registered=false                  → no registry entry
+		//   client_registered=true,  client_name=""  → registered, anonymous
+		//   client_registered=true,  client_name=X   → registered as X
+		c, clientRegistered := o.GetClient(clientID)
+		var clientName string
+		if clientRegistered {
+			clientName = c.ClientName
+		}
+		// Both values are caller-controlled and length-bounded by nothing but
+		// the 16 KiB body cap: clientID is a raw form value that never has to
+		// match the registry to reach this line, and client_name is not
+		// length-validated at registration either (see handleOAuthRegister).
+		// This endpoint is unauthenticated at 60 req/min/IP, so an unbounded
+		// echo would let one IP write ~1 MB/min of WARN lines. Hence
+		// truncateEchoedValue, which is what maxEchoedValueLen exists for and
+		// what both registration paths already use.
+		slog.Warn("token exchange failed",
+			"grant_type", grantType,
+			"client_id", truncateEchoedValue(clientID),
+			"client_registered", clientRegistered,
+			"client_name", truncateEchoedValue(clientName),
+			"error", err)
 		if errors.Is(err, auth.ErrServerError) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Cache-Control", "no-store")

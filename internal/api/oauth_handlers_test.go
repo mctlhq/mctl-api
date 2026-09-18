@@ -15,9 +15,12 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -70,5 +73,109 @@ func TestHandleProtectedResourceMeta_NotFoundWithoutOAuthServer(t *testing.T) {
 	h.handleProtectedResourceMeta(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+// A failed token exchange must name the client. Without client_id and
+// client_name in this line a burst of invalid_grant said only that SOMEBODY's
+// refresh had died, which is how the 2026-09-17 refresh-family revocation went
+// undiagnosed until the refresh store's own WARN was correlated by hand.
+func TestHandleOAuthToken_FailureLogsClientIdentity(t *testing.T) {
+	srv := &auth.OAuthServer{BaseURL: "https://api.mctl.ai", JWTSecret: []byte("test-secret")}
+	registered := srv.RegisterClient("Claude", []string{"https://claude.ai/api/mcp/auth_callback"})
+	h := &Handlers{opts: Options{OAuthServer: srv}}
+
+	anonymous := srv.RegisterClient("", []string{"https://claude.ai/api/mcp/auth_callback"})
+	// One IP can reach this endpoint at 60 req/min without registering
+	// anything, so an unbounded client_id would be a log-volume amplifier.
+	oversized := strings.Repeat("a", maxEchoedValueLen*3)
+
+	// A self-registered client whose NAME is the string an in-band sentinel
+	// would have used: the log line must still say it is registered, which is
+	// only possible because the state lives in its own field.
+	impostor := srv.RegisterClient("unregistered", []string{"https://claude.ai/api/mcp/auth_callback"})
+
+	cases := []struct {
+		name           string
+		clientID       string
+		wantClientID   string
+		wantRegistered bool
+		wantClientName string
+	}{
+		{"registered client", registered.ClientID, registered.ClientID, true, "Claude"},
+		// An aged-out or never-registered id is not a gap in the signal: it
+		// is the signal for that case, so it is asserted rather than skipped.
+		{"unknown client", "no-such-client", "no-such-client", false, ""},
+		// client_name is optional in RFC 7591, so "registered but anonymous"
+		// is a third state and must not read as "unregistered".
+		{"registered without a name", anonymous.ClientID, anonymous.ClientID, true, ""},
+		{"oversized client_id is clipped", oversized, truncateEchoedValue(oversized), false, ""},
+		// /oauth/register is unauthenticated and stores the name verbatim, so
+		// this is self-service, not hypothetical.
+		{"client cannot forge the unregistered state", impostor.ClientID, impostor.ClientID, true, "unregistered"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			restore := swapDefaultLogger(&buf)
+			defer restore()
+
+			form := url.Values{
+				"grant_type":    {"refresh_token"},
+				"refresh_token": {"not-a-real-refresh-token"},
+				"client_id":     {c.clientID},
+			}
+			req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			h.handleOAuthToken(rec, req)
+
+			// The failure itself is the precondition: a 200 here would mean
+			// the test never reached the arm it pins.
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (invalid_grant); body: %s", rec.Code, rec.Body.String())
+			}
+
+			var line struct {
+				Msg        string `json:"msg"`
+				ClientID   string `json:"client_id"`
+				Registered bool   `json:"client_registered"`
+				ClientName string `json:"client_name"`
+			}
+			var found bool
+			for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+				if raw == "" {
+					continue
+				}
+				if err := json.Unmarshal([]byte(raw), &line); err != nil {
+					t.Fatalf("log line is not JSON: %v (%s)", err, raw)
+				}
+				if line.Msg == "token exchange failed" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("no %q log line; got:\n%s", "token exchange failed", buf.String())
+			}
+			if line.ClientID != c.wantClientID {
+				t.Errorf("client_id = %q, want %q", line.ClientID, c.wantClientID)
+			}
+			if len(line.ClientID) > maxEchoedValueLen+len("...") {
+				t.Errorf("client_id is %d bytes, want at most %d: the echo must stay bounded", len(line.ClientID), maxEchoedValueLen+len("..."))
+			}
+			if line.ClientName != c.wantClientName {
+				t.Errorf("client_name = %q, want %q", line.ClientName, c.wantClientName)
+			}
+			// The discriminator the caller cannot write to.
+			if line.Registered != c.wantRegistered {
+				t.Errorf("client_registered = %v, want %v", line.Registered, c.wantRegistered)
+			}
+			// The presented refresh token is a credential; it must never ride
+			// along in the diagnostic line that now names the client.
+			if strings.Contains(buf.String(), "not-a-real-refresh-token") {
+				t.Error("the presented refresh token must not be logged")
+			}
+		})
 	}
 }

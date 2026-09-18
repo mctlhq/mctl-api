@@ -60,7 +60,43 @@ type PostgresStore struct {
 // predecessor token is treated as a possible lost-response retry (see
 // rotateTx) rather than reuse. A package-level var, not a const, so tests can
 // shrink it instead of sleeping real wall-clock time.
-var rotationGraceWindow = 30 * time.Second
+//
+// 30s was too tight to cover the case it exists for. A client that never
+// received the rotation response does not retry within the same second: it
+// retries on its next scheduled refresh or when the user next touches the
+// connector, which is minutes later. Outside the window the replay is read as
+// reuse and the WHOLE family is revoked, so every client on that family gets
+// `invalid_grant` and the user is told to re-authenticate.
+//
+// What the 2026-09-17 incident establishes precisely, and what it does not:
+// family 9f57b332 (login mashkovd) took twelve replays of one already-rotated
+// token in two bursts ten minutes apart, which shows the blast radius — one
+// late replay logs out every client on the family. It does NOT establish that
+// 2m would have saved it: the log does not carry the rotation time of the
+// token that first burst replayed, and every replay after the first hits the
+// revoked family anyway. So this window is sized against client retry
+// cadence, which is the thing it has to cover, not against that log.
+//
+// The signal to retune against is already emitted: compare the rate of the
+// `oauth refresh token grace-window replay` INFO to the `reuse detected` WARN.
+// Replays still being read as reuse mean the window is short for the clients
+// in play; grace replays with no reuse mean it is doing its job.
+//
+// 2m is chosen against the failure it prevents rather than the one it admits.
+// A widened window does NOT weaken reuse detection into a free replay: the
+// grace path in rotateTx re-issues the ALREADY EXISTING successor and only
+// when that successor is still the live tip of the family (not revoked, not
+// itself rotated, not expired). A stolen predecessor therefore buys an
+// attacker the same token the legitimate client already holds, never a
+// second live branch, and the moment the legitimate client rotates again the
+// replay stops being honoured.
+//
+// The default lives in its own const so the floor below it can be pinned by a
+// test: rotationGraceWindow itself is mutated by withShortGraceWindow during
+// the suite, so reading the var would pin whatever the last test left behind.
+const defaultRotationGraceWindow = 2 * time.Minute
+
+var rotationGraceWindow = defaultRotationGraceWindow
 
 // NewPostgresStore creates a PostgresStore and auto-creates the schema.
 func NewPostgresStore(ctx context.Context, connStr string) (*PostgresStore, error) {
