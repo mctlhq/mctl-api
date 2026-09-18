@@ -331,7 +331,26 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		slog.Warn("token exchange failed", "grant_type", grantType, "error", err)
+		// client_id and client_name are the two fields that make a failed
+		// exchange actionable, and neither was logged: the refresh-store WARN
+		// that precedes a reuse revocation carries the client_id but no name,
+		// and every other failure arm carried nothing at all, so a burst of
+		// `invalid_grant` said only that SOMEBODY's refresh had died. The name
+		// comes from the registry, which holds dynamic registrations for
+		// ClientRegistrationTTL (24h by default) — a client whose registration
+		// has since aged out reads as "unregistered", which is itself the
+		// signal for that case rather than a gap in it. Neither field is a
+		// secret: this server is public-client only, PKCE is the proof, and
+		// the client_id travels in the clear on every authorize request.
+		clientName := "unregistered"
+		if c, ok := o.GetClient(clientID); ok {
+			clientName = c.ClientName
+		}
+		slog.Warn("token exchange failed",
+			"grant_type", grantType,
+			"client_id", clientID,
+			"client_name", clientName,
+			"error", err)
 		if errors.Is(err, auth.ErrServerError) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Cache-Control", "no-store")

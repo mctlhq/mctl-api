@@ -454,3 +454,15 @@ func TestGCRemovesOldRevokedRows(t *testing.T) {
 		t.Errorf("expected ErrInvalidToken after GC, got %v", err)
 	}
 }
+
+// The grace window exists to absorb a lost rotation response, and a client
+// that never saw one retries on its next refresh cycle — minutes later, not
+// milliseconds. A window shorter than a minute therefore fails to cover the
+// only case it is for, while still paying its full cost: the replay lands
+// outside the window, is read as reuse, and the whole family is revoked, which
+// logs every client on it out (2026-09-17, family 9f57b332).
+func TestDefaultRotationGraceWindow_CoversAClientRetryCycle(t *testing.T) {
+	if defaultRotationGraceWindow < time.Minute {
+		t.Errorf("defaultRotationGraceWindow = %s, want at least 1m: see the comment on rotationGraceWindow", defaultRotationGraceWindow)
+	}
+}
