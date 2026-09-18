@@ -338,8 +338,9 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		// `invalid_grant` said only that SOMEBODY's refresh had died. The name
 		// comes from the registry, which holds dynamic registrations for
 		// ClientRegistrationTTL (24h by default) — a client whose registration
-		// has since aged out reads as "unregistered", which is itself the
-		// signal for that case rather than a gap in it. Neither field is a
+		// has since aged out is indistinguishable from one that never
+		// registered, and that is itself the signal for the case rather than a
+		// gap in it. Neither field is a
 		// secret: this server is public-client only, PKCE is the proof, and
 		// the client_id travels in the clear on every authorize request.
 		// Three distinct states, kept distinct: no registry entry at all

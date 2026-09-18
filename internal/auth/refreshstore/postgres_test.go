@@ -99,8 +99,9 @@ func TestRotateRejectsClientMismatch(t *testing.T) {
 	}
 }
 
-// withShortGraceWindow shrinks rotationGraceWindow for the duration of the
-// test so grace-window tests don't need real 30s sleeps.
+// withShortGraceWindow overrides rotationGraceWindow for the duration of the
+// test, so a grace-window test neither sleeps out the real default nor depends
+// on what that default happens to be.
 func withShortGraceWindow(t *testing.T, d time.Duration) {
 	t.Helper()
 	prev := rotationGraceWindow
