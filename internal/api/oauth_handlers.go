@@ -343,17 +343,23 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		// secret: this server is public-client only, PKCE is the proof, and
 		// the client_id travels in the clear on every authorize request.
 		// Three distinct states, kept distinct: no registry entry at all
-		// ("unregistered" — including a dynamic registration that has aged
-		// out), a registration that carries no name (RFC 7591 §2 makes
-		// client_name optional and RegisterClient stores the empty string as
-		// given), and a named client. Collapsing the first two would make a
-		// log burst harder to read for no gain.
-		clientName := "unregistered"
-		if c, ok := o.GetClient(clientID); ok {
-			clientName = "unnamed"
-			if c.ClientName != "" {
-				clientName = c.ClientName
-			}
+		// (including a dynamic registration that has aged out), a
+		// registration that carries no name (RFC 7591 §2 makes client_name
+		// optional and RegisterClient stores the empty string as given), and
+		// a named client. They are encoded OUT OF BAND, in client_registered,
+		// rather than as sentinel strings inside client_name: /oauth/register
+		// is unauthenticated and stores name verbatim, so a client may
+		// register itself AS "unregistered" or "unnamed" and forge exactly the
+		// state the sentinel was meant to denote. client_registered is
+		// derived here from the registry lookup and cannot be chosen by the
+		// caller, so the three states stay:
+		//   client_registered=false                  → no registry entry
+		//   client_registered=true,  client_name=""  → registered, anonymous
+		//   client_registered=true,  client_name=X   → registered as X
+		c, clientRegistered := o.GetClient(clientID)
+		var clientName string
+		if clientRegistered {
+			clientName = c.ClientName
 		}
 		// Both values are caller-controlled and length-bounded by nothing but
 		// the 16 KiB body cap: clientID is a raw form value that never has to
@@ -366,6 +372,7 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("token exchange failed",
 			"grant_type", grantType,
 			"client_id", truncateEchoedValue(clientID),
+			"client_registered", clientRegistered,
 			"client_name", truncateEchoedValue(clientName),
 			"error", err)
 		if errors.Is(err, auth.ErrServerError) {

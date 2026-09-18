@@ -90,20 +90,29 @@ func TestHandleOAuthToken_FailureLogsClientIdentity(t *testing.T) {
 	// anything, so an unbounded client_id would be a log-volume amplifier.
 	oversized := strings.Repeat("a", maxEchoedValueLen*3)
 
+	// A self-registered client whose NAME is the string an in-band sentinel
+	// would have used: the log line must still say it is registered, which is
+	// only possible because the state lives in its own field.
+	impostor := srv.RegisterClient("unregistered", []string{"https://claude.ai/api/mcp/auth_callback"})
+
 	cases := []struct {
 		name           string
 		clientID       string
 		wantClientID   string
+		wantRegistered bool
 		wantClientName string
 	}{
-		{"registered client", registered.ClientID, registered.ClientID, "Claude"},
+		{"registered client", registered.ClientID, registered.ClientID, true, "Claude"},
 		// An aged-out or never-registered id is not a gap in the signal: it
 		// is the signal for that case, so it is asserted rather than skipped.
-		{"unknown client", "no-such-client", "no-such-client", "unregistered"},
+		{"unknown client", "no-such-client", "no-such-client", false, ""},
 		// client_name is optional in RFC 7591, so "registered but anonymous"
 		// is a third state and must not read as "unregistered".
-		{"registered without a name", anonymous.ClientID, anonymous.ClientID, "unnamed"},
-		{"oversized client_id is clipped", oversized, truncateEchoedValue(oversized), "unregistered"},
+		{"registered without a name", anonymous.ClientID, anonymous.ClientID, true, ""},
+		{"oversized client_id is clipped", oversized, truncateEchoedValue(oversized), false, ""},
+		// /oauth/register is unauthenticated and stores the name verbatim, so
+		// this is self-service, not hypothetical.
+		{"client cannot forge the unregistered state", impostor.ClientID, impostor.ClientID, true, "unregistered"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -130,6 +139,7 @@ func TestHandleOAuthToken_FailureLogsClientIdentity(t *testing.T) {
 			var line struct {
 				Msg        string `json:"msg"`
 				ClientID   string `json:"client_id"`
+				Registered bool   `json:"client_registered"`
 				ClientName string `json:"client_name"`
 			}
 			var found bool
@@ -156,6 +166,10 @@ func TestHandleOAuthToken_FailureLogsClientIdentity(t *testing.T) {
 			}
 			if line.ClientName != c.wantClientName {
 				t.Errorf("client_name = %q, want %q", line.ClientName, c.wantClientName)
+			}
+			// The discriminator the caller cannot write to.
+			if line.Registered != c.wantRegistered {
+				t.Errorf("client_registered = %v, want %v", line.Registered, c.wantRegistered)
 			}
 			// The presented refresh token is a credential; it must never ride
 			// along in the diagnostic line that now names the client.
