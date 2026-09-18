@@ -851,6 +851,7 @@ func TestRelay_RunDrainsOnNotifyAndClosesOnCancel(t *testing.T) {
 	st, pub := newFakes(1)
 	r := NewRelay(st, pub, false)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // a t.Fatalf below must not leave Run alive for the next test
 	done := make(chan struct{})
 	go func() { r.Run(ctx); close(done) }()
 
