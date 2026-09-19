@@ -141,7 +141,10 @@ func agentPlatformError(err error) (status int, code string, ok bool) {
 	case errors.Is(err, agentregistry.ErrReleaseNotFound):
 		return http.StatusNotFound, "", true
 	case errors.Is(err, agentregistry.ErrNoRollbackTarget):
-		return http.StatusUnprocessableEntity, "no_rollback_target", true
+		// 409 is what its one real producer, the v1 rollback handler,
+		// already answers; a second status for the same condition would be
+		// a contract this table invented.
+		return http.StatusConflict, "", true
 	case errors.Is(err, agentregistry.ErrInvalidPhase):
 		return http.StatusBadRequest, "", true
 	default:

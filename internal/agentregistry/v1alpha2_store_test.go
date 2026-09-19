@@ -652,7 +652,11 @@ func TestSentinelsListsEveryExportedSentinel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
-	declared := regexp.MustCompile(`(?m)^\s*(Err[A-Za-z0-9_]*)\s*=\s*errors\.New\(`)
+	// Matches both a declaration inside a `var (...)` block and a top-level
+	// `var Err... = errors.New(...)`; requiring only leading whitespace would
+	// miss the second shape, and the count check cannot notice what the
+	// pattern never saw.
+	declared := regexp.MustCompile(`(?m)^\s*(?:var\s+)?(Err[A-Za-z0-9_]*)\s*=\s*errors\.New\(`)
 	found := 0
 	for _, entry := range entries {
 		name := entry.Name()
@@ -736,5 +740,51 @@ func TestResolveBinding_UnknownAgentIsDefinitionNotFound(t *testing.T) {
 	_, err = s.ResolveBinding(ctx, "issue-investigator", EnvironmentProduction)
 	if !errors.Is(err, ErrBindingNotFound) {
 		t.Fatalf("declared agent, no binding: expected ErrBindingNotFound, got %v", err)
+	}
+}
+
+// TestPublishDefinitionVersion_RejectsANonObjectSpecBeforeTheDatabase pins
+// the store-side half of the spec check. The handler validated it, so the
+// rule lived in the caller rather than in the thing it constrains, and a
+// non-HTTP caller wrote a scalar into a column the contract says is an
+// object.
+func TestPublishDefinitionVersion_RejectsANonObjectSpecBeforeTheDatabase(t *testing.T) {
+	s := &Store{}
+	for _, spec := range []string{`[1,2]`, `42`, `"text"`, `null`, `{`, ``} {
+		d := newDefinitionVersion("issue-investigator", "1.0.0", ">=1.0.0 <2.0.0")
+		d.SpecJSON = spec
+		if _, err := s.PublishDefinitionVersion(context.Background(), d); !errors.Is(err, ErrInvalidSpec) {
+			t.Errorf("spec %q: expected ErrInvalidSpec, got %v", spec, err)
+		}
+	}
+}
+
+// TestCreateBinding_DefaultsBindingSource pins the default the docs state
+// and only the HTTP handler applied: an omitted binding_source reached the
+// column as an empty string, which every reader of the resolve envelope then
+// saw instead of "registry".
+func TestCreateBinding_DefaultsBindingSource(t *testing.T) {
+	s := newV1Alpha2TestStore(t)
+	ctx := context.Background()
+	if _, err := s.CreateDefinition(ctx, "issue-investigator", "", ""); err != nil {
+		t.Fatalf("create definition: %v", err)
+	}
+	if _, err := s.PublishDefinitionVersion(ctx, newDefinitionVersion("issue-investigator", "1.4.0", ">=2.0.0 <3.0.0")); err != nil {
+		t.Fatalf("publish definition: %v", err)
+	}
+	if _, err := s.PublishProfileVersion(ctx, newProfileVersion("standard-investigate", "2.1.0")); err != nil {
+		t.Fatalf("publish profile: %v", err)
+	}
+
+	binding, err := s.CreateBinding(ctx, CreateBindingRequest{
+		Agent: "issue-investigator", Environment: EnvironmentShadow,
+		DefinitionVersion: "1.4.0", Profile: "standard-investigate", ProfileVersion: "2.1.0",
+		Actor: "tester", // BindingSource deliberately omitted
+	})
+	if err != nil {
+		t.Fatalf("create binding: %v", err)
+	}
+	if binding.BindingSource != BindingSourceRegistry {
+		t.Fatalf("expected binding_source %q, got %q", BindingSourceRegistry, binding.BindingSource)
 	}
 }

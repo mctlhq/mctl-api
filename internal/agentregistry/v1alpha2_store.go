@@ -114,6 +114,13 @@ func (s *Store) PublishDefinitionVersion(ctx context.Context, d *DefinitionVersi
 	if _, err := ParseRange(d.ProfileRange); err != nil {
 		return nil, fmt.Errorf("agentregistry: publish definition version: profile_range: %w", err)
 	}
+	// The profile path validates its spec through validateProfileSpec; this
+	// one left it to the handler, so a non-HTTP caller could store `[1,2]`
+	// or `42` in a JSONB column the contract says holds an object, and
+	// malformed JSON reached Postgres as an unmapped 22P02.
+	if err := ValidateSpecIsObject(d.SpecJSON); err != nil {
+		return nil, fmt.Errorf("agentregistry: publish definition version: spec: %w", err)
+	}
 
 	apiVersion := d.APIVersion
 	if apiVersion == "" {
@@ -441,6 +448,12 @@ func validateBindingPairNotDisabled(def *DefinitionVersion, prof *ProfileVersion
 func (s *Store) CreateBinding(ctx context.Context, req CreateBindingRequest) (*ReleaseBinding, error) {
 	if !validEnvironment(req.Environment) {
 		return nil, fmt.Errorf("agentregistry: create binding: %w: %q", ErrInvalidEnvironment, req.Environment)
+	}
+	// "defaults to registry if omitted" was the handler's rule, not the
+	// store's, so a caller that did not go through HTTP wrote an empty
+	// string into a column every consumer of the resolve envelope reads.
+	if req.BindingSource == "" {
+		req.BindingSource = BindingSourceRegistry
 	}
 	if req.BindingSource == BindingSourceCompatibilityFixture {
 		return nil, fmt.Errorf("%w: compatibility-fixture intents are non-promotable; use bindingSource=registry", ErrFixtureNotPromotable)

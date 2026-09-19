@@ -184,8 +184,11 @@ type ResolvedBinding struct {
 	BindingSource string                `json:"bindingSource"`
 	Intent        *ResolvedIntent       `json:"intent,omitempty"`
 	RollbackOf    *int                  `json:"rollbackOf"`
-	CreatedAt     time.Time             `json:"createdAt"`
-	CreatedBy     string                `json:"createdBy,omitempty"`
+	// omitzero, not omitempty: a struct field is never "empty", so the
+	// explicit-pin form emitted "0001-01-01T00:00:00Z" for a binding that
+	// does not exist. Its neighbours here already omit on the same form.
+	CreatedAt time.Time `json:"createdAt,omitzero"`
+	CreatedBy string    `json:"createdBy,omitempty"`
 }
 
 // ResolvedDefinition is the definition half of a ResolvedBinding envelope.

@@ -299,7 +299,6 @@ binding not found) that predate this error-code scheme.
 | 422 | `version_deprecated` | either named version is `deprecated` |
 | 422 | `version_disabled` | either named version is `disabled` |
 | 422 | `fixture_not_promotable` | `binding_source: compatibility-fixture` was used on a bind/rollback |
-| 422 | `no_rollback_target` | a rollback was asked for where no prior binding revision exists |
 
 ## MCP tools
 
