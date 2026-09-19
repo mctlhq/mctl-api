@@ -648,6 +648,16 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/"},
 		Parameters: []ParameterDef{
 			{Name: "issue_url", Type: "string", Required: true, Description: "Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123", Pattern: `^https://github\.com/mctlhq/[A-Za-z0-9_.-]+/issues/[0-9]+$`},
+			// Resume identifiers (mctlhq/mctl-agents#267). Optional and opaque to
+			// mctl-api: nothing here resolves them, mints them, or defaults them.
+			// Declared so StripUndeclared stops dropping them on the way to Argo;
+			// the CWFT half is mctlhq/mctl-gitops#1279.
+			{Name: "work_item_id", Type: "string", Required: false,
+				Description: "Optional. Canonical WorkItem id to resume from (docs/work-context-contract.md, e.g. wi_<uuid>). Omit for a cold issue-driven run.",
+				Pattern:     `^[A-Za-z0-9_-]{1,64}$`},
+			{Name: "execution_id", Type: "string", Required: false,
+				Description: "Optional. WorkItemExecution id this run is attributed to (e.g. we_<uuid>). Omit for a cold issue-driven run.",
+				Pattern:     `^[A-Za-z0-9_-]{1,64}$`},
 		},
 	},
 	{
