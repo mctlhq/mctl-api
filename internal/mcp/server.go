@@ -249,6 +249,11 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolApproveDevLoop())
 	srv.AddTool(s.toolGetDevLoop())
 	srv.AddTool(s.toolGetLifecycleOwnership())
+	srv.AddTool(s.toolInspectLifecycleConflict())
+	srv.AddTool(s.toolRequestLifecycleReconcile())
+	srv.AddTool(s.toolFenceLifecycleClaim())
+	srv.AddTool(s.toolRequestLifecycleHandoff())
+	srv.AddTool(s.toolRetryLifecycleHandoff())
 	srv.AddTool(s.toolListRecentAgentRuns())
 
 	// Cloudflare MCP portal (dispatch only — no Cloudflare credential here).
