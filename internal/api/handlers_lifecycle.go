@@ -137,6 +137,30 @@ func writeLifecycleError(w http.ResponseWriter, err error, current *lifecycle.Ow
 		// underneath it, which is a different instruction — re-read, do not
 		// retry blindly.
 		writeError(w, http.StatusPreconditionFailed, err.Error())
+	case errors.Is(err, lifecycle.ErrOwnerMismatch), errors.Is(err, lifecycle.ErrVersionMismatch):
+		// Also 412, and for the same reason as ErrEpochMismatch above: a
+		// recovery request pins owner and entity version too, and either
+		// disagreeing means the operator's read is out of date. The current
+		// record rides along so the caller does not have to re-read to see
+		// what moved.
+		conflict := map[string]any{"error": err.Error()}
+		if current != nil {
+			conflict["ownership"] = newOwnershipResponse(current)
+		}
+		writeJSON(w, http.StatusPreconditionFailed, conflict)
+	case errors.Is(err, lifecycle.ErrOwnerNotStuck):
+		writeError(w, http.StatusConflict, err.Error()+
+			"; see mctl_inspect_lifecycle_conflict for which recovery transition applies")
+	case errors.Is(err, lifecycle.ErrHandoffNotStalled):
+		writeError(w, http.StatusConflict, err.Error()+
+			"; the handoff is still within its liveness bound")
+	case errors.Is(err, lifecycle.ErrInvalidPrecondition):
+		// A caller mistake (a missing or malformed precondition), not a race
+		// -- see the sentinel's own doc comment. The recovery handlers
+		// validate each field before ever calling the store, so this arm is
+		// a defense-in-depth backstop for a direct store caller, not the
+		// primary path a human operator hits.
+		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, lifecycle.ErrNotOwner), errors.Is(err, lifecycle.ErrNoHandoff):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, lifecycle.ErrUnknownPhase):

@@ -45,6 +45,11 @@ var recordedHints = map[string]hints{
 	"mctl_get_dev_loop":                       {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_incident":                       {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_lifecycle_ownership":            {readOnly: true, destructive: false, idempotent: false},
+	"mctl_inspect_lifecycle_conflict":         {readOnly: true, destructive: false, idempotent: false},
+	"mctl_request_lifecycle_reconcile":        {readOnly: false, destructive: false, idempotent: true},
+	"mctl_fence_lifecycle_claim":              {readOnly: false, destructive: true, idempotent: false},
+	"mctl_request_lifecycle_handoff":          {readOnly: false, destructive: true, idempotent: false},
+	"mctl_retry_lifecycle_handoff":            {readOnly: false, destructive: false, idempotent: true},
 	"mctl_get_openclaw_sizing_recommendation": {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_operation":                      {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_resource_usage":                 {readOnly: true, destructive: false, idempotent: false},
@@ -223,7 +228,7 @@ func TestEveryToolDeclaresBothHintsInSource(t *testing.T) {
 // spelled out so the allowlist can be copied rather than derived.
 func TestReadOnlyToolsAreTheRecordedSet(t *testing.T) {
 	want := []string{
-		"mctl_get_dev_loop", "mctl_get_incident", "mctl_get_lifecycle_ownership",
+		"mctl_get_dev_loop", "mctl_get_incident", "mctl_get_lifecycle_ownership", "mctl_inspect_lifecycle_conflict",
 		"mctl_get_openclaw_sizing_recommendation", "mctl_get_operation",
 		"mctl_get_resource_usage", "mctl_get_service_config", "mctl_get_service_logs", "mctl_get_service_status",
 		"mctl_get_tenant", "mctl_get_workflow_logs", "mctl_get_workflow_status", "mctl_incident_summary",
