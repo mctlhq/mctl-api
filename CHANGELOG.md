@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.51.0](https://github.com/mctlhq/mctl-api/compare/4.50.0...4.51.0) (2026-09-19)
+
+
+### Features
+
+* **agents:** issue-335-feat-operations-allow-work-item-id-and-e ([769a7de](https://github.com/mctlhq/mctl-api/commit/769a7de900e97438892206e5814fbb39c47ec975))
+* **operations:** allow work_item_id and execution_id on mctl-agents-investigate ([28d132e](https://github.com/mctlhq/mctl-api/commit/28d132edda99a74ab90f7bb4db6870b57c885ee2))
+
 ## [4.50.0](https://github.com/mctlhq/mctl-api/compare/4.49.0...4.50.0) (2026-09-19)
 
 
