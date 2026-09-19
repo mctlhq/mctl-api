@@ -46,3 +46,86 @@ func TestWorkflowNamespace(t *testing.T) {
 		})
 	}
 }
+
+// The shape that matters to mctl-agents' implement-outcome taxonomy: two
+// Pod nodes, both Failed, distinguishable ONLY by hostNodeName — one ran
+// and exited non-zero, the other never reached a kubelet because it sat on
+// a synchronization lock until a deadline killed it. If the projection
+// drops that field the two collapse into one, every failed implementer
+// reads as "never started", and the caller requeues work that may already
+// be committed (mctl-agents#395).
+func TestTrimWorkflowStatusKeepsHostNodeNameAndTemplateRef(t *testing.T) {
+	obj := map[string]interface{}{
+		"metadata": map[string]interface{}{"name": "wf", "namespace": "argo-workflows", "managedFields": []interface{}{"dropped"}},
+		"spec":     map[string]interface{}{"templates": []interface{}{"dropped"}},
+		"status": map[string]interface{}{
+			"phase": "Failed",
+			"nodes": map[string]interface{}{
+				"ran": map[string]interface{}{
+					"displayName":  "implement",
+					"type":         "Pod",
+					"phase":        "Failed",
+					"templateName": "run-implementer",
+					"hostNodeName": "worker-1",
+					"outputs":      map[string]interface{}{"exitCode": "1", "artifacts": []interface{}{"big"}},
+				},
+				"never-started": map[string]interface{}{
+					"displayName": "implement",
+					"type":        "Pod",
+					"phase":       "Failed",
+					"templateRef": map[string]interface{}{"name": "cwft-mctl-agents-implement", "template": "run-implementer"},
+					"message":     "Step exceeded its deadline",
+				},
+			},
+		},
+	}
+
+	trimmed := trimWorkflowStatus(obj)
+
+	status, ok := trimmed["status"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("status missing from trimmed object: %#v", trimmed)
+	}
+	nodes, ok := status["nodes"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("nodes missing from trimmed status: %#v", status)
+	}
+
+	ran, ok := nodes["ran"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("node %q missing: %#v", "ran", nodes)
+	}
+	if ran["hostNodeName"] != "worker-1" {
+		t.Errorf("hostNodeName dropped from a node that ran: %#v", ran)
+	}
+	if _, present := ran["outputs"]; present {
+		t.Errorf("outputs should stay excluded — it carries artifacts and parameters: %#v", ran)
+	}
+
+	neverStarted, ok := nodes["never-started"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("node %q missing: %#v", "never-started", nodes)
+	}
+	if _, present := neverStarted["hostNodeName"]; present {
+		t.Errorf("hostNodeName invented on a node that never ran: %#v", neverStarted)
+	}
+	ref, ok := neverStarted["templateRef"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("templateRef dropped, so the node's template is unknowable: %#v", neverStarted)
+	}
+	if ref["template"] != "run-implementer" {
+		t.Errorf("templateRef.template not preserved: %#v", ref)
+	}
+
+	// The trimming this function exists for still happens.
+	meta, ok := trimmed["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("metadata missing: %#v", trimmed)
+	}
+	if _, present := meta["managedFields"]; present {
+		t.Errorf("managedFields should be dropped: %#v", meta)
+	}
+	if _, present := trimmed["spec"]; present {
+		t.Errorf("spec should be dropped: %#v", trimmed)
+	}
+}
