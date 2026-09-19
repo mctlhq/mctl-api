@@ -87,6 +87,19 @@ const (
 	EventOwnerReleased    = "owner-released"
 	EventOwnerTerminal    = "owner-terminal"
 	EventRecovered        = "recovered"
+
+	// The four events a human-codeowner recovery transition appends
+	// (internal/lifecycle/recovery.go). Distinct from EventRecovered above,
+	// which is Store.Recover's own event: that operation and Fence both take
+	// ownership off a dead row, but Recover installs a new OWNER while Fence
+	// installs none — conflating their events would make an operator reading
+	// the trail unable to tell "somebody took this" from "this was released
+	// back to the pool", which is the whole point of ADR-010's out-of-scope
+	// line against a generic override.
+	EventFenced             = "fenced"
+	EventHandoffRequested   = "handoff-requested"
+	EventHandoffRetried     = "handoff-retried"
+	EventReconcileRequested = "reconcile-requested"
 )
 
 // bounds are per (kind, phase), and there are TWO of them because there are two
@@ -344,4 +357,44 @@ var (
 	// of whoever wants to act, which is the shape of the failure this package
 	// exists to remove.
 	ErrOwnerAlive = errors.New("lifecycle: current owner is still alive")
+
+	// The four sentinels a recovery transition (internal/lifecycle/recovery.go)
+	// adds. They exist because "the caller's read is stale" is not one
+	// question here: a recovery precondition names an owner, an epoch AND an
+	// entity version, and each of those failing means something different to
+	// the human operator who sent it, in the same way ErrOwnedByOther and
+	// ErrEpochMismatch already mean different things to an ordinary write.
+
+	// ErrOwnerMismatch means the expected owner a recovery request pinned is
+	// not the row's current owner, even though other preconditions may still
+	// match. Maps to 412: the caller's read is out of date, not merely
+	// contended.
+	ErrOwnerMismatch = errors.New("lifecycle: expected owner does not match the current owner")
+
+	// ErrVersionMismatch means the expected entity version a recovery request
+	// pinned is not the row's current one. Version is not part of the
+	// ownership key and is not a precondition on any ordinary write — a new
+	// head on the same pull request is the normal case, not a handoff — but a
+	// human operator's recovery DECISION was made by reading the entity, so a
+	// head that moved after that read can void it. Maps to 412.
+	ErrVersionMismatch = errors.New("lifecycle: expected entity version does not match the current version")
+
+	// ErrOwnerNotStuck means RequestHandoff was asked to escalate an owner
+	// that IsStuck does not license: healthy, dead (fence it instead), or
+	// already handing off (retry the handoff instead). Maps to 409.
+	ErrOwnerNotStuck = errors.New("lifecycle: current owner is not stuck")
+
+	// ErrHandoffNotStalled means RetryHandoff was asked to re-arm a handoff
+	// still inside its liveness bound. Maps to 409.
+	ErrHandoffNotStalled = errors.New("lifecycle: handoff has not stalled")
+
+	// ErrInvalidPrecondition means a recovery request itself is malformed —
+	// a missing expected owner, a non-positive expected epoch, a nil expected
+	// version, or an absent reason/principal. This is a caller mistake, not a
+	// race: the store's ordinary CAS mismatches (ErrEpochMismatch and the
+	// four above) describe a row that moved, while this describes a request
+	// that never named what it was pinning against. A typed sentinel rather
+	// than a plain error for the same reason requireEpoch exists at the API
+	// layer — a plain error there becomes an unexplained 500.
+	ErrInvalidPrecondition = errors.New("lifecycle: recovery precondition is missing or invalid")
 )
