@@ -1,5 +1,33 @@
 # Changelog
 
+## [4.50.0](https://github.com/mctlhq/mctl-api/compare/4.49.0...4.50.0) (2026-09-19)
+
+
+### Features
+
+* **agents:** issue-283-feat-agent-platform-publish-and-resolve ([4da4d74](https://github.com/mctlhq/mctl-api/commit/4da4d74f917e8f2a001de1fd42be3833a08bef16))
+* **agents:** issue-283-feat-agent-platform-publish-and-resolve ([30b6cdf](https://github.com/mctlhq/mctl-api/commit/30b6cdfa736af1348b33c4dcf7f2a0eb254cd581))
+
+
+### Bug Fixes
+
+* **agent-platform:** make the error mapping the only list, so a fix reaches the wire ([1caf59b](https://github.com/mctlhq/mctl-api/commit/1caf59b2de93169a8e5d6c4441f1b042afcc51a3))
+* **agent-platform:** move the spec check and the binding_source default into the store ([347ff02](https://github.com/mctlhq/mctl-api/commit/347ff02afc06ae661fb88e0cb75d8075255ed8ee))
+* **agent-platform:** read the package source through a rooted FS in the sentinel guard ([253856a](https://github.com/mctlhq/mctl-api/commit/253856acab231692ec85ab784e8ccfb6599a5c84))
+* **agent-platform:** report a non-object spec as the client error it is ([7371e17](https://github.com/mctlhq/mctl-api/commit/7371e17a80d070b190e126a6e7dbbdda9bc64cc0))
+* **agent-platform:** validate the version being published, and tell the two resolve 404s apart ([724bcb1](https://github.com/mctlhq/mctl-api/commit/724bcb1ff7888f0ce64253b2e88c0654cd31a330))
+* **agents:** address P1/P2 codex findings on issue-283-feat-agent-platform-publish-and-resolve ([bbda013](https://github.com/mctlhq/mctl-api/commit/bbda013afbcd86177d0ed21e2a1e3d0a45893df0))
+* **agents:** address P1/P2 codex findings on issue-283-feat-agent-platform-publish-and-resolve ([6f942bc](https://github.com/mctlhq/mctl-api/commit/6f942bc664e3883bede2d1b152d8fbb6eb85e146))
+* **events:** never publish a partial outbox batch, and cover Relay.Run ([300bbc6](https://github.com/mctlhq/mctl-api/commit/300bbc6d15cb5e87de3294d115fa58ea1643d746))
+* **events:** never publish a partial outbox batch, and cover Relay.Run ([4ffd3cf](https://github.com/mctlhq/mctl-api/commit/4ffd3cfd7c26b29fd7cfc6801c62f677a30bfbee))
+* **oauth:** bound the echoed client fields and split the unnamed case ([ea2194b](https://github.com/mctlhq/mctl-api/commit/ea2194b434a5e8d2956ea6937fab782032feda32))
+* **oauth:** move client-registration state out of client_name ([3a88f82](https://github.com/mctlhq/mctl-api/commit/3a88f82a0e132044f7fee26a9723ffaf2a4678b1))
+* **oauth:** widen refresh rotation grace window and log the failing client ([#332](https://github.com/mctlhq/mctl-api/issues/332)) ([67036de](https://github.com/mctlhq/mctl-api/commit/67036dec99e1d868d6e66e85e1b8f5cbb0133aaa))
+* **oauth:** widen refresh rotation grace window and name the client on a failed exchange ([67036de](https://github.com/mctlhq/mctl-api/commit/67036dec99e1d868d6e66e85e1b8f5cbb0133aaa))
+* **oauth:** widen the refresh rotation grace window and name the client on a failed exchange ([da6192d](https://github.com/mctlhq/mctl-api/commit/da6192dee7a49593c3b0de5bf647345fd72a8c97))
+* **workflows:** keep hostNodeName and templateRef in the trimmed node status ([0ca2d50](https://github.com/mctlhq/mctl-api/commit/0ca2d5014af4a369ecbc5a5fd5cbfc2c21839718))
+* **workflows:** keep hostNodeName and templateRef in the trimmed node status ([10423a9](https://github.com/mctlhq/mctl-api/commit/10423a98f6b7c2c921c712f60439731a07a094f9))
+
 ## [4.49.0](https://github.com/mctlhq/mctl-api/compare/4.48.0...4.49.0) (2026-09-17)
 
 
