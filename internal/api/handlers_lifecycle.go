@@ -137,12 +137,13 @@ func writeLifecycleError(w http.ResponseWriter, err error, current *lifecycle.Ow
 		// underneath it, which is a different instruction — re-read, do not
 		// retry blindly.
 		writeError(w, http.StatusPreconditionFailed, err.Error())
-	case errors.Is(err, lifecycle.ErrOwnerMismatch), errors.Is(err, lifecycle.ErrVersionMismatch):
+	case errors.Is(err, lifecycle.ErrOwnerMismatch), errors.Is(err, lifecycle.ErrVersionMismatch),
+		errors.Is(err, lifecycle.ErrLastSeenAtMismatch):
 		// Also 412, and for the same reason as ErrEpochMismatch above: a
-		// recovery request pins owner and entity version too, and either
-		// disagreeing means the operator's read is out of date. The current
-		// record rides along so the caller does not have to re-read to see
-		// what moved.
+		// recovery request pins owner, entity version and optionally
+		// last_seen_at too, and any of them disagreeing means the operator's
+		// read is out of date. The current record rides along so the caller
+		// does not have to re-read to see what moved.
 		conflict := map[string]any{"error": err.Error()}
 		if current != nil {
 			conflict["ownership"] = newOwnershipResponse(current)

@@ -379,6 +379,14 @@ var (
 	// head that moved after that read can void it. Maps to 412.
 	ErrVersionMismatch = errors.New("lifecycle: expected entity version does not match the current version")
 
+	// ErrLastSeenAtMismatch means the optional expected_last_seen_at a
+	// recovery request pinned is not the row's current one -- the liveness
+	// evidence the operator read (e.g. the owner's own tick) moved between
+	// that read and this write. Like ErrOwnerMismatch and ErrVersionMismatch,
+	// this is the operator's decision voided by a read that is no longer
+	// current, not ordinary contention, so it maps to 412 the same way.
+	ErrLastSeenAtMismatch = errors.New("lifecycle: expected last_seen_at does not match the current last_seen_at")
+
 	// ErrOwnerNotStuck means RequestHandoff was asked to escalate an owner
 	// that IsStuck does not license: healthy, dead (fence it instead), or
 	// already handing off (retry the handoff instead). Maps to 409.

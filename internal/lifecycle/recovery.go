@@ -59,8 +59,8 @@ type RecoveryPreconditions struct {
 	// ExpectedLastSeenAt is an optional extra pin on the liveness evidence the
 	// operator read. When set, a last_seen_at that moved between the read and
 	// the write (e.g. the owner's own tick landing mid-recovery) refuses the
-	// write with ErrStaleRead, on top of whatever the transition's own
-	// liveness/progress re-derivation already refuses.
+	// write with ErrLastSeenAtMismatch, on top of whatever the transition's
+	// own liveness/progress re-derivation already refuses.
 	ExpectedLastSeenAt *time.Time
 }
 
@@ -160,7 +160,7 @@ func checkPreconditions(current *Ownership, pre RecoveryPreconditions) error {
 	}
 	if pre.ExpectedLastSeenAt != nil && !current.LastSeenAt.Equal(*pre.ExpectedLastSeenAt) {
 		return fmt.Errorf("%w: last_seen_at is now %s, caller's read was pinned to %s",
-			ErrStaleRead, current.LastSeenAt.Format(time.RFC3339), pre.ExpectedLastSeenAt.Format(time.RFC3339))
+			ErrLastSeenAtMismatch, current.LastSeenAt.Format(time.RFC3339), pre.ExpectedLastSeenAt.Format(time.RFC3339))
 	}
 	return nil
 }
@@ -302,12 +302,19 @@ func fenceRaceLost(ctx context.Context, tx pgx.Tx, entity EntityRef, phase strin
 // UNCHANGED by the SET: the outgoing owner keeps driving until the named
 // target calls its own HandoffComplete, exactly as an ordinary HandoffStart
 // does.
+//
+// last_seen_at is set to the same `now` as handoff_started_at, mirroring
+// handoffStartUpdateSQL's own active -> handing-off transition (store.go):
+// this call is only reachable from an active row (RequestHandoff refuses
+// anything else before building the statement's args), so there is no
+// existing handoff to freeze the clock against — the row is not yet
+// handing off until this write lands.
 const handoffRequestUpdateSQL = `UPDATE lifecycle_ownership
 			   SET state = $1, handoff_to_type = $2, handoff_to_id = $3,
-			       handoff_started_at = $4, updated_at = $4
-			 WHERE entity_kind = $5 AND entity_id = $6 AND phase = $7
-			   AND state = $8 AND handoff_to_type = '' AND handoff_to_id = ''
-			   AND epoch = $9 AND owner_type = $10 AND owner_id = $11 AND entity_version = $12
+			       handoff_started_at = $4, last_seen_at = $5, updated_at = $6
+			 WHERE entity_kind = $7 AND entity_id = $8 AND phase = $9
+			   AND state = $10 AND handoff_to_type = '' AND handoff_to_id = ''
+			   AND epoch = $11 AND owner_type = $12 AND owner_id = $13 AND entity_version = $14
 			 RETURNING ` + ownershipColumns
 
 // RequestHandoff escalates a STUCK owner by starting a handoff toward
@@ -354,7 +361,7 @@ func (s *Store) RequestHandoff(ctx context.Context, req RecoveryRequest, toOwner
 		}
 
 		updated, err := scanOne(tx.QueryRow(ctx, handoffRequestUpdateSQL,
-			StateHandingOff, toOwner.Type, toOwner.ID, now,
+			StateHandingOff, toOwner.Type, toOwner.ID, now, now, now,
 			req.Entity.Kind, req.Entity.ID, req.Phase,
 			StateActive, req.Pre.ExpectedEpoch, req.Pre.ExpectedOwner.Type, req.Pre.ExpectedOwner.ID,
 			*req.Pre.ExpectedVersion))

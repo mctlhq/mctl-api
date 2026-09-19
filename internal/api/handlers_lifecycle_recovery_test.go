@@ -316,6 +316,18 @@ func TestFenceLifecycleClaim_StatusMapping(t *testing.T) {
 		t.Fatalf("version mismatch: want 412, got %d: %s", rec.Code, rec.Body.String())
 	}
 
+	// Optional last_seen_at pin, mismatched at the right owner+epoch+version:
+	// also 412, not 409 -- see lifecycle.ErrLastSeenAtMismatch.
+	current, err := store.Get(context.Background(), entity, "review-remediation")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	wrongLastSeenAt := recoveryBody("pull-request", id, "review-remediation", "devloop-workflow", "wf-1", got.Epoch, "", "escalate")
+	wrongLastSeenAt["expected_last_seen_at"] = current.LastSeenAt.Add(-1 * time.Hour).Format(time.RFC3339Nano)
+	if rec := lifecyclePost(t, h, h.FenceLifecycleClaim, wrongLastSeenAt); rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("last_seen_at mismatch: want 412, got %d: %s", rec.Code, rec.Body.String())
+	}
+
 	// Now the real thing: success.
 	success := recoveryBody("pull-request", id, "review-remediation", "devloop-workflow", "wf-1", got.Epoch, "", "unseen for 11h")
 	if rec := lifecyclePost(t, h, h.FenceLifecycleClaim, success); rec.Code != http.StatusOK {

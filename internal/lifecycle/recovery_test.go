@@ -436,6 +436,52 @@ func TestRequestReconcile_LeavesRowUnchanged(t *testing.T) {
 	}
 }
 
+// TestRequestReconcile_ExpectedLastSeenAt exercises the optional
+// last_seen_at pin: a request pinned to the row's actual last_seen_at
+// succeeds, and one pinned to a reading the row has since moved past is
+// refused with ErrLastSeenAtMismatch -- not ErrStaleRead, which the 409 arm
+// of writeLifecycleError (internal/api/handlers_lifecycle.go) would answer
+// with the wrong instruction (retry blindly) for what is actually a stale
+// operator read. ErrLastSeenAtMismatch maps to 412 there, the same as
+// ErrOwnerMismatch and ErrVersionMismatch, both exercised above.
+func TestRequestReconcile_ExpectedLastSeenAt(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "reconcile-last-seen-at")
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	current, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	// Pinned to the row's actual reading: succeeds like any other matching
+	// precondition.
+	req := fenceReq(entity, PhaseReviewRemediation, owner, got.Epoch, got.Entity.Version, "op1", "reading last_seen_at")
+	seenAt := current.LastSeenAt
+	req.Pre.ExpectedLastSeenAt = &seenAt
+	if _, err := s.RequestReconcile(ctx, req); err != nil {
+		t.Fatalf("matching last_seen_at: want success, got %v", err)
+	}
+
+	// Pinned to a reading the row has moved past: refused, and with the
+	// sentinel that maps to 412 -- not ErrStaleRead, which means "retry" and
+	// maps to 409.
+	stale := current.LastSeenAt.Add(-1 * time.Hour)
+	req.Pre.ExpectedLastSeenAt = &stale
+	_, err = s.RequestReconcile(ctx, req)
+	if !errors.Is(err, ErrLastSeenAtMismatch) {
+		t.Fatalf("stale last_seen_at: want ErrLastSeenAtMismatch, got %v", err)
+	}
+	if errors.Is(err, ErrStaleRead) {
+		t.Fatalf("stale last_seen_at must not also answer ErrStaleRead (409): got %v", err)
+	}
+}
+
 // TestValidatePreconditions_RejectsMalformedInput pins that a missing or
 // invalid precondition is a typed error, not a plain one -- a plain error at
 // this boundary becomes an unexplained 500 at the API layer.
