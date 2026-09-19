@@ -590,3 +590,51 @@ func TestNewStore_SchemaIsIdempotent(t *testing.T) {
 		t.Fatalf("expected the row to survive a second NewStore call, got count=%d", count)
 	}
 }
+
+// The three tests below run without TEST_DATABASE_URL on purpose. Every other
+// test in this file is Postgres-gated and skips silently when the variable is
+// unset, so a behaviour that is only covered there is, in practice, covered by
+// nothing on a developer machine or in a CI job without a database. All three
+// paths below reject before the store touches its pool, so a zero-value Store
+// is enough to exercise them.
+
+func TestValidateProfileSpec_ExplicitNullCountsAsMissing(t *testing.T) {
+	// An explicit null is the half of this rule that the empty-object case
+	// does not reach: the key is present, so a plain presence check passes it.
+	missing, err := validateProfileSpec(`{"maxTokens":null,"maxToolCalls":50,"timeoutSeconds":600}`)
+	if err != nil {
+		t.Fatalf("validateProfileSpec: %v", err)
+	}
+	if len(missing) != 1 || missing[0] != "maxTokens" {
+		t.Fatalf("expected exactly maxTokens to be missing, got %v", missing)
+	}
+
+	missing, err = validateProfileSpec(`{"maxTokens":100000,"maxToolCalls":50,"timeoutSeconds":600}`)
+	if err != nil {
+		t.Fatalf("validateProfileSpec: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("expected no missing fields, got %v", missing)
+	}
+}
+
+func TestValidateProfileSpec_NonObjectIsClientError(t *testing.T) {
+	// Valid JSON that is not an object used to reach the caller with no
+	// sentinel, which the handler's default arm reported as a 500.
+	for _, spec := range []string{`[1,2]`, `42`, `"text"`, `null`, `not json`} {
+		_, err := validateProfileSpec(spec)
+		if !errors.Is(err, ErrInvalidSpec) {
+			t.Errorf("validateProfileSpec(%q): expected ErrInvalidSpec, got %v", spec, err)
+		}
+	}
+}
+
+func TestPublishProfileVersion_RejectsAnUnparseableVersionBeforeTheDatabase(t *testing.T) {
+	// The version is parsed at publish time, ahead of every query, so a
+	// zero-value Store reaches the check without a pool.
+	s := &Store{}
+	p := newProfileVersion("standard-investigate", "1.x")
+	if _, err := s.PublishProfileVersion(context.Background(), p); !errors.Is(err, ErrInvalidRange) {
+		t.Fatalf("expected ErrInvalidRange for an unparseable version, got %v", err)
+	}
+}

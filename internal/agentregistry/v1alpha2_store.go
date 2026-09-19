@@ -33,7 +33,14 @@ import (
 func topLevelJSONFields(specJSON string) (map[string]json.RawMessage, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(specJSON), &raw); err != nil {
-		return nil, fmt.Errorf("spec_json must be a JSON object: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrInvalidSpec, err)
+	}
+	// A bare `null` unmarshals into a nil map without an error, so the
+	// decode alone does not establish that the spec is an object. Left
+	// unchecked it reads as an object with no keys and is reported as
+	// missing every policy field, which describes the wrong problem.
+	if raw == nil {
+		return nil, fmt.Errorf("%w: got null", ErrInvalidSpec)
 	}
 	return raw, nil
 }

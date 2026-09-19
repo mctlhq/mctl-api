@@ -118,6 +118,8 @@ func writeAgentPlatformError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusBadRequest, "missing_required_fields", err.Error(), nil)
 	case errors.Is(err, agentregistry.ErrInvalidRange):
 		writeErrorCode(w, http.StatusBadRequest, "invalid_range", err.Error(), nil)
+	case errors.Is(err, agentregistry.ErrInvalidSpec):
+		writeErrorCode(w, http.StatusBadRequest, "invalid_spec", err.Error(), nil)
 	case errors.Is(err, agentregistry.ErrInvalidLifecycleTransition):
 		writeErrorCode(w, http.StatusConflict, "invalid_lifecycle_transition", err.Error(), nil)
 	case errors.Is(err, agentregistry.ErrInvalidEnvironment):

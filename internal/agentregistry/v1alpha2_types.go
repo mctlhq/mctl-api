@@ -55,6 +55,10 @@ var (
 	ErrInvalidLifecycleTransition = errors.New("agentregistry: invalid lifecycle transition")
 	ErrMissingPolicyFields        = errors.New("agentregistry: execution profile is missing required policy fields")
 	ErrMissingRequiredFields      = errors.New("agentregistry: missing required fields")
+	// A spec that parses as JSON but is not an object is client-fixable
+	// input, not a server fault, so it needs a sentinel of its own: without
+	// one the handler's default arm turns `[1,2]` or `42` into a 500.
+	ErrInvalidSpec = errors.New("agentregistry: spec_json must be a JSON object")
 )
 
 // RequiredProfilePolicyFields names the fields an ExecutionProfile's

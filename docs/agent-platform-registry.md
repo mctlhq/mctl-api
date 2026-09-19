@@ -289,8 +289,10 @@ binding not found) that predate this error-code scheme.
 
 | HTTP | `code` | When |
 | --- | --- | --- |
-| 400 | `invalid_range` | `profile_range` does not parse under the grammar above |
-| 400 | `missing_policy_fields` | a profile spec is missing a required policy-ceiling field |
+| 400 | `invalid_range` | a version or a `profile_range` does not parse — the sentinel covers both, since a version is parsed by the same grammar |
+| 400 | `invalid_spec` | `spec_json` is not a JSON object: it failed to parse, or it parsed as an array, a number, a string or `null` |
+| 400 | `missing_policy_fields` | a profile spec is missing a required policy-ceiling field, or carries it as an explicit `null` |
+| 400 | `missing_required_fields` | `owner`, `sourceManifest.gitSha` or `sourceManifest.contentHash` is empty; every missing one is named in a single response |
 | 404 | `version_not_found` | a named definition or profile version does not exist |
 | 409 | `invalid_lifecycle_transition` | the requested lifecycle change is not `published->deprecated`, `published->disabled` or `deprecated->disabled` |
 | 422 | `incompatible_profile` | the named profile version does not satisfy the definition's declared range |
