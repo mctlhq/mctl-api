@@ -314,7 +314,8 @@ func trimWorkflowStatus(obj map[string]interface{}) map[string]interface{} {
 		result["metadata"] = trimmed
 	}
 
-	// Full status block — contains phase, nodes, conditions, timestamps.
+	// Status is an ALLOWLIST, not the full block: only the keys below
+	// survive, and a caller that needs another one has to add it here.
 	if status, ok := obj["status"].(map[string]interface{}); ok {
 		trimmedStatus := map[string]interface{}{}
 		for _, key := range []string{"phase", "startedAt", "finishedAt", "estimatedDuration", "progress", "message", "conditions"} {
@@ -323,12 +324,34 @@ func trimWorkflowStatus(obj map[string]interface{}) map[string]interface{} {
 			}
 		}
 		// Trim nodes to essential fields only.
+		//
+		// `hostNodeName` is here because it is the only field in this
+		// projection that says whether a Pod node ever reached a kubelet.
+		// `phase` cannot answer that: a node blocked on a synchronization
+		// lock and then killed by a deadline is Failed with no pod, and a
+		// pod that ran and exited non-zero is Failed too. Dropping it made
+		// those two indistinguishable to mctl-agents' implement-outcome
+		// taxonomy, which then read every FAILED implementer as one that
+		// never started and requeued it — including, in principle, one
+		// that had already committed and pushed (mctl-agents#395, #399).
+		// `startedAt` is not a substitute: Argo stamps it when the node is
+		// created, which for a node waiting on a mutex is while it is
+		// still Pending.
+		//
+		// `templateRef` is here for the same reason in a smaller way: a
+		// step resolved through a templateRef leaves `templateName` empty
+		// on the node, so without it a caller cannot tell which template
+		// a node ran once a CWFT pulls one in by reference.
+		//
+		// Both are scalars. `outputs` is deliberately still excluded — it
+		// carries artifacts and parameters and would undo the trimming
+		// this function exists for.
 		if nodes, ok := status["nodes"].(map[string]interface{}); ok {
 			trimmedNodes := map[string]interface{}{}
 			for nodeID, nodeVal := range nodes {
 				if node, ok := nodeVal.(map[string]interface{}); ok {
 					tn := map[string]interface{}{}
-					for _, key := range []string{"displayName", "phase", "type", "startedAt", "finishedAt", "message", "templateName"} {
+					for _, key := range []string{"displayName", "phase", "type", "startedAt", "finishedAt", "message", "templateName", "templateRef", "hostNodeName"} {
 						if v, exists := node[key]; exists {
 							tn[key] = v
 						}
