@@ -17,9 +17,13 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -362,5 +366,94 @@ func TestRecordAgentExecution_V1Alpha2FieldsRoundTrip(t *testing.T) {
 		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
 			t.Errorf("expected list executions response to contain %s, got %s", want, rec.Body.String())
 		}
+	}
+}
+
+// The three tests below deliberately do not take a database. Every other test
+// in this file is TEST_DATABASE_URL-gated and skips silently without one, so a
+// mapping covered only there is covered by nothing on a machine with no
+// Postgres — and the defect these guard against was precisely a mapping that
+// was written and never reached. A zero-value Store is enough: both publish
+// handlers reject a non-object spec before they call it.
+
+func TestPublishVersion_NonObjectSpecIs400NotInternalError(t *testing.T) {
+	h := &Handlers{opts: Options{AgentRegistry: &agentregistry.Store{}}}
+
+	for _, spec := range []string{`[1, 2]`, `42`, `null`, `"text"`} {
+		// The spec travels as a JSON string inside the request body, so it has
+		// to be encoded rather than pasted: `"text"` carries quotes of its own.
+		encoded, err := json.Marshal(spec)
+		if err != nil {
+			t.Fatalf("marshal spec %s: %v", spec, err)
+		}
+		defBody := `{"version":"1.0.0","spec":` + string(encoded) + `,"owner":"mctl-agents",` +
+			`"source_manifest":{"repo":"r","path":"p","git_sha":"s","content_hash":"c"},"profile_range":">=1.0.0"}`
+		req := adminCtx(withChiParam(httptest.NewRequest("POST", "/api/v1/agents/issue-investigator/definition-versions", bytes.NewBufferString(defBody)), "name", "issue-investigator"))
+		rec := httptest.NewRecorder()
+		h.PublishDefinitionVersion(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("definition spec %s: expected 400, got %d: %s", spec, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "invalid_spec") {
+			t.Errorf("definition spec %s: expected the invalid_spec code, got: %s", spec, rec.Body.String())
+		}
+
+		profBody := `{"version":"1.0.0","spec":` + string(encoded) + `,"owner":"mctl-agents",` +
+			`"source_manifest":{"repo":"r","path":"p","git_sha":"s","content_hash":"c"}}`
+		req = adminCtx(withChiParam(httptest.NewRequest("POST", "/api/v1/agent-profiles/standard-investigate/versions", bytes.NewBufferString(profBody)), "profile", "standard-investigate"))
+		rec = httptest.NewRecorder()
+		h.PublishProfileVersion(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("profile spec %s: expected 400, got %d: %s", spec, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "invalid_spec") {
+			t.Errorf("profile spec %s: expected the invalid_spec code, got: %s", spec, rec.Body.String())
+		}
+	}
+}
+
+// TestAgentPlatformErrorMapsEverySentinel is the guard the publish handlers
+// used to need a hand-kept whitelist for: every sentinel the package exports
+// must be mapped, so adding one and forgetting a call site cannot silently
+// produce a 500.
+func TestAgentPlatformErrorMapsEverySentinel(t *testing.T) {
+	sentinels := map[string]error{
+		"ErrVersionConflict":            agentregistry.ErrVersionConflict,
+		"ErrDefinitionNotFound":         agentregistry.ErrDefinitionNotFound,
+		"ErrDefinitionVersionNotFound":  agentregistry.ErrDefinitionVersionNotFound,
+		"ErrProfileVersionNotFound":     agentregistry.ErrProfileVersionNotFound,
+		"ErrBindingNotFound":            agentregistry.ErrBindingNotFound,
+		"ErrVersionDeprecated":          agentregistry.ErrVersionDeprecated,
+		"ErrVersionDisabled":            agentregistry.ErrVersionDisabled,
+		"ErrIncompatibleProfile":        agentregistry.ErrIncompatibleProfile,
+		"ErrFixtureNotPromotable":       agentregistry.ErrFixtureNotPromotable,
+		"ErrMissingPolicyFields":        agentregistry.ErrMissingPolicyFields,
+		"ErrMissingRequiredFields":      agentregistry.ErrMissingRequiredFields,
+		"ErrInvalidRange":               agentregistry.ErrInvalidRange,
+		"ErrInvalidSpec":                agentregistry.ErrInvalidSpec,
+		"ErrInvalidLifecycleTransition": agentregistry.ErrInvalidLifecycleTransition,
+		"ErrInvalidEnvironment":         agentregistry.ErrInvalidEnvironment,
+	}
+	for name, sentinel := range sentinels {
+		status, _, ok := agentPlatformError(fmt.Errorf("wrapped: %w", sentinel))
+		if !ok {
+			t.Errorf("%s is not mapped, so a handler answering it would fall through to 500", name)
+			continue
+		}
+		if status >= http.StatusInternalServerError {
+			t.Errorf("%s maps to %d; a sentinel names client input, not a server fault", name, status)
+		}
+	}
+
+	if _, _, ok := agentPlatformError(errors.New("a dropped connection")); ok {
+		t.Error("an unmapped error must not be reported as a mapped sentinel")
+	}
+}
+
+func TestWriteAgentPlatformError_UnmappedErrorIs500(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeAgentPlatformError(rec, errors.New("pool timeout"))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for an unmapped error, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

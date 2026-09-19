@@ -87,45 +87,68 @@ type rollbackBindingRequest struct {
 	Reason      string `json:"reason,omitempty"`
 }
 
-// writeAgentPlatformError maps a v1alpha2 sentinel error to its documented
-// HTTP status and, where design.md's error-code table names one, an
-// explicit machine-readable code via writeErrorCode. Order matters only
-// where a wrapped error could satisfy two errors.Is checks; the sentinels
-// below are mutually exclusive so it does not arise in practice.
-func writeAgentPlatformError(w http.ResponseWriter, err error) {
+// agentPlatformError maps a v1alpha2 sentinel error to its documented HTTP
+// status and, where design.md's error-code table names one, a machine-readable
+// code. ok is false when err is not one of the sentinels, which is what the
+// publish handlers use to tell client input apart from a server fault.
+//
+// This is deliberately the only such list. It used to be three: this switch,
+// plus a hand-written whitelist in each publish handler naming the subset it
+// would forward here. A sentinel added to the switch and forgotten in a
+// whitelist is mapped correctly and never reached, which is exactly how
+// ErrInvalidSpec still answered 500 after it was given a 400.
+//
+// Order matters only where a wrapped error could satisfy two errors.Is checks;
+// the sentinels below are mutually exclusive so it does not arise in practice.
+func agentPlatformError(err error) (status int, code string, ok bool) {
 	switch {
 	case errors.Is(err, agentregistry.ErrVersionConflict):
-		writeError(w, http.StatusConflict, err.Error())
+		return http.StatusConflict, "", true
 	case errors.Is(err, agentregistry.ErrDefinitionNotFound):
-		writeError(w, http.StatusNotFound, err.Error())
+		return http.StatusNotFound, "", true
 	case errors.Is(err, agentregistry.ErrDefinitionVersionNotFound):
-		writeErrorCode(w, http.StatusNotFound, "version_not_found", err.Error(), nil)
+		return http.StatusNotFound, "version_not_found", true
 	case errors.Is(err, agentregistry.ErrProfileVersionNotFound):
-		writeErrorCode(w, http.StatusNotFound, "version_not_found", err.Error(), nil)
+		return http.StatusNotFound, "version_not_found", true
 	case errors.Is(err, agentregistry.ErrBindingNotFound):
-		writeError(w, http.StatusNotFound, err.Error())
+		return http.StatusNotFound, "", true
 	case errors.Is(err, agentregistry.ErrVersionDeprecated):
-		writeErrorCode(w, http.StatusUnprocessableEntity, "version_deprecated", err.Error(), nil)
+		return http.StatusUnprocessableEntity, "version_deprecated", true
 	case errors.Is(err, agentregistry.ErrVersionDisabled):
-		writeErrorCode(w, http.StatusUnprocessableEntity, "version_disabled", err.Error(), nil)
+		return http.StatusUnprocessableEntity, "version_disabled", true
 	case errors.Is(err, agentregistry.ErrIncompatibleProfile):
-		writeErrorCode(w, http.StatusUnprocessableEntity, "incompatible_profile", err.Error(), nil)
+		return http.StatusUnprocessableEntity, "incompatible_profile", true
 	case errors.Is(err, agentregistry.ErrFixtureNotPromotable):
-		writeErrorCode(w, http.StatusUnprocessableEntity, "fixture_not_promotable", err.Error(), nil)
+		return http.StatusUnprocessableEntity, "fixture_not_promotable", true
 	case errors.Is(err, agentregistry.ErrMissingPolicyFields):
-		writeErrorCode(w, http.StatusBadRequest, "missing_policy_fields", err.Error(), nil)
+		return http.StatusBadRequest, "missing_policy_fields", true
 	case errors.Is(err, agentregistry.ErrMissingRequiredFields):
-		writeErrorCode(w, http.StatusBadRequest, "missing_required_fields", err.Error(), nil)
+		return http.StatusBadRequest, "missing_required_fields", true
 	case errors.Is(err, agentregistry.ErrInvalidRange):
-		writeErrorCode(w, http.StatusBadRequest, "invalid_range", err.Error(), nil)
+		return http.StatusBadRequest, "invalid_range", true
 	case errors.Is(err, agentregistry.ErrInvalidSpec):
-		writeErrorCode(w, http.StatusBadRequest, "invalid_spec", err.Error(), nil)
+		return http.StatusBadRequest, "invalid_spec", true
 	case errors.Is(err, agentregistry.ErrInvalidLifecycleTransition):
-		writeErrorCode(w, http.StatusConflict, "invalid_lifecycle_transition", err.Error(), nil)
+		return http.StatusConflict, "invalid_lifecycle_transition", true
 	case errors.Is(err, agentregistry.ErrInvalidEnvironment):
-		writeError(w, http.StatusBadRequest, err.Error())
+		return http.StatusBadRequest, "", true
 	default:
+		return 0, "", false
+	}
+}
+
+// writeAgentPlatformError answers a mapped sentinel with its status, and
+// anything else with a 500 carrying the raw error. The publish handlers do not
+// use that last arm: they check agentPlatformError first and log instead.
+func writeAgentPlatformError(w http.ResponseWriter, err error) {
+	status, code, ok := agentPlatformError(err)
+	switch {
+	case !ok:
 		writeError(w, http.StatusInternalServerError, err.Error())
+	case code == "":
+		writeError(w, status, err.Error())
+	default:
+		writeErrorCode(w, status, code, err.Error(), nil)
 	}
 }
 
@@ -182,8 +205,10 @@ func (h *Handlers) PublishDefinitionVersion(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "missing required fields: version, spec")
 		return
 	}
-	if !json.Valid([]byte(body.Spec)) {
-		writeError(w, http.StatusBadRequest, "spec must be valid JSON")
+	// The documented contract for spec_json is a JSON object, so a syntax
+	// check alone lets an array or a scalar through to be stored.
+	if err := agentregistry.ValidateSpecIsObject(body.Spec); err != nil {
+		writeAgentPlatformError(w, err)
 		return
 	}
 
@@ -197,8 +222,7 @@ func (h *Handlers) PublishDefinitionVersion(w http.ResponseWriter, r *http.Reque
 		CreatedBy:      user.ID,
 	})
 	if err != nil {
-		if errors.Is(err, agentregistry.ErrVersionConflict) || errors.Is(err, agentregistry.ErrDefinitionNotFound) ||
-			errors.Is(err, agentregistry.ErrInvalidRange) || errors.Is(err, agentregistry.ErrMissingRequiredFields) {
+		if _, _, ok := agentPlatformError(err); ok {
 			writeAgentPlatformError(w, err)
 			return
 		}
@@ -278,8 +302,10 @@ func (h *Handlers) PublishProfileVersion(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "missing required fields: version, spec")
 		return
 	}
-	if !json.Valid([]byte(body.Spec)) {
-		writeError(w, http.StatusBadRequest, "spec must be valid JSON")
+	// The documented contract for spec_json is a JSON object, so a syntax
+	// check alone lets an array or a scalar through to be stored.
+	if err := agentregistry.ValidateSpecIsObject(body.Spec); err != nil {
+		writeAgentPlatformError(w, err)
 		return
 	}
 
@@ -292,8 +318,7 @@ func (h *Handlers) PublishProfileVersion(w http.ResponseWriter, r *http.Request)
 		CreatedBy:      user.ID,
 	})
 	if err != nil {
-		if errors.Is(err, agentregistry.ErrVersionConflict) || errors.Is(err, agentregistry.ErrMissingPolicyFields) ||
-			errors.Is(err, agentregistry.ErrInvalidRange) || errors.Is(err, agentregistry.ErrMissingRequiredFields) {
+		if _, _, ok := agentPlatformError(err); ok {
 			writeAgentPlatformError(w, err)
 			return
 		}

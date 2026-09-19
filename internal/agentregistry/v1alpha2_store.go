@@ -45,6 +45,16 @@ func topLevelJSONFields(specJSON string) (map[string]json.RawMessage, error) {
 	return raw, nil
 }
 
+// ValidateSpecIsObject reports whether specJSON is a JSON object, as the
+// documented spec_json contract requires. It exists so the HTTP layer can
+// enforce the same rule the store does, on both publish paths, without
+// reimplementing the decode: a syntax-only check lets an array or a scalar
+// through to be stored.
+func ValidateSpecIsObject(specJSON string) error {
+	_, err := topLevelJSONFields(specJSON)
+	return err
+}
+
 // missingRequiredFields is a small helper shared by the two publish paths:
 // it collects every empty required field into one message instead of
 // failing on the first one, matching requirements.md's "listing every
