@@ -724,7 +724,7 @@ func TestResolveBinding_UnknownAgentIsDefinitionNotFound(t *testing.T) {
 	s := newV1Alpha2TestStore(t)
 	ctx := context.Background()
 
-	_, err := s.ResolveBinding(ctx, "no-such-agent", "prod")
+	_, err := s.ResolveBinding(ctx, "no-such-agent", EnvironmentProduction)
 	if !errors.Is(err, ErrDefinitionNotFound) {
 		t.Fatalf("unknown agent: expected ErrDefinitionNotFound, got %v", err)
 	}
@@ -733,7 +733,7 @@ func TestResolveBinding_UnknownAgentIsDefinitionNotFound(t *testing.T) {
 	if _, err := s.CreateDefinition(ctx, "issue-investigator", "", ""); err != nil {
 		t.Fatalf("create definition: %v", err)
 	}
-	_, err = s.ResolveBinding(ctx, "issue-investigator", "prod")
+	_, err = s.ResolveBinding(ctx, "issue-investigator", EnvironmentProduction)
 	if !errors.Is(err, ErrBindingNotFound) {
 		t.Fatalf("declared agent, no binding: expected ErrBindingNotFound, got %v", err)
 	}
