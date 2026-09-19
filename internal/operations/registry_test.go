@@ -221,3 +221,196 @@ func TestReconcileDefaultsToWriting(t *testing.T) {
 		t.Errorf("explicit dry_run overridden: got %q, want \"true\"", got)
 	}
 }
+
+// validInvestigateIssueURL is a sample GitHub issue URL matching
+// mctl-agents-investigate's issue_url pattern.
+const validInvestigateIssueURL = "https://github.com/mctlhq/mctl-api/issues/335"
+
+// TestInvestigateAcceptsResumeIdentifiers pins the acceptance criterion "the
+// two parameters are accepted" through the exact function the handler calls
+// (mctlhq/mctl-agents#267).
+func TestInvestigateAcceptsResumeIdentifiers(t *testing.T) {
+	registry := NewRegistry()
+	op, ok := registry.Get("mctl-agents-investigate")
+	if !ok {
+		t.Fatal("operation \"mctl-agents-investigate\" not found in registry")
+	}
+
+	input := map[string]string{
+		"issue_url":    validInvestigateIssueURL,
+		"work_item_id": "wi_5c8e1f2b-0000-0000-0000-000000000000",
+		"execution_id": "we_9a010000-0000-0000-0000-000000000000",
+	}
+	if errs := registry.ValidateInput(op, input); len(errs) != 0 {
+		t.Errorf("ValidateInput with issue_url + work_item_id + execution_id "+
+			"returned errors, want none: %v", errs)
+	}
+}
+
+// TestInvestigateResumeIdentifiersStayOptional pins "no invented default":
+// a cold, issue-driven caller that never heard of #267 must keep working
+// unchanged, and ApplyDefaults must not manufacture ids for it.
+func TestInvestigateResumeIdentifiersStayOptional(t *testing.T) {
+	registry := NewRegistry()
+	op, ok := registry.Get("mctl-agents-investigate")
+	if !ok {
+		t.Fatal("operation \"mctl-agents-investigate\" not found in registry")
+	}
+
+	input := map[string]string{"issue_url": validInvestigateIssueURL}
+	if errs := registry.ValidateInput(op, input); len(errs) != 0 {
+		t.Errorf("ValidateInput with only issue_url returned errors, want none: %v", errs)
+	}
+
+	filled := registry.ApplyDefaults(op, input)
+	if got := filled["work_item_id"]; got != "" {
+		t.Errorf("ApplyDefaults gave work_item_id = %q for a caller that omitted "+
+			"it, want \"\" — a cold issue-driven run must not get an invented id", got)
+	}
+	if got := filled["execution_id"]; got != "" {
+		t.Errorf("ApplyDefaults gave execution_id = %q for a caller that omitted "+
+			"it, want \"\" — a cold issue-driven run must not get an invented id", got)
+	}
+
+	var workItemID, executionID *ParameterDef
+	for i := range op.Parameters {
+		switch op.Parameters[i].Name {
+		case "work_item_id":
+			workItemID = &op.Parameters[i]
+		case "execution_id":
+			executionID = &op.Parameters[i]
+		}
+	}
+	if workItemID == nil {
+		t.Fatal("operation has no 'work_item_id' parameter")
+	}
+	if executionID == nil {
+		t.Fatal("operation has no 'execution_id' parameter")
+	}
+	if workItemID.Required {
+		t.Error("work_item_id must stay optional so callers can omit it")
+	}
+	if workItemID.Default != "" {
+		t.Errorf("work_item_id Default = %q, want \"\"", workItemID.Default)
+	}
+	if executionID.Required {
+		t.Error("execution_id must stay optional so callers can omit it")
+	}
+	if executionID.Default != "" {
+		t.Errorf("execution_id Default = %q, want \"\"", executionID.Default)
+	}
+}
+
+// TestInvestigateForwardsResumeIdentifiers pins "forwards them" and "a
+// parameter outside the declared set is still rejected" at the exact
+// function handlers_write.go calls before submitting to Argo.
+func TestInvestigateForwardsResumeIdentifiers(t *testing.T) {
+	registry := NewRegistry()
+	op, ok := registry.Get("mctl-agents-investigate")
+	if !ok {
+		t.Fatal("operation \"mctl-agents-investigate\" not found in registry")
+	}
+
+	input := map[string]string{
+		"issue_url":    validInvestigateIssueURL,
+		"work_item_id": "wi_5c8e1f2b-0000-0000-0000-000000000000",
+		"execution_id": "we_9a010000-0000-0000-0000-000000000000",
+		"config_patch": ".image.tag = \"pwned\"",
+	}
+	result, dropped := registry.StripUndeclared(op, input)
+
+	if got := result["issue_url"]; got != validInvestigateIssueURL {
+		t.Errorf("StripUndeclared dropped or mutated issue_url: got %q, want %q", got, validInvestigateIssueURL)
+	}
+	if got := result["work_item_id"]; got != input["work_item_id"] {
+		t.Errorf("StripUndeclared dropped or mutated work_item_id: got %q, want %q", got, input["work_item_id"])
+	}
+	if got := result["execution_id"]; got != input["execution_id"] {
+		t.Errorf("StripUndeclared dropped or mutated execution_id: got %q, want %q", got, input["execution_id"])
+	}
+	if _, exists := result["config_patch"]; exists {
+		t.Error("StripUndeclared kept config_patch, want it dropped — it is not a declared parameter")
+	}
+	if len(dropped) != 1 || dropped[0] != "config_patch" {
+		t.Errorf("StripUndeclared dropped = %v, want [\"config_patch\"]", dropped)
+	}
+}
+
+// TestInvestigateRejectsMalformedResumeIdentifiers pins the pattern that
+// keeps work_item_id/execution_id from becoming a shell-injection or
+// argument-smuggling vector on their way into the Argo workflow arguments.
+func TestInvestigateRejectsMalformedResumeIdentifiers(t *testing.T) {
+	registry := NewRegistry()
+	op, ok := registry.Get("mctl-agents-investigate")
+	if !ok {
+		t.Fatal("operation \"mctl-agents-investigate\" not found in registry")
+	}
+
+	longID := ""
+	for i := 0; i < 100; i++ {
+		longID += "a"
+	}
+
+	malformed := []struct {
+		param string
+		value string
+	}{
+		{"work_item_id", "wi_x; rm -rf /"},
+		{"execution_id", "we_a b"},
+		{"work_item_id", longID},
+		{"execution_id", "we_abc\ndef"},
+	}
+	for _, tc := range malformed {
+		input := map[string]string{
+			"issue_url": validInvestigateIssueURL,
+			tc.param:    tc.value,
+		}
+		errs := registry.ValidateInput(op, input)
+		found := false
+		for _, e := range errs {
+			if len(e) >= len(tc.param) && e[:len(tc.param)] == tc.param {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("ValidateInput(%s=%q) errors = %v, want an error naming %q",
+				tc.param, tc.value, errs, tc.param)
+		}
+	}
+
+	wellFormed := map[string]string{
+		"issue_url":    validInvestigateIssueURL,
+		"work_item_id": "wi_5c8e1f2b-0000-0000-0000-000000000000",
+		"execution_id": "we_9a010000-0000-0000-0000-000000000000",
+	}
+	if errs := registry.ValidateInput(op, wellFormed); len(errs) != 0 {
+		t.Errorf("ValidateInput with well-formed resume identifiers returned errors, want none: %v", errs)
+	}
+}
+
+// TestInvestigateStillRequiresIssueURL pins that adding resume identifiers
+// did not turn issue_url optional by accident.
+func TestInvestigateStillRequiresIssueURL(t *testing.T) {
+	registry := NewRegistry()
+	op, ok := registry.Get("mctl-agents-investigate")
+	if !ok {
+		t.Fatal("operation \"mctl-agents-investigate\" not found in registry")
+	}
+
+	input := map[string]string{
+		"work_item_id": "wi_5c8e1f2b-0000-0000-0000-000000000000",
+		"execution_id": "we_9a010000-0000-0000-0000-000000000000",
+	}
+	errs := registry.ValidateInput(op, input)
+	found := false
+	for _, e := range errs {
+		if e == "missing required parameter: issue_url" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ValidateInput without issue_url errors = %v, want \"missing required parameter: issue_url\"", errs)
+	}
+}
