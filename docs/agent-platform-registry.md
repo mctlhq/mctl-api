@@ -289,7 +289,7 @@ binding not found) that predate this error-code scheme.
 
 | HTTP | `code` | When |
 | --- | --- | --- |
-| 400 | `invalid_range` | a version or a `profile_range` does not parse — the sentinel covers both, since a version is parsed by the same grammar |
+| 400 | `invalid_range` | a version or a `profile_range` does not parse — the sentinel covers both, since a version is parsed by the same grammar, and both publish paths check the version being published as well as the range |
 | 400 | `invalid_spec` | `spec_json` is not a JSON object: it failed to parse, or it parsed as an array, a number, a string or `null` |
 | 400 | `missing_policy_fields` | a profile spec is missing a required policy-ceiling field, or carries it as an explicit `null` |
 | 400 | `missing_required_fields` | `owner`, `sourceManifest.gitSha` or `sourceManifest.contentHash` is empty; every missing one is named in a single response |
@@ -299,6 +299,7 @@ binding not found) that predate this error-code scheme.
 | 422 | `version_deprecated` | either named version is `deprecated` |
 | 422 | `version_disabled` | either named version is `disabled` |
 | 422 | `fixture_not_promotable` | `binding_source: compatibility-fixture` was used on a bind/rollback |
+| 422 | `no_rollback_target` | a rollback was asked for where no prior binding revision exists |
 
 ## MCP tools
 

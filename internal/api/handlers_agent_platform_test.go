@@ -415,26 +415,15 @@ func TestPublishVersion_NonObjectSpecIs400NotInternalError(t *testing.T) {
 // TestAgentPlatformErrorMapsEverySentinel is the guard the publish handlers
 // used to need a hand-kept whitelist for: every sentinel the package exports
 // must be mapped, so adding one and forgetting a call site cannot silently
-// produce a 500.
+// produce a 500. The set comes from agentregistry.Sentinels, which the
+// registry's own TestSentinelsListsEveryExportedSentinel checks against that
+// package's source — so this really does walk all of them, not a copy that
+// can drift.
 func TestAgentPlatformErrorMapsEverySentinel(t *testing.T) {
-	sentinels := map[string]error{
-		"ErrVersionConflict":            agentregistry.ErrVersionConflict,
-		"ErrDefinitionNotFound":         agentregistry.ErrDefinitionNotFound,
-		"ErrDefinitionVersionNotFound":  agentregistry.ErrDefinitionVersionNotFound,
-		"ErrProfileVersionNotFound":     agentregistry.ErrProfileVersionNotFound,
-		"ErrBindingNotFound":            agentregistry.ErrBindingNotFound,
-		"ErrVersionDeprecated":          agentregistry.ErrVersionDeprecated,
-		"ErrVersionDisabled":            agentregistry.ErrVersionDisabled,
-		"ErrIncompatibleProfile":        agentregistry.ErrIncompatibleProfile,
-		"ErrFixtureNotPromotable":       agentregistry.ErrFixtureNotPromotable,
-		"ErrMissingPolicyFields":        agentregistry.ErrMissingPolicyFields,
-		"ErrMissingRequiredFields":      agentregistry.ErrMissingRequiredFields,
-		"ErrInvalidRange":               agentregistry.ErrInvalidRange,
-		"ErrInvalidSpec":                agentregistry.ErrInvalidSpec,
-		"ErrInvalidLifecycleTransition": agentregistry.ErrInvalidLifecycleTransition,
-		"ErrInvalidEnvironment":         agentregistry.ErrInvalidEnvironment,
+	if len(agentregistry.Sentinels) == 0 {
+		t.Fatal("agentregistry exports no sentinels, so this guard proves nothing")
 	}
-	for name, sentinel := range sentinels {
+	for name, sentinel := range agentregistry.Sentinels {
 		status, _, ok := agentPlatformError(fmt.Errorf("wrapped: %w", sentinel))
 		if !ok {
 			t.Errorf("%s is not mapped, so a handler answering it would fall through to 500", name)

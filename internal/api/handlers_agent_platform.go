@@ -132,6 +132,18 @@ func agentPlatformError(err error) (status int, code string, ok bool) {
 		return http.StatusConflict, "invalid_lifecycle_transition", true
 	case errors.Is(err, agentregistry.ErrInvalidEnvironment):
 		return http.StatusBadRequest, "", true
+	// The four below are v1 sentinels no v1alpha2 handler produces today.
+	// They are mapped anyway so the table is the whole of what the package
+	// exports: an unmapped sentinel is a 500 waiting for the first caller
+	// that reaches it, and "v1 only" is not a property the mapper can check.
+	case errors.Is(err, agentregistry.ErrVersionNotFound):
+		return http.StatusNotFound, "version_not_found", true
+	case errors.Is(err, agentregistry.ErrReleaseNotFound):
+		return http.StatusNotFound, "", true
+	case errors.Is(err, agentregistry.ErrNoRollbackTarget):
+		return http.StatusUnprocessableEntity, "no_rollback_target", true
+	case errors.Is(err, agentregistry.ErrInvalidPhase):
+		return http.StatusBadRequest, "", true
 	default:
 		return 0, "", false
 	}
@@ -159,7 +171,11 @@ func (h *Handlers) ListAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	agents, err := h.opts.AgentRegistry.ListCatalog(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list agents: "+err.Error())
+		// The driver error names the pool and the query; the publish paths
+		// already log it instead of answering with it, and a read path is
+		// no different.
+		slog.Error("failed to list agents", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list agents")
 		return
 	}
 	if agents == nil {
@@ -245,7 +261,11 @@ func (h *Handlers) ListDefinitionVersions(w http.ResponseWriter, r *http.Request
 	agent := chi.URLParam(r, "name")
 	versions, err := h.opts.AgentRegistry.ListDefinitionVersions(r.Context(), agent)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list definition versions: "+err.Error())
+		// The driver error names the pool and the query; the publish paths
+		// already log it instead of answering with it, and a read path is
+		// no different.
+		slog.Error("failed to list definition versions", "agent", agent, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list definition versions")
 		return
 	}
 	if versions == nil {
@@ -340,7 +360,11 @@ func (h *Handlers) ListProfileVersions(w http.ResponseWriter, r *http.Request) {
 	profile := chi.URLParam(r, "profile")
 	versions, err := h.opts.AgentRegistry.ListProfileVersions(r.Context(), profile)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list profile versions: "+err.Error())
+		// The driver error names the pool and the query; the publish paths
+		// already log it instead of answering with it, and a read path is
+		// no different.
+		slog.Error("failed to list profile versions", "profile", profile, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list profile versions")
 		return
 	}
 	if versions == nil {

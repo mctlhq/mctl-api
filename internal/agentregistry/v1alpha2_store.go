@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -66,6 +67,9 @@ func missingRequiredFields(fields map[string]string) []string {
 			missing = append(missing, name)
 		}
 	}
+	// Map iteration is randomized, so the same two missing fields came back
+	// in either order; the message is part of the response a client reads.
+	sort.Strings(missing)
 	return missing
 }
 
@@ -99,6 +103,13 @@ func (s *Store) PublishDefinitionVersion(ctx context.Context, d *DefinitionVersi
 	})
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("agentregistry: publish definition version: %w: %s", ErrMissingRequiredFields, strings.Join(missing, ", "))
+	}
+	// The range is not the only version-shaped field here: the version being
+	// published is one too, and docs/agent-platform-registry.md requires both
+	// to be strict MAJOR.MINOR.PATCH at publish time. Only the profile path
+	// checked it, so "1.2" or "v1.0.0" persisted unparseable on this one.
+	if _, err := ParseVersion(d.Version); err != nil {
+		return nil, fmt.Errorf("agentregistry: publish definition version: version: %w", err)
 	}
 	if _, err := ParseRange(d.ProfileRange); err != nil {
 		return nil, fmt.Errorf("agentregistry: publish definition version: profile_range: %w", err)
@@ -695,6 +706,16 @@ func (s *Store) ResolveBinding(ctx context.Context, agent, environment string) (
 	}
 	b, err := s.ActiveBinding(ctx, agent, environment)
 	if err != nil {
+		// "never bound" and "no such agent" are two different 404s in
+		// docs/agent-platform-registry.md, and only the binding table was
+		// consulted, so an unknown name answered the wrong one.
+		if errors.Is(err, ErrBindingNotFound) {
+			if exists, existsErr := s.definitionExists(ctx, agent); existsErr != nil {
+				return nil, existsErr
+			} else if !exists {
+				return nil, fmt.Errorf("agentregistry: resolve binding: %w: %s", ErrDefinitionNotFound, agent)
+			}
+		}
 		return nil, err
 	}
 	def, err := s.definitionVersion(ctx, agent, b.DefinitionVersion)
@@ -777,6 +798,19 @@ func (s *Store) highestCompatibleProfileVersion(ctx context.Context, profile, pr
 		return nil, fmt.Errorf("%w: no published version of profile %q satisfies range %q", ErrProfileVersionNotFound, profile, profileRange)
 	}
 	return best, nil
+}
+
+// definitionExists reports whether the agent is declared at all, which is
+// what separates ErrDefinitionNotFound from ErrBindingNotFound on a resolve.
+func (s *Store) definitionExists(ctx context.Context, agent string) (bool, error) {
+	var one int
+	if err := s.pool.QueryRow(ctx, `SELECT 1 FROM agent_definitions WHERE name = $1`, agent).Scan(&one); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("agentregistry: definition exists: %w", err)
+	}
+	return true, nil
 }
 
 func (s *Store) definitionVersion(ctx context.Context, agent, version string) (*DefinitionVersion, error) {

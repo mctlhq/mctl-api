@@ -61,6 +61,32 @@ var (
 	ErrInvalidSpec = errors.New("agentregistry: spec_json must be a JSON object")
 )
 
+// Sentinels is every error value this package exports, by name. It exists so
+// a test can range over the set rather than restate it: the API layer's
+// mapping guard walks this map, and TestSentinelsListsEveryExportedSentinel
+// walks the package source to prove nothing is missing from the map itself.
+var Sentinels = map[string]error{
+	"ErrDefinitionNotFound":         ErrDefinitionNotFound,
+	"ErrVersionConflict":            ErrVersionConflict,
+	"ErrVersionNotFound":            ErrVersionNotFound,
+	"ErrReleaseNotFound":            ErrReleaseNotFound,
+	"ErrNoRollbackTarget":           ErrNoRollbackTarget,
+	"ErrInvalidEnvironment":         ErrInvalidEnvironment,
+	"ErrInvalidPhase":               ErrInvalidPhase,
+	"ErrDefinitionVersionNotFound":  ErrDefinitionVersionNotFound,
+	"ErrProfileVersionNotFound":     ErrProfileVersionNotFound,
+	"ErrVersionDeprecated":          ErrVersionDeprecated,
+	"ErrVersionDisabled":            ErrVersionDisabled,
+	"ErrIncompatibleProfile":        ErrIncompatibleProfile,
+	"ErrFixtureNotPromotable":       ErrFixtureNotPromotable,
+	"ErrBindingNotFound":            ErrBindingNotFound,
+	"ErrInvalidRange":               ErrInvalidRange,
+	"ErrInvalidLifecycleTransition": ErrInvalidLifecycleTransition,
+	"ErrMissingPolicyFields":        ErrMissingPolicyFields,
+	"ErrMissingRequiredFields":      ErrMissingRequiredFields,
+	"ErrInvalidSpec":                ErrInvalidSpec,
+}
+
 // RequiredProfilePolicyFields names the fields an ExecutionProfile's
 // spec_json must carry for the profile to be published. See requirements.md
 // open questions: the exact field names ADR 007 / mctl-gitops#950 use are

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -636,5 +637,99 @@ func TestPublishProfileVersion_RejectsAnUnparseableVersionBeforeTheDatabase(t *t
 	p := newProfileVersion("standard-investigate", "1.x")
 	if _, err := s.PublishProfileVersion(context.Background(), p); !errors.Is(err, ErrInvalidRange) {
 		t.Fatalf("expected ErrInvalidRange for an unparseable version, got %v", err)
+	}
+}
+
+// TestSentinelsListsEveryExportedSentinel is what makes Sentinels a list
+// rather than a second hand-kept copy: it reads this package's own source and
+// fails if an `Err... = errors.New(...)` declaration is missing from the map.
+// Without it, adding a sentinel and forgetting the map leaves the API layer's
+// mapping guard green while the new error falls through to a 500.
+func TestSentinelsListsEveryExportedSentinel(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	declared := regexp.MustCompile(`(?m)^\s*(Err[A-Za-z0-9_]*)\s*=\s*errors\.New\(`)
+	found := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, m := range declared.FindAllStringSubmatch(string(src), -1) {
+			found++
+			if _, ok := Sentinels[m[1]]; !ok {
+				t.Errorf("%s declares %s but Sentinels does not list it, so nothing checks that the API maps it", name, m[1])
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("scanned the package and found no sentinel declarations, so this guard proves nothing")
+	}
+	if found != len(Sentinels) {
+		t.Errorf("Sentinels has %d entries but the package declares %d sentinels", len(Sentinels), found)
+	}
+}
+
+// TestPublishDefinitionVersion_RejectsAnUnparseableVersionBeforeTheDatabase
+// pins the half of the publish-time semver check that only the profile path
+// had: a definition version was written unparsed, so "1.2" or "v1.0.0"
+// persisted and every later range comparison against it was undefined.
+func TestPublishDefinitionVersion_RejectsAnUnparseableVersionBeforeTheDatabase(t *testing.T) {
+	// Both parses happen ahead of every query, so a zero-value Store is
+	// enough to reach them without a pool.
+	s := &Store{}
+	for _, version := range []string{"1.2", "v1.0.0", "latest", ""} {
+		d := newDefinitionVersion("issue-investigator", version, ">=1.0.0 <2.0.0")
+		if _, err := s.PublishDefinitionVersion(context.Background(), d); !errors.Is(err, ErrInvalidRange) {
+			t.Errorf("version %q: expected ErrInvalidRange, got %v", version, err)
+		}
+	}
+	// The positive case cannot run here — a well-formed version reaches the
+	// pool, which a zero-value Store does not have. It is covered by the
+	// Postgres-gated TestPublishDefinitionVersion_DuplicateConflict, which
+	// publishes 1.0.0 successfully.
+}
+
+// TestMissingRequiredFields_IsOrdered pins the order of the message a client
+// reads: the helper ranges over a map, so two missing fields came back in
+// either order between runs.
+func TestMissingRequiredFields_IsOrdered(t *testing.T) {
+	fields := map[string]string{"owner": "", "sourceManifest.gitSha": "", "sourceManifest.contentHash": "", "present": "x"}
+	want := []string{"owner", "sourceManifest.contentHash", "sourceManifest.gitSha"}
+	for i := 0; i < 20; i++ {
+		got := missingRequiredFields(fields)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("run %d: got %v, want %v", i, got, want)
+		}
+	}
+}
+
+// TestResolveBinding_UnknownAgentIsDefinitionNotFound pins the distinction
+// docs/agent-platform-registry.md draws between the two 404s on a resolve:
+// only the binding table was consulted, so an agent that was never declared
+// answered "no binding for this environment" — which reads as a rollout gap
+// rather than a typo in the name.
+func TestResolveBinding_UnknownAgentIsDefinitionNotFound(t *testing.T) {
+	s := newV1Alpha2TestStore(t)
+	ctx := context.Background()
+
+	_, err := s.ResolveBinding(ctx, "no-such-agent", "prod")
+	if !errors.Is(err, ErrDefinitionNotFound) {
+		t.Fatalf("unknown agent: expected ErrDefinitionNotFound, got %v", err)
+	}
+
+	// A declared agent with no binding keeps the other 404.
+	if _, err := s.CreateDefinition(ctx, "issue-investigator", "", ""); err != nil {
+		t.Fatalf("create definition: %v", err)
+	}
+	_, err = s.ResolveBinding(ctx, "issue-investigator", "prod")
+	if !errors.Is(err, ErrBindingNotFound) {
+		t.Fatalf("declared agent, no binding: expected ErrBindingNotFound, got %v", err)
 	}
 }
