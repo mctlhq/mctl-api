@@ -17,6 +17,7 @@ package agentregistry
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"regexp"
 	"strings"
@@ -646,7 +647,8 @@ func TestPublishProfileVersion_RejectsAnUnparseableVersionBeforeTheDatabase(t *t
 // Without it, adding a sentinel and forgetting the map leaves the API layer's
 // mapping guard green while the new error falls through to a 500.
 func TestSentinelsListsEveryExportedSentinel(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	pkg := os.DirFS(".")
+	entries, err := fs.ReadDir(pkg, ".")
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
@@ -657,7 +659,10 @@ func TestSentinelsListsEveryExportedSentinel(t *testing.T) {
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		src, err := os.ReadFile(name)
+		// Read through a directory FS rather than by path: the name comes
+		// from ReadDir, but gosec cannot see that, and a rooted FS is the
+		// honest way to say the read cannot leave this package.
+		src, err := fs.ReadFile(pkg, name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
