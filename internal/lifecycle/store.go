@@ -586,10 +586,24 @@ func (s *Store) RecordProgress(ctx context.Context, entity EntityRef, phase stri
 // handoff_started_at needs no clause of its own: it moves in lockstep with
 // handoff_to under every writer here, which is the same lockstep
 // TestHandoffCompleteCannotLandOnAFinishedOrRetargetedRow identified and then
-// deliberately broke with a raw write. last_seen_at needs none either, and for
-// a different reason worth stating: nothing can move it forward on a
-// handing-off row at the same epoch, because all three writers that could
-// reach it freeze it.
+// deliberately broke with a raw write.
+//
+// last_seen_at has no clause either, and that one is now a GAP rather than an
+// argument. It used to rest on "nothing can move it forward on a handing-off
+// row at the same epoch, because all three writers that could reach it freeze
+// it". handoffRetryUpdateSQL (recovery.go) is a fourth writer and does move
+// it forward, deliberately — that is the whole point of a retry — so the
+// premise no longer holds. A stalled write from progressUpdateSQL,
+// reacquireRefreshSQL or this statement, none of which pins last_seen_at,
+// could put the pre-retry value back and recreate the dead-but-not-stalled
+// row the retry existed to remove.
+//
+// Unreachable today only because inTx serialises writers on a Postgres
+// advisory lock — which is precisely the reliance store.go's recover path
+// argues against one function away, and why this is written down as a gap
+// instead of left as a stale claim. Closing it means pinning last_seen_at
+// into this CAS, which changes the failure mode of a hot, stabilised path
+// and belongs in its own change, not this one: mctlhq/mctl-api#343.
 //
 // The binds are the values that were READ (the empty pair on an active row,
 // which is what acquireUpsertSQL and finishUpdateSQL write), not the ones
