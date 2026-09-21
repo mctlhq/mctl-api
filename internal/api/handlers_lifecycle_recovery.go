@@ -309,8 +309,16 @@ func (h *Handlers) RequestLifecycleHandoffRecovery(w http.ResponseWriter, r *htt
 
 // RetryLifecycleHandoff handles
 // POST /api/v1/lifecycle/ownership/recovery/handoff/retry -- re-arms a
-// STALLED handoff's clock for the same target. Owner, target, state and
-// epoch are unchanged; only handoff_started_at moves.
+// STALLED handoff's clocks for the same target. Owner, target, state and
+// epoch are unchanged; handoff_started_at and last_seen_at both move, which
+// is what makes the extension real (see handoffRetryUpdateSQL).
+//
+// Consequence worth knowing before calling it: the row comes back ALIVE, so
+// for one liveness bound it is neither dead nor stalled -- Fence and Recover
+// stop applying to it, and a second retry is refused with
+// ErrHandoffNotStalled. That is the protection the operation grants the named
+// target, and it is also a window in which the usual recovery levers are
+// deliberately unavailable.
 func (h *Handlers) RetryLifecycleHandoff(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.requireLifecycleRecovery(w, r)
 	if !ok {

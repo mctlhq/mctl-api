@@ -332,7 +332,7 @@ func (s *Server) toolRetryLifecycleHandoff() (mcplib.Tool, server.ToolHandlerFun
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithIdempotentHintAnnotation(true),
-		mcplib.WithDescription(`Mutates the lifecycle ownership store. Performs exactly one transition: re-arms the clock (handoff_started_at) of a handoff the server re-derives as STALLED -- started, and never completed within the phase's liveness bound -- for the SAME target. Refused if the row is not handing off at all, or if the handoff is still within its bound (not yet stalled).
+		mcplib.WithDescription(`Mutates the lifecycle ownership store. Performs exactly one transition: re-arms the clocks (handoff_started_at AND last_seen_at) of a handoff the server re-derives as STALLED -- started, and never completed within the phase's liveness bound -- for the SAME target. Refused if the row is not handing off at all, or if the handoff is still within its bound (not yet stalled).
 
 Owner, target, state and fencing epoch are all UNCHANGED -- this does not retarget the handoff or take it from anybody, only extends how long the named target has left to complete it.
 
@@ -340,7 +340,7 @@ Every precondition fails closed: expected_owner_type/id, expected_epoch and expe
 
 This confers NO GitHub merge or approval authority.
 
-Idempotent: repeating the call while the handoff is still stalled re-arms the same clock again and is safe to retry.
+The row comes back ALIVE for one liveness bound: that is the extension, and it also means mctl_fence_lifecycle_claim and recovery stop applying to this row until the bound passes, and a second retry is refused as not-yet-stalled until then. Repeating the call while the handoff is still stalled re-arms the same clocks again and is safe to retry.
 
 Admin-only.`),
 		mcplib.WithString("kind",
