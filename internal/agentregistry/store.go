@@ -130,6 +130,85 @@ CREATE TABLE IF NOT EXISTS agent_executions (
 );
 CREATE INDEX IF NOT EXISTS agent_executions_agent ON agent_executions (agent, id DESC);
 CREATE INDEX IF NOT EXISTS agent_executions_workflow ON agent_executions (temporal_workflow_id);
+
+-- v1alpha2 layer (ADR 007): immutable AgentDefinition and ExecutionProfile
+-- versions, plus append-only per-(agent, environment) ReleaseBinding
+-- revisions. Extends the registry in place rather than standing up a
+-- second release database — see design.md's "Shape" section. No existing
+-- table, column or row is touched by the statements below; a database
+-- created before this change gets them idempotently at startup.
+CREATE TABLE IF NOT EXISTS agent_definition_versions (
+    id            SERIAL PRIMARY KEY,
+    agent         TEXT NOT NULL REFERENCES agent_definitions(name),
+    version       TEXT NOT NULL,
+    api_version   TEXT NOT NULL DEFAULT 'agents.mctl.ai/v1alpha2',
+    spec_json     JSONB NOT NULL,
+    owner         TEXT NOT NULL,
+    source_repo   TEXT NOT NULL,
+    source_path   TEXT NOT NULL,
+    source_git_sha       TEXT NOT NULL,
+    source_content_hash  TEXT NOT NULL,
+    profile_range TEXT NOT NULL,
+    lifecycle     TEXT NOT NULL DEFAULT 'published',
+    lifecycle_reason TEXT NOT NULL DEFAULT '',
+    lifecycle_at  TIMESTAMPTZ,
+    lifecycle_by  TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL,
+    created_by    TEXT NOT NULL DEFAULT '',
+    UNIQUE (agent, version)
+);
+CREATE INDEX IF NOT EXISTS agent_definition_versions_agent ON agent_definition_versions (agent, id DESC);
+
+CREATE TABLE IF NOT EXISTS agent_profile_versions (
+    id            SERIAL PRIMARY KEY,
+    profile       TEXT NOT NULL,
+    version       TEXT NOT NULL,
+    spec_json     JSONB NOT NULL,
+    owner         TEXT NOT NULL,
+    source_repo   TEXT NOT NULL,
+    source_path   TEXT NOT NULL,
+    source_git_sha      TEXT NOT NULL,
+    source_content_hash TEXT NOT NULL,
+    lifecycle     TEXT NOT NULL DEFAULT 'published',
+    lifecycle_reason TEXT NOT NULL DEFAULT '',
+    lifecycle_at  TIMESTAMPTZ,
+    lifecycle_by  TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL,
+    created_by    TEXT NOT NULL DEFAULT '',
+    UNIQUE (profile, version)
+);
+CREATE INDEX IF NOT EXISTS agent_profile_versions_profile ON agent_profile_versions (profile, id DESC);
+
+CREATE TABLE IF NOT EXISTS agent_release_bindings (
+    id                  SERIAL PRIMARY KEY,
+    agent               TEXT NOT NULL REFERENCES agent_definitions(name),
+    environment         TEXT NOT NULL,
+    revision            INTEGER NOT NULL,
+    definition_version  TEXT NOT NULL,
+    profile             TEXT NOT NULL,
+    profile_version     TEXT NOT NULL,
+    profile_range       TEXT NOT NULL,
+    binding_source      TEXT NOT NULL,
+    intent_repo         TEXT NOT NULL DEFAULT '',
+    intent_path         TEXT NOT NULL DEFAULT '',
+    intent_git_sha      TEXT NOT NULL DEFAULT '',
+    rollback_of         INTEGER REFERENCES agent_release_bindings(id),
+    reason              TEXT NOT NULL DEFAULT '',
+    created_at          TIMESTAMPTZ NOT NULL,
+    created_by          TEXT NOT NULL DEFAULT '',
+    UNIQUE (agent, environment, revision),
+    FOREIGN KEY (agent, definition_version)
+        REFERENCES agent_definition_versions(agent, version),
+    FOREIGN KEY (profile, profile_version)
+        REFERENCES agent_profile_versions(profile, version)
+);
+CREATE INDEX IF NOT EXISTS agent_release_bindings_current
+    ON agent_release_bindings (agent, environment, revision DESC);
+
+ALTER TABLE agent_executions ADD COLUMN IF NOT EXISTS definition_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE agent_executions ADD COLUMN IF NOT EXISTS profile            TEXT NOT NULL DEFAULT '';
+ALTER TABLE agent_executions ADD COLUMN IF NOT EXISTS profile_version    TEXT NOT NULL DEFAULT '';
+ALTER TABLE agent_executions ADD COLUMN IF NOT EXISTS binding_revision   INTEGER;
 `
 
 // Store is a PostgreSQL-backed agent registry.
@@ -471,15 +550,21 @@ func (s *Store) RecordExecution(ctx context.Context, e *AgentExecution) (*AgentE
 	// SET clause so a retry doesn't reset when this step was first recorded.
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO agent_executions
-		   (temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		   (temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase,
+		    definition_version, profile, profile_version, binding_revision, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		 ON CONFLICT (temporal_workflow_id, agent, argo_workflow_name) DO UPDATE SET
 		   environment = EXCLUDED.environment, version = EXCLUDED.version,
-		   image_ref = EXCLUDED.image_ref, target_repo = EXCLUDED.target_repo, phase = EXCLUDED.phase
-		 RETURNING id, temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase, created_at`,
-		e.TemporalWorkflowID, e.Agent, e.Environment, e.Version, e.ImageRef, e.TargetRepo, e.ArgoWorkflowName, e.Phase, now,
+		   image_ref = EXCLUDED.image_ref, target_repo = EXCLUDED.target_repo, phase = EXCLUDED.phase,
+		   definition_version = EXCLUDED.definition_version, profile = EXCLUDED.profile,
+		   profile_version = EXCLUDED.profile_version, binding_revision = EXCLUDED.binding_revision
+		 RETURNING id, temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase,
+		   definition_version, profile, profile_version, binding_revision, created_at`,
+		e.TemporalWorkflowID, e.Agent, e.Environment, e.Version, e.ImageRef, e.TargetRepo, e.ArgoWorkflowName, e.Phase,
+		e.DefinitionVersion, e.Profile, e.ProfileVersion, e.BindingRevision, now,
 	).Scan(&result.ID, &result.TemporalWorkflowID, &result.Agent, &result.Environment, &result.Version,
-		&result.ImageRef, &result.TargetRepo, &result.ArgoWorkflowName, &result.Phase, &result.CreatedAt)
+		&result.ImageRef, &result.TargetRepo, &result.ArgoWorkflowName, &result.Phase,
+		&result.DefinitionVersion, &result.Profile, &result.ProfileVersion, &result.BindingRevision, &result.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("agentregistry: record execution: %w", err)
 	}
@@ -498,7 +583,8 @@ func (s *Store) ListExecutions(ctx context.Context, agent, workflowID string, li
 	case limit > 100:
 		limit = 100
 	}
-	const baseQuery = `SELECT id, temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase, created_at
+	const baseQuery = `SELECT id, temporal_workflow_id, agent, environment, version, image_ref, target_repo, argo_workflow_name, phase,
+		definition_version, profile, profile_version, binding_revision, created_at
 		FROM agent_executions`
 
 	var conditions []string
@@ -528,7 +614,8 @@ func (s *Store) ListExecutions(ctx context.Context, agent, workflowID string, li
 	for rows.Next() {
 		var e AgentExecution
 		if err := rows.Scan(&e.ID, &e.TemporalWorkflowID, &e.Agent, &e.Environment, &e.Version,
-			&e.ImageRef, &e.TargetRepo, &e.ArgoWorkflowName, &e.Phase, &e.CreatedAt); err != nil {
+			&e.ImageRef, &e.TargetRepo, &e.ArgoWorkflowName, &e.Phase,
+			&e.DefinitionVersion, &e.Profile, &e.ProfileVersion, &e.BindingRevision, &e.CreatedAt); err != nil {
 			return nil, fmt.Errorf("agentregistry: scan execution: %w", err)
 		}
 		executions = append(executions, e)
