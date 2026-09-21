@@ -47,14 +47,22 @@ func ageLastProgress(t *testing.T, s *Store, entity EntityRef, phase string, d t
 	}
 }
 
-func ageHandoffStartedAt(t *testing.T, s *Store, entity EntityRef, phase string, d time.Duration) {
+// ageHandoff backdates BOTH handoff clocks together, because that is the only
+// shape a real handing-off row can have: every writer keeps
+// last_seen_at <= handoff_started_at (store.go:640-660 freezes seen while
+// moving started; handoffRequestUpdateSQL writes them equal). Moving
+// handoff_started_at alone would produce seen > started, which no writer in
+// this package can reach, and a stalled-but-alive row is exactly the case
+// production never has — so a test built on it cannot see whether a retry
+// actually extends anything.
+func ageHandoff(t *testing.T, s *Store, entity EntityRef, phase string, d time.Duration) {
 	t.Helper()
 	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE lifecycle_ownership SET handoff_started_at = $1
+		`UPDATE lifecycle_ownership SET handoff_started_at = $1, last_seen_at = $1
 		 WHERE entity_kind = $2 AND entity_id = $3 AND phase = $4`,
 		time.Now().UTC().Add(d), entity.Kind, entity.ID, phase,
 	); err != nil {
-		t.Fatalf("age handoff_started_at: %v", err)
+		t.Fatalf("age handoff clocks: %v", err)
 	}
 }
 
@@ -360,7 +368,7 @@ func TestRetryHandoff_OnlySucceedsOnStalledHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handoff start: %v", err)
 	}
-	ageHandoffStartedAt(t, s, stalled, PhaseReviewRemediation, -11*time.Hour)
+	ageHandoff(t, s, stalled, PhaseReviewRemediation, -11*time.Hour)
 
 	before, err := s.Get(ctx, stalled, PhaseReviewRemediation)
 	if err != nil {
@@ -381,6 +389,24 @@ func TestRetryHandoff_OnlySucceedsOnStalledHandoff(t *testing.T) {
 	}
 	if result.Licensed != "handoff-stalled" {
 		t.Fatalf("licensed = %q, want handoff-stalled", result.Licensed)
+	}
+
+	// The point of the operation. Both clocks are measured against the same
+	// LivenessBound, so a stalled row is always also dead; if the retry moved
+	// only handoff_started_at the row would stay dead and Store.Recover could
+	// still bump the epoch out from under the target the retry just protected.
+	now := time.Now().UTC()
+	if !before.HandoffStalled(now) || !before.IsDead(now) {
+		t.Fatalf("premise: a stalled handoff must also be dead before the retry: stalled=%v dead=%v",
+			before.HandoffStalled(now), before.IsDead(now))
+	}
+	if !result.Ownership.LastSeenAt.After(before.LastSeenAt) {
+		t.Fatalf("last_seen_at did not move forward: before %v, after %v",
+			before.LastSeenAt, result.Ownership.LastSeenAt)
+	}
+	if result.Ownership.IsDead(now) || result.Ownership.HandoffStalled(now) {
+		t.Fatalf("retry left the row takeable: dead=%v stalled=%v",
+			result.Ownership.IsDead(now), result.Ownership.HandoffStalled(now))
 	}
 }
 

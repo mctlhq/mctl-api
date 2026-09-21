@@ -392,8 +392,27 @@ func (s *Store) RequestHandoff(ctx context.Context, req RecoveryRequest, toOwner
 // documents in store.go applies here just the same: without pinning the
 // clock a retry that raced a legitimate retarget could re-arm a handoff for a
 // target the row no longer names — plus epoch, owner and entity version.
+//
+// BOTH clocks move, for the same reason handoffRequestUpdateSQL writes both:
+// HandoffStalled and IsDead are measured against the SAME LivenessBound, and
+// on any handing-off row last_seen_at <= handoff_started_at by construction
+// (store.go:640-660 freezes seen and moves started; handoffRequestUpdateSQL
+// writes them equal). So HandoffStalled IMPLIES IsDead, and every row this
+// statement is permitted to touch is already dead when it runs. Moving
+// handoff_started_at alone would leave the row dead — takeable by
+// Store.Recover, which bumps the epoch out from under the very target the
+// retry was meant to protect — while clearing the more specific
+// `handoff-stalled` status Derive exists to preserve and disabling
+// RetryHandoff itself for a full bound. The operation would then buy the
+// target nothing, which is the one thing it claims to do.
+//
+// Safe to bound: a retry still requires HandoffStalled, so at most one per
+// liveness bound, and the route is admin-only, audited and rate-limited.
+// This is not the hazard the frozen last_seen_at guards against — that one is
+// the OUTGOING OWNER refreshing its own clock by polling, and an operator
+// escalation is a different act with a different actor.
 const handoffRetryUpdateSQL = `UPDATE lifecycle_ownership
-			   SET handoff_started_at = $1, updated_at = $1
+			   SET handoff_started_at = $1, last_seen_at = $1, updated_at = $1
 			 WHERE entity_kind = $2 AND entity_id = $3 AND phase = $4
 			   AND state = 'handing-off'
 			   AND handoff_to_type = $5 AND handoff_to_id = $6 AND handoff_started_at = $7
@@ -406,9 +425,11 @@ const handoffRetryUpdateSQL = `UPDATE lifecycle_ownership
 // for the identical situation) and on one still inside its bound
 // (ErrHandoffNotStalled).
 //
-// Only handoff_started_at and updated_at move. Owner, target, state and epoch
-// are unchanged — this does not retarget the handoff or touch who holds it,
-// only how long the incoming owner has left to complete it.
+// Only the two clocks and updated_at move. Owner, target, state and epoch are
+// unchanged — this does not retarget the handoff or touch who holds it, only
+// how long the incoming owner has left to complete it. last_seen_at moves
+// with handoff_started_at so that "how long it has left" is real: see
+// handoffRetryUpdateSQL for why moving one without the other grants nothing.
 func (s *Store) RetryHandoff(ctx context.Context, req RecoveryRequest) (*RecoveryResult, error) {
 	if err := validate(req.Entity, req.Phase); err != nil {
 		return nil, err
