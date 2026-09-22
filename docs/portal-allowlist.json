@@ -108,6 +108,31 @@
       "reason": "Read-only view of the lifecycle ownership store: who is responsible for an entity phase, whether that owner is alive, and whether the store agrees with the old DevLoopWorkflow check. It exposes internal repo/PR identifiers and owner ids, no credentials, and grants no authority -- ownership says who is responsible, never what they may do. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication and admin check are the access control -- the portal only decides visibility."
     },
     {
+      "name": "mctl_inspect_lifecycle_conflict",
+      "enabled": true,
+      "reason": "Read-only evidence for a lifecycle recovery decision: the stored row, derived status, the legacy DevLoopWorkflow answer, divergence class, recent transitions, and the precondition values a recovery call must send. Same exposure class as mctl_get_lifecycle_ownership -- internal repo/PR identifiers and owner ids, no credentials, no authority. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication and admin check are the access control -- the portal only decides visibility."
+    },
+    {
+      "name": "mctl_request_lifecycle_reconcile",
+      "enabled": false,
+      "reason": "Human-operator lifecycle recovery transition, not yet vetted for the shared portal: it appends an audited event but the recovery surface as a whole is new and disabled here pending operational experience."
+    },
+    {
+      "name": "mctl_fence_lifecycle_claim",
+      "enabled": false,
+      "reason": "Human-operator lifecycle recovery transition that releases a claim; disabled on the shared portal pending operational experience with the new recovery surface, matching the other three mutating recovery tools."
+    },
+    {
+      "name": "mctl_request_lifecycle_handoff",
+      "enabled": false,
+      "reason": "Human-operator lifecycle recovery transition that starts a handoff off a stuck owner; disabled on the shared portal pending operational experience with the new recovery surface."
+    },
+    {
+      "name": "mctl_retry_lifecycle_handoff",
+      "enabled": false,
+      "reason": "Human-operator lifecycle recovery transition that re-arms a stalled handoff; disabled on the shared portal pending operational experience with the new recovery surface."
+    },
+    {
       "name": "mctl_get_openclaw_sizing_recommendation",
       "enabled": true,
       "reason": "Aggregated VictoriaMetrics resource history and a recommended profile for one OpenClaw service; numbers only, tenant-scoped upstream."

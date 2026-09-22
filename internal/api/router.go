@@ -421,6 +421,12 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/lifecycle/ownership/record", h.GetLifecycleOwnershipRecord)
 			r.Get("/lifecycle/ownership/batch", h.BatchGetLifecycleOwnership)
 			r.Get("/lifecycle/events", h.ListLifecycleEvents)
+			// Recovery evidence read: what a follow-up recovery call below
+			// needs (stored row, derived view, legacy DevLoopWorkflow
+			// answer, divergence class, recent transitions, and the exact
+			// precondition values to send). A read like the four above it,
+			// so it sits outside the write budgets too.
+			r.Get("/lifecycle/ownership/conflict", h.GetLifecycleConflict)
 
 			// Lifecycle ownership WRITES — their own group and their own
 			// budget.
@@ -450,6 +456,31 @@ func NewRouter(opts Options) http.Handler {
 				// admin group: it moves ownership off a live record, which
 				// no other endpoint here can do.
 				r.Post("/lifecycle/ownership/recover", h.RecoverLifecycleOwnership)
+			})
+
+			// Human-operator lifecycle RECOVERY -- fence a dead claim,
+			// escalate a stuck owner into a handoff, retry a stalled
+			// handoff, or request reconciliation. A SEPARATE group and a
+			// tighter budget than the 120/min actor-write group above: these
+			// are rare, human-initiated interventions, not per-tick
+			// bookkeeping, and a caller hammering this endpoint is far more
+			// likely to be a bug than a legitimate burst.
+			//
+			// "recovery/handoff/*" is deliberately a distinct static prefix
+			// from the actor-driven "handoff/start"/"handoff/complete"
+			// above, so chi's radix tree cannot confuse an operator's
+			// escalation with an actor's own declared handoff.
+			r.Group(func(r chi.Router) {
+				r.Use(httprate.Limit(10, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					if user := auth.UserFromContext(r.Context()); user != nil {
+						return "lifecycle-recovery:" + user.ID, nil
+					}
+					return keyByTrustedIP(r)
+				})))
+				r.Post("/lifecycle/ownership/recovery/reconcile", h.RequestLifecycleReconcile)
+				r.Post("/lifecycle/ownership/recovery/fence", h.FenceLifecycleClaim)
+				r.Post("/lifecycle/ownership/recovery/handoff/request", h.RequestLifecycleHandoffRecovery)
+				r.Post("/lifecycle/ownership/recovery/handoff/retry", h.RetryLifecycleHandoff)
 			})
 
 			// Operation registry (metadata only).
