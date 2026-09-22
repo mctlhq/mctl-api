@@ -158,8 +158,8 @@ func TestUsageHandlers_IngestIsIdempotentOverHTTP(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if first.Accepted != 1 || first.Deduped != 0 {
-		t.Fatalf("first: accepted=%d deduped=%d, want 1/0", first.Accepted, first.Deduped)
+	if first.AcceptedCount != 1 || first.DedupedCount != 0 {
+		t.Fatalf("first: accepted=%d deduped=%d, want 1/0", first.AcceptedCount, first.DedupedCount)
 	}
 
 	rec = postUsage(t, h, body, true)
@@ -170,9 +170,9 @@ func TestUsageHandlers_IngestIsIdempotentOverHTTP(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &second); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if second.Accepted != 0 || second.Deduped != 1 {
+	if second.AcceptedCount != 0 || second.DedupedCount != 1 {
 		t.Fatalf("replay: accepted=%d deduped=%d, want 0/1 — a paid invocation was counted twice",
-			second.Accepted, second.Deduped)
+			second.AcceptedCount, second.DedupedCount)
 	}
 }
 
@@ -467,10 +467,17 @@ func TestUsageHandlers_SummaryReportsTruncationAndItsAxis(t *testing.T) {
 	h := &Handlers{opts: Options{Usage: store}}
 
 	// Three distinct workflow ids, so a limit of 2 must truncate.
+	//
+	// Scoped by work_item_id rather than by repository: this assertion is a
+	// LOWER bound (truncated must be true because 3 buckets exceed limit=2),
+	// and foreign rows can only push the bucket count up — so filtering on the
+	// repository every fixture hardcodes would let leftover data mask a
+	// regression in this test's own ingest.
 	var batch []any
 	for i := 0; i < 3; i++ {
 		rec := usageRecordBody(prefix, fmt.Sprintf("w%d", i))
 		rec["temporal_workflow_id"] = fmt.Sprintf("%s-wf-%d", prefix, i)
+		rec["work_item_id"] = prefix + "-trunc"
 		batch = append(batch, rec)
 	}
 	if resp := postUsage(t, h, map[string]any{"records": batch}, true); resp.Code != http.StatusOK {
@@ -478,7 +485,7 @@ func TestUsageHandlers_SummaryReportsTruncationAndItsAxis(t *testing.T) {
 	}
 
 	req := adminCtx(httptest.NewRequest("GET",
-		"/api/v1/usage/summary?group_by=temporal_workflow_id&repository=mctlhq/mctl-api&limit=2", nil))
+		"/api/v1/usage/summary?group_by=temporal_workflow_id&work_item_id="+prefix+"-trunc&limit=2", nil))
 	rec := httptest.NewRecorder()
 	h.GetUsageSummary(rec, req)
 	if rec.Code != http.StatusOK {

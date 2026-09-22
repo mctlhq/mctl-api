@@ -94,10 +94,14 @@ type summaryUsageResponse struct {
 	*usage.SummaryResult
 }
 
+// ingestUsageResponse embeds the store result for the same reason the read
+// responses do, and because flattening cost information: Accepted and Deduped
+// arrive as two distinct lists, and concatenating them into one `ids` told a
+// producer that two of five collided without saying WHICH two.
 type ingestUsageResponse struct {
-	Accepted int      `json:"accepted"`
-	Deduped  int      `json:"deduped"`
-	IDs      []string `json:"ids"`
+	*usage.IngestResult
+	AcceptedCount int `json:"accepted_count"`
+	DedupedCount  int `json:"deduped_count"`
 }
 
 // IngestUsageRecords accepts a batch of usage records idempotently.
@@ -149,9 +153,9 @@ func (h *Handlers) IngestUsageRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ingestUsageResponse{
-		Accepted: len(res.Accepted),
-		Deduped:  len(res.Deduped),
-		IDs:      append(append([]string{}, res.Accepted...), res.Deduped...),
+		IngestResult:  res,
+		AcceptedCount: len(res.Accepted),
+		DedupedCount:  len(res.Deduped),
 	})
 }
 

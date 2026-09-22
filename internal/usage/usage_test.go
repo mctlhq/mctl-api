@@ -31,13 +31,19 @@ func i64(v int64) *int64 { return &v }
 // proves there is no field to scrub, which is the actual guarantee and the one
 // that survives a future producer written by someone who never read the ADR.
 func TestRecordHasNoFreeTextContentField(t *testing.T) {
-	forbidden := []string{"prompt", "completion", "message", "content", "text", "body", "response", "input_text", "output_text"}
+	// Substring matching, not equality. The guard exists to survive a producer
+	// who never read the ADR, and that person reaches for PromptText,
+	// UserMessage or ResponseBody long before the bare noun — exact equality
+	// would wave every one of them through. Checked against all current field
+	// names: none contains any of these, so the stronger form costs nothing.
+	forbidden := []string{"prompt", "completion", "message", "content", "text", "body", "response"}
 	rt := reflect.TypeOf(Record{})
 	for i := 0; i < rt.NumField(); i++ {
 		name := strings.ToLower(rt.Field(i).Name)
 		for _, bad := range forbidden {
-			if name == bad {
-				t.Errorf("Record has field %q, which can carry model content; ADR-012 invariant 8 forbids it", rt.Field(i).Name)
+			if strings.Contains(name, bad) {
+				t.Errorf("Record has field %q, whose name contains %q: it can carry model content, and ADR-012 invariant 8 forbids the field existing at all",
+					rt.Field(i).Name, bad)
 			}
 		}
 	}

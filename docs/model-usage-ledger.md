@@ -80,11 +80,11 @@ commercially sensitive in a way a workflow status is not.
 { "records": [ { "session_id": "...", "model_key": "...", "input_tokens": 123 } ] }
 ```
 
-Idempotent. The response reports `accepted` and `deduped` counts; re-delivery
-is a success, not an error:
+Idempotent. Re-delivery is a success, not an error. The response names which
+ids landed and which collided, not just how many:
 
 ```json
-{ "accepted": 0, "deduped": 1, "ids": ["<sha256>"] }
+{ "accepted": [], "deduped": ["<sha256>"], "accepted_count": 0, "deduped_count": 1 }
 ```
 
 A producer that crashes mid-batch simply re-sends. Every record's id is
