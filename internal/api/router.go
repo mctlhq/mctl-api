@@ -33,6 +33,7 @@ import (
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/openapi"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -103,6 +104,12 @@ type Options struct {
 	// lifecycle phase (optional — nil makes the lifecycle endpoints 503,
 	// which callers treat as "unknown", never as "unowned").
 	Lifecycle *lifecycle.Store
+
+	// Usage is the durable model-usage and cost ledger (mctl-api#266,
+	// ADR-012). Optional — nil makes the usage endpoints 503, which a caller
+	// must read as "the ledger is unavailable" and never as "nothing was
+	// spent".
+	Usage *usage.Store
 	// TemporalClient starts/signals DevLoopWorkflow runs on the dev-workflow
 	// control plane's Temporal deployment (optional — nil disables
 	// mctl_trigger_issue's use_temporal path; callers fall back to the
@@ -457,6 +464,21 @@ func NewRouter(opts Options) http.Handler {
 				// no other endpoint here can do.
 				r.Post("/lifecycle/ownership/recover", h.RecoverLifecycleOwnership)
 			})
+
+			// Model usage ledger (mctl-api#266). Ingestion is a write but is
+			// not on the 20/min group: that budget exists for calls that
+			// trigger Argo workflows and Temporal executions, while this is a
+			// single short Postgres transaction that a producer makes once per
+			// completed model invocation. Throttling it would drop cost
+			// records for work that has already been paid for, which is the
+			// one failure this ledger cannot absorb — the money is spent
+			// whether or not the row lands.
+			//
+			// The reads share the group because they are operator-driven and
+			// infrequent.
+			r.Post("/usage/records", h.IngestUsageRecords)
+			r.Get("/usage/records", h.ListUsageRecords)
+			r.Get("/usage/summary", h.GetUsageSummary)
 
 			// Human-operator lifecycle RECOVERY -- fence a dead claim,
 			// escalate a stuck owner into a handoff, retry a stalled
