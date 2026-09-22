@@ -45,9 +45,9 @@ const usageMaxBodyBytes = 1 << 20 // 1 MiB — a batch of records, never a paylo
 // requests; the deterministic id makes a split batch safe to retry.
 const maxIngestBatch = 500
 
-// usageMaxLimit mirrors the store's page ceiling so the handler can reject an
-// over-large request instead of letting the store clamp it invisibly.
-const usageMaxLimit = 1000
+// The handler rejects an over-large limit rather than letting the store clamp
+// it invisibly, and takes the ceiling FROM the store so the two cannot drift —
+// a duplicated constant would eventually turn valid limits into 400s.
 
 // requireUsageAdmin mirrors requireLifecycleAdmin.
 //
@@ -194,12 +194,12 @@ func usageFilterFromQuery(r *http.Request) (usage.Filter, error) {
 		if convErr != nil || v <= 0 {
 			return f, errors.New("invalid limit")
 		}
-		if v > usageMaxLimit {
+		if v > usage.MaxQueryLimit {
 			// Same rule as every other filter here: an out-of-range argument
 			// is an error, never a quietly different answer. Returning a
 			// smaller page than was asked for would have a caller summing
 			// costs believe they had seen everything.
-			return f, errors.New("limit exceeds " + strconv.Itoa(usageMaxLimit))
+			return f, errors.New("limit exceeds " + strconv.Itoa(usage.MaxQueryLimit))
 		}
 		f.Limit = v
 	}
@@ -218,18 +218,20 @@ func (h *Handlers) ListUsageRecords(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	records, err := h.opts.Usage.List(r.Context(), f)
+	res, err := h.opts.Usage.List(r.Context(), f)
 	if err != nil {
 		slog.Error("usage list failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to read usage records")
 		return
 	}
-	if records == nil {
-		records = []*usage.Record{}
-	}
+	// count is the size of THIS page, so truncated must travel with it:
+	// without that, a caller summing calculated_cost over a busy week reads a
+	// clipped page as the complete answer and understates real spend.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"records": records,
-		"count":   len(records),
+		"records":   res.Records,
+		"count":     len(res.Records),
+		"truncated": res.Truncated,
+		"limit":     res.Limit,
 	})
 }
 

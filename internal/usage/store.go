@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -142,9 +143,13 @@ func (s *Store) Catalog() *Catalog { return s.catalog }
 
 // Query page bounds, shared by List and Summary so a caller cannot get an
 // unbounded answer from one and a capped answer from the other.
+//
+// Exported because the HTTP layer rejects an over-large limit before it
+// reaches the store. Two constants across the package boundary would drift,
+// and the drift shows up as valid limits answering 400.
 const (
-	defaultQueryLimit = 200
-	maxQueryLimit     = 1000
+	DefaultQueryLimit = 200
+	MaxQueryLimit     = 1000
 )
 
 const insertRecordSQL = `
@@ -206,8 +211,19 @@ func (s *Store) Ingest(ctx context.Context, records []*Record) (*IngestResult, e
 			// the token counts are still the truth, and a cost can be derived
 			// later once a card exists. Dropping the record would lose the
 			// measurement permanently.
-			if err := s.catalog.Calculate(r); err != nil && !errors.Is(err, ErrNoPricing) {
-				return nil, err
+			if err := s.catalog.Calculate(r); err != nil {
+				if !errors.Is(err, ErrNoPricing) {
+					return nil, err
+				}
+				// Not fatal — the token counts are still the truth and a cost
+				// can be derived later once a card exists. But it must not be
+				// silent: a catalog that failed to load at boot, or one whose
+				// cards all name a provider the producer omits, makes every
+				// row costless, and "spend is zero" is indistinguishable from
+				// "spend was never priced" without this line.
+				slog.Warn("usage record stored without calculated cost: no pricing card matched",
+					"canonical_model", r.CanonicalModel, "model_key", r.ModelKey,
+					"provider", r.Provider, "recorded_at", r.RecordedAt)
 			}
 		}
 		if err := r.Validate(); err != nil {
@@ -338,21 +354,24 @@ const selectColumns = `
     num_turns, duration_api_ms, retry_attempt, recorded_at
 `
 
+// ListResult is a bounded page of records.
+//
+// Truncated is part of the answer for the same reason it is on SummaryResult:
+// a clipped page is otherwise indistinguishable from a complete one, and a
+// caller summing calculated_cost over what it received would understate real
+// spend with nothing to warn it.
+type ListResult struct {
+	Records   []*Record `json:"records"`
+	Truncated bool      `json:"truncated"`
+	Limit     int       `json:"limit"`
+}
+
 // List returns matching records, newest first.
-func (s *Store) List(ctx context.Context, f Filter) ([]*Record, error) {
+func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
 	where, args := f.where()
-	limit := f.Limit
-	switch {
-	case limit <= 0:
-		limit = defaultQueryLimit
-	case limit > maxQueryLimit:
-		// Clamp, never shrink. Resetting an over-large request to the default
-		// would return FEWER rows than asking for the ceiling, and on a
-		// financial read model a caller summing a silently clipped page
-		// understates real spend.
-		limit = maxQueryLimit
-	}
-	args = append(args, limit)
+	limit := clampLimit(f.Limit)
+	// One row beyond the limit, so truncation is detected rather than guessed.
+	args = append(args, limit+1)
 	q := "SELECT" + selectColumns + "FROM model_usage_records" + where +
 		fmt.Sprintf(" ORDER BY recorded_at DESC, id ASC LIMIT $%d", len(args))
 	rows, err := s.pool.Query(ctx, q, args...)
@@ -360,7 +379,7 @@ func (s *Store) List(ctx context.Context, f Filter) ([]*Record, error) {
 		return nil, fmt.Errorf("usage: list: %w", err)
 	}
 	defer rows.Close()
-	var out []*Record
+	out := []*Record{}
 	for rows.Next() {
 		r, err := scanRecord(rows)
 		if err != nil {
@@ -371,7 +390,29 @@ func (s *Store) List(ctx context.Context, f Filter) ([]*Record, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("usage: list rows: %w", err)
 	}
-	return out, nil
+	res := &ListResult{Limit: limit}
+	if len(out) > limit {
+		res.Truncated = true
+		out = out[:limit]
+	}
+	res.Records = out
+	return res, nil
+}
+
+// clampLimit bounds a requested page size.
+//
+// Clamp, never shrink. Resetting an over-large request to the default would
+// return FEWER rows than asking for the ceiling, and on a financial read model
+// a caller summing a silently clipped page understates real spend.
+func clampLimit(limit int) int {
+	switch {
+	case limit <= 0:
+		return DefaultQueryLimit
+	case limit > MaxQueryLimit:
+		return MaxQueryLimit
+	default:
+		return limit
+	}
 }
 
 func scanRecord(rows pgx.Rows) (*Record, error) {
@@ -407,10 +448,17 @@ const (
 	GroupByOutcome  GroupBy = "outcome"
 )
 
+// The mapped values are fixed SQL fragments, never request data, so a
+// group-by argument still cannot reach the query as SQL.
+//
+// The model dimension uses the same model_key fallback the filter does: a
+// producer reporting only model_key would otherwise land in an empty-string
+// bucket, so a per-model breakdown would show spend under "" instead of under
+// the model that incurred it.
 var groupColumns = map[GroupBy]string{
 	GroupByAgent:    "agent",
 	GroupByStage:    "devloop_stage",
-	GroupByModel:    "canonical_model",
+	GroupByModel:    "COALESCE(NULLIF(canonical_model, ''), model_key)",
 	GroupByProvider: "provider",
 	GroupByRepo:     "target_repo",
 	GroupByWorkflow: "temporal_workflow_id",
@@ -455,10 +503,17 @@ type Bucket struct {
 // indistinguishable from a complete one, and an operator reading a partial
 // breakdown as the whole spend would reach the wrong conclusion about where
 // the money went.
+//
+// TruncatedBy names the axis the cut was made on, because on a ledger read for
+// money the axis matters: buckets are ordered by record COUNT, so a handful of
+// expensive invocations can be clipped out by a large number of cheap ones. An
+// operator seeing truncation needs to know the tail was dropped by volume, not
+// by spend, before concluding anything about where the money went.
 type SummaryResult struct {
-	Buckets   []*Bucket `json:"buckets"`
-	Truncated bool      `json:"truncated"`
-	Limit     int       `json:"limit"`
+	Buckets     []*Bucket `json:"buckets"`
+	Truncated   bool      `json:"truncated"`
+	TruncatedBy string    `json:"truncated_by,omitempty"`
+	Limit       int       `json:"limit"`
 }
 
 // Summary aggregates matching records over one dimension.
@@ -472,13 +527,7 @@ func (s *Store) Summary(ctx context.Context, f Filter, by GroupBy) (*SummaryResu
 	if !ok {
 		return nil, fmt.Errorf("%w: unknown group_by %q", ErrInvalidRecord, string(by))
 	}
-	limit := f.Limit
-	switch {
-	case limit <= 0:
-		limit = defaultQueryLimit
-	case limit > maxQueryLimit:
-		limit = maxQueryLimit
-	}
+	limit := clampLimit(f.Limit)
 	where, args := f.where()
 	// One row beyond the limit, so truncation is detected rather than guessed.
 	args = append(args, limit+1)
@@ -515,6 +564,7 @@ LIMIT $%d`, col, where, col, len(args))
 	res := &SummaryResult{Limit: limit}
 	if len(out) > limit {
 		res.Truncated = true
+		res.TruncatedBy = "record_count"
 		out = out[:limit]
 	}
 	res.Buckets = out

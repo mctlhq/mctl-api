@@ -388,14 +388,18 @@ func TestUsageHandlers_ListReturnsIngestedRecords(t *testing.T) {
 		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
 	}
 	var out struct {
-		Records []*usage.Record `json:"records"`
-		Count   int             `json:"count"`
+		Records   []*usage.Record `json:"records"`
+		Count     int             `json:"count"`
+		Truncated bool            `json:"truncated"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if out.Count != 1 || len(out.Records) != 1 {
 		t.Fatalf("count = %d, records = %d, want 1/1", out.Count, len(out.Records))
+	}
+	if out.Truncated {
+		t.Error("a single-record page reported itself truncated")
 	}
 	got := out.Records[0]
 	if got.SessionID != prefix+"-listed" {
@@ -407,5 +411,45 @@ func TestUsageHandlers_ListReturnsIngestedRecords(t *testing.T) {
 	// The ledger's own derived cost must come back with the version that made it.
 	if got.CalculatedCost == nil || got.PricingVersion != "handler-v1" {
 		t.Errorf("cost = %v, pricing version = %q", got.CalculatedCost, got.PricingVersion)
+	}
+}
+
+// Review round 2, claude P2: Summary reported truncation but the record list
+// did not, so a caller summing `records[].calculated_cost` over a busy window
+// read a clipped page as the complete answer and understated spend.
+func TestUsageHandlers_ListReportsTruncation(t *testing.T) {
+	store, prefix := newTestUsageStore(t)
+	h := &Handlers{opts: Options{Usage: store}}
+
+	var batch []any
+	for i := 0; i <= usage.DefaultQueryLimit; i++ {
+		batch = append(batch, usageRecordBody(prefix, fmt.Sprintf("t%d", i)))
+	}
+	if resp := postUsage(t, h, map[string]any{"records": batch}, true); resp.Code != http.StatusOK {
+		t.Fatalf("ingest: %d %s", resp.Code, resp.Body.String())
+	}
+
+	req := adminCtx(httptest.NewRequest("GET", "/api/v1/usage/records?workflow_id="+prefix+"-wf", nil))
+	rec := httptest.NewRecorder()
+	h.ListUsageRecords(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Count     int  `json:"count"`
+		Truncated bool `json:"truncated"`
+		Limit     int  `json:"limit"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Count != usage.DefaultQueryLimit {
+		t.Fatalf("count = %d, want %d", out.Count, usage.DefaultQueryLimit)
+	}
+	if !out.Truncated {
+		t.Error("a clipped page did not report truncated; the caller cannot tell it saw everything")
+	}
+	if out.Limit != usage.DefaultQueryLimit {
+		t.Errorf("limit = %d", out.Limit)
 	}
 }

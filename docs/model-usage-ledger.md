@@ -23,6 +23,13 @@ With no catalog the ledger still records every token count and stores whatever
 cost a producer supplies — it simply derives none of its own. That is the
 honest behaviour when the rates are unknown.
 
+A record that matches no card is stored without a calculated cost and logs a
+warning naming the model and provider. It is not an error — the token counts
+are still true and a cost can be derived later — but it must not be silent: a
+catalog that failed to load, or one whose cards all name a provider the
+producer omits, would otherwise make every row costless with nothing pointing
+at why.
+
 ## Rate cards
 
 Rates live in a file rather than in the binary. A published price is a fact
@@ -104,7 +111,14 @@ for one issue's spend must not silently receive the repository's. `limit` above
 model, a caller summing a clipped page understates real spend.
 
 `model` matches `canonical_model`, falling back to `model_key` for records whose
-producer reported only the latter.
+producer reported only the latter. `group_by=canonical_model` uses the same
+fallback, so those records are counted under their model rather than under an
+empty bucket.
+
+The response carries `truncated` and `limit`. `count` is the size of *this
+page*, not the number of matching records — a caller summing
+`records[].calculated_cost` must check `truncated` before treating the total as
+complete.
 
 ### `GET /api/v1/usage/summary?group_by=agent`
 
@@ -113,7 +127,10 @@ producer reported only the latter.
 closed, so a query parameter can never become SQL.
 
 Results are capped the same way `records` are and the response carries
-`truncated` and `limit`. A clipped bucket list is otherwise indistinguishable
+`truncated`, `truncated_by` and `limit`. Buckets are ordered by record
+**count**, so truncation drops the tail by volume, not by spend: a handful of
+expensive invocations can be clipped out by many cheap ones, and
+`truncated_by: "record_count"` says so. A clipped bucket list is otherwise indistinguishable
 from a complete breakdown, which matters most on the high-cardinality
 dimensions (`temporal_workflow_id`, `work_item_id`) that grow as the ledger
 ages.

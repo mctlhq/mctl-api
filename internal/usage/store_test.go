@@ -101,8 +101,8 @@ func TestIngestIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("rows after replay = %d, want 1", len(got))
+	if len(got.Records) != 1 {
+		t.Fatalf("rows after replay = %d, want 1", len(got.Records))
 	}
 }
 
@@ -127,8 +127,8 @@ func TestRunSpanningTwoModelsProducesTwoRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("rows = %d, want 2", len(got))
+	if len(got.Records) != 2 {
+		t.Fatalf("rows = %d, want 2", len(got.Records))
 	}
 }
 
@@ -157,7 +157,7 @@ func TestAbsentAndZeroSurviveRoundTrip(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	var sawAbsent, sawZero bool
-	for _, r := range rows {
+	for _, r := range rows.Records {
 		switch r.SessionID {
 		case prefix + "-absent":
 			sawAbsent = true
@@ -189,15 +189,15 @@ func TestStoredCostSurvivesAPriceChange(t *testing.T) {
 		t.Fatalf("Ingest: %v", err)
 	}
 	before, err := s.List(ctx, Filter{TemporalWorkflowID: prefix + "-wf"})
-	if err != nil || len(before) != 1 {
-		t.Fatalf("List: %v (rows %d)", err, len(before))
+	if err != nil || len(before.Records) != 1 {
+		t.Fatalf("List: %v (rows %d)", err, len(before.Records))
 	}
-	if before[0].CalculatedCost == nil {
+	if before.Records[0].CalculatedCost == nil {
 		t.Fatal("no calculated cost was stored")
 	}
-	original := *before[0].CalculatedCost
-	if before[0].PricingVersion != "test-v1" {
-		t.Fatalf("pricing version = %q, want test-v1", before[0].PricingVersion)
+	original := *before.Records[0].CalculatedCost
+	if before.Records[0].PricingVersion != "test-v1" {
+		t.Fatalf("pricing version = %q, want test-v1", before.Records[0].PricingVersion)
 	}
 
 	// The price doubles from July.
@@ -216,11 +216,11 @@ func TestStoredCostSurvivesAPriceChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if *after[0].CalculatedCost != original {
-		t.Errorf("stored cost changed from %v to %v after a price change", original, *after[0].CalculatedCost)
+	if *after.Records[0].CalculatedCost != original {
+		t.Errorf("stored cost changed from %v to %v after a price change", original, *after.Records[0].CalculatedCost)
 	}
-	if after[0].PricingVersion != "test-v1" {
-		t.Errorf("pricing version changed to %q", after[0].PricingVersion)
+	if after.Records[0].PricingVersion != "test-v1" {
+		t.Errorf("pricing version changed to %q", after.Records[0].PricingVersion)
 	}
 }
 
@@ -284,7 +284,7 @@ func TestRecordsRemainQueryableByCorrelationWithoutTraceData(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	var found bool
-	for _, rec := range got {
+	for _, rec := range got.Records {
 		if rec.SessionID == r.SessionID {
 			found = true
 		}
@@ -345,7 +345,7 @@ func TestModelFilterMatchesRecordsWithoutCanonicalModel(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	var found bool
-	for _, r := range got {
+	for _, r := range got.Records {
 		if r.SessionID == prefix+"-bare" {
 			found = true
 		}
@@ -393,13 +393,19 @@ func TestSummaryIsBoundedAndSaysSo(t *testing.T) {
 // Review round 1, claude P2 (store.go:315): asking for more than the ceiling
 // silently returned the DEFAULT page, i.e. fewer rows than asking for the
 // ceiling, with nothing in the response saying so.
+//
+// Round 2 note: the first version of this test used three records, which
+// cannot distinguish a clamp to 1000 from a reset to 200 — it passed against
+// the unfixed code and locked in nothing. It needs more rows than the default
+// page to discriminate, so it inserts 201 and asserts all 201 come back.
 func TestOverLargeLimitClampsRatherThanShrinks(t *testing.T) {
 	s, prefix := newTestStore(t)
 	ctx := context.Background()
 	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
+	const rows = DefaultQueryLimit + 1
 	var batch []*Record
-	for i := 0; i < 3; i++ {
+	for i := 0; i < rows; i++ {
 		r := testRecord(prefix, "test-model", at)
 		r.SessionID = fmt.Sprintf("%s-c%d", prefix, i)
 		r.ResultUUID = fmt.Sprintf("%s-cu%d", prefix, i)
@@ -408,12 +414,29 @@ func TestOverLargeLimitClampsRatherThanShrinks(t *testing.T) {
 	if _, err := s.Ingest(ctx, batch); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
+
 	huge, err := s.List(ctx, Filter{TemporalWorkflowID: prefix + "-wf", Limit: 50000})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(huge) != 3 {
-		t.Errorf("rows = %d, want 3; an over-large limit did not clamp to the ceiling", len(huge))
+	if len(huge.Records) != rows {
+		t.Errorf("rows = %d, want %d; an over-large limit did not clamp to the ceiling (a reset to the %d default returns fewer than asking for the ceiling)",
+			len(huge.Records), rows, DefaultQueryLimit)
+	}
+	if huge.Truncated {
+		t.Error("a complete result reported itself truncated")
+	}
+
+	// And the default page truncates visibly rather than silently.
+	def, err := s.List(ctx, Filter{TemporalWorkflowID: prefix + "-wf"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(def.Records) != DefaultQueryLimit {
+		t.Errorf("default page = %d rows, want %d", len(def.Records), DefaultQueryLimit)
+	}
+	if !def.Truncated {
+		t.Error("a clipped page did not report itself truncated; it reads as the complete answer")
 	}
 }
 
@@ -432,5 +455,39 @@ func TestIngestRejectsNilRecordInBatch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "record 1") {
 		t.Errorf("error does not name the offending index: %v", err)
+	}
+}
+
+// Review round 2, claude P3: the filter learned the model_key fallback in
+// round 1 but group_by=canonical_model did not, so a per-model breakdown
+// showed those records' spend under "" rather than under the model that
+// incurred it.
+func TestSummaryByModelUsesTheModelKeyFallback(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	bare := testRecord(prefix, "test-model", at)
+	bare.SessionID = prefix + "-bare"
+	bare.ResultUUID = prefix + "-bare-uuid"
+	bare.CanonicalModel = "" // only model_key reported
+
+	if _, err := s.Ingest(ctx, []*Record{bare}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	res, err := s.Summary(ctx, Filter{TemporalWorkflowID: prefix + "-wf"}, GroupByModel)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	for _, b := range res.Buckets {
+		if b.Key == "" {
+			t.Error("a model_key-only record was bucketed under the empty string instead of its model")
+		}
+		if b.Key != "test-model" {
+			t.Errorf("bucket key = %q, want test-model", b.Key)
+		}
+	}
+	if len(res.Buckets) != 1 {
+		t.Fatalf("buckets = %d, want 1", len(res.Buckets))
 	}
 }
