@@ -453,3 +453,57 @@ func TestUsageHandlers_ListReportsTruncation(t *testing.T) {
 		t.Errorf("limit = %d", out.Limit)
 	}
 }
+
+// Review round 3, agy finding 1 (P2) and finding 2 (P3): the store set
+// `truncated_by`, the docs promised it, and the handler's hand-built response
+// map dropped it — so a documented field never reached a client. agy also
+// named the reason it went unnoticed: summary truncation had no HTTP test,
+// only the record list did.
+//
+// This asserts the field over the wire rather than on the struct, because the
+// struct was already correct; it was the serialisation that was not.
+func TestUsageHandlers_SummaryReportsTruncationAndItsAxis(t *testing.T) {
+	store, prefix := newTestUsageStore(t)
+	h := &Handlers{opts: Options{Usage: store}}
+
+	// Three distinct workflow ids, so a limit of 2 must truncate.
+	var batch []any
+	for i := 0; i < 3; i++ {
+		rec := usageRecordBody(prefix, fmt.Sprintf("w%d", i))
+		rec["temporal_workflow_id"] = fmt.Sprintf("%s-wf-%d", prefix, i)
+		batch = append(batch, rec)
+	}
+	if resp := postUsage(t, h, map[string]any{"records": batch}, true); resp.Code != http.StatusOK {
+		t.Fatalf("ingest: %d %s", resp.Code, resp.Body.String())
+	}
+
+	req := adminCtx(httptest.NewRequest("GET",
+		"/api/v1/usage/summary?group_by=temporal_workflow_id&repository=mctlhq/mctl-api&limit=2", nil))
+	rec := httptest.NewRecorder()
+	h.GetUsageSummary(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("summary: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		GroupBy     string          `json:"group_by"`
+		Buckets     []*usage.Bucket `json:"buckets"`
+		Truncated   bool            `json:"truncated"`
+		TruncatedBy string          `json:"truncated_by"`
+		Limit       int             `json:"limit"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.GroupBy != "temporal_workflow_id" {
+		t.Errorf("group_by = %q", out.GroupBy)
+	}
+	if len(out.Buckets) != 2 || out.Limit != 2 {
+		t.Fatalf("buckets = %d, limit = %d, want 2/2", len(out.Buckets), out.Limit)
+	}
+	if !out.Truncated {
+		t.Fatal("a clipped bucket list did not report truncated")
+	}
+	if out.TruncatedBy != "record_count" {
+		t.Errorf("truncated_by = %q, want \"record_count\" — the docs promise the axis, and an operator needs it before concluding where the money went", out.TruncatedBy)
+	}
+}

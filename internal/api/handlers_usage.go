@@ -76,6 +76,24 @@ type ingestUsageRequest struct {
 	Records []*usage.Record `json:"records"`
 }
 
+// listUsageResponse and summaryUsageResponse embed the store's result rather
+// than copying its fields into a map.
+//
+// The hand-built map is what let `truncated_by` be set on the result, promised
+// in the docs, and never reach a client: adding a field to the result did not
+// add it to the response. Embedding makes that class of drift impossible —
+// the wire shape follows the type.
+type listUsageResponse struct {
+	*usage.ListResult
+	// Count is the size of THIS page, not the number of matching records.
+	Count int `json:"count"`
+}
+
+type summaryUsageResponse struct {
+	GroupBy string `json:"group_by"`
+	*usage.SummaryResult
+}
+
 type ingestUsageResponse struct {
 	Accepted int      `json:"accepted"`
 	Deduped  int      `json:"deduped"`
@@ -224,15 +242,10 @@ func (h *Handlers) ListUsageRecords(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read usage records")
 		return
 	}
-	// count is the size of THIS page, so truncated must travel with it:
-	// without that, a caller summing calculated_cost over a busy week reads a
-	// clipped page as the complete answer and understates real spend.
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"records":   res.Records,
-		"count":     len(res.Records),
-		"truncated": res.Truncated,
-		"limit":     res.Limit,
-	})
+	// count travels with truncated: without that, a caller summing
+	// calculated_cost over a busy week reads a clipped page as the complete
+	// answer and understates real spend.
+	writeJSON(w, http.StatusOK, listUsageResponse{ListResult: res, Count: len(res.Records)})
 }
 
 // GetUsageSummary aggregates matching rows over one dimension.
@@ -267,10 +280,5 @@ func (h *Handlers) GetUsageSummary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to summarize usage")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"group_by":  string(by),
-		"buckets":   res.Buckets,
-		"truncated": res.Truncated,
-		"limit":     res.Limit,
-	})
+	writeJSON(w, http.StatusOK, summaryUsageResponse{GroupBy: string(by), SummaryResult: res})
 }
