@@ -48,6 +48,7 @@ import (
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
+	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/vault"
 	"github.com/mctlhq/mctl-api/internal/vmetrics"
 )
@@ -235,6 +236,45 @@ func main() {
 			slog.Error("lifecycle ownership store init failed; lifecycle endpoints will return 503", "error", lsErr)
 		} else {
 			lifecycleStore = ls
+		}
+	}
+
+	// Model usage / cost ledger (mctl-api#266, ADR-012). Optional — enabled
+	// when USAGE_DB_URL or AUDIT_DB_URL is set. A nil store makes the usage
+	// endpoints 503; see requireUsageAdmin for why that must not degrade to an
+	// empty result.
+	//
+	// The pricing catalog is loaded from a file named by USAGE_PRICING_CATALOG
+	// rather than compiled in: a published rate is a fact about the world with
+	// an effective date, and a wrong constant silently produces plausible
+	// money. With no catalog the ledger still records every token count and
+	// stores whatever cost a producer supplies — it simply derives none of its
+	// own, which is the honest behaviour when the rates are unknown.
+	var usageStore *usage.Store
+	usageDBURL := postgresURL(os.Getenv("USAGE_DB_URL"))
+	if usageDBURL == "" {
+		usageDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+	}
+	if usageDBURL != "" {
+		var pricing *usage.Catalog
+		if path := os.Getenv("USAGE_PRICING_CATALOG"); path != "" {
+			pc, pcErr := usage.LoadCatalogFile(path)
+			if pcErr != nil {
+				// Refusing to start would take the whole API down over a
+				// rate card; recording usage without derived cost is strictly
+				// better than recording nothing.
+				slog.Error("usage pricing catalog failed to load; usage will be recorded without calculated cost", "error", pcErr)
+			} else {
+				pricing = pc
+			}
+		}
+		us, usErr := initStore(initCtx, "usage ledger", func(ctx context.Context) (*usage.Store, error) {
+			return usage.NewStore(ctx, usageDBURL, pricing)
+		})
+		if usErr != nil {
+			slog.Error("usage ledger store init failed; usage endpoints will return 503", "error", usErr)
+		} else {
+			usageStore = us
 		}
 	}
 
@@ -501,6 +541,7 @@ func main() {
 		AlertStore:                     alertStore,
 		AgentRegistry:                  agentRegistryStore,
 		Lifecycle:                      lifecycleStore,
+		Usage:                          usageStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,
