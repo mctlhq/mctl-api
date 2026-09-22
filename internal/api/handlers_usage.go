@@ -45,6 +45,10 @@ const usageMaxBodyBytes = 1 << 20 // 1 MiB — a batch of records, never a paylo
 // requests; the deterministic id makes a split batch safe to retry.
 const maxIngestBatch = 500
 
+// usageMaxLimit mirrors the store's page ceiling so the handler can reject an
+// over-large request instead of letting the store clamp it invisibly.
+const usageMaxLimit = 1000
+
 // requireUsageAdmin mirrors requireLifecycleAdmin.
 //
 // A nil store is 503, not 404 or an empty result: "the ledger is not
@@ -93,6 +97,15 @@ func (h *Handlers) IngestUsageRecords(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, usageMaxBodyBytes)
 	var req ingestUsageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// A batch over the byte cap must not read as malformed JSON: the
+		// producer needs to tell "do not retry this" from "split and retry",
+		// and the record-count cap below already answers 413.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge,
+				"batch exceeds "+strconv.FormatInt(usageMaxBodyBytes, 10)+" bytes")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -181,6 +194,13 @@ func usageFilterFromQuery(r *http.Request) (usage.Filter, error) {
 		if convErr != nil || v <= 0 {
 			return f, errors.New("invalid limit")
 		}
+		if v > usageMaxLimit {
+			// Same rule as every other filter here: an out-of-range argument
+			// is an error, never a quietly different answer. Returning a
+			// smaller page than was asked for would have a caller summing
+			// costs believe they had seen everything.
+			return f, errors.New("limit exceeds " + strconv.Itoa(usageMaxLimit))
+		}
 		f.Limit = v
 	}
 	return f, nil
@@ -239,17 +259,16 @@ func (h *Handlers) GetUsageSummary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unknown group_by")
 		return
 	}
-	buckets, err := h.opts.Usage.Summary(r.Context(), f, by)
+	res, err := h.opts.Usage.Summary(r.Context(), f, by)
 	if err != nil {
 		slog.Error("usage summary failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to summarize usage")
 		return
 	}
-	if buckets == nil {
-		buckets = []*usage.Bucket{}
-	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"group_by": string(by),
-		"buckets":  buckets,
+		"group_by":  string(by),
+		"buckets":   res.Buckets,
+		"truncated": res.Truncated,
+		"limit":     res.Limit,
 	})
 }

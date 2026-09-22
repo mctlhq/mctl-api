@@ -16,6 +16,7 @@ package usage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -238,14 +239,17 @@ func TestSummaryAggregatesOverDimensions(t *testing.T) {
 	if _, err := s.Ingest(ctx, []*Record{testRecord(prefix, "test-model", at), investigator}); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
-	buckets, err := s.Summary(ctx, Filter{TemporalWorkflowID: prefix + "-wf"}, GroupByAgent)
+	res, err := s.Summary(ctx, Filter{TemporalWorkflowID: prefix + "-wf"}, GroupByAgent)
 	if err != nil {
 		t.Fatalf("Summary: %v", err)
 	}
-	if len(buckets) != 2 {
-		t.Fatalf("buckets = %d, want 2 (investigator, implementer)", len(buckets))
+	if len(res.Buckets) != 2 {
+		t.Fatalf("buckets = %d, want 2 (investigator, implementer)", len(res.Buckets))
 	}
-	for _, b := range buckets {
+	if res.Truncated {
+		t.Error("a two-bucket summary reported itself truncated")
+	}
+	for _, b := range res.Buckets {
 		if b.Count != 1 {
 			t.Errorf("bucket %q count = %d, want 1", b.Key, b.Count)
 		}
@@ -317,5 +321,116 @@ INSERT INTO model_usage_records (id, schema_version, session_id, model_key, calc
 VALUES ($1, $2, $3, 'm', 1.23, 'test-v1', NOW())`,
 		prefix+"-good", SchemaVersion, prefix+"-direct"); err != nil {
 		t.Fatalf("a priced row with a version was rejected: %v", err)
+	}
+}
+
+// Review round 1, agy finding 3: a producer that reports only model_key leaves
+// canonical_model empty, and a filter on canonical_model alone omitted those
+// rows — so a repository's spend read lower than it actually was.
+func TestModelFilterMatchesRecordsWithoutCanonicalModel(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	bare := testRecord(prefix, "test-model", at)
+	bare.SessionID = prefix + "-bare"
+	bare.ResultUUID = prefix + "-bare-uuid"
+	bare.CanonicalModel = "" // only model_key reported
+
+	if _, err := s.Ingest(ctx, []*Record{bare}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	got, err := s.List(ctx, Filter{TemporalWorkflowID: prefix + "-wf", CanonicalModel: "test-model"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var found bool
+	for _, r := range got {
+		if r.SessionID == prefix+"-bare" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("a record reported with model_key only was invisible to a model filter; spend would read low")
+	}
+}
+
+// Review round 1, claude P2 (store.go:429): Summary had no LIMIT, so an
+// unfiltered group-by on a high-cardinality dimension returned one bucket per
+// workflow that ever ran.
+func TestSummaryIsBoundedAndSaysSo(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	var batch []*Record
+	for i := 0; i < 5; i++ {
+		r := testRecord(prefix, "test-model", at)
+		r.SessionID = fmt.Sprintf("%s-s%d", prefix, i)
+		r.ResultUUID = fmt.Sprintf("%s-u%d", prefix, i)
+		r.TemporalWorkflowID = fmt.Sprintf("%s-wf-%d", prefix, i)
+		batch = append(batch, r)
+	}
+	if _, err := s.Ingest(ctx, batch); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	res, err := s.Summary(ctx, Filter{TargetRepo: "mctlhq/mctl-api", Limit: 2}, GroupByWorkflow)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if len(res.Buckets) != 2 {
+		t.Fatalf("buckets = %d, want 2 (the limit)", len(res.Buckets))
+	}
+	if !res.Truncated {
+		t.Error("a clipped bucket list did not report itself truncated; it reads as the whole breakdown")
+	}
+	if res.Limit != 2 {
+		t.Errorf("limit = %d, want 2", res.Limit)
+	}
+}
+
+// Review round 1, claude P2 (store.go:315): asking for more than the ceiling
+// silently returned the DEFAULT page, i.e. fewer rows than asking for the
+// ceiling, with nothing in the response saying so.
+func TestOverLargeLimitClampsRatherThanShrinks(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	var batch []*Record
+	for i := 0; i < 3; i++ {
+		r := testRecord(prefix, "test-model", at)
+		r.SessionID = fmt.Sprintf("%s-c%d", prefix, i)
+		r.ResultUUID = fmt.Sprintf("%s-cu%d", prefix, i)
+		batch = append(batch, r)
+	}
+	if _, err := s.Ingest(ctx, batch); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	huge, err := s.List(ctx, Filter{TemporalWorkflowID: prefix + "-wf", Limit: 50000})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(huge) != 3 {
+		t.Errorf("rows = %d, want 3; an over-large limit did not clamp to the ceiling", len(huge))
+	}
+}
+
+// Review round 1, agy finding 1, at the boundary a client can actually reach.
+func TestIngestRejectsNilRecordInBatch(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	_, err := s.Ingest(ctx, []*Record{testRecord(prefix, "test-model", at), nil})
+	if err == nil {
+		t.Fatal("a batch containing a null record was accepted")
+	}
+	if !errors.Is(err, ErrInvalidRecord) {
+		t.Errorf("error = %v, want ErrInvalidRecord (a 400, not a panic or a 500)", err)
+	}
+	if !strings.Contains(err.Error(), "record 1") {
+		t.Errorf("error does not name the offending index: %v", err)
 	}
 }

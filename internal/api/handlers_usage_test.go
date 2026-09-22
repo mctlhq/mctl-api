@@ -33,8 +33,6 @@ import (
 	"github.com/mctlhq/mctl-api/internal/usage"
 )
 
-func usageInt(v int64) *int64 { return &v }
-
 func newTestUsageStore(t *testing.T) (*usage.Store, string) {
 	t.Helper()
 	connStr := os.Getenv("TEST_DATABASE_URL")
@@ -255,8 +253,9 @@ func TestUsageHandlers_SummaryAnswersOperatorQuestion(t *testing.T) {
 		t.Fatalf("summary: %d %s", rec.Code, rec.Body.String())
 	}
 	var out struct {
-		GroupBy string          `json:"group_by"`
-		Buckets []*usage.Bucket `json:"buckets"`
+		GroupBy   string          `json:"group_by"`
+		Buckets   []*usage.Bucket `json:"buckets"`
+		Truncated bool            `json:"truncated"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -306,5 +305,107 @@ func TestUsageRoutesAreRegistered(t *testing.T) {
 		if !found[want] {
 			t.Errorf("route not registered: %s", want)
 		}
+	}
+}
+
+// Review round 1, claude P2: a client-chosen id must not reach the store. Over
+// HTTP this is the path that matters — `id` is a plain JSON field, so nothing
+// stopped a producer from sending one before.
+func TestUsageHandlers_ClientSuppliedIDIsRejected(t *testing.T) {
+	store, prefix := newTestUsageStore(t)
+	h := &Handlers{opts: Options{Usage: store}}
+
+	body := usageRecordBody(prefix, "spoof")
+	body["id"] = "client-chosen-id"
+	resp := postUsage(t, h, map[string]any{"records": []any{body}}, true)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for a client-chosen id, got %d (%s)", resp.Code, resp.Body.String())
+	}
+}
+
+// Review round 1, agy finding 1: {"records":[null]} panicked the process.
+func TestUsageHandlers_NullRecordIsRejectedNotPanicked(t *testing.T) {
+	store, _ := newTestUsageStore(t)
+	h := &Handlers{opts: Options{Usage: store}}
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			t.Fatalf("a null record panicked the handler: %v", rec)
+		}
+	}()
+	resp := postUsage(t, h, map[string]any{"records": []any{nil}}, true)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for a null record, got %d (%s)", resp.Code, resp.Body.String())
+	}
+}
+
+// Review round 1, claude P2: an over-large limit is an error, not a quietly
+// smaller page — the same rule the rest of the filters already follow.
+func TestUsageHandlers_OverLargeLimitIsRejected(t *testing.T) {
+	store, _ := newTestUsageStore(t)
+	h := &Handlers{opts: Options{Usage: store}}
+
+	req := adminCtx(httptest.NewRequest("GET", "/api/v1/usage/records?limit=5000", nil))
+	rec := httptest.NewRecorder()
+	h.ListUsageRecords(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("limit=5000: want 400, got %d", rec.Code)
+	}
+}
+
+// Review round 1, claude P3: a batch over the byte cap read as "invalid JSON
+// body", so a producer could not tell "do not retry" from "split and retry".
+func TestUsageHandlers_OversizedBodyIs413NotMalformedJSON(t *testing.T) {
+	store, prefix := newTestUsageStore(t)
+	h := &Handlers{opts: Options{Usage: store}}
+
+	body := usageRecordBody(prefix, "big")
+	body["work_item_id"] = strings.Repeat("x", int(usageMaxBodyBytes)+1)
+	raw, err := json.Marshal(map[string]any{"records": []any{body}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := adminCtx(httptest.NewRequest("POST", "/api/v1/usage/records", bytes.NewReader(raw)))
+	rec := httptest.NewRecorder()
+	h.IngestUsageRecords(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized body: want 413, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// Review round 1, agy finding 5: the list success path had no coverage.
+func TestUsageHandlers_ListReturnsIngestedRecords(t *testing.T) {
+	store, prefix := newTestUsageStore(t)
+	h := &Handlers{opts: Options{Usage: store}}
+
+	if resp := postUsage(t, h, map[string]any{"records": []any{usageRecordBody(prefix, "listed")}}, true); resp.Code != http.StatusOK {
+		t.Fatalf("ingest: %d %s", resp.Code, resp.Body.String())
+	}
+	req := adminCtx(httptest.NewRequest("GET", "/api/v1/usage/records?workflow_id="+prefix+"-wf", nil))
+	rec := httptest.NewRecorder()
+	h.ListUsageRecords(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Records []*usage.Record `json:"records"`
+		Count   int             `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Count != 1 || len(out.Records) != 1 {
+		t.Fatalf("count = %d, records = %d, want 1/1", out.Count, len(out.Records))
+	}
+	got := out.Records[0]
+	if got.SessionID != prefix+"-listed" {
+		t.Errorf("session_id = %q", got.SessionID)
+	}
+	if got.InputTokens == nil || *got.InputTokens != 1_000_000 {
+		t.Errorf("input tokens = %v", got.InputTokens)
+	}
+	// The ledger's own derived cost must come back with the version that made it.
+	if got.CalculatedCost == nil || got.PricingVersion != "handler-v1" {
+		t.Errorf("cost = %v, pricing version = %q", got.CalculatedCost, got.PricingVersion)
 	}
 }

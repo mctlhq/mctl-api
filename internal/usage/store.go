@@ -39,6 +39,13 @@ import (
 //     with no record of the rates that produced it cannot be reproduced after a
 //     price change, so the database refuses to hold one.
 //
+// Money is NUMERIC rather than DOUBLE PRECISION. SUM(double precision) in
+// Postgres is order-dependent, and a parallel aggregate plan does not fix the
+// partial-sum order, so the same summary query could return slightly different
+// totals on successive calls — which would undercut exactly the reproducibility
+// the CHECK below exists to protect. Changing the type later is a migration on
+// a table nobody wants to rewrite.
+//
 // Every token column is NULLable on purpose: NULL means the provider did not
 // report the figure, 0 means it reported zero, and SUM() over the column
 // ignores the former while counting the latter. Making these NOT NULL DEFAULT 0
@@ -71,10 +78,10 @@ CREATE TABLE IF NOT EXISTS model_usage_records (
     reasoning_tokens        BIGINT,
     web_search_requests     BIGINT,
 
-    provider_reported_cost  DOUBLE PRECISION,
-    calculated_cost         DOUBLE PRECISION,
+    provider_reported_cost  NUMERIC,
+    calculated_cost         NUMERIC,
     pricing_version         TEXT NOT NULL DEFAULT '',
-    invoice_reconciled_cost DOUBLE PRECISION,
+    invoice_reconciled_cost NUMERIC,
 
     outcome                 TEXT NOT NULL DEFAULT '',
     api_error_status        TEXT NOT NULL DEFAULT '',
@@ -133,6 +140,13 @@ func (s *Store) Close() {
 // Catalog exposes the pricing catalog this store prices with.
 func (s *Store) Catalog() *Catalog { return s.catalog }
 
+// Query page bounds, shared by List and Summary so a caller cannot get an
+// unbounded answer from one and a capped answer from the other.
+const (
+	defaultQueryLimit = 200
+	maxQueryLimit     = 1000
+)
+
 const insertRecordSQL = `
 INSERT INTO model_usage_records (
     id, schema_version, session_id, result_uuid, model_key, canonical_model, provider,
@@ -178,9 +192,14 @@ func (s *Store) Ingest(ctx context.Context, records []*Record) (*IngestResult, e
 	if len(records) == 0 {
 		return res, nil
 	}
-	for _, r := range records {
+	for i, r := range records {
+		if r == nil {
+			// A JSON body of {"records":[null]} decodes to a nil element.
+			// Without this the loop dereferences it and panics the process.
+			return nil, fmt.Errorf("%w: record %d is null", ErrInvalidRecord, i)
+		}
 		if err := r.EnsureID(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
 		if r.CalculatedCost == nil && r.ProviderReportedCost == nil && s.catalog != nil {
 			// A model with no rate card is not a reason to reject the record:
@@ -192,7 +211,10 @@ func (s *Store) Ingest(ctx context.Context, records []*Record) (*IngestResult, e
 			}
 		}
 		if err := r.Validate(); err != nil {
-			return nil, err
+			// Naming the index matters: the write is all-or-nothing, so a
+			// producer whose batch is rejected needs to know which record to
+			// fix rather than re-sending the same 500 and failing again.
+			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -279,7 +301,16 @@ func (f Filter) where() (string, []any) {
 		add("provider = $%d", f.Provider)
 	}
 	if f.CanonicalModel != "" {
-		add("canonical_model = $%d", f.CanonicalModel)
+		// A producer that reports only model_key leaves canonical_model empty,
+		// and pricing already treats model_key as the fallback identity. A
+		// filter on canonical_model alone would silently omit those records,
+		// so a repo's spend would read lower than it was. Matching the
+		// fallback here rather than writing model_key into canonical_model at
+		// ingest keeps the record honest about what the provider actually
+		// reported.
+		args = append(args, f.CanonicalModel)
+		clauses = append(clauses, fmt.Sprintf(
+			"(canonical_model = $%d OR (canonical_model = '' AND model_key = $%d))", len(args), len(args)))
 	}
 	if f.Outcome != "" {
 		add("outcome = $%d", f.Outcome)
@@ -311,8 +342,15 @@ const selectColumns = `
 func (s *Store) List(ctx context.Context, f Filter) ([]*Record, error) {
 	where, args := f.where()
 	limit := f.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 200
+	switch {
+	case limit <= 0:
+		limit = defaultQueryLimit
+	case limit > maxQueryLimit:
+		// Clamp, never shrink. Resetting an over-large request to the default
+		// would return FEWER rows than asking for the ceiling, and on a
+		// financial read model a caller summing a silently clipped page
+		// understates real spend.
+		limit = maxQueryLimit
 	}
 	args = append(args, limit)
 	q := "SELECT" + selectColumns + "FROM model_usage_records" + where +
@@ -411,13 +449,39 @@ type Bucket struct {
 	InvoiceReconciledCost *float64 `json:"invoice_reconciled_cost,omitempty"`
 }
 
+// SummaryResult is a bounded aggregation.
+//
+// Truncated is part of the answer, not a detail: a clipped bucket list is
+// indistinguishable from a complete one, and an operator reading a partial
+// breakdown as the whole spend would reach the wrong conclusion about where
+// the money went.
+type SummaryResult struct {
+	Buckets   []*Bucket `json:"buckets"`
+	Truncated bool      `json:"truncated"`
+	Limit     int       `json:"limit"`
+}
+
 // Summary aggregates matching records over one dimension.
-func (s *Store) Summary(ctx context.Context, f Filter, by GroupBy) ([]*Bucket, error) {
+//
+// The result is bounded for the same reason List is, and more urgently: the
+// high-cardinality dimensions here (temporal_workflow_id, work_item_id) grow
+// without limit as the ledger ages, so an unfiltered group-by would load one
+// bucket per workflow that ever ran into a single JSON buffer.
+func (s *Store) Summary(ctx context.Context, f Filter, by GroupBy) (*SummaryResult, error) {
 	col, ok := groupColumns[by]
 	if !ok {
 		return nil, fmt.Errorf("%w: unknown group_by %q", ErrInvalidRecord, string(by))
 	}
+	limit := f.Limit
+	switch {
+	case limit <= 0:
+		limit = defaultQueryLimit
+	case limit > maxQueryLimit:
+		limit = maxQueryLimit
+	}
 	where, args := f.where()
+	// One row beyond the limit, so truncation is detected rather than guessed.
+	args = append(args, limit+1)
 	q := fmt.Sprintf(`
 SELECT %s AS key,
        COUNT(*),
@@ -426,13 +490,14 @@ SELECT %s AS key,
        SUM(provider_reported_cost), SUM(calculated_cost), SUM(invoice_reconciled_cost)
 FROM model_usage_records%s
 GROUP BY %s
-ORDER BY COUNT(*) DESC, key ASC`, col, where, col)
+ORDER BY COUNT(*) DESC, key ASC
+LIMIT $%d`, col, where, col, len(args))
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("usage: summary: %w", err)
 	}
 	defer rows.Close()
-	var out []*Bucket
+	out := []*Bucket{}
 	for rows.Next() {
 		var b Bucket
 		if err := rows.Scan(&b.Key, &b.Count,
@@ -447,5 +512,11 @@ ORDER BY COUNT(*) DESC, key ASC`, col, where, col)
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("usage: summary rows: %w", err)
 	}
-	return out, nil
+	res := &SummaryResult{Limit: limit}
+	if len(out) > limit {
+		res.Truncated = true
+		out = out[:limit]
+	}
+	res.Buckets = out
+	return res, nil
 }

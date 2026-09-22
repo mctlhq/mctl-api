@@ -49,6 +49,14 @@ money.
 Rates are US dollars per million tokens, the unit providers publish, so a card
 can be reviewed against the provider's own page without arithmetic.
 
+Cards resolve on `(canonical_model, provider)`. The same model is billed
+differently on firstParty, Bedrock and Vertex, so a card naming a provider
+applies only to that provider; a card with no `provider` is a wildcard used
+when the provider has no card of its own. Two cards for the same model,
+provider and `effective_from` are rejected at load: there is no correct answer,
+and picking one by sort order would price identical records differently between
+restarts.
+
 Cost is derived once, at ingest, and the number and the `version` that produced
 it are stored on the row. Adding a later card therefore cannot reach back and
 change history (ADR-012 invariant 7). Correcting a *past* card is a backfill,
@@ -74,7 +82,16 @@ is a success, not an error:
 
 A producer that crashes mid-batch simply re-sends. Every record's id is
 derived from its content, so the retry collides on the primary key and counts
-nothing twice. Batches are capped at 500 records and 1 MiB.
+nothing twice.
+
+`id` is always derived server-side and never taken from the request. A
+producer that could choose its own id would opt out of the guarantee entirely —
+a fresh uuid per delivery makes every retry a new row. Sending an `id` that
+disagrees with the derived key is a `400` rather than a silent overwrite, so a
+producer computing it wrongly finds out.
+
+Batches are capped at 500 records (`413`) and 1 MiB (`413`). The write is
+all-or-nothing, and a rejection names the offending record's index.
 
 ### `GET /api/v1/usage/records`
 
@@ -82,13 +99,24 @@ Filters: `workflow_id`, `work_item_id`, `repository`, `issue`, `pr`, `agent`,
 `stage`, `provider`, `model`, `outcome`, `since`, `until` (RFC3339), `limit`.
 
 An unparseable filter is a `400`, never a dropped predicate — a caller asking
-for one issue's spend must not silently receive the repository's.
+for one issue's spend must not silently receive the repository's. `limit` above
+1000 is likewise a `400` rather than a quietly smaller page: on a financial read
+model, a caller summing a clipped page understates real spend.
+
+`model` matches `canonical_model`, falling back to `model_key` for records whose
+producer reported only the latter.
 
 ### `GET /api/v1/usage/summary?group_by=agent`
 
 `group_by` is one of `agent`, `devloop_stage`, `canonical_model`, `provider`,
 `target_repo`, `temporal_workflow_id`, `work_item_id`, `outcome`. The set is
 closed, so a query parameter can never become SQL.
+
+Results are capped the same way `records` are and the response carries
+`truncated` and `limit`. A clipped bucket list is otherwise indistinguishable
+from a complete breakdown, which matters most on the high-cardinality
+dimensions (`temporal_workflow_id`, `work_item_id`) that grow as the ledger
+ages.
 
 Costs come back as three separate fields — `provider_reported_cost`,
 `calculated_cost`, `invoice_reconciled_cost` — and are never summed into one
@@ -101,6 +129,11 @@ not report cache tokens and a run that read no cache are different facts, and
 `SUM()` ignores the first while counting the second. Making these columns
 `NOT NULL DEFAULT 0` would silently convert "not measured" into "nothing
 spent".
+
+**Money is `NUMERIC`, not `DOUBLE PRECISION`.** `SUM(double precision)` is
+order-dependent in Postgres and a parallel aggregate plan does not fix the
+partial-sum order, so the same summary could return slightly different totals on
+successive calls.
 
 **The record cannot hold model content.** There is no prompt, completion or
 message field on the type. That is enforced by construction rather than by a

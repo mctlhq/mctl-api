@@ -32,6 +32,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -144,28 +145,58 @@ type Record struct {
 // already unique per run, and num_turns keeps two records from colliding if a
 // single session ever emits two results for one model.
 //
+// The parts are length-prefixed and the two shapes carry different
+// discriminators, so no combination of field values can produce the digest of a
+// different combination. Joining on a bare separator would let ("a", "b|c", "d")
+// and ("a", "b", "c|d") collide, and the three-part fallback would collide with
+// the three-part uuid form. A collision here is not a corrupted read: it is a
+// paid invocation that ON CONFLICT DO NOTHING silently discards, so it is worth
+// ruling out by construction rather than by how unlikely the inputs look.
+//
 // Note what is NOT in the key: retry_attempt. A Temporal retry that re-runs the
 // model is a genuinely different invocation carrying a new session_id and a
 // real new charge, so it lands on a different id and is counted. A retry that
 // merely re-records the same result carries the same session_id and collapses.
 func DeterministicID(sessionID, resultUUID, modelKey string, numTurns *int64) string {
-	var parts []string
-	if resultUUID != "" {
-		parts = []string{sessionID, resultUUID, modelKey}
-	} else {
-		turns := ""
-		if numTurns != nil {
-			turns = fmt.Sprintf("%d", *numTurns)
-		}
-		parts = []string{sessionID, modelKey, turns}
+	h := sha256.New()
+	// hash.Hash.Write never returns an error, but errcheck cannot know that.
+	write := func(part string) {
+		_, _ = fmt.Fprintf(h, "%d:%s|", len(part), part)
 	}
-	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
-	return hex.EncodeToString(sum[:])
+	if resultUUID != "" {
+		write("v1.uuid")
+		write(sessionID)
+		write(resultUUID)
+		write(modelKey)
+	} else {
+		write("v1.noresult")
+		write(sessionID)
+		write(modelKey)
+		if numTurns != nil {
+			write(strconv.FormatInt(*numTurns, 10))
+		} else {
+			write("")
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
-// EnsureID fills ID from the deterministic key when a producer did not supply
-// one, and validates the fields the key is derived from.
+// EnsureID derives the record's id and validates the fields it is derived from.
+//
+// The id is recomputed unconditionally rather than trusted from the wire. A
+// producer that sends its own id would otherwise opt out of the entire
+// idempotency guarantee: a fresh uuid per delivery makes every retry a new row
+// and double-counts a paid invocation, and an id that happens to collide with a
+// future real invocation makes ON CONFLICT DO NOTHING drop that charge silently.
+// The field is still serialised on read; it is only the ingest direction that
+// must not trust it.
+//
+// A supplied id that disagrees with the derived one is an error rather than a
+// silent overwrite, so a producer computing the key wrongly finds out.
 func (r *Record) EnsureID() error {
+	if r == nil {
+		return fmt.Errorf("%w: record must not be nil", ErrInvalidRecord)
+	}
 	if r.SchemaVersion == 0 {
 		r.SchemaVersion = SchemaVersion
 	}
@@ -178,9 +209,11 @@ func (r *Record) EnsureID() error {
 	if strings.TrimSpace(r.ModelKey) == "" {
 		return fmt.Errorf("%w: model_key is required", ErrInvalidRecord)
 	}
-	if r.ID == "" {
-		r.ID = DeterministicID(r.SessionID, r.ResultUUID, r.ModelKey, r.NumTurns)
+	derived := DeterministicID(r.SessionID, r.ResultUUID, r.ModelKey, r.NumTurns)
+	if r.ID != "" && r.ID != derived {
+		return fmt.Errorf("%w: id %q does not match the key derived from session_id/result_uuid/model_key", ErrInvalidRecord, r.ID)
 	}
+	r.ID = derived
 	if r.RecordedAt.IsZero() {
 		r.RecordedAt = time.Now().UTC()
 	}
@@ -190,6 +223,9 @@ func (r *Record) EnsureID() error {
 // Validate enforces the invariants the database also enforces, so a producer
 // gets a 400 with a reason instead of a constraint violation.
 func (r *Record) Validate() error {
+	if r == nil {
+		return fmt.Errorf("%w: record must not be nil", ErrInvalidRecord)
+	}
 	if r.CalculatedCost != nil && strings.TrimSpace(r.PricingVersion) == "" {
 		// ADR-012 invariant 6. Without the version, the number cannot be
 		// reproduced after a price change, which makes it worse than absent.

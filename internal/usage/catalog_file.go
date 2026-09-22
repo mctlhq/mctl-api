@@ -42,6 +42,11 @@ import (
 //	  }
 //	]
 func LoadCatalogFile(path string) (*Catalog, error) {
+	// #nosec G304 -- the path is USAGE_PRICING_CATALOG, supplied by the
+	// operator in the deployment manifest alongside the database URL. It is
+	// not attacker-influenced, and an operator who can set it can already set
+	// the connection string. Scoped to this one call rather than excluded
+	// repo-wide, so a future variable-path read still has to justify itself.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("usage: read pricing catalog: %w", err)
