@@ -17,7 +17,7 @@ type Mutation struct {
 	Surface   string
 	RequestID string
 	// IdempotencyKey deduplicates the request: per tenant for Create, per
-	// work item for everything else. RequestHash is the digest of the
+	// work item for everything else, and always bound to Actor. RequestHash is the digest of the
 	// request that key was first used with; a replay with the same key and a
 	// different hash is ErrIdempotencyKeyReuse, never a silent replay.
 	IdempotencyKey string
@@ -47,7 +47,10 @@ type TransitionInput struct {
 }
 
 // ResumeInput starts a new execution continuing a prior one. A waiting item
-// moves back to active; either way a resumed event is recorded.
+// moves back to active; either way a resumed event is recorded. An item that
+// never had an execution can still be resumed (a request parked for input
+// before any run started): the new execution is attempt 1 with no
+// resumed_from, and Resume stays the only way out of waiting.
 type ResumeInput struct {
 	Mutation
 	WorkItemID           string

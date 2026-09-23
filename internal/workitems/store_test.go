@@ -660,12 +660,39 @@ func TestExternalKeyNeverDedupesOntoWorkTheCallerCouldNotOpen(t *testing.T) {
 	}
 }
 
-func TestResumeNeedsAPriorExecution(t *testing.T) {
+func TestAWaitingItemWithNoExecutionCanStillResume(t *testing.T) {
 	s := newStoreForTest(t)
+	ctx := context.Background()
 	w := open(t, s, CreateInput{})
-	_, _, _, err := s.Resume(context.Background(), ResumeInput{Mutation: as("github:alice"), WorkItemID: w.ID, ExpectedStateVersion: 1, Engine: EngineArgo, EngineRef: "first"})
-	if !errors.Is(err, ErrInvalid) {
-		t.Fatalf("resume with nothing to resume: err = %v", err)
+	waiting, err := s.Transition(ctx, TransitionInput{Mutation: as("github:alice"), WorkItemID: w.ID, Action: ActionWait, WaitingReason: WaitingInput, ExpectedStateVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, exec, _, err := s.Resume(ctx, ResumeInput{Mutation: as("github:alice"), WorkItemID: w.ID, ExpectedStateVersion: waiting.StateVersion, Engine: EngineArgo, EngineRef: "first"})
+	if err != nil || item.State != StateActive || exec.Attempt != 1 || exec.ResumedFromExecutionID != "" {
+		t.Fatalf("resume without a prior execution = %+v %+v %v", item, exec, err)
+	}
+}
+
+func TestAKeyBelongsToOnePrincipal(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	in := CreateInput{Mutation: keyed("github:alice", "shared-key", "same-body"), Tenant: "acme", Visibility: VisibilityTenant, OriginSurface: "cli", Title: "x"}
+	w, _, err := s.Create(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Mutation = keyed("github:bob", "shared-key", "same-body")
+	if _, _, err := s.Create(ctx, in); !errors.Is(err, ErrIdempotencyKeyReuse) {
+		t.Fatalf("bob replaying alice's create key: err = %v", err)
+	}
+	tr := TransitionInput{Mutation: keyed("github:alice", "t", "h"), WorkItemID: w.ID, Action: ActionArchive, ExpectedStateVersion: 1}
+	if _, err := s.Transition(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	tr.Mutation = keyed("github:bob", "t", "h")
+	if _, err := s.Transition(ctx, tr); !errors.Is(err, ErrIdempotencyKeyReuse) {
+		t.Fatalf("bob replaying alice's transition key: err = %v", err)
 	}
 }
 

@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS work_item_create_requests (
     tenant          TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
     request_hash    TEXT NOT NULL,
+    actor           TEXT NOT NULL,
     work_item_id    TEXT NOT NULL REFERENCES work_items (id) ON DELETE CASCADE,
     created_at      TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (tenant, idempotency_key)
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS work_item_requests (
     idempotency_key TEXT NOT NULL,
     operation       TEXT NOT NULL,
     request_hash    TEXT NOT NULL,
+    actor           TEXT NOT NULL,
     result_id       TEXT NOT NULL DEFAULT '',
     created_at      TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (work_item_id, idempotency_key)
@@ -221,7 +223,9 @@ func getItem(ctx context.Context, q querier, id string) (*WorkItem, error) {
 	return w, nil
 }
 
-// Get returns one work item or ErrNotFound.
+// Get returns one work item or ErrNotFound. Like Events and Executions it
+// applies no authorization: every HTTP caller gates the result with
+// canSeeWorkItem, the same rule List applies through Viewer and Tenants.
 func (s *Store) Get(ctx context.Context, id string) (*WorkItem, error) {
 	return getItem(ctx, s.pool, id)
 }
@@ -242,11 +246,14 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*WorkItem, bool, er
 	err := s.withTx(ctx, "workitem-create:"+in.Tenant, func(tx pgx.Tx) error {
 		now := s.now()
 		if in.IdempotencyKey != "" {
-			var id, hash string
-			err := tx.QueryRow(ctx, `SELECT work_item_id, request_hash FROM work_item_create_requests
-				WHERE tenant=$1 AND idempotency_key=$2`, in.Tenant, in.IdempotencyKey).Scan(&id, &hash)
+			var id, hash, actor string
+			err := tx.QueryRow(ctx, `SELECT work_item_id, request_hash, actor FROM work_item_create_requests
+				WHERE tenant=$1 AND idempotency_key=$2`, in.Tenant, in.IdempotencyKey).Scan(&id, &hash, &actor)
 			if err == nil {
-				if hash != in.RequestHash {
+				// A key names one principal's request: another principal
+				// sending the same key (and body) is not a retry, and must
+				// not be told the first principal's write was theirs.
+				if hash != in.RequestHash || actor != in.Actor {
 					return ErrIdempotencyKeyReuse
 				}
 				w, err := getItem(ctx, tx, id)
@@ -304,8 +311,8 @@ func rememberCreate(ctx context.Context, tx pgx.Tx, in CreateInput, id string, a
 		return nil
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO work_item_create_requests
-		(tenant, idempotency_key, request_hash, work_item_id, created_at) VALUES ($1,$2,$3,$4,$5)`,
-		in.Tenant, in.IdempotencyKey, in.RequestHash, id, at)
+		(tenant, idempotency_key, request_hash, actor, work_item_id, created_at) VALUES ($1,$2,$3,$4,$5,$6)`,
+		in.Tenant, in.IdempotencyKey, in.RequestHash, in.Actor, id, at)
 	if err != nil {
 		return fmt.Errorf("workitems: create: record idempotency key: %w", err)
 	}
@@ -339,16 +346,16 @@ func replayed(ctx context.Context, tx pgx.Tx, id, op string, m Mutation) (string
 	if m.IdempotencyKey == "" {
 		return "", false, nil
 	}
-	var gotOp, hash, result string
-	err := tx.QueryRow(ctx, `SELECT operation, request_hash, result_id FROM work_item_requests
-		WHERE work_item_id=$1 AND idempotency_key=$2`, id, m.IdempotencyKey).Scan(&gotOp, &hash, &result)
+	var gotOp, hash, actor, result string
+	err := tx.QueryRow(ctx, `SELECT operation, request_hash, actor, result_id FROM work_item_requests
+		WHERE work_item_id=$1 AND idempotency_key=$2`, id, m.IdempotencyKey).Scan(&gotOp, &hash, &actor, &result)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
 	if err != nil {
 		return "", false, fmt.Errorf("workitems: idempotency lookup: %w", err)
 	}
-	if gotOp != op || hash != m.RequestHash {
+	if gotOp != op || hash != m.RequestHash || actor != m.Actor {
 		return "", false, ErrIdempotencyKeyReuse
 	}
 	return result, true, nil
@@ -359,8 +366,8 @@ func remember(ctx context.Context, tx pgx.Tx, id, op, result string, m Mutation,
 		return nil
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO work_item_requests
-		(work_item_id, idempotency_key, operation, request_hash, result_id, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6)`, id, m.IdempotencyKey, op, m.RequestHash, result, at)
+		(work_item_id, idempotency_key, operation, request_hash, actor, result_id, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`, id, m.IdempotencyKey, op, m.RequestHash, m.Actor, result, at)
 	if err != nil {
 		return fmt.Errorf("workitems: record idempotency key: %w", err)
 	}
@@ -478,9 +485,6 @@ func (s *Store) Resume(ctx context.Context, in ResumeInput) (*WorkItem, *Executi
 		}
 		if from == "" && len(execs) > 0 {
 			from = execs[len(execs)-1].ID
-		}
-		if len(execs) == 0 {
-			return invalid("%s has no execution to resume; attach the first one", cur.ID)
 		}
 		if from != "" && !containsExecution(execs, from) {
 			return invalid("resumed_from_execution_id %s is not an execution of %s", from, cur.ID)
