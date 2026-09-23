@@ -68,6 +68,9 @@ var (
 // UI the answer was typed in), not a trust signal, so it is only shape-checked.
 var humanInputSurfacePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
+// humanInputUnconfirmed is the one 202 detail: signalled, not yet confirmed.
+const humanInputUnconfirmed = "delivered; not yet confirmed by the workflow, resubmit the same response to check again"
+
 // Response statuses reported to the caller.
 const (
 	humanInputStatusAccepted = humaninput.DeliveryAccepted
@@ -306,7 +309,11 @@ func (h *Handlers) deliverHumanInput(ctx context.Context, r *http.Request, user 
 	resolve := func(state, reason string) {
 		wctx, wcancel := ledgerCtx()
 		defer wcancel()
-		if err := ledger.Resolve(wctx, d, state); err != nil && !errors.Is(err, humaninput.ErrDeliveryNotPending) {
+		if err := ledger.Resolve(wctx, d, state); err != nil {
+			if errors.Is(err, humaninput.ErrDeliveryNotPending) {
+				// Another call closed this delivery and audited it.
+				return
+			}
 			slog.Error("human_input.ledger_resolve_failed", "request_id", d.RequestID, "state", state, "error", err)
 		}
 		op, status := "human_input.response_accepted", "succeeded"
@@ -324,7 +331,10 @@ func (h *Handlers) deliverHumanInput(ctx context.Context, r *http.Request, user 
 		}
 		return http.StatusServiceUnavailable, deliveryResult(d, humanInputStatusPending, HumanInputUnknown, "owning workflow did not answer; the response is recorded, resubmit it to retry delivery")
 	}
-	if pre.ResumeCount > d.BaselineResumeCount {
+	// resume_count is per workflow: a rise proves THIS request was answered
+	// only while the workflow still reports this request. A stale row whose
+	// workflow has since moved on falls through to "not pending".
+	if pre.ResumeCount > d.BaselineResumeCount && pre.RequestID == d.RequestID {
 		resolve(humaninput.DeliveryAccepted, "")
 		return http.StatusOK, deliveryResult(d, humanInputStatusAccepted, HumanInputResolved, "")
 	}
@@ -380,7 +390,7 @@ func (h *Handlers) deliverHumanInput(ctx context.Context, r *http.Request, user 
 		if humanInputConfirmInterval > 0 {
 			select {
 			case <-cctx.Done():
-				return http.StatusAccepted, deliveryResult(d, humanInputStatusPending, HumanInputUnknown, "delivered; not yet confirmed")
+				return http.StatusAccepted, deliveryResult(d, humanInputStatusPending, HumanInputPending, humanInputUnconfirmed)
 			case <-time.After(humanInputConfirmInterval):
 			}
 		}
@@ -392,7 +402,7 @@ func (h *Handlers) deliverHumanInput(ctx context.Context, r *http.Request, user 
 			}
 			continue
 		}
-		if st.ResumeCount > d.BaselineResumeCount {
+		if st.ResumeCount > d.BaselineResumeCount && st.RequestID == d.RequestID {
 			resolve(humaninput.DeliveryAccepted, "")
 			return http.StatusOK, deliveryResult(d, humanInputStatusAccepted, HumanInputResolved, "")
 		}
@@ -409,7 +419,7 @@ func (h *Handlers) deliverHumanInput(ctx context.Context, r *http.Request, user 
 			return http.StatusConflict, deliveryResult(d, humanInputStatusRejected, HumanInputPending, "the workflow refused this response")
 		}
 	}
-	return http.StatusAccepted, deliveryResult(d, humanInputStatusPending, HumanInputPending, "delivered; not yet confirmed by the workflow, resubmit the same response to check again")
+	return http.StatusAccepted, deliveryResult(d, humanInputStatusPending, HumanInputPending, humanInputUnconfirmed)
 }
 
 func (h *Handlers) queryHumanInput(ctx context.Context, d humaninput.Delivery) (*temporalclient.HumanInputState, error) {

@@ -2338,7 +2338,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/HumanInputResponseResult'
         '202':
-          description: Signalled, not yet confirmed by the workflow; resubmit the same answer to check again
+          description: Signalled, not yet confirmed by the workflow (`status: pending_delivery`, `state: pending`); resubmit the same answer to check again
           content:
             application/json:
               schema:
@@ -2388,11 +2388,16 @@ paths:
               schema:
                 $ref: '#/components/schemas/HumanInputResponseResult'
         '500':
-          description: The gitops requests could not be read
+          description: |
+            `Error` when the gitops requests could not be read;
+            `HumanInputResponseResult` (`status: rejected`) when a recorded
+            answer is unreadable and has been dropped.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                oneOf:
+                  - $ref: '#/components/schemas/HumanInputResponseResult'
+                  - $ref: '#/components/schemas/Error'
         '503':
           description: |
             `HumanInputResponseResult` with `status: pending_delivery` when the

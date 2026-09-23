@@ -585,3 +585,56 @@ func TestRespondHumanInput_LosingToARefusedDeliveryClaimsAgain(t *testing.T) {
 		t.Fatalf("bob after the winner was refused = %d %s", got.code, got.raw)
 	}
 }
+
+// resume_count is per workflow. A pending row whose workflow has since
+// answered a DIFFERENT request must not be reported accepted.
+func TestRespondHumanInput_StaleRowIsNotAcceptedByAnotherRequestsResume(t *testing.T) {
+	h, tc, ledger, _ := newHumanInputResponseHandlers(t)
+	tc.signalErr = errors.New("temporal unavailable")
+	if got := respond(t, h, alice, hiASCII, answer(`"library A"`)); got.code != http.StatusServiceUnavailable {
+		t.Fatalf("outage = %d", got.code)
+	}
+	tc.signalErr = nil
+	// Meanwhile the workflow moved on and resumed on another request.
+	tc.humanInputStates[hiWF] = &temporalclient.HumanInputState{State: temporalclient.HumanInputRunning, RequestID: "hir-ffffffffffffffff", ResumeCount: 1}
+	got := respond(t, h, alice, hiASCII, answer(`"library A"`))
+	if got.code == http.StatusOK || got.res.Status == "accepted" {
+		t.Fatalf("stale row reported accepted: %d %s", got.code, got.raw)
+	}
+	if row, _ := ledger.Get(context.Background(), hiASCII); row.State == humaninput.DeliveryAccepted {
+		t.Fatalf("ledger = %+v", row)
+	}
+}
+
+// Two calls closing the same delivery (the concurrent at-least-once case:
+// both observe the acceptance) audit its outcome once.
+func TestRespondHumanInput_OutcomeIsAuditedOncePerDelivery(t *testing.T) {
+	h, tc, ledger, log := newHumanInputResponseHandlers(t)
+	tc.signalErr = errors.New("temporal unavailable")
+	if got := respond(t, h, alice, hiASCII, answer(`"library A"`)); got.code != http.StatusServiceUnavailable {
+		t.Fatalf("outage = %d", got.code)
+	}
+	tc.signalErr = nil
+	workflowAccepts(tc, hiWF, nil) // the earlier delivery did land
+	row, _ := ledger.Get(context.Background(), hiASCII)
+	s, err := h.findHumanInput(hiASCII)
+	if err != nil || s == nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	for i := 0; i < 2; i++ {
+		if code, res := h.deliverHumanInput(context.Background(), req, alice, s, *row); code != http.StatusOK || res.Status != "accepted" {
+			t.Fatalf("delivery %d = %d %+v", i, code, res)
+		}
+	}
+	accepted := 0
+	entries := log.List(100)
+	for i := range entries {
+		if entries[i].Operation == "human_input.response_accepted" {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted audited %d times, want 1", accepted)
+	}
+}
