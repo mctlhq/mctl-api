@@ -372,7 +372,7 @@ Built (mctl-api#349):
   `internal/openapi/openapi.yaml`, `README.md` and `.env.example` (step 4, and
   the wiring part of step 3).
 
-Not built yet, each tracked as its own issue:
+Not built yet, each tracked as its own issue (#352 snapshots, #353 approvals and retention, #350 surface identities):
 
 - `GET|POST .../executions/{execution_id}/snapshots` (`ContextSnapshot`).
 - `GET .../approvals`, `POST .../approvals/{approval_id}/decision` and the
