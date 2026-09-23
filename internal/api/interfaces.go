@@ -80,6 +80,7 @@ type DevLoopClient interface {
 	DescribeDevLoop(ctx context.Context, workflowID string) (status string, err error)
 	QueryShepherdInLoop(ctx context.Context, workflowID string) (bool, error)
 	QueryHumanInputState(ctx context.Context, workflowID, runID string) (*temporalclient.HumanInputState, error)
+	SignalHumanInputResponse(ctx context.Context, workflowID, runID string, response map[string]any) error
 }
 
 // WorkflowDispatcher starts a GitHub Actions workflow_dispatch run. An

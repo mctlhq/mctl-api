@@ -52,6 +52,24 @@ type fakeDevLoopClient struct {
 	humanInputErr         error
 	humanInputQueries     []string
 	humanInputBlocks      bool
+	// Human-input signals: every delivered document, the error to return,
+	// and an optional hook standing in for the workflow draining its queue.
+	humanInputSignals  []map[string]any
+	humanInputSignalTo []string
+	signalErr          error
+	onSignal           func(f *fakeDevLoopClient, workflowID string, doc map[string]any)
+}
+
+func (f *fakeDevLoopClient) SignalHumanInputResponse(ctx context.Context, workflowID, runID string, response map[string]any) error {
+	if f.signalErr != nil {
+		return f.signalErr
+	}
+	f.humanInputSignals = append(f.humanInputSignals, response)
+	f.humanInputSignalTo = append(f.humanInputSignalTo, workflowID+"@"+runID)
+	if f.onSignal != nil {
+		f.onSignal(f, workflowID, response)
+	}
+	return nil
 }
 
 func (f *fakeDevLoopClient) QueryHumanInputState(ctx context.Context, workflowID, runID string) (*temporalclient.HumanInputState, error) {

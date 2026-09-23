@@ -300,3 +300,17 @@ func TestQueryHumanInputState_ErrorsPropagate(t *testing.T) {
 		t.Fatal("query error swallowed")
 	}
 }
+
+func TestSignalHumanInputResponse_PinsRunAndSignalName(t *testing.T) {
+	resp := map[string]any{"request_id": "hir-1", "value": "A"}
+	mockClient := new(mocks.Client)
+	mockClient.On("SignalWorkflow", mock.Anything, "dev-loop-mctlhq-mctl-api-261", "run-1", HumanInputResponseSignalName, resp).
+		Return(nil)
+
+	c := &Client{temporal: mockClient}
+	if err := c.SignalHumanInputResponse(context.Background(), "dev-loop-mctlhq-mctl-api-261", "run-1", resp); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mockClient.AssertExpectations(t)
+	mockClient.AssertNotCalled(t, "SignalWorkflow", mock.Anything, mock.Anything, mock.Anything, ApproveSignalName, mock.Anything)
+}

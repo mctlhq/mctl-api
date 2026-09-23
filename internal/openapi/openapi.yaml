@@ -510,6 +510,25 @@ components:
         state_detail:
           type: string
 
+    HumanInputResponseResult:
+      type: object
+      properties:
+        request_id:
+          type: string
+        status:
+          type: string
+          enum: [accepted, pending_delivery, rejected]
+        state:
+          type: string
+          description: Request state when not accepted (superseded, expired, timed_out, not_pending, answered, invalid_value, not_eligible, ...).
+        detail:
+          type: string
+        respondent:
+          type: string
+          example: github:alice
+        received_at:
+          type: string
+
     Error:
       type: object
       properties:
@@ -2258,6 +2277,120 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /api/v1/human-input/{request_id}/response:
+    post:
+      summary: Answer a human-input request
+      description: |
+        Delivers one HumanInputResponse to the DevLoopWorkflow execution that
+        sealed the request, as the `human_input_response` signal.
+
+        - The respondent is always derived from authentication as
+          `github:<login>`, and only when authentication proved the GitHub
+          login. The body cannot name a respondent (unknown fields are
+          rejected), and the service principal cannot answer.
+        - Eligibility, `request_hash`, expiry and the typed value are
+          checked here and again by the workflow, which has the final word.
+        - Idempotent: resubmitting the same answer returns the same outcome.
+          The first recorded answer wins; a different answer afterwards gets
+          409 `answered`.
+        - Recoverable: the answer is recorded before it is signalled. If
+          Temporal is unavailable the call answers 503 `pending_delivery`,
+          and any later submission for the request (the same one retried, or
+          a competing one) first delivers the recorded answer.
+        - An answer is information, not approval: this never signals
+          `approve`.
+      tags: [Agent Registry]
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^hir-[0-9a-f]{16}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [request_hash, value]
+              properties:
+                request_hash:
+                  type: string
+                  description: The `request_hash` of the request being answered.
+                value:
+                  description: |
+                    The answer. A string for `free_text` (non-blank) and
+                    `single_choice` (one of the options), a non-empty array of
+                    options for `multi_choice`, an object for `structured`.
+                surface:
+                  type: string
+                  pattern: '^[a-z][a-z0-9_-]{0,31}$'
+                  default: api
+                  description: Where the answer was typed (provenance only, not trusted).
+      responses:
+        '200':
+          description: Accepted by the workflow
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanInputResponseResult'
+        '202':
+          description: Signalled, not yet confirmed by the workflow; resubmit the same answer to check again
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanInputResponseResult'
+        '400':
+          description: Malformed body or request_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Caller may read but not answer (not an eligible, GitHub-verified respondent; or the service principal)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanInputResponseResult'
+        '404':
+          description: No such request, or not visible to the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: |
+            Not accepted in the request's current state: `superseded` (hash
+            mismatch), `expired`, `timed_out`, `not_pending`, `answered`
+            (another answer won), or refused by the workflow.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanInputResponseResult'
+        '422':
+          description: The value does not match the request's response type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanInputResponseResult'
+        '503':
+          description: |
+            Not configured, the ledger or Temporal is unavailable. When
+            `status` is `pending_delivery` the answer IS recorded and will be
+            delivered on the next submission for this request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanInputResponseResult'
 
 tags:
   - name: Health
