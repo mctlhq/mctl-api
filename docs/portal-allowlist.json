@@ -103,6 +103,16 @@
       "reason": "Read-only list of ready roadmap work items from the published RoadmapPublication (public mctlhq/.github data, no credentials). Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#333."
     },
     {
+      "name": "mctl_plan_epic_wave",
+      "enabled": false,
+      "reason": "Read-only dry run of a roadmap epic wave from the published RoadmapPublication (mctl-api#334); starts nothing. Not enabled on the shared portal: that is an owner decision."
+    },
+    {
+      "name": "mctl_start_epic_wave",
+      "enabled": false,
+      "reason": "Starts one DevLoopWorkflow per item of a publication-bound wave plan (mctl-api#334). Admin-only and paid per started DevLoop; not for the shared portal."
+    },
+    {
       "name": "mctl_get_dev_loop",
       "enabled": true,
       "reason": "Liveness of one DevLoop workflow by id: status and phase only, no code, no secrets; the upstream refuses ids outside the caller's tenants."

@@ -529,6 +529,61 @@ components:
         received_at:
           type: string
 
+    RoadmapWaveRequest:
+      type: object
+      additionalProperties: false
+      required: [epic]
+      properties:
+        epic: {type: string, description: 'Epic name or root issue (owner/repo#N)'}
+        required_only: {type: boolean, default: true}
+        items:
+          type: array
+          items: {type: string}
+          description: Exact work-item ids; omit (plan only) for every eligible item
+    RoadmapWaveExecuteRequest:
+      type: object
+      additionalProperties: false
+      required: [epic, items, plan_hash, state_revision]
+      properties:
+        epic: {type: string, description: 'Epic name or root issue (owner/repo#N)'}
+        required_only: {type: boolean, default: true}
+        items:
+          type: array
+          items: {type: string}
+          description: The plan's exact selected ids
+        plan_hash: {type: string}
+        state_revision: {type: string}
+    RoadmapWaveItem:
+      type: object
+      properties:
+        id: {type: string}
+        required: {type: boolean}
+        issue:
+          type: object
+          properties:
+            repository: {type: string}
+            number: {type: integer}
+        issue_url: {type: string}
+        workflow_id: {type: string}
+    RoadmapWavePlan:
+      type: object
+      properties:
+        plan_hash: {type: string, description: 'sha256 over the epic, manifest path/sha256/revision, state and evaluator revisions, required_only and the selected items'}
+        operation_id: {type: string}
+        epic: {$ref: '#/components/schemas/RoadmapEpic'}
+        required_only: {type: boolean}
+        selected:
+          type: array
+          items: {$ref: '#/components/schemas/RoadmapWaveItem'}
+        refused:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              reason: {type: string, enum: [unknown_item, not_ready, optional_not_requested, unbound, not_startable, duplicate_item]}
+              state: {type: string}
+        provenance: {$ref: '#/components/schemas/RoadmapProvenance'}
     RoadmapEpic:
       type: object
       properties:
@@ -2505,6 +2560,96 @@ paths:
           description: No epic by that name or root issue in the publication
         '503':
           description: No verified roadmap publication
+  /api/v1/roadmap/waves/plan:
+    post:
+      summary: Plan a roadmap epic wave (dry run)
+      description: |
+        The exact ready, bound work items of one epic that a wave would start
+        (mctl-api#334), selected from the verified RoadmapPublication. Starts
+        nothing. Only items the published ready set lists as ready are
+        eligible; `required_only` defaults to true. With `items`, exactly
+        those ids are planned or the answer is 409 `invalid_selection` naming
+        each refused id — never a subset. Ready items that cannot be started
+        (unbound, or not startable as a DevLoop) are listed in `refused`.
+        `executable` says whether the plan can execute now: the publication's
+        observation must be no older than `max_age_seconds`
+        (ROADMAP_WAVE_MAX_AGE, default 30 minutes).
+      tags: [Roadmap]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoadmapWaveRequest'
+      responses:
+        '200':
+          description: The plan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plan: {$ref: '#/components/schemas/RoadmapWavePlan'}
+                  max_age_seconds: {type: integer}
+                  executable: {type: boolean}
+                  not_executable_reason: {type: string}
+        '400': {description: Invalid body}
+        '401': {description: Not authenticated}
+        '404': {description: No such epic in the publication}
+        '409': {description: '`invalid_selection`: an explicit item is unknown, not ready, optional without `required_only=false`, unbound, not startable or repeated'}
+        '503': {description: No verified publication (readiness unknown, not empty)}
+  /api/v1/roadmap/waves/execute:
+    post:
+      summary: Start a planned roadmap epic wave
+      description: |
+        Starts one DevLoopWorkflow per selected item of a plan from
+        `/api/v1/roadmap/waves/plan` (mctl-api#334). Admin-only. The body names
+        the plan: its epic, `required_only`, exact selected `items`,
+        `plan_hash` and `state_revision`. mctl-api reloads the latest verified
+        publication and fails closed, starting nothing, unless its
+        `state_revision` is the plan's (409 `plan_stale`), its observation is
+        no older than ROADMAP_WAVE_MAX_AGE (409 `publication_too_old`), and
+        the request re-derives the identical plan (409 `invalid_selection`).
+        mctl-api never evaluates readiness, reads GitHub or dispatches the
+        publisher here. Each item reports `started`, `already_running`,
+        `already_exists` (a closed DevLoop is not restarted) or `failed`;
+        repeating the request starts nothing twice. It never approves a
+        proposal. Audited as `roadmap-wave-execute`.
+      tags: [Roadmap]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoadmapWaveExecuteRequest'
+      responses:
+        '200':
+          description: Per-item outcomes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operation_id: {type: string}
+                  plan_hash: {type: string}
+                  epic: {$ref: '#/components/schemas/RoadmapEpic'}
+                  provenance: {$ref: '#/components/schemas/RoadmapProvenance'}
+                  outcomes:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: '#/components/schemas/RoadmapWaveItem'
+                        - type: object
+                          properties:
+                            outcome: {type: string, enum: [started, already_running, already_exists, failed]}
+                            status: {type: string}
+                            run_id: {type: string}
+                            error: {type: string}
+        '400': {description: Invalid body, or no plan named}
+        '401': {description: Not authenticated}
+        '403': {description: Not an admin}
+        '409': {description: '`plan_stale`, `publication_too_old` or `invalid_selection`; nothing was started'}
+        '503': {description: 'No verified publication, `wave_execution_disabled` (invalid ROADMAP_WAVE_MAX_AGE), or no Temporal client'}
   /api/v1/human-input:
     get:
       summary: List human-input requests the caller may answer

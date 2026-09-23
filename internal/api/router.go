@@ -119,6 +119,11 @@ type Options struct {
 	// Roadmap serves the RoadmapPublication read model (mctl-api#333).
 	// Optional: nil makes the roadmap endpoints 503.
 	Roadmap *roadmap.Reader
+	// RoadmapWaveMaxAge bounds how old the latest publication's observation
+	// may be when a wave executes (mctl-api#334). Zero means
+	// DefaultRoadmapWaveMaxAge; negative means the configuration was
+	// invalid, and execution is refused.
+	RoadmapWaveMaxAge time.Duration
 
 	// Usage is the durable model-usage and cost ledger (mctl-api#266,
 	// ADR-012). Optional — nil makes the usage endpoints 503, which a caller
@@ -433,6 +438,9 @@ func NewRouter(opts Options) http.Handler {
 				})))
 				r.Post("/operations/{name}/execute", h.ExecuteOperation)
 				r.Post("/agents/dev-loop/start", h.StartDevLoopWorkflow)
+				// Starts one DevLoop per item of a publication-bound plan
+				// (mctl-api#334), on this budget like the single start.
+				r.Post("/roadmap/waves/execute", h.ExecuteRoadmapWave)
 				r.Post("/agents/dev-loop/{workflow_id}/approve", h.ApproveDevLoopWorkflow)
 				// Signals the owning DevLoopWorkflow (mctl-api#261).
 				r.Post("/human-input/{request_id}/response", h.RespondHumanInput)
@@ -484,6 +492,9 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/roadmap/epics", h.ListRoadmapEpics)
 			r.Get("/roadmap/epic-status", h.GetRoadmapEpicStatus)
 			r.Get("/roadmap/ready", h.GetRoadmapReadyWorkItems)
+			// A wave plan is a dry run: POST only to carry an exact item
+			// list, no side effects (mctl-api#334).
+			r.Post("/roadmap/waves/plan", h.PlanRoadmapWave)
 
 			// Lifecycle ownership READS. Deliberately OUTSIDE the write
 			// group above, for the same reason the dev-loop liveness read
