@@ -88,8 +88,14 @@ var surfaceRoutes = []surfaceRoute{
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items$`), true},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+$`), true},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/intents$`), true},
-	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/resume$`), true},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/surface-refs$`), true},
+	// Execution requests (mctl-api#368): a surface REQUESTS execution and
+	// never declares its identity. POST /work-items/{id}/resume is
+	// deliberately absent: it takes engine and engine_ref, which only the
+	// execution platform supplies (by fulfilling a request).
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/execution-requests$`), true},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/execution-requests$`), true},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/execution-requests/[^/]+$`), true},
 }
 
 const (

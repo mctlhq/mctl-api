@@ -811,12 +811,85 @@ components:
                  approval_intent_mismatch, approval_consumed, approval_requester_forbidden,
                  approval_decider_forbidden, approval_reader_forbidden]
 
+    ExecutionRequest:
+      type: object
+      description: |
+        A durable request that a work item run (mctl-api#368). SURFACE
+        REQUESTS EXECUTION; SURFACE DOES NOT DECLARE EXECUTION IDENTITY: a
+        person or a relaying surface creates it with the kind, the expected
+        `state_version`, an optional intent and resumed-from reference, and
+        an idempotency key. The execution platform (the service principal)
+        claims it under a lease and fulfils it by attaching the canonical
+        execution; only fulfilment sets `execution_id`. States: `pending` ->
+        `claimed` -> `fulfilled` | `rejected`. A claim whose
+        `claim_expires_at` has passed stays `claimed` and is claimable again;
+        its lapsed holder can no longer fulfil or reject it. At most one
+        `pending` or `claimed` request per work item.
+      properties:
+        id: {type: string, example: xr_0f8c2d1e9b7a4c3d8e6f5a4b3c2d1e0f}
+        work_item_id: {type: string}
+        kind: {type: string, enum: [start, resume]}
+        expected_state_version: {type: integer, format: int64}
+        resumed_from_execution_id: {type: string}
+        intent_id: {type: integer, format: int64}
+        surface: {type: string, description: 'Forced to the relaying surface on a relayed call.'}
+        requested_by: {type: string, description: 'From authentication: the linked human on a relayed call, never a body field.', example: 'github:alice'}
+        acting_principal: {type: string, description: 'The surface principal that relayed the request; absent when not relayed.', example: 'surface:telegram'}
+        idempotency_key: {type: string}
+        state: {type: string, enum: [pending, claimed, fulfilled, rejected]}
+        claimed_by: {type: string, example: 'service:mctl-agent'}
+        claimed_at: {type: string, format: date-time}
+        claim_expires_at: {type: string, format: date-time}
+        execution_id: {type: string, description: Set only by fulfilment, from the platform.}
+        reason: {type: string, description: Why the platform rejected the request.}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        closed_at: {type: string, format: date-time}
+        schema_version: {type: string, enum: [workitem/v1]}
+      required: [id, work_item_id, kind, expected_state_version, surface, requested_by, state, created_at, updated_at, schema_version]
+
+    ExecutionRequestResponse:
+      type: object
+      properties:
+        schema_version: {type: string, enum: [workitem/v1]}
+        execution_request: {$ref: '#/components/schemas/ExecutionRequest'}
+      required: [schema_version, execution_request]
+
+    ExecutionRequestError:
+      type: object
+      description: Error with a typed code a client can branch on.
+      properties:
+        error: {type: string}
+        code:
+          type: string
+          enum: [work_items_unavailable, work_item_not_found, invalid_request, actor_not_accepted,
+                 execution_identity_not_accepted, state_version_conflict, invalid_transition,
+                 execution_active, idempotency_key_reused, secret_in_text, execution_not_found,
+                 intent_not_found, execution_request_open, execution_request_not_found,
+                 execution_request_not_claimed, execution_request_closed,
+                 execution_request_requester_forbidden, execution_request_claimant_forbidden]
+        details:
+          type: object
+          description: |
+            For 409s on the item, its current `state` and `state_version`. For
+            `execution_request_open`, the open request's
+            `execution_request_id` and `state`, to follow instead. For
+            `execution_request_closed`, the request's `execution_request_id`,
+            `state` and, once fulfilled, `execution_id`.
+          properties:
+            state: {type: string}
+            state_version: {type: integer, format: int64}
+            execution_request_id: {type: string}
+            execution_id: {type: string}
+      required: [error, code]
+
     WorkItemEvent:
       type: object
       properties:
         work_item_id: {type: string}
         seq: {type: integer, format: int64}
-        kind: {type: string, enum: [created, state_changed, resumed, intent_appended, execution_attached, surface_linked, snapshot_sealed]}
+        kind: {type: string, enum: [created, state_changed, resumed, intent_appended, execution_attached, surface_linked, snapshot_sealed,
+                                     execution_requested, execution_request_claimed, execution_request_fulfilled, execution_request_rejected]}
         from_state: {type: string}
         to_state: {type: string}
         actor_principal: {type: string}
@@ -3445,6 +3518,11 @@ paths:
         A waiting item becomes active and a `resumed` event is recorded;
         `resumed` is never a state. Refused on a terminal item, while an
         execution is Pending/Running, or with a stale `expected_state_version`.
+
+        It names the engine run, so it is not a relay route. A surface asks
+        for a resume with
+        `POST /api/v1/work-items/{id}/execution-requests` instead
+        (mctl-api#368).
       tags: [Work Items]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
@@ -3470,6 +3548,211 @@ paths:
         '400': {description: Invalid request or an actor field, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
         '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
         '409': {description: 'state_version_conflict, invalid_transition or execution_active', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}/execution-requests:
+    post:
+      summary: Request that a work item run
+      description: |
+        SURFACE REQUESTS EXECUTION; SURFACE DOES NOT DECLARE EXECUTION
+        IDENTITY (mctl-api#368). A person acting directly, or a surface
+        relaying for its linked human (a relay route), asks the execution
+        platform to `start` the item's first run or `resume` it. The body
+        names no engine, engine run or execution id: any of `engine`,
+        `engine_ref`, `execution_id` is 400
+        `execution_identity_not_accepted`, and an actor field is 400
+        `actor_not_accepted`. `requested_by` is the authenticated principal
+        (the linked human on relay) and `surface` is forced to the relaying
+        surface. The service principal cannot create one (403
+        `execution_request_requester_forbidden`).
+
+        `start` needs an active item that has never run; `resume` needs an
+        item that is waiting or has run, with no execution Pending or
+        Running, and `resumed_from_execution_id` (default the latest) must be
+        an execution of this item (404 `execution_not_found`). `intent_id`
+        must be an intent of this item (404 `intent_not_found`).
+
+        Idempotent per work item and key, bound to the actor (the
+        `Idempotency-Key` header or `idempotency_key`): the same key and body
+        return the stored request with 200, whatever its state now; a
+        different body is 409 `idempotency_key_reused`. At most one open
+        (`pending` or `claimed`) request per item: another is 409
+        `execution_request_open` with the open request's id in `details`.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 512}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                kind: {type: string, enum: [start, resume]}
+                expected_state_version: {type: integer, format: int64}
+                resumed_from_execution_id: {type: string, description: 'resume only'}
+                intent_id: {type: integer, format: int64, description: The intent that triggered the request}
+                surface: {type: string}
+                idempotency_key: {type: string, maxLength: 512}
+              required: [kind, expected_state_version]
+      responses:
+        '201': {description: Recorded as pending, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestResponse'}}}}
+        '200': {description: Idempotent replay; the stored request, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestResponse'}}}}
+        '400': {description: 'invalid_request, execution_identity_not_accepted or actor_not_accepted', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '403': {description: execution_request_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '404': {description: 'work_item_not_found (or not visible), execution_not_found or intent_not_found', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '409': {description: 'state_version_conflict, invalid_transition (terminal item, or the wrong kind), execution_active, idempotency_key_reused or execution_request_open', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+    get:
+      summary: List a work item's execution requests
+      description: Newest first, at most 100. Visible to whoever can see the item; a relay route.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: The requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string, enum: [workitem/v1]}
+                  execution_requests: {type: array, items: {$ref: '#/components/schemas/ExecutionRequest'}}
+        '404': {description: work_item_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+
+  /api/v1/work-items/{id}/execution-requests/{request_id}:
+    get:
+      summary: Read one execution request
+      description: Visible to whoever can see the item; a relay route.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: request_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: The request, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestResponse'}}}}
+        '404': {description: 'work_item_not_found or execution_request_not_found', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+
+  /api/v1/execution-requests/claim:
+    post:
+      summary: Claim the oldest claimable execution request
+      description: |
+        The execution platform only: the service principal acting directly
+        (anyone else is 403 `execution_request_claimant_forbidden`; a
+        surface never reaches it). Claims the oldest request that is
+        `pending` or whose claim lease has lapsed, for `lease_seconds`
+        (5-900, default 60), as one compare-and-set under the item's lock:
+        however many claimants race, one wins. Every claim mints a new
+        `claim_token`, which fulfil and reject must present; it is returned
+        here only and never in a read. 204 when nothing is claimable.
+      tags: [Work Items]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                lease_seconds: {type: integer, minimum: 5, maximum: 900, default: 60}
+      responses:
+        '200':
+          description: Claimed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string, enum: [workitem/v1]}
+                  execution_request: {$ref: '#/components/schemas/ExecutionRequest'}
+                  claim_token: {type: string, description: Fences this claim; present it to fulfil or reject}
+                required: [schema_version, execution_request, claim_token]
+        '204': {description: Nothing is claimable}
+        '400': {description: invalid_request (lease out of range), content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '403': {description: execution_request_claimant_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+
+  /api/v1/execution-requests/{request_id}/fulfil:
+    post:
+      summary: Fulfil a claimed execution request
+      description: |
+        The claim holder only: the service principal that claimed it,
+        presenting the current `claim_token` before `claim_expires_at` (a
+        lapsed, foreign or superseded claim is 409
+        `execution_request_not_claimed`). In one transaction it attaches the
+        canonical execution and marks the request `fulfilled` with its
+        `execution_id`: `start` attaches a Running execution (the
+        `/executions` rule); `resume` follows `/resume` with the request's
+        `expected_state_version` and `resumed_from_execution_id`, so a
+        waiting item becomes active and `state_version` rises. A request whose
+        item has since moved is refused with the item's 409 and stays claimed
+        for the platform to reject. The holder repeating the same engine run
+        gets the same execution (200); another run is 409
+        `execution_request_closed`, as is fulfilling a rejected request.
+      tags: [Work Items]
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                claim_token: {type: string}
+                engine: {type: string, enum: [temporal, argo]}
+                engine_ref: {type: string, maxLength: 256}
+              required: [claim_token, engine, engine_ref]
+      responses:
+        '201':
+          description: Fulfilled now
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string, enum: [workitem/v1]}
+                  execution_request: {$ref: '#/components/schemas/ExecutionRequest'}
+                  execution: {$ref: '#/components/schemas/WorkItemExecution'}
+                  work_item: {$ref: '#/components/schemas/WorkItem'}
+                  state_version: {type: integer, format: int64}
+        '200': {description: The holder repeated the same engine run; the same execution}
+        '400': {description: invalid_request, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '403': {description: execution_request_claimant_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '404': {description: execution_request_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '409': {description: 'execution_request_not_claimed, execution_request_closed, state_version_conflict, invalid_transition or execution_active', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+
+  /api/v1/execution-requests/{request_id}/reject:
+    post:
+      summary: Reject a claimed execution request
+      description: |
+        The claim holder only, as fulfil. Closes the request without an
+        execution; the item then takes a new request. `reason` is required,
+        at most 1 KiB and secret-scanned (400 `secret_in_text`); it is kept
+        on the request, never in events or audit. The holder repeating the
+        same reason gets the rejected request (200); fulfilling or rejecting
+        it otherwise is 409 `execution_request_closed`.
+      tags: [Work Items]
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                claim_token: {type: string}
+                reason: {type: string, maxLength: 1024}
+              required: [claim_token, reason]
+      responses:
+        '200': {description: Rejected, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestResponse'}}}}
+        '400': {description: 'invalid_request or secret_in_text', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '403': {description: execution_request_claimant_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '404': {description: execution_request_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '409': {description: 'execution_request_not_claimed or execution_request_closed', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
 
   /api/v1/work-items/{id}/surface-refs:
     post:
@@ -3555,7 +3838,11 @@ tags:
       GET /api/v1/human-input, GET /api/v1/human-input/{request_id},
       POST /api/v1/human-input/{request_id}/response, POST /api/v1/work-items,
       GET /api/v1/work-items/{id}, POST /api/v1/work-items/{id}/intents,
-      POST /api/v1/work-items/{id}/resume, POST /api/v1/work-items/{id}/surface-refs.
+      POST /api/v1/work-items/{id}/surface-refs,
+      GET|POST /api/v1/work-items/{id}/execution-requests,
+      GET /api/v1/work-items/{id}/execution-requests/{request_id}. No relay
+      route takes an engine, engine run or execution id: POST
+      /api/v1/work-items/{id}/resume is not one (mctl-api#368).
       Unknown, revoked or expired links, another surface's link, or a missing
       header answer 403; the header from any other caller answers 400.
   - name: Roadmap

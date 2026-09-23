@@ -468,6 +468,27 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/action-approvals", h.CreateActionApproval)
 				r.Post("/action-approvals/{id}/decision", h.DecideActionApproval)
 				r.Post("/action-approvals/{id}/consume", h.ConsumeActionApproval)
+				// Execution requests (mctl-api#368): a person or a relaying
+				// surface asks for a run; the platform supplies its identity.
+				r.Post("/work-items/{id}/execution-requests", h.CreateExecutionRequest)
+			})
+
+			// The execution platform's side of execution requests
+			// (mctl-api#368): claim, fulfil, reject. Service principal only.
+			// Its own group and budget: the dispatcher polls claim, and on
+			// the 20/min write budget shared with dev-loop starts it would
+			// starve the very workflow triggers it feeds, the lifecycle
+			// writes' reasoning below.
+			r.Group(func(r chi.Router) {
+				r.Use(httprate.Limit(120, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					if user := auth.UserFromContext(r.Context()); user != nil {
+						return "execution-requests:" + rateLimitSubject(r, user), nil
+					}
+					return keyByTrustedIP(r)
+				})))
+				r.Post("/execution-requests/claim", h.ClaimExecutionRequest)
+				r.Post("/execution-requests/{request_id}/fulfil", h.FulfilExecutionRequest)
+				r.Post("/execution-requests/{request_id}/reject", h.RejectExecutionRequest)
 			})
 
 			// Work-item reads: side-effect free, outside the write budget.
@@ -479,6 +500,8 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/work-items/{id}/executions/{execution_id}/snapshot", h.GetWorkItemExecutionSnapshot)
 			r.Get("/work-items/{id}/snapshots", h.ListWorkItemSnapshots)
 			r.Get("/work-items/{id}/snapshots/{snapshot_id}", h.GetWorkItemSnapshot)
+			r.Get("/work-items/{id}/execution-requests", h.ListExecutionRequests)
+			r.Get("/work-items/{id}/execution-requests/{request_id}", h.GetExecutionRequest)
 			r.Get("/action-approvals", h.ListActionApprovals)
 			r.Get("/action-approvals/{id}", h.GetActionApproval)
 

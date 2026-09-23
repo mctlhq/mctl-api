@@ -167,6 +167,10 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("workitems: create action approval schema: %w", err)
 	}
+	if _, err := pool.Exec(ctx, executionRequestSchema); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("workitems: create execution request schema: %w", err)
+	}
 	slog.Info("work-items store initialized")
 	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
 }
@@ -484,65 +488,8 @@ func (s *Store) Resume(ctx context.Context, in ResumeInput) (*WorkItem, *Executi
 			exec, err = getExecution(ctx, tx, cur.ID, result)
 			return err
 		}
-		if cur.StateVersion != in.ExpectedStateVersion {
-			return &ConflictError{Err: ErrVersionConflict, Current: cur}
-		}
-		if IsTerminal(cur.State) {
-			return &ConflictError{Err: fmt.Errorf("%w: resume from %s", ErrInvalidTransition, cur.State), Current: cur}
-		}
-		execs, err := listExecutions(ctx, tx, cur.ID)
-		if err != nil {
-			return err
-		}
-		from := in.ResumedFromExecutionID
-		for i := range execs {
-			if !IsTerminalPhase(execs[i].Phase) {
-				return &ConflictError{Err: ErrExecutionActive, Current: cur}
-			}
-		}
-		if from == "" && len(execs) > 0 {
-			from = execs[len(execs)-1].ID
-		}
-		// An active item starts its first run with AttachExecution; only a
-		// waiting one may resume with nothing before it, since Resume is
-		// the sole way out of waiting.
-		if len(execs) == 0 && cur.State == StateActive {
-			return invalid("%s has no execution to resume; attach the first one", cur.ID)
-		}
-		if from != "" && !containsExecution(execs, from) {
-			return invalid("resumed_from_execution_id %s is not an execution of %s", from, cur.ID)
-		}
-		for i := range execs {
-			if execs[i].Engine == in.Engine && execs[i].EngineRef == in.EngineRef {
-				return invalid("%s %s is already execution %s of %s; a resume starts a new run",
-					in.Engine, in.EngineRef, execs[i].ID, cur.ID)
-			}
-		}
 		now := s.now()
-		exec, err = insertExecution(ctx, tx, cur.ID, in.Engine, in.EngineRef, PhasePending, from, len(execs)+1, now)
-		if err != nil {
-			return err
-		}
-		to := cur.State
-		if cur.State == StateWaiting {
-			if to, err = Next(cur.State, ActionResume); err != nil {
-				return &ConflictError{Err: err, Current: cur}
-			}
-		}
-		item, err = scanItem(tx.QueryRow(ctx, `UPDATE work_items SET state=$2, waiting_reason='',
-				state_version=state_version+1, updated_at=$3
-			WHERE id=$1 AND state_version=$4 RETURNING `+itemColumns, cur.ID, to, now, cur.StateVersion))
-		if errors.Is(err, pgx.ErrNoRows) {
-			return &ConflictError{Err: ErrVersionConflict, Current: cur}
-		}
-		if err != nil {
-			return fmt.Errorf("workitems: resume: %w", err)
-		}
-		detail := map[string]string{"execution_id": exec.ID}
-		if from != "" {
-			detail["resumed_from_execution_id"] = from
-		}
-		if err := appendEvent(ctx, tx, cur.ID, EventResumed, cur.State, to, in.Mutation, detail, now); err != nil {
+		if item, exec, err = resumeTx(ctx, tx, cur, in, now); err != nil {
 			return err
 		}
 		if err := remember(ctx, tx, cur.ID, opResume, exec.ID, in.Mutation, now); err != nil {
@@ -555,6 +502,73 @@ func (s *Store) Resume(ctx context.Context, in ResumeInput) (*WorkItem, *Executi
 		return nil, nil, false, err
 	}
 	return item, exec, created, nil
+}
+
+// resumeTx is Resume's decision and write, for a caller that holds the
+// item's lock and has already handled idempotency: Resume itself, and the
+// fulfilment of a resume execution request.
+func resumeTx(ctx context.Context, tx pgx.Tx, cur *WorkItem, in ResumeInput, now time.Time) (*WorkItem, *Execution, error) {
+	if cur.StateVersion != in.ExpectedStateVersion {
+		return nil, nil, &ConflictError{Err: ErrVersionConflict, Current: cur}
+	}
+	if IsTerminal(cur.State) {
+		return nil, nil, &ConflictError{Err: fmt.Errorf("%w: resume from %s", ErrInvalidTransition, cur.State), Current: cur}
+	}
+	execs, err := listExecutions(ctx, tx, cur.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	from := in.ResumedFromExecutionID
+	for i := range execs {
+		if !IsTerminalPhase(execs[i].Phase) {
+			return nil, nil, &ConflictError{Err: ErrExecutionActive, Current: cur}
+		}
+	}
+	if from == "" && len(execs) > 0 {
+		from = execs[len(execs)-1].ID
+	}
+	// An active item starts its first run with AttachExecution; only a
+	// waiting one may resume with nothing before it, since Resume is
+	// the sole way out of waiting.
+	if len(execs) == 0 && cur.State == StateActive {
+		return nil, nil, invalid("%s has no execution to resume; attach the first one", cur.ID)
+	}
+	if from != "" && !containsExecution(execs, from) {
+		return nil, nil, invalid("resumed_from_execution_id %s is not an execution of %s", from, cur.ID)
+	}
+	for i := range execs {
+		if execs[i].Engine == in.Engine && execs[i].EngineRef == in.EngineRef {
+			return nil, nil, invalid("%s %s is already execution %s of %s; a resume starts a new run",
+				in.Engine, in.EngineRef, execs[i].ID, cur.ID)
+		}
+	}
+	exec, err := insertExecution(ctx, tx, cur.ID, in.Engine, in.EngineRef, PhasePending, from, len(execs)+1, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	to := cur.State
+	if cur.State == StateWaiting {
+		if to, err = Next(cur.State, ActionResume); err != nil {
+			return nil, nil, &ConflictError{Err: err, Current: cur}
+		}
+	}
+	item, err := scanItem(tx.QueryRow(ctx, `UPDATE work_items SET state=$2, waiting_reason='',
+			state_version=state_version+1, updated_at=$3
+		WHERE id=$1 AND state_version=$4 RETURNING `+itemColumns, cur.ID, to, now, cur.StateVersion))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, &ConflictError{Err: ErrVersionConflict, Current: cur}
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("workitems: resume: %w", err)
+	}
+	detail := map[string]string{"execution_id": exec.ID}
+	if from != "" {
+		detail["resumed_from_execution_id"] = from
+	}
+	if err := appendEvent(ctx, tx, cur.ID, EventResumed, cur.State, to, in.Mutation, detail, now); err != nil {
+		return nil, nil, err
+	}
+	return item, exec, nil
 }
 
 func containsExecution(execs []Execution, id string) bool {
@@ -665,26 +679,7 @@ func (s *Store) AttachExecution(ctx context.Context, in ExecutionInput) (*Execut
 			}
 			out = existing
 		case errors.Is(err, pgx.ErrNoRows):
-			if IsTerminal(cur.State) {
-				return &ConflictError{Err: fmt.Errorf("%w: attach to %s", ErrInvalidTransition, cur.State), Current: cur}
-			}
-			execs, err := listExecutions(ctx, tx, cur.ID)
-			if err != nil {
-				return err
-			}
-			if !IsTerminalPhase(in.Phase) {
-				for i := range execs {
-					if !IsTerminalPhase(execs[i].Phase) {
-						return &ConflictError{Err: ErrExecutionActive, Current: cur}
-					}
-				}
-			}
-			out, err = insertExecution(ctx, tx, cur.ID, in.Engine, in.EngineRef, in.Phase, "", len(execs)+1, now)
-			if err != nil {
-				return err
-			}
-			detail := map[string]string{"execution_id": out.ID, "engine": in.Engine, "engine_ref": in.EngineRef}
-			if err := appendEvent(ctx, tx, cur.ID, EventExecutionAttached, "", "", in.Mutation, detail, now); err != nil {
+			if out, err = attachNewTx(ctx, tx, cur, in, now); err != nil {
 				return err
 			}
 			created = true
@@ -697,6 +692,35 @@ func (s *Store) AttachExecution(ctx context.Context, in ExecutionInput) (*Execut
 		return nil, false, err
 	}
 	return out, created, nil
+}
+
+// attachNewTx attaches an engine run not yet correlated with cur, for a
+// caller that holds the item's lock: AttachExecution, and the fulfilment of
+// a start execution request.
+func attachNewTx(ctx context.Context, tx pgx.Tx, cur *WorkItem, in ExecutionInput, now time.Time) (*Execution, error) {
+	if IsTerminal(cur.State) {
+		return nil, &ConflictError{Err: fmt.Errorf("%w: attach to %s", ErrInvalidTransition, cur.State), Current: cur}
+	}
+	execs, err := listExecutions(ctx, tx, cur.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !IsTerminalPhase(in.Phase) {
+		for i := range execs {
+			if !IsTerminalPhase(execs[i].Phase) {
+				return nil, &ConflictError{Err: ErrExecutionActive, Current: cur}
+			}
+		}
+	}
+	out, err := insertExecution(ctx, tx, cur.ID, in.Engine, in.EngineRef, in.Phase, "", len(execs)+1, now)
+	if err != nil {
+		return nil, err
+	}
+	detail := map[string]string{"execution_id": out.ID, "engine": in.Engine, "engine_ref": in.EngineRef}
+	if err := appendEvent(ctx, tx, cur.ID, EventExecutionAttached, "", "", in.Mutation, detail, now); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // AppendIntent records a bounded intent on a non-terminal work item.

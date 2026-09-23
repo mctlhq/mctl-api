@@ -244,6 +244,13 @@ Surfaces correlate to it; they never own its lifecycle.
   `expected_state_version` and answer 409 with the current state on a mismatch.
 - `POST .../intents` (≤ 8 KiB, secret-scanned), `GET|POST .../executions`,
   `POST .../surface-refs`, `GET .../events`.
+- `POST .../execution-requests` asks the platform to `start` or `resume` the
+  item without naming an engine run (mctl-api#368): a person or a relaying
+  surface requests, the service principal claims it
+  (`POST /api/v1/execution-requests/claim`) and fulfils it
+  (`POST /api/v1/execution-requests/{request_id}/fulfil {claim_token, engine,
+  engine_ref}`) or rejects it. A surface relays the request routes, never
+  `/resume`.
 - `POST .../executions/{execution_id}/snapshot` seals the execution's
   ContextSnapshot (service principal only). The table is insert-only: one
   snapshot per execution, the same bytes again return the stored one, and

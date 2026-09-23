@@ -98,7 +98,9 @@ may live in different databases.
 - **`WorkItemEvent`** — append-only lifecycle log entry: `kind`
   (`created` | `state_changed` | `resumed` | `intent_appended` |
   `execution_attached` | `approval_requested` | `approval_decided` |
-  `surface_linked`), `from_state`, `to_state`, `actor_principal`, `surface`,
+  `surface_linked` | `snapshot_sealed` | `execution_requested` |
+  `execution_request_claimed` | `execution_request_fulfilled` |
+  `execution_request_rejected`), `from_state`, `to_state`, `actor_principal`, `surface`,
   `request_id`, `detail`, `created_at`. Unique per `(work_item_id, seq)`.
 - **`WorkItemIntent`** — a bounded, normalized statement of what the user
   asked for: `actor_principal`, `surface`, `text` (max 8 KiB), `params`,
@@ -132,6 +134,20 @@ may live in different databases.
   viewer of the work item may read the bytes, deliberately, since they are
   the context of that viewer's own work. A listing carries metadata only;
   the bytes come from a single-snapshot read.
+- **`ExecutionRequest`** — a durable request that the item run
+  (mctl-api#368): `id` (`xr_...`), `kind` (`start` | `resume`),
+  `expected_state_version`, optional `resumed_from_execution_id` and
+  `intent_id`, `surface`, `requested_by` (from authentication: the linked
+  human on relay), `acting_principal`, `idempotency_key`, `state`
+  (`pending` → `claimed` → `fulfilled` | `rejected`), `claimed_by`,
+  `claimed_at`, `claim_expires_at`, `execution_id` (set only by
+  fulfilment), `reason`, `created_at`, `updated_at`, `closed_at`. The
+  owner rule it encodes: **a surface requests execution; a surface does not
+  declare execution identity.** The surface supplies the item, the
+  expected version, the intent (by id), its provenance and idempotency;
+  the execution platform (a service principal) supplies `execution_id`,
+  `engine` and `engine_ref` by claiming and fulfilling the request. At
+  most one open (`pending` or `claimed`) request per item.
 - **`WorkItemApproval`** — `kind`, `state`
   (`pending` | `granted` | `denied` | `expired`), `signal_engine`,
   `signal_ref`, `signal_name`, `requested_by`, `requested_at`, `decided_by`,
@@ -341,7 +357,10 @@ this, the same pattern `alerts_tenant_fingerprint_open` already uses in
 
 Mounted under `/api/v1/work-items` inside the authenticated group. Mutating
 routes join the existing write-side rate-limit group (20/min) alongside
-`/operations/{name}/execute` and the dev-loop routes; reads stay outside it.
+`/operations/{name}/execute` and the dev-loop routes; reads stay outside it. The
+platform's claim, fulfil and reject routes have their own 120/min group, as
+the lifecycle-ownership writes do: the dispatcher polls claim, and on the
+shared 20/min budget it would starve the workflow triggers it feeds.
 
 | Method & path                                                        | Purpose                                            |
 |------------------------------------------------------------------------|-----------------------------------------------------|
@@ -353,7 +372,12 @@ routes join the existing write-side rate-limit group (20/min) alongside
 | `GET|POST /api/v1/work-items/{id}/executions`                          | list / attach-correlate an execution |
 | `GET|POST /api/v1/work-items/{id}/executions/{execution_id}/snapshot`  | read / seal the execution's context snapshot |
 | `GET /api/v1/work-items/{id}/snapshots[/{snapshot_id}]`                | list / read sealed snapshots |
-| `POST /api/v1/work-items/{id}/resume`                                  | start a new execution continuing a prior one |
+| `POST /api/v1/work-items/{id}/resume`                                  | start a new execution continuing a prior one (names the engine run: not a relay route) |
+| `GET|POST /api/v1/work-items/{id}/execution-requests`                  | list / request a `start` or `resume` (no engine identity accepted) |
+| `GET /api/v1/work-items/{id}/execution-requests/{request_id}`          | read one execution request |
+| `POST /api/v1/execution-requests/claim`                                | claim the oldest claimable request under a lease (service only) |
+| `POST /api/v1/execution-requests/{request_id}/fulfil`                  | attach the canonical execution for a claimed request (claim holder only) |
+| `POST /api/v1/execution-requests/{request_id}/reject`                  | close a claimed request without an execution (claim holder only) |
 | `GET /api/v1/work-items/{id}/approvals`                                | list approvals |
 | `POST /api/v1/work-items/{id}/approvals/{approval_id}/decision`        | decide a pending approval |
 | `POST /api/v1/work-items/{id}/surface-refs`                            | correlate a surface reference |
@@ -456,10 +480,65 @@ surface's link, or a missing header answers 403 (`link_not_found`,
 the header gets 400. Relay routes: `GET /human-input`,
 `GET /human-input/{id}`, `POST /human-input/{id}/response`,
 `POST /work-items`, `GET /work-items/{id}`,
-`POST /work-items/{id}/intents|resume|surface-refs`. A relayed request's
+`POST /work-items/{id}/intents|surface-refs`,
+`GET|POST /work-items/{id}/execution-requests` and
+`GET /work-items/{id}/execution-requests/{request_id}`. No relay route
+accepts an engine, engine run or execution id: `POST /work-items/{id}/resume`
+left the allowlist with mctl-api#368, and a surface asks for a run with an
+execution request instead. A relayed request's
 `surface` / `origin_surface` is forced to the relaying surface (claiming
 another is 400). Both identities are kept: work-item events and audit rows
 carry the human as actor and `acting_principal: surface:<name>`.
+
+### Execution requests (mctl-api#368)
+
+**A surface requests execution; a surface does not declare execution
+identity.** `internal/workitems/execution_requests.go` and
+`internal/api/handlers_execution_requests.go`, in the work-items store and
+schema (`work_item_execution_requests`):
+
+| Route | Who | |
+|---|---|---|
+| `POST /work-items/{id}/execution-requests` | a person directly, or a surface relaying for its linked human; never the service principal (403 `execution_request_requester_forbidden`) | `{kind, expected_state_version, resumed_from_execution_id?, intent_id?, surface?, idempotency_key?}`; `engine`, `engine_ref` or `execution_id` → 400 `execution_identity_not_accepted` |
+| `GET /work-items/{id}/execution-requests[/{request_id}]` | whoever can see the item | |
+| `POST /execution-requests/claim` | the service principal, directly | `{lease_seconds}` (5–900, default 60) → the request and a fresh `claim_token`, or 204 |
+| `POST /execution-requests/{request_id}/fulfil` | the claim holder | `{claim_token, engine, engine_ref}` |
+| `POST /execution-requests/{request_id}/reject` | the claim holder | `{claim_token, reason}` (≤ 1 KiB, secret-scanned) |
+
+- Create refuses a stale `expected_state_version` (409
+  `state_version_conflict` with the current state), a terminal item (409
+  `invalid_transition`), a kind the item cannot take (`start` needs an
+  active item that never ran; `resume` needs a waiting item or one that
+  ran), a Pending/Running execution (409 `execution_active`), a
+  `resumed_from_execution_id` or `intent_id` of another item (404
+  `execution_not_found` / `intent_not_found`), and a second open request
+  (409 `execution_request_open`, the open one's id in `details`).
+  Idempotency is the per-item key bound to the actor, as for every other
+  work-item mutation.
+- Claim is a compare-and-set under the item's advisory lock: racing
+  claimants serialize and one wins. A claim whose lease lapsed is
+  claimable again. Each claim mints a `claim_token` (returned by claim
+  only, never in a read) that fulfil and reject must present, so a lapsed
+  holder is fenced even when the new holder is the same service principal
+  (409 `execution_request_not_claimed`).
+- Fulfil attaches the execution in the same transaction: `start` with the
+  `/executions` rule (a Running execution), `resume` with the `/resume` rule
+  and the request's `expected_state_version` and
+  `resumed_from_execution_id` (a waiting item becomes active,
+  `state_version` rises). An item that moved since is refused with its 409
+  and the request stays claimed for the platform to reject. The holder
+  repeating the same engine run gets the same execution; another run is 409
+  `execution_request_closed`.
+- Every transition writes a work-item event (`execution_requested`,
+  `execution_request_claimed`, `execution_request_fulfilled`,
+  `execution_request_rejected`) and an audit row. On create the actor is
+  the human and a relayed call keeps `acting_principal: surface:<name>`;
+  claim, fulfil and reject are the service's, with `requested_by` kept.
+  Refused claims, fulfils and rejects are audited too. The reject reason
+  stays on the request, never in events or audit.
+- Not built here: a request TTL (an unclaimed request waits for the
+  platform), cancellation by the requester, and the dispatcher that claims
+  (mctl-agents#461).
 
 Not built yet, tracked as its own issue (#353 approvals and retention):
 
