@@ -277,7 +277,9 @@ func Parse(files map[string][]byte, revision string) (*Publication, error) {
 			Observation:       pub.Observation,
 		},
 	}
+	// Both lookup keys, folded as lookup folds them, must name one epic.
 	names := map[string]bool{}
+	roots := map[string]bool{}
 	for _, m := range pub.Manifests {
 		if m.SHA256 == "" {
 			return nil, unavailable("manifest %s carries no digest", m.Path)
@@ -292,6 +294,12 @@ func Parse(files map[string][]byte, revision string) (*Publication, error) {
 			return nil, unavailable("epic %s is published twice", m.Epic.Name)
 		}
 		names[folded] = true
+		if issue := rootIssueKey(ready[m.Path]); issue != "" {
+			if roots[issue] {
+				return nil, unavailable("root issue %s is bound to two epics", issue)
+			}
+			roots[issue] = true
+		}
 		r, ok := ready[m.Path]
 		if !ok {
 			return nil, unavailable("%s has no ready set for %s", ReadySetFile, m.Path)
@@ -506,4 +514,11 @@ func (r *Reader) Current() (*Publication, error) {
 	pub, err := Parse(files, readRev)
 	r.cachedRev, r.cached, r.cachedErr = readRev, pub, err
 	return pub, err
+}
+
+func rootIssueKey(doc parsedDoc) string {
+	if doc.wire.Epic.Issue == nil {
+		return ""
+	}
+	return strings.ToLower(doc.wire.Epic.Issue.String())
 }

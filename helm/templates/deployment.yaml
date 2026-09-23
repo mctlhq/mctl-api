@@ -102,6 +102,8 @@ spec:
           volumeMounts:
             - name: gitops-cache
               mountPath: /data/mctl-gitops
+            - name: roadmap-state
+              mountPath: /data/roadmap-state
             {{- if .Values.gitopsSSHSecret }}
             - name: gitops-ssh
               mountPath: /etc/gitops-ssh
@@ -121,6 +123,11 @@ spec:
         - name: gitops-cache
           emptyDir:
             sizeLimit: 500Mi
+        # A --depth=1 checkout of a few JSON files; the limit bounds loose
+        # objects from repeated shallow fetches.
+        - name: roadmap-state
+          emptyDir:
+            sizeLimit: 64Mi
         {{- if .Values.gitopsSSHSecret }}
         - name: gitops-ssh
           secret:
