@@ -293,10 +293,11 @@ func NewRouter(opts Options) http.Handler {
 		r.Use(surfaceAggregateLimit(httprate.Limit(surfaceAggregateLimitPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 			return "surface-total:" + auth.UserFromContext(r.Context()).ID, nil
 		}))))
+		// Above the gate: relay resolves a link in Postgres there.
+		r.Use(middleware.Timeout(30 * 1000000000)) // 30s
 		// Surface principals reach only their allowlisted routes; relay
 		// routes continue as the linked human.
 		r.Use(h.surfacePrincipalGate)
-		r.Use(middleware.Timeout(30 * 1000000000)) // 30s
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
 		// Loopback is skipped so MCP's in-process REST to localhost:8080 does

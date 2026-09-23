@@ -47,8 +47,9 @@ import (
 
 // SurfaceActorHeader names the surface-native end user (a Telegram user id,
 // a portal subject) a surface principal is calling for. Only a surface
-// principal may send it. Rate limits key a surface principal's budget on
-// it, so one end user cannot spend the whole surface's budget.
+// principal may send it. On redeem, the per-user rate limits key the
+// surface principal's budget on it, so one end user cannot spend the whole
+// surface's budget; on a relay route they count against the linked human.
 const SurfaceActorHeader = "X-MCTL-Surface-Actor"
 
 const (

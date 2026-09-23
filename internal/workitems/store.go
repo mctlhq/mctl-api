@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS work_item_events (
     from_state      TEXT NOT NULL DEFAULT '',
     to_state        TEXT NOT NULL DEFAULT '',
     actor_principal TEXT NOT NULL,
+    acting_principal TEXT NOT NULL DEFAULT '',
     surface         TEXT NOT NULL DEFAULT '',
     request_id      TEXT NOT NULL DEFAULT '',
     detail          JSONB,
