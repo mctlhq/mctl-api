@@ -315,7 +315,9 @@ func (s *Store) Redeem(ctx context.Context, surface, code, externalID string) (*
 			refusal = &ChallengeError{Reason: ReasonExpired}
 			return consume(ReasonExpired)
 		}
-		existing, err := liveLink(ctx, tx, surface, externalID)
+		// FOR UPDATE: a Revoke committing meanwhile is waited for, so this
+		// never reports (or audits) a link that is already revoked.
+		existing, err := liveLink(ctx, tx, surface, externalID, true)
 		if err != nil && !errors.Is(err, ErrLinkNotFound) {
 			return err
 		}
@@ -369,14 +371,24 @@ func scanLink(row pgx.Row) (*Link, error) {
 		return nil, err
 	}
 	l.CreatedAt = l.CreatedAt.UTC()
+	for _, t := range []**time.Time{&l.ExpiresAt, &l.RevokedAt} {
+		if *t != nil {
+			u := (*t).UTC()
+			*t = &u
+		}
+	}
 	return &l, nil
 }
 
 func liveLink(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
-}, surface, externalID string) (*Link, error) {
-	l, err := scanLink(q.QueryRow(ctx, `SELECT `+linkColumns+` FROM surface_identity_links
-		WHERE surface=$1 AND external_id=$2 AND revoked_at IS NULL`, surface, externalID))
+}, surface, externalID string, forUpdate bool) (*Link, error) {
+	query := `SELECT ` + linkColumns + ` FROM surface_identity_links
+		WHERE surface=$1 AND external_id=$2 AND revoked_at IS NULL`
+	if forUpdate {
+		query += ` FOR UPDATE`
+	}
+	l, err := scanLink(q.QueryRow(ctx, query, surface, externalID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrLinkNotFound
 	}
@@ -393,7 +405,7 @@ func (s *Store) Resolve(ctx context.Context, surface, externalID string) (*Link,
 	if !IsSurface(surface) || !ValidExternalID(surface, externalID) {
 		return nil, ErrLinkNotFound
 	}
-	l, err := liveLink(ctx, s.pool, surface, externalID)
+	l, err := liveLink(ctx, s.pool, surface, externalID, false)
 	if errors.Is(err, ErrLinkNotFound) {
 		var revoked bool
 		if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM surface_identity_links

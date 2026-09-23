@@ -120,7 +120,7 @@ func (e *sidEnv) challenge(who, surface string) string {
 }
 
 func (e *sidEnv) redeem(who, code, externalID string) (int, map[string]any) {
-	return e.do(who, "POST", "/api/v1/surface-identities/redeem", map[string]any{"code": code, "external_id": externalID})
+	return e.do(who, "POST", "/api/v1/surface-identities/redeem", map[string]any{"code": code}, SurfaceActorHeader, externalID)
 }
 
 func TestSurfaceIdentity_OnlyAGitHubHumanCreatesAChallenge(t *testing.T) {
@@ -159,14 +159,22 @@ func TestSurfaceIdentity_OnlyTheRightSurfaceRedeemsOnce(t *testing.T) {
 	// Humans and the service principal cannot redeem, and trying does not
 	// consume the challenge.
 	for _, who := range []string{"alice", "bob", "service", "root"} {
-		if status, body := e.redeem(who, code, "4242"); status != http.StatusForbidden || body["code"] != "surface_principal_required" {
+		if status, body := e.do(who, "POST", "/api/v1/surface-identities/redeem", map[string]any{"code": code}); status != http.StatusForbidden || body["code"] != "surface_principal_required" {
 			t.Errorf("%s redeem = %d %v", who, status, body)
 		}
 	}
 	// The body can never say whom to link.
 	if status, body := e.do("telegram", "POST", "/api/v1/surface-identities/redeem",
-		map[string]any{"code": code, "external_id": "4242", "principal": "github:bob"}); status != http.StatusBadRequest || body["code"] != "actor_not_accepted" {
+		map[string]any{"code": code, "principal": "github:bob"}, SurfaceActorHeader, "4242"); status != http.StatusBadRequest || body["code"] != "actor_not_accepted" {
 		t.Errorf("forged principal on redeem = %d %v", status, body)
+	}
+	// The observed identity comes from the header, never the body.
+	if status, body := e.do("telegram", "POST", "/api/v1/surface-identities/redeem",
+		map[string]any{"code": code, "external_id": "4242"}, SurfaceActorHeader, "4242"); status != http.StatusBadRequest {
+		t.Errorf("external_id in the body = %d %v", status, body)
+	}
+	if status, body := e.do("telegram", "POST", "/api/v1/surface-identities/redeem", map[string]any{"code": code}); status != http.StatusBadRequest {
+		t.Errorf("redeem naming no identity = %d %v", status, body)
 	}
 	status, body := e.redeem("telegram", code, "4242")
 	if status != http.StatusCreated {
@@ -230,6 +238,22 @@ func TestSurfaceIdentity_GateConfinesSurfacePrincipals(t *testing.T) {
 		if code, body := e.do(who, "GET", "/api/v1/surface-identities", nil, SurfaceActorHeader, "4242"); code != http.StatusBadRequest || body["code"] != "actor_not_accepted" {
 			t.Errorf("%s sending %s = %d %v", who, SurfaceActorHeader, code, body)
 		}
+	}
+}
+
+func TestSurfaceIdentity_OneEndUserCannotSpendTheSurfacesBudget(t *testing.T) {
+	e := newSIDEnv(t)
+	limited := false
+	for i := 0; i < 25 && !limited; i++ {
+		code, _ := e.redeem("telegram", "AAAA-AAAA", "111")
+		limited = code == http.StatusTooManyRequests
+	}
+	if !limited {
+		t.Fatal("one telegram user was never rate limited")
+	}
+	// Another user of the same surface still has their own budget.
+	if code, body := e.redeem("telegram", e.challenge("alice", "telegram"), "222"); code != http.StatusCreated {
+		t.Fatalf("second telegram user = %d %v", code, body)
 	}
 }
 
@@ -321,6 +345,19 @@ func TestSurfaceIdentityRoutesAreRegistered(t *testing.T) {
 	} {
 		if !found[want] {
 			t.Errorf("route not registered: %s", want)
+		}
+	}
+}
+
+func TestSurfaceIdentity_BodyIsParsedStrictly(t *testing.T) {
+	e := newSIDEnv(t)
+	for body, want := range map[string]int{
+		`{"surface":"telegram"}{"surface":"portal"}`:                 http.StatusBadRequest,
+		`{"surface":"telegram"} x`:                                   http.StatusBadRequest,
+		`{"surface":"` + strings.Repeat("t", sidMaxBodyBytes) + `"}`: http.StatusRequestEntityTooLarge,
+	} {
+		if code, out := e.do("alice", "POST", "/api/v1/surface-identities/challenges", body); code != want {
+			t.Errorf("%.40s… = %d %v, want %d", body, code, out, want)
 		}
 	}
 }

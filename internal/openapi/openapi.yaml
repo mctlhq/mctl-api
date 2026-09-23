@@ -2282,11 +2282,19 @@ paths:
       summary: Redeem a challenge as the surface that observed it
       description: |
         Only the surface principal of the challenge's own surface
-        (`surface:telegram`, `surface:portal`). Binds `external_id`, the
-        identity the surface observed, to the human who requested the
-        challenge. Any failed redemption consumes the challenge and answers
-        the same 403.
+        (`surface:telegram`, `surface:portal`). Binds the identity the
+        surface observed, named in `X-MCTL-Surface-Actor` (a Telegram user
+        id, digits; or a portal subject), to the human who requested the
+        challenge. A refused redemption by the surface consumes the
+        challenge and answers the same 403. Rate limits count against the
+        named identity, not the whole surface.
       tags: [Surface Identity]
+      parameters:
+        - name: X-MCTL-Surface-Actor
+          in: header
+          required: true
+          schema: {type: string, maxLength: 256}
+          description: The surface-native identity being linked
       requestBody:
         required: true
         content:
@@ -2294,13 +2302,12 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [code, external_id]
+              required: [code]
               properties:
                 code: {type: string}
-                external_id: {type: string, description: 'Telegram user id (digits) or portal subject'}
       responses:
         '201': {description: Link created (or the same link again)}
-        '400': {description: Invalid body or external_id}
+        '400': {description: Invalid body or X-MCTL-Surface-Actor}
         '403': {description: Not a surface principal, or challenge unknown, used, expired or for another surface}
         '409': {description: The identity is linked to another principal}
   /api/v1/surface-identities:

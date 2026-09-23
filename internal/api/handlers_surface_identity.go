@@ -27,13 +27,14 @@ package api
 // allowlist (surfacePrincipalGate).
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -43,9 +44,10 @@ import (
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
 )
 
-// SurfaceActorHeader names the surface-native actor a surface principal
-// relays for. Only a surface principal may send it, and only on a route
-// that opted in to relay.
+// SurfaceActorHeader names the surface-native end user (a Telegram user id,
+// a portal subject) a surface principal is calling for. Only a surface
+// principal may send it. Rate limits key a surface principal's budget on
+// it, so one end user cannot spend the whole surface's budget.
 const SurfaceActorHeader = "X-MCTL-Surface-Actor"
 
 const (
@@ -74,6 +76,9 @@ var surfaceRoutes = []struct {
 
 // surfacePrincipalGate confines surface principals to surfaceRoutes and
 // refuses the surface-actor header from anyone else.
+//
+// It runs before the rate limiters, whose keys trust the header only
+// because it has passed here.
 func surfacePrincipalGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
@@ -139,9 +144,18 @@ var forbiddenLinkFields = []string{
 // decodeSurfaceBody decodes a small JSON body, refusing identity fields and
 // unknown keys.
 func decodeSurfaceBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, sidMaxBodyBytes)
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, sidMaxBodyBytes))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeErrorCode(w, http.StatusRequestEntityTooLarge, sidCodeInvalid, "request body exceeds "+strconv.Itoa(sidMaxBodyBytes)+" bytes", nil)
+			return false
+		}
+		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid, "could not read the body", nil)
+		return false
+	}
 	var raw map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid, "invalid JSON body", nil)
 		return false
 	}
@@ -152,8 +166,8 @@ func decodeSurfaceBody(w http.ResponseWriter, r *http.Request, v any) bool {
 			return false
 		}
 	}
-	data, _ := json.Marshal(raw)
-	dec := json.NewDecoder(strings.NewReader(string(data)))
+	// json.Unmarshal above already refused trailing data.
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid, "invalid body: "+err.Error(), nil)
@@ -224,18 +238,21 @@ func (h *Handlers) RedeemSurfaceChallenge(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var body struct {
-		Code       string `json:"code"`
-		ExternalID string `json:"external_id"`
+		Code string `json:"code"`
 	}
 	if !decodeSurfaceBody(w, r, &body) {
 		return
 	}
-	if !surfaceid.ValidExternalID(surface, body.ExternalID) {
-		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid, "external_id is not a valid "+surface+" identity", nil)
+	// The identity the surface observed travels in the same header on every
+	// surface call, so the rate limiters key on it here too.
+	externalID := r.Header.Get(SurfaceActorHeader)
+	if !surfaceid.ValidExternalID(surface, externalID) {
+		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid,
+			SurfaceActorHeader+" must name a valid "+surface+" identity", nil)
 		return
 	}
-	link, err := h.opts.SurfaceIdentities.Redeem(r.Context(), surface, body.Code, body.ExternalID)
-	params := map[string]string{"surface": surface, "external_id": body.ExternalID}
+	link, err := h.opts.SurfaceIdentities.Redeem(r.Context(), surface, body.Code, externalID)
+	params := map[string]string{"surface": surface, "external_id": externalID}
 	var ce *surfaceid.ChallengeError
 	switch {
 	case errors.As(err, &ce):

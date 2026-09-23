@@ -296,7 +296,7 @@ func NewRouter(opts Options) http.Handler {
 		// must still be throttled.
 		r.Use(skipLoopbackRateLimit(httprate.Limit(300, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 			if user := auth.UserFromContext(r.Context()); user != nil {
-				return "user:" + user.ID, nil
+				return "user:" + rateLimitSubject(r, user), nil
 			}
 			return keyByTrustedIP(r)
 		}))))
@@ -416,7 +416,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(httprate.Limit(20, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 					if user := auth.UserFromContext(r.Context()); user != nil {
-						return "write:" + user.ID, nil
+						return "write:" + rateLimitSubject(r, user), nil
 					}
 					return keyByTrustedIP(r)
 				})))
@@ -503,7 +503,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(httprate.Limit(120, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 					if user := auth.UserFromContext(r.Context()); user != nil {
-						return "lifecycle:" + user.ID, nil
+						return "lifecycle:" + rateLimitSubject(r, user), nil
 					}
 					return keyByTrustedIP(r)
 				})))
@@ -549,7 +549,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(httprate.Limit(10, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 					if user := auth.UserFromContext(r.Context()); user != nil {
-						return "lifecycle-recovery:" + user.ID, nil
+						return "lifecycle-recovery:" + rateLimitSubject(r, user), nil
 					}
 					return keyByTrustedIP(r)
 				})))
@@ -695,4 +695,15 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// rateLimitSubject is who a per-user rate limit counts against. A surface
+// principal calls for many end users, so its budget is split by the one it
+// names in SurfaceActorHeader (vetted by surfacePrincipalGate, which runs
+// first): otherwise one Telegram user could exhaust every other's.
+func rateLimitSubject(r *http.Request, user *auth.User) string {
+	if _, isSurface := user.Surface(); isSurface {
+		return user.ID + "|" + r.Header.Get(SurfaceActorHeader)
+	}
+	return user.ID
 }
