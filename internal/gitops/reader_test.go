@@ -1422,3 +1422,44 @@ func TestListHumanInputRequests(t *testing.T) {
 		t.Fatalf("files = %v", seen)
 	}
 }
+
+func TestReadFilesReturnsOneCheckoutAndRefusesPaths(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	work := filepath.Join(root, "work")
+	cache := filepath.Join(root, "cache")
+	runGit(t, root, "init", "--bare", remote)
+	runGit(t, root, "clone", remote, work)
+	runGit(t, work, "checkout", "-b", "roadmap-state")
+	runGit(t, work, "config", "user.email", "test@example.com")
+	runGit(t, work, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(work, "publication.json"), []byte(`{"v":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, work, "publish")
+	runGit(t, work, "push", "origin", "roadmap-state")
+	want := strings.TrimSpace(runGit(t, work, "rev-parse", "HEAD"))
+
+	r := &Reader{repoURL: remote, branch: "roadmap-state", localPath: cache}
+	if err := r.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	files, rev, err := r.ReadFiles("publication.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev != want || string(files["publication.json"]) != `{"v":1}` {
+		t.Fatalf("rev=%s files=%q, want rev %s", rev, files, want)
+	}
+	if got, err := r.Revision(); err != nil || got != want {
+		t.Fatalf("Revision() = %s, %v", got, err)
+	}
+	for _, bad := range []string{"../remote.git/HEAD", ".git/config", "", ".", ".."} {
+		if _, _, err := r.ReadFiles(bad); err == nil {
+			t.Errorf("ReadFiles(%q) was allowed", bad)
+		}
+	}
+	if _, _, err := r.ReadFiles("missing.json"); err == nil {
+		t.Error("a missing file read as present")
+	}
+}

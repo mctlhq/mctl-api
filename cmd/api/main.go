@@ -48,6 +48,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/loki"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/roadmap"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/vault"
@@ -238,6 +239,24 @@ func main() {
 		} else {
 			lifecycleStore = ls
 		}
+	}
+
+	// Roadmap read model (mctl-api#333). A second gitops.Reader on the
+	// generated roadmap-state branch of mctlhq/.github: mctl-api only reads
+	// the published RoadmapPublication, it never runs the evaluator. The
+	// repository is public, so no credential is needed; ROADMAP_STATE_TOKEN
+	// exists for a private fork. ROADMAP_STATE_DISABLED (any value but false/0/no/off) turns it off and
+	// the roadmap endpoints answer 503.
+	var roadmapGit *gitops.Reader
+	var roadmapReader *roadmap.Reader
+	if !killSwitchOn(os.Getenv("ROADMAP_STATE_DISABLED")) {
+		roadmapGit = gitops.NewReader(
+			envOr("ROADMAP_STATE_REPO_URL", "https://github.com/mctlhq/.github.git"),
+			envOr("ROADMAP_STATE_BRANCH", "roadmap-state"),
+			envOr("ROADMAP_STATE_LOCAL_PATH", "/tmp/roadmap-state"),
+			ghtoken.Static(os.Getenv("ROADMAP_STATE_TOKEN")), "", "",
+		)
+		roadmapReader = roadmap.NewReader(roadmapGit)
 	}
 
 	// Model usage / cost ledger (mctl-api#266, ADR-012). Optional — enabled
@@ -565,6 +584,7 @@ func main() {
 		AlertStore:                     alertStore,
 		AgentRegistry:                  agentRegistryStore,
 		Lifecycle:                      lifecycleStore,
+		Roadmap:                        roadmapReader,
 		Usage:                          usageStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
@@ -598,6 +618,11 @@ func main() {
 	ctx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
 	go gitReader.RefreshLoop(ctx, 60*time.Second)
+	if roadmapGit != nil {
+		// The publication changes at most every couple of hours; freshness is
+		// the capture time it carries, not how often this pulls.
+		go roadmapGit.RefreshLoop(ctx, 5*time.Minute)
+	}
 
 	// Close out audit rows the Argo completion webhook cannot reach. The hook's
 	// HMAC secret exists only in the argo-workflows namespace, so operations
@@ -1146,4 +1171,15 @@ func splitCSV(v string) []string {
 		}
 	}
 	return out
+}
+
+// killSwitchOn reads a kill-switch value. It errs toward off: any value
+// except an explicit "false"/"0"/"no"/"off" (or empty) turns the feature off,
+// so "yes" or "disabled" never silently leaves it on.
+func killSwitchOn(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "false", "0", "no", "off":
+		return false
+	}
+	return true
 }

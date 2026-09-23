@@ -134,6 +134,11 @@ docker run -p 8080:8080 mctl-api
 | `OAUTH_PREREGISTERED_CLIENTS` | JSON array of static public OAuth clients for counterparts that cannot register dynamically (the Cloudflare MCP portal): `[{"client_id":"…","client_name":"…","redirect_uris":["https://…"]}]`. Exact redirect match, no secret field, never evicted; a malformed value or an unknown key refuses startup | — | No |
 | `AUDIT_DB_URL` | PostgreSQL connection string (falls back to in-memory). `sslmode=disable` is upgraded to `require`, or `verify-full` when a CNPG CA is mounted. | — | No |
 | `HUMAN_INPUT_DB_URL` | PostgreSQL for the human-input delivery ledger (`POST /api/v1/human-input/{request_id}/response`). Falls back to `AUDIT_DB_URL`; with neither, that endpoint answers 503 (there is no in-memory fallback). The raw answer is kept only until its delivery resolves, or until the request expires. | — | No |
+| `ROADMAP_STATE_REPO_URL` | Repository holding the generated roadmap publication read by `/api/v1/roadmap/*` and the `mctl_get_epic_status` / `mctl_get_ready_work_items` tools. mctl-api only reads it; it never evaluates readiness. | `https://github.com/mctlhq/.github.git` | No |
+| `ROADMAP_STATE_BRANCH` | Branch of the publication. | `roadmap-state` | No |
+| `ROADMAP_STATE_LOCAL_PATH` | Local checkout, refreshed every 5 minutes. | `/tmp/roadmap-state` | No |
+| `ROADMAP_STATE_TOKEN` | Credential for a private publication repository; the default repository is public. | — | No |
+| `ROADMAP_STATE_DISABLED` | Kill switch: any value except `false`/`0`/`no`/`off` leaves the roadmap reader off (routes answer 503). | unset | No |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated Traefik CIDRs/IPs trusted for `X-Forwarded-For` on audit events | — | No |
 | `ALLOW_INSECURE_DB` | Permit `sslmode=disable` (tests/local only) | — | No |
 | `BACKSTAGE_URL` | Backstage catalog URL | — | No |

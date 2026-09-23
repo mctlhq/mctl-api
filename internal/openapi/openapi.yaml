@@ -529,6 +529,45 @@ components:
         received_at:
           type: string
 
+    RoadmapEpic:
+      type: object
+      properties:
+        name: {type: string}
+        lifecycle: {type: string, enum: [proposed, active, paused, completed, archived]}
+        title: {type: string}
+        goal: {type: string}
+        issue:
+          type: object
+          properties:
+            repository: {type: string}
+            number: {type: integer}
+        manifest:
+          type: object
+          properties:
+            path: {type: string}
+            sha256: {type: string}
+    RoadmapProvenance:
+      type: object
+      properties:
+        state_revision:
+          type: string
+          description: The roadmap-state commit this answer was read from.
+        evaluator_revision: {type: string}
+        source:
+          type: object
+          properties:
+            repository: {type: string}
+            ref: {type: string}
+            revision: {type: string}
+        observation:
+          type: object
+          properties:
+            mode: {type: string, enum: [live-capture, synthetic-fixture]}
+            capturedAt: {type: string, format: date-time}
+            apiBase: {type: string}
+        age_seconds:
+          type: integer
+          description: Seconds since observation.capturedAt; absent when the observation has no capture time.
     Error:
       type: object
       properties:
@@ -2135,6 +2174,124 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/roadmap/epics:
+    get:
+      summary: List the epics in the roadmap publication
+      description: |
+        Read-only view of the RoadmapPublication mctlhq/.github publishes to
+        its generated `roadmap-state` branch (mctlhq/.github#119). mctl-api
+        verifies the publication's digests and serves it; it never evaluates
+        readiness. 503 means no publication could be verified: "cannot say",
+        never "nothing is ready".
+      tags: [Roadmap]
+      responses:
+        '200':
+          description: Every published epic with its lifecycle, and the publication's provenance
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  epics:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RoadmapEpic'
+                  provenance:
+                    $ref: '#/components/schemas/RoadmapProvenance'
+        '503':
+          description: No verified roadmap publication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/roadmap/epic-status:
+    get:
+      summary: Status of one roadmap epic
+      description: |
+        The published RoadmapReadySet and RoadmapHealth for one epic, byte for
+        byte, with the epic's lifecycle, title, goal and manifest digest.
+      tags: [Roadmap]
+      parameters:
+        - name: epic
+          in: query
+          required: true
+          schema: {type: string}
+          description: 'Epic name, or its root issue as `owner/repo#N` (URL-encode the `#`).'
+      responses:
+        '200':
+          description: Epic status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  epic:
+                    $ref: '#/components/schemas/RoadmapEpic'
+                  readiness:
+                    type: object
+                    description: The published RoadmapReadySet document for this epic.
+                  health:
+                    type: object
+                    description: The published RoadmapHealth document for this epic.
+                  provenance:
+                    $ref: '#/components/schemas/RoadmapProvenance'
+        '400':
+          description: Missing epic
+        '404':
+          description: No epic by that name or root issue in the publication
+        '503':
+          description: No verified roadmap publication
+  /api/v1/roadmap/ready:
+    get:
+      summary: Roadmap work items ready now
+      description: |
+        Ready-set items the publication lists as ready, verbatim, grouped by
+        epic. Without `epic`, every epic whose lifecycle is `active`.
+        Choosing among several ready items is a priority decision this
+        endpoint does not make.
+      tags: [Roadmap]
+      parameters:
+        - name: epic
+          in: query
+          required: false
+          schema: {type: string}
+          description: Epic name or root issue; omit for every active epic.
+        - name: required_only
+          in: query
+          required: false
+          schema: {type: boolean, default: true}
+      responses:
+        '200':
+          description: Ready work items
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  required_only: {type: boolean}
+                  epics:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        epic:
+                          $ref: '#/components/schemas/RoadmapEpic'
+                        source:
+                          type: object
+                          description: The epic's observation block from the ready set.
+                        items:
+                          type: array
+                          items:
+                            type: object
+                            description: A published ready-set item.
+                  provenance:
+                    $ref: '#/components/schemas/RoadmapProvenance'
+        '400':
+          description: Invalid required_only
+        '404':
+          description: No epic by that name or root issue in the publication
+        '503':
+          description: No verified roadmap publication
   /api/v1/human-input:
     get:
       summary: List human-input requests the caller may answer
@@ -2435,5 +2592,7 @@ tags:
     description: Platform operation registry and execution
   - name: Platform Skills
     description: Platform-wide skill catalog and tenant bindings
+  - name: Roadmap
+    description: Read-only roadmap publication (epic status and ready work items)
   - name: Agent Registry
     description: mctl-agents AgentManifest versions, releases, and promote/rollback

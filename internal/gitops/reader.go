@@ -759,6 +759,46 @@ func (r *Reader) LastSync() time.Time {
 	return r.lastSync
 }
 
+// Revision returns the commit the checkout is on.
+func (r *Reader) Revision() (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.revisionLocked()
+}
+
+func (r *Reader) revisionLocked() (string, error) {
+	out, err := r.gitOutput(nil, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("reading checkout revision: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ReadFiles reads top-level files of the checkout together with the commit
+// they came from. Holding the read lock across all of them means a refresh
+// cannot land in between: the files and the revision are one checkout.
+// Names are plain file names; anything with a path separator is refused.
+func (r *Reader) ReadFiles(names ...string) (map[string][]byte, string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rev, err := r.revisionLocked()
+	if err != nil {
+		return nil, "", err
+	}
+	out := make(map[string][]byte, len(names))
+	for _, name := range names {
+		if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
+			return nil, "", fmt.Errorf("invalid file name %q", name)
+		}
+		data, err := os.ReadFile(filepath.Join(r.localPath, name))
+		if err != nil {
+			return nil, "", err
+		}
+		out[name] = data
+	}
+	return out, rev, nil
+}
+
 // ListPlatformSkills reads all platform-wide skills from
 // platform-gitops/platform-skills/catalog.
 func (r *Reader) ListPlatformSkills() ([]PlatformSkill, error) {
