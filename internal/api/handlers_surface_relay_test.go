@@ -89,12 +89,19 @@ func TestSurfaceRelay_FailsClosed(t *testing.T) {
 		{"POST", "/api/v1/work-items"},
 		{"GET", "/api/v1/work-items/wi_x"},
 		{"POST", "/api/v1/work-items/wi_x/intents"},
-		{"POST", "/api/v1/work-items/wi_x/resume"},
 		{"POST", "/api/v1/work-items/wi_x/surface-refs"},
+		{"POST", "/api/v1/work-items/wi_x/execution-requests"},
+		{"GET", "/api/v1/work-items/wi_x/execution-requests"},
+		{"GET", "/api/v1/work-items/wi_x/execution-requests/xr_x"},
 	} {
 		if code, body := e.do("telegram", route[0], route[1], nil); code != http.StatusForbidden || body["code"] != sidCodeRelayRequired {
 			t.Errorf("%s %s without an actor = %d %v", route[0], route[1], code, body)
 		}
+	}
+	// Resume declares engine identity, so it is no relay route at all
+	// (mctl-api#368): a surface requests execution instead.
+	if code, body := e.do("telegram", "POST", "/api/v1/work-items/wi_x/resume", nil, SurfaceActorHeader, "4242"); code != http.StatusForbidden || body["code"] != sidCodeRouteNotAllowed {
+		t.Errorf("relayed resume = %d %v", code, body)
 	}
 	// Redeem is not a relay route: the surface acts as itself there, so an
 	// already-linked actor gains nothing — the challenge is still checked.

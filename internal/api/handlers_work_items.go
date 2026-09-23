@@ -157,9 +157,8 @@ func decodeWorkItemBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 
 // decodeWorkItemBodyLimit is decodeWorkItemBody with its own size bound.
 func decodeWorkItemBodyLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) bool {
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
-	if err != nil {
-		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "request body too large or unreadable", nil)
+	raw, ok := readWorkItemBody(w, r, limit)
+	if !ok {
 		return false
 	}
 	var keys map[string]json.RawMessage
@@ -186,6 +185,23 @@ func decodeWorkItemBodyLimit(w http.ResponseWriter, r *http.Request, dst any, li
 		return false
 	}
 	return true
+}
+
+// readWorkItemBody reads a body of at most limit bytes, answering 400 when it
+// cannot.
+func readWorkItemBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "request body too large or unreadable", nil)
+		return nil, false
+	}
+	return raw, true
+}
+
+// restoreBody puts a body already read back on the request, for the next
+// reader.
+func restoreBody(r *http.Request, raw []byte) {
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 }
 
 // mutationFor builds the store Mutation: actor from authentication, key from

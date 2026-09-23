@@ -80,6 +80,12 @@ func workItemsRouter(h *Handlers) chi.Router {
 	r.Get("/api/v1/action-approvals/{id}", h.GetActionApproval)
 	r.Post("/api/v1/action-approvals/{id}/decision", h.DecideActionApproval)
 	r.Post("/api/v1/action-approvals/{id}/consume", h.ConsumeActionApproval)
+	r.Post("/api/v1/work-items/{id}/execution-requests", h.CreateExecutionRequest)
+	r.Get("/api/v1/work-items/{id}/execution-requests", h.ListExecutionRequests)
+	r.Get("/api/v1/work-items/{id}/execution-requests/{request_id}", h.GetExecutionRequest)
+	r.Post("/api/v1/execution-requests/claim", h.ClaimExecutionRequest)
+	r.Post("/api/v1/execution-requests/{request_id}/fulfil", h.FulfilExecutionRequest)
+	r.Post("/api/v1/execution-requests/{request_id}/reject", h.RejectExecutionRequest)
 	return r
 }
 
@@ -143,7 +149,9 @@ func code(res wiResponse) string {
 func TestWorkItems_UnconfiguredStoreAnswers503(t *testing.T) {
 	h := &Handlers{}
 	r := workItemsRouter(h)
-	for _, rt := range [][2]string{{"GET", "/api/v1/work-items"}, {"POST", "/api/v1/work-items"}, {"GET", "/api/v1/work-items/wi_x"}, {"POST", "/api/v1/work-items/wi_x/resume"}} {
+	for _, rt := range [][2]string{{"GET", "/api/v1/work-items"}, {"POST", "/api/v1/work-items"}, {"GET", "/api/v1/work-items/wi_x"}, {"POST", "/api/v1/work-items/wi_x/resume"},
+		{"POST", "/api/v1/work-items/wi_x/execution-requests"}, {"GET", "/api/v1/work-items/wi_x/execution-requests"},
+		{"POST", "/api/v1/execution-requests/claim"}, {"POST", "/api/v1/execution-requests/xr_x/fulfil"}} {
 		req := httptest.NewRequest(rt[0], rt[1], strings.NewReader("{}"))
 		req = req.WithContext(auth.WithUser(req.Context(), auth.NewGitHubUser("alice", []string{"acme"})))
 		rec := httptest.NewRecorder()
