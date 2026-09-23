@@ -102,9 +102,10 @@ const (
 // surface-actor header from anyone else.
 //
 // Relay resolves here, in one place, rather than per route: a relay route
-// can then never be reached by a surface principal as itself. The gate runs
-// before the rate limiters, whose keys trust the header only because it has
-// passed here.
+// can then never be reached by a surface principal as itself. The
+// header-keyed rate limiters run after the gate and trust the header only
+// because it has passed here; the per-surface ceiling deliberately runs
+// before it (see router.go).
 func (h *Handlers) surfacePrincipalGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
@@ -163,30 +164,7 @@ func (h *Handlers) surfacePrincipalGate(next http.Handler) http.Handler {
 func (h *Handlers) relaySubject(w http.ResponseWriter, r *http.Request, acting *auth.User) (*auth.User, bool) {
 	surface, _ := acting.Surface()
 	externalID := r.Header.Get(SurfaceActorHeader)
-	if externalID == "" {
-		writeErrorCode(w, http.StatusForbidden, sidCodeRelayRequired,
-			"a surface principal must name the linked actor in "+SurfaceActorHeader, nil)
-		return nil, false
-	}
-	if h.opts.SurfaceIdentities == nil {
-		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "surface identity store not configured", nil)
-		return nil, false
-	}
-	link, err := h.opts.SurfaceIdentities.Resolve(r.Context(), surface, externalID)
-	var code, msg string
-	switch {
-	case errors.Is(err, surfaceid.ErrLinkRevoked):
-		code, msg = sidCodeLinkRevoked, "the link for this "+surface+" identity was revoked"
-	case errors.Is(err, surfaceid.ErrLinkExpired):
-		code, msg = sidCodeLinkExpired, "the link for this "+surface+" identity expired"
-	case errors.Is(err, surfaceid.ErrLinkNotFound):
-		code, msg = sidCodeNotFound, "no verified link for this "+surface+" identity"
-	case err != nil:
-		slog.Error("surface relay resolve failed", "error", err)
-		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not resolve the surface identity", nil)
-		return nil, false
-	}
-	if code != "" {
+	refuse := func(code, msg string) (*auth.User, bool) {
 		h.logAudit(r, audit.Entry{
 			UserID: acting.ID, Operation: "surface_identity.relay_refused", Status: "failed",
 			RiskLevel:  string(operations.RiskMedium),
@@ -195,21 +173,42 @@ func (h *Handlers) relaySubject(w http.ResponseWriter, r *http.Request, acting *
 		writeErrorCode(w, http.StatusForbidden, code, msg, nil)
 		return nil, false
 	}
-	login := strings.TrimPrefix(link.Principal, "github:")
-	var groups []string
-	if h.opts.TenantResolver != nil {
-		g, err := h.opts.TenantResolver.GetTenantsForUser(login)
-		if err != nil {
-			slog.Warn("surface relay: tenant lookup failed; relaying with no tenant access", "subject", link.Principal, "error", err)
-		}
-		groups = g
+	if externalID == "" {
+		return refuse(sidCodeRelayRequired, "a surface principal must name the linked actor in "+SurfaceActorHeader)
 	}
-	subject := auth.NewRelayedUser(login, groups, acting)
-	if subject == nil || link.Principal != "github:"+login {
-		writeErrorCode(w, http.StatusForbidden, sidCodeNotFound, "the link does not name a GitHub principal", nil)
+	if h.opts.SurfaceIdentities == nil {
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "surface identity store not configured", nil)
 		return nil, false
 	}
-	return subject, true
+	link, err := h.opts.SurfaceIdentities.Resolve(r.Context(), surface, externalID)
+	switch {
+	case errors.Is(err, surfaceid.ErrLinkRevoked):
+		return refuse(sidCodeLinkRevoked, "the link for this "+surface+" identity was revoked")
+	case errors.Is(err, surfaceid.ErrLinkExpired):
+		return refuse(sidCodeLinkExpired, "the link for this "+surface+" identity expired")
+	case errors.Is(err, surfaceid.ErrLinkNotFound):
+		return refuse(sidCodeNotFound, "no verified link for this "+surface+" identity")
+	case err != nil:
+		slog.Error("surface relay resolve failed", "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not resolve the surface identity", nil)
+		return nil, false
+	}
+	login, isGitHub := strings.CutPrefix(link.Principal, "github:")
+	if !isGitHub || login == "" {
+		return refuse(sidCodeNotFound, "the link does not name a GitHub principal")
+	}
+	var groups []string
+	if h.opts.TenantResolver != nil {
+		// Same as authentication: a failed lookup grants no tenant, even
+		// if the resolver returned a partial list alongside the error.
+		if g, err := h.opts.TenantResolver.GetTenantsForUser(login); err != nil {
+			slog.Warn("surface relay: tenant lookup failed; relaying with no tenant access", "subject", link.Principal, "error", err)
+		} else {
+			groups = g
+		}
+	}
+	// Never nil here: acting is a surface principal and login is set.
+	return auth.NewRelayedUser(login, groups, acting), true
 }
 
 // humanPrincipal is the principal a caller may link: a GitHub login proven

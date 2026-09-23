@@ -330,3 +330,45 @@ func TestSurfaceIdentity_ReviewFollowUps(t *testing.T) {
 		t.Fatalf("revoked_by = %q, %v", by, err)
 	}
 }
+
+// #359 review: a failed tenant lookup grants nothing even with a partial
+// list; every 403 relay refusal is audited, including a missing header and
+// a link that does not name a GitHub principal; surface-refs relays.
+func TestSurfaceRelay_ReviewFollowUps(t *testing.T) {
+	e := newSIDEnv(t)
+	e.link("carol", "telegram", "3333")
+	if code, body := e.relayCreate("telegram", "3333", nil); code != http.StatusForbidden {
+		t.Errorf("relay after a failed tenant lookup = %d %v", code, body)
+	}
+
+	if _, err := e.pool.Exec(context.Background(), `INSERT INTO surface_identity_links
+		(id, surface, external_id, principal, challenge_id, created_at) VALUES ('sil_dex','telegram','9191','dex:bob','sic_x',now())`); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := e.relayCreate("telegram", "9191", nil); code != http.StatusForbidden || body["code"] != sidCodeNotFound {
+		t.Errorf("relay through a non-GitHub link = %d %v", code, body)
+	}
+	e.relayCreate("telegram", "", nil)
+	reasons := map[string]bool{}
+	for _, entry := range e.audit.List(100) {
+		if entry.Operation == "surface_identity.relay_refused" {
+			reasons[entry.Parameters["external_id"]+"/"+entry.Parameters["reason"]] = true
+		}
+	}
+	if !reasons["9191/"+sidCodeNotFound] || !reasons["/"+sidCodeRelayRequired] {
+		t.Errorf("relay_refused audit = %v", reasons)
+	}
+
+	e.link("alice", "telegram", "4242")
+	_, body := e.relayCreate("telegram", "4242", nil)
+	id := body["work_item"].(map[string]any)["id"].(string)
+	if code, body := e.do("telegram", "POST", "/api/v1/work-items/"+id+"/surface-refs",
+		map[string]any{"external_id": "chat-9"}, SurfaceActorHeader, "4242"); code != http.StatusCreated {
+		t.Fatalf("relayed surface-ref = %d %v", code, body)
+	}
+	var surface, acting string
+	if err := e.pool.QueryRow(context.Background(), `SELECT surface, acting_principal FROM work_item_events
+		WHERE work_item_id=$1 AND kind='surface_linked'`, id).Scan(&surface, &acting); err != nil || surface != "telegram" || acting != "surface:telegram" {
+		t.Fatalf("surface_linked event = %q %q %v", surface, acting, err)
+	}
+}

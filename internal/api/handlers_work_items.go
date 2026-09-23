@@ -630,6 +630,11 @@ func (h *Handlers) LinkWorkItemSurface(w http.ResponseWriter, r *http.Request) {
 	if !decodeWorkItemBody(w, r, &body) {
 		return
 	}
+	if relay, ok := user.RelaySurface(); ok && body.Surface == "" {
+		// A relayed reference is on the relaying surface; mutationFor
+		// refuses any other it claims.
+		body.Surface = relay
+	}
 	if body.Surface == "" {
 		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "surface is required", nil)
 		return

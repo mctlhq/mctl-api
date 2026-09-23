@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -49,7 +50,13 @@ type sidEnv struct {
 // from.
 type sidTenants map[string][]string
 
-func (s sidTenants) GetTenantsForUser(login string) ([]string, error) { return s[login], nil }
+func (s sidTenants) GetTenantsForUser(login string) ([]string, error) {
+	if login == "carol" {
+		// A resolver that fails but still hands back a partial list.
+		return s[login], errors.New("gitops read timed out")
+	}
+	return s[login], nil
+}
 
 // newSIDEnv builds the real router with a stand-in auth middleware that
 // picks the caller from the X-Test-User header, so the surface gate is
@@ -89,6 +96,7 @@ func newSIDEnv(t *testing.T) *sidEnv {
 	e := &sidEnv{t: t, audit: audit.NewLogger(), pool: pool, tenant: tenant, users: map[string]*auth.User{
 		"alice":    auth.NewGitHubUser("alice", []string{"acme"}),
 		"bob":      auth.NewGitHubUser("bob", []string{"acme"}),
+		"carol":    auth.NewGitHubUser("carol", nil),
 		"root":     auth.NewGitHubUser("root", []string{"admins"}),
 		"dex":      {ID: "alice", Groups: []string{"acme"}},
 		"service":  auth.NewServiceUser(),
@@ -108,7 +116,7 @@ func newSIDEnv(t *testing.T) *sidEnv {
 	e.router = NewRouter(Options{
 		AuthMiddleware: fakeAuth, SurfaceIdentities: store, WorkItems: items, AuditLog: e.audit,
 		// alice is an admin in her own right; relaying must not carry it.
-		TenantResolver: sidTenants{"alice": {tenant, "admins"}, "bob": {"acme"}},
+		TenantResolver: sidTenants{"alice": {tenant, "admins"}, "bob": {"acme"}, "carol": {tenant}},
 	})
 	return e
 }
