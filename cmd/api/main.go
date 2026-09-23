@@ -260,6 +260,14 @@ func main() {
 		)
 		roadmapReader = roadmap.NewReader(roadmapGit)
 	}
+	// ROADMAP_WAVE_MAX_AGE (mctl-api#334): how old the latest publication may
+	// be when a wave executes. Invalid turns wave execution off rather than
+	// running it against a bound nobody meant.
+	roadmapWaveMaxAge, err := parseWaveMaxAge(os.Getenv("ROADMAP_WAVE_MAX_AGE"))
+	if err != nil {
+		slog.Error("invalid ROADMAP_WAVE_MAX_AGE; roadmap wave execution is off", "error", err)
+		roadmapWaveMaxAge = -1
+	}
 
 	// Model usage / cost ledger (mctl-api#266, ADR-012). Optional — enabled
 	// when USAGE_DB_URL or AUDIT_DB_URL is set. A nil store makes the usage
@@ -644,6 +652,7 @@ func main() {
 		AgentRegistry:                  agentRegistryStore,
 		Lifecycle:                      lifecycleStore,
 		Roadmap:                        roadmapReader,
+		RoadmapWaveMaxAge:              roadmapWaveMaxAge,
 		Usage:                          usageStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
@@ -1262,6 +1271,23 @@ func parseLinkTTL(v string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("SURFACE_LINK_TTL must be positive, got %s", v)
+	}
+	return d, nil
+}
+
+// parseWaveMaxAge reads ROADMAP_WAVE_MAX_AGE: empty means the default, any
+// other value must be a positive Go duration.
+func parseWaveMaxAge(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return mctlapi.DefaultRoadmapWaveMaxAge, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, err
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("ROADMAP_WAVE_MAX_AGE must be positive, got %s", v)
 	}
 	return d, nil
 }
