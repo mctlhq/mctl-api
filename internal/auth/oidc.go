@@ -63,6 +63,13 @@ type User struct {
 	// ("surface:telegram"), authenticated by that surface's own token
 	// (mctl-api#350). Unexported for the same reason as service.
 	surface string
+
+	// actingPrincipal and relaySurface are set only on a relayed subject:
+	// the human a surface principal spoke for through a verified
+	// SurfaceIdentityLink. The request is attributed to the human (ID), and
+	// the surface that carried it is kept, never collapsed into it.
+	actingPrincipal string
+	relaySurface    string
 }
 
 // NewGitHubUser builds a principal whose ID is a GitHub-verified login.
@@ -249,6 +256,41 @@ func (u *User) Surface() (string, bool) {
 		return "", false
 	}
 	return u.surface, true
+}
+
+// NewRelayedUser builds the subject a surface principal relays for, from a
+// verified link. The subject is the linked GitHub login with its tenant
+// groups; relaying never confers admin, so "admins" is dropped. Returns nil
+// unless acting is a surface principal.
+func NewRelayedUser(login string, groups []string, acting *User) *User {
+	surface, ok := acting.Surface()
+	if !ok || login == "" {
+		return nil
+	}
+	kept := make([]string, 0, len(groups))
+	for _, g := range groups {
+		if g != "admins" {
+			kept = append(kept, g)
+		}
+	}
+	return &User{ID: login, Groups: kept, githubLogin: true, actingPrincipal: acting.ID, relaySurface: surface}
+}
+
+// ActingPrincipal is the surface principal that carried a relayed request,
+// or "" when the caller acted directly.
+func (u *User) ActingPrincipal() string {
+	if u == nil {
+		return ""
+	}
+	return u.actingPrincipal
+}
+
+// RelaySurface is the surface a relayed request came through.
+func (u *User) RelaySurface() (string, bool) {
+	if u == nil || u.relaySurface == "" {
+		return "", false
+	}
+	return u.relaySurface, true
 }
 
 // surfaceTokens reads the configured surface tokens. A token that is short,

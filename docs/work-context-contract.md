@@ -123,9 +123,12 @@ may live in different databases.
   for reply routing), `actor_external_id`, `first_seen_at`, `last_seen_at`.
   Unique per `(work_item_id, surface, external_id)`.
 - **`SurfaceIdentityLink`** — the only way a surface-native ID (a Telegram
-  user ID, an MCP client ID) resolves to an mctl-api principal: `surface`,
-  `external_id`, `principal`, `linked_at`, `linked_by`. Created only by an
-  authenticated call from that principal.
+  user ID, a portal subject) resolves to an mctl-api principal: `surface`,
+  `external_id`, `principal`, `created_at`, `expires_at`, `revoked_at`.
+  Made by a possession proof that neither side can complete alone: the
+  human requests a one-time challenge, and that surface's own principal
+  redeems it naming the identity it observed (mctl-api#350, see
+  "Surface relay" below).
 
 Every payload returned by the work-item API carries
 `"schema_version": "workitem/v1"`.
@@ -303,7 +306,6 @@ routes join the existing write-side rate-limit group (20/min) alongside
 | `POST /api/v1/work-items/{id}/approvals/{approval_id}/decision`        | decide a pending approval |
 | `POST /api/v1/work-items/{id}/surface-refs`                            | correlate a surface reference |
 | `GET /api/v1/work-items/{id}/events`                                   | lifecycle history |
-| `POST /api/v1/work-items/surface-identities`                           | link the caller's principal to a surface-native ID |
 
 If the work-items store is not configured (`WORK_ITEMS_DB_URL` and
 `AUDIT_DB_URL` both unset, `WORK_ITEMS_DISABLED` set, or store init failed),
@@ -372,14 +374,40 @@ Built (mctl-api#349):
   `internal/openapi/openapi.yaml`, `README.md` and `.env.example` (step 4, and
   the wiring part of step 3).
 
-Not built yet, each tracked as its own issue (#352 snapshots, #353 approvals and retention, #350 surface identities):
+### Surface relay (mctl-api#350)
+
+Each surface has its own service principal (`surface:telegram`,
+`surface:portal`, tokens `MCTL_SURFACE_*_TOKEN`): non-admin, no tenant,
+distinct from `mctl-agent`, and confined to an allowlist of routes. There
+is no generic on-behalf-of: relay is opt-in per route.
+
+| Route | Who | |
+|---|---|---|
+| `POST /api/v1/surface-identities/challenges` | the human (GitHub login) | one-time code, 10 min, bound to the human and the surface; stored hashed |
+| `POST /api/v1/surface-identities/redeem` | that surface's principal | `{"code"}` + `X-MCTL-Surface-Actor: <external id>` → link |
+| `GET /api/v1/surface-identities`, `POST .../{id}/revoke` | the human, or a human admin | |
+
+On a relay route the surface principal names the end user in
+`X-MCTL-Surface-Actor`; mctl-api resolves the verified link for (its own
+surface, that id) and runs the handler as the linked human, with its tenant
+groups and never admin. An unknown, revoked or expired link, another
+surface's link, or a missing header answers 403 (`link_not_found`,
+`link_revoked`, `link_expired`, `relay_required`); any other caller sending
+the header gets 400. Relay routes: `GET /human-input`,
+`GET /human-input/{id}`, `POST /human-input/{id}/response`,
+`POST /work-items`, `GET /work-items/{id}`,
+`POST /work-items/{id}/intents|resume|surface-refs`. A relayed request's
+`surface` / `origin_surface` is forced to the relaying surface (claiming
+another is 400). Both identities are kept: work-item events and audit rows
+carry the human as actor and `acting_principal: surface:<name>`.
+
+Not built yet, each tracked as its own issue (#352 snapshots, #353 approvals and retention):
 
 - `GET|POST .../executions/{execution_id}/snapshots` (`ContextSnapshot`).
 - `GET .../approvals`, `POST .../approvals/{approval_id}/decision` and the
   projection to `DevLoopClient.SignalApprove` (step 3).
-- `POST /api/v1/work-items/surface-identities` (`SurfaceIdentityLink`),
-  mctl-api#350. Until it lands, a surface acts only as its own authenticated
-  principal; `actor_external_id` on a surface reference is correlation only.
+- `actor_external_id` on a surface reference stays correlation only; the
+  relayed subject comes from the link, never from a body field.
 - The retention sweeper and `WORKITEM_SURFACE_RETENTION_DAYS` /
   `WORKITEM_RETENTION_DAYS` (step 3).
 - MCP tool wrappers and the first surface adapter (step 5).

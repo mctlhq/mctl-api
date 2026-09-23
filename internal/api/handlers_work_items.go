@@ -194,10 +194,19 @@ func mutationFor(w http.ResponseWriter, r *http.Request, user *auth.User, op, it
 		}
 		key = bodyKey
 	}
+	// A relayed request speaks for its surface and no other.
+	if relay, ok := user.RelaySurface(); ok {
+		if surface != "" && surface != relay {
+			writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid,
+				"a request relayed by surface:"+relay+" cannot claim surface "+strconv.Quote(surface), nil)
+			return workitems.Mutation{}, false
+		}
+		surface = relay
+	}
 	if surface == "" {
 		surface = defaultWorkItemSurface
 	}
-	m := workitems.Mutation{Actor: principalOf(user), Surface: surface, IdempotencyKey: key}
+	m := workitems.Mutation{Actor: principalOf(user), ActingPrincipal: user.ActingPrincipal(), Surface: surface, IdempotencyKey: key}
 	if meta, ok := ClientMetaFromContext(r.Context()); ok {
 		m.RequestID = truncateRequestID(meta.RequestID)
 	}
@@ -233,6 +242,9 @@ func requestDigestInput(body any) ([]byte, error) {
 // ids (contract "Retention and privacy").
 func (h *Handlers) auditWorkItem(r *http.Request, user *auth.User, op, itemID, tenant string, extra map[string]string) {
 	params := map[string]string{"work_item_id": itemID, "tenant": tenant, "actor": principalOf(user)}
+	if acting := user.ActingPrincipal(); acting != "" {
+		params["acting_principal"] = acting
+	}
 	for k, v := range extra {
 		params[k] = v
 	}
@@ -312,7 +324,13 @@ func (h *Handlers) CreateWorkItem(w http.ResponseWriter, r *http.Request) {
 		body.Visibility = workitems.VisibilityTenant
 	}
 	if body.OriginSurface == "" {
-		body.OriginSurface = defaultWorkItemSurface
+		// A relayed create originates on its surface; mutationFor refuses
+		// any other it claims.
+		if relay, ok := user.RelaySurface(); ok {
+			body.OriginSurface = relay
+		} else {
+			body.OriginSurface = defaultWorkItemSurface
+		}
 	}
 	m, ok := mutationFor(w, r, user, "create", body.Tenant, body.OriginSurface, body.IdempotencyKey, body)
 	if !ok {

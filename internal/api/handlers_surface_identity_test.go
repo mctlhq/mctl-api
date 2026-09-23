@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,6 +33,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 type sidEnv struct {
@@ -40,7 +42,14 @@ type sidEnv struct {
 	audit  *audit.Logger
 	pool   *pgxpool.Pool
 	users  map[string]*auth.User
+	tenant string
 }
+
+// sidTenants is the TenantResolver the relay reads the subject's groups
+// from.
+type sidTenants map[string][]string
+
+func (s sidTenants) GetTenantsForUser(login string) ([]string, error) { return s[login], nil }
 
 // newSIDEnv builds the real router with a stand-in auth middleware that
 // picks the caller from the X-Test-User header, so the surface gate is
@@ -65,8 +74,19 @@ func newSIDEnv(t *testing.T) *sidEnv {
 		_, _ = pool.Exec(ctx, "DELETE FROM surface_identity_challenges")
 	}
 	wipe()
-	t.Cleanup(func() { wipe(); pool.Close(); store.Close() })
-	e := &sidEnv{t: t, audit: audit.NewLogger(), pool: pool, users: map[string]*auth.User{
+	items, err := workitems.NewStore(ctx, connStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant := fmt.Sprintf("sid-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		wipe()
+		_, _ = pool.Exec(ctx, `DELETE FROM work_items WHERE tenant = $1`, tenant)
+		pool.Close()
+		store.Close()
+		items.Close()
+	})
+	e := &sidEnv{t: t, audit: audit.NewLogger(), pool: pool, tenant: tenant, users: map[string]*auth.User{
 		"alice":    auth.NewGitHubUser("alice", []string{"acme"}),
 		"bob":      auth.NewGitHubUser("bob", []string{"acme"}),
 		"root":     auth.NewGitHubUser("root", []string{"admins"}),
@@ -85,7 +105,11 @@ func newSIDEnv(t *testing.T) *sidEnv {
 			next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), u)))
 		})
 	}
-	e.router = NewRouter(Options{AuthMiddleware: fakeAuth, SurfaceIdentities: store, AuditLog: e.audit})
+	e.router = NewRouter(Options{
+		AuthMiddleware: fakeAuth, SurfaceIdentities: store, WorkItems: items, AuditLog: e.audit,
+		// alice is an admin in her own right; relaying must not carry it.
+		TenantResolver: sidTenants{"alice": {tenant, "admins"}, "bob": {"acme"}},
+	})
 	return e
 }
 
@@ -226,8 +250,10 @@ func TestSurfaceIdentity_GateConfinesSurfacePrincipals(t *testing.T) {
 			{"POST", "/api/v1/surface-identities/challenges"},
 			{"POST", "/api/v1/surface-identities/sil_x/revoke"},
 			{"GET", "/api/v1/whoami"},
-			{"POST", "/api/v1/work-items"},
-			{"GET", "/api/v1/human-input"},
+			{"GET", "/api/v1/work-items"},
+			{"PATCH", "/api/v1/work-items/wi_x"},
+			{"POST", "/api/v1/work-items/wi_x/executions"},
+			{"GET", "/api/v1/work-items/wi_x/events"},
 		} {
 			if code, body := e.do(who, route[0], route[1], nil); code != http.StatusForbidden || body["code"] != "surface_route_not_allowed" {
 				t.Errorf("%s %s %s = %d %v", who, route[0], route[1], code, body)

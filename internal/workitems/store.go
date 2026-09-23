@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS work_item_requests (
 -- Additive columns for databases created by an earlier revision.
 ALTER TABLE work_item_create_requests ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT '';
 ALTER TABLE work_item_requests ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS acting_principal TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS work_item_create_requests_item ON work_item_create_requests (work_item_id);
 `
 
@@ -333,10 +334,10 @@ func appendEvent(ctx context.Context, tx pgx.Tx, id, kind, from, to string, m Mu
 		raw = b
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO work_item_events
-		(work_item_id, seq, kind, from_state, to_state, actor_principal, surface, request_id, detail, created_at)
+		(work_item_id, seq, kind, from_state, to_state, actor_principal, acting_principal, surface, request_id, detail, created_at)
 		VALUES ($1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM work_item_events WHERE work_item_id=$1),
-		        $2,$3,$4,$5,$6,$7,$8,$9)`,
-		id, kind, from, to, m.Actor, m.Surface, m.RequestID, raw, at)
+		        $2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		id, kind, from, to, m.Actor, m.ActingPrincipal, m.Surface, m.RequestID, raw, at)
 	if err != nil {
 		return fmt.Errorf("workitems: append event: %w", err)
 	}
@@ -818,7 +819,7 @@ func (s *Store) LinkSurface(ctx context.Context, in SurfaceRefInput) (*SurfaceRe
 // answers an empty list, not ErrNotFound, so the caller Gets the item first.
 func (s *Store) Events(ctx context.Context, itemID string) ([]Event, error) {
 	rows, err := s.pool.Query(ctx, `SELECT work_item_id, seq, kind, from_state, to_state, actor_principal,
-			surface, request_id, detail, created_at
+			acting_principal, surface, request_id, detail, created_at
 		FROM work_item_events WHERE work_item_id=$1 ORDER BY seq`, itemID)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: events: %w", err)
@@ -828,7 +829,7 @@ func (s *Store) Events(ctx context.Context, itemID string) ([]Event, error) {
 	for rows.Next() {
 		var e Event
 		if err := rows.Scan(&e.WorkItemID, &e.Seq, &e.Kind, &e.FromState, &e.ToState, &e.ActorPrincipal,
-			&e.Surface, &e.RequestID, &e.Detail, &e.CreatedAt); err != nil {
+			&e.ActingPrincipal, &e.Surface, &e.RequestID, &e.Detail, &e.CreatedAt); err != nil {
 			return nil, fmt.Errorf("workitems: events: %w", err)
 		}
 		e.CreatedAt = e.CreatedAt.UTC()

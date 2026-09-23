@@ -13,9 +13,13 @@ import (
 // authenticated principal the HTTP layer derived; the store records it and
 // never looks for one anywhere else.
 type Mutation struct {
-	Actor     string
-	Surface   string
-	RequestID string
+	Actor string
+	// ActingPrincipal is the surface principal that relayed the request for
+	// Actor (mctl-api#350), or "" when Actor acted directly. Recorded on the
+	// event, never used for authorization.
+	ActingPrincipal string
+	Surface         string
+	RequestID       string
 	// IdempotencyKey deduplicates the request: per tenant for Create, per
 	// work item for everything else. RequestHash is the digest of the
 	// request the key was first used with. The same key with a different

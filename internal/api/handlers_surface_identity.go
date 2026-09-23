@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -64,22 +65,47 @@ const (
 	sidMaxBodyBytes         = 4 << 10
 )
 
-// surfaceRoutes are the only routes a surface principal may call. Anything
-// else answers 403 before any handler runs: a surface credential is a narrow
-// relay capability, not an API key.
-var surfaceRoutes = []struct {
+// surfaceRoute is one route a surface principal may call. relay routes run
+// as the linked human (the subject), never as the surface principal; the
+// rest run as the surface principal itself.
+type surfaceRoute struct {
 	method  string
 	pattern *regexp.Regexp
-}{
-	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-identities/redeem$`)},
+	relay   bool
 }
 
-// surfacePrincipalGate confines surface principals to surfaceRoutes and
-// refuses the surface-actor header from anyone else.
+// surfaceRoutes are the only routes a surface principal may call. Anything
+// else answers 403 before any handler runs: a surface credential is a narrow
+// relay capability, not an API key. Relay is opt-in per route, here.
+var surfaceRoutes = []surfaceRoute{
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-identities/redeem$`), false},
+	// Human input (mctl-api#261): see and answer what the linked human may.
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/human-input$`), true},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/human-input/[^/]+$`), true},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/human-input/[^/]+/response$`), true},
+	// Work items (workitem/v1): the surface operations of the contract.
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items$`), true},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+$`), true},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/intents$`), true},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/resume$`), true},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/surface-refs$`), true},
+}
+
+const (
+	sidCodeRelayRequired = "relay_required"
+	sidCodeLinkRevoked   = "link_revoked"
+	sidCodeLinkExpired   = "link_expired"
+)
+
+// surfacePrincipalGate confines surface principals to surfaceRoutes, turns a
+// relay route's surface principal into the linked human, and refuses the
+// surface-actor header from anyone else.
 //
-// It runs before the rate limiters, whose keys trust the header only
-// because it has passed here.
-func surfacePrincipalGate(next http.Handler) http.Handler {
+// Relay resolves here, in one place, rather than per route: a relay route
+// can then never be reached by a surface principal as itself. The gate runs
+// before the rate limiters, whose keys trust the header only because it has
+// passed here.
+func (h *Handlers) surfacePrincipalGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
 		if user == nil {
@@ -97,28 +123,95 @@ func surfacePrincipalGate(next http.Handler) http.Handler {
 			return
 		}
 		for _, route := range surfaceRoutes {
-			if r.Method == route.method && route.pattern.MatchString(r.URL.Path) {
-				// The rate limiters key on this value: it must be one of
-				// the surface's own ids, not arbitrary bytes.
-				if actor := r.Header.Get(SurfaceActorHeader); actor != "" && !surfaceid.ValidExternalID(surface, actor) {
-					writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid,
-						SurfaceActorHeader+" is not a valid "+surface+" identity", nil)
-					return
-				}
+			if r.Method != route.method || !route.pattern.MatchString(r.URL.Path) {
+				continue
+			}
+			// The rate limiters key on this value: it must be one of the
+			// surface's own ids, not arbitrary bytes.
+			if actor := r.Header.Get(SurfaceActorHeader); actor != "" && !surfaceid.ValidExternalID(surface, actor) {
+				writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid,
+					SurfaceActorHeader+" is not a valid "+surface+" identity", nil)
+				return
+			}
+			if !route.relay {
+				// Redeem: the surface acts as itself, naming the identity
+				// it observed.
 				next.ServeHTTP(w, r)
 				return
 			}
+			subject, ok := h.relaySubject(w, r, user)
+			if !ok {
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), subject)))
+			return
 		}
 		writeErrorCode(w, http.StatusForbidden, sidCodeRouteNotAllowed,
 			"a surface principal may not call "+r.Method+" "+r.URL.Path, nil)
 	})
 }
 
+// relaySubject resolves the human a surface principal speaks for: the
+// verified link for (its own surface, the X-MCTL-Surface-Actor id). Every
+// gap fails closed with a typed 403, or 503 when links cannot be read.
+func (h *Handlers) relaySubject(w http.ResponseWriter, r *http.Request, acting *auth.User) (*auth.User, bool) {
+	surface, _ := acting.Surface()
+	externalID := r.Header.Get(SurfaceActorHeader)
+	if externalID == "" {
+		writeErrorCode(w, http.StatusForbidden, sidCodeRelayRequired,
+			"a surface principal must name the linked actor in "+SurfaceActorHeader, nil)
+		return nil, false
+	}
+	if h.opts.SurfaceIdentities == nil {
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "surface identity store not configured", nil)
+		return nil, false
+	}
+	link, err := h.opts.SurfaceIdentities.Resolve(r.Context(), surface, externalID)
+	var code, msg string
+	switch {
+	case errors.Is(err, surfaceid.ErrLinkRevoked):
+		code, msg = sidCodeLinkRevoked, "the link for this "+surface+" identity was revoked"
+	case errors.Is(err, surfaceid.ErrLinkExpired):
+		code, msg = sidCodeLinkExpired, "the link for this "+surface+" identity expired"
+	case errors.Is(err, surfaceid.ErrLinkNotFound):
+		code, msg = sidCodeNotFound, "no verified link for this "+surface+" identity"
+	case err != nil:
+		slog.Error("surface relay resolve failed", "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not resolve the surface identity", nil)
+		return nil, false
+	}
+	if code != "" {
+		h.logAudit(r, audit.Entry{
+			UserID: acting.ID, Operation: "surface_identity.relay_refused", Status: "failed",
+			RiskLevel:  string(operations.RiskMedium),
+			Parameters: map[string]string{"acting_principal": acting.ID, "surface": surface, "external_id": externalID, "reason": code},
+		})
+		writeErrorCode(w, http.StatusForbidden, code, msg, nil)
+		return nil, false
+	}
+	login := strings.TrimPrefix(link.Principal, "github:")
+	var groups []string
+	if h.opts.TenantResolver != nil {
+		g, err := h.opts.TenantResolver.GetTenantsForUser(login)
+		if err != nil {
+			slog.Warn("surface relay: tenant lookup failed; relaying with no tenant access", "subject", link.Principal, "error", err)
+		}
+		groups = g
+	}
+	subject := auth.NewRelayedUser(login, groups, acting)
+	if subject == nil || link.Principal != "github:"+login {
+		writeErrorCode(w, http.StatusForbidden, sidCodeNotFound, "the link does not name a GitHub principal", nil)
+		return nil, false
+	}
+	return subject, true
+}
+
 // humanPrincipal is the principal a caller may link: a GitHub login proven
 // by authentication, and nothing else (not the service principal, not a
 // surface, not a Dex username).
 func humanPrincipal(u *auth.User) (string, bool) {
-	if u.IsService() {
+	if u.IsService() || u.ActingPrincipal() != "" {
+		// Nor a relayed subject: a link is made by the human directly.
 		return "", false
 	}
 	if _, isSurface := u.Surface(); isSurface {
