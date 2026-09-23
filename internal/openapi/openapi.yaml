@@ -2596,7 +2596,7 @@ paths:
         '400': {description: Invalid body}
         '401': {description: Not authenticated}
         '404': {description: No such epic in the publication}
-        '409': {description: '`invalid_selection`: an explicit item is unknown, not ready, optional without `required_only=false`, unbound, not startable or repeated'}
+        '409': {description: '`invalid_selection`: an explicit item is unknown, not ready, optional without `required_only=false`, unbound, not startable or repeated; `epic_paused` / `epic_completed` / `epic_not_active`: only an active epic can plan a wave, with no override'}
         '503': {description: No verified publication (readiness unknown, not empty)}
   /api/v1/roadmap/waves/execute:
     post:
@@ -2648,7 +2648,7 @@ paths:
         '400': {description: Invalid body, or no plan named}
         '401': {description: Not authenticated}
         '403': {description: Not an admin}
-        '409': {description: '`plan_stale`, `publication_too_old` or `invalid_selection`; nothing was started'}
+        '409': {description: '`plan_stale`, `publication_too_old`, `invalid_selection`, or `epic_paused` / `epic_completed` / `epic_not_active` (no override); nothing was started'}
         '503': {description: 'No verified publication, `wave_execution_disabled` (invalid ROADMAP_WAVE_MAX_AGE), or no Temporal client'}
   /api/v1/human-input:
     get:

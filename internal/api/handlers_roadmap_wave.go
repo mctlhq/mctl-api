@@ -144,11 +144,14 @@ func waveFreshness(prov roadmap.Provenance, maxAge time.Duration) (fresh bool, r
 // wavePlanErrorCode is the typed code writeWavePlanError answers err with.
 func wavePlanErrorCode(err error) string {
 	var sel *roadmap.SelectionError
+	var inactive *roadmap.EpicNotActiveError
 	switch {
 	case errors.As(err, &sel):
 		return roadmapCodeInvalidSelection
 	case errors.Is(err, roadmap.ErrEpicNotFound):
 		return roadmapCodeEpicNotFound
+	case errors.As(err, &inactive):
+		return inactive.Reason()
 	case errors.Is(err, roadmap.ErrUnavailable):
 		return roadmapCodeUnavailable
 	}
@@ -167,6 +170,11 @@ func writeWavePlanError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusConflict, roadmapCodeInvalidSelection, err.Error(), details)
 	case roadmapCodeEpicNotFound:
 		writeErrorCode(w, http.StatusNotFound, roadmapCodeEpicNotFound, err.Error(), nil)
+	case roadmap.EpicRefusalPaused, roadmap.EpicRefusalCompleted, roadmap.EpicRefusalInactive:
+		var inactive *roadmap.EpicNotActiveError
+		errors.As(err, &inactive)
+		writeErrorCode(w, http.StatusConflict, wavePlanErrorCode(err), err.Error(),
+			map[string]any{"epic": inactive.Epic, "lifecycle": inactive.Lifecycle})
 	case roadmapCodeUnavailable:
 		slog.Warn("roadmap wave: publication unusable", "error", err)
 		writeErrorCode(w, http.StatusServiceUnavailable, roadmapCodeUnavailable,

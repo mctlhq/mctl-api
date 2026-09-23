@@ -182,6 +182,8 @@ func (s *Server) wavePost(ctx context.Context, path string, body map[string]any,
 		hint = " Nothing was started. Use the plan's exact selected ids, or plan again."
 	case "roadmap_unavailable":
 		hint = " Readiness is UNKNOWN, not empty."
+	case "epic_paused", "epic_completed", "epic_not_active":
+		hint = " The epic is not active: the standard wave start refuses it and has no override. Do not retry; tell the user."
 	case "wave_execution_disabled":
 		hint = " Wave execution is switched off by server configuration: do not retry or replan; only an operator can fix it."
 	}
