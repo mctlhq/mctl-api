@@ -35,6 +35,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/openapi"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
+	"github.com/mctlhq/mctl-api/internal/surfaceid"
 	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 	"github.com/prometheus/client_golang/prometheus"
@@ -107,6 +108,10 @@ type Options struct {
 	// lifecycle phase (optional — nil makes the lifecycle endpoints 503,
 	// which callers treat as "unknown", never as "unowned").
 	Lifecycle *lifecycle.Store
+
+	// SurfaceIdentities stores SurfaceIdentityLinks (mctl-api#350).
+	// Optional: nil makes the surface-identity endpoints 503.
+	SurfaceIdentities *surfaceid.Store
 
 	// Roadmap serves the RoadmapPublication read model (mctl-api#333).
 	// Optional: nil makes the roadmap endpoints 503.
@@ -279,6 +284,8 @@ func NewRouter(opts Options) http.Handler {
 		if opts.AuthMiddleware != nil {
 			r.Use(opts.AuthMiddleware)
 		}
+		// Surface principals reach only their allowlisted routes.
+		r.Use(surfacePrincipalGate)
 		r.Use(middleware.Timeout(30 * 1000000000)) // 30s
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
@@ -287,9 +294,12 @@ func NewRouter(opts Options) http.Handler {
 		// not used on this group; Traefik cannot spoof RemoteAddr as loopback.
 		// The write 20/min group below does NOT skip loopback — MCP deploys
 		// must still be throttled.
+		r.Use(surfaceAggregateLimit(httprate.Limit(surfaceAggregateLimitPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+			return "surface-total:" + auth.UserFromContext(r.Context()).ID, nil
+		}))))
 		r.Use(skipLoopbackRateLimit(httprate.Limit(300, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 			if user := auth.UserFromContext(r.Context()); user != nil {
-				return "user:" + user.ID, nil
+				return "user:" + rateLimitSubject(r, user), nil
 			}
 			return keyByTrustedIP(r)
 		}))))
@@ -409,7 +419,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(httprate.Limit(20, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 					if user := auth.UserFromContext(r.Context()); user != nil {
-						return "write:" + user.ID, nil
+						return "write:" + rateLimitSubject(r, user), nil
 					}
 					return keyByTrustedIP(r)
 				})))
@@ -426,6 +436,10 @@ func NewRouter(opts Options) http.Handler {
 				// Work-item mutations (mctl-api#349): the contract puts them
 				// on this shared write budget.
 				r.Post("/work-items", h.CreateWorkItem)
+				// Surface identity links (mctl-api#350).
+				r.Post("/surface-identities/challenges", h.CreateSurfaceChallenge)
+				r.Post("/surface-identities/redeem", h.RedeemSurfaceChallenge)
+				r.Post("/surface-identities/{id}/revoke", h.RevokeSurfaceIdentity)
 				r.Patch("/work-items/{id}", h.TransitionWorkItem)
 				r.Post("/work-items/{id}/intents", h.AppendWorkItemIntent)
 				r.Post("/work-items/{id}/executions", h.AttachWorkItemExecution)
@@ -435,6 +449,7 @@ func NewRouter(opts Options) http.Handler {
 
 			// Work-item reads: side-effect free, outside the write budget.
 			r.Get("/work-items", h.ListWorkItems)
+			r.Get("/surface-identities", h.ListSurfaceIdentities)
 			r.Get("/work-items/{id}", h.GetWorkItem)
 			r.Get("/work-items/{id}/executions", h.ListWorkItemExecutions)
 			r.Get("/work-items/{id}/events", h.ListWorkItemEvents)
@@ -491,7 +506,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(httprate.Limit(120, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 					if user := auth.UserFromContext(r.Context()); user != nil {
-						return "lifecycle:" + user.ID, nil
+						return "lifecycle:" + rateLimitSubject(r, user), nil
 					}
 					return keyByTrustedIP(r)
 				})))
@@ -537,7 +552,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(httprate.Limit(10, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 					if user := auth.UserFromContext(r.Context()); user != nil {
-						return "lifecycle-recovery:" + user.ID, nil
+						return "lifecycle-recovery:" + rateLimitSubject(r, user), nil
 					}
 					return keyByTrustedIP(r)
 				})))
@@ -678,6 +693,39 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 			}
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// rateLimitSubject is who a per-user rate limit counts against. A surface
+// principal calls for many end users, so its budget is split by the one it
+// names in SurfaceActorHeader, otherwise one Telegram user could exhaust
+// every other's. surfacePrincipalGate runs first and refuses a value that is
+// not one of the surface's own ids, which bounds the key space;
+// surfaceAggregateLimit still caps the surface as a whole.
+func rateLimitSubject(r *http.Request, user *auth.User) string {
+	if _, isSurface := user.Surface(); isSurface {
+		return user.ID + "|" + r.Header.Get(SurfaceActorHeader)
+	}
+	return user.ID
+}
+
+// surfaceAggregateLimitPerMinute caps one surface principal across all the
+// end users it calls for, the ceiling rateLimitSubject's per-user split
+// would otherwise remove. Roughly Telegram's own bot send rate.
+const surfaceAggregateLimitPerMinute = 1200
+
+// surfaceAggregateLimit applies limit to surface principals only, keyed on
+// the principal alone.
+func surfaceAggregateLimit(limit func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		limited := limit(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, isSurface := auth.UserFromContext(r.Context()).Surface(); isSurface {
+				limited.ServeHTTP(w, r)
 				return
 			}
 			next.ServeHTTP(w, r)

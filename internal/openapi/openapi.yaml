@@ -2252,6 +2252,85 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/surface-identities/challenges:
+    post:
+      summary: Request a one-time link challenge for a surface
+      description: |
+        mctl-api#350. Only a human authenticated by GitHub. Returns a one-time
+        code, valid for 10 minutes, bound to the caller and the surface. The
+        human sends it through that surface (e.g. to the Telegram bot), whose
+        own principal redeems it. The body never names who is linked.
+      tags: [Surface Identity]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [surface]
+              properties:
+                surface: {type: string, enum: [telegram, portal]}
+      responses:
+        '201': {description: 'Challenge created; the code is shown once'}
+        '400': {description: Invalid body or an identity field in it}
+        '403': {description: Not a GitHub-authenticated human}
+        '429': {description: Too many open challenges}
+        '503': {description: Surface identity store not configured}
+  /api/v1/surface-identities/redeem:
+    post:
+      summary: Redeem a challenge as the surface that observed it
+      description: |
+        Only the surface principal of the challenge's own surface
+        (`surface:telegram`, `surface:portal`). Binds the identity the
+        surface observed, named in `X-MCTL-Surface-Actor` (a Telegram user
+        id, digits; or a portal subject), to the human who requested the
+        challenge. A refused redemption by the surface consumes the
+        challenge and answers the same 403. Rate limits count against the
+        named identity, not the whole surface.
+      tags: [Surface Identity]
+      parameters:
+        - name: X-MCTL-Surface-Actor
+          in: header
+          required: true
+          schema: {type: string, maxLength: 256}
+          description: The surface-native identity being linked
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code]
+              properties:
+                code: {type: string}
+      responses:
+        '201': {description: Link created (or the same link again)}
+        '400': {description: Invalid body or X-MCTL-Surface-Actor}
+        '403': {description: Not a surface principal, or challenge unknown, used, expired or for another surface}
+        '409': {description: The identity is linked to another principal}
+  /api/v1/surface-identities:
+    get:
+      summary: List the caller's surface identity links
+      description: A human admin may pass `principal=github:<login>`.
+      tags: [Surface Identity]
+      parameters:
+        - {name: principal, in: query, required: false, schema: {type: string}}
+      responses:
+        '200': {description: Links, live and revoked}
+        '403': {description: Not a GitHub-authenticated human, or not an admin for another principal}
+  /api/v1/surface-identities/{id}/revoke:
+    post:
+      summary: Revoke a surface identity link
+      description: The linked human or a human admin. Relayed requests for it fail from then on.
+      tags: [Surface Identity]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Revoked (or already revoked)}
+        '403': {description: Not a GitHub-authenticated human}
+        '404': {description: No such link visible to the caller}
   /api/v1/roadmap/epics:
     get:
       summary: List the epics in the roadmap publication
@@ -2939,6 +3018,8 @@ tags:
     description: Platform operation registry and execution
   - name: Platform Skills
     description: Platform-wide skill catalog and tenant bindings
+  - name: Surface Identity
+    description: Verified links between surface-native identities and human principals (mctl-api#350)
   - name: Roadmap
     description: Read-only roadmap publication (epic status and ready work items)
   - name: Agent Registry

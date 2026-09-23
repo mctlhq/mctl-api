@@ -16,6 +16,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -57,6 +58,11 @@ type User struct {
 	// the same reason as service: it is how the caller authenticated, not a
 	// claim.
 	githubLogin bool
+
+	// surface is set only on a per-surface service principal
+	// ("surface:telegram"), authenticated by that surface's own token
+	// (mctl-api#350). Unexported for the same reason as service.
+	surface string
 }
 
 // NewGitHubUser builds a principal whose ID is a GitHub-verified login.
@@ -215,6 +221,81 @@ const ServiceUserID = "mctl-agent"
 // token, rather than being a person who merely shares its name.
 func (u *User) IsService() bool { return u.service }
 
+// Surface principals (mctl-api#350). Each surface has its own token and its
+// own principal, "surface:<name>". They are not admins, belong to no tenant,
+// and are distinct from ServiceUserID: mctl-agent never gains the right to
+// relay, and a surface can only ever speak for its own surface.
+const SurfacePrincipalPrefix = "surface:"
+
+// surfaceTokenEnv names each surface's token variable.
+var surfaceTokenEnv = map[string]string{
+	"telegram": "MCTL_SURFACE_TELEGRAM_TOKEN",
+	"portal":   "MCTL_SURFACE_PORTAL_TOKEN",
+}
+
+// minSurfaceTokenLen refuses a token too short to be a secret.
+const minSurfaceTokenLen = 32
+
+// NewSurfaceUser builds the principal for one surface. Exported for tests,
+// like NewServiceUser; only the middleware mints it from a token.
+func NewSurfaceUser(surface string) *User {
+	return &User{ID: SurfacePrincipalPrefix + surface, surface: surface}
+}
+
+// Surface reports the surface this principal authenticated as, if it is a
+// surface principal.
+func (u *User) Surface() (string, bool) {
+	if u == nil || u.surface == "" {
+		return "", false
+	}
+	return u.surface, true
+}
+
+// surfaceTokens reads the configured surface tokens. A token that is short,
+// shared by two surfaces, or equal to the mctl-agent service token is
+// refused: each must prove exactly one surface and nothing more.
+func surfaceTokens() map[string]string {
+	service := strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN"))
+	byToken := map[string]string{}
+	refused := map[string]bool{}
+	for surface, env := range surfaceTokenEnv {
+		token := strings.TrimSpace(os.Getenv(env))
+		switch {
+		case token == "":
+			continue
+		case len(token) < minSurfaceTokenLen:
+			slog.Error("surface token too short; surface principal disabled", "env", env, "min_length", minSurfaceTokenLen)
+			continue
+		case service != "" && token == service:
+			slog.Error("surface token equals MCTL_AGENT_SERVICE_TOKEN; surface principal disabled", "env", env)
+			continue
+		}
+		if _, dup := byToken[token]; dup || refused[token] {
+			slog.Error("two surfaces share one token; both disabled", "env", env)
+			delete(byToken, token)
+			refused[token] = true
+			continue
+		}
+		byToken[token] = surface
+	}
+	return byToken
+}
+
+// surfaceUserFor matches a bearer token against the surface tokens in
+// constant time per candidate.
+func surfaceUserFor(tokens map[string]string, token string) *User {
+	var match string
+	for candidate, surface := range tokens {
+		if subtle.ConstantTimeCompare([]byte(candidate), []byte(token)) == 1 {
+			match = surface
+		}
+	}
+	if match == "" {
+		return nil
+	}
+	return NewSurfaceUser(match)
+}
+
 // staticServiceUser returns a platform-internal service principal when the
 // bearer token matches a configured service token. This bypasses GitHub/Dex
 // validation for trusted in-cluster automation such as mctl-agent.
@@ -237,6 +318,7 @@ func staticServiceUser(token string) *User {
 // dex and oauth may be nil; in that case those token types are rejected.
 func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer) func(http.Handler) http.Handler {
 	authRequired := os.Getenv("AUTH_REQUIRED") != "false"
+	surfaces := surfaceTokens()
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -284,6 +366,8 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 
 			if svc := staticServiceUser(token); svc != nil {
 				user = svc
+			} else if su := surfaceUserFor(surfaces, token); su != nil {
+				user = su
 			} else if isJWT(token) {
 				// Peek at the JWT issuer to route to the correct verifier.
 				if oauth != nil && jwtIssuer(token) == oauth.BaseURL {
