@@ -298,6 +298,7 @@ func main() {
 			slog.Error("human-input ledger init failed; human-input responses will return 503", "error", hlErr)
 		} else {
 			humanInputLedger = hl
+			defer hl.Close()
 		}
 	}
 

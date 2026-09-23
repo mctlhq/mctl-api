@@ -21,6 +21,11 @@ package api
 //     retryable instead of silently lost. It is the first claim per
 //     request that wins, matching the workflow's first-valid-response rule.
 //
+// Delivery is at-least-once: two identical submissions racing each other can
+// both signal. The workflow tolerates that by construction: it drains its
+// queue first-valid-wins, and a payload arriving once it no longer waits is
+// counted and dropped.
+//
 // An answer is information, not authorization. This endpoint never signals
 // approve, and nothing it records is read by the approval path.
 
@@ -56,6 +61,7 @@ const maxHumanInputResponseBytes = 64 << 10
 var (
 	humanInputConfirmAttempts = 8
 	humanInputConfirmInterval = 250 * time.Millisecond
+	humanInputConfirmBudget   = 5 * time.Second
 )
 
 // humanInputSurfacePattern: the surface is caller-declared provenance (which
@@ -104,6 +110,14 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "request_id must look like hir-<16 hex>")
 		return
 	}
+	// Retention: an answer that could not be delivered before its request
+	// expired is dropped here rather than kept indefinitely. Opportunistic
+	// (every submission sweeps) and best-effort.
+	if n, err := h.opts.HumanInputLedger.ClearExpiredValues(r.Context(), humanInputNow().UTC()); err != nil {
+		slog.Warn("human_input.ledger_clear_expired_failed", "error", err)
+	} else if n > 0 {
+		slog.Info("human_input.ledger_cleared_expired_values", "count", n)
+	}
 	body, value, err := decodeHumanInputResponse(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -125,7 +139,13 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 	// callerActorRef. Without one the caller has no respondent reference.
 	ref, verified := callerActorRef(user)
 	reject := func(code int, state, detail string) {
-		h.auditHumanInput(r, user, s, "human_input.response_rejected", "failed", body.Surface, state+": "+detail)
+		msg := state + ": " + detail
+		if state == "invalid_value" {
+			// The validation error lists the question's options; the audit
+			// row carries ids and the outcome only.
+			msg = state
+		}
+		h.auditHumanInput(r, user, s, "human_input.response_rejected", "failed", body.Surface, msg)
 		writeJSON(w, code, humanInputResponseResult{RequestID: id, Status: humanInputStatusRejected, State: state, Detail: detail, Respondent: ref})
 	}
 	if !verified {
@@ -168,6 +188,7 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 		ValueHash:   humaninput.HashBytes(canonical),
 		Value:       canonical,
 		ReceivedAt:  now,
+		ExpiresAt:   req.Expires(),
 	}
 
 	ctx := r.Context()
@@ -216,7 +237,8 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, code, res)
 			return
 		}
-		writeJSON(w, http.StatusConflict, humanInputResponseResult{RequestID: id, Status: humanInputStatusRejected, State: "answered", Detail: "another response was submitted concurrently"})
+		code, res := h.refuseAnswered(r, user, s, sub, "another response was submitted concurrently")
+		writeJSON(w, code, res)
 		return
 	}
 	code, res := h.deliverHumanInput(ctx, r, user, s, *cur)
@@ -232,7 +254,8 @@ func (h *Handlers) settleExisting(ctx context.Context, r *http.Request, user *au
 		if same {
 			return http.StatusOK, deliveryResult(*existing, humanInputStatusAccepted, "", "already accepted"), true
 		}
-		return http.StatusConflict, humanInputResponseResult{RequestID: sub.RequestID, Status: humanInputStatusRejected, State: "answered", Detail: "the request was already answered"}, true
+		code, res := h.refuseAnswered(r, user, s, sub, "the request was already answered")
+		return code, res, true
 	}
 	// Pending: push the recorded answer through first, whoever asked. This
 	// is what makes delivery recoverable without a background worker.
@@ -247,7 +270,16 @@ func (h *Handlers) settleExisting(ctx context.Context, r *http.Request, user *au
 	if res.Status == humanInputStatusAccepted {
 		detail = "the request was already answered"
 	}
-	return http.StatusConflict, humanInputResponseResult{RequestID: sub.RequestID, Status: humanInputStatusRejected, State: "answered", Detail: detail}, true
+	code, res = h.refuseAnswered(r, user, s, sub, detail)
+	return code, res, true
+}
+
+// refuseAnswered refuses sub because another answer holds the request. It
+// is audited like every other refusal: an attempt to override a recorded
+// answer is exactly what an operator looks for afterwards.
+func (h *Handlers) refuseAnswered(r *http.Request, user *auth.User, s *sealedHumanInput, sub humaninput.Delivery, detail string) (int, humanInputResponseResult) {
+	h.auditHumanInput(r, user, s, "human_input.response_rejected", "failed", sub.Surface, "answered: "+detail)
+	return http.StatusConflict, humanInputResponseResult{RequestID: sub.RequestID, Status: humanInputStatusRejected, State: "answered", Detail: detail, Respondent: sub.Respondent}
 }
 
 // deliverHumanInput signals the recorded delivery d and waits briefly for
@@ -317,16 +349,25 @@ func (h *Handlers) deliverHumanInput(ctx context.Context, r *http.Request, user 
 	slog.Info("human_input.signal_sent", "request_id", d.RequestID, "workflow_id", d.WorkflowID, "work_item_id", s.req.WorkItemID)
 	h.auditHumanInput(r, user, s, "human_input.signal_sent", "submitted", d.Surface, "")
 
+	// One budget for the whole confirmation, well inside the 30s route
+	// timeout: past it the answer is recorded and delivered, only not yet
+	// confirmed, and the caller is told so rather than cut off.
+	cctx, ccancel := context.WithTimeout(ctx, humanInputConfirmBudget)
+	defer ccancel()
 	for i := 0; i < humanInputConfirmAttempts; i++ {
 		if humanInputConfirmInterval > 0 {
 			select {
-			case <-ctx.Done():
+			case <-cctx.Done():
 				return http.StatusAccepted, deliveryResult(d, humanInputStatusPending, HumanInputUnknown, "delivered; not yet confirmed")
 			case <-time.After(humanInputConfirmInterval):
 			}
 		}
-		st, err := h.queryHumanInput(ctx, d)
+		st, err := h.queryHumanInput(cctx, d)
 		if err != nil {
+			slog.Debug("human_input.confirm_query_failed", "request_id", d.RequestID, "error", err)
+			if cctx.Err() != nil {
+				break
+			}
 			continue
 		}
 		if st.ResumeCount > d.BaselineResumeCount {
@@ -352,7 +393,11 @@ func (h *Handlers) deliverHumanInput(ctx context.Context, r *http.Request, user 
 func (h *Handlers) queryHumanInput(ctx context.Context, d humaninput.Delivery) (*temporalclient.HumanInputState, error) {
 	qctx, cancel := context.WithTimeout(ctx, humanInputQueryTimeout)
 	defer cancel()
-	return h.opts.TemporalClient.QueryHumanInputState(qctx, d.WorkflowID, d.RunID)
+	st, err := h.opts.TemporalClient.QueryHumanInputState(qctx, d.WorkflowID, d.RunID)
+	if err == nil && st == nil {
+		return nil, errors.New("owning workflow returned no state")
+	}
+	return st, err
 }
 
 func deliveryResult(d humaninput.Delivery, status, state, detail string) humanInputResponseResult {

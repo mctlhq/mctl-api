@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,6 +22,7 @@ CREATE TABLE IF NOT EXISTS human_input_deliveries (
     value_hash            TEXT NOT NULL,
     value                 TEXT,
     received_at           TIMESTAMPTZ NOT NULL,
+    expires_at            TIMESTAMPTZ NOT NULL,
     state                 TEXT NOT NULL,
     baseline_resume_count INTEGER NOT NULL,
     attempts              INTEGER NOT NULL DEFAULT 0,
@@ -29,7 +31,7 @@ CREATE TABLE IF NOT EXISTS human_input_deliveries (
 `
 
 const deliveryColumns = `request_id, request_hash, workflow_id, run_id, respondent, surface,
-	value_hash, value, received_at, state, baseline_resume_count, attempts, updated_at`
+	value_hash, value, received_at, expires_at, state, baseline_resume_count, attempts, updated_at`
 
 // PostgresLedger is the Ledger mctl-api runs with. The request_id primary
 // key is what makes the first claim win across replicas.
@@ -58,13 +60,14 @@ func scanDelivery(row pgx.Row) (*Delivery, error) {
 	var d Delivery
 	var value *string
 	if err := row.Scan(&d.RequestID, &d.RequestHash, &d.WorkflowID, &d.RunID, &d.Respondent, &d.Surface,
-		&d.ValueHash, &value, &d.ReceivedAt, &d.State, &d.BaselineResumeCount, &d.Attempts, &d.UpdatedAt); err != nil {
+		&d.ValueHash, &value, &d.ReceivedAt, &d.ExpiresAt, &d.State, &d.BaselineResumeCount, &d.Attempts, &d.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if value != nil {
 		d.Value = []byte(*value)
 	}
 	d.ReceivedAt = d.ReceivedAt.UTC()
+	d.ExpiresAt = d.ExpiresAt.UTC()
 	d.UpdatedAt = d.UpdatedAt.UTC()
 	return &d, nil
 }
@@ -87,17 +90,17 @@ func (p *PostgresLedger) Get(ctx context.Context, requestID string) (*Delivery, 
 func (p *PostgresLedger) Claim(ctx context.Context, d Delivery) (*Delivery, bool, error) {
 	claimed, err := scanDelivery(p.pool.QueryRow(ctx, `
 		INSERT INTO human_input_deliveries (`+deliveryColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'`+DeliveryPending+`',$10,0,now())
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$11,'`+DeliveryPending+`',$10,0,now())
 		ON CONFLICT (request_id) DO UPDATE SET
 		    request_hash=EXCLUDED.request_hash, workflow_id=EXCLUDED.workflow_id,
 		    run_id=EXCLUDED.run_id, respondent=EXCLUDED.respondent, surface=EXCLUDED.surface,
-		    value_hash=EXCLUDED.value_hash, value=EXCLUDED.value, received_at=EXCLUDED.received_at,
+		    value_hash=EXCLUDED.value_hash, value=EXCLUDED.value, received_at=EXCLUDED.received_at, expires_at=EXCLUDED.expires_at,
 		    state=EXCLUDED.state, baseline_resume_count=EXCLUDED.baseline_resume_count,
 		    attempts=0, updated_at=now()
 		WHERE human_input_deliveries.state='`+DeliveryRejected+`'
 		RETURNING `+deliveryColumns,
 		d.RequestID, d.RequestHash, d.WorkflowID, d.RunID, d.Respondent, d.Surface,
-		d.ValueHash, string(d.Value), d.ReceivedAt, d.BaselineResumeCount))
+		d.ValueHash, string(d.Value), d.ReceivedAt, d.BaselineResumeCount, d.ExpiresAt))
 	if err == nil {
 		return claimed, true, nil
 	}
@@ -126,6 +129,15 @@ func (p *PostgresLedger) NoteAttempt(ctx context.Context, requestID string) erro
 		return ErrDeliveryNotPending
 	}
 	return nil
+}
+
+func (p *PostgresLedger) ClearExpiredValues(ctx context.Context, now time.Time) (int, error) {
+	tag, err := p.pool.Exec(ctx, `UPDATE human_input_deliveries SET value=NULL, updated_at=now()
+		WHERE state='`+DeliveryPending+`' AND value IS NOT NULL AND expires_at <= $1`, now)
+	if err != nil {
+		return 0, fmt.Errorf("human-input ledger: clear expired values: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 func (p *PostgresLedger) Resolve(ctx context.Context, d Delivery, state string) error {

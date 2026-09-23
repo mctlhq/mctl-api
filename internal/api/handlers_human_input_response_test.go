@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"go.temporal.io/api/serviceerror"
@@ -254,7 +255,7 @@ func TestRespondHumanInput_FreeTextIsTyped(t *testing.T) {
 }
 
 func TestRespondHumanInput_DuplicateIsIdempotentAndConflictIsDeterministic(t *testing.T) {
-	h, tc, _, _ := newHumanInputResponseHandlers(t)
+	h, tc, _, log := newHumanInputResponseHandlers(t)
 	tc.onSignal = workflowAccepts
 
 	if got := respond(t, h, alice, hiASCII, answer(`"library A"`)); got.code != http.StatusOK {
@@ -267,6 +268,17 @@ func TestRespondHumanInput_DuplicateIsIdempotentAndConflictIsDeterministic(t *te
 	other := respond(t, h, alice, hiASCII, answer(`"library B"`))
 	if other.code != http.StatusConflict || other.res.State != "answered" {
 		t.Fatalf("conflicting = %d %s, want 409 answered", other.code, other.raw)
+	}
+	// An attempt to override a recorded answer is audited like any refusal.
+	var overrides int
+	entries := log.List(100)
+	for i := range entries {
+		if entries[i].Operation == "human_input.response_rejected" && strings.HasPrefix(entries[i].Message, "answered") {
+			overrides++
+		}
+	}
+	if overrides != 1 {
+		t.Fatalf("override attempts audited %d times, want 1: %v", overrides, auditOps(log))
 	}
 	if len(tc.humanInputSignals) != 1 {
 		t.Fatalf("%d signals, want exactly 1", len(tc.humanInputSignals))
@@ -411,5 +423,64 @@ func TestRespondHumanInput_EarlierRoundsDoNotCountAsAnOutcome(t *testing.T) {
 	tc.onSignal = workflowAccepts
 	if got := respond(t, h, alice, hiASCII, answer(`"library A"`)); got.code != http.StatusOK {
 		t.Fatalf("after the workflow drains = %d %s", got.code, got.raw)
+	}
+}
+
+// The audit row of an invalid value names the outcome only: the validation
+// message lists the question's options.
+func TestRespondHumanInput_InvalidValueAuditCarriesNoQuestionContent(t *testing.T) {
+	h, _, _, log := newHumanInputResponseHandlers(t)
+	got := respond(t, h, alice, hiASCII, answer(`"library C"`))
+	if got.code != http.StatusUnprocessableEntity || !strings.Contains(got.res.Detail, "library A") {
+		t.Fatalf("respond = %d %s (the caller still gets the reason)", got.code, got.raw)
+	}
+	entries := log.List(100)
+	for i := range entries {
+		if strings.Contains(entries[i].Message, "library") {
+			t.Fatalf("audit leaks question options: %+v", entries[i])
+		}
+	}
+}
+
+// A client returning no state is an unanswered query: nothing is recorded.
+func TestRespondHumanInput_NilStateIsNotPending(t *testing.T) {
+	h, tc, ledger, _ := newHumanInputResponseHandlers(t)
+	tc.humanInputStates[hiWF] = nil
+	if got := respond(t, h, alice, hiASCII, answer(`"library A"`)); got.code != http.StatusServiceUnavailable {
+		t.Fatalf("respond = %d %s", got.code, got.raw)
+	}
+	if row, _ := ledger.Get(context.Background(), hiASCII); row != nil {
+		t.Fatalf("recorded %+v", row)
+	}
+}
+
+// An answer that could not be delivered before its request expired is not
+// kept: the next submission (for any request) drops it.
+func TestRespondHumanInput_UndeliverableAnswerIsNotRetained(t *testing.T) {
+	h, tc, ledger, _ := newHumanInputResponseHandlers(t)
+	tc.signalErr = errors.New("temporal unavailable")
+	if got := respond(t, h, alice, hiASCII, answer(`"library A"`)); got.code != http.StatusServiceUnavailable {
+		t.Fatalf("outage = %d", got.code)
+	}
+	withHumanInputClock(t, "2026-09-24T02:00:00Z")
+	if got := respond(t, h, alice, hiASCII, answer(`"library A"`)); got.code != http.StatusConflict || got.res.State != HumanInputExpired {
+		t.Fatalf("after expiry = %d %s", got.code, got.raw)
+	}
+	if row, _ := ledger.Get(context.Background(), hiASCII); row == nil || row.Value != nil {
+		t.Fatalf("ledger after expiry = %+v, want the answer dropped", row)
+	}
+}
+
+// The confirmation wait is bounded as a whole, not per query.
+func TestRespondHumanInput_ConfirmationIsBounded(t *testing.T) {
+	h, tc, _, _ := newHumanInputResponseHandlers(t)
+	prevB, prevI := humanInputConfirmBudget, humanInputConfirmInterval
+	humanInputConfirmBudget, humanInputConfirmInterval = 50*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() { humanInputConfirmBudget, humanInputConfirmInterval = prevB, prevI })
+	tc.onSignal = func(f *fakeDevLoopClient, _ string, _ map[string]any) { f.humanInputBlocks = true }
+	start := time.Now()
+	got := respond(t, h, alice, hiASCII, answer(`"library A"`))
+	if got.code != http.StatusAccepted || got.res.Status != "pending_delivery" || time.Since(start) > time.Second {
+		t.Fatalf("respond = %d %s after %s", got.code, got.raw, time.Since(start))
 	}
 }

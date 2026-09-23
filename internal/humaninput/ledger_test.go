@@ -43,6 +43,7 @@ func delivery(respondent, value string) Delivery {
 		RequestID: "hir-0123456789abcdef", RequestHash: "sha256:aa", WorkflowID: "wf", RunID: "run-1",
 		Respondent: respondent, Surface: "api", ValueHash: "sha256:" + value, Value: []byte(`"` + value + `"`),
 		ReceivedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC), BaselineResumeCount: 2,
+		ExpiresAt: time.Date(2026, 9, 24, 2, 0, 0, 0, time.UTC),
 	}
 }
 
@@ -130,6 +131,32 @@ func TestLedger_ConcurrentClaimsHaveOneWinner(t *testing.T) {
 			wg.Wait()
 			if wins != 1 {
 				t.Fatalf("%d concurrent claims won, want exactly 1", wins)
+			}
+		})
+	}
+}
+
+func TestLedger_ClearExpiredValuesDropsOnlyUndeliverableAnswers(t *testing.T) {
+	for name, mk := range ledgers(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			l := mk(t)
+			d := delivery("github:alice", "A")
+			if _, won, _ := l.Claim(ctx, d); !won {
+				t.Fatal("claim")
+			}
+			if n, err := l.ClearExpiredValues(ctx, d.ExpiresAt.Add(-time.Second)); err != nil || n != 0 {
+				t.Fatalf("before expiry: cleared %d, %v", n, err)
+			}
+			if got, _ := l.Get(ctx, d.RequestID); string(got.Value) != `"A"` {
+				t.Fatalf("value dropped before expiry: %+v", got)
+			}
+			if n, err := l.ClearExpiredValues(ctx, d.ExpiresAt); err != nil || n != 1 {
+				t.Fatalf("at expiry: cleared %d, %v", n, err)
+			}
+			got, _ := l.Get(ctx, d.RequestID)
+			if got.Value != nil || got.State != DeliveryPending || !got.ExpiresAt.Equal(d.ExpiresAt) {
+				t.Fatalf("after expiry: %+v (value cleared, state kept)", got)
 			}
 		})
 	}

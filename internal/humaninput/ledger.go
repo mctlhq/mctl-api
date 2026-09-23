@@ -45,7 +45,10 @@ type Delivery struct {
 	// become a second store of human answers.
 	Value      json.RawMessage
 	ReceivedAt time.Time
-	State      string
+	// ExpiresAt is the request's expires_at. Past it nothing can be
+	// delivered any more, so ClearExpiredValues drops a still-pending value.
+	ExpiresAt time.Time
+	State     string
 	// BaselineResumeCount is the workflow's resume_count just before the
 	// first delivery. Only an accepted response increments it, so a later
 	// value above the baseline proves the request was answered.
@@ -74,6 +77,11 @@ type Ledger interface {
 	// Resolve moves the pending row that is exactly d's submission to state
 	// (accepted or rejected) and clears its value.
 	Resolve(ctx context.Context, d Delivery, state string) error
+	// ClearExpiredValues drops the retained answer of every pending row
+	// whose request expired at or before now. The row and its state stay:
+	// whether the workflow took the answer before expiry is unknown, so it
+	// is neither accepted nor rejected, only no longer deliverable.
+	ClearExpiredValues(ctx context.Context, now time.Time) (int, error)
 }
 
 // MemoryLedger is an in-process Ledger. It is only correct with a single
@@ -124,6 +132,20 @@ func (m *MemoryLedger) NoteAttempt(_ context.Context, requestID string) error {
 	d.UpdatedAt = m.now().UTC()
 	m.rows[requestID] = d
 	return nil
+}
+
+func (m *MemoryLedger) ClearExpiredValues(_ context.Context, now time.Time) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for k, d := range m.rows {
+		if d.State == DeliveryPending && d.Value != nil && !now.Before(d.ExpiresAt) {
+			d.Value = nil
+			m.rows[k] = d
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (m *MemoryLedger) Resolve(_ context.Context, d Delivery, state string) error {
