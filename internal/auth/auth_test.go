@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestIsJWT(t *testing.T) {
@@ -209,5 +210,33 @@ func TestMiddlewareUnauthorized_OtherRouteHasRootResourceMetadata(t *testing.T) 
 	want := `Bearer realm="https://api.mctl.ai", resource_metadata="https://api.mctl.ai/.well-known/oauth-protected-resource"`
 	if got := rr.Header().Get("WWW-Authenticate"); got != want {
 		t.Errorf("WWW-Authenticate = %q, want %q", got, want)
+	}
+}
+
+// Only the GitHub token path proves a GitHub login; the service token does
+// not (human-input eligibility, mctl-api#261).
+func TestMiddlewareRecordsGitHubLoginProvenance(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	t.Setenv("MCTL_AGENT_SERVICE_TOKEN", "svc-token-123")
+	v := NewGitHubValidator(nil)
+	v.cache["gho_alice"] = &githubUserInfo{Login: "alice", CachedAt: time.Now()}
+
+	for token, want := range map[string]bool{"gho_alice": true, "svc-token-123": false} {
+		var got *User
+		h := Middleware(v, nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = UserFromContext(r.Context())
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/human-input", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		if got == nil {
+			t.Fatalf("%s: no user", token)
+		}
+		if _, ok := got.GitHubLogin(); ok != want {
+			t.Fatalf("%s: GitHubLogin ok = %v, want %v", token, ok, want)
+		}
+	}
+	if _, ok := (&User{ID: "alice"}).GitHubLogin(); ok {
+		t.Fatal("a bare User claims a GitHub login")
 	}
 }

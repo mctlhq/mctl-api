@@ -241,6 +241,50 @@ func (c *Client) QueryShepherdInLoop(ctx context.Context, workflowID string) (bo
 	return inLoop, nil
 }
 
+// HumanInputStateQueryName is DevLoopWorkflow's query handler for the
+// durable clarification gate (mctl-agents#333, ADR 013). It never returns
+// the question, reason or answer -- only ids, hashes, timestamps and
+// counters -- and is served on closed executions too.
+const HumanInputStateQueryName = "human_input_state"
+
+// DevLoop human-input states (dev_loop.py). RUNNING also covers "never
+// waited" and "answered and resumed"; RequestID tells them apart.
+const (
+	HumanInputRunning         = "RUNNING"
+	HumanInputWaitingForInput = "WAITING_FOR_INPUT"
+	HumanInputTimedOut        = "INPUT_TIMED_OUT"
+)
+
+// HumanInputState is the workflow's own view of its clarification gate,
+// decoded from the HumanInputState dataclass. It is the ONLY source of
+// truth for whether a request is still waiting: mctl-api keeps no copy of
+// that state machine.
+type HumanInputState struct {
+	State             string `json:"state"`
+	RequestID         string `json:"request_id"`
+	RequestHash       string `json:"request_hash"`
+	QuestionHash      string `json:"question_hash"`
+	ExpiresAt         string `json:"expires_at"`
+	Round             int    `json:"round"`
+	ResumeCount       int    `json:"resume_count"`
+	RejectedCount     int    `json:"rejected_count"`
+	EffectiveDeadline string `json:"effective_deadline"`
+}
+
+// QueryHumanInputState asks the workflow for its clarification state.
+// runID may be empty (the latest run of workflowID).
+func (c *Client) QueryHumanInputState(ctx context.Context, workflowID, runID string) (*HumanInputState, error) {
+	value, err := c.temporal.QueryWorkflow(ctx, workflowID, runID, HumanInputStateQueryName)
+	if err != nil {
+		return nil, fmt.Errorf("temporalclient: query %s on %s: %w", HumanInputStateQueryName, workflowID, err)
+	}
+	var st HumanInputState
+	if err := value.Get(&st); err != nil {
+		return nil, fmt.Errorf("temporalclient: decode %s on %s: %w", HumanInputStateQueryName, workflowID, err)
+	}
+	return &st, nil
+}
+
 // IsNotFound reports whether err is (or wraps) Temporal's NotFound service
 // error — the case SignalApprove hits when workflowID doesn't correspond to
 // any workflow (never started, or already past retention). Callers use this

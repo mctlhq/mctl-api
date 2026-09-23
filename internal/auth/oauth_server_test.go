@@ -53,6 +53,11 @@ func TestOAuthServerExchangeCodeReturnsRefreshToken(t *testing.T) {
 	if user.ID != "dmitrii" {
 		t.Fatalf("unexpected user id %q", user.ID)
 	}
+	// The local JWT is minted only after the GitHub callback, so its
+	// subject is a verified GitHub login (human-input eligibility, #261).
+	if login, ok := user.GitHubLogin(); !ok || login != "dmitrii" {
+		t.Fatalf("GitHubLogin() = %q, %v", login, ok)
+	}
 }
 
 func TestOAuthServerRefreshRotatesToken(t *testing.T) {

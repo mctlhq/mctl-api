@@ -24,6 +24,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/loki"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/temporalclient"
 )
 
 // QuotaReader fetches live Kubernetes ResourceQuota usage for a namespace.
@@ -46,6 +47,7 @@ type GitReader interface {
 	ListPlatformTenantBindings() ([]gitops.PlatformSkillBinding, error)
 	ListPlatformRoleBindings() ([]gitops.PlatformSkillBinding, error)
 	GetPlatformPolicy() (*gitops.PlatformSkillPolicy, error)
+	ListHumanInputRequests() ([]gitops.HumanInputRequestFile, error)
 }
 
 // ArgoStatusClient is the subset of argocd.Client used by API handlers.
@@ -77,6 +79,7 @@ type DevLoopClient interface {
 	SignalApprove(ctx context.Context, workflowID string, payload map[string]string) error
 	DescribeDevLoop(ctx context.Context, workflowID string) (status string, err error)
 	QueryShepherdInLoop(ctx context.Context, workflowID string) (bool, error)
+	QueryHumanInputState(ctx context.Context, workflowID, runID string) (*temporalclient.HumanInputState, error)
 }
 
 // WorkflowDispatcher starts a GitHub Actions workflow_dispatch run. An

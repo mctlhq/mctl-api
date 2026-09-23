@@ -48,6 +48,29 @@ type User struct {
 	// "mctl-agent" (claude P2 on gitops#986). Only NewServiceUser sets it, and
 	// User is never unmarshalled from JSON, so it cannot be forged.
 	service bool
+
+	// githubLogin records that ID is a GitHub login proven by GitHub: the
+	// GitHub token path, or a local OAuth JWT (minted only after the GitHub
+	// OAuth callback validated the login). A Dex JWT's ID is
+	// preferred_username, email or sub, which can equal some GitHub login
+	// without being that person, so it is never set there. Unexported for
+	// the same reason as service: it is how the caller authenticated, not a
+	// claim.
+	githubLogin bool
+}
+
+// NewGitHubUser builds a principal whose ID is a GitHub-verified login.
+func NewGitHubUser(login string, groups []string) *User {
+	return &User{ID: login, Groups: groups, githubLogin: true}
+}
+
+// GitHubLogin returns the caller's GitHub login when authentication proved
+// one, and false otherwise (Dex, the service principal, dev mode).
+func (u *User) GitHubLogin() (string, bool) {
+	if u == nil || !u.githubLogin {
+		return "", false
+	}
+	return u.ID, true
 }
 
 // NewServiceUser builds the platform-internal service principal. Exported so
@@ -293,7 +316,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					return
 				}
 				groups := resolveGroups(login, validator, resolver)
-				user = &User{ID: login, Groups: groups}
+				user = NewGitHubUser(login, groups)
 			}
 
 			// Store user and raw token in context for downstream handlers.

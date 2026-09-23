@@ -448,6 +448,68 @@ components:
           type: string
           format: date-time
 
+    HumanInputRequest:
+      type: object
+      description: |
+        Redacted view of a sealed HumanInputRequest. Execution hashes, the
+        target commit, Argo names and question_hash are not exposed.
+      properties:
+        request_id:
+          type: string
+          example: hir-377a93a48528eb13
+        request_hash:
+          type: string
+          description: Seal a response must echo back.
+        request_version:
+          type: integer
+        round:
+          type: integer
+        work_item_id:
+          type: string
+        service:
+          type: string
+        proposal:
+          type: string
+        workflow_id:
+          type: string
+          example: dev-loop-mctlhq-mctl-api-261
+        agent:
+          type: string
+        question:
+          type: string
+        reason:
+          type: string
+        response_type:
+          type: string
+          enum: [free_text, single_choice, multi_choice, structured]
+        options:
+          type: array
+          items:
+            type: string
+        context_refs:
+          type: array
+          items:
+            type: string
+        audience:
+          type: string
+        eligible_actors:
+          type: array
+          items:
+            type: string
+          description: Full allow-list; present only for admins and the service principal.
+        can_respond:
+          type: boolean
+          description: Whether the caller's own GitHub-verified `github:<login>` is eligible.
+        created_at:
+          type: string
+        expires_at:
+          type: string
+        state:
+          type: string
+          enum: [pending, expired, timed_out, resolved, not_pending, unknown]
+        state_detail:
+          type: string
+
     Error:
       type: object
       properties:
@@ -2049,6 +2111,149 @@ paths:
                 $ref: '#/components/schemas/Error'
         '503':
           description: Temporal client not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/human-input:
+    get:
+      summary: List human-input requests the caller may answer
+      description: |
+        Read model for DevLoop human-input requests (mctl-agents ADR 013).
+        Request content comes from mctl-gitops and is verified against its
+        `request_hash` seal; a document that fails verification is never
+        listed. Whether a request is still pending comes only from the owning
+        DevLoopWorkflow's `human_input_state` query. Past `expires_at` a
+        request is never pending; its reported state is still the workflow's
+        (`resolved`, `timed_out`, ...) and falls back to `expired` only when
+        the workflow cannot be asked.
+
+        A caller sees a request only if their `github:<login>` is in its
+        eligible actors, or they are an admin, or they are the service
+        principal relaying for a surface. The login must be proven by
+        authentication (a GitHub token, or an mctl-api OAuth token minted
+        after GitHub login); a Dex username is never treated as a GitHub
+        login. Other callers do not learn the request exists.
+
+        Each owning workflow execution is queried once per call, within one
+        overall time budget; expired requests are not queried.
+      tags: [Agent Registry]
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, all]
+            default: pending
+          description: |
+            `pending` lists only requests the owning workflow is waiting on and
+            that have not expired; `all` lists every visible request with its
+            derived state.
+        - name: work_item_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Visible requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/HumanInputRequest'
+                  count:
+                    type: integer
+                  invalid_documents:
+                    type: integer
+                    description: |
+                      Admins and the service principal only: request documents
+                      skipped because they failed verification (malformed or
+                      altered after sealing). The workflow never waits on such
+                      a document either.
+        '400':
+          description: Invalid state filter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: The gitops requests could not be read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: |
+            gitops reader not configured, or `state=pending` was requested
+            and pending could not be determined for at least one candidate
+            (no Temporal client, a query failed or timed out). A short list
+            is never returned in that case.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/human-input/{request_id}:
+    get:
+      summary: Read one human-input request
+      description: |
+        Same visibility and verification rules as the list. A request the
+        caller may not see is reported as 404, not 403.
+      tags: [Agent Registry]
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^hir-[0-9a-f]{16}$'
+          example: hir-377a93a48528eb13
+      responses:
+        '200':
+          description: The request and its derived state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanInputRequest'
+        '400':
+          description: Malformed request_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such request, or not visible to the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: The gitops requests could not be read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: gitops reader not configured (retryable)
           content:
             application/json:
               schema:

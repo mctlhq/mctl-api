@@ -679,10 +679,9 @@ func (s *OAuthServer) ValidateJWT(token string) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &User{
-		ID:     payload.Subject,
-		Groups: payload.Groups,
-	}, nil
+	// The subject is the GitHub login the OAuth callback validated before
+	// IssueCode; this server mints for no other identity provider.
+	return NewGitHubUser(payload.Subject, payload.Groups), nil
 }
 
 // ─── PKCE ─────────────────────────────────────────────────────────────────────
