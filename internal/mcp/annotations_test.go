@@ -47,6 +47,8 @@ var recordedHints = map[string]hints{
 	"mctl_get_dev_loop":                       {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_epic_status":                    {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_ready_work_items":               {readOnly: true, destructive: false, idempotent: false},
+	"mctl_plan_epic_wave":                     {readOnly: true, destructive: false, idempotent: false},
+	"mctl_start_epic_wave":                    {readOnly: false, destructive: false, idempotent: true},
 	"mctl_get_incident":                       {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_lifecycle_ownership":            {readOnly: true, destructive: false, idempotent: false},
 	"mctl_inspect_lifecycle_conflict":         {readOnly: true, destructive: false, idempotent: false},
@@ -246,6 +248,7 @@ func TestReadOnlyToolsAreTheRecordedSet(t *testing.T) {
 		"mctl_list_openclaw_identity", "mctl_list_openclaw_skills", "mctl_list_operations", "mctl_list_platform_skills",
 		"mctl_list_previews", "mctl_list_recent_agent_runs", "mctl_list_recent_operations", "mctl_list_repos",
 		"mctl_list_services", "mctl_list_tenant_skill_bindings", "mctl_list_tenants", "mctl_list_workflows",
+		"mctl_plan_epic_wave",
 		"mctl_read_openclaw_identity", "mctl_read_openclaw_skill", "mctl_read_platform_skill", "mctl_resolve_agent",
 		"mctl_whoami",
 	}

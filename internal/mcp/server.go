@@ -259,6 +259,8 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	// Roadmap read model (mctl-api#333).
 	srv.AddTool(s.toolGetEpicStatus())
 	srv.AddTool(s.toolGetReadyWorkItems())
+	srv.AddTool(s.toolPlanEpicWave())
+	srv.AddTool(s.toolStartEpicWave())
 
 	// Cloudflare MCP portal (dispatch only — no Cloudflare credential here).
 	srv.AddTool(s.toolTriggerPortalServerAuthApply())
