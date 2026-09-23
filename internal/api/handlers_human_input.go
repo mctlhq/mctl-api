@@ -56,6 +56,10 @@ const (
 	HumanInputUnknown    = "unknown"
 )
 
+// humanInputWorkflowNotFound is the not_pending detail for an execution
+// Temporal no longer knows.
+const humanInputWorkflowNotFound = "owning workflow not found"
+
 var humanInputIDPattern = regexp.MustCompile(`^hir-[0-9a-f]{16}$`)
 
 // humanInputNow is the clock expiry is judged against; tests replace it.
@@ -125,23 +129,27 @@ func canSeeHumanInput(u *auth.User, req *humaninput.Request) bool {
 }
 
 // loadHumanInputRequests reads and verifies every sealed request in gitops.
-// A document that fails verification is skipped with a warning: it was
-// malformed or altered after sealing, and the workflow rejects it too.
-func (h *Handlers) loadHumanInputRequests() ([]sealedHumanInput, error) {
+// A document that fails verification is skipped with a warning and counted:
+// it was malformed or altered after sealing, and the workflow never waits on
+// one either (it fails the execution with human_input_malformed). The count
+// lets an operator see the skip without reading API logs.
+func (h *Handlers) loadHumanInputRequests() ([]sealedHumanInput, int, error) {
 	files, err := h.opts.GitReader.ListHumanInputRequests()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	invalid := 0
 	out := make([]sealedHumanInput, 0, len(files))
 	for _, f := range files {
 		req, err := humaninput.ParseRequest(f.Raw)
 		if err != nil {
 			slog.Warn("human_input.invalid_document", "service", f.Service, "proposal", f.Proposal, "error", err)
+			invalid++
 			continue
 		}
 		out = append(out, sealedHumanInput{file: gitopsHumanInputFile{Service: f.Service, Proposal: f.Proposal}, req: req})
 	}
-	return out, nil
+	return out, invalid, nil
 }
 
 // humanInputStates resolves request states for one HTTP call, querying each
@@ -187,7 +195,7 @@ func (q *humanInputStates) state(ctx context.Context, req *humaninput.Request, n
 		if temporalclient.IsNotFound(res.err) {
 			// No such execution (never started, or past retention): it is
 			// certainly not waiting on anything.
-			return HumanInputNotPending, "owning workflow not found"
+			return HumanInputNotPending, humanInputWorkflowNotFound
 		}
 		slog.Debug("human_input_state query failed", "workflow_id", wf, "error", res.err)
 		return HumanInputUnknown, "owning workflow did not answer"
@@ -213,7 +221,9 @@ func (q *humanInputStates) resolve(ctx context.Context, req *humaninput.Request,
 		return HumanInputExpired, ""
 	}
 	state, detail = q.state(ctx, req, now)
-	if expired && state == HumanInputUnknown {
+	// A workflow that cannot answer, or no longer exists (past Temporal
+	// retention), cannot say more than the sealed expiry already does.
+	if expired && (state == HumanInputUnknown || detail == humanInputWorkflowNotFound) {
 		return HumanInputExpired, ""
 	}
 	return state, detail
@@ -320,7 +330,7 @@ func (h *Handlers) ListHumanInputs(w http.ResponseWriter, r *http.Request) {
 	}
 	workItem := r.URL.Query().Get("work_item_id")
 
-	all, err := h.loadHumanInputRequests()
+	all, invalid, err := h.loadHumanInputRequests()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read human-input requests")
 		slog.Error("human_input.list failed", "error", err)
@@ -357,7 +367,13 @@ func (h *Handlers) ListHumanInputs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("human_input.read", "user", user.ID, "list", true, "state_filter", filter, "count", len(items))
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+	body := map[string]any{"items": items, "count": len(items)}
+	if user.IsAdmin() || user.IsService() {
+		// Whose request an unverifiable document was cannot be trusted, so
+		// the count goes only to callers who see everything.
+		body["invalid_documents"] = invalid
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // GetHumanInput handles GET /api/v1/human-input/{request_id}. A request the
@@ -390,7 +406,7 @@ func (h *Handlers) GetHumanInput(w http.ResponseWriter, r *http.Request) {
 
 // findHumanInput returns the verified request with this id, or nil.
 func (h *Handlers) findHumanInput(id string) (*sealedHumanInput, error) {
-	all, err := h.loadHumanInputRequests()
+	all, _, err := h.loadHumanInputRequests()
 	if err != nil {
 		return nil, err
 	}

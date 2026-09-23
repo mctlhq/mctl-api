@@ -176,7 +176,8 @@ func TestHumanInput_VisibilityAndRedaction(t *testing.T) {
 	}
 }
 
-// A request altered after sealing is never shown, not even to an admin.
+// A request altered after sealing is never shown, not even to an admin, but
+// admins do see that a document was skipped.
 func TestHumanInput_TamperedRequestIsNeverShown(t *testing.T) {
 	h, _ := newHumanInputHandlers(t)
 	var m map[string]any
@@ -188,6 +189,12 @@ func TestHumanInput_TamperedRequestIsNeverShown(t *testing.T) {
 	h.opts.GitReader = &humanInputGitReader{files: []gitops.HumanInputRequestFile{{Service: "mctl-api", Proposal: "issue-261-x", Raw: raw}}}
 	if _, items, _ := listHumanInputs(t, h, admin, "?state=all"); len(items) != 0 {
 		t.Fatalf("tampered request listed: %+v", items)
+	}
+	if _, _, body := listHumanInputs(t, h, admin, "?state=all"); !strings.Contains(body, `"invalid_documents":1`) {
+		t.Fatalf("admin list does not report the skipped document: %s", body)
+	}
+	if _, _, body := listHumanInputs(t, h, alice, "?state=all"); strings.Contains(body, "invalid_documents") {
+		t.Fatalf("non-admin list reports skipped documents: %s", body)
 	}
 	if code, _, _ := getHumanInput(t, h, admin, hiASCII); code != http.StatusNotFound {
 		t.Fatalf("tampered get = %d", code)
@@ -280,11 +287,26 @@ func TestHumanInput_TerminalStateOutlivesExpiry(t *testing.T) {
 		t.Fatalf("answered, then expired: GET state = %s, want resolved", v.State)
 	}
 	_, items, _ := listHumanInputs(t, h, admin, "?state=all")
+	found := false
 	for _, v := range items {
-		if v.RequestID == hiASCII && v.State != HumanInputResolved {
-			t.Fatalf("answered, then expired: list state = %s, want resolved", v.State)
+		if v.RequestID == hiASCII {
+			found = true
+			if v.State != HumanInputResolved {
+				t.Fatalf("answered, then expired: list state = %s, want resolved", v.State)
+			}
 		}
 	}
+	if !found {
+		t.Fatalf("%s missing from the list: %+v", hiASCII, items)
+	}
+	// Past Temporal retention the execution is gone; the sealed expiry is
+	// still the better answer than "not pending".
+	tc.humanInputStates[hiWF] = nil
+	tc.humanInputErr = serviceerror.NewNotFound("gone")
+	if _, v, _ := getHumanInput(t, h, alice, hiASCII); v.State != HumanInputExpired {
+		t.Fatalf("expired and past retention: state = %s, want expired", v.State)
+	}
+	tc.humanInputErr = nil
 	tc.humanInputStates[hiWF] = &temporalclient.HumanInputState{State: temporalclient.HumanInputTimedOut, RequestID: hiASCII}
 	if _, v, _ := getHumanInput(t, h, alice, hiASCII); v.State != HumanInputTimedOut {
 		t.Fatalf("timed out: state = %s", v.State)
@@ -345,7 +367,7 @@ func TestListHumanInputs_Filters(t *testing.T) {
 func TestDeriveHumanInputState(t *testing.T) {
 	raw := humanInputFixture(t, "ascii_single_choice")
 	withHumanInputClock(t, "2026-09-23T12:00:00Z")
-	sealed, err := (&Handlers{opts: Options{GitReader: &humanInputGitReader{files: []gitops.HumanInputRequestFile{{Raw: raw}}}}}).loadHumanInputRequests()
+	sealed, _, err := (&Handlers{opts: Options{GitReader: &humanInputGitReader{files: []gitops.HumanInputRequestFile{{Raw: raw}}}}}).loadHumanInputRequests()
 	if err != nil || len(sealed) != 1 {
 		t.Fatal(err)
 	}

@@ -2170,6 +2170,13 @@ paths:
                       $ref: '#/components/schemas/HumanInputRequest'
                   count:
                     type: integer
+                  invalid_documents:
+                    type: integer
+                    description: |
+                      Admins and the service principal only: request documents
+                      skipped because they failed verification (malformed or
+                      altered after sealing). The workflow never waits on such
+                      a document either.
         '400':
           description: Invalid state filter
           content:
