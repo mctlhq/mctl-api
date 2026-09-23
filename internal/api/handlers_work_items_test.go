@@ -424,3 +424,28 @@ func TestWorkItems_ExecutionListAndSupersedeVisibility(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkItems_LongRequestIDNeverFailsAWrite(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	raw, _ := json.Marshal(map[string]any{"tenant": e.tenant, "title": "x"})
+	req := httptest.NewRequest("POST", "/api/v1/work-items", bytes.NewReader(raw))
+	ctx := auth.WithUser(req.Context(), e.user("alice"))
+	ctx = context.WithValue(ctx, clientMetaKey{}, ClientMeta{RequestID: strings.Repeat("a", 300) + "\xff"})
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("300-byte X-Request-Id = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWorkItems_AnotherPrincipalCannotReplayYourKey(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	alice, bob := e.user("alice"), e.user("bob")
+	body := map[string]any{"tenant": e.tenant, "title": "same"}
+	if res := e.do(alice, "POST", "/api/v1/work-items", body, "Idempotency-Key", "k"); res.code != http.StatusCreated {
+		t.Fatalf("alice = %d", res.code)
+	}
+	if res := e.do(bob, "POST", "/api/v1/work-items", body, "Idempotency-Key", "k"); res.code != http.StatusConflict || code(res) != "idempotency_key_reused" {
+		t.Fatalf("bob with alice's key = %d %s", res.code, res.raw)
+	}
+}

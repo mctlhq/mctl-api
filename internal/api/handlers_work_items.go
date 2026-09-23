@@ -27,6 +27,8 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -195,7 +197,7 @@ func mutationFor(w http.ResponseWriter, r *http.Request, user *auth.User, op, it
 	}
 	m := workitems.Mutation{Actor: principalOf(user), Surface: surface, IdempotencyKey: key}
 	if meta, ok := ClientMetaFromContext(r.Context()); ok {
-		m.RequestID = meta.RequestID
+		m.RequestID = truncateRequestID(meta.RequestID)
 	}
 	if key != "" {
 		// body is the decoded request (a copy, key field included); the same
@@ -626,4 +628,16 @@ func (h *Handlers) ListWorkItemEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"schema_version": workitems.SchemaVersion, "events": events})
+}
+
+// truncateRequestID bounds the correlation id copied into history. chi's
+// RequestID middleware takes an inbound X-Request-Id verbatim, so a long or
+// non-UTF-8 trace id from a proxy must shorten, never fail the write.
+func truncateRequestID(id string) string {
+	id = strings.ToValidUTF8(id, "")
+	for len(id) > workitems.MaxExternalIDBytes {
+		_, size := utf8.DecodeLastRuneInString(id)
+		id = id[:len(id)-size]
+	}
+	return id
 }
