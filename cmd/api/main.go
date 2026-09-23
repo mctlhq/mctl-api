@@ -48,6 +48,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/loki"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/roadmap"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/vault"
@@ -241,6 +242,24 @@ func main() {
 		}
 	}
 
+	// Roadmap read model (mctl-api#333). A second gitops.Reader on the
+	// generated roadmap-state branch of mctlhq/.github: mctl-api only reads
+	// the published RoadmapPublication, it never runs the evaluator. The
+	// repository is public, so no credential is needed; ROADMAP_STATE_TOKEN
+	// exists for a private fork. ROADMAP_STATE_DISABLED (any value but false/0/no/off) turns it off and
+	// the roadmap endpoints answer 503.
+	var roadmapGit *gitops.Reader
+	var roadmapReader *roadmap.Reader
+	if !killSwitchOn(os.Getenv("ROADMAP_STATE_DISABLED")) {
+		roadmapGit = gitops.NewReader(
+			envOr("ROADMAP_STATE_REPO_URL", "https://github.com/mctlhq/.github.git"),
+			envOr("ROADMAP_STATE_BRANCH", "roadmap-state"),
+			envOr("ROADMAP_STATE_LOCAL_PATH", "/tmp/roadmap-state"),
+			ghtoken.Static(os.Getenv("ROADMAP_STATE_TOKEN")), "", "",
+		)
+		roadmapReader = roadmap.NewReader(roadmapGit)
+	}
+
 	// Model usage / cost ledger (mctl-api#266, ADR-012). Optional — enabled
 	// when USAGE_DB_URL or AUDIT_DB_URL is set. A nil store makes the usage
 	// endpoints 503; see requireUsageAdmin for why that must not degrade to an
@@ -314,7 +333,7 @@ func main() {
 		workItemsDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
 	}
 	switch {
-	case workItemsDisabled(os.Getenv("WORK_ITEMS_DISABLED")):
+	case killSwitchOn(os.Getenv("WORK_ITEMS_DISABLED")):
 		slog.Warn("WORK_ITEMS_DISABLED is set; /api/v1/work-items routes will return 503")
 	case workItemsDBURL == "":
 		slog.Warn("no WORK_ITEMS_DB_URL or AUDIT_DB_URL; /api/v1/work-items routes will return 503")
@@ -593,6 +612,7 @@ func main() {
 		AlertStore:                     alertStore,
 		AgentRegistry:                  agentRegistryStore,
 		Lifecycle:                      lifecycleStore,
+		Roadmap:                        roadmapReader,
 		Usage:                          usageStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
@@ -627,6 +647,11 @@ func main() {
 	ctx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
 	go gitReader.RefreshLoop(ctx, 60*time.Second)
+	if roadmapGit != nil {
+		// The publication changes at most every couple of hours; freshness is
+		// the capture time it carries, not how often this pulls.
+		go roadmapGit.RefreshLoop(ctx, 5*time.Minute)
+	}
 
 	// Close out audit rows the Argo completion webhook cannot reach. The hook's
 	// HMAC secret exists only in the argo-workflows namespace, so operations
@@ -1177,11 +1202,12 @@ func splitCSV(v string) []string {
 	return out
 }
 
-// workItemsDisabled reads the WORK_ITEMS_DISABLED kill switch. A kill switch
-// errs toward off: any value turns work items off except an explicit
-// "false"/"f"/"0"/"no"/"off" (or empty), so a template that renders the flag as
-// "false" keeps them on while "yes" or "disabled" never silently fails open.
-func workItemsDisabled(v string) bool {
+// killSwitchOn reads a kill-switch value (WORK_ITEMS_DISABLED,
+// ROADMAP_STATE_DISABLED). It errs toward off: any value except an explicit
+// "false"/"f"/"0"/"no"/"off" (or empty) turns the feature off, so a template
+// that renders the flag as "false" keeps it on while "yes" or "disabled" never
+// silently fails open.
+func killSwitchOn(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", "false", "f", "0", "no", "off":
 		return false

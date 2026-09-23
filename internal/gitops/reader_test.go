@@ -1422,3 +1422,84 @@ func TestListHumanInputRequests(t *testing.T) {
 		t.Fatalf("files = %v", seen)
 	}
 }
+
+func TestReadFilesReturnsOneCheckoutAndRefusesPaths(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	work := filepath.Join(root, "work")
+	cache := filepath.Join(root, "cache")
+	runGit(t, root, "init", "--bare", remote)
+	runGit(t, root, "clone", remote, work)
+	runGit(t, work, "checkout", "-b", "roadmap-state")
+	runGit(t, work, "config", "user.email", "test@example.com")
+	runGit(t, work, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(work, "publication.json"), []byte(`{"v":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, work, "publish")
+	runGit(t, work, "push", "origin", "roadmap-state")
+	want := strings.TrimSpace(runGit(t, work, "rev-parse", "HEAD"))
+
+	r := &Reader{repoURL: remote, branch: "roadmap-state", localPath: cache}
+	if err := r.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	files, rev, err := r.ReadFiles("publication.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev != want || string(files["publication.json"]) != `{"v":1}` {
+		t.Fatalf("rev=%s files=%q, want rev %s", rev, files, want)
+	}
+	if got, err := r.Revision(); err != nil || got != want {
+		t.Fatalf("Revision() = %s, %v", got, err)
+	}
+	for _, bad := range []string{"../remote.git/HEAD", ".git/config", "", ".", ".."} {
+		if _, _, err := r.ReadFiles(bad); err == nil {
+			t.Errorf("ReadFiles(%q) was allowed", bad)
+		}
+	}
+	if _, _, err := r.ReadFiles("missing.json"); err == nil {
+		t.Error("a missing file read as present")
+	}
+	outside := filepath.Join(root, "outside.json")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(cache, "link.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.ReadFiles("link.json"); err == nil {
+		t.Error("a symlink out of the checkout was followed")
+	}
+	// Before any sync there is no revision to report.
+	if _, err := (&Reader{localPath: filepath.Join(root, "never")}).Revision(); err == nil {
+		t.Error("an unsynced reader reported a revision")
+	}
+	// A failed clone into a directory inside another repository must not
+	// borrow that repository's HEAD.
+	nestedPath := filepath.Join(work, "nested")
+	if err := os.MkdirAll(nestedPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	nested := &Reader{repoURL: filepath.Join(root, "missing.git"), branch: "roadmap-state", localPath: nestedPath}
+	if err := nested.refresh(); err == nil {
+		t.Fatal("clone of a missing repository succeeded")
+	}
+	if got, err := nested.Revision(); err == nil {
+		t.Errorf("a failed clone reported revision %s", got)
+	}
+	// The revision tracks what a refresh put on disk.
+	if err := os.WriteFile(filepath.Join(work, "publication.json"), []byte(`{"v":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, work, "publish again")
+	runGit(t, work, "push", "origin", "roadmap-state")
+	if err := r.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	next := strings.TrimSpace(runGit(t, work, "rev-parse", "HEAD"))
+	if got, _ := r.Revision(); got != next || got == want {
+		t.Fatalf("after refresh Revision() = %s, want %s", got, next)
+	}
+}

@@ -16,7 +16,7 @@ package main
 
 import "testing"
 
-func TestWorkItemsDisabledErrsTowardOff(t *testing.T) {
+func TestKillSwitchErrsTowardOff(t *testing.T) {
 	cases := []struct {
 		value string
 		want  bool
@@ -26,8 +26,8 @@ func TestWorkItemsDisabledErrsTowardOff(t *testing.T) {
 		{"true", true}, {"1", true}, {"TRUE", true}, {"yes", true}, {"on", true}, {"disabled", true},
 	}
 	for _, c := range cases {
-		if got := workItemsDisabled(c.value); got != c.want {
-			t.Errorf("workItemsDisabled(%q) = %v, want %v", c.value, got, c.want)
+		if got := killSwitchOn(c.value); got != c.want {
+			t.Errorf("killSwitchOn(%q) = %v, want %v", c.value, got, c.want)
 		}
 	}
 }

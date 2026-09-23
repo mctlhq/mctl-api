@@ -34,6 +34,7 @@ import (
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/openapi"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/roadmap"
 	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 	"github.com/prometheus/client_golang/prometheus"
@@ -106,6 +107,10 @@ type Options struct {
 	// lifecycle phase (optional — nil makes the lifecycle endpoints 503,
 	// which callers treat as "unknown", never as "unowned").
 	Lifecycle *lifecycle.Store
+
+	// Roadmap serves the RoadmapPublication read model (mctl-api#333).
+	// Optional: nil makes the roadmap endpoints 503.
+	Roadmap *roadmap.Reader
 
 	// Usage is the durable model-usage and cost ledger (mctl-api#266,
 	// ADR-012). Optional — nil makes the usage endpoints 503, which a caller
@@ -445,6 +450,12 @@ func NewRouter(opts Options) http.Handler {
 			// outside the write group like the dev-loop liveness read.
 			r.Get("/human-input", h.ListHumanInputs)
 			r.Get("/human-input/{request_id}", h.GetHumanInput)
+
+			// Roadmap read model (mctl-api#333): read-only, selected from the
+			// published RoadmapPublication, never evaluated here.
+			r.Get("/roadmap/epics", h.ListRoadmapEpics)
+			r.Get("/roadmap/epic-status", h.GetRoadmapEpicStatus)
+			r.Get("/roadmap/ready", h.GetRoadmapReadyWorkItems)
 
 			// Lifecycle ownership READS. Deliberately OUTSIDE the write
 			// group above, for the same reason the dev-loop liveness read
