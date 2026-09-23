@@ -58,7 +58,10 @@ type waveDevLoop struct {
 	started     []string
 }
 
-func (f *waveDevLoop) DescribeDevLoop(_ context.Context, workflowID string) (string, error) {
+func (f *waveDevLoop) DescribeDevLoop(ctx context.Context, workflowID string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if err := f.describeErr[workflowID]; err != nil {
 		return "", err
 	}
@@ -68,7 +71,10 @@ func (f *waveDevLoop) DescribeDevLoop(_ context.Context, workflowID string) (str
 	return "", serviceerror.NewNotFound("workflow not found")
 }
 
-func (f *waveDevLoop) StartDevLoopWorkflow(_ context.Context, issueURL string) (string, string, error) {
+func (f *waveDevLoop) StartDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
 	wf := "dev-loop-mctlhq-" + strings.Replace(strings.TrimPrefix(issueURL, "https://github.com/mctlhq/"), "/issues/", "-", 1)
 	if err := f.startErr[wf]; err != nil {
 		return "", "", err
@@ -366,7 +372,7 @@ func TestRoadmapWaveRoutesAreRegistered(t *testing.T) {
 // A publication with no observation time (a synthetic capture) is never
 // fresh enough to execute from, whatever the bound.
 func TestRoadmapWave_NoCaptureTimeIsNeverFresh(t *testing.T) {
-	age := int64(60)
+	age, future := int64(60), int64(-3600)
 	for _, c := range []struct {
 		prov  roadmap.Provenance
 		max   time.Duration
@@ -376,6 +382,8 @@ func TestRoadmapWave_NoCaptureTimeIsNeverFresh(t *testing.T) {
 		{roadmap.Provenance{AgeSeconds: &age}, time.Hour, true},
 		{roadmap.Provenance{AgeSeconds: &age}, 59 * time.Second, false},
 		{roadmap.Provenance{AgeSeconds: &age}, -1, false},
+		// Captured in the future: clock skew is not freshness.
+		{roadmap.Provenance{AgeSeconds: &future}, time.Hour, false},
 	} {
 		if fresh, why := waveFreshness(c.prov, c.max); fresh != c.fresh || (!fresh && why == "") {
 			t.Errorf("waveFreshness(%v, %v) = %v %q", c.prov.AgeSeconds, c.max, fresh, why)
@@ -416,5 +424,55 @@ func TestRoadmapWave_NoReaderAndUnknownEpicAreAuditedRefusals(t *testing.T) {
 	}
 	if !reasons[roadmapCodeEpicNotFound] || !reasons[roadmapCodeUnavailable] {
 		t.Errorf("audited refusals = %v", reasons)
+	}
+}
+
+// An invalid ROADMAP_WAVE_MAX_AGE is the same terminal answer from plan and
+// execute; a publication that is merely old is a different one.
+func TestRoadmapWave_InvalidBoundIsDisabledNotTooOld(t *testing.T) {
+	e := newWaveEnv(t)
+	e.h.opts.RoadmapWaveMaxAge = -1
+	code, resp := e.post(waveUser, "/api/v1/roadmap/waves/plan", map[string]any{"epic": "enterprise-mcp"})
+	why, _ := resp["not_executable_reason"].(string)
+	if code != http.StatusOK || resp["executable"] != false || !strings.HasPrefix(why, roadmapCodeWaveDisabled+":") || resp["max_age_seconds"] != float64(0) {
+		t.Fatalf("plan with an invalid bound: %d %v", code, resp)
+	}
+}
+
+// A malformed or incomplete execute is refused and audited.
+func TestRoadmapWave_MalformedExecuteIsAudited(t *testing.T) {
+	e := newWaveEnv(t)
+	for _, body := range []any{
+		map[string]any{"epic": "enterprise-mcp", "surprise": true},
+		map[string]any{"epic": "enterprise-mcp"},
+		map[string]any{"epic": " ", "items": []string{"x"}, "plan_hash": "h", "state_revision": "r"},
+	} {
+		if code, _ := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", body); code != http.StatusBadRequest {
+			t.Errorf("%v: %d", body, code)
+		}
+	}
+	var audited int
+	for _, a := range e.audit.List(100) {
+		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" && a.Parameters["reason"] == roadmapCodeInvalid {
+			audited++
+		}
+	}
+	if audited != 3 {
+		t.Errorf("audited malformed executes = %d, want 3", audited)
+	}
+}
+
+// A caller that goes away mid-wave does not abort the starts it began.
+func TestRoadmapWave_DisconnectDoesNotAbortTheWave(t *testing.T) {
+	e := newWaveEnv(t)
+	_, exec := e.plan("enterprise-mcp")
+	raw, _ := json.Marshal(exec)
+	ctx, cancel := context.WithCancel(auth.WithUser(context.Background(), waveAdmin))
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/roadmap/waves/execute", bytes.NewReader(raw)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	e.h.ExecuteRoadmapWave(rec, req)
+	if rec.Code != http.StatusOK || len(e.tc.started) != len(exec["items"].([]string)) {
+		t.Fatalf("cancelled request: %d started %v: %s", rec.Code, e.tc.started, rec.Body.String())
 	}
 }

@@ -540,6 +540,19 @@ components:
           type: array
           items: {type: string}
           description: Exact work-item ids; omit (plan only) for every eligible item
+    RoadmapWaveExecuteRequest:
+      type: object
+      additionalProperties: false
+      required: [epic, items, plan_hash, state_revision]
+      properties:
+        epic: {type: string, description: 'Epic name or root issue (owner/repo#N)'}
+        required_only: {type: boolean, default: true}
+        items:
+          type: array
+          items: {type: string}
+          description: The plan's exact selected ids
+        plan_hash: {type: string}
+        state_revision: {type: string}
     RoadmapWaveItem:
       type: object
       properties:
@@ -2553,13 +2566,7 @@ paths:
         content:
           application/json:
             schema:
-              allOf:
-                - $ref: '#/components/schemas/RoadmapWaveRequest'
-                - type: object
-                  required: [items, plan_hash, state_revision]
-                  properties:
-                    plan_hash: {type: string}
-                    state_revision: {type: string}
+              $ref: '#/components/schemas/RoadmapWaveExecuteRequest'
       responses:
         '200':
           description: Per-item outcomes

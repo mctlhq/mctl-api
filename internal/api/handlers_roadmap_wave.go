@@ -16,6 +16,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -53,6 +54,9 @@ const (
 	roadmapCodeWaveDisabled     = "wave_execution_disabled"
 
 	roadmapWaveMaxBody = 64 << 10
+
+	// roadmapWaveStartTimeout bounds one wave's DevLoop starts once begun.
+	roadmapWaveStartTimeout = 2 * time.Minute
 )
 
 // Per-item execution outcomes.
@@ -117,6 +121,11 @@ func waveFreshness(prov roadmap.Provenance, maxAge time.Duration) (fresh bool, r
 	if maxAge <= 0 {
 		return false, "ROADMAP_WAVE_MAX_AGE is invalid"
 	}
+	if *prov.AgeSeconds < 0 {
+		// Captured "in the future": the clocks disagree, so the age is
+		// unknown. Fail closed rather than read it as fresh.
+		return false, "the publication's observation time is ahead of this server's clock"
+	}
 	if time.Duration(*prov.AgeSeconds)*time.Second > maxAge {
 		return false, "the publication's observation is " + strconv.FormatInt(*prov.AgeSeconds, 10) +
 			"s old; the maximum is " + strconv.FormatInt(int64(maxAge/time.Second), 10) + "s"
@@ -138,15 +147,18 @@ func wavePlanErrorCode(err error) string {
 	return "internal_error"
 }
 
+// writeWavePlanError answers err with the code wavePlanErrorCode names, so
+// the audited reason and the HTTP answer cannot diverge.
 func writeWavePlanError(w http.ResponseWriter, err error) {
-	var sel *roadmap.SelectionError
-	switch {
-	case errors.As(err, &sel):
+	switch wavePlanErrorCode(err) {
+	case roadmapCodeInvalidSelection:
+		var sel *roadmap.SelectionError
+		errors.As(err, &sel)
 		writeErrorCode(w, http.StatusConflict, roadmapCodeInvalidSelection, err.Error(),
 			map[string]any{"refused": sel.Refused})
-	case errors.Is(err, roadmap.ErrEpicNotFound):
+	case roadmapCodeEpicNotFound:
 		writeErrorCode(w, http.StatusNotFound, roadmapCodeEpicNotFound, err.Error(), nil)
-	case errors.Is(err, roadmap.ErrUnavailable):
+	case roadmapCodeUnavailable:
 		slog.Warn("roadmap wave: publication unusable", "error", err)
 		writeErrorCode(w, http.StatusServiceUnavailable, roadmapCodeUnavailable,
 			"no verified roadmap publication: readiness is unknown, not empty", nil)
@@ -183,10 +195,13 @@ func (h *Handlers) PlanRoadmapWave(w http.ResponseWriter, r *http.Request) {
 	fresh, why := waveFreshness(plan.Provenance, maxAge)
 	resp := map[string]any{
 		"plan":            plan,
-		"max_age_seconds": int64(maxAge / time.Second),
+		"max_age_seconds": max(int64(maxAge/time.Second), 0),
 		"executable":      fresh && len(plan.Selected) > 0,
 	}
 	switch {
+	case maxAge < 0:
+		// The same terminal answer execute gives: no publication fixes it.
+		resp["not_executable_reason"] = roadmapCodeWaveDisabled + ": ROADMAP_WAVE_MAX_AGE is invalid"
 	case !fresh:
 		resp["not_executable_reason"] = roadmapCodeTooOld + ": " + why
 	case len(plan.Selected) == 0:
@@ -225,24 +240,13 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body waveExecuteRequest
-	if !decodeWaveBody(w, r, &body) {
-		return
-	}
-	if body.PlanHash == "" || body.StateRevision == "" || len(body.Items) == 0 {
-		writeErrorCode(w, http.StatusBadRequest, roadmapCodeInvalid,
-			"plan_hash, state_revision and the plan's exact items are required: plan first with POST /api/v1/roadmap/waves/plan", nil)
-		return
-	}
-	req, ok := waveRequest(w, body.Epic, body.RequiredOnly, body.Items)
-	if !ok {
-		return
-	}
+	// Every refusal from here on is audited, including a malformed body.
 	auditRefusal := func(code, msg string) {
 		h.logAudit(r, audit.Entry{
 			UserID: user.ID, Operation: "roadmap-wave-execute", Status: "failed",
 			RiskLevel: string(operations.RiskMedium),
 			Parameters: map[string]string{
-				"epic": req.Epic, "plan_hash": body.PlanHash, "state_revision": body.StateRevision,
+				"epic": body.Epic, "plan_hash": body.PlanHash, "state_revision": body.StateRevision,
 				"items": strings.Join(body.Items, ","), "reason": code,
 			},
 			Message: msg,
@@ -251,6 +255,20 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 	refuse := func(status int, code, msg string, details map[string]any) {
 		auditRefusal(code, msg)
 		writeErrorCode(w, status, code, msg, details)
+	}
+	if !decodeWaveBody(w, r, &body) {
+		auditRefusal(roadmapCodeInvalid, "malformed request body")
+		return
+	}
+	if body.PlanHash == "" || body.StateRevision == "" || len(body.Items) == 0 {
+		refuse(http.StatusBadRequest, roadmapCodeInvalid,
+			"plan_hash, state_revision and the plan's exact items are required: plan first with POST /api/v1/roadmap/waves/plan", nil)
+		return
+	}
+	req, ok := waveRequest(w, body.Epic, body.RequiredOnly, body.Items)
+	if !ok {
+		auditRefusal(roadmapCodeInvalid, "invalid epic or items")
+		return
 	}
 	if h.waveMaxAge() < 0 {
 		refuse(http.StatusServiceUnavailable, roadmapCodeWaveDisabled, "ROADMAP_WAVE_MAX_AGE is invalid; wave execution is off", nil)
@@ -300,10 +318,14 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 		RunID   string `json:"run_id,omitempty"`
 		Error   string `json:"error,omitempty"`
 	}
+	// A client that disconnects mid-wave must not abort it part-way: the
+	// loop finishes what it began, bounded by its own timeout.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), roadmapWaveStartTimeout)
+	defer cancel()
 	outcomes := make([]outcome, 0, len(plan.Selected))
 	for _, it := range plan.Selected {
 		o := outcome{WaveItem: it}
-		status, err := h.opts.TemporalClient.DescribeDevLoop(r.Context(), it.WorkflowID)
+		status, err := h.opts.TemporalClient.DescribeDevLoop(ctx, it.WorkflowID)
 		switch {
 		case err != nil && !temporalclient.IsNotFound(err):
 			// Cannot tell whether it exists: do not start blind.
@@ -314,7 +336,7 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 			// A closed DevLoop is not restarted (REJECT_DUPLICATE); report it.
 			o.Outcome, o.Status = waveOutcomeAlreadyExists, status
 		default:
-			wf, runID, err := h.opts.TemporalClient.StartDevLoopWorkflow(r.Context(), it.IssueURL)
+			wf, runID, err := h.opts.TemporalClient.StartDevLoopWorkflow(ctx, it.IssueURL)
 			switch {
 			case err != nil:
 				o.Outcome, o.Error = waveOutcomeFailed, err.Error()
