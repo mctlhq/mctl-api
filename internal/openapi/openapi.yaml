@@ -805,7 +805,7 @@ components:
         error: {type: string}
         code:
           type: string
-          enum: [work_items_unavailable, invalid_request, actor_not_accepted, intent_hash_mismatch,
+          enum: [work_items_unavailable, invalid_request, actor_not_accepted, secret_in_text, intent_hash_mismatch,
                  approval_not_found, approval_idempotency_conflict, approval_already_decided,
                  approval_self_decision, approval_not_approved, approval_denied, approval_expired,
                  approval_intent_mismatch, approval_consumed, approval_requester_forbidden,
@@ -3290,7 +3290,12 @@ paths:
         the `Idempotency-Key` header (they must agree): the same key with the
         same intent returns the stored request (200, whatever its state now),
         the same key with a different intent is 409
-        `approval_idempotency_conflict`. A new request needs `expires_at` in
+        `approval_idempotency_conflict`. Because a replay returns the stored
+        request even once it is expired, denied or consumed, the key must vary
+        per attempt (for example intent plus an attempt counter); a key
+        derived from the intent alone can never request that action again.
+        Every field is checked by the secret scanner (400
+        `secret_in_text`). A new request needs `expires_at` in
         the future and at most 7 days ahead. A named `work_item_id` must exist.
       tags: [Action Approvals]
       parameters:
@@ -3318,7 +3323,7 @@ paths:
       responses:
         '201': {description: Created in state pending, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
         '200': {description: This key already names this intent; the stored request, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
-        '400': {description: 'invalid_request (missing or oversized field, expiry outside the window, unknown work item), intent_hash_mismatch, or actor_not_accepted (a body naming requested_by or another actor)', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '400': {description: 'invalid_request (missing or oversized field, expiry outside the window, unknown work item), secret_in_text, intent_hash_mismatch, or actor_not_accepted (a body naming requested_by or another actor)', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '403': {description: approval_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '409': {description: approval_idempotency_conflict, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
@@ -3392,7 +3397,7 @@ paths:
               required: [decision]
       responses:
         '200': {description: Decided, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
-        '400': {description: 'invalid_request or actor_not_accepted (a body naming decided_by)', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '400': {description: 'invalid_request, secret_in_text (a credential in reason), or actor_not_accepted (a body naming decided_by)', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '403': {description: 'approval_decider_forbidden or approval_self_decision', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '404': {description: approval_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '409': {description: 'approval_already_decided or approval_expired', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}

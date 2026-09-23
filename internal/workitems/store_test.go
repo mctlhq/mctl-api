@@ -26,7 +26,9 @@ func newStoreForTest(t *testing.T) *Store {
 		if _, err := s.pool.Exec(ctx, "DELETE FROM work_items"); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.pool.Exec(ctx, "DELETE FROM action_approval_requests"); err != nil {
+		// Only this package's rows: the api tests share the database.
+		if _, err := s.pool.Exec(ctx, "DELETE FROM action_approval_requests WHERE execution_id = $1",
+			storeTestExecution); err != nil {
 			t.Fatal(err)
 		}
 	}

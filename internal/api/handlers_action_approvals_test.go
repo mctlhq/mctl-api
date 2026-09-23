@@ -75,7 +75,35 @@ func (e *workItemsEnv) auditOps(op, id string) int {
 	return n
 }
 
+// auditRefusals counts failed audit entries op recorded for id with reason.
+func (e *workItemsEnv) auditRefusals(op, id, reason string) int {
+	n := 0
+	entries := e.audit.List(1000)
+	for i := range entries {
+		p := entries[i].Parameters
+		if entries[i].Operation == op && entries[i].Status == "failed" && p["approval_id"] == id && p["reason"] == reason {
+			n++
+		}
+	}
+	return n
+}
+
 var rootAdmin = auth.NewGitHubUser("root", []string{"admins"})
+
+func TestActionApprovals_RefuseSecretsInText(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	token := "ghp_" + strings.Repeat("a", 36)
+	b := e.approvalBody("k-secret")
+	b["target"] = "https://hooks.internal/x?token=" + token
+	if res := e.do(auth.NewServiceUser(), "POST", "/api/v1/action-approvals", b); res.code != http.StatusBadRequest || code(res) != wiCodeSecret {
+		t.Fatalf("secret target = %d %s", res.code, res.raw)
+	}
+	id := e.requestApproval("k-1")["id"].(string)
+	res := e.do(rootAdmin, "POST", "/api/v1/action-approvals/"+id+"/decision", map[string]any{"decision": "deny", "reason": "old key " + token})
+	if res.code != http.StatusBadRequest || code(res) != wiCodeSecret {
+		t.Fatalf("secret reason = %d %s", res.code, res.raw)
+	}
+}
 
 func TestActionApprovals_CreateIsIdempotentAndBindsTheIntent(t *testing.T) {
 	e := newWorkItemsEnv(t)
@@ -199,6 +227,9 @@ func TestActionApprovals_OnlyAHumanAdminDecides(t *testing.T) {
 	if res.code != http.StatusOK || res.body["approval"].(map[string]any)["state"] != "pending" {
 		t.Fatalf("refusals changed it: %s", res.raw)
 	}
+	if n := e.auditRefusals("action_approval.decision_refused", id, aarCodeDeciderForbidden); n != 4 {
+		t.Fatalf("forbidden deciders audited %d times, want 4", n)
+	}
 	if res := e.do(rootAdmin, "POST", "/api/v1/action-approvals/"+id+"/decision", map[string]any{"decision": "approve", "decided_by": "github:other"}); res.code != http.StatusBadRequest || code(res) != wiCodeActorNotAccepted {
 		t.Fatalf("decided_by in body = %d %s", res.code, res.raw)
 	}
@@ -218,6 +249,9 @@ func TestActionApprovals_OnlyAHumanAdminDecides(t *testing.T) {
 	if res := e.decide(rootAdmin, id, "deny"); res.code != http.StatusConflict || code(res) != aarCodeAlreadyDecided {
 		t.Fatalf("re-decide = %d %s", res.code, res.raw)
 	}
+	if n := e.auditRefusals("action_approval.decision_refused", id, aarCodeAlreadyDecided); n != 1 {
+		t.Fatalf("re-decide audited %d times", n)
+	}
 	if res := e.decide(rootAdmin, "aar_missing", "approve"); res.code != http.StatusNotFound || code(res) != aarCodeNotFound {
 		t.Fatalf("missing = %d %s", res.code, res.raw)
 	}
@@ -234,6 +268,9 @@ func TestActionApprovals_ConsumeIsSingleUseAndTyped(t *testing.T) {
 	e.decide(rootAdmin, id, "approve")
 	if res := e.consume(id, "sha256:"+strings.Repeat("0", 64)); res.code != http.StatusConflict || code(res) != aarCodeIntentMismatch {
 		t.Fatalf("mismatch = %d %s", res.code, res.raw)
+	}
+	if n := e.auditRefusals("action_approval.consume_refused", id, aarCodeIntentMismatch); n != 1 {
+		t.Fatalf("intent mismatch audited %d times", n)
 	}
 	if res := e.consume(id, ""); res.code != http.StatusBadRequest || code(res) != wiCodeInvalid {
 		t.Fatalf("no hash = %d %s", res.code, res.raw)
@@ -277,6 +314,10 @@ func TestActionApprovals_ConsumeIsSingleUseAndTyped(t *testing.T) {
 	res := e.consume(id, hash)
 	if res.code != http.StatusConflict || code(res) != aarCodeConsumed {
 		t.Fatalf("again = %d %s", res.code, res.raw)
+	}
+	// Every refused consume is audited: the 7 racing losers and this replay.
+	if n := e.auditRefusals("action_approval.consume_refused", id, aarCodeConsumed); n != racers {
+		t.Fatalf("replayed consumes audited %d times, want %d", n, racers)
 	}
 	res = e.do(rootAdmin, "GET", "/api/v1/action-approvals/"+id, nil)
 	if got := res.body["approval"].(map[string]any); got["state"] != "consumed" || got["consumed_at"] == nil {

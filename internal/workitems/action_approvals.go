@@ -235,6 +235,11 @@ func (in ActionApprovalInput) validate() error {
 		if err := checkText(f.name, f.value, f.max, f.required); err != nil {
 			return err
 		}
+		// Every field is persisted and read back, and target is pinned
+		// into intent_hash: none may carry a credential.
+		if err := scanSecrets(f.name, f.value); err != nil {
+			return err
+		}
 	}
 	if in.WorkItemID != "" && !strings.HasPrefix(in.WorkItemID, WorkItemIDPrefix) {
 		return invalid("work_item_id must be a %s id", WorkItemIDPrefix)
@@ -412,8 +417,11 @@ func (s *Store) ActionApprovals(ctx context.Context, f ActionApprovalFilter) ([]
 	if f.RequestedBy != "" {
 		where = append(where, "requested_by = "+arg(f.RequestedBy))
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+actionApprovalColumns+` FROM action_approval_requests
-		WHERE `+strings.Join(where, " AND ")+` ORDER BY created_at DESC, id LIMIT `+arg(f.Limit), args...)
+	// Finish the query first: arg appends to args, and the evaluation order
+	// of a call operand against a plain variable operand is unspecified.
+	query := `SELECT ` + actionApprovalColumns + ` FROM action_approval_requests
+		WHERE ` + strings.Join(where, " AND ") + ` ORDER BY created_at DESC, id LIMIT ` + arg(f.Limit)
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: list action approvals: %w", err)
 	}
@@ -426,7 +434,10 @@ func (s *Store) ActionApprovals(ctx context.Context, f ActionApprovalFilter) ([]
 		}
 		out = append(out, *a)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("workitems: list action approvals: %w", err)
+	}
+	return out, nil
 }
 
 // ActionDecisionInput decides a pending request.
@@ -446,6 +457,9 @@ func (s *Store) DecideActionApproval(ctx context.Context, in ActionDecisionInput
 		return nil, err
 	}
 	if err := checkText("reason", in.Reason, MaxApprovalReasonBytes, false); err != nil {
+		return nil, err
+	}
+	if err := scanSecrets("reason", in.Reason); err != nil {
 		return nil, err
 	}
 	var to string

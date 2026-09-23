@@ -152,13 +152,20 @@ may live in different databases.
   decision or consume on it is refused. Create and consume: the requesting
   service principal only, `requested_by` from authentication, idempotent per
   `(requested_by, idempotency_key)` (a different intent under the same key
-  is 409 `approval_idempotency_conflict`). Decide: a human admin acting
+  is 409 `approval_idempotency_conflict`). A replayed key returns the stored
+  request whatever its state, so once it is `expired`, `denied` or
+  `consumed` that key can never open a new request: a client must vary the
+  key per attempt (for example the intent plus an attempt counter), never
+  derive it from the intent alone. Every bound field and the decision
+  `reason` pass the `secretscan.Scan` gate below (400). Decide: a human admin acting
   directly only — never a service, a surface or a relayed request, never
   the requester. Consume is one compare-and-set `UPDATE` (`state='approved'`,
   matching `intent_hash`, unexpired) that records `consumed_at`, so a
   receipt authorizes exactly one side effect. Reads: every request for a
   human admin, its own requests for a service. Create, decision and consume
-  are audited (ids and hashes only). mctl-api is the approval record;
+  are audited (ids and hashes only), and so are refused decisions and
+  consumes (`action_approval.decision_refused` /
+  `action_approval.consume_refused`, with the typed code). mctl-api is the approval record;
   Temporal only waits on it and re-reads it after a best-effort wake-up.
 - **`SurfaceRef`** — correlates a work item to a surface-native
   conversation: `surface`, `external_id` (chat/thread/run identifier needed

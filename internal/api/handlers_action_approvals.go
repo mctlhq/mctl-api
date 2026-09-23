@@ -71,31 +71,48 @@ func canSeeActionApproval(u *auth.User, a *workitems.ActionApprovalRequest) bool
 	return isDirectService(u) && a.RequestedBy == principalOf(u)
 }
 
-func writeActionApprovalError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, workitems.ErrApprovalNotFound):
-		writeErrorCode(w, http.StatusNotFound, aarCodeNotFound, "action approval request not found", nil)
-	case errors.Is(err, workitems.ErrApprovalIdempotencyConflict):
-		writeErrorCode(w, http.StatusConflict, aarCodeIdempotencyConflict, err.Error(), nil)
-	case errors.Is(err, workitems.ErrApprovalIntentHash):
-		writeErrorCode(w, http.StatusBadRequest, aarCodeIntentHashInvalid, err.Error(), nil)
-	case errors.Is(err, workitems.ErrApprovalAlreadyDecided):
-		writeErrorCode(w, http.StatusConflict, aarCodeAlreadyDecided, err.Error(), nil)
-	case errors.Is(err, workitems.ErrApprovalSelfDecision):
-		writeErrorCode(w, http.StatusForbidden, aarCodeSelfDecision, err.Error(), nil)
-	case errors.Is(err, workitems.ErrApprovalNotApproved):
-		writeErrorCode(w, http.StatusConflict, aarCodeNotApproved, err.Error(), nil)
-	case errors.Is(err, workitems.ErrApprovalDenied):
-		writeErrorCode(w, http.StatusConflict, aarCodeDenied, err.Error(), nil)
-	case errors.Is(err, workitems.ErrApprovalExpired):
-		writeErrorCode(w, http.StatusConflict, aarCodeExpired, err.Error(), nil)
-	case errors.Is(err, workitems.ErrApprovalIntentMismatch):
-		writeErrorCode(w, http.StatusConflict, aarCodeIntentMismatch, err.Error(), nil)
-	case errors.Is(err, workitems.ErrApprovalConsumed):
-		writeErrorCode(w, http.StatusConflict, aarCodeConsumed, err.Error(), nil)
-	default:
-		writeWorkItemError(w, err)
+// actionApprovalRefusals maps each store refusal to its status and typed
+// code, in match order.
+var actionApprovalRefusals = []struct {
+	err    error
+	status int
+	code   string
+}{
+	{workitems.ErrApprovalNotFound, http.StatusNotFound, aarCodeNotFound},
+	{workitems.ErrApprovalIdempotencyConflict, http.StatusConflict, aarCodeIdempotencyConflict},
+	{workitems.ErrApprovalIntentHash, http.StatusBadRequest, aarCodeIntentHashInvalid},
+	{workitems.ErrApprovalAlreadyDecided, http.StatusConflict, aarCodeAlreadyDecided},
+	{workitems.ErrApprovalSelfDecision, http.StatusForbidden, aarCodeSelfDecision},
+	{workitems.ErrApprovalNotApproved, http.StatusConflict, aarCodeNotApproved},
+	{workitems.ErrApprovalDenied, http.StatusConflict, aarCodeDenied},
+	{workitems.ErrApprovalExpired, http.StatusConflict, aarCodeExpired},
+	{workitems.ErrApprovalIntentMismatch, http.StatusConflict, aarCodeIntentMismatch},
+	{workitems.ErrApprovalConsumed, http.StatusConflict, aarCodeConsumed},
+}
+
+// actionApprovalRefusalCode is the typed code of a store refusal, or "" for
+// any other error.
+func actionApprovalRefusalCode(err error) string {
+	for _, r := range actionApprovalRefusals {
+		if errors.Is(err, r.err) {
+			return r.code
+		}
 	}
+	return ""
+}
+
+func writeActionApprovalError(w http.ResponseWriter, err error) {
+	for _, r := range actionApprovalRefusals {
+		if errors.Is(err, r.err) {
+			msg := err.Error()
+			if r.code == aarCodeNotFound {
+				msg = "action approval request not found"
+			}
+			writeErrorCode(w, r.status, r.code, msg, nil)
+			return
+		}
+	}
+	writeWorkItemError(w, err)
 }
 
 // visibleActionApproval loads {id} and answers 404 unless the caller may
@@ -137,6 +154,23 @@ func (h *Handlers) auditActionApproval(r *http.Request, user *auth.User, op stri
 		Parameters: params,
 		Status:     "succeeded",
 		RiskLevel:  string(risk),
+	})
+}
+
+// auditActionApprovalRefusal records a refused decision or consume: the
+// signatures of a replay, an intent swap or a confused deputy. Ids and the
+// typed code only, never the reason text or a presented hash.
+func (h *Handlers) auditActionApprovalRefusal(r *http.Request, user *auth.User, op, id, code string) {
+	h.logAudit(r, audit.Entry{
+		UserID:    user.ID,
+		Operation: op,
+		Parameters: map[string]string{
+			"approval_id": id,
+			"reason":      code,
+			"actor":       principalOf(user),
+		},
+		Status:    "failed",
+		RiskLevel: string(operations.RiskMedium),
 	})
 }
 
@@ -281,6 +315,7 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !isHumanAdmin(user) {
+		h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", chi.URLParam(r, "id"), aarCodeDeciderForbidden)
 		writeErrorCode(w, http.StatusForbidden, aarCodeDeciderForbidden,
 			"only a human admin acting directly may decide an action approval", nil)
 		return
@@ -293,6 +328,9 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 		ID: chi.URLParam(r, "id"), DecidedBy: principalOf(user), Decision: body.Decision, Reason: body.Reason,
 	})
 	if err != nil {
+		if code := actionApprovalRefusalCode(err); code != "" {
+			h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", chi.URLParam(r, "id"), code)
+		}
 		writeActionApprovalError(w, err)
 		return
 	}
@@ -312,6 +350,7 @@ func (h *Handlers) ConsumeActionApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !isDirectService(user) {
+		h.auditActionApprovalRefusal(r, user, "action_approval.consume_refused", chi.URLParam(r, "id"), aarCodeRequesterForbidden)
 		writeErrorCode(w, http.StatusForbidden, aarCodeRequesterForbidden,
 			"only the requesting service may consume an action approval", nil)
 		return
@@ -327,6 +366,9 @@ func (h *Handlers) ConsumeActionApproval(w http.ResponseWriter, r *http.Request)
 	}
 	a, err := h.opts.WorkItems.ConsumeActionApproval(r.Context(), cur.ID, body.IntentHash)
 	if err != nil {
+		if code := actionApprovalRefusalCode(err); code != "" {
+			h.auditActionApprovalRefusal(r, user, "action_approval.consume_refused", cur.ID, code)
+		}
 		writeActionApprovalError(w, err)
 		return
 	}

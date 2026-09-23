@@ -9,12 +9,19 @@ import (
 	"time"
 )
 
-const agentPrincipal = "service:mctl-agent"
+// agentPrincipal and storeTestExecution scope this package's approvals: the
+// api package shares the database, requests as service:mctl-agent with the
+// same idempotency keys, and cleans up only its own rows, so this one must
+// neither collide with its keys nor wipe them.
+const (
+	agentPrincipal     = "service:workitems-store-test"
+	storeTestExecution = "exec-1"
+)
 
 func approvalInput(s *Store, key string) ActionApprovalInput {
 	return ActionApprovalInput{
 		ActionIntent: ActionIntent{
-			ExecutionID:   "exec-1",
+			ExecutionID:   storeTestExecution,
 			ActionKind:    "github.merge_pr",
 			Target:        "mctlhq/mctl-api#1",
 			ArgsDigest:    "sha256:args",
@@ -159,6 +166,40 @@ func TestCreateActionApprovalValidates(t *testing.T) {
 	}
 }
 
+func TestActionApprovalRefusesSecretsInText(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	token := "ghp_" + strings.Repeat("a", 36)
+	for name, mutate := range map[string]func(*ActionApprovalInput){
+		"execution_id":    func(i *ActionApprovalInput) { i.ExecutionID = token },
+		"action_kind":     func(i *ActionApprovalInput) { i.ActionKind = token },
+		"target":          func(i *ActionApprovalInput) { i.Target = "https://hooks.internal/x?token=" + token },
+		"args_digest":     func(i *ActionApprovalInput) { i.ArgsDigest = token },
+		"policy_rule_id":  func(i *ActionApprovalInput) { i.PolicyRuleID = token },
+		"policy_version":  func(i *ActionApprovalInput) { i.PolicyVersion = token },
+		"artifact_hash":   func(i *ActionApprovalInput) { i.ArtifactHash = token },
+		"idempotency_key": func(i *ActionApprovalInput) { i.IdempotencyKey = token },
+	} {
+		in := approvalInput(s, "k-secret-"+name)
+		mutate(&in)
+		if _, _, err := s.CreateActionApproval(ctx, in); !errors.Is(err, ErrSecretInText) {
+			t.Errorf("%s: err = %v, want ErrSecretInText", name, err)
+		}
+	}
+	if list, err := s.ActionApprovals(ctx, ActionApprovalFilter{ExecutionID: storeTestExecution}); err != nil || len(list) != 0 {
+		t.Fatalf("a refused request was stored: %d %v", len(list), err)
+	}
+
+	a := createApproval(t, s, approvalInput(s, "k-reason"))
+	if _, err := s.DecideActionApproval(ctx, ActionDecisionInput{ID: a.ID, DecidedBy: "github:root", Decision: DecisionDeny,
+		Reason: "rotating, old key was AKIA" + strings.Repeat("A", 16)}); !errors.Is(err, ErrSecretInText) {
+		t.Fatalf("reason: err = %v, want ErrSecretInText", err)
+	}
+	if got, err := s.ActionApproval(ctx, a.ID); err != nil || got.State != ApprovalPending || got.Reason != "" {
+		t.Fatalf("refused decision changed it: %+v %v", got, err)
+	}
+}
+
 func TestDecideActionApproval(t *testing.T) {
 	s := newStoreForTest(t)
 	ctx := context.Background()
@@ -198,11 +239,11 @@ func TestActionApprovalExpiresLazily(t *testing.T) {
 			t.Fatalf("read %s = %+v %v", id, got, err)
 		}
 	}
-	list, err := s.ActionApprovals(ctx, ActionApprovalFilter{State: ApprovalExpired})
+	list, err := s.ActionApprovals(ctx, ActionApprovalFilter{State: ApprovalExpired, ExecutionID: storeTestExecution})
 	if err != nil || len(list) != 2 {
 		t.Fatalf("expired list = %d %v", len(list), err)
 	}
-	if list, _ := s.ActionApprovals(ctx, ActionApprovalFilter{State: ApprovalPending}); len(list) != 0 {
+	if list, _ := s.ActionApprovals(ctx, ActionApprovalFilter{State: ApprovalPending, ExecutionID: storeTestExecution}); len(list) != 0 {
 		t.Fatalf("pending list = %v", list)
 	}
 	if _, err := s.DecideActionApproval(ctx, ActionDecisionInput{ID: pending.ID, DecidedBy: "github:root", Decision: DecisionApprove}); !errors.Is(err, ErrApprovalExpired) {
