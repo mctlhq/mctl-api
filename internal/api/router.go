@@ -463,6 +463,11 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/work-items/{id}/surface-refs", h.LinkWorkItemSurface)
 				// Sealed ContextSnapshots (mctl-agents#431): insert-only.
 				r.Post("/work-items/{id}/executions/{execution_id}/snapshot", h.SealWorkItemSnapshot)
+				// Action approval requests (mctl-api#366): single-use
+				// approvals of one hashed runtime side effect.
+				r.Post("/action-approvals", h.CreateActionApproval)
+				r.Post("/action-approvals/{id}/decision", h.DecideActionApproval)
+				r.Post("/action-approvals/{id}/consume", h.ConsumeActionApproval)
 			})
 
 			// Work-item reads: side-effect free, outside the write budget.
@@ -474,6 +479,8 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/work-items/{id}/executions/{execution_id}/snapshot", h.GetWorkItemExecutionSnapshot)
 			r.Get("/work-items/{id}/snapshots", h.ListWorkItemSnapshots)
 			r.Get("/work-items/{id}/snapshots/{snapshot_id}", h.GetWorkItemSnapshot)
+			r.Get("/action-approvals", h.ListActionApprovals)
+			r.Get("/action-approvals/{id}", h.GetActionApproval)
 
 			// Liveness read for one DevLoopWorkflow. Deliberately OUTSIDE the
 			// write group above: it has no side effects, and the shepherd

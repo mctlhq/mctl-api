@@ -343,15 +343,15 @@ func main() {
 	}
 	switch {
 	case killSwitchOn(os.Getenv("WORK_ITEMS_DISABLED")):
-		slog.Warn("WORK_ITEMS_DISABLED is set; /api/v1/work-items routes will return 503")
+		slog.Warn("WORK_ITEMS_DISABLED is set; /api/v1/work-items and /api/v1/action-approvals routes will return 503")
 	case workItemsDBURL == "":
-		slog.Warn("no WORK_ITEMS_DB_URL or AUDIT_DB_URL; /api/v1/work-items routes will return 503")
+		slog.Warn("no WORK_ITEMS_DB_URL or AUDIT_DB_URL; /api/v1/work-items and /api/v1/action-approvals routes will return 503")
 	default:
 		ws, wsErr := initStore(initCtx, "work items", func(ctx context.Context) (*workitems.Store, error) {
 			return workitems.NewStore(ctx, workItemsDBURL)
 		})
 		if wsErr != nil {
-			slog.Error("work-items store init failed; /api/v1/work-items routes will return 503", "error", wsErr)
+			slog.Error("work-items store init failed; /api/v1/work-items and /api/v1/action-approvals routes will return 503", "error", wsErr)
 		} else {
 			workItemsStore = ws
 			defer ws.Close()

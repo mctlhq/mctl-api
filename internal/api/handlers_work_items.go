@@ -66,6 +66,7 @@ const (
 var forbiddenIdentityFields = []string{
 	"actor", "actor_principal", "owner", "owner_principal", "created_by",
 	"on_behalf_of", "subject", "delegated_actor", "user", "user_id",
+	"requested_by", "decided_by",
 }
 
 // principalOf renders the authenticated caller as a principal string. The

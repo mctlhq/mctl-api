@@ -21,8 +21,12 @@ func newStoreForTest(t *testing.T) *Store {
 		t.Fatalf("NewStore: %v", err)
 	}
 	wipe := func() {
-		// Every other table cascades from work_items.
+		// Every other table cascades from work_items, except action
+		// approvals, which reference a work item only optionally.
 		if _, err := s.pool.Exec(ctx, "DELETE FROM work_items"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.pool.Exec(ctx, "DELETE FROM action_approval_requests"); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -749,6 +749,68 @@ components:
         schema_version: {type: string, enum: [workitem/v1]}
       required: [id, work_item_id, execution_id, execution_sequence, content_hash, strategy, strategy_version, produced_by, created_at, schema_version]
 
+    ActionApprovalRequest:
+      type: object
+      description: |
+        A durable, single-use human approval of ONE hashed side effect of one
+        runtime execution (mctl-api#366). Immutable once created apart from
+        its state transitions: `pending` -> `approved` | `denied`, then
+        `approved` -> `consumed`. `state` is the effective state: a pending or
+        approved request past `expires_at` reads as `expired` (lazy expiry;
+        `expired` is never stored), and a decision or consume on it is
+        refused. `requested_by` and `decided_by` come from authentication,
+        never from a body.
+      properties:
+        id: {type: string, example: aar_0f8c2d1e9b7a4c3d8e6f5a4b3c2d1e0f}
+        execution_id: {type: string}
+        action_kind: {type: string, description: The action or capability, e.g. github.merge_pr}
+        target: {type: string}
+        args_digest: {type: string}
+        policy_rule_id: {type: string}
+        policy_version: {type: string}
+        artifact_hash: {type: string, description: Optional diff or payload hash}
+        work_item_id: {type: string, description: Optional work item the action belongs to}
+        idempotency_key: {type: string}
+        requested_by: {type: string, example: 'service:mctl-agent'}
+        intent_hash:
+          type: string
+          description: |
+            `sha256:<hex>` over the canonical intent encoding, computed by the
+            server: the line `mctl-action-intent/v1` then one line
+            `<field>:<byte length>:<value>` per field, each ending in `\n`, in
+            the order execution_id, action_kind, target, args_digest,
+            policy_rule_id, policy_version, artifact_hash, work_item_id (an
+            absent optional field is the empty string).
+        state: {type: string, enum: [pending, approved, denied, consumed, expired]}
+        expires_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        decided_by: {type: string}
+        decided_at: {type: string, format: date-time}
+        reason: {type: string}
+        consumed_at: {type: string, format: date-time}
+        schema_version: {type: string, enum: [actionapproval/v1]}
+      required: [id, execution_id, action_kind, target, args_digest, policy_rule_id, policy_version, idempotency_key, requested_by, intent_hash, state, expires_at, created_at, schema_version]
+
+    ActionApprovalResponse:
+      type: object
+      properties:
+        schema_version: {type: string, enum: [actionapproval/v1]}
+        approval: {$ref: '#/components/schemas/ActionApprovalRequest'}
+      required: [schema_version, approval]
+
+    ActionApprovalError:
+      type: object
+      description: Error with a typed code a client can branch on.
+      properties:
+        error: {type: string}
+        code:
+          type: string
+          enum: [work_items_unavailable, invalid_request, actor_not_accepted, intent_hash_mismatch,
+                 approval_not_found, approval_idempotency_conflict, approval_already_decided,
+                 approval_self_decision, approval_not_approved, approval_denied, approval_expired,
+                 approval_intent_mismatch, approval_consumed, approval_requester_forbidden,
+                 approval_decider_forbidden, approval_reader_forbidden]
+
     WorkItemEvent:
       type: object
       properties:
@@ -3216,6 +3278,160 @@ paths:
                   snapshot: {$ref: '#/components/schemas/ContextSnapshot'}
         '404': {description: 'work_item_not_found or snapshot_not_found', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
 
+  /api/v1/action-approvals:
+    post:
+      summary: Request approval of one runtime side effect
+      description: |
+        Service principal only, acting directly (a relayed surface or a person
+        gets 403 `approval_requester_forbidden`); `requested_by` is the
+        authenticated principal. The server computes `intent_hash`; a sent
+        `intent_hash` must equal it (400 `intent_hash_mismatch`).
+        Idempotent per (requested_by, idempotency_key), the key in the body or
+        the `Idempotency-Key` header (they must agree): the same key with the
+        same intent returns the stored request (200, whatever its state now),
+        the same key with a different intent is 409
+        `approval_idempotency_conflict`. A new request needs `expires_at` in
+        the future and at most 7 days ahead. A named `work_item_id` must exist.
+      tags: [Action Approvals]
+      parameters:
+        - {name: Idempotency-Key, in: header, required: false, schema: {type: string, maxLength: 512}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                execution_id: {type: string, maxLength: 256}
+                action_kind: {type: string, maxLength: 512}
+                target: {type: string, maxLength: 2048}
+                args_digest: {type: string, maxLength: 512}
+                policy_rule_id: {type: string, maxLength: 512}
+                policy_version: {type: string, maxLength: 512}
+                artifact_hash: {type: string, maxLength: 512}
+                work_item_id: {type: string, description: 'A wi_ id'}
+                idempotency_key: {type: string, maxLength: 512}
+                expires_at: {type: string, format: date-time}
+                intent_hash: {type: string, description: Optional; verified against the server's hash}
+              required: [execution_id, action_kind, target, args_digest, policy_rule_id, policy_version, expires_at]
+      responses:
+        '201': {description: Created in state pending, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
+        '200': {description: This key already names this intent; the stored request, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
+        '400': {description: 'invalid_request (missing or oversized field, expiry outside the window, unknown work item), intent_hash_mismatch, or actor_not_accepted (a body naming requested_by or another actor)', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '403': {description: approval_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '409': {description: approval_idempotency_conflict, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+    get:
+      summary: List action approval requests
+      description: |
+        Newest first. A human admin lists every request; a service principal
+        lists the requests it made; anyone else gets 403
+        `approval_reader_forbidden`. `state` filters on the effective state,
+        so `expired` finds pending and approved requests past `expires_at`.
+      tags: [Action Approvals]
+      parameters:
+        - {name: state, in: query, schema: {type: string, enum: [pending, approved, denied, consumed, expired]}}
+        - {name: execution_id, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+      responses:
+        '200':
+          description: Requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string, enum: [actionapproval/v1]}
+                  approvals:
+                    type: array
+                    items: {$ref: '#/components/schemas/ActionApprovalRequest'}
+        '400': {description: invalid_request (unknown state or limit out of range), content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '403': {description: approval_reader_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+
+  /api/v1/action-approvals/{id}:
+    get:
+      summary: One action approval request
+      description: |
+        Read by a human admin, or by the service that requested it (another
+        caller's request answers 404). The waiting workflow re-reads this
+        after any wake-up; `state` applies lazy expiry.
+      tags: [Action Approvals]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: The request, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
+        '403': {description: approval_reader_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '404': {description: approval_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+
+  /api/v1/action-approvals/{id}/decision:
+    post:
+      summary: Approve or deny a pending action approval request
+      description: |
+        A human admin acting directly only: a service principal, a surface
+        principal or a relayed request gets 403 `approval_decider_forbidden`,
+        and the requester can never decide its own request (403
+        `approval_self_decision`). `decided_by` is the authenticated
+        principal. Only a pending, unexpired request is decided: otherwise
+        409 `approval_already_decided` or `approval_expired`.
+      tags: [Action Approvals]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                decision: {type: string, enum: [approve, deny]}
+                reason: {type: string, maxLength: 1024}
+              required: [decision]
+      responses:
+        '200': {description: Decided, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
+        '400': {description: 'invalid_request or actor_not_accepted (a body naming decided_by)', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '403': {description: 'approval_decider_forbidden or approval_self_decision', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '404': {description: approval_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '409': {description: 'approval_already_decided or approval_expired', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+
+  /api/v1/action-approvals/{id}/consume:
+    post:
+      summary: Spend an approved action approval request, exactly once
+      description: |
+        The requesting service only (anyone else 403
+        `approval_requester_forbidden`; another service's request 404). One
+        atomic compare-and-set from `approved` to `consumed`, which holds
+        only while the stored `intent_hash` equals the presented one and the
+        request has not expired; it records `consumed_at`. Of any number of
+        concurrent consumes exactly one succeeds. A refusal is typed:
+        `approval_not_approved` (pending), `approval_denied`,
+        `approval_expired`, `approval_intent_mismatch`, `approval_consumed`.
+        A consumed receipt never authorizes a second side effect.
+      tags: [Action Approvals]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                intent_hash: {type: string}
+              required: [intent_hash]
+      responses:
+        '200': {description: Consumed, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
+        '400': {description: invalid_request, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '403': {description: approval_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '404': {description: approval_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '409': {description: 'approval_not_approved, approval_denied, approval_expired, approval_intent_mismatch or approval_consumed', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+
   /api/v1/work-items/{id}/resume:
     post:
       summary: Resume a work item
@@ -3343,3 +3559,5 @@ tags:
     description: mctl-agents AgentManifest versions, releases, and promote/rollback
   - name: Work Items
     description: workitem/v1 durable work across surfaces (docs/work-context-contract.md)
+  - name: Action Approvals
+    description: actionapproval/v1 durable single-use approvals of runtime agent side effects (mctl-api#366)
