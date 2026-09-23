@@ -158,6 +158,7 @@ var (
 	ErrExecutionActive     = errors.New("work item already has a non-terminal execution")
 	ErrIdempotencyKeyReuse = errors.New("idempotency key was already used for a different request")
 	ErrSecretInText        = errors.New("text matches a secret pattern")
+	ErrExternalKeyInUse    = errors.New("external_key already names open work this request cannot share")
 )
 
 // ConflictError carries the item as it is now, so a 409 can tell the caller

@@ -261,6 +261,14 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*WorkItem, bool, er
 			w, err := scanItem(tx.QueryRow(ctx, `SELECT `+itemColumns+` FROM work_items
 				WHERE tenant=$1 AND external_key=$2 AND state IN ('active','waiting')`, in.Tenant, in.ExternalKey))
 			if err == nil {
+				// Dedupe only onto an item this caller could open itself: the
+				// same visibility, and not someone else's private item. An
+				// external_key is guessable (an issue URL), so anything else
+				// would read another principal's private work, or silently
+				// hand a private request a tenant-visible item.
+				if w.Visibility != in.Visibility || (w.Visibility == VisibilityPrivate && w.OwnerPrincipal != in.Actor) {
+					return ErrExternalKeyInUse
+				}
 				out = w
 				// The key now names this item, so a retry keeps returning it
 				// even after it goes terminal.
@@ -470,6 +478,9 @@ func (s *Store) Resume(ctx context.Context, in ResumeInput) (*WorkItem, *Executi
 		}
 		if from == "" && len(execs) > 0 {
 			from = execs[len(execs)-1].ID
+		}
+		if len(execs) == 0 {
+			return invalid("%s has no execution to resume; attach the first one", cur.ID)
 		}
 		if from != "" && !containsExecution(execs, from) {
 			return invalid("resumed_from_execution_id %s is not an execution of %s", from, cur.ID)
@@ -827,13 +838,13 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]WorkItem, error) {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
 	}
-	if !f.AllTenants {
-		// Fail closed: a filter that names no tenant and does not ask for
-		// all of them matches nothing.
-		if len(f.Tenants) == 0 {
-			return []WorkItem{}, nil
-		}
+	// Fail closed: a filter that names no tenant and does not ask for all
+	// of them matches nothing. AllTenants only lifts that requirement; named
+	// Tenants still narrow.
+	if len(f.Tenants) > 0 {
 		query += ` AND tenant = ANY(` + arg(f.Tenants) + `)`
+	} else if !f.AllTenants {
+		return []WorkItem{}, nil
 	}
 	if state == FilterOpen {
 		query += ` AND state IN ('active','waiting')`
