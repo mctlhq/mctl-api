@@ -55,10 +55,14 @@ type waveDevLoop struct {
 	statuses    map[string]string // workflow id -> status; absent = NotFound
 	describeErr map[string]error
 	startErr    map[string]error
+	hang        map[string]bool // Describe waits for its deadline
 	started     []string
 }
 
 func (f *waveDevLoop) DescribeDevLoop(ctx context.Context, workflowID string) (string, error) {
+	if f.hang[workflowID] {
+		<-ctx.Done()
+	}
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -474,5 +478,24 @@ func TestRoadmapWave_DisconnectDoesNotAbortTheWave(t *testing.T) {
 	e.h.ExecuteRoadmapWave(rec, req)
 	if rec.Code != http.StatusOK || len(e.tc.started) != len(exec["items"].([]string)) {
 		t.Fatalf("cancelled request: %d started %v: %s", rec.Code, e.tc.started, rec.Body.String())
+	}
+}
+
+// One slow item uses its own time budget, not the rest of the wave's.
+func TestRoadmapWave_ASlowItemDoesNotStarveTheOthers(t *testing.T) {
+	prev := roadmapWaveItemTimeout
+	roadmapWaveItemTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { roadmapWaveItemTimeout = prev })
+	e := newWaveEnv(t)
+	resp, exec := e.plan("enterprise-mcp")
+	selected := resp["plan"].(map[string]any)["selected"].([]any)
+	first := selected[0].(map[string]any)["workflow_id"].(string)
+	e.tc.hang = map[string]bool{first: true}
+	code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", exec)
+	if code != http.StatusOK {
+		t.Fatalf("execute = %d %v", code, out)
+	}
+	if len(e.tc.started) != len(selected)-1 {
+		t.Fatalf("started %v; every item after the slow one should still start", e.tc.started)
 	}
 }

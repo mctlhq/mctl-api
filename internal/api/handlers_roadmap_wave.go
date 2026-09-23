@@ -55,9 +55,11 @@ const (
 
 	roadmapWaveMaxBody = 64 << 10
 
-	// roadmapWaveStartTimeout bounds one wave's DevLoop starts once begun.
-	roadmapWaveStartTimeout = 2 * time.Minute
 )
+
+// roadmapWaveItemTimeout bounds one item's Describe + Start once the wave
+// has begun, so the bound does not shrink as the wave grows. A var for tests.
+var roadmapWaveItemTimeout = 30 * time.Second
 
 // Per-item execution outcomes.
 const (
@@ -152,10 +154,11 @@ func wavePlanErrorCode(err error) string {
 func writeWavePlanError(w http.ResponseWriter, err error) {
 	switch wavePlanErrorCode(err) {
 	case roadmapCodeInvalidSelection:
-		var sel *roadmap.SelectionError
-		errors.As(err, &sel)
-		writeErrorCode(w, http.StatusConflict, roadmapCodeInvalidSelection, err.Error(),
-			map[string]any{"refused": sel.Refused})
+		var details map[string]any
+		if sel := (*roadmap.SelectionError)(nil); errors.As(err, &sel) {
+			details = map[string]any{"refused": sel.Refused}
+		}
+		writeErrorCode(w, http.StatusConflict, roadmapCodeInvalidSelection, err.Error(), details)
 	case roadmapCodeEpicNotFound:
 		writeErrorCode(w, http.StatusNotFound, roadmapCodeEpicNotFound, err.Error(), nil)
 	case roadmapCodeUnavailable:
@@ -319,12 +322,12 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 		Error   string `json:"error,omitempty"`
 	}
 	// A client that disconnects mid-wave must not abort it part-way: the
-	// loop finishes what it began, bounded by its own timeout.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), roadmapWaveStartTimeout)
-	defer cancel()
+	// loop finishes what it began, each item bounded by its own timeout.
+	detached := context.WithoutCancel(r.Context())
 	outcomes := make([]outcome, 0, len(plan.Selected))
 	for _, it := range plan.Selected {
 		o := outcome{WaveItem: it}
+		ctx, cancel := context.WithTimeout(detached, roadmapWaveItemTimeout)
 		status, err := h.opts.TemporalClient.DescribeDevLoop(ctx, it.WorkflowID)
 		switch {
 		case err != nil && !temporalclient.IsNotFound(err):
@@ -346,6 +349,7 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 				o.Outcome, o.RunID = waveOutcomeStarted, runID
 			}
 		}
+		cancel()
 		outcomes = append(outcomes, o)
 	}
 
