@@ -1177,9 +1177,14 @@ func splitCSV(v string) []string {
 	return out
 }
 
-// workItemsDisabled reads WORK_ITEMS_DISABLED as a boolean: "false", "0" or
-// empty keep work items on, so a rendered-unset flag never turns them off.
+// workItemsDisabled reads the WORK_ITEMS_DISABLED kill switch. A kill switch
+// errs toward off: any value turns work items off except an explicit
+// "false"/"0"/"no"/"off" (or empty), so a template that renders the flag as
+// "false" keeps them on while "yes" or "disabled" never silently fails open.
 func workItemsDisabled(v string) bool {
-	disabled, err := strconv.ParseBool(strings.TrimSpace(v))
-	return err == nil && disabled
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "false", "0", "no", "off":
+		return false
+	}
+	return true
 }

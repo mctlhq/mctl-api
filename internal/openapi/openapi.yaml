@@ -2716,6 +2716,9 @@ paths:
         its last_seen_at. `actor_external_id` is correlation metadata only: it
         is never used as, or resolved to, the acting principal (that needs
         the surface-identity binding, mctl-api#350).
+
+        This route is idempotent by (surface, external_id) and takes no
+        `Idempotency-Key`: a request carrying that header answers 400.
       tags: [Work Items]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}

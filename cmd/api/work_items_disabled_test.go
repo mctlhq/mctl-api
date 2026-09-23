@@ -18,8 +18,8 @@ import "testing"
 
 func TestWorkItemsDisabledParsesABoolean(t *testing.T) {
 	for v, want := range map[string]bool{
-		"": false, "false": false, "0": false, "no": false, " false ": false,
-		"true": true, "1": true, "TRUE": true,
+		"": false, "false": false, "0": false, "no": false, "off": false, " FALSE ": false,
+		"true": true, "1": true, "TRUE": true, "yes": true, "on": true, "disabled": true,
 	} {
 		if got := workItemsDisabled(v); got != want {
 			t.Errorf("workItemsDisabled(%q) = %v, want %v", v, got, want)

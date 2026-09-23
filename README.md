@@ -135,7 +135,7 @@ docker run -p 8080:8080 mctl-api
 | `AUDIT_DB_URL` | PostgreSQL connection string (falls back to in-memory). `sslmode=disable` is upgraded to `require`, or `verify-full` when a CNPG CA is mounted. | — | No |
 | `HUMAN_INPUT_DB_URL` | PostgreSQL for the human-input delivery ledger (`POST /api/v1/human-input/{request_id}/response`). Falls back to `AUDIT_DB_URL`; with neither, that endpoint answers 503 (there is no in-memory fallback). The raw answer is kept only until its delivery resolves, or until the request expires. | — | No |
 | `WORK_ITEMS_DB_URL` | PostgreSQL for the `workitem/v1` store (`/api/v1/work-items*`). Falls back to `AUDIT_DB_URL`; with neither, every work-items route answers 503. | — | No |
-| `WORK_ITEMS_DISABLED` | Kill switch: any value leaves the work-items store off (routes answer 503) without touching `AUDIT_DB_URL` for other stores. | unset | No |
+| `WORK_ITEMS_DISABLED` | Kill switch: any value except `false`/`0`/`no`/`off` leaves the work-items store off (routes answer 503) without touching `AUDIT_DB_URL` for other stores. | unset | No |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated Traefik CIDRs/IPs trusted for `X-Forwarded-For` on audit events | — | No |
 | `ALLOW_INSECURE_DB` | Permit `sslmode=disable` (tests/local only) | — | No |
 | `BACKSTAGE_URL` | Backstage catalog URL | — | No |
