@@ -86,7 +86,8 @@ func surfacePrincipalGate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if _, isSurface := user.Surface(); !isSurface {
+		surface, isSurface := user.Surface()
+		if !isSurface {
 			if r.Header.Get(SurfaceActorHeader) != "" {
 				writeErrorCode(w, http.StatusBadRequest, sidCodeActorNotAccepted,
 					SurfaceActorHeader+" may only be sent by a surface principal", nil)
@@ -97,6 +98,13 @@ func surfacePrincipalGate(next http.Handler) http.Handler {
 		}
 		for _, route := range surfaceRoutes {
 			if r.Method == route.method && route.pattern.MatchString(r.URL.Path) {
+				// The rate limiters key on this value: it must be one of
+				// the surface's own ids, not arbitrary bytes.
+				if actor := r.Header.Get(SurfaceActorHeader); actor != "" && !surfaceid.ValidExternalID(surface, actor) {
+					writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid,
+						SurfaceActorHeader+" is not a valid "+surface+" identity", nil)
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}

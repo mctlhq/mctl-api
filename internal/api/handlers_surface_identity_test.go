@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -254,6 +255,36 @@ func TestSurfaceIdentity_OneEndUserCannotSpendTheSurfacesBudget(t *testing.T) {
 	// Another user of the same surface still has their own budget.
 	if code, body := e.redeem("telegram", e.challenge("alice", "telegram"), "222"); code != http.StatusCreated {
 		t.Fatalf("second telegram user = %d %v", code, body)
+	}
+}
+
+// The per-end-user split must not lift the ceiling on the surface itself:
+// rotating the actor header is still capped, and the header value must be
+// one of the surface's own ids before any limiter keys on it.
+func TestSurfaceIdentity_TheSurfaceKeepsAnAggregateCeiling(t *testing.T) {
+	e := newSIDEnv(t)
+	// Refused by the gate, before any limiter mints a key for it: however
+	// often it is sent, it never reaches a bucket (the write bucket would
+	// answer 429 from the 21st).
+	for _, bad := range []string{"abc", "0", strings.Repeat("9", 21)} {
+		for i := 0; i < 25; i++ {
+			if code, body := e.do("telegram", "POST", "/api/v1/surface-identities/redeem", "x", SurfaceActorHeader, bad); code != http.StatusBadRequest || body["code"] != "invalid_request" {
+				t.Fatalf("actor %q, attempt %d = %d %v", bad, i, code, body)
+			}
+		}
+	}
+	limited := 0
+	for i := 1; i <= surfaceAggregateLimitPerMinute+5; i++ {
+		if code, _ := e.do("telegram", "POST", "/api/v1/surface-identities/redeem", "x", SurfaceActorHeader, strconv.Itoa(i)); code == http.StatusTooManyRequests {
+			limited++
+		}
+	}
+	if limited == 0 {
+		t.Fatal("a surface rotating its actor header was never throttled")
+	}
+	// The ceiling is the surface's own: another surface is unaffected.
+	if code, _ := e.do("portal", "POST", "/api/v1/surface-identities/redeem", "x", SurfaceActorHeader, "p-1"); code == http.StatusTooManyRequests {
+		t.Fatal("the portal surface shares telegram's ceiling")
 	}
 }
 

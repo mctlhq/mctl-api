@@ -241,8 +241,16 @@ func (s *Store) CreateChallenge(ctx context.Context, principal, surface string) 
 	c := &Challenge{ID: id, Code: code, Surface: surface, Principal: principal, ExpiresAt: now.Add(ChallengeTTL)}
 	err = s.withTx(ctx, "surfaceid-challenge:"+principal, func(tx pgx.Tx) error {
 		// Housekeeping: nothing past its expiry by a day is worth keeping.
-		if _, err := tx.Exec(ctx, `DELETE FROM surface_identity_challenges WHERE expires_at < $1`, now.Add(-24*time.Hour)); err != nil {
+		// It spans every principal, so it takes its own lock; a request that
+		// loses the race skips it rather than waiting or deadlocking.
+		var sweep bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtext('surfaceid-sweep'))`).Scan(&sweep); err != nil {
 			return err
+		}
+		if sweep {
+			if _, err := tx.Exec(ctx, `DELETE FROM surface_identity_challenges WHERE expires_at < $1`, now.Add(-24*time.Hour)); err != nil {
+				return err
+			}
 		}
 		var open int
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM surface_identity_challenges
@@ -333,6 +341,14 @@ func (s *Store) Redeem(ctx context.Context, surface, code, externalID string) (*
 			if existing.Principal != principal {
 				refusal = ErrLinkConflict
 				return consume(ReasonConflict)
+			}
+			// A fresh possession proof renews a link that expires.
+			if s.linkTTL > 0 {
+				exp := now.Add(s.linkTTL)
+				if _, err := tx.Exec(ctx, `UPDATE surface_identity_links SET expires_at=$2 WHERE id=$1`, existing.ID, exp); err != nil {
+					return err
+				}
+				existing.ExpiresAt = &exp
 			}
 			link = existing
 			return consume(ReasonLinked)

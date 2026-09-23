@@ -294,6 +294,9 @@ func NewRouter(opts Options) http.Handler {
 		// not used on this group; Traefik cannot spoof RemoteAddr as loopback.
 		// The write 20/min group below does NOT skip loopback — MCP deploys
 		// must still be throttled.
+		r.Use(surfaceAggregateLimit(httprate.Limit(surfaceAggregateLimitPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+			return "surface-total:" + auth.UserFromContext(r.Context()).ID, nil
+		}))))
 		r.Use(skipLoopbackRateLimit(httprate.Limit(300, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 			if user := auth.UserFromContext(r.Context()); user != nil {
 				return "user:" + rateLimitSubject(r, user), nil
@@ -699,11 +702,33 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 
 // rateLimitSubject is who a per-user rate limit counts against. A surface
 // principal calls for many end users, so its budget is split by the one it
-// names in SurfaceActorHeader (vetted by surfacePrincipalGate, which runs
-// first): otherwise one Telegram user could exhaust every other's.
+// names in SurfaceActorHeader, otherwise one Telegram user could exhaust
+// every other's. surfacePrincipalGate runs first and refuses a value that is
+// not one of the surface's own ids, which bounds the key space;
+// surfaceAggregateLimit still caps the surface as a whole.
 func rateLimitSubject(r *http.Request, user *auth.User) string {
 	if _, isSurface := user.Surface(); isSurface {
 		return user.ID + "|" + r.Header.Get(SurfaceActorHeader)
 	}
 	return user.ID
+}
+
+// surfaceAggregateLimitPerMinute caps one surface principal across all the
+// end users it calls for, the ceiling rateLimitSubject's per-user split
+// would otherwise remove. Roughly Telegram's own bot send rate.
+const surfaceAggregateLimitPerMinute = 1200
+
+// surfaceAggregateLimit applies limit to surface principals only, keyed on
+// the principal alone.
+func surfaceAggregateLimit(limit func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		limited := limit(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, isSurface := auth.UserFromContext(r.Context()).Surface(); isSurface {
+				limited.ServeHTTP(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }

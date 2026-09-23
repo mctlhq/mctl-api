@@ -265,3 +265,28 @@ func TestConcurrentRedeemsLinkOnce(t *testing.T) {
 		t.Fatalf("%d redemptions succeeded", ok)
 	}
 }
+
+func TestRelinkingRenewsAnExpiringLink(t *testing.T) {
+	s := newStoreForTest(t, time.Hour)
+	ctx := context.Background()
+	c, _ := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	first, err := s.Redeem(ctx, SurfaceTelegram, c.Code, "4242")
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := s.now
+	s.now = func() time.Time { return real().Add(50 * time.Minute) }
+	c, _ = s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	again, err := s.Redeem(ctx, SurfaceTelegram, c.Code, "4242")
+	if err != nil || again.ID != first.ID {
+		t.Fatalf("relink = %+v, %v", again, err)
+	}
+	if !again.ExpiresAt.After(*first.ExpiresAt) {
+		t.Fatalf("expires_at %v not renewed past %v", again.ExpiresAt, first.ExpiresAt)
+	}
+	// Past the original expiry, the renewed link still answers.
+	s.now = func() time.Time { return real().Add(time.Hour + time.Minute) }
+	if _, err := s.Resolve(ctx, SurfaceTelegram, "4242"); err != nil {
+		t.Fatalf("renewed link: %v", err)
+	}
+}
