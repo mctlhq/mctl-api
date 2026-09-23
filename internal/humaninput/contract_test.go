@@ -29,7 +29,8 @@ func TestParseRequest_VerifiesPythonSealedRequests(t *testing.T) {
 		"unicode_free_text":       "hir-accc85063686b5e0",
 		"multi_structured_round2": "hir-ebf62288d90cf1ce",
 		// question_hash normalisation edges; see gen_fixtures.py.
-		"casefold_edges": "hir-f543f28e8926bf7f",
+		"casefold_edges":  "hir-f543f28e8926bf7f",
+		"two_respondents": "hir-88a9e66f157feb60",
 	} {
 		r, err := ParseRequest(loadFixture(t, name))
 		if err != nil {

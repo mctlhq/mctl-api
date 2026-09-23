@@ -2356,11 +2356,16 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Caller may read but not answer (not an eligible, GitHub-verified respondent; or the service principal)
+          description: |
+            Caller may read but not answer. `HumanInputResponseResult` with
+            state `not_eligible` for an ineligible or non-GitHub-verified
+            caller; `Error` for the service principal.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HumanInputResponseResult'
+                oneOf:
+                  - $ref: '#/components/schemas/HumanInputResponseResult'
+                  - $ref: '#/components/schemas/Error'
         '404':
           description: No such request, or not visible to the caller
           content:
@@ -2382,15 +2387,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HumanInputResponseResult'
-        '503':
-          description: |
-            Not configured, the ledger or Temporal is unavailable. When
-            `status` is `pending_delivery` the answer IS recorded and will be
-            delivered on the next submission for this request.
+        '500':
+          description: The gitops requests could not be read
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HumanInputResponseResult'
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: |
+            `HumanInputResponseResult` with `status: pending_delivery` when the
+            answer IS recorded but could not be signalled; it is delivered on
+            the next submission for this request. `Error` (nothing recorded;
+            retry) when the endpoint is not configured, the ledger is
+            unavailable, or the workflow could not be asked before recording.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/HumanInputResponseResult'
+                  - $ref: '#/components/schemas/Error'
 
 tags:
   - name: Health

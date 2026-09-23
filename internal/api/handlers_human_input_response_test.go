@@ -16,6 +16,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/humaninput"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 )
@@ -482,5 +483,105 @@ func TestRespondHumanInput_ConfirmationIsBounded(t *testing.T) {
 	got := respond(t, h, alice, hiASCII, answer(`"library A"`))
 	if got.code != http.StatusAccepted || got.res.Status != "pending_delivery" || time.Since(start) > time.Second {
 		t.Fatalf("respond = %d %s after %s", got.code, got.raw, time.Since(start))
+	}
+}
+
+const (
+	hiTwo     = "hir-88a9e66f157feb60"
+	hiTwoHash = "sha256:88a9e66f157feb60c6f3f7f40828d4687cf2f09d2346fa48cf06226b4208c036"
+)
+
+// newTwoRespondentHandlers serves only two_respondents (alice and bob may
+// answer), which the workflow is waiting on.
+func newTwoRespondentHandlers(t *testing.T) (*Handlers, *fakeDevLoopClient, *audit.Logger) {
+	t.Helper()
+	h, tc, _, log := newHumanInputResponseHandlers(t)
+	h.opts.GitReader = &humanInputGitReader{files: []gitops.HumanInputRequestFile{
+		{Service: "mctl-api", Proposal: "issue-263-z", Raw: humanInputFixture(t, "two_respondents")},
+	}}
+	tc.humanInputStates[hiWF] = &temporalclient.HumanInputState{State: temporalclient.HumanInputWaitingForInput, RequestID: hiTwo}
+	return h, tc, log
+}
+
+func twoAnswer(v string) string {
+	return `{"request_hash":"` + hiTwoHash + `","value":"` + v + `"}`
+}
+
+// When bob's submission pushes alice's recorded answer through, every audit
+// row names whose answer it is about: alice's was delivered and accepted,
+// bob's was refused. UserID stays who triggered it.
+func TestRespondHumanInput_RedeliveryIsAttributedToTheRecordedRespondent(t *testing.T) {
+	h, tc, log := newTwoRespondentHandlers(t)
+	tc.signalErr = errors.New("temporal unavailable")
+	if got := respond(t, h, alice, hiTwo, twoAnswer("Monday")); got.code != http.StatusServiceUnavailable {
+		t.Fatalf("alice during outage = %d %s", got.code, got.raw)
+	}
+	tc.signalErr = nil
+	tc.onSignal = workflowAccepts
+	if got := respond(t, h, bob, hiTwo, twoAnswer("Tuesday")); got.code != http.StatusConflict || got.res.Respondent != "github:bob" {
+		t.Fatalf("bob = %d %s", got.code, got.raw)
+	}
+	if len(tc.humanInputSignals) != 1 || tc.humanInputSignals[0]["respondent"].(map[string]any)["actor_id"] != "alice" {
+		t.Fatalf("signals = %v", tc.humanInputSignals)
+	}
+	want := map[string]string{
+		"human_input.signal_sent":       "github:alice",
+		"human_input.response_accepted": "github:alice",
+		"human_input.response_rejected": "github:bob",
+	}
+	entries := log.List(100)
+	seen := map[string]bool{}
+	for i := range entries {
+		e := &entries[i]
+		if r, ok := want[e.Operation]; ok && e.UserID == "bob" {
+			if e.Parameters["respondent"] != r {
+				t.Fatalf("%s triggered by bob names respondent %q, want %q", e.Operation, e.Parameters["respondent"], r)
+			}
+			seen[e.Operation] = true
+		}
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("audited %v, want all of %v", seen, want)
+	}
+}
+
+// raceLedger makes the first Claim lose to another respondent's pending row,
+// as a concurrent submission would.
+type raceLedger struct {
+	*humaninput.MemoryLedger
+	lost  bool
+	other humaninput.Delivery
+}
+
+func (l *raceLedger) Claim(ctx context.Context, d humaninput.Delivery) (*humaninput.Delivery, bool, error) {
+	if !l.lost {
+		l.lost = true
+		o := l.other
+		return &o, false, nil
+	}
+	return l.MemoryLedger.Claim(ctx, d)
+}
+
+// Losing the claim to a delivery the workflow then refuses leaves the
+// request free: the loser claims it instead of being told "answered".
+func TestRespondHumanInput_LosingToARefusedDeliveryClaimsAgain(t *testing.T) {
+	h, tc, _ := newTwoRespondentHandlers(t)
+	h.opts.HumanInputLedger = &raceLedger{MemoryLedger: humaninput.NewMemoryLedger(), other: humaninput.Delivery{
+		RequestID: hiTwo, RequestHash: hiTwoHash, WorkflowID: hiWF, RunID: "run-1", Respondent: "github:alice",
+		Surface: "api", ValueHash: "sha256:x", Value: []byte(`"Monday"`), State: humaninput.DeliveryPending,
+		ExpiresAt: time.Date(2026, 9, 24, 2, 0, 0, 0, time.UTC),
+	}}
+	signals := 0
+	tc.onSignal = func(f *fakeDevLoopClient, wf string, doc map[string]any) {
+		signals++
+		if signals == 1 {
+			workflowRefuses(f, wf, doc) // alice's racing answer is refused
+			return
+		}
+		workflowAccepts(f, wf, doc)
+	}
+	got := respond(t, h, bob, hiTwo, twoAnswer("Tuesday"))
+	if got.code != http.StatusOK || got.res.Status != "accepted" || got.res.Respondent != "github:bob" {
+		t.Fatalf("bob after the winner was refused = %d %s", got.code, got.raw)
 	}
 }

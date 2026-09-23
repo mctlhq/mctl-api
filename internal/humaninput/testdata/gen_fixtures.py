@@ -23,6 +23,12 @@ cases = {
     reason="edge", response=ResponseSpec(type="free_text", options=(), schema_ref=None),
     requested_from=RequestedFrom(audience="work_item_owner", actor_refs=("github:alice",)),
     context_refs=()),
+ # Two humans may answer: the redelivery path must attribute each audit
+ # row to the right one.
+ "two_respondents": dict(question="Ship on Monday or Tuesday?", reason="Two owners.",
+    response=ResponseSpec(type="single_choice", options=("Monday","Tuesday"), schema_ref=None),
+    requested_from=RequestedFrom(audience="repo_operators", actor_refs=("github:alice","github:bob")),
+    context_refs=()),
  "multi_structured_round2": dict(question="Pick any.", reason="r", round=2, request_version=3,
     response=ResponseSpec(type="multi_choice", options=("x","y","z"), schema_ref="schema://x"),
     requested_from=RequestedFrom(audience="tenant_operators", actor_refs=("github:bob",)),

@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS human_input_deliveries (
     attempts              INTEGER NOT NULL DEFAULT 0,
     updated_at            TIMESTAMPTZ NOT NULL
 );
+-- ClearExpiredValues runs on submissions; only rows still holding an
+-- undelivered answer are ever candidates.
+CREATE INDEX IF NOT EXISTS human_input_deliveries_retained
+    ON human_input_deliveries (expires_at)
+    WHERE state = 'pending_delivery' AND value IS NOT NULL;
 `
 
 const deliveryColumns = `request_id, request_hash, workflow_id, run_id, respondent, surface,

@@ -110,14 +110,6 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "request_id must look like hir-<16 hex>")
 		return
 	}
-	// Retention: an answer that could not be delivered before its request
-	// expired is dropped here rather than kept indefinitely. Opportunistic
-	// (every submission sweeps) and best-effort.
-	if n, err := h.opts.HumanInputLedger.ClearExpiredValues(r.Context(), humanInputNow().UTC()); err != nil {
-		slog.Warn("human_input.ledger_clear_expired_failed", "error", err)
-	} else if n > 0 {
-		slog.Info("human_input.ledger_cleared_expired_values", "count", n)
-	}
 	body, value, err := decodeHumanInputResponse(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -145,7 +137,7 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 			// row carries ids and the outcome only.
 			msg = state
 		}
-		h.auditHumanInput(r, user, s, "human_input.response_rejected", "failed", body.Surface, msg)
+		h.auditHumanInput(r, user, s, ref, "human_input.response_rejected", "failed", body.Surface, msg)
 		writeJSON(w, code, humanInputResponseResult{RequestID: id, Status: humanInputStatusRejected, State: state, Detail: detail, Respondent: ref})
 	}
 	if !verified {
@@ -155,6 +147,15 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 	if !req.CanRespond(ref) {
 		reject(http.StatusForbidden, "not_eligible", ref+" is not an eligible respondent for this request")
 		return
+	}
+	// Retention: an answer that could not be delivered before its request
+	// expired is dropped rather than kept indefinitely. Opportunistic (each
+	// eligible submission sweeps; a partial index keeps it cheap) and
+	// best-effort.
+	if n, err := h.opts.HumanInputLedger.ClearExpiredValues(r.Context(), humanInputNow().UTC()); err != nil {
+		slog.Warn("human_input.ledger_clear_expired_failed", "error", err)
+	} else if n > 0 {
+		slog.Info("human_input.ledger_cleared_expired_values", "count", n)
 	}
 	if body.RequestHash != req.RequestHash {
 		reject(http.StatusConflict, "superseded", "request_hash does not match the current request")
@@ -237,9 +238,19 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, code, res)
 			return
 		}
-		code, res := h.refuseAnswered(r, user, s, sub, "another response was submitted concurrently")
-		writeJSON(w, code, res)
-		return
+		// The winner was rejected meanwhile, so the request is free again:
+		// claim once more, as the path above does.
+		cur, won, err = ledger.Claim(ctx, sub)
+		if err != nil {
+			slog.Error("human_input.respond ledger claim failed", "request_id", id, "error", err)
+			writeError(w, http.StatusServiceUnavailable, "human-input ledger unavailable")
+			return
+		}
+		if !won {
+			code, res := h.refuseAnswered(r, user, s, sub, "another response was submitted concurrently")
+			writeJSON(w, code, res)
+			return
+		}
 	}
 	code, res := h.deliverHumanInput(ctx, r, user, s, *cur)
 	writeJSON(w, code, res)
@@ -278,7 +289,7 @@ func (h *Handlers) settleExisting(ctx context.Context, r *http.Request, user *au
 // is audited like every other refusal: an attempt to override a recorded
 // answer is exactly what an operator looks for afterwards.
 func (h *Handlers) refuseAnswered(r *http.Request, user *auth.User, s *sealedHumanInput, sub humaninput.Delivery, detail string) (int, humanInputResponseResult) {
-	h.auditHumanInput(r, user, s, "human_input.response_rejected", "failed", sub.Surface, "answered: "+detail)
+	h.auditHumanInput(r, user, s, sub.Respondent, "human_input.response_rejected", "failed", sub.Surface, "answered: "+detail)
 	return http.StatusConflict, humanInputResponseResult{RequestID: sub.RequestID, Status: humanInputStatusRejected, State: "answered", Detail: detail, Respondent: sub.Respondent}
 }
 
@@ -286,15 +297,23 @@ func (h *Handlers) refuseAnswered(r *http.Request, user *auth.User, s *sealedHum
 // the workflow to accept or reject it.
 func (h *Handlers) deliverHumanInput(ctx context.Context, r *http.Request, user *auth.User, s *sealedHumanInput, d humaninput.Delivery) (int, humanInputResponseResult) {
 	ledger := h.opts.HumanInputLedger
+	// Ledger writes that close or count a delivery must not depend on the
+	// caller staying connected: a delivered answer left pending would keep
+	// its raw value and look undelivered.
+	ledgerCtx := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.WithoutCancel(ctx), humanInputQueryTimeout)
+	}
 	resolve := func(state, reason string) {
-		if err := ledger.Resolve(ctx, d, state); err != nil && !errors.Is(err, humaninput.ErrDeliveryNotPending) {
+		wctx, wcancel := ledgerCtx()
+		defer wcancel()
+		if err := ledger.Resolve(wctx, d, state); err != nil && !errors.Is(err, humaninput.ErrDeliveryNotPending) {
 			slog.Error("human_input.ledger_resolve_failed", "request_id", d.RequestID, "state", state, "error", err)
 		}
 		op, status := "human_input.response_accepted", "succeeded"
 		if state == humaninput.DeliveryRejected {
 			op, status = "human_input.response_rejected", "failed"
 		}
-		h.auditHumanInput(r, user, s, op, status, d.Surface, reason)
+		h.auditHumanInput(r, user, s, d.Respondent, op, status, d.Surface, reason)
 	}
 
 	pre, err := h.queryHumanInput(ctx, d)
@@ -332,7 +351,10 @@ func (h *Handlers) deliverHumanInput(ctx context.Context, r *http.Request, user 
 		"value":        value,
 		"received_at":  d.ReceivedAt.UTC().Format(time.RFC3339),
 	}
-	if err := ledger.NoteAttempt(ctx, d.RequestID); err != nil && !errors.Is(err, humaninput.ErrDeliveryNotPending) {
+	nctx, ncancel := ledgerCtx()
+	err = ledger.NoteAttempt(nctx, d.RequestID)
+	ncancel()
+	if err != nil && !errors.Is(err, humaninput.ErrDeliveryNotPending) {
 		slog.Warn("human_input.ledger_attempt_failed", "request_id", d.RequestID, "error", err)
 	}
 	sctx, cancel := context.WithTimeout(ctx, humanInputQueryTimeout)
@@ -347,7 +369,7 @@ func (h *Handlers) deliverHumanInput(ctx context.Context, r *http.Request, user 
 		return http.StatusServiceUnavailable, deliveryResult(d, humanInputStatusPending, HumanInputUnknown, "the workflow could not be signalled; the response is recorded, resubmit it to retry delivery")
 	}
 	slog.Info("human_input.signal_sent", "request_id", d.RequestID, "workflow_id", d.WorkflowID, "work_item_id", s.req.WorkItemID)
-	h.auditHumanInput(r, user, s, "human_input.signal_sent", "submitted", d.Surface, "")
+	h.auditHumanInput(r, user, s, d.Respondent, "human_input.signal_sent", "submitted", d.Surface, "")
 
 	// One budget for the whole confirmation, well inside the 30s route
 	// timeout: past it the answer is recorded and delivered, only not yet
@@ -409,7 +431,11 @@ func deliveryResult(d humaninput.Delivery, status, state, detail string) humanIn
 
 // auditHumanInput records a lifecycle event. It carries ids only: never the
 // question or the answer.
-func (h *Handlers) auditHumanInput(r *http.Request, user *auth.User, s *sealedHumanInput, op, status, surface, message string) {
+//
+// respondent is whose answer the event is about. It differs from the caller
+// (UserID, who triggered the event) when a submission redelivers an answer
+// another eligible human recorded earlier.
+func (h *Handlers) auditHumanInput(r *http.Request, user *auth.User, s *sealedHumanInput, respondent, op, status, surface, message string) {
 	h.logAudit(r, audit.Entry{
 		UserID:    user.ID,
 		Operation: op,
@@ -419,13 +445,14 @@ func (h *Handlers) auditHumanInput(r *http.Request, user *auth.User, s *sealedHu
 			"service":      s.file.Service,
 			"proposal":     s.file.Proposal,
 			"surface":      surface,
+			"respondent":   respondent,
 		},
 		WorkflowName: s.req.Execution.TemporalWorkflowID,
 		Status:       status,
 		RiskLevel:    string(operations.RiskLow),
 		Message:      message,
 	})
-	slog.Info(op, "request_id", s.req.RequestID, "workflow_id", s.req.Execution.TemporalWorkflowID, "work_item_id", s.req.WorkItemID, "user", user.ID, "detail", message)
+	slog.Info(op, "respondent", respondent, "request_id", s.req.RequestID, "workflow_id", s.req.Execution.TemporalWorkflowID, "work_item_id", s.req.WorkItemID, "user", user.ID, "detail", message)
 }
 
 func decodeHumanInputResponse(w http.ResponseWriter, r *http.Request) (humanInputResponseBody, any, error) {
