@@ -395,3 +395,32 @@ func TestWorkItems_NoTranscriptInHistoryOrAudit(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkItems_ExecutionListAndSupersedeVisibility(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	alice, bob, svc := e.user("alice"), e.user("bob"), auth.NewServiceUser()
+	id := e.open(alice, nil)["id"].(string)
+
+	empty := e.do(alice, "GET", "/api/v1/work-items/"+id+"/executions", nil)
+	if empty.code != http.StatusOK || !strings.Contains(empty.raw, `"executions":[]`) {
+		t.Fatalf("no executions = %d %s; want an empty array, not null", empty.code, empty.raw)
+	}
+	for _, ref := range []string{"run-1", "run-2"} {
+		e.do(svc, "POST", "/api/v1/work-items/"+id+"/executions", map[string]any{"engine": "argo", "engine_ref": ref, "phase": "Succeeded"})
+	}
+	list := e.do(alice, "GET", "/api/v1/work-items/"+id+"/executions", nil)
+	execs, _ := list.body["executions"].([]any)
+	if list.code != http.StatusOK || len(execs) != 2 || execs[0].(map[string]any)["attempt"] != float64(1) || execs[1].(map[string]any)["engine_ref"] != "run-2" {
+		t.Fatalf("executions = %s", list.raw)
+	}
+
+	// superseded_by must name an item the caller can see: a missing id and
+	// someone else's private item answer the same 400.
+	hidden := e.open(bob, map[string]any{"visibility": "private"})["id"].(string)
+	for _, next := range []string{"wi_missing", hidden} {
+		res := e.do(alice, "PATCH", "/api/v1/work-items/"+id, map[string]any{"action": "supersede", "superseded_by": next, "expected_state_version": 1})
+		if res.code != http.StatusBadRequest || code(res) != "invalid_request" {
+			t.Errorf("supersede by %s = %d %s", next, res.code, res.raw)
+		}
+	}
+}
