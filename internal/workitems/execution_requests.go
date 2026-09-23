@@ -2,6 +2,7 @@ package workitems
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"strings"
@@ -266,7 +267,11 @@ func (in ExecutionRequestInput) validate() error {
 
 // checkRunnable is the request-time half of what fulfil will decide: a
 // request the platform could never fulfil is refused now, with the same
-// typed errors fulfil would give.
+// typed errors fulfil would give. One exception: a resumed_from_execution_id
+// that is not an execution of the item is a 404 execution_not_found here,
+// because the requester named it; fulfil (resumeTx) reports the same fault
+// as invalid_request. Executions are never deleted, so a reference valid at
+// create stays valid at fulfil and the second answer is not reachable.
 func checkRunnable(cur *WorkItem, execs []Execution, kind, from string) error {
 	if IsTerminal(cur.State) {
 		return &ConflictError{Err: fmt.Errorf("%w: execution request on %s", ErrInvalidTransition, cur.State), Current: cur}
@@ -517,7 +522,8 @@ func (in ClaimRef) validate() error {
 // holds reports whether ref names x's current claim: the same claimant and
 // the claim token that claim minted. Expiry is checked separately.
 func (ref ClaimRef) holds(x *ExecutionRequest) bool {
-	return x.ClaimedBy == ref.Actor && x.ClaimToken == ref.ClaimToken
+	return x.ClaimedBy == ref.Actor &&
+		subtle.ConstantTimeCompare([]byte(x.ClaimToken), []byte(ref.ClaimToken)) == 1
 }
 
 // lockedRequest reads the request's work item id, then runs fn under that
@@ -583,7 +589,7 @@ func (s *Store) FulfilExecutionRequest(ctx context.Context, in FulfilInput) (*Ex
 		case ExecutionRequestRejected:
 			return &ClosedRequestError{Request: x}
 		}
-		if x.State != ExecutionRequestClaimed || !in.holds(x) || !x.ClaimExpiresAt.After(now) {
+		if x.State != ExecutionRequestClaimed || !in.holds(x) || x.ClaimExpiresAt == nil || !x.ClaimExpiresAt.After(now) {
 			return fmt.Errorf("%w: %s", ErrExecutionRequestNotClaimed, x.ID)
 		}
 		var err error
@@ -681,7 +687,7 @@ func (s *Store) RejectExecutionRequest(ctx context.Context, in RejectInput) (*Ex
 		case ExecutionRequestFulfilled:
 			return &ClosedRequestError{Request: x}
 		}
-		if x.State != ExecutionRequestClaimed || !in.holds(x) || !x.ClaimExpiresAt.After(now) {
+		if x.State != ExecutionRequestClaimed || !in.holds(x) || x.ClaimExpiresAt == nil || !x.ClaimExpiresAt.After(now) {
 			return fmt.Errorf("%w: %s", ErrExecutionRequestNotClaimed, x.ID)
 		}
 		var err error
