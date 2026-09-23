@@ -65,6 +65,45 @@ type ParameterDef struct {
 	Enum        []string `json:"enum,omitempty"`
 	Pattern     string   `json:"pattern,omitempty"`
 	Secret      bool     `json:"secret,omitempty"` // true = never echo in logs/responses
+	// OmitWhenEmpty marks an optional parameter whose absence must reach Argo
+	// as an absence, not as "". ApplyDefaults normally fills every missing
+	// parameter with Default, and Executor.Submit forwards the whole map, so a
+	// declared parameter with Default "" would OVERRIDE a non-empty default in
+	// the ClusterWorkflowTemplate with an empty string. For agent_image that
+	// is the container image itself: an unpinned caller would get a pod with
+	// no image instead of the CWFT's baked-in default. With this set,
+	// ApplyDefaults leaves the key out when the caller omitted it or sent "",
+	// so the CWFT's own default applies.
+	OmitWhenEmpty bool `json:"-"`
+}
+
+// agentImagePattern is the only image an mctl-agents CWFT may be pinned to:
+// the mctl-agents GHCR repository, by semver tag or by digest. These are the
+// two shapes mctl-agents' registry activity (_image_ref in
+// orchestrator/temporal/activities/registry.py) builds from a published
+// agent_versions row — "<image_repository>:<version>" or
+// "<image_repository>@<image_digest>" — and image_repository is
+// ghcr.io/mctlhq/mctl-agents on every row published so far. agent_image
+// becomes the pod's container image, so the repository is fixed rather than
+// left to the caller.
+const agentImagePattern = `^ghcr\.io/mctlhq/mctl-agents(:[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,64})?|@sha256:[0-9a-f]{64})$`
+
+// agentPinParams declares the release-pin pair the mctl-agents DevLoop (and
+// the incident responder) send when the agent registry has a released
+// version: agent_image, the image the CWFT runs, and agent_version,
+// "<agent>@<version>", carried for the record. Both CWFTs declare them with
+// agent_image defaulting to the current pin, so both are OmitWhenEmpty: an
+// unpinned caller keeps the CWFT default. agent_version is bound to the one
+// agent that runs in this operation (mctlhq/mctl-api#372).
+func agentPinParams(agent string) []ParameterDef {
+	return []ParameterDef{
+		{Name: "agent_image", Type: "string", Required: false, OmitWhenEmpty: true,
+			Description: "Optional. Released image to run, from the agent registry (ghcr.io/mctlhq/mctl-agents:<version> or @sha256:<digest>). Omit to run the ClusterWorkflowTemplate's default image.",
+			Pattern:     agentImagePattern},
+		{Name: "agent_version", Type: "string", Required: false, OmitWhenEmpty: true,
+			Description: "Optional. Registry release being run, " + agent + "@<version>; recorded only. Omit when agent_image is omitted.",
+			Pattern:     `^` + regexp.QuoteMeta(agent) + `@[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,64})?$`},
+	}
 }
 
 // NewRegistry creates the operation registry with all known operations.
@@ -175,13 +214,21 @@ func (r *Registry) StripUndeclared(op Operation, input map[string]string) (map[s
 	return result, dropped
 }
 
-// ApplyDefaults fills in default values for missing parameters.
+// ApplyDefaults fills in default values for missing parameters. An
+// OmitWhenEmpty parameter is never filled, and an empty value for one is
+// removed, so the workflow template's own default applies.
 func (r *Registry) ApplyDefaults(op Operation, input map[string]string) map[string]string {
 	result := make(map[string]string, len(input))
 	for k, v := range input {
 		result[k] = v
 	}
 	for _, p := range op.Parameters {
+		if p.OmitWhenEmpty {
+			if result[p.Name] == "" {
+				delete(result, p.Name)
+			}
+			continue
+		}
 		if _, exists := result[p.Name]; !exists {
 			result[p.Name] = p.Default
 		}
@@ -573,10 +620,12 @@ var builtinOperations = []Operation{
 		RequiresConfirm:  false,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/incident-{id}/"},
-		Parameters: []ParameterDef{
+		Parameters: append([]ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "incident-responder", Description: "Run mode (locked to 'incident-responder')", Enum: []string{"incident-responder"}},
 			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for incident-responder mode"},
-		},
+			// Release pin (mctlhq/mctl-api#372): mctl-agents' IncidentResponderWorkflow
+			// sends it; cwft-mctl-agents-run declares both.
+		}, agentPinParams("incident-responder")...),
 	},
 	{
 		// Tier 2 implementer — turns accepted proposals into PRs in sibling
@@ -592,11 +641,13 @@ var builtinOperations = []Operation{
 		RequiresConfirm:  false,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch>"},
-		Parameters: []ParameterDef{
+		Parameters: append([]ParameterDef{
 			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github"}},
 			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
 			{Name: "max_proposals", Type: "string", Required: false, Default: "1", Description: "Safety bound. The API permits exactly one proposal per run.", Enum: []string{"1"}},
-		},
+			// Release pin (mctlhq/mctl-api#372): the DevLoop's implement step sends
+			// it; cwft-mctl-agents-implement declares both.
+		}, agentPinParams("implementer")...),
 	},
 	{
 		// Tier 3 PR shepherd — drives existing implementer-PRs through codex
@@ -616,7 +667,7 @@ var builtinOperations = []Operation{
 		RequiresConfirm:  false,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch> (follow-up commits or merge)"},
-		Parameters: []ParameterDef{
+		Parameters: append([]ParameterDef{
 			// `mctl-agents` is intentionally INCLUDED in the shepherd's service
 			// enum (and the matching MCP tool enum), aligned with the Tier 2
 			// implementer which added `mctl-agents` to its allowlist in
@@ -628,7 +679,9 @@ var builtinOperations = []Operation{
 			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github"}},
 			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
 			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to evaluate decide() for every matched proposal and print the decision WITHOUT calling the implementer or merging anything. Default 'false'.", Enum: []string{"true", "false"}},
-		},
+			// Release pin (mctlhq/mctl-api#372): the DevLoop's in-loop shepherd tick
+			// sends it; cwft-mctl-agents-shepherd declares both.
+		}, agentPinParams("shepherd")...),
 	},
 	{
 		// Issue-investigator — the issue-driven entry point. Reads a GitHub
@@ -646,7 +699,7 @@ var builtinOperations = []Operation{
 		RequiresConfirm:  false,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/"},
-		Parameters: []ParameterDef{
+		Parameters: append([]ParameterDef{
 			{Name: "issue_url", Type: "string", Required: true, Description: "Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123", Pattern: `^https://github\.com/mctlhq/[A-Za-z0-9_.-]+/issues/[0-9]+$`},
 			// Resume identifiers (mctlhq/mctl-agents#267). Optional and opaque to
 			// mctl-api: nothing here resolves them, mints them, or defaults them.
@@ -658,7 +711,10 @@ var builtinOperations = []Operation{
 			{Name: "execution_id", Type: "string", Required: false,
 				Description: "Optional. WorkItemExecution id this run is attributed to (e.g. we_<uuid>). Omit for a cold issue-driven run.",
 				Pattern:     `^[A-Za-z0-9_-]{1,64}$`},
-		},
+			// Release pin (mctlhq/mctl-api#372): the DevLoop resolves the released
+			// issue-investigator and sends it; cwft-mctl-agents-investigate declares
+			// both. Undeclared, it was stripped and every run used the CWFT default.
+		}, agentPinParams("issue-investigator")...),
 	},
 	{
 		// Approve step — flips exactly one proposal's .status.yaml from
