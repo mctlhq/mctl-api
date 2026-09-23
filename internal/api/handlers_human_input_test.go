@@ -350,3 +350,40 @@ func TestDeriveHumanInputState(t *testing.T) {
 		}
 	}
 }
+
+// Both endpoints decide expiry from the sealed timestamp, before and
+// without Temporal.
+func TestGetHumanInput_ExpiredWithoutTemporal(t *testing.T) {
+	h, tc := newHumanInputHandlers(t)
+	withHumanInputClock(t, "2026-09-24T02:00:00Z")
+	h.opts.TemporalClient = nil
+	if _, v, _ := getHumanInput(t, h, alice, hiASCII); v.State != HumanInputExpired {
+		t.Fatalf("state = %s, want expired", v.State)
+	}
+	h.opts.TemporalClient = tc
+	tc.humanInputErr = errors.New("no worker")
+	if _, v, _ := getHumanInput(t, h, alice, hiASCII); v.State != HumanInputExpired || len(tc.humanInputQueries) != 0 {
+		t.Fatalf("state = %s, queries %v", v.State, tc.humanInputQueries)
+	}
+}
+
+// The handlers are only reachable if the router registers them; every other
+// test here calls them directly.
+func TestHumanInputRoutesAreRegistered(t *testing.T) {
+	router, ok := NewRouter(Options{}).(chi.Routes)
+	if !ok {
+		t.Fatal("the router does not expose its routes")
+	}
+	found := map[string]bool{}
+	if err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		found[method+" "+strings.TrimSuffix(route, "/")] = true
+		return nil
+	}); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	for _, want := range []string{"GET /api/v1/human-input", "GET /api/v1/human-input/{request_id}"} {
+		if !found[want] {
+			t.Errorf("route %q is not registered", want)
+		}
+	}
+}

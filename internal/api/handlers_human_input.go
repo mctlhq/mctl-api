@@ -198,6 +198,17 @@ func (q *humanInputStates) state(ctx context.Context, req *humaninput.Request, n
 	return deriveHumanInputState(res.st, req, now)
 }
 
+// resolve is the state of req for one call. Expiry is decided from the
+// sealed expires_at first: nothing is accepted at or after it, whatever the
+// workflow says, so there is nothing to ask (and a missing or failing
+// Temporal client cannot turn an expired request into "unknown").
+func (q *humanInputStates) resolve(ctx context.Context, req *humaninput.Request, now time.Time) (state, detail string) {
+	if !now.Before(req.Expires()) {
+		return HumanInputExpired, ""
+	}
+	return q.state(ctx, req, now)
+}
+
 // deriveHumanInputState maps the workflow's own state onto this request.
 //
 // A workflow that was terminated or failed while parked still answers the
@@ -319,13 +330,7 @@ func (h *Handlers) ListHumanInputs(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		v := humanInputViewOf(user, s)
-		if !now.Before(s.req.Expires()) {
-			// Nothing is accepted at or after expires_at, whatever the
-			// workflow says, so there is nothing to ask it.
-			v.State = HumanInputExpired
-		} else {
-			v.State, v.StateDetail = states.state(ctx, s.req, now)
-		}
+		v.State, v.StateDetail = states.resolve(ctx, s.req, now)
 		if filter == HumanInputPending {
 			if v.State == HumanInputUnknown {
 				undetermined++
@@ -368,7 +373,7 @@ func (h *Handlers) GetHumanInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := humanInputViewOf(user, *s)
-	v.State, v.StateDetail = h.newHumanInputStates().state(r.Context(), s.req, humanInputNow().UTC())
+	v.State, v.StateDetail = h.newHumanInputStates().resolve(r.Context(), s.req, humanInputNow().UTC())
 	slog.Info("human_input.read", "user", user.ID, "request_id", id, "state", v.State)
 	writeJSON(w, http.StatusOK, v)
 }
