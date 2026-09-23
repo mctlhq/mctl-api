@@ -137,6 +137,36 @@ may live in different databases.
   `signal_ref`, `signal_name`, `requested_by`, `requested_at`, `decided_by`,
   `decided_at`, `reason`, `expires_at`. At most one pending approval per
   work item.
+- **`ActionApprovalRequest`** (`actionapproval/v1`, mctl-api#366) — a
+  sibling of `WorkItemApproval`, not a variant: the durable, single-use
+  human approval of ONE hashed side effect of one runtime execution
+  (mctl-agents#197/#198), in the same store. An execution may hold many.
+  `id` (`aar_...`) binds `execution_id`, `action_kind`, `target`,
+  `args_digest`, `policy_rule_id`, `policy_version`, optional
+  `artifact_hash` and `work_item_id`; `intent_hash` is `sha256:<hex>` over
+  the line `mctl-action-intent/v1` followed by one line
+  `<field>:<byte length>:<value>` per bound field in that order, computed by
+  the server (a client-sent hash must match). State `pending` →
+  `approved` | `denied`, then `approved` → `consumed`; a pending or approved
+  request past `expires_at` (at most 7 days ahead) reads as `expired`, and a
+  decision or consume on it is refused. Create and consume: the requesting
+  service principal only, `requested_by` from authentication, idempotent per
+  `(requested_by, idempotency_key)` (a different intent under the same key
+  is 409 `approval_idempotency_conflict`). A replayed key returns the stored
+  request whatever its state, so once it is `expired`, `denied` or
+  `consumed` that key can never open a new request: a client must vary the
+  key per attempt (for example the intent plus an attempt counter), never
+  derive it from the intent alone. Every bound field and the decision
+  `reason` pass the `secretscan.Scan` gate below (400). Decide: a human admin acting
+  directly only — never a service, a surface or a relayed request, never
+  the requester. Consume is one compare-and-set `UPDATE` (`state='approved'`,
+  matching `intent_hash`, unexpired) that records `consumed_at`, so a
+  receipt authorizes exactly one side effect. Reads: every request for a
+  human admin, its own requests for a service. Create, decision and consume
+  are audited (ids and hashes only), and so are refused decisions and
+  consumes (`action_approval.decision_refused` /
+  `action_approval.consume_refused`, with the typed code). mctl-api is the approval record;
+  Temporal only waits on it and re-reads it after a best-effort wake-up.
 - **`SurfaceRef`** — correlates a work item to a surface-native
   conversation: `surface`, `external_id` (chat/thread/run identifier needed
   for reply routing), `actor_external_id`, `first_seen_at`, `last_seen_at`.
@@ -327,6 +357,10 @@ routes join the existing write-side rate-limit group (20/min) alongside
 | `GET /api/v1/work-items/{id}/approvals`                                | list approvals |
 | `POST /api/v1/work-items/{id}/approvals/{approval_id}/decision`        | decide a pending approval |
 | `POST /api/v1/work-items/{id}/surface-refs`                            | correlate a surface reference |
+| `GET|POST /api/v1/action-approvals`                                    | list (`state`, `execution_id`, `limit`) / request an action approval |
+| `GET /api/v1/action-approvals/{id}`                                    | read one, with lazy expiry |
+| `POST /api/v1/action-approvals/{id}/decision`                          | approve or deny (human admin only) |
+| `POST /api/v1/action-approvals/{id}/consume`                           | spend an approved request exactly once |
 | `GET /api/v1/work-items/{id}/events`                                   | lifecycle history |
 
 If the work-items store is not configured (`WORK_ITEMS_DB_URL` and

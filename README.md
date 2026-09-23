@@ -250,6 +250,11 @@ Surfaces correlate to it; they never own its lifecycle.
   different bytes answer 409 `snapshot_divergence`. `GET` the same path,
   `GET .../snapshots[/{snapshot_id}]` to read; the item view carries
   `latest_snapshot`.
+- `POST /api/v1/action-approvals` (service principal only) requests the
+  single-use approval of one hashed runtime side effect; a human admin
+  answers it with `POST .../{id}/decision`, and the requesting service
+  spends it once with `POST .../{id}/consume {intent_hash}`. `GET
+  /api/v1/action-approvals[/{id}]` reads, with lazy expiry (mctl-api#366).
 - The acting principal is always the authenticated caller. A body naming an
   actor (`actor`, `owner_principal`, `on_behalf_of`, ...) gets 400
   `actor_not_accepted`; a surface acting for its users needs mctl-api#350.

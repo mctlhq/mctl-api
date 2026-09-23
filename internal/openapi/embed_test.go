@@ -18,13 +18,17 @@ func TestSpecParses(t *testing.T) {
 		t.Fatalf("openapi.yaml does not parse: %v", err)
 	}
 	for path, methods := range map[string][]string{
-		"/api/v1/work-items":                   {"get", "post"},
-		"/api/v1/work-items/{id}":              {"get", "patch"},
-		"/api/v1/work-items/{id}/intents":      {"post"},
-		"/api/v1/work-items/{id}/executions":   {"get", "post"},
-		"/api/v1/work-items/{id}/resume":       {"post"},
-		"/api/v1/work-items/{id}/surface-refs": {"post"},
-		"/api/v1/work-items/{id}/events":       {"get"},
+		"/api/v1/work-items":                     {"get", "post"},
+		"/api/v1/work-items/{id}":                {"get", "patch"},
+		"/api/v1/work-items/{id}/intents":        {"post"},
+		"/api/v1/work-items/{id}/executions":     {"get", "post"},
+		"/api/v1/work-items/{id}/resume":         {"post"},
+		"/api/v1/work-items/{id}/surface-refs":   {"post"},
+		"/api/v1/work-items/{id}/events":         {"get"},
+		"/api/v1/action-approvals":               {"get", "post"},
+		"/api/v1/action-approvals/{id}":          {"get"},
+		"/api/v1/action-approvals/{id}/decision": {"post"},
+		"/api/v1/action-approvals/{id}/consume":  {"post"},
 	} {
 		for _, m := range methods {
 			if _, ok := doc.Paths[path][m]; !ok {

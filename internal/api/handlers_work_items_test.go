@@ -48,6 +48,7 @@ func newWorkItemsEnv(t *testing.T) *workItemsEnv {
 		pool, err := pgxpool.New(ctx, connStr)
 		if err == nil {
 			_, _ = pool.Exec(ctx, `DELETE FROM work_items WHERE tenant LIKE $1`, tenant+"%")
+			_, _ = pool.Exec(ctx, `DELETE FROM action_approval_requests WHERE execution_id LIKE $1`, tenant+"%")
 			pool.Close()
 		}
 		store.Close()
@@ -74,6 +75,11 @@ func workItemsRouter(h *Handlers) chi.Router {
 	r.Get("/api/v1/work-items/{id}/executions/{execution_id}/snapshot", h.GetWorkItemExecutionSnapshot)
 	r.Get("/api/v1/work-items/{id}/snapshots", h.ListWorkItemSnapshots)
 	r.Get("/api/v1/work-items/{id}/snapshots/{snapshot_id}", h.GetWorkItemSnapshot)
+	r.Post("/api/v1/action-approvals", h.CreateActionApproval)
+	r.Get("/api/v1/action-approvals", h.ListActionApprovals)
+	r.Get("/api/v1/action-approvals/{id}", h.GetActionApproval)
+	r.Post("/api/v1/action-approvals/{id}/decision", h.DecideActionApproval)
+	r.Post("/api/v1/action-approvals/{id}/consume", h.ConsumeActionApproval)
 	return r
 }
 
