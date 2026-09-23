@@ -35,6 +35,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/openapi"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
+	"github.com/mctlhq/mctl-api/internal/surfaceid"
 	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 	"github.com/prometheus/client_golang/prometheus"
@@ -107,6 +108,10 @@ type Options struct {
 	// lifecycle phase (optional — nil makes the lifecycle endpoints 503,
 	// which callers treat as "unknown", never as "unowned").
 	Lifecycle *lifecycle.Store
+
+	// SurfaceIdentities stores SurfaceIdentityLinks (mctl-api#350).
+	// Optional: nil makes the surface-identity endpoints 503.
+	SurfaceIdentities *surfaceid.Store
 
 	// Roadmap serves the RoadmapPublication read model (mctl-api#333).
 	// Optional: nil makes the roadmap endpoints 503.
@@ -279,6 +284,8 @@ func NewRouter(opts Options) http.Handler {
 		if opts.AuthMiddleware != nil {
 			r.Use(opts.AuthMiddleware)
 		}
+		// Surface principals reach only their allowlisted routes.
+		r.Use(surfacePrincipalGate)
 		r.Use(middleware.Timeout(30 * 1000000000)) // 30s
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
@@ -426,6 +433,10 @@ func NewRouter(opts Options) http.Handler {
 				// Work-item mutations (mctl-api#349): the contract puts them
 				// on this shared write budget.
 				r.Post("/work-items", h.CreateWorkItem)
+				// Surface identity links (mctl-api#350).
+				r.Post("/surface-identities/challenges", h.CreateSurfaceChallenge)
+				r.Post("/surface-identities/redeem", h.RedeemSurfaceChallenge)
+				r.Post("/surface-identities/{id}/revoke", h.RevokeSurfaceIdentity)
 				r.Patch("/work-items/{id}", h.TransitionWorkItem)
 				r.Post("/work-items/{id}/intents", h.AppendWorkItemIntent)
 				r.Post("/work-items/{id}/executions", h.AttachWorkItemExecution)
@@ -435,6 +446,7 @@ func NewRouter(opts Options) http.Handler {
 
 			// Work-item reads: side-effect free, outside the write budget.
 			r.Get("/work-items", h.ListWorkItems)
+			r.Get("/surface-identities", h.ListSurfaceIdentities)
 			r.Get("/work-items/{id}", h.GetWorkItem)
 			r.Get("/work-items/{id}/executions", h.ListWorkItemExecutions)
 			r.Get("/work-items/{id}/events", h.ListWorkItemEvents)

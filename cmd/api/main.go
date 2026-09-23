@@ -49,6 +49,7 @@ import (
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
+	"github.com/mctlhq/mctl-api/internal/surfaceid"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/vault"
@@ -349,6 +350,36 @@ func main() {
 		}
 	}
 
+	// Surface identity links (mctl-api#350). Same shape as the work-items
+	// store: SURFACE_IDENTITY_DB_URL, else AUDIT_DB_URL, with a kill switch.
+	// SURFACE_LINK_TTL (a Go duration, e.g. 2160h) gives new links an
+	// expiry; unset means a link lasts until revoked. Nil answers 503, and a
+	// surface principal can then relay for no one.
+	var surfaceIDs *surfaceid.Store
+	surfaceDBURL := postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL"))
+	if surfaceDBURL == "" {
+		surfaceDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+	}
+	linkTTL, ttlErr := parseLinkTTL(os.Getenv("SURFACE_LINK_TTL"))
+	switch {
+	case killSwitchOn(os.Getenv("SURFACE_IDENTITY_DISABLED")):
+		slog.Warn("SURFACE_IDENTITY_DISABLED is set; /api/v1/surface-identities routes will return 503")
+	case ttlErr != nil:
+		slog.Error("invalid SURFACE_LINK_TTL; surface identities disabled", "error", ttlErr)
+	case surfaceDBURL == "":
+		slog.Warn("no SURFACE_IDENTITY_DB_URL or AUDIT_DB_URL; /api/v1/surface-identities routes will return 503")
+	default:
+		ss, ssErr := initStore(initCtx, "surface identities", func(ctx context.Context) (*surfaceid.Store, error) {
+			return surfaceid.NewStore(ctx, surfaceDBURL, linkTTL)
+		})
+		if ssErr != nil {
+			slog.Error("surface identity store init failed; routes will return 503", "error", ssErr)
+		} else {
+			surfaceIDs = ss
+			defer ss.Close()
+		}
+	}
+
 	// Agent registry (optional — enabled when AGENT_REGISTRY_DB_URL or AUDIT_DB_URL is set).
 	// Inbound events for Claude Remote (mctlhq/.github#87): GitHub pull request
 	// webhooks are accepted into a Postgres outbox and relayed to platform
@@ -620,6 +651,7 @@ func main() {
 		TemporalClient:                 devLoopClient,
 		HumanInputLedger:               humanInputLedger,
 		WorkItems:                      workItemsStore,
+		SurfaceIdentities:              surfaceIDs,
 		WorkflowDispatcher:             workflowDispatcher,
 		GitopsReady:                    gitopsReady,
 		PostgresReady:                  postgresReady,
@@ -1213,4 +1245,22 @@ func killSwitchOn(v string) bool {
 		return false
 	}
 	return true
+}
+
+// parseLinkTTL reads SURFACE_LINK_TTL: empty is no expiry; anything else must
+// be a positive Go duration. A malformed value disables the feature rather
+// than silently meaning "forever".
+func parseLinkTTL(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, err
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("SURFACE_LINK_TTL must be positive, got %s", v)
+	}
+	return d, nil
 }

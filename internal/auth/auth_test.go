@@ -240,3 +240,87 @@ func TestMiddlewareRecordsGitHubLoginProvenance(t *testing.T) {
 		t.Fatal("a bare User claims a GitHub login")
 	}
 }
+
+const (
+	tgToken     = "tg-surface-token-0123456789abcdef0123"
+	portalToken = "portal-surface-token-0123456789abcdef"
+)
+
+// authAs runs the middleware for token and returns the user it minted, or
+// nil when it refused.
+func authAs(t *testing.T, token string) *User {
+	t.Helper()
+	var got *User
+	h := Middleware(NewGitHubValidator(nil), nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = UserFromContext(r.Context())
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	return got
+}
+
+func TestSurfaceTokensMintNarrowDistinctPrincipals(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	t.Setenv("MCTL_AGENT_SERVICE_TOKEN", "svc-token-123")
+	t.Setenv("MCTL_SURFACE_TELEGRAM_TOKEN", tgToken)
+	t.Setenv("MCTL_SURFACE_PORTAL_TOKEN", portalToken)
+	for token, surface := range map[string]string{tgToken: "telegram", portalToken: "portal"} {
+		u := authAs(t, token)
+		if u == nil {
+			t.Fatalf("%s: refused", surface)
+		}
+		got, ok := u.Surface()
+		if !ok || got != surface || u.ID != "surface:"+surface {
+			t.Fatalf("%s: user = %+v", surface, u)
+		}
+		if u.IsAdmin() || u.IsService() || len(u.Groups) != 0 {
+			t.Fatalf("%s: a surface principal carries authority: admin=%v service=%v groups=%v", surface, u.IsAdmin(), u.IsService(), u.Groups)
+		}
+		if _, ok := u.GitHubLogin(); ok {
+			t.Fatalf("%s: a surface principal claims a GitHub login", surface)
+		}
+	}
+	// The service principal stays exactly what it was: never a surface.
+	if svc := authAs(t, "svc-token-123"); svc == nil || !svc.IsService() {
+		t.Fatal("service token no longer authenticates the service principal")
+	} else if _, ok := svc.Surface(); ok {
+		t.Fatal("mctl-agent became a surface principal")
+	}
+	// A near-miss is not a surface token.
+	if u := authAs(t, tgToken+"x"); u != nil {
+		t.Fatalf("a wrong token authenticated as %+v", u)
+	}
+}
+
+func TestSurfaceTokensThatCouldBeConfusedAreRefused(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	cases := []struct {
+		name, service, telegram, portal string
+	}{
+		{"too short", "svc-token-123", "short", ""},
+		{"shared by two surfaces", "svc-token-123", tgToken, tgToken},
+		{"equal to the service token", tgToken, tgToken, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("MCTL_AGENT_SERVICE_TOKEN", c.service)
+			t.Setenv("MCTL_SURFACE_TELEGRAM_TOKEN", c.telegram)
+			t.Setenv("MCTL_SURFACE_PORTAL_TOKEN", c.portal)
+			if u := authAs(t, c.telegram); u != nil {
+				if _, ok := u.Surface(); ok {
+					t.Fatalf("minted surface principal %s", u.ID)
+				}
+			}
+		})
+	}
+}
+
+func TestSurfaceTokenTableHoldsOnlyUsableTokens(t *testing.T) {
+	t.Setenv("MCTL_AGENT_SERVICE_TOKEN", tgToken)
+	t.Setenv("MCTL_SURFACE_TELEGRAM_TOKEN", tgToken)
+	t.Setenv("MCTL_SURFACE_PORTAL_TOKEN", portalToken)
+	if got := surfaceTokens(); len(got) != 1 || got[portalToken] != "portal" {
+		t.Fatalf("token table = %v", got)
+	}
+}
