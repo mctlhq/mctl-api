@@ -289,3 +289,44 @@ func TestSurfaceRelay_CountsAgainstTheSurfaceCeiling(t *testing.T) {
 		t.Fatal("relay calls never reached the surface ceiling")
 	}
 }
+
+// Review follow-ups from #358 (P3): listing takes the same reading as
+// revoking, a redeem must name its identity at the gate, and retiring an
+// expired link is audited.
+func TestSurfaceIdentity_ReviewFollowUps(t *testing.T) {
+	e := newSIDEnv(t)
+	e.users["dexadmin"] = &auth.User{ID: "root", Groups: []string{"admins"}}
+	e.link("alice", "telegram", "4242")
+	if code, body := e.do("dexadmin", "GET", "/api/v1/surface-identities?principal=github:alice", nil); code != http.StatusForbidden {
+		t.Errorf("an unverified admin listing alice = %d %v", code, body)
+	}
+	if code, body := e.do("alice", "GET", "/api/v1/surface-identities?principal=github:alice", nil); code != http.StatusOK {
+		t.Errorf("alice naming herself = %d %v", code, body)
+	}
+
+	for i := 0; i < 25; i++ {
+		if code, body := e.do("telegram", "POST", "/api/v1/surface-identities/redeem", map[string]any{"code": "AAAA"}); code != http.StatusBadRequest {
+			t.Fatalf("redeem without an actor, attempt %d = %d %v", i, code, body)
+		}
+	}
+
+	if _, err := e.pool.Exec(context.Background(),
+		`UPDATE surface_identity_links SET expires_at=$1 WHERE external_id='4242'`, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	e.link("bob", "telegram", "4242")
+	var retired bool
+	for _, entry := range e.audit.List(100) {
+		if entry.Operation == "surface_identity.revoked" && entry.Parameters["subject"] == "github:alice" {
+			retired = entry.Parameters["revoked_by"] == surfaceid.RevokedByExpiry && entry.Parameters["acting_principal"] == "surface:telegram"
+		}
+	}
+	if !retired {
+		t.Fatal("retiring alice's expired link left no audit row")
+	}
+	var by string
+	if err := e.pool.QueryRow(context.Background(),
+		`SELECT revoked_by FROM surface_identity_links WHERE principal='github:alice' AND external_id='4242'`).Scan(&by); err != nil || by != surfaceid.RevokedByExpiry {
+		t.Fatalf("revoked_by = %q, %v", by, err)
+	}
+}

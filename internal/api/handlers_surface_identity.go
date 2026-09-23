@@ -135,7 +135,13 @@ func (h *Handlers) surfacePrincipalGate(next http.Handler) http.Handler {
 			}
 			if !route.relay {
 				// Redeem: the surface acts as itself, naming the identity
-				// it observed.
+				// it observed. Required here, so no limiter ever keys on
+				// an absent one.
+				if r.Header.Get(SurfaceActorHeader) == "" {
+					writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid,
+						SurfaceActorHeader+" must name the "+surface+" identity", nil)
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -376,6 +382,14 @@ func (h *Handlers) RedeemSurfaceChallenge(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "could not redeem the challenge")
 		return
 	}
+	if old := link.Retired; old != nil {
+		// Retiring someone's expired link is a state change like any
+		// revoke: it leaves a trace.
+		h.auditSurfaceIdentity(r, user, "surface_identity.revoked", "succeeded", map[string]string{
+			"link_id": old.ID, "surface": old.Surface, "external_id": old.ExternalID,
+			"subject": old.Principal, "revoked_by": old.RevokedBy,
+		})
+	}
 	params["link_id"] = link.ID
 	params["subject"] = link.Principal
 	h.auditSurfaceIdentity(r, user, "surface_identity.linked", "succeeded", params)
@@ -389,18 +403,20 @@ func (h *Handlers) ListSurfaceIdentities(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	// Same reading as revoke: a GitHub-proven human first, and only then,
+	// if an admin, anyone's links.
+	own, ok := humanPrincipal(user)
+	if !ok {
+		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only a human authenticated by GitHub has links", nil)
+		return
+	}
 	principal := r.URL.Query().Get("principal")
 	switch {
-	case principal != "" && (!user.IsAdmin() || user.IsService()):
+	case principal == "":
+		principal = own
+	case principal != own && !user.IsAdmin():
 		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only an admin may list another principal's links", nil)
 		return
-	case principal == "":
-		p, ok := humanPrincipal(user)
-		if !ok {
-			writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only a human authenticated by GitHub has links", nil)
-			return
-		}
-		principal = p
 	}
 	links, err := h.opts.SurfaceIdentities.Links(r.Context(), principal)
 	if err != nil {
