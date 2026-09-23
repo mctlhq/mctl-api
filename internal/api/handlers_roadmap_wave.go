@@ -58,9 +58,12 @@ const (
 
 // Once a wave has begun, each Temporal call (one item's Describe, then its
 // Start) gets its own bound, so neither a slow item nor a slow Describe eats
-// another call's budget; the whole wave is still bounded. Vars for tests.
+// another call's budget; the whole wave is still bounded. The call bound
+// stays well under the server's 30s WriteTimeout (cmd/api/main.go), so one
+// slow call still leaves time to deliver the per-item outcomes. Vars for
+// tests.
 var (
-	roadmapWaveCallTimeout = 30 * time.Second
+	roadmapWaveCallTimeout = 10 * time.Second
 	roadmapWaveTimeout     = 5 * time.Minute
 )
 

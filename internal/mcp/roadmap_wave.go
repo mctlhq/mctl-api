@@ -182,6 +182,8 @@ func (s *Server) wavePost(ctx context.Context, path string, body map[string]any,
 		hint = " Nothing was started. Use the plan's exact selected ids, or plan again."
 	case "roadmap_unavailable":
 		hint = " Readiness is UNKNOWN, not empty."
+	case "wave_execution_disabled":
+		hint = " Wave execution is switched off by server configuration: do not retry or replan; only an operator can fix it."
 	}
 	return mcplib.NewToolResultError(fmt.Sprintf("Failed to %s (HTTP %d):%s %s", what, resp.StatusCode, hint, strings.TrimSpace(string(out)))), nil
 }

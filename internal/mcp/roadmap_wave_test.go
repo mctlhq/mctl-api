@@ -90,9 +90,10 @@ func TestEpicWaveToolsRefuseBadArgumentsWithoutCalling(t *testing.T) {
 
 func TestStartEpicWaveExplainsTypedRefusals(t *testing.T) {
 	for code, want := range map[string]string{
-		"plan_stale":          "plan again",
-		"publication_too_old": "too old",
-		"invalid_selection":   "Nothing was started",
+		"plan_stale":              "plan again",
+		"publication_too_old":     "too old",
+		"invalid_selection":       "Nothing was started",
+		"wave_execution_disabled": "do not retry",
 	} {
 		ts, _, _ := waveBackend(t, http.StatusConflict, `{"code":"`+code+`","error":"x"}`)
 		r := callRoadmapTool(t, (*Server).toolStartEpicWave, ts.URL, map[string]any{
