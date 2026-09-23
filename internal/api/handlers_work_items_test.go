@@ -296,6 +296,14 @@ func TestWorkItems_VisibilityAnswers404AndTenantAccess403(t *testing.T) {
 	if res := e.do(mallory, "GET", "/api/v1/work-items?tenant="+e.tenant, nil); res.code != http.StatusForbidden {
 		t.Errorf("list foreign tenant = %d", res.code)
 	}
+	// A guessable external_key never reveals someone's private item.
+	e.open(alice, map[string]any{"visibility": "private", "external_key": "https://github.com/o/r/issues/1"})
+	for _, vis := range []string{"private", "tenant"} {
+		res := e.do(bob, "POST", "/api/v1/work-items", map[string]any{"tenant": e.tenant, "title": "x", "visibility": vis, "external_key": "https://github.com/o/r/issues/1"})
+		if res.code != http.StatusConflict || code(res) != "external_key_in_use" || strings.Contains(res.raw, "wi_") {
+			t.Errorf("external_key onto a private item (%s) = %d %s", vis, res.code, res.raw)
+		}
+	}
 	admin := auth.NewGitHubUser("root", []string{"admins"})
 	if res := e.do(admin, "GET", "/api/v1/work-items/"+private, nil); res.code != http.StatusOK {
 		t.Errorf("admin read private = %d", res.code)

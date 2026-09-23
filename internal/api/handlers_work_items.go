@@ -133,6 +133,8 @@ func writeWorkItemError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusConflict, wiCodeExecutionActive, err.Error(), details)
 	case errors.Is(err, workitems.ErrIdempotencyKeyReuse):
 		writeErrorCode(w, http.StatusConflict, wiCodeKeyReused, err.Error(), nil)
+	case errors.Is(err, workitems.ErrExternalKeyInUse):
+		writeErrorCode(w, http.StatusConflict, wiCodeExternalKeyInUse, err.Error(), nil)
 	case errors.Is(err, workitems.ErrSecretInText):
 		writeErrorCode(w, http.StatusBadRequest, wiCodeSecret, err.Error(), nil)
 	case errors.Is(err, workitems.ErrInvalid):
