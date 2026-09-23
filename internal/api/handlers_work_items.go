@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -142,6 +143,7 @@ func writeWorkItemError(w http.ResponseWriter, err error) {
 	case errors.Is(err, workitems.ErrInvalid):
 		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, err.Error(), nil)
 	default:
+		slog.Error("work-items store error", "error", err)
 		writeError(w, http.StatusInternalServerError, "work-items store error")
 	}
 }
@@ -200,9 +202,10 @@ func mutationFor(w http.ResponseWriter, r *http.Request, user *auth.User, op, it
 		m.RequestID = truncateRequestID(meta.RequestID)
 	}
 	if key != "" {
-		// body is the decoded request (a copy, key field included); the same
-		// retry always hashes the same, a different request never does.
-		canonical, err := json.Marshal(body)
+		// Hash the decoded request without its key, so a retry hashes the
+		// same whether the key travels in the header or the body. Map keys
+		// marshal sorted, so the digest is canonical.
+		canonical, err := requestDigestInput(body)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "hash request")
 			return workitems.Mutation{}, false
@@ -211,6 +214,19 @@ func mutationFor(w http.ResponseWriter, r *http.Request, user *auth.User, op, it
 		m.RequestHash = "sha256:" + hex.EncodeToString(sum[:])
 	}
 	return m, true
+}
+
+func requestDigestInput(body any) ([]byte, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	delete(fields, "idempotency_key")
+	return json.Marshal(fields)
 }
 
 // auditWorkItem records ids only: never intent text, never surface external
@@ -284,7 +300,11 @@ func (h *Handlers) CreateWorkItem(w http.ResponseWriter, r *http.Request) {
 	if !decodeWorkItemBody(w, r, &body) {
 		return
 	}
-	if body.Tenant == "" || !user.HasTenantAccess(body.Tenant) {
+	if body.Tenant == "" {
+		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "tenant is required", nil)
+		return
+	}
+	if !user.HasTenantAccess(body.Tenant) {
 		writeErrorCode(w, http.StatusForbidden, wiCodeTenantForbidden, "no access to tenant "+strconv.Quote(body.Tenant), nil)
 		return
 	}
@@ -307,9 +327,14 @@ func (h *Handlers) CreateWorkItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canSeeWorkItem(user, item) {
-		// external_key resolved to someone else's private item: say the key
-		// is taken without disclosing the item.
-		writeErrorCode(w, http.StatusConflict, wiCodeExternalKeyInUse, "external_key already names open work you cannot see", nil)
+		// The store binds keys to the principal and refuses a foreign
+		// private item on external_key, so this is defence in depth: answer
+		// without disclosing the item, naming what actually matched.
+		if body.ExternalKey != "" {
+			writeErrorCode(w, http.StatusConflict, wiCodeExternalKeyInUse, "external_key already names open work you cannot see", nil)
+		} else {
+			writeErrorCode(w, http.StatusConflict, wiCodeKeyReused, "idempotency key names work you cannot see", nil)
+		}
 		return
 	}
 	if created {
@@ -342,8 +367,8 @@ func (h *Handlers) ListWorkItems(w http.ResponseWriter, r *http.Request) {
 	f := workitems.ListFilter{State: q.Get("state"), Owner: q.Get("owner")}
 	if limit := q.Get("limit"); limit != "" {
 		n, err := strconv.Atoi(limit)
-		if err != nil || n <= 0 {
-			writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "limit must be a positive integer", nil)
+		if err != nil || n <= 0 || n > 500 {
+			writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "limit must be an integer from 1 to 500", nil)
 			return
 		}
 		f.Limit = n
@@ -557,13 +582,10 @@ func (h *Handlers) ResumeWorkItem(w http.ResponseWriter, r *http.Request) {
 	if created {
 		h.auditWorkItem(r, user, "work_item.resume", item.ID, item.Tenant, map[string]string{"execution_id": exec.ID})
 	}
-	v, err := h.viewOf(r, updated)
-	if err != nil {
-		writeWorkItemError(w, err)
-		return
-	}
+	// Built from what Resume returned: the resume is committed, so a second
+	// read here could only turn a success into an error.
 	writeJSON(w, createdStatus(created), map[string]any{
-		"schema_version": workitems.SchemaVersion, "work_item": v.WorkItem, "state_version": v.StateVersion,
+		"schema_version": workitems.SchemaVersion, "work_item": updated, "state_version": updated.StateVersion,
 		"execution": exec,
 	})
 }
@@ -594,11 +616,15 @@ func (h *Handlers) LinkWorkItemSurface(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "surface is required", nil)
 		return
 	}
+	if r.Header.Get("Idempotency-Key") != "" {
+		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid,
+			"this route is idempotent by (surface, external_id); Idempotency-Key is not used", nil)
+		return
+	}
 	m, ok := mutationFor(w, r, user, "surface_ref", item.ID, body.Surface, "", body)
 	if !ok {
 		return
 	}
-	m.IdempotencyKey, m.RequestHash = "", "" // the upsert is this route's idempotency
 	ref, created, err := h.opts.WorkItems.LinkSurface(r.Context(), workitems.SurfaceRefInput{
 		Mutation: m, WorkItemID: item.ID, ExternalID: body.ExternalID, ActorExternalID: body.ActorExternalID,
 	})

@@ -449,3 +449,78 @@ func TestWorkItems_AnotherPrincipalCannotReplayYourKey(t *testing.T) {
 		t.Fatalf("bob with alice's key = %d %s", res.code, res.raw)
 	}
 }
+
+func TestWorkItems_ListWithoutTenantStaysInsideTheCallersTenants(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	other := e.tenant + "-b"
+	alice := e.user("alice")
+	carol := auth.NewGitHubUser("carol", []string{other})
+	mine := e.open(alice, nil)["id"].(string)
+	res := e.do(carol, "POST", "/api/v1/work-items", map[string]any{"tenant": other, "title": "theirs"})
+	if res.code != http.StatusCreated {
+		t.Fatalf("create in second tenant = %d %s", res.code, res.raw)
+	}
+	theirs := res.body["work_item"].(map[string]any)["id"].(string)
+
+	ids := func(res wiResponse) map[string]bool {
+		out := map[string]bool{}
+		items, _ := res.body["items"].([]any)
+		for _, it := range items {
+			out[it.(map[string]any)["id"].(string)] = true
+		}
+		return out
+	}
+	if got := ids(e.do(alice, "GET", "/api/v1/work-items", nil)); !got[mine] || got[theirs] {
+		t.Errorf("member without ?tenant= lists %v", got)
+	}
+	if got := ids(e.do(carol, "GET", "/api/v1/work-items", nil)); got[mine] || !got[theirs] {
+		t.Errorf("second member without ?tenant= lists %v", got)
+	}
+	admin := auth.NewGitHubUser("root", []string{"admins"})
+	if got := ids(e.do(admin, "GET", "/api/v1/work-items?limit=500", nil)); !got[mine] || !got[theirs] {
+		t.Errorf("admin without ?tenant= lists %v", got)
+	}
+}
+
+func TestWorkItems_LimitAndTenantAreValidated(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	alice := e.user("alice")
+	for _, q := range []string{"0", "-1", "abc", "501"} {
+		if res := e.do(alice, "GET", "/api/v1/work-items?limit="+q, nil); res.code != http.StatusBadRequest {
+			t.Errorf("limit=%s = %d %s", q, res.code, res.raw)
+		}
+	}
+	if res := e.do(alice, "GET", "/api/v1/work-items?limit=500", nil); res.code != http.StatusOK {
+		t.Errorf("limit=500 = %d %s", res.code, res.raw)
+	}
+	if res := e.do(alice, "POST", "/api/v1/work-items", map[string]any{"title": "no tenant"}); res.code != http.StatusBadRequest {
+		t.Errorf("missing tenant = %d %s", res.code, res.raw)
+	}
+}
+
+func TestWorkItems_KeyInHeaderOrBodyIsTheSameRequest(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	alice := e.user("alice")
+	body := map[string]any{"tenant": e.tenant, "title": "once"}
+	first := e.do(alice, "POST", "/api/v1/work-items", body, "Idempotency-Key", "k-hb")
+	body["idempotency_key"] = "k-hb"
+	again := e.do(alice, "POST", "/api/v1/work-items", body)
+	if first.code != http.StatusCreated || again.code != http.StatusOK {
+		t.Fatalf("header then body key = %d, %d %s", first.code, again.code, again.raw)
+	}
+}
+
+func TestWorkItems_SurfaceRefsRefuseAnIdempotencyKeyAndAForgedActor(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	svc := auth.NewServiceUser()
+	id := e.open(e.user("alice"), nil)["id"].(string)
+	path := "/api/v1/work-items/" + id + "/surface-refs"
+	ref := map[string]any{"surface": "telegram", "external_id": "chat:1"}
+	if res := e.do(svc, "POST", path, ref, "Idempotency-Key", "k"); res.code != http.StatusBadRequest {
+		t.Errorf("surface-refs with Idempotency-Key = %d %s", res.code, res.raw)
+	}
+	forged := map[string]any{"surface": "telegram", "external_id": "chat:1", "actor": "tg:123"}
+	if res := e.do(svc, "POST", path, forged); res.code != http.StatusBadRequest || code(res) != "actor_not_accepted" {
+		t.Errorf("surface-refs with forged actor = %d %s", res.code, res.raw)
+	}
+}

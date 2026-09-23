@@ -314,7 +314,7 @@ func main() {
 		workItemsDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
 	}
 	switch {
-	case os.Getenv("WORK_ITEMS_DISABLED") != "":
+	case workItemsDisabled(os.Getenv("WORK_ITEMS_DISABLED")):
 		slog.Warn("WORK_ITEMS_DISABLED is set; /api/v1/work-items routes will return 503")
 	case workItemsDBURL == "":
 		slog.Warn("no WORK_ITEMS_DB_URL or AUDIT_DB_URL; /api/v1/work-items routes will return 503")
@@ -1175,4 +1175,11 @@ func splitCSV(v string) []string {
 		}
 	}
 	return out
+}
+
+// workItemsDisabled reads WORK_ITEMS_DISABLED as a boolean: "false", "0" or
+// empty keep work items on, so a rendered-unset flag never turns them off.
+func workItemsDisabled(v string) bool {
+	disabled, err := strconv.ParseBool(strings.TrimSpace(v))
+	return err == nil && disabled
 }
