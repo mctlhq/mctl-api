@@ -29,6 +29,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/domains"
+	"github.com/mctlhq/mctl-api/internal/humaninput"
 	"github.com/mctlhq/mctl-api/internal/lifecycle"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/openapi"
@@ -117,6 +118,11 @@ type Options struct {
 	// DevLoopClient interface, not the concrete *temporalclient.Client, so
 	// tests can inject a fake — see interfaces.go.
 	TemporalClient DevLoopClient
+	// HumanInputLedger is the idempotency/delivery record for human-input
+	// responses (mctl-api#261). Optional — nil makes the response endpoint
+	// 503: without it a response could be neither deduplicated nor
+	// redelivered after a Temporal outage.
+	HumanInputLedger humaninput.Ledger
 	// WorkflowDispatcher starts GitHub Actions workflow_dispatch runs
 	// (optional — nil makes POST /api/v1/cloudflare/portal/server-auth/apply
 	// return 503). Deliberately a dispatcher and not a Cloudflare client: the
@@ -401,6 +407,8 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/operations/{name}/execute", h.ExecuteOperation)
 				r.Post("/agents/dev-loop/start", h.StartDevLoopWorkflow)
 				r.Post("/agents/dev-loop/{workflow_id}/approve", h.ApproveDevLoopWorkflow)
+				// Signals the owning DevLoopWorkflow (mctl-api#261).
+				r.Post("/human-input/{request_id}/response", h.RespondHumanInput)
 				// Starts a mctl-gitops workflow, not a platform workflow, and
 				// belongs in this group for the same reason the two above do:
 				// it costs a write on the far side and shares the 20/min

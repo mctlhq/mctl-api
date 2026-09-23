@@ -133,6 +133,7 @@ docker run -p 8080:8080 mctl-api
 | `OAUTH_ALLOWED_REDIRECT_URIS` | Allowed OAuth redirect URIs | — | No |
 | `OAUTH_PREREGISTERED_CLIENTS` | JSON array of static public OAuth clients for counterparts that cannot register dynamically (the Cloudflare MCP portal): `[{"client_id":"…","client_name":"…","redirect_uris":["https://…"]}]`. Exact redirect match, no secret field, never evicted; a malformed value or an unknown key refuses startup | — | No |
 | `AUDIT_DB_URL` | PostgreSQL connection string (falls back to in-memory). `sslmode=disable` is upgraded to `require`, or `verify-full` when a CNPG CA is mounted. | — | No |
+| `HUMAN_INPUT_DB_URL` | PostgreSQL for the human-input delivery ledger (`POST /api/v1/human-input/{request_id}/response`). Falls back to `AUDIT_DB_URL`; with neither, that endpoint answers 503 (there is no in-memory fallback). The raw answer is kept only until its delivery resolves, or until the request expires. | — | No |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated Traefik CIDRs/IPs trusted for `X-Forwarded-For` on audit events | — | No |
 | `ALLOW_INSECURE_DB` | Permit `sslmode=disable` (tests/local only) | — | No |
 | `BACKSTAGE_URL` | Backstage catalog URL | — | No |

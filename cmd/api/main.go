@@ -42,6 +42,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/ghactions"
 	"github.com/mctlhq/mctl-api/internal/ghtoken"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/humaninput"
 	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/lifecycle"
 	"github.com/mctlhq/mctl-api/internal/loki"
@@ -275,6 +276,29 @@ func main() {
 			slog.Error("usage ledger store init failed; usage endpoints will return 503", "error", usErr)
 		} else {
 			usageStore = us
+		}
+	}
+
+	// Human-input delivery ledger (mctl-api#261). Optional — enabled when
+	// HUMAN_INPUT_DB_URL or AUDIT_DB_URL is set. Without it the response
+	// endpoint is 503: an answer that could be neither deduplicated nor
+	// redelivered after a Temporal outage must not be taken at all. There is
+	// deliberately no in-memory fallback, which would be wrong as soon as
+	// two replicas run.
+	var humanInputLedger humaninput.Ledger
+	humanInputDBURL := postgresURL(os.Getenv("HUMAN_INPUT_DB_URL"))
+	if humanInputDBURL == "" {
+		humanInputDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+	}
+	if humanInputDBURL != "" {
+		hl, hlErr := initStore(initCtx, "human-input ledger", func(ctx context.Context) (*humaninput.PostgresLedger, error) {
+			return humaninput.NewPostgresLedger(ctx, humanInputDBURL)
+		})
+		if hlErr != nil {
+			slog.Error("human-input ledger init failed; human-input responses will return 503", "error", hlErr)
+		} else {
+			humanInputLedger = hl
+			defer hl.Close()
 		}
 	}
 
@@ -546,6 +570,7 @@ func main() {
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,
 		TemporalClient:                 devLoopClient,
+		HumanInputLedger:               humanInputLedger,
 		WorkflowDispatcher:             workflowDispatcher,
 		GitopsReady:                    gitopsReady,
 		PostgresReady:                  postgresReady,

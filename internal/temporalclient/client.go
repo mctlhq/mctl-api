@@ -285,6 +285,24 @@ func (c *Client) QueryHumanInputState(ctx context.Context, workflowID, runID str
 	return &st, nil
 }
 
+// HumanInputResponseSignalName is DevLoopWorkflow's human_input_response
+// signal. Its handler only queues the payload; the workflow validates it
+// (request id and hash, expiry, respondent, typed value) when it drains the
+// queue, and the first valid response wins. It never touches the approval
+// gate: an answer is data with provenance, not an authorization.
+const HumanInputResponseSignalName = "human_input_response"
+
+// SignalHumanInputResponse delivers one HumanInputResponse document to the
+// workflow execution that sealed the request. runID pins the execution the
+// request belongs to, so a response can never land on a later run of the
+// same workflow id.
+func (c *Client) SignalHumanInputResponse(ctx context.Context, workflowID, runID string, response map[string]any) error {
+	if err := c.temporal.SignalWorkflow(ctx, workflowID, runID, HumanInputResponseSignalName, response); err != nil {
+		return fmt.Errorf("temporalclient: signal %s on %s: %w", HumanInputResponseSignalName, workflowID, err)
+	}
+	return nil
+}
+
 // IsNotFound reports whether err is (or wraps) Temporal's NotFound service
 // error — the case SignalApprove hits when workflowID doesn't correspond to
 // any workflow (never started, or already past retention). Callers use this

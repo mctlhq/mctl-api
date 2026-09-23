@@ -168,3 +168,6 @@ func pyNormalizeQuestion(q string) string {
 	}
 	return cases.Fold().String(strings.TrimFunc(b.String(), pyIsSpace))
 }
+
+// HashBytes is hashBytes for callers outside this package.
+func HashBytes(raw []byte) string { return hashBytes(raw) }

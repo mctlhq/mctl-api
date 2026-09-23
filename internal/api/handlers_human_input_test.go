@@ -425,7 +425,7 @@ func TestHumanInputRoutesAreRegistered(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("walk: %v", err)
 	}
-	for _, want := range []string{"GET /api/v1/human-input", "GET /api/v1/human-input/{request_id}"} {
+	for _, want := range []string{"GET /api/v1/human-input", "GET /api/v1/human-input/{request_id}", "POST /api/v1/human-input/{request_id}/response"} {
 		if !found[want] {
 			t.Errorf("route %q is not registered", want)
 		}
