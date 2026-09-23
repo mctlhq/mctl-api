@@ -536,6 +536,84 @@ components:
           type: string
       required: [error]
 
+    WorkItemError:
+      type: object
+      description: Error with a typed code a client can branch on.
+      properties:
+        error: {type: string}
+        code:
+          type: string
+          enum: [work_items_unavailable, work_item_not_found, invalid_request, actor_not_accepted,
+                 state_version_conflict, invalid_transition, execution_active, idempotency_key_reused,
+                 secret_in_text, tenant_forbidden, external_key_in_use]
+        details:
+          type: object
+          description: For 409s on an item, its current `state` and `state_version`.
+          properties:
+            state: {type: string}
+            state_version: {type: integer, format: int64}
+      required: [error, code]
+
+    WorkItem:
+      type: object
+      properties:
+        id: {type: string, example: wi_5c8e0f3a-1b2c-4d5e-8f90-123456789abc}
+        tenant: {type: string}
+        owner_principal: {type: string, description: 'Derived from authentication, e.g. github:alice or service:mctl-agent.'}
+        visibility: {type: string, enum: [tenant, private]}
+        origin_surface: {type: string}
+        title: {type: string, maxLength: 256}
+        external_key: {type: string}
+        state: {type: string, enum: [active, waiting, completed, superseded, archived]}
+        waiting_reason: {type: string, enum: [input, approval]}
+        superseded_by: {type: string}
+        state_version: {type: integer, format: int64}
+        created_by: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time}
+        schema_version: {type: string, enum: [workitem/v1]}
+      required: [id, tenant, owner_principal, visibility, origin_surface, title, state, state_version, created_by, created_at, updated_at, schema_version]
+
+    WorkItemExecution:
+      type: object
+      properties:
+        id: {type: string, example: we_9a01c2d3-0000-4000-8000-000000000000}
+        work_item_id: {type: string}
+        engine: {type: string, enum: [temporal, argo]}
+        engine_ref: {type: string}
+        attempt: {type: integer}
+        resumed_from_execution_id: {type: string}
+        phase: {type: string, enum: [Pending, Running, Succeeded, Failed, Error]}
+        started_at: {type: string, format: date-time}
+        ended_at: {type: string, format: date-time}
+      required: [id, work_item_id, engine, engine_ref, attempt, phase, started_at]
+
+    WorkItemView:
+      type: object
+      properties:
+        schema_version: {type: string, enum: [workitem/v1]}
+        work_item: {$ref: '#/components/schemas/WorkItem'}
+        state_version: {type: integer, format: int64}
+        latest_execution:
+          nullable: true
+          allOf: [{$ref: '#/components/schemas/WorkItemExecution'}]
+      required: [schema_version, work_item, state_version, latest_execution]
+
+    WorkItemEvent:
+      type: object
+      properties:
+        work_item_id: {type: string}
+        seq: {type: integer, format: int64}
+        kind: {type: string, enum: [created, state_changed, resumed, intent_appended, execution_attached, surface_linked]}
+        from_state: {type: string}
+        to_state: {type: string}
+        actor_principal: {type: string}
+        surface: {type: string}
+        request_id: {type: string}
+        detail: {type: object}
+        created_at: {type: string, format: date-time}
+
 paths:
   /healthz:
     get:
@@ -2338,7 +2416,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/HumanInputResponseResult'
         '202':
-          description: Signalled, not yet confirmed by the workflow (`status: pending_delivery`, `state: pending`); resubmit the same answer to check again
+          description: 'Signalled, not yet confirmed by the workflow (`status: pending_delivery`, `state: pending`); resubmit the same answer to check again'
           content:
             application/json:
               schema:
@@ -2412,6 +2490,272 @@ paths:
                   - $ref: '#/components/schemas/HumanInputResponseResult'
                   - $ref: '#/components/schemas/Error'
 
+  /api/v1/work-items:
+    get:
+      summary: List work items
+      description: |
+        workitem/v1 (docs/work-context-contract.md). Without `state` lists open
+        (non-terminal) items. A non-admin sees its tenants' `tenant` items and
+        its own `private` ones; admins see every tenant unless `tenant` is set.
+      tags: [Work Items]
+      parameters:
+        - {name: tenant, in: query, schema: {type: string}}
+        - {name: state, in: query, schema: {type: string, enum: [open, active, waiting, completed, superseded, archived]}}
+        - {name: owner, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500}}
+      responses:
+        '200':
+          description: Work items, most recently updated first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string}
+                  items: {type: array, items: {$ref: '#/components/schemas/WorkItem'}}
+        '401': {description: Authentication required}
+        '403': {description: No access to the tenant, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '503': {description: Work-items store not configured, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+    post:
+      summary: Open a work item
+      description: |
+        Idempotent create-or-return. `Idempotency-Key` (header, or
+        `idempotency_key` in the body) dedupes per tenant; an open item with the
+        same `external_key` in the tenant is returned instead of a second one.
+        The owner is the authenticated caller: a body naming an actor
+        (`actor`, `owner_principal`, `created_by`, `on_behalf_of`, ...) is
+        refused with 400 `actor_not_accepted`.
+      tags: [Work Items]
+      parameters:
+        - {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 512}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                tenant: {type: string}
+                visibility: {type: string, enum: [tenant, private], default: tenant}
+                origin_surface: {type: string, pattern: '^[a-z][a-z0-9_-]{0,31}$', default: api}
+                title: {type: string, maxLength: 256}
+                external_key: {type: string, maxLength: 512}
+                idempotency_key: {type: string, maxLength: 512}
+              required: [tenant, title]
+      responses:
+        '201': {description: Opened, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemView'}}}}
+        '200': {description: Replay or external_key dedupe; the existing item, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemView'}}}}
+        '400': {description: Invalid body, a secret in text, or an actor field, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '401': {description: Authentication required}
+        '403': {description: No access to the tenant, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '409': {description: Idempotency key reused, or external_key names open work the caller cannot see, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '503': {description: Work-items store not configured, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}:
+    get:
+      summary: Read one work item
+      description: The item, its state_version and its latest execution. An item the caller may not see is 404.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Current state, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemView'}}}}
+        '401': {description: Authentication required}
+        '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '503': {description: Work-items store not configured, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+    patch:
+      summary: Transition a work item
+      description: |
+        `complete`, `archive`, `supersede` (needs `superseded_by`) or `wait`
+        (needs `waiting_reason`). `expected_state_version` is required; a
+        mismatch is 409 `state_version_conflict` with the current state and
+        version. A transition outside the table is 409 `invalid_transition`.
+        Resume has its own route.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 512}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                action: {type: string, enum: [complete, archive, supersede, wait]}
+                waiting_reason: {type: string, enum: [input, approval]}
+                superseded_by: {type: string}
+                expected_state_version: {type: integer, format: int64}
+                surface: {type: string}
+                idempotency_key: {type: string}
+              required: [action, expected_state_version]
+      responses:
+        '200': {description: Transitioned (or an idempotent replay), content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemView'}}}}
+        '400': {description: Invalid request or an actor field, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '409': {description: 'state_version_conflict, invalid_transition or idempotency_key_reused', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}/intents:
+    post:
+      summary: Append a bounded intent
+      description: At most 8 KiB of text plus a JSON object of params, scanned for secrets. Never a transcript; history records the intent id only.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 512}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                text: {type: string, maxLength: 8192}
+                params: {type: object}
+                surface: {type: string}
+                idempotency_key: {type: string}
+              required: [text]
+      responses:
+        '201': {description: Appended}
+        '200': {description: Idempotent replay}
+        '400': {description: Too long, a secret, or an actor field, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '409': {description: The item is terminal, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}/executions:
+    get:
+      summary: List a work item's executions
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Executions, oldest attempt first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string}
+                  executions: {type: array, items: {$ref: '#/components/schemas/WorkItemExecution'}}
+        '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+    post:
+      summary: Attach or correlate an execution
+      description: |
+        Attaches an engine run (`temporal` or `argo`), or records a later phase
+        of one already attached under the same `(engine, engine_ref)`. At most
+        one Pending/Running execution per item; a finished execution's phase
+        never changes.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 512}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                engine: {type: string, enum: [temporal, argo]}
+                engine_ref: {type: string, maxLength: 256}
+                phase: {type: string, enum: [Pending, Running, Succeeded, Failed, Error], default: Pending}
+                surface: {type: string}
+                idempotency_key: {type: string}
+              required: [engine, engine_ref]
+      responses:
+        '201': {description: Attached}
+        '200': {description: Correlated or replayed}
+        '400': {description: Invalid request or an actor field, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '409': {description: 'execution_active or invalid_transition', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}/resume:
+    post:
+      summary: Resume a work item
+      description: |
+        Starts a new execution continuing a prior one (default: the latest).
+        A waiting item becomes active and a `resumed` event is recorded;
+        `resumed` is never a state. Refused on a terminal item, while an
+        execution is Pending/Running, or with a stale `expected_state_version`.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 512}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                expected_state_version: {type: integer, format: int64}
+                resumed_from_execution_id: {type: string}
+                engine: {type: string, enum: [temporal, argo]}
+                engine_ref: {type: string}
+                surface: {type: string}
+                idempotency_key: {type: string}
+              required: [expected_state_version, engine, engine_ref]
+      responses:
+        '201': {description: Resumed; the item and the new execution}
+        '200': {description: Idempotent replay; the execution the first request started}
+        '400': {description: Invalid request or an actor field, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '409': {description: 'state_version_conflict, invalid_transition or execution_active', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}/surface-refs:
+    post:
+      summary: Correlate a surface reference
+      description: |
+        Records a surface-native conversation for reply routing, or refreshes
+        its last_seen_at. `actor_external_id` is correlation metadata only: it
+        is never used as, or resolved to, the acting principal (that needs
+        the surface-identity binding, mctl-api#350).
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                surface: {type: string, pattern: '^[a-z][a-z0-9_-]{0,31}$'}
+                external_id: {type: string, maxLength: 256}
+                actor_external_id: {type: string, maxLength: 256}
+              required: [surface, external_id]
+      responses:
+        '201': {description: Linked}
+        '200': {description: Already linked; last_seen_at refreshed}
+        '400': {description: Invalid request or an actor field, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}/events:
+    get:
+      summary: Lifecycle history
+      description: Append-only events. They carry ids, never intent text or surface external ids.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Events in order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string}
+                  events: {type: array, items: {$ref: '#/components/schemas/WorkItemEvent'}}
+        '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
 tags:
   - name: Health
     description: Health and readiness probes
@@ -2437,3 +2781,5 @@ tags:
     description: Platform-wide skill catalog and tenant bindings
   - name: Agent Registry
     description: mctl-agents AgentManifest versions, releases, and promote/rollback
+  - name: Work Items
+    description: workitem/v1 durable work across surfaces (docs/work-context-contract.md)

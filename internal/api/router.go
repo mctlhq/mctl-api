@@ -35,6 +35,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/openapi"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/usage"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -118,6 +119,9 @@ type Options struct {
 	// DevLoopClient interface, not the concrete *temporalclient.Client, so
 	// tests can inject a fake — see interfaces.go.
 	TemporalClient DevLoopClient
+	// WorkItems is the workitem/v1 store (mctl-api#349). Optional — nil makes
+	// every /api/v1/work-items route answer 503.
+	WorkItems *workitems.Store
 	// HumanInputLedger is the idempotency/delivery record for human-input
 	// responses (mctl-api#261). Optional — nil makes the response endpoint
 	// 503: without it a response could be neither deduplicated nor
@@ -414,7 +418,21 @@ func NewRouter(opts Options) http.Handler {
 				// it costs a write on the far side and shares the 20/min
 				// budget rather than getting an exemption.
 				r.Post("/cloudflare/portal/server-auth/apply", h.DispatchPortalServerAuthApply)
+				// Work-item mutations (mctl-api#349): the contract puts them
+				// on this shared write budget.
+				r.Post("/work-items", h.CreateWorkItem)
+				r.Patch("/work-items/{id}", h.TransitionWorkItem)
+				r.Post("/work-items/{id}/intents", h.AppendWorkItemIntent)
+				r.Post("/work-items/{id}/executions", h.AttachWorkItemExecution)
+				r.Post("/work-items/{id}/resume", h.ResumeWorkItem)
+				r.Post("/work-items/{id}/surface-refs", h.LinkWorkItemSurface)
 			})
+
+			// Work-item reads: side-effect free, outside the write budget.
+			r.Get("/work-items", h.ListWorkItems)
+			r.Get("/work-items/{id}", h.GetWorkItem)
+			r.Get("/work-items/{id}/executions", h.ListWorkItemExecutions)
+			r.Get("/work-items/{id}/events", h.ListWorkItemEvents)
 
 			// Liveness read for one DevLoopWorkflow. Deliberately OUTSIDE the
 			// write group above: it has no side effects, and the shepherd
