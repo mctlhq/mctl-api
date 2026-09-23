@@ -138,7 +138,8 @@ func (m *MemoryLedger) ClearExpiredValues(_ context.Context, now time.Time) (int
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := 0
-	for k, d := range m.rows {
+	for k := range m.rows {
+		d := m.rows[k]
 		if d.State == DeliveryPending && d.Value != nil && !now.Before(d.ExpiresAt) {
 			d.Value = nil
 			m.rows[k] = d
