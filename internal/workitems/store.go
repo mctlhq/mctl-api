@@ -159,6 +159,10 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("workitems: create schema: %w", err)
 	}
+	if _, err := pool.Exec(ctx, snapshotSchema); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("workitems: create snapshot schema: %w", err)
+	}
 	slog.Info("work-items store initialized")
 	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
 }

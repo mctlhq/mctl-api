@@ -151,7 +151,12 @@ func writeWorkItemError(w http.ResponseWriter, err error) {
 // decodeWorkItemBody decodes a strict JSON object into dst. A key that would
 // name the actor is refused with its own code before anything else.
 func decodeWorkItemBody(w http.ResponseWriter, r *http.Request, dst any) bool {
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWorkItemBodyBytes))
+	return decodeWorkItemBodyLimit(w, r, dst, maxWorkItemBodyBytes)
+}
+
+// decodeWorkItemBodyLimit is decodeWorkItemBody with its own size bound.
+func decodeWorkItemBodyLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) bool {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
 		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "request body too large or unreadable", nil)
 		return false
@@ -262,6 +267,8 @@ type workItemView struct {
 	WorkItem        *workitems.WorkItem  `json:"work_item"`
 	StateVersion    int64                `json:"state_version"`
 	LatestExecution *workitems.Execution `json:"latest_execution"`
+	// LatestSnapshot points at the latest sealed ContextSnapshot, or null.
+	LatestSnapshot *workitems.SnapshotRef `json:"latest_snapshot"`
 }
 
 func (h *Handlers) viewOf(r *http.Request, item *workitems.WorkItem) (workItemView, error) {
@@ -272,6 +279,9 @@ func (h *Handlers) viewOf(r *http.Request, item *workitems.WorkItem) (workItemVi
 	v := workItemView{SchemaVersion: workitems.SchemaVersion, WorkItem: item, StateVersion: item.StateVersion}
 	if len(execs) > 0 {
 		v.LatestExecution = &execs[len(execs)-1]
+	}
+	if v.LatestSnapshot, err = h.opts.WorkItems.LatestSnapshot(r.Context(), item.ID); err != nil {
+		return workItemView{}, err
 	}
 	return v, nil
 }

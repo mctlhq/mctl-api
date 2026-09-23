@@ -453,6 +453,8 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/work-items/{id}/executions", h.AttachWorkItemExecution)
 				r.Post("/work-items/{id}/resume", h.ResumeWorkItem)
 				r.Post("/work-items/{id}/surface-refs", h.LinkWorkItemSurface)
+				// Sealed ContextSnapshots (mctl-agents#431): insert-only.
+				r.Post("/work-items/{id}/executions/{execution_id}/snapshot", h.SealWorkItemSnapshot)
 			})
 
 			// Work-item reads: side-effect free, outside the write budget.
@@ -461,6 +463,9 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/work-items/{id}", h.GetWorkItem)
 			r.Get("/work-items/{id}/executions", h.ListWorkItemExecutions)
 			r.Get("/work-items/{id}/events", h.ListWorkItemEvents)
+			r.Get("/work-items/{id}/executions/{execution_id}/snapshot", h.GetWorkItemExecutionSnapshot)
+			r.Get("/work-items/{id}/snapshots", h.ListWorkItemSnapshots)
+			r.Get("/work-items/{id}/snapshots/{snapshot_id}", h.GetWorkItemSnapshot)
 
 			// Liveness read for one DevLoopWorkflow. Deliberately OUTSIDE the
 			// write group above: it has no side effects, and the shepherd
