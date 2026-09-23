@@ -790,7 +790,7 @@ func (r *Reader) ReadFiles(names ...string) (map[string][]byte, string, error) {
 		if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
 			return nil, "", fmt.Errorf("invalid file name %q", name)
 		}
-		data, err := os.ReadFile(filepath.Join(r.localPath, name))
+		data, err := os.ReadFile(filepath.Join(r.localPath, name)) //nolint:gosec // name is a plain file name, checked above
 		if err != nil {
 			return nil, "", err
 		}

@@ -1174,11 +1174,11 @@ func splitCSV(v string) []string {
 }
 
 // killSwitchOn reads a kill-switch value. It errs toward off: any value
-// except an explicit "false"/"0"/"no"/"off" (or empty) turns the feature off,
+// except an explicit "false"/"f"/"0"/"no"/"off" (or empty) turns the feature off,
 // so "yes" or "disabled" never silently leaves it on.
 func killSwitchOn(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "", "false", "0", "no", "off":
+	case "", "false", "f", "0", "no", "off":
 		return false
 	}
 	return true

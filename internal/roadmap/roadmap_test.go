@@ -39,7 +39,7 @@ func liveFiles(t *testing.T) map[string][]byte {
 	t.Helper()
 	files := map[string][]byte{}
 	for _, name := range []string{PublicationFile, SnapshotFile, ReadySetFile, HealthFile} {
-		data, err := os.ReadFile(filepath.Join(liveDir, name))
+		data, err := os.ReadFile(filepath.Join(liveDir, name)) //nolint:gosec // fixed fixture names
 		if err != nil {
 			t.Fatal(err)
 		}

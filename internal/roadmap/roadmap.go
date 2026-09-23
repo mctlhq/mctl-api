@@ -296,7 +296,7 @@ func Parse(files map[string][]byte, revision string) (*Publication, error) {
 		}
 		delete(ready, m.Path)
 		delete(health, m.Path)
-		for _, doc := range []parsedDoc{r, h} {
+		for _, doc := range []*parsedDoc{&r, &h} {
 			if doc.wire.Epic.Manifest.SHA256 != m.SHA256 || doc.wire.Epic.Name != m.Epic.Name {
 				return nil, unavailable("%s was derived from a different manifest than the publication names", m.Path)
 			}

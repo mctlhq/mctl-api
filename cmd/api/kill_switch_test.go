@@ -17,12 +17,17 @@ package main
 import "testing"
 
 func TestKillSwitchErrsTowardOff(t *testing.T) {
-	for v, want := range map[string]bool{
-		"": false, "false": false, "0": false, "no": false, "off": false, " FALSE ": false,
-		"true": true, "1": true, "yes": true, "on": true, "disabled": true,
-	} {
-		if got := killSwitchOn(v); got != want {
-			t.Errorf("killSwitchOn(%q) = %v, want %v", v, got, want)
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"", false}, {"false", false}, {"f", false}, {"0", false}, {"no", false}, {"off", false},
+		{"  FALSE\t", false},
+		{"true", true}, {"1", true}, {"yes", true}, {"on", true}, {"disabled", true},
+	}
+	for _, c := range cases {
+		if got := killSwitchOn(c.value); got != c.want {
+			t.Errorf("killSwitchOn(%q) = %v, want %v", c.value, got, c.want)
 		}
 	}
 }

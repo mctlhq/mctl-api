@@ -34,7 +34,7 @@ func (s roadmapDirSource) Revision() (string, error) { return "0123abc", nil }
 func (s roadmapDirSource) ReadFiles(names ...string) (map[string][]byte, string, error) {
 	out := map[string][]byte{}
 	for _, n := range names {
-		data, err := os.ReadFile(filepath.Join(s.dir, n))
+		data, err := os.ReadFile(filepath.Join(s.dir, n)) //nolint:gosec // test fixture directory
 		if err != nil {
 			return nil, "", err
 		}
