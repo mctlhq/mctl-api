@@ -37,7 +37,7 @@ func (s *Server) toolPlanEpicWave() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Plan "start the next wave for this epic" without starting anything: the exact ready work items of one roadmap epic that a wave would start, from the published RoadmapPublication. Each selected item carries its issue and the exact DevLoop workflow id it would get; ready items that cannot be started (not bound to an exact issue) are listed as refused, never dropped.
 
-Only items the published ready set lists as ready are eligible; required_only defaults to true. With items, exactly those ids are planned or the plan fails with invalid_selection naming each refused id — never a subset. The answer says whether the plan is executable now: the publication must be no older than the configured maximum (default 30 minutes).
+Only an active epic can be planned: a paused or completed epic is refused (epic_paused / epic_completed) with no override. Only items the published ready set lists as ready are eligible; required_only defaults to true. With items, exactly those ids are planned or the plan fails with invalid_selection naming each refused id — never a subset. The answer says whether the plan is executable now: the publication must be no older than the configured maximum (default 30 minutes).
 
 `+waveFlowNote+`
 

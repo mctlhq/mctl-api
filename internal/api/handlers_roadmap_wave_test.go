@@ -531,10 +531,13 @@ func TestRoadmapWave_DescribeAndStartHaveTheirOwnBudgets(t *testing.T) {
 func TestRoadmapWave_InactiveEpicsAreRefusedWithTypedReasons(t *testing.T) {
 	e := newWaveEnv(t)
 	_, exec := e.plan("enterprise-mcp")
-	for epic, want := range map[string]string{"lifecycle-ownership": "epic_completed", "edge-ai-android": "epic_paused"} {
+	for epic, want := range map[string]struct{ code, lifecycle string }{
+		"lifecycle-ownership": {"epic_completed", "completed"},
+		"edge-ai-android":     {"epic_paused", "paused"},
+	} {
 		code, out := e.post(waveUser, "/api/v1/roadmap/waves/plan", map[string]any{"epic": epic})
 		details, _ := out["details"].(map[string]any)
-		if code != http.StatusConflict || out["code"] != want || details["epic"] != epic {
+		if code != http.StatusConflict || out["code"] != want.code || details["epic"] != epic || details["lifecycle"] != want.lifecycle {
 			t.Errorf("plan %s: %d %v", epic, code, out)
 		}
 		body := map[string]any{}
@@ -542,7 +545,7 @@ func TestRoadmapWave_InactiveEpicsAreRefusedWithTypedReasons(t *testing.T) {
 			body[k] = v
 		}
 		body["epic"] = epic
-		if code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", body); code != http.StatusConflict || out["code"] != want {
+		if code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", body); code != http.StatusConflict || out["code"] != want.code {
 			t.Errorf("execute %s: %d %v", epic, code, out)
 		}
 	}

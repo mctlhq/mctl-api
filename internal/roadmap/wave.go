@@ -72,9 +72,9 @@ func (e *EpicNotActiveError) Unwrap() error { return ErrEpicNotActive }
 // Reason is the typed refusal for this lifecycle.
 func (e *EpicNotActiveError) Reason() string {
 	switch e.Lifecycle {
-	case "paused":
+	case LifecyclePaused:
 		return EpicRefusalPaused
-	case "completed":
+	case LifecycleCompleted:
 		return EpicRefusalCompleted
 	}
 	return EpicRefusalInactive

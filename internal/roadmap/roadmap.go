@@ -56,7 +56,11 @@ const (
 )
 
 // LifecycleActive is the EpicDefinition lifecycle selected by "all epics".
-const LifecycleActive = "active"
+const (
+	LifecycleActive    = "active"
+	LifecyclePaused    = "paused"
+	LifecycleCompleted = "completed"
+)
 
 var (
 	// ErrUnavailable: there is no publication this reader can trust. It means
