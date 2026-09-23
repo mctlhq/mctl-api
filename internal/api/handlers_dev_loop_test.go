@@ -51,10 +51,15 @@ type fakeDevLoopClient struct {
 	humanInputStates      map[string]*temporalclient.HumanInputState
 	humanInputErr         error
 	humanInputQueries     []string
+	humanInputBlocks      bool
 }
 
 func (f *fakeDevLoopClient) QueryHumanInputState(ctx context.Context, workflowID, runID string) (*temporalclient.HumanInputState, error) {
 	f.humanInputQueries = append(f.humanInputQueries, workflowID+"@"+runID)
+	if f.humanInputBlocks {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if f.humanInputErr != nil {
 		return nil, f.humanInputErr
 	}

@@ -1391,6 +1391,22 @@ func TestListHumanInputRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Nor a symlinked human-input directory.
+	outside := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(outside, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "request.json"), []byte(`{"outside":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirLinkParent := filepath.Join(dir, "platform-gitops", "agents-state", "mctl-web", "proposals", "issue-8-d")
+	if err := os.MkdirAll(dirLinkParent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dirLinkParent, "human-input")); err != nil {
+		t.Fatal(err)
+	}
+
 	got, err := r.ListHumanInputRequests()
 	if err != nil {
 		t.Fatal(err)

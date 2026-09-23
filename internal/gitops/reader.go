@@ -1161,7 +1161,22 @@ func (r *Reader) ListHumanInputRequests() ([]HumanInputRequestFile, error) {
 			if !p.IsDir() || strings.HasPrefix(p.Name(), ".") {
 				continue
 			}
-			path := filepath.Join(proposalsDir, p.Name(), "human-input", "request.json")
+			// Directory entries are Lstat'ed, so a symlinked service or
+			// proposal directory already fails IsDir above. The human-input
+			// directory and the file are checked the same way here: a
+			// symlink in either could point anywhere on the API's
+			// filesystem, and a sealed request is always a regular file in a
+			// real directory.
+			hiDir := filepath.Join(proposalsDir, p.Name(), "human-input")
+			if dirInfo, err := os.Lstat(hiDir); err != nil || !dirInfo.IsDir() {
+				if err == nil {
+					slog.Warn("gitops: skipping non-directory human-input path", "path", hiDir)
+				} else if !os.IsNotExist(err) {
+					return nil, fmt.Errorf("stat %s: %w", hiDir, err)
+				}
+				continue
+			}
+			path := filepath.Join(hiDir, "request.json")
 			info, err := os.Lstat(path)
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -1169,8 +1184,6 @@ func (r *Reader) ListHumanInputRequests() ([]HumanInputRequestFile, error) {
 				}
 				return nil, fmt.Errorf("stat %s: %w", path, err)
 			}
-			// A symlink could point anywhere on the API's filesystem; a
-			// sealed request is always a regular file.
 			if !info.Mode().IsRegular() {
 				slog.Warn("gitops: skipping non-regular human-input request", "path", path)
 				continue

@@ -72,6 +72,10 @@ func TestParseRequest_RejectsAlteredOrMalformed(t *testing.T) {
 		"missing release_revision": func(m map[string]any) {
 			delete(m["execution"].(map[string]any), "release_revision")
 		},
+		// Required int in context_snapshot.ExecutionCorrelation, not Optional.
+		"null release_revision": func(m map[string]any) {
+			m["execution"].(map[string]any)["release_revision"] = nil
+		},
 		"wrong kind":       func(m map[string]any) { m["kind"] = "HumanInputResponse" },
 		"empty actor_refs": func(m map[string]any) { m["requested_from"].(map[string]any)["actor_refs"] = []any{} },
 		"bad audience":     func(m map[string]any) { m["requested_from"].(map[string]any)["audience"] = "everyone" },

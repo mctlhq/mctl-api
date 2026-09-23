@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"go.temporal.io/api/serviceerror"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
@@ -112,8 +113,8 @@ func getHumanInput(t *testing.T, h *Handlers, u *auth.User, id string) (int, hum
 }
 
 var (
-	alice = &auth.User{ID: "alice"}
-	bob   = &auth.User{ID: "bob"}
+	alice = auth.NewGitHubUser("alice", nil)
+	bob   = auth.NewGitHubUser("bob", nil)
 	admin = &auth.User{ID: "root", Groups: []string{"admins"}}
 )
 
@@ -207,15 +208,96 @@ func TestListHumanInputs_PendingNeedsTemporal(t *testing.T) {
 	}
 }
 
+// A failed query is never pending, and state=pending does not turn it into
+// a short list that reads as "nothing is waiting": it answers 503.
 func TestListHumanInputs_QueryFailureIsNeverPending(t *testing.T) {
 	h, tc := newHumanInputHandlers(t)
 	tc.humanInputErr = errors.New("no worker")
-	if _, items, _ := listHumanInputs(t, h, alice, ""); len(items) != 0 {
-		t.Fatalf("pending despite a failed query: %+v", items)
+	if code, items, body := listHumanInputs(t, h, alice, ""); code != http.StatusServiceUnavailable || len(items) != 0 {
+		t.Fatalf("pending list with a failed query = %d %s, want 503", code, body)
 	}
 	_, v, _ := getHumanInput(t, h, alice, hiASCII)
 	if v.State != HumanInputUnknown {
 		t.Fatalf("state = %s", v.State)
+	}
+	// state=all still answers, with the state marked unknown.
+	code, items, _ := listHumanInputs(t, h, alice, "?state=all")
+	if code != http.StatusOK || len(items) != 2 {
+		t.Fatalf("state=all = %d %+v", code, items)
+	}
+	for _, v := range items {
+		if v.State != HumanInputUnknown {
+			t.Fatalf("state=all item = %s", v.State)
+		}
+	}
+}
+
+// A GitHub login is only a GitHub login when authentication proved it. A
+// Dex (or dev-mode) principal whose ID equals an eligible login is not that
+// person: it neither sees the request nor may answer it.
+func TestHumanInput_OnlyVerifiedGitHubLoginsAreRespondents(t *testing.T) {
+	h, _ := newHumanInputHandlers(t)
+	impostor := &auth.User{ID: "alice"} // e.g. Dex preferred_username
+	if _, items, _ := listHumanInputs(t, h, impostor, "?state=all"); len(items) != 0 {
+		t.Fatalf("unverified alice sees %d requests", len(items))
+	}
+	if code, _, _ := getHumanInput(t, h, impostor, hiASCII); code != http.StatusNotFound {
+		t.Fatalf("unverified alice get = %d, want 404", code)
+	}
+	// An admin reached through Dex still reads it, but cannot answer.
+	dexAdmin := &auth.User{ID: "alice", Groups: []string{"admins"}}
+	if _, v, _ := getHumanInput(t, h, dexAdmin, hiASCII); v.CanRespond {
+		t.Fatal("unverified admin alice reported as a respondent")
+	}
+}
+
+// One query per owning execution, however many of its requests are listed;
+// an expired request is never queried at all.
+func TestListHumanInputs_QueriesEachExecutionOnce(t *testing.T) {
+	h, tc := newHumanInputHandlers(t)
+	if _, items, _ := listHumanInputs(t, h, admin, "?state=all"); len(items) != 2 {
+		t.Fatalf("items = %d", len(items))
+	}
+	if len(tc.humanInputQueries) != 1 {
+		t.Fatalf("queries = %v, want one for the shared execution", tc.humanInputQueries)
+	}
+	tc.humanInputQueries = nil
+	withHumanInputClock(t, "2026-09-24T02:00:00Z")
+	code, items, _ := listHumanInputs(t, h, admin, "?state=all")
+	if code != http.StatusOK || len(items) != 2 || items[0].State != HumanInputExpired || len(tc.humanInputQueries) != 0 {
+		t.Fatalf("expired = %d %+v, queries %v", code, items, tc.humanInputQueries)
+	}
+}
+
+// A worker outage costs one bounded budget, not 3s per request.
+func TestListHumanInputs_OutageIsBounded(t *testing.T) {
+	h, tc := newHumanInputHandlers(t)
+	tc.humanInputBlocks = true
+	prev := humanInputListBudget
+	humanInputListBudget = 50 * time.Millisecond
+	t.Cleanup(func() { humanInputListBudget = prev })
+	start := time.Now()
+	code, _, _ := listHumanInputs(t, h, admin, "")
+	if code != http.StatusServiceUnavailable || time.Since(start) > time.Second {
+		t.Fatalf("outage = %d after %s", code, time.Since(start))
+	}
+}
+
+// A workflow that no longer exists is not waiting on anything; a nil state
+// from a client is unknown, never a panic.
+func TestHumanInputState_NotFoundAndNil(t *testing.T) {
+	h, tc := newHumanInputHandlers(t)
+	tc.humanInputErr = serviceerror.NewNotFound("gone")
+	if code, items, body := listHumanInputs(t, h, alice, ""); code != http.StatusOK || len(items) != 0 {
+		t.Fatalf("pending with the workflow gone = %d %s", code, body)
+	}
+	if _, v, _ := getHumanInput(t, h, alice, hiASCII); v.State != HumanInputNotPending {
+		t.Fatalf("state = %s", v.State)
+	}
+	tc.humanInputErr = nil
+	tc.humanInputStates[hiWF] = nil
+	if _, v, _ := getHumanInput(t, h, alice, hiASCII); v.State != HumanInputUnknown {
+		t.Fatalf("nil state = %s", v.State)
 	}
 }
 

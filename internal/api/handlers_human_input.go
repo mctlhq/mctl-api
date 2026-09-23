@@ -16,12 +16,13 @@ package api
 //     was answered.
 //
 // Question and reason are shown only to someone who may answer (their
-// "github:<login>" is in the request's actor_refs), to admins, and to the
-// service principal that relays for a surface. Everyone else does not learn
-// the request exists.
+// GitHub-verified "github:<login>" is in the request's actor_refs), to
+// admins, and to the service principal that relays for a surface. Everyone
+// else does not learn the request exists.
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -38,6 +39,11 @@ import (
 // blocks a query until a worker answers, so during a worker outage the only
 // other bound would be the 30s API timeout.
 const humanInputQueryTimeout = 3 * time.Second
+
+// humanInputListBudget bounds all state queries of one list call together,
+// well inside the 30s request timeout, so a Temporal worker outage yields a
+// bounded answer instead of a per-request pile-up.
+var humanInputListBudget = 10 * time.Second
 
 // Read-model states. "pending" is the only one a response can be accepted
 // in; everything else is either terminal for this request or unknown.
@@ -93,15 +99,29 @@ type sealedHumanInput struct {
 type gitopsHumanInputFile struct{ Service, Proposal string }
 
 // callerActorRef is the respondent reference an authenticated caller answers
-// as. Callers authenticate as their GitHub login (GitHub token or the local
-// OAuth JWT, whose sub is the login), so "github:<ID>" is the form
-// mctl-agents writes into actor_refs.
-func callerActorRef(u *auth.User) string { return "github:" + u.ID }
+// as: "github:<login>", the form mctl-agents writes into actor_refs, and
+// only when authentication PROVED a GitHub login (GitHub token, or the local
+// OAuth JWT minted after the GitHub callback). A Dex username that happens
+// to equal someone's GitHub login is not that person, so a caller without a
+// verified login has no reference and is never eligible.
+func callerActorRef(u *auth.User) (string, bool) {
+	login, ok := u.GitHubLogin()
+	if !ok {
+		return "", false
+	}
+	return "github:" + login, true
+}
+
+// callerCanRespond: the caller's verified reference is in actor_refs.
+func callerCanRespond(u *auth.User, req *humaninput.Request) bool {
+	ref, ok := callerActorRef(u)
+	return ok && req.CanRespond(ref)
+}
 
 // canSeeHumanInput: a potential respondent, an admin, or the service
 // principal relaying for a surface.
 func canSeeHumanInput(u *auth.User, req *humaninput.Request) bool {
-	return u.IsAdmin() || u.IsService() || req.CanRespond(callerActorRef(u))
+	return u.IsAdmin() || u.IsService() || callerCanRespond(u, req)
 }
 
 // loadHumanInputRequests reads and verifies every sealed request in gitops.
@@ -124,29 +144,67 @@ func (h *Handlers) loadHumanInputRequests() ([]sealedHumanInput, error) {
 	return out, nil
 }
 
-// humanInputState asks the owning workflow whether it is waiting on req.
-func (h *Handlers) humanInputState(ctx context.Context, req *humaninput.Request, now time.Time) (state, detail string) {
-	if h.opts.TemporalClient == nil {
+// humanInputStates resolves request states for one HTTP call, querying each
+// owning workflow execution at most once: the query answers for the
+// workflow (which request it waits on), so every request of that execution
+// shares the result.
+type humanInputStates struct {
+	client DevLoopClient
+	cache  map[string]humanInputQueryResult
+}
+
+type humanInputQueryResult struct {
+	st  *temporalclient.HumanInputState
+	err error
+}
+
+func (h *Handlers) newHumanInputStates() *humanInputStates {
+	return &humanInputStates{client: h.opts.TemporalClient, cache: map[string]humanInputQueryResult{}}
+}
+
+func requestRunID(req *humaninput.Request) string {
+	if req.Execution.TemporalRunID != nil {
+		return *req.Execution.TemporalRunID
+	}
+	return ""
+}
+
+// state asks the owning workflow whether it is waiting on req.
+func (q *humanInputStates) state(ctx context.Context, req *humaninput.Request, now time.Time) (state, detail string) {
+	if q.client == nil {
 		return HumanInputUnknown, "dev-loop Temporal client not configured"
 	}
-	runID := ""
-	if req.Execution.TemporalRunID != nil {
-		runID = *req.Execution.TemporalRunID
+	wf, runID := req.Execution.TemporalWorkflowID, requestRunID(req)
+	key := wf + "@" + runID
+	res, ok := q.cache[key]
+	if !ok {
+		qctx, cancel := context.WithTimeout(ctx, humanInputQueryTimeout)
+		res.st, res.err = q.client.QueryHumanInputState(qctx, wf, runID)
+		cancel()
+		q.cache[key] = res
 	}
-	qctx, cancel := context.WithTimeout(ctx, humanInputQueryTimeout)
-	defer cancel()
-	st, err := h.opts.TemporalClient.QueryHumanInputState(qctx, req.Execution.TemporalWorkflowID, runID)
-	if err != nil {
-		if temporalclient.IsNotFound(err) {
-			return HumanInputUnknown, "owning workflow not found"
+	if res.err != nil {
+		if temporalclient.IsNotFound(res.err) {
+			// No such execution (never started, or past retention): it is
+			// certainly not waiting on anything.
+			return HumanInputNotPending, "owning workflow not found"
 		}
-		slog.Debug("human_input_state query failed", "workflow_id", req.Execution.TemporalWorkflowID, "error", err)
+		slog.Debug("human_input_state query failed", "workflow_id", wf, "error", res.err)
 		return HumanInputUnknown, "owning workflow did not answer"
 	}
-	return deriveHumanInputState(st, req, now)
+	if res.st == nil {
+		return HumanInputUnknown, "owning workflow returned no state"
+	}
+	return deriveHumanInputState(res.st, req, now)
 }
 
 // deriveHumanInputState maps the workflow's own state onto this request.
+//
+// A workflow that was terminated or failed while parked still answers the
+// query with its last state, so such a request reads as pending until
+// expires_at. Telling it apart needs a describe call per execution; a
+// response to it is refused anyway, because signalling a closed execution
+// fails and the response endpoint then reports it not pending.
 func deriveHumanInputState(st *temporalclient.HumanInputState, req *humaninput.Request, now time.Time) (string, string) {
 	if st.RequestID != req.RequestID {
 		if st.RequestID == "" {
@@ -174,7 +232,7 @@ func deriveHumanInputState(st *temporalclient.HumanInputState, req *humaninput.R
 	}
 }
 
-func (h *Handlers) humanInputView(ctx context.Context, u *auth.User, s sealedHumanInput, now time.Time) humanInputView {
+func humanInputViewOf(u *auth.User, s sealedHumanInput) humanInputView {
 	req := s.req
 	v := humanInputView{
 		RequestID:      req.RequestID,
@@ -192,14 +250,13 @@ func (h *Handlers) humanInputView(ctx context.Context, u *auth.User, s sealedHum
 		Options:        req.Response.Options,
 		ContextRefs:    req.ContextRefs,
 		Audience:       req.RequestedFrom.Audience,
-		CanRespond:     req.CanRespond(callerActorRef(u)),
+		CanRespond:     callerCanRespond(u, req),
 		CreatedAt:      req.CreatedAt,
 		ExpiresAt:      req.ExpiresAt,
 	}
 	if u.IsAdmin() || u.IsService() {
 		v.EligibleActors = req.RequestedFrom.ActorRefs
 	}
-	v.State, v.StateDetail = h.humanInputState(ctx, req, now)
 	return v
 }
 
@@ -219,10 +276,10 @@ func (h *Handlers) requireHumanInputReader(w http.ResponseWriter, r *http.Reques
 // ListHumanInputs handles GET /api/v1/human-input.
 //
 // Query: state=pending (default) | all; work_item_id=<id> (optional).
-// Only requests the caller may see are listed. state=pending needs the
-// Temporal client: without it no request can be proven pending, so the
-// endpoint answers 503 rather than an empty list that reads as "nothing is
-// waiting".
+// Only requests the caller may see are listed. state=pending answers 503,
+// never a short or empty list that reads as "nothing is waiting", when the
+// Temporal client is missing or any candidate's state could not be
+// determined.
 func (h *Handlers) ListHumanInputs(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.requireHumanInputReader(w, r)
 	if !ok {
@@ -249,7 +306,11 @@ func (h *Handlers) ListHumanInputs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := humanInputNow().UTC()
+	ctx, cancel := context.WithTimeout(r.Context(), humanInputListBudget)
+	defer cancel()
+	states := h.newHumanInputStates()
 	items := make([]humanInputView, 0)
+	undetermined := 0
 	for _, s := range all {
 		if !canSeeHumanInput(user, s.req) {
 			continue
@@ -257,11 +318,28 @@ func (h *Handlers) ListHumanInputs(w http.ResponseWriter, r *http.Request) {
 		if workItem != "" && s.req.WorkItemID != workItem {
 			continue
 		}
-		v := h.humanInputView(r.Context(), user, s, now)
-		if filter == HumanInputPending && v.State != HumanInputPending {
-			continue
+		v := humanInputViewOf(user, s)
+		if !now.Before(s.req.Expires()) {
+			// Nothing is accepted at or after expires_at, whatever the
+			// workflow says, so there is nothing to ask it.
+			v.State = HumanInputExpired
+		} else {
+			v.State, v.StateDetail = states.state(ctx, s.req, now)
+		}
+		if filter == HumanInputPending {
+			if v.State == HumanInputUnknown {
+				undetermined++
+			}
+			if v.State != HumanInputPending {
+				continue
+			}
 		}
 		items = append(items, v)
+	}
+	if undetermined > 0 {
+		slog.Warn("human_input.list_undetermined", "user", user.ID, "undetermined", undetermined)
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("pending state could not be determined for %d request(s); retry later or use state=all", undetermined))
+		return
 	}
 	slog.Info("human_input.read", "user", user.ID, "list", true, "state_filter", filter, "count", len(items))
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
@@ -289,7 +367,8 @@ func (h *Handlers) GetHumanInput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "human-input request not found: "+id)
 		return
 	}
-	v := h.humanInputView(r.Context(), user, *s, humanInputNow().UTC())
+	v := humanInputViewOf(user, *s)
+	v.State, v.StateDetail = h.newHumanInputStates().state(r.Context(), s.req, humanInputNow().UTC())
 	slog.Info("human_input.read", "user", user.ID, "request_id", id, "state", v.State)
 	writeJSON(w, http.StatusOK, v)
 }

@@ -499,7 +499,7 @@ components:
           description: Full allow-list; present only for admins and the service principal.
         can_respond:
           type: boolean
-          description: Whether the caller's own `github:<login>` is eligible.
+          description: Whether the caller's own GitHub-verified `github:<login>` is eligible.
         created_at:
           type: string
         expires_at:
@@ -2128,8 +2128,13 @@ paths:
 
         A caller sees a request only if their `github:<login>` is in its
         eligible actors, or they are an admin, or they are the service
-        principal relaying for a surface. Other callers do not learn the
-        request exists.
+        principal relaying for a surface. The login must be proven by
+        authentication (a GitHub token, or an mctl-api OAuth token minted
+        after GitHub login); a Dex username is never treated as a GitHub
+        login. Other callers do not learn the request exists.
+
+        Each owning workflow execution is queried once per call, within one
+        overall time budget; expired requests are not queried.
       tags: [Agent Registry]
       parameters:
         - name: state
@@ -2177,7 +2182,9 @@ paths:
         '503':
           description: |
             gitops reader not configured, or `state=pending` was requested
-            without a Temporal client (pending cannot be proven).
+            and pending could not be determined for at least one candidate
+            (no Temporal client, a query failed or timed out). A short list
+            is never returned in that case.
           content:
             application/json:
               schema:
