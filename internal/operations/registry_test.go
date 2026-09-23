@@ -414,3 +414,109 @@ func TestInvestigateStillRequiresIssueURL(t *testing.T) {
 		t.Errorf("ValidateInput without issue_url errors = %v, want \"missing required parameter: issue_url\"", errs)
 	}
 }
+
+// TestInvestigateForwardsReleasePin is the focused half of mctlhq/mctl-api#372:
+// the DevLoop's agent_image/agent_version pass StripUndeclared untouched while
+// an undeclared key in the same request is still dropped.
+func TestInvestigateForwardsReleasePin(t *testing.T) {
+	registry := NewRegistry()
+	op, ok := registry.Get("mctl-agents-investigate")
+	if !ok {
+		t.Fatal("operation \"mctl-agents-investigate\" not found in registry")
+	}
+
+	input := map[string]string{
+		"issue_url":     validInvestigateIssueURL,
+		"agent_image":   "ghcr.io/mctlhq/mctl-agents:1.54.0",
+		"agent_version": "issue-investigator@1.54.0",
+		"config_patch":  ".image.tag = \"pwned\"",
+	}
+	result, dropped := registry.StripUndeclared(op, input)
+	for _, k := range []string{"issue_url", "agent_image", "agent_version"} {
+		if result[k] != input[k] {
+			t.Errorf("StripUndeclared dropped or mutated %s: got %q, want %q", k, result[k], input[k])
+		}
+	}
+	if len(dropped) != 1 || dropped[0] != "config_patch" {
+		t.Errorf("StripUndeclared dropped = %v, want [\"config_patch\"]", dropped)
+	}
+	if errs := registry.ValidateInput(op, registry.ApplyDefaults(op, result)); len(errs) != 0 {
+		t.Errorf("ValidateInput rejected the DevLoop's release pin: %v", errs)
+	}
+}
+
+// TestReleasePinPatterns pins what the four pinned operations accept: the
+// two image shapes mctl-agents builds, and only its own agent's version.
+func TestReleasePinPatterns(t *testing.T) {
+	registry := NewRegistry()
+	agents := map[string]string{
+		"mctl-agents-investigate": "issue-investigator",
+		"mctl-agents-implement":   "implementer",
+		"mctl-agents-shepherd":    "shepherd",
+		"mctl-agents-incidents":   "incident-responder",
+	}
+	const digest = "sha256:6ef615deee2a2864195014760bf6c3989b26059b47435933f04c6d8f5060e9f6"
+	for opName, agent := range agents {
+		op, ok := registry.Get(opName)
+		if !ok {
+			t.Fatalf("operation %q not found in registry", opName)
+		}
+		base := map[string]string{}
+		if opName == "mctl-agents-investigate" {
+			base["issue_url"] = validInvestigateIssueURL
+		}
+		check := func(param, value string, wantOK bool) {
+			t.Helper()
+			input := map[string]string{param: value}
+			for k, v := range base {
+				input[k] = v
+			}
+			errs := registry.ValidateInput(op, input)
+			if wantOK && len(errs) != 0 {
+				t.Errorf("%s: %s=%q rejected, want accepted: %v", opName, param, value, errs)
+			}
+			if !wantOK && len(errs) == 0 {
+				t.Errorf("%s: %s=%q accepted, want rejected", opName, param, value)
+			}
+		}
+
+		check("agent_image", "ghcr.io/mctlhq/mctl-agents:1.54.0", true)
+		check("agent_image", "ghcr.io/mctlhq/mctl-agents:1.22.0-2", true)
+		check("agent_image", "ghcr.io/mctlhq/mctl-agents@"+digest, true)
+		check("agent_image", "ghcr.io/mctlhq/mctl-agents:latest", false)
+		check("agent_image", "ghcr.io/mctlhq/mctl-agents:1.54.0:1.54.0", false)
+		check("agent_image", "ghcr.io/mctlhq/mctl-agents@"+digest+"@"+digest, false)
+		check("agent_image", "ghcr.io/evil/mctl-agents:1.54.0", false)
+		check("agent_image", "docker.io/mctlhq/mctl-agents:1.54.0", false)
+		check("agent_image", "ghcr.io/mctlhq/mctl-agents-evil:1.54.0", false)
+		check("agent_image", "ghcr.io/mctlhq/mctl-agents:1.54.0\n", false)
+		check("agent_image", "ghcr.io/mctlhq/mctl-agents@sha256:abc", false)
+
+		check("agent_version", agent+"@1.54.0", true)
+		check("agent_version", agent+"@1.22.0-2", true)
+		check("agent_version", "someone-else@1.54.0", false)
+		check("agent_version", agent+"@latest", false)
+		check("agent_version", agent+"@1.54.0; rm -rf /", false)
+	}
+}
+
+// TestReleasePinIsOmittedWhenEmpty pins OmitWhenEmpty: ApplyDefaults must not
+// turn an absent or empty pin into agent_image="", which Argo would use over
+// the CWFT's default image.
+func TestReleasePinIsOmittedWhenEmpty(t *testing.T) {
+	registry := NewRegistry()
+	for _, opName := range []string{"mctl-agents-investigate", "mctl-agents-implement", "mctl-agents-shepherd", "mctl-agents-incidents"} {
+		op, _ := registry.Get(opName)
+		for _, input := range []map[string]string{
+			{},
+			{"agent_image": "", "agent_version": ""},
+		} {
+			filled := registry.ApplyDefaults(op, input)
+			for _, k := range []string{"agent_image", "agent_version"} {
+				if v, ok := filled[k]; ok {
+					t.Errorf("%s: ApplyDefaults(%v) set %s = %q, want it absent", opName, input, k, v)
+				}
+			}
+		}
+	}
+}

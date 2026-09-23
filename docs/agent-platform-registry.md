@@ -340,6 +340,39 @@ the pre-existing `version`/`image_ref` fields — the trace attributes
 themselves are `mctl-agents#196`'s job; mctl-api only accepts, stores and
 returns the tuple.
 
+## Release pins on `mctl-agents-*` operations
+
+The version a step resolves reaches its pod only through two operation
+parameters: `agent_image`, the container image, and `agent_version`,
+`<agent>@<version>`, which is recorded and not otherwise used. The generic
+`POST /api/v1/operations/{name}/execute` path drops every parameter the
+operation registry does not declare (`StripUndeclared`), so a pin the
+registry does not declare never reaches Argo and the run uses the CWFT's
+default image. Until mctlhq/mctl-api#372 none of the pins were declared.
+
+| Operation | `agent_version` agent | Sender in mctl-agents |
+|---|---|---|
+| `mctl-agents-investigate` | `issue-investigator` | `dev_loop.py`, investigate step |
+| `mctl-agents-implement` | `implementer` | `dev_loop.py`, implement step |
+| `mctl-agents-shepherd` | `shepherd` | `dev_loop.py`, `_shepherd_tick` |
+| `mctl-agents-incidents` | `incident-responder` | `incidents.py` |
+
+- `agent_image` must match
+  `ghcr.io/mctlhq/mctl-agents:<MAJOR.MINOR.PATCH[-pre]>` or
+  `ghcr.io/mctlhq/mctl-agents@sha256:<64 hex>`, the two shapes mctl-agents
+  builds from a published version (`_image_ref` in
+  `orchestrator/temporal/activities/registry.py`). It becomes the pod's
+  image, so the repository is fixed.
+- `agent_version` must name the operation's own agent.
+- Both are optional and `OmitWhenEmpty`: omitted or empty, they are not
+  sent to Argo at all, so the CWFT's default image applies. Sending
+  `agent_image=""` would override that default with an empty image.
+
+`TestExecuteOperation_DevLoopParamsAreNeverDropped`
+(`internal/api/handlers_write_devloop_params_test.go`) lists every
+parameter set mctl-agents submits per operation. A parameter added there
+has to be declared here, after the CWFT declares it (gitops first).
+
 ## GitOps reconciliation contract
 
 **Push, not pull.** `mctl-api` has no gitops write credential and
