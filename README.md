@@ -134,6 +134,8 @@ docker run -p 8080:8080 mctl-api
 | `OAUTH_PREREGISTERED_CLIENTS` | JSON array of static public OAuth clients for counterparts that cannot register dynamically (the Cloudflare MCP portal): `[{"client_id":"…","client_name":"…","redirect_uris":["https://…"]}]`. Exact redirect match, no secret field, never evicted; a malformed value or an unknown key refuses startup | — | No |
 | `AUDIT_DB_URL` | PostgreSQL connection string (falls back to in-memory). `sslmode=disable` is upgraded to `require`, or `verify-full` when a CNPG CA is mounted. | — | No |
 | `HUMAN_INPUT_DB_URL` | PostgreSQL for the human-input delivery ledger (`POST /api/v1/human-input/{request_id}/response`). Falls back to `AUDIT_DB_URL`; with neither, that endpoint answers 503 (there is no in-memory fallback). The raw answer is kept only until its delivery resolves, or until the request expires. | — | No |
+| `WORK_ITEMS_DB_URL` | PostgreSQL for the `workitem/v1` store (`/api/v1/work-items*`). Falls back to `AUDIT_DB_URL`; with neither, every work-items route answers 503. | — | No |
+| `WORK_ITEMS_DISABLED` | Kill switch: any value except `false`/`0`/`no`/`off` leaves the work-items store off (routes answer 503) without touching `AUDIT_DB_URL` for other stores. | unset | No |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated Traefik CIDRs/IPs trusted for `X-Forwarded-For` on audit events | — | No |
 | `ALLOW_INSECURE_DB` | Permit `sslmode=disable` (tests/local only) | — | No |
 | `BACKSTAGE_URL` | Backstage catalog URL | — | No |
@@ -218,6 +220,23 @@ v1alpha2 tools (`mctl_publish_agent_definition_version`,
 `mctl_bind_agent_release`, `mctl_rollback_agent_binding`,
 `mctl_list_agents`, `mctl_get_agent`); `mctl_resolve_agent` gained an
 optional `api_version` argument selecting between the two layers.
+
+### Work Items
+
+`workitem/v1` ([`docs/work-context-contract.md`](docs/work-context-contract.md)) is
+the durable record of a piece of work a human asked for, shared by every surface.
+Surfaces correlate to it; they never own its lifecycle.
+
+- `POST /api/v1/work-items` opens one (idempotent per tenant `Idempotency-Key`,
+  dedupes open work on `external_key`); `GET /api/v1/work-items[/{id}]` reads.
+- `PATCH /api/v1/work-items/{id}` completes, archives, supersedes or parks it
+  (`wait`); `POST .../resume` starts the next execution. Both require
+  `expected_state_version` and answer 409 with the current state on a mismatch.
+- `POST .../intents` (≤ 8 KiB, secret-scanned), `GET|POST .../executions`,
+  `POST .../surface-refs`, `GET .../events`.
+- The acting principal is always the authenticated caller. A body naming an
+  actor (`actor`, `owner_principal`, `on_behalf_of`, ...) gets 400
+  `actor_not_accepted`; a surface acting for its users needs mctl-api#350.
 
 ### OpenAPI Documentation
 

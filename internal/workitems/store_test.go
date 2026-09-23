@@ -686,6 +686,13 @@ func TestAWaitingItemWithNoExecutionCanStillResume(t *testing.T) {
 func TestSchemaUpgradesAnEarlierRevision(t *testing.T) {
 	s := newStoreForTest(t)
 	ctx := context.Background()
+	// Restore the columns whatever happens, so a failure here stays one
+	// failure instead of a half-dropped schema for every later test.
+	t.Cleanup(func() {
+		for _, table := range []string{"work_item_requests", "work_item_create_requests"} {
+			_, _ = s.pool.Exec(context.Background(), `ALTER TABLE `+table+` ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT ''`)
+		}
+	})
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE work_item_requests DROP COLUMN actor`); err != nil {
 		t.Fatal(err)
 	}
