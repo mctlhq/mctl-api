@@ -270,7 +270,7 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*WorkItem, bool, er
 		}
 		if in.ExternalKey != "" {
 			w, err := scanItem(tx.QueryRow(ctx, `SELECT `+itemColumns+` FROM work_items
-				WHERE tenant=$1 AND external_key=$2 AND state IN ('active','waiting')`, in.Tenant, in.ExternalKey))
+				WHERE tenant=$1 AND external_key=$2 AND state IN ('active','waiting') FOR UPDATE`, in.Tenant, in.ExternalKey))
 			if err == nil {
 				// Dedupe only onto an item this caller could open itself: the
 				// same visibility, and not someone else's private item. An
@@ -402,6 +402,9 @@ func (s *Store) Transition(ctx context.Context, in TransitionInput) (*WorkItem, 
 			return &ConflictError{Err: err, Current: cur}
 		}
 		if in.Action == ActionSupersede {
+			// The successor must exist in the same tenant; it may itself be
+			// terminal. The contract only records the pointer, and a chain of
+			// superseded items is a legitimate history.
 			next, err := getItem(ctx, tx, in.SupersededBy)
 			if errors.Is(err, ErrNotFound) || (err == nil && next.Tenant != cur.Tenant) {
 				return invalid("superseded_by %s is not a work item in tenant %s", in.SupersededBy, cur.Tenant)
@@ -602,7 +605,8 @@ func listExecutions(ctx context.Context, q rowsQuerier, itemID string) ([]Execut
 }
 
 // Executions lists a work item's executions, oldest attempt first. No
-// authorization: the caller checks tenant and visibility.
+// authorization: the caller checks tenant and visibility. An unknown id
+// answers an empty list, not ErrNotFound, so the caller Gets the item first.
 func (s *Store) Executions(ctx context.Context, itemID string) ([]Execution, error) {
 	return listExecutions(ctx, s.pool, itemID)
 }
@@ -810,7 +814,8 @@ func (s *Store) LinkSurface(ctx context.Context, in SurfaceRefInput) (*SurfaceRe
 }
 
 // Events returns a work item's lifecycle history in order. No
-// authorization: the caller checks tenant and visibility.
+// authorization: the caller checks tenant and visibility. An unknown id
+// answers an empty list, not ErrNotFound, so the caller Gets the item first.
 func (s *Store) Events(ctx context.Context, itemID string) ([]Event, error) {
 	rows, err := s.pool.Query(ctx, `SELECT work_item_id, seq, kind, from_state, to_state, actor_principal,
 			surface, request_id, detail, created_at
