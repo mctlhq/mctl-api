@@ -2124,7 +2124,10 @@ paths:
         Request content comes from mctl-gitops and is verified against its
         `request_hash` seal; a document that fails verification is never
         listed. Whether a request is still pending comes only from the owning
-        DevLoopWorkflow's `human_input_state` query.
+        DevLoopWorkflow's `human_input_state` query. Past `expires_at` a
+        request is never pending; its reported state is still the workflow's
+        (`resolved`, `timed_out`, ...) and falls back to `expired` only when
+        the workflow cannot be asked.
 
         A caller sees a request only if their `github:<login>` is in its
         eligible actors, or they are an admin, or they are the service
@@ -2179,6 +2182,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '500':
+          description: The gitops requests could not be read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '503':
           description: |
             gitops reader not configured, or `state=pending` was requested
@@ -2226,6 +2235,18 @@ paths:
                 $ref: '#/components/schemas/Error'
         '404':
           description: No such request, or not visible to the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: The gitops requests could not be read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: gitops reader not configured (retryable)
           content:
             application/json:
               schema:

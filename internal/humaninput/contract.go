@@ -210,6 +210,16 @@ func (r *Request) Validate() error {
 	if r.RequestID != "hir-"+r.RequestHash[7:23] {
 		return invalid("request_id does not derive from request_hash")
 	}
+	// question_hash is outside request_hash, so it is recomputed on its
+	// own, as HumanInputRequest.validate does: a document the workflow would
+	// reject must not be shown as answerable.
+	qh, err := r.computeQuestionHash()
+	if err != nil {
+		return err
+	}
+	if qh != r.QuestionHash {
+		return invalid("question_hash does not match the question and response spec")
+	}
 	return nil
 }
 
@@ -219,14 +229,38 @@ func (r *Request) Expires() time.Time {
 	return t
 }
 
-// computeHash is `_content_payload` + `_hash_bytes(_canonical_json(...))`:
-// every field except request_id, request_hash and created_at.
-func (r *Request) computeHash() (string, error) {
-	e := r.Execution
+// responseSpecDict is ResponseSpec.to_dict().
+func (r *Request) responseSpecDict() map[string]any {
 	options := r.Response.Options
 	if options == nil {
 		options = []string{}
 	}
+	return map[string]any{
+		"type":       r.Response.Type,
+		"options":    options,
+		"schema_ref": optString(r.Response.SchemaRef),
+	}
+}
+
+// computeQuestionHash is `question_hash_for`: sha256 over the canonical
+// JSON of the whitespace-collapsed, stripped, case-folded question plus the
+// response spec.
+func (r *Request) computeQuestionHash() (string, error) {
+	raw, err := canonicalJSON(map[string]any{
+		"question": pyNormalizeQuestion(r.Question),
+		"response": r.responseSpecDict(),
+	})
+	if err != nil {
+		return "", err
+	}
+	return hashBytes(raw), nil
+}
+
+// computeHash is `_content_payload` + `_hash_bytes(_canonical_json(...))`:
+// every field except request_id, request_hash, question_hash (checked
+// separately, see computeQuestionHash) and created_at.
+func (r *Request) computeHash() (string, error) {
+	e := r.Execution
 	payload := map[string]any{
 		"api_version":     APIVersion,
 		"kind":            RequestKind,
@@ -248,11 +282,7 @@ func (r *Request) computeHash() (string, error) {
 		},
 		"question": r.Question,
 		"reason":   r.Reason,
-		"response": map[string]any{
-			"type":       r.Response.Type,
-			"options":    options,
-			"schema_ref": optString(r.Response.SchemaRef),
-		},
+		"response": r.responseSpecDict(),
 		"requested_from": map[string]any{
 			"audience":   r.RequestedFrom.Audience,
 			"actor_refs": r.RequestedFrom.ActorRefs,

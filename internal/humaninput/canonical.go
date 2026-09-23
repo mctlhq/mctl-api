@@ -7,7 +7,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/cases"
 )
 
 // canonicalJSON reproduces mctl-agents' `_canonical_json` byte for byte:
@@ -136,4 +139,32 @@ func writePyString(b *strings.Builder, s string) {
 func hashBytes(raw []byte) string {
 	sum := sha256.Sum256(raw)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// pyIsSpace is Python's str.isspace, which is what both re's `\s` (on str)
+// and str.strip() use: Go's unicode.IsSpace plus the four ASCII information
+// separators U+001C..U+001F, which Python counts as whitespace and Go does
+// not.
+func pyIsSpace(r rune) bool {
+	return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
+}
+
+// pyNormalizeQuestion is question_hash_for's normalisation:
+// _WHITESPACE_RE.sub(" ", q).strip().casefold(). cases.Fold is full Unicode
+// case folding, which is what str.casefold implements (e.g. "ß" -> "ss").
+func pyNormalizeQuestion(q string) string {
+	var b strings.Builder
+	inSpace := false
+	for _, r := range q {
+		if pyIsSpace(r) {
+			if !inSpace {
+				b.WriteByte(' ')
+				inSpace = true
+			}
+			continue
+		}
+		inSpace = false
+		b.WriteRune(r)
+	}
+	return cases.Fold().String(strings.TrimFunc(b.String(), pyIsSpace))
 }

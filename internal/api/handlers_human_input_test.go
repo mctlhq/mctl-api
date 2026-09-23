@@ -263,9 +263,31 @@ func TestListHumanInputs_QueriesEachExecutionOnce(t *testing.T) {
 	}
 	tc.humanInputQueries = nil
 	withHumanInputClock(t, "2026-09-24T02:00:00Z")
-	code, items, _ := listHumanInputs(t, h, admin, "?state=all")
-	if code != http.StatusOK || len(items) != 2 || items[0].State != HumanInputExpired || len(tc.humanInputQueries) != 0 {
-		t.Fatalf("expired = %d %+v, queries %v", code, items, tc.humanInputQueries)
+	code, items, _ := listHumanInputs(t, h, admin, "")
+	if code != http.StatusOK || len(items) != 0 || len(tc.humanInputQueries) != 0 {
+		t.Fatalf("pending after expiry = %d %+v, queries %v", code, items, tc.humanInputQueries)
+	}
+}
+
+// Past expires_at the workflow still decides the terminal state: an
+// answered request reads resolved and a timed-out one timed_out, not
+// "expired" for everything.
+func TestHumanInput_TerminalStateOutlivesExpiry(t *testing.T) {
+	h, tc := newHumanInputHandlers(t)
+	withHumanInputClock(t, "2026-09-25T00:00:00Z")
+	tc.humanInputStates[hiWF] = &temporalclient.HumanInputState{State: temporalclient.HumanInputRunning, RequestID: hiASCII, ResumeCount: 1}
+	if _, v, _ := getHumanInput(t, h, alice, hiASCII); v.State != HumanInputResolved {
+		t.Fatalf("answered, then expired: GET state = %s, want resolved", v.State)
+	}
+	_, items, _ := listHumanInputs(t, h, admin, "?state=all")
+	for _, v := range items {
+		if v.RequestID == hiASCII && v.State != HumanInputResolved {
+			t.Fatalf("answered, then expired: list state = %s, want resolved", v.State)
+		}
+	}
+	tc.humanInputStates[hiWF] = &temporalclient.HumanInputState{State: temporalclient.HumanInputTimedOut, RequestID: hiASCII}
+	if _, v, _ := getHumanInput(t, h, alice, hiASCII); v.State != HumanInputTimedOut {
+		t.Fatalf("timed out: state = %s", v.State)
 	}
 }
 
@@ -362,8 +384,8 @@ func TestGetHumanInput_ExpiredWithoutTemporal(t *testing.T) {
 	}
 	h.opts.TemporalClient = tc
 	tc.humanInputErr = errors.New("no worker")
-	if _, v, _ := getHumanInput(t, h, alice, hiASCII); v.State != HumanInputExpired || len(tc.humanInputQueries) != 0 {
-		t.Fatalf("state = %s, queries %v", v.State, tc.humanInputQueries)
+	if _, v, _ := getHumanInput(t, h, alice, hiASCII); v.State != HumanInputExpired {
+		t.Fatalf("state = %s", v.State)
 	}
 }
 

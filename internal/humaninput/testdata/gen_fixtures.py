@@ -16,6 +16,13 @@ cases = {
     response=ResponseSpec(type="free_text", options=(), schema_ref=None),
     requested_from=RequestedFrom(audience="repo_operators", actor_refs=("github:alice","telegram:12345")),
     context_refs=()),
+ # question_hash normalisation edges: full case folding (ß, ǅ, final/other
+ # sigma, dotted I), Python-only whitespace (U+001C..U+001F), Unicode spaces
+ # (NBSP, EM SPACE, U+2028) and a zero-width space that is NOT whitespace.
+ "casefold_edges": dict(question="\u2003 STRASSE Straße ǅ ΣΑΣ İstanbul\u00a0x\u2003y\x1cz\u2028q\u200bw \x1f",
+    reason="edge", response=ResponseSpec(type="free_text", options=(), schema_ref=None),
+    requested_from=RequestedFrom(audience="work_item_owner", actor_refs=("github:alice",)),
+    context_refs=()),
  "multi_structured_round2": dict(question="Pick any.", reason="r", round=2, request_version=3,
     response=ResponseSpec(type="multi_choice", options=("x","y","z"), schema_ref="schema://x"),
     requested_from=RequestedFrom(audience="tenant_operators", actor_refs=("github:bob",)),

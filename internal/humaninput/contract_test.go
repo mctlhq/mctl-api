@@ -28,6 +28,8 @@ func TestParseRequest_VerifiesPythonSealedRequests(t *testing.T) {
 		"ascii_single_choice":     "hir-377a93a48528eb13",
 		"unicode_free_text":       "hir-accc85063686b5e0",
 		"multi_structured_round2": "hir-ebf62288d90cf1ce",
+		// question_hash normalisation edges; see gen_fixtures.py.
+		"casefold_edges": "hir-f543f28e8926bf7f",
 	} {
 		r, err := ParseRequest(loadFixture(t, name))
 		if err != nil {
@@ -64,7 +66,9 @@ func TestParseRequest_RejectsAlteredOrMalformed(t *testing.T) {
 		"workflow id swapped": func(m map[string]any) {
 			m["execution"].(map[string]any)["temporal_workflow_id"] = "dev-loop-mctlhq-x-1"
 		},
-		"request_id not derived":  func(m map[string]any) { m["request_id"] = "hir-0000000000000000" },
+		"request_id not derived": func(m map[string]any) { m["request_id"] = "hir-0000000000000000" },
+		// Outside request_hash, so only its own recomputation catches it.
+		"question_hash replaced":  func(m map[string]any) { m["question_hash"] = "sha256:" + strings.Repeat("0", 64) },
 		"unknown top-level key":   func(m map[string]any) { m["note"] = "x" },
 		"unknown nested key":      func(m map[string]any) { m["response"].(map[string]any)["hint"] = "x" },
 		"missing execution":       func(m map[string]any) { delete(m, "execution") },
