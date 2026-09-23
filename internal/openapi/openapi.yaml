@@ -658,7 +658,8 @@ components:
         (mctl-agents#431). One per execution. `canonical_b64` is the exact
         canonical bytes, base64-encoded so no JSON re-encoding can change
         them; `content_hash` is `sha256:<hex>` of those bytes and is verified
-        on every write and read. `id` is derived from `content_hash`.
+        on every write and read. `id` is derived from the execution id and
+        `content_hash`, so identical bytes of two executions are two snapshots.
       properties:
         id: {type: string, example: cs_1f2b3c4d5e6f708192a3b4c5d6e7f809}
         work_item_id: {type: string}
@@ -2969,9 +2970,10 @@ paths:
       summary: Seal an execution's context snapshot
       description: |
         Insert-only. The retry identity is the execution: sealing the same
-        bytes again returns the stored snapshot (200); different bytes for
-        the same execution are refused with `snapshot_divergence` and never
-        stored. `execution_sequence` is validation only and must equal the
+        bytes with the same strategy and prior references again returns the
+        stored snapshot (200); different bytes or claims for the same
+        execution are refused with `snapshot_divergence` and never stored.
+        No `Idempotency-Key` is taken (400 if sent). `execution_sequence` is validation only and must equal the
         execution's attempt. A named prior execution or snapshot must exist
         on this work item and precede this execution. Only a service
         principal may seal; a person or a relayed surface gets 403.

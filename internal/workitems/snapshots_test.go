@@ -56,7 +56,7 @@ func TestSealSnapshotStoresVerifiedBytesAndReusesAReplay(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("seal: %v %v", created, err)
 	}
-	if snap.ID != SnapshotIDFor(in.ContentHash) || !strings.HasPrefix(snap.ID, SnapshotIDPrefix) ||
+	if snap.ID != SnapshotIDFor(first.ID, in.ContentHash) || !strings.HasPrefix(snap.ID, SnapshotIDPrefix) ||
 		snap.ExecutionID != first.ID || snap.ExecutionSequence != 1 || snap.SchemaVersion != SchemaVersion ||
 		string(snap.Canonical) != `{"b":1,"a":"x"}` || snap.ProducedBy != "service:mctl-agent" {
 		t.Fatalf("snapshot = %+v", snap)
@@ -93,9 +93,43 @@ func TestSealSnapshotRefusesDivergenceForTheSameExecution(t *testing.T) {
 	_, _, err := s.SealSnapshot(ctx, sealInput(w, first, `{"v":2}`))
 	conflictCurrent(t, err, ErrSnapshotDivergence)
 
+	// Same bytes, different claims about them: also a divergent seal.
+	for name, mutate := range map[string]func(*SnapshotInput){
+		"strategy":         func(in *SnapshotInput) { in.Strategy = "other" },
+		"strategy version": func(in *SnapshotInput) { in.StrategyVersion = "v2" },
+		"prior execution":  func(in *SnapshotInput) { in.PriorExecutionID = ExecutionIDPrefix + "x" },
+		"prior snapshot":   func(in *SnapshotInput) { in.PriorSnapshotID = SnapshotIDPrefix + "x" },
+	} {
+		in := sealInput(w, first, `{"v":1}`)
+		mutate(&in)
+		if _, _, err := s.SealSnapshot(ctx, in); !errors.Is(err, ErrSnapshotDivergence) {
+			t.Errorf("%s: err = %v, want ErrSnapshotDivergence", name, err)
+		}
+	}
+
 	list, err := s.Snapshots(ctx, w.ID)
 	if err != nil || len(list) != 1 || string(list[0].Canonical) != `{"v":1}` {
 		t.Fatalf("snapshots = %+v %v", list, err)
+	}
+}
+
+func TestIdenticalBytesFromTwoExecutionsAreTwoSnapshots(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	w, first, second := twoExecutions(t, s)
+	other, otherFirst, _ := twoExecutions(t, s)
+	a, _, err := s.SealSnapshot(ctx, sealInput(w, first, `{"same":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, created, err := s.SealSnapshot(ctx, sealInput(w, second, `{"same":true}`))
+	if err != nil || !created || b.ID == a.ID || b.ContentHash != a.ContentHash {
+		t.Fatalf("second execution, same bytes = %+v %v %v", b, created, err)
+	}
+	// Nor does another work item's (or tenant's) snapshot block the bytes.
+	c, created, err := s.SealSnapshot(ctx, sealInput(other, otherFirst, `{"same":true}`))
+	if err != nil || !created || c.ID == a.ID {
+		t.Fatalf("other item, same bytes = %+v %v %v", c, created, err)
 	}
 }
 
@@ -114,7 +148,12 @@ func TestSealSnapshotRejectsBadInputBeforeTouchingTheStore(t *testing.T) {
 			in.Canonical = []byte(`{"a":1} {"b":2}`)
 			in.ContentHash = HashCanonical(in.Canonical)
 		},
-		"empty":            func(in *SnapshotInput) { in.Canonical, in.ContentHash = nil, HashCanonical(nil) },
+		"empty": func(in *SnapshotInput) { in.Canonical, in.ContentHash = nil, HashCanonical(nil) },
+		"json null": func(in *SnapshotInput) {
+			in.Canonical = []byte(`null`)
+			in.ContentHash = HashCanonical(in.Canonical)
+		},
+		"idempotency key":  func(in *SnapshotInput) { in.IdempotencyKey, in.RequestHash = "k", "h" },
 		"no strategy":      func(in *SnapshotInput) { in.Strategy = "" },
 		"no actor":         func(in *SnapshotInput) { in.Actor = "" },
 		"zero sequence":    func(in *SnapshotInput) { in.ExecutionSequence = 0 },

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Sealed ContextSnapshots (mctl-agents#431, owner decisions A–B).
@@ -126,14 +125,21 @@ func HashCanonical(canonical []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// SnapshotIDFor derives a snapshot's id from its content hash.
-func SnapshotIDFor(contentHash string) string {
-	return SnapshotIDPrefix + strings.TrimPrefix(contentHash, "sha256:")[:32]
+// SnapshotIDFor derives a snapshot's id from its execution and content
+// hash: deterministic, so a replay names the same snapshot, and scoped to
+// the execution, so byte-identical snapshots of two executions (or two
+// tenants) never collide.
+func SnapshotIDFor(executionID, contentHash string) string {
+	sum := sha256.Sum256([]byte(executionID + "\x00" + contentHash))
+	return SnapshotIDPrefix + hex.EncodeToString(sum[:16])
 }
 
 func (in SnapshotInput) validate() error {
-	if err := checkIdentity("actor", in.Actor); err != nil {
+	if err := in.Mutation.validate(); err != nil {
 		return err
+	}
+	if in.IdempotencyKey != "" {
+		return invalid("a snapshot takes no idempotency key: its execution id is its identity")
 	}
 	if in.WorkItemID == "" || !strings.HasPrefix(in.ExecutionID, ExecutionIDPrefix) {
 		return invalid("work item and execution ids are required")
@@ -146,7 +152,7 @@ func (in SnapshotInput) validate() error {
 	}
 	var obj map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(in.Canonical))
-	if err := dec.Decode(&obj); err != nil || dec.More() {
+	if err := dec.Decode(&obj); err != nil || obj == nil || dec.More() {
 		return invalid("snapshot must be one JSON object")
 	}
 	if got := HashCanonical(in.Canonical); in.ContentHash != got {
@@ -223,9 +229,16 @@ func (s *Store) SealSnapshot(ctx context.Context, in SnapshotInput) (*ContextSna
 			WHERE execution_id=$1`, exec.ID))
 		switch {
 		case err == nil:
+			// A replay is the same bytes AND the same claims about them;
+			// anything else is a divergent seal of this execution.
 			if existing.ContentHash != in.ContentHash {
 				return &ConflictError{Err: fmt.Errorf("%w: execution %s sealed %s, not %s",
 					ErrSnapshotDivergence, exec.ID, existing.ContentHash, in.ContentHash), Current: cur}
+			}
+			if existing.Strategy != in.Strategy || existing.StrategyVersion != in.StrategyVersion ||
+				existing.PriorExecutionID != in.PriorExecutionID || existing.PriorSnapshotID != in.PriorSnapshotID {
+				return &ConflictError{Err: fmt.Errorf("%w: execution %s sealed these bytes with a different strategy or prior reference",
+					ErrSnapshotDivergence, exec.ID), Current: cur}
 			}
 			out = existing
 			return nil
@@ -238,15 +251,8 @@ func (s *Store) SealSnapshot(ctx context.Context, in SnapshotInput) (*ContextSna
 		now := s.now()
 		out, err = scanSnapshot(tx.QueryRow(ctx, `INSERT INTO work_item_context_snapshots (`+snapshotColumns+`)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING `+snapshotColumns,
-			SnapshotIDFor(in.ContentHash), cur.ID, exec.ID, exec.Attempt, in.ContentHash, in.Canonical,
+			SnapshotIDFor(exec.ID, in.ContentHash), cur.ID, exec.ID, exec.Attempt, in.ContentHash, in.Canonical,
 			in.Strategy, in.StrategyVersion, in.PriorExecutionID, in.PriorSnapshotID, in.Actor, now, SchemaVersion))
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			// The same bytes already sealed for another execution: the
-			// content-bound id cannot name two executions.
-			return &ConflictError{Err: fmt.Errorf("%w: these bytes are already another execution's snapshot",
-				ErrSnapshotDivergence), Current: cur}
-		}
 		if err != nil {
 			return fmt.Errorf("workitems: insert snapshot: %w", err)
 		}

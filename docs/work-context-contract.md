@@ -108,7 +108,9 @@ may live in different databases.
   (`Pending` | `Running` | `Succeeded` | `Failed` | `Error`), `started_at`,
   `ended_at`. At most one non-terminal execution per work item.
 - **`ContextSnapshot`** — one sealed snapshot per execution
-  (mctl-agents#431): `id` (`cs_` + the first 32 hex of `content_hash`),
+  (mctl-agents#431): `id` (`cs_` + 32 hex of sha256 over the execution id
+and `content_hash`, so byte-identical snapshots of two executions stay two
+snapshots),
   `execution_id` (unique), `execution_sequence` (must equal the execution's
   `attempt`; validation only, never the identity), the canonical bytes
   (opaque to mctl-api, a JSON object carrying its own inner
@@ -118,9 +120,9 @@ may live in different databases.
   `prior_snapshot_id` (continuity; must exist on this item and precede this
   execution), `produced_by`, `created_at`. Insert-only: no store method or
   API route updates a snapshot, and a trigger refuses an `UPDATE` of the
-  table. The retry identity is the execution id: the same bytes again
-  return the stored snapshot, different bytes are `snapshot_divergence`
-  (409). A new execution — created by the work-item layer, e.g. a resume —
+  table. The retry identity is the execution id: the same bytes and
+  claims (strategy, prior references) again return the stored snapshot;
+  different bytes or claims are `snapshot_divergence` (409). A new execution — created by the work-item layer, e.g. a resume —
   seals its own snapshot; a human-input signal continues the current
   execution and seals nothing new.
 - **`WorkItemApproval`** — `kind`, `state`
@@ -273,7 +275,8 @@ work-item route:
    already-created entity with HTTP 200 instead of creating a duplicate —
    the same idempotent-create-returns-existing shape `internal/domains`'
    `Store.Create` already uses. A snapshot needs no key: its execution id
-   is its identity, and the same bytes again are the 200 replay.
+   is its identity, and the same bytes with the same strategy and prior
+   references again are the 200 replay; a key sent anyway is 400.
 2. **Optimistic concurrency** via `expected_state_version` in the request
    body (deliberately a body field, not an `If-Match` header: the repo has
    no ETag plumbing, and MCP tool arguments are flat strings, which would

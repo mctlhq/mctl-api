@@ -131,6 +131,9 @@ func TestWorkItemSnapshots_RejectsBadBodies(t *testing.T) {
 			t.Errorf("%s: %d %s", name, res.code, res.raw)
 		}
 	}
+	if res := e.do(svc, "POST", path, sealBody(`{"a":1}`, 1), "Idempotency-Key", "k-1"); res.code != http.StatusBadRequest || code(res) != wiCodeInvalid {
+		t.Errorf("idempotency key: %d %s", res.code, res.raw)
+	}
 	if res := e.do(svc, "POST", path, actor); res.code != http.StatusBadRequest || code(res) != wiCodeActorNotAccepted {
 		t.Errorf("actor: %d %s", res.code, res.raw)
 	}
