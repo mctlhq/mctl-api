@@ -53,6 +53,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/vault"
 	"github.com/mctlhq/mctl-api/internal/vmetrics"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 func main() {
@@ -318,6 +319,33 @@ func main() {
 		} else {
 			humanInputLedger = hl
 			defer hl.Close()
+		}
+	}
+
+	// Work-items store (workitem/v1, mctl-api#349). Optional — enabled when
+	// WORK_ITEMS_DB_URL or AUDIT_DB_URL is set, unless WORK_ITEMS_DISABLED is.
+	// The kill switch leaves the store nil without touching the shared
+	// AUDIT_DB_URL other stores depend on. Nil makes every /api/v1/work-items
+	// route answer 503.
+	var workItemsStore *workitems.Store
+	workItemsDBURL := postgresURL(os.Getenv("WORK_ITEMS_DB_URL"))
+	if workItemsDBURL == "" {
+		workItemsDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+	}
+	switch {
+	case killSwitchOn(os.Getenv("WORK_ITEMS_DISABLED")):
+		slog.Warn("WORK_ITEMS_DISABLED is set; /api/v1/work-items routes will return 503")
+	case workItemsDBURL == "":
+		slog.Warn("no WORK_ITEMS_DB_URL or AUDIT_DB_URL; /api/v1/work-items routes will return 503")
+	default:
+		ws, wsErr := initStore(initCtx, "work items", func(ctx context.Context) (*workitems.Store, error) {
+			return workitems.NewStore(ctx, workItemsDBURL)
+		})
+		if wsErr != nil {
+			slog.Error("work-items store init failed; /api/v1/work-items routes will return 503", "error", wsErr)
+		} else {
+			workItemsStore = ws
+			defer ws.Close()
 		}
 	}
 
@@ -591,6 +619,7 @@ func main() {
 		PlatformDomain:                 cfg.PlatformDomain,
 		TemporalClient:                 devLoopClient,
 		HumanInputLedger:               humanInputLedger,
+		WorkItems:                      workItemsStore,
 		WorkflowDispatcher:             workflowDispatcher,
 		GitopsReady:                    gitopsReady,
 		PostgresReady:                  postgresReady,
@@ -1173,9 +1202,11 @@ func splitCSV(v string) []string {
 	return out
 }
 
-// killSwitchOn reads a kill-switch value. It errs toward off: any value
-// except an explicit "false"/"f"/"0"/"no"/"off" (or empty) turns the feature off,
-// so "yes" or "disabled" never silently leaves it on.
+// killSwitchOn reads a kill-switch value (WORK_ITEMS_DISABLED,
+// ROADMAP_STATE_DISABLED). It errs toward off: any value except an explicit
+// "false"/"f"/"0"/"no"/"off" (or empty) turns the feature off, so a template
+// that renders the flag as "false" keeps it on while "yes" or "disabled" never
+// silently fails open.
 func killSwitchOn(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", "false", "f", "0", "no", "off":

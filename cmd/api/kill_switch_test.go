@@ -21,9 +21,9 @@ func TestKillSwitchErrsTowardOff(t *testing.T) {
 		value string
 		want  bool
 	}{
-		{"", false}, {"false", false}, {"f", false}, {"0", false}, {"no", false}, {"off", false},
+		{"", false}, {"false", false}, {"f", false}, {"F", false}, {"0", false}, {"no", false}, {"off", false},
 		{"  FALSE\t", false},
-		{"true", true}, {"1", true}, {"yes", true}, {"on", true}, {"disabled", true},
+		{"true", true}, {"1", true}, {"TRUE", true}, {"yes", true}, {"on", true}, {"disabled", true},
 	}
 	for _, c := range cases {
 		if got := killSwitchOn(c.value); got != c.want {

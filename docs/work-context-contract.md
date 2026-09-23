@@ -1,12 +1,11 @@
 # Work-context contract (`workitem/v1`)
 
-Status: **design accepted, not yet implemented**. This document is the
+Status: **design accepted; steps 1, 2 and 4 implemented (mctl-api#349)**. This document is the
 canonical answer to [issue #227](https://github.com/mctlhq/mctl-api/issues/227)
 ("architecture: define canonical work/context ownership model across
-surfaces"). It describes the target shape of a new `WorkItem` resource in
-mctl-api. No code in this repository implements it yet — see "Implementation
-status" at the bottom for what exists today and what is tracked as follow-up
-work.
+surfaces"). It describes the shape of the `WorkItem` resource in mctl-api;
+see "Implementation status" at the bottom for what exists today and what is
+tracked as follow-up work.
 
 ## Why this document exists
 
@@ -362,29 +361,25 @@ change to `workitem/v1`. When the contract changes, this document and
 
 ## Implementation status
 
-This document currently describes an **accepted design, not yet built**.
-None of `internal/workitems`, the REST handlers, the `WorkItemStore` wiring
-in `cmd/api/main.go`, the retention sweeper, or the `internal/openapi/openapi.yaml`
-schemas above exist in this repository yet. Landing them is tracked as
-follow-up proposals against
-`platform-gitops/agents-state/mctl-api/proposals/issue-227-architecture-work-context-define-canonic/`,
-split roughly along these lines so each PR is independently reviewable and
-buildable:
+Built (mctl-api#349):
 
-1. `internal/workitems/types.go` and `internal/workitems/store.go` — the
-   schema, the transition map, sentinel errors, and store-level CRUD/
-   lifecycle/idempotency/concurrency methods, with store-level tests
-   (Postgres-backed, skipped without `TEST_DATABASE_URL`, matching the
-   convention in `internal/alerts/store_test.go` and
-   `internal/domains/store_test.go`). No REST surface yet.
-2. `internal/api/handlers_work_items.go` plus route registration in
-   `internal/api/router.go`, the authorization matrix, and audit
-   integration.
-3. Approval projection to `DevLoopClient.SignalApprove`, the retention
-   sweeper goroutine, and the `cmd/api/main.go` wiring
-   (`WORK_ITEMS_DB_URL`, `WORK_ITEMS_DISABLED`, the two retention env
-   vars).
-4. `internal/openapi/openapi.yaml` schemas and paths, `README.md` and
-   `.env.example` updates.
-5. A follow-up issue for the MCP tool wrappers and the first surface
-   adapter (`mctl-telegram`), filed once step 2 lands.
+- `internal/workitems`: schema, the `Transitions` map, sentinel errors, and the
+  Postgres store with idempotency, `state_version` concurrency and
+  `pg_advisory_xact_lock` serialization (step 1).
+- `internal/api/handlers_work_items.go` and the routes above except the ones
+  listed below, the authorization matrix and audit (step 2).
+- `WORK_ITEMS_DB_URL` / `WORK_ITEMS_DISABLED` wiring in `cmd/api/main.go`,
+  `internal/openapi/openapi.yaml`, `README.md` and `.env.example` (step 4, and
+  the wiring part of step 3).
+
+Not built yet, each tracked as its own issue (#352 snapshots, #353 approvals and retention, #350 surface identities):
+
+- `GET|POST .../executions/{execution_id}/snapshots` (`ContextSnapshot`).
+- `GET .../approvals`, `POST .../approvals/{approval_id}/decision` and the
+  projection to `DevLoopClient.SignalApprove` (step 3).
+- `POST /api/v1/work-items/surface-identities` (`SurfaceIdentityLink`),
+  mctl-api#350. Until it lands, a surface acts only as its own authenticated
+  principal; `actor_external_id` on a surface reference is correlation only.
+- The retention sweeper and `WORKITEM_SURFACE_RETENTION_DAYS` /
+  `WORKITEM_RETENTION_DAYS` (step 3).
+- MCP tool wrappers and the first surface adapter (step 5).
