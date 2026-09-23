@@ -70,6 +70,7 @@ const (
 	EventIntentAppended    = "intent_appended"
 	EventExecutionAttached = "execution_attached"
 	EventSurfaceLinked     = "surface_linked"
+	EventSnapshotSealed    = "snapshot_sealed"
 )
 
 // Execution engines and phases.

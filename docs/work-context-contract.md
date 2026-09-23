@@ -107,12 +107,31 @@ may live in different databases.
   `engine_ref`, `attempt`, `resumed_from_execution_id`, `phase`
   (`Pending` | `Running` | `Succeeded` | `Failed` | `Error`), `started_at`,
   `ended_at`. At most one non-terminal execution per work item.
-- **`ContextSnapshot`** — `id` (`cs_...`), `execution_id`, `seq` (unique per
-  `(work_item_id, execution_id)`), `snapshot_json` (opaque JSONB carrying
-  its own inner `schema_version` so `mctl-agents` can evolve the payload
-  without an mctl-api release), `content_hash`, `produced_by`,
-  `created_at`. Append-only: no store method or API route ever updates or
-  deletes a snapshot.
+- **`ContextSnapshot`** — one sealed snapshot per execution
+  (mctl-agents#431): `id` (`cs_` + 32 hex of sha256 over the execution id
+  and `content_hash`, so byte-identical snapshots of two executions stay
+  two snapshots), `execution_id` (unique), `execution_sequence` (must equal
+  the execution's `attempt`; validation only, never the identity), the
+  canonical bytes (opaque to mctl-api, a JSON object carrying its own inner
+  `schema_version`, at most 1 MiB, served as `canonical_b64`),
+  `content_hash` (`sha256:<hex>` of those bytes, verified on every write
+  and read), `strategy`, `strategy_version`, `prior_execution_id` /
+  `prior_snapshot_id` (continuity; must exist on this item and precede this
+  execution; the prior execution is stored resolved through the prior
+  snapshot), `produced_by`, `created_at`. Insert-only: no store method or
+  API route updates a snapshot, and a trigger refuses an `UPDATE` of the
+  table. The retry identity is the execution id: the same bytes and claims
+  (strategy, strategy version, prior references) again return the stored
+  snapshot; different bytes or claims are `snapshot_divergence` (409). A
+  producer must therefore keep a retry's claims stable — mctl-agents folds
+  its strategy and version into the canonical bytes, so a retry from a
+  newer build is a different snapshot only if it really built a different
+  one. A new execution — created by the work-item layer, e.g. a resume —
+  seals its own snapshot; a human-input signal continues the current
+  execution and seals nothing new. Only a service principal seals; every
+  viewer of the work item may read the bytes, deliberately, since they are
+  the context of that viewer's own work. A listing carries metadata only;
+  the bytes come from a single-snapshot read.
 - **`WorkItemApproval`** — `kind`, `state`
   (`pending` | `granted` | `denied` | `expired`), `signal_engine`,
   `signal_ref`, `signal_name`, `requested_by`, `requested_at`, `decided_by`,
@@ -259,10 +278,12 @@ work-item route:
 1. **`Idempotency-Key`** (request header, or an `idempotency_key` body
    field) deduplicates a mutating request: per `(tenant, idempotency_key)`
    for create, per `(work_item_id, idempotency_key)` for intents,
-   executions, snapshots, approvals and resume. A replay returns the
+   executions, approvals and resume. A replay returns the
    already-created entity with HTTP 200 instead of creating a duplicate —
    the same idempotent-create-returns-existing shape `internal/domains`'
-   `Store.Create` already uses.
+   `Store.Create` already uses. A snapshot needs no key: its execution id
+   is its identity, and the same bytes with the same strategy and prior
+   references again are the 200 replay; a key sent anyway is 400.
 2. **Optimistic concurrency** via `expected_state_version` in the request
    body (deliberately a body field, not an `If-Match` header: the repo has
    no ETag plumbing, and MCP tool arguments are flat strings, which would
@@ -300,7 +321,8 @@ routes join the existing write-side rate-limit group (20/min) alongside
 | `PATCH /api/v1/work-items/{id}`                                        | state transition (`complete`, `archive`, `supersede`, `wait`); requires `expected_state_version` |
 | `POST /api/v1/work-items/{id}/intents`                                 | append a user intent |
 | `GET|POST /api/v1/work-items/{id}/executions`                          | list / attach-correlate an execution |
-| `GET|POST /api/v1/work-items/{id}/executions/{execution_id}/snapshots` | list / append a context snapshot |
+| `GET|POST /api/v1/work-items/{id}/executions/{execution_id}/snapshot`  | read / seal the execution's context snapshot |
+| `GET /api/v1/work-items/{id}/snapshots[/{snapshot_id}]`                | list / read sealed snapshots |
 | `POST /api/v1/work-items/{id}/resume`                                  | start a new execution continuing a prior one |
 | `GET /api/v1/work-items/{id}/approvals`                                | list approvals |
 | `POST /api/v1/work-items/{id}/approvals/{approval_id}/decision`        | decide a pending approval |
@@ -334,6 +356,10 @@ store in `internal/api/router.go` already follows.
   `WORKITEM_SURFACE_RETENTION_DAYS` while retaining the work item, its
   lifecycle history and its execution/snapshot correlations, and deletes
   terminal work items older than `WORKITEM_RETENTION_DAYS`.
+  Sealed snapshot bytes embed the context an execution was given (intent
+  text included) and cannot be redacted in place (the table refuses
+  `UPDATE`), so the sweeper (#353) deletes `work_item_context_snapshots`
+  rows on the same schedule as intent text.
 
 ## Versioning
 
@@ -401,9 +427,8 @@ the header gets 400. Relay routes: `GET /human-input`,
 another is 400). Both identities are kept: work-item events and audit rows
 carry the human as actor and `acting_principal: surface:<name>`.
 
-Not built yet, each tracked as its own issue (#352 snapshots, #353 approvals and retention):
+Not built yet, tracked as its own issue (#353 approvals and retention):
 
-- `GET|POST .../executions/{execution_id}/snapshots` (`ContextSnapshot`).
 - `GET .../approvals`, `POST .../approvals/{approval_id}/decision` and the
   projection to `DevLoopClient.SignalApprove` (step 3).
 - `actor_external_id` on a surface reference stays correlation only; the

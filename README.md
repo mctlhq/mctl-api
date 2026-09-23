@@ -244,6 +244,12 @@ Surfaces correlate to it; they never own its lifecycle.
   `expected_state_version` and answer 409 with the current state on a mismatch.
 - `POST .../intents` (≤ 8 KiB, secret-scanned), `GET|POST .../executions`,
   `POST .../surface-refs`, `GET .../events`.
+- `POST .../executions/{execution_id}/snapshot` seals the execution's
+  ContextSnapshot (service principal only). The table is insert-only: one
+  snapshot per execution, the same bytes again return the stored one, and
+  different bytes answer 409 `snapshot_divergence`. `GET` the same path,
+  `GET .../snapshots[/{snapshot_id}]` to read; the item view carries
+  `latest_snapshot`.
 - The acting principal is always the authenticated caller. A body naming an
   actor (`actor`, `owner_principal`, `on_behalf_of`, ...) gets 400
   `actor_not_accepted`; a surface acting for its users needs mctl-api#350.

@@ -692,14 +692,69 @@ components:
         latest_execution:
           nullable: true
           allOf: [{$ref: '#/components/schemas/WorkItemExecution'}]
-      required: [schema_version, work_item, state_version, latest_execution]
+        latest_snapshot:
+          nullable: true
+          description: The latest sealed ContextSnapshot, by pointer; null when none is sealed.
+          allOf: [{$ref: '#/components/schemas/ContextSnapshotRef'}]
+      required: [schema_version, work_item, state_version, latest_execution, latest_snapshot]
+
+    ContextSnapshotRef:
+      type: object
+      properties:
+        id: {type: string, example: cs_1f2b3c4d5e6f708192a3b4c5d6e7f809}
+        execution_id: {type: string}
+        content_hash: {type: string, example: 'sha256:1f2b...'}
+      required: [id, execution_id, content_hash]
+
+    ContextSnapshot:
+      type: object
+      description: |
+        One sealed, immutable snapshot of what an execution was given
+        (mctl-agents#431). One per execution. `canonical_b64` is the exact
+        canonical bytes, base64-encoded so no JSON re-encoding can change
+        them; `content_hash` is `sha256:<hex>` of those bytes and is verified
+        on every write and read. `id` is derived from the execution id and
+        `content_hash`, so identical bytes of two executions are two snapshots.
+      properties:
+        id: {type: string, example: cs_1f2b3c4d5e6f708192a3b4c5d6e7f809}
+        work_item_id: {type: string}
+        execution_id: {type: string}
+        execution_sequence: {type: integer, description: "The execution's attempt."}
+        content_hash: {type: string}
+        canonical_b64: {type: string, format: byte}
+        strategy: {type: string}
+        strategy_version: {type: string}
+        prior_execution_id: {type: string}
+        prior_snapshot_id: {type: string}
+        produced_by: {type: string}
+        created_at: {type: string, format: date-time}
+        schema_version: {type: string, enum: [workitem/v1]}
+      required: [id, work_item_id, execution_id, execution_sequence, content_hash, canonical_b64, strategy, strategy_version, produced_by, created_at, schema_version]
+
+    ContextSnapshotSummary:
+      type: object
+      description: A ContextSnapshot without `canonical_b64`, as listed.
+      properties:
+        id: {type: string}
+        work_item_id: {type: string}
+        execution_id: {type: string}
+        execution_sequence: {type: integer}
+        content_hash: {type: string}
+        strategy: {type: string}
+        strategy_version: {type: string}
+        prior_execution_id: {type: string}
+        prior_snapshot_id: {type: string}
+        produced_by: {type: string}
+        created_at: {type: string, format: date-time}
+        schema_version: {type: string, enum: [workitem/v1]}
+      required: [id, work_item_id, execution_id, execution_sequence, content_hash, strategy, strategy_version, produced_by, created_at, schema_version]
 
     WorkItemEvent:
       type: object
       properties:
         work_item_id: {type: string}
         seq: {type: integer, format: int64}
-        kind: {type: string, enum: [created, state_changed, resumed, intent_appended, execution_attached, surface_linked]}
+        kind: {type: string, enum: [created, state_changed, resumed, intent_appended, execution_attached, surface_linked, snapshot_sealed]}
         from_state: {type: string}
         to_state: {type: string}
         actor_principal: {type: string}
@@ -3055,6 +3110,111 @@ paths:
         '400': {description: Invalid request or an actor field, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
         '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
         '409': {description: 'execution_active or invalid_transition', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}/executions/{execution_id}/snapshot:
+    get:
+      summary: The context snapshot an execution sealed
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: execution_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: The sealed snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string}
+                  snapshot: {$ref: '#/components/schemas/ContextSnapshot'}
+        '404': {description: 'work_item_not_found, or snapshot_not_found when this execution has not sealed one', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+    post:
+      summary: Seal an execution's context snapshot
+      description: |
+        Insert-only. The retry identity is the execution: sealing the same
+        bytes with the same strategy and prior references again returns the
+        stored snapshot (200); different bytes or claims for the same
+        execution are refused with `snapshot_divergence` and never stored.
+        No `Idempotency-Key` is taken (400 if sent). `execution_sequence` is validation only and must equal the
+        execution's attempt. A named prior execution or snapshot must exist
+        on this work item and precede this execution. Only a service
+        principal may seal; a person or a relayed surface gets 403.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: execution_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                execution_sequence: {type: integer, minimum: 1}
+                canonical_b64: {type: string, format: byte, description: 'Base64 of the canonical JSON object bytes, at most 1 MiB decoded'}
+                content_hash: {type: string, description: 'sha256:<hex> of the decoded bytes'}
+                strategy: {type: string, maxLength: 512}
+                strategy_version: {type: string, maxLength: 512}
+                prior_execution_id: {type: string}
+                prior_snapshot_id: {type: string}
+              required: [execution_sequence, canonical_b64, content_hash, strategy, strategy_version]
+      responses:
+        '201':
+          description: Sealed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string}
+                  snapshot: {$ref: '#/components/schemas/ContextSnapshot'}
+        '200': {description: This execution already sealed these bytes; the stored snapshot}
+        '400': {description: 'invalid_request (bad base64, hash mismatch, wrong sequence, not one JSON object) or actor_not_accepted', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '403': {description: snapshot_writer_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '404': {description: 'work_item_not_found or execution_not_found', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '409': {description: 'snapshot_divergence or prior_snapshot_invalid', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}/snapshots:
+    get:
+      summary: List a work item's sealed context snapshots
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Snapshots, oldest execution first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string}
+                  snapshots:
+                    type: array
+                    description: Metadata only; read one snapshot for its bytes.
+                    items: {$ref: '#/components/schemas/ContextSnapshotSummary'}
+        '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}/snapshots/{snapshot_id}:
+    get:
+      summary: One sealed context snapshot
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: snapshot_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: The snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string}
+                  snapshot: {$ref: '#/components/schemas/ContextSnapshot'}
+        '404': {description: 'work_item_not_found or snapshot_not_found', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
 
   /api/v1/work-items/{id}/resume:
     post:

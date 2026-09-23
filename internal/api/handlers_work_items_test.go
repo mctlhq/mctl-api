@@ -70,6 +70,10 @@ func workItemsRouter(h *Handlers) chi.Router {
 	r.Post("/api/v1/work-items/{id}/resume", h.ResumeWorkItem)
 	r.Post("/api/v1/work-items/{id}/surface-refs", h.LinkWorkItemSurface)
 	r.Get("/api/v1/work-items/{id}/events", h.ListWorkItemEvents)
+	r.Post("/api/v1/work-items/{id}/executions/{execution_id}/snapshot", h.SealWorkItemSnapshot)
+	r.Get("/api/v1/work-items/{id}/executions/{execution_id}/snapshot", h.GetWorkItemExecutionSnapshot)
+	r.Get("/api/v1/work-items/{id}/snapshots", h.ListWorkItemSnapshots)
+	r.Get("/api/v1/work-items/{id}/snapshots/{snapshot_id}", h.GetWorkItemSnapshot)
 	return r
 }
 
