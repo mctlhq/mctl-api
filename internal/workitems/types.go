@@ -193,16 +193,19 @@ type WorkItem struct {
 
 // Event is one append-only lifecycle record.
 type Event struct {
-	WorkItemID     string          `json:"work_item_id"`
-	Seq            int64           `json:"seq"`
-	Kind           string          `json:"kind"`
-	FromState      string          `json:"from_state,omitempty"`
-	ToState        string          `json:"to_state,omitempty"`
-	ActorPrincipal string          `json:"actor_principal"`
-	Surface        string          `json:"surface,omitempty"`
-	RequestID      string          `json:"request_id,omitempty"`
-	Detail         json.RawMessage `json:"detail,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
+	WorkItemID     string `json:"work_item_id"`
+	Seq            int64  `json:"seq"`
+	Kind           string `json:"kind"`
+	FromState      string `json:"from_state,omitempty"`
+	ToState        string `json:"to_state,omitempty"`
+	ActorPrincipal string `json:"actor_principal"`
+	// ActingPrincipal is the surface principal that relayed the change for
+	// ActorPrincipal, when it was relayed.
+	ActingPrincipal string          `json:"acting_principal,omitempty"`
+	Surface         string          `json:"surface,omitempty"`
+	RequestID       string          `json:"request_id,omitempty"`
+	Detail          json.RawMessage `json:"detail,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
 }
 
 // Intent is a bounded statement of what was asked for. Never a transcript.

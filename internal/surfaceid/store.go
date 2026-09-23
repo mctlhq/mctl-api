@@ -111,7 +111,15 @@ type Link struct {
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 	RevokedBy  string     `json:"revoked_by,omitempty"`
+
+	// Retired is the expired link a Redeem retired to make room for this
+	// one, for the caller to audit. Never serialized.
+	Retired *Link `json:"-"`
 }
+
+// RevokedByExpiry is revoked_by on a link retired because it expired. The
+// system: prefix keeps the column one of principal-or-system.
+const RevokedByExpiry = "system:expired"
 
 const schema = `
 CREATE TABLE IF NOT EXISTS surface_identity_challenges (
@@ -329,13 +337,15 @@ func (s *Store) Redeem(ctx context.Context, surface, code, externalID string) (*
 		if err != nil && !errors.Is(err, ErrLinkNotFound) {
 			return err
 		}
+		var retired *Link
 		if existing != nil && s.expired(existing, now) {
 			// An expired link no longer answers; retire it so a fresh one
 			// can take its place.
-			if _, err := tx.Exec(ctx, `UPDATE surface_identity_links SET revoked_at=$2, revoked_by='expired' WHERE id=$1`, existing.ID, now); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE surface_identity_links SET revoked_at=$2, revoked_by=$3 WHERE id=$1`, existing.ID, now, RevokedByExpiry); err != nil {
 				return err
 			}
-			existing = nil
+			existing.RevokedAt, existing.RevokedBy = &now, RevokedByExpiry
+			retired, existing = existing, nil
 		}
 		if existing != nil {
 			if existing.Principal != principal {
@@ -357,7 +367,7 @@ func (s *Store) Redeem(ctx context.Context, surface, code, externalID string) (*
 		if err != nil {
 			return err
 		}
-		l := &Link{ID: linkID, Surface: surface, ExternalID: externalID, Principal: principal, CreatedAt: now}
+		l := &Link{ID: linkID, Surface: surface, ExternalID: externalID, Principal: principal, CreatedAt: now, Retired: retired}
 		if s.linkTTL > 0 {
 			exp := now.Add(s.linkTTL)
 			l.ExpiresAt = &exp

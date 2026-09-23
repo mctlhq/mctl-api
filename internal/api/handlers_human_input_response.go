@@ -118,6 +118,17 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// A relayed answer came through its surface and no other.
+	if relay, ok := user.RelaySurface(); ok {
+		if body.Surface != "" && body.Surface != relay {
+			writeError(w, http.StatusBadRequest, "an answer relayed by surface:"+relay+" cannot claim surface "+body.Surface)
+			return
+		}
+		body.Surface = relay
+	}
+	if body.Surface == "" {
+		body.Surface = "api"
+	}
 
 	s, err := h.findHumanInput(id)
 	if err != nil {
@@ -446,17 +457,23 @@ func deliveryResult(d humaninput.Delivery, status, state, detail string) humanIn
 // (UserID, who triggered the event) when a submission redelivers an answer
 // another eligible human recorded earlier.
 func (h *Handlers) auditHumanInput(r *http.Request, user *auth.User, s *sealedHumanInput, respondent, op, status, surface, message string) {
+	params := map[string]string{
+		"request_id":   s.req.RequestID,
+		"work_item_id": s.req.WorkItemID,
+		"service":      s.file.Service,
+		"proposal":     s.file.Proposal,
+		"surface":      surface,
+		"respondent":   respondent,
+	}
+	// A relayed answer keeps both: the human it is attributed to
+	// (respondent) and the surface principal that carried it.
+	if acting := user.ActingPrincipal(); acting != "" {
+		params["acting_principal"] = acting
+	}
 	h.logAudit(r, audit.Entry{
-		UserID:    user.ID,
-		Operation: op,
-		Parameters: map[string]string{
-			"request_id":   s.req.RequestID,
-			"work_item_id": s.req.WorkItemID,
-			"service":      s.file.Service,
-			"proposal":     s.file.Proposal,
-			"surface":      surface,
-			"respondent":   respondent,
-		},
+		UserID:       user.ID,
+		Operation:    op,
+		Parameters:   params,
 		WorkflowName: s.req.Execution.TemporalWorkflowID,
 		Status:       status,
 		RiskLevel:    string(operations.RiskLow),
@@ -481,10 +498,7 @@ func decodeHumanInputResponse(w http.ResponseWriter, r *http.Request) (humanInpu
 	if len(body.Value) == 0 {
 		return body, nil, errors.New("value is required")
 	}
-	if body.Surface == "" {
-		body.Surface = "api"
-	}
-	if !humanInputSurfacePattern.MatchString(body.Surface) {
+	if body.Surface != "" && !humanInputSurfacePattern.MatchString(body.Surface) {
 		return body, nil, errors.New("surface must match " + humanInputSurfacePattern.String())
 	}
 	var value any

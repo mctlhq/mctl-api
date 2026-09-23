@@ -652,6 +652,7 @@ func main() {
 		HumanInputLedger:               humanInputLedger,
 		WorkItems:                      workItemsStore,
 		SurfaceIdentities:              surfaceIDs,
+		TenantResolver:                 gitReader,
 		WorkflowDispatcher:             workflowDispatcher,
 		GitopsReady:                    gitopsReady,
 		PostgresReady:                  postgresReady,

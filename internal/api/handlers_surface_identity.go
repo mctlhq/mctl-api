@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -46,8 +47,9 @@ import (
 
 // SurfaceActorHeader names the surface-native end user (a Telegram user id,
 // a portal subject) a surface principal is calling for. Only a surface
-// principal may send it. Rate limits key a surface principal's budget on
-// it, so one end user cannot spend the whole surface's budget.
+// principal may send it. On redeem, the per-user rate limits key the
+// surface principal's budget on it, so one end user cannot spend the whole
+// surface's budget; on a relay route they count against the linked human.
 const SurfaceActorHeader = "X-MCTL-Surface-Actor"
 
 const (
@@ -64,22 +66,48 @@ const (
 	sidMaxBodyBytes         = 4 << 10
 )
 
-// surfaceRoutes are the only routes a surface principal may call. Anything
-// else answers 403 before any handler runs: a surface credential is a narrow
-// relay capability, not an API key.
-var surfaceRoutes = []struct {
+// surfaceRoute is one route a surface principal may call. relay routes run
+// as the linked human (the subject), never as the surface principal; the
+// rest run as the surface principal itself.
+type surfaceRoute struct {
 	method  string
 	pattern *regexp.Regexp
-}{
-	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-identities/redeem$`)},
+	relay   bool
 }
 
-// surfacePrincipalGate confines surface principals to surfaceRoutes and
-// refuses the surface-actor header from anyone else.
+// surfaceRoutes are the only routes a surface principal may call. Anything
+// else answers 403 before any handler runs: a surface credential is a narrow
+// relay capability, not an API key. Relay is opt-in per route, here.
+var surfaceRoutes = []surfaceRoute{
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-identities/redeem$`), false},
+	// Human input (mctl-api#261): see and answer what the linked human may.
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/human-input$`), true},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/human-input/[^/]+$`), true},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/human-input/[^/]+/response$`), true},
+	// Work items (workitem/v1): the surface operations of the contract.
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items$`), true},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+$`), true},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/intents$`), true},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/resume$`), true},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/surface-refs$`), true},
+}
+
+const (
+	sidCodeRelayRequired = "relay_required"
+	sidCodeLinkRevoked   = "link_revoked"
+	sidCodeLinkExpired   = "link_expired"
+)
+
+// surfacePrincipalGate confines surface principals to surfaceRoutes, turns a
+// relay route's surface principal into the linked human, and refuses the
+// surface-actor header from anyone else.
 //
-// It runs before the rate limiters, whose keys trust the header only
-// because it has passed here.
-func surfacePrincipalGate(next http.Handler) http.Handler {
+// Relay resolves here, in one place, rather than per route: a relay route
+// can then never be reached by a surface principal as itself. The
+// header-keyed rate limiters run after the gate and trust the header only
+// because it has passed here; the per-surface ceiling deliberately runs
+// before it (see router.go).
+func (h *Handlers) surfacePrincipalGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
 		if user == nil {
@@ -97,28 +125,99 @@ func surfacePrincipalGate(next http.Handler) http.Handler {
 			return
 		}
 		for _, route := range surfaceRoutes {
-			if r.Method == route.method && route.pattern.MatchString(r.URL.Path) {
-				// The rate limiters key on this value: it must be one of
-				// the surface's own ids, not arbitrary bytes.
-				if actor := r.Header.Get(SurfaceActorHeader); actor != "" && !surfaceid.ValidExternalID(surface, actor) {
+			if r.Method != route.method || !route.pattern.MatchString(r.URL.Path) {
+				continue
+			}
+			// The rate limiters key on this value: it must be one of the
+			// surface's own ids, not arbitrary bytes.
+			if actor := r.Header.Get(SurfaceActorHeader); actor != "" && !surfaceid.ValidExternalID(surface, actor) {
+				writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid,
+					SurfaceActorHeader+" is not a valid "+surface+" identity", nil)
+				return
+			}
+			if !route.relay {
+				// Redeem: the surface acts as itself, naming the identity
+				// it observed. Required here, so no limiter ever keys on
+				// an absent one.
+				if r.Header.Get(SurfaceActorHeader) == "" {
 					writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid,
-						SurfaceActorHeader+" is not a valid "+surface+" identity", nil)
+						SurfaceActorHeader+" must name the "+surface+" identity", nil)
 					return
 				}
 				next.ServeHTTP(w, r)
 				return
 			}
+			subject, ok := h.relaySubject(w, r, user)
+			if !ok {
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), subject)))
+			return
 		}
 		writeErrorCode(w, http.StatusForbidden, sidCodeRouteNotAllowed,
 			"a surface principal may not call "+r.Method+" "+r.URL.Path, nil)
 	})
 }
 
+// relaySubject resolves the human a surface principal speaks for: the
+// verified link for (its own surface, the X-MCTL-Surface-Actor id). Every
+// gap fails closed with a typed 403, or 503 when links cannot be read.
+func (h *Handlers) relaySubject(w http.ResponseWriter, r *http.Request, acting *auth.User) (*auth.User, bool) {
+	surface, _ := acting.Surface()
+	externalID := r.Header.Get(SurfaceActorHeader)
+	refuse := func(code, msg string) (*auth.User, bool) {
+		h.logAudit(r, audit.Entry{
+			UserID: acting.ID, Operation: "surface_identity.relay_refused", Status: "failed",
+			RiskLevel:  string(operations.RiskMedium),
+			Parameters: map[string]string{"acting_principal": acting.ID, "surface": surface, "external_id": externalID, "reason": code},
+		})
+		writeErrorCode(w, http.StatusForbidden, code, msg, nil)
+		return nil, false
+	}
+	if externalID == "" {
+		return refuse(sidCodeRelayRequired, "a surface principal must name the linked actor in "+SurfaceActorHeader)
+	}
+	if h.opts.SurfaceIdentities == nil {
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "surface identity store not configured", nil)
+		return nil, false
+	}
+	link, err := h.opts.SurfaceIdentities.Resolve(r.Context(), surface, externalID)
+	switch {
+	case errors.Is(err, surfaceid.ErrLinkRevoked):
+		return refuse(sidCodeLinkRevoked, "the link for this "+surface+" identity was revoked")
+	case errors.Is(err, surfaceid.ErrLinkExpired):
+		return refuse(sidCodeLinkExpired, "the link for this "+surface+" identity expired")
+	case errors.Is(err, surfaceid.ErrLinkNotFound):
+		return refuse(sidCodeNotFound, "no verified link for this "+surface+" identity")
+	case err != nil:
+		slog.Error("surface relay resolve failed", "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not resolve the surface identity", nil)
+		return nil, false
+	}
+	login, isGitHub := strings.CutPrefix(link.Principal, "github:")
+	if !isGitHub || login == "" {
+		return refuse(sidCodeNotFound, "the link does not name a GitHub principal")
+	}
+	var groups []string
+	if h.opts.TenantResolver != nil {
+		// Same as authentication: a failed lookup grants no tenant, even
+		// if the resolver returned a partial list alongside the error.
+		if g, err := h.opts.TenantResolver.GetTenantsForUser(login); err != nil {
+			slog.Warn("surface relay: tenant lookup failed; relaying with no tenant access", "subject", link.Principal, "error", err)
+		} else {
+			groups = g
+		}
+	}
+	// Never nil here: acting is a surface principal and login is set.
+	return auth.NewRelayedUser(login, groups, acting), true
+}
+
 // humanPrincipal is the principal a caller may link: a GitHub login proven
 // by authentication, and nothing else (not the service principal, not a
 // surface, not a Dex username).
 func humanPrincipal(u *auth.User) (string, bool) {
-	if u.IsService() {
+	if u.IsService() || u.ActingPrincipal() != "" {
+		// Nor a relayed subject: a link is made by the human directly.
 		return "", false
 	}
 	if _, isSurface := u.Surface(); isSurface {
@@ -283,6 +382,14 @@ func (h *Handlers) RedeemSurfaceChallenge(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "could not redeem the challenge")
 		return
 	}
+	if old := link.Retired; old != nil {
+		// Retiring someone's expired link is a state change like any
+		// revoke: it leaves a trace.
+		h.auditSurfaceIdentity(r, user, "surface_identity.revoked", "succeeded", map[string]string{
+			"link_id": old.ID, "surface": old.Surface, "external_id": old.ExternalID,
+			"subject": old.Principal, "revoked_by": old.RevokedBy,
+		})
+	}
 	params["link_id"] = link.ID
 	params["subject"] = link.Principal
 	h.auditSurfaceIdentity(r, user, "surface_identity.linked", "succeeded", params)
@@ -296,18 +403,20 @@ func (h *Handlers) ListSurfaceIdentities(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	// Same reading as revoke: a GitHub-proven human first, and only then,
+	// if an admin, anyone's links.
+	own, ok := humanPrincipal(user)
+	if !ok {
+		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only a human authenticated by GitHub has links", nil)
+		return
+	}
 	principal := r.URL.Query().Get("principal")
 	switch {
-	case principal != "" && (!user.IsAdmin() || user.IsService()):
+	case principal == "":
+		principal = own
+	case principal != own && !user.IsAdmin():
 		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only an admin may list another principal's links", nil)
 		return
-	case principal == "":
-		p, ok := humanPrincipal(user)
-		if !ok {
-			writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only a human authenticated by GitHub has links", nil)
-			return
-		}
-		principal = p
 	}
 	links, err := h.opts.SurfaceIdentities.Links(r.Context(), principal)
 	if err != nil {

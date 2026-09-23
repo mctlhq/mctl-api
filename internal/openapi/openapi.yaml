@@ -648,6 +648,7 @@ components:
         from_state: {type: string}
         to_state: {type: string}
         actor_principal: {type: string}
+        acting_principal: {type: string, description: 'The surface principal (surface:<name>) that relayed the change for actor_principal; absent when not relayed'}
         surface: {type: string}
         request_id: {type: string}
         detail: {type: object}
@@ -3019,7 +3020,18 @@ tags:
   - name: Platform Skills
     description: Platform-wide skill catalog and tenant bindings
   - name: Surface Identity
-    description: Verified links between surface-native identities and human principals (mctl-api#350)
+    description: |
+      Verified links between surface-native identities and human principals
+      (mctl-api#350). A surface principal (`surface:telegram`,
+      `surface:portal`) calling a relay route names the end user in the
+      `X-MCTL-Surface-Actor` header; the request then runs as the linked
+      human (never admin) and is audited with both identities. Relay routes:
+      GET /api/v1/human-input, GET /api/v1/human-input/{request_id},
+      POST /api/v1/human-input/{request_id}/response, POST /api/v1/work-items,
+      GET /api/v1/work-items/{id}, POST /api/v1/work-items/{id}/intents,
+      POST /api/v1/work-items/{id}/resume, POST /api/v1/work-items/{id}/surface-refs.
+      Unknown, revoked or expired links, another surface's link, or a missing
+      header answer 403; the header from any other caller answers 400.
   - name: Roadmap
     description: Read-only roadmap publication (epic status and ready work items)
   - name: Agent Registry
