@@ -40,8 +40,11 @@ const (
 func (h *Handlers) roadmapPublication(w http.ResponseWriter) (*roadmap.Publication, bool) {
 	pub, err := h.opts.Roadmap.Current()
 	if err != nil {
+		// The detail (paths, git output) goes to the log; the caller needs
+		// only to know nothing verified, which means "cannot say".
 		slog.Warn("roadmap publication unavailable", "error", err)
-		writeErrorCode(w, http.StatusServiceUnavailable, roadmapCodeUnavailable, err.Error(), nil)
+		writeErrorCode(w, http.StatusServiceUnavailable, roadmapCodeUnavailable,
+			"no verified roadmap publication: readiness is unknown, not empty", nil)
 		return nil, false
 	}
 	return pub, true

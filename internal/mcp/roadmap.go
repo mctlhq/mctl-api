@@ -16,7 +16,9 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -50,11 +52,7 @@ Read-only: it never labels, approves, starts a DevLoop or writes to GitHub. Read
 		if epic == "" {
 			return mcplib.NewToolResultError("missing required argument: epic"), nil
 		}
-		body, err := s.apiGet(ctx, "/api/v1/roadmap/epic-status?"+url.Values{"epic": {epic}}.Encode())
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to read epic status: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
+		return s.roadmapFetch(ctx, "/api/v1/roadmap/epic-status?"+url.Values{"epic": {epic}}.Encode(), "epic status")
 	}
 	return tool, handler
 }
@@ -72,8 +70,8 @@ required_only defaults to true — the safe wave-selection default. Several item
 		mcplib.WithString("epic",
 			mcplib.Description(`Epic name or root issue ("mctlhq/.github#42"). Omit for every active epic.`),
 		),
-		mcplib.WithString("required_only",
-			mcplib.Description(`"false" to include optional items. Defaults to true.`),
+		mcplib.WithBoolean("required_only",
+			mcplib.Description(`false to include optional items. Defaults to true.`),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -81,18 +79,54 @@ required_only defaults to true — the safe wave-selection default. Several item
 		if epic := strings.TrimSpace(stringArg(req, "epic")); epic != "" {
 			q.Set("epic", epic)
 		}
-		if v := strings.TrimSpace(stringArg(req, "required_only")); v != "" {
-			q.Set("required_only", v)
+		// A boolean is the declared type; a string is still accepted so a
+		// client sending "false" is not silently answered as if it sent nothing.
+		switch v := req.GetArguments()["required_only"].(type) {
+		case bool:
+			q.Set("required_only", fmt.Sprint(v))
+		case string:
+			if v = strings.TrimSpace(v); v != "" {
+				q.Set("required_only", v)
+			}
+		case nil:
+		default:
+			return mcplib.NewToolResultError("required_only must be a boolean"), nil
 		}
 		path := "/api/v1/roadmap/ready"
 		if len(q) > 0 {
 			path += "?" + q.Encode()
 		}
-		body, err := s.apiGet(ctx, path)
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to read ready work items: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
+		return s.roadmapFetch(ctx, path, "ready work items")
 	}
 	return tool, handler
+}
+
+// roadmapFetch keeps the answers that mean different things apart: 503 is
+// "cannot say", 404 is "no such epic", and neither is "nothing is ready".
+func (s *Server) roadmapFetch(ctx context.Context, path, what string) (*mcplib.CallToolResult, error) {
+	body, status, err := s.apiGetStatus(ctx, path)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("Failed to read %s: %v", what, err)), nil
+	}
+	if status < 400 {
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	var apiErr struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	_ = json.Unmarshal(body, &apiErr)
+	switch {
+	case status == http.StatusServiceUnavailable:
+		return mcplib.NewToolResultError(fmt.Sprintf(
+			"Roadmap publication unavailable (HTTP 503): readiness is UNKNOWN, not empty. Do not read this as \"nothing is ready\". %s", apiErr.Error)), nil
+	case status == http.StatusNotFound && apiErr.Code == "epic_not_found":
+		return mcplib.NewToolResultError(fmt.Sprintf("Epic not found in the roadmap publication: %s", apiErr.Error)), nil
+	default:
+		msg := apiErr.Error
+		if msg == "" {
+			msg = strings.TrimSpace(string(body))
+		}
+		return mcplib.NewToolResultError(fmt.Sprintf("Failed to read %s (HTTP %d): %s", what, status, msg)), nil
+	}
 }

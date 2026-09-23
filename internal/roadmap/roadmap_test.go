@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -213,6 +214,9 @@ func TestAcceptanceExamplesFollowThePublication(t *testing.T) {
 	if err != nil || !bytes.Equal(byName.Readiness, byIssue.Readiness) {
 		t.Fatalf("root issue and name disagree: %v", err)
 	}
+	if folded, err := pub.EpicStatus(strings.ToUpper(byIssue.Epic.Name), liveNow); err != nil || folded.Epic.Name != byIssue.Epic.Name {
+		t.Fatalf("name lookup is not case-insensitive like the issue lookup: %v", err)
+	}
 	if _, err := pub.EpicStatus("no-such-epic", liveNow); !errors.Is(err, ErrEpicNotFound) {
 		t.Fatalf("unknown epic: %v", err)
 	}
@@ -296,6 +300,24 @@ func TestAnythingUnverifiedIsRefused(t *testing.T) {
 			editJSON(t, files, PublicationFile, func(doc map[string]any) {
 				delete(doc["manifests"].([]any)[0].(map[string]any)["epic"].(map[string]any), "lifecycle")
 			})
+		},
+		"a manifest without a digest": func(t *testing.T, files map[string][]byte) {
+			editJSON(t, files, PublicationFile, func(doc map[string]any) {
+				for _, m := range doc["manifests"].([]any) {
+					m.(map[string]any)["sha256"] = ""
+				}
+			})
+			editJSON(t, files, ReadySetFile, func(doc map[string]any) {
+				for _, d := range doc["items"].([]any) {
+					d.(map[string]any)["epic"].(map[string]any)["manifest"].(map[string]any)["sha256"] = ""
+				}
+			})
+			editJSON(t, files, HealthFile, func(doc map[string]any) {
+				for _, d := range doc["items"].([]any) {
+					d.(map[string]any)["epic"].(map[string]any)["manifest"].(map[string]any)["sha256"] = ""
+				}
+			})
+			resign(t, files)
 		},
 		"a live capture without capturedAt": func(t *testing.T, files map[string][]byte) {
 			editJSON(t, files, PublicationFile, func(doc map[string]any) {
@@ -389,6 +411,15 @@ func TestReaderReverifiesOnlyWhenTheCheckoutMovesAndNeverServesStale(t *testing.
 	}
 	if _, err := r.Current(); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("broken publication, asked again: err = %v", err)
+	}
+	if src.reads != 2 {
+		t.Fatalf("a broken revision was re-verified on every call: reads=%d", src.reads)
+	}
+	// It moves again, to a good publication: served at once.
+	src.rev = "c"
+	src.files = liveFiles(t)
+	if _, err := r.Current(); err != nil {
+		t.Fatalf("repaired publication: %v", err)
 	}
 	var nilReader *Reader
 	if _, err := nilReader.Current(); !errors.Is(err, ErrUnavailable) {

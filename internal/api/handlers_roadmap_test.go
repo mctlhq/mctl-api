@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -73,8 +74,12 @@ func TestRoadmap_UnconfiguredOrBrokenAnswers503(t *testing.T) {
 		"broken":       {opts: Options{Roadmap: roadmap.NewReader(roadmapDirSource{dir: t.TempDir()})}},
 	} {
 		for _, path := range []string{"/api/v1/roadmap/epics", "/api/v1/roadmap/ready", "/api/v1/roadmap/epic-status?epic=x"} {
-			if code, body := roadmapGet(t, h, path); code != http.StatusServiceUnavailable || body["code"] != "roadmap_unavailable" {
+			code, body := roadmapGet(t, h, path)
+			if code != http.StatusServiceUnavailable || body["code"] != "roadmap_unavailable" {
 				t.Errorf("%s %s = %d %v", name, path, code, body)
+			}
+			if msg, _ := body["error"].(string); strings.Contains(msg, "/") {
+				t.Errorf("%s %s leaks local detail: %q", name, path, msg)
 			}
 		}
 	}
@@ -95,6 +100,10 @@ func TestRoadmap_EpicStatusAndReady(t *testing.T) {
 		t.Fatalf("provenance = %v", prov)
 	}
 
+	code, list := roadmapGet(t, h, "/api/v1/roadmap/epics")
+	if epics, _ := list["epics"].([]any); code != http.StatusOK || len(epics) == 0 || list["provenance"] == nil {
+		t.Fatalf("epics = %d %v", code, list)
+	}
 	if code, _ := roadmapGet(t, h, "/api/v1/roadmap/epic-status"); code != http.StatusBadRequest {
 		t.Errorf("missing epic = %d", code)
 	}

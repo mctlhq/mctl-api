@@ -279,6 +279,9 @@ func Parse(files map[string][]byte, revision string) (*Publication, error) {
 	}
 	names := map[string]bool{}
 	for _, m := range pub.Manifests {
+		if m.SHA256 == "" {
+			return nil, unavailable("manifest %s carries no digest", m.Path)
+		}
 		if m.Epic == nil || m.Epic.Name == "" || m.Epic.Lifecycle == "" {
 			return nil, unavailable("manifest %s carries no epic identity", m.Path)
 		}
@@ -404,7 +407,7 @@ func (p *Publication) Provenance(now time.Time) Provenance {
 func (p *Publication) find(key string) (*epicEntry, error) {
 	key = strings.TrimSpace(key)
 	for _, e := range p.epics {
-		if e.epic.Name == key || (e.epic.Issue != nil && strings.EqualFold(e.epic.Issue.String(), key)) {
+		if strings.EqualFold(e.epic.Name, key) || (e.epic.Issue != nil && strings.EqualFold(e.epic.Issue.String(), key)) {
 			return e, nil
 		}
 	}
@@ -465,8 +468,12 @@ func (p *Publication) Epics() []Epic {
 type Reader struct {
 	src FileSource
 
-	mu     sync.Mutex
-	cached *Publication
+	mu sync.Mutex
+	// The answer for one revision, good or bad: a publication that failed
+	// verification is re-read only when the checkout moves.
+	cachedRev string
+	cached    *Publication
+	cachedErr error
 }
 
 // NewReader wraps a file source.
@@ -485,17 +492,15 @@ func (r *Reader) Current() (*Publication, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.cached != nil && r.cached.revision == rev {
-		return r.cached, nil
+	if r.cachedRev != "" && r.cachedRev == rev {
+		return r.cached, r.cachedErr
 	}
 	files, readRev, err := r.src.ReadFiles(PublicationFile, SnapshotFile, ReadySetFile, HealthFile)
 	if err != nil {
+		// Not cached: a read error is about the checkout, not the revision.
 		return nil, unavailable("roadmap-state checkout: %v", err)
 	}
 	pub, err := Parse(files, readRev)
-	if err != nil {
-		return nil, err
-	}
-	r.cached = pub
-	return pub, nil
+	r.cachedRev, r.cached, r.cachedErr = readRev, pub, err
+	return pub, err
 }

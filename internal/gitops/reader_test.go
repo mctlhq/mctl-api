@@ -1462,4 +1462,31 @@ func TestReadFilesReturnsOneCheckoutAndRefusesPaths(t *testing.T) {
 	if _, _, err := r.ReadFiles("missing.json"); err == nil {
 		t.Error("a missing file read as present")
 	}
+	outside := filepath.Join(root, "outside.json")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(cache, "link.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.ReadFiles("link.json"); err == nil {
+		t.Error("a symlink out of the checkout was followed")
+	}
+	// Before any sync there is no revision to report.
+	if _, err := (&Reader{localPath: filepath.Join(root, "never")}).Revision(); err == nil {
+		t.Error("an unsynced reader reported a revision")
+	}
+	// The revision tracks what a refresh put on disk.
+	if err := os.WriteFile(filepath.Join(work, "publication.json"), []byte(`{"v":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, work, "publish again")
+	runGit(t, work, "push", "origin", "roadmap-state")
+	if err := r.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	next := strings.TrimSpace(runGit(t, work, "rev-parse", "HEAD"))
+	if got, _ := r.Revision(); got != next || got == want {
+		t.Fatalf("after refresh Revision() = %s, want %s", got, next)
+	}
 }

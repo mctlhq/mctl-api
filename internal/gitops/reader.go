@@ -46,6 +46,9 @@ type Reader struct {
 	knownHostsPath string         // Path to a known_hosts file for SSH host-key pinning (optional; empty means "use the shipped embedded default, materialized lazily")
 	mu             sync.RWMutex
 	lastSync       time.Time
+	// head is the commit the checkout is on, recorded at the end of every
+	// refresh under the write lock, so readers never fork git to learn it.
+	head string
 
 	// resolvedKnownHostsPath caches the on-disk path of the materialized
 	// embedded default known_hosts file, computed lazily on first SSH-mode
@@ -231,6 +234,15 @@ func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
 func (r *Reader) refresh() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Whatever happens below, head ends up naming what is on disk: a failed
+	// fetch leaves the old checkout (and its head) in place, a failed reset
+	// may not, and an absent checkout has none.
+	defer func() {
+		r.head = ""
+		if out, err := r.gitOutput(nil, "rev-parse", "HEAD"); err == nil {
+			r.head = strings.TrimSpace(string(out))
+		}
+	}()
 
 	// Resolve the credential once, here, and store it for the duration of this
 	// refresh. Everything downstream — the clone URL below and redactTokenLocked,
@@ -759,7 +771,8 @@ func (r *Reader) LastSync() time.Time {
 	return r.lastSync
 }
 
-// Revision returns the commit the checkout is on.
+// Revision returns the commit the checkout is on, as the last refresh
+// recorded it.
 func (r *Reader) Revision() (string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -767,11 +780,10 @@ func (r *Reader) Revision() (string, error) {
 }
 
 func (r *Reader) revisionLocked() (string, error) {
-	out, err := r.gitOutput(nil, "rev-parse", "HEAD")
-	if err != nil {
-		return "", fmt.Errorf("reading checkout revision: %w", err)
+	if r.head == "" {
+		return "", errors.New("no checkout revision: the repository has not been synced")
 	}
-	return strings.TrimSpace(string(out)), nil
+	return r.head, nil
 }
 
 // ReadFiles reads top-level files of the checkout together with the commit
@@ -790,7 +802,14 @@ func (r *Reader) ReadFiles(names ...string) (map[string][]byte, string, error) {
 		if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
 			return nil, "", fmt.Errorf("invalid file name %q", name)
 		}
-		data, err := os.ReadFile(filepath.Join(r.localPath, name)) //nolint:gosec // name is a plain file name, checked above
+		path := filepath.Join(r.localPath, name)
+		// A committed symlink would otherwise be followed out of the checkout.
+		if info, err := os.Lstat(path); err != nil {
+			return nil, "", err
+		} else if !info.Mode().IsRegular() {
+			return nil, "", fmt.Errorf("%s is not a regular file", name)
+		}
+		data, err := os.ReadFile(path) //nolint:gosec // plain file name, regular file inside the checkout
 		if err != nil {
 			return nil, "", err
 		}
