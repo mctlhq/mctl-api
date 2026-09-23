@@ -382,3 +382,39 @@ func TestRoadmapWave_NoCaptureTimeIsNeverFresh(t *testing.T) {
 		}
 	}
 }
+
+// With no roadmap reader (ROADMAP_STATE_DISABLED) both routes answer
+// roadmap_unavailable, and an execute of an unknown epic is refused, audited,
+// and starts nothing.
+func TestRoadmapWave_NoReaderAndUnknownEpicAreAuditedRefusals(t *testing.T) {
+	e := newWaveEnv(t)
+	_, exec := e.plan("enterprise-mcp")
+	stale := map[string]any{}
+	for k, v := range exec {
+		stale[k] = v
+	}
+	stale["epic"] = "no-such-epic"
+	if code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", stale); code != http.StatusNotFound || out["code"] != roadmapCodeEpicNotFound {
+		t.Errorf("unknown epic: %d %v", code, out)
+	}
+
+	e.h.opts.Roadmap = nil
+	if code, out := e.post(waveUser, "/api/v1/roadmap/waves/plan", map[string]any{"epic": "enterprise-mcp"}); code != http.StatusServiceUnavailable || out["code"] != roadmapCodeUnavailable {
+		t.Errorf("plan without a reader: %d %v", code, out)
+	}
+	if code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", exec); code != http.StatusServiceUnavailable || out["code"] != roadmapCodeUnavailable {
+		t.Errorf("execute without a reader: %d %v", code, out)
+	}
+	if len(e.tc.started) != 0 {
+		t.Fatalf("started %v", e.tc.started)
+	}
+	reasons := map[string]bool{}
+	for _, a := range e.audit.List(100) {
+		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" {
+			reasons[a.Parameters["reason"]] = true
+		}
+	}
+	if !reasons[roadmapCodeEpicNotFound] || !reasons[roadmapCodeUnavailable] {
+		t.Errorf("audited refusals = %v", reasons)
+	}
+}

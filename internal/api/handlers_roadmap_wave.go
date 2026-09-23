@@ -124,6 +124,20 @@ func waveFreshness(prov roadmap.Provenance, maxAge time.Duration) (fresh bool, r
 	return true, ""
 }
 
+// wavePlanErrorCode is the typed code writeWavePlanError answers err with.
+func wavePlanErrorCode(err error) string {
+	var sel *roadmap.SelectionError
+	switch {
+	case errors.As(err, &sel):
+		return roadmapCodeInvalidSelection
+	case errors.Is(err, roadmap.ErrEpicNotFound):
+		return roadmapCodeEpicNotFound
+	case errors.Is(err, roadmap.ErrUnavailable):
+		return roadmapCodeUnavailable
+	}
+	return "internal_error"
+}
+
 func writeWavePlanError(w http.ResponseWriter, err error) {
 	var sel *roadmap.SelectionError
 	switch {
@@ -223,7 +237,7 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	refuse := func(status int, code, msg string, details map[string]any) {
+	auditRefusal := func(code, msg string) {
 		h.logAudit(r, audit.Entry{
 			UserID: user.ID, Operation: "roadmap-wave-execute", Status: "failed",
 			RiskLevel: string(operations.RiskMedium),
@@ -233,6 +247,9 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 			},
 			Message: msg,
 		})
+	}
+	refuse := func(status int, code, msg string, details map[string]any) {
+		auditRefusal(code, msg)
 		writeErrorCode(w, status, code, msg, details)
 	}
 	if h.waveMaxAge() < 0 {
@@ -264,11 +281,8 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 	// 4. Exactly the planned selection and provenance.
 	plan, err := pub.PlanWave(req, temporalclient.WorkflowIDForIssueURL, waveNow())
 	if err != nil {
-		var sel *roadmap.SelectionError
-		if errors.As(err, &sel) {
-			refuse(http.StatusConflict, roadmapCodeInvalidSelection, err.Error(), map[string]any{"refused": sel.Refused})
-			return
-		}
+		// Every refused execution is audited, whatever the planning error.
+		auditRefusal(wavePlanErrorCode(err), err.Error())
 		writeWavePlanError(w, err)
 		return
 	}
