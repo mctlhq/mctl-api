@@ -18,11 +18,14 @@ import (
 //
 // One immutable snapshot per execution, INSERT-only:
 //
-//   - the id is derived from the content hash, and the stored hash is
-//     recomputed from the stored canonical bytes on every write;
+//   - the id is derived from the execution id and the content hash, so two
+//     executions that seal identical bytes are two snapshots, and the
+//     stored hash is recomputed from the stored bytes on every write and
+//     read;
 //   - the retry identity is the execution id: the same execution with the
-//     same bytes is the same snapshot (a replay), the same execution with
-//     different bytes is ErrSnapshotDivergence — never a second snapshot;
+//     same bytes and claims is the same snapshot (a replay), the same
+//     execution with different bytes or claims is ErrSnapshotDivergence —
+//     never a second snapshot;
 //   - a new execution (a new attempt the work-item layer created) may seal
 //     its own snapshot, naming the prior execution/snapshot it continues;
 //   - no route or method updates or deletes a snapshot, and a trigger
@@ -235,8 +238,12 @@ func (s *Store) SealSnapshot(ctx context.Context, in SnapshotInput) (*ContextSna
 				return &ConflictError{Err: fmt.Errorf("%w: execution %s sealed %s, not %s",
 					ErrSnapshotDivergence, exec.ID, existing.ContentHash, in.ContentHash), Current: cur}
 			}
+			priorExec, err := resolvePriorExecution(ctx, tx, cur.ID, in)
+			if err != nil {
+				return err
+			}
 			if existing.Strategy != in.Strategy || existing.StrategyVersion != in.StrategyVersion ||
-				existing.PriorExecutionID != in.PriorExecutionID || existing.PriorSnapshotID != in.PriorSnapshotID {
+				existing.PriorExecutionID != priorExec || existing.PriorSnapshotID != in.PriorSnapshotID {
 				return &ConflictError{Err: fmt.Errorf("%w: execution %s sealed these bytes with a different strategy or prior reference",
 					ErrSnapshotDivergence, exec.ID), Current: cur}
 			}
@@ -245,14 +252,15 @@ func (s *Store) SealSnapshot(ctx context.Context, in SnapshotInput) (*ContextSna
 		case !errors.Is(err, pgx.ErrNoRows):
 			return fmt.Errorf("workitems: find snapshot: %w", err)
 		}
-		if err := checkPrior(ctx, tx, cur, exec, in); err != nil {
+		priorExec, err := checkPrior(ctx, tx, cur, exec, in)
+		if err != nil {
 			return err
 		}
 		now := s.now()
 		out, err = scanSnapshot(tx.QueryRow(ctx, `INSERT INTO work_item_context_snapshots (`+snapshotColumns+`)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING `+snapshotColumns,
 			SnapshotIDFor(exec.ID, in.ContentHash), cur.ID, exec.ID, exec.Attempt, in.ContentHash, in.Canonical,
-			in.Strategy, in.StrategyVersion, in.PriorExecutionID, in.PriorSnapshotID, in.Actor, now, SchemaVersion))
+			in.Strategy, in.StrategyVersion, priorExec, in.PriorSnapshotID, in.Actor, now, SchemaVersion))
 		if err != nil {
 			return fmt.Errorf("workitems: insert snapshot: %w", err)
 		}
@@ -269,39 +277,59 @@ func (s *Store) SealSnapshot(ctx context.Context, in SnapshotInput) (*ContextSna
 	return out, created, nil
 }
 
+// resolvePriorExecution is the prior execution a seal names, directly or
+// through its prior snapshot: the form stored, so a replay naming the same
+// prior either way compares equal. An unresolvable reference resolves to
+// what was sent, which a stored row can then only match by being the same.
+func resolvePriorExecution(ctx context.Context, tx pgx.Tx, itemID string, in SnapshotInput) (string, error) {
+	if in.PriorExecutionID != "" || in.PriorSnapshotID == "" {
+		return in.PriorExecutionID, nil
+	}
+	prior, err := getSnapshot(ctx, tx, itemID, in.PriorSnapshotID)
+	if errors.Is(err, ErrSnapshotNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return prior.ExecutionID, nil
+}
+
 // checkPrior fails explicitly on a missing or stale continuity reference:
-// it must exist on this work item and precede this execution.
-func checkPrior(ctx context.Context, tx pgx.Tx, cur *WorkItem, exec *Execution, in SnapshotInput) error {
+// it must exist on this work item and precede this execution. It returns
+// the prior execution, resolved through the prior snapshot when only that
+// was named.
+func checkPrior(ctx context.Context, tx pgx.Tx, cur *WorkItem, exec *Execution, in SnapshotInput) (string, error) {
 	priorExec := in.PriorExecutionID
 	if in.PriorSnapshotID != "" {
 		prior, err := getSnapshot(ctx, tx, cur.ID, in.PriorSnapshotID)
 		if errors.Is(err, ErrSnapshotNotFound) {
-			return &ConflictError{Err: fmt.Errorf("%w: no snapshot %s on %s", ErrPriorSnapshot, in.PriorSnapshotID, cur.ID), Current: cur}
+			return "", &ConflictError{Err: fmt.Errorf("%w: no snapshot %s on %s", ErrPriorSnapshot, in.PriorSnapshotID, cur.ID), Current: cur}
 		}
 		if err != nil {
-			return err
+			return "", err
 		}
 		if priorExec != "" && priorExec != prior.ExecutionID {
-			return &ConflictError{Err: fmt.Errorf("%w: snapshot %s belongs to %s, not %s",
+			return "", &ConflictError{Err: fmt.Errorf("%w: snapshot %s belongs to %s, not %s",
 				ErrPriorSnapshot, prior.ID, prior.ExecutionID, priorExec), Current: cur}
 		}
 		priorExec = prior.ExecutionID
 	}
 	if priorExec == "" {
-		return nil
+		return "", nil
 	}
 	pe, err := getExecution(ctx, tx, cur.ID, priorExec)
 	if errors.Is(err, ErrNotFound) {
-		return &ConflictError{Err: fmt.Errorf("%w: no execution %s on %s", ErrPriorSnapshot, priorExec, cur.ID), Current: cur}
+		return "", &ConflictError{Err: fmt.Errorf("%w: no execution %s on %s", ErrPriorSnapshot, priorExec, cur.ID), Current: cur}
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	if pe.Attempt >= exec.Attempt {
-		return &ConflictError{Err: fmt.Errorf("%w: execution %s (attempt %d) does not precede %s (attempt %d)",
+		return "", &ConflictError{Err: fmt.Errorf("%w: execution %s (attempt %d) does not precede %s (attempt %d)",
 			ErrPriorSnapshot, pe.ID, pe.Attempt, exec.ID, exec.Attempt), Current: cur}
 	}
-	return nil
+	return priorExec, nil
 }
 
 // Snapshot returns one snapshot of a work item, verified against its hash.
@@ -341,21 +369,44 @@ func (s *Store) LatestSnapshot(ctx context.Context, itemID string) (*SnapshotRef
 	return &ref, nil
 }
 
-// Snapshots lists a work item's snapshots, oldest execution first.
-func (s *Store) Snapshots(ctx context.Context, itemID string) ([]ContextSnapshot, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+snapshotColumns+` FROM work_item_context_snapshots
-		WHERE work_item_id=$1 ORDER BY execution_sequence`, itemID)
+// SnapshotSummary is a snapshot's metadata without its bytes: the list
+// shape, so listing a long-lived item never carries megabytes. The bytes
+// come only from a single-snapshot read.
+type SnapshotSummary struct {
+	ID                string    `json:"id"`
+	WorkItemID        string    `json:"work_item_id"`
+	ExecutionID       string    `json:"execution_id"`
+	ExecutionSequence int       `json:"execution_sequence"`
+	ContentHash       string    `json:"content_hash"`
+	Strategy          string    `json:"strategy"`
+	StrategyVersion   string    `json:"strategy_version"`
+	PriorExecutionID  string    `json:"prior_execution_id,omitempty"`
+	PriorSnapshotID   string    `json:"prior_snapshot_id,omitempty"`
+	ProducedBy        string    `json:"produced_by"`
+	CreatedAt         time.Time `json:"created_at"`
+	SchemaVersion     string    `json:"schema_version"`
+}
+
+// Snapshots lists a work item's snapshots, oldest execution first, without
+// their bytes.
+func (s *Store) Snapshots(ctx context.Context, itemID string) ([]SnapshotSummary, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, work_item_id, execution_id, execution_sequence, content_hash,
+		strategy, strategy_version, prior_execution_id, prior_snapshot_id, produced_by, created_at, schema_version
+		FROM work_item_context_snapshots WHERE work_item_id=$1 ORDER BY execution_sequence`, itemID)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: list snapshots: %w", err)
 	}
 	defer rows.Close()
-	out := []ContextSnapshot{}
+	out := []SnapshotSummary{}
 	for rows.Next() {
-		c, err := scanSnapshot(rows)
-		if err != nil {
+		var c SnapshotSummary
+		if err := rows.Scan(&c.ID, &c.WorkItemID, &c.ExecutionID, &c.ExecutionSequence, &c.ContentHash,
+			&c.Strategy, &c.StrategyVersion, &c.PriorExecutionID, &c.PriorSnapshotID, &c.ProducedBy,
+			&c.CreatedAt, &c.SchemaVersion); err != nil {
 			return nil, fmt.Errorf("workitems: list snapshots: %w", err)
 		}
-		out = append(out, *c)
+		c.CreatedAt = c.CreatedAt.UTC()
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }

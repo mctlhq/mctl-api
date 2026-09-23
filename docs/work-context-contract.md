@@ -109,22 +109,29 @@ may live in different databases.
   `ended_at`. At most one non-terminal execution per work item.
 - **`ContextSnapshot`** — one sealed snapshot per execution
   (mctl-agents#431): `id` (`cs_` + 32 hex of sha256 over the execution id
-and `content_hash`, so byte-identical snapshots of two executions stay two
-snapshots),
-  `execution_id` (unique), `execution_sequence` (must equal the execution's
-  `attempt`; validation only, never the identity), the canonical bytes
-  (opaque to mctl-api, a JSON object carrying its own inner
+  and `content_hash`, so byte-identical snapshots of two executions stay
+  two snapshots), `execution_id` (unique), `execution_sequence` (must equal
+  the execution's `attempt`; validation only, never the identity), the
+  canonical bytes (opaque to mctl-api, a JSON object carrying its own inner
   `schema_version`, at most 1 MiB, served as `canonical_b64`),
   `content_hash` (`sha256:<hex>` of those bytes, verified on every write
   and read), `strategy`, `strategy_version`, `prior_execution_id` /
   `prior_snapshot_id` (continuity; must exist on this item and precede this
-  execution), `produced_by`, `created_at`. Insert-only: no store method or
+  execution; the prior execution is stored resolved through the prior
+  snapshot), `produced_by`, `created_at`. Insert-only: no store method or
   API route updates a snapshot, and a trigger refuses an `UPDATE` of the
-  table. The retry identity is the execution id: the same bytes and
-  claims (strategy, prior references) again return the stored snapshot;
-  different bytes or claims are `snapshot_divergence` (409). A new execution — created by the work-item layer, e.g. a resume —
+  table. The retry identity is the execution id: the same bytes and claims
+  (strategy, strategy version, prior references) again return the stored
+  snapshot; different bytes or claims are `snapshot_divergence` (409). A
+  producer must therefore keep a retry's claims stable — mctl-agents folds
+  its strategy and version into the canonical bytes, so a retry from a
+  newer build is a different snapshot only if it really built a different
+  one. A new execution — created by the work-item layer, e.g. a resume —
   seals its own snapshot; a human-input signal continues the current
-  execution and seals nothing new.
+  execution and seals nothing new. Only a service principal seals; every
+  viewer of the work item may read the bytes, deliberately, since they are
+  the context of that viewer's own work. A listing carries metadata only;
+  the bytes come from a single-snapshot read.
 - **`WorkItemApproval`** — `kind`, `state`
   (`pending` | `granted` | `denied` | `expired`), `signal_engine`,
   `signal_ref`, `signal_name`, `requested_by`, `requested_at`, `decided_by`,
@@ -349,6 +356,10 @@ store in `internal/api/router.go` already follows.
   `WORKITEM_SURFACE_RETENTION_DAYS` while retaining the work item, its
   lifecycle history and its execution/snapshot correlations, and deletes
   terminal work items older than `WORKITEM_RETENTION_DAYS`.
+  Sealed snapshot bytes embed the context an execution was given (intent
+  text included) and cannot be redacted in place (the table refuses
+  `UPDATE`), so the sweeper (#353) deletes `work_item_context_snapshots`
+  rows on the same schedule as intent text.
 
 ## Versioning
 

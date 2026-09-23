@@ -108,7 +108,7 @@ func TestSealSnapshotRefusesDivergenceForTheSameExecution(t *testing.T) {
 	}
 
 	list, err := s.Snapshots(ctx, w.ID)
-	if err != nil || len(list) != 1 || string(list[0].Canonical) != `{"v":1}` {
+	if err != nil || len(list) != 1 || list[0].ContentHash != HashCanonical([]byte(`{"v":1}`)) {
 		t.Fatalf("snapshots = %+v %v", list, err)
 	}
 }
@@ -218,6 +218,19 @@ func TestSealSnapshotNamesOnlyAnEarlierExecutionOfTheSameItem(t *testing.T) {
 	list, err := s.Snapshots(ctx, w.ID)
 	if err != nil || len(list) != 2 || list[0].ID != e1.ID || list[1].ID != e2.ID {
 		t.Fatalf("snapshots = %+v %v", list, err)
+	}
+	// The prior execution is stored resolved, so naming the same prior as
+	// the consistent pair is the same seal, not a divergent one.
+	if e2.PriorExecutionID != first.ID {
+		t.Fatalf("prior execution not resolved: %+v", e2)
+	}
+	if again, created, err := s.SealSnapshot(ctx, in); err != nil || created || again.ID != e2.ID {
+		t.Fatalf("plain replay = %+v %v %v", again, created, err)
+	}
+	in.PriorExecutionID = first.ID
+	again, created, err := s.SealSnapshot(ctx, in)
+	if err != nil || created || again.ID != e2.ID {
+		t.Fatalf("replay naming the pair = %+v %v %v", again, created, err)
 	}
 	// A snapshot of another work item is not a prior here.
 	other, otherFirst, otherSecond := twoExecutions(t, s)

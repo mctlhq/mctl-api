@@ -59,8 +59,12 @@ func TestWorkItemSnapshots_SealReplayDivergeAndRead(t *testing.T) {
 		}
 	}
 	res = e.do(alice, "GET", "/api/v1/work-items/"+id+"/snapshots", nil)
-	if list := res.body["snapshots"].([]any); res.code != http.StatusOK || len(list) != 1 {
+	list := res.body["snapshots"].([]any)
+	if res.code != http.StatusOK || len(list) != 1 {
 		t.Fatalf("list = %d %s", res.code, res.raw)
+	}
+	if _, hasBytes := list[0].(map[string]any)["canonical_b64"]; hasBytes || list[0].(map[string]any)["id"] != snapID {
+		t.Fatalf("a listing carries no bytes: %s", res.raw)
 	}
 	// The item view points at it.
 	res = e.do(alice, "GET", "/api/v1/work-items/"+id, nil)

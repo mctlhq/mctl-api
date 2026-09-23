@@ -641,7 +641,7 @@ components:
           nullable: true
           description: The latest sealed ContextSnapshot, by pointer; null when none is sealed.
           allOf: [{$ref: '#/components/schemas/ContextSnapshotRef'}]
-      required: [schema_version, work_item, state_version, latest_execution]
+      required: [schema_version, work_item, state_version, latest_execution, latest_snapshot]
 
     ContextSnapshotRef:
       type: object
@@ -675,6 +675,24 @@ components:
         created_at: {type: string, format: date-time}
         schema_version: {type: string, enum: [workitem/v1]}
       required: [id, work_item_id, execution_id, execution_sequence, content_hash, canonical_b64, strategy, strategy_version, produced_by, created_at, schema_version]
+
+    ContextSnapshotSummary:
+      type: object
+      description: A ContextSnapshot without `canonical_b64`, as listed.
+      properties:
+        id: {type: string}
+        work_item_id: {type: string}
+        execution_id: {type: string}
+        execution_sequence: {type: integer}
+        content_hash: {type: string}
+        strategy: {type: string}
+        strategy_version: {type: string}
+        prior_execution_id: {type: string}
+        prior_snapshot_id: {type: string}
+        produced_by: {type: string}
+        created_at: {type: string, format: date-time}
+        schema_version: {type: string, enum: [workitem/v1]}
+      required: [id, work_item_id, execution_id, execution_sequence, content_hash, strategy, strategy_version, produced_by, created_at, schema_version]
 
     WorkItemEvent:
       type: object
@@ -3028,7 +3046,10 @@ paths:
                 type: object
                 properties:
                   schema_version: {type: string}
-                  snapshots: {type: array, items: {$ref: '#/components/schemas/ContextSnapshot'}}
+                  snapshots:
+                    type: array
+                    description: Metadata only; read one snapshot for its bytes.
+                    items: {$ref: '#/components/schemas/ContextSnapshotSummary'}
         '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
 
   /api/v1/work-items/{id}/snapshots/{snapshot_id}:
