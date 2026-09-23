@@ -294,12 +294,6 @@ func Parse(files map[string][]byte, revision string) (*Publication, error) {
 			return nil, unavailable("epic %s is published twice", m.Epic.Name)
 		}
 		names[folded] = true
-		if issue := rootIssueKey(ready[m.Path]); issue != "" {
-			if roots[issue] {
-				return nil, unavailable("root issue %s is bound to two epics", issue)
-			}
-			roots[issue] = true
-		}
 		r, ok := ready[m.Path]
 		if !ok {
 			return nil, unavailable("%s has no ready set for %s", ReadySetFile, m.Path)
@@ -314,6 +308,12 @@ func Parse(files map[string][]byte, revision string) (*Publication, error) {
 			if doc.wire.Epic.Manifest.SHA256 != m.SHA256 || doc.wire.Epic.Name != m.Epic.Name {
 				return nil, unavailable("%s was derived from a different manifest than the publication names", m.Path)
 			}
+		}
+		if issue := rootIssueKey(r); issue != "" {
+			if roots[issue] {
+				return nil, unavailable("root issue %s is bound to two epics", issue)
+			}
+			roots[issue] = true
 		}
 		entry := &epicEntry{
 			epic: Epic{
