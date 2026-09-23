@@ -117,6 +117,10 @@ CREATE TABLE IF NOT EXISTS work_item_requests (
     created_at      TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (work_item_id, idempotency_key)
 );
+-- Additive columns for databases created by an earlier revision.
+ALTER TABLE work_item_create_requests ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_item_requests ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS work_item_create_requests_item ON work_item_create_requests (work_item_id);
 `
 
 const itemColumns = `id, tenant, owner_principal, visibility, origin_surface, title, external_key,
@@ -223,9 +227,9 @@ func getItem(ctx context.Context, q querier, id string) (*WorkItem, error) {
 	return w, nil
 }
 
-// Get returns one work item or ErrNotFound. Like Events and Executions it
-// applies no authorization: every HTTP caller gates the result with
-// canSeeWorkItem, the same rule List applies through Viewer and Tenants.
+// Get returns one work item or ErrNotFound. It applies no authorization: the
+// caller checks tenant and visibility, as List does through Tenants and
+// Viewer.
 func (s *Store) Get(ctx context.Context, id string) (*WorkItem, error) {
 	return getItem(ctx, s.pool, id)
 }
@@ -486,6 +490,12 @@ func (s *Store) Resume(ctx context.Context, in ResumeInput) (*WorkItem, *Executi
 		if from == "" && len(execs) > 0 {
 			from = execs[len(execs)-1].ID
 		}
+		// An active item starts its first run with AttachExecution; only a
+		// waiting one may resume with nothing before it, since Resume is
+		// the sole way out of waiting.
+		if len(execs) == 0 && cur.State == StateActive {
+			return invalid("%s has no execution to resume; attach the first one", cur.ID)
+		}
 		if from != "" && !containsExecution(execs, from) {
 			return invalid("resumed_from_execution_id %s is not an execution of %s", from, cur.ID)
 		}
@@ -591,7 +601,8 @@ func listExecutions(ctx context.Context, q rowsQuerier, itemID string) ([]Execut
 	return out, rows.Err()
 }
 
-// Executions lists a work item's executions, oldest attempt first.
+// Executions lists a work item's executions, oldest attempt first. No
+// authorization: the caller checks tenant and visibility.
 func (s *Store) Executions(ctx context.Context, itemID string) ([]Execution, error) {
 	return listExecutions(ctx, s.pool, itemID)
 }
@@ -798,7 +809,8 @@ func (s *Store) LinkSurface(ctx context.Context, in SurfaceRefInput) (*SurfaceRe
 	return &out, created, nil
 }
 
-// Events returns a work item's lifecycle history in order.
+// Events returns a work item's lifecycle history in order. No
+// authorization: the caller checks tenant and visibility.
 func (s *Store) Events(ctx context.Context, itemID string) ([]Event, error) {
 	rows, err := s.pool.Query(ctx, `SELECT work_item_id, seq, kind, from_state, to_state, actor_principal,
 			surface, request_id, detail, created_at

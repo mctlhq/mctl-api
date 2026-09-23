@@ -672,6 +672,34 @@ func TestAWaitingItemWithNoExecutionCanStillResume(t *testing.T) {
 	if err != nil || item.State != StateActive || exec.Attempt != 1 || exec.ResumedFromExecutionID != "" {
 		t.Fatalf("resume without a prior execution = %+v %+v %v", item, exec, err)
 	}
+	events, _ := s.Events(ctx, w.ID)
+	if last := events[len(events)-1]; last.Kind != EventResumed || last.FromState != StateWaiting || last.ToState != StateActive {
+		t.Fatalf("last event = %+v", last)
+	}
+	// An active item with nothing before it starts with AttachExecution.
+	fresh := open(t, s, CreateInput{})
+	if _, _, _, err := s.Resume(ctx, ResumeInput{Mutation: as("github:alice"), WorkItemID: fresh.ID, ExpectedStateVersion: 1, Engine: EngineArgo, EngineRef: "x"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("resume of an active item with no execution: err = %v", err)
+	}
+}
+
+func TestSchemaUpgradesAnEarlierRevision(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE work_item_requests DROP COLUMN actor`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE work_item_create_requests DROP COLUMN actor`); err != nil {
+		t.Fatal(err)
+	}
+	again, err := NewStore(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if _, _, err := again.Create(ctx, CreateInput{Mutation: keyed("github:alice", "k", "h"), Tenant: "acme", Visibility: VisibilityTenant, OriginSurface: "cli", Title: "x"}); err != nil {
+		t.Fatalf("keyed create after upgrading an old schema: %v", err)
+	}
 }
 
 func TestAKeyBelongsToOnePrincipal(t *testing.T) {
