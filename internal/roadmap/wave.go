@@ -45,6 +45,41 @@ const (
 	RefusalDuplicateItem = "duplicate_item"         // the same id requested twice
 )
 
+// ErrEpicNotActive: the governed wave start runs only for an active epic.
+// There is no implicit override (mctl-api#363): an operator override would
+// be a separate, explicitly privileged operation.
+var ErrEpicNotActive = errors.New("epic is not active")
+
+// Reasons an epic is not active, by lifecycle.
+const (
+	EpicRefusalPaused    = "epic_paused"
+	EpicRefusalCompleted = "epic_completed"
+	EpicRefusalInactive  = "epic_not_active" // any other lifecycle
+)
+
+// EpicNotActiveError names the lifecycle that refused the wave.
+type EpicNotActiveError struct {
+	Epic      string
+	Lifecycle string
+}
+
+func (e *EpicNotActiveError) Error() string {
+	return fmt.Sprintf("%s: epic %s is %q", ErrEpicNotActive, e.Epic, e.Lifecycle)
+}
+
+func (e *EpicNotActiveError) Unwrap() error { return ErrEpicNotActive }
+
+// Reason is the typed refusal for this lifecycle.
+func (e *EpicNotActiveError) Reason() string {
+	switch e.Lifecycle {
+	case LifecyclePaused:
+		return EpicRefusalPaused
+	case LifecycleCompleted:
+		return EpicRefusalCompleted
+	}
+	return EpicRefusalInactive
+}
+
 // ErrInvalidSelection: the requested selection cannot be planned exactly.
 // A wave never starts a subset of what was asked for.
 var ErrInvalidSelection = errors.New("invalid wave selection")
@@ -132,6 +167,12 @@ func (p *Publication) PlanWave(req WaveRequest, workflowID WorkflowIDFunc, now t
 	e, err := p.find(req.Epic)
 	if err != nil {
 		return nil, err
+	}
+	// Fail closed on anything but an active epic, before any item is
+	// considered: a paused or completed epic's ready items are not work
+	// the standard wave start may begin.
+	if e.epic.Lifecycle != LifecycleActive {
+		return nil, &EpicNotActiveError{Epic: e.epic.Name, Lifecycle: e.epic.Lifecycle}
 	}
 	byID := make(map[string]waveItemWire, len(e.items))
 	order := make([]string, 0, len(e.items))

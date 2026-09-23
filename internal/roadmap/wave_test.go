@@ -208,11 +208,30 @@ func TestWavePlanHashBindsPublicationAndSelection(t *testing.T) {
 
 func TestWavePlanForAnEpicWithNothingReadyIsEmptyNotAnError(t *testing.T) {
 	pub := livePublication(t)
-	plan, err := pub.PlanWave(WaveRequest{Epic: "lifecycle-ownership", RequiredOnly: true}, testWorkflowID, liveNow)
+	plan, err := pub.PlanWave(WaveRequest{Epic: "unified-identity", RequiredOnly: true}, testWorkflowID, liveNow)
 	if err != nil || len(plan.Selected) != 0 {
 		t.Fatalf("plan = %+v, %v", plan, err)
 	}
 	if _, err := pub.PlanWave(WaveRequest{Epic: "no-such-epic"}, testWorkflowID, liveNow); !errors.Is(err, ErrEpicNotFound) {
 		t.Fatalf("unknown epic: %v", err)
+	}
+}
+
+func TestWavePlanRefusesAnEpicThatIsNotActive(t *testing.T) {
+	pub := livePublication(t)
+	for epic, want := range map[string]string{
+		"lifecycle-ownership": EpicRefusalCompleted,
+		"edge-ai-android":     EpicRefusalPaused,
+	} {
+		for _, req := range []WaveRequest{{Epic: epic, RequiredOnly: true}, {Epic: epic, Items: []string{"anything"}}} {
+			plan, err := pub.PlanWave(req, testWorkflowID, liveNow)
+			var inactive *EpicNotActiveError
+			if plan != nil || !errors.Is(err, ErrEpicNotActive) || !errors.As(err, &inactive) || inactive.Reason() != want {
+				t.Fatalf("%s %+v: plan=%v err=%v", epic, req, plan, err)
+			}
+		}
+	}
+	if r := (&EpicNotActiveError{Lifecycle: "archived"}).Reason(); r != EpicRefusalInactive {
+		t.Fatalf("unknown lifecycle reason = %q", r)
 	}
 }

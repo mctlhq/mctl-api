@@ -356,7 +356,7 @@ func TestRoadmapWave_PlanReportsWhyItCannotRun(t *testing.T) {
 		t.Fatalf("old plan = %v", resp)
 	}
 	waveNow = func() time.Time { return waveCaptured }
-	resp, _ = e.plan("lifecycle-ownership")
+	resp, _ = e.plan("unified-identity")
 	if resp["executable"] != false || !strings.HasPrefix(resp["not_executable_reason"].(string), roadmapCodeInvalidSelection) {
 		t.Fatalf("empty plan = %v", resp)
 	}
@@ -522,5 +522,43 @@ func TestRoadmapWave_DescribeAndStartHaveTheirOwnBudgets(t *testing.T) {
 	e.tc.slow = 50 * time.Millisecond // each call fits, the two together do not
 	if code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", exec); code != http.StatusOK || len(e.tc.started) != len(exec["items"].([]string)) {
 		t.Fatalf("execute = %d, started %v: %v", code, e.tc.started, out)
+	}
+}
+
+// A paused or completed epic is refused by plan and by execute, with a
+// typed reason and no override; execute audits the refusal and starts
+// nothing (mctl-api#363).
+func TestRoadmapWave_InactiveEpicsAreRefusedWithTypedReasons(t *testing.T) {
+	e := newWaveEnv(t)
+	_, exec := e.plan("enterprise-mcp")
+	for epic, want := range map[string]struct{ code, lifecycle string }{
+		"lifecycle-ownership": {"epic_completed", "completed"},
+		"edge-ai-android":     {"epic_paused", "paused"},
+	} {
+		code, out := e.post(waveUser, "/api/v1/roadmap/waves/plan", map[string]any{"epic": epic})
+		details, _ := out["details"].(map[string]any)
+		if code != http.StatusConflict || out["code"] != want.code || details["epic"] != epic || details["lifecycle"] != want.lifecycle {
+			t.Errorf("plan %s: %d %v", epic, code, out)
+		}
+		body := map[string]any{}
+		for k, v := range exec {
+			body[k] = v
+		}
+		body["epic"] = epic
+		if code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", body); code != http.StatusConflict || out["code"] != want.code {
+			t.Errorf("execute %s: %d %v", epic, code, out)
+		}
+	}
+	if len(e.tc.started) != 0 {
+		t.Fatalf("started %v", e.tc.started)
+	}
+	reasons := map[string]bool{}
+	for _, a := range e.audit.List(100) {
+		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" {
+			reasons[a.Parameters["reason"]] = true
+		}
+	}
+	if !reasons["epic_completed"] || !reasons["epic_paused"] {
+		t.Errorf("audited refusals = %v", reasons)
 	}
 }
