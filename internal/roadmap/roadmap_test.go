@@ -319,6 +319,29 @@ func TestAnythingUnverifiedIsRefused(t *testing.T) {
 			})
 			resign(t, files)
 		},
+		"two epics equal but for case": func(t *testing.T, files map[string][]byte) {
+			var second string
+			editJSON(t, files, PublicationFile, func(doc map[string]any) {
+				ms := doc["manifests"].([]any)
+				first := ms[0].(map[string]any)["epic"].(map[string]any)["name"].(string)
+				e := ms[1].(map[string]any)["epic"].(map[string]any)
+				second = e["name"].(string)
+				e["name"] = strings.ToUpper(first)
+			})
+			for _, f := range []string{ReadySetFile, HealthFile} {
+				editJSON(t, files, f, func(doc map[string]any) {
+					for _, d := range doc["items"].([]any) {
+						e := d.(map[string]any)["epic"].(map[string]any)
+						if e["name"] == second {
+							var pub map[string]any
+							_ = json.Unmarshal(files[PublicationFile], &pub)
+							e["name"] = pub["manifests"].([]any)[1].(map[string]any)["epic"].(map[string]any)["name"]
+						}
+					}
+				})
+			}
+			resign(t, files)
+		},
 		"a live capture without capturedAt": func(t *testing.T, files map[string][]byte) {
 			editJSON(t, files, PublicationFile, func(doc map[string]any) {
 				delete(doc["observation"].(map[string]any), "capturedAt")

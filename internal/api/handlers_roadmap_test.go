@@ -128,3 +128,28 @@ func TestRoadmap_EpicStatusAndReady(t *testing.T) {
 		t.Fatalf("required_only default/true/false = %d/%d/%d", count(def), count(req), count(all))
 	}
 }
+
+// The handler tests above mount their own router; this pins that the real
+// one serves the roadmap reads at all.
+func TestRoadmapRoutesAreRegistered(t *testing.T) {
+	router, ok := NewRouter(Options{}).(chi.Routes)
+	if !ok {
+		t.Fatal("the router does not expose its routes")
+	}
+	found := map[string]bool{}
+	if err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		found[method+" "+strings.TrimSuffix(route, "/")] = true
+		return nil
+	}); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	for _, want := range []string{
+		"GET /api/v1/roadmap/epics",
+		"GET /api/v1/roadmap/epic-status",
+		"GET /api/v1/roadmap/ready",
+	} {
+		if !found[want] {
+			t.Errorf("route not registered: %s", want)
+		}
+	}
+}

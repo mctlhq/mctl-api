@@ -239,6 +239,11 @@ func (r *Reader) refresh() error {
 	// may not, and an absent checkout has none.
 	defer func() {
 		r.head = ""
+		// Only this checkout's own HEAD: rev-parse from a path without its
+		// own .git would walk up and answer for an enclosing repository.
+		if _, err := os.Stat(filepath.Join(r.localPath, ".git")); err != nil {
+			return
+		}
 		if out, err := r.gitOutput(nil, "rev-parse", "HEAD"); err == nil {
 			r.head = strings.TrimSpace(string(out))
 		}

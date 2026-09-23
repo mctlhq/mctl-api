@@ -1476,6 +1476,19 @@ func TestReadFilesReturnsOneCheckoutAndRefusesPaths(t *testing.T) {
 	if _, err := (&Reader{localPath: filepath.Join(root, "never")}).Revision(); err == nil {
 		t.Error("an unsynced reader reported a revision")
 	}
+	// A failed clone into a directory inside another repository must not
+	// borrow that repository's HEAD.
+	nestedPath := filepath.Join(work, "nested")
+	if err := os.MkdirAll(nestedPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	nested := &Reader{repoURL: filepath.Join(root, "missing.git"), branch: "roadmap-state", localPath: nestedPath}
+	if err := nested.refresh(); err == nil {
+		t.Fatal("clone of a missing repository succeeded")
+	}
+	if got, err := nested.Revision(); err == nil {
+		t.Errorf("a failed clone reported revision %s", got)
+	}
 	// The revision tracks what a refresh put on disk.
 	if err := os.WriteFile(filepath.Join(work, "publication.json"), []byte(`{"v":2}`), 0o600); err != nil {
 		t.Fatal(err)

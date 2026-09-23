@@ -285,10 +285,13 @@ func Parse(files map[string][]byte, revision string) (*Publication, error) {
 		if m.Epic == nil || m.Epic.Name == "" || m.Epic.Lifecycle == "" {
 			return nil, unavailable("manifest %s carries no epic identity", m.Path)
 		}
-		if names[m.Epic.Name] {
+		// Folded, because lookup folds: two names equal but for case would
+		// otherwise both verify and then resolve ambiguously.
+		folded := strings.ToLower(m.Epic.Name)
+		if names[folded] {
 			return nil, unavailable("epic %s is published twice", m.Epic.Name)
 		}
-		names[m.Epic.Name] = true
+		names[folded] = true
 		r, ok := ready[m.Path]
 		if !ok {
 			return nil, unavailable("%s has no ready set for %s", ReadySetFile, m.Path)
