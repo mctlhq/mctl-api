@@ -342,6 +342,20 @@ func TestAnythingUnverifiedIsRefused(t *testing.T) {
 			}
 			resign(t, files)
 		},
+		"two epics bound to one root issue": func(t *testing.T, files map[string][]byte) {
+			editJSON(t, files, ReadySetFile, func(doc map[string]any) {
+				docs := doc["items"].([]any)
+				first := docs[0].(map[string]any)["epic"].(map[string]any)["issue"]
+				docs[1].(map[string]any)["epic"].(map[string]any)["issue"] = first
+			})
+			resign(t, files)
+		},
+		"a manifest with no ready set": func(t *testing.T, files map[string][]byte) {
+			editJSON(t, files, ReadySetFile, func(doc map[string]any) {
+				doc["items"] = doc["items"].([]any)[1:]
+			})
+			resign(t, files)
+		},
 		"a live capture without capturedAt": func(t *testing.T, files map[string][]byte) {
 			editJSON(t, files, PublicationFile, func(doc map[string]any) {
 				delete(doc["observation"].(map[string]any), "capturedAt")

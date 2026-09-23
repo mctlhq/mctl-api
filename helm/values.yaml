@@ -43,6 +43,8 @@ env:
   GITOPS_REPO_URL: https://github.com/mctlhq/mctl-gitops.git
   GITOPS_BRANCH: main
   GITOPS_LOCAL_PATH: /data/mctl-gitops
+  # Roadmap publication checkout (mctl-api#333), on its own sized volume.
+  ROADMAP_STATE_LOCAL_PATH: /data/roadmap-state
   ARGOCD_URL: https://ops.mctl.me
   ARGO_WORKFLOWS_NAMESPACE: argo-workflows
 
