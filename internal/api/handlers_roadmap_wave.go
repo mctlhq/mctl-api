@@ -54,12 +54,15 @@ const (
 	roadmapCodeWaveDisabled     = "wave_execution_disabled"
 
 	roadmapWaveMaxBody = 64 << 10
-
 )
 
-// roadmapWaveItemTimeout bounds one item's Describe + Start once the wave
-// has begun, so the bound does not shrink as the wave grows. A var for tests.
-var roadmapWaveItemTimeout = 30 * time.Second
+// Once a wave has begun, each Temporal call (one item's Describe, then its
+// Start) gets its own bound, so neither a slow item nor a slow Describe eats
+// another call's budget; the whole wave is still bounded. Vars for tests.
+var (
+	roadmapWaveCallTimeout = 30 * time.Second
+	roadmapWaveTimeout     = 5 * time.Minute
+)
 
 // Per-item execution outcomes.
 const (
@@ -323,12 +326,19 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 	}
 	// A client that disconnects mid-wave must not abort it part-way: the
 	// loop finishes what it began, each item bounded by its own timeout.
-	detached := context.WithoutCancel(r.Context())
+	wave, waveCancel := context.WithTimeout(context.WithoutCancel(r.Context()), roadmapWaveTimeout)
+	defer waveCancel()
+	call := func(fn func(ctx context.Context)) {
+		ctx, cancel := context.WithTimeout(wave, roadmapWaveCallTimeout)
+		defer cancel()
+		fn(ctx)
+	}
 	outcomes := make([]outcome, 0, len(plan.Selected))
 	for _, it := range plan.Selected {
 		o := outcome{WaveItem: it}
-		ctx, cancel := context.WithTimeout(detached, roadmapWaveItemTimeout)
-		status, err := h.opts.TemporalClient.DescribeDevLoop(ctx, it.WorkflowID)
+		var status string
+		var err error
+		call(func(ctx context.Context) { status, err = h.opts.TemporalClient.DescribeDevLoop(ctx, it.WorkflowID) })
 		switch {
 		case err != nil && !temporalclient.IsNotFound(err):
 			// Cannot tell whether it exists: do not start blind.
@@ -339,7 +349,10 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 			// A closed DevLoop is not restarted (REJECT_DUPLICATE); report it.
 			o.Outcome, o.Status = waveOutcomeAlreadyExists, status
 		default:
-			wf, runID, err := h.opts.TemporalClient.StartDevLoopWorkflow(ctx, it.IssueURL)
+			var wf, runID string
+			call(func(ctx context.Context) {
+				wf, runID, err = h.opts.TemporalClient.StartDevLoopWorkflow(ctx, it.IssueURL)
+			})
 			switch {
 			case err != nil:
 				o.Outcome, o.Error = waveOutcomeFailed, err.Error()
@@ -349,7 +362,6 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 				o.Outcome, o.RunID = waveOutcomeStarted, runID
 			}
 		}
-		cancel()
 		outcomes = append(outcomes, o)
 	}
 

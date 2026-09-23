@@ -56,6 +56,7 @@ type waveDevLoop struct {
 	describeErr map[string]error
 	startErr    map[string]error
 	hang        map[string]bool // Describe waits for its deadline
+	slow        time.Duration   // Describe and Start each take this long
 	started     []string
 }
 
@@ -63,6 +64,7 @@ func (f *waveDevLoop) DescribeDevLoop(ctx context.Context, workflowID string) (s
 	if f.hang[workflowID] {
 		<-ctx.Done()
 	}
+	f.pause(ctx)
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -75,7 +77,17 @@ func (f *waveDevLoop) DescribeDevLoop(ctx context.Context, workflowID string) (s
 	return "", serviceerror.NewNotFound("workflow not found")
 }
 
+func (f *waveDevLoop) pause(ctx context.Context) {
+	if f.slow > 0 {
+		select {
+		case <-time.After(f.slow):
+		case <-ctx.Done():
+		}
+	}
+}
+
 func (f *waveDevLoop) StartDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
+	f.pause(ctx)
 	if err := ctx.Err(); err != nil {
 		return "", "", err
 	}
@@ -483,9 +495,9 @@ func TestRoadmapWave_DisconnectDoesNotAbortTheWave(t *testing.T) {
 
 // One slow item uses its own time budget, not the rest of the wave's.
 func TestRoadmapWave_ASlowItemDoesNotStarveTheOthers(t *testing.T) {
-	prev := roadmapWaveItemTimeout
-	roadmapWaveItemTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { roadmapWaveItemTimeout = prev })
+	prev := roadmapWaveCallTimeout
+	roadmapWaveCallTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { roadmapWaveCallTimeout = prev })
 	e := newWaveEnv(t)
 	resp, exec := e.plan("enterprise-mcp")
 	selected := resp["plan"].(map[string]any)["selected"].([]any)
@@ -497,5 +509,18 @@ func TestRoadmapWave_ASlowItemDoesNotStarveTheOthers(t *testing.T) {
 	}
 	if len(e.tc.started) != len(selected)-1 {
 		t.Fatalf("started %v; every item after the slow one should still start", e.tc.started)
+	}
+}
+
+// A slow Describe does not eat the Start's budget: each call has its own.
+func TestRoadmapWave_DescribeAndStartHaveTheirOwnBudgets(t *testing.T) {
+	prev := roadmapWaveCallTimeout
+	roadmapWaveCallTimeout = 80 * time.Millisecond
+	t.Cleanup(func() { roadmapWaveCallTimeout = prev })
+	e := newWaveEnv(t)
+	_, exec := e.plan("enterprise-mcp")
+	e.tc.slow = 50 * time.Millisecond // each call fits, the two together do not
+	if code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", exec); code != http.StatusOK || len(e.tc.started) != len(exec["items"].([]string)) {
+		t.Fatalf("execute = %d, started %v: %v", code, e.tc.started, out)
 	}
 }
