@@ -85,9 +85,9 @@ type SurfaceRefInput struct {
 	ActorExternalID string
 }
 
-// ListFilter selects work items. Tenancy fails closed: only Tenants are
-// searched unless AllTenants is set (admins only; the HTTP layer decides), so
-// a forgotten or empty Tenants matches nothing. Viewer, when set, hides
+// ListFilter selects work items. Tenancy fails closed: an empty Tenants
+// matches nothing unless AllTenants is set (admins only; the HTTP layer
+// decides). Named Tenants always narrow, AllTenants or not. Viewer, when set, hides
 // private items owned by anyone else.
 type ListFilter struct {
 	Tenants    []string
@@ -120,8 +120,21 @@ func checkText(field, value string, max int, required bool) error {
 	return nil
 }
 
+// checkIdentity is checkText for values matched exactly later (principals,
+// tenants): stored as given, padding would make them miss every match, a
+// private item invisible to its own owner.
+func checkIdentity(field, value string) error {
+	if err := checkText(field, value, MaxExternalIDBytes, true); err != nil {
+		return err
+	}
+	if value != strings.TrimSpace(value) {
+		return invalid("%s has leading or trailing whitespace", field)
+	}
+	return nil
+}
+
 func (m Mutation) validate() error {
-	if err := checkText("actor", m.Actor, MaxExternalIDBytes, true); err != nil {
+	if err := checkIdentity("actor", m.Actor); err != nil {
 		return err
 	}
 	if err := checkText("request_id", m.RequestID, MaxExternalIDBytes, false); err != nil {
@@ -143,7 +156,7 @@ func (in CreateInput) validate() error {
 	if err := in.Mutation.validate(); err != nil {
 		return err
 	}
-	if err := checkText("tenant", in.Tenant, MaxExternalIDBytes, true); err != nil {
+	if err := checkIdentity("tenant", in.Tenant); err != nil {
 		return err
 	}
 	if in.Visibility != VisibilityTenant && in.Visibility != VisibilityPrivate {

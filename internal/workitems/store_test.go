@@ -395,6 +395,9 @@ func TestResumeRejectsAForeignPriorExecution(t *testing.T) {
 	s := newStoreForTest(t)
 	ctx := context.Background()
 	a, b := open(t, s, CreateInput{}), open(t, s, CreateInput{})
+	if _, _, err := s.AttachExecution(ctx, ExecutionInput{Mutation: as("service:mctl-agent"), WorkItemID: a.ID, Engine: EngineArgo, EngineRef: "own", Phase: PhaseFailed}); err != nil {
+		t.Fatal(err)
+	}
 	foreign, _, err := s.AttachExecution(ctx, ExecutionInput{Mutation: as("service:mctl-agent"), WorkItemID: b.ID, Engine: EngineArgo, EngineRef: "wf", Phase: PhaseSucceeded})
 	if err != nil {
 		t.Fatal(err)
@@ -410,6 +413,9 @@ func TestIntentsAreBoundedAndNeverCarrySecrets(t *testing.T) {
 	s := newStoreForTest(t)
 	ctx := context.Background()
 	w := open(t, s, CreateInput{})
+	if _, _, err := s.AppendIntent(ctx, IntentInput{Mutation: as("github:alice"), WorkItemID: w.ID, Text: "trailing newline is fine\n"}); err != nil {
+		t.Fatalf("intent with a trailing newline: %v", err)
+	}
 	in := IntentInput{Mutation: as("github:alice"), WorkItemID: w.ID, Text: "please add a retry", Params: []byte(`{"service":"api"}`)}
 	intent, created, err := s.AppendIntent(ctx, in)
 	if err != nil || !created || intent.Text != in.Text || intent.ActorPrincipal != "github:alice" {
@@ -430,7 +436,7 @@ func TestIntentsAreBoundedAndNeverCarrySecrets(t *testing.T) {
 	}
 
 	var stored int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM work_item_intents WHERE work_item_id=$1`, w.ID).Scan(&stored); err != nil || stored != 1 {
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM work_item_intents WHERE work_item_id=$1`, w.ID).Scan(&stored); err != nil || stored != 2 {
 		t.Fatalf("stored intents = %d, %v; rejected ones must not persist", stored, err)
 	}
 	events, _ := s.Events(ctx, w.ID)
@@ -505,6 +511,10 @@ func TestListDefaultsToOpenAndHidesOthersPrivateItems(t *testing.T) {
 	// Tenancy fails closed: a filter naming no tenant matches nothing.
 	if got, err := s.List(ctx, ListFilter{}); err != nil || len(got) != 0 {
 		t.Fatalf("zero filter = %d items, %v; want none", len(got), err)
+	}
+	// AllTenants lifts the requirement, it does not drop a named tenant.
+	if got, _ := s.List(ctx, ListFilter{AllTenants: true, Tenants: []string{"other"}}); len(got) != 1 || got[0].Tenant != "other" {
+		t.Fatalf("admin narrowed to other = %v", got)
 	}
 	got, _ = s.List(ctx, ListFilter{Tenants: []string{"acme"}, Owner: "github:bob"})
 	if len(got) != 1 || !ids(got)[private.ID] {
@@ -621,5 +631,52 @@ func TestSecretsAreRejectedInEveryFreeTextField(t *testing.T) {
 	var n int
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM work_items`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("work items = %d, %v; rejected creates must not persist", n, err)
+	}
+}
+
+func TestExternalKeyNeverDedupesOntoWorkTheCallerCouldNotOpen(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	key := "https://github.com/mctlhq/mctl-api/issues/7"
+	private := open(t, s, CreateInput{Visibility: VisibilityPrivate, ExternalKey: key})
+	bob := CreateInput{Mutation: as("github:bob"), Tenant: "acme", Visibility: VisibilityPrivate, OriginSurface: "cli", Title: "x", ExternalKey: key}
+	if got, _, err := s.Create(ctx, bob); !errors.Is(err, ErrExternalKeyInUse) || got != nil {
+		t.Fatalf("another member's private item: %v %v", got, err)
+	}
+	bob.Visibility = VisibilityTenant
+	if got, _, err := s.Create(ctx, bob); !errors.Is(err, ErrExternalKeyInUse) || got != nil {
+		t.Fatalf("tenant request onto a private item: %v %v", got, err)
+	}
+	// The owner asking again with the same visibility gets it back.
+	mine := CreateInput{Mutation: as("github:alice"), Tenant: "acme", Visibility: VisibilityPrivate, OriginSurface: "cli", Title: "x", ExternalKey: key}
+	if got, created, err := s.Create(ctx, mine); err != nil || created || got.ID != private.ID {
+		t.Fatalf("owner dedupe = %v %v %v", got, created, err)
+	}
+	// A private request never silently lands on a tenant-visible item.
+	shared := open(t, s, CreateInput{ExternalKey: key + "-shared"})
+	mine.ExternalKey = shared.ExternalKey
+	if _, _, err := s.Create(ctx, mine); !errors.Is(err, ErrExternalKeyInUse) {
+		t.Fatalf("private request onto a tenant item: err = %v", err)
+	}
+}
+
+func TestResumeNeedsAPriorExecution(t *testing.T) {
+	s := newStoreForTest(t)
+	w := open(t, s, CreateInput{})
+	_, _, _, err := s.Resume(context.Background(), ResumeInput{Mutation: as("github:alice"), WorkItemID: w.ID, ExpectedStateVersion: 1, Engine: EngineArgo, EngineRef: "first"})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("resume with nothing to resume: err = %v", err)
+	}
+}
+
+func TestPaddedIdentitiesAreRefused(t *testing.T) {
+	s := newStoreForTest(t)
+	for name, in := range map[string]CreateInput{
+		"actor":  {Mutation: as(" github:alice "), Tenant: "acme", Visibility: VisibilityTenant, OriginSurface: "cli", Title: "x"},
+		"tenant": {Mutation: as("github:alice"), Tenant: "acme ", Visibility: VisibilityTenant, OriginSurface: "cli", Title: "x"},
+	} {
+		if _, _, err := s.Create(context.Background(), in); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: err = %v, want ErrInvalid", name, err)
+		}
 	}
 }
