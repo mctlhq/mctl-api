@@ -260,3 +260,43 @@ func TestQueryShepherdInLoop_UndecodableResultIsAnError(t *testing.T) {
 		t.Fatal("an undecodable result must not report the workflow as shepherding")
 	}
 }
+
+// fakeStateValue decodes into *HumanInputState.
+type fakeStateValue struct {
+	val HumanInputState
+	err error
+}
+
+func (f *fakeStateValue) HasValue() bool { return f.err == nil }
+func (f *fakeStateValue) Get(target interface{}) error {
+	if f.err != nil {
+		return f.err
+	}
+	if p, ok := target.(*HumanInputState); ok {
+		*p = f.val
+	}
+	return nil
+}
+
+func TestQueryHumanInputState_PassesRunIDAndDecodes(t *testing.T) {
+	mockClient := new(mocks.Client)
+	want := HumanInputState{State: HumanInputWaitingForInput, RequestID: "hir-1", ResumeCount: 0}
+	mockClient.On("QueryWorkflow", mock.Anything, "dev-loop-mctlhq-mctl-api-261", "run-1", HumanInputStateQueryName).
+		Return(&fakeStateValue{val: want}, nil)
+	c := &Client{temporal: mockClient}
+	got, err := c.QueryHumanInputState(context.Background(), "dev-loop-mctlhq-mctl-api-261", "run-1")
+	if err != nil || *got != want {
+		t.Fatalf("got %+v %v", got, err)
+	}
+	mockClient.AssertExpectations(t)
+}
+
+func TestQueryHumanInputState_ErrorsPropagate(t *testing.T) {
+	mockClient := new(mocks.Client)
+	mockClient.On("QueryWorkflow", mock.Anything, "wf", "", HumanInputStateQueryName).
+		Return(nil, errors.New("unknown queryType human_input_state"))
+	c := &Client{temporal: mockClient}
+	if _, err := c.QueryHumanInputState(context.Background(), "wf", ""); err == nil {
+		t.Fatal("query error swallowed")
+	}
+}

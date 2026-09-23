@@ -54,6 +54,12 @@ type fakeGitReader struct {
 	platformTenantBindings []gitops.PlatformSkillBinding
 	platformRoleBindings   []gitops.PlatformSkillBinding
 	platformPolicy         *gitops.PlatformSkillPolicy
+	humanInputFiles        []gitops.HumanInputRequestFile
+	humanInputErr          error
+}
+
+func (f *fakeGitReader) ListHumanInputRequests() ([]gitops.HumanInputRequestFile, error) {
+	return f.humanInputFiles, f.humanInputErr
 }
 
 func (f *fakeGitReader) ListTenants() ([]gitops.Tenant, error) { return f.tenants, nil }

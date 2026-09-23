@@ -1358,3 +1358,51 @@ func TestRefresh_ScrubsEvenWhenTheFetchFails(t *testing.T) {
 		t.Error("a failing refresh returned without scrubbing the credential from .git/config")
 	}
 }
+
+func TestListHumanInputRequests(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	write := func(rel, content string) {
+		t.Helper()
+		p := filepath.Join(dir, "platform-gitops", "agents-state", rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := r.ListHumanInputRequests(); err != nil || len(got) != 0 {
+		t.Fatalf("empty repo: %v %v", got, err)
+	}
+	write("mctl-api/proposals/issue-261-x/human-input/request.json", `{"a":1}`)
+	write("mctl-api/proposals/issue-262-y/proposal.yaml", `x: 1`) // no request
+	write("mctl-web/proposals/issue-5-z/human-input/request.json", `{"b":2}`)
+	write("mctl-web/proposals/issue-6-w/human-input/other.json", `{}`) // wrong name
+	// A symlinked request must not be followed.
+	target := filepath.Join(dir, "secret.json")
+	if err := os.WriteFile(target, []byte(`{"secret":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "platform-gitops", "agents-state", "mctl-web", "proposals", "issue-7-l", "human-input")
+	if err := os.MkdirAll(link, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(link, "request.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.ListHumanInputRequests()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d files: %+v", len(got), got)
+	}
+	seen := map[string]string{}
+	for _, f := range got {
+		seen[f.Service+"/"+f.Proposal] = string(f.Raw)
+	}
+	if seen["mctl-api/issue-261-x"] != `{"a":1}` || seen["mctl-web/issue-5-z"] != `{"b":2}` {
+		t.Fatalf("files = %v", seen)
+	}
+}

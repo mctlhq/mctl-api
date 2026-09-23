@@ -415,6 +415,11 @@ func NewRouter(opts Options) http.Handler {
 			// /operations/{name}/execute and starve real writes.
 			r.Get("/agents/dev-loop/{workflow_id}", h.GetDevLoopWorkflow)
 
+			// Human-input read model (mctl-api#261): side-effect-free reads,
+			// outside the write group like the dev-loop liveness read.
+			r.Get("/human-input", h.ListHumanInputs)
+			r.Get("/human-input/{request_id}", h.GetHumanInput)
+
 			// Lifecycle ownership READS. Deliberately OUTSIDE the write
 			// group above, for the same reason the dev-loop liveness read
 			// is: the shepherd calls these once per sweep and an operator

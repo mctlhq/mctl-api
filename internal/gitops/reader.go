@@ -1109,3 +1109,82 @@ func (r *Reader) ReadOpenClawIdentity(team, fileName string) (string, error) {
 	}
 	return string(data), nil
 }
+
+// maxHumanInputRequestBytes caps one request.json. mctl-agents reads the
+// file through the GitHub contents API, which only inlines files up to
+// 1 MB; anything larger is malformed on that side too.
+const maxHumanInputRequestBytes = 1 << 20
+
+// HumanInputRequestFile is one sealed HumanInputRequest document as it sits
+// in gitops (mctl-agents ADR 013): the raw bytes plus where it was found.
+// The content is NOT validated here -- humaninput.ParseRequest does that.
+type HumanInputRequestFile struct {
+	// Service is the target repository name (agents-state/<service>).
+	Service string
+	// Proposal is the proposal directory (issue-<N>-<slug>).
+	Proposal string
+	Raw      []byte
+}
+
+// ListHumanInputRequests returns every
+// platform-gitops/agents-state/<service>/proposals/<proposal>/human-input/request.json.
+// There is at most one per proposal (a re-asking investigator overwrites it),
+// and an answered request is not removed, so this is the set of requests
+// that EXIST, not the set that are pending -- only the owning workflow
+// knows that.
+func (r *Reader) ListHumanInputRequests() ([]HumanInputRequestFile, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	root := filepath.Join(r.localPath, "platform-gitops", "agents-state")
+	services, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", root, err)
+	}
+	var out []HumanInputRequestFile
+	for _, svc := range services {
+		if !svc.IsDir() || strings.HasPrefix(svc.Name(), ".") {
+			continue
+		}
+		proposalsDir := filepath.Join(root, svc.Name(), "proposals")
+		proposals, err := os.ReadDir(proposalsDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("reading %s: %w", proposalsDir, err)
+		}
+		for _, p := range proposals {
+			if !p.IsDir() || strings.HasPrefix(p.Name(), ".") {
+				continue
+			}
+			path := filepath.Join(proposalsDir, p.Name(), "human-input", "request.json")
+			info, err := os.Lstat(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return nil, fmt.Errorf("stat %s: %w", path, err)
+			}
+			// A symlink could point anywhere on the API's filesystem; a
+			// sealed request is always a regular file.
+			if !info.Mode().IsRegular() {
+				slog.Warn("gitops: skipping non-regular human-input request", "path", path)
+				continue
+			}
+			if info.Size() > maxHumanInputRequestBytes {
+				slog.Warn("gitops: skipping oversized human-input request", "path", path, "bytes", info.Size())
+				continue
+			}
+			data, err := os.ReadFile(path) //nolint:gosec // path built from directory entries under the clone
+			if err != nil {
+				return nil, fmt.Errorf("reading %s: %w", path, err)
+			}
+			out = append(out, HumanInputRequestFile{Service: svc.Name(), Proposal: p.Name(), Raw: data})
+		}
+	}
+	return out, nil
+}
