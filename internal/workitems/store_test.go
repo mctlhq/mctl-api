@@ -498,11 +498,128 @@ func TestListDefaultsToOpenAndHidesOthersPrivateItems(t *testing.T) {
 	if len(got) != 1 || !ids(got)[done.ID] {
 		t.Fatalf("archived = %v", ids(got))
 	}
-	got, _ = s.List(ctx, ListFilter{})
+	got, _ = s.List(ctx, ListFilter{AllTenants: true})
 	if len(got) != 3 {
 		t.Fatalf("every tenant, open = %d items, want 3", len(got))
 	}
+	// Tenancy fails closed: a filter naming no tenant matches nothing.
+	if got, err := s.List(ctx, ListFilter{}); err != nil || len(got) != 0 {
+		t.Fatalf("zero filter = %d items, %v; want none", len(got), err)
+	}
+	got, _ = s.List(ctx, ListFilter{Tenants: []string{"acme"}, Owner: "github:bob"})
+	if len(got) != 1 || !ids(got)[private.ID] {
+		t.Fatalf("owner bob = %v", ids(got))
+	}
 	if _, err := s.List(ctx, ListFilter{State: "resumed"}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("resumed filter: err = %v", err)
+	}
+}
+
+func TestCreateRecordsItsKeyEvenWhenExternalKeyDedupes(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	existing := open(t, s, CreateInput{ExternalKey: "https://github.com/mctlhq/mctl-api/issues/1"})
+	in := CreateInput{Mutation: keyed("github:bob", "K", "H1"), Tenant: "acme", Visibility: VisibilityTenant,
+		OriginSurface: "telegram", Title: "same issue", ExternalKey: existing.ExternalKey}
+	if got, created, err := s.Create(ctx, in); err != nil || created || got.ID != existing.ID {
+		t.Fatalf("dedupe = %v %v %v", got, created, err)
+	}
+	other := in
+	other.RequestHash = "H2"
+	if _, _, err := s.Create(ctx, other); !errors.Is(err, ErrIdempotencyKeyReuse) {
+		t.Fatalf("same key, different request: err = %v", err)
+	}
+	if _, err := s.Transition(ctx, TransitionInput{Mutation: as("github:alice"), WorkItemID: existing.ID, Action: ActionComplete, ExpectedStateVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// Retried after the item went terminal, the key still names that item.
+	if got, created, err := s.Create(ctx, in); err != nil || created || got.ID != existing.ID {
+		t.Fatalf("retry after terminal = %v %v %v; want %s", got, created, err, existing.ID)
+	}
+}
+
+func TestTerminalItemsRefuseIntentsAndNewExecutions(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	w := open(t, s, CreateInput{})
+	if _, err := s.Transition(ctx, TransitionInput{Mutation: as("github:alice"), WorkItemID: w.ID, Action: ActionArchive, ExpectedStateVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := s.AppendIntent(ctx, IntentInput{Mutation: as("github:alice"), WorkItemID: w.ID, Text: "one more thing"})
+	conflictCurrent(t, err, ErrInvalidTransition)
+	_, _, err = s.AttachExecution(ctx, ExecutionInput{Mutation: as("service:mctl-agent"), WorkItemID: w.ID, Engine: EngineArgo, EngineRef: "late", Phase: PhaseRunning})
+	conflictCurrent(t, err, ErrInvalidTransition)
+}
+
+func TestAKeyIsBoundToOneOperation(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	w := open(t, s, CreateInput{})
+	m := keyed("github:alice", "shared", "same-hash")
+	if _, err := s.Transition(ctx, TransitionInput{Mutation: m, WorkItemID: w.ID, Action: ActionWait, WaitingReason: WaitingInput, ExpectedStateVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.AppendIntent(ctx, IntentInput{Mutation: m, WorkItemID: w.ID, Text: "x"}); !errors.Is(err, ErrIdempotencyKeyReuse) {
+		t.Fatalf("key reused for another operation: err = %v", err)
+	}
+}
+
+func TestResumeRefusesAnEngineRefAlreadyRecorded(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	w := open(t, s, CreateInput{})
+	if _, _, err := s.AttachExecution(ctx, ExecutionInput{Mutation: as("service:mctl-agent"), WorkItemID: w.ID, Engine: EngineTemporal, EngineRef: "run-1", Phase: PhaseFailed}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err := s.Resume(ctx, ResumeInput{Mutation: as("github:alice"), WorkItemID: w.ID, ExpectedStateVersion: 1, Engine: EngineTemporal, EngineRef: "run-1"})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("resume onto a recorded engine_ref: err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestResumeOfAnActiveItemKeepsItActive(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	w := open(t, s, CreateInput{})
+	if _, _, err := s.AttachExecution(ctx, ExecutionInput{Mutation: as("service:mctl-agent"), WorkItemID: w.ID, Engine: EngineArgo, EngineRef: "wf-1", Phase: PhaseError}); err != nil {
+		t.Fatal(err)
+	}
+	item, exec, created, err := s.Resume(ctx, ResumeInput{Mutation: as("github:alice"), WorkItemID: w.ID, ExpectedStateVersion: 1, Engine: EngineArgo, EngineRef: "wf-2"})
+	if err != nil || !created || item.State != StateActive || item.StateVersion != 2 || exec.Attempt != 2 {
+		t.Fatalf("resume = %+v %+v %v %v", item, exec, created, err)
+	}
+	events, _ := s.Events(ctx, w.ID)
+	last := events[len(events)-1]
+	if last.Kind != EventResumed || last.FromState != StateActive || last.ToState != StateActive {
+		t.Fatalf("last event = %+v", last)
+	}
+}
+
+func TestSecretsAreRejectedInEveryFreeTextField(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	token := "ghp_" + strings.Repeat("a", 36)
+	base := CreateInput{Mutation: as("github:alice"), Tenant: "acme", Visibility: VisibilityTenant, OriginSurface: "cli", Title: "t"}
+	title, key := base, base
+	title.Title = "use " + token
+	key.ExternalKey = "https://x:" + token + "@example.com/issue/1"
+	for name, in := range map[string]CreateInput{"title": title, "external_key": key} {
+		if _, _, err := s.Create(ctx, in); !errors.Is(err, ErrSecretInText) {
+			t.Errorf("%s: err = %v, want ErrSecretInText", name, err)
+		}
+	}
+	w := open(t, s, CreateInput{})
+	if _, _, err := s.AppendIntent(ctx, IntentInput{Mutation: as("github:alice"), WorkItemID: w.ID, Text: "ok",
+		Params: []byte(`{"token":"` + token + `"}`)}); !errors.Is(err, ErrSecretInText) {
+		t.Errorf("params: err = %v, want ErrSecretInText", err)
+	}
+	m := as("github:alice")
+	m.Surface = "telegram"
+	if _, _, err := s.LinkSurface(ctx, SurfaceRefInput{Mutation: m, WorkItemID: w.ID, ExternalID: token}); !errors.Is(err, ErrSecretInText) {
+		t.Errorf("external_id: err = %v, want ErrSecretInText", err)
+	}
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM work_items`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("work items = %d, %v; rejected creates must not persist", n, err)
 	}
 }

@@ -85,15 +85,17 @@ type SurfaceRefInput struct {
 	ActorExternalID string
 }
 
-// ListFilter selects work items. Tenants nil means every tenant (admins
-// only; the HTTP layer decides). Viewer, when set, hides private items owned
-// by anyone else.
+// ListFilter selects work items. Tenancy fails closed: only Tenants are
+// searched unless AllTenants is set (admins only; the HTTP layer decides), so
+// a forgotten or empty Tenants matches nothing. Viewer, when set, hides
+// private items owned by anyone else.
 type ListFilter struct {
-	Tenants []string
-	State   string // "" or FilterOpen: non-terminal; otherwise one state
-	Owner   string
-	Viewer  string
-	Limit   int
+	Tenants    []string
+	AllTenants bool
+	State      string // "" or FilterOpen: non-terminal; otherwise one state
+	Owner      string
+	Viewer     string
+	Limit      int
 }
 
 const (
@@ -119,8 +121,11 @@ func checkText(field, value string, max int, required bool) error {
 }
 
 func (m Mutation) validate() error {
-	if strings.TrimSpace(m.Actor) == "" {
-		return invalid("actor is required")
+	if err := checkText("actor", m.Actor, MaxExternalIDBytes, true); err != nil {
+		return err
+	}
+	if err := checkText("request_id", m.RequestID, MaxExternalIDBytes, false); err != nil {
+		return err
 	}
 	if m.Surface != "" && !surfacePattern.MatchString(m.Surface) {
 		return invalid("surface must match %s", surfacePattern)
@@ -153,7 +158,10 @@ func (in CreateInput) validate() error {
 	if err := checkText("external_key", in.ExternalKey, MaxKeyBytes, false); err != nil {
 		return err
 	}
-	return scanSecrets("title", in.Title)
+	if err := scanSecrets("title", in.Title); err != nil {
+		return err
+	}
+	return scanSecrets("external_key", in.ExternalKey)
 }
 
 func (in TransitionInput) validate() error {
@@ -255,7 +263,13 @@ func (in SurfaceRefInput) validate() error {
 	if err := checkText("external_id", in.ExternalID, MaxExternalIDBytes, true); err != nil {
 		return err
 	}
-	return checkText("actor_external_id", in.ActorExternalID, MaxExternalIDBytes, false)
+	if err := checkText("actor_external_id", in.ActorExternalID, MaxExternalIDBytes, false); err != nil {
+		return err
+	}
+	if err := scanSecrets("external_id", in.ExternalID); err != nil {
+		return err
+	}
+	return scanSecrets("actor_external_id", in.ActorExternalID)
 }
 
 func validateEngine(engine, ref string) error {

@@ -30,13 +30,8 @@ CREATE TABLE IF NOT EXISTS work_items (
     created_at             TIMESTAMPTZ NOT NULL,
     updated_at             TIMESTAMPTZ NOT NULL,
     completed_at           TIMESTAMPTZ,
-    schema_version         TEXT NOT NULL,
-    create_idempotency_key TEXT,
-    create_request_hash    TEXT
+    schema_version         TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS work_items_tenant_idempotency
-    ON work_items (tenant, create_idempotency_key)
-    WHERE create_idempotency_key IS NOT NULL;
 -- Open-work dedupe: one non-terminal item per (tenant, external_key), the
 -- same shape as alerts_tenant_fingerprint_open.
 CREATE UNIQUE INDEX IF NOT EXISTS work_items_tenant_external_key_open
@@ -97,6 +92,17 @@ CREATE TABLE IF NOT EXISTS work_item_surface_refs (
     first_seen_at     TIMESTAMPTZ NOT NULL,
     last_seen_at      TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (work_item_id, surface, external_id)
+);
+
+-- Create idempotency per (tenant, key). Kept apart from work_items so a key
+-- that deduped onto an existing item (external_key) is recorded too.
+CREATE TABLE IF NOT EXISTS work_item_create_requests (
+    tenant          TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash    TEXT NOT NULL,
+    work_item_id    TEXT NOT NULL REFERENCES work_items (id) ON DELETE CASCADE,
+    created_at      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (tenant, idempotency_key)
 );
 
 -- Per-item idempotency for every mutation other than create.
@@ -229,11 +235,16 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*WorkItem, bool, er
 	}
 	var out *WorkItem
 	created := false
+	// One lock per tenant: the key lookup, the external_key lookup and the
+	// insert (plus recording the key) must be one decision. The partial
+	// unique index backs the dedupe, but ON CONFLICT alone could not also
+	// record the idempotency key against the item it resolved to.
 	err := s.withTx(ctx, "workitem-create:"+in.Tenant, func(tx pgx.Tx) error {
+		now := s.now()
 		if in.IdempotencyKey != "" {
 			var id, hash string
-			err := tx.QueryRow(ctx, `SELECT id, create_request_hash FROM work_items
-				WHERE tenant=$1 AND create_idempotency_key=$2`, in.Tenant, in.IdempotencyKey).Scan(&id, &hash)
+			err := tx.QueryRow(ctx, `SELECT work_item_id, request_hash FROM work_item_create_requests
+				WHERE tenant=$1 AND idempotency_key=$2`, in.Tenant, in.IdempotencyKey).Scan(&id, &hash)
 			if err == nil {
 				if hash != in.RequestHash {
 					return ErrIdempotencyKeyReuse
@@ -251,24 +262,20 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*WorkItem, bool, er
 				WHERE tenant=$1 AND external_key=$2 AND state IN ('active','waiting')`, in.Tenant, in.ExternalKey))
 			if err == nil {
 				out = w
-				return nil
+				// The key now names this item, so a retry keeps returning it
+				// even after it goes terminal.
+				return rememberCreate(ctx, tx, in, w.ID, now)
 			}
 			if !errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("workitems: create: external key lookup: %w", err)
 			}
 		}
 
-		now := s.now()
-		var key, hash *string
-		if in.IdempotencyKey != "" {
-			key, hash = &in.IdempotencyKey, &in.RequestHash
-		}
-		w, err := scanItem(tx.QueryRow(ctx, `INSERT INTO work_items (`+itemColumns+`,
-				create_idempotency_key, create_request_hash)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,'`+StateActive+`','','',1,$3,$8,$8,NULL,$9,$10,$11)
+		w, err := scanItem(tx.QueryRow(ctx, `INSERT INTO work_items (`+itemColumns+`)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,'`+StateActive+`','','',1,$3,$8,$8,NULL,$9)
 			RETURNING `+itemColumns,
 			WorkItemIDPrefix+uuid.NewString(), in.Tenant, in.Actor, in.Visibility, in.OriginSurface,
-			in.Title, in.ExternalKey, now, SchemaVersion, key, hash))
+			in.Title, in.ExternalKey, now, SchemaVersion))
 		if err != nil {
 			return fmt.Errorf("workitems: create: %w", err)
 		}
@@ -276,12 +283,25 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*WorkItem, bool, er
 			return err
 		}
 		out, created = w, true
-		return nil
+		return rememberCreate(ctx, tx, in, w.ID, now)
 	})
 	if err != nil {
 		return nil, false, err
 	}
 	return out, created, nil
+}
+
+func rememberCreate(ctx context.Context, tx pgx.Tx, in CreateInput, id string, at time.Time) error {
+	if in.IdempotencyKey == "" {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO work_item_create_requests
+		(tenant, idempotency_key, request_hash, work_item_id, created_at) VALUES ($1,$2,$3,$4,$5)`,
+		in.Tenant, in.IdempotencyKey, in.RequestHash, id, at)
+	if err != nil {
+		return fmt.Errorf("workitems: create: record idempotency key: %w", err)
+	}
+	return nil
 }
 
 func appendEvent(ctx context.Context, tx pgx.Tx, id, kind, from, to string, m Mutation, detail any, at time.Time) error {
@@ -339,10 +359,6 @@ func remember(ctx context.Context, tx pgx.Tx, id, op, result string, m Mutation,
 	return nil
 }
 
-func lockedItem(ctx context.Context, tx pgx.Tx, id string) (*WorkItem, error) {
-	return getItem(ctx, tx, id)
-}
-
 // Transition applies one lifecycle action. A replay of the same request
 // returns the item as it is now.
 func (s *Store) Transition(ctx context.Context, in TransitionInput) (*WorkItem, error) {
@@ -351,7 +367,7 @@ func (s *Store) Transition(ctx context.Context, in TransitionInput) (*WorkItem, 
 	}
 	var out *WorkItem
 	err := s.withTx(ctx, "workitem:"+in.WorkItemID, func(tx pgx.Tx) error {
-		cur, err := lockedItem(ctx, tx, in.WorkItemID)
+		cur, err := getItem(ctx, tx, in.WorkItemID)
 		if err != nil {
 			return err
 		}
@@ -425,7 +441,7 @@ func (s *Store) Resume(ctx context.Context, in ResumeInput) (*WorkItem, *Executi
 	var exec *Execution
 	created := false
 	err := s.withTx(ctx, "workitem:"+in.WorkItemID, func(tx pgx.Tx) error {
-		cur, err := lockedItem(ctx, tx, in.WorkItemID)
+		cur, err := getItem(ctx, tx, in.WorkItemID)
 		if err != nil {
 			return err
 		}
@@ -457,6 +473,12 @@ func (s *Store) Resume(ctx context.Context, in ResumeInput) (*WorkItem, *Executi
 		}
 		if from != "" && !containsExecution(execs, from) {
 			return invalid("resumed_from_execution_id %s is not an execution of %s", from, cur.ID)
+		}
+		for i := range execs {
+			if execs[i].Engine == in.Engine && execs[i].EngineRef == in.EngineRef {
+				return invalid("%s %s is already execution %s of %s; a resume starts a new run",
+					in.Engine, in.EngineRef, execs[i].ID, cur.ID)
+			}
 		}
 		now := s.now()
 		exec, err = insertExecution(ctx, tx, cur.ID, in.Engine, in.EngineRef, PhasePending, from, len(execs)+1, now)
@@ -569,7 +591,7 @@ func (s *Store) AttachExecution(ctx context.Context, in ExecutionInput) (*Execut
 	var out *Execution
 	created := false
 	err := s.withTx(ctx, "workitem:"+in.WorkItemID, func(tx pgx.Tx) error {
-		cur, err := lockedItem(ctx, tx, in.WorkItemID)
+		cur, err := getItem(ctx, tx, in.WorkItemID)
 		if err != nil {
 			return err
 		}
@@ -645,7 +667,7 @@ func (s *Store) AppendIntent(ctx context.Context, in IntentInput) (*Intent, bool
 	var out *Intent
 	created := false
 	err := s.withTx(ctx, "workitem:"+in.WorkItemID, func(tx pgx.Tx) error {
-		cur, err := lockedItem(ctx, tx, in.WorkItemID)
+		cur, err := getItem(ctx, tx, in.WorkItemID)
 		if err != nil {
 			return err
 		}
@@ -715,7 +737,9 @@ func getIntent(ctx context.Context, q querier, itemID, id string) (*Intent, erro
 }
 
 // LinkSurface correlates a surface-native conversation with a work item, or
-// refreshes last_seen_at on an existing correlation.
+// refreshes last_seen_at on an existing correlation. The upsert on
+// (item, surface, external_id) is its idempotency: an Idempotency-Key adds
+// nothing here and is not recorded.
 func (s *Store) LinkSurface(ctx context.Context, in SurfaceRefInput) (*SurfaceRef, bool, error) {
 	if err := in.validate(); err != nil {
 		return nil, false, err
@@ -723,7 +747,7 @@ func (s *Store) LinkSurface(ctx context.Context, in SurfaceRefInput) (*SurfaceRe
 	var out SurfaceRef
 	created := false
 	err := s.withTx(ctx, "workitem:"+in.WorkItemID, func(tx pgx.Tx) error {
-		cur, err := lockedItem(ctx, tx, in.WorkItemID)
+		cur, err := getItem(ctx, tx, in.WorkItemID)
 		if err != nil {
 			return err
 		}
@@ -803,7 +827,12 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]WorkItem, error) {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
 	}
-	if f.Tenants != nil {
+	if !f.AllTenants {
+		// Fail closed: a filter that names no tenant and does not ask for
+		// all of them matches nothing.
+		if len(f.Tenants) == 0 {
+			return []WorkItem{}, nil
+		}
 		query += ` AND tenant = ANY(` + arg(f.Tenants) + `)`
 	}
 	if state == FilterOpen {
