@@ -96,7 +96,7 @@ func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 
-	checks := make(map[string]string, len(probes))
+	checks := make(map[string]string, len(probes)+1)
 	ready := true
 	for i, p := range probes {
 		checks[p.name] = results[i].status
@@ -105,14 +105,28 @@ func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Stores are not probed live: a store that failed its one startup init
+	// stays nil until the pod restarts (mctl-api#387), so the only honest
+	// readiness answer while any did is "not ready". Checked without a
+	// network call, so it cannot slow the probe down.
+	body := map[string]any{}
+	if h.opts.StoreInitFailures == nil {
+		checks["stores"] = "not_configured"
+	} else if failed := h.opts.StoreInitFailures(); len(failed) > 0 {
+		checks["stores"] = "init_failed"
+		body["failed_stores"] = failed
+		ready = false
+	} else {
+		checks["stores"] = "ok"
+	}
+
 	status := "ready"
 	code := http.StatusOK
 	if !ready {
 		status = "not ready"
 		code = http.StatusServiceUnavailable
 	}
-	writeJSON(w, code, map[string]any{
-		"status": status,
-		"checks": checks,
-	})
+	body["status"] = status
+	body["checks"] = checks
+	writeJSON(w, code, body)
 }

@@ -130,8 +130,9 @@ func TestHTTPReady_SuccessAndFailure(t *testing.T) {
 }
 
 type readyBody struct {
-	Status string            `json:"status"`
-	Checks map[string]string `json:"checks"`
+	Status       string            `json:"status"`
+	Checks       map[string]string `json:"checks"`
+	FailedStores []string          `json:"failed_stores"`
 }
 
 func decodeReady(t *testing.T, rec *httptest.ResponseRecorder) readyBody {
@@ -141,4 +142,58 @@ func decodeReady(t *testing.T, rec *httptest.ResponseRecorder) readyBody {
 		t.Fatalf("decode: %v body=%s", err, rec.Body.String())
 	}
 	return body
+}
+
+// mctl-api#387: a configured store that failed its one startup init stays nil
+// for the life of the pod. /readyz must say so and name it, even when every
+// live dependency probe is healthy, so a rolling update keeps the old pod.
+func TestReadyz_FailedStoreInitIsNotReady(t *testing.T) {
+	ok := func(context.Context) error { return nil }
+	h := &Handlers{opts: Options{
+		GitopsReady:   ok,
+		PostgresReady: ok,
+		StoreInitFailures: func() []string {
+			return []string{"surface identities", "agent registry"}
+		},
+	}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeReady(t, rec)
+	if body.Status != "not ready" {
+		t.Errorf("status = %q, want not ready", body.Status)
+	}
+	if body.Checks["stores"] != "init_failed" {
+		t.Errorf("checks[stores] = %q, want init_failed", body.Checks["stores"])
+	}
+	if got := fmt.Sprint(body.FailedStores); got != "[surface identities agent registry]" {
+		t.Errorf("failed_stores = %s, want both stores named", got)
+	}
+}
+
+func TestReadyz_StoresAllInitialisedIsReady(t *testing.T) {
+	h := &Handlers{opts: Options{StoreInitFailures: func() []string { return nil }}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeReady(t, rec)
+	if body.Checks["stores"] != "ok" || body.FailedStores != nil {
+		t.Errorf("checks[stores] = %q failed_stores = %v, want ok and none", body.Checks["stores"], body.FailedStores)
+	}
+}
+
+func TestReadyz_StoresNotWiredIsNotConfigured(t *testing.T) {
+	h := &Handlers{opts: Options{}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := decodeReady(t, rec).Checks["stores"]; got != "not_configured" {
+		t.Errorf("checks[stores] = %q, want not_configured", got)
+	}
 }
