@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.52.1](https://github.com/mctlhq/mctl-api/compare/4.52.0...4.52.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **readyz:** keep a pod out of readiness while a configured store failed init ([06ba9d4](https://github.com/mctlhq/mctl-api/commit/06ba9d45fdf5a6ab91340dbf44d8f13a1b0c8b86))
+* **readyz:** keep a pod out of readiness while a configured store failed init ([da0de45](https://github.com/mctlhq/mctl-api/commit/da0de45ff570e1f3b13929b7a054889ae11a23cc))
+
 ## [4.52.0](https://github.com/mctlhq/mctl-api/compare/4.51.0...4.52.0) (2026-09-24)
 
 
