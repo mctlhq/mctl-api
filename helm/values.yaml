@@ -95,3 +95,9 @@ envFromExtraSecret: ""
 githubAppTokenSecret: ""
 # Key inside that Secret holding the token. Defaults to "token".
 githubAppTokenKey: ""
+
+# Optional: Secret holding MCTL_USAGE_WRITER_TOKEN, the bearer token of the
+# usage-writer principal (service:mctl-agents-usage, mctlhq/.github#50). It
+# may only append usage records. The reference is optional, so an absent
+# Secret leaves the principal disabled rather than failing the pod.
+usageWriterTokenSecret: ""
