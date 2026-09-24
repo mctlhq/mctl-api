@@ -120,10 +120,37 @@ producer computing it wrongly finds out.
 Batches are capped at 500 records (`413`) and 1 MiB (`413`). The write is
 all-or-nothing, and a rejection names the offending record's index.
 
+#### Correlation fields
+
+Every correlation field is optional, so a producer that sends none of them is
+still accepted. When a field is sent, its shape is checked, because these are
+the values callers filter on. A malformed value would make its record
+unreachable by the query meant to find it (mctlhq/mctl-agents#499).
+
+| Field | Shape |
+|---|---|
+| `target_repo` | `owner/name` |
+| `issue_number`, `pr_number` | positive integer; requires `target_repo`, because a number alone does not say which repository it belongs to |
+| `execution_id` | up to 128 characters from `[A-Za-z0-9_.:-]`, starting alphanumeric |
+| `argo_workflow_name`, `temporal_workflow_id`, `work_item_id`, `devloop_stage` | free text, unchanged |
+
+`execution_id` identifies the runner invocation that spent the tokens. It is
+the work-context store's `we_…` when the run has one, and otherwise the
+runner's own execution identity (`ex-…`). The server checks only the
+character set, not the prefix: the batch is all-or-nothing, and a new identity
+scheme must not cost usage records. `execution_id` is not part of the dedupe
+key, so sending the same result again with a different `execution_id` is
+still deduped.
+
 ### `GET /api/v1/usage/records`
 
-Filters: `workflow_id`, `work_item_id`, `repository`, `issue`, `pr`, `agent`,
-`stage`, `provider`, `model`, `outcome`, `since`, `until` (RFC3339), `limit`.
+Filters: `workflow_id`, `work_item_id`, `execution_id`, `repository`, `issue`,
+`pr`, `agent`, `stage`, `provider`, `model`, `outcome`, `since`, `until`
+(RFC3339), `limit`.
+
+`issue` and `pr` are accepted only together with `repository`. Issue and PR
+numbers repeat in every repository, so a bare `pr=12` would add up spend from
+unrelated repositories. It is a `400`.
 
 An unparseable filter is a `400`, never a dropped predicate — a caller asking
 for one issue's spend must not silently receive the repository's. `limit` above
@@ -143,7 +170,7 @@ complete.
 ### `GET /api/v1/usage/summary?group_by=agent`
 
 `group_by` is one of `agent`, `devloop_stage`, `canonical_model`, `provider`,
-`target_repo`, `temporal_workflow_id`, `work_item_id`, `outcome`. The set is
+`target_repo`, `temporal_workflow_id`, `work_item_id`, `execution_id`, `outcome`. The set is
 closed, so a query parameter can never become SQL.
 
 Results are capped the same way `records` are and the response carries
@@ -152,7 +179,7 @@ Results are capped the same way `records` are and the response carries
 expensive invocations can be clipped out by many cheap ones, and
 `truncated_by: "record_count"` says so. A clipped bucket list is otherwise indistinguishable
 from a complete breakdown, which matters most on the high-cardinality
-dimensions (`temporal_workflow_id`, `work_item_id`) that grow as the ledger
+dimensions (`temporal_workflow_id`, `work_item_id`, `execution_id`) that grow as the ledger
 ages.
 
 Costs come back as three separate fields — `provider_reported_cost`,

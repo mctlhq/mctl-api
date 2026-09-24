@@ -491,3 +491,69 @@ func TestSummaryByModelUsesTheModelKeyFallback(t *testing.T) {
 		t.Fatalf("buckets = %d, want 1", len(res.Buckets))
 	}
 }
+
+// mctl-agents#499: a DevLoop's usage is queryable by its execution and by its
+// pull request, not only by workflow name, and the execution survives the
+// round trip.
+func TestRecordsAreQueryableByExecutionAndPullRequest(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	inv := testRecord(prefix+"-inv", "test-model", at)
+	inv.Agent, inv.ExecutionID = "investigator", prefix+"-we-1"
+	impl := testRecord(prefix+"-impl", "test-model", at)
+	impl.ExecutionID, impl.PRNumber = prefix+"-ex-2", i64(9001)
+	other := testRecord(prefix+"-other", "test-model", at)
+	other.TargetRepo, other.PRNumber, other.ExecutionID = "mctlhq/elsewhere", i64(9001), prefix+"-we-3"
+	if _, err := s.IngestAs(ctx, Ingester{}, []*Record{inv, impl, other}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	sessions := func(f Filter) []string {
+		t.Helper()
+		got, err := s.List(ctx, f)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		var out []string
+		for _, r := range got.Records {
+			if strings.HasPrefix(r.SessionID, prefix) {
+				out = append(out, r.SessionID)
+			}
+		}
+		return out
+	}
+
+	byExec := sessions(Filter{ExecutionID: prefix + "-we-1"})
+	if len(byExec) != 1 || byExec[0] != inv.SessionID {
+		t.Errorf("execution filter: got %v, want only the investigator's row", byExec)
+	}
+	pr := int64(9001)
+	byPR := sessions(Filter{TargetRepo: "mctlhq/mctl-api", PRNumber: &pr})
+	if len(byPR) != 1 || byPR[0] != impl.SessionID {
+		t.Errorf("repo+pr filter: got %v, want only mctl-api's PR 9001 row (not elsewhere's)", byPR)
+	}
+
+	got, err := s.List(ctx, Filter{ExecutionID: prefix + "-ex-2"})
+	if err != nil || len(got.Records) != 1 {
+		t.Fatalf("List by execution: %v, %d rows", err, len(got.Records))
+	}
+	if got.Records[0].ExecutionID != prefix+"-ex-2" {
+		t.Errorf("execution_id did not round-trip: %q", got.Records[0].ExecutionID)
+	}
+
+	sum, err := s.Summary(ctx, Filter{Since: &at}, GroupByExecution)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, b := range sum.Buckets {
+		seen[b.Key] = true
+	}
+	for _, want := range []string{prefix + "-we-1", prefix + "-ex-2", prefix + "-we-3"} {
+		if !seen[want] {
+			t.Errorf("group_by=execution_id has no bucket %q", want)
+		}
+	}
+}

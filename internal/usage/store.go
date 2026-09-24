@@ -105,6 +105,12 @@ CREATE TABLE IF NOT EXISTS model_usage_records (
 ALTER TABLE model_usage_records ADD COLUMN IF NOT EXISTS ingested_by TEXT NOT NULL DEFAULT '';
 ALTER TABLE model_usage_records ADD COLUMN IF NOT EXISTS ingested_by_principal_id TEXT NOT NULL DEFAULT '';
 
+-- The canonical execution the model ran for (mctlhq/mctl-agents#499): the
+-- work-item store's we_… or the runner's ExecutionContext ex-…. Additive and
+-- defaulted, so rows written before it read as '' and older producers keep
+-- working.
+ALTER TABLE model_usage_records ADD COLUMN IF NOT EXISTS execution_id TEXT NOT NULL DEFAULT '';
+
 CREATE INDEX IF NOT EXISTS model_usage_recorded_at_idx ON model_usage_records (recorded_at);
 CREATE INDEX IF NOT EXISTS model_usage_workflow_idx    ON model_usage_records (temporal_workflow_id);
 CREATE INDEX IF NOT EXISTS model_usage_repo_issue_idx  ON model_usage_records (target_repo, issue_number);
@@ -112,6 +118,7 @@ CREATE INDEX IF NOT EXISTS model_usage_repo_pr_idx     ON model_usage_records (t
 CREATE INDEX IF NOT EXISTS model_usage_agent_idx       ON model_usage_records (agent, devloop_stage);
 CREATE INDEX IF NOT EXISTS model_usage_model_idx       ON model_usage_records (canonical_model, provider);
 CREATE INDEX IF NOT EXISTS model_usage_work_item_idx   ON model_usage_records (work_item_id);
+CREATE INDEX IF NOT EXISTS model_usage_execution_idx   ON model_usage_records (execution_id);
 `
 
 // Store is the durable ledger.
@@ -168,7 +175,7 @@ INSERT INTO model_usage_records (
     provider_reported_cost, calculated_cost, pricing_version, invoice_reconciled_cost,
     outcome, api_error_status, stop_reason, terminal_reason,
     num_turns, duration_api_ms, retry_attempt, recorded_at,
-    ingested_by, ingested_by_principal_id
+    ingested_by, ingested_by_principal_id, execution_id
 ) VALUES (
     $1,$2,$3,$4,$5,$6,$7,
     $8,$9,$10,$11,$12,
@@ -178,7 +185,7 @@ INSERT INTO model_usage_records (
     $24,$25,$26,$27,
     $28,$29,$30,$31,
     $32,$33,$34,$35,
-    $36,$37
+    $36,$37,$38
 )
 ON CONFLICT (id) DO NOTHING
 `
@@ -270,7 +277,7 @@ func (s *Store) IngestAs(ctx context.Context, by Ingester, records []*Record) (*
 			r.ProviderReportedCost, r.CalculatedCost, r.PricingVersion, r.InvoiceReconciledCost,
 			r.Outcome, r.APIErrorStatus, r.StopReason, r.TerminalReason,
 			r.NumTurns, r.DurationAPIMs, r.RetryAttempt, r.RecordedAt,
-			r.IngestedBy, r.IngestedByPrincipalID,
+			r.IngestedBy, r.IngestedByPrincipalID, r.ExecutionID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("usage: insert %s: %w", r.ID, err)
@@ -290,6 +297,7 @@ func (s *Store) IngestAs(ctx context.Context, by Ingester, records []*Record) (*
 // Filter narrows a query. A zero Filter matches everything.
 type Filter struct {
 	TemporalWorkflowID string
+	ExecutionID        string
 	WorkItemID         string
 	TargetRepo         string
 	IssueNumber        *int64
@@ -316,6 +324,9 @@ func (f Filter) where() (string, []any) {
 	}
 	if f.TemporalWorkflowID != "" {
 		add("temporal_workflow_id = $%d", f.TemporalWorkflowID)
+	}
+	if f.ExecutionID != "" {
+		add("execution_id = $%d", f.ExecutionID)
 	}
 	if f.WorkItemID != "" {
 		add("work_item_id = $%d", f.WorkItemID)
@@ -374,7 +385,7 @@ const selectColumns = `
     provider_reported_cost, calculated_cost, pricing_version, invoice_reconciled_cost,
     outcome, api_error_status, stop_reason, terminal_reason,
     num_turns, duration_api_ms, retry_attempt, recorded_at,
-    ingested_by, ingested_by_principal_id
+    ingested_by, ingested_by_principal_id, execution_id
 `
 
 // ListResult is a bounded page of records.
@@ -449,7 +460,7 @@ func scanRecord(rows pgx.Rows) (*Record, error) {
 		&r.ProviderReportedCost, &r.CalculatedCost, &r.PricingVersion, &r.InvoiceReconciledCost,
 		&r.Outcome, &r.APIErrorStatus, &r.StopReason, &r.TerminalReason,
 		&r.NumTurns, &r.DurationAPIMs, &r.RetryAttempt, &r.RecordedAt,
-		&r.IngestedBy, &r.IngestedByPrincipalID,
+		&r.IngestedBy, &r.IngestedByPrincipalID, &r.ExecutionID,
 	); err != nil {
 		return nil, fmt.Errorf("usage: scan: %w", err)
 	}
@@ -462,14 +473,15 @@ func scanRecord(rows pgx.Rows) (*Record, error) {
 type GroupBy string
 
 const (
-	GroupByAgent    GroupBy = "agent"
-	GroupByStage    GroupBy = "devloop_stage"
-	GroupByModel    GroupBy = "canonical_model"
-	GroupByProvider GroupBy = "provider"
-	GroupByRepo     GroupBy = "target_repo"
-	GroupByWorkflow GroupBy = "temporal_workflow_id"
-	GroupByWorkItem GroupBy = "work_item_id"
-	GroupByOutcome  GroupBy = "outcome"
+	GroupByAgent     GroupBy = "agent"
+	GroupByStage     GroupBy = "devloop_stage"
+	GroupByModel     GroupBy = "canonical_model"
+	GroupByProvider  GroupBy = "provider"
+	GroupByRepo      GroupBy = "target_repo"
+	GroupByWorkflow  GroupBy = "temporal_workflow_id"
+	GroupByWorkItem  GroupBy = "work_item_id"
+	GroupByExecution GroupBy = "execution_id"
+	GroupByOutcome   GroupBy = "outcome"
 )
 
 // The mapped values are fixed SQL fragments, never request data, so a
@@ -480,14 +492,15 @@ const (
 // bucket, so a per-model breakdown would show spend under "" instead of under
 // the model that incurred it.
 var groupColumns = map[GroupBy]string{
-	GroupByAgent:    "agent",
-	GroupByStage:    "devloop_stage",
-	GroupByModel:    "COALESCE(NULLIF(canonical_model, ''), model_key)",
-	GroupByProvider: "provider",
-	GroupByRepo:     "target_repo",
-	GroupByWorkflow: "temporal_workflow_id",
-	GroupByWorkItem: "work_item_id",
-	GroupByOutcome:  "outcome",
+	GroupByAgent:     "agent",
+	GroupByStage:     "devloop_stage",
+	GroupByModel:     "COALESCE(NULLIF(canonical_model, ''), model_key)",
+	GroupByProvider:  "provider",
+	GroupByRepo:      "target_repo",
+	GroupByWorkflow:  "temporal_workflow_id",
+	GroupByWorkItem:  "work_item_id",
+	GroupByExecution: "execution_id",
+	GroupByOutcome:   "outcome",
 }
 
 // ParseGroupBy resolves a request value to a known dimension.

@@ -359,3 +359,69 @@ func TestParseCatalogReadsARateCardDocument(t *testing.T) {
 		t.Error("a card with no version was accepted; its cost could never be reproduced")
 	}
 }
+
+// mctl-agents#499: correlation is optional, but a value that is present must be
+// one a filter can match. A malformed repository or a zero issue is not a
+// smaller answer later, it is a row no query will ever find.
+func TestCorrelationShapesAreValidatedAtIngest(t *testing.T) {
+	base := func() *Record {
+		return &Record{SessionID: "s", ModelKey: "m"}
+	}
+	valid := []struct {
+		name string
+		mod  func(*Record)
+	}{
+		{"no correlation at all (an older producer)", func(*Record) {}},
+		{"store execution", func(r *Record) { r.ExecutionID = "we_55a6b6b8-7227-4040-a5a3-3353b09963c7" }},
+		{"execution context id", func(r *Record) { r.ExecutionID = "ex-59192fe7b189bd94" }},
+		{"repo, issue and pr", func(r *Record) {
+			r.TargetRepo, r.IssueNumber, r.PRNumber = "mctlhq/mctl-agents", i64(499), i64(500)
+		}},
+		{"repo with dots", func(r *Record) { r.TargetRepo = "mctlhq/.github" }},
+	}
+	for _, c := range valid {
+		r := base()
+		c.mod(r)
+		if err := r.Validate(); err != nil {
+			t.Errorf("%s: rejected: %v", c.name, err)
+		}
+	}
+	invalid := []struct {
+		name string
+		mod  func(*Record)
+	}{
+		{"repo without owner", func(r *Record) { r.TargetRepo = "mctl-agents" }},
+		{"repo as a URL", func(r *Record) { r.TargetRepo = "https://github.com/mctlhq/mctl-agents" }},
+		{"repo with whitespace", func(r *Record) { r.TargetRepo = "mctlhq/mctl-agents " }},
+		{"issue zero", func(r *Record) { r.TargetRepo, r.IssueNumber = "mctlhq/x", i64(0) }},
+		{"pr negative", func(r *Record) { r.TargetRepo, r.PRNumber = "mctlhq/x", i64(-1) }},
+		{"issue without repo", func(r *Record) { r.IssueNumber = i64(12) }},
+		{"pr without repo", func(r *Record) { r.PRNumber = i64(12) }},
+		{"execution id with a space", func(r *Record) { r.ExecutionID = "we_ 1" }},
+		{"execution id with a slash", func(r *Record) { r.ExecutionID = "dev-loop/x" }},
+		{"execution id too long", func(r *Record) { r.ExecutionID = "we_" + strings.Repeat("a", 200) }},
+	}
+	for _, c := range invalid {
+		r := base()
+		c.mod(r)
+		if err := r.Validate(); err == nil {
+			t.Errorf("%s: accepted", c.name)
+		}
+	}
+}
+
+// The execution id is correlation, never identity: two deliveries of one
+// result that disagree on it must still collapse to one row.
+func TestExecutionIDIsNotPartOfTheDedupeKey(t *testing.T) {
+	a := &Record{SessionID: "s", ResultUUID: "u", ModelKey: "m", ExecutionID: "we_a"}
+	b := &Record{SessionID: "s", ResultUUID: "u", ModelKey: "m", ExecutionID: "ex-b"}
+	if err := a.EnsureID(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.EnsureID(); err != nil {
+		t.Fatal(err)
+	}
+	if a.ID != b.ID {
+		t.Error("execution_id changed the dedupe key; a replay with a different correlation would double count")
+	}
+}

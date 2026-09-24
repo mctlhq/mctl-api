@@ -32,6 +32,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -93,9 +94,17 @@ type Record struct {
 	CanonicalModel string `json:"canonical_model,omitempty"`
 	Provider       string `json:"provider,omitempty"`
 
-	// Correlation.
+	// Correlation. All optional: a producer that sends none of it still
+	// lands its usage; one that sends it makes the row queryable by issue,
+	// PR and execution (mctlhq/mctl-agents#499).
+	//
+	// ExecutionID is the canonical execution the model ran for: the
+	// work-item store's `we_…` when the run has one, otherwise the runner's
+	// ExecutionContext id (`ex-…`). It is correlation, never part of the
+	// dedupe key.
 	TemporalWorkflowID string `json:"temporal_workflow_id,omitempty"`
 	ArgoWorkflowName   string `json:"argo_workflow_name,omitempty"`
+	ExecutionID        string `json:"execution_id,omitempty"`
 	Agent              string `json:"agent,omitempty"`
 	DevLoopStage       string `json:"devloop_stage,omitempty"`
 	TargetRepo         string `json:"target_repo,omitempty"`
@@ -236,6 +245,9 @@ func (r *Record) Validate() error {
 		// reproduced after a price change, which makes it worse than absent.
 		return fmt.Errorf("%w: calculated_cost requires pricing_version", ErrInvalidRecord)
 	}
+	if err := r.validateCorrelation(); err != nil {
+		return err
+	}
 	switch r.Outcome {
 	case "", OutcomeSuccess, OutcomeError, OutcomeInterrupted:
 	default:
@@ -251,6 +263,44 @@ func (r *Record) Validate() error {
 	} {
 		if v != nil && *v < 0 {
 			return fmt.Errorf("%w: %s must not be negative", ErrInvalidRecord, name)
+		}
+	}
+	return nil
+}
+
+// Shapes of the correlation fields a caller filters on. They are checked at
+// ingest because a malformed value is not a smaller answer later, it is no
+// answer: a row whose repository reads "MCTLHQ/X " or whose issue is 0 can
+// never be found by the query it was meant to serve, and nothing would say so.
+var (
+	// owner/name, as GitHub spells a repository.
+	targetRepoPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$`)
+	// The charset of both expected shapes (`we_<uuid>`, `ex-<hex>`) and of
+	// any engine id a later producer may use; no whitespace, no separators
+	// that would need escaping in a query string.
+	executionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
+)
+
+// validateCorrelation enforces the shapes above. Every field stays optional;
+// only a value that is present must be well formed. An issue or PR number
+// without a repository is refused because it is unqueryable: the filters
+// pair them, and "issue 12" alone names nothing.
+func (r *Record) validateCorrelation() error {
+	if r.TargetRepo != "" && !targetRepoPattern.MatchString(r.TargetRepo) {
+		return fmt.Errorf("%w: target_repo %q is not owner/name", ErrInvalidRecord, r.TargetRepo)
+	}
+	if r.ExecutionID != "" && !executionIDPattern.MatchString(r.ExecutionID) {
+		return fmt.Errorf("%w: execution_id %q is not a valid execution id", ErrInvalidRecord, r.ExecutionID)
+	}
+	for name, v := range map[string]*int64{"issue_number": r.IssueNumber, "pr_number": r.PRNumber} {
+		if v == nil {
+			continue
+		}
+		if *v <= 0 {
+			return fmt.Errorf("%w: %s must be positive", ErrInvalidRecord, name)
+		}
+		if r.TargetRepo == "" {
+			return fmt.Errorf("%w: %s requires target_repo", ErrInvalidRecord, name)
 		}
 	}
 	return nil
