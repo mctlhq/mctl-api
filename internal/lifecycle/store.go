@@ -93,6 +93,11 @@ CREATE TABLE IF NOT EXISTS lifecycle_events (
 );
 CREATE INDEX IF NOT EXISTS lifecycle_events_entity
   ON lifecycle_events (entity_kind, entity_id, phase, id DESC);
+-- The authenticated caller's canonical principal id, and the relaying
+-- surface's (mctl-api#373), next to actor_type/actor_id, which name the
+-- owner the event is about rather than who asked.
+ALTER TABLE lifecycle_events ADD COLUMN IF NOT EXISTS caller_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE lifecycle_events ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
 `
 
 const ownershipColumns = `entity_kind, entity_id, phase, entity_version,
@@ -200,6 +205,18 @@ func validate(entity EntityRef, phase string) error {
 		return fmt.Errorf("%w: %s/%s", ErrUnknownPhase, entity.Kind, phase)
 	}
 	return nil
+}
+
+type callerKey struct{}
+
+type caller struct{ principalID, viaPrincipalID string }
+
+// WithCaller records on ctx the canonical principal id (prn_…) of the
+// authenticated caller, and of the surface that relayed it, if any. Every
+// lifecycle event written under ctx carries them (mctl-api#373 phase 1:
+// recorded only, never read for a decision).
+func WithCaller(ctx context.Context, principalID, viaPrincipalID string) context.Context {
+	return context.WithValue(ctx, callerKey{}, caller{principalID: principalID, viaPrincipalID: viaPrincipalID})
 }
 
 // Store is a PostgreSQL-backed lifecycle ownership store.
@@ -1633,13 +1650,14 @@ func (s *Store) currentFor(ctx context.Context, tx pgx.Tx, entity EntityRef, pha
 }
 
 func insertEvent(ctx context.Context, tx pgx.Tx, entity EntityRef, phase, event string, epoch int, actor Owner, reason string, now time.Time) error {
+	c, _ := ctx.Value(callerKey{}).(caller)
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO lifecycle_events
 		   (entity_kind, entity_id, phase, event, owner_epoch, entity_version,
-		    actor_type, actor_id, reason, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		    actor_type, actor_id, reason, created_at, caller_principal_id, via_principal_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 		entity.Kind, entity.ID, phase, event, epoch, entity.Version,
-		actor.Type, actor.ID, reason, now); err != nil {
+		actor.Type, actor.ID, reason, now, c.principalID, c.viaPrincipalID); err != nil {
 		return fmt.Errorf("lifecycle: record event %s: %w", event, err)
 	}
 	return nil

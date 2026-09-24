@@ -199,11 +199,14 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 		WorkflowID:  req.Execution.TemporalWorkflowID,
 		RunID:       runID,
 		Respondent:  ref,
-		Surface:     body.Surface,
-		ValueHash:   humaninput.HashBytes(canonical),
-		Value:       canonical,
-		ReceivedAt:  now,
-		ExpiresAt:   req.Expires(),
+		// Recorded only (mctl-api#373 phase 1).
+		RespondentPrincipalID: user.PrincipalID(),
+		ViaPrincipalID:        user.ViaPrincipalID(),
+		Surface:               body.Surface,
+		ValueHash:             humaninput.HashBytes(canonical),
+		Value:                 canonical,
+		ReceivedAt:            now,
+		ExpiresAt:             req.Expires(),
 	}
 
 	ctx := r.Context()

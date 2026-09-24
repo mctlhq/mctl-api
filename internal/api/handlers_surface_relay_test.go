@@ -431,3 +431,46 @@ func TestSurfaceRelay_ResolvesTheHumansPrincipal(t *testing.T) {
 		})
 	}
 }
+
+// A relayed write records the linked human as the actor principal and the
+// surface's service principal as the via principal, on the work item, its
+// event and the audit entry (mctl-api#373 phase 1: recorded only).
+func TestSurfaceRelay_RecordsHumanAndSurfacePrincipals(t *testing.T) {
+	pr := &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE", auth.SurfacePrincipalPrefix + "telegram": "prn_TELEGRAM"}}
+	e := newSIDEnvWith(t, pr)
+	e.link("alice", "telegram", "4242")
+	// The surface authenticated with its principal attached, as
+	// auth.Middleware does.
+	if err := auth.AttachPrincipal(context.Background(), pr, e.users["telegram"]); err != nil {
+		t.Fatal(err)
+	}
+	code, body := e.relayCreate("telegram", "4242", nil)
+	if code != http.StatusCreated {
+		t.Fatalf("relayed create = %d %v", code, body)
+	}
+	id := body["work_item"].(map[string]any)["id"].(string)
+	ctx := context.Background()
+	var owner, actor, via string
+	if err := e.pool.QueryRow(ctx, `SELECT owner_principal_id FROM work_items WHERE id=$1`, id).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.pool.QueryRow(ctx, `SELECT actor_principal_id, via_principal_id FROM work_item_events
+		WHERE work_item_id=$1 AND seq=1`, id).Scan(&actor, &via); err != nil {
+		t.Fatal(err)
+	}
+	if owner != "prn_ALICE" || actor != "prn_ALICE" || via != "prn_TELEGRAM" {
+		t.Fatalf("owner=%q actor=%q via=%q; want the human, and the surface as via", owner, actor, via)
+	}
+	var audited bool
+	for _, a := range e.audit.List(100) {
+		if a.Parameters["work_item_id"] == id {
+			audited = true
+			if a.PrincipalID != "prn_ALICE" || a.ViaPrincipalID != "prn_TELEGRAM" {
+				t.Fatalf("audit %s principals = %q / %q", a.Operation, a.PrincipalID, a.ViaPrincipalID)
+			}
+		}
+	}
+	if !audited {
+		t.Fatal("the relayed create was not audited")
+	}
+}

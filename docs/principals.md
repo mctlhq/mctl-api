@@ -68,7 +68,30 @@ human principal, then mirrors every live surface link whose human is now
 known. `audit_events.user_id` is never a source: it carries no provider, so
 a Dex username there is indistinguishable from a GitHub login.
 
+## Dual-write
+
+New records carry the principal id next to the string they already store.
+On a relayed request the actor is the linked human and `via_principal_id`
+is the relaying surface's service principal. A column stays `''` when the
+principal could not be resolved (see degradation above) and on rows written
+before this change; nothing is backfilled into them.
+
+| Table | String column(s) | Principal id column(s) |
+|---|---|---|
+| `work_items` | `owner_principal` | `owner_principal_id` |
+| `work_item_events` | `actor_principal`, `acting_principal` | `actor_principal_id`, `via_principal_id` |
+| `work_item_intents` | `actor_principal` | `actor_principal_id` |
+| `work_item_execution_requests` | `requested_by`, `acting_principal`, `claimed_by` | `requested_by_principal_id`, `via_principal_id`, `claimed_by_principal_id` |
+| `action_approval_requests` | `requested_by`, `decided_by` | `requested_by_principal_id`, `via_principal_id`, `decided_by_principal_id`, `decided_via_principal_id` |
+| `audit_events` | `user_id` | `user_principal_id`, `via_principal_id` |
+| `human_input_deliveries` | `respondent` | `respondent_principal_id`, `via_principal_id` |
+| `lifecycle_events` | (`actor_type`/`actor_id` name the owner, not the caller) | `caller_principal_id`, `via_principal_id` |
+
+The ids are written only: no API response serves them yet and nothing reads
+them for a decision.
+
 ## Not in phase 1
 
-Authorization and tenant membership still use `User.ID` and `User.Groups`.
-Records do not store principal ids yet (dual-write is the next step).
+Authorization and tenant membership still use `User.ID` and `User.Groups`,
+and idempotency keys stay scoped to the actor strings. Switching them to
+principal ids is phase 2 (#377).

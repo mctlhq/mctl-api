@@ -38,8 +38,16 @@ type Delivery struct {
 	WorkflowID  string
 	RunID       string
 	Respondent  string // actor_type:actor_id, derived from authentication
-	Surface     string
-	ValueHash   string
+	// RespondentPrincipalID is Respondent's canonical principal id (prn_…)
+	// and ViaPrincipalID the relaying surface's (mctl-api#373). Recorded
+	// only and not part of SameSubmission. PostgresLedger writes them but
+	// deliveryColumns does not read them back, so its Get and Claim return
+	// them empty (MemoryLedger keeps the struct): a phase-2 reader must add
+	// them to deliveryColumns first.
+	RespondentPrincipalID string
+	ViaPrincipalID        string
+	Surface               string
+	ValueHash             string
 	// Value is the JSON of the answer. It is kept only while the delivery
 	// is pending and cleared once it is resolved, so the ledger does not
 	// become a second store of human answers.

@@ -229,10 +229,13 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 			ArtifactHash:  body.ArtifactHash,
 			WorkItemID:    body.WorkItemID,
 		},
-		RequestedBy:    principalOf(user),
-		IdempotencyKey: body.IdempotencyKey,
-		ExpiresAt:      body.ExpiresAt,
-		IntentHash:     body.IntentHash,
+		RequestedBy: principalOf(user),
+		// Recorded only (mctl-api#373 phase 1).
+		RequestedByPrincipalID: user.PrincipalID(),
+		ViaPrincipalID:         user.ViaPrincipalID(),
+		IdempotencyKey:         body.IdempotencyKey,
+		ExpiresAt:              body.ExpiresAt,
+		IntentHash:             body.IntentHash,
 	})
 	if err != nil {
 		writeActionApprovalError(w, err)
@@ -326,6 +329,7 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 	}
 	a, err := h.opts.WorkItems.DecideActionApproval(r.Context(), workitems.ActionDecisionInput{
 		ID: chi.URLParam(r, "id"), DecidedBy: principalOf(user), Decision: body.Decision, Reason: body.Reason,
+		DecidedByPrincipalID: user.PrincipalID(), DecidedViaPrincipalID: user.ViaPrincipalID(),
 	})
 	if err != nil {
 		if code := actionApprovalRefusalCode(err); code != "" {

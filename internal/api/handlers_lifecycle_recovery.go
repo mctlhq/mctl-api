@@ -239,7 +239,7 @@ func (h *Handlers) RequestLifecycleReconcile(w http.ResponseWriter, r *http.Requ
 		writeLifecycleError(w, err, nil)
 		return
 	}
-	result, err := h.opts.Lifecycle.RequestReconcile(r.Context(), body.request(user.ID))
+	result, err := h.opts.Lifecycle.RequestReconcile(lifecycleCaller(r, user), body.request(user.ID))
 	if err != nil {
 		h.writeLifecycleRecoveryError(w, r, user, "lifecycle-recovery-reconcile", body, before, err)
 		return
@@ -264,7 +264,7 @@ func (h *Handlers) FenceLifecycleClaim(w http.ResponseWriter, r *http.Request) {
 		writeLifecycleError(w, err, nil)
 		return
 	}
-	result, err := h.opts.Lifecycle.FenceDeadClaim(r.Context(), body.request(user.ID))
+	result, err := h.opts.Lifecycle.FenceDeadClaim(lifecycleCaller(r, user), body.request(user.ID))
 	if err != nil {
 		h.writeLifecycleRecoveryError(w, r, user, "lifecycle-recovery-fence", body, before, err)
 		return
@@ -298,7 +298,7 @@ func (h *Handlers) RequestLifecycleHandoffRecovery(w http.ResponseWriter, r *htt
 		return
 	}
 	toOwner := lifecycle.Owner{Type: body.ToOwnerType, ID: body.ToOwnerID}
-	result, err := h.opts.Lifecycle.RequestHandoff(r.Context(), body.request(user.ID), toOwner)
+	result, err := h.opts.Lifecycle.RequestHandoff(lifecycleCaller(r, user), body.request(user.ID), toOwner)
 	if err != nil {
 		h.writeLifecycleRecoveryError(w, r, user, "lifecycle-recovery-handoff-request", body, before, err)
 		return
@@ -333,7 +333,7 @@ func (h *Handlers) RetryLifecycleHandoff(w http.ResponseWriter, r *http.Request)
 		writeLifecycleError(w, err, nil)
 		return
 	}
-	result, err := h.opts.Lifecycle.RetryHandoff(r.Context(), body.request(user.ID))
+	result, err := h.opts.Lifecycle.RetryHandoff(lifecycleCaller(r, user), body.request(user.ID))
 	if err != nil {
 		h.writeLifecycleRecoveryError(w, r, user, "lifecycle-recovery-handoff-retry", body, before, err)
 		return

@@ -122,6 +122,11 @@ CREATE TABLE IF NOT EXISTS work_item_requests (
 ALTER TABLE work_item_create_requests ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT '';
 ALTER TABLE work_item_requests ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT '';
 ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS acting_principal TEXT NOT NULL DEFAULT '';
+-- Canonical principal ids (mctl-api#373), dual-written next to the strings.
+ALTER TABLE work_items ADD COLUMN IF NOT EXISTS owner_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS actor_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_item_intents ADD COLUMN IF NOT EXISTS actor_principal_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS work_item_create_requests_item ON work_item_create_requests (work_item_id);
 `
 
@@ -304,11 +309,11 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*WorkItem, bool, er
 			}
 		}
 
-		w, err := scanItem(tx.QueryRow(ctx, `INSERT INTO work_items (`+itemColumns+`)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,'`+StateActive+`','','',1,$3,$8,$8,NULL,$9)
+		w, err := scanItem(tx.QueryRow(ctx, `INSERT INTO work_items (`+itemColumns+`, owner_principal_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,'`+StateActive+`','','',1,$3,$8,$8,NULL,$9,$10)
 			RETURNING `+itemColumns,
 			WorkItemIDPrefix+uuid.NewString(), in.Tenant, in.Actor, in.Visibility, in.OriginSurface,
-			in.Title, in.ExternalKey, now, SchemaVersion))
+			in.Title, in.ExternalKey, now, SchemaVersion, in.ActorPrincipalID))
 		if err != nil {
 			return fmt.Errorf("workitems: create: %w", err)
 		}
@@ -347,10 +352,11 @@ func appendEvent(ctx context.Context, tx pgx.Tx, id, kind, from, to string, m Mu
 		raw = b
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO work_item_events
-		(work_item_id, seq, kind, from_state, to_state, actor_principal, acting_principal, surface, request_id, detail, created_at)
+		(work_item_id, seq, kind, from_state, to_state, actor_principal, acting_principal, surface, request_id, detail, created_at,
+		 actor_principal_id, via_principal_id)
 		VALUES ($1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM work_item_events WHERE work_item_id=$1),
-		        $2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		id, kind, from, to, m.Actor, m.ActingPrincipal, m.Surface, m.RequestID, raw, at)
+		        $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		id, kind, from, to, m.Actor, m.ActingPrincipal, m.Surface, m.RequestID, raw, at, m.ActorPrincipalID, m.ViaPrincipalID)
 	if err != nil {
 		return fmt.Errorf("workitems: append event: %w", err)
 	}
@@ -752,10 +758,10 @@ func (s *Store) AppendIntent(ctx context.Context, in IntentInput) (*Intent, bool
 		var intent Intent
 		var text *string
 		err = tx.QueryRow(ctx, `INSERT INTO work_item_intents
-			(work_item_id, actor_principal, surface, text, params, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6)
+			(work_item_id, actor_principal, surface, text, params, created_at, actor_principal_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)
 			RETURNING id, work_item_id, actor_principal, surface, text, params, created_at`,
-			cur.ID, in.Actor, in.Surface, in.Text, params, now).Scan(
+			cur.ID, in.Actor, in.Surface, in.Text, params, now, in.ActorPrincipalID).Scan(
 			&intent.ID, &intent.WorkItemID, &intent.ActorPrincipal, &intent.Surface, &text, &intent.Params, &intent.CreatedAt)
 		if err != nil {
 			return fmt.Errorf("workitems: append intent: %w", err)

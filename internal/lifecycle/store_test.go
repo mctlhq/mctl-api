@@ -3256,3 +3256,35 @@ func TestADuplicateRecoverAnswersOnlyForItsOwnWrite(t *testing.T) {
 		}
 	})
 }
+
+// mctl-api#373 phase 1: a lifecycle event records the authenticated caller's
+// principal id and the relaying surface's, carried on the context.
+func TestEventsRecordCallerPrincipal(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := WithCaller(context.Background(), "prn_AGENT", "prn_TELEGRAM")
+	entity := pr(prefix, "caller")
+	if _, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: devloop("wf-1")}); err != nil {
+		t.Fatal(err)
+	}
+	// Without a caller the columns stay empty rather than failing.
+	if _, err := s.RecordProgress(context.Background(), entity, PhaseReviewRemediation, devloop("wf-1"), 1, "pushed"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.pool.Query(context.Background(), `SELECT event, caller_principal_id || '/' || via_principal_id
+		FROM lifecycle_events WHERE entity_id=$1 ORDER BY id`, entity.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var e, p string
+		if err := rows.Scan(&e, &p); err != nil {
+			t.Fatal(err)
+		}
+		got[e] = p
+	}
+	if got[EventOwnerAcquired] != "prn_AGENT/prn_TELEGRAM" || got[EventProgress] != "/" {
+		t.Fatalf("events = %v", got)
+	}
+}

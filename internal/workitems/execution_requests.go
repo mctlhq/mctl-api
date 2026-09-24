@@ -152,6 +152,10 @@ CREATE INDEX IF NOT EXISTS work_item_execution_requests_claimable
     WHERE state IN ('pending', 'claimed');
 CREATE INDEX IF NOT EXISTS work_item_execution_requests_item
     ON work_item_execution_requests (work_item_id, created_at DESC);
+-- Canonical principal ids (mctl-api#373), dual-written next to the strings.
+ALTER TABLE work_item_execution_requests ADD COLUMN IF NOT EXISTS requested_by_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_item_execution_requests ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_item_execution_requests ADD COLUMN IF NOT EXISTS claimed_by_principal_id TEXT NOT NULL DEFAULT '';
 `
 
 const executionRequestColumns = `id, work_item_id, kind, expected_state_version, resumed_from_execution_id,
@@ -363,12 +367,13 @@ func (s *Store) CreateExecutionRequest(ctx context.Context, in ExecutionRequestI
 		now := s.now()
 		out, err = scanExecutionRequest(tx.QueryRow(ctx, `INSERT INTO work_item_execution_requests (
 				id, work_item_id, kind, expected_state_version, resumed_from_execution_id, intent_id, surface,
-				requested_by, acting_principal, idempotency_key, state, created_at, updated_at, schema_version)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'`+ExecutionRequestPending+`',$11,$11,$12)
+				requested_by, acting_principal, idempotency_key, state, created_at, updated_at, schema_version,
+				requested_by_principal_id, via_principal_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'`+ExecutionRequestPending+`',$11,$11,$12,$13,$14)
 			RETURNING `+executionRequestColumns,
 			ExecutionRequestIDPrefix+strings.ReplaceAll(uuid.NewString(), "-", ""), cur.ID, in.Kind,
 			in.ExpectedStateVersion, in.ResumedFromExecutionID, in.IntentID, in.Surface, in.Actor,
-			in.ActingPrincipal, in.IdempotencyKey, now, SchemaVersion))
+			in.ActingPrincipal, in.IdempotencyKey, now, SchemaVersion, in.ActorPrincipalID, in.ViaPrincipalID))
 		if err != nil {
 			return fmt.Errorf("workitems: insert execution request: %w", err)
 		}
@@ -472,9 +477,10 @@ func (s *Store) ClaimExecutionRequest(ctx context.Context, in ClaimInput) (*Exec
 			now := s.now()
 			token := executionRequestClaimPrefix + strings.ReplaceAll(uuid.NewString(), "-", "")
 			x, err := scanExecutionRequest(tx.QueryRow(ctx, `UPDATE work_item_execution_requests
-				SET state='claimed', claimed_by=$2, claim_token=$3, claimed_at=$4, claim_expires_at=$5, updated_at=$4
+				SET state='claimed', claimed_by=$2, claim_token=$3, claimed_at=$4, claim_expires_at=$5, updated_at=$4,
+				    claimed_by_principal_id=$6
 				WHERE id=$1 AND (state='pending' OR (state='claimed' AND claim_expires_at <= $4))
-				RETURNING `+executionRequestColumns, c.id, in.Actor, token, now, now.Add(in.Lease)))
+				RETURNING `+executionRequestColumns, c.id, in.Actor, token, now, now.Add(in.Lease), in.ActorPrincipalID))
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil // another claimant won it, or it closed
 			}

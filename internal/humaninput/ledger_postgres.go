@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS human_input_deliveries (
 CREATE INDEX IF NOT EXISTS human_input_deliveries_retained
     ON human_input_deliveries (expires_at)
     WHERE state = 'pending_delivery' AND value IS NOT NULL;
+-- Canonical principal ids (mctl-api#373), dual-written next to respondent.
+ALTER TABLE human_input_deliveries ADD COLUMN IF NOT EXISTS respondent_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE human_input_deliveries ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
 `
 
 const deliveryColumns = `request_id, request_hash, workflow_id, run_id, respondent, surface,
@@ -94,18 +97,20 @@ func (p *PostgresLedger) Get(ctx context.Context, requestID string) (*Delivery, 
 // accepted, which is how the loser of a race finds out.
 func (p *PostgresLedger) Claim(ctx context.Context, d Delivery) (*Delivery, bool, error) {
 	claimed, err := scanDelivery(p.pool.QueryRow(ctx, `
-		INSERT INTO human_input_deliveries (`+deliveryColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$11,'`+DeliveryPending+`',$10,0,now())
+		INSERT INTO human_input_deliveries (`+deliveryColumns+`, respondent_principal_id, via_principal_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$11,'`+DeliveryPending+`',$10,0,now(),$12,$13)
 		ON CONFLICT (request_id) DO UPDATE SET
 		    request_hash=EXCLUDED.request_hash, workflow_id=EXCLUDED.workflow_id,
 		    run_id=EXCLUDED.run_id, respondent=EXCLUDED.respondent, surface=EXCLUDED.surface,
+		    respondent_principal_id=EXCLUDED.respondent_principal_id, via_principal_id=EXCLUDED.via_principal_id,
 		    value_hash=EXCLUDED.value_hash, value=EXCLUDED.value, received_at=EXCLUDED.received_at, expires_at=EXCLUDED.expires_at,
 		    state=EXCLUDED.state, baseline_resume_count=EXCLUDED.baseline_resume_count,
 		    attempts=0, updated_at=now()
 		WHERE human_input_deliveries.state='`+DeliveryRejected+`'
 		RETURNING `+deliveryColumns,
 		d.RequestID, d.RequestHash, d.WorkflowID, d.RunID, d.Respondent, d.Surface,
-		d.ValueHash, string(d.Value), d.ReceivedAt, d.BaselineResumeCount, d.ExpiresAt))
+		d.ValueHash, string(d.Value), d.ReceivedAt, d.BaselineResumeCount, d.ExpiresAt,
+		d.RespondentPrincipalID, d.ViaPrincipalID))
 	if err == nil {
 		return claimed, true, nil
 	}
