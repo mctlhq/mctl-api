@@ -74,8 +74,9 @@ type Resolver struct {
 	ttl      time.Duration
 	now      func() time.Time
 
-	mu    sync.Mutex
-	cache map[string]cached
+	mu        sync.Mutex
+	cache     map[string]cached
+	lastSweep time.Time
 }
 
 type cached struct {
@@ -130,8 +131,24 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 	c = cached{principal: p.ID, disabled: p.Status == StatusDisabled, at: now}
 	r.mu.Lock()
 	r.cache[key] = c
+	r.sweepLocked(now)
 	r.mu.Unlock()
 	return answer(c)
+}
+
+// sweepLocked drops expired entries, at most once per TTL, so the cache
+// holds only the identities seen within the last TTL or two instead of every
+// identity ever seen.
+func (r *Resolver) sweepLocked(now time.Time) {
+	if now.Sub(r.lastSweep) < r.ttl {
+		return
+	}
+	r.lastSweep = now
+	for k, c := range r.cache {
+		if now.Sub(c.at) >= r.ttl {
+			delete(r.cache, k)
+		}
+	}
 }
 
 func answer(c cached) (string, error) {

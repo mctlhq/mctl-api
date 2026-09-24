@@ -17,11 +17,14 @@ package principals
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 // Surface identity links are MIRRORED, not replaced (mctl-api#373 D4).
@@ -46,6 +49,12 @@ func (s *Store) mirrorLink(ctx context.Context, tx pgx.Tx, surface, externalID, 
 	login, ok := strings.CutPrefix(principal, "github:")
 	if !ok || login == "" || surface == "" || externalID == "" {
 		return false, nil
+	}
+	// A mirror row is (provider=<surface>, "", <surface-native id>). A
+	// surface named like an authentication provider would collide with, and
+	// the upsert below repoint, a real identity of that provider.
+	if reservedProvider(surface) {
+		return false, fmt.Errorf("principals: surface %q uses a reserved provider name", surface)
 	}
 	var principalID string
 	err := tx.QueryRow(ctx, `SELECT principal_id FROM external_identities
@@ -75,6 +84,16 @@ func (s *Store) mirrorLink(ctx context.Context, tx pgx.Tx, surface, externalID, 
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// reservedProvider reports the provider names authentication uses, which no
+// surface may take.
+func reservedProvider(name string) bool {
+	switch name {
+	case auth.ProviderGitHub, auth.ProviderDex, auth.ProviderService, auth.ProviderDev:
+		return true
+	}
+	return false
 }
 
 // MirrorRevoke marks a revoked surface link's mirrored identity revoked.

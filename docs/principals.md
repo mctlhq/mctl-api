@@ -36,7 +36,8 @@ a different id, the older row stops answering for it.
   identity, idempotent under concurrency. Never linked by spelling: a Dex
   user named like a GitHub login is a different principal.
 - A **disabled** principal is refused at authentication (403). A **revoked**
-  identity is refused (401), never given a new principal.
+  identity is refused (401), never given a new principal. A surface relaying
+  for such a human gets 403 `principal_disabled` / `identity_refused`.
 - The dev identity is refused unless `AUTH_REQUIRED=false`.
 - Resolution is cached for 5 minutes.
 - **Store unavailable** (or GitHub unreachable for a login lookup): the
@@ -50,7 +51,9 @@ and for a link's expiry. A redeemed link is written to
 `external_identities` (`provider=<surface>`) for the linked human in the same
 transaction; a revoked link sets `revoked_at` there. A failed mirror rolls
 the redeem back. That is why both live in one database
-(`SURFACE_IDENTITY_DB_URL`, else `AUDIT_DB_URL`).
+(`SURFACE_IDENTITY_DB_URL`, else `AUDIT_DB_URL`). A surface may not be named
+after an authentication provider (`github`, `dex`, `service`, `dev`): its
+mirror rows would collide with real identities.
 
 ## Backfill
 

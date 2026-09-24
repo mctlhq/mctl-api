@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"testing"
 	"time"
 
@@ -90,6 +91,30 @@ func TestResolverCachesForTheTTL(t *testing.T) {
 
 // Store unavailable: the resolver answers ErrUnresolved, counts it, and does
 // not cache the failure, so the next request tries again.
+// Expired entries are swept, so the cache holds recent identities only.
+func TestResolverCacheEvictsExpiredEntries(t *testing.T) {
+	b := &fakeBackend{}
+	r := newResolver(b, nil, false)
+	now := time.Unix(1_800_000_000, 0)
+	r.now = func() time.Time { return now }
+	for i := 0; i < 50; i++ {
+		id := auth.Identity{Provider: auth.ProviderGitHub, Subject: strconv.Itoa(i + 1), Display: "u" + strconv.Itoa(i), Kind: auth.KindHuman}
+		if _, err := r.ResolvePrincipal(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now = now.Add(2 * CacheTTL)
+	if _, err := r.ResolvePrincipal(context.Background(), githubAlice); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	size := len(r.cache)
+	r.mu.Unlock()
+	if size != 1 {
+		t.Fatalf("cache holds %d entries after the TTL, want 1", size)
+	}
+}
+
 func TestResolverDegradesAndCountsWhenTheStoreIsDown(t *testing.T) {
 	b := &fakeBackend{err: errors.New("dial tcp: connection refused")}
 	r := newResolver(b, nil, false)

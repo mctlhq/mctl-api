@@ -173,6 +173,17 @@ func (s *Store) Provision(ctx context.Context, id auth.Identity) (*Principal, er
 	}
 	var out *Principal
 	err := s.withTx(ctx, lockKey(id), func(tx pgx.Tx) error {
+		// Claiming a GitHub login writes OTHER identities' rows
+		// (claimGitHubDisplay). A per-login lock is not enough: two accounts
+		// swapping logins each write the other's row and deadlock. So every
+		// GitHub provision with a login serializes on one lock, taken before
+		// any row write and after nothing but the identity lock. Provision
+		// runs on a resolver cache miss only, so the contention is small.
+		if id.Provider == auth.ProviderGitHub && id.Display != "" {
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, githubLoginLock); err != nil {
+				return fmt.Errorf("principals: acquire login lock: %w", err)
+			}
+		}
 		now := s.now()
 		var revoked *time.Time
 		var p Principal
@@ -216,6 +227,9 @@ func (s *Store) Provision(ctx context.Context, id auth.Identity) (*Principal, er
 	}
 	return out, nil
 }
+
+// githubLoginLock serializes the GitHub provisions that may move a login.
+const githubLoginLock = "principals:github-logins"
 
 func createPrincipal(ctx context.Context, tx pgx.Tx, kind, display string, now time.Time) (*Principal, error) {
 	pid, err := newPrefixedID(PrincipalIDPrefix, now)

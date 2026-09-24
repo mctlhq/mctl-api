@@ -177,6 +177,72 @@ func TestGitHubRenameKeepsThePrincipalAndMovesTheLogin(t *testing.T) {
 	}
 }
 
+// Two accounts swapping logins at once: each claim writes the other's row.
+// Serialized on the login, neither deadlocks.
+func TestCrossedLoginClaimsDoNotDeadlock(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	for round := 0; round < 20; round++ {
+		a, b := "x"+strconv.Itoa(round), "y"+strconv.Itoa(round)
+		ida, idb := int64(5000+2*round), int64(5001+2*round)
+		if _, err := s.Provision(ctx, github(ida, a)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Provision(ctx, github(idb, b)); err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		for _, c := range []struct {
+			id    int64
+			login string
+		}{{ida, b}, {idb, a}} {
+			go func(id int64, login string) {
+				<-start
+				_, err := s.Provision(ctx, github(id, login))
+				errs <- err
+			}(c.id, c.login)
+		}
+		close(start)
+		for i := 0; i < 2; i++ {
+			if err := <-errs; err != nil {
+				t.Fatalf("round %d: %v", round, err)
+			}
+		}
+	}
+}
+
+// A surface may not take an authentication provider's name: its mirror row
+// would collide with, and repoint, a real identity.
+func TestMirrorRefusesReservedProviderNames(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	gh, err := s.Provision(ctx, github(4242, "alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Provision(ctx, github(77, "bob")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{auth.ProviderGitHub, auth.ProviderDex, auth.ProviderService, auth.ProviderDev} {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// "bob" linking surface-native id 4242 on a surface named github
+		// would otherwise move alice's GitHub identity onto bob.
+		err = s.MirrorLink(ctx, tx, name, "4242", "github:bob")
+		_ = tx.Rollback(ctx)
+		if err == nil {
+			t.Fatalf("surface %q was mirrored", name)
+		}
+	}
+	p, err := s.ResolveGitHubLogin(ctx, "alice")
+	if err != nil || p.ID != gh.ID {
+		t.Fatalf("alice now resolves to %v, %v", p, err)
+	}
+}
+
 func TestProvisionRejectsMalformedIdentities(t *testing.T) {
 	s := newStoreForTest(t)
 	ctx := context.Background()
