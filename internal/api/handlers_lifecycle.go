@@ -431,14 +431,15 @@ func decodeLifecycleWrite(w http.ResponseWriter, r *http.Request) (lifecycleWrit
 
 // AcquireLifecycleOwnership handles POST /api/v1/lifecycle/ownership/acquire.
 func (h *Handlers) AcquireLifecycleOwnership(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
+	user, ok := h.requireLifecycleAdmin(w, r)
+	if !ok {
 		return
 	}
 	body, ok := decodeLifecycleWrite(w, r)
 	if !ok {
 		return
 	}
-	got, err := h.opts.Lifecycle.Acquire(lifecycleCaller(r), lifecycle.AcquireRequest{
+	got, err := h.opts.Lifecycle.Acquire(lifecycleCaller(r, user), lifecycle.AcquireRequest{
 		Entity: body.entity(), Phase: body.Phase, Owner: body.owner(),
 		ProposalRef: body.ProposalRef, PolicyRef: body.PolicyRef,
 		TemporalWorkflowID: body.TemporalWorkflowID,
@@ -457,7 +458,8 @@ func (h *Handlers) AcquireLifecycleOwnership(w http.ResponseWriter, r *http.Requ
 // would let an owner prove liveness forever while achieving nothing, which is
 // the failure mode the staleness bound exists to catch.
 func (h *Handlers) RecordLifecycleProgress(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
+	user, ok := h.requireLifecycleAdmin(w, r)
+	if !ok {
 		return
 	}
 	body, ok := decodeLifecycleWrite(w, r)
@@ -476,7 +478,7 @@ func (h *Handlers) RecordLifecycleProgress(w http.ResponseWriter, r *http.Reques
 	if !requireEpoch(w, body) {
 		return
 	}
-	got, err := h.opts.Lifecycle.RecordProgress(lifecycleCaller(r), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence)
+	got, err := h.opts.Lifecycle.RecordProgress(lifecycleCaller(r, user), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence)
 	if err != nil {
 		writeLifecycleError(w, err, nil)
 		return
@@ -486,7 +488,8 @@ func (h *Handlers) RecordLifecycleProgress(w http.ResponseWriter, r *http.Reques
 
 // StartLifecycleHandoff handles POST /api/v1/lifecycle/ownership/handoff/start.
 func (h *Handlers) StartLifecycleHandoff(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
+	user, ok := h.requireLifecycleAdmin(w, r)
+	if !ok {
 		return
 	}
 	body, ok := decodeLifecycleWrite(w, r)
@@ -500,7 +503,7 @@ func (h *Handlers) StartLifecycleHandoff(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "to_owner_type and to_owner_id are required")
 		return
 	}
-	got, err := h.opts.Lifecycle.HandoffStart(lifecycleCaller(r), body.entity(), body.Phase, body.owner(), body.Epoch,
+	got, err := h.opts.Lifecycle.HandoffStart(lifecycleCaller(r, user), body.entity(), body.Phase, body.owner(), body.Epoch,
 		lifecycle.Owner{Type: body.ToOwnerType, ID: body.ToOwnerID}, body.Reason)
 	if err != nil {
 		writeLifecycleError(w, err, nil)
@@ -513,7 +516,8 @@ func (h *Handlers) StartLifecycleHandoff(w http.ResponseWriter, r *http.Request)
 // POST /api/v1/lifecycle/ownership/handoff/complete. Called by the INCOMING
 // owner, which is why owner_type/owner_id here name the arriving actor.
 func (h *Handlers) CompleteLifecycleHandoff(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
+	user, ok := h.requireLifecycleAdmin(w, r)
+	if !ok {
 		return
 	}
 	body, ok := decodeLifecycleWrite(w, r)
@@ -521,7 +525,7 @@ func (h *Handlers) CompleteLifecycleHandoff(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	got, err := h.opts.Lifecycle.HandoffComplete(
-		lifecycleCaller(r), body.entity(), body.Phase, body.owner(), ownerOptions(body)...,
+		lifecycleCaller(r, user), body.entity(), body.Phase, body.owner(), ownerOptions(body)...,
 	)
 	if err != nil {
 		writeLifecycleError(w, err, nil)
@@ -604,7 +608,8 @@ func ownerOptions(body lifecycleWriteRequest) []lifecycle.OwnerOption {
 // store's refusals are plain errors and a plain error is a 500 — see the
 // comment on the checks themselves.
 func (h *Handlers) RecoverLifecycleOwnership(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
+	user, ok := h.requireLifecycleAdmin(w, r)
+	if !ok {
 		return
 	}
 	body, ok := decodeLifecycleWrite(w, r)
@@ -631,7 +636,7 @@ func (h *Handlers) RecoverLifecycleOwnership(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	got, err := h.opts.Lifecycle.Recover(
-		lifecycleCaller(r), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence,
+		lifecycleCaller(r, user), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence,
 		ownerOptions(body)...,
 	)
 	if err != nil {
@@ -642,7 +647,8 @@ func (h *Handlers) RecoverLifecycleOwnership(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *Handlers) finishLifecycle(w http.ResponseWriter, r *http.Request, terminal bool) {
-	if _, ok := h.requireLifecycleAdmin(w, r); !ok {
+	user, ok := h.requireLifecycleAdmin(w, r)
+	if !ok {
 		return
 	}
 	body, ok := decodeLifecycleWrite(w, r)
@@ -657,9 +663,9 @@ func (h *Handlers) finishLifecycle(w http.ResponseWriter, r *http.Request, termi
 		err error
 	)
 	if terminal {
-		got, err = h.opts.Lifecycle.Terminal(lifecycleCaller(r), body.entity(), body.Phase, body.owner(), body.Epoch, body.Reason)
+		got, err = h.opts.Lifecycle.Terminal(lifecycleCaller(r, user), body.entity(), body.Phase, body.owner(), body.Epoch, body.Reason)
 	} else {
-		got, err = h.opts.Lifecycle.Release(lifecycleCaller(r), body.entity(), body.Phase, body.owner(), body.Epoch, body.Reason)
+		got, err = h.opts.Lifecycle.Release(lifecycleCaller(r, user), body.entity(), body.Phase, body.owner(), body.Epoch, body.Reason)
 	}
 	if err != nil {
 		writeLifecycleError(w, err, nil)
@@ -669,8 +675,9 @@ func (h *Handlers) finishLifecycle(w http.ResponseWriter, r *http.Request, termi
 }
 
 // lifecycleCaller is the request context carrying the authenticated caller's
-// principal ids for the lifecycle events a write records (mctl-api#373).
-func lifecycleCaller(r *http.Request) context.Context {
-	u := auth.UserFromContext(r.Context())
-	return lifecycle.WithCaller(r.Context(), u.PrincipalID(), u.ViaPrincipalID())
+// principal ids for the lifecycle events a write records (mctl-api#373). It
+// takes the user the handler's admin gate returned, so the event names the
+// same caller as the gate and the audit entry.
+func lifecycleCaller(r *http.Request, user *auth.User) context.Context {
+	return lifecycle.WithCaller(r.Context(), user.PrincipalID(), user.ViaPrincipalID())
 }

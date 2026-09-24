@@ -652,7 +652,31 @@ func TestRespondHumanInput_RecordsTheRespondentsPrincipal(t *testing.T) {
 		t.Fatalf("respond = %d %s", got.code, got.raw)
 	}
 	row, _ := ledger.Get(context.Background(), hiASCII)
-	if row == nil || row.RespondentPrincipalID != "prn_ALICE" || row.Respondent != "github:alice" {
+	if row == nil || row.RespondentPrincipalID != "prn_ALICE" || row.Respondent != "github:alice" || row.ViaPrincipalID != "" {
+		t.Fatalf("ledger row = %+v", row)
+	}
+}
+
+// A surface relaying the answer is recorded as the via principal; the human
+// stays the respondent.
+func TestRespondHumanInput_RecordsTheRelayingSurface(t *testing.T) {
+	h, tc, ledger, _ := newHumanInputResponseHandlers(t)
+	tc.onSignal = workflowAccepts
+	pr := &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE", auth.SurfacePrincipalPrefix + "telegram": "prn_TELEGRAM"}}
+	surface := auth.NewSurfaceUser("telegram")
+	if err := auth.AttachPrincipal(context.Background(), pr, surface); err != nil {
+		t.Fatal(err)
+	}
+	u := auth.NewRelayedUser("alice", alice.Groups, surface)
+	if err := auth.AttachPrincipal(context.Background(), pr, u); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"request_hash":"` + hiASCIIHash + `","value":"library A","surface":"telegram"}`
+	if got := respond(t, h, u, hiASCII, body); got.code != http.StatusOK {
+		t.Fatalf("respond = %d %s", got.code, got.raw)
+	}
+	row, _ := ledger.Get(context.Background(), hiASCII)
+	if row == nil || row.RespondentPrincipalID != "prn_ALICE" || row.ViaPrincipalID != "prn_TELEGRAM" {
 		t.Fatalf("ledger row = %+v", row)
 	}
 }

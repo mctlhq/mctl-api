@@ -1166,3 +1166,29 @@ func TestLifecycleHandlers_RecordCallerPrincipal(t *testing.T) {
 		t.Fatalf("caller principal = %q", principal)
 	}
 }
+
+// lifecycleCaller never dereferences a missing user: the auth accessors are
+// nil-safe, and the events then record no caller.
+func TestLifecycleCaller_NilUserRecordsNoCaller(t *testing.T) {
+	store, prefix := newTestLifecycleStore(t)
+	r := httptest.NewRequest("POST", "/", nil)
+	id := prefix + "-nil"
+	if _, err := store.Acquire(lifecycleCaller(r, nil), lifecycle.AcquireRequest{
+		Entity: lifecycle.EntityRef{Kind: lifecycle.KindPullRequest, ID: id}, Phase: "review-remediation",
+		Owner: lifecycle.Owner{Type: "shepherd", ID: "cron"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.New(context.Background(), os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var principal string
+	if err := pool.QueryRow(context.Background(), `SELECT caller_principal_id FROM lifecycle_events WHERE entity_id=$1 LIMIT 1`, id).Scan(&principal); err != nil {
+		t.Fatal(err)
+	}
+	if principal != "" {
+		t.Fatalf("caller principal = %q, want none", principal)
+	}
+}

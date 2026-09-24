@@ -90,7 +90,7 @@ func TestActionApprovalRecordsPrincipalIDs(t *testing.T) {
 	a := createApproval(t, s, in)
 	if _, err := s.DecideActionApproval(context.Background(), ActionDecisionInput{
 		ID: a.ID, DecidedBy: "github:root", Decision: DecisionApprove,
-		DecidedByPrincipalID: "prn_ROOT", ViaPrincipalID: "prn_TELEGRAM",
+		DecidedByPrincipalID: "prn_ROOT", DecidedViaPrincipalID: "prn_TELEGRAM",
 	}); err != nil {
 		t.Fatal(err)
 	}

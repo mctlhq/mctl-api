@@ -454,12 +454,13 @@ type ActionDecisionInput struct {
 	ID string
 	// DecidedBy is the authenticated human principal; never from a body.
 	DecidedBy string
-	// DecidedByPrincipalID and ViaPrincipalID are recorded only
-	// (mctl-api#373 phase 1); see Mutation.
-	DecidedByPrincipalID string
-	ViaPrincipalID       string
-	Decision             string
-	Reason               string
+	// DecidedByPrincipalID and DecidedViaPrincipalID (the surface that
+	// relayed the decision) are recorded only (mctl-api#373 phase 1); see
+	// Mutation.
+	DecidedByPrincipalID  string
+	DecidedViaPrincipalID string
+	Decision              string
+	Reason                string
 }
 
 // DecideActionApproval moves a pending request to approved or denied. A
@@ -505,7 +506,7 @@ func (s *Store) DecideActionApproval(ctx context.Context, in ActionDecisionInput
 			SET state=$2, decided_by=$3, decided_at=$4, reason=$5,
 			    decided_by_principal_id=$6, decided_via_principal_id=$7
 			WHERE id=$1 AND state='pending' RETURNING `+actionApprovalColumns,
-			cur.ID, to, in.DecidedBy, now, in.Reason, in.DecidedByPrincipalID, in.ViaPrincipalID), now)
+			cur.ID, to, in.DecidedBy, now, in.Reason, in.DecidedByPrincipalID, in.DecidedViaPrincipalID), now)
 		if err != nil {
 			return fmt.Errorf("workitems: decide action approval: %w", err)
 		}

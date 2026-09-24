@@ -40,7 +40,10 @@ type Delivery struct {
 	Respondent  string // actor_type:actor_id, derived from authentication
 	// RespondentPrincipalID is Respondent's canonical principal id (prn_…)
 	// and ViaPrincipalID the relaying surface's (mctl-api#373). Recorded
-	// only; not read back and not part of SameSubmission.
+	// only and not part of SameSubmission. PostgresLedger writes them but
+	// deliveryColumns does not read them back, so its Get and Claim return
+	// them empty (MemoryLedger keeps the struct): a phase-2 reader must add
+	// them to deliveryColumns first.
 	RespondentPrincipalID string
 	ViaPrincipalID        string
 	Surface               string

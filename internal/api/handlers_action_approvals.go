@@ -329,7 +329,7 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 	}
 	a, err := h.opts.WorkItems.DecideActionApproval(r.Context(), workitems.ActionDecisionInput{
 		ID: chi.URLParam(r, "id"), DecidedBy: principalOf(user), Decision: body.Decision, Reason: body.Reason,
-		DecidedByPrincipalID: user.PrincipalID(), ViaPrincipalID: user.ViaPrincipalID(),
+		DecidedByPrincipalID: user.PrincipalID(), DecidedViaPrincipalID: user.ViaPrincipalID(),
 	})
 	if err != nil {
 		if code := actionApprovalRefusalCode(err); code != "" {
