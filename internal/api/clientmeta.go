@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/mctlhq/mctl-api/internal/audit"
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 const maxUserAgentLen = 512
@@ -177,6 +178,13 @@ func (h *Handlers) logAudit(r *http.Request, entry audit.Entry) {
 			entry.ClientIP = m.IP
 			entry.UserAgent = m.UserAgent
 			entry.RequestID = m.RequestID
+		}
+		// The entry is about the authenticated caller (a relayed request's
+		// context user is the linked human, carrying the surface as its via
+		// principal). An entry naming anyone else keeps what it was given.
+		if u := auth.UserFromContext(r.Context()); u != nil && u.ID == entry.UserID && entry.PrincipalID == "" {
+			entry.PrincipalID = u.PrincipalID()
+			entry.ViaPrincipalID = u.ViaPrincipalID()
 		}
 	}
 	h.opts.AuditLog.Log(entry)

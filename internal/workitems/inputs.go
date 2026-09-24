@@ -18,8 +18,14 @@ type Mutation struct {
 	// Actor (mctl-api#350), or "" when Actor acted directly. Recorded on the
 	// event, never used for authorization.
 	ActingPrincipal string
-	Surface         string
-	RequestID       string
+	// ActorPrincipalID and ViaPrincipalID are the canonical principal ids
+	// (prn_…, mctl-api#373) of Actor and of the relaying surface. Phase 1
+	// records them next to the strings above; nothing reads them for
+	// authorization. "" when authentication could not resolve one.
+	ActorPrincipalID string
+	ViaPrincipalID   string
+	Surface          string
+	RequestID        string
 	// IdempotencyKey deduplicates the request: per tenant for Create, per
 	// work item for everything else. RequestHash is the digest of the
 	// request the key was first used with. The same key with a different

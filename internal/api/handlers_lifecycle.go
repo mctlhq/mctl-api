@@ -15,6 +15,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -437,7 +438,7 @@ func (h *Handlers) AcquireLifecycleOwnership(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	got, err := h.opts.Lifecycle.Acquire(r.Context(), lifecycle.AcquireRequest{
+	got, err := h.opts.Lifecycle.Acquire(lifecycleCaller(r), lifecycle.AcquireRequest{
 		Entity: body.entity(), Phase: body.Phase, Owner: body.owner(),
 		ProposalRef: body.ProposalRef, PolicyRef: body.PolicyRef,
 		TemporalWorkflowID: body.TemporalWorkflowID,
@@ -475,7 +476,7 @@ func (h *Handlers) RecordLifecycleProgress(w http.ResponseWriter, r *http.Reques
 	if !requireEpoch(w, body) {
 		return
 	}
-	got, err := h.opts.Lifecycle.RecordProgress(r.Context(), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence)
+	got, err := h.opts.Lifecycle.RecordProgress(lifecycleCaller(r), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence)
 	if err != nil {
 		writeLifecycleError(w, err, nil)
 		return
@@ -499,7 +500,7 @@ func (h *Handlers) StartLifecycleHandoff(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "to_owner_type and to_owner_id are required")
 		return
 	}
-	got, err := h.opts.Lifecycle.HandoffStart(r.Context(), body.entity(), body.Phase, body.owner(), body.Epoch,
+	got, err := h.opts.Lifecycle.HandoffStart(lifecycleCaller(r), body.entity(), body.Phase, body.owner(), body.Epoch,
 		lifecycle.Owner{Type: body.ToOwnerType, ID: body.ToOwnerID}, body.Reason)
 	if err != nil {
 		writeLifecycleError(w, err, nil)
@@ -520,7 +521,7 @@ func (h *Handlers) CompleteLifecycleHandoff(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	got, err := h.opts.Lifecycle.HandoffComplete(
-		r.Context(), body.entity(), body.Phase, body.owner(), ownerOptions(body)...,
+		lifecycleCaller(r), body.entity(), body.Phase, body.owner(), ownerOptions(body)...,
 	)
 	if err != nil {
 		writeLifecycleError(w, err, nil)
@@ -630,7 +631,7 @@ func (h *Handlers) RecoverLifecycleOwnership(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	got, err := h.opts.Lifecycle.Recover(
-		r.Context(), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence,
+		lifecycleCaller(r), body.entity(), body.Phase, body.owner(), body.Epoch, body.Evidence,
 		ownerOptions(body)...,
 	)
 	if err != nil {
@@ -656,13 +657,20 @@ func (h *Handlers) finishLifecycle(w http.ResponseWriter, r *http.Request, termi
 		err error
 	)
 	if terminal {
-		got, err = h.opts.Lifecycle.Terminal(r.Context(), body.entity(), body.Phase, body.owner(), body.Epoch, body.Reason)
+		got, err = h.opts.Lifecycle.Terminal(lifecycleCaller(r), body.entity(), body.Phase, body.owner(), body.Epoch, body.Reason)
 	} else {
-		got, err = h.opts.Lifecycle.Release(r.Context(), body.entity(), body.Phase, body.owner(), body.Epoch, body.Reason)
+		got, err = h.opts.Lifecycle.Release(lifecycleCaller(r), body.entity(), body.Phase, body.owner(), body.Epoch, body.Reason)
 	}
 	if err != nil {
 		writeLifecycleError(w, err, nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, newOwnershipResponse(got))
+}
+
+// lifecycleCaller is the request context carrying the authenticated caller's
+// principal ids for the lifecycle events a write records (mctl-api#373).
+func lifecycleCaller(r *http.Request) context.Context {
+	u := auth.UserFromContext(r.Context())
+	return lifecycle.WithCaller(r.Context(), u.PrincipalID(), u.ViaPrincipalID())
 }

@@ -125,6 +125,11 @@ CREATE INDEX IF NOT EXISTS action_approval_requests_execution
     ON action_approval_requests (execution_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS action_approval_requests_state
     ON action_approval_requests (state, created_at DESC);
+-- Canonical principal ids (mctl-api#373), dual-written next to the strings.
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS requested_by_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS decided_by_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS decided_via_principal_id TEXT NOT NULL DEFAULT '';
 `
 
 const actionApprovalColumns = `id, execution_id, action_kind, target, args_digest, policy_rule_id,
@@ -208,9 +213,13 @@ func IntentHash(in ActionIntent) string {
 type ActionApprovalInput struct {
 	ActionIntent
 	// RequestedBy is the authenticated principal; never from a body.
-	RequestedBy    string
-	IdempotencyKey string
-	ExpiresAt      time.Time
+	RequestedBy string
+	// RequestedByPrincipalID and ViaPrincipalID are recorded only
+	// (mctl-api#373 phase 1); see Mutation.
+	RequestedByPrincipalID string
+	ViaPrincipalID         string
+	IdempotencyKey         string
+	ExpiresAt              time.Time
 	// IntentHash, when set, must equal IntentHash(ActionIntent).
 	IntentHash string
 }
@@ -341,12 +350,12 @@ func (s *Store) CreateActionApproval(ctx context.Context, in ActionApprovalInput
 		out, err = scanActionApproval(tx.QueryRow(ctx, `INSERT INTO action_approval_requests (
 				id, execution_id, action_kind, target, args_digest, policy_rule_id, policy_version,
 				artifact_hash, work_item_id, idempotency_key, requested_by, intent_hash, state,
-				expires_at, created_at, schema_version)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING `+actionApprovalColumns,
+				expires_at, created_at, schema_version, requested_by_principal_id, via_principal_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING `+actionApprovalColumns,
 			ActionApprovalIDPrefix+strings.ReplaceAll(uuid.NewString(), "-", ""), in.ExecutionID, in.ActionKind,
 			in.Target, in.ArgsDigest, in.PolicyRuleID, in.PolicyVersion, in.ArtifactHash, in.WorkItemID,
 			in.IdempotencyKey, in.RequestedBy, hash, ApprovalPending, in.ExpiresAt.UTC(), now,
-			ActionApprovalSchemaVersion), now)
+			ActionApprovalSchemaVersion, in.RequestedByPrincipalID, in.ViaPrincipalID), now)
 		if err != nil {
 			return fmt.Errorf("workitems: insert action approval: %w", err)
 		}
@@ -445,8 +454,12 @@ type ActionDecisionInput struct {
 	ID string
 	// DecidedBy is the authenticated human principal; never from a body.
 	DecidedBy string
-	Decision  string
-	Reason    string
+	// DecidedByPrincipalID and ViaPrincipalID are recorded only
+	// (mctl-api#373 phase 1); see Mutation.
+	DecidedByPrincipalID string
+	ViaPrincipalID       string
+	Decision             string
+	Reason               string
 }
 
 // DecideActionApproval moves a pending request to approved or denied. A
@@ -489,9 +502,10 @@ func (s *Store) DecideActionApproval(ctx context.Context, in ActionDecisionInput
 		}
 		now := s.now()
 		out, err = scanActionApproval(tx.QueryRow(ctx, `UPDATE action_approval_requests
-			SET state=$2, decided_by=$3, decided_at=$4, reason=$5
+			SET state=$2, decided_by=$3, decided_at=$4, reason=$5,
+			    decided_by_principal_id=$6, decided_via_principal_id=$7
 			WHERE id=$1 AND state='pending' RETURNING `+actionApprovalColumns,
-			cur.ID, to, in.DecidedBy, now, in.Reason), now)
+			cur.ID, to, in.DecidedBy, now, in.Reason, in.DecidedByPrincipalID, in.ViaPrincipalID), now)
 		if err != nil {
 			return fmt.Errorf("workitems: decide action approval: %w", err)
 		}

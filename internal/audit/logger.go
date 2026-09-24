@@ -40,6 +40,12 @@ type Entry struct {
 	ClientIP  string `json:"clientIp,omitempty"`
 	UserAgent string `json:"userAgent,omitempty"`
 	RequestID string `json:"requestId,omitempty"`
+	// PrincipalID is UserID's canonical principal id (prn_…) and
+	// ViaPrincipalID the relaying surface's, when a surface relayed the
+	// request (mctl-api#373). Phase 1 records them in the database only; they
+	// are not served and nothing authorizes on them.
+	PrincipalID    string `json:"-"`
+	ViaPrincipalID string `json:"-"`
 }
 
 // Log is the interface for recording and querying audit events.

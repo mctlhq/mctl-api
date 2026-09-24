@@ -638,3 +638,21 @@ func TestRespondHumanInput_OutcomeIsAuditedOncePerDelivery(t *testing.T) {
 		t.Fatalf("accepted audited %d times, want 1", accepted)
 	}
 }
+
+// The delivery records the respondent's canonical principal id next to the
+// respondent string (mctl-api#373 phase 1: recorded only).
+func TestRespondHumanInput_RecordsTheRespondentsPrincipal(t *testing.T) {
+	h, tc, ledger, _ := newHumanInputResponseHandlers(t)
+	tc.onSignal = workflowAccepts
+	u := *alice
+	if err := auth.AttachPrincipal(context.Background(), &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE"}}, &u); err != nil {
+		t.Fatal(err)
+	}
+	if got := respond(t, h, &u, hiASCII, answer(`"library A"`)); got.code != http.StatusOK {
+		t.Fatalf("respond = %d %s", got.code, got.raw)
+	}
+	row, _ := ledger.Get(context.Background(), hiASCII)
+	if row == nil || row.RespondentPrincipalID != "prn_ALICE" || row.Respondent != "github:alice" {
+		t.Fatalf("ledger row = %+v", row)
+	}
+}

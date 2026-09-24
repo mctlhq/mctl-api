@@ -161,3 +161,39 @@ func TestLedger_ClearExpiredValuesDropsOnlyUndeliverableAnswers(t *testing.T) {
 		})
 	}
 }
+
+// mctl-api#373 phase 1: the respondent's canonical principal id and the
+// relaying surface's are recorded, including when a new answer takes over a
+// rejected row.
+func TestPostgresLedger_RecordsPrincipalIDs(t *testing.T) {
+	l := newPostgresLedgerForTest(t)
+	ctx := context.Background()
+	principals := func() string {
+		t.Helper()
+		var p, v string
+		if err := l.pool.QueryRow(ctx, `SELECT respondent_principal_id, via_principal_id FROM human_input_deliveries
+			WHERE request_id='hir-0123456789abcdef'`).Scan(&p, &v); err != nil {
+			t.Fatal(err)
+		}
+		return p + "/" + v
+	}
+	d := delivery("user:alice", "yes")
+	d.RespondentPrincipalID, d.ViaPrincipalID = "prn_ALICE", "prn_TELEGRAM"
+	if _, ok, err := l.Claim(ctx, d); err != nil || !ok {
+		t.Fatalf("claim = %v %v", ok, err)
+	}
+	if got := principals(); got != "prn_ALICE/prn_TELEGRAM" {
+		t.Fatalf("recorded %s", got)
+	}
+	if err := l.Resolve(ctx, d, DeliveryRejected); err != nil {
+		t.Fatal(err)
+	}
+	next := delivery("user:bob", "no")
+	next.RespondentPrincipalID = "prn_BOB"
+	if _, ok, err := l.Claim(ctx, next); err != nil || !ok {
+		t.Fatalf("takeover = %v %v", ok, err)
+	}
+	if got := principals(); got != "prn_BOB/" {
+		t.Fatalf("after takeover recorded %s", got)
+	}
+}

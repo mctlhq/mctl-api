@@ -228,7 +228,11 @@ func mutationFor(w http.ResponseWriter, r *http.Request, user *auth.User, op, it
 	if surface == "" {
 		surface = defaultWorkItemSurface
 	}
-	m := workitems.Mutation{Actor: principalOf(user), ActingPrincipal: user.ActingPrincipal(), Surface: surface, IdempotencyKey: key}
+	m := workitems.Mutation{
+		Actor: principalOf(user), ActingPrincipal: user.ActingPrincipal(),
+		ActorPrincipalID: user.PrincipalID(), ViaPrincipalID: user.ViaPrincipalID(),
+		Surface: surface, IdempotencyKey: key,
+	}
 	if meta, ok := ClientMetaFromContext(r.Context()); ok {
 		m.RequestID = truncateRequestID(meta.RequestID)
 	}

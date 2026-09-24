@@ -44,6 +44,9 @@ CREATE INDEX IF NOT EXISTS audit_events_timestamp ON audit_events (timestamp DES
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS client_ip TEXT;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS user_agent TEXT;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS request_id TEXT;
+-- Canonical principal ids (mctl-api#373), dual-written next to user_id.
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS user_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
 `
 
 // PostgresLogger persists audit entries to PostgreSQL via pgx.
@@ -104,12 +107,14 @@ func (p *PostgresLogger) Log(entry Entry) {
 	defer cancel()
 
 	_, err := p.pool.Exec(ctx,
-		`INSERT INTO audit_events (id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		`INSERT INTO audit_events (id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id,
+		                           user_principal_id, via_principal_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		 ON CONFLICT (id) DO NOTHING`,
 		entry.ID, entry.Timestamp, entry.UserID, entry.Operation,
 		params, entry.WorkflowName, entry.Status, entry.RiskLevel, entry.Message,
 		entry.ClientIP, entry.UserAgent, entry.RequestID,
+		entry.PrincipalID, entry.ViaPrincipalID,
 	)
 	if err != nil {
 		slog.Error("audit postgres: insert failed", "error", err)
@@ -117,6 +122,7 @@ func (p *PostgresLogger) Log(entry Entry) {
 
 	slog.Info("audit",
 		"user", entry.UserID,
+		"principal", entry.PrincipalID,
 		"operation", entry.Operation,
 		"workflow", entry.WorkflowName,
 		"status", entry.Status,

@@ -1131,3 +1131,38 @@ func TestLifecycleHandlers_BatchStillTakesRepeatedID(t *testing.T) {
 			rec.Body.String())
 	}
 }
+
+// A lifecycle write records the authenticated caller's principal id on the
+// event it appends (mctl-api#373 phase 1: recorded only).
+func TestLifecycleHandlers_RecordCallerPrincipal(t *testing.T) {
+	store, prefix := newTestLifecycleStore(t)
+	h := &Handlers{opts: Options{Lifecycle: store}}
+	caller := auth.NewServiceUser()
+	pr := &relayPrincipals{byLogin: map[string]string{auth.ServiceUserID: "prn_AGENT"}}
+	if err := auth.AttachPrincipal(context.Background(), pr, caller); err != nil {
+		t.Fatal(err)
+	}
+	id := prefix + "-pr"
+	rec := lifecyclePost(t, h, func(w http.ResponseWriter, r *http.Request) {
+		h.AcquireLifecycleOwnership(w, r.WithContext(auth.WithUser(r.Context(), caller)))
+	}, map[string]any{"kind": "pull-request", "id": id, "phase": "review-remediation", "owner_type": "shepherd", "owner_id": "cron"})
+	if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+		t.Fatalf("acquire = %d %s", rec.Code, rec.Body.String())
+	}
+	events, err := store.Events(context.Background(), lifecycle.EntityRef{Kind: lifecycle.KindPullRequest, ID: id}, "review-remediation", 10)
+	if err != nil || len(events) == 0 {
+		t.Fatalf("events = %v %v", events, err)
+	}
+	pool, err := pgxpool.New(context.Background(), os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var principal string
+	if err := pool.QueryRow(context.Background(), `SELECT caller_principal_id FROM lifecycle_events WHERE entity_id=$1 ORDER BY id LIMIT 1`, id).Scan(&principal); err != nil {
+		t.Fatal(err)
+	}
+	if principal != "prn_AGENT" {
+		t.Fatalf("caller principal = %q", principal)
+	}
+}
