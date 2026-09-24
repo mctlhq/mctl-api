@@ -19,6 +19,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,6 +48,7 @@ func newStoreForTest(t *testing.T) *Store {
 			"DELETE FROM principals",
 			// The surface tables exist once any test built a surface store.
 			"DELETE FROM surface_identity_links",
+			"DELETE FROM surface_identity_challenges",
 		} {
 			if _, err := s.pool.Exec(ctx, q); err != nil && !isUndefinedTable(err) {
 				t.Fatal(err)
@@ -70,35 +72,42 @@ func github(id int64, login string) auth.Identity {
 func TestProvisionIsIdempotentUnderConcurrency(t *testing.T) {
 	s := newStoreForTest(t)
 	ctx := context.Background()
-	var wg sync.WaitGroup
-	ids := make([]string, 16)
-	errs := make([]error, 16)
-	for i := range ids {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			p, err := s.Provision(ctx, github(4242, "alice"))
-			if err == nil {
-				ids[i] = p.ID
-			}
-			errs[i] = err
-		}(i)
-	}
-	wg.Wait()
-	for i := range ids {
-		if errs[i] != nil {
-			t.Fatal(errs[i])
+	const rounds, workers = 8, 24
+	for round := 0; round < rounds; round++ {
+		id := github(int64(1000+round), "user"+strconv.Itoa(round))
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		ids := make([]string, workers)
+		errs := make([]error, workers)
+		for i := range ids {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				p, err := s.Provision(ctx, id)
+				if err == nil {
+					ids[i] = p.ID
+				}
+				errs[i] = err
+			}(i)
 		}
-		if ids[i] != ids[0] {
-			t.Fatalf("one identity got two principals: %s and %s", ids[0], ids[i])
+		close(start)
+		wg.Wait()
+		for i := range ids {
+			if errs[i] != nil {
+				t.Fatalf("round %d: %v", round, errs[i])
+			}
+			if ids[i] != ids[0] {
+				t.Fatalf("round %d: one identity got two principals: %s and %s", round, ids[0], ids[i])
+			}
 		}
 	}
 	var principals, identities int
 	if err := s.pool.QueryRow(ctx, "SELECT (SELECT count(*) FROM principals), (SELECT count(*) FROM external_identities)").Scan(&principals, &identities); err != nil {
 		t.Fatal(err)
 	}
-	if principals != 1 || identities != 1 {
-		t.Fatalf("%d principals, %d identities; want 1 and 1", principals, identities)
+	if principals != rounds || identities != rounds {
+		t.Fatalf("%d principals, %d identities; want %d and %d", principals, identities, rounds, rounds)
 	}
 }
 
@@ -154,6 +163,17 @@ func TestGitHubRenameKeepsThePrincipalAndMovesTheLogin(t *testing.T) {
 	p, err := s.ResolveGitHubLogin(ctx, "ALICE-RENAMED")
 	if err != nil || p.ID != taker.ID {
 		t.Fatalf("login now resolves to %v, %v; want the new holder %s", p, err, taker.ID)
+	}
+	// The previous holder's row no longer carries the login at all, so no
+	// ordering of verified_at can ever route the login back to it.
+	idents, err := s.Identities(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range idents {
+		if strings.EqualFold(x.Display, "alice-renamed") {
+			t.Fatalf("the previous holder still carries the login: %+v", x)
+		}
 	}
 }
 
