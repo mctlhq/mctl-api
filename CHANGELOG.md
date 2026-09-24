@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.53.0](https://github.com/mctlhq/mctl-api/compare/4.52.1...4.53.0) (2026-09-24)
+
+
+### Features
+
+* **usage:** execution_id and correlation shapes for the usage ledger (mctl-agents[#499](https://github.com/mctlhq/mctl-api/issues/499)) ([6c252a0](https://github.com/mctlhq/mctl-api/commit/6c252a0b28283960d967d38d1ac68fa17f79a909))
+* **usage:** execution_id and validated correlation fields (mctl-agents[#499](https://github.com/mctlhq/mctl-api/issues/499)) ([88e0d2b](https://github.com/mctlhq/mctl-api/commit/88e0d2bcd46dc04fdb37519e5e9bd2c4f6c3defb))
+
 ## [4.52.1](https://github.com/mctlhq/mctl-api/compare/4.52.0...4.52.1) (2026-09-24)
 
 
