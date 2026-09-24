@@ -191,7 +191,14 @@ type IngestResult struct {
 	Deduped  []string `json:"deduped"`
 }
 
-// Ingest persists records idempotently.
+// Ingester is who appends a batch: the authenticated caller and its
+// canonical principal. It is recorded on every row the batch creates.
+type Ingester struct {
+	ID          string
+	PrincipalID string
+}
+
+// IngestAs persists records idempotently, attributed to by.
 //
 // The whole batch is one transaction, so a producer retrying after a partial
 // failure re-sends a batch that either applied entirely or not at all — and in
@@ -200,20 +207,11 @@ type IngestResult struct {
 // Pricing is applied here, at ingest, and the resulting number plus the rate
 // card version are stored on the row. That is what makes invariant 7 hold: a
 // later rate card cannot reach back into history.
-func (s *Store) Ingest(ctx context.Context, records []*Record) (*IngestResult, error) {
-	return s.IngestAs(ctx, Ingester{}, records)
-}
-
-// Ingester is who appends a batch: the authenticated caller and its
-// canonical principal. It is recorded on every row the batch creates.
-type Ingester struct {
-	ID          string
-	PrincipalID string
-}
-
-// IngestAs is Ingest attributed to by. The attribution comes from the
-// server, never from the records: whatever a producer put in ingested_by is
-// overwritten. A deduped record keeps the attribution of its first write.
+//
+// The attribution comes from the server, never from the records: whatever a
+// producer put in ingested_by is overwritten. A deduped record keeps the
+// attribution of its first write. There is deliberately no unattributed
+// variant: an empty Ingester is visible at the call site.
 func (s *Store) IngestAs(ctx context.Context, by Ingester, records []*Record) (*IngestResult, error) {
 	res := &IngestResult{Accepted: []string{}, Deduped: []string{}}
 	if len(records) == 0 {

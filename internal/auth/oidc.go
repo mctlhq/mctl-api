@@ -360,7 +360,11 @@ func (u *User) HasPermission(permission string) bool {
 // usageWriterToken reads the usage-writer token. One that is short, or equal
 // to the mctl-agent service token or to any surface token, is refused: it
 // must prove exactly this principal and nothing more.
-func usageWriterToken(surfaces map[string]string) string {
+//
+// The surface tokens are re-read from the environment, not taken from the
+// map surfaceTokens returns. That map drops a surface token it refused, and a
+// refused token must still not be reusable here.
+func usageWriterToken() string {
 	token := strings.TrimSpace(os.Getenv(usageWriterTokenEnv))
 	service := strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN"))
 	switch {
@@ -465,7 +469,7 @@ func staticServiceUser(token string) *User {
 func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, opts ...MiddlewareOption) func(http.Handler) http.Handler {
 	authRequired := os.Getenv("AUTH_REQUIRED") != "false"
 	surfaces := surfaceTokens()
-	usageWriter := usageWriterToken(surfaces)
+	usageWriter := usageWriterToken()
 	var cfg middlewareConfig
 	for _, o := range opts {
 		o(&cfg)

@@ -82,14 +82,14 @@ func TestIngestIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
-	first, err := s.Ingest(ctx, []*Record{testRecord(prefix, "test-model", at)})
+	first, err := s.IngestAs(ctx, Ingester{}, []*Record{testRecord(prefix, "test-model", at)})
 	if err != nil {
 		t.Fatalf("first ingest: %v", err)
 	}
 	if len(first.Accepted) != 1 || len(first.Deduped) != 0 {
 		t.Fatalf("first ingest: accepted=%d deduped=%d, want 1/0", len(first.Accepted), len(first.Deduped))
 	}
-	second, err := s.Ingest(ctx, []*Record{testRecord(prefix, "test-model", at)})
+	second, err := s.IngestAs(ctx, Ingester{}, []*Record{testRecord(prefix, "test-model", at)})
 	if err != nil {
 		t.Fatalf("second ingest: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestRunSpanningTwoModelsProducesTwoRows(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
-	res, err := s.Ingest(ctx, []*Record{
+	res, err := s.IngestAs(ctx, Ingester{}, []*Record{
 		testRecord(prefix, "test-model", at),
 		testRecord(prefix, "other-model", at),
 	})
@@ -149,7 +149,7 @@ func TestAbsentAndZeroSurviveRoundTrip(t *testing.T) {
 	zero.ResultUUID = prefix + "-zero-uuid"
 	zero.CacheReadTokens = i64(0)
 
-	if _, err := s.Ingest(ctx, []*Record{absent, zero}); err != nil {
+	if _, err := s.IngestAs(ctx, Ingester{}, []*Record{absent, zero}); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 	rows, err := s.List(ctx, Filter{TemporalWorkflowID: prefix + "-wf"})
@@ -185,7 +185,7 @@ func TestStoredCostSurvivesAPriceChange(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
-	if _, err := s.Ingest(ctx, []*Record{testRecord(prefix, "test-model", at)}); err != nil {
+	if _, err := s.IngestAs(ctx, Ingester{}, []*Record{testRecord(prefix, "test-model", at)}); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 	before, err := s.List(ctx, Filter{TemporalWorkflowID: prefix + "-wf"})
@@ -236,7 +236,7 @@ func TestSummaryAggregatesOverDimensions(t *testing.T) {
 	investigator.ResultUUID = prefix + "-inv-uuid"
 	investigator.Agent = "investigator"
 
-	if _, err := s.Ingest(ctx, []*Record{testRecord(prefix, "test-model", at), investigator}); err != nil {
+	if _, err := s.IngestAs(ctx, Ingester{}, []*Record{testRecord(prefix, "test-model", at), investigator}); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 	res, err := s.Summary(ctx, Filter{TemporalWorkflowID: prefix + "-wf"}, GroupByAgent)
@@ -275,7 +275,7 @@ func TestRecordsRemainQueryableByCorrelationWithoutTraceData(t *testing.T) {
 	r := testRecord(prefix, "test-model", at)
 	r.TraceID = ""
 	r.SpanID = ""
-	if _, err := s.Ingest(ctx, []*Record{r}); err != nil {
+	if _, err := s.IngestAs(ctx, Ingester{}, []*Record{r}); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 	issue := int64(266)
@@ -337,7 +337,7 @@ func TestModelFilterMatchesRecordsWithoutCanonicalModel(t *testing.T) {
 	bare.ResultUUID = prefix + "-bare-uuid"
 	bare.CanonicalModel = "" // only model_key reported
 
-	if _, err := s.Ingest(ctx, []*Record{bare}); err != nil {
+	if _, err := s.IngestAs(ctx, Ingester{}, []*Record{bare}); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 	got, err := s.List(ctx, Filter{TemporalWorkflowID: prefix + "-wf", CanonicalModel: "test-model"})
@@ -371,7 +371,7 @@ func TestSummaryIsBoundedAndSaysSo(t *testing.T) {
 		r.TemporalWorkflowID = fmt.Sprintf("%s-wf-%d", prefix, i)
 		batch = append(batch, r)
 	}
-	if _, err := s.Ingest(ctx, batch); err != nil {
+	if _, err := s.IngestAs(ctx, Ingester{}, batch); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 
@@ -411,7 +411,7 @@ func TestOverLargeLimitClampsRatherThanShrinks(t *testing.T) {
 		r.ResultUUID = fmt.Sprintf("%s-cu%d", prefix, i)
 		batch = append(batch, r)
 	}
-	if _, err := s.Ingest(ctx, batch); err != nil {
+	if _, err := s.IngestAs(ctx, Ingester{}, batch); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 
@@ -446,7 +446,7 @@ func TestIngestRejectsNilRecordInBatch(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
-	_, err := s.Ingest(ctx, []*Record{testRecord(prefix, "test-model", at), nil})
+	_, err := s.IngestAs(ctx, Ingester{}, []*Record{testRecord(prefix, "test-model", at), nil})
 	if err == nil {
 		t.Fatal("a batch containing a null record was accepted")
 	}
@@ -472,7 +472,7 @@ func TestSummaryByModelUsesTheModelKeyFallback(t *testing.T) {
 	bare.ResultUUID = prefix + "-bare-uuid"
 	bare.CanonicalModel = "" // only model_key reported
 
-	if _, err := s.Ingest(ctx, []*Record{bare}); err != nil {
+	if _, err := s.IngestAs(ctx, Ingester{}, []*Record{bare}); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 	res, err := s.Summary(ctx, Filter{TemporalWorkflowID: prefix + "-wf"}, GroupByModel)
