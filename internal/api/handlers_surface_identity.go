@@ -102,6 +102,8 @@ const (
 	sidCodeRelayRequired = "relay_required"
 	sidCodeLinkRevoked   = "link_revoked"
 	sidCodeLinkExpired   = "link_expired"
+	// sidCodePrincipalDisabled: the linked human's principal is disabled.
+	sidCodePrincipalDisabled = "principal_disabled"
 )
 
 // surfacePrincipalGate confines surface principals to surfaceRoutes, turns a
@@ -215,7 +217,17 @@ func (h *Handlers) relaySubject(w http.ResponseWriter, r *http.Request, acting *
 		}
 	}
 	// Never nil here: acting is a surface principal and login is set.
-	return auth.NewRelayedUser(login, groups, acting), true
+	subject := auth.NewRelayedUser(login, groups, acting)
+	// The human's canonical principal, the same way authentication resolves
+	// a direct caller. A disabled principal is refused; anything else that
+	// fails relays without one (phase 1 records, it does not authorize).
+	if err := auth.AttachPrincipal(r.Context(), h.opts.Principals, subject); err != nil {
+		if errors.Is(err, auth.ErrPrincipalDisabled) {
+			return refuse(sidCodePrincipalDisabled, "the principal linked to this "+surface+" identity is disabled")
+		}
+		slog.Warn("surface relay: principal not resolved; relaying without a principal id", "subject", link.Principal, "error", err)
+	}
+	return subject, true
 }
 
 // humanPrincipal is the principal a caller may link: a GitHub login proven

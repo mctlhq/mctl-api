@@ -269,6 +269,15 @@ transcript sink.
 
 ## Identity and authorization
 
+- **Canonical principal id: `prn_<ulid>`** (mctl-api#373). Every
+  authenticated caller also carries an opaque, mctl-api-issued principal id
+  (`auth.User.PrincipalID()`), resolved from the external identity it proved:
+  a numeric GitHub user id, a Dex `(issuer, sub)`, the service principal or a
+  surface principal. It is never derived from a login's spelling. Phase 1
+  records it next to the existing login strings and authorizes nothing on
+  it; phase 2 (mctl-api#377) moves authorization and tenant membership onto
+  it. A relayed request also carries the relaying surface's principal
+  (`auth.User.ViaPrincipalID()`). See [principals.md](principals.md).
 - The acting principal is always derived from `auth.UserFromContext`
   (`internal/auth/oidc.go`) — GitHub PAT, Dex JWT, OAuth JWT, or the static
   service principal (`auth.User.IsService()`). A caller-supplied actor field

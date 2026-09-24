@@ -19,6 +19,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -70,6 +71,22 @@ type User struct {
 	// the surface that carried it is kept, never collapsed into it.
 	actingPrincipal string
 	relaySurface    string
+
+	// How the caller authenticated, for the principal model (mctl-api#373).
+	// Unexported for the same reason as service: set only by the code that
+	// verified them. githubID is the numeric GitHub user id when the GitHub
+	// token path saw it; dexIssuer/dexSubject are a verified Dex token's
+	// iss and sub; dev marks the AUTH_REQUIRED=false caller.
+	githubID   int64
+	dexIssuer  string
+	dexSubject string
+	dev        bool
+
+	// principalID is the canonical principal (prn_...) resolved from that
+	// identity, and viaPrincipalID the relaying surface's principal. Set
+	// only by AttachPrincipal and NewRelayedUser.
+	principalID    string
+	viaPrincipalID string
 }
 
 // NewGitHubUser builds a principal whose ID is a GitHub-verified login.
@@ -189,7 +206,7 @@ func (d *DexVerifier) Verify(ctx context.Context, token string) (*User, error) {
 		username = claims.Sub
 	}
 
-	return &User{ID: username, Groups: claims.Groups}, nil
+	return &User{ID: username, Groups: claims.Groups, dexIssuer: idToken.Issuer, dexSubject: claims.Sub}, nil
 }
 
 // isJWT returns true if the token looks like a JWT (three dot-separated parts).
@@ -273,7 +290,10 @@ func NewRelayedUser(login string, groups []string, acting *User) *User {
 			kept = append(kept, g)
 		}
 	}
-	return &User{ID: login, Groups: kept, githubLogin: true, actingPrincipal: acting.ID, relaySurface: surface}
+	return &User{
+		ID: login, Groups: kept, githubLogin: true, actingPrincipal: acting.ID, relaySurface: surface,
+		viaPrincipalID: acting.principalID,
+	}
 }
 
 // ActingPrincipal is the surface principal that carried a relayed request,
@@ -358,9 +378,19 @@ func staticServiceUser(token string) *User {
 //  4. Bearer <github_token> → validate via GitHub API → resolve groups from gitops
 //
 // dex and oauth may be nil; in that case those token types are rejected.
-func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer) func(http.Handler) http.Handler {
+//
+// With WithPrincipalResolver, every authenticated caller is also resolved to
+// its canonical principal (mctl-api#373, phase 1): a disabled principal is
+// refused with 403, and a principal that cannot be resolved leaves the
+// request without one (logged and counted by the resolver) rather than
+// failing it.
+func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, opts ...MiddlewareOption) func(http.Handler) http.Handler {
 	authRequired := os.Getenv("AUTH_REQUIRED") != "false"
 	surfaces := surfaceTokens()
+	var cfg middlewareConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -387,10 +417,11 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					writeErr("authentication required — set Authorization: Bearer <token>")
 					return
 				}
-				ctx := context.WithValue(r.Context(), userContextKey, &User{
-					ID:     "dev-user",
-					Groups: []string{"admins"},
-				})
+				dev := &User{ID: "dev-user", Groups: []string{"admins"}, dev: true}
+				if !attachPrincipal(w, r, cfg.principals, dev, writeErr) {
+					return
+				}
+				ctx := context.WithValue(r.Context(), userContextKey, dev)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -435,7 +466,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 				}
 			} else {
 				// GitHub token path: validate via GitHub API, resolve groups from gitops.
-				login, ghErr := validator.Validate(r.Context(), token)
+				login, githubID, ghErr := validator.ValidateIdentity(r.Context(), token)
 				if ghErr != nil {
 					slog.Warn("github auth failed", "error", ghErr, "path", r.URL.Path)
 					writeErr(ghErr.Error())
@@ -443,6 +474,11 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 				}
 				groups := resolveGroups(login, validator, resolver)
 				user = NewGitHubUser(login, groups)
+				user.githubID = githubID
+			}
+
+			if !attachPrincipal(w, r, cfg.principals, user, writeErr) {
+				return
 			}
 
 			// Store user and raw token in context for downstream handlers.
@@ -451,6 +487,48 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// MiddlewareOption configures Middleware.
+type MiddlewareOption func(*middlewareConfig)
+
+type middlewareConfig struct {
+	principals PrincipalResolver
+}
+
+// WithPrincipalResolver resolves every authenticated caller to its
+// canonical principal. A nil resolver is the same as not passing it.
+func WithPrincipalResolver(pr PrincipalResolver) MiddlewareOption {
+	return func(c *middlewareConfig) { c.principals = pr }
+}
+
+// attachPrincipal resolves the caller's principal. It answers false after
+// writing the response when the request must be refused: a disabled
+// principal (403) or an identity no rule accepts (401). Every other failure
+// degrades to a request without a principal id.
+func attachPrincipal(w http.ResponseWriter, r *http.Request, pr PrincipalResolver, u *User, writeErr func(string)) bool {
+	err := AttachPrincipal(r.Context(), pr, u)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, ErrPrincipalDisabled):
+		slog.Warn("disabled principal refused", "user", u.ID, "path", r.URL.Path)
+		writeForbidden(w, "principal is disabled")
+		return false
+	case errors.Is(err, ErrIdentityRefused):
+		slog.Warn("identity refused", "user", u.ID, "path", r.URL.Path, "error", err)
+		writeErr("identity is not accepted")
+		return false
+	default:
+		slog.Warn("principal not resolved; continuing without a principal id", "user", u.ID, "path", r.URL.Path, "error", err)
+		return true
+	}
+}
+
+func writeForbidden(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // resolveGroups builds the list of groups (tenant names) for a GitHub user.
