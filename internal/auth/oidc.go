@@ -60,6 +60,11 @@ type User struct {
 	// claim.
 	githubLogin bool
 
+	// usageWriter is set only on the usage-writer principal, authenticated
+	// by MCTL_USAGE_WRITER_TOKEN (mctlhq/.github#50). Unexported for the same
+	// reason as service.
+	usageWriter bool
+
 	// surface is set only on a per-surface service principal
 	// ("surface:telegram"), authenticated by that surface's own token
 	// (mctl-api#350). Unexported for the same reason as service.
@@ -313,6 +318,79 @@ func (u *User) RelaySurface() (string, bool) {
 	return u.relaySurface, true
 }
 
+// Usage-writer principal (mctlhq/.github#50, variant B). The model-usage
+// producers (investigator, implementer, shepherd) append ledger records with
+// their own credential instead of the admin mctl-agent token: a leaked or
+// misused producer credential can then only add usage rows, and every row it
+// writes is attributed to this principal, not to "some admin".
+//
+// It holds exactly one permission, PermissionUsageWrite, is not an admin,
+// belongs to no tenant, and is confined to POST /api/v1/usage/records by
+// the API's usage-writer gate. Human admins keep their existing write
+// access to the ledger.
+const (
+	UsageWriterUserID    = "service:mctl-agents-usage"
+	PermissionUsageWrite = "usage:write"
+	usageWriterTokenEnv  = "MCTL_USAGE_WRITER_TOKEN" //nolint:gosec // env var name, not a credential
+)
+
+// NewUsageWriterUser builds the usage-writer principal. Exported for tests,
+// like NewServiceUser; only the middleware mints it from a token.
+func NewUsageWriterUser() *User {
+	return &User{ID: UsageWriterUserID, usageWriter: true}
+}
+
+// IsUsageWriter reports whether this principal authenticated with the
+// usage-writer token.
+func (u *User) IsUsageWriter() bool { return u != nil && u.usageWriter }
+
+// HasPermission reports whether the caller holds a named permission. Only
+// PermissionUsageWrite is modelled so far: the usage writer holds it, and
+// an admin holds it because the ledger has always been admin-writable.
+func (u *User) HasPermission(permission string) bool {
+	if u == nil {
+		return false
+	}
+	if permission == PermissionUsageWrite {
+		return u.usageWriter || u.IsAdmin()
+	}
+	return false
+}
+
+// usageWriterToken reads the usage-writer token. One that is short, or equal
+// to the mctl-agent service token or to any surface token, is refused: it
+// must prove exactly this principal and nothing more.
+func usageWriterToken(surfaces map[string]string) string {
+	token := strings.TrimSpace(os.Getenv(usageWriterTokenEnv))
+	service := strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN"))
+	switch {
+	case token == "":
+		return ""
+	case len(token) < minSurfaceTokenLen:
+		slog.Error("usage-writer token too short; usage-writer principal disabled", "env", usageWriterTokenEnv, "min_length", minSurfaceTokenLen)
+		return ""
+	case service != "" && token == service:
+		slog.Error("usage-writer token equals MCTL_AGENT_SERVICE_TOKEN; usage-writer principal disabled", "env", usageWriterTokenEnv)
+		return ""
+	}
+	for _, env := range surfaceTokenEnv {
+		if strings.TrimSpace(os.Getenv(env)) == token {
+			slog.Error("usage-writer token equals a surface token; usage-writer principal disabled", "env", usageWriterTokenEnv)
+			return ""
+		}
+	}
+	return token
+}
+
+// usageWriterUserFor matches a bearer token against the usage-writer token
+// in constant time.
+func usageWriterUserFor(configured, token string) *User {
+	if configured == "" || subtle.ConstantTimeCompare([]byte(configured), []byte(token)) != 1 {
+		return nil
+	}
+	return NewUsageWriterUser()
+}
+
 // surfaceTokens reads the configured surface tokens. A token that is short,
 // shared by two surfaces, or equal to the mctl-agent service token is
 // refused: each must prove exactly one surface and nothing more.
@@ -387,6 +465,7 @@ func staticServiceUser(token string) *User {
 func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, opts ...MiddlewareOption) func(http.Handler) http.Handler {
 	authRequired := os.Getenv("AUTH_REQUIRED") != "false"
 	surfaces := surfaceTokens()
+	usageWriter := usageWriterToken(surfaces)
 	var cfg middlewareConfig
 	for _, o := range opts {
 		o(&cfg)
@@ -441,6 +520,8 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 				user = svc
 			} else if su := surfaceUserFor(surfaces, token); su != nil {
 				user = su
+			} else if uw := usageWriterUserFor(usageWriter, token); uw != nil {
+				user = uw
 			} else if isJWT(token) {
 				// Peek at the JWT issuer to route to the correct verifier.
 				if oauth != nil && jwtIssuer(token) == oauth.BaseURL {

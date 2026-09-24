@@ -34,10 +34,12 @@ import (
 // out, which is why it is mctl-owned storage rather than a query over a
 // tracing backend.
 //
-// Authorization is admin-only on both the write and the read side, matching the
-// lifecycle and agent-registry surfaces. The read side is admin-only for a
-// reason specific to this data: aggregate spend per repository and per agent is
-// commercially sensitive in a way that a workflow status is not.
+// Authorization: the read side is admin-only, matching the lifecycle and
+// agent-registry surfaces, for a reason specific to this data: aggregate spend
+// per repository and per agent is commercially sensitive in a way that a
+// workflow status is not. The write side needs usage:write, which admins hold
+// and the dedicated usage-writer principal (mctlhq/.github#50) holds alone;
+// every row records who ingested it.
 
 const usageMaxBodyBytes = 1 << 20 // 1 MiB — a batch of records, never a payload.
 
@@ -48,6 +50,45 @@ const maxIngestBatch = 500
 // The handler rejects an over-large limit rather than letting the store clamp
 // it invisibly, and takes the ceiling FROM the store so the two cannot drift —
 // a duplicated constant would eventually turn valid limits into 400s.
+
+// usageWriterRoute is the one route the usage-writer principal may call.
+const usageWriterRoute = "/api/v1/usage/records"
+
+// usageWriterGate confines the usage-writer principal (mctlhq/.github#50)
+// to appending usage records. Everything else, including the ledger's own
+// reads and every admin route, answers 403 before any handler runs: the
+// credential is a single capability, not an API key. Its reads stay
+// admin-only because per-repository spend is commercially sensitive.
+func usageWriterGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user := auth.UserFromContext(r.Context()); user.IsUsageWriter() &&
+			(r.Method != http.MethodPost || r.URL.Path != usageWriterRoute) {
+			writeErrorCode(w, http.StatusForbidden, "usage_writer_route_not_allowed",
+				"the usage writer may only call POST "+usageWriterRoute, nil)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireUsageWriter admits the callers allowed to append records: those
+// holding usage:write, which is the usage writer and, as before, admins.
+func (h *Handlers) requireUsageWriter(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
+	if h.opts.Usage == nil {
+		writeError(w, http.StatusServiceUnavailable, "usage ledger not configured")
+		return nil, false
+	}
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return nil, false
+	}
+	if !user.HasPermission(auth.PermissionUsageWrite) {
+		writeError(w, http.StatusForbidden, "appending usage records requires "+auth.PermissionUsageWrite)
+		return nil, false
+	}
+	return user, true
+}
 
 // requireUsageAdmin mirrors requireLifecycleAdmin.
 //
@@ -112,7 +153,7 @@ type ingestUsageResponse struct {
 // were already present so a producer can tell a genuine no-op from a lost
 // write, and neither outcome asks it to retry.
 func (h *Handlers) IngestUsageRecords(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.requireUsageAdmin(w, r)
+	user, ok := h.requireUsageWriter(w, r)
 	if !ok {
 		return
 	}
@@ -139,7 +180,7 @@ func (h *Handlers) IngestUsageRecords(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusRequestEntityTooLarge, "batch exceeds "+strconv.Itoa(maxIngestBatch)+" records")
 		return
 	}
-	res, err := h.opts.Usage.Ingest(r.Context(), req.Records)
+	res, err := h.opts.Usage.IngestAs(r.Context(), usage.Ingester{ID: user.ID, PrincipalID: user.PrincipalID()}, req.Records)
 	if err != nil {
 		switch {
 		case errors.Is(err, usage.ErrUnsupportedSchema), errors.Is(err, usage.ErrInvalidRecord):

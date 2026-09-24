@@ -307,6 +307,8 @@ func NewRouter(opts Options) http.Handler {
 		// Surface principals reach only their allowlisted routes; relay
 		// routes continue as the linked human.
 		r.Use(h.surfacePrincipalGate)
+		// The usage writer reaches one route and nothing else.
+		r.Use(usageWriterGate)
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
 		// Loopback is skipped so MCP's in-process REST to localhost:8080 does
