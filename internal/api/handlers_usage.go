@@ -209,6 +209,7 @@ func usageFilterFromQuery(r *http.Request) (usage.Filter, error) {
 	q := r.URL.Query()
 	f := usage.Filter{
 		TemporalWorkflowID: q.Get("workflow_id"),
+		ExecutionID:        q.Get("execution_id"),
 		WorkItemID:         q.Get("work_item_id"),
 		TargetRepo:         q.Get("repository"),
 		Agent:              q.Get("agent"),
@@ -234,6 +235,12 @@ func usageFilterFromQuery(r *http.Request) (usage.Filter, error) {
 	}
 	if f.PRNumber, err = parseInt("pr"); err != nil {
 		return f, err
+	}
+	// An issue or PR number names nothing without its repository: every repo
+	// has an issue 12. Answering the bare number would sum the spend of every
+	// "#12" in the ledger and present it as one issue's cost.
+	if (f.IssueNumber != nil || f.PRNumber != nil) && f.TargetRepo == "" {
+		return f, errors.New("issue and pr require repository")
 	}
 	parseTime := func(key string) (*time.Time, error) {
 		raw := q.Get(key)

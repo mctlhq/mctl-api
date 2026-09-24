@@ -514,3 +514,58 @@ func TestUsageHandlers_SummaryReportsTruncationAndItsAxis(t *testing.T) {
 		t.Errorf("truncated_by = %q, want \"record_count\" — the docs promise the axis, and an operator needs it before concluding where the money went", out.TruncatedBy)
 	}
 }
+
+// mctl-agents#499: an issue or PR number without its repository is refused,
+// and the execution filter reaches the store.
+func TestUsageFilterPairsIssueAndPRWithRepository(t *testing.T) {
+	for _, q := range []string{"issue=12", "pr=12", "issue=12&pr=3"} {
+		if _, err := usageFilterFromQuery(httptest.NewRequest("GET", "/api/v1/usage/records?"+q, nil)); err == nil {
+			t.Errorf("%s without repository: accepted", q)
+		}
+	}
+	f, err := usageFilterFromQuery(httptest.NewRequest("GET",
+		"/api/v1/usage/records?repository=mctlhq/mctl-agents&pr=499&execution_id=we_abc", nil))
+	if err != nil {
+		t.Fatalf("repository+pr+execution_id: %v", err)
+	}
+	if f.TargetRepo != "mctlhq/mctl-agents" || f.PRNumber == nil || *f.PRNumber != 499 || f.ExecutionID != "we_abc" {
+		t.Errorf("filter not built from the query: %+v", f)
+	}
+}
+
+// Over HTTP: a record carrying the #499 correlation is accepted and found again
+// by its execution id; a malformed one is a 400 that names the record.
+func TestUsageHandlers_CorrelationRoundTripsOverHTTP(t *testing.T) {
+	store, prefix := newTestUsageStore(t)
+	h := &Handlers{opts: Options{Usage: store}}
+
+	rec := usageRecordBody(prefix, "corr")
+	rec["execution_id"] = prefix + "-we"
+	rec["pr_number"] = 77
+	if w := postUsage(t, h, map[string]any{"records": []any{rec}}, true); w.Code != http.StatusOK {
+		t.Fatalf("ingest: %d %s", w.Code, w.Body.String())
+	}
+	req := adminCtx(httptest.NewRequest("GET", "/api/v1/usage/records?execution_id="+prefix+"-we", nil))
+	w := httptest.NewRecorder()
+	h.ListUsageRecords(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Records []usage.Record `json:"records"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Records) != 1 || got.Records[0].ExecutionID != prefix+"-we" ||
+		got.Records[0].PRNumber == nil || *got.Records[0].PRNumber != 77 {
+		t.Errorf("execution filter over HTTP: %+v", got.Records)
+	}
+
+	bad := usageRecordBody(prefix, "bad")
+	bad["target_repo"] = "not-a-repo"
+	w = postUsage(t, h, map[string]any{"records": []any{bad}}, true)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "record 0") {
+		t.Errorf("malformed target_repo: want 400 naming record 0, got %d %s", w.Code, w.Body.String())
+	}
+}
