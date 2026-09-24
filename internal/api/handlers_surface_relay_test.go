@@ -16,6 +16,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -377,5 +378,56 @@ func TestSurfaceRelay_ReviewFollowUps(t *testing.T) {
 	if err := e.pool.QueryRow(context.Background(), `SELECT surface, acting_principal FROM work_item_events
 		WHERE work_item_id=$1 AND kind='surface_linked'`, id).Scan(&surface, &acting); err != nil || surface != "telegram" || acting != "surface:telegram" {
 		t.Fatalf("surface_linked event = %q %q %v", surface, acting, err)
+	}
+}
+
+// relayPrincipals answers a relayed human's principal from a table keyed by
+// login, or a fixed error, and records what it was asked.
+type relayPrincipals struct {
+	byLogin map[string]string
+	err     error
+	seen    []auth.Identity
+}
+
+func (p *relayPrincipals) ResolvePrincipal(_ context.Context, id auth.Identity) (string, error) {
+	p.seen = append(p.seen, id)
+	if p.err != nil {
+		return "", p.err
+	}
+	return p.byLogin[id.Display], nil
+}
+
+// The relay resolves the human's principal the way authentication does, and
+// refuses exactly what authentication refuses (mctl-api#373).
+func TestSurfaceRelay_ResolvesTheHumansPrincipal(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err      error
+		wantCode int
+		wantErr  string
+	}{
+		"resolved":           {wantCode: http.StatusCreated},
+		"store down degrade": {err: errors.New("dial tcp: connection refused"), wantCode: http.StatusCreated},
+		"disabled":           {err: auth.ErrPrincipalDisabled, wantCode: http.StatusForbidden, wantErr: sidCodePrincipalDisabled},
+		"revoked identity":   {err: auth.ErrIdentityRefused, wantCode: http.StatusForbidden, wantErr: sidCodeIdentityRefused},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pr := &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE"}, err: tc.err}
+			e := newSIDEnvWith(t, pr)
+			e.link("alice", "telegram", "4242")
+			code, body := e.relayCreate("telegram", "4242", nil)
+			if code != tc.wantCode {
+				t.Fatalf("relayed create = %d %v, want %d", code, body, tc.wantCode)
+			}
+			if tc.wantErr != "" && body["code"] != tc.wantErr {
+				t.Fatalf("error code = %v, want %s", body["code"], tc.wantErr)
+			}
+			if len(pr.seen) == 0 {
+				t.Fatal("the relay never resolved the human's principal")
+			}
+			last := pr.seen[len(pr.seen)-1]
+			if !last.GitHubLoginOnly() || last.Display != "alice" {
+				t.Fatalf("resolved %+v; want alice's GitHub login", last)
+			}
+		})
 	}
 }

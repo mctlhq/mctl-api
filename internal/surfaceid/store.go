@@ -158,6 +158,29 @@ type Store struct {
 	pool    *pgxpool.Pool
 	now     func() time.Time
 	linkTTL time.Duration
+	mirror  LinkMirror
+}
+
+// LinkMirror copies links into the canonical principal model
+// (mctl-api#373 D4: mirror, not replace). It runs inside this store's
+// transaction, so a link and its mirror commit or roll back together; the
+// mirror's tables must live in the same database.
+type LinkMirror interface {
+	MirrorLink(ctx context.Context, tx pgx.Tx, surface, externalID, principal string) error
+	MirrorRevoke(ctx context.Context, tx pgx.Tx, surface, externalID string, at time.Time) error
+}
+
+// SetMirror installs the principal-model mirror. Call before serving.
+func (s *Store) SetMirror(m LinkMirror) { s.mirror = m }
+
+func (s *Store) mirrorLink(ctx context.Context, tx pgx.Tx, l *Link) error {
+	if s.mirror == nil {
+		return nil
+	}
+	if err := s.mirror.MirrorLink(ctx, tx, l.Surface, l.ExternalID, l.Principal); err != nil {
+		return fmt.Errorf("surfaceid: mirror link: %w", err)
+	}
+	return nil
 }
 
 // NewStore connects and creates the schema. linkTTL > 0 gives every new link
@@ -360,6 +383,9 @@ func (s *Store) Redeem(ctx context.Context, surface, code, externalID string) (*
 				}
 				existing.ExpiresAt = &exp
 			}
+			if err := s.mirrorLink(ctx, tx, existing); err != nil {
+				return err
+			}
 			link = existing
 			return consume(ReasonLinked)
 		}
@@ -375,6 +401,9 @@ func (s *Store) Redeem(ctx context.Context, surface, code, externalID string) (*
 		if _, err := tx.Exec(ctx, `INSERT INTO surface_identity_links
 			(id, surface, external_id, principal, challenge_id, created_at, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
 			l.ID, l.Surface, l.ExternalID, l.Principal, id, l.CreatedAt, l.ExpiresAt); err != nil {
+			return err
+		}
+		if err := s.mirrorLink(ctx, tx, l); err != nil {
 			return err
 		}
 		link = l
@@ -491,6 +520,11 @@ func (s *Store) Revoke(ctx context.Context, id, by string, asAdmin bool) (*Link,
 			now := s.now()
 			if _, err := tx.Exec(ctx, `UPDATE surface_identity_links SET revoked_at=$2, revoked_by=$3 WHERE id=$1`, id, now, by); err != nil {
 				return err
+			}
+			if s.mirror != nil {
+				if err := s.mirror.MirrorRevoke(ctx, tx, l.Surface, l.ExternalID, now); err != nil {
+					return fmt.Errorf("surfaceid: mirror revoke: %w", err)
+				}
 			}
 			l.RevokedAt, l.RevokedBy = &now, by
 		}

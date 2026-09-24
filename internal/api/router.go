@@ -115,6 +115,10 @@ type Options struct {
 	// TenantResolver gives a relayed subject its tenant memberships, the
 	// same lookup authentication uses. Nil relays with no tenant access.
 	TenantResolver auth.TenantResolver
+	// Principals resolves a relayed human to their canonical principal
+	// (mctl-api#373 phase 1), as authentication does for a direct caller.
+	// Nil relays without a principal id.
+	Principals auth.PrincipalResolver
 
 	// Roadmap serves the RoadmapPublication read model (mctl-api#333).
 	// Optional: nil makes the roadmap endpoints 503.

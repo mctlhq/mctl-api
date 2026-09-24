@@ -48,6 +48,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/loki"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/principals"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
@@ -181,7 +182,38 @@ func main() {
 		}
 	}
 
-	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer)
+	// Canonical principals, phase 1 (mctl-api#373). The store shares the
+	// surface identity database (SURFACE_IDENTITY_DB_URL, else AUDIT_DB_URL)
+	// because a redeemed link is mirrored into it in the same transaction.
+	// Without a store every caller simply has no principal id; nothing
+	// authorizes on it yet.
+	var (
+		principalStore    *principals.Store
+		principalResolver auth.PrincipalResolver
+	)
+	principalDBURL := postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL"))
+	if principalDBURL == "" {
+		principalDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+	}
+	switch {
+	case killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")):
+		slog.Warn("PRINCIPALS_DISABLED is set; callers carry no canonical principal id")
+	case principalDBURL == "":
+		slog.Warn("no SURFACE_IDENTITY_DB_URL or AUDIT_DB_URL; callers carry no canonical principal id")
+	default:
+		ps, psErr := initStore(initCtx, "principals", func(ctx context.Context) (*principals.Store, error) {
+			return principals.NewStore(ctx, principalDBURL)
+		})
+		if psErr != nil {
+			slog.Error("principal store init failed; callers carry no canonical principal id", "error", psErr)
+		} else {
+			principalStore = ps
+			defer ps.Close()
+			principalResolver = principals.NewResolver(ps, githubIDLookup(), os.Getenv("AUTH_REQUIRED") == "false")
+		}
+	}
+
+	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer, auth.WithPrincipalResolver(principalResolver))
 
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
 
@@ -385,6 +417,11 @@ func main() {
 		} else {
 			surfaceIDs = ss
 			defer ss.Close()
+			if principalStore != nil {
+				// Same database by construction: both resolve
+				// SURFACE_IDENTITY_DB_URL, else AUDIT_DB_URL.
+				ss.SetMirror(principalStore)
+			}
 		}
 	}
 
@@ -662,6 +699,7 @@ func main() {
 		WorkItems:                      workItemsStore,
 		SurfaceIdentities:              surfaceIDs,
 		TenantResolver:                 gitReader,
+		Principals:                     principalResolver,
 		WorkflowDispatcher:             workflowDispatcher,
 		GitopsReady:                    gitopsReady,
 		PostgresReady:                  postgresReady,
@@ -689,6 +727,9 @@ func main() {
 	ctx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
 	go gitReader.RefreshLoop(ctx, 60*time.Second)
+	if principalStore != nil {
+		go backfillPrincipals(ctx, principalStore, gitReader)
+	}
 	if roadmapGit != nil {
 		// The publication changes at most every couple of hours; freshness is
 		// the capture time it carries, not how often this pulls.
@@ -1244,8 +1285,65 @@ func splitCSV(v string) []string {
 	return out
 }
 
+// githubIDLookup resolves a GitHub login to its numeric id, with the same
+// credential the gitops clone uses (a GitHub App installation token, re-read
+// per call).
+func githubIDLookup() principals.GitHubIDLookup {
+	return principals.NewGitHubIDLookup(&http.Client{Timeout: 15 * time.Second}, "", gitOpsTokenSource())
+}
+
+// backfillPrincipals runs the principal backfill once, after the first
+// successful gitops sync (mctl-api#373 D6): one human principal per tenant
+// member, then a mirror of every live surface link. It is idempotent, so it
+// runs on every start; a failure is logged and never blocks serving.
+func backfillPrincipals(ctx context.Context, store *principals.Store, reader *gitops.Reader) {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	for reader.LastSync().IsZero() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+	logins, err := tenantMemberLogins(reader)
+	if err != nil {
+		slog.Error("principal backfill skipped: tenant members unreadable", "error", err)
+		return
+	}
+	res, err := store.Backfill(ctx, logins, githubIDLookup())
+	if err != nil {
+		slog.Error("principal backfill failed", "error", err, "result", res)
+		return
+	}
+	slog.Info("principal backfill done", "logins", res.Logins, "known", res.Known,
+		"provisioned", res.Provisioned, "failed", res.Failed, "links_mirrored", res.LinksMirrored, "links_failed", res.LinksFailed)
+}
+
+// tenantMemberLogins lists every GitHub login gitops names as a tenant or
+// team member.
+func tenantMemberLogins(reader *gitops.Reader) ([]string, error) {
+	tenants, err := reader.ListTenants()
+	if err != nil {
+		return nil, err
+	}
+	var logins []string
+	for i := range tenants {
+		t := &tenants[i]
+		for _, m := range t.Members {
+			logins = append(logins, m.UserID)
+		}
+		for _, team := range t.Teams {
+			for _, m := range team.Members {
+				logins = append(logins, m.UserID)
+			}
+		}
+	}
+	return logins, nil
+}
+
 // killSwitchOn reads a kill-switch value (WORK_ITEMS_DISABLED,
-// ROADMAP_STATE_DISABLED). It errs toward off: any value except an explicit
+// ROADMAP_STATE_DISABLED, PRINCIPALS_DISABLED). It errs toward off: any value except an explicit
 // "false"/"f"/"0"/"no"/"off" (or empty) turns the feature off, so a template
 // that renders the flag as "false" keeps it on while "yes" or "disabled" never
 // silently fails open.

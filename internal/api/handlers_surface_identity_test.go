@@ -63,6 +63,12 @@ func (s sidTenants) GetTenantsForUser(login string) ([]string, error) {
 // exercised exactly where NewRouter puts it.
 func newSIDEnv(t *testing.T) *sidEnv {
 	t.Helper()
+	return newSIDEnvWith(t, nil)
+}
+
+// newSIDEnvWith is newSIDEnv with a principal resolver for relayed humans.
+func newSIDEnvWith(t *testing.T, principals auth.PrincipalResolver) *sidEnv {
+	t.Helper()
 	connStr := os.Getenv("TEST_DATABASE_URL")
 	if connStr == "" {
 		t.Skip("TEST_DATABASE_URL not set; skipping Postgres-backed surface identity handler test")
@@ -117,6 +123,7 @@ func newSIDEnv(t *testing.T) *sidEnv {
 		AuthMiddleware: fakeAuth, SurfaceIdentities: store, WorkItems: items, AuditLog: e.audit,
 		// alice is an admin in her own right; relaying must not carry it.
 		TenantResolver: sidTenants{"alice": {tenant, "admins"}, "bob": {"acme"}, "carol": {tenant}},
+		Principals:     principals,
 	})
 	return e
 }

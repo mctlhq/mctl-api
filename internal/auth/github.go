@@ -28,6 +28,7 @@ import (
 // githubUserInfo holds cached GitHub user information.
 type githubUserInfo struct {
 	Login    string
+	ID       int64
 	CachedAt time.Time
 }
 
@@ -55,24 +56,32 @@ func NewGitHubValidator(adminUsers []string) *GitHubValidator {
 // Results are cached for 5 minutes to avoid hammering the GitHub API.
 // Authorization (which tenants the user can access) is resolved separately via gitops.
 func (v *GitHubValidator) Validate(ctx context.Context, token string) (string, error) {
+	login, _, err := v.ValidateIdentity(ctx, token)
+	return login, err
+}
+
+// ValidateIdentity is Validate plus the numeric GitHub user id: the stable
+// half of a GitHub identity (a login can be renamed, then taken by someone
+// else), which the principal model keys on (mctl-api#373).
+func (v *GitHubValidator) ValidateIdentity(ctx context.Context, token string) (string, int64, error) {
 	// Check cache.
 	v.mu.RLock()
 	if cached, ok := v.cache[token]; ok && time.Since(cached.CachedAt) < v.ttl {
 		v.mu.RUnlock()
-		return cached.Login, nil
+		return cached.Login, cached.ID, nil
 	}
 	v.mu.RUnlock()
 
-	login, err := v.fetchLogin(ctx, token)
+	login, id, err := v.fetchUser(ctx, token)
 	if err != nil {
-		return "", fmt.Errorf("invalid GitHub token: %w", err)
+		return "", 0, fmt.Errorf("invalid GitHub token: %w", err)
 	}
 
 	v.mu.Lock()
-	v.cache[token] = &githubUserInfo{Login: login, CachedAt: time.Now()}
+	v.cache[token] = &githubUserInfo{Login: login, ID: id, CachedAt: time.Now()}
 	v.mu.Unlock()
 
-	return login, nil
+	return login, id, nil
 }
 
 // IsAdmin returns true if the GitHub login is a configured admin.
@@ -85,10 +94,10 @@ func (v *GitHubValidator) IsAdmin(login string) bool {
 	return false
 }
 
-func (v *GitHubValidator) fetchLogin(ctx context.Context, token string) (string, error) {
+func (v *GitHubValidator) fetchUser(ctx context.Context, token string) (string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user", nil)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -96,24 +105,25 @@ func (v *GitHubValidator) fetchLogin(ctx context.Context, token string) (string,
 
 	resp, err := v.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("GitHub API request failed: %w", err)
+		return "", 0, fmt.Errorf("GitHub API request failed: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return "", fmt.Errorf("token rejected by GitHub (HTTP %d)", resp.StatusCode)
+		return "", 0, fmt.Errorf("token rejected by GitHub (HTTP %d)", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+		return "", 0, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
 	}
 
 	var user struct {
 		Login string `json:"login"`
+		ID    int64  `json:"id"`
 	}
 	if err := json.Unmarshal(body, &user); err != nil || user.Login == "" {
-		return "", fmt.Errorf("unexpected GitHub API response")
+		return "", 0, fmt.Errorf("unexpected GitHub API response")
 	}
 
-	return user.Login, nil
+	return user.Login, user.ID, nil
 }

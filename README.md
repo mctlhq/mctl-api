@@ -137,9 +137,10 @@ docker run -p 8080:8080 mctl-api
 | `WORK_ITEMS_DB_URL` | PostgreSQL for the `workitem/v1` store (`/api/v1/work-items*`). Falls back to `AUDIT_DB_URL`; with neither, every work-items route answers 503. | — | No |
 | `WORK_ITEMS_DISABLED` | Kill switch: any value except `false`/`f`/`0`/`no`/`off` leaves the work-items store off (routes answer 503) without touching `AUDIT_DB_URL` for other stores. | unset | No |
 | `MCTL_SURFACE_TELEGRAM_TOKEN` / `MCTL_SURFACE_PORTAL_TOKEN` | Bearer tokens of the per-surface principals `surface:telegram` / `surface:portal` (mctl-api#350): non-admin, no tenant, confined to the surface routes. At least 32 characters; a token shared by two surfaces or equal to `MCTL_AGENT_SERVICE_TOKEN` is refused. | — | No |
-| `SURFACE_IDENTITY_DB_URL` | PostgreSQL for surface identity links and challenges. Falls back to `AUDIT_DB_URL`; with neither, `/api/v1/surface-identities*` answers 503. | — | No |
+| `SURFACE_IDENTITY_DB_URL` | PostgreSQL for surface identity links and challenges, and for the canonical principal model (`principals`, `external_identities`; see [docs/principals.md](docs/principals.md)), which mirrors links in the same transaction. Falls back to `AUDIT_DB_URL`; with neither, `/api/v1/surface-identities*` answers 503 and callers carry no principal id. | — | No |
 | `SURFACE_LINK_TTL` | Go duration after which a new link expires (e.g. `2160h`); unset means until revoked. Malformed disables the feature. | unset | No |
 | `SURFACE_IDENTITY_DISABLED` | Kill switch: any value except `false`/`f`/`0`/`no`/`off`. | unset | No |
+| `PRINCIPALS_DISABLED` | Kill switch for the canonical principal model: callers carry no `prn_` id, links are not mirrored, no backfill. Same values as the other kill switches. | unset | No |
 | `ROADMAP_STATE_REPO_URL` | Repository holding the generated roadmap publication read by `/api/v1/roadmap/*` and the `mctl_get_epic_status` / `mctl_get_ready_work_items` tools. mctl-api only reads it; it never evaluates readiness. | `https://github.com/mctlhq/.github.git` | No |
 | `ROADMAP_STATE_BRANCH` | Branch of the publication. | `roadmap-state` | No |
 | `ROADMAP_STATE_LOCAL_PATH` | Local checkout, refreshed every 5 minutes. | `/tmp/roadmap-state` | No |
