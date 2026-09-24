@@ -71,8 +71,28 @@ not a catalog edit, and is out of scope here.
 
 ## Endpoints
 
-All three are admin-only. Aggregate spend per repository and per agent is
+Reads are admin-only. Aggregate spend per repository and per agent is
 commercially sensitive in a way a workflow status is not.
+
+Writing needs the `usage:write` permission. Human admins hold it. So does the
+**usage writer** (`service:mctl-agents-usage`, mctlhq/.github#50), a separate
+least-privilege principal for the producers: it authenticates with its own
+bearer token (`MCTL_USAGE_WRITER_TOKEN`), is not an admin, belongs to no
+tenant, and is refused with `403 usage_writer_route_not_allowed` on every route
+except `POST /api/v1/usage/records`, including `/mcp` and the ledger's own
+reads. The admin `mctl-agent` service token is deliberately not used for usage
+ingestion.
+
+The token is disabled (and logged at `ERROR`) when it is shorter than 32
+characters, or equal to `MCTL_AGENT_SERVICE_TOKEN` or to any surface token:
+one secret must never resolve to two principals. Unset, the principal does not
+exist and only admins can write.
+
+Every row records who wrote it: `ingested_by` (the user id) and
+`ingested_by_principal_id` (the durable `prn_` principal, empty when the
+principal store is not configured). Both are set by the server; a producer
+cannot supply them. A re-delivered record is deduped and keeps the attribution
+of its first write.
 
 ### `POST /api/v1/usage/records`
 

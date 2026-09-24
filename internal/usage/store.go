@@ -99,6 +99,12 @@ CREATE TABLE IF NOT EXISTS model_usage_records (
         CHECK (calculated_cost IS NULL OR pricing_version <> '')
 );
 
+-- Who appended the row (mctlhq/.github#50): the authenticated caller and its
+-- canonical principal. Set by the server, never by the producer. Rows written
+-- before these columns existed read as ''.
+ALTER TABLE model_usage_records ADD COLUMN IF NOT EXISTS ingested_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE model_usage_records ADD COLUMN IF NOT EXISTS ingested_by_principal_id TEXT NOT NULL DEFAULT '';
+
 CREATE INDEX IF NOT EXISTS model_usage_recorded_at_idx ON model_usage_records (recorded_at);
 CREATE INDEX IF NOT EXISTS model_usage_workflow_idx    ON model_usage_records (temporal_workflow_id);
 CREATE INDEX IF NOT EXISTS model_usage_repo_issue_idx  ON model_usage_records (target_repo, issue_number);
@@ -161,7 +167,8 @@ INSERT INTO model_usage_records (
     reasoning_tokens, web_search_requests,
     provider_reported_cost, calculated_cost, pricing_version, invoice_reconciled_cost,
     outcome, api_error_status, stop_reason, terminal_reason,
-    num_turns, duration_api_ms, retry_attempt, recorded_at
+    num_turns, duration_api_ms, retry_attempt, recorded_at,
+    ingested_by, ingested_by_principal_id
 ) VALUES (
     $1,$2,$3,$4,$5,$6,$7,
     $8,$9,$10,$11,$12,
@@ -170,7 +177,8 @@ INSERT INTO model_usage_records (
     $22,$23,
     $24,$25,$26,$27,
     $28,$29,$30,$31,
-    $32,$33,$34,$35
+    $32,$33,$34,$35,
+    $36,$37
 )
 ON CONFLICT (id) DO NOTHING
 `
@@ -183,7 +191,14 @@ type IngestResult struct {
 	Deduped  []string `json:"deduped"`
 }
 
-// Ingest persists records idempotently.
+// Ingester is who appends a batch: the authenticated caller and its
+// canonical principal. It is recorded on every row the batch creates.
+type Ingester struct {
+	ID          string
+	PrincipalID string
+}
+
+// IngestAs persists records idempotently, attributed to by.
 //
 // The whole batch is one transaction, so a producer retrying after a partial
 // failure re-sends a batch that either applied entirely or not at all — and in
@@ -192,7 +207,12 @@ type IngestResult struct {
 // Pricing is applied here, at ingest, and the resulting number plus the rate
 // card version are stored on the row. That is what makes invariant 7 hold: a
 // later rate card cannot reach back into history.
-func (s *Store) Ingest(ctx context.Context, records []*Record) (*IngestResult, error) {
+//
+// The attribution comes from the server, never from the records: whatever a
+// producer put in ingested_by is overwritten. A deduped record keeps the
+// attribution of its first write. There is deliberately no unattributed
+// variant: an empty Ingester is visible at the call site.
+func (s *Store) IngestAs(ctx context.Context, by Ingester, records []*Record) (*IngestResult, error) {
 	res := &IngestResult{Accepted: []string{}, Deduped: []string{}}
 	if len(records) == 0 {
 		return res, nil
@@ -206,6 +226,7 @@ func (s *Store) Ingest(ctx context.Context, records []*Record) (*IngestResult, e
 		if err := r.EnsureID(); err != nil {
 			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
+		r.IngestedBy, r.IngestedByPrincipalID = by.ID, by.PrincipalID
 		if r.CalculatedCost == nil && r.ProviderReportedCost == nil && s.catalog != nil {
 			// A model with no rate card is not a reason to reject the record:
 			// the token counts are still the truth, and a cost can be derived
@@ -249,6 +270,7 @@ func (s *Store) Ingest(ctx context.Context, records []*Record) (*IngestResult, e
 			r.ProviderReportedCost, r.CalculatedCost, r.PricingVersion, r.InvoiceReconciledCost,
 			r.Outcome, r.APIErrorStatus, r.StopReason, r.TerminalReason,
 			r.NumTurns, r.DurationAPIMs, r.RetryAttempt, r.RecordedAt,
+			r.IngestedBy, r.IngestedByPrincipalID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("usage: insert %s: %w", r.ID, err)
@@ -351,7 +373,8 @@ const selectColumns = `
     reasoning_tokens, web_search_requests,
     provider_reported_cost, calculated_cost, pricing_version, invoice_reconciled_cost,
     outcome, api_error_status, stop_reason, terminal_reason,
-    num_turns, duration_api_ms, retry_attempt, recorded_at
+    num_turns, duration_api_ms, retry_attempt, recorded_at,
+    ingested_by, ingested_by_principal_id
 `
 
 // ListResult is a bounded page of records.
@@ -426,6 +449,7 @@ func scanRecord(rows pgx.Rows) (*Record, error) {
 		&r.ProviderReportedCost, &r.CalculatedCost, &r.PricingVersion, &r.InvoiceReconciledCost,
 		&r.Outcome, &r.APIErrorStatus, &r.StopReason, &r.TerminalReason,
 		&r.NumTurns, &r.DurationAPIMs, &r.RetryAttempt, &r.RecordedAt,
+		&r.IngestedBy, &r.IngestedByPrincipalID,
 	); err != nil {
 		return nil, fmt.Errorf("usage: scan: %w", err)
 	}

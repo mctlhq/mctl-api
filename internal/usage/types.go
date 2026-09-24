@@ -131,6 +131,11 @@ type Record struct {
 	RetryAttempt   *int64 `json:"retry_attempt,omitempty"`
 
 	RecordedAt time.Time `json:"recorded_at"`
+
+	// Attribution (mctlhq/.github#50): who appended the row. Set by the
+	// server from the authenticated caller; a producer cannot choose it.
+	IngestedBy            string `json:"ingested_by,omitempty"`
+	IngestedByPrincipalID string `json:"ingested_by_principal_id,omitempty"`
 }
 
 // DeterministicID is the dedupe key from ADR-012:

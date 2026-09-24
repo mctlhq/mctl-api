@@ -53,6 +53,17 @@ spec:
             - name: GITHUB_APP_TOKEN_FILE
               value: /var/run/secrets/github/token
             {{- end }}
+            {{- if .Values.usageWriterTokenSecret }}
+            # Optional on purpose: a missing Secret leaves the usage-writer
+            # principal disabled (only admins can write usage), it does not
+            # keep the pod from starting.
+            - name: MCTL_USAGE_WRITER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.usageWriterTokenSecret }}
+                  key: MCTL_USAGE_WRITER_TOKEN
+                  optional: true
+            {{- end }}
             {{- with .Values.openclaw }}
             {{- with .skills }}
             {{- if .maxPerSkillBytes }}

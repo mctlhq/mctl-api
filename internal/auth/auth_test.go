@@ -324,3 +324,78 @@ func TestSurfaceTokenTableHoldsOnlyUsableTokens(t *testing.T) {
 		t.Fatalf("token table = %v", got)
 	}
 }
+
+const usageWriterToken32 = "usage-writer-token-0123456789abcdef"
+
+// mctlhq/.github#50, variant B: the usage producers get their own principal
+// with a single permission, never the admin mctl-agent.
+func TestUsageWriterTokenMintsASinglePermissionPrincipal(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	t.Setenv("MCTL_AGENT_SERVICE_TOKEN", "svc-token-123")
+	t.Setenv("MCTL_USAGE_WRITER_TOKEN", usageWriterToken32)
+	u := authAs(t, usageWriterToken32)
+	if u == nil {
+		t.Fatal("usage-writer token refused")
+	}
+	if !u.IsUsageWriter() || u.ID != UsageWriterUserID {
+		t.Fatalf("user = %+v", u)
+	}
+	if u.IsAdmin() || u.IsService() || len(u.Groups) != 0 {
+		t.Fatalf("the usage writer carries authority: admin=%v service=%v groups=%v", u.IsAdmin(), u.IsService(), u.Groups)
+	}
+	if _, ok := u.Surface(); ok {
+		t.Fatal("the usage writer is a surface principal")
+	}
+	if !u.HasPermission(PermissionUsageWrite) || u.HasPermission("usage:read") || u.HasPermission("") {
+		t.Fatal("the usage writer's permissions are not exactly usage:write")
+	}
+	id, ok := u.Identity()
+	if !ok || id.Provider != ProviderService || id.Subject != UsageWriterUserID || id.Kind != KindService {
+		t.Fatalf("identity = %+v", id)
+	}
+	// The admin service principal is untouched, and is not the usage writer.
+	if svc := authAs(t, "svc-token-123"); svc == nil || !svc.IsService() || svc.IsUsageWriter() {
+		t.Fatalf("service principal = %+v", svc)
+	}
+	if u := authAs(t, usageWriterToken32+"x"); u != nil {
+		t.Fatalf("a wrong token authenticated as %+v", u)
+	}
+}
+
+func TestUsageWriterTokenThatCouldBeConfusedIsRefused(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	cases := []struct{ name, service, telegram, writer string }{
+		{"too short", "svc-token-123", "", "short"},
+		{"equal to the service token", usageWriterToken32, "", usageWriterToken32},
+		{"equal to a surface token", "svc-token-123", usageWriterToken32, usageWriterToken32},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("MCTL_AGENT_SERVICE_TOKEN", c.service)
+			t.Setenv("MCTL_SURFACE_TELEGRAM_TOKEN", c.telegram)
+			t.Setenv("MCTL_USAGE_WRITER_TOKEN", c.writer)
+			if u := authAs(t, c.writer); u.IsUsageWriter() {
+				t.Fatalf("minted the usage writer from a token that proves something else: %+v", u)
+			}
+		})
+	}
+}
+
+func TestOnlyAdminsAndTheUsageWriterMayWriteUsage(t *testing.T) {
+	var nobody *User
+	for name, c := range map[string]struct {
+		u    *User
+		want bool
+	}{
+		"usage writer":  {NewUsageWriterUser(), true},
+		"admin":         {&User{ID: "a", Groups: []string{"admins"}}, true},
+		"service":       {NewServiceUser(), true},
+		"tenant member": {&User{ID: "t", Groups: []string{"some-tenant"}}, false},
+		"surface":       {NewSurfaceUser("telegram"), false},
+		"nil":           {nobody, false},
+	} {
+		if got := c.u.HasPermission(PermissionUsageWrite); got != c.want {
+			t.Errorf("%s: HasPermission(usage:write) = %v, want %v", name, got, c.want)
+		}
+	}
+}
