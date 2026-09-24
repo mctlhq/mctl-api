@@ -235,3 +235,41 @@ func TestULIDShape(t *testing.T) {
 		t.Fatalf("ULIDs do not sort by time: %s !< %s", a, b)
 	}
 }
+
+// blockingBackend never answers until the test ends: a store that is up but
+// stalled, or a caller parked on a lock.
+type blockingBackend struct {
+	fakeBackend
+	release chan struct{}
+}
+
+func (b *blockingBackend) Provision(ctx context.Context, _ auth.Identity) (*Principal, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-b.release:
+		return nil, errors.New("released")
+	}
+}
+
+// A stalled store degrades within the resolution deadline instead of holding
+// the request.
+func TestResolverDegradesWhenTheStoreStalls(t *testing.T) {
+	b := &blockingBackend{release: make(chan struct{})}
+	t.Cleanup(func() { close(b.release) })
+	r := newResolver(b, nil, false)
+	r.timeout = 50 * time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.ResolvePrincipal(context.Background(), githubAlice)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrUnresolved) {
+			t.Fatalf("stalled store = %v, want ErrUnresolved", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolution is not bounded: a stalled store holds the request")
+	}
+}

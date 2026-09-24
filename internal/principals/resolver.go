@@ -34,6 +34,12 @@ import (
 // refused once its entry expires.
 const CacheTTL = 5 * time.Minute
 
+// ResolveTimeout bounds one resolution on the authentication path. A store
+// that is up but slow, a saturated pool or a caller parked on the GitHub
+// login lock degrades like an unreachable store instead of stalling the
+// request (mctl-api#373 D2).
+const ResolveTimeout = 3 * time.Second
+
 // resolutionFailed counts requests that proceeded without a principal id
 // because it could not be resolved (mctl-api#373 D2): phase 1 degrades
 // instead of failing authentication.
@@ -72,6 +78,7 @@ type Resolver struct {
 	lookup   GitHubIDLookup
 	allowDev bool
 	ttl      time.Duration
+	timeout  time.Duration
 	now      func() time.Time
 
 	mu        sync.Mutex
@@ -94,7 +101,7 @@ func NewResolver(store *Store, lookup GitHubIDLookup, allowDev bool) *Resolver {
 
 func newResolver(store backend, lookup GitHubIDLookup, allowDev bool) *Resolver {
 	return &Resolver{
-		store: store, lookup: lookup, allowDev: allowDev, ttl: CacheTTL,
+		store: store, lookup: lookup, allowDev: allowDev, ttl: CacheTTL, timeout: ResolveTimeout,
 		now: time.Now, cache: map[string]cached{},
 	}
 }
@@ -119,7 +126,9 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 	if ok && now.Sub(c.at) < r.ttl {
 		return answer(c)
 	}
-	p, err := r.resolve(ctx, id)
+	rctx, cancel := context.WithTimeout(ctx, r.timeout)
+	p, err := r.resolve(rctx, id)
+	cancel()
 	if err != nil {
 		if errors.Is(err, auth.ErrIdentityRefused) {
 			return "", err
