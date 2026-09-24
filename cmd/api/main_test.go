@@ -16,10 +16,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 )
 
 // shrinkStoreInitDelay keeps the retry tests in microseconds instead of the
@@ -62,7 +70,7 @@ func TestInitStore(t *testing.T) {
 			shrinkStoreInitDelay(t)
 
 			attempts := 0
-			store, err := initStore(context.Background(), "test", func(context.Context) (string, error) {
+			store, err := initStore(context.Background(), nil, "test", func(context.Context) (string, error) {
 				attempts++
 				if attempts <= tc.failures {
 					return "", errDial
@@ -107,7 +115,7 @@ func TestInitStoreStopsOnCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	attempts := 0
 
-	_, err := initStore(ctx, "test", func(context.Context) (string, error) {
+	_, err := initStore(ctx, nil, "test", func(context.Context) (string, error) {
 		attempts++
 		cancel() // cancelled while the first attempt is in flight
 		return "", errors.New("connection refused")
@@ -172,14 +180,15 @@ func TestInitStoreSharedDeadlineStopsLaterStores(t *testing.T) {
 	}
 
 	for _, name := range []string{"oauth refresh", "audit log", "alert", "agent registry"} {
-		if _, err := initStore(ctx, name, counting); err == nil {
+		if _, err := initStore(ctx, nil, name, counting); err == nil {
 			t.Fatalf("%s: expected an error against a dead database", name)
 		}
 	}
 	elapsed := time.Since(start)
 
 	// Four independent budgets would be four full ladders; one shared deadline
-	// is spent by the first store and the rest fail out immediately.
+	// is spent by the first store and each later one gets a single last-chance
+	// attempt (mctl-api#387), never a ladder of its own.
 	if elapsed > time.Second {
 		t.Errorf("four stores took %v — the deadline is not shared", elapsed)
 	}
@@ -320,5 +329,150 @@ func TestParsePreregisteredClients(t *testing.T) {
 				t.Fatalf("len = %d, want %d", len(got), tc.wantN)
 			}
 		})
+	}
+}
+
+// The mctl-api#387 incident, reproduced: a rolling update where the old pod
+// still holds the role's connections. Every store's first attempts are
+// refused ("too many connections for role"), the shared budget runs out on
+// the first store, and later stores used to fail "before attempt 1" and stay
+// nil, while /readyz still said ready. Now each later store gets one
+// last-chance attempt, every store that still failed is recorded, and the
+// real router's /readyz answers 503 naming them.
+func TestTransientStoreInitFailureKeepsThePodNotReady(t *testing.T) {
+	original := storeInitBaseDelay
+	storeInitBaseDelay = time.Millisecond
+	t.Cleanup(func() { storeInitBaseDelay = original })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+
+	errTooMany := errors.New("FATAL: too many connections for role \"mctl-api\" (SQLSTATE 53300)")
+	refused := func(context.Context) (string, error) { return "", errTooMany }
+	failures := &storeInitFailures{}
+	for _, name := range []string{"oauth refresh", "surface identities", "event outbox", "agent registry"} {
+		if _, err := initStore(ctx, failures, name, refused); err == nil {
+			t.Fatalf("%s: expected an error while the connections are exhausted", name)
+		}
+	}
+	want := []string{"oauth refresh", "surface identities", "event outbox", "agent registry"}
+	if got := failures.List(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("failures = %v, want %v", got, want)
+	}
+
+	router := mctlapi.NewRouter(mctlapi.Options{StoreInitFailures: failures.List})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Status       string   `json:"status"`
+		FailedStores []string `json:"failed_stores"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "not ready" || fmt.Sprint(body.FailedStores) != fmt.Sprint(want) {
+		t.Errorf("/readyz body = %+v, want not ready naming %v", body, want)
+	}
+
+	// Liveness is untouched: a not-ready pod is not a dead one, and must not
+	// be restarted into a crash loop while the database recovers.
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("/healthz = %d, want 200", rec.Code)
+	}
+}
+
+func TestInitStoreRecordsOnlyFailedStores(t *testing.T) {
+	shrinkStoreInitDelay(t)
+	failures := &storeInitFailures{}
+	if _, err := initStore(context.Background(), failures, "alert", func(context.Context) (string, error) {
+		return "ok", nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := failures.List(); len(got) != 0 {
+		t.Fatalf("a store that initialised was recorded as failed: %v", got)
+	}
+	if _, err := initStore(context.Background(), failures, "domains", func(context.Context) (string, error) {
+		return "", errors.New("connection refused")
+	}); err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := failures.List(); fmt.Sprint(got) != "[domains]" {
+		t.Fatalf("failures = %v, want [domains]", got)
+	}
+}
+
+// A store reached after an earlier one spent the shared budget gets one real
+// attempt instead of none, and succeeds if its database answers.
+func TestInitStoreLastChanceAfterTheBudgetIsSpent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done()
+
+	attempts := 0
+	store, err := initStore(ctx, nil, "agent registry", func(attemptCtx context.Context) (string, error) {
+		attempts++
+		if err := attemptCtx.Err(); err != nil {
+			return "", err
+		}
+		return "ready", nil
+	})
+	if err != nil || store != "ready" {
+		t.Fatalf("store = %q err = %v, want a successful last-chance attempt", store, err)
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want exactly one last-chance attempt", attempts)
+	}
+
+	// Still exactly one: a failed last chance does not start a ladder.
+	attempts = 0
+	_, err = initStore(ctx, nil, "domains", func(context.Context) (string, error) {
+		attempts++
+		return "", errors.New("connection refused")
+	})
+	if err == nil || !strings.Contains(err.Error(), "last-chance") || attempts != 1 {
+		t.Errorf("err = %v attempts = %d, want one failed last-chance attempt", err, attempts)
+	}
+}
+
+// A cancelled (not expired) context is a shutdown signal: no last chance.
+func TestInitStoreCancelledContextGetsNoLastChance(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	attempts := 0
+	_, err := initStore(ctx, nil, "alert", func(context.Context) (string, error) {
+		attempts++
+		return "ok", nil
+	})
+	if err == nil || attempts != 0 {
+		t.Errorf("err = %v attempts = %d, want no attempt after cancellation", err, attempts)
+	}
+}
+
+// main() itself is not unit-testable, so pin its two wiring points in the
+// source: every store main initialises reports into the tracker (a nil there
+// would silently exempt that store from readiness), and the tracker reaches
+// the router's /readyz.
+func TestMainWiresEveryStoreIntoReadiness(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := regexp.MustCompile(`initStore\(([^,]+), ([^,]+), "`).FindAllStringSubmatch(string(src), -1)
+	if len(calls) < 14 {
+		t.Fatalf("found %d initStore calls in main.go, expected every store (>= 14)", len(calls))
+	}
+	for _, c := range calls {
+		if c[1] != "initCtx" || c[2] != "storeFailures" {
+			t.Errorf("initStore(%s, %s, ...) in main.go: every store must report into storeFailures", c[1], c[2])
+		}
+	}
+	if !regexp.MustCompile(`StoreInitFailures:\s+storeFailures\.List,`).Match(src) {
+		t.Error("main.go does not pass storeFailures.List to the router: /readyz would never see a failed store")
 	}
 }

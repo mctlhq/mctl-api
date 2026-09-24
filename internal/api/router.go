@@ -166,6 +166,11 @@ type Options struct {
 	PostgresReady ReadyCheck
 	DexReady      ReadyCheck
 	VaultReady    ReadyCheck
+	// StoreInitFailures lists the configured stores whose startup init failed
+	// (mctl-api#387). Such a store stays nil for the life of the pod, so any
+	// entry keeps GET /readyz at 503 and names the store; liveness (/healthz)
+	// is unaffected. Nil means not wired (tests) and is not_configured.
+	StoreInitFailures func() []string
 	// ArgoWebhookSecret authenticates POST /api/v1/workflows/events/argo-complete.
 	// Fail-closed: an empty secret rejects every callback.
 	ArgoWebhookSecret string

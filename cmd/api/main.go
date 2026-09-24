@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -121,6 +123,11 @@ func main() {
 	// pgxpool.New and the schema Exec, then keeps only the pool. So it is safe
 	// to release it once the last store is built.
 	initCtx, cancelInit := context.WithTimeout(rootCtx, storeInitBudget)
+	// Every store below that is configured but fails init is recorded here,
+	// and GET /readyz answers 503 while any is (mctl-api#387): such a store
+	// stays nil for the pod's lifetime, so a pod that reported ready with it
+	// would serve 503s (or an in-memory fallback) until someone restarted it.
+	storeFailures := &storeInitFailures{}
 
 	// OAuth 2.0 server (optional — disabled if OAUTH_GITHUB_CLIENT_ID is unset).
 	var oauthServer *auth.OAuthServer
@@ -162,7 +169,7 @@ func main() {
 		// When available, refresh tokens survive pod restarts; without it the in-memory
 		// fallback is used (tokens lost on restart — the original band-aid behaviour).
 		if oauthDBURL := postgresURL(envOr("OAUTH_DB_URL", os.Getenv("AUDIT_DB_URL"))); oauthDBURL != "" {
-			rs, rsErr := initStore(initCtx, "oauth refresh", func(ctx context.Context) (*refreshstore.PostgresStore, error) {
+			rs, rsErr := initStore(initCtx, storeFailures, "oauth refresh", func(ctx context.Context) (*refreshstore.PostgresStore, error) {
 				return refreshstore.NewPostgresStore(ctx, oauthDBURL)
 			})
 			if rsErr != nil {
@@ -201,7 +208,7 @@ func main() {
 	case principalDBURL == "":
 		slog.Warn("no SURFACE_IDENTITY_DB_URL or AUDIT_DB_URL; callers carry no canonical principal id")
 	default:
-		ps, psErr := initStore(initCtx, "principals", func(ctx context.Context) (*principals.Store, error) {
+		ps, psErr := initStore(initCtx, storeFailures, "principals", func(ctx context.Context) (*principals.Store, error) {
 			return principals.NewStore(ctx, principalDBURL)
 		})
 		if psErr != nil {
@@ -219,7 +226,7 @@ func main() {
 
 	var auditLog audit.Log
 	if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		pgLog, pgErr := initStore(initCtx, "audit log", func(ctx context.Context) (*audit.PostgresLogger, error) {
+		pgLog, pgErr := initStore(initCtx, storeFailures, "audit log", func(ctx context.Context) (*audit.PostgresLogger, error) {
 			return audit.NewPostgresLogger(ctx, dbURL)
 		})
 		if pgErr != nil {
@@ -235,7 +242,7 @@ func main() {
 	// Alert store (optional — enabled when ALERT_DB_URL or AUDIT_DB_URL is set).
 	var alertStore *alerts.Store
 	if alertDBURL := postgresURL(os.Getenv("ALERT_DB_URL")); alertDBURL != "" {
-		as, asErr := initStore(initCtx, "alert", func(ctx context.Context) (*alerts.Store, error) {
+		as, asErr := initStore(initCtx, storeFailures, "alert", func(ctx context.Context) (*alerts.Store, error) {
 			return alerts.NewStore(ctx, alertDBURL)
 		})
 		if asErr != nil {
@@ -244,7 +251,7 @@ func main() {
 			alertStore = as
 		}
 	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		as, asErr := initStore(initCtx, "alert", func(ctx context.Context) (*alerts.Store, error) {
+		as, asErr := initStore(initCtx, storeFailures, "alert", func(ctx context.Context) (*alerts.Store, error) {
 			return alerts.NewStore(ctx, dbURL)
 		})
 		if asErr != nil {
@@ -265,7 +272,7 @@ func main() {
 		lifecycleDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
 	}
 	if lifecycleDBURL != "" {
-		ls, lsErr := initStore(initCtx, "lifecycle ownership", func(ctx context.Context) (*lifecycle.Store, error) {
+		ls, lsErr := initStore(initCtx, storeFailures, "lifecycle ownership", func(ctx context.Context) (*lifecycle.Store, error) {
 			return lifecycle.NewStore(ctx, lifecycleDBURL)
 		})
 		if lsErr != nil {
@@ -330,7 +337,7 @@ func main() {
 				pricing = pc
 			}
 		}
-		us, usErr := initStore(initCtx, "usage ledger", func(ctx context.Context) (*usage.Store, error) {
+		us, usErr := initStore(initCtx, storeFailures, "usage ledger", func(ctx context.Context) (*usage.Store, error) {
 			return usage.NewStore(ctx, usageDBURL, pricing)
 		})
 		if usErr != nil {
@@ -352,7 +359,7 @@ func main() {
 		humanInputDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
 	}
 	if humanInputDBURL != "" {
-		hl, hlErr := initStore(initCtx, "human-input ledger", func(ctx context.Context) (*humaninput.PostgresLedger, error) {
+		hl, hlErr := initStore(initCtx, storeFailures, "human-input ledger", func(ctx context.Context) (*humaninput.PostgresLedger, error) {
 			return humaninput.NewPostgresLedger(ctx, humanInputDBURL)
 		})
 		if hlErr != nil {
@@ -379,7 +386,7 @@ func main() {
 	case workItemsDBURL == "":
 		slog.Warn("no WORK_ITEMS_DB_URL or AUDIT_DB_URL; /api/v1/work-items and /api/v1/action-approvals routes will return 503")
 	default:
-		ws, wsErr := initStore(initCtx, "work items", func(ctx context.Context) (*workitems.Store, error) {
+		ws, wsErr := initStore(initCtx, storeFailures, "work items", func(ctx context.Context) (*workitems.Store, error) {
 			return workitems.NewStore(ctx, workItemsDBURL)
 		})
 		if wsErr != nil {
@@ -409,7 +416,7 @@ func main() {
 	case surfaceDBURL == "":
 		slog.Warn("no SURFACE_IDENTITY_DB_URL or AUDIT_DB_URL; /api/v1/surface-identities routes will return 503")
 	default:
-		ss, ssErr := initStore(initCtx, "surface identities", func(ctx context.Context) (*surfaceid.Store, error) {
+		ss, ssErr := initStore(initCtx, storeFailures, "surface identities", func(ctx context.Context) (*surfaceid.Store, error) {
 			return surfaceid.NewStore(ctx, surfaceDBURL, linkTTL)
 		})
 		if ssErr != nil {
@@ -444,7 +451,7 @@ func main() {
 		case eventsDBURL == "":
 			slog.Error("no EVENTS_DB_URL or AUDIT_DB_URL; github webhook will return 503")
 		default:
-			ob, obErr := initStore(initCtx, "event outbox", func(ctx context.Context) (*events.Outbox, error) {
+			ob, obErr := initStore(initCtx, storeFailures, "event outbox", func(ctx context.Context) (*events.Outbox, error) {
 				return events.NewOutbox(ctx, eventsDBURL)
 			})
 			if obErr != nil {
@@ -460,7 +467,7 @@ func main() {
 
 	var agentRegistryStore *agentregistry.Store
 	if agentRegistryDBURL := postgresURL(os.Getenv("AGENT_REGISTRY_DB_URL")); agentRegistryDBURL != "" {
-		ars, arsErr := initStore(initCtx, "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
+		ars, arsErr := initStore(initCtx, storeFailures, "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
 			return agentregistry.NewStore(ctx, agentRegistryDBURL)
 		})
 		if arsErr != nil {
@@ -469,7 +476,7 @@ func main() {
 			agentRegistryStore = ars
 		}
 	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		ars, arsErr := initStore(initCtx, "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
+		ars, arsErr := initStore(initCtx, storeFailures, "agent registry", func(ctx context.Context) (*agentregistry.Store, error) {
 			return agentregistry.NewStore(ctx, dbURL)
 		})
 		if arsErr != nil {
@@ -484,7 +491,7 @@ func main() {
 	// proxies to Backstage's custom-domains plugin.
 	var domainStore *domains.Store
 	if domainsDBURL := postgresURL(os.Getenv("DOMAINS_DB_URL")); domainsDBURL != "" {
-		ds, dsErr := initStore(initCtx, "domains", func(ctx context.Context) (*domains.Store, error) {
+		ds, dsErr := initStore(initCtx, storeFailures, "domains", func(ctx context.Context) (*domains.Store, error) {
 			return domains.NewStore(ctx, domainsDBURL)
 		})
 		if dsErr != nil {
@@ -493,7 +500,7 @@ func main() {
 			domainStore = ds
 		}
 	} else if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
-		ds, dsErr := initStore(initCtx, "domains", func(ctx context.Context) (*domains.Store, error) {
+		ds, dsErr := initStore(initCtx, storeFailures, "domains", func(ctx context.Context) (*domains.Store, error) {
 			return domains.NewStore(ctx, dbURL)
 		})
 		if dsErr != nil {
@@ -705,6 +712,7 @@ func main() {
 		PostgresReady:                  postgresReady,
 		DexReady:                       dexReady,
 		VaultReady:                     vaultReady,
+		StoreInitFailures:              storeFailures.List,
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
 		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,
 		GitHubWebhookOwners:            cfg.GitHubWebhookOwners,
@@ -1062,9 +1070,17 @@ const (
 	//
 	// 8s leaves a lone store its full ladder while keeping the process
 	// listening before the readiness probe's first check at
-	// initialDelaySeconds: 10 (helm/templates/deployment.yaml), so a degraded
-	// pod still reports ready on schedule instead of looking hung.
+	// initialDelaySeconds: 10 (helm/templates/deployment.yaml), so the probe
+	// gets an answer on schedule instead of a pod that looks hung. Since
+	// mctl-api#387 that answer is "not ready" while any configured store
+	// failed: a degraded pod no longer reports ready.
 	storeInitBudget = 8 * time.Second
+
+	// The one attempt a store gets when the shared budget ran out before its
+	// turn (mctl-api#387). A reachable database answers in milliseconds, and
+	// a refusal (connection limit, auth) comes back just as fast; this only
+	// bounds a store whose database does not answer at all.
+	storeInitLastChance = time.Second
 )
 
 // A var, not a const, only so tests can shrink it — nothing at runtime writes it.
@@ -1088,7 +1104,19 @@ var storeInitBaseDelay = 250 * time.Millisecond
 // transient network error from a permanent one by inspecting the message is
 // exactly the kind of guess that produced the five-month silence, and the cost
 // of being wrong is one bounded delay at startup.
-func initStore[T any](ctx context.Context, name string, newStore func(context.Context) (T, error)) (T, error) {
+//
+// Every call site is a configured store, so a failure is recorded in failures
+// and keeps the pod out of readiness (mctl-api#387); a nil failures records
+// nothing (tests).
+func initStore[T any](ctx context.Context, failures *storeInitFailures, name string, newStore func(context.Context) (T, error)) (T, error) {
+	store, err := initStoreAttempts(ctx, name, newStore)
+	if err != nil && failures != nil {
+		failures.record(name)
+	}
+	return store, err
+}
+
+func initStoreAttempts[T any](ctx context.Context, name string, newStore func(context.Context) (T, error)) (T, error) {
 	var zero T
 	delay := storeInitBaseDelay
 	for attempt := 1; ; attempt++ {
@@ -1099,6 +1127,16 @@ func initStore[T any](ctx context.Context, name string, newStore func(context.Co
 		// never succeed — which is the multiplication this budget exists to
 		// prevent, just faster.
 		if err := ctx.Err(); err != nil {
+			// Except for the first attempt of a store that found the shared
+			// budget already spent by an earlier one (mctl-api#387: three
+			// stores failed "before attempt 1" without ever trying). It gets
+			// one bounded last-chance attempt of its own, so a transient
+			// failure that cost an earlier store its ladder cannot starve
+			// every later store too. Only on an expired deadline: a cancelled
+			// context is a shutdown signal and must stop here.
+			if attempt == 1 && errors.Is(err, context.DeadlineExceeded) {
+				return lastChanceInit(ctx, name, newStore)
+			}
 			return zero, fmt.Errorf("before attempt %d: %w", attempt, err)
 		}
 		store, err := newStore(ctx)
@@ -1127,6 +1165,43 @@ func initStore[T any](ctx context.Context, name string, newStore func(context.Co
 		}
 		delay *= 2
 	}
+}
+
+// lastChanceInit is the single attempt a store gets when the shared budget
+// was already spent before its turn. Bounded by storeInitLastChance, so the
+// worst case stays "the budget, plus one short attempt per remaining store".
+// Detached from ctx's (expired) deadline but not from its values; the
+// constructors do not retain the context (see initCtx in main).
+func lastChanceInit[T any](ctx context.Context, name string, newStore func(context.Context) (T, error)) (T, error) {
+	var zero T
+	attemptCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeInitLastChance)
+	defer cancel()
+	store, err := newStore(attemptCtx)
+	if err != nil {
+		return zero, fmt.Errorf("last-chance attempt after the shared budget was spent: %w", err)
+	}
+	slog.Info("store init succeeded on its last-chance attempt", "store", name)
+	return store, nil
+}
+
+// storeInitFailures is the set of configured stores whose init failed. It is
+// written only during startup and read by every /readyz call.
+type storeInitFailures struct {
+	mu    sync.Mutex
+	names []string
+}
+
+func (f *storeInitFailures) record(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.names = append(f.names, name)
+}
+
+// List returns a copy of the failed store names, in init order.
+func (f *storeInitFailures) List() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.names...)
 }
 
 // maxOAuthTokenTTL is the ceiling on OAUTH_TOKEN_TTL. An access token is what
