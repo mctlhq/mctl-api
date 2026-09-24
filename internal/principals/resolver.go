@@ -40,6 +40,12 @@ const CacheTTL = 5 * time.Minute
 // request (mctl-api#373 D2).
 const ResolveTimeout = 3 * time.Second
 
+// FailureTTL is how long a failed resolution is remembered. Within it the
+// identity degrades at once instead of each request waiting ResolveTimeout
+// on a stalled store again. Short, so a recovered store is used within
+// seconds; a failure is never kept for CacheTTL.
+const FailureTTL = 5 * time.Second
+
 // resolutionFailed counts requests that proceeded without a principal id
 // because it could not be resolved (mctl-api#373 D2): phase 1 degrades
 // instead of failing authentication.
@@ -74,12 +80,13 @@ type backend interface {
 //   - a disabled principal is refused;
 //   - anything else that fails is ErrUnresolved, counted, and not cached.
 type Resolver struct {
-	store    backend
-	lookup   GitHubIDLookup
-	allowDev bool
-	ttl      time.Duration
-	timeout  time.Duration
-	now      func() time.Time
+	store      backend
+	lookup     GitHubIDLookup
+	allowDev   bool
+	ttl        time.Duration
+	failureTTL time.Duration
+	timeout    time.Duration
+	now        func() time.Time
 
 	mu        sync.Mutex
 	cache     map[string]cached
@@ -89,7 +96,9 @@ type Resolver struct {
 type cached struct {
 	principal string
 	disabled  bool
-	at        time.Time
+	// failed marks a remembered failure (FailureTTL), not an answer.
+	failed bool
+	at     time.Time
 }
 
 // NewResolver builds a resolver. lookup may be nil (a login-only caller whose
@@ -101,7 +110,7 @@ func NewResolver(store *Store, lookup GitHubIDLookup, allowDev bool) *Resolver {
 
 func newResolver(store backend, lookup GitHubIDLookup, allowDev bool) *Resolver {
 	return &Resolver{
-		store: store, lookup: lookup, allowDev: allowDev, ttl: CacheTTL, timeout: ResolveTimeout,
+		store: store, lookup: lookup, allowDev: allowDev, ttl: CacheTTL, failureTTL: FailureTTL, timeout: ResolveTimeout,
 		now: time.Now, cache: map[string]cached{},
 	}
 }
@@ -123,7 +132,11 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 	r.mu.Lock()
 	c, ok := r.cache[key]
 	r.mu.Unlock()
-	if ok && now.Sub(c.at) < r.ttl {
+	switch {
+	case ok && c.failed && now.Sub(c.at) < r.failureTTL:
+		resolutionFailed.Inc()
+		return "", fmt.Errorf("%w: resolution failed %s ago", ErrUnresolved, now.Sub(c.at).Round(time.Millisecond))
+	case ok && !c.failed && now.Sub(c.at) < r.ttl:
 		return answer(c)
 	}
 	rctx, cancel := context.WithTimeout(ctx, r.timeout)
@@ -135,6 +148,9 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 		}
 		resolutionFailed.Inc()
 		slog.Warn("principal resolution failed", "provider", id.Provider, "error", err)
+		r.mu.Lock()
+		r.cache[key] = cached{failed: true, at: now}
+		r.mu.Unlock()
 		return "", fmt.Errorf("%w: %v", ErrUnresolved, err)
 	}
 	c = cached{principal: p.ID, disabled: p.Status == StatusDisabled, at: now}

@@ -98,8 +98,13 @@ func reservedProvider(name string) bool {
 
 // MirrorRevoke marks a revoked surface link's mirrored identity revoked.
 func (s *Store) MirrorRevoke(ctx context.Context, tx pgx.Tx, surface, externalID string, at time.Time) error {
+	// No mirror row can exist for such a surface (mirrorLink refuses it), and
+	// its subject could match a real identity's. Refusing would roll the
+	// revoke back and leave the link live, so the revoke goes through and
+	// the identity rows are left alone.
 	if reservedProvider(surface) {
-		return fmt.Errorf("principals: surface %q is named like an authentication provider", surface)
+		slog.Warn("surface link revoked without a mirror: the surface is named like an authentication provider", "surface", surface)
+		return nil
 	}
 	_, err := tx.Exec(ctx, `UPDATE external_identities SET revoked_at=$3
 		WHERE provider=$1 AND issuer='' AND subject=$2 AND revoked_at IS NULL`, surface, externalID, at)

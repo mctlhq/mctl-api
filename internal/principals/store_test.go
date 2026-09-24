@@ -469,7 +469,7 @@ func TestBackfillMirrorsTheRestPastAFailingLink(t *testing.T) {
 	if err == nil {
 		t.Fatal("the failing link was not reported")
 	}
-	if res.LinksMirrored != 1 {
+	if res.LinksMirrored != 1 || res.LinksFailed != 1 {
 		t.Fatalf("backfill = %+v", res)
 	}
 	dave, _ := s.ResolveGitHubLogin(ctx, "dave")
@@ -478,7 +478,10 @@ func TestBackfillMirrorsTheRestPastAFailingLink(t *testing.T) {
 	}
 }
 
-func TestMirrorRevokeRefusesReservedProviderNames(t *testing.T) {
+// Revoking a link on a surface named like an auth provider must neither
+// touch the real identity that shares its subject nor fail: a failure would
+// roll the revoke back and leave the link live.
+func TestMirrorRevokeSkipsReservedProviderNames(t *testing.T) {
 	s := newStoreForTest(t)
 	ctx := context.Background()
 	if _, err := s.Provision(ctx, github(4242, "alice")); err != nil {
@@ -492,10 +495,10 @@ func TestMirrorRevokeRefusesReservedProviderNames(t *testing.T) {
 	if cerr := tx.Commit(ctx); cerr != nil {
 		t.Fatal(cerr)
 	}
-	if err == nil {
-		t.Fatal("a surface named github revoked a mirror row")
+	if err != nil {
+		t.Fatalf("the revoke was refused (the link would stay live): %v", err)
 	}
 	if _, err := s.Provision(ctx, github(4242, "alice")); err != nil {
-		t.Fatalf("alice's GitHub identity after the refused revoke: %v", err)
+		t.Fatalf("alice's GitHub identity after the revoke: %v", err)
 	}
 }

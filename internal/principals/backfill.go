@@ -89,6 +89,7 @@ type BackfillResult struct {
 	Provisioned   int `json:"provisioned"`
 	Failed        int `json:"failed"`
 	LinksMirrored int `json:"links_mirrored"`
+	LinksFailed   int `json:"links_failed"`
 }
 
 // Backfill provisions one human principal and one GitHub identity per login
@@ -137,20 +138,20 @@ func (s *Store) Backfill(ctx context.Context, logins []string, lookup GitHubIDLo
 		}
 		res.Provisioned++
 	}
-	n, err := s.mirrorLiveLinks(ctx)
-	res.LinksMirrored = n
+	var err error
+	res.LinksMirrored, res.LinksFailed, err = s.mirrorLiveLinks(ctx)
 	return res, err
 }
 
 // mirrorLiveLinks copies every live surface link that is not mirrored yet.
 // The surface store may be disabled, so a missing table is not an error.
-func (s *Store) mirrorLiveLinks(ctx context.Context) (int, error) {
+func (s *Store) mirrorLiveLinks(ctx context.Context) (mirrored, failed int, err error) {
 	var exists bool
 	if err := s.pool.QueryRow(ctx, `SELECT to_regclass('surface_identity_links') IS NOT NULL`).Scan(&exists); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if !exists {
-		return 0, nil
+		return 0, 0, nil
 	}
 	rows, err := s.pool.Query(ctx, `SELECT l.surface, l.external_id, l.principal FROM surface_identity_links l
 		WHERE l.revoked_at IS NULL AND NOT EXISTS (
@@ -158,7 +159,7 @@ func (s *Store) mirrorLiveLinks(ctx context.Context) (int, error) {
 			WHERE x.provider = l.surface AND x.issuer = '' AND x.subject = l.external_id)
 		ORDER BY l.surface, l.external_id`)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	type link struct{ surface, externalID, principal string }
 	var links []link
@@ -166,31 +167,30 @@ func (s *Store) mirrorLiveLinks(ctx context.Context) (int, error) {
 		var l link
 		if err := rows.Scan(&l.surface, &l.externalID, &l.principal); err != nil {
 			rows.Close()
-			return 0, err
+			return 0, 0, err
 		}
 		links = append(links, l)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	// One link that cannot be mirrored must not keep every later one
 	// unmirrored on every start: it is logged and the rest go on. A link
 	// counts only once its transaction committed.
-	mirrored, failed := 0, 0
 	for _, l := range links {
 		var wrote bool
-		err := s.withTx(ctx, "principals:mirror:"+l.surface+"|"+l.externalID, func(tx pgx.Tx) error {
+		err = s.withTx(ctx, "principals:mirror:"+l.surface+"|"+l.externalID, func(tx pgx.Tx) error {
 			var err error
 			wrote, err = s.mirrorLink(ctx, tx, l.surface, l.externalID, l.principal, true)
 			return err
 		})
 		if ctx.Err() != nil {
-			return mirrored, ctx.Err()
+			return mirrored, failed, ctx.Err()
 		}
 		if err != nil {
 			failed++
-			slog.Warn("principal backfill: surface link not mirrored", "surface", l.surface, "error", err)
+			slog.Warn("principal backfill: surface link not mirrored", "surface", l.surface, "principal", l.principal, "error", err)
 			continue
 		}
 		if wrote {
@@ -198,7 +198,7 @@ func (s *Store) mirrorLiveLinks(ctx context.Context) (int, error) {
 		}
 	}
 	if failed > 0 {
-		return mirrored, fmt.Errorf("principals: %d surface link(s) not mirrored", failed)
+		return mirrored, failed, fmt.Errorf("principals: %d surface link(s) not mirrored", failed)
 	}
-	return mirrored, nil
+	return mirrored, 0, nil
 }
