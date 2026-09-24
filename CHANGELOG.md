@@ -1,5 +1,28 @@
 # Changelog
 
+## [4.52.0](https://github.com/mctlhq/mctl-api/compare/4.51.0...4.52.0) (2026-09-24)
+
+
+### Features
+
+* **helm:** optional usageWriterTokenSecret for MCTL_USAGE_WRITER_TOKEN ([e605b78](https://github.com/mctlhq/mctl-api/commit/e605b78dee75bc01cd6e9b366c27abde054b231e))
+* **principals:** canonical principal model, phase 1 ([#373](https://github.com/mctlhq/mctl-api/issues/373)) ([679d6a6](https://github.com/mctlhq/mctl-api/commit/679d6a6fb214fbf196114960a625fa11bb6e8bd9))
+* **principals:** canonical principal model, phase 1 ([#373](https://github.com/mctlhq/mctl-api/issues/373)) ([cd6857d](https://github.com/mctlhq/mctl-api/commit/cd6857d7de3f50db237e75fc5d0dcdce1aeadb98))
+* **principals:** dual-write principal ids next to actor strings ([44d8e4f](https://github.com/mctlhq/mctl-api/commit/44d8e4ff2ae4c31b77921c9f415f528008bef278))
+* **principals:** dual-write principal ids next to actor strings ([#373](https://github.com/mctlhq/mctl-api/issues/373) phase 1) ([7cc9e64](https://github.com/mctlhq/mctl-api/commit/7cc9e6478ec08f5d3241b2c3c4eaec0777057b97))
+* **usage:** least-privilege usage-writer principal with usage:write ([8ad3c50](https://github.com/mctlhq/mctl-api/commit/8ad3c5057484c84ff130f154f854db6cb2947c26))
+* **usage:** least-privilege usage-writer principal with usage:write (.github[#50](https://github.com/mctlhq/mctl-api/issues/50) B) ([56b0403](https://github.com/mctlhq/mctl-api/commit/56b04031ef4a939d893f03458be3dac6101fc47a))
+
+
+### Bug Fixes
+
+* **operations:** declare the mctl-agents release pin parameters ([a99810e](https://github.com/mctlhq/mctl-api/commit/a99810ece409cc842e4827e10c5ba4fb2bff995b)), closes [#372](https://github.com/mctlhq/mctl-api/issues/372)
+* **operations:** forward DevLoop release pins to mctl-agents workflows ([a691fc6](https://github.com/mctlhq/mctl-api/commit/a691fc6148d3cf267c78489611234b23a018db8a))
+* **principals:** bound resolution, guard revoke, mirror past a bad link ([c20ed5c](https://github.com/mctlhq/mctl-api/commit/c20ed5c757c179ba39b3ad757b0227e533117fce))
+* **principals:** explicit lifecycle caller, DecidedViaPrincipalID, relay test ([e138a09](https://github.com/mctlhq/mctl-api/commit/e138a09c55446d88b8c331bd85316f22ad760395))
+* **principals:** refuse revoked relays, serialize GitHub login claims ([a8e31af](https://github.com/mctlhq/mctl-api/commit/a8e31afcb689b2001f9382e6b2e1d9af0d11bd2e))
+* **principals:** remember failures briefly, let reserved-surface revokes through ([1acfaf7](https://github.com/mctlhq/mctl-api/commit/1acfaf7ff46b961e6f3cdaca0032654ecd96849a))
+
 ## [4.51.0](https://github.com/mctlhq/mctl-api/compare/4.50.0...4.51.0) (2026-09-23)
 
 
