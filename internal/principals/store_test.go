@@ -449,3 +449,56 @@ func TestBackfillMirrorsLinksMadeBeforeThePrincipal(t *testing.T) {
 		t.Fatalf("second backfill = %+v, %v", again, err)
 	}
 }
+
+// One link that cannot be mirrored is reported, and every other link is
+// still mirrored and counted.
+func TestBackfillMirrorsTheRestPastAFailingLink(t *testing.T) {
+	s := newStoreForTest(t)
+	ss := newSurfaceStore(t)
+	ss.SetMirror(s)
+	ctx := context.Background()
+	link(t, ss, "carol", "3003")
+	link(t, ss, "dave", "4004")
+	// A row no mirror accepts, ordered before the good one.
+	if _, err := s.pool.Exec(ctx, `UPDATE surface_identity_links SET surface='github' WHERE external_id='3003'`); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]int64{"carol": 33, "dave": 44}
+	lookup := func(_ context.Context, login string) (int64, error) { return ids[login], nil }
+	res, err := s.Backfill(ctx, []string{"carol", "dave"}, lookup)
+	if err == nil {
+		t.Fatal("the failing link was not reported")
+	}
+	if res.LinksMirrored != 1 || res.LinksFailed != 1 {
+		t.Fatalf("backfill = %+v", res)
+	}
+	dave, _ := s.ResolveGitHubLogin(ctx, "dave")
+	if pid, _, found := telegramIdentity(t, s, "4004"); !found || pid != dave.ID {
+		t.Fatalf("dave's link after a failing one: %q found=%v", pid, found)
+	}
+}
+
+// Revoking a link on a surface named like an auth provider must neither
+// touch the real identity that shares its subject nor fail: a failure would
+// roll the revoke back and leave the link live.
+func TestMirrorRevokeSkipsReservedProviderNames(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	if _, err := s.Provision(ctx, github(4242, "alice")); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.MirrorRevoke(ctx, tx, auth.ProviderGitHub, "4242", time.Now())
+	if cerr := tx.Commit(ctx); cerr != nil {
+		t.Fatal(cerr)
+	}
+	if err != nil {
+		t.Fatalf("the revoke was refused (the link would stay live): %v", err)
+	}
+	if _, err := s.Provision(ctx, github(4242, "alice")); err != nil {
+		t.Fatalf("alice's GitHub identity after the revoke: %v", err)
+	}
+}

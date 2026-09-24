@@ -1285,11 +1285,6 @@ func splitCSV(v string) []string {
 	return out
 }
 
-// killSwitchOn reads a kill-switch value (WORK_ITEMS_DISABLED,
-// ROADMAP_STATE_DISABLED). It errs toward off: any value except an explicit
-// "false"/"f"/"0"/"no"/"off" (or empty) turns the feature off, so a template
-// that renders the flag as "false" keeps it on while "yes" or "disabled" never
-// silently fails open.
 // githubIDLookup resolves a GitHub login to its numeric id, with the same
 // credential the gitops clone uses (a GitHub App installation token, re-read
 // per call).
@@ -1322,7 +1317,7 @@ func backfillPrincipals(ctx context.Context, store *principals.Store, reader *gi
 		return
 	}
 	slog.Info("principal backfill done", "logins", res.Logins, "known", res.Known,
-		"provisioned", res.Provisioned, "failed", res.Failed, "links_mirrored", res.LinksMirrored)
+		"provisioned", res.Provisioned, "failed", res.Failed, "links_mirrored", res.LinksMirrored, "links_failed", res.LinksFailed)
 }
 
 // tenantMemberLogins lists every GitHub login gitops names as a tenant or
@@ -1347,6 +1342,11 @@ func tenantMemberLogins(reader *gitops.Reader) ([]string, error) {
 	return logins, nil
 }
 
+// killSwitchOn reads a kill-switch value (WORK_ITEMS_DISABLED,
+// ROADMAP_STATE_DISABLED, PRINCIPALS_DISABLED). It errs toward off: any value except an explicit
+// "false"/"f"/"0"/"no"/"off" (or empty) turns the feature off, so a template
+// that renders the flag as "false" keeps it on while "yes" or "disabled" never
+// silently fails open.
 func killSwitchOn(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", "false", "f", "0", "no", "off":

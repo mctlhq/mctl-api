@@ -42,7 +42,11 @@ a different id, the older row stops answering for it.
 - Resolution is cached for 5 minutes.
 - **Store unavailable** (or GitHub unreachable for a login lookup): the
   request proceeds without a principal id, logged and counted as
-  `principal_resolution_failed_total`. Phase 2 fails closed instead.
+  `principal_resolution_failed_total`. A resolution is bounded at 3 s, so a
+  store that is slow rather than down degrades the same way, and a failure
+  is remembered for 5 s so a stalled store does not cost every request the
+  full 3 s. Phase 2 fails
+  closed instead.
 
 ## Surface identity links: mirrored, not replaced
 

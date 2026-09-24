@@ -118,8 +118,13 @@ func TestResolverCacheEvictsExpiredEntries(t *testing.T) {
 func TestResolverDegradesAndCountsWhenTheStoreIsDown(t *testing.T) {
 	b := &fakeBackend{err: errors.New("dial tcp: connection refused")}
 	r := newResolver(b, nil, false)
+	now := time.Unix(1_800_000_000, 0)
+	r.now = func() time.Time { return now }
 	before := testutil.ToFloat64(resolutionFailed)
 	for i := 0; i < 2; i++ {
+		// Past the short failure window: a failure is never kept like an
+		// answer.
+		now = now.Add(FailureTTL)
 		_, err := r.ResolvePrincipal(context.Background(), githubAlice)
 		if !errors.Is(err, ErrUnresolved) {
 			t.Fatalf("err = %v, want ErrUnresolved", err)
@@ -233,5 +238,73 @@ func TestULIDShape(t *testing.T) {
 	b, _ := newULID(time.UnixMilli(2000))
 	if a >= b {
 		t.Fatalf("ULIDs do not sort by time: %s !< %s", a, b)
+	}
+}
+
+// blockingBackend never answers until the test ends: a store that is up but
+// stalled, or a caller parked on a lock.
+type blockingBackend struct {
+	fakeBackend
+	release chan struct{}
+}
+
+func (b *blockingBackend) Provision(ctx context.Context, _ auth.Identity) (*Principal, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-b.release:
+		return nil, errors.New("released")
+	}
+}
+
+// A stalled store degrades within the resolution deadline instead of holding
+// the request.
+func TestResolverDegradesWhenTheStoreStalls(t *testing.T) {
+	b := &blockingBackend{release: make(chan struct{})}
+	t.Cleanup(func() { close(b.release) })
+	r := newResolver(b, nil, false)
+	r.timeout = 50 * time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.ResolvePrincipal(context.Background(), githubAlice)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrUnresolved) {
+			t.Fatalf("stalled store = %v, want ErrUnresolved", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolution is not bounded: a stalled store holds the request")
+	}
+}
+
+// A failure is remembered for FailureTTL only: within it the store is not
+// asked again (a stalled store would otherwise cost every request the full
+// ResolveTimeout), after it the store is used again.
+func TestResolverRemembersAFailureBriefly(t *testing.T) {
+	b := &fakeBackend{err: errors.New("dial tcp: i/o timeout")}
+	r := newResolver(b, nil, false)
+	now := time.Unix(1_800_000_000, 0)
+	r.now = func() time.Time { return now }
+	before := testutil.ToFloat64(resolutionFailed)
+	for i := 0; i < 3; i++ {
+		if _, err := r.ResolvePrincipal(context.Background(), githubAlice); !errors.Is(err, ErrUnresolved) {
+			t.Fatalf("attempt %d = %v", i, err)
+		}
+	}
+	if len(b.provisions) != 1 {
+		t.Fatalf("the store was asked %d times inside the failure window, want 1", len(b.provisions))
+	}
+	if got := testutil.ToFloat64(resolutionFailed) - before; got != 3 {
+		t.Fatalf("counted %v degraded requests, want 3", got)
+	}
+	b.err = nil
+	now = now.Add(FailureTTL)
+	if p, err := r.ResolvePrincipal(context.Background(), githubAlice); err != nil || p == "" {
+		t.Fatalf("after the window = %q, %v", p, err)
+	}
+	if len(b.provisions) != 2 {
+		t.Fatalf("the store was not asked again after the window")
 	}
 }
