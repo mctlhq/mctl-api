@@ -24,9 +24,13 @@ type portalAllowlist struct {
 		// test failure, not a silent false. "Explicit decision for every
 		// tool" has to be enforced here or it is enforced nowhere.
 		Enabled *bool `json:"enabled"`
-		// Reason is required on an enabled tool: readOnlyHint says a tool
-		// has no side effects, not that its output belongs on a shared
-		// surface. mctl_get_service_logs is read-only and returns log text.
+		// Reason is required on every entry, enabled or not. On an enabled
+		// tool it is the privacy decision: readOnlyHint says a tool has no
+		// side effects, not that its output belongs on a shared surface
+		// (mctl_get_service_logs is read-only and returns log text). On a
+		// disabled one it says why the tool stays off, and mctl-gitops,
+		// which vendors this file byte-identical, rejects an entry without
+		// one (mctlhq/mctl-gitops#1370).
 		Reason string `json:"reason,omitempty"`
 	} `json:"tools"`
 }
@@ -110,10 +114,11 @@ var mutatingOnPortal = map[string]string{
 // Three invariants:
 //   - the set of names in the file equals the set of tools the server
 //     registers -- no missing tool, no stale entry;
-//   - a tool may be enabled only if it says why its output is acceptable on
-//     a shared surface, and a tool that is NOT recorded read-only may be
-//     enabled only if mutatingOnPortal names it: a reviewed Go change, not a
-//     JSON edit;
+//   - every entry, enabled or not, carries a reason of at least minReasonLen
+//     tool-specific chars (an enabled tool's says why its output is
+//     acceptable on a shared surface), and a tool that is NOT recorded
+//     read-only may be enabled only if mutatingOnPortal names it: a reviewed
+//     Go change, not a JSON edit;
 //   - default_disabled is true, the half of the mapping that hides a tool
 //     the file does not know about.
 func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
@@ -159,8 +164,11 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 		if i := strings.Index(specific, sharedProvenance); i >= 0 {
 			specific = specific[:i]
 		}
-		if *tool.Enabled && len(strings.TrimSpace(specific)) < minReasonLen {
-			t.Errorf("%s: enabled, but the part of the reason that is specific to this tool is %d chars (minimum %d, the shared provenance sentence does not count): say what this tool exposes or changes and why that is acceptable on a shared surface", tool.Name, len(strings.TrimSpace(specific)), minReasonLen)
+		// The floor applies to disabled entries too: mctl-gitops vendors this
+		// file and rejects an entry without a reason, and a placeholder such
+		// as "todo" would satisfy a bare emptiness check.
+		if len(strings.TrimSpace(specific)) < minReasonLen {
+			t.Errorf("%s: the part of the reason that is specific to this tool is %d chars (minimum %d, the shared provenance sentence does not count): say what this tool exposes or changes, and for an enabled tool why that is acceptable on a shared surface", tool.Name, len(strings.TrimSpace(specific)), minReasonLen)
 		}
 	}
 
