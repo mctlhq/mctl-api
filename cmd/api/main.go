@@ -37,6 +37,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/domains"
@@ -182,6 +183,28 @@ func main() {
 					for range ticker.C {
 						if err := rs.GC(); err != nil {
 							slog.Warn("oauth refresh store gc failed", "error", err)
+						}
+					}
+				}()
+			}
+			// Persistent RFC 7591 registrations, same database (mctl-api#395).
+			// A client that registers once and caches its client_id -- the
+			// Cloudflare MCP portal in automatic mode -- keeps resolving across
+			// rollouts; without it the in-memory registry is used and every
+			// restart forgets it.
+			cs, csErr := initStore(initCtx, storeFailures, "oauth clients", func(ctx context.Context) (*clientstore.PostgresStore, error) {
+				return clientstore.NewPostgresStore(ctx, oauthDBURL)
+			})
+			if csErr != nil {
+				slog.Error("oauth client store init failed; falling back to in-memory (dynamic client registrations will not survive a restart)", "error", csErr)
+			} else {
+				oauthServer.ClientStore = cs
+				go func() {
+					ticker := time.NewTicker(15 * time.Minute)
+					defer ticker.Stop()
+					for range ticker.C {
+						if err := oauthServer.GCPersistedClients(); err != nil {
+							slog.Warn("oauth client store gc failed", "error", err)
 						}
 					}
 				}()

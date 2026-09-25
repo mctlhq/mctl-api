@@ -45,6 +45,9 @@ type OAuthMeta struct {
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
 }
 
+// oauthScope is the only OAuth scope this server issues or advertises.
+const oauthScope = "mctl"
+
 // maxOAuthFormBytes caps the request body size for OAuth form-encoded endpoints
 // (token, revoke). Real OAuth bodies are well under 1 KB; 16 KB leaves headroom
 // for unusually long client_id / refresh_token values without enabling abuse.
@@ -63,7 +66,7 @@ func (h *Handlers) handleOAuthMeta(w http.ResponseWriter, r *http.Request) {
 		TokenEndpoint:                     base + "/oauth/token",
 		RegistrationEndpoint:              base + "/oauth/register",
 		RevocationEndpoint:                base + "/oauth/revoke",
-		ScopesSupported:                   []string{"mctl"},
+		ScopesSupported:                   []string{oauthScope},
 		ResponseTypesSupported:            []string{"code"},
 		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
 		CodeChallengeMethodsSupported:     []string{"S256"},
@@ -106,7 +109,7 @@ func (h *Handlers) handleProtectedResourceMeta(w http.ResponseWriter, r *http.Re
 	meta := ProtectedResourceMeta{
 		Resource:             resource,
 		AuthorizationServers: []string{base},
-		ScopesSupported:      []string{"mctl"},
+		ScopesSupported:      []string{oauthScope},
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
@@ -402,7 +405,7 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		"refresh_token": refreshToken,
 		"token_type":    "Bearer",
 		"expires_in":    int(ttl.Seconds()),
-		"scope":         "mctl",
+		"scope":         oauthScope,
 	})
 }
 
@@ -529,7 +532,20 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	client := o.RegisterClient(req.ClientName, req.RedirectURIs)
+	// Persisted and idempotent when a client store is configured (see
+	// OAuthServer.RegisterDynamicClient): a repeat of the same registration
+	// returns the same client_id, and the id survives a restart.
+	client, err := o.RegisterDynamicClient(req.ClientName, req.RedirectURIs)
+	if err != nil {
+		slog.Error("OAuth client registration failed", "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "server_error",
+			"error_description": "client registration could not be stored; retry later",
+		})
+		return
+	}
 
 	// Bounded on the success path too: neither client_name nor the redirect
 	// URIs are length-validated before registration succeeds, so leaving them
@@ -552,6 +568,11 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 		"client_id_issued_at":        client.CreatedAt.Unix(),
+		// RFC 7591 §2: the server may substitute the scope it will grant.
+		// "mctl" is the only scope (scopes_supported) and every token carries
+		// it, whether the request named a scope, named another one, or -- the
+		// usual case, and the Cloudflare portal's -- named none.
+		"scope": oauthScope,
 	})
 }
 

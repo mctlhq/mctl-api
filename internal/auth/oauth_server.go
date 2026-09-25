@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 )
 
@@ -68,6 +70,26 @@ type OAuthServer struct {
 	// refresh tokens survive pod restarts. Inject via main.go after construction.
 	RefreshStore refreshstore.Store
 
+	// ClientStore is an optional persistent store for RFC 7591 dynamic
+	// registrations. When non-nil, RegisterDynamicClient writes to it and
+	// GetClient reads from it instead of the in-memory registry, so a client
+	// that registered once and cached its client_id -- the Cloudflare MCP
+	// portal in automatic mode -- still resolves after a pod restart
+	// (mctlhq/mctl-api#395). Registration is then idempotent: the id is
+	// derived from the registration metadata, so the same client re-registering
+	// gets the same row back instead of adding one. Rows are bounded by
+	// MaxRegisteredClients (least recently seen evicted) and by
+	// PersistedClientRetention. Inject via main.go after construction.
+	ClientStore clientstore.Store
+
+	// PersistedClientRetention is how long a persisted registration survives
+	// without being seen (registered again, or used for a token exchange or
+	// refresh). It replaces ClientRegistrationTTL for the persistent store:
+	// that TTL runs from registration, which would drop a client that
+	// registered once and has been using its tokens ever since. 0 selects
+	// defaultPersistedClientRetention; negative disables it.
+	PersistedClientRetention time.Duration
+
 	// MaxRegisteredClients caps how many RFC 7591 dynamic registrations are
 	// held at once. /oauth/register is unauthenticated, so without a ceiling
 	// the map grows for the lifetime of the process — and it grows during
@@ -102,7 +124,8 @@ type OAuthServer struct {
 	// registration. A counterpart that cannot perform RFC 7591 registration
 	// -- the Cloudflare MCP portal, whose manual OAuth stores one client id
 	// per upstream -- needs an id that is still valid after a pod restart,
-	// which the dynamic registry, being in-memory, cannot promise.
+	// which the in-memory dynamic registry cannot promise (a ClientStore can,
+	// for a counterpart that does register: mctlhq/mctl-api#395).
 	static map[string]RegisteredClient
 }
 
@@ -117,6 +140,56 @@ const defaultMaxRegisteredClients = 1000
 // authorization flow — a client that still needs its registration a day later
 // can re-register, which is one unauthenticated POST.
 const defaultClientRegistrationTTL = 24 * time.Hour
+
+// defaultPersistedClientRetention bounds how long a persisted registration is
+// kept without being seen. Longer than the 30-day refresh-token lifetime, so a
+// client that stays signed in never loses its registration, and a client that
+// has been gone for three months is not worth a row.
+const defaultPersistedClientRetention = 90 * 24 * time.Hour
+
+// persistedClientRetention resolves the configured value; negative means
+// "never expire".
+func (s *OAuthServer) persistedClientRetention() time.Duration {
+	if s.PersistedClientRetention == 0 {
+		return defaultPersistedClientRetention
+	}
+	return s.PersistedClientRetention
+}
+
+// ErrClientIDTaken is returned by RegisterDynamicClient when the id derived
+// for a registration is already held by something else: a pre-registered
+// client, or (only on a hash collision) a stored client with different
+// metadata. Handlers map it to a server error; it is never the caller's fault.
+var ErrClientIDTaken = errors.New("derived client_id is already taken")
+
+// dynamicClientIDPrefix marks ids minted by idempotent registration, so an
+// operator reading a log line can tell them from the random ids of the
+// in-memory registry and from pre-registered ids.
+const dynamicClientIDPrefix = "dcr_"
+
+// derivedClientID is the idempotency key of a persisted registration: a hash
+// of the client name and the redirect-URI set (deduplicated and sorted, so the
+// order a client lists its callbacks in does not matter; each URI byte-exact,
+// as IsRedirectURIAllowed compares them). The same client registering again
+// gets the same id; a different name or a different callback set is a
+// different client. The id is not a secret -- this server is public-client
+// only and PKCE is the proof -- so a plain hash is enough.
+func derivedClientID(name string, canonicalURIs []string) string {
+	b, _ := json.Marshal(struct {
+		V    int      `json:"v"`
+		Name string   `json:"client_name"`
+		URIs []string `json:"redirect_uris"`
+	}{1, name, canonicalURIs})
+	sum := sha256.Sum256(b)
+	return dynamicClientIDPrefix + hex.EncodeToString(sum[:16])
+}
+
+// canonicalRedirectURIs returns uris deduplicated and sorted.
+func canonicalRedirectURIs(uris []string) []string {
+	out := slices.Clone(uris)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
 
 // clientRegistrationTTL resolves the configured value, honouring a negative
 // duration as "never expire".
@@ -250,6 +323,14 @@ func (s *OAuthServer) mintClientID() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// staticClient returns the pre-registered client with this id, if any.
+func (s *OAuthServer) staticClient(clientID string) (RegisteredClient, bool) {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	c, ok := s.static[clientID]
+	return c, ok
+}
+
 // isStatic reports whether clientID names a pre-registered client.
 func (s *OAuthServer) isStatic(clientID string) bool {
 	_, ok := s.staticRedirectURIs(clientID)
@@ -268,7 +349,10 @@ func (s *OAuthServer) staticRedirectURIs(clientID string) ([]string, bool) {
 	return c.RedirectURIs, true
 }
 
-// RegisterClient stores a dynamically registered client and returns the assigned client_id.
+// RegisterClient stores a dynamically registered client in the in-memory
+// registry under a fresh random id and returns it. It never consults
+// ClientStore; RegisterDynamicClient is the entry point that chooses between
+// the two.
 func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) RegisteredClient {
 	clientID := s.mintClientID()
 	// A 128-bit random id colliding with a static one is not a realistic
@@ -324,8 +408,105 @@ func (s *OAuthServer) RegisterClient(name string, redirectURIs []string) Registe
 	return client
 }
 
+// RegisterDynamicClient is the RFC 7591 registration entry point used by
+// POST /oauth/register. Without a ClientStore it is RegisterClient, the
+// in-memory registry with a random id, unchanged. With one, the registration
+// is persisted and idempotent: the id is derived from the name and the
+// redirect-URI set (derivedClientID), so a client that registers again gets
+// its existing record back rather than a new row, and the record outlives the
+// process. The caller must have validated the redirect URIs already.
+func (s *OAuthServer) RegisterDynamicClient(name string, redirectURIs []string) (RegisteredClient, error) {
+	if s.ClientStore == nil {
+		return s.RegisterClient(name, redirectURIs), nil
+	}
+	uris := canonicalRedirectURIs(redirectURIs)
+	clientID := derivedClientID(name, uris)
+	// A derived id can only equal a static one if an operator configured
+	// exactly this string, but the consequence -- a dynamic registration
+	// answering for a pre-registered client -- is the same one RegisterClient
+	// rules out, so it is refused here too rather than trusted not to happen.
+	if s.isStatic(clientID) {
+		return RegisteredClient{}, fmt.Errorf("register client: %w", ErrClientIDTaken)
+	}
+	max := s.MaxRegisteredClients
+	if max <= 0 {
+		max = defaultMaxRegisteredClients
+	}
+	stored, err := s.ClientStore.Register(clientstore.Client{
+		ClientID:     clientID,
+		ClientName:   name,
+		RedirectURIs: uris,
+	}, max)
+	if err != nil {
+		slog.Error("oauth: client store register failed", "error", err)
+		return RegisteredClient{}, fmt.Errorf("register client: %w", ErrServerError)
+	}
+	// The store returns the first registration's record on a repeat. With a
+	// 128-bit hash of the metadata it can only differ on a collision; never
+	// hand one client another's callbacks, however unlikely.
+	if stored.ClientName != name || !slices.Equal(stored.RedirectURIs, uris) {
+		slog.Error("oauth: derived client_id collides with a different registration", "client_id", clientID)
+		return RegisteredClient{}, fmt.Errorf("register client: %w", ErrClientIDTaken)
+	}
+	return fromStored(stored), nil
+}
+
+func fromStored(c clientstore.Client) RegisteredClient {
+	return RegisteredClient{
+		ClientID:     c.ClientID,
+		ClientName:   c.ClientName,
+		RedirectURIs: c.RedirectURIs,
+		CreatedAt:    c.CreatedAt,
+	}
+}
+
+// touchClient records that clientID used a grant, so the persistent store's
+// cap and retention measure activity rather than registration age. A client
+// that registered once and then only refreshes -- the portal -- would
+// otherwise be the first evicted. Best effort: a failed touch must not fail
+// the token exchange it rides on.
+func (s *OAuthServer) touchClient(clientID string) {
+	if s.ClientStore == nil || clientID == "" || s.isStatic(clientID) {
+		return
+	}
+	if err := s.ClientStore.Touch(clientID); err != nil {
+		slog.Warn("oauth: client store touch failed", "error", err)
+	}
+}
+
+// GCPersistedClients deletes persisted registrations past
+// PersistedClientRetention. A no-op without a ClientStore or with retention
+// disabled.
+func (s *OAuthServer) GCPersistedClients() error {
+	r := s.persistedClientRetention()
+	if s.ClientStore == nil || r < 0 {
+		return nil
+	}
+	return s.ClientStore.GC(time.Now().Add(-r))
+}
+
 // GetClient returns a registered client by ID, or false if not found.
+// Pre-registered clients are consulted first, then the persistent store when
+// one is configured, otherwise the in-memory registry.
 func (s *OAuthServer) GetClient(clientID string) (RegisteredClient, bool) {
+	if s.ClientStore != nil {
+		if c, ok := s.staticClient(clientID); ok {
+			return c, true
+		}
+		stored, err := s.ClientStore.Get(clientID)
+		if err != nil {
+			if !errors.Is(err, clientstore.ErrNotFound) {
+				slog.Warn("oauth: client store lookup failed", "error", err)
+			}
+			return RegisteredClient{}, false
+		}
+		// Read as absent once past retention, without waiting for the GC
+		// ticker, for the same reason the in-memory registry expires on read.
+		if r := s.persistedClientRetention(); r > 0 && time.Since(stored.LastSeenAt) > r {
+			return RegisteredClient{}, false
+		}
+		return fromStored(stored), true
+	}
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
 	if c, ok := s.static[clientID]; ok {
@@ -427,10 +608,10 @@ func (s *OAuthServer) IsRedirectURIAllowed(clientID, uri string) bool {
 	// Loopback redirects (RFC 8252 §7.3). A native app — the mctl CLI, Claude
 	// Code — binds an ephemeral port and cannot know it ahead of registration,
 	// so the port must not take part in the comparison and no static allowlist
-	// entry can cover it. Without this, such a client works only until the
-	// pod restarts: the registry below is in-memory, so a restart drops the
-	// registration while the client keeps its cached client_id and never
-	// re-registers, leaving authorize permanently at 400.
+	// entry can cover it. Without this, such a client works only until its
+	// registration is gone -- a restart of the in-memory registry, or expiry
+	// or eviction in either registry -- while the client keeps its cached
+	// client_id and never re-registers, leaving authorize permanently at 400.
 	//
 	// Safe because the code is useless on its own: ExchangeCode verifies PKCE,
 	// so a listener that intercepts a redirect on the user's own machine still
@@ -561,6 +742,7 @@ func (s *OAuthServer) ExchangeCode(code, codeVerifier, clientID, redirectURI str
 	if err != nil {
 		return "", "", err
 	}
+	s.touchClient(clientID)
 	return accessToken, refreshToken, nil
 }
 
@@ -635,6 +817,7 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 		if err != nil {
 			return "", "", err
 		}
+		s.touchClient(clientID)
 		return accessToken, newToken, nil
 	}
 
@@ -653,6 +836,7 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 	if err != nil {
 		return "", "", err
 	}
+	s.touchClient(clientID)
 	return accessToken, newRefreshToken, nil
 }
 
