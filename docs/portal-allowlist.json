@@ -26,7 +26,8 @@
     },
     {
       "name": "mctl_bind_agent_release",
-      "enabled": false
+      "enabled": false,
+      "reason": "Admin-only write: appends a ReleaseBinding revision that changes which AgentDefinition/ExecutionProfile pair an agent runs in an environment. Destructive to running behaviour and not recorded readOnly, so it stays off the shared portal."
     },
     {
       "name": "mctl_create_agent",
@@ -90,7 +91,8 @@
     },
     {
       "name": "mctl_get_agent",
-      "enabled": false
+      "enabled": false,
+      "reason": "Admin-only read of one agent's registry entry: owner, every definition version with its lifecycle, and the active binding per environment. Read-only, but it exposes the agent registry's internals; not yet enabled on the shared portal, an owner decision."
     },
     {
       "name": "mctl_get_epic_status",
@@ -219,7 +221,8 @@
     },
     {
       "name": "mctl_list_agents",
-      "enabled": false
+      "enabled": false,
+      "reason": "Admin-only read of every registered agent: owner, version counts and the active binding revision per environment. Read-only, but it exposes the agent registry's internals; not yet enabled on the shared portal, an owner decision."
     },
     {
       "name": "mctl_list_domains",
@@ -303,11 +306,13 @@
     },
     {
       "name": "mctl_publish_agent_definition_version",
-      "enabled": false
+      "enabled": false,
+      "reason": "Admin-only write: publishes an immutable AgentDefinition version, whose (agent, version) key can never be reused. Not recorded readOnly and not reversible, so it stays off the shared portal."
     },
     {
       "name": "mctl_publish_agent_profile_version",
-      "enabled": false
+      "enabled": false,
+      "reason": "Admin-only write: publishes an immutable ExecutionProfile version in the global profile key space, including its policy ceilings. Not recorded readOnly and not reversible, so it stays off the shared portal."
     },
     {
       "name": "mctl_publish_agent_version",
@@ -366,7 +371,8 @@
     },
     {
       "name": "mctl_rollback_agent_binding",
-      "enabled": false
+      "enabled": false,
+      "reason": "Admin-only write: appends a ReleaseBinding revision that restores a prior definition/profile pair for an agent in an environment. Destructive to running behaviour and not recorded readOnly, so it stays off the shared portal."
     },
     {
       "name": "mctl_rollback_service",
@@ -390,7 +396,8 @@
     },
     {
       "name": "mctl_set_agent_version_lifecycle",
-      "enabled": false
+      "enabled": false,
+      "reason": "Admin-only write: moves a published definition or profile version to deprecated or disabled; a disabled version can no longer be bound or restored. Destructive and not recorded readOnly, so it stays off the shared portal."
     },
     {
       "name": "mctl_sync_repos",

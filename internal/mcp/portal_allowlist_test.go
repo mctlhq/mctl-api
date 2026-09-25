@@ -155,6 +155,12 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 			continue
 		}
 		listed[tool.Name] = *tool.Enabled
+		// A disabled entry needs a reason too: mctl-gitops vendors this file
+		// byte-identical and its validator rejects an entry without one
+		// (mctlhq/mctl-gitops#1370), so a reason-less entry blocks vendoring.
+		if strings.TrimSpace(tool.Reason) == "" {
+			t.Errorf("%s: no reason; every entry, enabled or not, must say why", tool.Name)
+		}
 		specific := tool.Reason
 		if i := strings.Index(specific, sharedProvenance); i >= 0 {
 			specific = specific[:i]
