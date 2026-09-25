@@ -32,11 +32,21 @@ CREATE TABLE IF NOT EXISTS oauth_registered_clients (
     client_name   TEXT        NOT NULL DEFAULT '',
     redirect_uris JSONB       NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL,
-    last_seen_at  TIMESTAMPTZ NOT NULL
+    last_seen_at  TIMESTAMPTZ NOT NULL,
+    used_at       TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS oauth_registered_clients_last_seen
     ON oauth_registered_clients (last_seen_at);
 `
+
+// schemaLockID serialises schema creation across replicas. Concurrent
+// CREATE TABLE IF NOT EXISTS is not race-free in Postgres: two sessions can
+// both pass the existence check and one then fails on
+// pg_type_typname_nsp_index (23505). On the first rollout every replica runs
+// it at once, and a replica whose init fails stays not-ready for its life
+// (mctl-api#387), so the DDL runs under a transaction-scoped advisory lock.
+// The value is arbitrary but fixed ("oauthcli" in ASCII).
+const schemaLockID int64 = 0x6f61757468636c69
 
 // touchInterval throttles Touch: last_seen_at only has to be accurate to
 // within the retention window (days), so rewriting it on every refresh would
@@ -54,12 +64,27 @@ func NewPostgresStore(ctx context.Context, connStr string) (*PostgresStore, erro
 	if err != nil {
 		return nil, fmt.Errorf("oauth client store: connect: %w", err)
 	}
-	if _, err := pool.Exec(ctx, schema); err != nil {
+	if err := createSchema(ctx, pool); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("oauth client store: create schema: %w", err)
 	}
 	slog.Info("oauth client registration store initialized")
 	return &PostgresStore{pool: pool}, nil
+}
+
+func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, schemaLockID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, schema); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // Register implements Store.
@@ -84,30 +109,36 @@ func (s *PostgresStore) Register(c Client, maxClients int) (Client, error) {
 	// rewrite them.
 	var out Client
 	var storedURIs []byte
+	var usedAt *time.Time
 	err = tx.QueryRow(ctx,
 		`INSERT INTO oauth_registered_clients
 		   (client_id, client_name, redirect_uris, created_at, last_seen_at)
 		 VALUES ($1, $2, $3, NOW(), NOW())
 		 ON CONFLICT (client_id) DO UPDATE SET last_seen_at = NOW()
-		 RETURNING client_id, client_name, redirect_uris, created_at, last_seen_at`,
+		 RETURNING client_id, client_name, redirect_uris, created_at, last_seen_at, used_at`,
 		c.ClientID, c.ClientName, uris,
-	).Scan(&out.ClientID, &out.ClientName, &storedURIs, &out.CreatedAt, &out.LastSeenAt)
+	).Scan(&out.ClientID, &out.ClientName, &storedURIs, &out.CreatedAt, &out.LastSeenAt, &usedAt)
 	if err != nil {
 		return Client{}, fmt.Errorf("oauth client store: upsert: %w", err)
 	}
 	if err := json.Unmarshal(storedURIs, &out.RedirectURIs); err != nil {
 		return Client{}, fmt.Errorf("oauth client store: unmarshal redirect_uris: %w", err)
 	}
+	if usedAt != nil {
+		out.UsedAt = *usedAt
+	}
 
 	if maxClients > 0 {
-		// Keep the maxClients most recently seen rows. The row just written
-		// has last_seen_at = NOW() and is excluded explicitly as well, so ties
-		// cannot make a registration evict itself.
+		// Keep the maxClients most recently seen NEVER-USED rows; used rows
+		// are exempt (see Store.Register). The row just written is excluded
+		// explicitly as well, so ties cannot make a registration evict itself.
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM oauth_registered_clients
-			 WHERE client_id <> $1
+			 WHERE used_at IS NULL
+			   AND client_id <> $1
 			   AND client_id NOT IN (
 			     SELECT client_id FROM oauth_registered_clients
+			     WHERE used_at IS NULL
 			     ORDER BY last_seen_at DESC, client_id
 			     LIMIT $2)`,
 			out.ClientID, maxClients,
@@ -123,16 +154,17 @@ func (s *PostgresStore) Register(c Client, maxClients int) (Client, error) {
 }
 
 // Get implements Store.
-func (s *PostgresStore) Get(clientID string) (Client, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (s *PostgresStore) Get(ctx context.Context, clientID string) (Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var out Client
 	var uris []byte
+	var usedAt *time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT client_id, client_name, redirect_uris, created_at, last_seen_at
+		`SELECT client_id, client_name, redirect_uris, created_at, last_seen_at, used_at
 		 FROM oauth_registered_clients WHERE client_id = $1`,
 		clientID,
-	).Scan(&out.ClientID, &out.ClientName, &uris, &out.CreatedAt, &out.LastSeenAt)
+	).Scan(&out.ClientID, &out.ClientName, &uris, &out.CreatedAt, &out.LastSeenAt, &usedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Client{}, ErrNotFound
 	}
@@ -142,6 +174,9 @@ func (s *PostgresStore) Get(clientID string) (Client, error) {
 	if err := json.Unmarshal(uris, &out.RedirectURIs); err != nil {
 		return Client{}, fmt.Errorf("oauth client store: unmarshal redirect_uris: %w", err)
 	}
+	if usedAt != nil {
+		out.UsedAt = *usedAt
+	}
 	return out, nil
 }
 
@@ -150,8 +185,10 @@ func (s *PostgresStore) Touch(clientID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := s.pool.Exec(ctx,
-		`UPDATE oauth_registered_clients SET last_seen_at = NOW()
-		 WHERE client_id = $1 AND last_seen_at < NOW() - make_interval(secs => $2)`,
+		`UPDATE oauth_registered_clients
+		 SET last_seen_at = NOW(), used_at = COALESCE(used_at, NOW())
+		 WHERE client_id = $1
+		   AND (used_at IS NULL OR last_seen_at < NOW() - make_interval(secs => $2))`,
 		clientID, touchInterval.Seconds(),
 	)
 	if err != nil {

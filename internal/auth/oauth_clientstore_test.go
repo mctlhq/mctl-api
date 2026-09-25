@@ -15,6 +15,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore/clientstoretest"
 )
 
@@ -220,7 +222,7 @@ func TestPersistedRegistration_StoreErrorIsServerError(t *testing.T) {
 	if !errors.Is(err, ErrServerError) {
 		t.Fatalf("err = %v, want ErrServerError", err)
 	}
-	if _, ok := s.GetClient("dcr_anything"); ok {
+	if _, ok := s.GetClient(derivedClientID("cli", []string{portalCallback})); ok {
 		t.Error("lookup during a store outage resolved a client")
 	}
 }
@@ -241,5 +243,103 @@ func TestPersistedRegistration_CannotShadowStatic(t *testing.T) {
 	}
 	if got, _ := s.GetClient(id); got.ClientName != "Static" {
 		t.Errorf("static client shadowed: %+v", got)
+	}
+}
+
+// Ids that cannot be in the store -- empty, or not of the derived shape --
+// are answered without a query: /oauth/authorize and /oauth/register reach
+// GetClient with caller-chosen values.
+func TestGetClient_OnlyQueriesStoreForDerivedIDs(t *testing.T) {
+	store := clientstoretest.New()
+	s := newPersistedServer(store)
+	for _, id := range []string{"", "anything", "dcr_", "dcr_xyz", "dcr_" + strings.Repeat("A", 32), "dcr_" + strings.Repeat("0", 31)} {
+		if _, ok := s.GetClient(id); ok {
+			t.Errorf("GetClient(%q) resolved", id)
+		}
+	}
+	if n := store.GetCount(); n != 0 {
+		t.Errorf("store queried %d times for ids that cannot be stored", n)
+	}
+	if _, ok := s.GetClient(derivedClientID("x", []string{portalCallback})); ok {
+		t.Error("unregistered derived id resolved")
+	}
+	if n := store.GetCount(); n != 1 {
+		t.Errorf("store queried %d times for one derived id, want 1", n)
+	}
+}
+
+// ClientForLog serves the failure branch of /oauth/token and must never
+// reach the store.
+func TestClientForLog_NeverQueriesStore(t *testing.T) {
+	store := clientstoretest.New()
+	s := newPersistedServer(store)
+	c, err := s.RegisterDynamicClient("portal", []string{portalCallback})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, consulted := s.ClientForLog(c.ClientID); consulted {
+		t.Error("ClientForLog claims to have consulted the registry for a persisted id")
+	}
+	if _, found, consulted := s.ClientForLog("random"); found || !consulted {
+		t.Errorf("unknown non-derived id: found=%v consulted=%v, want false/true", found, consulted)
+	}
+	if n := store.GetCount(); n != 0 {
+		t.Errorf("ClientForLog queried the store %d times", n)
+	}
+	// Without a store, the in-memory answer is authoritative as before.
+	mem := newPortalAllowlistServer()
+	mc := mem.RegisterClient("cli", []string{portalCallback})
+	if got, found, consulted := mem.ClientForLog(mc.ClientID); !found || !consulted || got.ClientName != "cli" {
+		t.Errorf("in-memory ClientForLog = %+v found=%v consulted=%v", got, found, consulted)
+	}
+}
+
+// blockingStore's Get blocks until its context is done, like a lookup
+// against a database that has stopped answering.
+type blockingStore struct{ *clientstoretest.MemoryStore }
+
+func (b blockingStore) Get(ctx context.Context, _ string) (clientstore.Client, error) {
+	<-ctx.Done()
+	return clientstore.Client{}, ctx.Err()
+}
+
+// A hung database costs a GetClient caller clientLookupTimeout, not the
+// store's 5s budget.
+func TestGetClient_StoreLookupIsBounded(t *testing.T) {
+	s := newPortalAllowlistServer()
+	s.ClientStore = blockingStore{clientstoretest.New()}
+	start := time.Now()
+	if _, ok := s.GetClient(derivedClientID("x", []string{portalCallback})); ok {
+		t.Fatal("hung lookup resolved a client")
+	}
+	if d := time.Since(start); d > 2*clientLookupTimeout {
+		t.Errorf("GetClient took %v with a hung store, want about %v", d, clientLookupTimeout)
+	}
+	// The authorize-path check degrades to the allowlist, not to an error.
+	if !s.IsRedirectURIAllowed(derivedClientID("x", []string{portalCallback}), portalCallback) {
+		t.Error("allowlisted callback refused while the store hangs")
+	}
+}
+
+// A client that completed a grant is never evicted by registration churn.
+func TestPersistedRegistration_UsedClientSurvivesChurn(t *testing.T) {
+	store := clientstoretest.New()
+	s := newPersistedServer(store)
+	s.MaxRegisteredClients = 1
+	portal, err := s.RegisterDynamicClient("portal", []string{portalCallback})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.touchClient(portal.ClientID)
+	for i := range 5 {
+		if _, err := s.RegisterDynamicClient(strings.Repeat("n", i+1), []string{portalCallback}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := s.GetClient(portal.ClientID); !ok {
+		t.Error("used client evicted by registration churn")
+	}
+	if store.Len() != 2 {
+		t.Errorf("stored clients = %d, want the used one plus the cap of 1", store.Len())
 	}
 }

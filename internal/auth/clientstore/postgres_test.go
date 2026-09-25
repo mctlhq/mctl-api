@@ -68,14 +68,14 @@ func TestRegisterAndGet(t *testing.T) {
 	if got.CreatedAt.IsZero() || got.LastSeenAt.IsZero() {
 		t.Fatalf("timestamps not set: %+v", got)
 	}
-	read, err := s.Get("dcr_1")
+	read, err := s.Get(context.Background(), "dcr_1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if !slices.Equal(read.RedirectURIs, uris) || read.ClientName != "portal" {
 		t.Fatalf("Get returned %+v", read)
 	}
-	if _, err := s.Get("missing"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Get(context.Background(), "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get(missing) err = %v, want ErrNotFound", err)
 	}
 }
@@ -92,7 +92,7 @@ func TestRegistrationVisibleToAnotherPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if _, err := other.Get("dcr_restart"); err != nil {
+	if _, err := other.Get(context.Background(), "dcr_restart"); err != nil {
 		t.Fatalf("second store instance cannot resolve the client: %v", err)
 	}
 }
@@ -129,58 +129,106 @@ func TestRegisterIsIdempotent(t *testing.T) {
 	}
 }
 
-// The cap evicts the least recently seen rows, never the one just written.
-func TestRegisterTrimsLeastRecentlySeen(t *testing.T) {
+// The cap evicts the least recently seen never-used rows, never the one just
+// written, and never a row that has been used for a grant -- however old its
+// last_seen_at -- so unauthenticated registrations cannot push out a client
+// that completed a sign-in.
+func TestRegisterTrimsLeastRecentlySeenUnused(t *testing.T) {
 	s := newTestStore(t)
 	for i := range 3 {
 		id := fmt.Sprintf("dcr_%d", i)
 		if _, err := s.Register(Client{ClientID: id, RedirectURIs: []string{"https://a.test/cb"}}, 10); err != nil {
 			t.Fatal(err)
 		}
-		// dcr_0 oldest, dcr_2 newest.
-		rewind(t, s, id, time.Duration(3-i)*time.Hour)
 	}
-	// Use dcr_0 so it becomes the most recent; dcr_1 is now the oldest.
+	// dcr_0 is used, then made the oldest row by far.
 	if err := s.Touch("dcr_0"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register(Client{ClientID: "dcr_new", RedirectURIs: []string{"https://a.test/cb"}}, 3); err != nil {
+	rewind(t, s, "dcr_0", 72*time.Hour)
+	rewind(t, s, "dcr_1", 2*time.Hour) // oldest unused
+	rewind(t, s, "dcr_2", time.Hour)
+	// Cap of 2 unused rows: dcr_1, dcr_2 and dcr_new are 3, so dcr_1 goes.
+	if _, err := s.Register(Client{ClientID: "dcr_new", RedirectURIs: []string{"https://a.test/cb"}}, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Get("dcr_1"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("least recently seen client survived the cap: err = %v", err)
+	if _, err := s.Get(context.Background(), "dcr_1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("least recently seen unused client survived the cap: err = %v", err)
 	}
 	for _, id := range []string{"dcr_0", "dcr_2", "dcr_new"} {
-		if _, err := s.Get(id); err != nil {
+		if _, err := s.Get(context.Background(), id); err != nil {
 			t.Errorf("client %s evicted: %v", id, err)
 		}
 	}
+	// Flood with fresh registrations at cap 1: the used row still stays.
+	for i := range 5 {
+		if _, err := s.Register(Client{ClientID: fmt.Sprintf("dcr_flood%d", i), RedirectURIs: []string{"https://a.test/cb"}}, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Get(context.Background(), "dcr_0"); err != nil {
+		t.Errorf("used client evicted by registration churn: %v", err)
+	}
 }
 
-// Touch is throttled: a fresh row is left alone, a stale one moves.
+// The first Touch always records use; later ones are throttled: a fresh row
+// is left alone, a stale one moves.
 func TestTouchIsThrottled(t *testing.T) {
 	s := newTestStore(t)
-	c, err := s.Register(Client{ClientID: "dcr_t", RedirectURIs: []string{"https://a.test/cb"}}, 10)
-	if err != nil {
+	if _, err := s.Register(Client{ClientID: "dcr_t", RedirectURIs: []string{"https://a.test/cb"}}, 10); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Touch("dcr_t"); err != nil {
 		t.Fatal(err)
 	}
-	fresh, _ := s.Get("dcr_t")
-	if !fresh.LastSeenAt.Equal(c.LastSeenAt) {
-		t.Errorf("touch inside the throttle window rewrote last_seen_at")
+	used, _ := s.Get(context.Background(), "dcr_t")
+	if used.UsedAt.IsZero() {
+		t.Fatal("first touch did not record use")
+	}
+	if err := s.Touch("dcr_t"); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _ := s.Get(context.Background(), "dcr_t")
+	if !fresh.LastSeenAt.Equal(used.LastSeenAt) || !fresh.UsedAt.Equal(used.UsedAt) {
+		t.Errorf("touch inside the throttle window rewrote the row")
 	}
 	rewind(t, s, "dcr_t", 2*touchInterval)
 	if err := s.Touch("dcr_t"); err != nil {
 		t.Fatal(err)
 	}
-	moved, _ := s.Get("dcr_t")
+	moved, _ := s.Get(context.Background(), "dcr_t")
 	if time.Since(moved.LastSeenAt) > time.Minute {
 		t.Errorf("touch past the throttle window did not refresh last_seen_at: %v", moved.LastSeenAt)
 	}
+	if !moved.UsedAt.Equal(used.UsedAt) {
+		t.Errorf("used_at moved on a later touch")
+	}
 	if err := s.Touch("missing"); err != nil {
 		t.Errorf("touch of an unknown id: %v", err)
+	}
+}
+
+// Replicas starting together must not fail schema creation on the
+// concurrent-DDL race (pg_type_typname_nsp_index).
+func TestConcurrentSchemaCreation(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.pool.Exec(context.Background(), `DROP TABLE oauth_registered_clients`); err != nil {
+		t.Fatal(err)
+	}
+	errs := make(chan error, 8)
+	for range 8 {
+		go func() {
+			st, err := NewPostgresStore(context.Background(), os.Getenv("TEST_DB_URL"))
+			if err == nil {
+				st.Close()
+			}
+			errs <- err
+		}()
+	}
+	for range 8 {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent init: %v", err)
+		}
 	}
 }
 
@@ -195,10 +243,10 @@ func TestGCDeletesOnlyStale(t *testing.T) {
 	if err := s.GC(time.Now().Add(-24 * time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Get("dcr_old"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Get(context.Background(), "dcr_old"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("stale client survived GC: %v", err)
 	}
-	if _, err := s.Get("dcr_live"); err != nil {
+	if _, err := s.Get(context.Background(), "dcr_live"); err != nil {
 		t.Errorf("live client deleted by GC: %v", err)
 	}
 }

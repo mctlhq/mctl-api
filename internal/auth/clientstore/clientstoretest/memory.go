@@ -20,6 +20,7 @@
 package clientstoretest
 
 import (
+	"context"
 	"slices"
 	"sort"
 	"sync"
@@ -39,6 +40,8 @@ type MemoryStore struct {
 	// Registers counts Register calls; LastMax records the cap passed in.
 	Registers int
 	LastMax   int
+	// Gets counts Get calls, to assert when a lookup must not reach the store.
+	Gets int
 }
 
 // New returns an empty MemoryStore.
@@ -69,27 +72,36 @@ func (m *MemoryStore) Register(c clientstore.Client, maxClients int) (clientstor
 		}
 	}
 	m.clients[c.ClientID] = stored
-	if maxClients > 0 && len(m.clients) > maxClients {
+	if maxClients > 0 {
+		// Only never-used rows count toward the cap and can be evicted.
+		unused := 0
 		ids := make([]string, 0, len(m.clients))
 		for id := range m.clients {
+			if !m.clients[id].UsedAt.IsZero() {
+				continue
+			}
+			unused++
 			if id != c.ClientID {
 				ids = append(ids, id)
 			}
 		}
-		sort.Slice(ids, func(i, j int) bool {
-			return m.clients[ids[i]].LastSeenAt.Before(m.clients[ids[j]].LastSeenAt)
-		})
-		for _, id := range ids[:len(m.clients)-maxClients] {
-			delete(m.clients, id)
+		if unused > maxClients {
+			sort.Slice(ids, func(i, j int) bool {
+				return m.clients[ids[i]].LastSeenAt.Before(m.clients[ids[j]].LastSeenAt)
+			})
+			for _, id := range ids[:min(len(ids), unused-maxClients)] {
+				delete(m.clients, id)
+			}
 		}
 	}
 	return stored, nil
 }
 
 // Get implements clientstore.Store.
-func (m *MemoryStore) Get(clientID string) (clientstore.Client, error) {
+func (m *MemoryStore) Get(_ context.Context, clientID string) (clientstore.Client, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.Gets++
 	if m.Err != nil {
 		return clientstore.Client{}, m.Err
 	}
@@ -112,6 +124,9 @@ func (m *MemoryStore) Touch(clientID string) error {
 		return nil
 	}
 	c.LastSeenAt = time.Now()
+	if c.UsedAt.IsZero() {
+		c.UsedAt = c.LastSeenAt
+	}
 	m.clients[clientID] = c
 	m.Touches[clientID]++
 	return nil
@@ -124,8 +139,8 @@ func (m *MemoryStore) GC(cutoff time.Time) error {
 	if m.Err != nil {
 		return m.Err
 	}
-	for id, c := range m.clients {
-		if c.LastSeenAt.Before(cutoff) {
+	for id := range m.clients {
+		if m.clients[id].LastSeenAt.Before(cutoff) {
 			delete(m.clients, id)
 		}
 	}
@@ -137,6 +152,13 @@ func (m *MemoryStore) Len() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.clients)
+}
+
+// GetCount reports how many times Get was called.
+func (m *MemoryStore) GetCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.Gets
 }
 
 // Age moves a client's LastSeenAt back by d, to test retention without

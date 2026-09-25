@@ -188,3 +188,47 @@ func TestOAuthRegister_StoreFailureIs500(t *testing.T) {
 		t.Errorf("error = %q, want server_error", body["error"])
 	}
 }
+
+// TestOAuthRegister_RejectsInvalidUTF8Name: client_name feeds the idempotency
+// key, and invalid UTF-8 would fold into U+FFFD and collide.
+func TestOAuthRegister_RejectsInvalidUTF8Name(t *testing.T) {
+	store := clientstoretest.New()
+	rec := postRegister(NewRouter(Options{OAuthServer: newPortalOAuth(store)}),
+		"{\"client_name\":\"bad\xff\",\"redirect_uris\":[\""+portalCallback+"\"]}", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	_ = json.NewDecoder(rec.Body).Decode(&body)
+	if body["error"] != "invalid_client_metadata" {
+		t.Errorf("error = %q, want invalid_client_metadata", body["error"])
+	}
+	if store.Len() != 0 {
+		t.Error("invalid registration stored")
+	}
+}
+
+// TestOAuthToken_FailureDoesNotQueryClientStore: the token endpoint's
+// failure branch enriches a log line only, and must not add a database
+// round-trip per failed, unauthenticated request.
+func TestOAuthToken_FailureDoesNotQueryClientStore(t *testing.T) {
+	store := clientstoretest.New()
+	o := newPortalOAuth(store)
+	c, err := o.RegisterDynamicClient("portal", []string{portalCallback})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(Options{OAuthServer: o})
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {"nope"}, "client_id": {c.ClientID}}
+	req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "192.0.2.1:1234"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 body=%s", rec.Code, rec.Body.String())
+	}
+	if n := store.GetCount(); n != 0 {
+		t.Errorf("failed token request queried the client store %d times", n)
+	}
+}

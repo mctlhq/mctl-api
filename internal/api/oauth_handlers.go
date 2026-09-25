@@ -339,11 +339,18 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		// that precedes a reuse revocation carries the client_id but no name,
 		// and every other failure arm carried nothing at all, so a burst of
 		// `invalid_grant` said only that SOMEBODY's refresh had died. The name
-		// comes from the registry, which holds dynamic registrations for
-		// ClientRegistrationTTL (24h by default) — a client whose registration
-		// has since aged out is indistinguishable from one that never
-		// registered, and that is itself the signal for the case rather than a
-		// gap in it. Neither field is a
+		// comes from the registry. The in-memory registry holds dynamic
+		// registrations for ClientRegistrationTTL (24h by default) — a client
+		// whose registration has since aged out is indistinguishable from one
+		// that never registered, and that is itself the signal for the case
+		// rather than a gap in it. The persistent registry (OAUTH_DB_URL) is
+		// NOT consulted here: this is the failure branch of an
+		// unauthenticated endpoint with a caller-chosen client_id, and a
+		// database round-trip for a log field would add load exactly when the
+		// database may be what is failing (mctl-api#400). A derived dcr_ id is
+		// then logged with client_registry=persistent and no
+		// client_registered field; the dcr_ prefix already says it came from
+		// a persisted registration. Neither field is a
 		// secret: this server is public-client only, PKCE is the proof, and
 		// the client_id travels in the clear on every authorize request.
 		// Three distinct states, kept distinct: no registry entry at all
@@ -360,10 +367,14 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		//   client_registered=false                  → no registry entry
 		//   client_registered=true,  client_name=""  → registered, anonymous
 		//   client_registered=true,  client_name=X   → registered as X
-		c, clientRegistered := o.GetClient(clientID)
+		c, clientRegistered, consulted := o.ClientForLog(clientID)
 		var clientName string
 		if clientRegistered {
 			clientName = c.ClientName
+		}
+		registryAttr := slog.Bool("client_registered", clientRegistered)
+		if !consulted {
+			registryAttr = slog.String("client_registry", "persistent")
 		}
 		// Both values are caller-controlled and length-bounded by nothing but
 		// the 16 KiB body cap: clientID is a raw form value that never has to
@@ -376,7 +387,7 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("token exchange failed",
 			"grant_type", grantType,
 			"client_id", truncateEchoedValue(clientID),
-			"client_registered", clientRegistered,
+			registryAttr,
 			"client_name", truncateEchoedValue(clientName),
 			"error", err)
 		if errors.Is(err, auth.ErrServerError) {
@@ -486,12 +497,31 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		ClientName   string   `json:"client_name"`
 		RedirectURIs []string `json:"redirect_uris"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err == nil {
+		err = json.Unmarshal(raw, &req)
+	}
+	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error":             "invalid_client_metadata",
 			"error_description": "failed to parse request body",
+		})
+		return
+	}
+
+	// RFC 7591 metadata is JSON text, which must be UTF-8 (RFC 8259 §8.1).
+	// Checked on the raw bytes because the decoder silently folds invalid
+	// UTF-8 into U+FFFD: client_name feeds the idempotency key of a persisted
+	// registration, so two different byte strings would otherwise quietly
+	// become one client under a name neither of them sent.
+	if !utf8.Valid(raw) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_client_metadata",
+			"error_description": "registration metadata must be valid UTF-8",
 		})
 		return
 	}

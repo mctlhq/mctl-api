@@ -174,7 +174,10 @@ func main() {
 				return refreshstore.NewPostgresStore(ctx, oauthDBURL)
 			})
 			if rsErr != nil {
-				slog.Error("oauth refresh store init failed; falling back to in-memory (refresh tokens will not survive a restart)", "error", rsErr)
+				// Recorded in storeFailures by initStore, which keeps GET /readyz
+				// at 503 for the life of this pod (mctl-api#387): it does not
+				// serve on an in-memory fallback.
+				slog.Error("oauth refresh store init failed; pod will report not-ready (GET /readyz 503) until restarted", "error", rsErr)
 			} else {
 				oauthServer.RefreshStore = rs
 				go func() {
@@ -190,13 +193,15 @@ func main() {
 			// Persistent RFC 7591 registrations, same database (mctl-api#395).
 			// A client that registers once and caches its client_id -- the
 			// Cloudflare MCP portal in automatic mode -- keeps resolving across
-			// rollouts; without it the in-memory registry is used and every
-			// restart forgets it.
+			// rollouts. Only a deployment with no database at all uses the
+			// in-memory registry, which every restart forgets.
 			cs, csErr := initStore(initCtx, storeFailures, "oauth clients", func(ctx context.Context) (*clientstore.PostgresStore, error) {
 				return clientstore.NewPostgresStore(ctx, oauthDBURL)
 			})
 			if csErr != nil {
-				slog.Error("oauth client store init failed; falling back to in-memory (dynamic client registrations will not survive a restart)", "error", csErr)
+				// As above: recorded in storeFailures, so the pod stays
+				// not-ready rather than serving on the in-memory registry.
+				slog.Error("oauth client store init failed; pod will report not-ready (GET /readyz 503) until restarted", "error", csErr)
 			} else {
 				oauthServer.ClientStore = cs
 				go func() {

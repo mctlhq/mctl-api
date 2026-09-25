@@ -15,6 +15,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -174,7 +175,21 @@ const dynamicClientIDPrefix = "dcr_"
 // gets the same id; a different name or a different callback set is a
 // different client. The id is not a secret -- this server is public-client
 // only and PKCE is the proof -- so a plain hash is enough.
+//
+// client_name is optional (RFC 7591 §2), so two unrelated anonymous clients
+// that use the same fixed callback -- the MCP Inspector's
+// http://localhost:6274/oauth/callback, say -- share one id and one row.
+// That is benign for public PKCE clients and is what bounds the rows; a
+// client that wants its own record names itself. The name must be valid
+// UTF-8 (the handler refuses anything else with invalid_client_metadata):
+// json.Marshal would otherwise fold invalid bytes into U+FFFD and derive the
+// same id for different names.
 func derivedClientID(name string, canonicalURIs []string) string {
+	// Marshal cannot fail here: the value is a struct of an int, a string and
+	// a []string, none of which has a type json rejects. Were it ever to fail,
+	// every client would hash the same nil input -- which the ClientName /
+	// RedirectURIs comparison in RegisterDynamicClient would then refuse as a
+	// collision rather than share.
 	b, _ := json.Marshal(struct {
 		V    int      `json:"v"`
 		Name string   `json:"client_name"`
@@ -485,28 +500,85 @@ func (s *OAuthServer) GCPersistedClients() error {
 	return s.ClientStore.GC(time.Now().Add(-r))
 }
 
+// clientLookupTimeout bounds a persistent-store lookup made by GetClient. It
+// is reached from unauthenticated endpoints with a caller-chosen client_id
+// (/oauth/authorize), so a degraded database must cost those requests a
+// fraction of a second, not the store's 5s default, and must not hold pool
+// slots long enough for failing traffic to saturate the pool.
+const clientLookupTimeout = 500 * time.Millisecond
+
+// isDerivedClientID reports whether id has the exact shape derivedClientID
+// produces. Anything else cannot be in the persistent store, so it is
+// answered without a query.
+func isDerivedClientID(id string) bool {
+	rest, ok := strings.CutPrefix(id, dynamicClientIDPrefix)
+	if !ok || len(rest) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(rest)
+	return err == nil && rest == strings.ToLower(rest)
+}
+
 // GetClient returns a registered client by ID, or false if not found.
 // Pre-registered clients are consulted first, then the persistent store when
-// one is configured, otherwise the in-memory registry.
+// one is configured, otherwise the in-memory registry. A store lookup is
+// bounded by clientLookupTimeout and is only made for an id of the derived
+// shape; a store error reads as "not found".
 func (s *OAuthServer) GetClient(clientID string) (RegisteredClient, bool) {
-	if s.ClientStore != nil {
-		if c, ok := s.staticClient(clientID); ok {
-			return c, true
-		}
-		stored, err := s.ClientStore.Get(clientID)
-		if err != nil {
-			if !errors.Is(err, clientstore.ErrNotFound) {
-				slog.Warn("oauth: client store lookup failed", "error", err)
-			}
-			return RegisteredClient{}, false
-		}
-		// Read as absent once past retention, without waiting for the GC
-		// ticker, for the same reason the in-memory registry expires on read.
-		if r := s.persistedClientRetention(); r > 0 && time.Since(stored.LastSeenAt) > r {
-			return RegisteredClient{}, false
-		}
-		return fromStored(stored), true
+	if clientID == "" {
+		return RegisteredClient{}, false
 	}
+	if s.ClientStore == nil {
+		return s.localClient(clientID)
+	}
+	if c, ok := s.staticClient(clientID); ok {
+		return c, true
+	}
+	if !isDerivedClientID(clientID) {
+		return RegisteredClient{}, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), clientLookupTimeout)
+	defer cancel()
+	stored, err := s.ClientStore.Get(ctx, clientID)
+	if err != nil {
+		if !errors.Is(err, clientstore.ErrNotFound) {
+			slog.Warn("oauth: client store lookup failed", "error", err)
+		}
+		return RegisteredClient{}, false
+	}
+	// Read as absent once past retention, without waiting for the GC
+	// ticker, for the same reason the in-memory registry expires on read.
+	if r := s.persistedClientRetention(); r > 0 && time.Since(stored.LastSeenAt) > r {
+		return RegisteredClient{}, false
+	}
+	return fromStored(stored), true
+}
+
+// ClientForLog resolves clientID for log enrichment only, without ever
+// touching the persistent store: the caller is the failure branch of
+// unauthenticated /oauth/token, where a database round-trip would add load
+// exactly when the database is already failing, for nothing but a name in a
+// log line. consulted is false when the answer would have needed the store
+// (a derived dcr_ id with a store configured); found is then meaningless.
+func (s *OAuthServer) ClientForLog(clientID string) (c RegisteredClient, found, consulted bool) {
+	if clientID == "" {
+		return RegisteredClient{}, false, true
+	}
+	if s.ClientStore == nil {
+		c, found = s.localClient(clientID)
+		return c, found, true
+	}
+	if c, ok := s.staticClient(clientID); ok {
+		return c, true, true
+	}
+	if isDerivedClientID(clientID) {
+		return RegisteredClient{}, false, false
+	}
+	return RegisteredClient{}, false, true
+}
+
+// localClient looks clientID up in the static and in-memory registries.
+func (s *OAuthServer) localClient(clientID string) (RegisteredClient, bool) {
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
 	if c, ok := s.static[clientID]; ok {
@@ -527,8 +599,10 @@ func (s *OAuthServer) GetClient(clientID string) (RegisteredClient, bool) {
 	return c, true
 }
 
-// RegisteredClientCount reports how many dynamic registrations are held.
-// Exported for tests and for operational visibility into the cap.
+// RegisteredClientCount reports how many registrations the IN-MEMORY
+// registry holds. With a ClientStore configured that registry is unused and
+// this is 0; the persisted rows live in oauth_registered_clients. Exported for
+// tests and for visibility into the in-memory cap.
 func (s *OAuthServer) RegisteredClientCount() int {
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()

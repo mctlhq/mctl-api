@@ -24,6 +24,7 @@
 package clientstore
 
 import (
+	"context"
 	"errors"
 	"time"
 )
@@ -44,6 +45,9 @@ type Client struct {
 	// client that registers once and then only uses its tokens -- the portal --
 	// is not mistaken for a stale one.
 	LastSeenAt time.Time
+	// UsedAt is when the client first completed a code exchange or refresh
+	// (set by Touch); zero for a registration that has never been used.
+	UsedAt time.Time
 }
 
 // Store is the interface OAuthServer uses to persist dynamic registrations.
@@ -53,17 +57,25 @@ type Store interface {
 	// Register stores c, or, when c.ClientID is already stored, marks it seen
 	// and returns the stored record unchanged (idempotent registration: the
 	// caller derives the id from the registration metadata). Afterwards the
-	// table is trimmed to maxClients rows by least recent LastSeenAt; the row
-	// just registered is never the one trimmed. maxClients <= 0 disables the
-	// trim.
+	// NEVER-USED rows are trimmed to maxClients by least recent LastSeenAt;
+	// the row just registered is never the one trimmed. maxClients <= 0
+	// disables the trim.
+	//
+	// A row that has been used (UsedAt set) is never trimmed: registration is
+	// unauthenticated, so letting fresh registrations push out a client that
+	// completed a GitHub sign-in would let anonymous traffic evict exactly
+	// the record this store exists to keep. Used rows are bounded by
+	// retention (GC) and by each one having needed a real sign-in.
 	Register(c Client, maxClients int) (Client, error)
 
-	// Get returns the stored client, or ErrNotFound.
-	Get(clientID string) (Client, error)
+	// Get returns the stored client, or ErrNotFound. ctx bounds the lookup;
+	// callers on unauthenticated paths pass a short deadline.
+	Get(ctx context.Context, clientID string) (Client, error)
 
-	// Touch marks clientID as seen now. It is throttled in the store so the
-	// hot path (every token exchange and refresh) is not a write per call.
-	// Idempotent and silent for an unknown id.
+	// Touch marks clientID as seen now and as used. last_seen_at is throttled
+	// in the store so the hot path (every token exchange and refresh) is not a
+	// write per call; the first use is always recorded. Idempotent and silent
+	// for an unknown id.
 	Touch(clientID string) error
 
 	// GC hard-deletes clients not seen since cutoff.
