@@ -471,27 +471,4 @@ Apache 2.0
 
 ## Portal tool allowlist
 
-`api.mctl.ai/mcp` is one upstream of the private aggregate portal `mcp.mctl.ai` (mctlhq/.github#35). The portal exposes a tool only when its mapping carries an explicit `enabled: true` for it and hides one it has an entry for with `enabled: false`; the mapping is kept at `default_disabled: true` plus an explicit entry for every tool. `docs/portal-allowlist.json` is the source of truth; `internal/mcp/portal_allowlist_test.go` fails the build when the set of registered tools differs from the file, when an enabled tool carries no `reason`, or when an enabled tool that is not recorded read-only in `internal/mcp/annotations_test.go` is missing from the `mutatingOnPortal` map in that test. Exposing a mutating tool is therefore a reviewed Go change naming what it changes, not a JSON edit — and it grants visibility only: the API's own authentication, team scope and role checks decide whether the call succeeds. After a release that changes the tool set, the operator re-applies the file (CI holds no Cloudflare credential):
-
-```
-read -rs CLOUDFLARE_API_TOKEN && export CLOUDFLARE_API_TOKEN   # not on the command line: the shell would record it
-export CLOUDFLARE_ACCOUNT_ID=…
-scripts/portal-allowlist-apply.sh --dry-run
-scripts/portal-allowlist-apply.sh
-```
-
-The script refuses a file that differs from `HEAD` and runs the guard test before it touches the API, so what is applied is a committed revision the build has judged.
-
-A portal access token carries the tool set as of its issuance; re-issue tokens after an apply.
-
-`scripts/portal-allowlist-apply.sh --check` compares the committed file against the live portal mapping instead of writing to it: `default_disabled`, plus the enabled/disabled state of every tool the server has synced. It is held to exactly the same pre-flight as an apply or a `--dry-run` — credentials, `jq`, a git checkout, the file tracked and matching `HEAD`, `portal=mcp`/`server=api`, `go`, and the guard test — and it never issues a `PUT`, on any path, including the one where it finds disagreement:
-
-```
-scripts/portal-allowlist-apply.sh --check
-```
-
-A tool whose live state disagrees with the file prints `drift: <tool> portal=<live> file=<committed>`; a `default_disabled` disagreement prints `drift: default_disabled portal=<live> file=<committed>`; a tool the server has synced but the file has no decision for prints `drift: <tool> synced by the server with no decision in docs/portal-allowlist.json`. A tool the file decides but the server has not synced is not drift — the apply holds it back by design — and is instead named on a `held back (not synced by the server): <names>` line after the in-sync summary.
-
-Exit codes: `0` in sync (or applied), `1` the comparison (or apply) could not be made — a pre-flight guard refused, or an API call failed, `2` a usage error, `3` the portal and the file disagree (`--check` only). Every non-zero status is a failure a caller must surface: the split between `1` and `3` exists only to say which one happened, never to make either tolerable — a job alerting on `3` alone would read an expired token or a revoked scope the same way it reads a clean portal. One documented exception to that table: a missing `jq` exits `2`, not the `1` that "could not check or apply" would otherwise imply. This is `mctl-telegram`'s landed behaviour, reproduced here so the two scripts do not disagree while it is fixed in both at once (mctlhq/mctl-telegram#635).
-
-`--check` is operator-run today, the same as the apply: CI holds no Cloudflare credential (mctlhq/mctl-gitops#1111). A scheduled job driving both this script and `mctl-telegram`'s is tracked in mctlhq/mctl-gitops#1211.
+`api.mctl.ai/mcp` is one upstream of the private aggregate portal `mcp.mctl.ai` (mctlhq/.github#35). The portal exposes a tool only when its mapping carries an explicit `enabled: true` for it and hides one it has an entry for with `enabled: false`; the mapping is kept at `default_disabled: true` plus an explicit entry for every tool. `docs/portal-allowlist.json` is the source of truth; `internal/mcp/portal_allowlist_test.go` fails the build when the set of registered tools differs from the file, when an enabled tool carries no `reason`, or when an enabled tool that is not recorded read-only in `internal/mcp/annotations_test.go` is missing from the `mutatingOnPortal` map in that test. Exposing a mutating tool is therefore a reviewed Go change naming what it changes, not a JSON edit — and it grants visibility only: the API's own authentication, team scope and role checks decide whether the call succeeds. Publishing the decision is automatic. When a change to `docs/portal-allowlist.json` lands on `main`, `.github/workflows/portal-allowlist-dispatch.yml` sends the file to mctlhq/mctl-gitops. There it is vendored byte-identical and opened as a PR whose `cloudflare-plan` names every tool that flips; the portal changes only when that PR merges and an approved `cloudflare-apply` runs (mctlhq/mctl-gitops#1370). Nothing in this repository talks to Cloudflare any more. The gitops side refuses a file that leaves a synced tool undecided, lets a widening through only once a human edits its `baseline.json` in that PR, and checks nightly that its vendored copy still matches this file. A portal access token carries the tool set as of its issuance; re-issue tokens after the apply.
