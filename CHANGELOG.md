@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.55.0](https://github.com/mctlhq/mctl-api/compare/4.54.0...4.55.0) (2026-09-26)
+
+
+### Features
+
+* **agents:** issue-402-feat-usage-persist-temporal-run-id-in-th ([7e62dcc](https://github.com/mctlhq/mctl-api/commit/7e62dcc62756384d63f608fc41dc2ba12150afe1))
+* **agents:** issue-402-feat-usage-persist-temporal-run-id-in-th ([9673297](https://github.com/mctlhq/mctl-api/commit/9673297505c1409bffe5e1633753f089e8c68d58))
+* **agents:** issue-403-feat-usage-mount-the-usage-price-catalog ([c9edc41](https://github.com/mctlhq/mctl-api/commit/c9edc41eb4cc35063d00bf3abaad69ef5b97fcb9))
+* **agents:** issue-403-feat-usage-mount-the-usage-price-catalog ([b4f54ba](https://github.com/mctlhq/mctl-api/commit/b4f54ba82859e158c0681bcbb569c2d5f80b8a76))
+
+
+### Bug Fixes
+
+* **ci:** fix failing required checks on issue-403-feat-usage-mount-the-usage-price-catalog ([cdec195](https://github.com/mctlhq/mctl-api/commit/cdec195e6ef88909016bcfee4fed5149efb2e0d7))
+
 ## [4.54.0](https://github.com/mctlhq/mctl-api/compare/4.53.0...4.54.0) (2026-09-26)
 
 
