@@ -533,6 +533,61 @@ func TestUsageFilterPairsIssueAndPRWithRepository(t *testing.T) {
 	}
 }
 
+// run_id populates Filter.TemporalRunID; an omitted run_id leaves it empty.
+func TestUsageFilterParsesRunID(t *testing.T) {
+	f, err := usageFilterFromQuery(httptest.NewRequest("GET",
+		"/api/v1/usage/records?run_id=018f6e2a-6e2a-7e2a-8e2a-9e2a6e2a6e2a", nil))
+	if err != nil {
+		t.Fatalf("run_id: %v", err)
+	}
+	if f.TemporalRunID != "018f6e2a-6e2a-7e2a-8e2a-9e2a6e2a6e2a" {
+		t.Errorf("TemporalRunID = %q, want the run id from the query", f.TemporalRunID)
+	}
+
+	f2, err := usageFilterFromQuery(httptest.NewRequest("GET", "/api/v1/usage/records", nil))
+	if err != nil {
+		t.Fatalf("no run_id: %v", err)
+	}
+	if f2.TemporalRunID != "" {
+		t.Errorf("TemporalRunID = %q, want empty when run_id is omitted", f2.TemporalRunID)
+	}
+}
+
+// Over HTTP: a record carrying temporal_run_id is accepted and found again by
+// its run id; a malformed one is a 400 that names the record.
+func TestUsageHandlers_TemporalRunIDRoundTripsOverHTTP(t *testing.T) {
+	store, prefix := newTestUsageStore(t)
+	h := &Handlers{opts: Options{Usage: store}}
+
+	rec := usageRecordBody(prefix, "run")
+	rec["temporal_run_id"] = prefix + "-018f6e2a"
+	if w := postUsage(t, h, map[string]any{"records": []any{rec}}, true); w.Code != http.StatusOK {
+		t.Fatalf("ingest: %d %s", w.Code, w.Body.String())
+	}
+	req := adminCtx(httptest.NewRequest("GET", "/api/v1/usage/records?run_id="+prefix+"-018f6e2a", nil))
+	w := httptest.NewRecorder()
+	h.ListUsageRecords(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Records []usage.Record `json:"records"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Records) != 1 || got.Records[0].TemporalRunID != prefix+"-018f6e2a" {
+		t.Errorf("run id filter over HTTP: %+v", got.Records)
+	}
+
+	bad := usageRecordBody(prefix, "bad-run")
+	bad["temporal_run_id"] = "018f6e2a 6e2a"
+	w = postUsage(t, h, map[string]any{"records": []any{bad}}, true)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "record 0") {
+		t.Errorf("malformed temporal_run_id: want 400 naming record 0, got %d %s", w.Code, w.Body.String())
+	}
+}
+
 // Over HTTP: a record carrying the #499 correlation is accepted and found again
 // by its execution id; a malformed one is a 400 that names the record.
 func TestUsageHandlers_CorrelationRoundTripsOverHTTP(t *testing.T) {
