@@ -15,6 +15,14 @@ answerable after trace data has aged out.
 | `USAGE_DB_URL` | Postgres for the ledger. Falls back to `AUDIT_DB_URL`. |
 | `USAGE_PRICING_CATALOG` | Path to a JSON rate-card file. Optional. |
 
+In production this path is not set by hand: the Helm chart value
+`usagePricingConfigMap` (`helm/values.yaml`) mounts the gitops-owned
+`mctl-api-usage-pricing` ConfigMap (key `catalog.json`) read-only at
+`/etc/mctl-api/usage-pricing` and points `USAGE_PRICING_CATALOG` at
+`catalog.json` inside it. The value is empty by default, and the volume
+reference is optional, so an absent or misconfigured ConfigMap degrades to
+"no calculated cost" (one ERROR log) rather than blocking pod start.
+
 With no database the endpoints answer `503`. That is deliberate and must not
 be softened into an empty `200`: an operator reading zero spend from an
 unconfigured ledger would conclude the opposite of the truth.
