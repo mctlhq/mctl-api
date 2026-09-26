@@ -3024,7 +3024,9 @@ Result: a new proposal directory committed to mctl-gitops main, plus a comment o
 
 Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.
 
-Set use_temporal=true to route through the dev-workflow control plane's Temporal deployment instead (plan phase 4) — a durable DevLoopWorkflow that pins a registry-resolved agent version, then waits for a signalled approval (POST /api/v1/agents/dev-loop/{workflow_id}/approve) before running the implementer, rather than requiring a separate mctl_trigger_implementer call against a gitops .status.yaml flip. Defaults to false (the direct-Argo path this tool has always used) until that slice is proven in production. Requires the server's Temporal client to be configured — returns 503 otherwise.`),
+Set use_temporal=true to route through the dev-workflow control plane's Temporal deployment instead (plan phase 4) — a durable DevLoopWorkflow that pins a registry-resolved agent version, then waits for a signalled approval (POST /api/v1/agents/dev-loop/{workflow_id}/approve) before running the implementer, rather than requiring a separate mctl_trigger_implementer call against a gitops .status.yaml flip. Defaults to false (the direct-Argo path this tool has always used) until that slice is proven in production. Requires the server's Temporal client to be configured — returns 503 otherwise.
+
+The Temporal start is idempotent on the workflow id dev-loop-mctlhq-{repo}-{issue}: calling this again for an issue that already has a DevLoopWorkflow never restarts or duplicates it, running or closed. The response's started field says whether anything new was actually submitted this call; started:false means nothing was — check the existing execution's run_id and status (also in the response) with mctl_get_dev_loop rather than assuming a fresh run began.`),
 		mcplib.WithString("issue_url",
 			mcplib.Required(),
 			mcplib.Description("Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123"),

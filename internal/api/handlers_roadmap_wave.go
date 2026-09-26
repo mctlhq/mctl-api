@@ -67,12 +67,15 @@ var (
 	roadmapWaveTimeout     = 5 * time.Minute
 )
 
-// Per-item execution outcomes.
+// Per-item execution outcomes — aliases of the shared devLoopOutcome*
+// vocabulary (handlers_dev_loop.go) so this route and
+// POST /api/v1/agents/dev-loop/start cannot drift on what "already_running"
+// means (issue #287).
 const (
-	waveOutcomeStarted        = "started"
-	waveOutcomeAlreadyRunning = "already_running"
-	waveOutcomeAlreadyExists  = "already_exists"
-	waveOutcomeFailed         = "failed"
+	waveOutcomeStarted        = devLoopOutcomeStarted
+	waveOutcomeAlreadyRunning = devLoopOutcomeAlreadyRunning
+	waveOutcomeAlreadyExists  = devLoopOutcomeAlreadyExists
+	waveOutcomeFailed         = devLoopOutcomeFailed
 )
 
 // waveMaxAge is the configured freshness bound. A negative value means the
@@ -349,31 +352,22 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 	outcomes := make([]outcome, 0, len(plan.Selected))
 	for _, it := range plan.Selected {
 		o := outcome{WaveItem: it}
-		var status string
-		var err error
-		call(func(ctx context.Context) { status, err = h.opts.TemporalClient.DescribeDevLoop(ctx, it.WorkflowID) })
-		switch {
-		case err != nil && !temporalclient.IsNotFound(err):
-			// Cannot tell whether it exists: do not start blind.
-			o.Outcome, o.Error = waveOutcomeFailed, "could not read the DevLoop: "+err.Error()
-		case err == nil && status == "Running":
-			o.Outcome, o.Status = waveOutcomeAlreadyRunning, status
-		case err == nil:
-			// A closed DevLoop is not restarted (REJECT_DUPLICATE); report it.
-			o.Outcome, o.Status = waveOutcomeAlreadyExists, status
-		default:
-			var wf, runID string
+		// classifyDevLoop and startDevLoopAfterNotFound (handlers_dev_loop.go)
+		// are the same shared decision startDevLoop composes for the
+		// single-issue route; kept as two separate call() invocations here so
+		// one item's slow describe cannot eat its own start's budget (or
+		// another item's) — each Temporal call still gets its own fresh
+		// roadmapWaveCallTimeout.
+		var result devLoopStartResult
+		call(func(ctx context.Context) { result = classifyDevLoop(ctx, h.opts.TemporalClient, it.WorkflowID) })
+		if result.Outcome == "" {
 			call(func(ctx context.Context) {
-				wf, runID, err = h.opts.TemporalClient.StartDevLoopWorkflow(ctx, it.IssueURL)
+				result = startDevLoopAfterNotFound(ctx, h.opts.TemporalClient, it.IssueURL, it.WorkflowID)
 			})
-			switch {
-			case err != nil:
-				o.Outcome, o.Error = waveOutcomeFailed, err.Error()
-			case wf != it.WorkflowID:
-				o.Outcome, o.Error = waveOutcomeFailed, "started workflow "+wf+", planned "+it.WorkflowID
-			default:
-				o.Outcome, o.RunID = waveOutcomeStarted, runID
-			}
+		}
+		o.Outcome, o.Status, o.RunID = result.Outcome, result.Status, result.RunID
+		if result.Err != nil {
+			o.Error = result.Err.Error()
 		}
 		outcomes = append(outcomes, o)
 	}

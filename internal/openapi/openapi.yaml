@@ -2266,6 +2266,13 @@ paths:
         that same CWFT as its first activity, then durably waits for a
         signalled approval before running the implementer. Requires the
         server's Temporal client to be configured. **Admin access required.**
+
+        The start is idempotent on the workflow id
+        dev-loop-mctlhq-{repo}-{issue}: this route describes the execution
+        before starting, so a call against an issue that already has a
+        running or closed DevLoopWorkflow reports that instead of claiming a
+        fresh start (issue #287). `started` says whether a new execution was
+        actually submitted this call.
       tags: [Agent Registry]
       requestBody:
         required: true
@@ -2280,7 +2287,7 @@ paths:
                   example: https://github.com/mctlhq/mctl-telegram/issues/296
       responses:
         '202':
-          description: Workflow started
+          description: A new DevLoopWorkflow was started
           content:
             application/json:
               schema:
@@ -2291,6 +2298,40 @@ paths:
                     example: dev-loop-mctlhq-mctl-telegram-296
                   run_id:
                     type: string
+                    description: The new run's id.
+                  started:
+                    type: boolean
+                    example: true
+                  outcome:
+                    type: string
+                    enum: [started]
+                  message:
+                    type: string
+        '200':
+          description: >-
+            Nothing new was started: a DevLoopWorkflow already exists for
+            this issue, running or closed. `run_id` and `status` describe
+            that existing execution, not a new one.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflow_id:
+                    type: string
+                    example: dev-loop-mctlhq-mctl-telegram-296
+                  run_id:
+                    type: string
+                    description: The existing execution's run id.
+                  started:
+                    type: boolean
+                    example: false
+                  outcome:
+                    type: string
+                    enum: [already_running, already_exists]
+                  status:
+                    type: string
+                    description: The existing execution's Temporal status, e.g. Running, Completed, Failed.
                   message:
                     type: string
         '400':
@@ -2301,6 +2342,12 @@ paths:
                 $ref: '#/components/schemas/Error'
         '403':
           description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: The existing DevLoop could not be read, or the start itself failed
           content:
             application/json:
               schema:

@@ -32,6 +32,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
+	"github.com/mctlhq/mctl-api/internal/temporalclient"
 )
 
 // The live fixture's observation was captured at 2026-09-23T09:09:33Z.
@@ -53,6 +54,7 @@ func (s waveSource) ReadFiles(names ...string) (map[string][]byte, string, error
 type waveDevLoop struct {
 	fakeDevLoopClient
 	statuses    map[string]string // workflow id -> status; absent = NotFound
+	runIDs      map[string]string // workflow id -> run id of a pre-existing execution; optional
 	describeErr map[string]error
 	startErr    map[string]error
 	hang        map[string]bool // Describe waits for its deadline
@@ -75,6 +77,18 @@ func (f *waveDevLoop) DescribeDevLoop(ctx context.Context, workflowID string) (s
 		return st, nil
 	}
 	return "", serviceerror.NewNotFound("workflow not found")
+}
+
+// DescribeDevLoopExecution mirrors DescribeDevLoop's status/error handling
+// and adds the run id — classifyDevLoop (handlers_dev_loop.go) reads both
+// from this single call, not from DescribeDevLoop plus a second describe, so
+// the fake must answer both from the one method to exercise that path.
+func (f *waveDevLoop) DescribeDevLoopExecution(ctx context.Context, workflowID string) (*temporalclient.DevLoopExecution, error) {
+	status, err := f.DescribeDevLoop(ctx, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	return &temporalclient.DevLoopExecution{Status: status, RunID: f.runIDs[workflowID]}, nil
 }
 
 func (f *waveDevLoop) pause(ctx context.Context) {
@@ -345,6 +359,50 @@ func TestRoadmapWave_ItemFailuresAreReportedPerItem(t *testing.T) {
 	_, out = e.post(waveAdmin, "/api/v1/roadmap/waves/execute", exec)
 	if outcomes(out)[wfs[0]] != waveOutcomeAlreadyExists {
 		t.Fatalf("a closed DevLoop: %v", outcomes(out))
+	}
+}
+
+// The wave route reports run_id for already_running and already_exists
+// outcomes, not just started ones — classifyDevLoop derives both the status
+// and the run id from one DescribeDevLoopExecution call. Regression coverage
+// for the fake test double silently dropping the run id on this path.
+func TestRoadmapWave_AlreadyRunningAndAlreadyExistsReportRunID(t *testing.T) {
+	e := newWaveEnv(t)
+	resp, exec := e.plan("enterprise-mcp")
+	var wfs []string
+	for _, it := range resp["plan"].(map[string]any)["selected"].([]any) {
+		wfs = append(wfs, it.(map[string]any)["workflow_id"].(string))
+	}
+	if len(wfs) < 2 {
+		t.Fatalf("need at least two selected items to cover both outcomes, got %v", wfs)
+	}
+	e.tc.statuses[wfs[0]] = "Running"
+	e.tc.statuses[wfs[1]] = "Completed"
+	e.tc.runIDs = map[string]string{
+		wfs[0]: "run-already-running",
+		wfs[1]: "run-already-closed",
+	}
+
+	code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", exec)
+	if code != http.StatusOK {
+		t.Fatalf("execute = %d %v", code, out)
+	}
+	byWF := map[string]map[string]any{}
+	for _, o := range out["outcomes"].([]any) {
+		m := o.(map[string]any)
+		byWF[m["workflow_id"].(string)] = m
+	}
+	if got := byWF[wfs[0]]["outcome"]; got != waveOutcomeAlreadyRunning {
+		t.Fatalf("expected %s = %s, got %v", wfs[0], waveOutcomeAlreadyRunning, got)
+	}
+	if got := byWF[wfs[0]]["run_id"]; got != "run-already-running" {
+		t.Errorf("expected run_id=run-already-running for an already_running outcome, got %v", got)
+	}
+	if got := byWF[wfs[1]]["outcome"]; got != waveOutcomeAlreadyExists {
+		t.Fatalf("expected %s = %s, got %v", wfs[1], waveOutcomeAlreadyExists, got)
+	}
+	if got := byWF[wfs[1]]["run_id"]; got != "run-already-closed" {
+		t.Errorf("expected run_id=run-already-closed for an already_exists outcome, got %v", got)
 	}
 }
 

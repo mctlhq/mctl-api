@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
@@ -188,34 +189,71 @@ func (c *Client) SignalApprove(ctx context.Context, workflowID string, payload m
 	return nil
 }
 
+// statusName maps a Temporal workflow execution status to the short name
+// DescribeDevLoop has always returned, e.g. "Running", "Completed",
+// "Failed", "TimedOut", "Terminated". Unrecognized values map to "Unknown" —
+// GetDevLoopWorkflow's shepherd_in_loop_known derivation reads that default
+// arm as "nothing was determined", so this default must stay as-is.
+func statusName(status enumspb.WorkflowExecutionStatus) string {
+	switch status {
+	case enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING:
+		return "Running"
+	case enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED:
+		return "Completed"
+	case enumspb.WORKFLOW_EXECUTION_STATUS_FAILED:
+		return "Failed"
+	case enumspb.WORKFLOW_EXECUTION_STATUS_CANCELED:
+		return "Canceled"
+	case enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED:
+		return "Terminated"
+	case enumspb.WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW:
+		return "ContinuedAsNew"
+	case enumspb.WORKFLOW_EXECUTION_STATUS_TIMED_OUT:
+		return "TimedOut"
+	default:
+		return "Unknown"
+	}
+}
+
+// DevLoopExecution is the richer describe answer DescribeDevLoopExecution
+// returns — status plus the run id and start time DescribeDevLoop's plain
+// string discards. startDevLoop (internal/api) uses RunID to report an
+// already-existing execution's identity instead of stamping a fresh "started"
+// message on it (issue #287).
+type DevLoopExecution struct {
+	Status    string
+	RunID     string
+	StartTime time.Time
+}
+
+// DescribeDevLoopExecution returns the status, run id and start time of the
+// DevLoopWorkflow with the given workflow ID.
+func (c *Client) DescribeDevLoopExecution(ctx context.Context, workflowID string) (*DevLoopExecution, error) {
+	resp, err := c.temporal.DescribeWorkflowExecution(ctx, workflowID, "")
+	if err != nil {
+		return nil, fmt.Errorf("temporalclient: describe %s: %w", workflowID, err)
+	}
+	info := resp.GetWorkflowExecutionInfo()
+	return &DevLoopExecution{
+		Status:    statusName(info.GetStatus()),
+		RunID:     info.GetExecution().GetRunId(),
+		StartTime: info.GetStartTime().AsTime(),
+	}, nil
+}
+
 // DescribeDevLoop returns the execution status of the DevLoopWorkflow with
 // the given workflow ID — the liveness read the shepherd sweeper uses to
 // skip proposals a live DevLoop already drives (mctl-agents#213). The
 // status string is Temporal's WORKFLOW_EXECUTION_STATUS_* short name, e.g.
-// "Running", "Completed", "Failed", "TimedOut", "Terminated".
+// "Running", "Completed", "Failed", "TimedOut", "Terminated". A thin wrapper
+// over DescribeDevLoopExecution — kept as its own method because the
+// shepherd sweeper and GetDevLoopWorkflow depend on this exact signature.
 func (c *Client) DescribeDevLoop(ctx context.Context, workflowID string) (string, error) {
-	resp, err := c.temporal.DescribeWorkflowExecution(ctx, workflowID, "")
+	exec, err := c.DescribeDevLoopExecution(ctx, workflowID)
 	if err != nil {
-		return "", fmt.Errorf("temporalclient: describe %s: %w", workflowID, err)
+		return "", err
 	}
-	switch resp.GetWorkflowExecutionInfo().GetStatus() {
-	case enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING:
-		return "Running", nil
-	case enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED:
-		return "Completed", nil
-	case enumspb.WORKFLOW_EXECUTION_STATUS_FAILED:
-		return "Failed", nil
-	case enumspb.WORKFLOW_EXECUTION_STATUS_CANCELED:
-		return "Canceled", nil
-	case enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED:
-		return "Terminated", nil
-	case enumspb.WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW:
-		return "ContinuedAsNew", nil
-	case enumspb.WORKFLOW_EXECUTION_STATUS_TIMED_OUT:
-		return "TimedOut", nil
-	default:
-		return "Unknown", nil
-	}
+	return exec.Status, nil
 }
 
 // ShepherdInLoopQueryName is DevLoopWorkflow's query handler reporting
