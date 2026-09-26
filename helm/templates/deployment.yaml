@@ -64,6 +64,14 @@ spec:
                   key: MCTL_USAGE_WRITER_TOKEN
                   optional: true
             {{- end }}
+            {{- if .Values.usagePricingConfigMap }}
+            # The path, not the JSON. internal/usage/catalog_file.go reads this file
+            # with os.ReadFile; a rate card is reviewed as a file in GitOps, and an env
+            # value carrying the whole document would be unreviewable and would blow
+            # past the env size a card will grow into.
+            - name: USAGE_PRICING_CATALOG
+              value: /etc/mctl-api/usage-pricing/catalog.json
+            {{- end }}
             {{- with .Values.openclaw }}
             {{- with .skills }}
             {{- if .maxPerSkillBytes }}
@@ -130,6 +138,11 @@ spec:
               mountPath: /etc/cnpg
               readOnly: true
             {{- end }}
+            {{- if .Values.usagePricingConfigMap }}
+            - name: usage-pricing
+              mountPath: /etc/mctl-api/usage-pricing
+              readOnly: true
+            {{- end }}
       volumes:
         - name: gitops-cache
           emptyDir:
@@ -185,4 +198,26 @@ spec:
               - key: {{ .Values.postgresCA.key | default "ca.crt" }}
                 path: ca.crt
             defaultMode: 0444
+        {{- end }}
+        {{- if .Values.usagePricingConfigMap }}
+        # optional: true on purpose, and it is the whole ordering story. The chart
+        # ships first and mctl-gitops sets the value second, so there is a window
+        # in which the name resolves to nothing. A non-optional ConfigMap volume
+        # leaves the pod in ContainerCreating -- the control plane down over a rate
+        # card, which is the opposite of what cmd/api/main.go decided when it chose
+        # to log and continue on a load failure. Optional gives an empty directory,
+        # LoadCatalogFile returns ENOENT, one ERROR is logged, and usage is still
+        # recorded without a derived cost.
+        #
+        # A directory mount with items, not subPath: subPath copies are frozen at
+        # container start, so a corrected card would need a delete rather than a
+        # restart. No defaultMode override is needed -- unlike the Secret volumes
+        # above, ConfigMap volume files land 0644 and are readable by uid 1000.
+        - name: usage-pricing
+          configMap:
+            name: {{ .Values.usagePricingConfigMap }}
+            optional: true
+            items:
+              - key: {{ .Values.usagePricingConfigMapKey | default "catalog.json" }}
+                path: catalog.json
         {{- end }}

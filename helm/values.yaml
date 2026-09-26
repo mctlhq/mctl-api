@@ -101,3 +101,22 @@ githubAppTokenKey: ""
 # may only append usage records. The reference is optional, so an absent
 # Secret leaves the principal disabled rather than failing the pod.
 usageWriterTokenSecret: ""
+
+# Optional: mount a versioned usage rate card from a ConfigMap.
+#
+# When set, the ConfigMap is mounted read-only at
+# /etc/mctl-api/usage-pricing and USAGE_PRICING_CATALOG points at
+# catalog.json inside it, which is what makes usage rows carry
+# calculated_cost and pricing_version (internal/usage/store.go). Empty by
+# default: an unset value renders exactly the chart that shipped before.
+#
+# The ConfigMap is owned by mctl-gitops (mctlhq/mctl-gitops#1409), not by
+# this chart -- a published price is a fact with an effective date and is
+# reviewed there against the provider's page. The volume reference is
+# optional, so a ConfigMap that has not landed yet degrades to "no
+# calculated cost" (one ERROR log) instead of a pod stuck pulling a
+# missing volume.
+usagePricingConfigMap: ""
+# Key inside that ConfigMap holding the rate-card JSON. Defaults to
+# "catalog.json", the key mctl-gitops publishes.
+usagePricingConfigMapKey: ""

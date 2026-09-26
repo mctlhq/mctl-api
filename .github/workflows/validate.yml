@@ -47,6 +47,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - uses: azure/setup-helm@v4
+
       - name: go build & test
         env:
           TEST_DB_URL: postgres://postgres:postgres@localhost:5432/mctl_api_test?sslmode=disable
