@@ -111,6 +111,12 @@ ALTER TABLE model_usage_records ADD COLUMN IF NOT EXISTS ingested_by_principal_i
 -- working.
 ALTER TABLE model_usage_records ADD COLUMN IF NOT EXISTS execution_id TEXT NOT NULL DEFAULT '';
 
+-- The single Temporal execution of temporal_workflow_id that spent the
+-- tokens (mctlhq/.github#50 decision 4, prerequisite for
+-- mctlhq/mctl-agents#505). Additive and defaulted: rows written before it
+-- read as '' and producers that do not send it are unaffected. No backfill.
+ALTER TABLE model_usage_records ADD COLUMN IF NOT EXISTS temporal_run_id TEXT NOT NULL DEFAULT '';
+
 CREATE INDEX IF NOT EXISTS model_usage_recorded_at_idx ON model_usage_records (recorded_at);
 CREATE INDEX IF NOT EXISTS model_usage_workflow_idx    ON model_usage_records (temporal_workflow_id);
 CREATE INDEX IF NOT EXISTS model_usage_repo_issue_idx  ON model_usage_records (target_repo, issue_number);
@@ -119,6 +125,7 @@ CREATE INDEX IF NOT EXISTS model_usage_agent_idx       ON model_usage_records (a
 CREATE INDEX IF NOT EXISTS model_usage_model_idx       ON model_usage_records (canonical_model, provider);
 CREATE INDEX IF NOT EXISTS model_usage_work_item_idx   ON model_usage_records (work_item_id);
 CREATE INDEX IF NOT EXISTS model_usage_execution_idx   ON model_usage_records (execution_id);
+CREATE INDEX IF NOT EXISTS model_usage_run_idx         ON model_usage_records (temporal_run_id);
 `
 
 // Store is the durable ledger.
@@ -175,7 +182,7 @@ INSERT INTO model_usage_records (
     provider_reported_cost, calculated_cost, pricing_version, invoice_reconciled_cost,
     outcome, api_error_status, stop_reason, terminal_reason,
     num_turns, duration_api_ms, retry_attempt, recorded_at,
-    ingested_by, ingested_by_principal_id, execution_id
+    ingested_by, ingested_by_principal_id, execution_id, temporal_run_id
 ) VALUES (
     $1,$2,$3,$4,$5,$6,$7,
     $8,$9,$10,$11,$12,
@@ -185,7 +192,7 @@ INSERT INTO model_usage_records (
     $24,$25,$26,$27,
     $28,$29,$30,$31,
     $32,$33,$34,$35,
-    $36,$37,$38
+    $36,$37,$38,$39
 )
 ON CONFLICT (id) DO NOTHING
 `
@@ -277,7 +284,7 @@ func (s *Store) IngestAs(ctx context.Context, by Ingester, records []*Record) (*
 			r.ProviderReportedCost, r.CalculatedCost, r.PricingVersion, r.InvoiceReconciledCost,
 			r.Outcome, r.APIErrorStatus, r.StopReason, r.TerminalReason,
 			r.NumTurns, r.DurationAPIMs, r.RetryAttempt, r.RecordedAt,
-			r.IngestedBy, r.IngestedByPrincipalID, r.ExecutionID,
+			r.IngestedBy, r.IngestedByPrincipalID, r.ExecutionID, r.TemporalRunID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("usage: insert %s: %w", r.ID, err)
@@ -297,6 +304,7 @@ func (s *Store) IngestAs(ctx context.Context, by Ingester, records []*Record) (*
 // Filter narrows a query. A zero Filter matches everything.
 type Filter struct {
 	TemporalWorkflowID string
+	TemporalRunID      string
 	ExecutionID        string
 	WorkItemID         string
 	TargetRepo         string
@@ -327,6 +335,9 @@ func (f Filter) where() (string, []any) {
 	}
 	if f.ExecutionID != "" {
 		add("execution_id = $%d", f.ExecutionID)
+	}
+	if f.TemporalRunID != "" {
+		add("temporal_run_id = $%d", f.TemporalRunID)
 	}
 	if f.WorkItemID != "" {
 		add("work_item_id = $%d", f.WorkItemID)
@@ -385,7 +396,7 @@ const selectColumns = `
     provider_reported_cost, calculated_cost, pricing_version, invoice_reconciled_cost,
     outcome, api_error_status, stop_reason, terminal_reason,
     num_turns, duration_api_ms, retry_attempt, recorded_at,
-    ingested_by, ingested_by_principal_id, execution_id
+    ingested_by, ingested_by_principal_id, execution_id, temporal_run_id
 `
 
 // ListResult is a bounded page of records.
@@ -460,7 +471,7 @@ func scanRecord(rows pgx.Rows) (*Record, error) {
 		&r.ProviderReportedCost, &r.CalculatedCost, &r.PricingVersion, &r.InvoiceReconciledCost,
 		&r.Outcome, &r.APIErrorStatus, &r.StopReason, &r.TerminalReason,
 		&r.NumTurns, &r.DurationAPIMs, &r.RetryAttempt, &r.RecordedAt,
-		&r.IngestedBy, &r.IngestedByPrincipalID, &r.ExecutionID,
+		&r.IngestedBy, &r.IngestedByPrincipalID, &r.ExecutionID, &r.TemporalRunID,
 	); err != nil {
 		return nil, fmt.Errorf("usage: scan: %w", err)
 	}

@@ -103,16 +103,21 @@ type Record struct {
 	// ExecutionContext id (`ex-…`). It is correlation, never part of the
 	// dedupe key.
 	TemporalWorkflowID string `json:"temporal_workflow_id,omitempty"`
-	ArgoWorkflowName   string `json:"argo_workflow_name,omitempty"`
-	ExecutionID        string `json:"execution_id,omitempty"`
-	Agent              string `json:"agent,omitempty"`
-	DevLoopStage       string `json:"devloop_stage,omitempty"`
-	TargetRepo         string `json:"target_repo,omitempty"`
-	IssueNumber        *int64 `json:"issue_number,omitempty"`
-	PRNumber           *int64 `json:"pr_number,omitempty"`
-	WorkItemID         string `json:"work_item_id,omitempty"`
-	TraceID            string `json:"trace_id,omitempty"`
-	SpanID             string `json:"span_id,omitempty"`
+	// TemporalRunID names the single execution of TemporalWorkflowID that spent
+	// the tokens (mctlhq/.github#50 decision 4). A workflow id survives a
+	// continue-as-new, a reset and a retry; the run id does not, so spend is
+	// attributable to the execution that actually incurred it. Correlation only.
+	TemporalRunID    string `json:"temporal_run_id,omitempty"`
+	ArgoWorkflowName string `json:"argo_workflow_name,omitempty"`
+	ExecutionID      string `json:"execution_id,omitempty"`
+	Agent            string `json:"agent,omitempty"`
+	DevLoopStage     string `json:"devloop_stage,omitempty"`
+	TargetRepo       string `json:"target_repo,omitempty"`
+	IssueNumber      *int64 `json:"issue_number,omitempty"`
+	PRNumber         *int64 `json:"pr_number,omitempty"`
+	WorkItemID       string `json:"work_item_id,omitempty"`
+	TraceID          string `json:"trace_id,omitempty"`
+	SpanID           string `json:"span_id,omitempty"`
 
 	// Usage. Nil means the provider did not report it — see the package doc.
 	InputTokens       *int64 `json:"input_tokens,omitempty"`
@@ -291,6 +296,9 @@ func (r *Record) validateCorrelation() error {
 	}
 	if r.ExecutionID != "" && !executionIDPattern.MatchString(r.ExecutionID) {
 		return fmt.Errorf("%w: execution_id %q is not a valid execution id", ErrInvalidRecord, r.ExecutionID)
+	}
+	if r.TemporalRunID != "" && !executionIDPattern.MatchString(r.TemporalRunID) {
+		return fmt.Errorf("%w: temporal_run_id %q is not a valid execution id", ErrInvalidRecord, r.TemporalRunID)
 	}
 	for name, v := range map[string]*int64{"issue_number": r.IssueNumber, "pr_number": r.PRNumber} {
 		if v == nil {

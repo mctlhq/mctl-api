@@ -132,6 +132,7 @@ unreachable by the query meant to find it (mctlhq/mctl-agents#499).
 | `target_repo` | `owner/name` |
 | `issue_number`, `pr_number` | positive integer; requires `target_repo`, because a number alone does not say which repository it belongs to |
 | `execution_id` | up to 128 characters from `[A-Za-z0-9_.:-]`, starting alphanumeric |
+| `temporal_run_id` | up to 128 characters from `[A-Za-z0-9_.:-]`, starting alphanumeric |
 | `argo_workflow_name`, `temporal_workflow_id`, `work_item_id`, `devloop_stage` | free text, unchanged |
 
 `execution_id` identifies the runner invocation that spent the tokens. It is
@@ -142,9 +143,17 @@ scheme must not cost usage records. `execution_id` is not part of the dedupe
 key, so sending the same result again with a different `execution_id` is
 still deduped.
 
+`temporal_run_id` names the single Temporal execution of `temporal_workflow_id`
+that spent the tokens (mctlhq/.github#50 decision 4): a workflow id survives a
+continue-as-new, a reset and a retry, but the run id does not, so spend is
+attributable to the one execution that actually incurred it. It is optional —
+a producer that does not send it is unaffected — and like every other
+correlation field it is not part of the dedupe key, so sending the same
+result again with a different `temporal_run_id` is still deduped.
+
 ### `GET /api/v1/usage/records`
 
-Filters: `workflow_id`, `work_item_id`, `execution_id`, `repository`, `issue`,
+Filters: `workflow_id`, `run_id`, `work_item_id`, `execution_id`, `repository`, `issue`,
 `pr`, `agent`, `stage`, `provider`, `model`, `outcome`, `since`, `until`
 (RFC3339), `limit`.
 

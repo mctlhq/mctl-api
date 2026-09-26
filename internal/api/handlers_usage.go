@@ -209,6 +209,7 @@ func usageFilterFromQuery(r *http.Request) (usage.Filter, error) {
 	q := r.URL.Query()
 	f := usage.Filter{
 		TemporalWorkflowID: q.Get("workflow_id"),
+		TemporalRunID:      q.Get("run_id"),
 		ExecutionID:        q.Get("execution_id"),
 		WorkItemID:         q.Get("work_item_id"),
 		TargetRepo:         q.Get("repository"),

@@ -15,6 +15,7 @@
 package usage
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -378,6 +379,8 @@ func TestCorrelationShapesAreValidatedAtIngest(t *testing.T) {
 			r.TargetRepo, r.IssueNumber, r.PRNumber = "mctlhq/mctl-agents", i64(499), i64(500)
 		}},
 		{"repo with dots", func(r *Record) { r.TargetRepo = "mctlhq/.github" }},
+		{"uuid run id", func(r *Record) { r.TemporalRunID = "018f6e2a-6e2a-7e2a-8e2a-9e2a6e2a6e2a" }},
+		{"empty run id", func(r *Record) {}},
 	}
 	for _, c := range valid {
 		r := base()
@@ -400,6 +403,9 @@ func TestCorrelationShapesAreValidatedAtIngest(t *testing.T) {
 		{"execution id with a space", func(r *Record) { r.ExecutionID = "we_ 1" }},
 		{"execution id with a slash", func(r *Record) { r.ExecutionID = "dev-loop/x" }},
 		{"execution id too long", func(r *Record) { r.ExecutionID = "we_" + strings.Repeat("a", 200) }},
+		{"run id with a space", func(r *Record) { r.TemporalRunID = "018f6e2a 6e2a" }},
+		{"run id with a slash", func(r *Record) { r.TemporalRunID = "018f6e2a/6e2a" }},
+		{"run id too long", func(r *Record) { r.TemporalRunID = "018f6e2a" + strings.Repeat("a", 200) }},
 	}
 	for _, c := range invalid {
 		r := base()
@@ -423,5 +429,37 @@ func TestExecutionIDIsNotPartOfTheDedupeKey(t *testing.T) {
 	}
 	if a.ID != b.ID {
 		t.Error("execution_id changed the dedupe key; a replay with a different correlation would double count")
+	}
+}
+
+// The Temporal run id is correlation, never identity: two deliveries of one
+// result that disagree on it must still collapse to one row.
+func TestTemporalRunIDIsNotPartOfTheDedupeKey(t *testing.T) {
+	a := &Record{SessionID: "s", ResultUUID: "u", ModelKey: "m", TemporalRunID: "018f6e2a-1111-1111-1111-111111111111"}
+	b := &Record{SessionID: "s", ResultUUID: "u", ModelKey: "m", TemporalRunID: "018f6e2a-2222-2222-2222-222222222222"}
+	if err := a.EnsureID(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.EnsureID(); err != nil {
+		t.Fatal(err)
+	}
+	if a.ID != b.ID {
+		t.Error("temporal_run_id changed the dedupe key; a replay with a different correlation would double count")
+	}
+}
+
+// A record ingested without temporal_run_id must marshal to JSON with no
+// temporal_run_id key, so an existing consumer sees a byte-identical body.
+func TestTemporalRunIDOmittedFromWireWhenAbsent(t *testing.T) {
+	r := &Record{SessionID: "s", ResultUUID: "u", ModelKey: "m"}
+	if err := r.EnsureID(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(b), "temporal_run_id") {
+		t.Errorf("temporal_run_id present in wire body despite omitempty: %s", b)
 	}
 }

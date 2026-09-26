@@ -557,3 +557,128 @@ func TestRecordsAreQueryableByExecutionAndPullRequest(t *testing.T) {
 		}
 	}
 }
+
+// TestTemporalRunIDRoundTrips covers T1/T2: a record carrying a run id is
+// queryable by it and round-trips byte-identical; a record with no run id is
+// accepted and reads back as "".
+func TestTemporalRunIDRoundTrips(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	withRun := testRecord(prefix+"-with-run", "test-model", at)
+	withRun.TemporalRunID = "018f6e2a-6e2a-7e2a-8e2a-9e2a6e2a6e2a"
+	otherRun := testRecord(prefix+"-other-run", "test-model", at)
+	otherRun.TemporalRunID = "018f6e2a-0000-0000-0000-000000000000"
+	noRun := testRecord(prefix+"-no-run", "test-model", at)
+
+	if _, err := s.IngestAs(ctx, Ingester{}, []*Record{withRun, otherRun, noRun}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	got, err := s.List(ctx, Filter{TemporalRunID: withRun.TemporalRunID})
+	if err != nil {
+		t.Fatalf("List by run id: %v", err)
+	}
+	if len(got.Records) != 1 {
+		t.Fatalf("run id filter: got %d rows, want 1", len(got.Records))
+	}
+	if got.Records[0].TemporalRunID != withRun.TemporalRunID {
+		t.Errorf("temporal_run_id did not round-trip: got %q, want %q",
+			got.Records[0].TemporalRunID, withRun.TemporalRunID)
+	}
+	if got.Records[0].SessionID != withRun.SessionID {
+		t.Errorf("run id filter matched the wrong row: %q", got.Records[0].SessionID)
+	}
+
+	noRunGot, err := s.List(ctx, Filter{TemporalWorkflowID: noRun.TemporalWorkflowID})
+	if err != nil {
+		t.Fatalf("List no-run record: %v", err)
+	}
+	if len(noRunGot.Records) != 1 {
+		t.Fatalf("no-run record: got %d rows, want 1", len(noRunGot.Records))
+	}
+	if noRunGot.Records[0].TemporalRunID != "" {
+		t.Errorf("no-run record: temporal_run_id = %q, want empty", noRunGot.Records[0].TemporalRunID)
+	}
+}
+
+// TestTemporalRunIDDedupeKeepsFirstWrite covers T4: a replay carrying a
+// different run id must not create a second row, and the surviving row keeps
+// the first write's run id — ON CONFLICT DO NOTHING, same as ingested_by.
+func TestTemporalRunIDDedupeKeepsFirstWrite(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	first := testRecord(prefix, "test-model", at)
+	first.TemporalRunID = "018f6e2a-1111-1111-1111-111111111111"
+	firstRes, err := s.IngestAs(ctx, Ingester{}, []*Record{first})
+	if err != nil {
+		t.Fatalf("first ingest: %v", err)
+	}
+	if len(firstRes.Accepted) != 1 {
+		t.Fatalf("first ingest: accepted=%d, want 1", len(firstRes.Accepted))
+	}
+
+	replay := testRecord(prefix, "test-model", at)
+	replay.TemporalRunID = "018f6e2a-2222-2222-2222-222222222222"
+	replayRes, err := s.IngestAs(ctx, Ingester{}, []*Record{replay})
+	if err != nil {
+		t.Fatalf("replay ingest: %v", err)
+	}
+	if len(replayRes.Accepted) != 0 || len(replayRes.Deduped) != 1 {
+		t.Fatalf("replay: accepted=%d deduped=%d, want 0/1", len(replayRes.Accepted), len(replayRes.Deduped))
+	}
+
+	got, err := s.List(ctx, Filter{TemporalWorkflowID: first.TemporalWorkflowID})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got.Records) != 1 {
+		t.Fatalf("rows after replay = %d, want 1", len(got.Records))
+	}
+	if got.Records[0].TemporalRunID != first.TemporalRunID {
+		t.Errorf("dedupe overwrote the run id: got %q, want the first write's %q",
+			got.Records[0].TemporalRunID, first.TemporalRunID)
+	}
+}
+
+// TestTemporalRunIDSchemaIsAdditiveAndIdempotent covers T6: pre-existing rows
+// (inserted before the column existed) stay readable with TemporalRunID == "",
+// and re-applying usageSchema is a no-op.
+func TestTemporalRunIDSchemaIsAdditiveAndIdempotent(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	// Simulate a row written before temporal_run_id existed, by inserting
+	// through raw SQL naming only pre-change columns. The column's
+	// NOT NULL DEFAULT '' makes this legal without naming it.
+	sessionID := prefix + "-legacy-session"
+	_, err := s.pool.Exec(ctx, `
+INSERT INTO model_usage_records (
+    id, schema_version, session_id, result_uuid, model_key, recorded_at
+) VALUES ($1, $2, $3, $4, $5, $6)`,
+		prefix+"-legacy-id", SchemaVersion, sessionID, prefix+"-legacy-uuid", "test-model", at)
+	if err != nil {
+		t.Fatalf("legacy insert: %v", err)
+	}
+
+	var runID string
+	row := s.pool.QueryRow(ctx, `SELECT temporal_run_id FROM model_usage_records WHERE session_id = $1`, sessionID)
+	if err := row.Scan(&runID); err != nil {
+		t.Fatalf("scanning legacy row: %v", err)
+	}
+	if runID != "" {
+		t.Errorf("legacy row: temporal_run_id = %q, want empty", runID)
+	}
+
+	// Applying the schema a second time must be a no-op.
+	if _, err := s.pool.Exec(ctx, usageSchema); err != nil {
+		t.Fatalf("re-applying usageSchema: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, usageSchema); err != nil {
+		t.Fatalf("re-applying usageSchema a third time: %v", err)
+	}
+}
