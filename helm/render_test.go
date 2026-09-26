@@ -89,6 +89,9 @@ func renderDeployment(t *testing.T, setArgs ...string) (deployment, []byte) {
 
 	args := []string{"template", "mctl-api", ".", "--show-only", "templates/deployment.yaml"}
 	args = append(args, setArgs...)
+	// #nosec G204 -- helmPath is resolved via exec.LookPath("helm") above, not
+	// attacker input, and setArgs are fixed --set literals from this test's
+	// own call sites, not external input.
 	cmd := exec.Command(helmPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -291,6 +294,9 @@ func TestHelmLintCleanWithAndWithoutUsagePricing(t *testing.T) {
 	}
 	for _, extra := range cases {
 		args := append([]string{"lint", "."}, extra...)
+		// #nosec G204 -- helmPath is resolved via exec.LookPath("helm") above,
+		// not attacker input, and extra is a fixed literal from the cases
+		// slice defined a few lines above, not external input.
 		cmd := exec.Command(helmPath, args...)
 		var out bytes.Buffer
 		cmd.Stdout = &out
