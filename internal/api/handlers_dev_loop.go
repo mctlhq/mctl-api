@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -34,6 +35,118 @@ import (
 // worker outage degrades to "false" quickly instead of holding the HTTP
 // request open until the API-wide 30s timeout.
 const shepherdQueryTimeout = 3 * time.Second
+
+// devLoopDescribeTimeout bounds each pre-start describe call startDevLoop
+// makes, mirroring roadmapWaveCallTimeout (handlers_roadmap_wave.go) so a
+// hung Temporal frontend fails fast instead of eating the request's full
+// API-wide timeout.
+const devLoopDescribeTimeout = 10 * time.Second
+
+// devLoopOutcome* is the shared vocabulary both the single-issue start route
+// and the roadmap wave route report; waveOutcome* in handlers_roadmap_wave.go
+// are aliases of these so the two routes cannot drift on what
+// "already_running" means.
+const (
+	devLoopOutcomeStarted        = "started"
+	devLoopOutcomeAlreadyRunning = "already_running"
+	devLoopOutcomeAlreadyExists  = "already_exists"
+	devLoopOutcomeFailed         = "failed"
+)
+
+// devLoopStartResult is startDevLoop's answer: what happened, and everything
+// a caller needs to report it (the pre-existing execution's status/run id, or
+// the new run's id, or why nothing could be decided/started).
+type devLoopStartResult struct {
+	Outcome string
+	Status  string // Temporal status of the pre-existing execution, when one exists
+	RunID   string
+	Err     error
+}
+
+// startDevLoop implements the describe -> classify -> start decision shared
+// by StartDevLoopWorkflow (the single-issue route) and ExecuteRoadmapWave
+// (the wave route), so the two cannot report "already_running" or
+// "already_exists" differently for the same execution (issue #287:
+// StartDevLoopWorkflow used to report "started" even when
+// WorkflowIDReusePolicy/WorkflowIDConflictPolicy silently absorbed the call
+// into an existing run).
+//
+// It is deliberately composed of two separately-callable halves,
+// classifyDevLoop and startDevLoopAfterNotFound: ExecuteRoadmapWave bounds
+// each one with its own fresh per-item Temporal-call timeout (so one item's
+// slow describe cannot eat its own start's budget, or another item's), while
+// this function bounds the describe half with devLoopDescribeTimeout and
+// otherwise lets the caller's context govern the start.
+//
+// TOCTOU: two callers racing can both observe NotFound between the describe
+// and the start; the second start is then absorbed by StartDevLoopWorkflow's
+// WorkflowIDConflictPolicy USE_EXISTING and reported as "started" even though
+// nothing new actually began. This is strictly narrower than the bug this
+// function fixes (which reported every no-op as a start regardless of
+// timing) and is not closable without dropping USE_EXISTING, which would be a
+// cross-repo behaviour change to orchestrator/temporal/cli.py's start policy
+// — out of scope here (see mctl-api#404).
+func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID string) devLoopStartResult {
+	dctx, cancel := context.WithTimeout(ctx, devLoopDescribeTimeout)
+	result := classifyDevLoop(dctx, c, workflowID)
+	cancel()
+	if result.Outcome != "" {
+		return result
+	}
+	// Empty Outcome is classifyDevLoop's signal for "not found; start it".
+	return startDevLoopAfterNotFound(ctx, c, issueURL, workflowID)
+}
+
+// classifyDevLoop describes workflowID and decides whether a start should
+// follow. A zero-value devLoopStartResult (empty Outcome, nil Err) means
+// "not found: proceed to start" — every other case is terminal and callers
+// must not start on top of it.
+//
+// It calls DescribeDevLoopExecution — not the plainer DescribeDevLoop — so a
+// single Temporal describe RPC supplies both the status used to classify the
+// execution and the run id reported alongside it. A second describe call
+// purely to fetch the run id would be a redundant Temporal round trip:
+// DescribeDevLoopExecution already returns both fields from the one call.
+//
+//   - describe succeeds and status == "Running" -> already_running, existing
+//     run id, do NOT start.
+//   - describe succeeds with any other status (a closed execution) ->
+//     already_exists, existing run id, do NOT start (REJECT_DUPLICATE would
+//     not restart it anyway).
+//   - describe fails with temporalclient.IsNotFound -> the zero value: proceed.
+//   - describe fails with any other error -> failed, WITHOUT starting: an
+//     unreadable execution is never started blind.
+func classifyDevLoop(ctx context.Context, c DevLoopClient, workflowID string) devLoopStartResult {
+	exec, err := c.DescribeDevLoopExecution(ctx, workflowID)
+	switch {
+	case err != nil && !temporalclient.IsNotFound(err):
+		// Cannot tell whether it exists: do not start blind.
+		return devLoopStartResult{Outcome: devLoopOutcomeFailed, Err: fmt.Errorf("could not read the existing DevLoop: %w", err)}
+	case err == nil && exec.Status == "Running":
+		return devLoopStartResult{Outcome: devLoopOutcomeAlreadyRunning, Status: exec.Status, RunID: exec.RunID}
+	case err == nil:
+		// A closed DevLoop is not restarted (REJECT_DUPLICATE); report it.
+		return devLoopStartResult{Outcome: devLoopOutcomeAlreadyExists, Status: exec.Status, RunID: exec.RunID}
+	default:
+		return devLoopStartResult{}
+	}
+}
+
+// startDevLoopAfterNotFound performs the actual start once classifyDevLoop
+// has determined no execution exists yet, including the "started workflow X,
+// planned Y" guard against trusting a start that reports a different id than
+// expected.
+func startDevLoopAfterNotFound(ctx context.Context, c DevLoopClient, issueURL, workflowID string) devLoopStartResult {
+	wf, runID, err := c.StartDevLoopWorkflow(ctx, issueURL)
+	switch {
+	case err != nil:
+		return devLoopStartResult{Outcome: devLoopOutcomeFailed, Err: err}
+	case wf != workflowID:
+		return devLoopStartResult{Outcome: devLoopOutcomeFailed, Err: fmt.Errorf("started workflow %s, planned %s", wf, workflowID)}
+	default:
+		return devLoopStartResult{Outcome: devLoopOutcomeStarted, RunID: runID}
+	}
+}
 
 // requireTemporalAdmin mirrors requireAgentRegistryAdmin: configured,
 // authenticated, admin. The dev-loop trigger path is a separate optional
@@ -66,6 +179,12 @@ type startDevLoopRequest struct {
 // shared Temporal deployment instead of submitting the investigate CWFT
 // directly; the workflow itself pins a registry-resolved version and
 // submits that same CWFT as its first activity.
+//
+// StartDevLoopWorkflow's own idempotency policies (REJECT_DUPLICATE +
+// USE_EXISTING) mean a call against an id that already has a running or
+// closed execution truly no-ops. Reporting every such call as "started"
+// would be a lie (issue #287, portfolio#7): this handler describes before it
+// starts, via the shared startDevLoop, and reports the real outcome.
 func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.requireTemporalAdmin(w, r)
 	if !ok {
@@ -82,43 +201,83 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	workflowID, err := temporalclient.WorkflowIDForIssueURL(body.IssueURL)
+	if err != nil {
+		// Caller input (a malformed issue_url) — real 400, not audited, same
+		// as before this change.
+		writeError(w, http.StatusBadRequest, "invalid issue_url: "+err.Error())
+		return
+	}
+
 	auditParams := map[string]string{"issue_url": body.IssueURL}
 
-	workflowID, runID, err := h.opts.TemporalClient.StartDevLoopWorkflow(r.Context(), body.IssueURL)
-	if err != nil {
-		// ErrInvalidIssueURL is caller input (a malformed issue_url) — real
-		// 400. Everything else is a Temporal RPC/connectivity failure the
-		// caller sent a perfectly valid request for and can't fix by
-		// retrying with different input, so it gets 502 instead of being
-		// indistinguishable from a bad request.
-		if errors.Is(err, temporalclient.ErrInvalidIssueURL) {
-			writeError(w, http.StatusBadRequest, "invalid issue_url: "+err.Error())
-			return
-		}
+	result := startDevLoop(r.Context(), h.opts.TemporalClient, body.IssueURL, workflowID)
+	auditParams["outcome"] = result.Outcome
+
+	switch result.Outcome {
+	case devLoopOutcomeStarted:
+		h.logAudit(r, audit.Entry{
+			UserID:       user.ID,
+			Operation:    "dev-loop-start",
+			Parameters:   auditParams,
+			WorkflowName: workflowID,
+			Status:       "succeeded",
+			RiskLevel:    string(operations.RiskMedium),
+		})
+		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+			"workflow_id": workflowID,
+			"run_id":      result.RunID,
+			"started":     true,
+			"outcome":     result.Outcome,
+			"message":     "DevLoopWorkflow started. Approve the implement step with POST /api/v1/agents/dev-loop/{workflow_id}/approve once the proposal is reviewed.",
+		})
+	case devLoopOutcomeAlreadyRunning:
+		h.logAudit(r, audit.Entry{
+			UserID:       user.ID,
+			Operation:    "dev-loop-start",
+			Parameters:   auditParams,
+			WorkflowName: workflowID,
+			Status:       "succeeded",
+			RiskLevel:    string(operations.RiskMedium),
+			Message:      "not started: already_running (run " + result.RunID + ")",
+		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"workflow_id": workflowID,
+			"run_id":      result.RunID,
+			"started":     false,
+			"outcome":     result.Outcome,
+			"status":      result.Status,
+			"message":     "A DevLoopWorkflow is already running for this issue; nothing new was started. Check its progress with GET /api/v1/agents/dev-loop/{workflow_id}.",
+		})
+	case devLoopOutcomeAlreadyExists:
+		h.logAudit(r, audit.Entry{
+			UserID:       user.ID,
+			Operation:    "dev-loop-start",
+			Parameters:   auditParams,
+			WorkflowName: workflowID,
+			Status:       "succeeded",
+			RiskLevel:    string(operations.RiskMedium),
+			Message:      "not started: already_exists (run " + result.RunID + ", status " + result.Status + ")",
+		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"workflow_id": workflowID,
+			"run_id":      result.RunID,
+			"started":     false,
+			"outcome":     result.Outcome,
+			"status":      result.Status,
+			"message":     "A DevLoopWorkflow already ran for this issue and is not restarted; nothing new was started.",
+		})
+	default: // devLoopOutcomeFailed
 		h.logAudit(r, audit.Entry{
 			UserID:     user.ID,
 			Operation:  "dev-loop-start",
 			Parameters: auditParams,
 			Status:     "failed",
 			RiskLevel:  string(operations.RiskMedium),
-			Message:    "failed to start dev-loop workflow: " + err.Error(),
+			Message:    "failed to start dev-loop workflow: " + result.Err.Error(),
 		})
-		writeError(w, http.StatusBadGateway, "failed to start dev-loop workflow: "+err.Error())
-		return
+		writeError(w, http.StatusBadGateway, "failed to start dev-loop workflow: "+result.Err.Error())
 	}
-	h.logAudit(r, audit.Entry{
-		UserID:       user.ID,
-		Operation:    "dev-loop-start",
-		Parameters:   auditParams,
-		WorkflowName: workflowID,
-		Status:       "succeeded",
-		RiskLevel:    string(operations.RiskMedium),
-	})
-	writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"workflow_id": workflowID,
-		"run_id":      runID,
-		"message":     "DevLoopWorkflow started. Approve the implement step with POST /api/v1/agents/dev-loop/{workflow_id}/approve once the proposal is reviewed.",
-	})
 }
 
 type approveDevLoopRequest struct {
