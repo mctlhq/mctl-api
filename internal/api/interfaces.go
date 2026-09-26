@@ -78,6 +78,12 @@ type DevLoopClient interface {
 	StartDevLoopWorkflow(ctx context.Context, issueURL string) (workflowID, runID string, err error)
 	SignalApprove(ctx context.Context, workflowID string, payload map[string]string) error
 	DescribeDevLoop(ctx context.Context, workflowID string) (status string, err error)
+	// DescribeDevLoopExecution is DescribeDevLoop's richer sibling: it also
+	// returns the existing execution's run id, which startDevLoop
+	// (handlers_dev_loop.go) uses to report an already-running or
+	// already-closed DevLoop instead of stamping a fresh "started" message
+	// on it (issue #287).
+	DescribeDevLoopExecution(ctx context.Context, workflowID string) (*temporalclient.DevLoopExecution, error)
 	QueryShepherdInLoop(ctx context.Context, workflowID string) (bool, error)
 	QueryHumanInputState(ctx context.Context, workflowID, runID string) (*temporalclient.HumanInputState, error)
 	SignalHumanInputResponse(ctx context.Context, workflowID, runID string, response map[string]any) error

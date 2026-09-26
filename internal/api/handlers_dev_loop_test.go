@@ -37,6 +37,7 @@ import (
 // the HTTP-layer wiring (auth, status-code mapping, request validation).
 type fakeDevLoopClient struct {
 	startErr              error
+	startCalls            int
 	workflowID, runID     string
 	approveErr            error
 	lastApprovedWorkflow  string
@@ -44,6 +45,9 @@ type fakeDevLoopClient struct {
 	describeErr           error
 	describeStatus        string
 	lastDescribedWorkflow string
+	describeExec          *temporalclient.DevLoopExecution
+	describeExecErr       error
+	describeExecCalls     int
 	shepherdInLoop        bool
 	shepherdInLoopErr     error
 	shepherdQueries       int
@@ -88,6 +92,7 @@ func (f *fakeDevLoopClient) QueryHumanInputState(ctx context.Context, workflowID
 }
 
 func (f *fakeDevLoopClient) StartDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
+	f.startCalls++
 	if f.startErr != nil {
 		return "", "", f.startErr
 	}
@@ -100,8 +105,18 @@ func (f *fakeDevLoopClient) SignalApprove(ctx context.Context, workflowID string
 	return f.approveErr
 }
 
+// DescribeDevLoop prefers describeExec/describeExecErr (the richer fields)
+// when set, falling back to describeStatus/describeErr — so a test can
+// configure either pair and both DescribeDevLoop and DescribeDevLoopExecution
+// answer consistently about the same simulated execution.
 func (f *fakeDevLoopClient) DescribeDevLoop(ctx context.Context, workflowID string) (string, error) {
 	f.lastDescribedWorkflow = workflowID
+	if f.describeExecErr != nil {
+		return "", f.describeExecErr
+	}
+	if f.describeExec != nil {
+		return f.describeExec.Status, nil
+	}
 	if f.describeErr != nil {
 		return "", f.describeErr
 	}
@@ -109,6 +124,24 @@ func (f *fakeDevLoopClient) DescribeDevLoop(ctx context.Context, workflowID stri
 		return "Running", nil
 	}
 	return f.describeStatus, nil
+}
+
+// DescribeDevLoopExecution defaults to describeStatus/describeErr (via
+// DescribeDevLoop) when describeExec/describeExecErr are left unset, so
+// existing tests that only configure the older fields keep working.
+func (f *fakeDevLoopClient) DescribeDevLoopExecution(ctx context.Context, workflowID string) (*temporalclient.DevLoopExecution, error) {
+	f.describeExecCalls++
+	if f.describeExecErr != nil {
+		return nil, f.describeExecErr
+	}
+	if f.describeExec != nil {
+		return f.describeExec, nil
+	}
+	status, err := f.DescribeDevLoop(ctx, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	return &temporalclient.DevLoopExecution{Status: status}, nil
 }
 
 func (f *fakeDevLoopClient) QueryShepherdInLoop(ctx context.Context, workflowID string) (bool, error) {
@@ -194,7 +227,12 @@ func TestStartDevLoopWorkflow_InvalidIssueURLIs400(t *testing.T) {
 }
 
 func TestStartDevLoopWorkflow_TemporalFailureIs502(t *testing.T) {
-	fake := &fakeDevLoopClient{startErr: serviceerror.NewUnavailable("temporal frontend unreachable")}
+	// No prior execution (describe is NotFound), so startDevLoop proceeds to
+	// the actual start, which fails.
+	fake := &fakeDevLoopClient{
+		describeErr: serviceerror.NewNotFound("workflow not found"),
+		startErr:    serviceerror.NewUnavailable("temporal frontend unreachable"),
+	}
 	logger := audit.NewLogger()
 	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 
@@ -225,7 +263,11 @@ func TestStartDevLoopWorkflow_TemporalFailureIs502(t *testing.T) {
 }
 
 func TestStartDevLoopWorkflow_Success(t *testing.T) {
-	fake := &fakeDevLoopClient{workflowID: "dev-loop-mctlhq-mctl-telegram-1", runID: "run-1"}
+	// No prior execution (describe is NotFound), so startDevLoop actually starts.
+	fake := &fakeDevLoopClient{
+		describeErr: serviceerror.NewNotFound("workflow not found"),
+		workflowID:  "dev-loop-mctlhq-mctl-telegram-1", runID: "run-1",
+	}
 	logger := audit.NewLogger()
 	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 
@@ -252,6 +294,158 @@ func TestStartDevLoopWorkflow_Success(t *testing.T) {
 	}
 	if entry.Parameters["issue_url"] != "https://github.com/mctlhq/mctl-telegram/issues/1" {
 		t.Errorf("expected Parameters[issue_url] to match the request, got %q", entry.Parameters["issue_url"])
+	}
+	if entry.Parameters["outcome"] != devLoopOutcomeStarted {
+		t.Errorf("expected Parameters[outcome]=%q, got %q", devLoopOutcomeStarted, entry.Parameters["outcome"])
+	}
+}
+
+// TestStartDevLoopWorkflow_AlreadyRunningIsNotReportedAsAStart is T2: THE
+// REGRESSION TEST for issue #287. StartDevLoopWorkflow's REJECT_DUPLICATE +
+// USE_EXISTING policies mean a call against a running execution truly
+// no-ops; the handler must say so instead of claiming a fresh start.
+func TestStartDevLoopWorkflow_AlreadyRunningIsNotReportedAsAStart(t *testing.T) {
+	fake := &fakeDevLoopClient{
+		describeExec: &temporalclient.DevLoopExecution{Status: "Running", RunID: "run-existing"},
+		// If StartDevLoopWorkflow were called, this would answer with a
+		// DIFFERENT run — proof that the assertions below distinguish "did
+		// not start" from "started and happened to return the same id".
+		workflowID: "dev-loop-mctlhq-mctl-telegram-1", runID: "run-new",
+	}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for an already-running execution, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	if body["started"] != false {
+		t.Errorf("expected started=false, got %v", body["started"])
+	}
+	if body["outcome"] != devLoopOutcomeAlreadyRunning {
+		t.Errorf("expected outcome=%q, got %v", devLoopOutcomeAlreadyRunning, body["outcome"])
+	}
+	if body["run_id"] != "run-existing" {
+		t.Errorf("expected run_id=run-existing (the EXISTING run), got %v", body["run_id"])
+	}
+	if msg, _ := body["message"].(string); strings.Contains(msg, "DevLoopWorkflow started") {
+		t.Errorf("message must not claim a start, got %q", msg)
+	}
+	if fake.startCalls != 0 {
+		t.Fatalf("StartDevLoopWorkflow must not be called for an already-running execution, got %d calls", fake.startCalls)
+	}
+
+	// T6: the audit entry names the no-op explicitly.
+	entries := logger.List(10)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one audit entry, got %d: %+v", len(entries), entries)
+	}
+	entry := entries[0]
+	if entry.Parameters["outcome"] != devLoopOutcomeAlreadyRunning {
+		t.Errorf("expected Parameters[outcome]=%q, got %q", devLoopOutcomeAlreadyRunning, entry.Parameters["outcome"])
+	}
+	if strings.Contains(entry.Message, "DevLoopWorkflow started") {
+		t.Errorf("audit message must not claim a start, got %q", entry.Message)
+	}
+}
+
+// TestStartDevLoopWorkflow_NotFoundStarts is T3: describe NotFound is the
+// only path that actually starts a new execution.
+func TestStartDevLoopWorkflow_NotFoundStarts(t *testing.T) {
+	fake := &fakeDevLoopClient{
+		describeErr: serviceerror.NewNotFound("workflow not found"),
+		workflowID:  "dev-loop-mctlhq-mctl-telegram-1", runID: "run-new",
+	}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	if body["started"] != true {
+		t.Errorf("expected started=true, got %v", body["started"])
+	}
+	if body["outcome"] != devLoopOutcomeStarted {
+		t.Errorf("expected outcome=%q, got %v", devLoopOutcomeStarted, body["outcome"])
+	}
+	if body["run_id"] != "run-new" {
+		t.Errorf("expected run_id=run-new, got %v", body["run_id"])
+	}
+	if fake.startCalls != 1 {
+		t.Fatalf("expected exactly one start call, got %d", fake.startCalls)
+	}
+	entries := logger.List(10)
+	if len(entries) != 1 || entries[0].Parameters["outcome"] != devLoopOutcomeStarted {
+		t.Fatalf("expected one audit entry with outcome=started, got %+v", entries)
+	}
+}
+
+// TestStartDevLoopWorkflow_ClosedExecutionIsAlreadyExists is T4: a closed
+// prior execution (REJECT_DUPLICATE will not restart it) is reported
+// already_exists, not started.
+func TestStartDevLoopWorkflow_ClosedExecutionIsAlreadyExists(t *testing.T) {
+	fake := &fakeDevLoopClient{
+		describeExec: &temporalclient.DevLoopExecution{Status: "Failed", RunID: "run-old"},
+		workflowID:   "dev-loop-mctlhq-mctl-telegram-1", runID: "run-new",
+	}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: audit.NewLogger()}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	if body["outcome"] != devLoopOutcomeAlreadyExists {
+		t.Errorf("expected outcome=%q, got %v", devLoopOutcomeAlreadyExists, body["outcome"])
+	}
+	if body["status"] != "Failed" {
+		t.Errorf("expected status=Failed, got %v", body["status"])
+	}
+	if fake.startCalls != 0 {
+		t.Fatalf("expected no start call for a closed execution, got %d", fake.startCalls)
+	}
+}
+
+// TestStartDevLoopWorkflow_UnreadableDescribeIs502 is T5: a non-NotFound
+// describe error must not be started blind, and the error must say the
+// existing DevLoop could not be read.
+func TestStartDevLoopWorkflow_UnreadableDescribeIs502(t *testing.T) {
+	fake := &fakeDevLoopClient{describeErr: serviceerror.NewUnavailable("temporal frontend unreachable")}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: audit.NewLogger()}}
+
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if fake.startCalls != 0 {
+		t.Fatalf("must not start blind when the existing DevLoop cannot be read, got %d start calls", fake.startCalls)
+	}
+	if !strings.Contains(rec.Body.String(), "could not read") {
+		t.Errorf("expected the body to mention the existing DevLoop could not be read, got %s", rec.Body.String())
 	}
 }
 

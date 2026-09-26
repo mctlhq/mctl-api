@@ -15,8 +15,18 @@
 package temporalclient
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/mock"
+	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
+	workflowpb "go.temporal.io/api/workflow/v1"
+	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/sdk/mocks"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestWorkflowIDForIssueURL(t *testing.T) {
@@ -119,5 +129,82 @@ func TestWorkflowIDForProposalRef(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDescribeDevLoopExecution_AndDescribeDevLoop_AgreeOnStatus is T1: every
+// WORKFLOW_EXECUTION_STATUS_* value (plus an unrecognized one, standing in for
+// the "Unknown" default arm) must map to the exact same status string on both
+// DescribeDevLoopExecution and DescribeDevLoop, and DescribeDevLoopExecution
+// must also surface the run id DescribeDevLoop has always discarded.
+func TestDescribeDevLoopExecution_AndDescribeDevLoop_AgreeOnStatus(t *testing.T) {
+	cases := []struct {
+		name   string
+		status enumspb.WorkflowExecutionStatus
+		want   string
+	}{
+		{"running", enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Running"},
+		{"completed", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, "Completed"},
+		{"failed", enumspb.WORKFLOW_EXECUTION_STATUS_FAILED, "Failed"},
+		{"canceled", enumspb.WORKFLOW_EXECUTION_STATUS_CANCELED, "Canceled"},
+		{"terminated", enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED, "Terminated"},
+		{"continued as new", enumspb.WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW, "ContinuedAsNew"},
+		{"timed out", enumspb.WORKFLOW_EXECUTION_STATUS_TIMED_OUT, "TimedOut"},
+		{"unrecognized status is Unknown", enumspb.WorkflowExecutionStatus(999), "Unknown"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockSDK := &mocks.Client{}
+			startTime := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+			mockSDK.On("DescribeWorkflowExecution", mock.Anything, "dev-loop-mctlhq-mctl-telegram-1", "").
+				Return(&workflowservice.DescribeWorkflowExecutionResponse{
+					WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{
+						Status:    tc.status,
+						Execution: &commonpb.WorkflowExecution{RunId: "run-abc"},
+						StartTime: timestamppb.New(startTime),
+					},
+				}, nil)
+			c := &Client{temporal: mockSDK}
+
+			exec, err := c.DescribeDevLoopExecution(context.Background(), "dev-loop-mctlhq-mctl-telegram-1")
+			if err != nil {
+				t.Fatalf("DescribeDevLoopExecution: unexpected error: %v", err)
+			}
+			if exec.Status != tc.want {
+				t.Errorf("DescribeDevLoopExecution status = %q, want %q", exec.Status, tc.want)
+			}
+			if exec.RunID != "run-abc" {
+				t.Errorf("DescribeDevLoopExecution run id = %q, want %q", exec.RunID, "run-abc")
+			}
+			if !exec.StartTime.Equal(startTime) {
+				t.Errorf("DescribeDevLoopExecution start time = %v, want %v", exec.StartTime, startTime)
+			}
+
+			status, err := c.DescribeDevLoop(context.Background(), "dev-loop-mctlhq-mctl-telegram-1")
+			if err != nil {
+				t.Fatalf("DescribeDevLoop: unexpected error: %v", err)
+			}
+			if status != tc.want {
+				t.Errorf("DescribeDevLoop status = %q, want %q (must match DescribeDevLoopExecution exactly)", status, tc.want)
+			}
+		})
+	}
+}
+
+// TestDescribeDevLoopExecution_PropagatesError confirms a Temporal RPC
+// failure surfaces from DescribeDevLoopExecution and, through the thin
+// wrapper, from DescribeDevLoop too.
+func TestDescribeDevLoopExecution_PropagatesError(t *testing.T) {
+	mockSDK := &mocks.Client{}
+	mockSDK.On("DescribeWorkflowExecution", mock.Anything, "dev-loop-x", "").
+		Return((*workflowservice.DescribeWorkflowExecutionResponse)(nil), errors.New("temporal frontend unreachable"))
+	c := &Client{temporal: mockSDK}
+
+	if _, err := c.DescribeDevLoopExecution(context.Background(), "dev-loop-x"); err == nil {
+		t.Fatal("expected an error from DescribeDevLoopExecution")
+	}
+	if _, err := c.DescribeDevLoop(context.Background(), "dev-loop-x"); err == nil {
+		t.Fatal("expected an error from DescribeDevLoop")
 	}
 }
