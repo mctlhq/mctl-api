@@ -102,6 +102,12 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 // "not found: proceed to start" — every other case is terminal and callers
 // must not start on top of it.
 //
+// It calls DescribeDevLoopExecution — not the plainer DescribeDevLoop — so a
+// single Temporal describe RPC supplies both the status used to classify the
+// execution and the run id reported alongside it. A second describe call
+// purely to fetch the run id would be a redundant Temporal round trip:
+// DescribeDevLoopExecution already returns both fields from the one call.
+//
 //   - describe succeeds and status == "Running" -> already_running, existing
 //     run id, do NOT start.
 //   - describe succeeds with any other status (a closed execution) ->
@@ -111,16 +117,16 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 //   - describe fails with any other error -> failed, WITHOUT starting: an
 //     unreadable execution is never started blind.
 func classifyDevLoop(ctx context.Context, c DevLoopClient, workflowID string) devLoopStartResult {
-	status, err := c.DescribeDevLoop(ctx, workflowID)
+	exec, err := c.DescribeDevLoopExecution(ctx, workflowID)
 	switch {
 	case err != nil && !temporalclient.IsNotFound(err):
 		// Cannot tell whether it exists: do not start blind.
 		return devLoopStartResult{Outcome: devLoopOutcomeFailed, Err: fmt.Errorf("could not read the existing DevLoop: %w", err)}
-	case err == nil && status == "Running":
-		return devLoopStartResult{Outcome: devLoopOutcomeAlreadyRunning, Status: status, RunID: existingDevLoopRunID(ctx, c, workflowID)}
+	case err == nil && exec.Status == "Running":
+		return devLoopStartResult{Outcome: devLoopOutcomeAlreadyRunning, Status: exec.Status, RunID: exec.RunID}
 	case err == nil:
 		// A closed DevLoop is not restarted (REJECT_DUPLICATE); report it.
-		return devLoopStartResult{Outcome: devLoopOutcomeAlreadyExists, Status: status, RunID: existingDevLoopRunID(ctx, c, workflowID)}
+		return devLoopStartResult{Outcome: devLoopOutcomeAlreadyExists, Status: exec.Status, RunID: exec.RunID}
 	default:
 		return devLoopStartResult{}
 	}
@@ -140,23 +146,6 @@ func startDevLoopAfterNotFound(ctx context.Context, c DevLoopClient, issueURL, w
 	default:
 		return devLoopStartResult{Outcome: devLoopOutcomeStarted, RunID: runID}
 	}
-}
-
-// existingDevLoopRunID best-effort fetches the run id of an execution
-// startDevLoop already knows exists (Running or closed) — a second describe,
-// bounded by its own short deadline, so a slow or failing lookup degrades to
-// an empty run id rather than turning a legitimate no-op outcome into a
-// failure. The status has already been decided by this point; this call only
-// enriches the response with an identifier for what the caller should follow
-// up on (e.g. with mctl_get_dev_loop).
-func existingDevLoopRunID(ctx context.Context, c DevLoopClient, workflowID string) string {
-	dctx, cancel := context.WithTimeout(ctx, devLoopDescribeTimeout)
-	defer cancel()
-	exec, err := c.DescribeDevLoopExecution(dctx, workflowID)
-	if err != nil || exec == nil {
-		return ""
-	}
-	return exec.RunID
 }
 
 // requireTemporalAdmin mirrors requireAgentRegistryAdmin: configured,
