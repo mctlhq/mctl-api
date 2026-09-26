@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.54.0](https://github.com/mctlhq/mctl-api/compare/4.53.0...4.54.0) (2026-09-26)
+
+
+### Features
+
+* **oauth:** persist dynamic client registrations for the Cloudflare portal (DCR) ([abfdb29](https://github.com/mctlhq/mctl-api/commit/abfdb29d26385b7d40f50fc9142f8eb31d3865af))
+* **oauth:** persist dynamic client registrations, idempotent per metadata ([8d3a185](https://github.com/mctlhq/mctl-api/commit/8d3a1854e13876bcafb091654fca24de07aba4c3)), closes [#395](https://github.com/mctlhq/mctl-api/issues/395)
+
+
+### Bug Fixes
+
+* **ci:** portal allowlist dispatch runs from main only; link the vendor run ([3e2e020](https://github.com/mctlhq/mctl-api/commit/3e2e020beb42081058e6258b04ee9e3d0f2ebdc2))
+* **mcp:** apply the reason floor to every allowlist entry ([473df1e](https://github.com/mctlhq/mctl-api/commit/473df1e3f8bda7c16db1ad777b4fc135de0406b1))
+* **mcp:** give every portal allowlist entry a reason ([e4ed099](https://github.com/mctlhq/mctl-api/commit/e4ed099d8996817b9ca33e8ab9bc9540326b0fd7))
+* **mcp:** give every portal allowlist entry a reason ([cf2dfc2](https://github.com/mctlhq/mctl-api/commit/cf2dfc25d463fd5e566067e693f61512d9bcfea8))
+* **oauth:** bound client-store lookups and keep used DCR clients under churn ([e2e6d59](https://github.com/mctlhq/mctl-api/commit/e2e6d59b15d3e9d29f78fee2de009742f8297ae1))
+
 ## [4.53.0](https://github.com/mctlhq/mctl-api/compare/4.52.1...4.53.0) (2026-09-24)
 
 
