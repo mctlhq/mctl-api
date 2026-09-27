@@ -243,7 +243,7 @@ func main() {
 			slog.Error("principal store init failed; callers carry no canonical principal id", "error", psErr)
 		} else {
 			principalStore = ps
-			defer ps.Close() //nolint:gocritic // exitAfterDefer: closed explicitly above the one os.Exit reachable after this defer (on fedErr, below); every other return from main runs this defer normally
+			defer ps.Close()
 			principalResolver = principals.NewResolver(ps, githubIDLookup(), os.Getenv("AUTH_REQUIRED") == "false")
 		}
 	}
@@ -266,7 +266,7 @@ func main() {
 			principalStore.Close()
 		}
 		stopSignals()
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // exitAfterDefer: principalStore, the one deferred close above, is closed explicitly just before this exit
 	}
 
 	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer,
