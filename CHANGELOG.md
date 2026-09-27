@@ -1,5 +1,38 @@
 # Changelog
 
+## [4.55.0](https://github.com/mctlhq/mctl-api/compare/4.54.0...4.55.0) (2026-09-27)
+
+
+### Features
+
+* **agents:** issue-287-mctl-trigger-issue-with-use-temporal-tru ([f4db203](https://github.com/mctlhq/mctl-api/commit/f4db2031215bb6916ae507d9585a994931f3f3fc))
+* **agents:** issue-287-mctl-trigger-issue-with-use-temporal-tru ([7512b9e](https://github.com/mctlhq/mctl-api/commit/7512b9e8056a48c58319a197e604f6a31ec8929f))
+* **agents:** issue-374-feat-unified-identity-introduce-a-swappa ([4ae298c](https://github.com/mctlhq/mctl-api/commit/4ae298cd4cb4574da58ea92837982b7a944d3b39))
+* **agents:** issue-374-feat-unified-identity-introduce-a-swappa ([6849319](https://github.com/mctlhq/mctl-api/commit/684931993b95a397fffed8c11d540f1dae2469c8))
+* **agents:** issue-402-feat-usage-persist-temporal-run-id-in-th ([7e62dcc](https://github.com/mctlhq/mctl-api/commit/7e62dcc62756384d63f608fc41dc2ba12150afe1))
+* **agents:** issue-402-feat-usage-persist-temporal-run-id-in-th ([9673297](https://github.com/mctlhq/mctl-api/commit/9673297505c1409bffe5e1633753f089e8c68d58))
+* **agents:** issue-403-feat-usage-mount-the-usage-price-catalog ([c9edc41](https://github.com/mctlhq/mctl-api/commit/c9edc41eb4cc35063d00bf3abaad69ef5b97fcb9))
+* **agents:** issue-403-feat-usage-mount-the-usage-price-catalog ([b4f54ba](https://github.com/mctlhq/mctl-api/commit/b4f54ba82859e158c0681bcbb569c2d5f80b8a76))
+* **agents:** issue-411-fix-auth-oauth-sessions-keep-tenant-grou ([5e4aa53](https://github.com/mctlhq/mctl-api/commit/5e4aa5303fe594e7913294a9236eea5fd605c22e))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-287-mctl-trigger-issue-with-use-temporal-tru ([b8be2ae](https://github.com/mctlhq/mctl-api/commit/b8be2ae319b127c66f617a99acbb57ccf726c519))
+* **agents:** address P1/P2 codex findings on issue-374-feat-unified-identity-introduce-a-swappa ([6870b55](https://github.com/mctlhq/mctl-api/commit/6870b55ea1c65ee064fbb338a25a7fb1be7d94c8))
+* **agents:** address P1/P2 codex findings on issue-374-feat-unified-identity-introduce-a-swappa ([8f384f9](https://github.com/mctlhq/mctl-api/commit/8f384f97419b73afd71335b8858160758298564e))
+* **auth:** bound busy-beyond-grace; login skips negative cache ([32a1ad1](https://github.com/mctlhq/mctl-api/commit/32a1ad1e4e3df29c0c43a164f5a792f65f16c9a4))
+* **auth:** busy bypasses grace; login waits; keep snapshot on fallback ([6df9748](https://github.com/mctlhq/mctl-api/commit/6df9748b738548c83345a4c9d580c30e5113dea4))
+* **auth:** fall back to the subject when no display claim matches ([58d4d32](https://github.com/mctlhq/mctl-api/commit/58d4d3254f0e0e56d1239d28faa158bd0a1056ea))
+* **auth:** harden the group-resolution failure path on the request hot path ([724d24d](https://github.com/mctlhq/mctl-api/commit/724d24d6d97f1920ef0b820447759ffd04f6dddb))
+* **auth:** keep admins on the Dex canary; name dex replaces the shim on any issuer ([0a19ea5](https://github.com/mctlhq/mctl-api/commit/0a19ea5cb99bc7e96f55902d502f26b21be07e64))
+* **auth:** let MCTL_FEDERATION_DISABLED roll back a refused federation config ([20428bf](https://github.com/mctlhq/mctl-api/commit/20428bfbfe2e112493ea097fd4d9980b902ae127))
+* **auth:** re-resolve tenant groups on OAuth refresh and validate ([51c2533](https://github.com/mctlhq/mctl-api/commit/51c2533dbe9e93d11750657c0618365f4336810c))
+* **ci:** fix failing required checks on issue-403-feat-usage-mount-the-usage-price-catalog ([cdec195](https://github.com/mctlhq/mctl-api/commit/cdec195e6ef88909016bcfee4fed5149efb2e0d7))
+* **lint:** put the exitAfterDefer nolint on the os.Exit it reports ([377f55c](https://github.com/mctlhq/mctl-api/commit/377f55c013dd80637df57640cccfc7f94b474a7d))
+* **operations:** tenant ops no longer claim the shared argocd/values.yaml ([9334275](https://github.com/mctlhq/mctl-api/commit/9334275545b6663b3178a6ae0b32f11f5444a786))
+* **operations:** tenant ops no longer claim the shared argocd/values.yaml ([88ef1d8](https://github.com/mctlhq/mctl-api/commit/88ef1d819f65f42bfbf3ef5f59c70b0e3d32bca2))
+
 ## [4.54.0](https://github.com/mctlhq/mctl-api/compare/4.53.0...4.54.0) (2026-09-26)
 
 
