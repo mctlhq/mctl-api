@@ -59,6 +59,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/vault"
 	"github.com/mctlhq/mctl-api/internal/vmetrics"
 	"github.com/mctlhq/mctl-api/internal/workitems"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func main() {
@@ -94,6 +95,21 @@ func main() {
 	checkCredentialSource("gitops-clone", cfg.GitOpsToken)
 	checkCredentialSource("actions-dispatch", cfg.GitOpsActionsToken)
 	gitReader := gitops.NewReader(cfg.GitOpsRepoURL, cfg.GitOpsBranch, cfg.GitOpsLocalPath, cfg.GitOpsToken, cfg.GitOpsSSHKeyPath, cfg.GitOpsSSHKnownHostsPath)
+	// Scrape-time gauge (never written from a "stale" branch, so it always
+	// reflects the current state and needs no reset path): backs
+	// OAUTH_GROUPS_MAX_STALENESS alerting and the "Authorization group
+	// freshness" behaviour documented in README.md. -1 while the checkout
+	// has never synced, so that is distinguishable from "just synced".
+	prometheus.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "mctl_api_gitops_last_sync_age_seconds",
+		Help: "Seconds since the gitops checkout's last successful sync; -1 while it has never synced.",
+	}, func() float64 {
+		last := gitReader.LastSync()
+		if last.IsZero() {
+			return -1
+		}
+		return time.Since(last).Seconds()
+	}))
 
 	// Dex JWT verifier (optional — disabled if DEX_ISSUER_URL is unset or unreachable).
 	var dexVerifier *auth.DexVerifier
@@ -144,6 +160,13 @@ func main() {
 		oauthServer.TenantResolver = gitReader
 		oauthServer.AccessTokenTTL = cfg.OAuthTokenTTL
 		oauthServer.RefreshTokenTTL = cfg.OAuthRefreshTokenTTL
+		// Unset/0 = strict mode off: a stale checkout is used and alerted on
+		// via the gauge above, not failed (mctl-api#411, README.md
+		// "Authorization group freshness"). GroupsDegradedGrace is
+		// deliberately left at 0, which OAuthServer resolves to
+		// AccessTokenTTL -- the bound requirements.md names.
+		oauthServer.GroupsMaxStaleness = parseDuration(os.Getenv("OAUTH_GROUPS_MAX_STALENESS"), 0)
+		oauthServer.GroupsCacheTTL = parseDuration(os.Getenv("OAUTH_GROUPS_CACHE_TTL"), 30*time.Second)
 		// Static public clients for counterparts that cannot register
 		// dynamically (the Cloudflare MCP portal). Seeded before the first
 		// request and never evicted, so the client id a portal stored keeps
@@ -164,7 +187,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		slog.Info("OAuth 2.0 server enabled", "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL, "preregistered_clients", oauthServer.PreregisteredClientCount())
+		slog.Info("OAuth 2.0 server enabled", "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL, "preregistered_clients", oauthServer.PreregisteredClientCount(), "groups_max_staleness", oauthServer.GroupsMaxStaleness, "groups_cache_ttl", oauthServer.GroupsCacheTTL)
 
 		// Persistent refresh-token store: prefer OAUTH_DB_URL, fall back to AUDIT_DB_URL.
 		// When available, refresh tokens survive pod restarts; without it the in-memory

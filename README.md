@@ -135,6 +135,8 @@ docker run -p 8080:8080 mctl-api
 | `OAUTH_ALLOWED_REDIRECT_URIS` | Comma-separated redirect URIs accepted at `/oauth/authorize` and by Dynamic Client Registration (`POST /oauth/register`). An entry is an **exact** string compare unless it ends in `/*`, which makes it a prefix match; prefer exact entries (the Cloudflare MCP portal's `https://mcp.mctl.ai/servers-callback` and its dashboard `…/mcp-server/oauth-callback/api` callback are listed exactly, never as a `dash.cloudflare.com/*` prefix). Loopback `http://` callbacks are always accepted (RFC 8252). A registration naming any other URI gets `400 invalid_redirect_uri` | glama, smithery, `chatgpt.com/connector/oauth/*` | No |
 | `OAUTH_DB_URL` | PostgreSQL for OAuth refresh tokens and dynamic client registrations (falls back to `AUDIT_DB_URL`). With a database, a client registered through `POST /oauth/register` survives restarts, and registration is idempotent: the same `client_name` and redirect-URI set get the same `client_id` back. Registrations that have never completed a token exchange are capped at 1000 (least recently seen evicted); a client that has completed one is never evicted by the cap. Any row is dropped after 90 days unseen, where a registration, token exchange or refresh counts as seen. Without one, registrations are in-memory and lost on restart. Every registration is granted scope `mctl`, the only scope | `AUDIT_DB_URL` | No |
 | `OAUTH_PREREGISTERED_CLIENTS` | JSON array of static public OAuth clients for counterparts that cannot register dynamically (the Cloudflare MCP portal): `[{"client_id":"…","client_name":"…","redirect_uris":["https://…"]}]`. Exact redirect match, no secret field, never evicted; a malformed value or an unknown key refuses startup | — | No |
+| `OAUTH_GROUPS_MAX_STALENESS` | Strict mode for tenant-group resolution (mctl-api#411, see "Authorization group freshness" below): a Go duration beyond which a gitops checkout that has not synced recently is treated as a **failed** resolution instead of merely a logged warning. Unset (or malformed) disables strict mode. | unset | No |
+| `OAUTH_GROUPS_CACHE_TTL` | How long a successful tenant-group resolution is memoized per login, bounding the added cost of re-resolving on every JWT validation. Unset or malformed falls back to the default. | `30s` | No |
 | `AUDIT_DB_URL` | PostgreSQL connection string (falls back to in-memory). `sslmode=disable` is upgraded to `require`, or `verify-full` when a CNPG CA is mounted. | — | No |
 | `HUMAN_INPUT_DB_URL` | PostgreSQL for the human-input delivery ledger (`POST /api/v1/human-input/{request_id}/response`). Falls back to `AUDIT_DB_URL`; with neither, that endpoint answers 503 (there is no in-memory fallback). The raw answer is kept only until its delivery resolves, or until the request expires. | — | No |
 | `WORK_ITEMS_DB_URL` | PostgreSQL for the `workitem/v1` store (`/api/v1/work-items*`). Falls back to `AUDIT_DB_URL`; with neither, every work-items route answers 503. | — | No |
@@ -179,6 +181,81 @@ Three authentication methods are supported:
 | OAuth 2.0 + PKCE | Authorization Code flow | For Claude.ai custom connectors |
 
 Get a token: run `gh auth token` or visit [mctl.ai/mcp](https://mctl.ai/mcp) to sign in and copy a pre-filled config. Your GitHub account must be a member of the `mctlhq` organization.
+
+### Authorization group freshness
+
+mctl-api#411. Local OAuth 2.0 sessions (the JWTs `ValidateJWT` verifies, and
+every refresh-token grant) re-resolve tenant group membership and admin
+status from the gitops checkout on every use, instead of freezing them at
+first login:
+
+- **Grant**: create or join a tenant in `tenants/<t>/values.yaml`, and the
+  next `POST /oauth/token` refresh or the next authenticated request carries
+  it — no re-login, within the gitops refresh interval (60s) plus
+  `OAUTH_GROUPS_CACHE_TTL` (30s), so about 90s at worst.
+- **Revoke**: remove someone from `tenants/<t>/values.yaml`, or delete the
+  tenant, and their live session loses access within one
+  `OAUTH_TOKEN_TTL`-sized "degraded grace" window at worst (see below), not
+  after the full `OAUTH_REFRESH_TOKEN_TTL` (30 days) the old frozen-groups
+  behaviour allowed.
+- **`admins`** is derived from `ADMIN_USERS` fresh on every resolution too,
+  never taken from a stored or claimed snapshot: granting or revoking admin
+  status behaves like any other group change.
+
+What happens to a live session when the gitops checkout is unreachable for
+two hours:
+
+1. For the first "degraded grace" window (not independently configurable;
+   it always equals `OAUTH_TOKEN_TTL`, so 1h by default) since the *last
+   process-wide successful resolution*, the session keeps its previously
+   known tenant groups, with `admins` still recomputed fresh, and a
+   `slog.Warn` is logged at most once a minute. The failure itself is cached
+   for 5s, so during an outage the tenant files are re-read at most once
+   every 5s, not on every authenticated request.
+2. Past that window, the session fails closed: it keeps working (never
+   signed out), but with tenant groups dropped, keeping only `admins` if the
+   login is a configured admin. This is what bounds a resolver outage from
+   defeating a tenant removal for longer than one access-token TTL.
+3. The moment the checkout resolves again, resolution succeeds and the
+   session's real groups are restored immediately — nothing needs a restart
+   or a re-login.
+
+A gitops checkout that is merely **stale but present** — the far more common
+case, since a `git fetch` failure most often means GitHub itself is down,
+which also blocks pushing a *removal* — is treated as a **successful**
+resolution by default, not a failure: fail-closed after 15 minutes would lock
+every tenant user out about 75 minutes into a GitHub incident, for no
+security benefit, since the same outage blocks the removal that would defeat.
+It is logged (rate-limited to once a minute) and exposed as the
+`mctl_api_gitops_last_sync_age_seconds` gauge so it can be alerted on
+(`-1` while the checkout has never synced). Set `OAUTH_GROUPS_MAX_STALENESS`
+to opt into strict mode, where a checkout older than that duration is treated
+as a failed resolution instead — a stricter operator setting always wins over
+the fixed 15-minute default.
+
+A suggested alert:
+
+```promql
+mctl_api_gitops_last_sync_age_seconds > 900
+```
+
+Per-request group resolution does not block on the gitops reader. A refresh
+holds the reader's write lock while it runs `git fetch`/`reset` (each git
+command is bounded by a 2-minute timeout). Within the degraded grace window, a
+lookup that would have to wait instead uses the session's own groups for that
+request, without a warning (a busy reader says nothing about its health).
+Beyond grace, the session snapshot is no longer trusted: the request retries
+for up to 2s, so a normal short refresh still answers correctly, and if the
+reader is still busy it fails closed like any other failure, with the
+rate-limited warning. A busy result is not cached. Login itself waits out a
+refresh and ignores the 5s failure cache, because the groups resolved at login
+become the refresh-token snapshot that later fallbacks rely on. `LastSync()` and the sync-age
+gauge are lock-free, so `/metrics` keeps answering during a hung fetch.
+
+A never-synced checkout (gauge reads `-1`, or `LastSync()` is the zero value)
+is always a failed resolution, never "this user has no tenants" — that
+distinction is what stops a pod whose first gitops clone failed from
+silently stripping every session's access.
 
 ### REST API
 
