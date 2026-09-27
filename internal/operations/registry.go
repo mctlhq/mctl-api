@@ -288,7 +288,13 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "create-tenant",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  true,
-		ModifiesPaths:    []string{"platform-gitops/tenants/{tenant_name}/", "platform-gitops/argocd/values.yaml"},
+		// Every path is tenant-scoped: since mctl-gitops#1431, Argo CD RBAC
+		// lives in a per-tenant fragment, not in the shared argocd/values.yaml.
+		ModifiesPaths: []string{
+			"platform-gitops/tenants/{tenant_name}/",
+			"platform-gitops/argocd/rbac/tenants/{tenant_name}.csv",
+			"platform-gitops/argo-workflows/sso-team-{tenant_name}.yaml",
+		},
 		Parameters: []ParameterDef{
 			{Name: "tenant_name", Type: "string", Required: true, Description: "Workspace name (DNS-safe, lowercase)", Pattern: "^[a-z0-9][a-z0-9-]{1,62}$"},
 			{Name: "display_name", Type: "string", Description: "Human-readable team name"},
@@ -345,7 +351,17 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "delete-tenant-safe",
 		RiskLevel:        RiskHigh,
 		RequiresConfirm:  true,
-		ModifiesPaths:    []string{"platform-gitops/tenants/{tenant_name}/", "platform-gitops/argocd/values.yaml"},
+		// What delete-tenant-safe removes. The CNPG shared files are the only
+		// non-tenant-scoped paths: the tenant's database entries are cut out
+		// of them.
+		ModifiesPaths: []string{
+			"platform-gitops/tenants/{tenant_name}/",
+			"platform-gitops/services/{tenant_name}/",
+			"platform-gitops/argocd/rbac/tenants/{tenant_name}.csv",
+			"platform-gitops/argo-workflows/sso-team-{tenant_name}.yaml",
+			"platform-gitops/platform-skills/bindings/tenants/{tenant_name}.yaml",
+			"platform-gitops/infra-components/data/cnpg/shared/",
+		},
 		Parameters: []ParameterDef{
 			{Name: "tenant_name", Type: "string", Required: true, Description: "Workspace name to delete", Pattern: "^[a-z0-9][a-z0-9-]{1,62}$"},
 		},
