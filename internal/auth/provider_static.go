@@ -67,9 +67,11 @@ func (p *serviceTokenProvider) Verify(_ context.Context, raw string) (*Verified,
 
 // surfaceProvider is the static-secret provider for the per-surface tokens
 // (MCTL_SURFACE_TELEGRAM_TOKEN, MCTL_SURFACE_PORTAL_TOKEN, mctl-api#350).
-// tokens is read fresh from the environment on every call, matching
-// surfaceTokens()'s existing behaviour of re-reading and re-validating (short,
-// shared or service-colliding tokens refused) on each request.
+// Both construction sites (BuildFederationRegistry, defaultFederationRegistry)
+// pass a closure over the map surfaceTokens() validated once at startup, as
+// the pre-registry Middleware does: the process environment cannot change
+// under a running pod, so rotating a surface token means a restart, and
+// re-reading per request only repeated the validation's error logging.
 type surfaceProvider struct{ tokens func() map[string]string }
 
 func newSurfaceProvider(tokens func() map[string]string) *surfaceProvider {

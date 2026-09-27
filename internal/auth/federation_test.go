@@ -460,6 +460,25 @@ func TestGenericOIDCProviderIdentityRoundTrips(t *testing.T) {
 	}
 }
 
+// An entry whose display_claims omit "sub" and match nothing in the token
+// still yields a non-empty User.ID: Display falls back to the subject, so
+// two such callers of one provider can never share the identity "".
+func TestGenericOIDCProviderDisplayFallsBackToSubject(t *testing.T) {
+	spec := OIDCProviderSpec{Name: "acme", Issuer: "https://acme.example", Audiences: []string{"aud"}, AudienceEnforcement: AudienceEnforce, Kind: KindHuman, DisplayClaims: []string{"email"}}
+	fv := fakeOIDCVerifier{tok: &oidcVerifiedToken{
+		Issuer: "https://acme.example", Audience: []string{"aud"},
+		Claims: map[string]any{"sub": "u-123"},
+	}}
+	p := newOIDCProviderForTest(spec, fv)
+	v, err := p.Verify(context.Background(), "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := userFromVerified(v); u.ID != "u-123" {
+		t.Fatalf("ID = %q, want the subject %q", u.ID, "u-123")
+	}
+}
+
 // A generic OIDC provider's groups claim has "admins" stripped (P2 fix:
 // docs/federation.md and requirements.md promise this proposal does not
 // change who counts as an admin, but the shared oidcProvider.Verify code

@@ -206,6 +206,13 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 			break
 		}
 	}
+	// An operator's display_claims may omit "sub" and match nothing in a
+	// given token. Fall back to the subject (the provider contract refuses
+	// an empty one) so User.ID is never empty: otherwise every such caller
+	// of this provider would share the one identity "".
+	if display == "" {
+		display = subject
+	}
 	var groups []string
 	if raw, ok := tok.Claims[p.spec.GroupsClaim]; ok {
 		groups = toStringSlice(raw)
