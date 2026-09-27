@@ -420,6 +420,81 @@ func TestDexShapedTokenMapsIdentically(t *testing.T) {
 	}
 }
 
+// A generic (non-dex, non-github, non-service) MCTL_OIDC_PROVIDERS entry's
+// verified identity round-trips through userFromVerified and User.Identity()
+// with the provider's own namespace, issuer, subject and kind -- proving the
+// P1 fix that such a user is now identity-bearing (previously
+// userFromVerified's default case dropped every discriminator and
+// Identity() had no case for it, so AttachPrincipal could never resolve or
+// disable it).
+func TestGenericOIDCProviderIdentityRoundTrips(t *testing.T) {
+	spec := OIDCProviderSpec{Name: "acme", Issuer: "https://acme.example", Audiences: []string{"aud"}, AudienceEnforcement: AudienceEnforce, Kind: KindHuman}
+	fv := fakeOIDCVerifier{tok: &oidcVerifiedToken{
+		Issuer: "https://acme.example", Audience: []string{"aud"},
+		Claims: map[string]any{"sub": "u-123", "preferred_username": "bob"},
+	}}
+	p := newOIDCProviderForTest(spec, fv)
+	v, err := p.Verify(context.Background(), "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := userFromVerified(v)
+	if u.ID != "bob" {
+		t.Fatalf("ID = %q, want %q", u.ID, "bob")
+	}
+	id, ok := u.Identity()
+	if !ok {
+		t.Fatal("Identity() ok = false, want true for a generic OIDC user")
+	}
+	want := Identity{Provider: "acme", Issuer: "https://acme.example", Subject: "u-123", Display: "bob", Kind: KindHuman}
+	if id != want {
+		t.Fatalf("Identity() = %+v, want %+v", id, want)
+	}
+}
+
+// A generic OIDC provider's groups claim has "admins" stripped (P2 fix:
+// docs/federation.md and requirements.md promise this proposal does not
+// change who counts as an admin, but the shared oidcProvider.Verify code
+// path is now reachable by any operator-configured MCTL_OIDC_PROVIDERS
+// entry). The Dex slot is exempt and keeps "admins" unfiltered, matching
+// DexVerifier.Verify's pre-existing behaviour bit-for-bit.
+func TestGenericOIDCProviderStripsAdminsGroupButDexKeepsIt(t *testing.T) {
+	claims := map[string]any{"sub": "u-123", "preferred_username": "bob", "groups": []any{"admins", "team-a"}}
+
+	genericSpec := OIDCProviderSpec{Name: "acme", Issuer: "https://acme.example", Audiences: []string{"aud"}, AudienceEnforcement: AudienceEnforce}
+	genericFV := fakeOIDCVerifier{tok: &oidcVerifiedToken{Issuer: "https://acme.example", Audience: []string{"aud"}, Claims: claims}}
+	genericP := newOIDCProviderForTest(genericSpec, genericFV)
+	gv, err := genericP.Verify(context.Background(), "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericUser := userFromVerified(gv)
+	if reflect.DeepEqual(genericUser.Groups, []string{"admins", "team-a"}) {
+		t.Fatal("generic OIDC provider must not keep the admins group")
+	}
+	if genericUser.IsAdmin() {
+		t.Fatal("generic OIDC provider must not be able to mint an admin user")
+	}
+	if !reflect.DeepEqual(genericUser.Groups, []string{"team-a"}) {
+		t.Fatalf("Groups = %v, want [team-a] (admins stripped, team-a kept)", genericUser.Groups)
+	}
+
+	dexSpec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://dex.example", AudienceEnforcement: AudienceEnforce, SkipAudienceCheck: true}
+	dexFV := fakeOIDCVerifier{tok: &oidcVerifiedToken{Issuer: "https://dex.example", Claims: claims}}
+	dexP := newOIDCProviderForTest(dexSpec, dexFV)
+	dv, err := dexP.Verify(context.Background(), "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dexUser := userFromVerified(dv)
+	if !dexUser.IsAdmin() {
+		t.Fatal("dex compatibility broken: admins group must still confer admin")
+	}
+	if !reflect.DeepEqual(dexUser.Groups, []string{"admins", "team-a"}) {
+		t.Fatalf("dex Groups = %v, want [admins team-a] unfiltered", dexUser.Groups)
+	}
+}
+
 // ─── T1/T2/T11: characterization against the pre-registry chain, and kill
 // switch parity ─────────────────────────────────────────────────────────────
 

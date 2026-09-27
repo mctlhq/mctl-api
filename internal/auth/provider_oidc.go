@@ -194,6 +194,22 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 	var groups []string
 	if raw, ok := tok.Claims[p.spec.GroupsClaim]; ok {
 		groups = toStringSlice(raw)
+		// docs/federation.md and requirements.md promise this proposal only
+		// relocates the existing group resolution without changing who counts
+		// as an admin. This same code path is now reachable by any
+		// operator-configured MCTL_OIDC_PROVIDERS entry, so "admins" is
+		// dropped here exactly as NewRelayedUser drops it for a relayed
+		// subject -- except for the Dex slot, which must keep reproducing
+		// DexVerifier.Verify's unfiltered-groups behaviour bit-for-bit.
+		if p.spec.Name != ProviderDex {
+			kept := make([]string, 0, len(groups))
+			for _, g := range groups {
+				if g != "admins" {
+					kept = append(kept, g)
+				}
+			}
+			groups = kept
+		}
 	}
 
 	return &Verified{

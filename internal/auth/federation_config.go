@@ -89,7 +89,8 @@ func ParseOIDCProviders(raw string) ([]OIDCProviderConfigEntry, error) {
 
 	seenNames := map[string]bool{}
 	seenIssuers := map[string]string{}
-	for _, e := range out {
+	for i := range out {
+		e := &out[i]
 		if e.Name == "" {
 			return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: an entry has no name")
 		}
@@ -155,20 +156,25 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 		return nil, err
 	}
 
+	surfaces := surfaceTokens()
+	usageWriter := usageWriterToken()
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
-		newSurfaceProvider(surfaceTokens),
-		newUsageWriterProvider(usageWriterToken),
+		newSurfaceProvider(func() map[string]string { return surfaces }),
+		newUsageWriterProvider(func() string { return usageWriter }),
 	}
 
 	var jwtProviders []Provider
-	if oauth != nil {
+	if oauth != nil && oauth.BaseURL != "" {
 		jwtProviders = append(jwtProviders, newLocalOAuthProvider(oauth))
+	} else if oauth != nil {
+		slog.Warn("oauth server has empty BaseURL; local-oauth provider disabled")
 	}
 
 	dexIssuer := normalizeIssuer(cfg.DexIssuerURL)
 	dexClaimedExplicitly := false
-	for _, e := range entries {
+	for i := range entries {
+		e := &entries[i]
 		if normalizeIssuer(e.Issuer) == dexIssuer && dexIssuer != "" {
 			dexClaimedExplicitly = true
 		}

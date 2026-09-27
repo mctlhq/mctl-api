@@ -88,6 +88,16 @@ type User struct {
 	dexSubject string
 	dev        bool
 
+	// oidcProviderName, oidcIssuer, oidcSubject, oidcKind record a verified
+	// identity from a generic MCTL_OIDC_PROVIDERS entry (mctl-api#374 slice A)
+	// that is none of service/surface/usage-writer/dev/dex/github. Unexported
+	// for the same reason as the other discriminators: set only by
+	// userFromVerified.
+	oidcProviderName string
+	oidcIssuer       string
+	oidcSubject      string
+	oidcKind         string
+
 	// principalID is the canonical principal (prn_...) resolved from that
 	// identity, and viaPrincipalID the relaying surface's principal. Set
 	// only by AttachPrincipal and NewRelayedUser.
@@ -671,8 +681,10 @@ func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolv
 		newUsageWriterProvider(func() string { return usageWriter }),
 	}
 	var jwtProviders []Provider
-	if oauth != nil {
+	if oauth != nil && oauth.BaseURL != "" {
 		jwtProviders = append(jwtProviders, newLocalOAuthProvider(oauth))
+	} else if oauth != nil {
+		slog.Warn("oauth server has empty BaseURL; local-oauth provider disabled")
 	}
 	if dex != nil && dex.Issuer() != "" {
 		jwtProviders = append(jwtProviders, legacyDexProvider{dex: dex})
@@ -747,7 +759,11 @@ func userFromVerified(v *Verified) *User {
 	case v.Identity.Provider == ProviderDex:
 		return &User{ID: v.Identity.Display, Groups: v.Claims.Groups, dexIssuer: v.Identity.Issuer, dexSubject: v.Identity.Subject}
 	default:
-		return &User{ID: v.Identity.Display, Groups: v.Claims.Groups}
+		return &User{
+			ID: v.Identity.Display, Groups: v.Claims.Groups,
+			oidcProviderName: v.Identity.Provider, oidcIssuer: v.Identity.Issuer,
+			oidcSubject: v.Identity.Subject, oidcKind: v.Identity.Kind,
+		}
 	}
 }
 

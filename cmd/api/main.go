@@ -263,6 +263,9 @@ func main() {
 	}, ghValidator, gitReader, oauthServer)
 	if fedErr != nil {
 		slog.Error("invalid configuration", "error", fmt.Errorf("MCTL_OIDC_PROVIDERS: %w", fedErr))
+		if principalStore != nil {
+			principalStore.Close()
+		}
 		stopSignals()
 		os.Exit(1)
 	}

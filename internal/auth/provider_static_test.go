@@ -93,7 +93,7 @@ func TestStaticSecretPathUsesConstantTimeCompareOnly(t *testing.T) {
 
 func readSourceFile(t *testing.T, path string) string {
 	t.Helper()
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- path is this package's own source file, derived from runtime.Caller, not user input
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
