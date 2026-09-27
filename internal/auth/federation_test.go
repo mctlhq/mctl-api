@@ -149,6 +149,13 @@ func TestParseOIDCProvidersRejectsInvalidEnforcement(t *testing.T) {
 	}
 }
 
+func TestParseOIDCProvidersRejectsInvalidKind(t *testing.T) {
+	raw := `[{"name":"acme","issuer":"https://issuer","audiences":["a"],"kind":"robot"}]`
+	if _, err := ParseOIDCProviders(raw); err == nil {
+		t.Fatal("expected refusal for invalid kind")
+	}
+}
+
 func TestParseOIDCProvidersRejectsDuplicateNameAndIssuer(t *testing.T) {
 	dupName := `[{"name":"a","issuer":"https://i1","audiences":["x"]},{"name":"a","issuer":"https://i2","audiences":["x"]}]`
 	if _, err := ParseOIDCProviders(dupName); err == nil {
@@ -479,7 +486,7 @@ func TestGenericOIDCProviderStripsAdminsGroupButDexKeepsIt(t *testing.T) {
 		t.Fatalf("Groups = %v, want [team-a] (admins stripped, team-a kept)", genericUser.Groups)
 	}
 
-	dexSpec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://dex.example", AudienceEnforcement: AudienceEnforce, SkipAudienceCheck: true}
+	dexSpec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://dex.example", AudienceEnforcement: AudienceEnforce, SkipAudienceCheck: true, LegacyDexShim: true}
 	dexFV := fakeOIDCVerifier{tok: &oidcVerifiedToken{Issuer: "https://dex.example", Claims: claims}}
 	dexP := newOIDCProviderForTest(dexSpec, dexFV)
 	dv, err := dexP.Verify(context.Background(), "tok")
@@ -492,6 +499,30 @@ func TestGenericOIDCProviderStripsAdminsGroupButDexKeepsIt(t *testing.T) {
 	}
 	if !reflect.DeepEqual(dexUser.Groups, []string{"admins", "team-a"}) {
 		t.Fatalf("dex Groups = %v, want [admins team-a] unfiltered", dexUser.Groups)
+	}
+}
+
+// A provider merely named "dex" -- exactly what ParseOIDCProviders allows an
+// operator's own MCTL_OIDC_PROVIDERS entry to be, since "dex" is
+// deliberately left out of reservedProviderNames -- is not the legacy shim
+// and must not get its unfiltered-admins behaviour. Only LegacyDexShim
+// grants that (P2 fix: gating on the bare name let an operator-controlled
+// provider mint admin identities).
+func TestOperatorNamedDexProviderStripsAdminsGroup(t *testing.T) {
+	claims := map[string]any{"sub": "u-123", "preferred_username": "bob", "groups": []any{"admins", "team-a"}}
+	spec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://acme.example", Audiences: []string{"aud"}, AudienceEnforcement: AudienceEnforce}
+	fv := fakeOIDCVerifier{tok: &oidcVerifiedToken{Issuer: "https://acme.example", Audience: []string{"aud"}, Claims: claims}}
+	p := newOIDCProviderForTest(spec, fv)
+	v, err := p.Verify(context.Background(), "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := userFromVerified(v)
+	if u.IsAdmin() {
+		t.Fatal("operator-named dex provider (not the legacy shim) must not confer admin")
+	}
+	if !reflect.DeepEqual(u.Groups, []string{"team-a"}) {
+		t.Fatalf("Groups = %v, want [team-a] (admins stripped)", u.Groups)
 	}
 }
 

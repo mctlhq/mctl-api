@@ -79,6 +79,13 @@ type OIDCProviderSpec struct {
 	// Kind is the auth.Kind* value minted for this provider's identities.
 	// Defaults to KindHuman.
 	Kind string
+	// LegacyDexShim marks the spec BuildFederationRegistry synthesizes for
+	// the legacy DEX_ISSUER_URL/DEX_CLIENT_ID configuration. Never set for
+	// an MCTL_OIDC_PROVIDERS entry -- not even one named "dex", which
+	// ParseOIDCProviders deliberately leaves unreserved for an operator to
+	// claim -- because only the actual synthesized shim may reproduce
+	// DexVerifier.Verify's unfiltered-groups behaviour bit-for-bit.
+	LegacyDexShim bool
 }
 
 func (s OIDCProviderSpec) withDefaults() OIDCProviderSpec {
@@ -199,9 +206,14 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 		// as an admin. This same code path is now reachable by any
 		// operator-configured MCTL_OIDC_PROVIDERS entry, so "admins" is
 		// dropped here exactly as NewRelayedUser drops it for a relayed
-		// subject -- except for the Dex slot, which must keep reproducing
-		// DexVerifier.Verify's unfiltered-groups behaviour bit-for-bit.
-		if p.spec.Name != ProviderDex {
+		// subject -- except for the actual legacy Dex shim, which must keep
+		// reproducing DexVerifier.Verify's unfiltered-groups behaviour
+		// bit-for-bit. Gated on LegacyDexShim rather than the bare name
+		// "dex": ParseOIDCProviders deliberately leaves "dex" unreserved for
+		// an operator's own entry, so a name check alone would hand that
+		// operator-controlled provider the same unfiltered-admins behaviour
+		// as the real shim.
+		if !p.spec.LegacyDexShim {
 			kept := make([]string, 0, len(groups))
 			for _, g := range groups {
 				if g != "admins" {

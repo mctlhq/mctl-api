@@ -105,6 +105,11 @@ func ParseOIDCProviders(raw string) ([]OIDCProviderConfigEntry, error) {
 		default:
 			return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has invalid audience_enforcement %q (must be \"audit\" or \"enforce\")", e.Name, e.AudienceEnforcement)
 		}
+		switch e.Kind {
+		case "", KindHuman, KindAgent, KindService:
+		default:
+			return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has invalid kind %q (must be %q, %q, or %q)", e.Name, e.Kind, KindHuman, KindAgent, KindService)
+		}
 		if reservedProviderNames[e.Name] {
 			return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q uses reserved provider name %q", e.Name, e.Name)
 		}
@@ -175,7 +180,19 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 	dexClaimedExplicitly := false
 	for i := range entries {
 		e := &entries[i]
-		if normalizeIssuer(e.Issuer) == dexIssuer && dexIssuer != "" {
+		// Only an entry actually named "dex" supersedes the shim. "dex" is
+		// the one name ParseOIDCProviders leaves unreserved specifically so
+		// an operator can replace the shim under the SAME identity
+		// namespace (reservedProviderNames' comment, federation.go); an
+		// entry that merely happens to share the Dex issuer under a
+		// different name is not that replacement -- treating it as such
+		// would silently re-namespace every existing Dex identity. Leaving
+		// dexClaimedExplicitly false in that case still synthesizes the
+		// shim under "dex", so the two same-issuer providers collide and
+		// NewRegistry refuses boot with a duplicate-issuer error naming
+		// both -- the same boot refusal design.md already calls for on two
+		// registrations sharing an issuer.
+		if e.Name == ProviderDex && normalizeIssuer(e.Issuer) == dexIssuer && dexIssuer != "" {
 			dexClaimedExplicitly = true
 		}
 		p, err := newOIDCProvider(ctx, e.spec())
@@ -192,7 +209,7 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 	case dexClaimedExplicitly:
 		slog.Info("dex provider: using explicit MCTL_OIDC_PROVIDERS entry, legacy shim not synthesized", "issuer", cfg.DexIssuerURL)
 	default:
-		shimSpec := OIDCProviderSpec{Name: ProviderDex, Issuer: cfg.DexIssuerURL, Kind: KindHuman}
+		shimSpec := OIDCProviderSpec{Name: ProviderDex, Issuer: cfg.DexIssuerURL, Kind: KindHuman, LegacyDexShim: true}
 		if cfg.DexClientID != "" {
 			shimSpec.Audiences = []string{cfg.DexClientID}
 			shimSpec.AudienceEnforcement = AudienceEnforce
