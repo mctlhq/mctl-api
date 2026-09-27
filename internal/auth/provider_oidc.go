@@ -148,16 +148,16 @@ type oidcProvider struct {
 	verifier oidcTokenVerifier
 }
 
-// newOIDCProvider builds an oidcProvider that verifies against the real
-// issuer over the network (OIDC discovery + JWKS). SkipClientIDCheck is
-// always set on the underlying library verifier: this provider computes its
-// own audience decision (audit vs. enforce) below, which the library's
-// binary enforce-or-skip cannot express.
 // newOIDCProviderFn is the constructor BuildFederationRegistry calls. A
 // package-level seam so its shim-vs-explicit composition is table-testable
 // without a live issuer (discovery + JWKS).
 var newOIDCProviderFn = newOIDCProvider
 
+// newOIDCProvider builds an oidcProvider that verifies against the real
+// issuer over the network (OIDC discovery + JWKS). SkipClientIDCheck is
+// always set on the underlying library verifier: this provider computes its
+// own audience decision (audit vs. enforce) below, which the library's
+// binary enforce-or-skip cannot express.
 func newOIDCProvider(ctx context.Context, spec OIDCProviderSpec) (*oidcProvider, error) {
 	spec = spec.withDefaults()
 	p, err := oidc.NewProvider(ctx, spec.Issuer)

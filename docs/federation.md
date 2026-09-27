@@ -162,9 +162,9 @@ A JSON array, parsed by `auth.ParseOIDCProviders` and validated in
 | `kind` | no | `human` | One of `human`, `agent`, `service`. |
 
 A malformed value, an entry missing `audiences`, an invalid
-`audience_enforcement`, a reserved or surface-colliding name, or two entries
-sharing a name or a normalized issuer all refuse startup, naming the
-offending entry.
+`audience_enforcement` or `kind`, a reserved or surface-colliding name, or two
+entries sharing a name or a normalized issuer all refuse startup, naming the
+offending entry — unless `MCTL_FEDERATION_DISABLED` is on (below).
 
 ### The legacy Dex shim
 
@@ -208,6 +208,13 @@ chain in `auth.Middleware`, unchanged — including its plain (non-constant-
 time) service-token compare, which is the one thing this proposal otherwise
 fixes (see below). The old chain stays in the tree, exercised by its own
 tests, until slice D deletes it.
+
+While the switch is on, `MCTL_OIDC_PROVIDERS` is neither validated nor built
+into a registry, so none of the boot refusals above apply. That is what makes
+it a rollback for them too: a value that crash-loops the pod (say, an entry
+under a new name on the Dex issuer) is recovered by setting the switch alone,
+without first editing the provider JSON. The value is validated again the
+moment the switch is turned off.
 
 ## The one behaviour fix: constant-time static-secret matching
 

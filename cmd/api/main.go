@@ -251,16 +251,15 @@ func main() {
 	// Federation registry (mctl-api#374, slice A): the static-secret
 	// providers, the local-OAuth provider, the GitHub PAT provider, any
 	// explicit MCTL_OIDC_PROVIDERS entries, and the legacy Dex shim (unless
-	// an explicit entry already claims its issuer). A construction failure
+	// an explicit entry is named "dex"). A construction failure
 	// here is one of the conditions requirements.md says must refuse boot
 	// (a malformed MCTL_OIDC_PROVIDERS value, or a registry invariant
 	// violated by the combined provider set); an unreachable OIDC issuer at
 	// boot is not one of them and is only logged (BuildFederationRegistry).
-	federationRegistry, fedErr := auth.BuildFederationRegistry(rootCtx, auth.FederationProvidersConfig{
-		OIDCProvidersRaw: cfg.OIDCProvidersRaw,
-		DexIssuerURL:     cfg.DexIssuerURL,
-		DexClientID:      cfg.DexClientID,
-	}, ghValidator, gitReader, oauthServer)
+	// With MCTL_FEDERATION_DISABLED on, none of this runs: the kill switch is
+	// the rollback for exactly these refusals, so it must reach the
+	// pre-registry chain instead of crash-looping on them.
+	federationRegistry, fedErr := buildFederationRegistry(rootCtx, cfg, ghValidator, gitReader, oauthServer)
 	if fedErr != nil {
 		slog.Error("invalid configuration", "error", fmt.Errorf("MCTL_OIDC_PROVIDERS: %w", fedErr))
 		if principalStore != nil {
@@ -956,6 +955,10 @@ type config struct {
 	// by auth.ParseOIDCProviders. Unset or blank means only the legacy Dex
 	// shim (DexIssuerURL/DexClientID above) applies.
 	OIDCProvidersRaw string
+	// FederationDisabled is MCTL_FEDERATION_DISABLED (mctl-api#374's kill
+	// switch). While it is on, MCTL_OIDC_PROVIDERS is neither validated nor
+	// built into a registry, and auth.Middleware runs the pre-registry chain.
+	FederationDisabled bool
 	// SelfURL is the public base URL used in MCP SSE endpoint advertisement.
 	SelfURL string
 	// AllowedOrigins is a list of origins permitted by CORS policy.
@@ -1055,6 +1058,7 @@ func loadConfig() config {
 		DexIssuerURL:                   envOr("DEX_ISSUER_URL", "https://ops.mctl.ai/api/dex"),
 		DexClientID:                    os.Getenv("DEX_CLIENT_ID"),
 		OIDCProvidersRaw:               os.Getenv("MCTL_OIDC_PROVIDERS"),
+		FederationDisabled:             killSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED")),
 		SelfURL:                        envOr("SELF_URL", "https://api.mctl.ai"),
 		AllowedOrigins:                 origins,
 		OAuthGitHubClientID:            os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
@@ -1317,11 +1321,32 @@ func (c config) validate() error {
 	// rather than the one after a second variable is also set. The full
 	// registry (this plus the legacy Dex shim and the built-in providers) is
 	// built for real in main(), which is where a duplicate against the
-	// local-OAuth or Dex provider would also be caught.
+	// local-OAuth or Dex provider would also be caught. Skipped while
+	// MCTL_FEDERATION_DISABLED is on, so the kill switch can roll back a
+	// value that would otherwise refuse boot.
+	if c.FederationDisabled {
+		return nil
+	}
 	if _, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw); err != nil {
 		return err
 	}
 	return nil
+}
+
+// buildFederationRegistry builds the federation registry from cfg, or
+// returns (nil, nil) while MCTL_FEDERATION_DISABLED is on: a nil registry
+// leaves auth.Middleware on its pre-registry chain, and none of the
+// registry's boot refusals can block the rollback.
+func buildFederationRegistry(ctx context.Context, cfg config, validator *auth.GitHubValidator, resolver auth.TenantResolver, oauth *auth.OAuthServer) (*auth.Registry, error) {
+	if cfg.FederationDisabled {
+		slog.Warn("MCTL_FEDERATION_DISABLED is on: federation registry not built, pre-registry auth chain in effect")
+		return nil, nil
+	}
+	return auth.BuildFederationRegistry(ctx, auth.FederationProvidersConfig{
+		OIDCProvidersRaw: cfg.OIDCProvidersRaw,
+		DexIssuerURL:     cfg.DexIssuerURL,
+		DexClientID:      cfg.DexClientID,
+	}, validator, resolver, oauth)
 }
 
 func parseDuration(s string, fallback time.Duration) time.Duration {
