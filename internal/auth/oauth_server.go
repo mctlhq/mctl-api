@@ -66,6 +66,14 @@ const groupsStaleWarnAfter = 15 * time.Minute
 // defaultGroupsCacheTTL is used when GroupsCacheTTL is unset.
 const defaultGroupsCacheTTL = 30 * time.Second
 
+// resolverFailureTTL is how long a resolver failure is negatively cached,
+// capped at the groups cache TTL. It is shorter than the success memo on
+// purpose. During an outage it costs one tenant scan per 5s, which is noise.
+// After recovery, sessions stay on the fallback (fail-closed, beyond grace)
+// for at most this long, because while a failure is cached nothing asks
+// the resolver.
+const resolverFailureTTL = 5 * time.Second
+
 // groupsCacheEntry is one memoized group-resolution result. It holds tenant
 // groups only; "admins" is added on every read by withAdmins, so a cache hit
 // still reflects IsAdmin as of that call and each caller gets its own slice.
@@ -173,7 +181,8 @@ type OAuthServer struct {
 
 	// resolverFailMu guards resolverFailErr/resolverFailUntil: the negative
 	// cache. After a resolver failure, further resolutions return the same
-	// error without touching the resolver for GroupsCacheTTL. Otherwise, during
+	// error without touching the resolver for resolverFailureTTL (capped at
+	// GroupsCacheTTL). Otherwise, during
 	// an outage, every authenticated request would re-read and re-parse every
 	// tenant file. The cache is process-wide, not per login, because every
 	// failure it holds (never-synced checkout, strict-mode staleness,
@@ -765,10 +774,13 @@ func NewOAuthServer(baseURL, ghClientID, ghClientSecret string, jwtSecret []byte
 // (internal/api/oauth_handlers.go, right after the GitHub OAuth callback
 // validates the login) and is reimplemented over resolveGroupsChecked,
 // discarding the error: a resolver failure (or none configured) at login
-// time still grants "admins" as computed right now and never blocks the
-// login on the tenant lookup, exactly as it did before this method existed.
+// time still grants "admins" as computed right now, exactly as it did before
+// this method existed. Unlike the per-request paths, login waits out an
+// in-progress gitops refresh rather than accepting a "busy" decline. Login is
+// not a hot path, and the groups resolved here become the refresh-token
+// snapshot that later degraded resolutions fall back on.
 func (s *OAuthServer) ResolveGroups(login string) []string {
-	if groups, err := s.resolveGroupsChecked(login); err == nil {
+	if groups, err := s.resolveGroups(login, true); err == nil {
 		return groups
 	}
 	return s.withAdmins(login, nil)
@@ -789,8 +801,8 @@ func (s *OAuthServer) ResolveGroups(login string) []string {
 //  3. A memoized result younger than GroupsCacheTTL is reused without
 //     touching the resolver, bounding the added cost of per-request
 //     resolution (ValidateJWT) to one lookup per login per TTL. A failure is
-//     memoized too, process-wide and for the same TTL, so an outage costs at
-//     most one resolver lookup per TTL rather than one per request. The
+//     memoized too, process-wide, for resolverFailureTTL (5s), so an outage
+//     costs at most one resolver lookup per 5s rather than one per request. The
 //     lookup itself never waits: a resolver that implements
 //     nonBlockingTenantResolver (gitops.Reader) and is mid-refresh answers
 //     errResolverBusy, which callers treat like a failure but without
@@ -809,6 +821,13 @@ func (s *OAuthServer) ResolveGroups(login string) []string {
 //     fail-closed while the resolver keeps working (even from a stale
 //     checkout).
 func (s *OAuthServer) resolveGroupsChecked(login string) ([]string, error) {
+	return s.resolveGroups(login, false)
+}
+
+// resolveGroups implements resolveGroupsChecked. With wait set, the lookup
+// blocks on the resolver instead of declining with errResolverBusy (used at
+// login, see ResolveGroups).
+func (s *OAuthServer) resolveGroups(login string, wait bool) ([]string, error) {
 	if s.TenantResolver == nil {
 		return nil, errResolverNotConfigured
 	}
@@ -822,26 +841,29 @@ func (s *OAuthServer) resolveGroupsChecked(login string) ([]string, error) {
 		s.noteResolverFailure(err)
 		return nil, err
 	}
-	tenants, err := s.lookupTenants(login)
+	tenants, err := s.lookupTenants(login, wait)
 	if errors.Is(err, errResolverBusy) {
 		return nil, err
 	}
 	if err != nil {
-		err = fmt.Errorf("resolve tenant groups for %q: %w", login, err)
+		// No login in the message: this error is memoized process-wide and
+		// may be logged against other users; both log sites add "user".
+		err = fmt.Errorf("resolve tenant groups: %w", err)
 		s.noteResolverFailure(err)
 		return nil, err
 	}
 	tenants = tenantsOnly(tenants)
 	s.lastResolveOK.Store(time.Now().UnixNano())
+	s.clearResolverFailure()
 	s.storeGroupsCache(login, tenants)
 	return s.withAdmins(login, tenants), nil
 }
 
-// lookupTenants asks the resolver for login's tenants without waiting when the
-// resolver supports that (see nonBlockingTenantResolver), and returns
-// errResolverBusy if it declined.
-func (s *OAuthServer) lookupTenants(login string) ([]string, error) {
-	if nb, ok := s.TenantResolver.(nonBlockingTenantResolver); ok {
+// lookupTenants asks the resolver for login's tenants. Unless wait is set, it
+// does so without waiting when the resolver supports that (see
+// nonBlockingTenantResolver), and returns errResolverBusy if it declined.
+func (s *OAuthServer) lookupTenants(login string, wait bool) ([]string, error) {
+	if nb, ok := s.TenantResolver.(nonBlockingTenantResolver); ok && !wait {
 		tenants, answered, err := nb.TryGetTenantsForUser(login)
 		if !answered {
 			return nil, errResolverBusy
@@ -862,13 +884,22 @@ func (s *OAuthServer) recentResolverFailure() error {
 	return s.resolverFailErr
 }
 
+// clearResolverFailure drops the memoized failure once the resolver answers
+// again, so recovery is not delayed by the rest of the negative-cache window.
+func (s *OAuthServer) clearResolverFailure() {
+	s.resolverFailMu.Lock()
+	defer s.resolverFailMu.Unlock()
+	s.resolverFailErr = nil
+}
+
 // noteResolverFailure memoizes err as the resolver's current failure for
 // GroupsCacheTTL.
 func (s *OAuthServer) noteResolverFailure(err error) {
 	s.resolverFailMu.Lock()
 	defer s.resolverFailMu.Unlock()
+	ttl := min(resolverFailureTTL, s.groupsCacheTTL())
 	s.resolverFailErr = err
-	s.resolverFailUntil = time.Now().Add(s.groupsCacheTTL())
+	s.resolverFailUntil = time.Now().Add(ttl)
 }
 
 // checkResolverFreshness applies the freshness gate described on
@@ -1023,26 +1054,40 @@ func (s *OAuthServer) lastResolveOKTime() time.Time {
 //     resolver outage from defeating a tenant removal for longer than one
 //     access-token TTL.
 func (s *OAuthServer) groupsForSession(login string, stored []string) []string {
+	groups, _ := s.sessionGroups(login, stored)
+	return groups
+}
+
+// sessionGroups is groupsForSession that also reports whether the result is
+// a fresh resolution (true), as opposed to the stored groups passed through
+// or a degraded/fail-closed fallback (false).
+func (s *OAuthServer) sessionGroups(login string, stored []string) ([]string, bool) {
 	groups, err := s.resolveGroupsChecked(login)
 	if err == nil {
-		return groups
+		return groups, true
 	}
 	if errors.Is(err, errResolverNotConfigured) {
-		return stored
+		return stored, false
+	}
+	// Busy says nothing about resolver health: we chose not to wait on an
+	// in-progress gitops refresh. It therefore bypasses the grace check, or
+	// the first request after an idle spell longer than the grace window
+	// that happened to land inside a refresh would be failed closed on a
+	// healthy resolver.
+	if errors.Is(err, errResolverBusy) {
+		slog.Debug("oauth: gitops refresh in progress; using session's tenant groups", "user", login)
+		return s.withAdmins(login, tenantsOnly(stored)), false
 	}
 	if time.Since(s.lastResolveOKTime()) <= s.degradedGrace() {
-		switch {
-		case errors.Is(err, errResolverBusy):
-			slog.Debug("oauth: gitops refresh in progress; using session's tenant groups", "user", login)
-		case s.degradedWarn.allow(groupsWarnInterval):
+		if s.degradedWarn.allow(groupsWarnInterval) {
 			slog.Warn("oauth: group resolution degraded; using stored tenant groups", "user", login, "error", err)
 		}
-		return s.withAdmins(login, tenantsOnly(stored))
+		return s.withAdmins(login, tenantsOnly(stored)), false
 	}
 	if s.failClosedWarn.allow(groupsWarnInterval) {
 		slog.Warn("oauth: group resolution unavailable beyond grace; dropping tenant groups", "user", login, "error", err)
 	}
-	return s.withAdmins(login, nil)
+	return s.withAdmins(login, nil), false
 }
 
 // IsRedirectURIAllowed returns true if uri is in the static whitelist, is a
@@ -1306,17 +1351,20 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 	if entry.ClientID != clientID {
 		return "", "", errors.New("client_id mismatch")
 	}
-	// Unlike the store path above, the in-memory successor row naturally
-	// records the re-resolved groups below (IssueRefreshToken is called with
-	// them), so grant and revoke both take effect on the very next refresh
-	// here. The asymmetry with the store path is harmless: it is bounded by
-	// GroupsDegradedGrace either way.
-	groups := s.groupsForSession(entry.Login, entry.Groups)
+	// The successor row records the groups only when they are a fresh
+	// resolution. A degraded or fail-closed fallback must not overwrite the
+	// snapshot: that would leave the next outage nothing to fall back on
+	// (the store path never overwrites it, since Rotate carries it forward).
+	groups, fresh := s.sessionGroups(entry.Login, entry.Groups)
 	accessToken, err := s.IssueJWT(entry.Login, groups)
 	if err != nil {
 		return "", "", err
 	}
-	newRefreshToken, err := s.IssueRefreshToken(entry.Login, groups, clientID)
+	snapshot := entry.Groups
+	if fresh {
+		snapshot = groups
+	}
+	newRefreshToken, err := s.IssueRefreshToken(entry.Login, snapshot, clientID)
 	if err != nil {
 		return "", "", err
 	}

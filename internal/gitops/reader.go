@@ -40,6 +40,11 @@ import (
 // network fetch would block every reader method indefinitely.
 const gitCommandTimeout = 2 * time.Minute
 
+// gitWaitDelay makes gitCommandTimeout a hard bound. Context expiry kills only
+// git itself; a helper it spawned (git-remote-https, ssh) can keep the output
+// pipe open, and without WaitDelay, Wait would block on it past the deadline.
+const gitWaitDelay = 5 * time.Second
+
 // Reader provides read access to the GitOps mono-repo state.
 // It clones the repo locally and refreshes periodically.
 type Reader struct {
@@ -348,6 +353,7 @@ func (r *Reader) refresh() error {
 		ctx, cancel := context.WithTimeout(context.Background(), gitCommandTimeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", "--branch="+r.branch, "--single-branch", cloneURL, r.localPath) //nolint:gosec // args are from trusted config
+		cmd.WaitDelay = gitWaitDelay
 		cmd.Env = append(os.Environ(), sshEnv...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git clone failed: %w\n%s", err, r.redactTokenLocked(bytes.TrimSpace(out)))
@@ -496,6 +502,7 @@ func (r *Reader) gitOutput(extraEnv []string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", fullArgs...) //nolint:gosec // args are from trusted config
+	cmd.WaitDelay = gitWaitDelay
 	cmd.Env = append(os.Environ(), extraEnv...)
 	out, err := cmd.CombinedOutput()
 	// Redact the slice itself, not just the error string built from it.

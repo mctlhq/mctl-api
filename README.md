@@ -210,8 +210,8 @@ two hours:
    process-wide successful resolution*, the session keeps its previously
    known tenant groups, with `admins` still recomputed fresh, and a
    `slog.Warn` is logged at most once a minute. The failure itself is cached
-   for `OAUTH_GROUPS_CACHE_TTL`, so during an outage the tenant files are
-   re-read at most once per TTL, not on every authenticated request.
+   for 5s, so during an outage the tenant files are re-read at most once
+   every 5s, not on every authenticated request.
 2. Past that window, the session fails closed: it keeps working (never
    signed out), but with tenant groups dropped, keeping only `admins` if the
    login is a configured admin. This is what bounds a resolver outage from
@@ -243,8 +243,11 @@ Group resolution never waits on the gitops reader. A refresh holds the
 reader's write lock while it runs `git fetch`/`reset` (each git command is
 bounded by a 2-minute timeout). A lookup that would have to wait instead
 uses the session's own groups for that request, the same fallback as a
-degraded resolution but without a warning. It is not cached, so the next
-request after the refresh resolves normally. `LastSync()` and the sync-age
+degraded resolution but without a warning, and never subject to the
+fail-closed grace check (a busy reader says nothing about its health). It is
+not cached, so the next request after the refresh resolves normally. Login
+itself waits out a refresh instead, because the groups resolved at login
+become the refresh-token snapshot that later fallbacks rely on. `LastSync()` and the sync-age
 gauge are lock-free, so `/metrics` keeps answering during a hung fetch.
 
 A never-synced checkout (gauge reads `-1`, or `LastSync()` is the zero value)

@@ -858,3 +858,85 @@ func TestWarnLimiterAllowsOncePerInterval(t *testing.T) {
 		t.Fatal("expected a warning to be allowed again after the interval")
 	}
 }
+
+// Busy must bypass the fail-closed grace check: after an idle spell longer
+// than the grace window, a request that lands inside a gitops refresh keeps
+// the session's tenant groups instead of being failed closed on a healthy
+// resolver. Fails if busy goes through the grace check.
+func TestGroupsBusyBeyondGraceKeepsSessionGroups(t *testing.T) {
+	server := newTestOAuthServer(t)
+	server.GroupsDegradedGrace = time.Hour
+	server.lastResolveOK.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	resolver := &busyTenantResolver{stubTenantResolver: &stubTenantResolver{}}
+	resolver.setBusy(true)
+	server.TenantResolver = resolver
+
+	groups := server.groupsForSession("dmitrii", []string{"acme"})
+	if !slices.Equal(groups, []string{"acme"}) {
+		t.Fatalf("expected the session's tenant groups while busy, even beyond grace, got %v", groups)
+	}
+}
+
+// Login waits out a busy resolver instead of recording admins-only groups
+// as the refresh-token snapshot. Fails if ResolveGroups takes the
+// non-blocking path.
+func TestResolveGroupsAtLoginWaitsOutBusyResolver(t *testing.T) {
+	server := newTestOAuthServer(t)
+	resolver := &busyTenantResolver{stubTenantResolver: &stubTenantResolver{}}
+	resolver.setTenants("dmitrii", []string{"acme"})
+	resolver.setBusy(true)
+	server.TenantResolver = resolver
+
+	if groups := server.ResolveGroups("dmitrii"); !slices.Equal(groups, []string{"acme"}) {
+		t.Fatalf("expected login to resolve through the blocking lookup, got %v", groups)
+	}
+}
+
+// On the in-memory path a fail-closed refresh must not overwrite the
+// successor's snapshot, or the next outage has nothing to fall back on.
+// Fails if the degraded result is persisted.
+func TestInMemoryRefreshKeepsSnapshotOnFailClosed(t *testing.T) {
+	server := newTestOAuthServer(t)
+	server.GroupsDegradedGrace = time.Minute
+	resolver := &stubTenantResolver{}
+	resolver.setErr(errors.New("gitops checkout unreachable"))
+	server.TenantResolver = resolver
+	server.lastResolveOK.Store(time.Now().Add(-time.Hour).UnixNano())
+
+	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme"}, "client-1")
+	if err != nil {
+		t.Fatalf("IssueRefreshToken: %v", err)
+	}
+	accessToken, next, err := server.RefreshAccessToken(raw, "client-1")
+	if err != nil {
+		t.Fatalf("RefreshAccessToken: %v", err)
+	}
+	if groups := mustIssuedGroups(t, server, accessToken); slices.Contains(groups, "acme") {
+		t.Fatalf("expected fail-closed access token beyond grace, got %v", groups)
+	}
+
+	// Back within grace, still failing: the fallback must still find the
+	// original snapshot on the successor row.
+	server.lastResolveOK.Store(time.Now().UnixNano())
+	accessToken, _, err = server.RefreshAccessToken(next, "client-1")
+	if err != nil {
+		t.Fatalf("RefreshAccessToken (second): %v", err)
+	}
+	if groups := mustIssuedGroups(t, server, accessToken); !slices.Contains(groups, "acme") {
+		t.Fatalf("expected the original snapshot to survive a fail-closed rotation, got %v", groups)
+	}
+}
+
+// The negative cache holds a failure for resolverFailureTTL, not the full
+// groups-cache TTL, so recovery is noticed within seconds.
+func TestResolverFailureTTLIsShort(t *testing.T) {
+	server := newTestOAuthServer(t)
+	server.GroupsCacheTTL = time.Minute
+	server.noteResolverFailure(errors.New("boom"))
+	server.resolverFailMu.Lock()
+	left := time.Until(server.resolverFailUntil)
+	server.resolverFailMu.Unlock()
+	if left > resolverFailureTTL || left <= 0 {
+		t.Fatalf("expected the failure cached for at most %v, got %v", resolverFailureTTL, left)
+	}
+}
