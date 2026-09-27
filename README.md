@@ -239,14 +239,16 @@ A suggested alert:
 mctl_api_gitops_last_sync_age_seconds > 900
 ```
 
-Group resolution never waits on the gitops reader. A refresh holds the
-reader's write lock while it runs `git fetch`/`reset` (each git command is
-bounded by a 2-minute timeout). A lookup that would have to wait instead
-uses the session's own groups for that request, the same fallback as a
-degraded resolution but without a warning, and never subject to the
-fail-closed grace check (a busy reader says nothing about its health). It is
-not cached, so the next request after the refresh resolves normally. Login
-itself waits out a refresh instead, because the groups resolved at login
+Per-request group resolution does not block on the gitops reader. A refresh
+holds the reader's write lock while it runs `git fetch`/`reset` (each git
+command is bounded by a 2-minute timeout). Within the degraded grace window, a
+lookup that would have to wait instead uses the session's own groups for that
+request, without a warning (a busy reader says nothing about its health).
+Beyond grace, the session snapshot is no longer trusted: the request retries
+for up to 2s, so a normal short refresh still answers correctly, and if the
+reader is still busy it fails closed like any other failure, with the
+rate-limited warning. A busy result is not cached. Login itself waits out a
+refresh and ignores the 5s failure cache, because the groups resolved at login
 become the refresh-token snapshot that later fallbacks rely on. `LastSync()` and the sync-age
 gauge are lock-free, so `/metrics` keeps answering during a hung fetch.
 

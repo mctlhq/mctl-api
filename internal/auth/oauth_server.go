@@ -74,6 +74,15 @@ const defaultGroupsCacheTTL = 30 * time.Second
 // the resolver.
 const resolverFailureTTL = 5 * time.Second
 
+// busyWaitLimit bounds how long a per-request resolution waits for an
+// in-progress gitops refresh once the session is past GroupsDegradedGrace
+// (see sessionGroups); busyPollInterval is how often it retries meanwhile.
+// Variables so tests can shorten them.
+var (
+	busyWaitLimit    = 2 * time.Second
+	busyPollInterval = 25 * time.Millisecond
+)
+
 // groupsCacheEntry is one memoized group-resolution result. It holds tenant
 // groups only; "admins" is added on every read by withAdmins, so a cache hit
 // still reflects IsAdmin as of that call and each caller gets its own slice.
@@ -834,8 +843,12 @@ func (s *OAuthServer) resolveGroups(login string, wait bool) ([]string, error) {
 	if tenants, ok := s.cachedGroups(login); ok {
 		return s.withAdmins(login, tenants), nil
 	}
-	if err := s.recentResolverFailure(); err != nil {
-		return nil, err
+	// Login (wait) pays to get the right answer: it skips the negative
+	// cache, since what it resolves becomes the refresh-token snapshot.
+	if !wait {
+		if err := s.recentResolverFailure(); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.checkResolverFreshness(login); err != nil {
 		s.noteResolverFailure(err)
@@ -854,7 +867,6 @@ func (s *OAuthServer) resolveGroups(login string, wait bool) ([]string, error) {
 	}
 	tenants = tenantsOnly(tenants)
 	s.lastResolveOK.Store(time.Now().UnixNano())
-	s.clearResolverFailure()
 	s.storeGroupsCache(login, tenants)
 	return s.withAdmins(login, tenants), nil
 }
@@ -874,7 +886,9 @@ func (s *OAuthServer) lookupTenants(login string, wait bool) ([]string, error) {
 }
 
 // recentResolverFailure returns the memoized resolver failure, if one was
-// recorded less than GroupsCacheTTL ago.
+// recorded less than resolverFailureTTL (capped at GroupsCacheTTL) ago.
+// Recovery after an outage is bounded by that TTL: the memo is not cleared
+// early, it simply expires.
 func (s *OAuthServer) recentResolverFailure() error {
 	s.resolverFailMu.Lock()
 	defer s.resolverFailMu.Unlock()
@@ -884,16 +898,8 @@ func (s *OAuthServer) recentResolverFailure() error {
 	return s.resolverFailErr
 }
 
-// clearResolverFailure drops the memoized failure once the resolver answers
-// again, so recovery is not delayed by the rest of the negative-cache window.
-func (s *OAuthServer) clearResolverFailure() {
-	s.resolverFailMu.Lock()
-	defer s.resolverFailMu.Unlock()
-	s.resolverFailErr = nil
-}
-
 // noteResolverFailure memoizes err as the resolver's current failure for
-// GroupsCacheTTL.
+// min(resolverFailureTTL, GroupsCacheTTL).
 func (s *OAuthServer) noteResolverFailure(err error) {
 	s.resolverFailMu.Lock()
 	defer s.resolverFailMu.Unlock()
@@ -1070,13 +1076,22 @@ func (s *OAuthServer) sessionGroups(login string, stored []string) ([]string, bo
 		return stored, false
 	}
 	// Busy says nothing about resolver health: we chose not to wait on an
-	// in-progress gitops refresh. It therefore bypasses the grace check, or
-	// the first request after an idle spell longer than the grace window
-	// that happened to land inside a refresh would be failed closed on a
-	// healthy resolver.
+	// in-progress gitops refresh. Within grace the session's groups are used
+	// as-is. Beyond grace the snapshot is no longer trustworthy, but a busy
+	// resolver can still answer, so wait for it -- boundedly, since a refresh
+	// whose git fetch hangs holds the lock for up to gitCommandTimeout. Only
+	// if it stays busy does this fall through to the fail-closed branch, so
+	// a persistently locked reader cannot defeat a tenant removal (and the
+	// first request after an idle spell, landing inside a normal short
+	// refresh, is still answered correctly rather than failed closed).
 	if errors.Is(err, errResolverBusy) {
-		slog.Debug("oauth: gitops refresh in progress; using session's tenant groups", "user", login)
-		return s.withAdmins(login, tenantsOnly(stored)), false
+		if time.Since(s.lastResolveOKTime()) <= s.degradedGrace() {
+			slog.Debug("oauth: gitops refresh in progress; using session's tenant groups", "user", login)
+			return s.withAdmins(login, tenantsOnly(stored)), false
+		}
+		if groups, err = s.awaitBusyResolver(login); err == nil {
+			return groups, true
+		}
 	}
 	if time.Since(s.lastResolveOKTime()) <= s.degradedGrace() {
 		if s.degradedWarn.allow(groupsWarnInterval) {
@@ -1088,6 +1103,19 @@ func (s *OAuthServer) sessionGroups(login string, stored []string) ([]string, bo
 		slog.Warn("oauth: group resolution unavailable beyond grace; dropping tenant groups", "user", login, "error", err)
 	}
 	return s.withAdmins(login, nil), false
+}
+
+// awaitBusyResolver retries a non-blocking resolution while the resolver
+// reports busy, for at most busyWaitLimit, and returns the last result.
+func (s *OAuthServer) awaitBusyResolver(login string) ([]string, error) {
+	deadline := time.Now().Add(busyWaitLimit)
+	for {
+		time.Sleep(busyPollInterval)
+		groups, err := s.resolveGroups(login, false)
+		if !errors.Is(err, errResolverBusy) || !time.Now().Before(deadline) {
+			return groups, err
+		}
+	}
 }
 
 // IsRedirectURIAllowed returns true if uri is in the static whitelist, is a

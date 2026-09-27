@@ -723,7 +723,7 @@ func (r *busyTenantResolver) TryGetTenantsForUser(login string) ([]string, bool,
 	return tenants, true, err
 }
 
-// A resolver failure is memoized process-wide for GroupsCacheTTL, so an
+// A resolver failure is memoized process-wide for resolverFailureTTL, so an
 // outage costs one resolver lookup per TTL instead of one per authenticated
 // request. Fails if failures are not negatively cached.
 func TestGroupsFailureIsNegativelyCached(t *testing.T) {
@@ -859,11 +859,32 @@ func TestWarnLimiterAllowsOncePerInterval(t *testing.T) {
 	}
 }
 
-// Busy must bypass the fail-closed grace check: after an idle spell longer
-// than the grace window, a request that lands inside a gitops refresh keeps
-// the session's tenant groups instead of being failed closed on a healthy
-// resolver. Fails if busy goes through the grace check.
-func TestGroupsBusyBeyondGraceKeepsSessionGroups(t *testing.T) {
+// Beyond grace, a busy resolver is waited for (boundedly) rather than
+// trusting the session snapshot. Fails if busy beyond grace returns the
+// stored groups instead of the fresh resolution.
+func TestGroupsBusyBeyondGraceWaitsForResolver(t *testing.T) {
+	server := newTestOAuthServer(t)
+	server.GroupsDegradedGrace = time.Hour
+	server.lastResolveOK.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	resolver := &busyTenantResolver{stubTenantResolver: &stubTenantResolver{}}
+	resolver.setTenants("dmitrii", []string{"globex"})
+	resolver.setBusy(true)
+	server.TenantResolver = resolver
+	time.AfterFunc(50*time.Millisecond, func() { resolver.setBusy(false) })
+
+	groups, fresh := server.sessionGroups("dmitrii", []string{"acme"})
+	if !fresh || !slices.Equal(groups, []string{"globex"}) {
+		t.Fatalf("expected the fresh resolution once the refresh ended, got %v (fresh=%v)", groups, fresh)
+	}
+}
+
+// A resolver that stays busy beyond grace must not keep a removed user's
+// tenant groups indefinitely: after busyWaitLimit it fails closed. Fails if
+// busy beyond grace falls back to the session snapshot.
+func TestGroupsBusyBeyondGraceFailsClosedWhenStillBusy(t *testing.T) {
+	old := busyWaitLimit
+	busyWaitLimit = 100 * time.Millisecond
+	t.Cleanup(func() { busyWaitLimit = old })
 	server := newTestOAuthServer(t)
 	server.GroupsDegradedGrace = time.Hour
 	server.lastResolveOK.Store(time.Now().Add(-2 * time.Hour).UnixNano())
@@ -871,9 +892,44 @@ func TestGroupsBusyBeyondGraceKeepsSessionGroups(t *testing.T) {
 	resolver.setBusy(true)
 	server.TenantResolver = resolver
 
-	groups := server.groupsForSession("dmitrii", []string{"acme"})
-	if !slices.Equal(groups, []string{"acme"}) {
-		t.Fatalf("expected the session's tenant groups while busy, even beyond grace, got %v", groups)
+	if groups := server.groupsForSession("dmitrii", []string{"acme"}); len(groups) != 0 {
+		t.Fatalf("expected fail-closed (no tenant groups) while busy beyond grace, got %v", groups)
+	}
+}
+
+// Within grace, busy uses the session's groups without waiting. Fails if
+// the within-grace case also waits (it would then see the refresh end and
+// return the fresh groups).
+func TestGroupsBusyWithinGraceKeepsSessionGroups(t *testing.T) {
+	server := newTestOAuthServer(t)
+	server.GroupsDegradedGrace = time.Hour
+	server.lastResolveOK.Store(time.Now().UnixNano())
+	resolver := &busyTenantResolver{stubTenantResolver: &stubTenantResolver{}}
+	resolver.setTenants("dmitrii", []string{"globex"})
+	resolver.setBusy(true)
+	server.TenantResolver = resolver
+	time.AfterFunc(50*time.Millisecond, func() { resolver.setBusy(false) })
+
+	if groups := server.groupsForSession("dmitrii", []string{"acme"}); !slices.Equal(groups, []string{"acme"}) {
+		t.Fatalf("expected the session's tenant groups while busy within grace, got %v", groups)
+	}
+}
+
+// Login bypasses the negative cache: a failure memoized a moment ago must
+// not become the refresh-token snapshot. Fails if ResolveGroups honours
+// recentResolverFailure.
+func TestResolveGroupsAtLoginSkipsNegativeCache(t *testing.T) {
+	server := newTestOAuthServer(t)
+	resolver := &stubTenantResolver{}
+	resolver.setTenants("dmitrii", []string{"acme"})
+	server.TenantResolver = resolver
+	server.noteResolverFailure(errors.New("transient"))
+
+	if groups := server.ResolveGroups("dmitrii"); !slices.Equal(groups, []string{"acme"}) {
+		t.Fatalf("expected login to bypass the negative cache, got %v", groups)
+	}
+	if _, err := server.resolveGroupsChecked("bob"); err == nil {
+		t.Fatalf("expected the per-request path to still honour the negative cache")
 	}
 }
 
