@@ -3,6 +3,13 @@
 mctl-api#373. Decision record: the owner-approved comments on that issue
 (D1–D3, 2026-09-23, and the phase-1 decisions, 2026-09-24).
 
+Where the `(provider, issuer, subject)` identity below comes from is a
+separate boundary, the federation registry: see
+[docs/federation.md](federation.md) (mctl-api#374). This model, and the
+resolution rules below, are unaffected by that registry — it only decides
+which verifier proves a token; `auth.Identity`, `PrincipalResolver` and
+everything in this document stay exactly as they are.
+
 ## Model
 
 - **`principals`**: `id` (`prn_<ulid>`, issued by mctl-api), `kind`

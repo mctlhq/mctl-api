@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -165,6 +166,11 @@ type TenantResolver interface {
 // DexVerifier validates Dex-issued JWTs.
 type DexVerifier struct {
 	verifier *oidc.IDTokenVerifier
+	// issuerURL is remembered (not just handed to the underlying library)
+	// so the federation registry's default construction (oidc.go
+	// defaultFederationRegistry) can route to this verifier by exact issuer
+	// match like every other JWT provider, without re-deriving it.
+	issuerURL string
 }
 
 // NewDexVerifier creates a DexVerifier by fetching OIDC configuration from the issuer.
@@ -182,8 +188,11 @@ func NewDexVerifier(ctx context.Context, issuerURL, clientID string) (*DexVerifi
 		cfg.SkipClientIDCheck = true
 	}
 	verifier := provider.Verifier(cfg)
-	return &DexVerifier{verifier: verifier}, nil
+	return &DexVerifier{verifier: verifier, issuerURL: issuerURL}, nil
 }
+
+// Issuer returns the issuer URL this verifier was constructed with.
+func (d *DexVerifier) Issuer() string { return d.issuerURL }
 
 // Verify validates a Dex JWT and returns the authenticated user.
 // Groups come directly from the token (Backstage populates them); no gitops lookup needed.
@@ -461,6 +470,16 @@ func staticServiceUser(token string) *User {
 //
 // dex and oauth may be nil; in that case those token types are rejected.
 //
+// Since mctl-api#374 (slice A), steps 2-4 above are dispatched through a
+// federation Registry (federation.go) instead of an inline if/else-if chain,
+// unless MCTL_FEDERATION_DISABLED is set, in which case the pre-registry
+// chain runs exactly as it always has (kept in the tree until slice D).
+// WithFederationRegistry supplies a fully-configured Registry (built by
+// cmd/api/main.go from MCTL_OIDC_PROVIDERS and the legacy Dex shim); without
+// it, Middleware builds a default registry from its own validator, resolver,
+// dex and oauth parameters, which is what every existing caller -- including
+// every test in this package -- exercises unchanged.
+//
 // With WithPrincipalResolver, every authenticated caller is also resolved to
 // its canonical principal (mctl-api#373, phase 1): a disabled principal is
 // refused with 403, and a principal that cannot be resolved leaves the
@@ -473,6 +492,12 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	var cfg middlewareConfig
 	for _, o := range opts {
 		o(&cfg)
+	}
+
+	federationDisabled := federationKillSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED"))
+	registry := cfg.federationRegistry
+	if !federationDisabled && registry == nil {
+		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter)
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -515,51 +540,71 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 				return
 			}
 
-			var (
-				user *User
-				err  error
-			)
+			var user *User
 
-			if svc := staticServiceUser(token); svc != nil {
-				user = svc
-			} else if su := surfaceUserFor(surfaces, token); su != nil {
-				user = su
-			} else if uw := usageWriterUserFor(usageWriter, token); uw != nil {
-				user = uw
-			} else if isJWT(token) {
-				// Peek at the JWT issuer to route to the correct verifier.
-				if oauth != nil && jwtIssuer(token) == oauth.BaseURL {
-					// Local OAuth JWT: validate with HMAC-SHA256.
-					user, err = oauth.ValidateJWT(token)
-					if err != nil {
-						slog.Warn("local oauth JWT auth failed", "error", err, "path", r.URL.Path)
-						writeErr(err.Error())
-						return
+			if federationDisabled {
+				// Pre-registry chain, unchanged (kept in the tree until
+				// slice D, and restored wholesale by
+				// MCTL_FEDERATION_DISABLED -- including the timing-unsafe
+				// service-token compare this proposal otherwise fixes; see
+				// requirements.md "Rollback").
+				if svc := staticServiceUser(token); svc != nil {
+					user = svc
+				} else if su := surfaceUserFor(surfaces, token); su != nil {
+					user = su
+				} else if uw := usageWriterUserFor(usageWriter, token); uw != nil {
+					user = uw
+				} else if isJWT(token) {
+					// Peek at the JWT issuer to route to the correct verifier.
+					if oauth != nil && jwtIssuer(token) == oauth.BaseURL {
+						// Local OAuth JWT: validate with HMAC-SHA256.
+						u, err := oauth.ValidateJWT(token)
+						if err != nil {
+							slog.Warn("local oauth JWT auth failed", "error", err, "path", r.URL.Path)
+							writeErr(err.Error())
+							return
+						}
+						user = u
+					} else {
+						// Dex JWT path: validate and extract user + groups from claims.
+						if dex == nil {
+							writeErr("JWT auth not configured on this server")
+							return
+						}
+						u, err := dex.Verify(r.Context(), token)
+						if err != nil {
+							slog.Warn("dex JWT auth failed", "error", err, "path", r.URL.Path)
+							writeErr(err.Error())
+							return
+						}
+						user = u
 					}
 				} else {
-					// Dex JWT path: validate and extract user + groups from claims.
-					if dex == nil {
-						writeErr("JWT auth not configured on this server")
+					// GitHub token path: validate via GitHub API, resolve groups from gitops.
+					login, githubID, ghErr := validator.ValidateIdentity(r.Context(), token)
+					if ghErr != nil {
+						slog.Warn("github auth failed", "error", ghErr, "path", r.URL.Path)
+						writeErr(ghErr.Error())
 						return
 					}
-					user, err = dex.Verify(r.Context(), token)
-					if err != nil {
-						slog.Warn("dex JWT auth failed", "error", err, "path", r.URL.Path)
-						writeErr(err.Error())
-						return
-					}
+					groups := resolveGroups(login, validator, resolver)
+					user = NewGitHubUser(login, groups)
+					user.githubID = githubID
 				}
 			} else {
-				// GitHub token path: validate via GitHub API, resolve groups from gitops.
-				login, githubID, ghErr := validator.ValidateIdentity(r.Context(), token)
-				if ghErr != nil {
-					slog.Warn("github auth failed", "error", ghErr, "path", r.URL.Path)
-					writeErr(ghErr.Error())
+				// Federation registry (mctl-api#374): a single lookup
+				// replaces the if/else-if chain above.
+				if registry == nil {
+					writeErr("no identity provider is configured on this server")
 					return
 				}
-				groups := resolveGroups(login, validator, resolver)
-				user = NewGitHubUser(login, groups)
-				user.githubID = githubID
+				v, verr := registry.Verify(r.Context(), token)
+				if verr != nil {
+					slog.Warn("federation auth failed", "error", verr, "path", r.URL.Path)
+					writeErr(verr.Error())
+					return
+				}
+				user = userFromVerified(v)
 			}
 
 			if !attachPrincipal(w, r, cfg.principals, user, writeErr) {
@@ -578,13 +623,132 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 type MiddlewareOption func(*middlewareConfig)
 
 type middlewareConfig struct {
-	principals PrincipalResolver
+	principals         PrincipalResolver
+	federationRegistry *Registry
 }
 
 // WithPrincipalResolver resolves every authenticated caller to its
 // canonical principal. A nil resolver is the same as not passing it.
 func WithPrincipalResolver(pr PrincipalResolver) MiddlewareOption {
 	return func(c *middlewareConfig) { c.principals = pr }
+}
+
+// WithFederationRegistry supplies a fully-configured federation Registry
+// (cmd/api/main.go builds one from MCTL_OIDC_PROVIDERS plus the legacy Dex
+// shim, federation_config.go) instead of the default Registry Middleware
+// would otherwise build from its own validator/resolver/dex/oauth
+// parameters. Ignored while MCTL_FEDERATION_DISABLED is set.
+func WithFederationRegistry(r *Registry) MiddlewareOption {
+	return func(c *middlewareConfig) { c.federationRegistry = r }
+}
+
+// federationKillSwitchOn mirrors cmd/api/main.go's killSwitchOn (used for
+// PRINCIPALS_DISABLED, WORK_ITEMS_DISABLED, ...): any value except an
+// explicit "false"/"f"/"0"/"no"/"off" (or empty) turns the override on, so a
+// template that renders the flag as "false" keeps the registry active while
+// "yes" or "disabled" never silently fails open. Duplicated here rather than
+// imported: cmd/api/main.go already imports this package, so the reverse
+// import would cycle.
+func federationKillSwitchOn(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "false", "f", "0", "no", "off":
+		return false
+	}
+	return true
+}
+
+// defaultFederationRegistry builds the Registry Middleware uses when the
+// caller does not supply one via WithFederationRegistry: the same four
+// verifiers Middleware has always taken as parameters, wrapped as
+// providers. cmd/api/main.go always supplies a fuller registry (built by
+// federation_config.go, with audience enforcement); this default is what
+// every existing caller of Middleware -- including every test in this
+// package -- exercises unchanged.
+func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter string) *Registry {
+	static := []Provider{
+		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
+		newSurfaceProvider(func() map[string]string { return surfaces }),
+		newUsageWriterProvider(func() string { return usageWriter }),
+	}
+	var jwtProviders []Provider
+	if oauth != nil {
+		jwtProviders = append(jwtProviders, newLocalOAuthProvider(oauth))
+	}
+	if dex != nil && dex.Issuer() != "" {
+		jwtProviders = append(jwtProviders, legacyDexProvider{dex: dex})
+	}
+	var opaque []Provider
+	if validator != nil {
+		opaque = append(opaque, newGitHubProvider(validator, legacyGroupSource{validator: validator, resolver: resolver}))
+	}
+	r, err := NewRegistry(static, jwtProviders, opaque)
+	if err != nil {
+		// Construction cannot fail here in practice: every input is a fixed
+		// built-in shape with distinct names and issuers. Surfaced
+		// defensively -- every request then 401s with "no identity
+		// provider configured" -- rather than panicking, so a future change
+		// to this function's inputs fails closed at request time, not at
+		// process start.
+		slog.Error("default federation registry refused to construct", "error", err)
+		return nil
+	}
+	return r
+}
+
+// legacyDexProvider adapts an already-constructed *DexVerifier (built by
+// NewDexVerifier from DEX_ISSUER_URL/DEX_CLIENT_ID) into a federation
+// Provider, for defaultFederationRegistry. It delegates entirely to
+// DexVerifier.Verify, so its audience behaviour is exactly what
+// SkipClientIDCheck already baked in at construction -- the audit/enforce
+// distinction is only available through the generic oidcProvider that
+// cmd/api/main.go builds via federation_config.go and supplies through
+// WithFederationRegistry.
+type legacyDexProvider struct{ dex *DexVerifier }
+
+func (p legacyDexProvider) Name() string       { return ProviderDex }
+func (p legacyDexProvider) issuerName() string { return p.dex.Issuer() }
+
+func (p legacyDexProvider) Claims(t tokenShape) bool {
+	return t.jwt && normalizeIssuer(t.iss) == normalizeIssuer(p.dex.Issuer())
+}
+
+func (p legacyDexProvider) Verify(ctx context.Context, raw string) (*Verified, error) {
+	u, err := p.dex.Verify(ctx, raw)
+	if err != nil {
+		return nil, err
+	}
+	return &Verified{
+		Identity: Identity{Provider: ProviderDex, Issuer: u.dexIssuer, Subject: u.dexSubject, Display: u.ID, Kind: KindHuman},
+		Claims:   Claims{Groups: u.Groups},
+	}, nil
+}
+
+// userFromVerified maps a provider's Verified result to a *User, setting
+// the unexported discriminators from the provider's declared namespace and
+// the identity it proved -- never from token claims directly. This is the
+// only place besides the constructors in this file that builds a *User from
+// authentication (design.md "The contract").
+func userFromVerified(v *Verified) *User {
+	switch {
+	case v.Identity.Provider == ProviderService && v.Identity.Subject == ServiceUserID:
+		return NewServiceUser()
+	case v.Identity.Provider == ProviderService && strings.HasPrefix(v.Identity.Subject, SurfacePrincipalPrefix):
+		return NewSurfaceUser(strings.TrimPrefix(v.Identity.Subject, SurfacePrincipalPrefix))
+	case v.Identity.Provider == ProviderService && v.Identity.Subject == UsageWriterUserID:
+		return NewUsageWriterUser()
+	case v.Identity.Provider == ProviderGitHub:
+		u := NewGitHubUser(v.Identity.Display, v.Claims.Groups)
+		if v.Identity.Subject != "" {
+			if id, err := strconv.ParseInt(v.Identity.Subject, 10, 64); err == nil {
+				u.githubID = id
+			}
+		}
+		return u
+	case v.Identity.Provider == ProviderDex:
+		return &User{ID: v.Identity.Display, Groups: v.Claims.Groups, dexIssuer: v.Identity.Issuer, dexSubject: v.Identity.Subject}
+	default:
+		return &User{ID: v.Identity.Display, Groups: v.Claims.Groups}
+	}
 }
 
 // attachPrincipal resolves the caller's principal. It answers false after

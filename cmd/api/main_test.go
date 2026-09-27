@@ -268,6 +268,31 @@ func TestConfigValidate(t *testing.T) {
 			cfg:     config{OAuthPreregisteredClientsRaw: `[{"client_id":"c","redirect_uris":["https://x/cb"]}]`},
 			wantErr: false,
 		},
+		{
+			// mctl-api#374: MCTL_OIDC_PROVIDERS is validated the same way,
+			// whether or not it is ever consulted.
+			name:    "malformed MCTL_OIDC_PROVIDERS is refused",
+			cfg:     config{OIDCProvidersRaw: `{`},
+			wantErr: true,
+			wantVar: "MCTL_OIDC_PROVIDERS",
+		},
+		{
+			name:    "MCTL_OIDC_PROVIDERS entry missing audiences is refused",
+			cfg:     config{OIDCProvidersRaw: `[{"name":"acme","issuer":"https://acme.example"}]`},
+			wantErr: true,
+			wantVar: "MCTL_OIDC_PROVIDERS",
+		},
+		{
+			name:    "MCTL_OIDC_PROVIDERS entry with a reserved name is refused",
+			cfg:     config{OIDCProvidersRaw: `[{"name":"agent","issuer":"https://acme.example","audiences":["a"]}]`},
+			wantErr: true,
+			wantVar: "MCTL_OIDC_PROVIDERS",
+		},
+		{
+			name:    "well-formed MCTL_OIDC_PROVIDERS is accepted",
+			cfg:     config{OIDCProvidersRaw: `[{"name":"acme","issuer":"https://acme.example","audiences":["mctl-api"],"audience_enforcement":"audit"}]`},
+			wantErr: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -248,7 +248,27 @@ func main() {
 		}
 	}
 
-	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer, auth.WithPrincipalResolver(principalResolver))
+	// Federation registry (mctl-api#374, slice A): the static-secret
+	// providers, the local-OAuth provider, the GitHub PAT provider, any
+	// explicit MCTL_OIDC_PROVIDERS entries, and the legacy Dex shim (unless
+	// an explicit entry already claims its issuer). A construction failure
+	// here is one of the conditions requirements.md says must refuse boot
+	// (a malformed MCTL_OIDC_PROVIDERS value, or a registry invariant
+	// violated by the combined provider set); an unreachable OIDC issuer at
+	// boot is not one of them and is only logged (BuildFederationRegistry).
+	federationRegistry, fedErr := auth.BuildFederationRegistry(rootCtx, auth.FederationProvidersConfig{
+		OIDCProvidersRaw: cfg.OIDCProvidersRaw,
+		DexIssuerURL:     cfg.DexIssuerURL,
+		DexClientID:      cfg.DexClientID,
+	}, ghValidator, gitReader, oauthServer)
+	if fedErr != nil {
+		slog.Error("invalid configuration", "error", fmt.Errorf("MCTL_OIDC_PROVIDERS: %w", fedErr))
+		stopSignals()
+		os.Exit(1)
+	}
+
+	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer,
+		auth.WithPrincipalResolver(principalResolver), auth.WithFederationRegistry(federationRegistry))
 
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
 
@@ -928,6 +948,11 @@ type config struct {
 	DexIssuerURL string
 	// DexClientID is the expected audience for Dex JWTs. If empty, audience check is skipped.
 	DexClientID string
+	// OIDCProvidersRaw is MCTL_OIDC_PROVIDERS as read: a JSON array of
+	// additional federation providers (mctl-api#374), parsed and validated
+	// by auth.ParseOIDCProviders. Unset or blank means only the legacy Dex
+	// shim (DexIssuerURL/DexClientID above) applies.
+	OIDCProvidersRaw string
 	// SelfURL is the public base URL used in MCP SSE endpoint advertisement.
 	SelfURL string
 	// AllowedOrigins is a list of origins permitted by CORS policy.
@@ -1026,6 +1051,7 @@ func loadConfig() config {
 		BackstageGithubAppConnectToken: os.Getenv("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN"),
 		DexIssuerURL:                   envOr("DEX_ISSUER_URL", "https://ops.mctl.ai/api/dex"),
 		DexClientID:                    os.Getenv("DEX_CLIENT_ID"),
+		OIDCProvidersRaw:               os.Getenv("MCTL_OIDC_PROVIDERS"),
 		SelfURL:                        envOr("SELF_URL", "https://api.mctl.ai"),
 		AllowedOrigins:                 origins,
 		OAuthGitHubClientID:            os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
@@ -1280,6 +1306,17 @@ func (c config) validate() error {
 		return fmt.Errorf("OAUTH_TOKEN_TTL must not exceed %v, got %v — clients renew "+
 			"silently with the refresh_token grant, and access tokens cannot be revoked, "+
 			"so a longer lifetime only widens the window on a leak", maxOAuthTokenTTL, c.OAuthTokenTTL)
+	}
+
+	// MCTL_OIDC_PROVIDERS (mctl-api#374): shape-validated here, in the same
+	// style as OAUTH_PREREGISTERED_CLIENTS above, so a malformed value or an
+	// entry missing audiences/naming a reserved provider refuses this boot
+	// rather than the one after a second variable is also set. The full
+	// registry (this plus the legacy Dex shim and the built-in providers) is
+	// built for real in main(), which is where a duplicate against the
+	// local-OAuth or Dex provider would also be caught.
+	if _, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw); err != nil {
+		return err
 	}
 	return nil
 }
