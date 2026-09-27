@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
@@ -40,6 +41,38 @@ import (
 // an invalid token or client credential. Token-endpoint handlers must respond
 // with HTTP 500 / error:"server_error" when they encounter this sentinel.
 var ErrServerError = errors.New("server_error")
+
+// errResolverNotConfigured is returned by resolveGroupsChecked when
+// OAuthServer.TenantResolver is nil. It is not a failure: callers treat it as
+// "feature off" and keep whatever groups the session already carried, so a
+// deployment without a gitops reader behaves exactly as it always has
+// (mctl-api#411).
+var errResolverNotConfigured = errors.New("tenant resolver not configured")
+
+// groupsStaleWarnAfter is the fixed threshold beyond which a present but
+// unrefreshed gitops checkout gets a rate-limited warning logged, even though
+// the resolution still succeeds from it. Not configurable, and never
+// overridden by a *looser* GroupsMaxStaleness -- only a *stricter* one can
+// turn staleness into a failure. See resolveGroupsChecked.
+const groupsStaleWarnAfter = 15 * time.Minute
+
+// defaultGroupsCacheTTL is used when GroupsCacheTTL is unset.
+const defaultGroupsCacheTTL = 30 * time.Second
+
+// groupsCacheEntry is one memoized group-resolution result.
+type groupsCacheEntry struct {
+	groups    []string
+	expiresAt time.Time
+}
+
+// staleSyncSource is satisfied by a TenantResolver that can also report when
+// its backing checkout last synced successfully. *gitops.Reader implements
+// it. A resolver that cannot report sync state (test doubles, future
+// implementations) simply skips the freshness gate in
+// resolveGroupsChecked.
+type staleSyncSource interface {
+	LastSync() time.Time
+}
 
 // OAuthServer implements OAuth 2.0 Authorization Code flow with PKCE (RFC 7636).
 // It acts as a public-client OAuth server backed by GitHub for user authentication.
@@ -65,6 +98,44 @@ type OAuthServer struct {
 	GitHubValidator *GitHubValidator
 	// TenantResolver resolves which tenants a GitHub login belongs to.
 	TenantResolver TenantResolver
+
+	// GroupsMaxStaleness, when > 0, enables strict mode for group
+	// resolution: a TenantResolver checkout whose last successful sync
+	// (reported via an optional LastSync() time.Time method) is older than
+	// this counts as a failed resolution, same as the resolver returning an
+	// error. 0 (the default) disables strict mode: a stale-but-present
+	// checkout is then used and only logged/alerted on (see
+	// resolveGroupsChecked). Configured from OAUTH_GROUPS_MAX_STALENESS.
+	GroupsMaxStaleness time.Duration
+	// GroupsDegradedGrace bounds how long the groups stored with a refresh
+	// token, or claimed by a JWT, may stand in for a failed group
+	// resolution before this server fails closed to admins-only. 0 selects
+	// AccessTokenTTL (falling back to 1h if that is also unset), which is
+	// the bound requirements.md names.
+	GroupsDegradedGrace time.Duration
+	// GroupsCacheTTL memoizes a successful group resolution per login, so
+	// the per-request re-resolution ValidateJWT performs costs at most one
+	// TenantResolver lookup per login per this interval. 0 selects
+	// defaultGroupsCacheTTL (30s).
+	GroupsCacheTTL time.Duration
+
+	// lastResolveOK is the Unix-nanosecond time of the last successful group
+	// resolution anywhere in this process (not per-session, per design.md:
+	// the failure being tolerated is a property of the resolver, not of any
+	// one session). Seeded to process start by NewOAuthServer, so a pod that
+	// boots with a broken gitops checkout still has a bounded grace window
+	// rather than an open-ended one.
+	lastResolveOK atomic.Int64
+
+	// groupsCacheMu guards groupsCache, the per-login memo of a successful
+	// group resolution. Modelled on GitHubValidator.cache.
+	groupsCacheMu sync.Mutex
+	groupsCache   map[string]groupsCacheEntry
+
+	// staleWarnMu guards staleWarnAt, which rate-limits the "stale but
+	// present checkout" warning to at most once per minute.
+	staleWarnMu sync.Mutex
+	staleWarnAt time.Time
 
 	// RefreshStore is an optional persistent store for refresh tokens.
 	// When non-nil it replaces the in-memory refreshTokens store, making
@@ -631,22 +702,242 @@ func NewOAuthServer(baseURL, ghClientID, ghClientSecret string, jwtSecret []byte
 	}
 	s.codes.init()
 	s.refreshTokens.init()
+	// Seeds the degraded-grace window from process start, not from whenever
+	// the first resolution happens to run: a pod that boots with a broken
+	// gitops checkout still has a bounded window rather than an open-ended
+	// one (design.md "A checked resolver").
+	s.lastResolveOK.Store(time.Now().UnixNano())
 	return s
 }
 
-// ResolveGroups resolves the tenant groups for a GitHub login.
+// ResolveGroups resolves the tenant groups for a GitHub login, best-effort.
+// It is the exported entry point used at login
+// (internal/api/oauth_handlers.go, right after the GitHub OAuth callback
+// validates the login) and is reimplemented over resolveGroupsChecked,
+// discarding the error: a resolver failure (or none configured) at login
+// time still grants "admins" as computed right now and never blocks the
+// login on the tenant lookup, exactly as it did before this method existed.
 func (s *OAuthServer) ResolveGroups(login string) []string {
-	var groups []string
-	if s.GitHubValidator.IsAdmin(login) {
-		groups = append(groups, "admins")
+	if groups, err := s.resolveGroupsChecked(login); err == nil {
+		return groups
 	}
-	if s.TenantResolver != nil {
-		tenants, err := s.TenantResolver.GetTenantsForUser(login)
-		if err == nil {
-			groups = append(groups, tenants...)
+	return s.withAdmins(login, nil)
+}
+
+// resolveGroupsChecked resolves groups for login, reporting failure instead
+// of hiding it -- unlike the free function resolveGroups in oidc.go, and
+// unlike this method's own predecessor. Rules, in order:
+//
+//  1. "admins" always comes from GitHubValidator.IsAdmin(login), computed
+//     fresh on every call. It is never taken from a stored or claimed value:
+//     that is what lets admin status be granted or withdrawn on the same
+//     terms as any other group (requirements.md).
+//  2. TenantResolver == nil returns errResolverNotConfigured. This is not a
+//     failure; it means the feature is off. Callers keep the stored/claimed
+//     groups verbatim (groupsForSession), so a deployment without a gitops
+//     reader is unaffected.
+//  3. A memoized result younger than GroupsCacheTTL is reused without
+//     touching the resolver, bounding the added cost of per-request
+//     resolution (ValidateJWT) to one lookup per login per TTL.
+//  4. Freshness gate (checkResolverFreshness): if the resolver also reports
+//     LastSync() (gitops.Reader does), a checkout that has never synced, or
+//     that is stale beyond a configured GroupsMaxStaleness (strict mode), is
+//     treated as a failed resolution -- never as "this user has no tenants".
+//     A stale-but-present checkout under strict mode's threshold (or with
+//     strict mode off) is not a failure; it is used, with a rate-limited
+//     warning past the fixed groupsStaleWarnAfter.
+//  5. A GetTenantsForUser error is a failure, wrapped with the login for
+//     context.
+//  6. On success the result is memoized and lastResolveOK is advanced, which
+//     is what keeps the degraded-grace window from drifting toward
+//     fail-closed while the resolver keeps working (even from a stale
+//     checkout).
+func (s *OAuthServer) resolveGroupsChecked(login string) ([]string, error) {
+	if s.TenantResolver == nil {
+		return nil, errResolverNotConfigured
+	}
+	if groups, ok := s.cachedGroups(login); ok {
+		return groups, nil
+	}
+	if err := s.checkResolverFreshness(login); err != nil {
+		return nil, err
+	}
+	tenants, err := s.TenantResolver.GetTenantsForUser(login)
+	if err != nil {
+		return nil, fmt.Errorf("resolve tenant groups for %q: %w", login, err)
+	}
+	groups := s.withAdmins(login, tenants)
+	s.lastResolveOK.Store(time.Now().UnixNano())
+	s.storeGroupsCache(login, groups)
+	return groups, nil
+}
+
+// checkResolverFreshness applies the freshness gate described on
+// resolveGroupsChecked. It returns nil when resolution may proceed (fresh,
+// stale-but-present with a rate-limited warning already logged, or the
+// resolver does not report sync state at all), and a non-nil error only when
+// the checkout is definitively too old to trust: never synced, or -- only in
+// strict mode -- older than GroupsMaxStaleness.
+func (s *OAuthServer) checkResolverFreshness(login string) error {
+	src, ok := s.TenantResolver.(staleSyncSource)
+	if !ok {
+		return nil
+	}
+	last := src.LastSync()
+	if last.IsZero() {
+		// A missing tenants directory reads as (nil, nil), not an error
+		// (gitops.Reader.ListTenants), which is indistinguishable from "this
+		// user has no tenants" unless caught here first.
+		return fmt.Errorf("gitops checkout for tenant resolution has never synced")
+	}
+	age := time.Since(last)
+	if s.GroupsMaxStaleness > 0 && age > s.GroupsMaxStaleness {
+		return fmt.Errorf("gitops checkout is %s old, beyond OAUTH_GROUPS_MAX_STALENESS (%s)", age.Round(time.Second), s.GroupsMaxStaleness)
+	}
+	// Independent of the strict-mode check above: the fixed 15m constant
+	// never overrides a stricter operator setting, but it still applies (as
+	// a warning, not a failure) whether or not strict mode is configured.
+	if age > groupsStaleWarnAfter {
+		s.warnStaleCheckout(login, age)
+	}
+	return nil
+}
+
+// warnStaleCheckout logs that a stale-but-present checkout is still being
+// used to answer group resolution, rate-limited to once per minute so a
+// long-lived incident does not flood logs.
+func (s *OAuthServer) warnStaleCheckout(login string, age time.Duration) {
+	s.staleWarnMu.Lock()
+	defer s.staleWarnMu.Unlock()
+	if !s.staleWarnAt.IsZero() && time.Since(s.staleWarnAt) < time.Minute {
+		return
+	}
+	s.staleWarnAt = time.Now()
+	slog.Warn("oauth: gitops checkout stale but present; resolving tenant groups from it anyway",
+		"user", login, "age", age.Round(time.Second), "warn_after", groupsStaleWarnAfter)
+}
+
+// groupsCacheTTL resolves the configured memo TTL.
+func (s *OAuthServer) groupsCacheTTL() time.Duration {
+	if s.GroupsCacheTTL == 0 {
+		return defaultGroupsCacheTTL
+	}
+	return s.GroupsCacheTTL
+}
+
+// cachedGroups returns a memoized resolution for login, if one exists and has
+// not yet expired.
+func (s *OAuthServer) cachedGroups(login string) ([]string, bool) {
+	s.groupsCacheMu.Lock()
+	defer s.groupsCacheMu.Unlock()
+	e, ok := s.groupsCache[login]
+	if !ok || time.Now().After(e.expiresAt) {
+		return nil, false
+	}
+	return e.groups, true
+}
+
+// storeGroupsCache memoizes groups for login. Expired entries across the
+// whole map are evicted opportunistically on every write (mirroring
+// GitHubValidator.cache), so the map cannot grow without bound even though
+// nothing ever sweeps it on a timer.
+func (s *OAuthServer) storeGroupsCache(login string, groups []string) {
+	s.groupsCacheMu.Lock()
+	defer s.groupsCacheMu.Unlock()
+	if s.groupsCache == nil {
+		s.groupsCache = make(map[string]groupsCacheEntry)
+	}
+	now := time.Now()
+	for k, e := range s.groupsCache {
+		if now.After(e.expiresAt) {
+			delete(s.groupsCache, k)
 		}
 	}
+	s.groupsCache[login] = groupsCacheEntry{groups: groups, expiresAt: now.Add(s.groupsCacheTTL())}
+}
+
+// withAdmins returns tenants -- with any incidental "admins" entry stripped
+// -- plus a freshly computed "admins" when login is currently an admin. This
+// is the only place group lists are assembled from a fresh IsAdmin check, so
+// every caller that wants "admins" reflects live admin status goes through
+// here rather than trusting a stored or claimed copy.
+func (s *OAuthServer) withAdmins(login string, tenants []string) []string {
+	groups := tenantsOnly(tenants)
+	if s.GitHubValidator.IsAdmin(login) {
+		groups = append([]string{"admins"}, groups...)
+	}
 	return groups
+}
+
+// tenantsOnly strips any "admins" entry from groups. Used to sanitize a
+// stored or claimed snapshot before treating it as a fallback: that snapshot
+// is never trusted as evidence of admin status, because withAdmins
+// recomputes "admins" fresh every time.
+func tenantsOnly(groups []string) []string {
+	if len(groups) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(groups))
+	for _, g := range groups {
+		if g != "admins" {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// degradedGrace resolves GroupsDegradedGrace, defaulting to AccessTokenTTL
+// (the bound requirements.md names), and falling back further to 1h -- the
+// same default IssueJWT itself falls back to -- if AccessTokenTTL is also
+// unset.
+func (s *OAuthServer) degradedGrace() time.Duration {
+	if s.GroupsDegradedGrace != 0 {
+		return s.GroupsDegradedGrace
+	}
+	if s.AccessTokenTTL != 0 {
+		return s.AccessTokenTTL
+	}
+	return time.Hour
+}
+
+// lastResolveOKTime returns the last time any group resolution in this
+// process succeeded.
+func (s *OAuthServer) lastResolveOKTime() time.Time {
+	return time.Unix(0, s.lastResolveOK.Load())
+}
+
+// groupsForSession returns the groups a token should carry for login, given
+// the groups previously recorded for that session -- the snapshot stored
+// with a refresh token, or the groups a JWT already claims. This is the
+// degradation policy described in design.md "A checked resolver" /
+// "groupsForSession":
+//
+//   - resolution succeeded: return the freshly resolved groups.
+//   - no TenantResolver configured: return stored unchanged (feature off).
+//   - any other failure, within GroupsDegradedGrace of the last successful
+//     resolution anywhere in the process: return the stored tenant groups
+//     with "admins" recomputed fresh, and log a warning. A resolver outage
+//     is tolerated for a bounded window rather than either defeating a
+//     removal forever or logging every session out on a single failed
+//     git fetch.
+//   - any other failure, beyond that grace window: fail closed to
+//     admins-only, and log a warning. This is the bound that keeps a
+//     resolver outage from defeating a tenant removal for longer than one
+//     access-token TTL.
+func (s *OAuthServer) groupsForSession(login string, stored []string) []string {
+	groups, err := s.resolveGroupsChecked(login)
+	if err == nil {
+		return groups
+	}
+	if errors.Is(err, errResolverNotConfigured) {
+		return stored
+	}
+	if time.Since(s.lastResolveOKTime()) <= s.degradedGrace() {
+		slog.Warn("oauth: group resolution degraded; using stored tenant groups", "user", login, "error", err)
+		return s.withAdmins(login, tenantsOnly(stored))
+	}
+	slog.Warn("oauth: group resolution unavailable beyond grace; dropping tenant groups", "user", login, "error", err)
+	return s.withAdmins(login, nil)
 }
 
 // IsRedirectURIAllowed returns true if uri is in the static whitelist, is a
@@ -874,7 +1165,7 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 		if ttl == 0 {
 			ttl = 30 * 24 * time.Hour
 		}
-		login, groups, err := s.RefreshStore.Rotate(refreshToken, newToken, clientID, time.Now().Add(ttl))
+		login, storedGroups, err := s.RefreshStore.Rotate(refreshToken, newToken, clientID, time.Now().Add(ttl))
 		if err != nil {
 			// Map store errors to the same string used by the in-memory path so
 			// oauth_handlers.go doesn't need to import the refreshstore package.
@@ -887,6 +1178,14 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 			slog.Error("oauth: refresh store unexpected error", "error", err)
 			return "", "", fmt.Errorf("oauth: %w", ErrServerError)
 		}
+		// The row rotate() just wrote still carries storedGroups verbatim --
+		// refreshstore.Store.Rotate has no parameter for new groups, and
+		// adding one would change the interface, the PostgresStore schema and
+		// the in-flight-rotation grace path (design.md "Both refresh paths").
+		// That snapshot's staleness is no longer load-bearing because
+		// groupsForSession re-resolves it here, bounded by the degraded-grace
+		// fallback when resolution fails.
+		groups := s.groupsForSession(login, storedGroups)
 		accessToken, err := s.IssueJWT(login, groups)
 		if err != nil {
 			return "", "", err
@@ -902,11 +1201,17 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 	if entry.ClientID != clientID {
 		return "", "", errors.New("client_id mismatch")
 	}
-	accessToken, err := s.IssueJWT(entry.Login, entry.Groups)
+	// Unlike the store path above, the in-memory successor row naturally
+	// records the re-resolved groups below (IssueRefreshToken is called with
+	// them), so grant and revoke both take effect on the very next refresh
+	// here. The asymmetry with the store path is harmless: it is bounded by
+	// GroupsDegradedGrace either way.
+	groups := s.groupsForSession(entry.Login, entry.Groups)
+	accessToken, err := s.IssueJWT(entry.Login, groups)
 	if err != nil {
 		return "", "", err
 	}
-	newRefreshToken, err := s.IssueRefreshToken(entry.Login, entry.Groups, clientID)
+	newRefreshToken, err := s.IssueRefreshToken(entry.Login, groups, clientID)
 	if err != nil {
 		return "", "", err
 	}
@@ -938,8 +1243,13 @@ func (s *OAuthServer) ValidateJWT(token string) (*User, error) {
 		return nil, err
 	}
 	// The subject is the GitHub login the OAuth callback validated before
-	// IssueCode; this server mints for no other identity provider.
-	return NewGitHubUser(payload.Subject, payload.Groups), nil
+	// IssueCode; this server mints for no other identity provider. The
+	// groups claim is retained on the token for compatibility and as the
+	// degraded fallback (groupsForSession), not as the authority: it is
+	// re-resolved here on every validation, which is what lets a same-session
+	// tenant grant or removal reach a live session without waiting for the
+	// access token to expire (requirements.md, the reported "karabu" case).
+	return NewGitHubUser(payload.Subject, s.groupsForSession(payload.Subject, payload.Groups)), nil
 }
 
 // ─── PKCE ─────────────────────────────────────────────────────────────────────
