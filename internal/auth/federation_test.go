@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -486,7 +487,7 @@ func TestGenericOIDCProviderStripsAdminsGroupButDexKeepsIt(t *testing.T) {
 		t.Fatalf("Groups = %v, want [team-a] (admins stripped, team-a kept)", genericUser.Groups)
 	}
 
-	dexSpec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://dex.example", AudienceEnforcement: AudienceEnforce, SkipAudienceCheck: true, LegacyDexShim: true}
+	dexSpec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://dex.example", AudienceEnforcement: AudienceEnforce, SkipAudienceCheck: true, LegacyDexGroups: true}
 	dexFV := fakeOIDCVerifier{tok: &oidcVerifiedToken{Issuer: "https://dex.example", Claims: claims}}
 	dexP := newOIDCProviderForTest(dexSpec, dexFV)
 	dv, err := dexP.Verify(context.Background(), "tok")
@@ -504,10 +505,10 @@ func TestGenericOIDCProviderStripsAdminsGroupButDexKeepsIt(t *testing.T) {
 
 // A provider merely named "dex" -- exactly what ParseOIDCProviders allows an
 // operator's own MCTL_OIDC_PROVIDERS entry to be, since "dex" is
-// deliberately left out of reservedProviderNames -- is not the legacy shim
-// and must not get its unfiltered-admins behaviour. Only LegacyDexShim
-// grants that (P2 fix: gating on the bare name let an operator-controlled
-// provider mint admin identities).
+// deliberately left out of reservedProviderNames -- does not by its name get
+// the unfiltered-admins behaviour. Only LegacyDexGroups grants that, and
+// BuildFederationRegistry sets it only for "dex" on DEX_ISSUER_URL
+// (TestBuildFederationRegistryDexSlot).
 func TestOperatorNamedDexProviderStripsAdminsGroup(t *testing.T) {
 	claims := map[string]any{"sub": "u-123", "preferred_username": "bob", "groups": []any{"admins", "team-a"}}
 	spec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://acme.example", Audiences: []string{"aud"}, AudienceEnforcement: AudienceEnforce}
@@ -523,6 +524,84 @@ func TestOperatorNamedDexProviderStripsAdminsGroup(t *testing.T) {
 	}
 	if !reflect.DeepEqual(u.Groups, []string{"team-a"}) {
 		t.Fatalf("Groups = %v, want [team-a] (admins stripped)", u.Groups)
+	}
+}
+
+// TestBuildFederationRegistryDexSlot pins BuildFederationRegistry's
+// shim-vs-explicit composition through the newOIDCProviderFn seam (no live
+// issuer): which provider serves the "dex" namespace, and which one keeps
+// Dex's unfiltered "admins" (LegacyDexGroups).
+func TestBuildFederationRegistryDexSlot(t *testing.T) {
+	const dexIssuer = "https://ops.example/api/dex"
+	entry := func(name, issuer string) string {
+		return `{"name":"` + name + `","issuer":"` + issuer + `","audiences":["mctl-api"],"audience_enforcement":"audit"}`
+	}
+	cases := []struct {
+		name        string
+		raw         string
+		failIssuer  string // the fake constructor fails for this issuer
+		wantErr     string
+		wantDex     bool // a provider named "dex" is registered
+		wantIssuer  string
+		wantLegacy  bool
+		wantJWTSize int
+	}{
+		{name: "no entries: shim synthesized, legacy groups on",
+			wantDex: true, wantIssuer: dexIssuer, wantLegacy: true, wantJWTSize: 1},
+		{name: "explicit dex on the Dex issuer (audit canary): replaces shim, keeps admins",
+			raw: "[" + entry("dex", dexIssuer) + "]", wantDex: true, wantIssuer: dexIssuer, wantLegacy: true, wantJWTSize: 1},
+		{name: "explicit dex on another issuer (documented replacement): boots, admins filtered",
+			raw: "[" + entry("dex", "https://idp.example") + "]", wantDex: true, wantIssuer: "https://idp.example", wantLegacy: false, wantJWTSize: 1},
+		{name: "another name on the Dex issuer: refused, never re-namespaced",
+			raw: "[" + entry("corp", dexIssuer) + "]", wantErr: "both claim issuer"},
+		{name: "one entry's init fails: that provider omitted, no boot refusal",
+			raw: "[" + entry("dex", dexIssuer) + "," + entry("corp", "https://down.example") + "]", failIssuer: "https://down.example",
+			wantDex: true, wantIssuer: dexIssuer, wantLegacy: true, wantJWTSize: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := newOIDCProviderFn
+			t.Cleanup(func() { newOIDCProviderFn = orig })
+			newOIDCProviderFn = func(_ context.Context, spec OIDCProviderSpec) (*oidcProvider, error) {
+				if spec.Issuer == tc.failIssuer {
+					return nil, errors.New("issuer unreachable")
+				}
+				return newOIDCProviderForTest(spec, nil), nil
+			}
+			r, err := BuildFederationRegistry(context.Background(), FederationProvidersConfig{
+				OIDCProvidersRaw: tc.raw, DexIssuerURL: dexIssuer, DexClientID: "mctl-api",
+			}, nil, nil, nil)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want one containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(r.jwt) != tc.wantJWTSize {
+				t.Fatalf("jwt providers = %d, want %d", len(r.jwt), tc.wantJWTSize)
+			}
+			var dex *oidcProvider
+			for _, p := range r.jwt {
+				if op, ok := p.(*oidcProvider); ok && op.Name() == ProviderDex {
+					dex = op
+				}
+			}
+			if (dex != nil) != tc.wantDex {
+				t.Fatalf("dex provider present = %v, want %v", dex != nil, tc.wantDex)
+			}
+			if dex == nil {
+				return
+			}
+			if dex.issuerName() != tc.wantIssuer {
+				t.Fatalf("dex issuer = %q, want %q", dex.issuerName(), tc.wantIssuer)
+			}
+			if dex.spec.LegacyDexGroups != tc.wantLegacy {
+				t.Fatalf("dex LegacyDexGroups = %v, want %v", dex.spec.LegacyDexGroups, tc.wantLegacy)
+			}
+		})
 	}
 }
 

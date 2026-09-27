@@ -168,9 +168,9 @@ offending entry.
 
 ### The legacy Dex shim
 
-Unset `MCTL_OIDC_PROVIDERS` (or an array with no entry naming the Dex
-issuer) reproduces today's single-Dex configuration exactly, synthesized
-from `DEX_ISSUER_URL` / `DEX_CLIENT_ID`:
+Unset `MCTL_OIDC_PROVIDERS` (or an array with no entry named `dex`)
+reproduces today's single-Dex configuration exactly, synthesized from
+`DEX_ISSUER_URL` / `DEX_CLIENT_ID`:
 
 - `DEX_CLIENT_ID` set → `audiences: [DEX_CLIENT_ID]`, `audience_enforcement:
   enforce` (library-equivalent to the pre-registry `ClientID` check).
@@ -178,14 +178,22 @@ from `DEX_ISSUER_URL` / `DEX_CLIENT_ID`:
   `federation_audience_check_skipped_total{provider="dex"}` is incremented
   on every verification, and a startup warning names the variable to set.
 
-If an explicit `MCTL_OIDC_PROVIDERS` entry claims the same (normalized)
-issuer as `DEX_ISSUER_URL`, the shim is **not** synthesized — the explicit
-entry supersedes it. Boot logs which of the two is active. Two registrations
-on one issuer would otherwise be a boot refusal, so this is how an operator
-replaces the shim: change the entry's `issuer` / `audiences` and keep
-`name: "dex"` (existing `external_identities` rows with `provider='dex'`
-keep resolving), or add a second entry under a new name and migrate users by
-linking.
+If an explicit `MCTL_OIDC_PROVIDERS` entry is **named `dex`**, the shim is
+**not** synthesized — the explicit entry supersedes it, whatever its issuer.
+Boot logs which of the two is active. The name is the identity namespace, so
+this is how an operator replaces the shim: keep `name: "dex"` and change the
+entry's `issuer` / `audiences` (existing `external_identities` rows with
+`provider='dex'` keep resolving), or add a second entry under a new name and
+migrate users by linking. An entry under any other name on the Dex issuer
+does not replace the shim: both would claim one issuer, and boot is refused
+with a duplicate-issuer error naming both.
+
+Which of these keeps the `admins` group is a separate, narrower rule. A
+`dex` entry on the **same** issuer as `DEX_ISSUER_URL` (the audit canary
+below) keeps Dex's unfiltered groups exactly as the shim does, because the
+operator already trusts that issuer. A `dex` entry repointed at **any other**
+issuer is a new trust decision: like every other `MCTL_OIDC_PROVIDERS` entry,
+it has `admins` stripped from its `groups` claim.
 
 An unreachable OIDC issuer at boot — for either the shim or an explicit
 entry — is **not** one of the conditions that refuses startup. It is logged

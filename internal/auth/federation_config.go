@@ -180,22 +180,27 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 	dexClaimedExplicitly := false
 	for i := range entries {
 		e := &entries[i]
-		// Only an entry actually named "dex" supersedes the shim. "dex" is
-		// the one name ParseOIDCProviders leaves unreserved specifically so
-		// an operator can replace the shim under the SAME identity
-		// namespace (reservedProviderNames' comment, federation.go); an
-		// entry that merely happens to share the Dex issuer under a
-		// different name is not that replacement -- treating it as such
-		// would silently re-namespace every existing Dex identity. Leaving
-		// dexClaimedExplicitly false in that case still synthesizes the
-		// shim under "dex", so the two same-issuer providers collide and
+		// The provider NAME is the identity namespace, so an entry named
+		// "dex" replaces the shim whatever its issuer: that is how an
+		// operator repoints Dex while existing external_identities rows with
+		// provider='dex' keep resolving (docs/federation.md). "dex" is the
+		// one name ParseOIDCProviders leaves unreserved for exactly this.
+		// An entry under a DIFFERENT name on the Dex issuer is not that
+		// replacement: the shim is still synthesized under "dex", and
 		// NewRegistry refuses boot with a duplicate-issuer error naming
-		// both -- the same boot refusal design.md already calls for on two
-		// registrations sharing an issuer.
-		if e.Name == ProviderDex && normalizeIssuer(e.Issuer) == dexIssuer && dexIssuer != "" {
+		// both, rather than silently re-namespacing every Dex identity.
+		if e.Name == ProviderDex {
 			dexClaimedExplicitly = true
 		}
-		p, err := newOIDCProvider(ctx, e.spec())
+		spec := e.spec()
+		// Unfiltered "admins" (LegacyDexGroups) only for the trusted Dex
+		// slot: "dex" on the issuer already configured in DEX_ISSUER_URL.
+		// That keeps the documented audit canary (an explicit "dex" entry on
+		// the Dex issuer) from silently stripping admin from every Dex
+		// caller, while "dex" on any other issuer is a new trust decision
+		// and gets the filtered behaviour.
+		spec.LegacyDexGroups = e.Name == ProviderDex && dexIssuer != "" && normalizeIssuer(e.Issuer) == dexIssuer
+		p, err := newOIDCProviderFn(ctx, spec)
 		if err != nil {
 			slog.Warn("oidc provider init failed; provider disabled", "name", e.Name, "issuer", e.Issuer, "error", err)
 			continue
@@ -209,7 +214,7 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 	case dexClaimedExplicitly:
 		slog.Info("dex provider: using explicit MCTL_OIDC_PROVIDERS entry, legacy shim not synthesized", "issuer", cfg.DexIssuerURL)
 	default:
-		shimSpec := OIDCProviderSpec{Name: ProviderDex, Issuer: cfg.DexIssuerURL, Kind: KindHuman, LegacyDexShim: true}
+		shimSpec := OIDCProviderSpec{Name: ProviderDex, Issuer: cfg.DexIssuerURL, Kind: KindHuman, LegacyDexGroups: true}
 		if cfg.DexClientID != "" {
 			shimSpec.Audiences = []string{cfg.DexClientID}
 			shimSpec.AudienceEnforcement = AudienceEnforce
@@ -217,7 +222,7 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 			shimSpec.SkipAudienceCheck = true
 			slog.Warn("DEX_CLIENT_ID is empty; dex audience check is skipped (compatibility) -- set DEX_CLIENT_ID to enable it", "issuer", cfg.DexIssuerURL)
 		}
-		p, err := newOIDCProvider(ctx, shimSpec)
+		p, err := newOIDCProviderFn(ctx, shimSpec)
 		if err != nil {
 			slog.Warn("dex OIDC init failed — JWT auth disabled for dex", "issuer", cfg.DexIssuerURL, "error", err)
 		} else {
