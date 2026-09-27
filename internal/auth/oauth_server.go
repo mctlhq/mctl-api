@@ -49,6 +49,13 @@ var ErrServerError = errors.New("server_error")
 // (mctl-api#411).
 var errResolverNotConfigured = errors.New("tenant resolver not configured")
 
+// errResolverBusy means the resolver could not answer without waiting, because
+// the gitops reader is mid-refresh (it holds its write lock across git
+// subprocesses). It is transient and expected about once a minute, so it is
+// neither negatively cached nor logged above debug. The session keeps its own
+// groups until the next attempt.
+var errResolverBusy = errors.New("tenant resolver busy (gitops refresh in progress)")
+
 // groupsStaleWarnAfter is the fixed threshold beyond which a present but
 // unrefreshed gitops checkout gets a rate-limited warning logged, even though
 // the resolution still succeeds from it. Not configurable, and never
@@ -59,11 +66,43 @@ const groupsStaleWarnAfter = 15 * time.Minute
 // defaultGroupsCacheTTL is used when GroupsCacheTTL is unset.
 const defaultGroupsCacheTTL = 30 * time.Second
 
-// groupsCacheEntry is one memoized group-resolution result.
+// groupsCacheEntry is one memoized group-resolution result. It holds tenant
+// groups only; "admins" is added on every read by withAdmins, so a cache hit
+// still reflects IsAdmin as of that call and each caller gets its own slice.
 type groupsCacheEntry struct {
-	groups    []string
+	tenants   []string
 	expiresAt time.Time
 }
+
+// nonBlockingTenantResolver is satisfied by a TenantResolver that can decline
+// to answer instead of waiting on a lock. *gitops.Reader implements it.
+// resolveGroupsChecked prefers it, so per-request resolution (ValidateJWT)
+// never queues behind a gitops fetch.
+type nonBlockingTenantResolver interface {
+	TryGetTenantsForUser(login string) (namespaces []string, ok bool, err error)
+}
+
+// warnLimiter lets a warning through at most once per interval.
+type warnLimiter struct {
+	mu   sync.Mutex
+	last time.Time
+}
+
+func (l *warnLimiter) allow(interval time.Duration) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	if !l.last.IsZero() && now.Sub(l.last) < interval {
+		return false
+	}
+	l.last = now
+	return true
+}
+
+// groupsWarnInterval rate-limits every group-resolution warning. ValidateJWT
+// resolves on each request, so an unlimited warning on a failure path would
+// log once per request for the length of an outage.
+const groupsWarnInterval = time.Minute
 
 // staleSyncSource is satisfied by a TenantResolver that can also report when
 // its backing checkout last synced successfully. *gitops.Reader implements
@@ -132,10 +171,21 @@ type OAuthServer struct {
 	groupsCacheMu sync.Mutex
 	groupsCache   map[string]groupsCacheEntry
 
-	// staleWarnMu guards staleWarnAt, which rate-limits the "stale but
-	// present checkout" warning to at most once per minute.
-	staleWarnMu sync.Mutex
-	staleWarnAt time.Time
+	// resolverFailMu guards resolverFailErr/resolverFailUntil: the negative
+	// cache. After a resolver failure, further resolutions return the same
+	// error without touching the resolver for GroupsCacheTTL. Otherwise, during
+	// an outage, every authenticated request would re-read and re-parse every
+	// tenant file. The cache is process-wide, not per login, because every
+	// failure it holds (never-synced checkout, strict-mode staleness,
+	// ListTenants error) is a property of the resolver.
+	resolverFailMu    sync.Mutex
+	resolverFailErr   error
+	resolverFailUntil time.Time
+
+	// Rate limiters for the stale-checkout, degraded and fail-closed warnings.
+	staleWarn      warnLimiter
+	degradedWarn   warnLimiter
+	failClosedWarn warnLimiter
 
 	// RefreshStore is an optional persistent store for refresh tokens.
 	// When non-nil it replaces the in-memory refreshTokens store, making
@@ -738,7 +788,13 @@ func (s *OAuthServer) ResolveGroups(login string) []string {
 //     reader is unaffected.
 //  3. A memoized result younger than GroupsCacheTTL is reused without
 //     touching the resolver, bounding the added cost of per-request
-//     resolution (ValidateJWT) to one lookup per login per TTL.
+//     resolution (ValidateJWT) to one lookup per login per TTL. A failure is
+//     memoized too, process-wide and for the same TTL, so an outage costs at
+//     most one resolver lookup per TTL rather than one per request. The
+//     lookup itself never waits: a resolver that implements
+//     nonBlockingTenantResolver (gitops.Reader) and is mid-refresh answers
+//     errResolverBusy, which callers treat like a failure but without
+//     negative caching or a warning.
 //  4. Freshness gate (checkResolverFreshness): if the resolver also reports
 //     LastSync() (gitops.Reader does), a checkout that has never synced, or
 //     that is stale beyond a configured GroupsMaxStaleness (strict mode), is
@@ -756,20 +812,63 @@ func (s *OAuthServer) resolveGroupsChecked(login string) ([]string, error) {
 	if s.TenantResolver == nil {
 		return nil, errResolverNotConfigured
 	}
-	if groups, ok := s.cachedGroups(login); ok {
-		return groups, nil
+	if tenants, ok := s.cachedGroups(login); ok {
+		return s.withAdmins(login, tenants), nil
 	}
-	if err := s.checkResolverFreshness(login); err != nil {
+	if err := s.recentResolverFailure(); err != nil {
 		return nil, err
 	}
-	tenants, err := s.TenantResolver.GetTenantsForUser(login)
-	if err != nil {
-		return nil, fmt.Errorf("resolve tenant groups for %q: %w", login, err)
+	if err := s.checkResolverFreshness(login); err != nil {
+		s.noteResolverFailure(err)
+		return nil, err
 	}
-	groups := s.withAdmins(login, tenants)
+	tenants, err := s.lookupTenants(login)
+	if errors.Is(err, errResolverBusy) {
+		return nil, err
+	}
+	if err != nil {
+		err = fmt.Errorf("resolve tenant groups for %q: %w", login, err)
+		s.noteResolverFailure(err)
+		return nil, err
+	}
+	tenants = tenantsOnly(tenants)
 	s.lastResolveOK.Store(time.Now().UnixNano())
-	s.storeGroupsCache(login, groups)
-	return groups, nil
+	s.storeGroupsCache(login, tenants)
+	return s.withAdmins(login, tenants), nil
+}
+
+// lookupTenants asks the resolver for login's tenants without waiting when the
+// resolver supports that (see nonBlockingTenantResolver), and returns
+// errResolverBusy if it declined.
+func (s *OAuthServer) lookupTenants(login string) ([]string, error) {
+	if nb, ok := s.TenantResolver.(nonBlockingTenantResolver); ok {
+		tenants, answered, err := nb.TryGetTenantsForUser(login)
+		if !answered {
+			return nil, errResolverBusy
+		}
+		return tenants, err
+	}
+	return s.TenantResolver.GetTenantsForUser(login)
+}
+
+// recentResolverFailure returns the memoized resolver failure, if one was
+// recorded less than GroupsCacheTTL ago.
+func (s *OAuthServer) recentResolverFailure() error {
+	s.resolverFailMu.Lock()
+	defer s.resolverFailMu.Unlock()
+	if s.resolverFailErr == nil || time.Now().After(s.resolverFailUntil) {
+		return nil
+	}
+	return s.resolverFailErr
+}
+
+// noteResolverFailure memoizes err as the resolver's current failure for
+// GroupsCacheTTL.
+func (s *OAuthServer) noteResolverFailure(err error) {
+	s.resolverFailMu.Lock()
+	defer s.resolverFailMu.Unlock()
+	s.resolverFailErr = err
+	s.resolverFailUntil = time.Now().Add(s.groupsCacheTTL())
 }
 
 // checkResolverFreshness applies the freshness gate described on
@@ -807,12 +906,9 @@ func (s *OAuthServer) checkResolverFreshness(login string) error {
 // used to answer group resolution, rate-limited to once per minute so a
 // long-lived incident does not flood logs.
 func (s *OAuthServer) warnStaleCheckout(login string, age time.Duration) {
-	s.staleWarnMu.Lock()
-	defer s.staleWarnMu.Unlock()
-	if !s.staleWarnAt.IsZero() && time.Since(s.staleWarnAt) < time.Minute {
+	if !s.staleWarn.allow(groupsWarnInterval) {
 		return
 	}
-	s.staleWarnAt = time.Now()
 	slog.Warn("oauth: gitops checkout stale but present; resolving tenant groups from it anyway",
 		"user", login, "age", age.Round(time.Second), "warn_after", groupsStaleWarnAfter)
 }
@@ -825,8 +921,8 @@ func (s *OAuthServer) groupsCacheTTL() time.Duration {
 	return s.GroupsCacheTTL
 }
 
-// cachedGroups returns a memoized resolution for login, if one exists and has
-// not yet expired.
+// cachedGroups returns the memoized tenant groups for login ("admins" not
+// included), if an entry exists and has not yet expired.
 func (s *OAuthServer) cachedGroups(login string) ([]string, bool) {
 	s.groupsCacheMu.Lock()
 	defer s.groupsCacheMu.Unlock()
@@ -834,14 +930,14 @@ func (s *OAuthServer) cachedGroups(login string) ([]string, bool) {
 	if !ok || time.Now().After(e.expiresAt) {
 		return nil, false
 	}
-	return e.groups, true
+	return e.tenants, true
 }
 
 // storeGroupsCache memoizes groups for login. Expired entries across the
 // whole map are evicted opportunistically on every write (mirroring
 // GitHubValidator.cache), so the map cannot grow without bound even though
 // nothing ever sweeps it on a timer.
-func (s *OAuthServer) storeGroupsCache(login string, groups []string) {
+func (s *OAuthServer) storeGroupsCache(login string, tenants []string) {
 	s.groupsCacheMu.Lock()
 	defer s.groupsCacheMu.Unlock()
 	if s.groupsCache == nil {
@@ -853,11 +949,13 @@ func (s *OAuthServer) storeGroupsCache(login string, groups []string) {
 			delete(s.groupsCache, k)
 		}
 	}
-	s.groupsCache[login] = groupsCacheEntry{groups: groups, expiresAt: now.Add(s.groupsCacheTTL())}
+	s.groupsCache[login] = groupsCacheEntry{tenants: tenants, expiresAt: now.Add(s.groupsCacheTTL())}
 }
 
-// withAdmins returns tenants -- with any incidental "admins" entry stripped
-// -- plus a freshly computed "admins" when login is currently an admin. This
+// withAdmins returns a new slice holding tenants -- with any incidental
+// "admins" entry stripped -- plus a freshly computed "admins" when login is
+// currently an admin. The result never aliases tenants, so it is safe to hand
+// out from the memo. This
 // is the only place group lists are assembled from a fresh IsAdmin check, so
 // every caller that wants "admins" reflects live admin status goes through
 // here rather than trusting a stored or claimed copy.
@@ -933,10 +1031,17 @@ func (s *OAuthServer) groupsForSession(login string, stored []string) []string {
 		return stored
 	}
 	if time.Since(s.lastResolveOKTime()) <= s.degradedGrace() {
-		slog.Warn("oauth: group resolution degraded; using stored tenant groups", "user", login, "error", err)
+		switch {
+		case errors.Is(err, errResolverBusy):
+			slog.Debug("oauth: gitops refresh in progress; using session's tenant groups", "user", login)
+		case s.degradedWarn.allow(groupsWarnInterval):
+			slog.Warn("oauth: group resolution degraded; using stored tenant groups", "user", login, "error", err)
+		}
 		return s.withAdmins(login, tenantsOnly(stored))
 	}
-	slog.Warn("oauth: group resolution unavailable beyond grace; dropping tenant groups", "user", login, "error", err)
+	if s.failClosedWarn.allow(groupsWarnInterval) {
+		slog.Warn("oauth: group resolution unavailable beyond grace; dropping tenant groups", "user", login, "error", err)
+	}
 	return s.withAdmins(login, nil)
 }
 

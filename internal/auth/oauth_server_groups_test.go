@@ -695,3 +695,166 @@ func TestGroupsRotationRegressionFakeStore(t *testing.T) {
 		t.Fatal("expected the replayed, rotated-out refresh token to be rejected (reuse detection)")
 	}
 }
+
+// ─── Review round 2 on #412: failure path hardening ─────────────────────────
+
+// busyTenantResolver implements nonBlockingTenantResolver and can be told to
+// decline (as gitops.Reader does while a refresh holds its write lock).
+type busyTenantResolver struct {
+	*stubTenantResolver
+	mu   sync.Mutex
+	busy bool
+}
+
+func (r *busyTenantResolver) setBusy(b bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.busy = b
+}
+
+func (r *busyTenantResolver) TryGetTenantsForUser(login string) ([]string, bool, error) {
+	r.mu.Lock()
+	busy := r.busy
+	r.mu.Unlock()
+	if busy {
+		return nil, false, nil
+	}
+	tenants, err := r.GetTenantsForUser(login)
+	return tenants, true, err
+}
+
+// A resolver failure is memoized process-wide for GroupsCacheTTL, so an
+// outage costs one resolver lookup per TTL instead of one per authenticated
+// request. Fails if failures are not negatively cached.
+func TestGroupsFailureIsNegativelyCached(t *testing.T) {
+	server := newTestOAuthServer(t)
+	server.GroupsCacheTTL = time.Minute
+	server.GroupsDegradedGrace = time.Hour
+	resolver := &stubTenantResolver{}
+	resolver.setErr(errors.New("reading tenants dir: permission denied"))
+	server.TenantResolver = resolver
+
+	for i := 0; i < 20; i++ {
+		groups := server.groupsForSession("dmitrii", []string{"acme"})
+		if !slices.Contains(groups, "acme") {
+			t.Fatalf("call %d: expected the degraded fallback to keep stored groups, got %v", i, groups)
+		}
+	}
+	if got := resolver.callCount(); got != 1 {
+		t.Fatalf("expected 1 resolver lookup while the failure is cached, got %d", got)
+	}
+
+	// Another login during the same outage hits the same negative cache.
+	server.groupsForSession("someone-else", nil)
+	if got := resolver.callCount(); got != 1 {
+		t.Fatalf("expected the negative cache to be process-wide, got %d lookups", got)
+	}
+
+	// Once the cached failure expires the resolver is consulted again, and a
+	// recovered resolver answers normally.
+	server.resolverFailMu.Lock()
+	server.resolverFailUntil = time.Now().Add(-time.Second)
+	server.resolverFailMu.Unlock()
+	resolver.setErr(nil)
+	resolver.setTenants("dmitrii", []string{"acme", "karabu"})
+	if groups := server.groupsForSession("dmitrii", []string{"acme"}); !slices.Contains(groups, "karabu") {
+		t.Fatalf("expected resolution to recover after the negative cache expired, got %v", groups)
+	}
+}
+
+// A busy resolver (gitops refresh in progress) must not block, must fall back
+// to the session's own groups, and must not be negatively cached: the next
+// call after the refresh finishes resolves normally. Fails if the lookup
+// waits on GetTenantsForUser or if busy is treated as a cached failure.
+func TestGroupsBusyResolverFallsBackWithoutCaching(t *testing.T) {
+	server := newTestOAuthServer(t)
+	server.GroupsCacheTTL = time.Minute
+	server.GroupsDegradedGrace = time.Hour
+	resolver := &busyTenantResolver{stubTenantResolver: &stubTenantResolver{}}
+	resolver.setTenants("dmitrii", []string{"acme", "karabu"})
+	resolver.setBusy(true)
+	server.TenantResolver = resolver
+
+	groups := server.groupsForSession("dmitrii", []string{"acme"})
+	if !slices.Equal(groups, []string{"acme"}) {
+		t.Fatalf("expected the session's own tenant groups while busy, got %v", groups)
+	}
+	if got := resolver.callCount(); got != 0 {
+		t.Fatalf("expected the blocking GetTenantsForUser never to be called, got %d calls", got)
+	}
+
+	resolver.setBusy(false)
+	groups = server.groupsForSession("dmitrii", []string{"acme"})
+	if !slices.Contains(groups, "karabu") {
+		t.Fatalf("expected resolution right after the refresh finished (busy is not negatively cached), got %v", groups)
+	}
+}
+
+// A memo hit recomputes "admins" from IsAdmin and hands every caller its own
+// slice. Fails if the memo stores the assembled list (admins frozen for the
+// TTL) or returns a shared backing array.
+func TestGroupsCacheHitRecomputesAdminsAndCopies(t *testing.T) {
+	server := newTestOAuthServer(t)
+	server.GroupsCacheTTL = time.Minute
+	server.GitHubValidator = NewGitHubValidator([]string{"dmitrii"})
+	resolver := &stubTenantResolver{}
+	resolver.setTenants("dmitrii", []string{"acme"})
+	server.TenantResolver = resolver
+
+	first, err := server.resolveGroupsChecked("dmitrii")
+	if err != nil {
+		t.Fatalf("resolveGroupsChecked: %v", err)
+	}
+	if !slices.Contains(first, "admins") {
+		t.Fatalf("expected admins on the first resolution, got %v", first)
+	}
+	for i := range first {
+		first[i] = "mutated"
+	}
+
+	server.GitHubValidator = NewGitHubValidator(nil)
+	second, err := server.resolveGroupsChecked("dmitrii")
+	if err != nil {
+		t.Fatalf("resolveGroupsChecked: %v", err)
+	}
+	if resolver.callCount() != 1 {
+		t.Fatalf("expected the second call to be a memo hit, got %d lookups", resolver.callCount())
+	}
+	if slices.Contains(second, "admins") {
+		t.Fatalf("expected admins recomputed on a memo hit (no longer an admin), got %v", second)
+	}
+	if !slices.Equal(second, []string{"acme"}) {
+		t.Fatalf("expected an unaliased copy of the memoized tenants, got %v", second)
+	}
+
+	// And the other direction: becoming an admin shows up on a memo hit too.
+	server.GitHubValidator = NewGitHubValidator([]string{"dmitrii"})
+	third, err := server.resolveGroupsChecked("dmitrii")
+	if err != nil {
+		t.Fatalf("resolveGroupsChecked: %v", err)
+	}
+	if resolver.callCount() != 1 {
+		t.Fatalf("expected the third call to be a memo hit, got %d lookups", resolver.callCount())
+	}
+	if !slices.Equal(third, []string{"admins", "acme"}) {
+		t.Fatalf("expected admins recomputed on a memo hit (admin again), got %v", third)
+	}
+}
+
+func TestWarnLimiterAllowsOncePerInterval(t *testing.T) {
+	var l warnLimiter
+	if !l.allow(time.Minute) {
+		t.Fatal("expected the first warning to be allowed")
+	}
+	for i := 0; i < 5; i++ {
+		if l.allow(time.Minute) {
+			t.Fatalf("expected warning %d within the interval to be suppressed", i+2)
+		}
+	}
+	l.mu.Lock()
+	l.last = time.Now().Add(-2 * time.Minute)
+	l.mu.Unlock()
+	if !l.allow(time.Minute) {
+		t.Fatal("expected a warning to be allowed again after the interval")
+	}
+}

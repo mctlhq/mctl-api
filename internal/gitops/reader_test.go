@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -1502,4 +1503,71 @@ func TestReadFilesReturnsOneCheckoutAndRefusesPaths(t *testing.T) {
 	if got, _ := r.Revision(); got != next || got == want {
 		t.Fatalf("after refresh Revision() = %s, want %s", got, next)
 	}
+}
+
+// LastSync must not wait on the reader lock: refresh() holds the write lock
+// across git subprocesses, and auth's freshness gate and the sync-age metric
+// read LastSync on the request and scrape paths (mctl-api#411). Fails if
+// LastSync takes r.mu.
+func TestLastSyncDoesNotWaitOnRefreshLock(t *testing.T) {
+	_, r := setupTempRepo(t)
+	want := time.Now().Add(-time.Minute).Truncate(time.Nanosecond)
+	r.lastSync.Store(want.UnixNano())
+
+	r.mu.Lock() // simulate an in-flight refresh
+	defer r.mu.Unlock()
+	done := make(chan time.Time, 1)
+	go func() { done <- r.LastSync() }()
+	select {
+	case got := <-done:
+		if !got.Equal(want) {
+			t.Fatalf("LastSync = %v, want %v", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("LastSync blocked on the refresh write lock")
+	}
+}
+
+func TestLastSyncZeroWhenNeverSynced(t *testing.T) {
+	r := NewReader("https://example.invalid/repo.git", "main", t.TempDir(), nil, "", "")
+	if got := r.LastSync(); !got.IsZero() {
+		t.Fatalf("expected zero LastSync before any refresh, got %v", got)
+	}
+}
+
+// TryGetTenantsForUser declines instead of waiting while a refresh holds the
+// write lock, and otherwise answers exactly like GetTenantsForUser.
+func TestTryGetTenantsForUser(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	writeTenantYAML(t, dir, "billing", `
+tenant:
+  name: billing
+  quotas: {}
+  members:
+    - userId: alice
+`)
+
+	got, ok, err := r.TryGetTenantsForUser("Alice")
+	if err != nil || !ok {
+		t.Fatalf("TryGetTenantsForUser unlocked: ok=%v err=%v", ok, err)
+	}
+	if len(got) != 1 || got[0] != "billing" {
+		t.Fatalf("expected [billing], got %v", got)
+	}
+
+	r.mu.Lock()
+	done := make(chan bool, 1)
+	go func() {
+		_, ok, _ := r.TryGetTenantsForUser("alice")
+		done <- ok
+	}()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("expected ok=false while the write lock is held")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("TryGetTenantsForUser blocked on the refresh write lock")
+	}
+	r.mu.Unlock()
 }

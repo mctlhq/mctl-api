@@ -191,7 +191,8 @@ first login:
 
 - **Grant**: create or join a tenant in `tenants/<t>/values.yaml`, and the
   next `POST /oauth/token` refresh or the next authenticated request carries
-  it — no re-login, typically within `OAUTH_GROUPS_CACHE_TTL` (30s).
+  it — no re-login, within the gitops refresh interval (60s) plus
+  `OAUTH_GROUPS_CACHE_TTL` (30s), so about 90s at worst.
 - **Revoke**: remove someone from `tenants/<t>/values.yaml`, or delete the
   tenant, and their live session loses access within one
   `OAUTH_TOKEN_TTL`-sized "degraded grace" window at worst (see below), not
@@ -208,7 +209,9 @@ two hours:
    it always equals `OAUTH_TOKEN_TTL`, so 1h by default) since the *last
    process-wide successful resolution*, the session keeps its previously
    known tenant groups, with `admins` still recomputed fresh, and a
-   `slog.Warn` is logged.
+   `slog.Warn` is logged at most once a minute. The failure itself is cached
+   for `OAUTH_GROUPS_CACHE_TTL`, so during an outage the tenant files are
+   re-read at most once per TTL, not on every authenticated request.
 2. Past that window, the session fails closed: it keeps working (never
    signed out), but with tenant groups dropped, keeping only `admins` if the
    login is a configured admin. This is what bounds a resolver outage from
@@ -235,6 +238,14 @@ A suggested alert:
 ```promql
 mctl_api_gitops_last_sync_age_seconds > 900
 ```
+
+Group resolution never waits on the gitops reader. A refresh holds the
+reader's write lock while it runs `git fetch`/`reset` (each git command is
+bounded by a 2-minute timeout). A lookup that would have to wait instead
+uses the session's own groups for that request, the same fallback as a
+degraded resolution but without a warning. It is not cached, so the next
+request after the refresh resolves normally. `LastSync()` and the sync-age
+gauge are lock-free, so `/metrics` keeps answering during a hung fetch.
 
 A never-synced checkout (gauge reads `-1`, or `LastSync()` is the zero value)
 is always a failed resolution, never "this user has no tenants" — that

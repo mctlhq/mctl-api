@@ -27,12 +27,18 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/mctlhq/mctl-api/internal/ghtoken"
 )
+
+// gitCommandTimeout bounds every git subprocess the reader runs. refresh()
+// holds the write lock for its whole duration, so without a bound a hung
+// network fetch would block every reader method indefinitely.
+const gitCommandTimeout = 2 * time.Minute
 
 // Reader provides read access to the GitOps mono-repo state.
 // It clones the repo locally and refreshes periodically.
@@ -45,7 +51,12 @@ type Reader struct {
 	sshKeyPath     string         // Path to SSH private key (optional, takes precedence over token)
 	knownHostsPath string         // Path to a known_hosts file for SSH host-key pinning (optional; empty means "use the shipped embedded default, materialized lazily")
 	mu             sync.RWMutex
-	lastSync       time.Time
+	// lastSync is the Unix-nanosecond time of the last successful refresh (0
+	// = never). It is atomic rather than guarded by mu because refresh()
+	// holds the write lock across git subprocesses: a caller that only wants
+	// the sync age (auth's freshness gate, the sync-age metric scrape) must
+	// never queue behind a slow or hung fetch (mctl-api#411).
+	lastSync atomic.Int64
 	// head is the commit the checkout is on, recorded at the end of every
 	// refresh under the write lock, so readers never fork git to learn it.
 	head string
@@ -334,7 +345,9 @@ func (r *Reader) refresh() error {
 	gitDir := filepath.Join(r.localPath, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		slog.Info("cloning gitops repo", "url", r.repoURL, "branch", r.branch, "path", r.localPath)
-		cmd := exec.Command("git", "clone", "--depth=1", "--branch="+r.branch, "--single-branch", cloneURL, r.localPath) //nolint:gosec // args are from trusted config
+		ctx, cancel := context.WithTimeout(context.Background(), gitCommandTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", "--branch="+r.branch, "--single-branch", cloneURL, r.localPath) //nolint:gosec // args are from trusted config
 		cmd.Env = append(os.Environ(), sshEnv...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git clone failed: %w\n%s", err, r.redactTokenLocked(bytes.TrimSpace(out)))
@@ -355,16 +368,17 @@ func (r *Reader) refresh() error {
 		}
 	}
 
-	r.lastSync = time.Now()
+	synced := time.Now()
+	r.lastSync.Store(synced.UnixNano())
 	if head, err := r.gitOutput(sshEnv, "rev-parse", "--short", "HEAD"); err == nil {
 		slog.Info("gitops refreshed",
 			"branch", r.branch,
 			"path", r.localPath,
 			"head", strings.TrimSpace(string(head)),
-			"lastSync", r.lastSync,
+			"lastSync", synced,
 		)
 	} else {
-		slog.Info("gitops refreshed", "branch", r.branch, "path", r.localPath, "lastSync", r.lastSync)
+		slog.Info("gitops refreshed", "branch", r.branch, "path", r.localPath, "lastSync", synced)
 	}
 	return nil
 }
@@ -479,7 +493,9 @@ func (r *Reader) runGit(extraEnv []string, args ...string) error {
 
 func (r *Reader) gitOutput(extraEnv []string, args ...string) ([]byte, error) {
 	fullArgs := append([]string{"-C", r.localPath}, args...)
-	cmd := exec.Command("git", fullArgs...) //nolint:gosec // args are from trusted config
+	ctx, cancel := context.WithTimeout(context.Background(), gitCommandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", fullArgs...) //nolint:gosec // args are from trusted config
 	cmd.Env = append(os.Environ(), extraEnv...)
 	out, err := cmd.CombinedOutput()
 	// Redact the slice itself, not just the error string built from it.
@@ -536,7 +552,12 @@ func (r *Reader) redactTokenLocked(out []byte) []byte {
 func (r *Reader) ListTenants() ([]Tenant, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.listTenantsLocked()
+}
 
+// listTenantsLocked is ListTenants for a caller that already holds r.mu for
+// reading.
+func (r *Reader) listTenantsLocked() ([]Tenant, error) {
 	tenantsDir := filepath.Join(r.localPath, "platform-gitops", "tenants")
 
 	entries, err := os.ReadDir(tenantsDir)
@@ -760,20 +781,44 @@ func (r *Reader) GetTenantsForUser(login string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	var result []string
-	for i := range tenants {
-		ns := tenants[i].UserNamespaces(login)
-		result = append(result, ns...)
-	}
-	return result, nil
+	return userNamespaces(tenants, login), nil
 }
 
-// LastSync returns the time of the last successful repo sync.
-func (r *Reader) LastSync() time.Time {
-	r.mu.RLock()
+// TryGetTenantsForUser is GetTenantsForUser without waiting: if a refresh
+// holds (or is waiting for) the write lock, it returns ok=false at once
+// instead of blocking behind the git subprocesses refresh() runs under that
+// lock. Auth resolves groups on every request (mctl-api#411), and must not
+// stall all authentication while a fetch is in flight or hung; it falls back
+// to the session's own groups when ok is false.
+func (r *Reader) TryGetTenantsForUser(login string) (namespaces []string, ok bool, err error) {
+	if !r.mu.TryRLock() {
+		return nil, false, nil
+	}
 	defer r.mu.RUnlock()
-	return r.lastSync
+	tenants, err := r.listTenantsLocked()
+	if err != nil {
+		return nil, true, err
+	}
+	return userNamespaces(tenants, login), true, nil
+}
+
+func userNamespaces(tenants []Tenant, login string) []string {
+	var result []string
+	for i := range tenants {
+		result = append(result, tenants[i].UserNamespaces(login)...)
+	}
+	return result
+}
+
+// LastSync returns the time of the last successful repo sync, or the zero
+// time if the repo has never synced. It takes no lock, so it never waits on
+// an in-progress refresh.
+func (r *Reader) LastSync() time.Time {
+	ns := r.lastSync.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 // Revision returns the commit the checkout is on, as the last refresh
