@@ -248,7 +248,29 @@ func main() {
 		}
 	}
 
-	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer, auth.WithPrincipalResolver(principalResolver))
+	// Federation registry (mctl-api#374, slice A): the static-secret
+	// providers, the local-OAuth provider, the GitHub PAT provider, any
+	// explicit MCTL_OIDC_PROVIDERS entries, and the legacy Dex shim (unless
+	// an explicit entry is named "dex"). A construction failure
+	// here is one of the conditions requirements.md says must refuse boot
+	// (a malformed MCTL_OIDC_PROVIDERS value, or a registry invariant
+	// violated by the combined provider set); an unreachable OIDC issuer at
+	// boot is not one of them and is only logged (BuildFederationRegistry).
+	// With MCTL_FEDERATION_DISABLED on, none of this runs: the kill switch is
+	// the rollback for exactly these refusals, so it must reach the
+	// pre-registry chain instead of crash-looping on them.
+	federationRegistry, fedErr := buildFederationRegistry(rootCtx, cfg, ghValidator, gitReader, oauthServer)
+	if fedErr != nil {
+		slog.Error("invalid configuration", "error", fmt.Errorf("MCTL_OIDC_PROVIDERS: %w", fedErr))
+		if principalStore != nil {
+			principalStore.Close()
+		}
+		stopSignals()
+		os.Exit(1) //nolint:gocritic // exitAfterDefer: principalStore, the one deferred close above, is closed explicitly just before this exit
+	}
+
+	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer,
+		auth.WithPrincipalResolver(principalResolver), auth.WithFederationRegistry(federationRegistry))
 
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
 
@@ -928,6 +950,15 @@ type config struct {
 	DexIssuerURL string
 	// DexClientID is the expected audience for Dex JWTs. If empty, audience check is skipped.
 	DexClientID string
+	// OIDCProvidersRaw is MCTL_OIDC_PROVIDERS as read: a JSON array of
+	// additional federation providers (mctl-api#374), parsed and validated
+	// by auth.ParseOIDCProviders. Unset or blank means only the legacy Dex
+	// shim (DexIssuerURL/DexClientID above) applies.
+	OIDCProvidersRaw string
+	// FederationDisabled is MCTL_FEDERATION_DISABLED (mctl-api#374's kill
+	// switch). While it is on, MCTL_OIDC_PROVIDERS is neither validated nor
+	// built into a registry, and auth.Middleware runs the pre-registry chain.
+	FederationDisabled bool
 	// SelfURL is the public base URL used in MCP SSE endpoint advertisement.
 	SelfURL string
 	// AllowedOrigins is a list of origins permitted by CORS policy.
@@ -1026,6 +1057,8 @@ func loadConfig() config {
 		BackstageGithubAppConnectToken: os.Getenv("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN"),
 		DexIssuerURL:                   envOr("DEX_ISSUER_URL", "https://ops.mctl.ai/api/dex"),
 		DexClientID:                    os.Getenv("DEX_CLIENT_ID"),
+		OIDCProvidersRaw:               os.Getenv("MCTL_OIDC_PROVIDERS"),
+		FederationDisabled:             killSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED")),
 		SelfURL:                        envOr("SELF_URL", "https://api.mctl.ai"),
 		AllowedOrigins:                 origins,
 		OAuthGitHubClientID:            os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
@@ -1281,7 +1314,39 @@ func (c config) validate() error {
 			"silently with the refresh_token grant, and access tokens cannot be revoked, "+
 			"so a longer lifetime only widens the window on a leak", maxOAuthTokenTTL, c.OAuthTokenTTL)
 	}
+
+	// MCTL_OIDC_PROVIDERS (mctl-api#374): shape-validated here, in the same
+	// style as OAUTH_PREREGISTERED_CLIENTS above, so a malformed value or an
+	// entry missing audiences/naming a reserved provider refuses this boot
+	// rather than the one after a second variable is also set. The full
+	// registry (this plus the legacy Dex shim and the built-in providers) is
+	// built for real in main(), which is where a duplicate against the
+	// local-OAuth or Dex provider would also be caught. Skipped while
+	// MCTL_FEDERATION_DISABLED is on, so the kill switch can roll back a
+	// value that would otherwise refuse boot.
+	if c.FederationDisabled {
+		return nil
+	}
+	if _, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw); err != nil {
+		return err
+	}
 	return nil
+}
+
+// buildFederationRegistry builds the federation registry from cfg, or
+// returns (nil, nil) while MCTL_FEDERATION_DISABLED is on: a nil registry
+// leaves auth.Middleware on its pre-registry chain, and none of the
+// registry's boot refusals can block the rollback.
+func buildFederationRegistry(ctx context.Context, cfg config, validator *auth.GitHubValidator, resolver auth.TenantResolver, oauth *auth.OAuthServer) (*auth.Registry, error) {
+	if cfg.FederationDisabled {
+		slog.Warn("MCTL_FEDERATION_DISABLED is on: federation registry not built, pre-registry auth chain in effect")
+		return nil, nil
+	}
+	return auth.BuildFederationRegistry(ctx, auth.FederationProvidersConfig{
+		OIDCProvidersRaw: cfg.OIDCProvidersRaw,
+		DexIssuerURL:     cfg.DexIssuerURL,
+		DexClientID:      cfg.DexClientID,
+	}, validator, resolver, oauth)
 }
 
 func parseDuration(s string, fallback time.Duration) time.Duration {

@@ -120,6 +120,8 @@ func (u *User) Identity() (Identity, bool) {
 		return Identity{Provider: ProviderDev, Subject: u.ID, Display: u.ID, Kind: KindHuman}, true
 	case u.dexSubject != "":
 		return Identity{Provider: ProviderDex, Issuer: u.dexIssuer, Subject: u.dexSubject, Display: u.ID, Kind: KindHuman}, true
+	case u.oidcSubject != "":
+		return Identity{Provider: u.oidcProviderName, Issuer: u.oidcIssuer, Subject: u.oidcSubject, Display: u.ID, Kind: u.oidcKind}, true
 	case u.githubLogin && u.githubID > 0:
 		return Identity{Provider: ProviderGitHub, Subject: strconv.FormatInt(u.githubID, 10), Display: u.ID, Kind: KindHuman}, true
 	case u.githubLogin:

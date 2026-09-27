@@ -47,6 +47,14 @@ env:
   ROADMAP_STATE_LOCAL_PATH: /data/roadmap-state
   ARGOCD_URL: https://ops.mctl.me
   ARGO_WORKFLOWS_NAMESPACE: argo-workflows
+  # Federation registry (mctl-api#374, docs/federation.md). Empty means: no
+  # explicit providers beyond the legacy DEX_ISSUER_URL/DEX_CLIENT_ID shim,
+  # and the kill switch off. Set MCTL_OIDC_PROVIDERS to the JSON provider
+  # array to add or replace an OIDC identity provider without a code change;
+  # set MCTL_FEDERATION_DISABLED only to roll back to the pre-registry
+  # authentication chain.
+  MCTL_OIDC_PROVIDERS: ""
+  MCTL_FEDERATION_DISABLED: ""
 
 # OpenClaw skill/identity save caps. Enforced in the save handlers
 # (internal/api/handlers_openclaw.go) before any workflow submission.

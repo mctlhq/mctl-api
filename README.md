@@ -124,7 +124,9 @@ docker run -p 8080:8080 mctl-api
 | `ARGO_WORKFLOWS_NAMESPACE` | Kubernetes namespace for workflows | `argo-workflows` | No |
 | `GITHUB_ORG` | Required GitHub organization | `mctlhq` | No |
 | `DEX_ISSUER_URL` | OIDC issuer URL | `https://ops.mctl.ai/api/dex` | No |
-| `DEX_CLIENT_ID` | JWT audience for Dex | — | No |
+| `DEX_CLIENT_ID` | JWT audience for Dex. Empty skips the audience check (compatibility) and counts `federation_audience_check_skipped_total{provider="dex"}` on every verification. | — | No |
+| `MCTL_OIDC_PROVIDERS` | JSON array of federation identity providers (mctl-api#374, see [docs/federation.md](docs/federation.md)): `[{"name":"dex","issuer":"https://…","audiences":["mctl-api"],"audience_enforcement":"audit"}]`. An entry **named `dex`** replaces the legacy shim built from `DEX_ISSUER_URL`/`DEX_CLIENT_ID` above, whatever its issuer; an entry under any other name on the `DEX_ISSUER_URL` issuer collides with the shim and refuses startup. `audiences` is required, `audience_enforcement` is `audit` or `enforce` (default `enforce`). A malformed value, a missing `audiences`, an invalid `audience_enforcement` or `kind`, a reserved or surface-colliding name, or a duplicate name/issuer refuses startup — unless `MCTL_FEDERATION_DISABLED` is on. | — | No |
+| `MCTL_FEDERATION_DISABLED` | Kill switch (mctl-api#374): any value except `false`/`f`/`0`/`no`/`off` restores the pre-registry authentication chain unchanged, including its plain (non-constant-time) service-token compare. While it is on, `MCTL_OIDC_PROVIDERS` is neither validated nor built, so it also recovers a value that would otherwise refuse startup. Same shape as `PRINCIPALS_DISABLED`. | unset | No |
 | `SELF_URL` | Public base URL | `https://api.mctl.ai` | No |
 | `ALLOWED_ORIGINS` | CORS allowed origins | — | No |
 | `OAUTH_GITHUB_CLIENT_ID` | GitHub OAuth app client ID | — | No |

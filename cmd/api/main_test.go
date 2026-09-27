@@ -268,6 +268,38 @@ func TestConfigValidate(t *testing.T) {
 			cfg:     config{OAuthPreregisteredClientsRaw: `[{"client_id":"c","redirect_uris":["https://x/cb"]}]`},
 			wantErr: false,
 		},
+		{
+			// mctl-api#374: MCTL_OIDC_PROVIDERS is validated the same way,
+			// whether or not it is ever consulted.
+			name:    "malformed MCTL_OIDC_PROVIDERS is refused",
+			cfg:     config{OIDCProvidersRaw: `{`},
+			wantErr: true,
+			wantVar: "MCTL_OIDC_PROVIDERS",
+		},
+		{
+			name:    "MCTL_OIDC_PROVIDERS entry missing audiences is refused",
+			cfg:     config{OIDCProvidersRaw: `[{"name":"acme","issuer":"https://acme.example"}]`},
+			wantErr: true,
+			wantVar: "MCTL_OIDC_PROVIDERS",
+		},
+		{
+			name:    "MCTL_OIDC_PROVIDERS entry with a reserved name is refused",
+			cfg:     config{OIDCProvidersRaw: `[{"name":"agent","issuer":"https://acme.example","audiences":["a"]}]`},
+			wantErr: true,
+			wantVar: "MCTL_OIDC_PROVIDERS",
+		},
+		{
+			// The kill switch is the rollback for a value that refuses boot,
+			// so it must not be refused by that same value.
+			name:    "malformed MCTL_OIDC_PROVIDERS is not validated while MCTL_FEDERATION_DISABLED is on",
+			cfg:     config{OIDCProvidersRaw: `{`, FederationDisabled: true},
+			wantErr: false,
+		},
+		{
+			name:    "well-formed MCTL_OIDC_PROVIDERS is accepted",
+			cfg:     config{OIDCProvidersRaw: `[{"name":"acme","issuer":"https://acme.example","audiences":["mctl-api"],"audience_enforcement":"audit"}]`},
+			wantErr: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -474,5 +506,26 @@ func TestMainWiresEveryStoreIntoReadiness(t *testing.T) {
 	}
 	if !regexp.MustCompile(`StoreInitFailures:\s+storeFailures\.List,`).Match(src) {
 		t.Error("main.go does not pass storeFailures.List to the router: /readyz would never see a failed store")
+	}
+}
+
+// TestBuildFederationRegistryHonoursKillSwitch pins that MCTL_FEDERATION_DISABLED
+// reaches the pre-registry chain even when MCTL_OIDC_PROVIDERS would refuse
+// boot: no registry is built, so none of its refusals can crash-loop the
+// rollback (mctl-api#374).
+func TestBuildFederationRegistryHonoursKillSwitch(t *testing.T) {
+	ctx := context.Background()
+
+	reg, err := buildFederationRegistry(ctx, config{OIDCProvidersRaw: `{`}, nil, nil, nil)
+	if err == nil {
+		t.Fatalf("switch off: buildFederationRegistry accepted a malformed MCTL_OIDC_PROVIDERS (registry %v), want the boot refusal", reg)
+	}
+
+	reg, err = buildFederationRegistry(ctx, config{OIDCProvidersRaw: `{`, FederationDisabled: true}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("switch on: buildFederationRegistry() error = %v, want nil so the rollback boots", err)
+	}
+	if reg != nil {
+		t.Fatalf("switch on: buildFederationRegistry() = %v, want a nil registry (pre-registry chain)", reg)
 	}
 }
