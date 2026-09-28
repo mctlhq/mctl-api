@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.56.0](https://github.com/mctlhq/mctl-api/compare/4.55.0...4.56.0) (2026-09-28)
+
+
+### Features
+
+* **agents:** issue-417-add-newton-mcp-gateway-to-the-devloop-se ([a744cb3](https://github.com/mctlhq/mctl-api/commit/a744cb3a6a418ad5af6728b1bfa368829b644e42))
+* **agents:** issue-417-add-newton-mcp-gateway-to-the-devloop-se ([19fc495](https://github.com/mctlhq/mctl-api/commit/19fc495a04d5b0cf9932f395482a438c11120385))
+
 ## [4.55.0](https://github.com/mctlhq/mctl-api/compare/4.54.0...4.55.0) (2026-09-27)
 
 
