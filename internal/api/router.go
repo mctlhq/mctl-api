@@ -482,6 +482,11 @@ func NewRouter(opts Options) http.Handler {
 				// Execution requests (mctl-api#368): a person or a relaying
 				// surface asks for a run; the platform supplies its identity.
 				r.Post("/work-items/{id}/execution-requests", h.CreateExecutionRequest)
+				// Agent run tokens (mctl-api#376): an execution-scoped
+				// credential minted by the direct service principal, so an
+				// agent run can authenticate as its own non-admin principal
+				// instead of the static admin token.
+				r.Post("/agent-run-tokens", h.MintAgentRunToken)
 			})
 
 			// The execution platform's side of execution requests

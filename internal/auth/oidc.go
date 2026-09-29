@@ -103,6 +103,24 @@ type User struct {
 	// only by AttachPrincipal and NewRelayedUser.
 	principalID    string
 	viaPrincipalID string
+
+	// agent records that this principal authenticated with an agent run
+	// token (mctl-api#376): its value is the bare agent name (never
+	// "agent:"-prefixed). Deliberately UNEXPORTED, for the same reason as
+	// service: it is proof of how the caller authenticated, not a claim
+	// anyone can make. Deriving it from ID's spelling instead would let a
+	// GitHub login or Dex username spelled "agent:implementer" pass as the
+	// agent principal. Only NewAgentUser sets it, and User is never
+	// unmarshalled from JSON, so it cannot be forged.
+	agent string
+	// execID, workItemID and runID are the execution, work item and run
+	// token id an agent run token is bound to. Empty unless agent != "".
+	execID     string
+	workItemID string
+	runID      string
+	// agentPermissions are the permissions the run token was minted with,
+	// checked by HasPermission. Empty for every non-agent principal.
+	agentPermissions []string
 }
 
 // NewGitHubUser builds a principal whose ID is a GitHub-verified login.
@@ -275,6 +293,11 @@ func (u *User) IsService() bool { return u.service }
 // relay, and a surface can only ever speak for its own surface.
 const SurfacePrincipalPrefix = "surface:"
 
+// AgentPrincipalPrefix labels an agent principal's id, "agent:<name>"
+// (mctl-api#376), a sibling of SurfacePrincipalPrefix: distinct per agent
+// name, not an admin, belonging to no tenant.
+const AgentPrincipalPrefix = "agent:"
+
 // surfaceTokenEnv names each surface's token variable.
 var surfaceTokenEnv = map[string]string{
 	"telegram": "MCTL_SURFACE_TELEGRAM_TOKEN",
@@ -363,11 +386,22 @@ func NewUsageWriterUser() *User {
 // usage-writer token.
 func (u *User) IsUsageWriter() bool { return u != nil && u.usageWriter }
 
-// HasPermission reports whether the caller holds a named permission. Only
-// PermissionUsageWrite is modelled so far: the usage writer holds it, and
-// an admin holds it because the ledger has always been admin-writable.
+// HasPermission reports whether the caller holds a named permission. An
+// agent principal holds exactly the permissions its run token was minted
+// with (mctl-api#376) and nothing else -- not PermissionUsageWrite by being
+// an admin, because an agent principal is never an admin. Otherwise, only
+// PermissionUsageWrite is modelled so far: the usage writer holds it, and an
+// admin holds it because the ledger has always been admin-writable.
 func (u *User) HasPermission(permission string) bool {
 	if u == nil {
+		return false
+	}
+	if u.agent != "" {
+		for _, p := range u.agentPermissions {
+			if p == permission {
+				return true
+			}
+		}
 		return false
 	}
 	if permission == PermissionUsageWrite {
@@ -464,7 +498,7 @@ func surfaceUserFor(tokens map[string]string, token string) *User {
 // validation for trusted in-cluster automation such as mctl-agent.
 func staticServiceUser(token string) *User {
 	serviceToken := strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN"))
-	if serviceToken != "" && token == serviceToken {
+	if serviceToken != "" && subtle.ConstantTimeCompare([]byte(serviceToken), []byte(token)) == 1 {
 		return NewServiceUser()
 	}
 	return nil
@@ -552,7 +586,23 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 
 			var user *User
 
-			if federationDisabled {
+			// Agent run tokens (mctl-api#376) are checked ahead of both the
+			// legacy chain and the federation registry, and regardless of
+			// MCTL_FEDERATION_DISABLED: they are minted and resolved
+			// entirely within mctl-api (never a JWT, never a GitHub token,
+			// never one of the fixed static secrets a Provider matches), so
+			// there is no registry seam for them to join yet, and refusing
+			// an unresolvable one here must never fall back to any other
+			// principal.
+			if cfg.agentRuns != nil && strings.HasPrefix(token, AgentRunTokenPrefix) {
+				run, rerr := cfg.agentRuns.ResolveAgentRun(r.Context(), token)
+				if rerr != nil {
+					slog.Warn("agent run token auth failed", "error", rerr, "path", r.URL.Path)
+					writeErr("invalid, expired, or revoked agent run token")
+					return
+				}
+				user = NewAgentUser(run.Agent, *run)
+			} else if federationDisabled {
 				// Pre-registry chain, unchanged (kept in the tree until
 				// slice D, and restored wholesale by
 				// MCTL_FEDERATION_DISABLED -- including the timing-unsafe
@@ -635,12 +685,22 @@ type MiddlewareOption func(*middlewareConfig)
 type middlewareConfig struct {
 	principals         PrincipalResolver
 	federationRegistry *Registry
+	agentRuns          AgentRunResolver
 }
 
 // WithPrincipalResolver resolves every authenticated caller to its
 // canonical principal. A nil resolver is the same as not passing it.
 func WithPrincipalResolver(pr PrincipalResolver) MiddlewareOption {
 	return func(c *middlewareConfig) { c.principals = pr }
+}
+
+// WithAgentRunResolver authenticates bearer tokens minted by
+// POST /api/v1/agent-run-tokens (mctl-api#376) as agent principals. A nil
+// resolver is the same as not passing it: every AgentRunTokenPrefix-shaped
+// token then falls through to the ordinary provider chain, which refuses it
+// as an unrecognized opaque token.
+func WithAgentRunResolver(r AgentRunResolver) MiddlewareOption {
+	return func(c *middlewareConfig) { c.agentRuns = r }
 }
 
 // WithFederationRegistry supplies a fully-configured federation Registry

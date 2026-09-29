@@ -502,3 +502,36 @@ func TestMirrorRevokeSkipsReservedProviderNames(t *testing.T) {
 		t.Fatalf("alice's GitHub identity after the revoke: %v", err)
 	}
 }
+
+// An agent principal (mctl-api#376): kind='agent' is already permitted by
+// the schema's CHECK and by validIdentity, so provisioning one needs no
+// migration. Two mints for the same agent name must yield one prn_ of kind
+// agent, exactly like any other identity.
+func TestProvisionAgentIdentityIsIdempotent(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	id := auth.Identity{Provider: auth.ProviderAgent, Subject: "agent:implementer", Display: "implementer", Kind: auth.KindAgent}
+
+	first, err := s.Provision(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Kind != auth.KindAgent {
+		t.Fatalf("kind = %q, want %q", first.Kind, auth.KindAgent)
+	}
+	second, err := s.Provision(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("provisioning the same agent identity twice yielded two principals: %s and %s", first.ID, second.ID)
+	}
+
+	other, err := s.Provision(ctx, auth.Identity{Provider: auth.ProviderAgent, Subject: "agent:shepherd", Display: "shepherd", Kind: auth.KindAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.ID == first.ID {
+		t.Fatal("two different agent names must not share one principal")
+	}
+}

@@ -46,6 +46,10 @@ type Entry struct {
 	// are not served and nothing authorizes on them.
 	PrincipalID    string `json:"-"`
 	ViaPrincipalID string `json:"-"`
+	// ViaExecutionID is the WorkItemExecution (we_...) an agent run token is
+	// bound to (mctl-api#376), recorded next to ViaPrincipalID on a request
+	// an agent principal made. "" for every non-agent request.
+	ViaExecutionID string `json:"-"`
 }
 
 // Log is the interface for recording and querying audit events.

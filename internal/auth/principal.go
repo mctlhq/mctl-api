@@ -40,6 +40,11 @@ const (
 	ProviderService = "service"
 	// ProviderDev: the dev-mode caller (AUTH_REQUIRED=false) only.
 	ProviderDev = "dev"
+	// ProviderAgent: subject is "agent:<name>" (mctl-api#376). Reserved in
+	// the federation registry (federation.go's reservedProviderNames) so no
+	// configured external provider can mint into this namespace; the only
+	// producer is an agent run token resolved by auth.Middleware.
+	ProviderAgent = "agent"
 )
 
 // Principal kinds.
@@ -110,6 +115,13 @@ func (u *User) Identity() (Identity, bool) {
 	switch {
 	case u == nil:
 		return Identity{}, false
+	case u.agent != "":
+		// Checked first, ahead of every other discriminator (mctl-api#376
+		// tasks.md A1): NewAgentUser never sets service/surface/usageWriter,
+		// so this case is unreachable together with any of them today, but
+		// ordering it first keeps that a property of this switch rather
+		// than an assumption about how the constructors behave.
+		return Identity{Provider: ProviderAgent, Subject: u.ID, Display: u.agent, Kind: KindAgent}, true
 	case u.service:
 		return Identity{Provider: ProviderService, Subject: ServiceUserID, Display: ServiceUserID, Kind: KindService}, true
 	case u.surface != "":

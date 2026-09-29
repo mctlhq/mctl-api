@@ -292,8 +292,18 @@ func main() {
 		os.Exit(1) //nolint:gocritic // exitAfterDefer: principalStore, the one deferred close above, is closed explicitly just before this exit
 	}
 
+	// Agent run tokens (mctl-api#376) resolve through the work-items store,
+	// which initializes later in startup than auth.Middleware is built
+	// (it needs AUDIT_DB_URL/env parsing that happens further down, and
+	// nothing before this point depends on it). agentRunResolver defers to
+	// whatever store main wires into it below, once that store exists,
+	// strictly before the server starts serving -- so there is no window
+	// where a request could observe the holder before its store is set.
+	agentRunResolver := &agentRunResolverHolder{}
+
 	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer,
-		auth.WithPrincipalResolver(principalResolver), auth.WithFederationRegistry(federationRegistry))
+		auth.WithPrincipalResolver(principalResolver), auth.WithFederationRegistry(federationRegistry),
+		auth.WithAgentRunResolver(agentRunResolver))
 
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
 
@@ -467,6 +477,9 @@ func main() {
 		} else {
 			workItemsStore = ws
 			defer ws.Close()
+			// Wired in before the server starts serving; see the comment on
+			// agentRunResolver's declaration above.
+			agentRunResolver.store = ws
 		}
 	}
 
@@ -1169,6 +1182,23 @@ const (
 
 // A var, not a const, only so tests can shrink it — nothing at runtime writes it.
 var storeInitBaseDelay = 250 * time.Millisecond
+
+// agentRunResolverHolder lets auth.Middleware capture an auth.AgentRunResolver
+// before its backing *workitems.Store exists: Middleware is built early in
+// main(), the work-items store later (mctl-api#376). main sets store exactly
+// once, before the server starts serving; ResolveAgentRun on a nil store
+// answers auth.ErrAgentRunNotFound, the same as an unresolvable token, which
+// is what every request sees until the store is wired in.
+type agentRunResolverHolder struct {
+	store *workitems.Store
+}
+
+func (h *agentRunResolverHolder) ResolveAgentRun(ctx context.Context, token string) (*auth.AgentRun, error) {
+	if h.store == nil {
+		return nil, auth.ErrAgentRunNotFound
+	}
+	return h.store.ResolveAgentRunToken(ctx, token)
+}
 
 // initStore opens an optional Postgres-backed store, retrying a failed attempt
 // instead of giving up on the first one.

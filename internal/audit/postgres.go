@@ -47,6 +47,10 @@ ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS request_id TEXT;
 -- Canonical principal ids (mctl-api#373), dual-written next to user_id.
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS user_principal_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
+-- The execution an agent run token is bound to (mctl-api#376), dual-written
+-- next to via_principal_id on an agent-authenticated request. Write-only:
+-- nothing reads it back yet.
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS via_execution_id TEXT NOT NULL DEFAULT '';
 `
 
 // PostgresLogger persists audit entries to PostgreSQL via pgx.
@@ -108,13 +112,13 @@ func (p *PostgresLogger) Log(entry Entry) {
 
 	_, err := p.pool.Exec(ctx,
 		`INSERT INTO audit_events (id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id,
-		                           user_principal_id, via_principal_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		                           user_principal_id, via_principal_id, via_execution_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		 ON CONFLICT (id) DO NOTHING`,
 		entry.ID, entry.Timestamp, entry.UserID, entry.Operation,
 		params, entry.WorkflowName, entry.Status, entry.RiskLevel, entry.Message,
 		entry.ClientIP, entry.UserAgent, entry.RequestID,
-		entry.PrincipalID, entry.ViaPrincipalID,
+		entry.PrincipalID, entry.ViaPrincipalID, entry.ViaExecutionID,
 	)
 	if err != nil {
 		slog.Error("audit postgres: insert failed", "error", err)
