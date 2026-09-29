@@ -1,0 +1,34 @@
+{
+  "api_version": "evidence.mctl.ai/v1alpha1",
+  "kind": "ExecutionEvidence",
+  "evidence_id": "ev-a9a3712cedd68759",
+  "content_hash": "sha256:a9a3712cedd687595969efeb3bebb813696b4ae14fe75614f00a0d2bbd45f886",
+  "created_at": "2026-01-15T12:00:00Z",
+  "execution": {
+    "execution_id": "",
+    "work_item_id": "wi_abc123",
+    "trace_id": "uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu",
+    "runtime_execution_id": "ex-a1b2c3d4e5f60718"
+  },
+  "outcome": {
+    "code": "succeeded",
+    "reason_code": "pr_opened"
+  },
+  "policy_decisions": [
+    {
+      "action_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "verdict": "allow",
+      "code": "ok",
+      "policy_version": "v1",
+      "rule_id": "rule.default",
+      "approval_ref": ""
+    }
+  ],
+  "approvals": [
+    {
+      "approval_id": "aar_xyz789",
+      "intent_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "state": "approved"
+    }
+  ]
+}

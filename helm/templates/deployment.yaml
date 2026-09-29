@@ -64,6 +64,17 @@ spec:
                   key: MCTL_USAGE_WRITER_TOKEN
                   optional: true
             {{- end }}
+            {{- if .Values.evidenceWriterTokenSecret }}
+            # Optional on purpose: a missing Secret leaves the
+            # evidence-writer principal disabled (only admins can write
+            # evidence), it does not keep the pod from starting.
+            - name: MCTL_EVIDENCE_WRITER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.evidenceWriterTokenSecret }}
+                  key: MCTL_EVIDENCE_WRITER_TOKEN
+                  optional: true
+            {{- end }}
             {{- if .Values.usagePricingConfigMap }}
             # The path, not the JSON. internal/usage/catalog_file.go reads this file
             # with os.ReadFile; a rate card is reviewed as a file in GitOps, and an env

@@ -42,6 +42,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/events"
+	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/ghactions"
 	"github.com/mctlhq/mctl-api/internal/ghtoken"
 	"github.com/mctlhq/mctl-api/internal/gitops"
@@ -470,6 +471,42 @@ func main() {
 		}
 	}
 
+	// Execution-evidence store (mctl-api#409, Tier B of
+	// evidence.mctl.ai/v1alpha1). Same shape as the work-items store:
+	// EVIDENCE_DB_URL, else AUDIT_DB_URL, with a kill switch. Nil makes
+	// every /api/v1/evidence* route (and GET /api/v1/work-items/{id}/evidence)
+	// answer 503, never an empty list.
+	var evidenceStore *evidence.Store
+	evidenceDBURL := postgresURL(os.Getenv("EVIDENCE_DB_URL"))
+	if evidenceDBURL == "" {
+		evidenceDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+	}
+	switch {
+	case killSwitchOn(os.Getenv("EVIDENCE_DISABLED")):
+		slog.Warn("EVIDENCE_DISABLED is set; /api/v1/evidence* routes will return 503")
+	case evidenceDBURL == "":
+		slog.Warn("no EVIDENCE_DB_URL or AUDIT_DB_URL; /api/v1/evidence* routes will return 503")
+	default:
+		es, esErr := initStore(initCtx, storeFailures, "evidence", func(ctx context.Context) (*evidence.Store, error) {
+			return evidence.NewStore(ctx, evidenceDBURL)
+		})
+		if esErr != nil {
+			slog.Error("evidence store init failed; /api/v1/evidence* routes will return 503", "error", esErr)
+		} else {
+			evidenceStore = es
+			defer es.Close()
+			// Best-effort correlation only, never a foreign key
+			// (docs/work-context-contract.md "ID scheme"): a nil
+			// workItemsStore (disabled, or not configured) simply leaves
+			// every derived projection empty rather than resolving nothing
+			// through a nil pointer.
+			if workItemsStore != nil {
+				evidenceStore.SetResolver(workItemsStore)
+			}
+			startEvidenceRetentionSweep(rootCtx, evidenceStore)
+		}
+	}
+
 	// Surface identity links (mctl-api#350). Same shape as the work-items
 	// store: SURFACE_IDENTITY_DB_URL, else AUDIT_DB_URL, with a kill switch.
 	// SURFACE_LINK_TTL (a Go duration, e.g. 2160h) gives new links an
@@ -771,6 +808,7 @@ func main() {
 		Roadmap:                        roadmapReader,
 		RoadmapWaveMaxAge:              roadmapWaveMaxAge,
 		Usage:                          usageStore,
+		Evidence:                       evidenceStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,
@@ -1579,4 +1617,65 @@ func parseWaveMaxAge(v string) (time.Duration, error) {
 		return 0, fmt.Errorf("ROADMAP_WAVE_MAX_AGE must be positive, got %s", v)
 	}
 	return d, nil
+}
+
+// evidenceRetentionSweepInterval is how often the background sweep checks
+// for evidence past EVIDENCE_RETENTION_DAYS. Retention is measured in days,
+// so an hourly check is far more often than it needs to be correct and far
+// less often than it would need to be to matter for load.
+const evidenceRetentionSweepInterval = 1 * time.Hour
+
+// parseEvidenceRetentionDays reads EVIDENCE_RETENTION_DAYS: unset or "0"
+// means retain indefinitely (requirements.md "Availability, gaps and
+// retention"). A malformed or negative value disables the sweep rather than
+// guessing at what was meant.
+func parseEvidenceRetentionDays(v string) (int, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	days, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("EVIDENCE_RETENTION_DAYS must be an integer, got %q", v)
+	}
+	if days < 0 {
+		return 0, fmt.Errorf("EVIDENCE_RETENTION_DAYS must not be negative, got %d", days)
+	}
+	return days, nil
+}
+
+// startEvidenceRetentionSweep runs a background loop that deletes whole
+// evidence rows older than EVIDENCE_RETENTION_DAYS, when that variable is
+// set to a positive number of days. Unset or zero (the default) retains
+// evidence indefinitely and starts no goroutine at all. The loop stops when
+// ctx is done (process shutdown).
+func startEvidenceRetentionSweep(ctx context.Context, store *evidence.Store) {
+	days, err := parseEvidenceRetentionDays(os.Getenv("EVIDENCE_RETENTION_DAYS"))
+	if err != nil {
+		slog.Error("invalid EVIDENCE_RETENTION_DAYS; evidence will be retained indefinitely", "error", err)
+		return
+	}
+	if days == 0 {
+		return
+	}
+	maxAge := time.Duration(days) * 24 * time.Hour
+	go func() {
+		ticker := time.NewTicker(evidenceRetentionSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				n, err := store.PurgeOlderThan(ctx, maxAge)
+				if err != nil {
+					slog.Error("evidence retention sweep failed", "error", err)
+					continue
+				}
+				if n > 0 {
+					slog.Info("evidence retention sweep purged rows", "count", n, "max_age_days", days)
+				}
+			}
+		}
+	}()
 }

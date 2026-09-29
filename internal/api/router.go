@@ -29,6 +29,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/domains"
+	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/humaninput"
 	"github.com/mctlhq/mctl-api/internal/lifecycle"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
@@ -144,6 +145,12 @@ type Options struct {
 	// WorkItems is the workitem/v1 store (mctl-api#349). Optional — nil makes
 	// every /api/v1/work-items route answer 503.
 	WorkItems *workitems.Store
+	// Evidence is the durable execution-evidence store (mctl-api#409, Tier B
+	// of evidence.mctl.ai/v1alpha1). Optional — nil makes every
+	// /api/v1/evidence* route (and GET /api/v1/work-items/{id}/evidence)
+	// answer 503, never an empty list (requirements.md "Availability, gaps
+	// and retention").
+	Evidence *evidence.Store
 	// HumanInputLedger is the idempotency/delivery record for human-input
 	// responses (mctl-api#261). Optional — nil makes the response endpoint
 	// 503: without it a response could be neither deduplicated nor
@@ -314,6 +321,9 @@ func NewRouter(opts Options) http.Handler {
 		r.Use(h.surfacePrincipalGate)
 		// The usage writer reaches one route and nothing else.
 		r.Use(usageWriterGate)
+		// The evidence writer reaches one route and nothing else
+		// (mctl-api#409), the same shape as the usage writer above.
+		r.Use(evidenceWriterGate)
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
 		// Loopback is skipped so MCP's in-process REST to localhost:8080 does
@@ -502,6 +512,23 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/execution-requests/{request_id}/reject", h.RejectExecutionRequest)
 			})
 
+			// Execution-evidence ingest (mctl-api#409). Its own group, the
+			// same reasoning as the execution-requests group above: a
+			// single short Postgres transaction a producer makes once per
+			// governed run must not compete with the 20/min budget
+			// reserved for calls that trigger Argo and Temporal, and a
+			// retry burst (the producer's own non-fatality contract) must
+			// not be throttled into a false gap.
+			r.Group(func(r chi.Router) {
+				r.Use(httprate.Limit(120, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					if user := auth.UserFromContext(r.Context()); user != nil {
+						return "evidence:" + rateLimitSubject(r, user), nil
+					}
+					return keyByTrustedIP(r)
+				})))
+				r.Post("/evidence/records", h.IngestEvidence)
+			})
+
 			// Work-item reads: side-effect free, outside the write budget.
 			r.Get("/work-items", h.ListWorkItems)
 			r.Get("/surface-identities", h.ListSurfaceIdentities)
@@ -515,6 +542,15 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/work-items/{id}/execution-requests/{request_id}", h.GetExecutionRequest)
 			r.Get("/action-approvals", h.ListActionApprovals)
 			r.Get("/action-approvals/{id}", h.GetActionApproval)
+
+			// Execution-evidence reads (mctl-api#409): side-effect free,
+			// admin-only except the work-item-scoped one, which reuses
+			// visibleWorkItem so evidence never leaks past what the caller
+			// could already see on the work item. Outside the write
+			// budget above like every other read in this block.
+			r.Get("/evidence/{id}", h.GetEvidence)
+			r.Get("/evidence", h.ListEvidence)
+			r.Get("/work-items/{id}/evidence", h.ListWorkItemEvidence)
 
 			// Liveness read for one DevLoopWorkflow. Deliberately OUTSIDE the
 			// write group above: it has no side effects, and the shepherd

@@ -1,0 +1,33 @@
+{
+  "api_version": "evidence.mctl.ai/v1alpha1",
+  "kind": "ExecutionEvidence",
+  "evidence_id": "ev-8f0d160c5aa10f84",
+  "content_hash": "sha256:8f0d160c5aa10f8495e44794044e931bf84da3bc9360cbd03fb12b3a948a9c85",
+  "created_at": "2026-01-15T12:00:00Z",
+  "execution": {
+    "execution_id": "we_01hzzzzzzzzzzzzzzzzzzzzzzz",
+    "work_item_id": "wi_abc123",
+    "trace_id": "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv",
+    "runtime_execution_id": "ex-b2c3d4e5f6071829"
+  },
+  "outcome": {
+    "code": "succeeded",
+    "reason_code": "merged"
+  },
+  "policy_decisions": [
+    {
+      "action_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "verdict": "allow",
+      "code": "ok",
+      "policy_version": "v1",
+      "rule_id": "rule.merge",
+      "approval_ref": ""
+    }
+  ],
+  "snapshot_refs": [
+    {
+      "snapshot_id": "cs_deadbeefdeadbeefdeadbeefdeadbeef",
+      "content_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+    }
+  ]
+}

@@ -749,6 +749,50 @@ components:
         schema_version: {type: string, enum: [workitem/v1]}
       required: [id, work_item_id, execution_id, execution_sequence, content_hash, strategy, strategy_version, produced_by, created_at, schema_version]
 
+    EvidenceEnvelope:
+      type: object
+      description: |
+        One sealed, immutable execution-evidence record (mctl-api#409, Tier
+        B of evidence.mctl.ai/v1alpha1, ADR 018 and its Amendment 1).
+        `envelope_b64` is the exact bytes first received, base64-encoded so
+        no JSON re-encoding can change them; `content_hash` is verified on
+        every write and read. `execution_id` (we_) and
+        `runtime_execution_id` (ex-) are the two typed join identities from
+        Amendment 1, copied verbatim and never classified into one another;
+        `ref` is the derived, non-authoritative retrieval projection (null
+        when it could not be resolved).
+      properties:
+        id: {type: string, example: ev-4941c4eb74e52230}
+        content_hash: {type: string}
+        api_version: {type: string, enum: ['evidence.mctl.ai/v1alpha1']}
+        envelope_b64: {type: string, format: byte}
+        execution_id: {type: string, description: 'we_... or empty'}
+        runtime_execution_id: {type: string, description: 'ex-<16 hex> or empty'}
+        work_item_id: {type: string}
+        trace_id: {type: string}
+        created_at: {type: string, format: date-time}
+        ingested_by: {type: string}
+        ingested_by_principal_id: {type: string}
+        ingested_at: {type: string, format: date-time}
+        primary_ref_kind: {type: string, enum: [work, runtime, '']}
+        primary_ref_id: {type: string}
+        ref:
+          type: object
+          nullable: true
+          description: The rebuildable derived projection. No authority; canonical state always wins on disagreement.
+          properties:
+            evidence_id: {type: string}
+            work_execution_id: {type: string}
+            work_item_id: {type: string}
+            tenant: {type: string}
+            engine: {type: string}
+            engine_ref: {type: string}
+            repository: {type: string}
+            issue_number: {type: integer, nullable: true}
+            pr_number: {type: integer, nullable: true}
+            derived_at: {type: string, format: date-time}
+      required: [id, content_hash, api_version, envelope_b64, created_at, ingested_by, ingested_at]
+
     ActionApprovalRequest:
       type: object
       description: |
@@ -3397,6 +3441,105 @@ paths:
                   schema_version: {type: string}
                   snapshot: {$ref: '#/components/schemas/ContextSnapshot'}
         '404': {description: 'work_item_not_found or snapshot_not_found', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/evidence/records:
+    post:
+      summary: Ingest one sealed execution-evidence envelope
+      description: |
+        Durable storage for evidence.mctl.ai/v1alpha1 envelopes (mctl-api#409,
+        ADR 018 and its Amendment 1). Requires `evidence:write` (the
+        dedicated evidence-writer principal, or an admin); the evidence
+        writer may call no other route. The envelope's own `api_version`,
+        `evidence_id` and `content_hash` are recomputed and verified
+        server-side; the wrapper repeats none of them. Idempotent on the
+        envelope's content: the same content (even re-sealed with a
+        different `created_at`) returns the first stored record (200)
+        instead of a second row (201 on first ingest).
+      tags: [Evidence]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                envelope_b64: {type: string, format: byte, description: 'Base64 of the sealed Tier A envelope JSON, verbatim, at most 256 KiB decoded'}
+              required: [envelope_b64]
+      responses:
+        '201': {description: Stored, content: {application/json: {schema: {$ref: '#/components/schemas/EvidenceEnvelope'}}}}
+        '200': {description: 'Already stored under this content (replay); the first stored record', content: {application/json: {schema: {$ref: '#/components/schemas/EvidenceEnvelope'}}}}
+        '400': {description: 'evidence_invalid, evidence_unsupported_api_version, evidence_hash_mismatch, evidence_execution_ref_invalid, or evidence_too_large', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '403': {description: caller lacks evidence:write, or the evidence writer called a route other than this one}
+        '503': {description: evidence_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/evidence/{id}:
+    get:
+      summary: One evidence record, by its ev- id
+      description: Admin-only. Returns the wrapper and the verbatim envelope bytes, base64-encoded.
+      tags: [Evidence]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: The evidence record, content: {application/json: {schema: {$ref: '#/components/schemas/EvidenceEnvelope'}}}}
+        '404': {description: evidence_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '503': {description: evidence_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/evidence:
+    get:
+      summary: List evidence by any combination of the supported filters
+      description: |
+        Admin-only. The response shape does not depend on which filters were
+        supplied. `issue`/`pr` require `repository`.
+      tags: [Evidence]
+      parameters:
+        - {name: execution_id, in: query, schema: {type: string}}
+        - {name: runtime_execution_id, in: query, schema: {type: string}}
+        - {name: trace_id, in: query, schema: {type: string}}
+        - {name: work_item_id, in: query, schema: {type: string}}
+        - {name: engine, in: query, schema: {type: string}}
+        - {name: engine_ref, in: query, schema: {type: string}}
+        - {name: repository, in: query, schema: {type: string}}
+        - {name: issue, in: query, schema: {type: integer}}
+        - {name: pr, in: query, schema: {type: integer}}
+        - {name: limit, in: query, schema: {type: integer}}
+      responses:
+        '200':
+          description: Matching evidence, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  evidence: {type: array, items: {$ref: '#/components/schemas/EvidenceEnvelope'}}
+                  truncated: {type: boolean}
+                  limit: {type: integer}
+        '503': {description: evidence_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}/evidence:
+    get:
+      summary: Evidence attached to one work item
+      description: |
+        Applies the same visibility check as every other work-item read
+        (`visibleWorkItem`): a work item the caller may not see answers 404,
+        never 403, so its existence -- and any evidence attached to it --
+        never leaks.
+      tags: [Evidence, Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Evidence attached to this work item, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  evidence: {type: array, items: {$ref: '#/components/schemas/EvidenceEnvelope'}}
+                  truncated: {type: boolean}
+                  limit: {type: integer}
+        '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '503': {description: evidence_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
 
   /api/v1/action-approvals:
     post:

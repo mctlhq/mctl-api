@@ -641,6 +641,44 @@ func (s *Store) Executions(ctx context.Context, itemID string) ([]Execution, err
 	return listExecutions(ctx, s.pool, itemID)
 }
 
+// ExecutionCorrelation is a best-effort, read-only join of one execution's
+// engine reference to its work item's tenant and external key, for a
+// consumer outside this package that needs those facts without holding a
+// foreign key to them (mctl-api#409, the evidence store's derived
+// projection). It is correlation, never identity: docs/work-context-contract.md
+// ("ID scheme") is explicit that cross-store relationships are joinable by
+// value, never by a database FK, because the stores may live in different
+// databases.
+type ExecutionCorrelation struct {
+	WorkItemID  string
+	Engine      string
+	EngineRef   string
+	Tenant      string
+	ExternalKey string
+}
+
+// ResolveExecution looks up an execution by its globally-unique id
+// (work_item_executions.id is a primary key, so no work-item id is needed
+// first) and joins it to its work item's tenant and external_key. Returns
+// nil, nil when no such execution exists — an unresolvable reference is not
+// an error at this layer, it is an honest absence a caller may store as
+// such (design.md section 5 of mctl-api#409).
+func (s *Store) ResolveExecution(ctx context.Context, executionID string) (*ExecutionCorrelation, error) {
+	var c ExecutionCorrelation
+	err := s.pool.QueryRow(ctx, `
+		SELECT wie.work_item_id, wie.engine, wie.engine_ref, wi.tenant, wi.external_key
+		FROM work_item_executions wie
+		JOIN work_items wi ON wi.id = wie.work_item_id
+		WHERE wie.id = $1`, executionID).Scan(&c.WorkItemID, &c.Engine, &c.EngineRef, &c.Tenant, &c.ExternalKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("workitems: resolve execution %s: %w", executionID, err)
+	}
+	return &c, nil
+}
+
 // AttachExecution correlates an engine run with a non-terminal work item,
 // or records a later phase of one already attached under the same
 // (engine, engine_ref). A finished execution's phase never changes.
