@@ -16,14 +16,18 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-chi/httprate"
 
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/delegation"
 )
 
 // surfaceRefRows counts the work_item_surface_refs rows on id naming actor.
@@ -178,5 +182,58 @@ func TestAgentAggregateLimit_CapsTheAgentNotTheRunOrOthers(t *testing.T) {
 		if code := call(human); code != http.StatusNoContent {
 			t.Fatalf("a non-agent caller was metered: call %d = %d", i, code)
 		}
+	}
+}
+
+// loginPrincipals resolves any login to "prn_<login>".
+type loginPrincipals struct{}
+
+func (loginPrincipals) ResolvePrincipal(_ context.Context, id auth.Identity) (string, error) {
+	return "prn_" + id.Display, nil
+}
+
+// Through the real router: an agent rotating grant refs across many human
+// subjects still hits ONE aggregate ceiling. Each subject stays far below the
+// global per-subject limit, so a 429 can only come from agentAggregateLimit
+// keyed on the agent. That proves it runs above agentPrincipalGate. If the
+// two were swapped, the key would be each delegated human and nothing here
+// would ever be throttled.
+func TestAgentAggregateLimit_HoldsAcrossDelegatedSubjectsInTheRouter(t *testing.T) {
+	const subjects = 60
+	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1"})
+	router := NewRouter(Options{
+		AuthMiddleware: func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), agent)))
+			})
+		},
+		AuditLog:   audit.NewLogger(),
+		Principals: loginPrincipals{},
+		Delegation: &fakeDelegation{fn: func(ref string, _ auth.AgentRun) (delegation.Grant, error) {
+			login := "u" + strings.TrimPrefix(ref, "xr_")
+			return delegation.Grant{Ref: ref, Kind: delegation.KindExecutionRequest,
+				Subject: "github:" + login, SubjectPrincipalID: "prn_" + login}, nil
+		}},
+	})
+	limited, delegated := 0, 0
+	for i := 0; i < agentAggregateLimitPerMinute+5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/work-items/wi_1", nil)
+		req.Header.Set(OnBehalfOfHeader, fmt.Sprintf("xr_%d", i%subjects))
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		switch rec.Code {
+		case http.StatusTooManyRequests:
+			limited++
+		case http.StatusForbidden, http.StatusBadRequest:
+			t.Fatalf("request %d was refused by the gate: %d %s", i, rec.Code, rec.Body.String())
+		default:
+			delegated++
+		}
+	}
+	if delegated == 0 {
+		t.Fatal("no request got through the delegation gate; the test proves nothing")
+	}
+	if limited == 0 {
+		t.Fatalf("an agent rotating across %d delegated subjects was never throttled", subjects)
 	}
 }
