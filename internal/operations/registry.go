@@ -106,6 +106,68 @@ func agentPinParams(agent string) []ParameterDef {
 	}
 }
 
+// temporalIDPattern mirrors the usage ledger's own acceptance for these
+// values (internal/usage/types.go executionIDPattern,
+// docs/model-usage-ledger.md): up to 128 characters from [A-Za-z0-9_.:-],
+// starting alphanumeric. Conservative enough to exclude newlines, spaces and
+// shell metacharacters on the way into Argo workflow arguments; permissive
+// enough to survive a change in how mctl-agents names a workflow id.
+const temporalIDPattern = `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`
+
+// correlationIDPattern is the shape already used for work_item_id /
+// execution_id on mctl-agents-investigate.
+const correlationIDPattern = `^[A-Za-z0-9_-]{1,64}$`
+
+// devLoopCorrelationParamDescriptions carries the description text for each
+// correlation identifier the DevLoopWorkflow sends, keyed by parameter name,
+// so the wording cannot drift between the operations that share a name.
+var devLoopCorrelationParamDescriptions = map[string]string{
+	"temporal_workflow_id": "Optional. Id of the DevLoopWorkflow that submitted this run/tick, forwarded for correlation only. Omit means not submitted by a loop, never derive one.",
+	"temporal_run_id":      "Optional. Run id of that same DevLoopWorkflow, forwarded for correlation only, so a record this run seals can be told apart from a leftover of an earlier run of the same workflow id.",
+	"execution_request_id": "Optional. The mctl-api execution request (xr_...) this run fulfils, forwarded for correlation only: the execution identity is still execution_id.",
+	"work_item_id":         "Optional. Canonical WorkItem id, minted by the caller (the dev-loop control plane). Correlation only.",
+	"execution_id":         "Optional. Execution identity for this attempt, minted by the same caller alongside work_item_id. Correlation only.",
+}
+
+// devLoopCorrelationParamPatterns keys each correlation identifier's Pattern
+// by name: the two temporal_* ids use the ledger's permissive shape,
+// everything else uses the tighter shape investigate's existing
+// work_item_id / execution_id already use.
+var devLoopCorrelationParamPatterns = map[string]string{
+	"temporal_workflow_id": temporalIDPattern,
+	"temporal_run_id":      temporalIDPattern,
+	"execution_request_id": correlationIDPattern,
+	"work_item_id":         correlationIDPattern,
+	"execution_id":         correlationIDPattern,
+}
+
+// devLoopCorrelationParams declares the DevLoopWorkflow's correlation
+// identifiers named by names: temporal_workflow_id, temporal_run_id,
+// execution_request_id, work_item_id and/or execution_id, exactly as the
+// corresponding ClusterWorkflowTemplate declares them
+// (mctl-gitops#1345 for mctl-agents-investigate, #1418 for
+// mctl-agents-implement and mctl-agents-shepherd). Opaque to mctl-api:
+// nothing here resolves, mints or defaults them (mctlhq/mctl-api#426,
+// mctlhq/.github#50). Every one is optional and OmitWhenEmpty, so a caller
+// that sends none — the directive poller, implement_sweep.py, a manual
+// operator trigger — is unaffected and the CWFT's own default applies; see
+// the ParameterDef.OmitWhenEmpty comment above for the hazard this avoids
+// (registry.go:68-77).
+func devLoopCorrelationParams(names ...string) []ParameterDef {
+	out := make([]ParameterDef, 0, len(names))
+	for _, name := range names {
+		out = append(out, ParameterDef{
+			Name:          name,
+			Type:          "string",
+			Required:      false,
+			OmitWhenEmpty: true,
+			Description:   devLoopCorrelationParamDescriptions[name],
+			Pattern:       devLoopCorrelationParamPatterns[name],
+		})
+	}
+	return out
+}
+
 // NewRegistry creates the operation registry with all known operations.
 func NewRegistry() *Registry {
 	r := &Registry{ops: make(map[string]Operation)}
@@ -663,7 +725,14 @@ var builtinOperations = []Operation{
 			{Name: "max_proposals", Type: "string", Required: false, Default: "1", Description: "Safety bound. The API permits exactly one proposal per run.", Enum: []string{"1"}},
 			// Release pin (mctlhq/mctl-api#372): the DevLoop's implement step sends
 			// it; cwft-mctl-agents-implement declares both.
-		}, agentPinParams("implementer")...),
+			// DevLoop correlation identifiers (mctlhq/mctl-api#426,
+			// mctlhq/.github#50): dev_loop.py's implement step sends these;
+			// cwft-mctl-agents-implement declares all five. Note:
+			// cwft-mctl-agents-implement also declares a "force" parameter that
+			// mctl-api deliberately does not expose here (see
+			// cwftParamsNotSettableViaAPI in registry_cwft_params_test.go).
+		}, append(agentPinParams("implementer"),
+			devLoopCorrelationParams("temporal_workflow_id", "temporal_run_id", "execution_request_id", "work_item_id", "execution_id")...)...),
 	},
 	{
 		// Tier 3 PR shepherd — drives existing implementer-PRs through codex
@@ -697,7 +766,11 @@ var builtinOperations = []Operation{
 			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to evaluate decide() for every matched proposal and print the decision WITHOUT calling the implementer or merging anything. Default 'false'.", Enum: []string{"true", "false"}},
 			// Release pin (mctlhq/mctl-api#372): the DevLoop's in-loop shepherd tick
 			// sends it; cwft-mctl-agents-shepherd declares both.
-		}, agentPinParams("shepherd")...),
+			// DevLoop correlation identifiers (mctlhq/mctl-api#426,
+			// mctlhq/.github#50): dev_loop.py's _shepherd_tick sends these;
+			// cwft-mctl-agents-shepherd declares all five.
+		}, append(agentPinParams("shepherd"),
+			devLoopCorrelationParams("temporal_workflow_id", "temporal_run_id", "execution_request_id", "work_item_id", "execution_id")...)...),
 	},
 	{
 		// Issue-investigator — the issue-driven entry point. Reads a GitHub
@@ -730,7 +803,14 @@ var builtinOperations = []Operation{
 			// Release pin (mctlhq/mctl-api#372): the DevLoop resolves the released
 			// issue-investigator and sends it; cwft-mctl-agents-investigate declares
 			// both. Undeclared, it was stripped and every run used the CWFT default.
-		}, agentPinParams("issue-investigator")...),
+			// DevLoop correlation identifiers (mctlhq/mctl-api#426,
+			// mctlhq/.github#50): dev_loop.py's investigate step sends these;
+			// cwft-mctl-agents-investigate declares all three.
+			// human_input_responses is deliberately NOT declared here: the CWFT
+			// does not declare it (mctl-api#372 item 3), so it stays in
+			// devLoopParamsPendingDeclaration.
+		}, append(agentPinParams("issue-investigator"),
+			devLoopCorrelationParams("temporal_workflow_id", "temporal_run_id", "execution_request_id")...)...),
 	},
 	{
 		// Approve step — flips exactly one proposal's .status.yaml from
