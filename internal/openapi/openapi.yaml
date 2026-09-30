@@ -683,6 +683,20 @@ components:
         ended_at: {type: string, format: date-time}
       required: [id, work_item_id, engine, engine_ref, attempt, phase, started_at]
 
+    WorkItemIntent:
+      type: object
+      description: A bounded, normalized statement of what was asked for. Never a transcript, never authorization or approval state.
+      properties:
+        id: {type: integer, format: int64}
+        work_item_id: {type: string}
+        actor_principal: {type: string}
+        surface: {type: string}
+        text: {type: string, maxLength: 8192}
+        params: {type: object}
+        text_redacted: {type: boolean, description: 'True when retention removed the text; text is then empty and must not be read as the intent''s content.'}
+        created_at: {type: string, format: date-time}
+      required: [id, work_item_id, actor_principal, text, text_redacted, created_at]
+
     WorkItemView:
       type: object
       properties:
@@ -3268,6 +3282,33 @@ paths:
         '409': {description: 'state_version_conflict, invalid_transition or idempotency_key_reused', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
 
   /api/v1/work-items/{id}/intents:
+    get:
+      summary: List a work item's intents
+      description: |
+        Provenance and input, never authorization or approval state. Oldest
+        first (ascending `id`), keyset-paginated by `after_id`; a page never
+        exceeds `limit` (default 50, max 100). A retention-swept intent
+        (mctl-api#353) is still listed, with `text` empty and
+        `text_redacted: true`.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: after_id, in: query, schema: {type: integer, format: int64, minimum: 0}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+      responses:
+        '200':
+          description: Intents, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string}
+                  intents: {type: array, items: {$ref: '#/components/schemas/WorkItemIntent'}}
+                  truncated: {type: boolean}
+                  limit: {type: integer}
+        '400': {description: Invalid after_id or limit, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+        '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
     post:
       summary: Append a bounded intent
       description: At most 8 KiB of text plus a JSON object of params, scanned for secrets. Never a transcript; history records the intent id only.
@@ -3294,6 +3335,26 @@ paths:
         '400': {description: Too long, a secret, or an actor field, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
         '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
         '409': {description: The item is terminal, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
+
+  /api/v1/work-items/{id}/intents/{intent_id}:
+    get:
+      summary: Read one intent
+      description: An intent id of another work item is 404 `intent_not_found`, never `work_item_not_found`.
+      tags: [Work Items]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: intent_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: The intent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version: {type: string}
+                  intent: {$ref: '#/components/schemas/WorkItemIntent'}
+        '404': {description: 'work_item_not_found (no such work item, or not visible), or intent_not_found (no such intent of this work item)', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
 
   /api/v1/work-items/{id}/executions:
     get:
@@ -4035,6 +4096,8 @@ tags:
       GET /api/v1/human-input, GET /api/v1/human-input/{request_id},
       POST /api/v1/human-input/{request_id}/response, POST /api/v1/work-items,
       GET /api/v1/work-items/{id}, POST /api/v1/work-items/{id}/intents,
+      GET /api/v1/work-items/{id}/intents,
+      GET /api/v1/work-items/{id}/intents/{intent_id},
       POST /api/v1/work-items/{id}/surface-refs,
       GET|POST /api/v1/work-items/{id}/execution-requests,
       GET /api/v1/work-items/{id}/execution-requests/{request_id}. No relay

@@ -90,6 +90,8 @@ func TestSurfaceRelay_FailsClosed(t *testing.T) {
 		{"POST", "/api/v1/work-items"},
 		{"GET", "/api/v1/work-items/wi_x"},
 		{"POST", "/api/v1/work-items/wi_x/intents"},
+		{"GET", "/api/v1/work-items/wi_x/intents"},
+		{"GET", "/api/v1/work-items/wi_x/intents/1"},
 		{"POST", "/api/v1/work-items/wi_x/surface-refs"},
 		{"POST", "/api/v1/work-items/wi_x/execution-requests"},
 		{"GET", "/api/v1/work-items/wi_x/execution-requests"},

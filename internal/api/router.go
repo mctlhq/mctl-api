@@ -553,6 +553,8 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/work-items/{id}", h.GetWorkItem)
 			r.Get("/work-items/{id}/executions", h.ListWorkItemExecutions)
 			r.Get("/work-items/{id}/events", h.ListWorkItemEvents)
+			r.Get("/work-items/{id}/intents", h.ListWorkItemIntents)
+			r.Get("/work-items/{id}/intents/{intent_id}", h.GetWorkItemIntent)
 			r.Get("/work-items/{id}/executions/{execution_id}/snapshot", h.GetWorkItemExecutionSnapshot)
 			r.Get("/work-items/{id}/snapshots", h.ListWorkItemSnapshots)
 			r.Get("/work-items/{id}/snapshots/{snapshot_id}", h.GetWorkItemSnapshot)

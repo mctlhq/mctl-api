@@ -94,6 +94,12 @@ const (
 	MaxKeyBytes         = 512
 	MaxExternalIDBytes  = 256
 	MaxEngineRefBytes   = 256
+
+	// DefaultIntentPageLimit and MaxIntentPageLimit bound a page of
+	// Store.Intents. The handler validates a caller-supplied limit against
+	// these; the store clamps to them regardless of what it is handed.
+	DefaultIntentPageLimit = 50
+	MaxIntentPageLimit     = 100
 )
 
 // Transitions is the single enforcement point for lifecycle rules: from
@@ -211,13 +217,18 @@ type Event struct {
 
 // Intent is a bounded statement of what was asked for. Never a transcript.
 type Intent struct {
-	ID             int64           `json:"id"`
-	WorkItemID     string          `json:"work_item_id"`
-	ActorPrincipal string          `json:"actor_principal"`
-	Surface        string          `json:"surface,omitempty"`
-	Text           string          `json:"text"`
-	Params         json.RawMessage `json:"params,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
+	ID             int64  `json:"id"`
+	WorkItemID     string `json:"work_item_id"`
+	ActorPrincipal string `json:"actor_principal"`
+	Surface        string `json:"surface,omitempty"`
+	Text           string `json:"text"`
+	// TextRedacted is true when retention has swept this intent's text: Text
+	// then reads "", and that emptiness must never be read as an empty
+	// intent. Always present, never omitted, so a reader cannot mistake its
+	// absence for false.
+	TextRedacted bool            `json:"text_redacted"`
+	Params       json.RawMessage `json:"params,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
 }
 
 // Execution correlates the work item to one engine run. The engine keeps the

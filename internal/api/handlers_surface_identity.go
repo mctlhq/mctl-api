@@ -89,6 +89,10 @@ var surfaceRoutes = []surfaceRoute{
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+$`), true},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/intents$`), true},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/surface-refs$`), true},
+	// Intent reads (mctl-api#430): relayed, so they run as the linked human
+	// and inherit that human's visibility -- never admin.
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/intents$`), true},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/intents/[^/]+$`), true},
 	// Execution requests (mctl-api#368): a surface REQUESTS execution and
 	// never declares its identity. POST /work-items/{id}/resume is
 	// deliberately absent: it takes engine and engine_ref, which only the
