@@ -106,3 +106,22 @@ func (p *usageWriterProvider) Verify(_ context.Context, raw string) (*Verified, 
 	}
 	return &Verified{Identity: Identity{Provider: ProviderService, Subject: UsageWriterUserID, Display: UsageWriterUserID, Kind: KindService}}, nil
 }
+
+// evidenceWriterProvider is the static-secret provider for
+// MCTL_EVIDENCE_WRITER_TOKEN (mctl-api#409), modelled one-for-one on
+// usageWriterProvider.
+type evidenceWriterProvider struct{ token func() string }
+
+func newEvidenceWriterProvider(token func() string) *evidenceWriterProvider {
+	return &evidenceWriterProvider{token: token}
+}
+
+func (*evidenceWriterProvider) Name() string           { return ProviderService }
+func (*evidenceWriterProvider) Claims(tokenShape) bool { return true }
+
+func (p *evidenceWriterProvider) Verify(_ context.Context, raw string) (*Verified, error) {
+	if !secretMatches(p.token(), raw) {
+		return nil, ErrNoProvider
+	}
+	return &Verified{Identity: Identity{Provider: ProviderService, Subject: EvidenceWriterUserID, Display: EvidenceWriterUserID, Kind: KindService}}, nil
+}

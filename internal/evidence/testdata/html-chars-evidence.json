@@ -1,0 +1,52 @@
+{
+  "api_version": "evidence.mctl.ai/v1alpha1",
+  "kind": "ExecutionEvidence",
+  "evidence_id": "ev-6d30924febe84bee",
+  "content_hash": "sha256:6d30924febe84beeb1af004991302a24c843a710841ddbf028412cd5ff7c7430",
+  "created_at": "2026-09-11T00:00:40Z",
+  "execution": {
+    "execution_id": "we_01J8ZQK7N3XG9F6C2R4D8T1M5W",
+    "work_item_id": "wi-<&>",
+    "trace_id": "trace-<a>&b\"c</a>"
+  },
+  "outcome": {
+    "code": "succeeded",
+    "reason_code": "proposal-opened"
+  },
+  "policy_decisions": [
+    {
+      "action_digest": "sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+      "verdict": "ALLOW",
+      "code": "allowed",
+      "policy_version": "mctl-agents/policy/v1",
+      "rule_id": "github-issue-comment",
+      "approval_ref": ""
+    }
+  ],
+  "snapshot_refs": [
+    {
+      "snapshot_id": "cs-de22a552ea05cf19",
+      "content_hash": "sha256:de22a552ea05cf198ad582262f8aea1a3c3813272b7854c736e2d8415b8140eb"
+    }
+  ],
+  "execution_request": {
+    "request_id": "xr_01J8ZQK7P4YH0G7D3S5E9U2N6X",
+    "kind": "start",
+    "state": "fulfilled"
+  },
+  "usage": {
+    "session_id": "sess-01J8ZQK7Q5ZJ1H8E4T6F0V3O7Y",
+    "model_key": "claude-sonnet-5",
+    "result_uuid": "9f2c1e4a-7b3d-4068-8c1a-4f9e2b7d0c3a",
+    "devloop_stage": "investigator"
+  },
+  "approvals": [],
+  "artifacts": [
+    {
+      "name": "requirements.md",
+      "kind": "proposal-document",
+      "content_hash": "sha256:3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
+    }
+  ],
+  "gaps": []
+}

@@ -110,6 +110,13 @@ githubAppTokenKey: ""
 # Secret leaves the principal disabled rather than failing the pod.
 usageWriterTokenSecret: ""
 
+# Optional: Secret holding MCTL_EVIDENCE_WRITER_TOKEN, the bearer token of
+# the evidence-writer principal (service:mctl-agents-evidence,
+# mctl-api#409). It may only append execution-evidence records. The
+# reference is optional, so an absent Secret leaves the principal disabled
+# rather than failing the pod.
+evidenceWriterTokenSecret: ""
+
 # Optional: Secret holding MCTL_SURFACE_TELEGRAM_TOKEN, the bearer token of
 # the surface:telegram principal (mctlhq/mctl-telegram#443). mctl-api
 # authenticates it in internal/auth/oidc.go (surfaceTokenEnv,

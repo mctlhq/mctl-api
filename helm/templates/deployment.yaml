@@ -64,6 +64,17 @@ spec:
                   key: MCTL_USAGE_WRITER_TOKEN
                   optional: true
             {{- end }}
+            {{- if .Values.evidenceWriterTokenSecret }}
+            # Optional on purpose: a missing Secret leaves the
+            # evidence-writer principal disabled (only admins can write
+            # evidence), it does not keep the pod from starting.
+            - name: MCTL_EVIDENCE_WRITER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.evidenceWriterTokenSecret }}
+                  key: MCTL_EVIDENCE_WRITER_TOKEN
+                  optional: true
+            {{- end }}
             {{- if .Values.surfaceTelegramTokenSecret }}
             # Optional on purpose, same as the usage writer above: the chart ships
             # before mctl-gitops flips surfaceTelegramToken.enabled, so the Secret may

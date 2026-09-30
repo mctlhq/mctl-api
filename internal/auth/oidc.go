@@ -66,6 +66,11 @@ type User struct {
 	// reason as service.
 	usageWriter bool
 
+	// evidenceWriter is set only on the evidence-writer principal,
+	// authenticated by MCTL_EVIDENCE_WRITER_TOKEN (mctl-api#409). Modelled
+	// one-for-one on usageWriter, and unexported for the same reason.
+	evidenceWriter bool
+
 	// surface is set only on a per-surface service principal
 	// ("surface:telegram"), authenticated by that surface's own token
 	// (mctl-api#350). Unexported for the same reason as service.
@@ -388,10 +393,12 @@ func (u *User) IsUsageWriter() bool { return u != nil && u.usageWriter }
 
 // HasPermission reports whether the caller holds a named permission. An
 // agent principal holds exactly the permissions its run token was minted
-// with (mctl-api#376) and nothing else -- not PermissionUsageWrite by being
-// an admin, because an agent principal is never an admin. Otherwise, only
-// PermissionUsageWrite is modelled so far: the usage writer holds it, and an
-// admin holds it because the ledger has always been admin-writable.
+// with (mctl-api#376) and nothing else -- not a writer permission by being
+// an admin, because an agent principal is never an admin. Otherwise:
+// PermissionUsageWrite is held by the usage writer and by an admin, because
+// the ledger has always been admin-writable; PermissionEvidenceWrite is the
+// same shape, one capability later (mctl-api#409): the evidence writer holds
+// it, and so does an admin.
 func (u *User) HasPermission(permission string) bool {
 	if u == nil {
 		return false
@@ -404,8 +411,11 @@ func (u *User) HasPermission(permission string) bool {
 		}
 		return false
 	}
-	if permission == PermissionUsageWrite {
+	switch permission {
+	case PermissionUsageWrite:
 		return u.usageWriter || u.IsAdmin()
+	case PermissionEvidenceWrite:
+		return u.evidenceWriter || u.IsAdmin()
 	}
 	return false
 }
@@ -437,6 +447,73 @@ func usageWriterToken() string {
 		}
 	}
 	return token
+}
+
+// Evidence-writer principal (mctl-api#409), modelled one-for-one on the
+// usage-writer principal above: the evidence producer (mctl-agents, once
+// #199's Tier A producer ships) appends sealed envelopes with its own
+// credential instead of the admin mctl-agent token, so a leaked or misused
+// producer credential can only ever write evidence records, and every
+// record it writes is attributed to this principal.
+//
+// It holds exactly one permission, PermissionEvidenceWrite, is not an
+// admin, belongs to no tenant, and is confined to
+// POST /api/v1/evidence/records by the API's evidence-writer gate. Human
+// admins keep their existing write access.
+const (
+	EvidenceWriterUserID    = "service:mctl-agents-evidence"
+	PermissionEvidenceWrite = "evidence:write"
+	evidenceWriterTokenEnv  = "MCTL_EVIDENCE_WRITER_TOKEN" //nolint:gosec // env var name, not a credential
+)
+
+// NewEvidenceWriterUser builds the evidence-writer principal. Exported for
+// tests, like NewUsageWriterUser; only the middleware mints it from a
+// token.
+func NewEvidenceWriterUser() *User {
+	return &User{ID: EvidenceWriterUserID, evidenceWriter: true}
+}
+
+// IsEvidenceWriter reports whether this principal authenticated with the
+// evidence-writer token.
+func (u *User) IsEvidenceWriter() bool { return u != nil && u.evidenceWriter }
+
+// evidenceWriterToken reads the evidence-writer token, refusing one that is
+// too short or equal to the mctl-agent service token, any surface token, or
+// the usage-writer token -- it must prove exactly this principal and
+// nothing more.
+func evidenceWriterToken() string {
+	token := strings.TrimSpace(os.Getenv(evidenceWriterTokenEnv))
+	service := strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN"))
+	usage := strings.TrimSpace(os.Getenv(usageWriterTokenEnv))
+	switch {
+	case token == "":
+		return ""
+	case len(token) < minSurfaceTokenLen:
+		slog.Error("evidence-writer token too short; evidence-writer principal disabled", "env", evidenceWriterTokenEnv, "min_length", minSurfaceTokenLen)
+		return ""
+	case service != "" && token == service:
+		slog.Error("evidence-writer token equals MCTL_AGENT_SERVICE_TOKEN; evidence-writer principal disabled", "env", evidenceWriterTokenEnv)
+		return ""
+	case usage != "" && token == usage:
+		slog.Error("evidence-writer token equals MCTL_USAGE_WRITER_TOKEN; evidence-writer principal disabled", "env", evidenceWriterTokenEnv)
+		return ""
+	}
+	for _, env := range surfaceTokenEnv {
+		if strings.TrimSpace(os.Getenv(env)) == token {
+			slog.Error("evidence-writer token equals a surface token; evidence-writer principal disabled", "env", evidenceWriterTokenEnv)
+			return ""
+		}
+	}
+	return token
+}
+
+// evidenceWriterUserFor matches a bearer token against the evidence-writer
+// token in constant time.
+func evidenceWriterUserFor(configured, token string) *User {
+	if configured == "" || subtle.ConstantTimeCompare([]byte(configured), []byte(token)) != 1 {
+		return nil
+	}
+	return NewEvidenceWriterUser()
 }
 
 // usageWriterUserFor matches a bearer token against the usage-writer token
@@ -533,6 +610,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	authRequired := os.Getenv("AUTH_REQUIRED") != "false"
 	surfaces := surfaceTokens()
 	usageWriter := usageWriterToken()
+	evidenceWriter := evidenceWriterToken()
 	var cfg middlewareConfig
 	for _, o := range opts {
 		o(&cfg)
@@ -541,7 +619,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	federationDisabled := federationKillSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED"))
 	registry := cfg.federationRegistry
 	if !federationDisabled && registry == nil {
-		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter)
+		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter)
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -615,6 +693,8 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					user = su
 				} else if uw := usageWriterUserFor(usageWriter, token); uw != nil {
 					user = uw
+				} else if ew := evidenceWriterUserFor(evidenceWriter, token); ew != nil {
+					user = ew
 				} else if isJWT(token) {
 					// Peek at the JWT issuer to route to the correct verifier.
 					if oauth != nil && jwtIssuer(token) == oauth.BaseURL {
@@ -735,11 +815,12 @@ func federationKillSwitchOn(v string) bool {
 // federation_config.go, with audience enforcement); this default is what
 // every existing caller of Middleware -- including every test in this
 // package -- exercises unchanged.
-func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter string) *Registry {
+func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter string) *Registry {
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
 		newSurfaceProvider(func() map[string]string { return surfaces }),
 		newUsageWriterProvider(func() string { return usageWriter }),
+		newEvidenceWriterProvider(func() string { return evidenceWriter }),
 	}
 	var jwtProviders []Provider
 	if oauth != nil && oauth.BaseURL != "" {
@@ -809,6 +890,8 @@ func userFromVerified(v *Verified) *User {
 		return NewSurfaceUser(strings.TrimPrefix(v.Identity.Subject, SurfacePrincipalPrefix))
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == UsageWriterUserID:
 		return NewUsageWriterUser()
+	case v.Identity.Provider == ProviderService && v.Identity.Subject == EvidenceWriterUserID:
+		return NewEvidenceWriterUser()
 	case v.Identity.Provider == ProviderGitHub:
 		u := NewGitHubUser(v.Identity.Display, v.Claims.Groups)
 		if v.Identity.Subject != "" {
