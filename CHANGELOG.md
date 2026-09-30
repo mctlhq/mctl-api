@@ -1,5 +1,27 @@
 # Changelog
 
+## [4.58.0](https://github.com/mctlhq/mctl-api/compare/4.57.0...4.58.0) (2026-09-30)
+
+
+### Features
+
+* **agents:** issue-428-feat-unified-identity-delegation-grants ([20e3668](https://github.com/mctlhq/mctl-api/commit/20e36688add7271f58ff0957ff5d9dbc97a3aa2d))
+* **agents:** issue-430-feat-work-items-read-canonical-workitem ([3b10d2b](https://github.com/mctlhq/mctl-api/commit/3b10d2b2445654b4f4d14591bc2eedee7f35e3ce))
+* **agents:** issue-430-feat-work-items-read-canonical-workitem ([a850004](https://github.com/mctlhq/mctl-api/commit/a8500045d1eb55760a2476cbe29a6c431d7a6ad3))
+* **delegation:** add the agentPrincipalGate and NewDelegatedUser (B2) ([a128672](https://github.com/mctlhq/mctl-api/commit/a128672fe20b486baece77b5ceb015724dc61661))
+* **delegation:** add the grant resolver package (B1) ([504306e](https://github.com/mctlhq/mctl-api/commit/504306ecd0268d829dc21b9dfd9bdc40499e97bf))
+* **delegation:** refuse acting_principal and delegation keys in bodies (B3) ([c3577b1](https://github.com/mctlhq/mctl-api/commit/c3577b16b8808c39a2b080112c6d1c95205ba355))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-428-feat-unified-identity-delegation-grants ([2116ad8](https://github.com/mctlhq/mctl-api/commit/2116ad8c4fa93aff7f4ace76fafd1abf102892b7))
+* **agents:** address P1/P2 codex findings on issue-428-feat-unified-identity-delegation-grants ([cdea5b3](https://github.com/mctlhq/mctl-api/commit/cdea5b38eb3af3fe24cd0241965dd327cbcdd3d2))
+* **agents:** address P1/P2 codex findings on issue-428-feat-unified-identity-delegation-grants ([9f31763](https://github.com/mctlhq/mctl-api/commit/9f31763dfdf07d0adc0844cb7b391ba2d679167d))
+* **delegation:** bind only the delegated subject's own surface identity ([3af537b](https://github.com/mctlhq/mctl-api/commit/3af537b294dcc0031d2e71a93d21774b6a5aa3eb))
+* **delegation:** refuse a surface actor binding from an undelegated agent ([ae04191](https://github.com/mctlhq/mctl-api/commit/ae041916bc6f41e6fb63e58d4dda2fc58a12c3af))
+* **delegation:** resolve the grant ref as sent, bound it only in audit ([12e5ea1](https://github.com/mctlhq/mctl-api/commit/12e5ea1ff9ecdfd41cc8a3ccf4d63269d7d3c4f6))
+
 ## [4.57.0](https://github.com/mctlhq/mctl-api/compare/4.56.0...4.57.0) (2026-09-30)
 
 
