@@ -15,6 +15,7 @@
 package evidence
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 // newTestStore connects to the Postgres that .github/workflows/validate.yml
@@ -269,8 +272,13 @@ func TestStoreGetRefusesTamperedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	tampered := append([]byte{}, env...)
-	tampered = append(tampered, ' ') // any byte change invalidates the hash
+	// Change content, not whitespace: the store verifies the canonical
+	// content hash, so an insignificant byte (a trailing space) would still
+	// hash to the same value and legitimately be served.
+	tampered := bytes.Replace(env, []byte(`"wi_test-tamper"`), []byte(`"wi_test-tampered"`), 1)
+	if bytes.Equal(tampered, env) {
+		t.Fatal("test setup: tamper did not change the envelope")
+	}
 	now := time.Now().UTC()
 	_, err = s.pool.Exec(ctx, `INSERT INTO execution_evidence (`+evidenceColumns+`)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
@@ -284,6 +292,9 @@ func TestStoreGetRefusesTamperedBytes(t *testing.T) {
 	_, err = s.Get(ctx, evidenceID)
 	if err == nil {
 		t.Fatal("Get() succeeded on a row whose bytes no longer hash to content_hash, want an error")
+	}
+	if errors.Is(err, ErrEvidenceNotFound) {
+		t.Errorf("Get() on a corrupt row = ErrEvidenceNotFound, want a server-side error (the row exists)")
 	}
 }
 
@@ -341,7 +352,7 @@ func TestStoreRebuildRefsIsIdempotentAndLeavesEvidenceUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get after rebuild: %v", err)
 	}
-	if again.ContentHash != stored.ContentHash || string(again.Envelope) != string(stored.Envelope) {
+	if again.ContentHash != stored.ContentHash || !bytes.Equal(again.Envelope, stored.Envelope) {
 		t.Error("RebuildRefs changed the sealed execution_evidence row; it must touch only execution_evidence_refs")
 	}
 }
@@ -353,4 +364,145 @@ func containsID(list []*Evidence, id string) bool {
 		}
 	}
 	return false
+}
+
+// fakeResolver answers ResolveExecution from a fixed correlation.
+type fakeResolver struct {
+	c *workitems.ExecutionCorrelation
+}
+
+func (f fakeResolver) ResolveExecution(context.Context, string) (*workitems.ExecutionCorrelation, error) {
+	return f.c, nil
+}
+
+// A runtime-shaped producer can send no work_item_id of its own; the
+// resolver then fills it in on the projection only. The work-item filter
+// must still find the row (both List and ByWorkItem), and a row whose own
+// work_item_id matches but whose projection is empty must be found too.
+func TestStoreListMatchesWorkItemOnEitherTable(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	workItem := "wi_projonly-" + uniqueSuffix()
+
+	s.SetResolver(fakeResolver{c: &workitems.ExecutionCorrelation{WorkItemID: workItem, Engine: "temporal", EngineRef: "r-1"}})
+	projOnly, _, err := s.Ingest(ctx, IngestInput{EnvelopeBytes: uniqueEnvelope(t, "", ""), IngestedBy: "test:writer"})
+	if err != nil {
+		t.Fatalf("ingest projection-only: %v", err)
+	}
+	if projOnly.WorkItemID != "" {
+		t.Fatalf("setup: envelope work_item_id = %q, want blank", projOnly.WorkItemID)
+	}
+
+	// The second row gets NO projection row at all: its derivation fails
+	// (a NUL byte in tenant is refused by Postgres), so only a LEFT join
+	// can still find it through its own work_item_id.
+	s.SetResolver(fakeResolver{c: &workitems.ExecutionCorrelation{Tenant: "bad\x00tenant"}})
+	ownOnly, _, err := s.Ingest(ctx, IngestInput{EnvelopeBytes: uniqueEnvelope(t, workItem, ""), IngestedBy: "test:writer"})
+	if err != nil {
+		t.Fatalf("ingest own-column-only: %v", err)
+	}
+	s.SetResolver(nil)
+	var refRows int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM execution_evidence_refs WHERE evidence_id=$1`, ownOnly.ID).Scan(&refRows); err != nil {
+		t.Fatalf("count refs: %v", err)
+	}
+	if refRows != 0 {
+		t.Fatalf("setup: own-column-only row has %d projection rows, want 0", refRows)
+	}
+
+	for name, list := range map[string]func() (*ListResult, error){
+		"List":       func() (*ListResult, error) { return s.List(ctx, Filter{WorkItemID: workItem}) },
+		"ByWorkItem": func() (*ListResult, error) { return s.ByWorkItem(ctx, workItem, 0) },
+	} {
+		res, err := list()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		got := map[string]bool{}
+		for _, e := range res.Evidence {
+			got[e.ID] = true
+		}
+		if !got[projOnly.ID] {
+			t.Errorf("%s(work_item_id) missed the row known only through the projection (%s)", name, projOnly.ID)
+		}
+		if !got[ownOnly.ID] {
+			t.Errorf("%s(work_item_id) missed the row known only through its own column (%s)", name, ownOnly.ID)
+		}
+		if len(res.Evidence) != 2 {
+			t.Errorf("%s returned %d rows, want exactly 2 (no join duplicates)", name, len(res.Evidence))
+		}
+	}
+}
+
+// A failing derivation must not roll back a valid ingest. A tenant with a
+// NUL byte makes the refs INSERT fail inside Postgres, which aborts the
+// surrounding transaction unless the derivation runs under a savepoint.
+func TestStoreDerivationFailureDoesNotRollBackIngest(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	s.SetResolver(fakeResolver{c: &workitems.ExecutionCorrelation{WorkItemID: "wi_x", Tenant: "bad\x00tenant"}})
+
+	stored, created, err := s.Ingest(ctx, IngestInput{EnvelopeBytes: uniqueEnvelope(t, "wi_test-derivefail", ""), IngestedBy: "test:writer"})
+	if err != nil {
+		t.Fatalf("Ingest with a failing derivation = %v, want success (derivation is best-effort)", err)
+	}
+	if !created {
+		t.Fatal("created=false, want true")
+	}
+	s.SetResolver(nil)
+	got, err := s.Get(ctx, stored.ID)
+	if err != nil {
+		t.Fatalf("Get after best-effort ingest: %v", err)
+	}
+	if got.ID != stored.ID {
+		t.Errorf("Get returned %s, want %s", got.ID, stored.ID)
+	}
+}
+
+// created_at is the envelope's own seal time; the ingest clock is
+// ingested_at. They must not be the same value by construction.
+func TestStoreKeepsEnvelopeCreatedAt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	stored, _, err := s.Ingest(ctx, IngestInput{EnvelopeBytes: uniqueEnvelope(t, "wi_test-createdat", ""), IngestedBy: "test:writer"})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	want := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC) // envelopeJSON's created_at
+	if !stored.CreatedAt.Equal(want) {
+		t.Errorf("CreatedAt = %s, want the envelope's %s", stored.CreatedAt, want)
+	}
+	if stored.CreatedAt.Equal(stored.IngestedAt) {
+		t.Errorf("CreatedAt equals IngestedAt (%s): the seal time was replaced by the ingest clock", stored.IngestedAt)
+	}
+}
+
+func TestStorePurgeOlderThan(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, age := range []time.Duration{0, -time.Hour} {
+		if _, err := s.PurgeOlderThan(ctx, age); err == nil {
+			t.Errorf("PurgeOlderThan(%s) succeeded, want a refusal (it would delete every row)", age)
+		}
+	}
+
+	stored, _, err := s.Ingest(ctx, IngestInput{EnvelopeBytes: uniqueEnvelope(t, "wi_test-purge", ""), IngestedBy: "test:writer"})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	// A fresh row survives a long retention window...
+	if _, err := s.PurgeOlderThan(ctx, 24*time.Hour); err != nil {
+		t.Fatalf("PurgeOlderThan(24h): %v", err)
+	}
+	if _, err := s.Get(ctx, stored.ID); err != nil {
+		t.Fatalf("fresh row purged by a 24h window: %v", err)
+	}
+	// ...and is removed once the clock is past it.
+	s.now = func() time.Time { return time.Now().Add(48 * time.Hour) }
+	if _, err := s.PurgeOlderThan(ctx, 24*time.Hour); err != nil {
+		t.Fatalf("PurgeOlderThan(24h) at +48h: %v", err)
+	}
+	if _, err := s.Get(ctx, stored.ID); !errors.Is(err, ErrEvidenceNotFound) {
+		t.Errorf("Get after purge = %v, want ErrEvidenceNotFound", err)
+	}
 }

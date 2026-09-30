@@ -168,6 +168,14 @@ func (h *Handlers) IngestEvidence(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxEvidenceBodyBytes)
 	var req ingestEvidenceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// An over-large body surfaces from MaxBytesReader as a decode error;
+		// answer with the documented evidence_too_large code, not
+		// evidence_invalid.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeErrorCode(w, http.StatusBadRequest, codeEvidenceTooLarge, "request body exceeds the evidence size limit", nil)
+			return
+		}
 		writeErrorCode(w, http.StatusBadRequest, codeEvidenceInvalid, "invalid JSON body", nil)
 		return
 	}

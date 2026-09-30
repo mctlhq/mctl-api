@@ -58,9 +58,10 @@ func clampLimit(limit int) int {
 }
 
 // Get returns one evidence record by its ev- id, with its derived
-// projection attached. ErrEvidenceNotFound when no such row exists, or when
-// the stored bytes no longer hash to their content_hash (scanEvidenceRow
-// refuses to serve it as that evidence).
+// projection attached. ErrEvidenceNotFound when no such row exists. A row
+// whose stored bytes no longer hash to their content_hash is refused with an
+// error that is deliberately NOT ErrEvidenceNotFound: the row exists but is
+// corrupt, which is a server-side fault (500), not an absence (404).
 func (s *Store) Get(ctx context.Context, id string) (*Evidence, error) {
 	e, err := scanEvidenceRow(s.pool.QueryRow(ctx, `SELECT `+evidenceColumns+` FROM execution_evidence WHERE id=$1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -124,7 +125,12 @@ func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
 		add("e.trace_id = $%d", f.TraceID)
 	}
 	if f.WorkItemID != "" {
-		add("e.work_item_id = $%d", f.WorkItemID)
+		// A runtime-only envelope may carry no work_item_id of its own while
+		// the resolver has filled it in on the projection, so match either
+		// column. One parameter, referenced twice.
+		needsRefJoin = true
+		args = append(args, f.WorkItemID)
+		clauses = append(clauses, fmt.Sprintf("(e.work_item_id = $%d OR r.work_item_id = $%d)", len(args), len(args)))
 	}
 	if f.Engine != "" {
 		needsRefJoin = true
@@ -152,7 +158,12 @@ func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
 
 	from := "execution_evidence e"
 	if needsRefJoin {
-		from = "execution_evidence e JOIN execution_evidence_refs r ON r.evidence_id = e.id"
+		// LEFT, so a row with no projection row still matches on its own
+		// e.work_item_id. The other r.* predicates are equalities that a
+		// missing ref row (all NULL) never satisfies, so they keep INNER
+		// semantics. evidence_id is the refs primary key: at most one ref
+		// row per evidence row, so the join never duplicates results.
+		from = "execution_evidence e LEFT JOIN execution_evidence_refs r ON r.evidence_id = e.id"
 	}
 	query := "SELECT " + qualifiedEvidenceColumns + " FROM " + from
 	if len(clauses) > 0 {
@@ -204,6 +215,12 @@ func (s *Store) ByWorkItem(ctx context.Context, workItemID string, limit int) (*
 // "Availability, gaps and retention"). DELETE cascades to
 // execution_evidence_refs.
 func (s *Store) PurgeOlderThan(ctx context.Context, maxAge time.Duration) (int64, error) {
+	// A non-positive age puts the cutoff at or after now and would delete
+	// every row. Refuse it here too, so no caller (an overflowed duration,
+	// a zero read as "no retention") can empty the store by mistake.
+	if maxAge <= 0 {
+		return 0, fmt.Errorf("evidence: purge: maxAge must be positive, got %s", maxAge)
+	}
 	cutoff := s.now().Add(-maxAge)
 	tag, err := s.pool.Exec(ctx, `DELETE FROM execution_evidence WHERE ingested_at < $1`, cutoff)
 	if err != nil {

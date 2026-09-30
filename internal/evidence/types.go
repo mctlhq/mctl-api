@@ -78,6 +78,13 @@ const (
 // derives: "ex-" followed by 16 lowercase hex characters.
 var runtimeExecutionIDPattern = regexp.MustCompile(`^ex-[0-9a-f]{16}$`)
 
+// createdAtPattern is Tier A's _CREATED_AT_PATTERN
+// (orchestrator/execution_evidence.py): the exact UTC shape seal() writes.
+// created_at is excluded from the content hash but is still part of the
+// record, so it is validated the way Tier A validates it rather than
+// accepted as any string.
+var createdAtPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$`)
+
 // Sentinel errors. The HTTP layer maps each to one status and typed code.
 var (
 	// ErrEvidenceNotFound: no evidence exists for the requested id or
@@ -213,7 +220,10 @@ type parsedEnvelope struct {
 	kind        string
 	evidenceID  string
 	contentHash string
-	execution   executionJoin
+	// createdAt is the envelope's own seal time. Excluded from the hash,
+	// stored as the record's created_at (the ingest clock is ingested_at).
+	createdAt time.Time
+	execution executionJoin
 	// contentFields holds every top-level key that participates in the
 	// content hash, in their original (already unmarshalled to
 	// interface{}) form, EXCEPT execution (rebuilt from executionJoin so
@@ -294,6 +304,15 @@ func parseEnvelope(raw []byte) (*parsedEnvelope, error) {
 
 	evidenceID, _ := top["evidence_id"].(string)
 	contentHash, _ := top["content_hash"].(string)
+	createdAtRaw, _ := top["created_at"].(string)
+	if !createdAtPattern.MatchString(createdAtRaw) {
+		return nil, fmt.Errorf("%w: created_at must be a UTC timestamp of the form YYYY-MM-DDTHH:MM:SS[.ffffff]Z, got %q",
+			ErrEvidenceInvalid, createdAtRaw)
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, createdAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: created_at: %s", ErrEvidenceInvalid, err)
+	}
 
 	execRaw, ok := top["execution"]
 	if !ok {
@@ -341,6 +360,7 @@ func parseEnvelope(raw []byte) (*parsedEnvelope, error) {
 		kind:          kind,
 		evidenceID:    evidenceID,
 		contentHash:   contentHash,
+		createdAt:     createdAt.UTC(),
 		execution:     join,
 		contentFields: contentFields,
 	}, nil
@@ -349,6 +369,14 @@ func parseEnvelope(raw []byte) (*parsedEnvelope, error) {
 // isEmptyBlock reports whether an optional block is present but empty
 // (an empty list, or a null object), which Tier A's _content_payload
 // treats as absent.
+//
+// An empty OBJECT ({}) is deliberately not empty here. Tier A tests list
+// blocks by truthiness (`if policy_decisions:`) but object blocks by
+// presence (`if execution_request is not None:`, `if usage is not None:`),
+// so a present object block always enters the payload. Tier A's seal()
+// never writes `{}` for one either: from_dict fills the block's full shape
+// (empty strings, nulls), which is what gets hashed. Treating `{}` as absent
+// would make this layer hash something Tier A never does.
 func isEmptyBlock(v any) bool {
 	switch t := v.(type) {
 	case nil:
@@ -697,3 +725,6 @@ func (p *parsedEnvelope) TraceID() string { return p.execution.TraceID }
 
 // APIVersion returns the parsed envelope's api_version.
 func (p *parsedEnvelope) APIVersion() string { return p.apiVersion }
+
+// CreatedAt is the envelope's own seal time (UTC), not the ingest time.
+func (p *parsedEnvelope) CreatedAt() time.Time { return p.createdAt }

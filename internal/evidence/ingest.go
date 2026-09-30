@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -47,13 +48,22 @@ func (s *Store) Ingest(ctx context.Context, in IngestInput) (*Evidence, bool, er
 	var out *Evidence
 	created := false
 	err = withTx(ctx, s.pool, "evidence:"+evidenceID, func(tx pgx.Tx) error {
-		existing, getErr := scanEvidenceRow(tx.QueryRow(ctx, `SELECT `+evidenceColumns+`
-			FROM execution_evidence WHERE id=$1`, evidenceID))
-		switch {
+		// Divergence is decided on the recorded content_hash alone, before
+		// the stored bytes are re-verified: a different recorded hash under
+		// this id is a collision whatever state the stored row is in, and
+		// must answer 409 without touching it.
+		var storedHash string
+		switch getErr := tx.QueryRow(ctx, `SELECT content_hash FROM execution_evidence WHERE id=$1`,
+			evidenceID).Scan(&storedHash); {
 		case getErr == nil:
-			if existing.ContentHash != contentHash {
+			if storedHash != contentHash {
 				return fmt.Errorf("evidence: id %s: %w (stored %s, submitted %s)",
-					evidenceID, ErrEvidenceDivergence, existing.ContentHash, contentHash)
+					evidenceID, ErrEvidenceDivergence, storedHash, contentHash)
+			}
+			existing, readErr := scanEvidenceRow(tx.QueryRow(ctx, `SELECT `+evidenceColumns+`
+				FROM execution_evidence WHERE id=$1`, evidenceID))
+			if readErr != nil {
+				return fmt.Errorf("evidence: read existing %s: %w", evidenceID, readErr)
 			}
 			out = existing
 			return nil
@@ -65,15 +75,21 @@ func (s *Store) Ingest(ctx context.Context, in IngestInput) (*Evidence, bool, er
 		inserted, insErr := scanEvidenceRow(tx.QueryRow(ctx, `INSERT INTO execution_evidence (`+evidenceColumns+`)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING `+evidenceColumns,
 			evidenceID, contentHash, p.APIVersion(), in.EnvelopeBytes, p.ExecutionID(), p.RuntimeExecutionID(),
-			p.WorkItemID(), p.TraceID(), now, in.IngestedBy, in.IngestedByPrincipalID, now))
+			p.WorkItemID(), p.TraceID(), p.CreatedAt(), in.IngestedBy, in.IngestedByPrincipalID, now))
 		if insErr != nil {
 			return fmt.Errorf("evidence: insert: %w", insErr)
 		}
 		// Derivation is best-effort by design (design.md section 5,
 		// tasks.md task 5 DoD): a valid join that mctl-api cannot resolve
 		// stores the evidence anyway with an empty projection, and a
-		// derivation error never fails or rolls back a valid ingest.
-		_ = s.deriveAndStoreRef(ctx, tx, inserted)
+		// derivation error never fails or rolls back a valid ingest. A
+		// failed statement aborts the whole Postgres transaction, so the
+		// derivation runs under a savepoint (pgx nests Begin as SAVEPOINT)
+		// and only the savepoint is rolled back on failure. The projection
+		// is rebuildable (RebuildRefs), so a skipped row is recoverable.
+		if err := s.deriveUnderSavepoint(ctx, tx, inserted); err != nil {
+			slog.Warn("evidence: derived projection skipped", "evidence_id", inserted.ID, "error", err)
+		}
 		created = true
 		out = inserted
 		return nil
@@ -85,4 +101,20 @@ func (s *Store) Ingest(ctx context.Context, in IngestInput) (*Evidence, bool, er
 		return nil, false, err
 	}
 	return out, created, nil
+}
+
+// deriveUnderSavepoint runs deriveAndStoreRef inside a savepoint of tx and
+// rolls back only that savepoint when it fails, leaving tx usable.
+func (s *Store) deriveUnderSavepoint(ctx context.Context, tx pgx.Tx, e *Evidence) error {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("savepoint: %w", err)
+	}
+	if err := s.deriveAndStoreRef(ctx, sp, e); err != nil {
+		if rbErr := sp.Rollback(ctx); rbErr != nil {
+			return fmt.Errorf("%w (rollback to savepoint: %v)", err, rbErr)
+		}
+		return err
+	}
+	return sp.Commit(ctx)
 }

@@ -1,26 +1,52 @@
 {
   "api_version": "evidence.mctl.ai/v1alpha1",
   "kind": "ExecutionEvidence",
-  "evidence_id": "ev-07f555b5529d9d6a",
-  "content_hash": "sha256:07f555b5529d9d6a087c76133d5f6790d5e2535dcc02fb635a124edf1c972fe8",
-  "created_at": "2026-01-15T12:00:00Z",
+  "evidence_id": "ev-e47cf92c53c7b45a",
+  "content_hash": "sha256:e47cf92c53c7b45a5c4001d6c1ed71e594cfe2929272ec817da29d256e8e0e04",
+  "created_at": "2026-09-11T00:00:40Z",
   "execution": {
-    "execution_id": "we_01hzzzzzzzzzzzzzzzzzzzzzzz",
-    "work_item_id": "wi_日本語_😀",
-    "trace_id": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww"
+    "execution_id": "we_01J8ZQK7N3XG9F6C2R4D8T1M5W",
+    "work_item_id": "wi-ÄÖÜ",
+    "trace_id": "trace-Привет-日本-😀"
   },
   "outcome": {
     "code": "succeeded",
-    "reason_code": "proposal_written"
+    "reason_code": "proposal-opened"
   },
   "policy_decisions": [
     {
-      "action_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
-      "verdict": "allow",
-      "code": "ok",
-      "policy_version": "v1",
-      "rule_id": "rule.unicode",
+      "action_digest": "sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+      "verdict": "ALLOW",
+      "code": "allowed",
+      "policy_version": "mctl-agents/policy/v1",
+      "rule_id": "github-issue-comment",
       "approval_ref": ""
     }
-  ]
+  ],
+  "snapshot_refs": [
+    {
+      "snapshot_id": "cs-de22a552ea05cf19",
+      "content_hash": "sha256:de22a552ea05cf198ad582262f8aea1a3c3813272b7854c736e2d8415b8140eb"
+    }
+  ],
+  "execution_request": {
+    "request_id": "xr_01J8ZQK7P4YH0G7D3S5E9U2N6X",
+    "kind": "start",
+    "state": "fulfilled"
+  },
+  "usage": {
+    "session_id": "sess-01J8ZQK7Q5ZJ1H8E4T6F0V3O7Y",
+    "model_key": "claude-sonnet-5",
+    "result_uuid": "9f2c1e4a-7b3d-4068-8c1a-4f9e2b7d0c3a",
+    "devloop_stage": "investigator"
+  },
+  "approvals": [],
+  "artifacts": [
+    {
+      "name": "requirements.md",
+      "kind": "proposal-document",
+      "content_hash": "sha256:3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
+    }
+  ],
+  "gaps": []
 }

@@ -770,7 +770,7 @@ components:
         runtime_execution_id: {type: string, description: 'ex-<16 hex> or empty'}
         work_item_id: {type: string}
         trace_id: {type: string}
-        created_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time, description: "The envelope's own seal time (its `created_at`, outside the hash). For a replay this stays the first stored envelope's value."}
         ingested_by: {type: string}
         ingested_by_principal_id: {type: string}
         ingested_at: {type: string, format: date-time}
@@ -792,6 +792,13 @@ components:
             pr_number: {type: integer, nullable: true}
             derived_at: {type: string, format: date-time}
       required: [id, content_hash, api_version, envelope_b64, created_at, ingested_by, ingested_at]
+
+    EvidenceRecordResponse:
+      type: object
+      description: The single-record response of the evidence ingest and read routes.
+      properties:
+        evidence: {$ref: '#/components/schemas/EvidenceEnvelope'}
+      required: [evidence]
 
     ActionApprovalRequest:
       type: object
@@ -3467,8 +3474,8 @@ paths:
                 envelope_b64: {type: string, format: byte, description: 'Base64 of the sealed Tier A envelope JSON, verbatim, at most 256 KiB decoded'}
               required: [envelope_b64]
       responses:
-        '201': {description: Stored, content: {application/json: {schema: {$ref: '#/components/schemas/EvidenceEnvelope'}}}}
-        '200': {description: 'Already stored under this content (replay); the first stored record', content: {application/json: {schema: {$ref: '#/components/schemas/EvidenceEnvelope'}}}}
+        '201': {description: Stored, content: {application/json: {schema: {$ref: '#/components/schemas/EvidenceRecordResponse'}}}}
+        '200': {description: 'Already stored under this content (replay); the first stored record', content: {application/json: {schema: {$ref: '#/components/schemas/EvidenceRecordResponse'}}}}
         '400': {description: 'evidence_invalid, evidence_unsupported_api_version, evidence_hash_mismatch, evidence_execution_ref_invalid, or evidence_too_large', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
         '403': {description: caller lacks evidence:write, or the evidence writer called a route other than this one}
         '503': {description: evidence_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
@@ -3481,7 +3488,7 @@ paths:
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
       responses:
-        '200': {description: The evidence record, content: {application/json: {schema: {$ref: '#/components/schemas/EvidenceEnvelope'}}}}
+        '200': {description: The evidence record, content: {application/json: {schema: {$ref: '#/components/schemas/EvidenceRecordResponse'}}}}
         '404': {description: evidence_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
         '503': {description: evidence_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
 

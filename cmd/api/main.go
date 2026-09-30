@@ -1629,6 +1629,12 @@ const evidenceRetentionSweepInterval = 1 * time.Hour
 // means retain indefinitely (requirements.md "Availability, gaps and
 // retention"). A malformed or negative value disables the sweep rather than
 // guessing at what was meant.
+// maxEvidenceRetentionDays bounds EVIDENCE_RETENTION_DAYS well inside
+// time.Duration's range (~106,751 days). Without it a large value wraps the
+// days*24h multiplication negative, the purge cutoff lands in the future,
+// and the sweep deletes every evidence row.
+const maxEvidenceRetentionDays = 36500
+
 func parseEvidenceRetentionDays(v string) (int, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -1640,6 +1646,9 @@ func parseEvidenceRetentionDays(v string) (int, error) {
 	}
 	if days < 0 {
 		return 0, fmt.Errorf("EVIDENCE_RETENTION_DAYS must not be negative, got %d", days)
+	}
+	if days > maxEvidenceRetentionDays {
+		return 0, fmt.Errorf("EVIDENCE_RETENTION_DAYS must be at most %d, got %d", maxEvidenceRetentionDays, days)
 	}
 	return days, nil
 }

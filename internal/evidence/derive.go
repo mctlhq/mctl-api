@@ -16,6 +16,7 @@ package evidence
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strconv"
 
@@ -117,7 +118,7 @@ func (s *Store) RebuildRefs(ctx context.Context, ids []string) error {
 	for _, id := range ids {
 		e, err := scanEvidenceRow(s.pool.QueryRow(ctx, `SELECT `+evidenceColumns+` FROM execution_evidence WHERE id=$1`, id))
 		if err != nil {
-			if err == pgx.ErrNoRows {
+			if errors.Is(err, pgx.ErrNoRows) {
 				continue
 			}
 			return err
