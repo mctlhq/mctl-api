@@ -43,6 +43,24 @@ var devLoopSubmissions = []struct {
 		},
 	},
 	{
+		// dev_loop.py investigate step, submitted by a DevLoopWorkflow: the
+		// release pin, the bound work item and execution, plus the Temporal
+		// correlation identifiers (mctlhq/mctl-api#426, mctlhq/.github#50)
+		// and the execution-request id the dispatcher path sets (#461).
+		name:      "investigate, pinned and correlated",
+		operation: "mctl-agents-investigate",
+		params: map[string]string{
+			"issue_url":            "https://github.com/mctlhq/mctl-api/issues/372",
+			"agent_image":          pinImageByTag,
+			"agent_version":        "issue-investigator@1.54.0",
+			"work_item_id":         "wi_5c8e1f2b-0000-0000-0000-000000000000",
+			"execution_id":         "we_9a010000-0000-0000-0000-000000000000",
+			"temporal_workflow_id": "dev-loop-mctlhq-mctl-agents-494",
+			"temporal_run_id":      "00000000-0000-0000-0000-000000000000",
+			"execution_request_id": "xr_0000",
+		},
+	},
+	{
 		// dev_loop.py investigate step, a published version with a digest.
 		name:      "investigate, pinned by digest",
 		operation: "mctl-agents-investigate",
@@ -80,6 +98,24 @@ var devLoopSubmissions = []struct {
 		},
 	},
 	{
+		// dev_loop.py implement step, submitted by a DevLoopWorkflow: the
+		// release pin plus the Temporal/work-item correlation identifiers
+		// (mctlhq/mctl-api#426, mctlhq/.github#50).
+		name:      "implement, pinned and correlated",
+		operation: "mctl-agents-implement",
+		params: map[string]string{
+			"service":              "mctl-api",
+			"slug":                 "issue-372-declare-pin-params",
+			"agent_image":          pinImageByTag,
+			"agent_version":        "implementer@1.54.0",
+			"temporal_workflow_id": "dev-loop-mctlhq-mctl-api-372",
+			"temporal_run_id":      "00000000-0000-0000-0000-000000000000",
+			"execution_request_id": "xr_0000",
+			"work_item_id":         "wi_5c8e1f2b-0000-0000-0000-000000000000",
+			"execution_id":         "we_9a010000-0000-0000-0000-000000000000",
+		},
+	},
+	{
 		// implement_sweep.py SweptImplementWorkflow.
 		name:      "implement, sweep",
 		operation: "mctl-agents-implement",
@@ -97,6 +133,24 @@ var devLoopSubmissions = []struct {
 			"slug":          "issue-372-declare-pin-params",
 			"agent_image":   pinImageByTag,
 			"agent_version": "shepherd@1.54.0",
+		},
+	},
+	{
+		// dev_loop.py _shepherd_tick, submitted by a DevLoopWorkflow: the
+		// release pin plus the Temporal/work-item correlation identifiers
+		// (mctlhq/mctl-api#426, mctlhq/.github#50).
+		name:      "shepherd tick, pinned and correlated",
+		operation: "mctl-agents-shepherd",
+		params: map[string]string{
+			"service":              "mctl-api",
+			"slug":                 "issue-372-declare-pin-params",
+			"agent_image":          pinImageByTag,
+			"agent_version":        "shepherd@1.54.0",
+			"temporal_workflow_id": "dev-loop-mctlhq-mctl-api-372",
+			"temporal_run_id":      "00000000-0000-0000-0000-000000000000",
+			"execution_request_id": "xr_0000",
+			"work_item_id":         "wi_5c8e1f2b-0000-0000-0000-000000000000",
+			"execution_id":         "we_9a010000-0000-0000-0000-000000000000",
 		},
 	},
 	{
@@ -167,11 +221,10 @@ var devLoopParamsPendingDeclaration = []struct {
 	// dev_loop.py human-input continuation; not declared by
 	// cwft-mctl-agents-investigate (mctlhq/mctl-api#372 item 3).
 	{"mctl-agents-investigate", "human_input_responses", `[{"request_id":"hir-0000000000000000"}]`},
-	// Loop identity (mctlhq/mctl-agents#461, #451). Order: gitops CWFT, then
-	// the mctl-agents release that sends them, then mctl-api.
-	{"mctl-agents-investigate", "temporal_workflow_id", "dev-loop-xr_0000"},
-	{"mctl-agents-investigate", "temporal_run_id", "00000000-0000-0000-0000-000000000000"},
-	{"mctl-agents-investigate", "execution_request_id", "xr_0000"},
+	// Loop identity (mctlhq/mctl-agents#461, #451) moved to devLoopSubmissions
+	// above: temporal_workflow_id, temporal_run_id and execution_request_id
+	// are now declared on all three DevLoop operations
+	// (mctlhq/mctl-api#426, mctlhq/.github#50).
 }
 
 // TestExecuteOperation_PendingDevLoopParamsAreStillStripped pins the other
@@ -219,6 +272,50 @@ func TestExecuteOperation_UnpinnedCallerSendsNoAgentImage(t *testing.T) {
 			for _, k := range []string{"agent_image", "agent_version"} {
 				if v, ok := got[k]; ok {
 					t.Errorf("%s = %q reached the executor for an unpinned caller; it must be absent so the CWFT default applies", k, v)
+				}
+			}
+		})
+	}
+}
+
+// TestExecuteOperation_UncorrelatedCallerSendsNoCorrelationParams pins the
+// byte-identical-to-today guarantee (mctlhq/mctl-api#426) for a caller that
+// sends none of the new DevLoop correlation identifiers: the directive
+// poller, implement_sweep.py, and a manual operator trigger. Declaring the
+// parameters with OmitWhenEmpty must not start sending
+// temporal_workflow_id="" (or similar) to Argo for these callers.
+//
+// investigate's pre-existing work_item_id / execution_id are deliberately
+// excluded from its case: they are declared without OmitWhenEmpty (a latent
+// inconsistency noted in the design doc) and were already sent as "" by an
+// unpinned caller before this change, so that behaviour is out of scope here.
+func TestExecuteOperation_UncorrelatedCallerSendsNoCorrelationParams(t *testing.T) {
+	newCorrelationKeys := []string{"temporal_workflow_id", "temporal_run_id", "execution_request_id"}
+	cases := []struct {
+		name      string
+		operation string
+		params    map[string]string
+		keys      []string
+	}{
+		{"investigate, omitted", "mctl-agents-investigate",
+			map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/372"},
+			newCorrelationKeys},
+		{"implement, omitted", "mctl-agents-implement",
+			map[string]string{"service": "mctl-api", "slug": "issue-372-declare-pin-params"},
+			append(append([]string{}, newCorrelationKeys...), "work_item_id", "execution_id")},
+		{"shepherd, omitted", "mctl-agents-shepherd",
+			map[string]string{"service": "mctl-api", "slug": "issue-372-declare-pin-params"},
+			append(append([]string{}, newCorrelationKeys...), "work_item_id", "execution_id")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			router, exec := newTestRouter(t)
+			w := postAs(t, router, "/api/v1/operations/"+tc.operation+"/execute", tc.params, auth.NewServiceUser())
+			assertStatus(t, w, http.StatusAccepted)
+			got := exec.submittedParams[len(exec.submittedParams)-1]
+			for _, k := range tc.keys {
+				if v, ok := got[k]; ok {
+					t.Errorf("%s: %s = %q reached the executor for an uncorrelated caller; it must be absent so the CWFT default applies", tc.operation, k, v)
 				}
 			}
 		})

@@ -521,3 +521,187 @@ func TestReleasePinIsOmittedWhenEmpty(t *testing.T) {
 		}
 	}
 }
+
+// devLoopCorrelationParamNamesByOp names the DevLoop correlation identifiers
+// each of the three operations declares, per the CWFT transcription in
+// registry_cwft_params_test.go (mctl-gitops#1345, #1418). investigate's
+// existing work_item_id / execution_id are untouched by this proposal and are
+// not part of the new devLoopCorrelationParams(...) block, so they are
+// excluded here.
+var devLoopCorrelationParamNamesByOp = map[string][]string{
+	"mctl-agents-investigate": {"temporal_workflow_id", "temporal_run_id", "execution_request_id"},
+	"mctl-agents-implement":   {"temporal_workflow_id", "temporal_run_id", "execution_request_id", "work_item_id", "execution_id"},
+	"mctl-agents-shepherd":    {"temporal_workflow_id", "temporal_run_id", "execution_request_id", "work_item_id", "execution_id"},
+}
+
+// TestDevLoopCorrelationParamsSurviveStripUndeclared pins the acceptance
+// criterion "forward all correlation parameters the CWFT declares unchanged
+// to Executor.Submit", mirroring TestInvestigateForwardsReleasePin
+// (mctlhq/mctl-api#426).
+func TestDevLoopCorrelationParamsSurviveStripUndeclared(t *testing.T) {
+	registry := NewRegistry()
+	for opName, names := range devLoopCorrelationParamNamesByOp {
+		op, ok := registry.Get(opName)
+		if !ok {
+			t.Fatalf("operation %q not found in registry", opName)
+		}
+		input := map[string]string{"config_patch": ".image.tag = \"pwned\""}
+		if opName == "mctl-agents-investigate" {
+			input["issue_url"] = validInvestigateIssueURL
+		}
+		for i, name := range names {
+			input[name] = "value-" + string(rune('a'+i))
+		}
+		result, dropped := registry.StripUndeclared(op, input)
+		for _, name := range names {
+			if got, want := result[name], input[name]; got != want {
+				t.Errorf("%s: StripUndeclared dropped or mutated %s: got %q, want %q", opName, name, got, want)
+			}
+		}
+		if len(dropped) != 1 || dropped[0] != "config_patch" {
+			t.Errorf("%s: StripUndeclared dropped = %v, want [\"config_patch\"]", opName, dropped)
+		}
+	}
+}
+
+// TestDevLoopCorrelationParamsAreOmittedWhenEmpty pins OmitWhenEmpty for the
+// correlation identifiers: ApplyDefaults must not turn an absent or empty
+// value into "", which would override the CWFT's own default. Mirrors
+// TestReleasePinIsOmittedWhenEmpty.
+func TestDevLoopCorrelationParamsAreOmittedWhenEmpty(t *testing.T) {
+	registry := NewRegistry()
+	for opName, names := range devLoopCorrelationParamNamesByOp {
+		op, ok := registry.Get(opName)
+		if !ok {
+			t.Fatalf("operation %q not found in registry", opName)
+		}
+		empty := map[string]string{}
+		for _, name := range names {
+			empty[name] = ""
+		}
+		for _, input := range []map[string]string{{}, empty} {
+			filled := registry.ApplyDefaults(op, input)
+			for _, name := range names {
+				if v, ok := filled[name]; ok {
+					t.Errorf("%s: ApplyDefaults(%v) set %s = %q, want it absent", opName, input, name, v)
+				}
+			}
+		}
+	}
+}
+
+// TestDevLoopCorrelationParamPatterns is a table-driven accept/reject check
+// over ValidateInput for the correlation identifiers, mirroring
+// TestInvestigateRejectsMalformedResumeIdentifiers. It accepts the observed
+// live shapes and rejects values carrying whitespace, newlines, shell
+// metacharacters or excessive length.
+func TestDevLoopCorrelationParamPatterns(t *testing.T) {
+	registry := NewRegistry()
+
+	longID := ""
+	for i := 0; i < 200; i++ {
+		longID += "a"
+	}
+
+	accept := map[string][]string{
+		"temporal_workflow_id": {"dev-loop-mctlhq-mctl-agents-494", "dev-loop-xr_0000"},
+		"temporal_run_id":      {"00000000-0000-0000-0000-000000000000"},
+		"execution_request_id": {"xr_0000"},
+		"work_item_id":         {"wi_5c8e1f2b-0000-0000-0000-000000000000"},
+		"execution_id":         {"we_9a010000-0000-0000-0000-000000000000"},
+	}
+	commonReject := []string{"a b", "x\ny", "x; rm -rf /", longID}
+	// A leading "-" is rejected only by temporalIDPattern (which requires an
+	// alphanumeric start, matching the ledger's own executionIDPattern).
+	// correlationIDPattern — the shape already used for investigate's
+	// existing work_item_id / execution_id — permits it, so this proposal
+	// does not newly reject it for the parameters that share that pattern.
+	temporalOnlyReject := []string{"-leading-dash"}
+
+	for opName, names := range devLoopCorrelationParamNamesByOp {
+		op, ok := registry.Get(opName)
+		if !ok {
+			t.Fatalf("operation %q not found in registry", opName)
+		}
+		base := map[string]string{}
+		if opName == "mctl-agents-investigate" {
+			base["issue_url"] = validInvestigateIssueURL
+		}
+		for _, name := range names {
+			for _, v := range accept[name] {
+				input := map[string]string{name: v}
+				for k, bv := range base {
+					input[k] = bv
+				}
+				if errs := registry.ValidateInput(op, input); len(errs) != 0 {
+					t.Errorf("%s: ValidateInput(%s=%q) = %v, want accepted", opName, name, v, errs)
+				}
+			}
+			rejectValues := commonReject
+			if name == "temporal_workflow_id" || name == "temporal_run_id" {
+				rejectValues = append(append([]string{}, commonReject...), temporalOnlyReject...)
+			}
+			for _, v := range rejectValues {
+				input := map[string]string{name: v}
+				for k, bv := range base {
+					input[k] = bv
+				}
+				errs := registry.ValidateInput(op, input)
+				found := false
+				for _, e := range errs {
+					if len(e) >= len(name) && e[:len(name)] == name {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("%s: ValidateInput(%s=%q) errors = %v, want an error naming %q", opName, name, v, errs, name)
+				}
+			}
+		}
+	}
+}
+
+// TestDevLoopCorrelationParamsStayOptional pins that none of the correlation
+// identifiers turned Required, carries a non-empty Default, or is missing
+// OmitWhenEmpty or Pattern; and that a caller sending only the pre-existing
+// required parameters is still accepted.
+func TestDevLoopCorrelationParamsStayOptional(t *testing.T) {
+	registry := NewRegistry()
+	for opName, names := range devLoopCorrelationParamNamesByOp {
+		op, ok := registry.Get(opName)
+		if !ok {
+			t.Fatalf("operation %q not found in registry", opName)
+		}
+		byName := map[string]ParameterDef{}
+		for i := range op.Parameters {
+			byName[op.Parameters[i].Name] = op.Parameters[i]
+		}
+		for _, name := range names {
+			p, ok := byName[name]
+			if !ok {
+				t.Fatalf("%s: operation has no %q parameter", opName, name)
+			}
+			if p.Required {
+				t.Errorf("%s: %s must stay optional", opName, name)
+			}
+			if p.Default != "" {
+				t.Errorf("%s: %s Default = %q, want \"\"", opName, name, p.Default)
+			}
+			if !p.OmitWhenEmpty {
+				t.Errorf("%s: %s must be OmitWhenEmpty", opName, name)
+			}
+			if p.Pattern == "" {
+				t.Errorf("%s: %s must have a non-empty Pattern", opName, name)
+			}
+		}
+
+		base := map[string]string{}
+		if opName == "mctl-agents-investigate" {
+			base["issue_url"] = validInvestigateIssueURL
+		}
+		if errs := registry.ValidateInput(op, base); len(errs) != 0 {
+			t.Errorf("%s: ValidateInput(%v) without correlation params returned errors, want none: %v", opName, base, errs)
+		}
+	}
+}

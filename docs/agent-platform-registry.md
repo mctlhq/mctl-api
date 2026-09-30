@@ -373,6 +373,52 @@ default image. Until mctlhq/mctl-api#372 none of the pins were declared.
 parameter set mctl-agents submits per operation. A parameter added there
 has to be declared here, after the CWFT declares it (gitops first).
 
+## DevLoop correlation parameters
+
+The Temporal `DevLoopWorkflow` sends correlation identifiers with every
+CWFT submit so the resulting Argo pod, and the usage ledger row it writes,
+can be traced back to the loop and work item that caused it
+(mctlhq/mctl-api#426, mctlhq/.github#50). Like the release pin above, these
+only reach Argo if the operation registry declares them — otherwise
+`StripUndeclared` drops them silently with a `slog.Warn`.
+
+| Parameter | Declared on | Sender in mctl-agents |
+|---|---|---|
+| `temporal_workflow_id` | investigate, implement, shepherd | `dev_loop.py` (all three steps), `_shepherd_tick` |
+| `temporal_run_id` | investigate, implement, shepherd | same as above |
+| `execution_request_id` | investigate, implement, shepherd | the execution-request dispatcher path (mctlhq/mctl-agents#461) |
+| `work_item_id` | investigate (pre-existing), implement, shepherd | the dev-loop control plane |
+| `execution_id` | investigate (pre-existing), implement, shepherd | the dev-loop control plane |
+
+- All five are opaque to mctl-api: nothing here resolves, mints, defaults,
+  or otherwise interprets them. They exist purely so the value the DevLoop
+  already has reaches the Argo workflow parameters unchanged.
+- All five are optional and `OmitWhenEmpty`, for the same reason as the
+  release pin: a declared parameter with `Default ""` would send an empty
+  string to Argo for any caller that omits it (the directive poller,
+  `implement_sweep.py`, a manual operator trigger), overriding whatever
+  non-empty default the CWFT declares. investigate's pre-existing
+  `work_item_id` / `execution_id` are the one exception — they predate this
+  change, are declared without `OmitWhenEmpty`, and are left as-is
+  (out of scope; a documented latent inconsistency).
+- `temporal_workflow_id` / `temporal_run_id` use `temporalIDPattern`
+  (`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`, mirroring the usage ledger's own
+  `executionIDPattern`, `internal/usage/types.go`); `execution_request_id`
+  (and the pre-existing `work_item_id` / `execution_id`) use
+  `correlationIDPattern` (`^[A-Za-z0-9_-]{1,64}$`).
+- The gitops-first ordering rule from the release pin above applies here
+  too: `devLoopParamsPendingDeclaration`
+  (`internal/api/handlers_write_devloop_params_test.go`) is where a
+  parameter mctl-agents sends but the CWFT does not declare yet belongs,
+  until the CWFT half lands.
+- `internal/operations/registry_cwft_params_test.go` holds the anti-drift
+  guard: a checked-in transcription of what each CWFT actually declares
+  (`cwftDeclaredParams`), and the explicit, reasoned exemption list
+  (`cwftParamsNotSettableViaAPI`) for the CWFT parameters mctl-api
+  deliberately does not expose (for example `force` on
+  `mctl-agents-implement`). When a CWFT parameter is added or removed in
+  mctl-gitops, update that inventory in the same change.
+
 ## GitOps reconciliation contract
 
 **Push, not pull.** `mctl-api` has no gitops write credential and
