@@ -169,6 +169,75 @@ func TestMiddlewareAcceptsMctlAgentServiceToken(t *testing.T) {
 	}
 }
 
+type fakeAgentRunResolver struct {
+	run *AgentRun
+	err error
+}
+
+func (f *fakeAgentRunResolver) ResolveAgentRun(ctx context.Context, token string) (*AgentRun, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.run, nil
+}
+
+func TestMiddlewareAcceptsAgentRunToken(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+
+	resolver := &fakeAgentRunResolver{run: &AgentRun{Agent: "implementer", ExecutionID: "we_1", WorkItemID: "wi_1", RunID: "art_1"}}
+	mw := Middleware(NewGitHubValidator(nil), nil, nil, nil, WithAgentRunResolver(resolver))
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := UserFromContext(r.Context())
+		if user == nil {
+			t.Fatal("expected user in context")
+		}
+		if !user.IsAgent() {
+			t.Fatal("expected an agent principal")
+		}
+		if name, ok := user.AgentName(); !ok || name != "implementer" {
+			t.Fatalf("AgentName() = (%q, %v), want (%q, true)", name, ok, "implementer")
+		}
+		if user.ExecutionID() != "we_1" {
+			t.Fatalf("ExecutionID() = %q, want %q", user.ExecutionID(), "we_1")
+		}
+		if user.WorkItemID() != "wi_1" {
+			t.Fatalf("WorkItemID() = %q, want %q", user.WorkItemID(), "wi_1")
+		}
+		if user.AgentRunID() != "art_1" {
+			t.Fatalf("AgentRunID() = %q, want %q", user.AgentRunID(), "art_1")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	req.Header.Set("Authorization", "Bearer art_sometoken")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+}
+
+func TestMiddlewareRejectsInvalidAgentRunToken(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+
+	resolver := &fakeAgentRunResolver{err: ErrAgentRunNotFound}
+	mw := Middleware(NewGitHubValidator(nil), nil, nil, nil, WithAgentRunResolver(resolver))
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be reached for an invalid agent run token")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	req.Header.Set("Authorization", "Bearer art_sometoken")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+}
+
 func TestMiddlewareUnauthorized_MCPRouteHasPathSpecificResourceMetadata(t *testing.T) {
 	t.Setenv("AUTH_REQUIRED", "true")
 

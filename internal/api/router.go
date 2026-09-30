@@ -482,11 +482,6 @@ func NewRouter(opts Options) http.Handler {
 				// Execution requests (mctl-api#368): a person or a relaying
 				// surface asks for a run; the platform supplies its identity.
 				r.Post("/work-items/{id}/execution-requests", h.CreateExecutionRequest)
-				// Agent run tokens (mctl-api#376): an execution-scoped
-				// credential minted by the direct service principal, so an
-				// agent run can authenticate as its own non-admin principal
-				// instead of the static admin token.
-				r.Post("/agent-run-tokens", h.MintAgentRunToken)
 			})
 
 			// The execution platform's side of execution requests
@@ -505,6 +500,24 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/execution-requests/claim", h.ClaimExecutionRequest)
 				r.Post("/execution-requests/{request_id}/fulfil", h.FulfilExecutionRequest)
 				r.Post("/execution-requests/{request_id}/reject", h.RejectExecutionRequest)
+			})
+
+			// Agent run tokens (mctl-api#376): minting is isDirectService
+			// only, so every mint shares the exact same principal key as
+			// every other route on the 20/min write budget above. An agent
+			// run needing a fresh credential would then compete with
+			// dev-loop starts, work-item mutations, and everything else on
+			// that budget and could be starved under load. Its own group
+			// and budget, the same reasoning as the execution-requests
+			// group above.
+			r.Group(func(r chi.Router) {
+				r.Use(httprate.Limit(120, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					if user := auth.UserFromContext(r.Context()); user != nil {
+						return "agent-run-tokens:" + rateLimitSubject(r, user), nil
+					}
+					return keyByTrustedIP(r)
+				})))
+				r.Post("/agent-run-tokens", h.MintAgentRunToken)
 			})
 
 			// Work-item reads: side-effect free, outside the write budget.

@@ -594,7 +594,8 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 			// there is no registry seam for them to join yet, and refusing
 			// an unresolvable one here must never fall back to any other
 			// principal.
-			if cfg.agentRuns != nil && strings.HasPrefix(token, AgentRunTokenPrefix) {
+			switch {
+			case cfg.agentRuns != nil && strings.HasPrefix(token, AgentRunTokenPrefix):
 				run, rerr := cfg.agentRuns.ResolveAgentRun(r.Context(), token)
 				if rerr != nil {
 					slog.Warn("agent run token auth failed", "error", rerr, "path", r.URL.Path)
@@ -602,7 +603,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					return
 				}
 				user = NewAgentUser(run.Agent, *run)
-			} else if federationDisabled {
+			case federationDisabled:
 				// Pre-registry chain, unchanged (kept in the tree until
 				// slice D, and restored wholesale by
 				// MCTL_FEDERATION_DISABLED -- including the timing-unsafe
@@ -651,7 +652,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					user = NewGitHubUser(login, groups)
 					user.githubID = githubID
 				}
-			} else {
+			default:
 				// Federation registry (mctl-api#374): a single lookup
 				// replaces the if/else-if chain above.
 				if registry == nil {

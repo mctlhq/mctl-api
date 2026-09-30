@@ -141,6 +141,25 @@ func TestMintAgentRunToken_RefusesAnOversizedTTL(t *testing.T) {
 	}
 }
 
+// A ttl_seconds large enough to overflow int64 when multiplied by
+// time.Second must still be refused as an invalid TTL, not silently wrap
+// into a small or negative Duration that slips past the ceiling.
+func TestMintAgentRunToken_RefusesATTLThatWouldOverflow(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	item := e.open(auth.NewServiceUser(), nil)
+	execID := e.attachExecution(auth.NewServiceUser(), item["id"].(string), "run-1", "Running")
+
+	res := e.mintRunToken(auth.NewServiceUser(), map[string]any{
+		"agent": "implementer", "execution_id": execID, "ttl_seconds": 10_000_000_000,
+	})
+	if res.code != http.StatusBadRequest {
+		t.Fatalf("mint = %d %s, want 400", res.code, res.raw)
+	}
+	if code(res) != artCodeInvalidTTL {
+		t.Errorf("code = %q, want %q", code(res), artCodeInvalidTTL)
+	}
+}
+
 // The body may never name a subject: the same forbiddenIdentityFields gate
 // every other work-item route already enforces.
 func TestMintAgentRunToken_RejectsABodyThatNamesASubject(t *testing.T) {
@@ -162,7 +181,9 @@ func TestMintAgentRunToken_RejectsABodyThatNamesASubject(t *testing.T) {
 // auditOpCount counts failed audit rows for op whose "reason" matches code.
 func (e *workItemsEnv) auditOpCount(op, code string) int {
 	n := 0
-	for _, entry := range e.audit.List(1000) {
+	entries := e.audit.List(1000)
+	for i := range entries {
+		entry := &entries[i]
 		if entry.Operation == op && entry.Status == "failed" && entry.Parameters["reason"] == code {
 			n++
 		}

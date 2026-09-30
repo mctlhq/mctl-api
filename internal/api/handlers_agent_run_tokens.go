@@ -139,8 +139,13 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 
 	ttl := workitems.DefaultAgentRunTokenTTL
 	if body.TTLSeconds != nil {
-		if *body.TTLSeconds <= 0 {
-			writeErrorCode(w, http.StatusBadRequest, artCodeInvalidTTL, "ttl_seconds must be positive", nil)
+		// Validated in raw seconds, before the multiplication below that can
+		// overflow int64 for an absurdly large ttl_seconds and wrap into a
+		// small or negative Duration -- which would then pass the store's
+		// own ttl > MaxAgentRunTokenTTL check unnoticed.
+		maxSeconds := int(workitems.MaxAgentRunTokenTTL / time.Second)
+		if *body.TTLSeconds <= 0 || *body.TTLSeconds > maxSeconds {
+			writeErrorCode(w, http.StatusBadRequest, artCodeInvalidTTL, "ttl_seconds must be positive and at most 86400", nil)
 			return
 		}
 		ttl = time.Duration(*body.TTLSeconds) * time.Second
@@ -167,6 +172,11 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		code, status := agentRunTokenErrorCode(err)
 		h.auditAgentRunTokenRefusal(r, user, body.Agent, code)
+		if status == http.StatusInternalServerError {
+			slog.Error("agent run token: mint failed", "agent", body.Agent, "execution_id", body.ExecutionID, "error", err)
+			writeErrorCode(w, status, code, "agent run token mint failed", nil)
+			return
+		}
 		writeErrorCode(w, status, code, err.Error(), nil)
 		return
 	}
