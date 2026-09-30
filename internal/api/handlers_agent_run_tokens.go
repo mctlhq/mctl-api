@@ -48,6 +48,7 @@ const (
 	artCodeExecutionTerminal   = "execution_terminal"
 	artCodeInvalidTTL          = "invalid_ttl"
 	artCodePrincipalDisabled   = "agent_principal_disabled"
+	artCodeIdentityRefused     = "agent_identity_refused"
 	artCodeRegistryUnavailable = "agent_registry_error"
 )
 
@@ -157,9 +158,14 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 	// degrades rather than failing the mint).
 	agentUser := auth.NewAgentUser(body.Agent, auth.AgentRun{})
 	if err := auth.AttachPrincipal(r.Context(), h.opts.Principals, agentUser); err != nil {
-		if errors.Is(err, auth.ErrPrincipalDisabled) {
+		switch {
+		case errors.Is(err, auth.ErrPrincipalDisabled):
 			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodePrincipalDisabled)
 			writeErrorCode(w, http.StatusForbidden, artCodePrincipalDisabled, "the agent principal is disabled", nil)
+			return
+		case errors.Is(err, auth.ErrIdentityRefused):
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeIdentityRefused)
+			writeErrorCode(w, http.StatusForbidden, artCodeIdentityRefused, "the agent identity is refused", nil)
 			return
 		}
 		slog.Warn("agent run token: agent principal not resolved; minting without one", "agent", body.Agent, "error", err)

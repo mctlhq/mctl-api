@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -175,6 +176,44 @@ func TestMintAgentRunToken_RejectsABodyThatNamesASubject(t *testing.T) {
 	}
 	if code(res) != wiCodeActorNotAccepted {
 		t.Errorf("code = %q, want %q", code(res), wiCodeActorNotAccepted)
+	}
+}
+
+// agentRunTokenPrincipals answers a fixed error for every identity it is
+// asked to resolve, so the mint handler's principal-refusal branches can be
+// exercised without a real principal store.
+type agentRunTokenPrincipals struct {
+	err error
+}
+
+func (p *agentRunTokenPrincipals) ResolvePrincipal(_ context.Context, _ auth.Identity) (string, error) {
+	return "", p.err
+}
+
+// A deliberately revoked agent identity (auth.ErrIdentityRefused, the
+// sibling of auth.ErrPrincipalDisabled) must refuse the mint the same way a
+// disabled principal does: 403, a typed error code, an audited refusal, and
+// no token ever minted.
+func TestMintAgentRunToken_RefusesARevokedAgentIdentity(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	e.h.opts.Principals = &agentRunTokenPrincipals{err: auth.ErrIdentityRefused}
+	item := e.open(auth.NewServiceUser(), nil)
+	execID := e.attachExecution(auth.NewServiceUser(), item["id"].(string), "run-1", "Running")
+
+	res := e.mintRunToken(auth.NewServiceUser(), map[string]any{"agent": "implementer", "execution_id": execID})
+	if res.code != http.StatusForbidden {
+		t.Fatalf("mint = %d %s, want 403", res.code, res.raw)
+	}
+	if code(res) != artCodeIdentityRefused {
+		t.Errorf("code = %q, want %q", code(res), artCodeIdentityRefused)
+	}
+	if n := e.auditOpCount("agent_run_token.mint_refused", artCodeIdentityRefused); n != 1 {
+		t.Errorf("mint_refused audit rows = %d, want 1", n)
+	}
+	for _, entry := range e.audit.List(1000) {
+		if entry.Operation == "agent_run_token.mint" && entry.Status == "succeeded" {
+			t.Fatalf("mint succeeded for a refused agent identity: %+v", entry)
+		}
 	}
 }
 
