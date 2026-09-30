@@ -748,8 +748,21 @@ func (h *Handlers) LinkWorkItemSurface(w http.ResponseWriter, r *http.Request) {
 // needs a match) and passes. A non-delegated caller, including the direct
 // surface relay, is unaffected.
 func (h *Handlers) delegatedActorIsSubject(w http.ResponseWriter, r *http.Request, user *auth.User, surface, actorExternalID string) bool {
+	if actorExternalID == "" {
+		return true
+	}
+	// An undelegated agent run token never binds a surface actor either.
+	// Today it cannot reach this route at all (an agent principal belongs to
+	// no tenant, so visibleWorkItem answers 404 first), but the refusal must
+	// not rest on that. The agent would otherwise be writing a binding row
+	// for any human's surface id, and then presenting that human's sil_ ref.
+	if name, isAgent := user.AgentName(); isAgent {
+		h.refuseDelegation(w, r, user, name, "", delegationCodeNotBound, http.StatusForbidden,
+			"an undelegated agent principal may not bind a surface actor identity")
+		return false
+	}
 	agentName, delegated := strings.CutPrefix(user.ActingPrincipal(), auth.AgentPrincipalPrefix)
-	if !delegated || actorExternalID == "" {
+	if !delegated {
 		return true
 	}
 	login, ok := user.GitHubLogin()

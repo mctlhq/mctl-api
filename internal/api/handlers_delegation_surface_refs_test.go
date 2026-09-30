@@ -237,3 +237,33 @@ func TestAgentAggregateLimit_HoldsAcrossDelegatedSubjectsInTheRouter(t *testing.
 		t.Fatalf("an agent rotating across %d delegated subjects was never throttled", subjects)
 	}
 }
+
+// An undelegated agent run token is refused a surface actor binding by the
+// guard itself, not only by the tenant check in front of it: that the agent
+// principal belongs to no tenant must not be the sole barrier.
+func TestDelegatedSurfaceRef_UndelegatedAgentNeverBindsAnActor(t *testing.T) {
+	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1"})
+	log := audit.NewLogger()
+	h := &Handlers{opts: Options{AuditLog: log}}
+	req := asUser(httptest.NewRequest(http.MethodPost, "/api/v1/work-items/wi_1/surface-refs", nil), agent)
+
+	rec := httptest.NewRecorder()
+	if h.delegatedActorIsSubject(rec, req, agent, "telegram", "5555") {
+		t.Fatal("an undelegated agent was allowed to bind a surface actor")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code = %d, want 403", rec.Code)
+	}
+	if !h.delegatedActorIsSubject(httptest.NewRecorder(), req, agent, "telegram", "") {
+		t.Fatal("an agent ref with no actor binds nothing and must pass")
+	}
+	audited := 0
+	for _, e := range log.List(10) {
+		if e.Operation == "agent_identity.delegation_refused" && e.Parameters["agent"] == "implementer" {
+			audited++
+		}
+	}
+	if audited != 1 {
+		t.Fatalf("audited refusals = %d, want 1", audited)
+	}
+}
