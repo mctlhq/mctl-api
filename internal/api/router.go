@@ -28,6 +28,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/agentregistry"
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/humaninput"
@@ -120,6 +121,10 @@ type Options struct {
 	// (mctl-api#373 phase 1), as authentication does for a direct caller.
 	// Nil relays without a principal id.
 	Principals auth.PrincipalResolver
+	// Delegation resolves an X-MCTL-On-Behalf-Of grant ref to the stored
+	// subject it names (mctl-api#376 slice B). Optional: nil makes every
+	// delegated request 503, never an undelegated one.
+	Delegation delegation.Resolver
 
 	// Roadmap serves the RoadmapPublication read model (mctl-api#333).
 	// Optional: nil makes the roadmap endpoints 503.
@@ -319,6 +324,24 @@ func NewRouter(opts Options) http.Handler {
 		// Surface principals reach only their allowlisted routes; relay
 		// routes continue as the linked human.
 		r.Use(h.surfacePrincipalGate)
+		// An agent principal's ceiling counts every call it makes, the same
+		// reasoning as surfaceAggregateLimit above: it must run before
+		// agentPrincipalGate substitutes the delegated human, otherwise the
+		// global limiter's per-subject split below (keyed on
+		// rateLimitSubject -> the delegated human's user.ID) becomes the
+		// agent's only ceiling, with no aggregate cap across every human it
+		// delegates to -- unlike the surface relay, which pairs its own
+		// per-subject split with exactly this aggregate ceiling.
+		r.Use(agentAggregateLimit(httprate.Limit(agentAggregateLimitPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+			return "agent-total:" + auth.UserFromContext(r.Context()).ID, nil
+		}))))
+		// Delegation (mctl-api#376 slice B): an agent principal's
+		// X-MCTL-On-Behalf-Of resolves to the grant's subject here, right
+		// after the surface gate and on the same footing -- it too resolves
+		// a grant in Postgres, so it belongs under the timeout above and
+		// before the rate limiter below, whose budget must key on the
+		// delegated subject once this gate has run.
+		r.Use(h.agentPrincipalGate)
 		// The usage writer reaches one route and nothing else.
 		r.Use(usageWriterGate)
 		// The evidence writer reaches one route and nothing else
@@ -848,6 +871,31 @@ func surfaceAggregateLimit(limit func(http.Handler) http.Handler) func(http.Hand
 			if _, isSurface := auth.UserFromContext(r.Context()).Surface(); isSurface {
 				limited.ServeHTTP(w, r)
 				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// agentAggregateLimitPerMinute caps one agent principal across all the
+// delegated subjects it acts for, the same ceiling surfaceAggregateLimit
+// pairs with the surface relay's per-subject split -- without it, an
+// agent's budget is only the global limiter's per-delegated-human split,
+// with no cap on the agent as a whole.
+const agentAggregateLimitPerMinute = 1200
+
+// agentAggregateLimit applies limit to agent principals only, keyed on the
+// principal alone, evaluated before agentPrincipalGate substitutes the
+// delegated subject into the request context.
+func agentAggregateLimit(limit func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		limited := limit(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if user := auth.UserFromContext(r.Context()); user != nil {
+				if _, isAgent := user.AgentName(); isAgent {
+					limited.ServeHTTP(w, r)
+					return
+				}
 			}
 			next.ServeHTTP(w, r)
 		})

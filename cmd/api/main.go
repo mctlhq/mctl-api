@@ -40,6 +40,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/dburl"
+	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/events"
 	"github.com/mctlhq/mctl-api/internal/evidence"
@@ -555,6 +556,23 @@ func main() {
 		}
 	}
 
+	// Delegation grants for agent principals (mctl-api#376 slice B):
+	// X-MCTL-On-Behalf-Of resolves through the same two stores above. Built
+	// from typed-nil-safe interface values -- a nil *workitems.Store or
+	// *surfaceid.Store assigned directly to the interface fields would leave
+	// a non-nil interface wrapping a nil pointer, which StoreResolver's own
+	// nil checks would never see as nil. Either half missing simply makes
+	// its kinds answer 503 delegation_unavailable, never a refusal.
+	var delegationItems delegation.WorkItemSource
+	if workItemsStore != nil {
+		delegationItems = workItemsStore
+	}
+	var delegationLinks delegation.SurfaceLinkSource
+	if surfaceIDs != nil {
+		delegationLinks = surfaceIDs
+	}
+	delegationResolver := delegation.NewStoreResolver(delegationItems, delegationLinks)
+
 	// Agent registry (optional — enabled when AGENT_REGISTRY_DB_URL or AUDIT_DB_URL is set).
 	// Inbound events for Claude Remote (mctlhq/.github#87): GitHub pull request
 	// webhooks are accepted into a Postgres outbox and relayed to platform
@@ -831,6 +849,7 @@ func main() {
 		SurfaceIdentities:              surfaceIDs,
 		TenantResolver:                 gitReader,
 		Principals:                     principalResolver,
+		Delegation:                     delegationResolver,
 		WorkflowDispatcher:             workflowDispatcher,
 		GitopsReady:                    gitopsReady,
 		PostgresReady:                  postgresReady,

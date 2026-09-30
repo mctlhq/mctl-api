@@ -113,6 +113,13 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "request_id must look like hir-<16 hex>")
 		return
 	}
+	// Refuse a body naming who answered before decoding it (mctl-api#376
+	// slice B3): additive only, ahead of decodeHumanInputResponse's own
+	// DisallowUnknownFields, so a delegation-relevant key gets the typed
+	// actor_not_accepted code instead of a generic invalid-JSON message.
+	if !refuseIdentityFields(w, r, maxHumanInputResponseBytes) {
+		return
+	}
 	body, value, err := decodeHumanInputResponse(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
