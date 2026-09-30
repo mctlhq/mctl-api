@@ -39,11 +39,32 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 // OnBehalfOfHeader names the grant an agent run is acting under. It carries
 // a RECORD ID, never a principal: the subject is read from the record.
 const OnBehalfOfHeader = "X-MCTL-On-Behalf-Of"
+
+// maxGrantRefBytes bounds X-MCTL-On-Behalf-Of the same way every other
+// grant/external id in this API is bounded (workitems.MaxExternalIDBytes).
+// This gate runs before the global rate limiter (router.go) and writes the
+// header verbatim into the agent_identity.delegation_refused audit entry on
+// every refusal (refuseDelegation below), so an unvalidated, unbounded
+// value here would let an authenticated-but-unaccepted caller grow audit
+// storage on every request, unthrottled, before anything limits it.
+const maxGrantRefBytes = workitems.MaxExternalIDBytes
+
+// boundedRef truncates ref to maxGrantRefBytes before it is ever used in a
+// log line or an audit parameter. It is never used to decide whether the
+// grant is valid -- an over-long ref still fails delegation.Resolve's own
+// lookup normally (ErrNotBound), this only caps what gets written about it.
+func boundedRef(ref string) string {
+	if len(ref) > maxGrantRefBytes {
+		return ref[:maxGrantRefBytes]
+	}
+	return ref
+}
 
 // Typed refusal codes a client can branch on.
 const (
@@ -119,6 +140,7 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		ref = boundedRef(ref)
 		agentName, isAgent := user.AgentName()
 		if !isAgent {
 			h.refuseDelegation(w, r, user, "", ref, delegationCodeNotAccepted, http.StatusBadRequest,

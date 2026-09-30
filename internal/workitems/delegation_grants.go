@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -29,8 +30,14 @@ import (
 // the requester, the requester's principal id, and the request's own work
 // item and execution ids (the binding scope). itemID narrows the row the
 // same way getExecutionRequest's AND work_item_id=$2 does, when non-empty.
+//
+// A rejected request is refused as ErrNotBound: rejection is this table's
+// "denied", and the work-item binding alone (execution_id is "" until
+// fulfilled) would otherwise let a long-dead, explicitly-rejected request
+// keep delegating as its original requester for as long as the work item
+// exists.
 func (s *Store) ExecutionRequestGrant(ctx context.Context, itemID, id string) (delegation.Record, error) {
-	query := `SELECT work_item_id, requested_by, requested_by_principal_id, execution_id
+	query := `SELECT work_item_id, requested_by, requested_by_principal_id, execution_id, state
 		FROM work_item_execution_requests WHERE id=$1`
 	args := []any{id}
 	if itemID != "" {
@@ -38,12 +45,16 @@ func (s *Store) ExecutionRequestGrant(ctx context.Context, itemID, id string) (d
 		args = append(args, itemID)
 	}
 	var rec delegation.Record
-	err := s.pool.QueryRow(ctx, query, args...).Scan(&rec.WorkItemID, &rec.Subject, &rec.SubjectPrincipalID, &rec.ExecutionID)
+	var state string
+	err := s.pool.QueryRow(ctx, query, args...).Scan(&rec.WorkItemID, &rec.Subject, &rec.SubjectPrincipalID, &rec.ExecutionID, &state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return delegation.Record{}, delegation.ErrNotBound
 	}
 	if err != nil {
 		return delegation.Record{}, fmt.Errorf("workitems: execution request grant: %w", err)
+	}
+	if state == ExecutionRequestRejected {
+		return delegation.Record{}, delegation.ErrNotBound
 	}
 	return rec, nil
 }
@@ -51,15 +62,31 @@ func (s *Store) ExecutionRequestGrant(ctx context.Context, itemID, id string) (d
 // ActionApprovalGrant implements delegation.WorkItemSource for an aar_ ref:
 // who decided it, their principal id, and the approval's own execution and
 // work item ids.
+//
+// decided_by/decided_by_principal_id stay populated once an approval is
+// decided, however the approval's own liveness later moves: denied,
+// consumed and (lazily) expired all leave those columns set. Only a
+// currently-live "approved" row (or a not-yet-decided "pending" one, whose
+// decided_by is still "" and so is refused further up, on an empty
+// principal) may answer this grant -- everything else is ErrNotBound, the
+// same as an unbound or unknown ref.
 func (s *Store) ActionApprovalGrant(ctx context.Context, id string) (delegation.Record, error) {
 	var rec delegation.Record
-	err := s.pool.QueryRow(ctx, `SELECT execution_id, work_item_id, decided_by, decided_by_principal_id
-		FROM action_approval_requests WHERE id=$1`, id).Scan(&rec.ExecutionID, &rec.WorkItemID, &rec.Subject, &rec.SubjectPrincipalID)
+	var state string
+	var expiresAt time.Time
+	err := s.pool.QueryRow(ctx, `SELECT execution_id, work_item_id, decided_by, decided_by_principal_id, state, expires_at
+		FROM action_approval_requests WHERE id=$1`, id).Scan(
+		&rec.ExecutionID, &rec.WorkItemID, &rec.Subject, &rec.SubjectPrincipalID, &state, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return delegation.Record{}, delegation.ErrNotBound
 	}
 	if err != nil {
 		return delegation.Record{}, fmt.Errorf("workitems: action approval grant: %w", err)
+	}
+	switch effectiveState(state, expiresAt, s.now()) {
+	case ApprovalPending, ApprovalApproved:
+	default: // denied, consumed, expired
+		return delegation.Record{}, delegation.ErrNotBound
 	}
 	return rec, nil
 }

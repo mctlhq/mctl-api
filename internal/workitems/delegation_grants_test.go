@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-api/internal/delegation"
 )
@@ -37,6 +38,25 @@ func TestExecutionRequestGrant_ProjectsTheGrantFields(t *testing.T) {
 	// Unknown id: not found.
 	if _, err := s.ExecutionRequestGrant(context.Background(), "", "xr_doesnotexist"); !errors.Is(err, delegation.ErrNotBound) {
 		t.Fatalf("unknown id: err = %v, want ErrNotBound", err)
+	}
+}
+
+// A rejected execution request is not a usable delegation grant: rejection
+// is this table's "denied", and requested_by/requested_by_principal_id stay
+// populated on the row after it, same as before rejection.
+func TestExecutionRequestGrant_RejectedIsNotBound(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	w := open(t, s, CreateInput{})
+	requestExecution(t, s, xrInput(w, ExecutionRequestStart, withPrincipals(as("github:alice"), "prn_ALICE", "")))
+	x := claim(t, s)
+	ref := ClaimRef{Mutation: as(platform), RequestID: x.ID, ClaimToken: x.ClaimToken}
+	if _, _, _, err := s.RejectExecutionRequest(ctx, RejectInput{ClaimRef: ref, Reason: "no capacity"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.ExecutionRequestGrant(ctx, w.ID, x.ID); !errors.Is(err, delegation.ErrNotBound) {
+		t.Fatalf("rejected: err = %v, want ErrNotBound", err)
 	}
 }
 
@@ -92,6 +112,39 @@ func TestActionApprovalGrant_ProjectsTheGrantFields(t *testing.T) {
 
 	if _, err := s.ActionApprovalGrant(context.Background(), "aar_doesnotexist"); !errors.Is(err, delegation.ErrNotBound) {
 		t.Fatalf("unknown id: err = %v, want ErrNotBound", err)
+	}
+}
+
+// A denied, consumed or (lazily) expired approval is not a usable
+// delegation grant, even though decided_by/decided_by_principal_id stay
+// populated in every one of those states.
+func TestActionApprovalGrant_DeniedConsumedAndExpiredAreNotBound(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+
+	denied := createApproval(t, s, approvalInput(s, "k-delegation-denied"))
+	if _, err := s.DecideActionApproval(ctx, ActionDecisionInput{
+		ID: denied.ID, DecidedBy: "github:root", Decision: DecisionDeny, DecidedByPrincipalID: "prn_ROOT",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActionApprovalGrant(ctx, denied.ID); !errors.Is(err, delegation.ErrNotBound) {
+		t.Fatalf("denied: err = %v, want ErrNotBound", err)
+	}
+
+	consumed := approved(t, s, "k-delegation-consumed")
+	if _, err := s.ConsumeActionApproval(ctx, consumed.ID, consumed.IntentHash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActionApprovalGrant(ctx, consumed.ID); !errors.Is(err, delegation.ErrNotBound) {
+		t.Fatalf("consumed: err = %v, want ErrNotBound", err)
+	}
+
+	expired := approved(t, s, "k-delegation-expired")
+	realNow := s.now
+	s.now = func() time.Time { return realNow().Add(2 * time.Hour) }
+	if _, err := s.ActionApprovalGrant(ctx, expired.ID); !errors.Is(err, delegation.ErrNotBound) {
+		t.Fatalf("expired: err = %v, want ErrNotBound", err)
 	}
 }
 
