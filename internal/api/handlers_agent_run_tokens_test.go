@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mctlhq/mctl-api/internal/agentregistry"
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
@@ -228,4 +229,59 @@ func (e *workItemsEnv) auditOpCount(op, code string) int {
 		}
 	}
 	return n
+}
+
+// withAgentRegistry wires a real Postgres-backed agent registry into the
+// work-items env, so the mint handler's registry check runs for real.
+func (e *workItemsEnv) withAgentRegistry() {
+	e.t.Helper()
+	reg, err := agentregistry.NewStore(context.Background(), e.connStr)
+	if err != nil {
+		e.t.Fatalf("agentregistry.NewStore: %v", err)
+	}
+	e.h.opts.AgentRegistry = reg
+}
+
+func TestMintAgentRunToken_RefusesAnUnregisteredAgent(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	e.withAgentRegistry()
+	item := e.open(auth.NewServiceUser(), nil)
+	execID := e.attachExecution(auth.NewServiceUser(), item["id"].(string), "run-1", "Running")
+
+	agent := "unregistered-" + e.tenant
+	res := e.mintRunToken(auth.NewServiceUser(), map[string]any{"agent": agent, "execution_id": execID})
+	if res.code != http.StatusBadRequest {
+		t.Fatalf("mint = %d %s, want 400", res.code, res.raw)
+	}
+	if code(res) != artCodeAgentUnknown {
+		t.Errorf("code = %q, want %q", code(res), artCodeAgentUnknown)
+	}
+	if n := e.auditOpCount("agent_run_token.mint_refused", artCodeAgentUnknown); n != 1 {
+		t.Errorf("mint_refused audit rows = %d, want 1", n)
+	}
+}
+
+// A registry read that fails must answer with the typed code, like every other
+// refusal of this handler, so a client can tell "registry down" from "agent
+// unknown" without parsing the message. Postgres rejects a NUL byte in a text
+// parameter, which makes HasDefinition fail on a real store.
+func TestMintAgentRunToken_RegistryErrorCarriesTypedCode(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	e.withAgentRegistry()
+	item := e.open(auth.NewServiceUser(), nil)
+	execID := e.attachExecution(auth.NewServiceUser(), item["id"].(string), "run-1", "Running")
+
+	res := e.mintRunToken(auth.NewServiceUser(), map[string]any{"agent": "impl\x00ementer", "execution_id": execID})
+	if res.code != http.StatusInternalServerError {
+		t.Fatalf("mint = %d %s, want 500", res.code, res.raw)
+	}
+	if code(res) != artCodeRegistryUnavailable {
+		t.Errorf("code = %q, want %q", code(res), artCodeRegistryUnavailable)
+	}
+	if strings.Contains(res.raw, "0x00") || strings.Contains(res.raw, "SQLSTATE") {
+		t.Errorf("response leaks the store error: %s", res.raw)
+	}
+	if n := e.auditOpCount("agent_run_token.mint_refused", artCodeRegistryUnavailable); n != 1 {
+		t.Errorf("mint_refused audit rows = %d, want 1", n)
+	}
 }

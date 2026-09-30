@@ -128,7 +128,7 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Error("agent run token: check agent registry", "error", err)
 			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeRegistryUnavailable)
-			writeError(w, http.StatusInternalServerError, "agent registry error")
+			writeErrorCode(w, http.StatusInternalServerError, artCodeRegistryUnavailable, "agent registry error", nil)
 			return
 		}
 		if !known {
