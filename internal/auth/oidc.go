@@ -348,6 +348,40 @@ func NewRelayedUser(login string, groups []string, acting *User) *User {
 	}
 }
 
+// NewDelegatedUser builds the subject an agent run token delegates to, from
+// a grant already bound to that run (mctl-api#376 slice B). Sibling of
+// NewRelayedUser, not a variant of it: it returns nil unless acting
+// authenticated with an agent run token and login is non-empty; delegating
+// never confers admin, so "admins" is dropped exactly as a relay drops it.
+//
+// It does NOT set agent: the delegated user is a human subject, not the
+// agent, so IsAgent() is false and Identity() resolves it through the
+// githubLogin case (KindHuman) like any other GitHub principal. It does NOT
+// set relaySurface either, so it is never mistaken for a surface relay by
+// isDirectService/isHumanAdmin. It DOES carry acting's execID, workItemID
+// and runID, so clientmeta.go and mutationFor keep stamping via_execution_id
+// for the delegated write -- the audit outcome this slice exists to record.
+func NewDelegatedUser(login string, groups []string, acting *User) *User {
+	name, isAgent := acting.AgentName()
+	if !isAgent || login == "" {
+		return nil
+	}
+	kept := make([]string, 0, len(groups))
+	for _, g := range groups {
+		if g != "admins" {
+			kept = append(kept, g)
+		}
+	}
+	return &User{
+		ID: login, Groups: kept, githubLogin: true,
+		actingPrincipal: AgentPrincipalPrefix + name,
+		viaPrincipalID:  acting.principalID,
+		execID:          acting.execID,
+		workItemID:      acting.workItemID,
+		runID:           acting.runID,
+	}
+}
+
 // ActingPrincipal is the surface principal that carried a relayed request,
 // or "" when the caller acted directly.
 func (u *User) ActingPrincipal() string {

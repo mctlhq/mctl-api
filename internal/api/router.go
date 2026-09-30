@@ -28,6 +28,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/agentregistry"
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/humaninput"
@@ -120,6 +121,10 @@ type Options struct {
 	// (mctl-api#373 phase 1), as authentication does for a direct caller.
 	// Nil relays without a principal id.
 	Principals auth.PrincipalResolver
+	// Delegation resolves an X-MCTL-On-Behalf-Of grant ref to the stored
+	// subject it names (mctl-api#376 slice B). Optional: nil makes every
+	// delegated request 503, never an undelegated one.
+	Delegation delegation.Resolver
 
 	// Roadmap serves the RoadmapPublication read model (mctl-api#333).
 	// Optional: nil makes the roadmap endpoints 503.
@@ -319,6 +324,13 @@ func NewRouter(opts Options) http.Handler {
 		// Surface principals reach only their allowlisted routes; relay
 		// routes continue as the linked human.
 		r.Use(h.surfacePrincipalGate)
+		// Delegation (mctl-api#376 slice B): an agent principal's
+		// X-MCTL-On-Behalf-Of resolves to the grant's subject here, right
+		// after the surface gate and on the same footing -- it too resolves
+		// a grant in Postgres, so it belongs under the timeout above and
+		// before the rate limiter below, whose budget must key on the
+		// delegated subject once this gate has run.
+		r.Use(h.agentPrincipalGate)
 		// The usage writer reaches one route and nothing else.
 		r.Use(usageWriterGate)
 		// The evidence writer reaches one route and nothing else
