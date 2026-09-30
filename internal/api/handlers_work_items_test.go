@@ -66,6 +66,8 @@ func workItemsRouter(h *Handlers) chi.Router {
 	r.Get("/api/v1/work-items/{id}", h.GetWorkItem)
 	r.Patch("/api/v1/work-items/{id}", h.TransitionWorkItem)
 	r.Post("/api/v1/work-items/{id}/intents", h.AppendWorkItemIntent)
+	r.Get("/api/v1/work-items/{id}/intents", h.ListWorkItemIntents)
+	r.Get("/api/v1/work-items/{id}/intents/{intent_id}", h.GetWorkItemIntent)
 	r.Get("/api/v1/work-items/{id}/executions", h.ListWorkItemExecutions)
 	r.Post("/api/v1/work-items/{id}/executions", h.AttachWorkItemExecution)
 	r.Post("/api/v1/work-items/{id}/resume", h.ResumeWorkItem)

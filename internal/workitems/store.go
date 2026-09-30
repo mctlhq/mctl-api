@@ -852,6 +852,81 @@ func getIntent(ctx context.Context, q querier, itemID, id string) (*Intent, erro
 	return &intent, nil
 }
 
+// IntentPage is a bounded page of intents, oldest first. Truncated is part
+// of the answer: a clipped page must never read as a complete one.
+type IntentPage struct {
+	Intents   []Intent `json:"intents"`
+	Truncated bool     `json:"truncated"`
+	Limit     int      `json:"limit"`
+}
+
+// Intents returns a page of the item's intents with id > afterID, ascending.
+// No authorization: the caller checks visibility, as Events does. An
+// unknown item id answers an empty page, not ErrNotFound, so the caller
+// Gets the item first.
+func (s *Store) Intents(ctx context.Context, itemID string, afterID int64, limit int) (*IntentPage, error) {
+	if limit <= 0 {
+		limit = DefaultIntentPageLimit
+	}
+	if limit > MaxIntentPageLimit {
+		limit = MaxIntentPageLimit
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id, work_item_id, actor_principal, surface, text, params, created_at
+		FROM work_item_intents WHERE work_item_id=$1 AND id > $2 ORDER BY id LIMIT $3`, itemID, afterID, limit+1)
+	if err != nil {
+		return nil, fmt.Errorf("workitems: intents: %w", err)
+	}
+	defer rows.Close()
+	out := []Intent{}
+	for rows.Next() {
+		var intent Intent
+		var text *string
+		if err := rows.Scan(&intent.ID, &intent.WorkItemID, &intent.ActorPrincipal, &intent.Surface,
+			&text, &intent.Params, &intent.CreatedAt); err != nil {
+			return nil, fmt.Errorf("workitems: intents: %w", err)
+		}
+		if text != nil {
+			intent.Text = *text
+		} else {
+			intent.TextRedacted = true
+		}
+		intent.CreatedAt = intent.CreatedAt.UTC()
+		out = append(out, intent)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("workitems: intents: %w", err)
+	}
+	page := &IntentPage{Intents: out, Limit: limit}
+	if len(page.Intents) > limit {
+		page.Intents = page.Intents[:limit]
+		page.Truncated = true
+	}
+	return page, nil
+}
+
+// Intent returns one intent of itemID. An id of another item, or no id at
+// all, is ErrIntentNotFound -- never ErrNotFound, which means the work item.
+func (s *Store) Intent(ctx context.Context, itemID, id string) (*Intent, error) {
+	var intent Intent
+	var text *string
+	err := s.pool.QueryRow(ctx, `SELECT id, work_item_id, actor_principal, surface, text, params, created_at
+		FROM work_item_intents WHERE work_item_id=$1 AND id::text=$2`, itemID, id).Scan(
+		&intent.ID, &intent.WorkItemID, &intent.ActorPrincipal, &intent.Surface, &text, &intent.Params, &intent.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("workitems: intent %s of %s: %w", id, itemID, ErrIntentNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("workitems: get intent: %w", err)
+	}
+	if text != nil {
+		intent.Text = *text
+	} else {
+		intent.TextRedacted = true
+	}
+	intent.CreatedAt = intent.CreatedAt.UTC()
+	return &intent, nil
+}
+
 // LinkSurface correlates a surface-native conversation with a work item, or
 // refreshes last_seen_at on an existing correlation. The upsert on
 // (item, surface, external_id) is its idempotency: an Idempotency-Key adds

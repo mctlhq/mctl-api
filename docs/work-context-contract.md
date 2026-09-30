@@ -104,7 +104,12 @@ may live in different databases.
   `request_id`, `detail`, `created_at`. Unique per `(work_item_id, seq)`.
 - **`WorkItemIntent`** — a bounded, normalized statement of what the user
   asked for: `actor_principal`, `surface`, `text` (max 8 KiB), `params`,
-  `created_at`. Never a full chat transcript.
+  `text_redacted`, `created_at`. Never a full chat transcript. Readable
+  (`GET /work-items/{id}/intents[/{intent_id}]`) by whoever can see the
+  item; an intent remains provenance and input, never authorization or
+  approval state. A retention-swept intent (mctl-api#353) reads back with
+  `text` empty and `text_redacted: true` — consumers must treat that as
+  "text not observable", never as an empty intent.
 - **`WorkItemExecution`** — `id` (`we_...`), `engine` (`temporal` | `argo`),
   `engine_ref`, `attempt`, `resumed_from_execution_id`, `phase`
   (`Pending` | `Running` | `Succeeded` | `Failed` | `Error`), `started_at`,
@@ -378,6 +383,8 @@ shared 20/min budget it would starve the workflow triggers it feeds.
 | `GET /api/v1/work-items/{id}`                                          | current state: item, latest execution, pending approval, latest snapshot pointers, `state_version` |
 | `PATCH /api/v1/work-items/{id}`                                        | state transition (`complete`, `archive`, `supersede`, `wait`); requires `expected_state_version` |
 | `POST /api/v1/work-items/{id}/intents`                                 | append a user intent |
+| `GET /api/v1/work-items/{id}/intents`                                  | list intents, ascending `id`, keyset-paginated (`after_id`, `limit`, `truncated`) |
+| `GET /api/v1/work-items/{id}/intents/{intent_id}`                      | read one intent; an id of another item is 404 `intent_not_found` |
 | `GET|POST /api/v1/work-items/{id}/executions`                          | list / attach-correlate an execution |
 | `GET|POST /api/v1/work-items/{id}/executions/{execution_id}/snapshot`  | read / seal the execution's context snapshot |
 | `GET /api/v1/work-items/{id}/snapshots[/{snapshot_id}]`                | list / read sealed snapshots |
@@ -490,6 +497,7 @@ the header gets 400. Relay routes: `GET /human-input`,
 `GET /human-input/{id}`, `POST /human-input/{id}/response`,
 `POST /work-items`, `GET /work-items/{id}`,
 `POST /work-items/{id}/intents|surface-refs`,
+`GET /work-items/{id}/intents[/{intent_id}]`,
 `GET|POST /work-items/{id}/execution-requests` and
 `GET /work-items/{id}/execution-requests/{request_id}`. No relay route
 accepts an engine, engine run or execution id: `POST /work-items/{id}/resume`

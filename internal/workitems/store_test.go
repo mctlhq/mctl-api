@@ -3,6 +3,7 @@ package workitems
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -450,6 +451,107 @@ func TestIntentsAreBoundedAndNeverCarrySecrets(t *testing.T) {
 		if strings.Contains(string(e.Detail), "retry") {
 			t.Fatalf("event %d copies intent text: %s", e.Seq, e.Detail)
 		}
+	}
+}
+
+func TestIntentsPaginateAscendingAndClampLimit(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	w := open(t, s, CreateInput{})
+	var ids []int64
+	for i := 0; i < 5; i++ {
+		in := IntentInput{Mutation: as("github:alice"), WorkItemID: w.ID, Text: fmt.Sprintf("intent %d", i)}
+		intent, _, err := s.AppendIntent(ctx, in)
+		if err != nil {
+			t.Fatalf("AppendIntent %d: %v", i, err)
+		}
+		ids = append(ids, intent.ID)
+	}
+
+	page, err := s.Intents(ctx, w.ID, 0, 2)
+	if err != nil || len(page.Intents) != 2 || !page.Truncated || page.Limit != 2 {
+		t.Fatalf("page 1 = %+v, %v", page, err)
+	}
+	if page.Intents[0].ID != ids[0] || page.Intents[1].ID != ids[1] {
+		t.Fatalf("page 1 ids = %v, want %v", page.Intents, ids[:2])
+	}
+
+	page2, err := s.Intents(ctx, w.ID, page.Intents[len(page.Intents)-1].ID, 2)
+	if err != nil || len(page2.Intents) != 2 || !page2.Truncated {
+		t.Fatalf("page 2 = %+v, %v", page2, err)
+	}
+	if page2.Intents[0].ID != ids[2] || page2.Intents[1].ID != ids[3] {
+		t.Fatalf("page 2 ids = %v, want %v", page2.Intents, ids[2:4])
+	}
+
+	page3, err := s.Intents(ctx, w.ID, page2.Intents[len(page2.Intents)-1].ID, 2)
+	if err != nil || len(page3.Intents) != 1 || page3.Truncated {
+		t.Fatalf("page 3 (last, not full) = %+v, %v", page3, err)
+	}
+	if page3.Intents[0].ID != ids[4] {
+		t.Fatalf("page 3 id = %v, want %v", page3.Intents, ids[4])
+	}
+
+	// limit <= 0 clamps to the default; limit above the max clamps to it.
+	def, err := s.Intents(ctx, w.ID, 0, 0)
+	if err != nil || def.Limit != DefaultIntentPageLimit {
+		t.Fatalf("limit<=0 clamp = %+v, %v", def, err)
+	}
+	high, err := s.Intents(ctx, w.ID, 0, MaxIntentPageLimit+50)
+	if err != nil || high.Limit != MaxIntentPageLimit {
+		t.Fatalf("limit>max clamp = %+v, %v", high, err)
+	}
+
+	// An unknown or empty item answers an empty slice, never an error.
+	empty, err := s.Intents(ctx, "wi_does_not_exist", 0, 10)
+	if err != nil || empty == nil || len(empty.Intents) != 0 || empty.Truncated {
+		t.Fatalf("unknown item = %+v, %v", empty, err)
+	}
+}
+
+func TestIntentReadsCrossItemAndNonNumericAsNotFoundNeverPgError(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	a, b := open(t, s, CreateInput{}), open(t, s, CreateInput{})
+	intent, _, err := s.AppendIntent(ctx, IntentInput{Mutation: as("github:alice"), WorkItemID: a.ID, Text: "for a"})
+	if err != nil {
+		t.Fatalf("AppendIntent: %v", err)
+	}
+
+	got, err := s.Intent(ctx, a.ID, fmt.Sprint(intent.ID))
+	if err != nil || got.ID != intent.ID || got.Text != "for a" || got.TextRedacted {
+		t.Fatalf("Intent = %+v, %v", got, err)
+	}
+
+	// intent.ID belongs to a, not b: cross-item is ErrIntentNotFound, never
+	// ErrNotFound (which would mean the work item itself is gone).
+	if _, err := s.Intent(ctx, b.ID, fmt.Sprint(intent.ID)); !errors.Is(err, ErrIntentNotFound) {
+		t.Fatalf("cross-item: err = %v, want ErrIntentNotFound", err)
+	}
+	if _, err := s.Intent(ctx, a.ID, "not-a-number"); !errors.Is(err, ErrIntentNotFound) {
+		t.Fatalf("non-numeric id: err = %v, want ErrIntentNotFound", err)
+	}
+}
+
+func TestIntentNullTextReadsEmptyAndRedacted(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	w := open(t, s, CreateInput{})
+	intent, _, err := s.AppendIntent(ctx, IntentInput{Mutation: as("github:alice"), WorkItemID: w.ID, Text: "to be redacted"})
+	if err != nil {
+		t.Fatalf("AppendIntent: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE work_item_intents SET text=NULL WHERE id=$1`, intent.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Intent(ctx, w.ID, fmt.Sprint(intent.ID))
+	if err != nil || got.Text != "" || !got.TextRedacted {
+		t.Fatalf("Intent after redaction = %+v, %v", got, err)
+	}
+	page, err := s.Intents(ctx, w.ID, 0, 10)
+	if err != nil || len(page.Intents) != 1 || page.Intents[0].Text != "" || !page.Intents[0].TextRedacted {
+		t.Fatalf("Intents after redaction = %+v, %v", page, err)
 	}
 }
 
