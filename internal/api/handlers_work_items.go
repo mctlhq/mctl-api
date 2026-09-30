@@ -65,8 +65,39 @@ const (
 // ever accepted.
 var forbiddenIdentityFields = []string{
 	"actor", "actor_principal", "owner", "owner_principal", "created_by",
-	"on_behalf_of", "subject", "delegated_actor", "user", "user_id",
+	"on_behalf_of", "subject", "delegated_actor", "acting_principal", "user", "user_id",
 	"requested_by", "decided_by",
+}
+
+// refuseIdentityFields answers 400 when the raw body names any
+// forbiddenIdentityFields, then restores the body for whatever decoder the
+// handler already uses. Modelled on refuseExecutionIdentity
+// (handlers_execution_requests.go): for routes that cannot yet move to
+// decodeWorkItemBodyLimit wholesale (the dev-loop approve route's lenient,
+// EOF-tolerant decode is Slice C's to change; the human-input response
+// route already uses DisallowUnknownFields but not this typed code).
+//
+// It tolerates an empty body (so the approve route's io.EOF case still
+// works) and, on a non-object body, simply restores and returns true --
+// leaving the existing decoder to produce the error it produces today.
+func refuseIdentityFields(w http.ResponseWriter, r *http.Request, limit int64) bool {
+	raw, ok := readWorkItemBody(w, r, limit)
+	if !ok {
+		return false
+	}
+	var keys map[string]json.RawMessage
+	if json.Unmarshal(raw, &keys) == nil {
+		for _, k := range forbiddenIdentityFields {
+			if _, present := keys[k]; present {
+				writeErrorCode(w, http.StatusBadRequest, wiCodeActorNotAccepted,
+					"the acting principal is taken from authentication; field "+strconv.Quote(k)+
+						" is not accepted (a surface acting for a user needs mctl-api#350)", nil)
+				return false
+			}
+		}
+	}
+	restoreBody(r, raw)
+	return true
 }
 
 // principalOf renders the authenticated caller as a principal string. The

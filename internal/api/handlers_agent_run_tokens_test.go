@@ -180,6 +180,25 @@ func TestMintAgentRunToken_RejectsABodyThatNamesASubject(t *testing.T) {
 	}
 }
 
+// mctl-api#376 slice B3: acting_principal joins on_behalf_of/subject/
+// delegated_actor in forbiddenIdentityFields, so a mint body naming it is
+// refused the same way.
+func TestMintAgentRunToken_RejectsABodyThatNamesActingPrincipal(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	item := e.open(auth.NewServiceUser(), nil)
+	execID := e.attachExecution(auth.NewServiceUser(), item["id"].(string), "run-1", "Running")
+
+	res := e.mintRunToken(auth.NewServiceUser(), map[string]any{
+		"agent": "implementer", "execution_id": execID, "acting_principal": "agent:implementer",
+	})
+	if res.code != http.StatusBadRequest {
+		t.Fatalf("mint = %d %s, want 400", res.code, res.raw)
+	}
+	if code(res) != wiCodeActorNotAccepted {
+		t.Errorf("code = %q, want %q", code(res), wiCodeActorNotAccepted)
+	}
+}
+
 // agentRunTokenPrincipals answers a fixed error for every identity it is
 // asked to resolve, so the mint handler's principal-refusal branches can be
 // exercised without a real principal store.

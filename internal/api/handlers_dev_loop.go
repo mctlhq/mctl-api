@@ -317,6 +317,14 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Refuse a body naming who acted before decoding it (mctl-api#376 slice
+	// B3): additive only, so the approver-equals-caller tolerance, the admin
+	// check and the EOF-tolerant decode just below are unchanged -- those
+	// belong to Slice C.
+	if !refuseIdentityFields(w, r, maxExecutionRequestBodyBytes) {
+		return
+	}
+
 	var body approveDevLoopRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
