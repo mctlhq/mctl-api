@@ -36,6 +36,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/surfaceid"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
@@ -710,6 +711,9 @@ func (h *Handlers) LinkWorkItemSurface(w http.ResponseWriter, r *http.Request) {
 			"this route is idempotent by (surface, external_id); Idempotency-Key is not used", nil)
 		return
 	}
+	if !h.delegatedActorIsSubject(w, r, user, body.Surface, body.ActorExternalID) {
+		return
+	}
 	m, ok := mutationFor(w, r, user, "surface_ref", item.ID, body.Surface, "", body)
 	if !ok {
 		return
@@ -725,6 +729,55 @@ func (h *Handlers) LinkWorkItemSurface(w http.ResponseWriter, r *http.Request) {
 		h.auditWorkItem(r, user, "work_item.surface_linked", item.ID, item.Tenant, map[string]string{"surface": ref.Surface})
 	}
 	writeJSON(w, createdStatus(created), map[string]any{"schema_version": workitems.SchemaVersion, "surface_ref": ref})
+}
+
+// delegatedActorIsSubject guards the one write that creates a sil_ binding.
+// A work_item_surface_refs row whose (surface, actor_external_id) names a
+// surface identity link is what binds that link's sil_ grant to the work
+// item (delegation.StoreResolver.resolveSurfaceLink). An agent delegating as
+// one human could otherwise write that row for ANOTHER human's surface
+// identity, then present that human's sil_ ref and act as them.
+//
+// So under delegation a non-empty actor_external_id must be the delegated
+// subject's own live surface identity on that surface, read server-side from
+// surface_identity_links. The body only names the identity, and the owner
+// comes from the store. Any other identity is refused before the write:
+// another human's, an unknown, a revoked or an expired one. All of them get
+// the same grant_not_bound, so the route is not an existence oracle for
+// surface ids. An empty actor_external_id binds nothing (SurfaceRefBound
+// needs a match) and passes. A non-delegated caller, including the direct
+// surface relay, is unaffected.
+func (h *Handlers) delegatedActorIsSubject(w http.ResponseWriter, r *http.Request, user *auth.User, surface, actorExternalID string) bool {
+	agentName, delegated := strings.CutPrefix(user.ActingPrincipal(), auth.AgentPrincipalPrefix)
+	if !delegated || actorExternalID == "" {
+		return true
+	}
+	login, ok := user.GitHubLogin()
+	if !ok {
+		h.refuseDelegation(w, r, user, agentName, "", delegationCodeUnresolved, http.StatusForbidden,
+			"the delegated subject is not a GitHub principal")
+		return false
+	}
+	if h.opts.SurfaceIdentities == nil {
+		h.refuseDelegation(w, r, user, agentName, "", delegationCodeUnavailable, http.StatusServiceUnavailable,
+			"surface identities are not configured")
+		return false
+	}
+	link, err := h.opts.SurfaceIdentities.Resolve(r.Context(), surface, actorExternalID)
+	switch {
+	case errors.Is(err, surfaceid.ErrLinkNotFound), errors.Is(err, surfaceid.ErrLinkRevoked), errors.Is(err, surfaceid.ErrLinkExpired):
+		// Falls through to the same refusal as another human's identity.
+	case err != nil:
+		slog.Error("delegation: surface identity lookup failed", "error", err)
+		h.refuseDelegation(w, r, user, agentName, "", delegationCodeUnavailable, http.StatusServiceUnavailable,
+			"could not verify the surface identity")
+		return false
+	case link.Principal == "github:"+login:
+		return true
+	}
+	h.refuseDelegation(w, r, user, agentName, "", delegationCodeNotBound, http.StatusForbidden,
+		"actor_external_id is not the delegated subject's surface identity")
+	return false
 }
 
 // ListWorkItemEvents handles GET /api/v1/work-items/{id}/events.
