@@ -1,5 +1,27 @@
 # Changelog
 
+## [4.57.0](https://github.com/mctlhq/mctl-api/compare/4.56.0...4.57.0) (2026-09-30)
+
+
+### Features
+
+* **agents:** issue-376-feat-unified-identity-represent-agent-ac ([73acd14](https://github.com/mctlhq/mctl-api/commit/73acd14837f0575af2e5988833e5de3800a2cfe7))
+* **agents:** issue-376-feat-unified-identity-represent-agent-ac ([87297f2](https://github.com/mctlhq/mctl-api/commit/87297f281062a453782f3146dc789ff6aae64dcb))
+* **agents:** issue-409-feat-evidence-persist-and-retrieve-seale ([c5bc7f3](https://github.com/mctlhq/mctl-api/commit/c5bc7f388a5399a9bc2035d62d05d6eba52f2827))
+* **agents:** issue-409-feat-evidence-persist-and-retrieve-seale ([0af2306](https://github.com/mctlhq/mctl-api/commit/0af2306e3db1f917572d0ec5af113cd2acde2fc4))
+* **agents:** issue-421-feat-helm-deliver-mctl-surface-telegram ([d9414f2](https://github.com/mctlhq/mctl-api/commit/d9414f269f3218fcfc5fde42d82fd213bdb749da))
+* **agents:** issue-421-feat-helm-deliver-mctl-surface-telegram ([cbdd628](https://github.com/mctlhq/mctl-api/commit/cbdd62879b9472822376c482498e4b4d6aca0cfc))
+* **agents:** issue-426-fix-operations-declare-the-devloop-corre ([dffa884](https://github.com/mctlhq/mctl-api/commit/dffa8847789289320cd55c72f439043342b9fdf7))
+* **agents:** issue-426-fix-operations-declare-the-devloop-corre ([65323ae](https://github.com/mctlhq/mctl-api/commit/65323ae8eeb396b0a69489ef11216c9cc3352c93))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-376-feat-unified-identity-represent-agent-ac ([5aa4ac9](https://github.com/mctlhq/mctl-api/commit/5aa4ac91469bd4c4c798ddbcabf3f72c7c07fc5b))
+* **agents:** address P1/P2 codex findings on issue-376-feat-unified-identity-represent-agent-ac ([5235f4d](https://github.com/mctlhq/mctl-api/commit/5235f4d518ad0b3e65d8c824ab0e7a485e9410d7))
+* **agents:** typed code on the agent-run-token registry error ([0638286](https://github.com/mctlhq/mctl-api/commit/06382864de68a77aaa5c6ce4a0fe2997488d3232))
+* **evidence:** address review round on the Tier B evidence store ([da0ca20](https://github.com/mctlhq/mctl-api/commit/da0ca20119838d192a5e30424079df59d143e6b1)), closes [#409](https://github.com/mctlhq/mctl-api/issues/409)
+
 ## [4.56.0](https://github.com/mctlhq/mctl-api/compare/4.55.0...4.56.0) (2026-09-28)
 
 
