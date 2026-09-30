@@ -117,6 +117,16 @@ usageWriterTokenSecret: ""
 # rather than failing the pod.
 evidenceWriterTokenSecret: ""
 
+# Optional: Secret holding MCTL_SURFACE_TELEGRAM_TOKEN, the bearer token of
+# the surface:telegram principal (mctlhq/mctl-telegram#443). mctl-api
+# authenticates it in internal/auth/oidc.go (surfaceTokenEnv,
+# minSurfaceTokenLen = 32); it may only speak for the telegram surface. The
+# key inside the Secret is MCTL_SURFACE_TELEGRAM_TOKEN, which is what the
+# mctl-gitops ExternalSecret mctl-api-surface-telegram produces. The
+# reference is optional, so an absent Secret leaves the principal disabled
+# rather than failing the pod.
+surfaceTelegramTokenSecret: ""
+
 # Optional: mount a versioned usage rate card from a ConfigMap.
 #
 # When set, the ConfigMap is mounted read-only at

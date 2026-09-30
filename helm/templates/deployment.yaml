@@ -75,6 +75,20 @@ spec:
                   key: MCTL_EVIDENCE_WRITER_TOKEN
                   optional: true
             {{- end }}
+            {{- if .Values.surfaceTelegramTokenSecret }}
+            # Optional on purpose, same as the usage writer above: the chart ships
+            # before mctl-gitops flips surfaceTelegramToken.enabled, so the Secret may
+            # not exist yet. A missing Secret leaves the surface:telegram principal
+            # disabled (relay calls 401) instead of holding the pod in
+            # CreateContainerConfigError. The key matches the ExternalSecret
+            # mctl-api-surface-telegram's secretKey.
+            - name: MCTL_SURFACE_TELEGRAM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.surfaceTelegramTokenSecret }}
+                  key: MCTL_SURFACE_TELEGRAM_TOKEN
+                  optional: true
+            {{- end }}
             {{- if .Values.usagePricingConfigMap }}
             # The path, not the JSON. internal/usage/catalog_file.go reads this file
             # with os.ReadFile; a rate card is reviewed as a file in GitOps, and an env
