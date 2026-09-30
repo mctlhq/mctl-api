@@ -167,8 +167,12 @@ func TestWorkItemGrant_ProjectsTheOwnerAndHasNoExecutionID(t *testing.T) {
 func TestSurfaceRefBound_MatchesExactlyOneCorrelation(t *testing.T) {
 	s := newStoreForTest(t)
 	w := open(t, s, CreateInput{})
+	// as() records Surface "cli"; the correlation must be stored under the
+	// surface the lookup names, so the mutation carries it explicitly.
+	m := as("surface:telegram")
+	m.Surface = "telegram"
 	if _, _, err := s.LinkSurface(context.Background(), SurfaceRefInput{
-		Mutation: as("surface:telegram"), WorkItemID: w.ID, ExternalID: "chat-1", ActorExternalID: "555",
+		Mutation: m, WorkItemID: w.ID, ExternalID: "chat-1", ActorExternalID: "555",
 	}); err != nil {
 		t.Fatal(err)
 	}
