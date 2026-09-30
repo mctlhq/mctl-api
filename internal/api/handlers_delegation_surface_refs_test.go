@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/httprate"
 
@@ -265,5 +266,40 @@ func TestDelegatedSurfaceRef_UndelegatedAgentNeverBindsAnActor(t *testing.T) {
 	}
 	if audited != 1 {
 		t.Fatalf("audited refusals = %d, want 1", audited)
+	}
+}
+
+// An over-long X-MCTL-On-Behalf-Of reaches Resolve exactly as sent. A valid
+// ref with extra bytes appended is therefore refused, never cut back down to
+// the valid prefix. Only the audit parameter is capped, and the cap never
+// splits a UTF-8 sequence.
+func TestAgentPrincipalGate_OverlongRefIsResolvedAsSentAndAuditedBounded(t *testing.T) {
+	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1"})
+	valid := "xr_" + strings.Repeat("a", maxGrantRefBytes-3)
+	var seen []string
+	log := audit.NewLogger()
+	h := &Handlers{opts: Options{AuditLog: log, Delegation: &fakeDelegation{fn: func(ref string, _ auth.AgentRun) (delegation.Grant, error) {
+		seen = append(seen, ref)
+		if ref == valid {
+			return delegation.Grant{Ref: ref, Kind: delegation.KindExecutionRequest, Subject: "github:alice", SubjectPrincipalID: "prn_alice"}, nil
+		}
+		return delegation.Grant{}, delegation.ErrNotBound
+	}}}}
+	sent := valid + "ééé"
+	rec, next := runGate(h, delegatedReq(http.MethodGet, allowlistedRoute, agent, sent))
+	if next.called || rec.Code != http.StatusForbidden {
+		t.Fatalf("over-long ref = %d called=%v, want 403 and no next", rec.Code, next.called)
+	}
+	if len(seen) != 1 || seen[0] != sent {
+		t.Fatalf("Resolve saw %q, want the ref exactly as sent", seen)
+	}
+	var got string
+	for _, e := range log.List(10) {
+		if e.Operation == "agent_identity.delegation_refused" {
+			got = e.Parameters["grant_ref"]
+		}
+	}
+	if len(got) > maxGrantRefBytes || !utf8.ValidString(got) || got == "" {
+		t.Fatalf("audited grant_ref has %d bytes, valid UTF-8 %v; want non-empty, <= %d and valid", len(got), utf8.ValidString(got), maxGrantRefBytes)
 	}
 }

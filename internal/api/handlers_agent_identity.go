@@ -55,13 +55,15 @@ const OnBehalfOfHeader = "X-MCTL-On-Behalf-Of"
 // storage on every request, unthrottled, before anything limits it.
 const maxGrantRefBytes = workitems.MaxExternalIDBytes
 
-// boundedRef truncates ref to maxGrantRefBytes before it is ever used in a
-// log line or an audit parameter. It is never used to decide whether the
-// grant is valid -- an over-long ref still fails delegation.Resolve's own
-// lookup normally (ErrNotBound), this only caps what gets written about it.
+// boundedRef caps ref to maxGrantRefBytes for the one place it is written
+// down, the audit parameter in refuseDelegation. It is applied there and
+// nowhere else. Resolve always receives the ref exactly as sent, so an
+// over-long one fails its lookup (ErrNotBound) instead of being cut down to
+// a valid id that happens to be its prefix. The cut never splits a UTF-8
+// sequence.
 func boundedRef(ref string) string {
 	if len(ref) > maxGrantRefBytes {
-		return ref[:maxGrantRefBytes]
+		return strings.ToValidUTF8(ref[:maxGrantRefBytes], "")
 	}
 	return ref
 }
@@ -119,7 +121,7 @@ func (h *Handlers) refuseDelegation(w http.ResponseWriter, r *http.Request, acti
 		UserID: acting.ID, Operation: "agent_identity.delegation_refused", Status: "failed",
 		RiskLevel: string(operations.RiskMedium),
 		Parameters: map[string]string{
-			"acting_principal": acting.ID, "agent": agentName, "grant_ref": ref,
+			"acting_principal": acting.ID, "agent": agentName, "grant_ref": boundedRef(ref),
 			"route": r.Method + " " + r.URL.Path, "reason": code,
 		},
 	})
@@ -155,7 +157,6 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 				OnBehalfOfHeader+" may only be sent by an agent principal", nil)
 			return
 		}
-		ref = boundedRef(ref)
 		if !delegationAllowlisted(r.Method, r.URL.Path) {
 			h.refuseDelegation(w, r, user, agentName, ref, delegationCodeNotSupported, http.StatusBadRequest,
 				"an agent principal may not delegate on "+r.Method+" "+r.URL.Path)
