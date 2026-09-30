@@ -149,7 +149,7 @@ var reservedProviderNames = map[string]bool{
 	ProviderGitHub:  true,
 	ProviderService: true,
 	ProviderDev:     true,
-	"agent":         true,
+	ProviderAgent:   true,
 }
 
 // Registry routes a bearer token to at most one provider and enforces the

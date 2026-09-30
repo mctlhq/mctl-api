@@ -182,9 +182,14 @@ func (h *Handlers) logAudit(r *http.Request, entry audit.Entry) {
 		// The entry is about the authenticated caller (a relayed request's
 		// context user is the linked human, carrying the surface as its via
 		// principal). An entry naming anyone else keeps what it was given.
-		if u := auth.UserFromContext(r.Context()); u != nil && u.ID == entry.UserID && entry.PrincipalID == "" {
-			entry.PrincipalID = u.PrincipalID()
-			entry.ViaPrincipalID = u.ViaPrincipalID()
+		if u := auth.UserFromContext(r.Context()); u != nil && u.ID == entry.UserID {
+			if entry.PrincipalID == "" {
+				entry.PrincipalID = u.PrincipalID()
+				entry.ViaPrincipalID = u.ViaPrincipalID()
+			}
+			if entry.ViaExecutionID == "" {
+				entry.ViaExecutionID = u.ExecutionID()
+			}
 		}
 	}
 	h.opts.AuditLog.Log(entry)

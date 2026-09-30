@@ -813,6 +813,15 @@ func (s *Store) highestCompatibleProfileVersion(ctx context.Context, profile, pr
 	return best, nil
 }
 
+// HasDefinition reports whether agent is declared in the registry at all
+// (mctl-api#376: POST /api/v1/agent-run-tokens refuses to mint for an agent
+// with no AgentDefinition row). A thin exported wrapper around
+// definitionExists, which every other v1alpha2 caller in this file already
+// uses internally.
+func (s *Store) HasDefinition(ctx context.Context, agent string) (bool, error) {
+	return s.definitionExists(ctx, agent)
+}
+
 // definitionExists reports whether the agent is declared at all, which is
 // what separates ErrDefinitionNotFound from ErrBindingNotFound on a resolve.
 func (s *Store) definitionExists(ctx context.Context, agent string) (bool, error) {

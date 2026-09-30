@@ -73,6 +73,9 @@ var forbiddenIdentityFields = []string{
 // prefix records how the caller authenticated, so a Dex username that
 // happens to equal a GitHub login never reads as that GitHub user.
 func principalOf(u *auth.User) string {
+	if name, ok := u.AgentName(); ok {
+		return auth.AgentPrincipalPrefix + name
+	}
 	if u.IsService() {
 		return "service:" + u.ID
 	}
@@ -231,7 +234,8 @@ func mutationFor(w http.ResponseWriter, r *http.Request, user *auth.User, op, it
 	m := workitems.Mutation{
 		Actor: principalOf(user), ActingPrincipal: user.ActingPrincipal(),
 		ActorPrincipalID: user.PrincipalID(), ViaPrincipalID: user.ViaPrincipalID(),
-		Surface: surface, IdempotencyKey: key,
+		ViaExecutionID: user.ExecutionID(),
+		Surface:        surface, IdempotencyKey: key,
 	}
 	if meta, ok := ClientMetaFromContext(r.Context()); ok {
 		m.RequestID = truncateRequestID(meta.RequestID)

@@ -126,6 +126,10 @@ ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS acting_principal TEXT NOT 
 ALTER TABLE work_items ADD COLUMN IF NOT EXISTS owner_principal_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS actor_principal_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
+-- The execution an agent run token is bound to (mctl-api#376), dual-written
+-- next to via_principal_id on an agent-authenticated request. Write-only
+-- like the principal id columns above: nothing reads it back yet.
+ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS via_execution_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE work_item_intents ADD COLUMN IF NOT EXISTS actor_principal_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS work_item_create_requests_item ON work_item_create_requests (work_item_id);
 `
@@ -175,6 +179,10 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 	if _, err := pool.Exec(ctx, executionRequestSchema); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("workitems: create execution request schema: %w", err)
+	}
+	if _, err := pool.Exec(ctx, agentRunTokenSchema); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("workitems: create agent run token schema: %w", err)
 	}
 	slog.Info("work-items store initialized")
 	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
@@ -353,10 +361,10 @@ func appendEvent(ctx context.Context, tx pgx.Tx, id, kind, from, to string, m Mu
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO work_item_events
 		(work_item_id, seq, kind, from_state, to_state, actor_principal, acting_principal, surface, request_id, detail, created_at,
-		 actor_principal_id, via_principal_id)
+		 actor_principal_id, via_principal_id, via_execution_id)
 		VALUES ($1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM work_item_events WHERE work_item_id=$1),
-		        $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-		id, kind, from, to, m.Actor, m.ActingPrincipal, m.Surface, m.RequestID, raw, at, m.ActorPrincipalID, m.ViaPrincipalID)
+		        $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		id, kind, from, to, m.Actor, m.ActingPrincipal, m.Surface, m.RequestID, raw, at, m.ActorPrincipalID, m.ViaPrincipalID, m.ViaExecutionID)
 	if err != nil {
 		return fmt.Errorf("workitems: append event: %w", err)
 	}

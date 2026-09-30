@@ -24,8 +24,12 @@ type Mutation struct {
 	// authorization. "" when authentication could not resolve one.
 	ActorPrincipalID string
 	ViaPrincipalID   string
-	Surface          string
-	RequestID        string
+	// ViaExecutionID is the WorkItemExecution (we_...) an agent run token is
+	// bound to (mctl-api#376), recorded next to ActingPrincipal/ViaPrincipalID
+	// on a request an agent principal made. "" for every non-agent request.
+	ViaExecutionID string
+	Surface        string
+	RequestID      string
 	// IdempotencyKey deduplicates the request: per tenant for Create, per
 	// work item for everything else. RequestHash is the digest of the
 	// request the key was first used with. The same key with a different

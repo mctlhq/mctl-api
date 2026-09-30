@@ -529,6 +529,24 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/evidence/records", h.IngestEvidence)
 			})
 
+			// Agent run tokens (mctl-api#376): minting is isDirectService
+			// only, so every mint shares the exact same principal key as
+			// every other route on the 20/min write budget above. An agent
+			// run needing a fresh credential would then compete with
+			// dev-loop starts, work-item mutations, and everything else on
+			// that budget and could be starved under load. Its own group
+			// and budget, the same reasoning as the execution-requests
+			// group above.
+			r.Group(func(r chi.Router) {
+				r.Use(httprate.Limit(120, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					if user := auth.UserFromContext(r.Context()); user != nil {
+						return "agent-run-tokens:" + rateLimitSubject(r, user), nil
+					}
+					return keyByTrustedIP(r)
+				})))
+				r.Post("/agent-run-tokens", h.MintAgentRunToken)
+			})
+
 			// Work-item reads: side-effect free, outside the write budget.
 			r.Get("/work-items", h.ListWorkItems)
 			r.Get("/surface-identities", h.ListSurfaceIdentities)
