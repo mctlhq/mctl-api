@@ -15,9 +15,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type secretKeyRef struct {
+	Name     string `yaml:"name"`
+	Key      string `yaml:"key"`
+	Optional bool   `yaml:"optional"`
+}
+
+type envVarSource struct {
+	SecretKeyRef *secretKeyRef `yaml:"secretKeyRef"`
+}
+
 type envVar struct {
-	Name  string `yaml:"name"`
-	Value string `yaml:"value"`
+	Name      string        `yaml:"name"`
+	Value     string        `yaml:"value"`
+	ValueFrom *envVarSource `yaml:"valueFrom"`
 }
 
 type volumeMount struct {
@@ -127,6 +138,16 @@ func findEnv(c container, name string) (envVar, bool) {
 	return envVar{}, false
 }
 
+func countEnv(c container, name string) int {
+	n := 0
+	for _, e := range c.Env {
+		if e.Name == name {
+			n++
+		}
+	}
+	return n
+}
+
 func findVolumeMount(c container, name string) (volumeMount, bool) {
 	for _, vm := range c.VolumeMounts {
 		if vm.Name == name {
@@ -222,6 +243,90 @@ func TestDeploymentEmptyUsagePricingRendersUnchanged(t *testing.T) {
 	}
 }
 
+func TestDeploymentDefaultRenderHasNoSurfaceTelegramToken(t *testing.T) {
+	d, _ := renderDeployment(t)
+	c := mainContainer(t, d)
+
+	if _, ok := findEnv(c, "MCTL_SURFACE_TELEGRAM_TOKEN"); ok {
+		t.Error("default render should not set MCTL_SURFACE_TELEGRAM_TOKEN")
+	}
+}
+
+func TestDeploymentEmptySurfaceTelegramTokenRendersUnchanged(t *testing.T) {
+	_, defaultOut := renderDeployment(t)
+	_, emptyOut := renderDeployment(t, "--set", "surfaceTelegramTokenSecret=")
+
+	if !bytes.Equal(defaultOut, emptyOut) {
+		t.Error("empty surfaceTelegramTokenSecret should render byte-identical output to the default")
+	}
+}
+
+func TestDeploymentRendersSurfaceTelegramTokenEnv(t *testing.T) {
+	d, _ := renderDeployment(t, "--set", "surfaceTelegramTokenSecret=mctl-api-surface-telegram")
+	c := mainContainer(t, d)
+
+	if n := countEnv(c, "MCTL_SURFACE_TELEGRAM_TOKEN"); n != 1 {
+		t.Fatalf("expected exactly one MCTL_SURFACE_TELEGRAM_TOKEN env entry, got %d", n)
+	}
+
+	env, ok := findEnv(c, "MCTL_SURFACE_TELEGRAM_TOKEN")
+	if !ok {
+		t.Fatal("expected MCTL_SURFACE_TELEGRAM_TOKEN env to be rendered")
+	}
+	if env.Value != "" {
+		t.Errorf("MCTL_SURFACE_TELEGRAM_TOKEN.value = %q, want empty (no literal leaked into the manifest)", env.Value)
+	}
+	if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+		t.Fatal("expected MCTL_SURFACE_TELEGRAM_TOKEN to be sourced from a secretKeyRef")
+	}
+	ref := env.ValueFrom.SecretKeyRef
+	if ref.Name != "mctl-api-surface-telegram" {
+		t.Errorf("secretKeyRef.name = %q, want %q", ref.Name, "mctl-api-surface-telegram")
+	}
+	if ref.Key != "MCTL_SURFACE_TELEGRAM_TOKEN" {
+		t.Errorf("secretKeyRef.key = %q, want %q", ref.Key, "MCTL_SURFACE_TELEGRAM_TOKEN")
+	}
+	if !ref.Optional {
+		t.Error("expected secretKeyRef.optional to be true")
+	}
+}
+
+func TestDeploymentBothSurfaceTokenSecretsRenderIndependently(t *testing.T) {
+	d, _ := renderDeployment(t,
+		"--set", "usageWriterTokenSecret=mctl-api-usage-writer",
+		"--set", "surfaceTelegramTokenSecret=mctl-api-surface-telegram",
+	)
+	c := mainContainer(t, d)
+
+	usageEnv, ok := findEnv(c, "MCTL_USAGE_WRITER_TOKEN")
+	if !ok {
+		t.Fatal("expected MCTL_USAGE_WRITER_TOKEN env to be rendered")
+	}
+	if usageEnv.ValueFrom == nil || usageEnv.ValueFrom.SecretKeyRef == nil {
+		t.Fatal("expected MCTL_USAGE_WRITER_TOKEN to be sourced from a secretKeyRef")
+	}
+	if got, want := usageEnv.ValueFrom.SecretKeyRef.Name, "mctl-api-usage-writer"; got != want {
+		t.Errorf("MCTL_USAGE_WRITER_TOKEN secretKeyRef.name = %q, want %q", got, want)
+	}
+	if got, want := usageEnv.ValueFrom.SecretKeyRef.Key, "MCTL_USAGE_WRITER_TOKEN"; got != want {
+		t.Errorf("MCTL_USAGE_WRITER_TOKEN secretKeyRef.key = %q, want %q", got, want)
+	}
+
+	telegramEnv, ok := findEnv(c, "MCTL_SURFACE_TELEGRAM_TOKEN")
+	if !ok {
+		t.Fatal("expected MCTL_SURFACE_TELEGRAM_TOKEN env to be rendered")
+	}
+	if telegramEnv.ValueFrom == nil || telegramEnv.ValueFrom.SecretKeyRef == nil {
+		t.Fatal("expected MCTL_SURFACE_TELEGRAM_TOKEN to be sourced from a secretKeyRef")
+	}
+	if got, want := telegramEnv.ValueFrom.SecretKeyRef.Name, "mctl-api-surface-telegram"; got != want {
+		t.Errorf("MCTL_SURFACE_TELEGRAM_TOKEN secretKeyRef.name = %q, want %q", got, want)
+	}
+	if got, want := telegramEnv.ValueFrom.SecretKeyRef.Key, "MCTL_SURFACE_TELEGRAM_TOKEN"; got != want {
+		t.Errorf("MCTL_SURFACE_TELEGRAM_TOKEN secretKeyRef.key = %q, want %q", got, want)
+	}
+}
+
 func TestDeploymentUsagePricingKeyOverride(t *testing.T) {
 	d, _ := renderDeployment(t,
 		"--set", "usagePricingConfigMap=cm",
@@ -285,12 +390,13 @@ func TestDeploymentUsagePricingLeavesOtherVolumesIntact(t *testing.T) {
 	}
 }
 
-func TestHelmLintCleanWithAndWithoutUsagePricing(t *testing.T) {
+func TestHelmLintCleanAcrossOptionalValues(t *testing.T) {
 	helmPath := requireHelm(t)
 
 	cases := [][]string{
 		nil,
 		{"--set", "usagePricingConfigMap=mctl-api-usage-pricing"},
+		{"--set", "surfaceTelegramTokenSecret=mctl-api-surface-telegram"},
 	}
 	for _, extra := range cases {
 		args := append([]string{"lint", "."}, extra...)
