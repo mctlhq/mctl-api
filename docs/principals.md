@@ -26,6 +26,7 @@ everything in this document stay exactly as they are.
 | Dex JWT | `dex` | token `iss` | token `sub` | human |
 | `MCTL_AGENT_SERVICE_TOKEN` | `service` | — | `mctl-agent` | service |
 | surface token | `service` | — | `surface:<name>` | service |
+| agent run token (mctl-api#376) | `agent` | — | `agent:<name>` | agent |
 | dev mode (`AUTH_REQUIRED=false`) | `dev` | — | `dev-user` | human |
 | surface link (mirror) | `<surface>` | — | the surface-native id | — (the linked human's) |
 

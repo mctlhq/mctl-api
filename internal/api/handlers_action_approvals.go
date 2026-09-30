@@ -202,6 +202,7 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !isDirectService(user) {
+		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", aarCodeRequesterForbidden)
 		writeErrorCode(w, http.StatusForbidden, aarCodeRequesterForbidden,
 			"only a service principal acting directly may request an action approval", nil)
 		return

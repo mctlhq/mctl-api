@@ -86,6 +86,7 @@ func workItemsRouter(h *Handlers) chi.Router {
 	r.Post("/api/v1/execution-requests/claim", h.ClaimExecutionRequest)
 	r.Post("/api/v1/execution-requests/{request_id}/fulfil", h.FulfilExecutionRequest)
 	r.Post("/api/v1/execution-requests/{request_id}/reject", h.RejectExecutionRequest)
+	r.Post("/api/v1/agent-run-tokens", h.MintAgentRunToken)
 	return r
 }
 
