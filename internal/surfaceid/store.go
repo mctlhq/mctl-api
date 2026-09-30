@@ -481,6 +481,39 @@ func (s *Store) Resolve(ctx context.Context, surface, externalID string) (*Link,
 	return l, nil
 }
 
+// LinkByID implements delegation.SurfaceLinkSource for a sil_ grant ref
+// (mctl-api#376 slice B): the link's surface, external id and principal
+// string. It reuses Resolve's own liveness rules rather than a second one:
+// a not-found row is ErrLinkNotFound, a revoked link ErrLinkRevoked, an
+// expired one ErrLinkExpired -- exactly the sentinels Resolve yields, so a
+// caller checking one checks the other identically.
+//
+// This package deliberately does NOT import internal/delegation to return
+// its ErrNotBound directly: internal/auth already imports this package (for
+// IsSurface), and internal/delegation imports internal/auth (for
+// auth.AgentRun), so this package importing internal/delegation back would
+// be a compile-time cycle (auth -> surfaceid -> delegation -> auth).
+// internal/delegation's StoreResolver imports this package instead, purely
+// to classify these three sentinels -- the reverse direction carries no
+// cycle, since this package imports neither internal/auth nor
+// internal/delegation.
+func (s *Store) LinkByID(ctx context.Context, id string) (surface, externalID, principal string, err error) {
+	l, err := scanLink(s.pool.QueryRow(ctx, `SELECT `+linkColumns+` FROM surface_identity_links WHERE id=$1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", "", ErrLinkNotFound
+	}
+	if err != nil {
+		return "", "", "", fmt.Errorf("surfaceid: link by id: %w", err)
+	}
+	if l.RevokedAt != nil {
+		return "", "", "", ErrLinkRevoked
+	}
+	if s.expired(l, s.now()) {
+		return "", "", "", ErrLinkExpired
+	}
+	return l.Surface, l.ExternalID, l.Principal, nil
+}
+
 // Links lists a principal's links, live and revoked, newest first.
 func (s *Store) Links(ctx context.Context, principal string) ([]Link, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+linkColumns+` FROM surface_identity_links
