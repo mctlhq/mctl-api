@@ -324,6 +324,17 @@ func NewRouter(opts Options) http.Handler {
 		// Surface principals reach only their allowlisted routes; relay
 		// routes continue as the linked human.
 		r.Use(h.surfacePrincipalGate)
+		// An agent principal's ceiling counts every call it makes, the same
+		// reasoning as surfaceAggregateLimit above: it must run before
+		// agentPrincipalGate substitutes the delegated human, otherwise the
+		// global limiter's per-subject split below (keyed on
+		// rateLimitSubject -> the delegated human's user.ID) becomes the
+		// agent's only ceiling, with no aggregate cap across every human it
+		// delegates to -- unlike the surface relay, which pairs its own
+		// per-subject split with exactly this aggregate ceiling.
+		r.Use(agentAggregateLimit(httprate.Limit(agentAggregateLimitPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+			return "agent-total:" + auth.UserFromContext(r.Context()).ID, nil
+		}))))
 		// Delegation (mctl-api#376 slice B): an agent principal's
 		// X-MCTL-On-Behalf-Of resolves to the grant's subject here, right
 		// after the surface gate and on the same footing -- it too resolves
@@ -858,6 +869,31 @@ func surfaceAggregateLimit(limit func(http.Handler) http.Handler) func(http.Hand
 			if _, isSurface := auth.UserFromContext(r.Context()).Surface(); isSurface {
 				limited.ServeHTTP(w, r)
 				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// agentAggregateLimitPerMinute caps one agent principal across all the
+// delegated subjects it acts for, the same ceiling surfaceAggregateLimit
+// pairs with the surface relay's per-subject split -- without it, an
+// agent's budget is only the global limiter's per-delegated-human split,
+// with no cap on the agent as a whole.
+const agentAggregateLimitPerMinute = 1200
+
+// agentAggregateLimit applies limit to agent principals only, keyed on the
+// principal alone, evaluated before agentPrincipalGate substitutes the
+// delegated subject into the request context.
+func agentAggregateLimit(limit func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		limited := limit(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if user := auth.UserFromContext(r.Context()); user != nil {
+				if _, isAgent := user.AgentName(); isAgent {
+					limited.ServeHTTP(w, r)
+					return
+				}
 			}
 			next.ServeHTTP(w, r)
 		})

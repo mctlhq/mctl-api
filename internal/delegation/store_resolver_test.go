@@ -144,6 +144,31 @@ func TestStoreResolver_BindingPerKind(t *testing.T) {
 	}
 }
 
+// T1b: a grant explicitly bound to execution B is refused when presented by
+// a run token bound to a different execution A, even when both executions
+// sit on the same work item -- the work-item fallback must not paper over
+// an execution-scoped grant's own binding.
+func TestStoreResolver_ExecutionScopedGrantRejectsOtherExecutionSameWorkItem(t *testing.T) {
+	items := &fakeWorkItems{
+		execReq: map[string]Record{
+			"xr_b": {Subject: "github:alice", SubjectPrincipalID: "prn_ALICE", ExecutionID: "we_B", WorkItemID: "wi_1"},
+		},
+		actionApprov: map[string]Record{
+			"aar_b": {Subject: "github:bob", SubjectPrincipalID: "prn_BOB", ExecutionID: "we_B", WorkItemID: "wi_1"},
+		},
+	}
+	r := NewStoreResolver(items, nil)
+	// bound to execution A, same work item wi_1 as the xr_/aar_ grants above.
+	bound := auth.AgentRun{ExecutionID: "we_A", WorkItemID: "wi_1"}
+
+	for _, ref := range []string{"xr_b", "aar_b"} {
+		_, err := r.Resolve(context.Background(), ref, bound)
+		if !errors.Is(err, ErrNotBound) {
+			t.Fatalf("Resolve(%s) by a different execution on the same work item = %v, want ErrNotBound", ref, err)
+		}
+	}
+}
+
 // T2: mint context vs grant disagreement. A run token minted on wi_X owned
 // by Alice, presenting an xr_ bound to wi_X but requested_by Bob, resolves
 // to Bob; the work item's owner never appears in the returned Grant.

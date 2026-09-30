@@ -183,10 +183,18 @@ type SurfaceLinkSource interface {
 	LinkByID(ctx context.Context, id string) (surface, externalID, principal string, err error)
 }
 
-// boundTo reports whether rec is bound to run: its execution id or its
-// work item id must equal run's, and an empty string never matches an
-// empty string, so two unset ids never "agree".
+// boundTo reports whether rec is bound to run. A record that carries its
+// own execution id (an ExecutionRequestGrant or ActionApprovalGrant, each
+// scoped to the execution that created it) must match that execution id
+// exactly -- it does NOT fall back to a work-item-level match, otherwise a
+// grant explicitly scoped to execution B would be presentable by any other
+// execution A that merely shares B's work item. Only a record with no
+// execution id of its own (a WorkItemGrant, which has none) is bound by
+// work item id. An empty string never matches an empty string, so two
+// unset ids never "agree".
 func boundTo(rec Record, run auth.AgentRun) bool {
-	return (rec.ExecutionID != "" && rec.ExecutionID == run.ExecutionID) ||
-		(rec.WorkItemID != "" && rec.WorkItemID == run.WorkItemID)
+	if rec.ExecutionID != "" {
+		return rec.ExecutionID == run.ExecutionID
+	}
+	return rec.WorkItemID != "" && rec.WorkItemID == run.WorkItemID
 }
