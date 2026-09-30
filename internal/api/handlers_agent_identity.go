@@ -140,13 +140,22 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		ref = boundedRef(ref)
 		agentName, isAgent := user.AgentName()
 		if !isAgent {
-			h.refuseDelegation(w, r, user, "", ref, delegationCodeNotAccepted, http.StatusBadRequest,
-				OnBehalfOfHeader+" may only be sent by an agent principal")
+			// Mirrors surfacePrincipalGate's !isSurface branch
+			// (handlers_surface_identity.go): this gate runs ahead of every
+			// rate limiter (router.go), so a non-agent caller -- any
+			// authenticated user -- can send this header on every request.
+			// refuseDelegation's audit write must not be reachable from
+			// that path: it would let an ordinary authenticated caller grow
+			// audit storage on every request, unthrottled. No grant ref has
+			// been resolved yet, so nothing of value would be recorded
+			// anyway.
+			writeErrorCode(w, http.StatusBadRequest, delegationCodeNotAccepted,
+				OnBehalfOfHeader+" may only be sent by an agent principal", nil)
 			return
 		}
+		ref = boundedRef(ref)
 		if !delegationAllowlisted(r.Method, r.URL.Path) {
 			h.refuseDelegation(w, r, user, agentName, ref, delegationCodeNotSupported, http.StatusBadRequest,
 				"an agent principal may not delegate on "+r.Method+" "+r.URL.Path)

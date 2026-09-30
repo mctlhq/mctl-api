@@ -105,8 +105,12 @@ func TestAgentPrincipalGate_PassesThroughWithNoUserOrNoHeader(t *testing.T) {
 // T7: X-MCTL-On-Behalf-Of sent by anyone that is not an agent principal is
 // 400 delegation_not_accepted, whoever they are -- a human, a surface
 // principal, a relayed subject, the service principal, the usage writer and
-// the evidence writer. Every refusal writes exactly one
-// agent_identity.delegation_refused audit row.
+// the evidence writer. This gate runs ahead of every rate limiter
+// (router.go), so none of these refusals write an
+// agent_identity.delegation_refused audit row: that write must not be
+// reachable, unthrottled, by every authenticated caller on every request --
+// mirrors surfacePrincipalGate's !isSurface branch
+// (handlers_surface_identity.go), which refuses the same way with no audit.
 func TestAgentPrincipalGate_NonAgentWithHeaderIsRefused(t *testing.T) {
 	log := audit.NewLogger()
 	h := &Handlers{opts: Options{Delegation: &fakeDelegation{fn: alwaysGrant}, AuditLog: log}}
@@ -137,13 +141,10 @@ func TestAgentPrincipalGate_NonAgentWithHeaderIsRefused(t *testing.T) {
 	for _, e := range log.List(100) {
 		if e.Operation == "agent_identity.delegation_refused" {
 			refusals++
-			if e.Parameters["reason"] != delegationCodeNotAccepted || e.Parameters["acting_principal"] == "" {
-				t.Errorf("delegation_refused audit = %+v", e.Parameters)
-			}
 		}
 	}
-	if refusals != 6 {
-		t.Fatalf("delegation_refused audit rows = %d, want 6", refusals)
+	if refusals != 0 {
+		t.Fatalf("delegation_refused audit rows = %d, want 0 (non-agent refusal must not audit)", refusals)
 	}
 }
 
