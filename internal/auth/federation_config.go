@@ -43,6 +43,12 @@ type OIDCProviderConfigEntry struct {
 	DisplayClaims       []string `json:"display_claims,omitempty"`
 	GroupsClaim         string   `json:"groups_claim,omitempty"`
 	Kind                string   `json:"kind,omitempty"`
+	// GrantGroups opts this entry's groups claim into User.Groups (tenant
+	// access). Unset means false: see OIDCProviderSpec.GrantGroups. A
+	// pointer so BuildFederationRegistry can refuse it on the trusted Dex
+	// slot, where it would not apply, rather than silently ignore an
+	// explicit "grant_groups": false there.
+	GrantGroups *bool `json:"grant_groups,omitempty"`
 }
 
 func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
@@ -55,6 +61,7 @@ func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
 		DisplayClaims:       e.DisplayClaims,
 		GroupsClaim:         e.GroupsClaim,
 		Kind:                e.Kind,
+		GrantGroups:         e.GrantGroups != nil && *e.GrantGroups,
 	}
 }
 
@@ -202,6 +209,13 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 		// caller, while "dex" on any other issuer is a new trust decision
 		// and gets the filtered behaviour.
 		spec.LegacyDexGroups = e.Name == ProviderDex && dexIssuer != "" && normalizeIssuer(e.Issuer) == dexIssuer
+		if spec.LegacyDexGroups && e.GrantGroups != nil {
+			// The trusted Dex slot passes its groups unfiltered, admins
+			// included, whatever grant_groups says. An explicit value here
+			// (most dangerously false) would read as a decision the code
+			// does not honour, so it is refused rather than ignored.
+			return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q is the trusted Dex slot (issuer = DEX_ISSUER_URL), whose groups always pass unfiltered; remove grant_groups from it", e.Name)
+		}
 		p, err := newOIDCProviderFn(ctx, spec)
 		if err != nil {
 			slog.Warn("oidc provider init failed; provider disabled", "name", e.Name, "issuer", e.Issuer, "error", err)
