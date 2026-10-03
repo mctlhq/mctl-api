@@ -300,3 +300,60 @@ func TestNoZitadelEntryKeepsCurrentBehaviour(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNoProvider", err)
 	}
 }
+
+// The trusted Dex slot passes groups unfiltered, admins included, so it keeps
+// reading only what DexVerifier.Verify read: an object-shaped claim (even one
+// keyed "admins") yields no groups there and is counted as unreadable.
+func TestTrustedDexSlotDoesNotReadObjectGroupsClaim(t *testing.T) {
+	spec := OIDCProviderSpec{Name: ProviderDex, Issuer: testDexIssuer, Audiences: []string{"mctl-api"}, GroupsClaim: "roles", LegacyDexGroups: true}
+	fv := fakeOIDCVerifier{tok: &oidcVerifiedToken{Issuer: testDexIssuer, Audience: []string{"mctl-api"}, Claims: map[string]any{
+		"sub": "u1", "roles": map[string]any{"admins": map[string]any{}, "acme": map[string]any{}},
+	}}}
+	before := testutil.ToFloat64(federationGroupsClaimUnreadable.WithLabelValues(ProviderDex))
+	v, err := newOIDCProviderForTest(spec, fv).Verify(context.Background(), "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := userFromVerified(v); len(u.Groups) != 0 || u.IsAdmin() {
+		t.Fatalf("Dex slot read an object claim: Groups = %v", u.Groups)
+	}
+	if got := testutil.ToFloat64(federationGroupsClaimUnreadable.WithLabelValues(ProviderDex)) - before; got != 1 {
+		t.Fatalf("federation_groups_claim_unreadable_total{dex} delta = %v, want 1", got)
+	}
+}
+
+// A groups claim that cannot be fully read is counted, so a misconfigured
+// groups_claim does not look like "no groups asserted".
+func TestUnreadableGroupsClaimIsCounted(t *testing.T) {
+	cases := []struct {
+		name       string
+		claim      any
+		unreadable bool
+	}{
+		{"array of strings", []any{"acme"}, false},
+		{"object", map[string]any{"acme": map[string]any{}}, false},
+		{"bare string", "acme", true},
+		{"number", float64(7), true},
+		{"array of numbers", []any{float64(1), float64(2)}, true},
+		{"mixed array", []any{"acme", float64(1)}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := `[{"name":"zitadel","issuer":"` + zitadelIssuer + `","audiences":["` + zitadelClientID + `"],"grant_groups":true}]`
+			r := buildZitadelRegistry(t, raw, map[string]*oidcVerifiedToken{
+				zitadelIssuer: zitadelToken([]string{zitadelClientID}, map[string]any{"groups": tc.claim}),
+			})
+			before := testutil.ToFloat64(federationGroupsClaimUnreadable.WithLabelValues("zitadel"))
+			if _, err := r.Verify(context.Background(), fakeJWT(zitadelIssuer)); err != nil {
+				t.Fatal(err)
+			}
+			want := 0.0
+			if tc.unreadable {
+				want = 1
+			}
+			if got := testutil.ToFloat64(federationGroupsClaimUnreadable.WithLabelValues("zitadel")) - before; got != want {
+				t.Fatalf("federation_groups_claim_unreadable_total{zitadel} delta = %v, want %v", got, want)
+			}
+		})
+	}
+}

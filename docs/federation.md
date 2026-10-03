@@ -161,7 +161,7 @@ A JSON array, parsed by `auth.ParseOIDCProviders` and validated in
 | `audience_enforcement` | no | `enforce` | `audit` accepts a mismatched token and counts `federation_audience_mismatch_total{provider}`; `enforce` refuses it. |
 | `subject_claim` | no | `sub` | Claim that becomes `Identity.Subject`. |
 | `display_claims` | no | `["preferred_username","email","sub"]` | Tried in order for `Identity.Display` — this reproduces the pre-registry Dex fallback as configuration, the concrete meaning of "swappable". |
-| `groups_claim` | no | `groups` | Claim read for groups: an array of strings, or an object whose keys are the group names (ZITADEL's `urn:zitadel:iam:org:project:roles`). Any other shape is logged and read as no groups. It reaches `User.Groups` only for the trusted Dex slot or when `grant_groups` is on (see "Groups" below). |
+| `groups_claim` | no | `groups` | Claim read for groups: an array of strings, or (outside the trusted Dex slot) an object whose keys are the group names (ZITADEL's `urn:zitadel:iam:org:project:roles`). Any other shape, or non-string array elements, counts in `federation_groups_claim_unreadable_total{provider}` and is dropped. It reaches `User.Groups` only for the trusted Dex slot or when `grant_groups` is on (see "Groups" below). |
 | `kind` | no | `human` | One of `human`, `agent`, `service`. |
 | `grant_groups` | no | `false` | Whether this entry's groups reach `User.Groups`, i.e. grant tenant access. Off: the claim is dropped and counted in `federation_groups_withheld_total{provider}`. On: kept, with `admins` still stripped. Refused at boot on the trusted Dex slot. See "Groups" below. |
 
@@ -330,6 +330,7 @@ wholesale, and is not part of that pin.
 | `federation_audience_rejected_total` | `provider` | A decision was computed, came out negative, and the token was refused (`audience_enforcement: enforce`). Also counted as `result="invalid"` above; this is the audience-only share of it. |
 | `federation_provider_contract_violations_total` | `provider` | A provider returned an identity outside its own namespace. Should be permanently zero. |
 | `federation_groups_withheld_total` | `provider` | A verified token carried a non-empty groups claim that was dropped because the entry does not set `grant_groups`. What the entry *would* have granted. |
+| `federation_groups_claim_unreadable_total` | `provider` | A groups claim could not be fully read (wrong shape, non-string elements, or an object on the trusted Dex slot). Usually a misconfigured `groups_claim`. |
 
 The two audience counters are deliberately distinct: "we never checked" and
 "we checked, it failed, we let it through" are different operational facts,

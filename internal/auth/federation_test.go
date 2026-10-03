@@ -344,6 +344,7 @@ func TestOIDCAudienceEnforceRefusesWrongAudience(t *testing.T) {
 
 func TestOIDCAudienceAuditAcceptsAndCountsMismatch(t *testing.T) {
 	before := testutil.ToFloat64(federationAudienceMismatch.WithLabelValues("dex-audit-test"))
+	rejectedBefore := testutil.ToFloat64(federationAudienceRejected.WithLabelValues("dex-audit-test"))
 	spec := OIDCProviderSpec{Name: "dex-audit-test", Issuer: "https://dex", Audiences: []string{"mctl-api"}, AudienceEnforcement: AudienceAudit}
 	fv := fakeOIDCVerifier{tok: &oidcVerifiedToken{Issuer: "https://dex", Audience: []string{"other"}, Claims: map[string]any{"sub": "u1"}}}
 	p := newOIDCProviderForTest(spec, fv)
@@ -359,7 +360,7 @@ func TestOIDCAudienceAuditAcceptsAndCountsMismatch(t *testing.T) {
 	}
 	// An audit-mode mismatch is accepted, so it must never count as a
 	// rejection: the ZITADEL canary gates on the rejected counter.
-	if got := testutil.ToFloat64(federationAudienceRejected.WithLabelValues("dex-audit-test")); got != 0 {
+	if got := testutil.ToFloat64(federationAudienceRejected.WithLabelValues("dex-audit-test")) - rejectedBefore; got != 0 {
 		t.Fatalf("rejected counter = %v in audit mode, want 0", got)
 	}
 }
@@ -411,6 +412,7 @@ func TestDexShapedTokenMapsIdentically(t *testing.T) {
 	spec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://dex.example", AudienceEnforcement: AudienceEnforce, SkipAudienceCheck: true, LegacyDexGroups: true}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			withheldBefore := testutil.ToFloat64(federationGroupsWithheld.WithLabelValues(ProviderDex))
 			fv := fakeOIDCVerifier{tok: &oidcVerifiedToken{Issuer: "https://dex.example", Claims: c.claims}}
 			p := newOIDCProviderForTest(spec, fv)
 			v, err := p.Verify(context.Background(), "tok")
@@ -424,7 +426,7 @@ func TestDexShapedTokenMapsIdentically(t *testing.T) {
 			if !reflect.DeepEqual(u.Groups, []string{"team-a"}) {
 				t.Fatalf("Groups = %v", u.Groups)
 			}
-			if got := testutil.ToFloat64(federationGroupsWithheld.WithLabelValues(ProviderDex)); got != 0 {
+			if got := testutil.ToFloat64(federationGroupsWithheld.WithLabelValues(ProviderDex)) - withheldBefore; got != 0 {
 				t.Fatalf("federation_groups_withheld_total{dex} = %v, want 0 for the trusted Dex slot", got)
 			}
 			if u.dexIssuer != "https://dex.example" || u.dexSubject != "CgVhbGljZQ" {

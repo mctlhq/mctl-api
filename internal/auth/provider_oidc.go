@@ -17,7 +17,6 @@ package auth
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"slices"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -227,12 +226,15 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 	}
 	var groups []string
 	if raw, ok := tok.Claims[p.spec.GroupsClaim]; ok {
-		groups = toStringSlice(raw)
-		if groups == nil && raw != nil {
-			// A groups_claim pointed at a claim of a shape we cannot read
-			// (a bare string, a number) would otherwise look exactly like
-			// "no groups asserted".
-			slog.Warn("oidc groups claim has an unsupported shape; treated as no groups", "provider", p.spec.Name, "claim", p.spec.GroupsClaim, "type", fmt.Sprintf("%T", raw))
+		var unreadable bool
+		// Object-shaped claims are read only outside the trusted Dex slot:
+		// that slot passes groups unfiltered, admins included, and must keep
+		// reading exactly what DexVerifier.Verify read (an array).
+		groups, unreadable = readGroupsClaim(raw, !p.spec.LegacyDexGroups)
+		if unreadable {
+			// A groups_claim pointing at a claim we cannot (fully) read would
+			// otherwise look exactly like "no groups asserted".
+			federationGroupsClaimUnreadable.WithLabelValues(p.spec.Name).Inc()
 		}
 		switch {
 		case p.spec.LegacyDexGroups:
@@ -293,10 +295,17 @@ func stringClaim(claims map[string]any, name string) (string, bool) {
 	return s, ok
 }
 
-func toStringSlice(v any) []string {
+// readGroupsClaim reads a groups claim: an array of strings, or -- when
+// allowObject -- an object whose keys name the groups (ZITADEL's
+// urn:zitadel:iam:org:project:roles is {"role": {"orgId": "orgDomain"}}).
+// unreadable reports a claim of any other shape, or an array holding
+// non-string elements (which are dropped).
+func readGroupsClaim(v any, allowObject bool) (groups []string, unreadable bool) {
 	switch t := v.(type) {
+	case nil:
+		return nil, false
 	case []string:
-		return t
+		return t, false
 	case []any:
 		out := make([]string, 0, len(t))
 		for _, e := range t {
@@ -304,18 +313,19 @@ func toStringSlice(v any) []string {
 				out = append(out, s)
 			}
 		}
-		return out
+		return out, len(out) < len(t)
 	case map[string]any:
-		// An object-shaped claim names its groups by key: ZITADEL's
-		// urn:zitadel:iam:org:project:roles is {"role": {"orgId": "orgDomain"}}.
+		if !allowObject {
+			return nil, true
+		}
 		// Sorted so the result does not depend on map iteration order.
 		out := make([]string, 0, len(t))
 		for k := range t {
 			out = append(out, k)
 		}
 		slices.Sort(out)
-		return out
+		return out, false
 	default:
-		return nil
+		return nil, true
 	}
 }
