@@ -17,6 +17,8 @@ package auth
 import (
 	"context"
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -179,7 +181,7 @@ func TestZitadelEntryAcceptsConfiguredClientAlongsideDexShim(t *testing.T) {
 func TestZitadelEntryWithholdsGroupsByDefault(t *testing.T) {
 	claims := map[string]any{
 		"groups":                            []any{"acme", "admins"},
-		"urn:zitadel:iam:org:project:roles": map[string]any{"admins": map[string]any{"1": "mctl"}},
+		"urn:zitadel:iam:org:project:roles": map[string]any{"acme": map[string]any{"1": "mctl"}, "admins": map[string]any{"1": "mctl"}},
 	}
 	r := buildZitadelRegistry(t, zitadelEntry, map[string]*oidcVerifiedToken{
 		zitadelIssuer: zitadelToken([]string{zitadelClientID}, claims),
@@ -205,12 +207,67 @@ func TestZitadelEntryWithholdsGroupsByDefault(t *testing.T) {
 	r = buildZitadelRegistry(t, rolesEntry, map[string]*oidcVerifiedToken{
 		zitadelIssuer: zitadelToken([]string{zitadelClientID}, claims),
 	})
+	before = testutil.ToFloat64(federationGroupsWithheld.WithLabelValues("zitadel"))
 	v, err = r.Verify(context.Background(), fakeJWT(zitadelIssuer))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u := userFromVerified(v); len(u.Groups) != 0 || u.IsAdmin() {
+	if u := userFromVerified(v); len(u.Groups) != 0 || u.IsAdmin() || u.HasTenantAccess("acme") {
 		t.Fatalf("roles claim reached authorization: Groups = %v", u.Groups)
+	}
+	// The counter is what distinguishes "withheld" from "never read": the
+	// object-shaped roles claim must be read (its keys) and then withheld.
+	if got := testutil.ToFloat64(federationGroupsWithheld.WithLabelValues("zitadel")) - before; got != 1 {
+		t.Fatalf("federation_groups_withheld_total{zitadel} delta for the roles claim = %v, want 1", got)
+	}
+}
+
+// With grant_groups on, the object-shaped roles claim yields its keys as
+// groups, admins still stripped.
+func TestOIDCEntryGrantGroupsReadsZitadelRolesClaim(t *testing.T) {
+	raw := `[{"name":"zitadel","issuer":"` + zitadelIssuer + `","audiences":["` + zitadelClientID + `"],"groups_claim":"urn:zitadel:iam:org:project:roles","grant_groups":true}]`
+	roles := map[string]any{"urn:zitadel:iam:org:project:roles": map[string]any{
+		"team-b": map[string]any{"1": "mctl"}, "admins": map[string]any{"1": "mctl"}, "acme": map[string]any{"1": "mctl"},
+	}}
+	r := buildZitadelRegistry(t, raw, map[string]*oidcVerifiedToken{
+		zitadelIssuer: zitadelToken([]string{zitadelClientID}, roles),
+	})
+	v, err := r.Verify(context.Background(), fakeJWT(zitadelIssuer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := userFromVerified(v); !reflect.DeepEqual(u.Groups, []string{"acme", "team-b"}) || u.IsAdmin() {
+		t.Fatalf("Groups = %v, want [acme team-b] without admin", u.Groups)
+	}
+}
+
+// grant_groups on the trusted Dex slot would be silently ignored (its groups
+// always pass unfiltered, admins included), so it is refused at boot.
+func TestGrantGroupsOnTrustedDexSlotIsRefused(t *testing.T) {
+	orig := newOIDCProviderFn
+	t.Cleanup(func() { newOIDCProviderFn = orig })
+	newOIDCProviderFn = func(_ context.Context, spec OIDCProviderSpec) (*oidcProvider, error) {
+		return newOIDCProviderForTest(spec, nil), nil
+	}
+	build := func(raw string) error {
+		_, err := BuildFederationRegistry(context.Background(), FederationProvidersConfig{
+			OIDCProvidersRaw: raw, DexIssuerURL: testDexIssuer, DexClientID: "mctl-api",
+		}, nil, nil, nil)
+		return err
+	}
+	for _, val := range []string{"false", "true"} {
+		raw := `[{"name":"dex","issuer":"` + testDexIssuer + `","audiences":["mctl-api"],"audience_enforcement":"audit","grant_groups":` + val + `}]`
+		if err := build(raw); err == nil || !strings.Contains(err.Error(), "trusted Dex slot") {
+			t.Fatalf("grant_groups=%s on the Dex slot: err = %v, want refusal", val, err)
+		}
+	}
+	// Without the field the audit canary still boots, and a "dex" entry
+	// repointed at another issuer may set it.
+	if err := build(`[{"name":"dex","issuer":"` + testDexIssuer + `","audiences":["mctl-api"],"audience_enforcement":"audit"}]`); err != nil {
+		t.Fatalf("audit canary without grant_groups refused: %v", err)
+	}
+	if err := build(`[{"name":"dex","issuer":"https://idp.example","audiences":["mctl-api"],"grant_groups":true}]`); err != nil {
+		t.Fatalf("repointed dex with grant_groups refused: %v", err)
 	}
 }
 

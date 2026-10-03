@@ -129,6 +129,9 @@ from `internal/api/handlers_surface_identity.go`).
   surface would collide with identities mirrored from surface links.
 - **More than one opaque-token provider**: an opaque token carries nothing
   to route on, so there can be at most one (the GitHub PAT provider).
+- **`grant_groups` on the trusted Dex slot** (an entry named `dex` on
+  `DEX_ISSUER_URL`), whether `true` or `false`: that slot always passes its
+  groups unfiltered, so the field would be silently ignored there.
 
 ## Configuration: `MCTL_OIDC_PROVIDERS`
 
@@ -158,9 +161,9 @@ A JSON array, parsed by `auth.ParseOIDCProviders` and validated in
 | `audience_enforcement` | no | `enforce` | `audit` accepts a mismatched token and counts `federation_audience_mismatch_total{provider}`; `enforce` refuses it. |
 | `subject_claim` | no | `sub` | Claim that becomes `Identity.Subject`. |
 | `display_claims` | no | `["preferred_username","email","sub"]` | Tried in order for `Identity.Display` — this reproduces the pre-registry Dex fallback as configuration, the concrete meaning of "swappable". |
-| `groups_claim` | no | `groups` | Claim read into `Claims.Groups` — only when `grant_groups` is on. |
+| `groups_claim` | no | `groups` | Claim read for groups: an array of strings, or an object whose keys are the group names (ZITADEL's `urn:zitadel:iam:org:project:roles`). Any other shape is logged and read as no groups. It reaches `User.Groups` only for the trusted Dex slot or when `grant_groups` is on (see "Groups" below). |
 | `kind` | no | `human` | One of `human`, `agent`, `service`. |
-| `grant_groups` | no | `false` | Whether this entry's groups reach `User.Groups`, i.e. grant tenant access. Off: the claim is dropped and counted in `federation_groups_withheld_total{provider}`. On: kept, with `admins` still stripped. See "Groups" below. |
+| `grant_groups` | no | `false` | Whether this entry's groups reach `User.Groups`, i.e. grant tenant access. Off: the claim is dropped and counted in `federation_groups_withheld_total{provider}`. On: kept, with `admins` still stripped. Refused at boot on the trusted Dex slot. See "Groups" below. |
 
 A malformed value, an entry missing `audiences`, an invalid
 `audience_enforcement` or `kind`, a reserved or surface-colliding name, or two

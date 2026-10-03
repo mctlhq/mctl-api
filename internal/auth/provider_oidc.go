@@ -17,6 +17,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -227,6 +228,12 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 	var groups []string
 	if raw, ok := tok.Claims[p.spec.GroupsClaim]; ok {
 		groups = toStringSlice(raw)
+		if groups == nil && raw != nil {
+			// A groups_claim pointed at a claim of a shape we cannot read
+			// (a bare string, a number) would otherwise look exactly like
+			// "no groups asserted".
+			slog.Warn("oidc groups claim has an unsupported shape; treated as no groups", "provider", p.spec.Name, "claim", p.spec.GroupsClaim, "type", fmt.Sprintf("%T", raw))
+		}
 		switch {
 		case p.spec.LegacyDexGroups:
 			// The trusted Dex slot keeps reproducing DexVerifier.Verify's
@@ -297,6 +304,16 @@ func toStringSlice(v any) []string {
 				out = append(out, s)
 			}
 		}
+		return out
+	case map[string]any:
+		// An object-shaped claim names its groups by key: ZITADEL's
+		// urn:zitadel:iam:org:project:roles is {"role": {"orgId": "orgDomain"}}.
+		// Sorted so the result does not depend on map iteration order.
+		out := make([]string, 0, len(t))
+		for k := range t {
+			out = append(out, k)
+		}
+		slices.Sort(out)
 		return out
 	default:
 		return nil

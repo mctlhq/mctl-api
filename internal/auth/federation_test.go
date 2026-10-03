@@ -357,6 +357,11 @@ func TestOIDCAudienceAuditAcceptsAndCountsMismatch(t *testing.T) {
 	if got := testutil.ToFloat64(federationAudienceMismatch.WithLabelValues("dex-audit-test")) - before; got != 1 {
 		t.Fatalf("mismatch counter delta = %v, want 1", got)
 	}
+	// An audit-mode mismatch is accepted, so it must never count as a
+	// rejection: the ZITADEL canary gates on the rejected counter.
+	if got := testutil.ToFloat64(federationAudienceRejected.WithLabelValues("dex-audit-test")); got != 0 {
+		t.Fatalf("rejected counter = %v in audit mode, want 0", got)
+	}
 }
 
 func TestOIDCAudienceMatchNeitherRefusesNorCounts(t *testing.T) {
@@ -418,6 +423,9 @@ func TestDexShapedTokenMapsIdentically(t *testing.T) {
 			}
 			if !reflect.DeepEqual(u.Groups, []string{"team-a"}) {
 				t.Fatalf("Groups = %v", u.Groups)
+			}
+			if got := testutil.ToFloat64(federationGroupsWithheld.WithLabelValues(ProviderDex)); got != 0 {
+				t.Fatalf("federation_groups_withheld_total{dex} = %v, want 0 for the trusted Dex slot", got)
 			}
 			if u.dexIssuer != "https://dex.example" || u.dexSubject != "CgVhbGljZQ" {
 				t.Fatalf("dexIssuer=%q dexSubject=%q", u.dexIssuer, u.dexSubject)
