@@ -89,6 +89,16 @@ type OIDCProviderSpec struct {
 	// qualifies: repointing "dex" at a new issuer is a new trust decision
 	// and must not inherit unfiltered admins.
 	LegacyDexGroups bool
+	// GrantGroups lets this provider's GroupsClaim reach User.Groups, which
+	// is what HasTenantAccess and IsAdmin read today: a group named like a
+	// tenant grants that tenant. Off by default for every
+	// MCTL_OIDC_PROVIDERS entry (mctl-api#434): until mctl-api#377 moves
+	// authorization onto principals, an identity provider added to the
+	// registry -- ZITADEL first -- proves who the caller is, never what they
+	// may touch. Ignored when LegacyDexGroups is set (the trusted Dex slot
+	// keeps its groups unfiltered). Even when set, "admins" is still
+	// stripped.
+	GrantGroups bool
 }
 
 func (s OIDCProviderSpec) withDefaults() OIDCProviderSpec {
@@ -193,6 +203,7 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 	case audienceMatches(tok.Audience, p.spec.Audiences):
 		// Matched; nothing to count.
 	case p.spec.AudienceEnforcement == AudienceEnforce:
+		federationAudienceRejected.WithLabelValues(p.spec.Name).Inc()
 		return nil, fmt.Errorf("token audience %v not in configured audiences %v", tok.Audience, p.spec.Audiences)
 	default:
 		federationAudienceMismatch.WithLabelValues(p.spec.Name).Inc()
@@ -216,19 +227,31 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 	var groups []string
 	if raw, ok := tok.Claims[p.spec.GroupsClaim]; ok {
 		groups = toStringSlice(raw)
-		// docs/federation.md and requirements.md promise this proposal only
-		// relocates the existing group resolution without changing who counts
-		// as an admin. This same code path is now reachable by any
-		// operator-configured MCTL_OIDC_PROVIDERS entry, so "admins" is
-		// dropped here exactly as NewRelayedUser drops it for a relayed
-		// subject -- except for the trusted Dex slot (see LegacyDexGroups),
-		// which must keep reproducing DexVerifier.Verify's unfiltered-groups
-		// behaviour bit-for-bit. Gated on LegacyDexGroups rather than the
-		// bare name "dex": ParseOIDCProviders deliberately leaves "dex"
-		// unreserved for an operator's own entry, so a name check alone
-		// would hand a "dex" entry on an arbitrary issuer the same
-		// unfiltered-admins behaviour.
-		if !p.spec.LegacyDexGroups {
+		switch {
+		case p.spec.LegacyDexGroups:
+			// The trusted Dex slot keeps reproducing DexVerifier.Verify's
+			// unfiltered-groups behaviour bit-for-bit, "admins" included.
+			// Gated on LegacyDexGroups rather than the bare name "dex":
+			// ParseOIDCProviders deliberately leaves "dex" unreserved for an
+			// operator's own entry, so a name check alone would hand a "dex"
+			// entry on an arbitrary issuer the same unfiltered-admins
+			// behaviour.
+		case !p.spec.GrantGroups:
+			// Fail-closed default for every other provider (mctl-api#434):
+			// User.Groups is still the authorization input (tenant names and
+			// "admins"), so a group asserted by a newly federated identity
+			// provider must not reach it until mctl-api#377 moves
+			// authorization onto principals. Counted, so an operator can see
+			// what an entry would have granted before opting in.
+			if len(groups) > 0 {
+				federationGroupsWithheld.WithLabelValues(p.spec.Name).Inc()
+			}
+			groups = nil
+		default:
+			// An explicit grant_groups opt-in still never confers admin:
+			// docs/federation.md promises the registry does not change who
+			// counts as an admin, so "admins" is dropped exactly as
+			// NewRelayedUser drops it for a relayed subject.
 			kept := make([]string, 0, len(groups))
 			for _, g := range groups {
 				if g != "admins" {

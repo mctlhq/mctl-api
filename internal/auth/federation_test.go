@@ -401,7 +401,9 @@ func TestDexShapedTokenMapsIdentically(t *testing.T) {
 		{"falls back to email", map[string]any{"sub": "CgVhbGljZQ", "email": "alice@example.com", "groups": []any{"team-a"}}, "alice@example.com"},
 		{"falls back to sub", map[string]any{"sub": "CgVhbGljZQ", "groups": []any{"team-a"}}, "CgVhbGljZQ"},
 	}
-	spec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://dex.example", AudienceEnforcement: AudienceEnforce, SkipAudienceCheck: true}
+	// LegacyDexGroups: true is what BuildFederationRegistry always sets on
+	// the synthesized shim this test characterizes.
+	spec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://dex.example", AudienceEnforcement: AudienceEnforce, SkipAudienceCheck: true, LegacyDexGroups: true}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			fv := fakeOIDCVerifier{tok: &oidcVerifiedToken{Issuer: "https://dex.example", Claims: c.claims}}
@@ -484,11 +486,13 @@ func TestGenericOIDCProviderDisplayFallsBackToSubject(t *testing.T) {
 // change who counts as an admin, but the shared oidcProvider.Verify code
 // path is now reachable by any operator-configured MCTL_OIDC_PROVIDERS
 // entry). The Dex slot is exempt and keeps "admins" unfiltered, matching
-// DexVerifier.Verify's pre-existing behaviour bit-for-bit.
+// DexVerifier.Verify's pre-existing behaviour bit-for-bit. The generic
+// provider opts into grant_groups here; without it no group reaches the
+// user at all (TestZitadelEntryWithholdsGroupsByDefault).
 func TestGenericOIDCProviderStripsAdminsGroupButDexKeepsIt(t *testing.T) {
 	claims := map[string]any{"sub": "u-123", "preferred_username": "bob", "groups": []any{"admins", "team-a"}}
 
-	genericSpec := OIDCProviderSpec{Name: "acme", Issuer: "https://acme.example", Audiences: []string{"aud"}, AudienceEnforcement: AudienceEnforce}
+	genericSpec := OIDCProviderSpec{Name: "acme", Issuer: "https://acme.example", Audiences: []string{"aud"}, AudienceEnforcement: AudienceEnforce, GrantGroups: true}
 	genericFV := fakeOIDCVerifier{tok: &oidcVerifiedToken{Issuer: "https://acme.example", Audience: []string{"aud"}, Claims: claims}}
 	genericP := newOIDCProviderForTest(genericSpec, genericFV)
 	gv, err := genericP.Verify(context.Background(), "tok")
@@ -530,7 +534,7 @@ func TestGenericOIDCProviderStripsAdminsGroupButDexKeepsIt(t *testing.T) {
 // (TestBuildFederationRegistryDexSlot).
 func TestOperatorNamedDexProviderStripsAdminsGroup(t *testing.T) {
 	claims := map[string]any{"sub": "u-123", "preferred_username": "bob", "groups": []any{"admins", "team-a"}}
-	spec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://acme.example", Audiences: []string{"aud"}, AudienceEnforcement: AudienceEnforce}
+	spec := OIDCProviderSpec{Name: ProviderDex, Issuer: "https://acme.example", Audiences: []string{"aud"}, AudienceEnforcement: AudienceEnforce, GrantGroups: true}
 	fv := fakeOIDCVerifier{tok: &oidcVerifiedToken{Issuer: "https://acme.example", Audience: []string{"aud"}, Claims: claims}}
 	p := newOIDCProviderForTest(spec, fv)
 	v, err := p.Verify(context.Background(), "tok")

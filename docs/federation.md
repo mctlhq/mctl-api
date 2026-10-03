@@ -158,8 +158,9 @@ A JSON array, parsed by `auth.ParseOIDCProviders` and validated in
 | `audience_enforcement` | no | `enforce` | `audit` accepts a mismatched token and counts `federation_audience_mismatch_total{provider}`; `enforce` refuses it. |
 | `subject_claim` | no | `sub` | Claim that becomes `Identity.Subject`. |
 | `display_claims` | no | `["preferred_username","email","sub"]` | Tried in order for `Identity.Display` — this reproduces the pre-registry Dex fallback as configuration, the concrete meaning of "swappable". |
-| `groups_claim` | no | `groups` | Claim read into `Claims.Groups`. |
+| `groups_claim` | no | `groups` | Claim read into `Claims.Groups` — only when `grant_groups` is on. |
 | `kind` | no | `human` | One of `human`, `agent`, `service`. |
+| `grant_groups` | no | `false` | Whether this entry's groups reach `User.Groups`, i.e. grant tenant access. Off: the claim is dropped and counted in `federation_groups_withheld_total{provider}`. On: kept, with `admins` still stripped. See "Groups" below. |
 
 A malformed value, an entry missing `audiences`, an invalid
 `audience_enforcement` or `kind`, a reserved or surface-colliding name, or two
@@ -193,12 +194,84 @@ Which of these keeps the `admins` group is a separate, narrower rule. A
 below) keeps Dex's unfiltered groups exactly as the shim does, because the
 operator already trusts that issuer. A `dex` entry repointed at **any other**
 issuer is a new trust decision: like every other `MCTL_OIDC_PROVIDERS` entry,
-it has `admins` stripped from its `groups` claim.
+its groups are withheld unless it sets `grant_groups: true`, and even then
+`admins` is stripped (see "Groups" below).
 
 An unreachable OIDC issuer at boot — for either the shim or an explicit
 entry — is **not** one of the conditions that refuses startup. It is logged
 and that one provider is simply omitted, the same graceful degradation Dex
 init failure has always had.
+
+### Groups
+
+`User.Groups` is still the authorization input: `IsAdmin` reads `admins`
+from it and `HasTenantAccess` reads tenant names from it. A groups claim from
+a newly federated identity provider would therefore grant tenant access the
+moment a group is named like a tenant. Until mctl-api#377 moves
+authorization onto principals, every `MCTL_OIDC_PROVIDERS` entry other than
+the trusted Dex slot is fail-closed:
+
+| Provider | Groups reaching `User.Groups` |
+|---|---|
+| Legacy shim, or `dex` on `DEX_ISSUER_URL` | The claim, unfiltered (`admins` included) — unchanged from before the registry. |
+| Any other entry, `grant_groups` unset or `false` | None. A non-empty claim is counted in `federation_groups_withheld_total{provider}`. |
+| Any other entry, `grant_groups: true` | The claim with `admins` stripped. |
+
+The identity itself is unaffected: the caller is still authenticated, keyed
+on `(provider, issuer, sub)` in `external_identities`, and resolved to a
+principal. It simply holds no tenant and no admin access through this path.
+
+## ZITADEL (mctl-api#434)
+
+ZITADEL is the MCTL human identity provider (mctlhq/.github#157). It enters
+here as one more `MCTL_OIDC_PROVIDERS` entry, not as a broker in front of
+every request: service tokens, local MCP OAuth JWTs and GitHub PATs are still
+verified by mctl-api itself, and the Dex shim keeps running next to it. No
+new verifier code: the entry is configuration.
+
+```json
+[
+  {
+    "name": "zitadel",
+    "issuer": "https://auth.mctl.ai",
+    "audiences": ["<client id of the mctl-api application in ZITADEL>"]
+  }
+]
+```
+
+- **Audience is enforced from day one.** `audience_enforcement` is left at
+  its `enforce` default and must not be set to `audit` for this entry: the
+  audit mode exists only to canary the *existing* Dex traffic, and there is
+  no existing ZITADEL traffic to protect. A token ZITADEL signed for another
+  application (or carrying only the project id) is refused with 401 and
+  counted in `federation_audience_rejected_total{provider="zitadel"}`.
+  ZITADEL puts the project id and the client ids of the project's
+  applications in `aud`; only the configured client id is accepted.
+- **Tokens must be JWTs.** ZITADEL issues opaque access tokens unless the
+  application's token type is set to JWT; an opaque token is routed to the
+  GitHub PAT provider and fails there. ID tokens are always JWTs.
+- **Identity.** `external_identities` rows are keyed on
+  `('zitadel', 'https://auth.mctl.ai', <ZITADEL user id>)`. `User.ID` is
+  `preferred_username` (the ZITADEL login name), falling back to `email`,
+  then `sub`. It never reads as a GitHub-proven login, so `ADMIN_USERS` and
+  GitHub-login tenant resolution never apply to it.
+- **No authorization from ZITADEL.** `grant_groups` stays unset: neither a
+  `groups` claim nor ZITADEL project roles
+  (`urn:zitadel:iam:org:project:roles`) grant tenant or admin access until
+  mctl-api#377.
+- **Name and issuer are permanent.** `zitadel` is the
+  `external_identities.provider` value; renaming the entry, or changing the
+  issuer (for example a custom domain), orphans every linked identity.
+
+Rollout is a production canary (mctl-api has no staging): add the entry,
+then watch `federation_token_verifications_total{provider="zitadel"}` by
+`result` and `federation_audience_rejected_total{provider="zitadel"}` —
+a non-zero rejection rate means a client is requesting tokens for the wrong
+application. Dex traffic (`provider="dex"`) must be unchanged. Rollback is one
+env change: remove the entry from `MCTL_OIDC_PROVIDERS` (or unset the
+variable if it is the only one). ZITADEL tokens are then unclaimed (401) and
+nothing else changes. If `auth.mctl.ai` is unreachable at boot, the entry is
+logged and omitted; mctl-api still starts.
 
 ## `MCTL_FEDERATION_DISABLED`: the kill switch
 
@@ -251,7 +324,9 @@ wholesale, and is not part of that pin.
 | `federation_verify_duration_seconds` | `provider` | Time spent verifying, per provider. |
 | `federation_audience_check_skipped_total` | `provider` | No audience decision was even computed (the legacy shim with an empty `DEX_CLIENT_ID`). |
 | `federation_audience_mismatch_total` | `provider` | A decision *was* computed, came out negative, and the token was accepted anyway (`audience_enforcement: audit`) — the canary gate. |
+| `federation_audience_rejected_total` | `provider` | A decision was computed, came out negative, and the token was refused (`audience_enforcement: enforce`). Also counted as `result="invalid"` above; this is the audience-only share of it. |
 | `federation_provider_contract_violations_total` | `provider` | A provider returned an identity outside its own namespace. Should be permanently zero. |
+| `federation_groups_withheld_total` | `provider` | A verified token carried a non-empty groups claim that was dropped because the entry does not set `grant_groups`. What the entry *would* have granted. |
 
 The two audience counters are deliberately distinct: "we never checked" and
 "we checked, it failed, we let it through" are different operational facts,

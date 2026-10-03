@@ -43,10 +43,14 @@ type OIDCProviderConfigEntry struct {
 	DisplayClaims       []string `json:"display_claims,omitempty"`
 	GroupsClaim         string   `json:"groups_claim,omitempty"`
 	Kind                string   `json:"kind,omitempty"`
+	// GrantGroups opts this entry's groups claim into User.Groups (tenant
+	// access). Defaults to false: see OIDCProviderSpec.GrantGroups.
+	GrantGroups bool `json:"grant_groups,omitempty"`
 }
 
 func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
 	return OIDCProviderSpec{
+		GrantGroups:         e.GrantGroups,
 		Name:                e.Name,
 		Issuer:              e.Issuer,
 		Audiences:           e.Audiences,

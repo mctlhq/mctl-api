@@ -338,6 +338,16 @@ var (
 		Help: "OIDC verifications in audit mode where the audience decision was computed, came out negative, and the token was accepted anyway, by provider.",
 	}, []string{"provider"})
 
+	federationAudienceRejected = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "federation_audience_rejected_total",
+		Help: "OIDC verifications in enforce mode refused because the token's aud held none of the provider's configured audiences, by provider.",
+	}, []string{"provider"})
+
+	federationGroupsWithheld = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "federation_groups_withheld_total",
+		Help: "OIDC verifications whose non-empty groups claim was withheld from authorization because the provider is not granted groups (grant_groups off), by provider.",
+	}, []string{"provider"})
+
 	federationContractViolations = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "federation_provider_contract_violations_total",
 		Help: "Verified results rejected because a provider returned an identity outside its own namespace, by provider. Should stay zero.",
@@ -350,6 +360,8 @@ func init() {
 		federationVerifyDuration,
 		federationAudienceCheckSkipped,
 		federationAudienceMismatch,
+		federationAudienceRejected,
+		federationGroupsWithheld,
 		federationContractViolations,
 	)
 }
