@@ -263,6 +263,13 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolPlanEpicWave())
 	srv.AddTool(s.toolStartEpicWave())
 
+	// Canonical WorkItems: MCP as a second surface (mctl-api#341).
+	srv.AddTool(s.toolGetWorkItem())
+	srv.AddTool(s.toolListWorkItemExecutions())
+	srv.AddTool(s.toolListWorkItemSnapshots())
+	srv.AddTool(s.toolListWorkItemExecutionRequests())
+	srv.AddTool(s.toolRequestWorkItemExecution())
+
 	// Cloudflare MCP portal (dispatch only — no Cloudflare credential here).
 	srv.AddTool(s.toolTriggerPortalServerAuthApply())
 

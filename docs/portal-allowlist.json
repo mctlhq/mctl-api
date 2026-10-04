@@ -287,7 +287,7 @@
     {
       "name": "mctl_list_tenant_skill_bindings",
       "enabled": true,
-      "reason": "Skill bindings per tenant; admins see all, members their own \u2014 the upstream applies that filter, the tool exposes only binding names."
+      "reason": "Skill bindings per tenant; admins see all, members their own — the upstream applies that filter, the tool exposes only binding names."
     },
     {
       "name": "mctl_list_tenants",
@@ -467,7 +467,32 @@
     {
       "name": "mctl_whoami",
       "enabled": true,
-      "reason": "Returns only the caller's own user id, admin flag, teams and namespaces \u2014 the identity probe the aggregate portal's A\u2260B check calls; nothing about anyone else."
+      "reason": "Returns only the caller's own user id, admin flag, teams and namespaces — the identity probe the aggregate portal's A≠B check calls; nothing about anyone else."
+    },
+    {
+      "name": "mctl_get_work_item",
+      "enabled": false,
+      "reason": "Read-only canonical WorkItem (state, state_version, tenant, latest execution and snapshot); visibility is the API's tenant check on the caller's own token. Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#341."
+    },
+    {
+      "name": "mctl_list_work_item_executions",
+      "enabled": false,
+      "reason": "Read-only list of a WorkItem's executions with the engine identity the platform recorded; same tenant check as mctl_get_work_item. Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#341."
+    },
+    {
+      "name": "mctl_list_work_item_snapshots",
+      "enabled": false,
+      "reason": "Read-only immutable ContextSnapshots of a WorkItem, which can carry investigation context; same tenant check as mctl_get_work_item. Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#341."
+    },
+    {
+      "name": "mctl_list_work_item_execution_requests",
+      "enabled": false,
+      "reason": "Read-only execution requests of a WorkItem (kind, state, requested_by, surface); same tenant check as mctl_get_work_item. Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#341."
+    },
+    {
+      "name": "mctl_request_work_item_execution",
+      "enabled": false,
+      "reason": "Records an execution request that the dispatcher turns into a DevLoop/investigator run on an existing WorkItem; consumes agent budget. Requester is the caller's token, the service principal is refused. Mutating: enabling it here also needs an entry in mutatingOnPortal. Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#341."
     }
   ]
 }
