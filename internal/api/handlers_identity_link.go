@@ -508,15 +508,20 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 		oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
 	// A page, not a redirect: prompt=login always asks for a login name,
 	// and with ignore_unknown_usernames ZITADEL answers a name it does not
-	// know (a GitHub login, a short user name) with a password page that a
-	// passkey-only account cannot pass (mctlhq/mctl-api#462). Say what to
-	// type before sending the person there.
+	// know (a GitHub login, a guessed name) with a password page that a
+	// passkey-only account cannot pass (mctlhq/mctl-api#462). The e-mail
+	// address does not work either: Login V2 v4.19.x finds the user by it
+	// but then opens the passkey session with the e-mail as a login name,
+	// which the API does not resolve ("Could not request passkey
+	// challenge"; upstream zitadel/zitadel#12852). Only the login name
+	// works, so say so before sending the person there.
 	renderLinkPage(w, http.StatusOK, linkPageData{
 		Title: "Now sign in to ZITADEL",
 		Lines: []string{
 			"GitHub: " + login + " verified.",
-			"On the ZITADEL page, enter the e-mail address your MCTL invitation was sent to, or your full ZITADEL login name. Do not enter your GitHub login.",
-			"If ZITADEL then asks for a password you never set, it did not recognize the name: go back and enter the e-mail address.",
+			"On the ZITADEL page, enter your ZITADEL login name, as your MCTL invitation e-mail gives it. Do not enter your e-mail address or your GitHub login. If you do not know your login name, ask your MCTL administrator.",
+			"If ZITADEL says it could not request a passkey challenge, you entered the e-mail address: go back and enter the login name.",
+			"If ZITADEL asks for a password you never set, it did not recognize the name: go back and check the login name.",
 		},
 		Continue: authURL,
 	})

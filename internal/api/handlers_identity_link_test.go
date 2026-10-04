@@ -962,7 +962,9 @@ func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 // The GitHub leg stops on a page that says what to type at ZITADEL
 // (mctlhq/mctl-api#462) instead of redirecting: under prompt=login an
 // unknown name gets ZITADEL's password mask, which a passkey-only account
-// cannot pass. The link still carries prompt=login and max_age=0.
+// cannot pass, and an e-mail address fails the passkey step, so the page
+// asks for the login name and never for the e-mail. The link still carries
+// prompt=login and max_age=0.
 func TestIdentityLinkGitHubLegShowsTheZitadelHint(t *testing.T) {
 	h := newLinkHarness(t)
 	ck, state := h.start()
@@ -971,9 +973,14 @@ func TestIdentityLinkGitHubLegShowsTheZitadelHint(t *testing.T) {
 		t.Fatalf("GitHub leg redirected to %q, want the hint page", loc)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"mashkovd", "e-mail address your MCTL invitation was sent to", "full ZITADEL login name", "Do not enter your GitHub login", "asks for a password"} {
+	for _, want := range []string{"mashkovd", "enter your ZITADEL login name", "Do not enter your e-mail address or your GitHub login", "could not request a passkey challenge", "asks for a password"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("hint page lacks %q", want)
+		}
+	}
+	for _, unwanted := range []string{"enter the e-mail", "e-mail address your MCTL invitation was sent to"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("hint page steers to the e-mail address (%q), which fails for passkey accounts", unwanted)
 		}
 	}
 	u, err := url.Parse(zitadelContinue(t, rec))
