@@ -108,7 +108,7 @@ func (s *Server) toolListWorkItemSnapshots() (mcplib.Tool, server.ToolHandlerFun
 			return errResult, nil
 		}
 		path := "/api/v1/work-items/" + id + "/snapshots"
-		sid, errResult := pathID(req, "snapshot_id", false)
+		sid, errResult := idArg(req, "snapshot_id", false)
 		if errResult != nil {
 			return errResult, nil
 		}
@@ -139,7 +139,7 @@ func (s *Server) toolListWorkItemExecutionRequests() (mcplib.Tool, server.ToolHa
 			return errResult, nil
 		}
 		path := "/api/v1/work-items/" + id + "/execution-requests"
-		rid, errResult := pathID(req, "request_id", false)
+		rid, errResult := idArg(req, "request_id", false)
 		if errResult != nil {
 			return errResult, nil
 		}
@@ -210,7 +210,7 @@ Idempotent by idempotency_key: repeating the same call with the same key returns
 			"surface":                workItemSurface,
 			"idempotency_key":        key,
 		}
-		from, errResult := pathID(req, "resumed_from_execution_id", false)
+		from, errResult := idArg(req, "resumed_from_execution_id", false)
 		if errResult != nil {
 			return errResult, nil
 		}
@@ -222,27 +222,27 @@ Idempotent by idempotency_key: repeating the same call with the same key returns
 	return tool, handler
 }
 
-// workItemIDPattern is the shape of every id these tools put in a path
-// (wi_, we_, cs_, xr_ ...). Escaping alone would let "." or ".." through as a
+// workItemIDPattern is the shape of every id these tools send (wi_, we_, cs_,
+// xr_ ...). In a path, escaping alone would let "." or ".." through as a
 // segment that a normalizing proxy resolves out of /work-items/{id}.
 var workItemIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
-// pathID returns a trimmed id that is safe as one path segment, or "" with
-// an error result.
-func pathID(req mcplib.CallToolRequest, name string, required bool) (string, *mcplib.CallToolResult) {
+// idArg returns a trimmed id argument of the expected shape, which is also
+// safe as one path segment, or "" with an error result.
+func idArg(req mcplib.CallToolRequest, name string, required bool) (string, *mcplib.CallToolResult) {
 	v := strings.TrimSpace(stringArg(req, name))
 	switch {
 	case v == "" && required:
 		return "", mcplib.NewToolResultError("missing required argument: " + name)
 	case v != "" && !workItemIDPattern.MatchString(v):
-		return "", mcplib.NewToolResultError(name + " must be an id such as wi_..., made of letters, digits, '_' and '-'")
+		return "", mcplib.NewToolResultError(name + " must be an id made of letters, digits, '_' and '-'")
 	}
 	return v, nil
 }
 
-// requiredPathArg is pathID for a required argument.
+// requiredPathArg is idArg for a required argument.
 func requiredPathArg(req mcplib.CallToolRequest, name string) (string, *mcplib.CallToolResult) {
-	return pathID(req, name, true)
+	return idArg(req, name, true)
 }
 
 // workItemCall keeps the API's typed refusals intact. doRequest collapses an
