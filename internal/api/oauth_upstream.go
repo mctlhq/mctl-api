@@ -358,9 +358,10 @@ func (h *Handlers) refuseZitadelSignin(w http.ResponseWriter, display string, p 
 			Primary: linkHint,
 		})
 		return "unlinked"
-	case p == nil:
-		// The refusals below name the principal; without one the store broke
-		// its contract, which is a failed read, not a refusal.
+	case p == nil && (errors.Is(err, principals.ErrNoGitHubIdentity) ||
+		errors.Is(err, principals.ErrGitHubLoginUnknown) || errors.Is(err, principals.ErrAmbiguousGitHubIdentity)):
+		// These refusals name the principal; without one the store broke its
+		// contract, which is a failed read, not a refusal.
 		return zitadelStoreUnavailable(w, err)
 	case errors.Is(err, principals.ErrNoGitHubIdentity):
 		renderOAuthPage(w, http.StatusForbidden, oauthPageData{

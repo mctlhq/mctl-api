@@ -353,21 +353,28 @@ func TestZitadelSigninMetricSeparatesFailures(t *testing.T) {
 
 func TestZitadelSigninRefusals(t *testing.T) {
 	p := &principals.Principal{ID: "prn_1", Status: principals.StatusActive}
+	// The principal is returned as principals.Store.LinkedGitHub does:
+	// not with a revoked identity or a disabled principal.
 	cases := map[string]struct {
+		p    *principals.Principal
 		err  error
 		code int
 	}{
-		"revoked identity":    {auth.ErrIdentityRefused, http.StatusForbidden},
-		"disabled principal":  {auth.ErrPrincipalDisabled, http.StatusForbidden},
-		"login unknown":       {principals.ErrGitHubLoginUnknown, http.StatusConflict},
-		"two GitHub accounts": {principals.ErrAmbiguousGitHubIdentity, http.StatusConflict},
+		"revoked identity":    {nil, auth.ErrIdentityRefused, http.StatusForbidden},
+		"disabled principal":  {nil, auth.ErrPrincipalDisabled, http.StatusForbidden},
+		"login unknown":       {p, principals.ErrGitHubLoginUnknown, http.StatusConflict},
+		"two GitHub accounts": {p, principals.ErrAmbiguousGitHubIdentity, http.StatusConflict},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			h := newUpstreamHarness(t, OAuthUpstreamZitadel, &fakeLinkedStore{p: p, err: tc.err})
+			before := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "refused"))
+			h := newUpstreamHarness(t, OAuthUpstreamZitadel, &fakeLinkedStore{p: tc.p, err: tc.err})
 			rec := h.callback(h.toZitadel(h.get(authorizeQuery(""))))
 			if rec.Code != tc.code || rec.Header().Get("Location") != "" {
 				t.Fatalf("callback = %d Location=%q, want %d and no code", rec.Code, rec.Header().Get("Location"), tc.code)
+			}
+			if n := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "refused")) - before; n != 1 {
+				t.Fatalf("refused +%v, want +1", n)
 			}
 		})
 	}
