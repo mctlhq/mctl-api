@@ -99,7 +99,8 @@ const (
 	linkChallengeTTL  = 10 * time.Minute
 	linkMaxChallenges = 1000
 	// linkMaxPerIP bounds one source's unfinished links; starting another
-	// drops its oldest, so no single IP can fill linkMaxChallenges.
+	// drops its oldest one still waiting for GitHub, so no single IP can
+	// fill linkMaxChallenges.
 	linkMaxPerIP       = 3
 	linkStartPath      = "/identity/link/zitadel"
 	linkCallbackPath   = "/identity/link/zitadel/callback"
@@ -223,24 +224,30 @@ func (l *identityLinker) liveLocked(c *linkChallenge, phase linkPhase, now time.
 	return l.byID[c.id] == c && c.phase == phase && !now.After(c.expiresAt)
 }
 
-// capSourceLocked drops ip's oldest unfinished challenges until it has room
-// for one more.
-func (l *identityLinker) capSourceLocked(ip string) {
+// capSourceLocked makes room for one more challenge from ip by dropping its
+// oldest challenge that is still waiting for GitHub. A challenge that has
+// left for GitHub or proven an identity is never dropped: on a shared egress
+// IP it is usually someone else's link that is furthest along. It reports
+// false when ip's unfinished links are all past that point.
+func (l *identityLinker) capSourceLocked(ip string) bool {
 	for {
-		var mine []*linkChallenge
+		mine := 0
+		var oldest *linkChallenge
 		for _, c := range l.byID {
-			if c.clientIP == ip {
-				mine = append(mine, c)
+			if c.clientIP != ip {
+				continue
 			}
-		}
-		if len(mine) < linkMaxPerIP {
-			return
-		}
-		oldest := mine[0]
-		for _, c := range mine[1:] {
-			if c.startedAt.Before(oldest.startedAt) {
+			mine++
+			waiting := c.phase == linkStarted && l.byGitHub[c.githubState] == c
+			if waiting && (oldest == nil || c.startedAt.Before(oldest.startedAt)) {
 				oldest = c
 			}
+		}
+		if mine < linkMaxPerIP {
+			return true
+		}
+		if oldest == nil {
+			return false
 		}
 		l.dropLocked(oldest.id, oldest)
 	}
@@ -352,7 +359,11 @@ func (h *Handlers) handleIdentityLinkStart(w http.ResponseWriter, r *http.Reques
 	}
 	l.mu.Lock()
 	l.sweepLocked(now)
-	l.capSourceLocked(ip)
+	if !l.capSourceLocked(ip) {
+		l.mu.Unlock()
+		linkFailed(w, http.StatusTooManyRequests, "Too many links in progress from your network; finish one or try again in a few minutes.")
+		return
+	}
 	if len(l.byID) >= linkMaxChallenges {
 		l.mu.Unlock()
 		linkFailed(w, http.StatusServiceUnavailable, "Too many links in progress; try again in a few minutes.")
@@ -394,7 +405,7 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 	}
 	l.mu.Unlock()
 	if !valid {
-		linkFailed(w, http.StatusBadRequest, "This link session is unknown, expired, or was started in another browser.")
+		linkFailed(w, http.StatusBadRequest, "This link session is unknown, expired, replaced by a newer link from the same network, or was started in another browser.")
 		return
 	}
 	if e := q.Get("error"); e != "" {
@@ -420,13 +431,17 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 		// Refusals are the person's to see; a store failure is not, and its
 		// text (hosts, connection detail) stays in the log.
 		switch {
-		case errors.Is(err, auth.ErrPrincipalDisabled):
-			linkFailed(w, http.StatusForbidden, "Your mctl principal is disabled.")
 		case errors.Is(err, auth.ErrIdentityRefused):
 			linkFailed(w, http.StatusForbidden, "Your GitHub identity is refused by mctl and cannot be used for linking.")
 		default:
 			linkFailed(w, http.StatusServiceUnavailable, "The principal store is unavailable; nothing was changed. Try again later.")
 		}
+		return
+	}
+	// Provision returns a disabled principal as a value, not an error. The
+	// confirm step would refuse it too; stop before the ZITADEL sign-in.
+	if p.Status == principals.StatusDisabled {
+		linkFailed(w, http.StatusForbidden, "Your mctl principal is disabled.")
 		return
 	}
 

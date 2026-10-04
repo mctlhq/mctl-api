@@ -94,8 +94,11 @@ e-mail:
    single-use. Sessions live in memory for 10 minutes, counted from the
    start and checked again after every network call (one replica; a
    restart cancels links in flight). One source IP holds at most 3
-   unfinished links; a fourth drops its oldest, so no single source can
-   fill the global cap of 1000. With more than one replica, a step
+   unfinished links; a fourth drops the oldest one still waiting for
+   GitHub, so no single source can fill the global cap of 1000. A link
+   that has left for GitHub or proven an identity is never dropped (on a
+   shared egress IP it is usually someone else's): when all 3 are past
+   that point, the new start gets a 429. With more than one replica, a step
    that reaches a pod other than the one that started the link gets a 400
    "start again", never a 500 or a link.
 

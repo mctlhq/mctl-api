@@ -38,13 +38,18 @@ type fakeLinkStore struct {
 	mergeErr error
 	listErr  error
 	provErr  error
+	disabled bool
 }
 
 func (f *fakeLinkStore) Provision(_ context.Context, id auth.Identity) (*principals.Principal, error) {
 	if f.provErr != nil {
 		return nil, f.provErr
 	}
-	return &principals.Principal{ID: "prn_" + id.Provider + "_" + id.Subject, Kind: auth.KindHuman, Status: principals.StatusActive}, nil
+	status := principals.StatusActive
+	if f.disabled {
+		status = principals.StatusDisabled
+	}
+	return &principals.Principal{ID: "prn_" + id.Provider + "_" + id.Subject, Kind: auth.KindHuman, Status: status}, nil
 }
 
 func (f *fakeLinkStore) LinkIdentity(_ context.Context, pid string, id auth.Identity) (string, error) {
@@ -430,7 +435,10 @@ func TestIdentityLinkIsOffWithoutAClient(t *testing.T) {
 // The 10-minute TTL holds at every step, and across the unlocked network
 // calls inside a step.
 func TestIdentityLinkRefusesAnExpiredChallengeAtEveryStep(t *testing.T) {
-	expired := linkChallengeTTL + time.Second
+	// Literal, not linkChallengeTTL: the test pins the documented 10 minutes,
+	// so changing the constant fails it.
+	const ttl = 10 * time.Minute
+	expired := ttl + time.Second
 
 	t.Run("github callback", func(t *testing.T) {
 		h := newLinkHarness(t)
@@ -470,41 +478,47 @@ func TestIdentityLinkRefusesAnExpiredChallengeAtEveryStep(t *testing.T) {
 	t.Run("just inside the TTL", func(t *testing.T) {
 		h := newLinkHarness(t)
 		ck, form := h.fullFlow()
-		h.advance(linkChallengeTTL - time.Second)
+		h.advance(ttl - time.Second)
 		if rec := h.do(http.MethodPost, linkConfirmPath, ck, form); rec.Code != http.StatusOK || len(h.store.linked) != 1 {
 			t.Fatalf("confirm inside the TTL = %d, links = %d", rec.Code, len(h.store.linked))
 		}
 	})
 }
 
-// One source cannot hold linking shut: its oldest unfinished link gives way
-// to its newest, and other sources are untouched.
+// startFrom begins a link from ip; ck and state are empty when the start
+// was refused.
+func (h *linkHarness) startFrom(ip string) (rec *httptest.ResponseRecorder, ck *http.Cookie, state string) {
+	h.t.Helper()
+	req := httptest.NewRequest(http.MethodGet, linkStartPath, nil)
+	req.RemoteAddr = ip + ":40000"
+	rec = httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		return rec, nil, ""
+	}
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == linkCookieName {
+			return rec, c, loc.Query().Get("state")
+		}
+	}
+	h.t.Fatal("no link cookie")
+	return rec, nil, ""
+}
+
+// One source cannot hold linking shut: its oldest link still waiting for
+// GitHub gives way to its newest, and other sources are untouched.
 func TestIdentityLinkCapsUnfinishedLinksPerSource(t *testing.T) {
 	h := newLinkHarness(t)
-	startFrom := func(ip string) (*http.Cookie, string) {
-		t.Helper()
-		req := httptest.NewRequest(http.MethodGet, linkStartPath, nil)
-		req.RemoteAddr = ip + ":40000"
-		rec := httptest.NewRecorder()
-		h.router.ServeHTTP(rec, req)
-		if rec.Code != http.StatusFound {
-			t.Fatalf("start from %s = %d", ip, rec.Code)
-		}
-		loc, _ := url.Parse(rec.Header().Get("Location"))
-		for _, c := range rec.Result().Cookies() {
-			if c.Name == linkCookieName {
-				return c, loc.Query().Get("state")
-			}
-		}
-		t.Fatal("no link cookie")
-		return nil, ""
-	}
-	otherCk, otherState := startFrom("198.51.100.9")
+	_, otherCk, otherState := h.startFrom("198.51.100.9")
 	var cks []*http.Cookie
 	var states []string
 	for i := 0; i <= linkMaxPerIP; i++ {
 		h.advance(time.Second)
-		ck, st := startFrom("198.51.100.1")
+		rec, ck, st := h.startFrom("198.51.100.1")
+		if ck == nil {
+			t.Fatalf("start %d from the source = %d", i, rec.Code)
+		}
 		cks, states = append(cks, ck), append(states, st)
 	}
 	if rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(states[0]), cks[0], nil); rec.Code != http.StatusBadRequest {
@@ -512,6 +526,59 @@ func TestIdentityLinkCapsUnfinishedLinksPerSource(t *testing.T) {
 	}
 	h.github(cks[linkMaxPerIP], states[linkMaxPerIP])
 	h.github(otherCk, otherState)
+}
+
+// On a shared egress IP the cap never ends a link that already proved
+// GitHub, however old: it drops a waiting one instead, and refuses a new
+// start once every unfinished link of that source is past GitHub.
+func TestIdentityLinkCapKeepsProvenLinks(t *testing.T) {
+	h := newLinkHarness(t)
+	const ip = "198.51.100.1"
+	var proven []*http.Cookie
+	var authURLs []string
+	for i := 0; i < linkMaxPerIP-1; i++ {
+		h.advance(time.Second)
+		_, ck, st := h.startFrom(ip)
+		rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(st), ck, nil)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("github callback %d = %d", i, rec.Code)
+		}
+		proven, authURLs = append(proven, ck), append(authURLs, rec.Header().Get("Location"))
+	}
+	h.advance(time.Second)
+	_, waitCk, waitState := h.startFrom(ip)
+	h.advance(time.Second)
+	_, lastCk, lastState := h.startFrom(ip)
+	if rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(waitState), waitCk, nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("the waiting link = %d, want 400 (dropped in place of a proven one)", rec.Code)
+	}
+	for i, ck := range proven {
+		// The fake IdP remembers one authorization; replay this link's.
+		zState := h.idp.authorize(t, authURLs[i])
+		if rec, form := h.zitadel(ck, zState); rec.Code != http.StatusOK || form.Get("csrf") == "" {
+			t.Fatalf("proven link %d after the cap = %d, want it still live", i, rec.Code)
+		}
+	}
+	h.github(lastCk, lastState)
+	rec, ck, _ := h.startFrom(ip)
+	if ck != nil || rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("start with every unfinished link past GitHub = %d, want 429", rec.Code)
+	}
+	if _, ck, _ := h.startFrom("198.51.100.9"); ck == nil {
+		t.Fatal("another source was refused")
+	}
+}
+
+// Provision answers a disabled principal with a value, not an error: the
+// GitHub leg must refuse it before sending the person to ZITADEL.
+func TestIdentityLinkGitHubLegRefusesADisabledPrincipal(t *testing.T) {
+	h := newLinkHarness(t)
+	h.store.disabled = true
+	ck, state := h.start()
+	rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(state), ck, nil)
+	if rec.Code != http.StatusForbidden || rec.Header().Get("Location") != "" || !strings.Contains(rec.Body.String(), "disabled") {
+		t.Fatalf("GitHub leg for a disabled principal = %d (Location %q)", rec.Code, rec.Header().Get("Location"))
+	}
 }
 
 func TestIdentityLinkCookieIsHostPrefixed(t *testing.T) {
@@ -528,7 +595,6 @@ func TestIdentityLinkGitHubLegClassifiesStoreErrors(t *testing.T) {
 		status int
 	}{
 		"store down": {errors.New("dial tcp 10.0.0.7:5432: connection refused"), http.StatusServiceUnavailable},
-		"disabled":   {auth.ErrPrincipalDisabled, http.StatusForbidden},
 		"refused":    {auth.ErrIdentityRefused, http.StatusForbidden},
 	}
 	for name, tc := range cases {
