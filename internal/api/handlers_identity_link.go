@@ -324,6 +324,7 @@ var linkPage = template.Must(template.New("link").Parse(`<!doctype html>
 <style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
 code{background:#f2f2f2;padding:0 .25rem}button{font-size:1rem;padding:.5rem 1rem}</style></head>
 <body><h1>{{.Title}}</h1>{{range .Lines}}<p>{{.}}</p>{{end}}
+{{if .Continue}}<p><a href="{{.Continue}}">Continue to ZITADEL sign-in</a></p>{{end}}
 {{if .Confirm}}<form method="post" action="{{.Confirm.Action}}">
 <input type="hidden" name="challenge" value="{{.Confirm.Challenge}}">
 <input type="hidden" name="csrf" value="{{.Confirm.CSRF}}">
@@ -331,9 +332,13 @@ code{background:#f2f2f2;padding:0 .25rem}button{font-size:1rem;padding:.5rem 1re
 </body></html>`))
 
 type linkPageData struct {
-	Title   string
-	Lines   []string
-	Confirm *struct{ Action, Challenge, CSRF string }
+	Title string
+	Lines []string
+	// Continue is the ZITADEL authorize URL of this challenge. It carries
+	// the challenge's own state, so the ZITADEL callback still checks the
+	// browser cookie and accepts it once.
+	Continue string
+	Confirm  *struct{ Action, Challenge, CSRF string }
 }
 
 func renderLinkPage(w http.ResponseWriter, status int, d linkPageData) {
@@ -501,7 +506,20 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 	// checks.
 	authURL := l.oauthConfig(prov).AuthCodeURL(zState, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce),
 		oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
-	http.Redirect(w, r, authURL, http.StatusFound)
+	// A page, not a redirect: prompt=login always asks for a login name,
+	// and with ignore_unknown_usernames ZITADEL answers a name it does not
+	// know (a GitHub login, a short user name) with a password page that a
+	// passkey-only account cannot pass (mctlhq/mctl-api#462). Say what to
+	// type before sending the person there.
+	renderLinkPage(w, http.StatusOK, linkPageData{
+		Title: "Now sign in to ZITADEL",
+		Lines: []string{
+			"GitHub: " + login + " verified.",
+			"On the ZITADEL page, enter the e-mail address your MCTL invitation was sent to, or your full ZITADEL login name. Do not enter your GitHub login.",
+			"If ZITADEL then asks for a password you never set, it did not recognize the name: go back and enter the e-mail address.",
+		},
+		Continue: authURL,
+	})
 }
 
 // handleIdentityLinkCallback: GET /identity/link/zitadel/callback.
