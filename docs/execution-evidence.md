@@ -137,12 +137,110 @@ read anyway. Deletion cascades to `execution_evidence_refs`.
   by `MCTL_EVIDENCE_WRITER_TOKEN`) or an admin. The evidence writer may call
   no other route (`evidenceWriterGate`, the same shape as `usageWriterGate`
   for the usage ledger).
-- `GET /api/v1/evidence/{id}` and `GET /api/v1/evidence` are admin-only:
+- `GET /api/v1/evidence/{id}`, `GET /api/v1/evidence` and
+  `GET /api/v1/evidence/current` are admin-only:
   cross-cutting governance evidence is more sensitive than a workflow
   status.
 - `GET /api/v1/work-items/{id}/evidence` reuses `visibleWorkItem` /
   `canSeeWorkItem`: a work item the caller may not see answers `404`, never
   `403`, so neither the work item's existence nor any evidence attached to
-  it leaks.
+  it leaks. `GET /api/v1/work-items/{id}/evidence/current` goes through the
+  same gate (see "Current vs historical" below).
 - Every accepted ingest writes an audit entry naming the evidence id, the
   primary execution identity, and the ingesting principal.
+
+## ADR 018 Amendment 2: versions, subject, tool calls, provenance
+
+mctlhq/mctl-agents#199 (contract merged as mctlhq/mctl-agents#575) added
+four optional envelope blocks and the `observation_failed` gap code. This
+store implements the ADR's "Tier B follow-up" checklist.
+
+**Accepted keys, re-validated on ingest.** `versions`, `subject`,
+`tool_calls` and `provenance` are accepted top-level keys. Each is absent
+when missing or `null` (`tool_calls` also when `[]`), and then hashes
+exactly as before: every pre-amendment vector keeps its literal hash. A
+present block is decoded strictly (unknown keys, non-string leaves and a
+non-integer `release_revision` are refused) and rebuilt in Tier A's
+`to_dict()` shape before hashing, which is what Tier A's
+`recompute_content_hash()` hashes. Every rule of Tier A's `validate()` is
+re-run (`internal/evidence/amendment2.go`): the `versions` slug/version/hash
+shapes and the signed 64-bit `release_revision`; the closed subject kinds,
+the numbered `ref` of a `pull_request`/`issue`, the `owner/name` repository
+with no path fragment, and a full lowercase 40/64-hex `revision` for
+`pull_request`/`branch`/`release`; `subject` requires `provenance`; the
+governed tool-call kinds (`policy_checkpoint.ACTION_KINDS`), the closed
+statuses and `MAX_TOOL_CALLS` = 256; the closed `authority`, the
+`observed_at` shape and `supersedes` = `ev-` + 16 hex, never the envelope's
+own id; `observation_failed` gaps must be required; a `redacted_out` gap on
+an Amendment 2 block must be required, and only such a gap excuses a blank
+`subject.ref` (non-numbered kinds only), `subject.repository` or
+`versions.agent`. Violations answer `400 evidence_invalid`. `observed_at`
+must also be a real instant (it is stored as `TIMESTAMPTZ`).
+`shepherd-pr-evidence.json` and `shepherd-pr-superseding-evidence.json` are
+byte-for-byte golden vectors with their literal hashes pinned.
+
+**Immutable columns.** `subject_kind`, `subject_repository`, `subject_ref`,
+`subject_revision`, `authority`, `supersedes` (`TEXT NOT NULL DEFAULT ''`)
+and `observed_at` (`TIMESTAMPTZ NULL`) are added by DDL only (`ADD COLUMN IF
+NOT EXISTS`), so the immutability trigger is untouched and no backfill is
+needed. They are written once at ingest from the envelope, and every read
+cross-checks them against the stored envelope (a disagreement is a corrupt
+row, `500`, never a silently preferred value). CHECK constraints repeat the
+contract at the storage layer (authority vocabulary, `supersedes` shape and
+not-self, subject requires provenance, SHA-bound revisions, plus the subject
+kind vocabulary, numbered refs and whole provenance). `versions` and
+`tool_calls` stay in the verbatim envelope only. Indexes:
+`(subject_kind, subject_repository, subject_ref, subject_revision,
+observed_at DESC) WHERE subject_kind <> ''` and `(supersedes) WHERE
+supersedes <> ''`.
+
+**Supersession at ingest.** When `provenance.supersedes` names a stored
+envelope, that envelope must have the same subject and revision and an
+authority no stronger than the new one, else `422
+evidence_supersedes_invalid`. A target that does not exist yet is accepted:
+the read rule only honours links inside a pool, so a dangling link retires
+nothing.
+
+**Exposed fields.** Every record carries `subject`, `authority`,
+`observed_at`, `supersedes` and a read-time `superseded_by` (valid links
+only: same subject and revision, neither subject redacted, equal or stronger
+authority). They are omitted on pre-amendment records, whose JSON is
+unchanged. `GET /api/v1/evidence` and `GET /api/v1/work-items/{id}/evidence`
+accept `subject_kind`, `subject_repository`, `subject_ref` and
+`subject_revision` filters (an unknown `subject_kind` is `400`).
+
+### Current vs historical
+
+`GET /api/v1/evidence/current?subject_kind=&repository=&ref=&revision=`
+implements Tier A's `resolve_current` exactly (`internal/evidence/resolve.go`
+is a line-for-line port, tested against Tier A's own cases and the golden
+pair) and answers `{"state": ..., "evidence": ...}`:
+
+| `state` | Meaning |
+|---|---|
+| `current` | exactly one envelope wins; `evidence` is that record |
+| `stale_revision` | no usable evidence at this revision, some at another |
+| `no_evidence` | no usable evidence for the subject at all (not "no run happened": a redacted-subject envelope answers it too) |
+| `unknown_revision` | `revision` missing for `pull_request`/`branch`/`release` |
+| `ambiguous` | a top-rank tie, a fully superseded pool, or two contents under one id |
+
+Authority outranks recency (`observed` > `derived` > `asserted`; among
+equals the later `observed_at` wins, the fraction normalized), and only an
+equal-or-stronger envelope in the same pool retires the one it supersedes.
+A malformed parameter (abbreviated or uppercase SHA, unknown kind, non-
+numeric PR ref, repeated parameter) answers `400 evidence_query_invalid`,
+never `no_evidence`.
+
+Could not observe is never observed absent: the read loads the complete
+pool at (subject, revision) and, only when it holds no usable envelope, one
+unredacted envelope at another revision as the `stale_revision` witness;
+every row is hash-verified. A pool larger than `MaxCurrentPool` (1000)
+answers `500 evidence_current_pool_too_large`, and any read or verification
+error is a `5xx`, never a truncated `no_evidence`.
+
+`GET /api/v1/work-items/{id}/evidence/current` (behind `visibleWorkItem`)
+resolves over the same complete pool and answers only when every record the
+answer depends on is attached to that work item; otherwise `403
+evidence_current_not_visible`. Resolving over the work item's slice of the
+pool could call a superseded envelope current, and answering from another
+work item's evidence would leak it.
