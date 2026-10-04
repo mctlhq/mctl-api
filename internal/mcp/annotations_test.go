@@ -26,6 +26,7 @@ type hints struct {
 // none is a closed-world tool, and the portal allowlist reasons from
 // readOnlyHint alone.
 var recordedHints = map[string]hints{
+	"mctl_abandon_dev_loop":                   {readOnly: false, destructive: true, idempotent: true},
 	"mctl_acknowledge_incident":               {readOnly: false, destructive: false, idempotent: true},
 	"mctl_add_custom_domain":                  {readOnly: false, destructive: false, idempotent: true},
 	"mctl_apply_openclaw_resource_profile":    {readOnly: false, destructive: false, idempotent: true},

@@ -200,6 +200,9 @@ func (h *Handlers) lifecycleLegacyFor(ctx context.Context, o *lifecycle.Ownershi
 // could not determine -- a statement about the read, not a workflow status.
 const devLoopStatusUnknown = "Unknown"
 
+// devLoopStatusRunning is DescribeDevLoop's answer for a live execution.
+const devLoopStatusRunning = "Running"
+
 func (h *Handlers) lifecycleDescribeLegacy(ctx context.Context, workflowID string) legacyAnswer {
 	status, err := h.opts.TemporalClient.DescribeDevLoop(ctx, workflowID)
 	if err != nil {

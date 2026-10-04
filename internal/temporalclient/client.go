@@ -65,6 +65,11 @@ const (
 	// ApproveSignalName matches DevLoopWorkflow's @workflow.signal method
 	// name (also un-overridden, so it's the method name "approve").
 	ApproveSignalName = "approve"
+	// AbandonSignalName matches DevLoopWorkflow's `abandon` signal
+	// (mctl-agents#420), likewise un-overridden. Unlike Temporal `terminate`
+	// it lets the workflow run `_watch_pr`'s `finally`, which releases the
+	// lifecycle-ownership row.
+	AbandonSignalName = "abandon"
 )
 
 var issueURLPattern = regexp.MustCompile(`^https://github\.com/mctlhq/([A-Za-z0-9_.-]+)/issues/([0-9]+)$`)
@@ -185,6 +190,20 @@ func (c *Client) SignalApprove(ctx context.Context, workflowID string, payload m
 	}
 	if err := c.temporal.SignalWorkflow(ctx, workflowID, "", ApproveSignalName, arg); err != nil {
 		return fmt.Errorf("temporalclient: signal approve on %s: %w", workflowID, err)
+	}
+	return nil
+}
+
+// SignalAbandon signals a running DevLoopWorkflow's abandon handler, which
+// ends the execution gracefully at its next observation point (the approval
+// park among them). runID pins the signal to the run the caller observed:
+// if that run closed and a new one started under the same workflow id,
+// Temporal answers NotFound instead of delivering to the new run. payload carries {"reason": ..., "abandoned_by": ...};
+// the workflow's defensive parser reads "reason" and falls back to a generic
+// one for any other shape, so the payload is always sent.
+func (c *Client) SignalAbandon(ctx context.Context, workflowID, runID string, payload map[string]string) error {
+	if err := c.temporal.SignalWorkflow(ctx, workflowID, runID, AbandonSignalName, payload); err != nil {
+		return fmt.Errorf("temporalclient: signal %s on %s: %w", AbandonSignalName, workflowID, err)
 	}
 	return nil
 }

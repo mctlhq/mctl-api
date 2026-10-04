@@ -162,6 +162,36 @@ func TestSignalApprove_OtherFailuresAreNotIsNotFound(t *testing.T) {
 	}
 }
 
+// The run id reaches SignalWorkflow, so the signal can only land on the run
+// the caller described, never on a newer run under the same workflow id.
+func TestSignalAbandon_SignalsAbandonOnTheGivenRun(t *testing.T) {
+	payload := map[string]string{"reason": "superseded", "abandoned_by": "mashkovd"}
+	mockClient := new(mocks.Client)
+	mockClient.On("SignalWorkflow", mock.Anything, "dev-loop-mctlhq-seerrsense-73", "run-1", "abandon", payload).
+		Return(nil)
+
+	c := &Client{temporal: mockClient}
+	if err := c.SignalAbandon(context.Background(), "dev-loop-mctlhq-seerrsense-73", "run-1", payload); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mockClient.AssertExpectations(t)
+}
+
+func TestSignalAbandon_UnknownWorkflowIsDetectableViaIsNotFound(t *testing.T) {
+	mockClient := new(mocks.Client)
+	mockClient.On("SignalWorkflow", mock.Anything, "dev-loop-x", "run-1", AbandonSignalName, mock.Anything).
+		Return(serviceerror.NewNotFound("workflow execution already completed"))
+
+	c := &Client{temporal: mockClient}
+	err := c.SignalAbandon(context.Background(), "dev-loop-x", "run-1", map[string]string{"reason": "r"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !IsNotFound(err) {
+		t.Fatalf("expected IsNotFound(err), got %v", err)
+	}
+}
+
 func TestDescribeDevLoop_MapsStatusToShortName(t *testing.T) {
 	mockClient := new(mocks.Client)
 	mockClient.On("DescribeWorkflowExecution", mock.Anything, "dev-loop-mctlhq-mctl-telegram-1", "").

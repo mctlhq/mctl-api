@@ -61,6 +61,7 @@ const sharedProvenance = "Enabled on the shared portal by owner decision 2026-09
 // Adding a name is the decision being asked for. The value says what the
 // tool changes, in the words of someone who would have to undo it.
 var mutatingOnPortal = map[string]string{
+	"mctl_abandon_dev_loop":                 "ends a running DevLoop for good",
 	"mctl_acknowledge_incident":             "incident state other operators read",
 	"mctl_add_custom_domain":                "tenant routing intent, plus a DNS ownership challenge",
 	"mctl_apply_openclaw_resource_profile":  "a tenant agent's CPU/memory profile in gitops",

@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -108,7 +109,7 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 // purely to fetch the run id would be a redundant Temporal round trip:
 // DescribeDevLoopExecution already returns both fields from the one call.
 //
-//   - describe succeeds and status == "Running" -> already_running, existing
+//   - describe succeeds and status == devLoopStatusRunning -> already_running, existing
 //     run id, do NOT start.
 //   - describe succeeds with any other status (a closed execution) ->
 //     already_exists, existing run id, do NOT start (REJECT_DUPLICATE would
@@ -122,7 +123,7 @@ func classifyDevLoop(ctx context.Context, c DevLoopClient, workflowID string) de
 	case err != nil && !temporalclient.IsNotFound(err):
 		// Cannot tell whether it exists: do not start blind.
 		return devLoopStartResult{Outcome: devLoopOutcomeFailed, Err: fmt.Errorf("could not read the existing DevLoop: %w", err)}
-	case err == nil && exec.Status == "Running":
+	case err == nil && exec.Status == devLoopStatusRunning:
 		return devLoopStartResult{Outcome: devLoopOutcomeAlreadyRunning, Status: exec.Status, RunID: exec.RunID}
 	case err == nil:
 		// A closed DevLoop is not restarted (REJECT_DUPLICATE); report it.
@@ -393,6 +394,184 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 	})
 }
 
+type abandonDevLoopRequest struct {
+	Reason string `json:"reason"`
+}
+
+// devLoopOutcomeSignalled and devLoopOutcomeAlreadyFinished are the two
+// answers AbandonDevLoopWorkflow gives on success.
+const (
+	devLoopOutcomeSignalled       = "signalled"
+	devLoopOutcomeAlreadyFinished = "already_finished"
+)
+
+// AbandonDevLoopWorkflow handles POST /api/v1/agents/dev-loop/{workflow_id}/abandon
+// (mctl-api#392) — the MCP-reachable form of mctl-agents#420's
+// `python -m orchestrator.temporal.cli abandon`. It sends the workflow's
+// `abandon` signal rather than Temporal `terminate`, because terminate skips
+// `_watch_pr`'s `finally`, where the lifecycle-ownership row is released.
+//
+// The body is {"reason": "<required>"}. Who ended the loop is the
+// authenticated caller, recorded on the signal and in the audit log the same
+// way ApproveDevLoopWorkflow records the approver, and never read from the
+// body: unknown fields are rejected, so `abandoned_by` cannot be supplied.
+//
+// The execution is described first, so the answer is always an observation:
+//   - no execution under this id: 404;
+//   - an execution that already finished: 200 with its final status and
+//     outcome already_finished, nothing signalled, so a retry is harmless;
+//   - a running execution: signalled, 200 with outcome signalled. The
+//     workflow ends at its next observation point, so the status reported is
+//     still Running; mctl_get_dev_loop shows the terminal status after.
+//
+// Any Temporal error is a 502, never a success. The signal is pinned to the
+// run the describe observed, so a run that closed in between -- even one
+// already replaced by a new run under the same workflow id -- answers
+// NotFound rather than abandoning a loop nobody looked at. That NotFound is
+// answered from a second describe rather than assumed either way; a new
+// run found there is reported as a 409, not abandoned.
+func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireTemporalAdmin(w, r)
+	if !ok {
+		return
+	}
+
+	workflowID := chi.URLParam(r, "workflow_id")
+	if workflowID == "" {
+		writeError(w, http.StatusBadRequest, "missing workflow_id path parameter")
+		return
+	}
+	if !refuseIdentityFields(w, r, maxExecutionRequestBodyBytes) {
+		return
+	}
+
+	var body abandonDevLoopRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest,
+			"invalid JSON: "+err.Error()+" (the body is {\"reason\": ...}; who abandoned the loop is taken from the authenticated caller)")
+		return
+	}
+	reason := strings.TrimSpace(body.Reason)
+	if reason == "" {
+		writeError(w, http.StatusBadRequest, "missing required field: reason")
+		return
+	}
+
+	auditParams := map[string]string{"abandoned_by": user.ID, "reason": reason}
+	fail := func(code int, message, clientMessage string) {
+		h.logAudit(r, audit.Entry{
+			UserID:       user.ID,
+			Operation:    "dev-loop-abandon",
+			Parameters:   auditParams,
+			WorkflowName: workflowID,
+			Status:       "failed",
+			RiskLevel:    string(operations.RiskMedium),
+			Message:      message,
+		})
+		writeError(w, code, clientMessage)
+	}
+	finished := func(exec *temporalclient.DevLoopExecution) {
+		h.logAudit(r, audit.Entry{
+			UserID:       user.ID,
+			Operation:    "dev-loop-abandon",
+			Parameters:   auditParams,
+			WorkflowName: workflowID,
+			Status:       "succeeded",
+			RiskLevel:    string(operations.RiskMedium),
+			Message:      "not signalled: already finished (run " + exec.RunID + ", status " + exec.Status + ")",
+		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"workflow_id": workflowID,
+			"run_id":      exec.RunID,
+			"status":      exec.Status,
+			"outcome":     devLoopOutcomeAlreadyFinished,
+			"message":     "The DevLoopWorkflow already finished; nothing was signalled.",
+		})
+	}
+	// describe answers with the execution, or writes the error response
+	// itself and returns nil. notFoundAudit is the audit message for a
+	// NotFound: on the second look the execution was observed moments ago,
+	// so "workflow not found" would misreport what happened.
+	describe := func(notFoundAudit string) *temporalclient.DevLoopExecution {
+		dctx, cancel := context.WithTimeout(r.Context(), devLoopDescribeTimeout)
+		defer cancel()
+		exec, err := h.opts.TemporalClient.DescribeDevLoopExecution(dctx, workflowID)
+		switch {
+		case temporalclient.IsNotFound(err):
+			fail(http.StatusNotFound, notFoundAudit, "workflow not found: "+workflowID)
+			return nil
+		case err != nil:
+			fail(http.StatusBadGateway, "describe failed: "+err.Error(), "failed to describe workflow: "+err.Error())
+			return nil
+		case exec.Status == devLoopStatusUnknown:
+			// Neither running nor finished as far as anyone can tell: not a
+			// state to signal into, and not one to report as finished.
+			fail(http.StatusBadGateway, "describe returned an unknown status",
+				"workflow "+workflowID+" has an execution status this server could not determine")
+			return nil
+		}
+		return exec
+	}
+
+	exec := describe("workflow not found")
+	if exec == nil {
+		return
+	}
+	if exec.Status != devLoopStatusRunning {
+		finished(exec)
+		return
+	}
+
+	payload := map[string]string{"reason": reason, "abandoned_by": user.ID}
+	if err := h.opts.TemporalClient.SignalAbandon(r.Context(), workflowID, exec.RunID, payload); err != nil {
+		if !temporalclient.IsNotFound(err) {
+			fail(http.StatusBadGateway, "signal failed: "+err.Error(), "failed to signal abandon: "+err.Error())
+			return
+		}
+		// Temporal answers NotFound for the described run once it has
+		// completed, whether or not a new run has started since. Look again
+		// instead of guessing.
+		after := describe("execution vanished between describe and signal")
+		if after == nil {
+			return
+		}
+		if after.Status == devLoopStatusRunning {
+			if after.RunID != exec.RunID {
+				// The described run ended and a new one took the id. It was
+				// not the run anyone looked at, so it is not abandoned here.
+				fail(http.StatusConflict, "described run "+exec.RunID+" ended; new run "+after.RunID+" not signalled",
+					"run "+exec.RunID+" ended before the signal and a new run "+after.RunID+
+						" is running under the same workflow id; it was not abandoned. Re-issue the request to abandon it.")
+				return
+			}
+			fail(http.StatusBadGateway, "signal answered not found for a running execution",
+				"failed to signal abandon: "+err.Error())
+			return
+		}
+		finished(after)
+		return
+	}
+
+	h.logAudit(r, audit.Entry{
+		UserID:       user.ID,
+		Operation:    "dev-loop-abandon",
+		Parameters:   auditParams,
+		WorkflowName: workflowID,
+		Status:       "succeeded",
+		RiskLevel:    string(operations.RiskMedium),
+	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"workflow_id": workflowID,
+		"run_id":      exec.RunID,
+		"status":      exec.Status,
+		"outcome":     devLoopOutcomeSignalled,
+		"signalled":   "abandon",
+		"message":     "Abandon signalled. The DevLoopWorkflow ends at its next observation point; check GET /api/v1/agents/dev-loop/{workflow_id} for the terminal status.",
+	})
+}
+
 // GetDevLoopWorkflow handles GET /api/v1/agents/dev-loop/{workflow_id} —
 // a liveness read: the shepherd cron's sweeper skips proposals whose
 // DevLoopWorkflow is still Running (it drives its own review loop, see
@@ -449,10 +628,10 @@ func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 	// returns "Unknown" from its own default arm for an execution status it
 	// could not determine, so a read that determined nothing would otherwise
 	// answer known=true about a false it derived from nothing. The old
-	// `status == "Running"` covered that case by accident; this covers it on
+	// `status == devLoopStatusRunning` covered that case by accident; this covers it on
 	// purpose.
 	shepherdInLoopKnown := status != "Unknown"
-	if status == "Running" {
+	if status == devLoopStatusRunning {
 		qctx, cancel := context.WithTimeout(r.Context(), shepherdQueryTimeout)
 		inLoop, qerr := h.opts.TemporalClient.QueryShepherdInLoop(qctx, workflowID)
 		cancel()

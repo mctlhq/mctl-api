@@ -486,6 +486,8 @@ func NewRouter(opts Options) http.Handler {
 				// (mctl-api#334), on this budget like the single start.
 				r.Post("/roadmap/waves/execute", h.ExecuteRoadmapWave)
 				r.Post("/agents/dev-loop/{workflow_id}/approve", h.ApproveDevLoopWorkflow)
+				// Ends a DevLoop gracefully (mctl-api#392).
+				r.Post("/agents/dev-loop/{workflow_id}/abandon", h.AbandonDevLoopWorkflow)
 				// Signals the owning DevLoopWorkflow (mctl-api#261).
 				r.Post("/human-input/{request_id}/response", h.RespondHumanInput)
 				// Starts a mctl-gitops workflow, not a platform workflow, and

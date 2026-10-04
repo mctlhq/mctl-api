@@ -247,6 +247,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolTriggerApprove())
 	srv.AddTool(s.toolTriggerIssue())
 	srv.AddTool(s.toolApproveDevLoop())
+	srv.AddTool(s.toolAbandonDevLoop())
 	srv.AddTool(s.toolGetDevLoop())
 	srv.AddTool(s.toolGetLifecycleOwnership())
 	srv.AddTool(s.toolInspectLifecycleConflict())
@@ -3090,6 +3091,52 @@ Admin-only. Requires the server's Temporal client to be configured — returns 5
 		respBody, err := s.apiPostJSON(ctx, "/api/v1/agents/dev-loop/"+url.PathEscape(workflowID)+"/approve", body)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to approve dev-loop workflow: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(respBody)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolAbandonDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_abandon_dev_loop",
+		mcplib.WithTitleAnnotation("Abandon a DevLoopWorkflow"),
+		// Destructive: it ends a running loop for good, and nothing restarts
+		// a closed DevLoop under the same workflow id. Idempotent: a repeat
+		// against a finished execution only reports its final status.
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(true),
+		mcplib.WithDescription(`Gracefully end an EXISTING DevLoopWorkflow execution by sending its durable Temporal "abandon" signal (mctl-agents#420).
+
+Use it for a loop that must not continue — typically one parked at the approval gate for a proposal that will never be approved. The workflow ends at its next observation point (the approval park observes it) and records "abandoned: <reason>" as its result. Unlike a Temporal terminate, it keeps the workflow's own cleanup, which releases the lifecycle-ownership row.
+
+Wraps POST /api/v1/agents/dev-loop/{workflow_id}/abandon. Returns outcome "signalled" for a running execution (status still reads "Running" at that moment; poll mctl_get_dev_loop for the terminal status) or "already_finished" with the final status for one that had already ended, in which case nothing is signalled. A 404 means no DevLoopWorkflow exists under that id. A 409 means the run that was looked at ended and a new run took the id before the signal; the new run was not abandoned, so call again if it should be. Who abandoned the loop is the authenticated caller, not an argument.
+
+This does not edit the proposal's .status.yaml.
+
+Admin-only. Requires the server's Temporal client to be configured — returns 503 otherwise.`),
+		mcplib.WithString("workflow_id",
+			mcplib.Required(),
+			mcplib.Description("The DevLoopWorkflow's Temporal workflow ID, e.g. dev-loop-mctlhq-mctl-telegram-296."),
+		),
+		mcplib.WithString("reason",
+			mcplib.Required(),
+			mcplib.Description("Why the loop is being ended, e.g. \"superseded by mctl-gitops#1363\". Recorded on the signal and in the workflow's result."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		workflowID := strings.TrimSpace(stringArg(req, "workflow_id"))
+		reason := strings.TrimSpace(stringArg(req, "reason"))
+		if workflowID == "" {
+			return mcplib.NewToolResultError("missing required argument: workflow_id"), nil
+		}
+		if reason == "" {
+			return mcplib.NewToolResultError("missing required argument: reason"), nil
+		}
+		respBody, err := s.apiPostJSON(ctx, "/api/v1/agents/dev-loop/"+url.PathEscape(workflowID)+"/abandon",
+			map[string]interface{}{"reason": reason})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to abandon dev-loop workflow: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(respBody)), nil
 	}
