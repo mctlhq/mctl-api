@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.63.1](https://github.com/mctlhq/mctl-api/compare/4.63.0...4.63.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **helm:** route /identity through the ingress ([270c990](https://github.com/mctlhq/mctl-api/commit/270c99096b2f40e459844d8bfea0afbb91fafb39))
+* **helm:** route /identity through the ingress ([d86cb1f](https://github.com/mctlhq/mctl-api/commit/d86cb1f5b63c078dedea9adca8fdfbaaa7dd8a77))
+
 ## [4.63.0](https://github.com/mctlhq/mctl-api/compare/4.62.0...4.63.0) (2026-10-04)
 
 
