@@ -797,7 +797,7 @@ func TestLocalOAuthJWTsAreCountedApartFromGitHubTokens(t *testing.T) {
 	count := func(provider, result string) float64 {
 		return testutil.ToFloat64(federationVerifications.WithLabelValues(provider, result))
 	}
-	localOK, localBad, ghOK := count(MetricLabelLocalOAuth, "ok"), count(MetricLabelLocalOAuth, "invalid"), count(ProviderGitHub, "ok")
+	localOK, localBad, ghOK := count(metricLabelLocalOAuth, "ok"), count(metricLabelLocalOAuth, "invalid"), count(ProviderGitHub, "ok")
 
 	v, err := r.Verify(context.Background(), token)
 	if err != nil || v.Identity.Provider != ProviderGitHub || v.Identity.Display != "mashkovd" {
@@ -809,13 +809,28 @@ func TestLocalOAuthJWTsAreCountedApartFromGitHubTokens(t *testing.T) {
 	if _, err := r.Verify(context.Background(), "gho_opaque"); err != nil {
 		t.Fatal(err)
 	}
-	if d := count(MetricLabelLocalOAuth, "ok") - localOK; d != 1 {
+	if d := count(metricLabelLocalOAuth, "ok") - localOK; d != 1 {
 		t.Errorf("mctl_oauth ok moved %v, want 1", d)
 	}
-	if d := count(MetricLabelLocalOAuth, "invalid") - localBad; d != 1 {
+	if d := count(metricLabelLocalOAuth, "invalid") - localBad; d != 1 {
 		t.Errorf("mctl_oauth invalid moved %v, want 1", d)
 	}
 	if d := count(ProviderGitHub, "ok") - ghOK; d != 1 {
 		t.Errorf("github ok moved %v, want exactly the raw token", d)
+	}
+}
+
+// A configured provider named like the local-OAuth label would be counted
+// in mctl-issued JWTs' series; it is refused wherever it is registered.
+func TestRegistryRefusesTheLocalOAuthMetricLabelAsAName(t *testing.T) {
+	named := &fakeProvider{name: metricLabelLocalOAuth, issuer: "https://issuer", claims: matchIssuer("https://issuer")}
+	for name, sets := range map[string][3][]Provider{
+		"static": {{named}, nil, nil},
+		"jwt":    {nil, {named}, nil},
+		"opaque": {nil, nil, {named}},
+	} {
+		if _, err := NewRegistry(sets[0], sets[1], sets[2]); err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Errorf("%s: NewRegistry = %v, want a refusal", name, err)
+		}
 	}
 }

@@ -16,6 +16,10 @@ package auth
 
 import "context"
 
+// metricLabelLocalOAuth is the federation metrics' provider label for
+// mctl-issued OAuth JWTs (OAuthServer.IssueJWT).
+const metricLabelLocalOAuth = "mctl_oauth"
+
 // localOAuthProvider is the local MCP OAuth HS256 JWT provider
 // (OAuthServer.ValidateJWT, oauth_server.go:677-686). It is claimed by exact
 // match of the token's unverified iss against OAuthServer.BaseURL.
@@ -38,11 +42,7 @@ func (*localOAuthProvider) Name() string { return ProviderGitHub }
 // metricLabel separates mctl-issued JWTs from raw GitHub tokens in the
 // federation metrics; both are namespace "github", so without it
 // provider="github" counts the two together.
-func (*localOAuthProvider) metricLabel() string { return MetricLabelLocalOAuth }
-
-// MetricLabelLocalOAuth is the federation metrics' provider label for
-// mctl-issued OAuth JWTs (OAuthServer.IssueJWT).
-const MetricLabelLocalOAuth = "mctl_oauth"
+func (*localOAuthProvider) metricLabel() string { return metricLabelLocalOAuth }
 
 func (p *localOAuthProvider) issuerName() string {
 	if p.oauth == nil {

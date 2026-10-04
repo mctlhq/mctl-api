@@ -182,6 +182,17 @@ func NewRegistry(static, jwt, opaque []Provider) (*Registry, error) {
 		return nil, fmt.Errorf("federation: more than one opaque-token provider registered (%s): an opaque token carries nothing to route on", strings.Join(names, ", "))
 	}
 
+	// A provider named like the local-OAuth metric label would be counted
+	// in mctl-issued JWTs' series, which is the conflation the label exists
+	// to remove.
+	for _, set := range [][]Provider{static, jwt, opaque} {
+		for _, p := range set {
+			if p.Name() == metricLabelLocalOAuth {
+				return nil, fmt.Errorf("federation: provider name %q is reserved for mctl-issued OAuth JWTs' metrics", metricLabelLocalOAuth)
+			}
+		}
+	}
+
 	seenNames := map[string]bool{}
 	seenIssuers := map[string]string{} // normalized issuer -> provider name
 	for _, p := range jwt {
@@ -296,7 +307,10 @@ type metricLabeler interface {
 	metricLabel() string
 }
 
-// metricLabel is the provider label of the federation metrics.
+// metricLabel is the provider label of the registry-owned federation
+// metrics (verifications, duration, contract violations). The audience and
+// groups counters are emitted by OIDC providers themselves under their own
+// name; none of them relabels, so the two never disagree.
 func metricLabel(p Provider) string {
 	if m, ok := p.(metricLabeler); ok {
 		return m.metricLabel()

@@ -334,9 +334,12 @@ wholesale, and is not part of that pin.
 
 `provider` is the provider's namespace, with one exception: mctl-issued
 OAuth JWTs (the local-OAuth provider, namespace `github`) are counted as
-`provider="mctl_oauth"`, so `provider="github"` counts only raw GitHub
-tokens used as bearers. That split is what shows when raw GitHub-token use
-has reached zero and `provider_github.go` can be retired.
+`provider="mctl_oauth"`, so `provider="github", result="ok"` counts only
+raw GitHub tokens accepted as bearers. That series reaching zero is the
+gate for retiring `provider_github.go`; `result="invalid"` under `github`
+never will, because the GitHub provider is the catch-all for every
+unrecognised non-JWT bearer. The name `mctl_oauth` is reserved: a
+configured provider of that name is refused at boot.
 
 The two audience counters are deliberately distinct: "we never checked" and
 "we checked, it failed, we let it through" are different operational facts,
