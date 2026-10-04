@@ -412,7 +412,7 @@ func TestStoreListMatchesWorkItemOnEitherTable(t *testing.T) {
 
 	for name, list := range map[string]func() (*ListResult, error){
 		"List":       func() (*ListResult, error) { return s.List(ctx, Filter{WorkItemID: workItem}) },
-		"ByWorkItem": func() (*ListResult, error) { return s.ByWorkItem(ctx, workItem, 0) },
+		"ByWorkItem": func() (*ListResult, error) { return s.ByWorkItem(ctx, workItem, Filter{}) },
 	} {
 		res, err := list()
 		if err != nil {

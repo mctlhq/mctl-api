@@ -29,6 +29,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -62,6 +63,11 @@ const (
 	codeEvidenceNotFound              = "evidence_not_found"
 	codeEvidenceStoreUnavailable      = "evidence_store_unavailable"
 	codeEvidenceWriterForbidden       = "evidence_writer_route_not_allowed"
+	// ADR 018 Amendment 2.
+	codeEvidenceSupersedesInvalid   = "evidence_supersedes_invalid"
+	codeEvidenceQueryInvalid        = "evidence_query_invalid"
+	codeEvidenceCurrentPoolTooLarge = "evidence_current_pool_too_large"
+	codeEvidenceCurrentNotVisible   = "evidence_current_not_visible"
 )
 
 // evidenceWriterGate confines the evidence-writer principal (mctl-api#409)
@@ -139,6 +145,17 @@ func writeEvidenceError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusConflict, codeEvidenceDivergence, err.Error(), nil)
 	case errors.Is(err, evidence.ErrEvidenceNotFound):
 		writeErrorCode(w, http.StatusNotFound, codeEvidenceNotFound, "evidence not found", nil)
+	case errors.Is(err, evidence.ErrEvidenceSupersedesInvalid):
+		writeErrorCode(w, http.StatusUnprocessableEntity, codeEvidenceSupersedesInvalid, err.Error(), nil)
+	case errors.Is(err, evidence.ErrCurrentQueryInvalid):
+		writeErrorCode(w, http.StatusBadRequest, codeEvidenceQueryInvalid, err.Error(), nil)
+	case errors.Is(err, evidence.ErrCurrentPoolTooLarge):
+		// Never a truncated no_evidence: the complete pool could not be
+		// loaded, so the server cannot answer.
+		writeErrorCode(w, http.StatusInternalServerError, codeEvidenceCurrentPoolTooLarge, err.Error(), nil)
+	case errors.Is(err, evidence.ErrCurrentNotVisible):
+		writeErrorCode(w, http.StatusForbidden, codeEvidenceCurrentNotVisible,
+			"the current evidence for this subject depends on evidence outside this work item", nil)
 	default:
 		slog.Error("evidence store error", "error", err)
 		writeError(w, http.StatusInternalServerError, "evidence store error")
@@ -243,6 +260,9 @@ func evidenceFilterFromQuery(r *http.Request) (evidence.Filter, error) {
 		EngineRef:          q.Get("engine_ref"),
 		Repository:         q.Get("repository"),
 	}
+	if err := subjectFilterFromQuery(r, &f); err != nil {
+		return f, err
+	}
 	parseInt := func(key string) (*int64, error) {
 		raw := q.Get(key)
 		if raw == "" {
@@ -275,6 +295,22 @@ func evidenceFilterFromQuery(r *http.Request) (evidence.Filter, error) {
 		f.Limit = v
 	}
 	return f, nil
+}
+
+// subjectFilterFromQuery reads the ADR 018 Amendment 2 subject filters
+// (subject_kind, subject_repository, subject_ref, subject_revision). An
+// unknown subject_kind is an error rather than a filter that silently
+// matches nothing.
+func subjectFilterFromQuery(r *http.Request, f *evidence.Filter) error {
+	q := r.URL.Query()
+	f.SubjectKind = q.Get("subject_kind")
+	f.SubjectRepository = q.Get("subject_repository")
+	f.SubjectRef = q.Get("subject_ref")
+	f.SubjectRevision = q.Get("subject_revision")
+	if f.SubjectKind != "" && !evidence.IsSubjectKind(f.SubjectKind) {
+		return errors.New("invalid subject_kind")
+	}
+	return nil
 }
 
 // ListEvidence handles GET /api/v1/evidence with any combination of the
@@ -314,7 +350,85 @@ func (h *Handlers) ListWorkItemEvidence(w http.ResponseWriter, r *http.Request) 
 		writeErrorCode(w, http.StatusServiceUnavailable, codeEvidenceStoreUnavailable, "evidence store not configured", nil)
 		return
 	}
-	res, err := h.opts.Evidence.ByWorkItem(r.Context(), item.ID, 0)
+	var f evidence.Filter
+	if err := subjectFilterFromQuery(r, &f); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	res, err := h.opts.Evidence.ByWorkItem(r.Context(), item.ID, f)
+	if err != nil {
+		writeEvidenceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// currentQuery reads GET .../evidence/current's parameters. Validation is
+// the store's (ValidateSubjectQuery): a malformed value answers 400
+// evidence_query_invalid, never no_evidence. A repeated parameter is
+// malformed too, rather than silently first-wins.
+func currentQuery(r *http.Request) (evidence.SubjectQuery, error) {
+	q := r.URL.Query()
+	for _, key := range []string{"subject_kind", "repository", "ref", "revision"} {
+		if len(q[key]) > 1 {
+			return evidence.SubjectQuery{}, fmt.Errorf("%w: %s given more than once", evidence.ErrCurrentQueryInvalid, key)
+		}
+	}
+	return evidence.SubjectQuery{
+		Kind:       q.Get("subject_kind"),
+		Repository: q.Get("repository"),
+		Ref:        q.Get("ref"),
+		Revision:   q.Get("revision"),
+	}, nil
+}
+
+// CurrentEvidence handles GET /api/v1/evidence/current
+// (?subject_kind=&repository=&ref=&revision=): ADR 018 Amendment 2's
+// resolve_current over the complete stored pool, answering {state,
+// evidence}. Admin-only, like GET /api/v1/evidence.
+func (h *Handlers) CurrentEvidence(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireEvidenceAdmin(w, r); !ok {
+		return
+	}
+	q, err := currentQuery(r)
+	if err != nil {
+		writeEvidenceError(w, err)
+		return
+	}
+	res, err := h.opts.Evidence.Current(r.Context(), q)
+	if err != nil {
+		writeEvidenceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// CurrentWorkItemEvidence handles GET
+// /api/v1/work-items/{id}/evidence/current: the work-item-scoped variant,
+// behind visibleWorkItem (404 for an item the caller may not see). It
+// resolves over the same complete pool as CurrentEvidence and answers only
+// when every record that answer depends on is attached to this work item
+// (403 evidence_current_not_visible otherwise) — evidence never leaks past
+// the work item, and a partial pool is never resolved.
+func (h *Handlers) CurrentWorkItemEvidence(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.workItemsUser(w, r)
+	if !ok {
+		return
+	}
+	item, ok := h.visibleWorkItem(w, r, user)
+	if !ok {
+		return
+	}
+	if h.opts.Evidence == nil {
+		writeErrorCode(w, http.StatusServiceUnavailable, codeEvidenceStoreUnavailable, "evidence store not configured", nil)
+		return
+	}
+	q, err := currentQuery(r)
+	if err != nil {
+		writeEvidenceError(w, err)
+		return
+	}
+	res, err := h.opts.Evidence.CurrentForWorkItem(r.Context(), q, item.ID)
 	if err != nil {
 		writeEvidenceError(w, err)
 		return

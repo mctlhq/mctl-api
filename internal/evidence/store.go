@@ -120,8 +120,86 @@ CREATE INDEX IF NOT EXISTS execution_evidence_refs_repo_pr
     WHERE repository <> '' AND pr_number IS NOT NULL;
 `
 
+// schemaAmendment2 is the ADR 018 Amendment 2 migration (Tier B follow-up,
+// checklist items 4-5). It is DDL only — ALTER TABLE ... ADD COLUMN, never
+// an UPDATE — so the execution_evidence_no_update trigger stays untouched
+// and existing rows need no backfill: no pre-amendment envelope can carry a
+// subject or provenance, and the column defaults (” / NULL) are exactly
+// what such a row would have been written with. Every column is written
+// once, at ingest, from the envelope itself; versions and tool_calls stay
+// in the verbatim envelope only (no columns, no second copy).
+//
+// Constraints are added under their own names inside DO blocks that
+// tolerate duplicate_object, so concurrent replicas applying the schema at
+// startup cannot fail each other.
+const schemaAmendment2 = `
+ALTER TABLE execution_evidence
+    ADD COLUMN IF NOT EXISTS subject_kind       TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS subject_repository TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS subject_ref        TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS subject_revision   TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS authority          TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS observed_at        TIMESTAMPTZ NULL,
+    ADD COLUMN IF NOT EXISTS supersedes         TEXT NOT NULL DEFAULT '';
+
+DO $$
+DECLARE
+    c RECORD;
+BEGIN
+    FOR c IN SELECT * FROM (VALUES
+        ('execution_evidence_authority_vocab',
+         $c$authority IN ('', 'observed', 'derived', 'asserted')$c$),
+        ('execution_evidence_supersedes_shape',
+         $c$supersedes = '' OR supersedes ~ '^ev-[0-9a-f]{16}$'$c$),
+        ('execution_evidence_supersedes_not_self',
+         $c$supersedes <> id$c$),
+        ('execution_evidence_subject_needs_provenance',
+         $c$subject_kind = '' OR (authority <> '' AND observed_at IS NOT NULL)$c$),
+        ('execution_evidence_sha_bound_revision',
+         $c$subject_kind NOT IN ('pull_request', 'branch', 'release') OR subject_revision ~ '^[0-9a-f]{40}([0-9a-f]{24})?$'$c$),
+        -- Beyond the ADR's list, the same rules Tier A states: a closed
+        -- subject vocabulary, a numbered ref for pull_request/issue (never
+        -- excused by redaction), no subject columns without a subject, and
+        -- provenance written as a whole (authority and observed_at
+        -- together).
+        ('execution_evidence_subject_kind_vocab',
+         $c$subject_kind IN ('', 'pull_request', 'issue', 'branch', 'release', 'work_item')$c$),
+        ('execution_evidence_numbered_ref',
+         $c$subject_kind NOT IN ('pull_request', 'issue') OR subject_ref ~ '^[1-9][0-9]{0,9}$'$c$),
+        ('execution_evidence_subject_columns_need_kind',
+         $c$subject_kind <> '' OR (subject_repository = '' AND subject_ref = '' AND subject_revision = '')$c$),
+        ('execution_evidence_provenance_whole',
+         $c$(authority = '') = (observed_at IS NULL)$c$)
+    ) AS t(name, expr)
+    LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = c.name) THEN
+            BEGIN
+                EXECUTE format('ALTER TABLE execution_evidence ADD CONSTRAINT %I CHECK (%s)', c.name, c.expr);
+            EXCEPTION WHEN duplicate_object THEN
+                NULL;
+            END;
+        END IF;
+    END LOOP;
+END;
+$$;
+
+CREATE INDEX IF NOT EXISTS execution_evidence_subject
+    ON execution_evidence (subject_kind, subject_repository, subject_ref, subject_revision, observed_at DESC)
+    WHERE subject_kind <> '';
+CREATE INDEX IF NOT EXISTS execution_evidence_supersedes
+    ON execution_evidence (supersedes) WHERE supersedes <> '';
+`
+
+// evidenceColumns are the pre-amendment columns, in insert order.
 const evidenceColumns = `id, content_hash, api_version, envelope, execution_id, runtime_execution_id,
 	work_item_id, trace_id, created_at, ingested_by, ingested_by_principal_id, ingested_at`
+
+// evidenceSubjectColumns are the ADR 018 Amendment 2 columns.
+const evidenceSubjectColumns = `subject_kind, subject_repository, subject_ref, subject_revision,
+	authority, observed_at, supersedes`
+
+// evidenceRowColumns is every column scanEvidenceRow reads, in scan order.
+const evidenceRowColumns = evidenceColumns + `, ` + evidenceSubjectColumns
 
 const refColumns = `evidence_id, work_execution_id, work_item_id, tenant, engine, engine_ref,
 	repository, issue_number, pr_number, derived_at`
@@ -150,6 +228,10 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("evidence: schema: %w", err)
 	}
+	if _, err := pool.Exec(ctx, schemaAmendment2); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("evidence: schema (ADR 018 Amendment 2): %w", err)
+	}
 	slog.Info("evidence store initialized")
 	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
 }
@@ -168,12 +250,17 @@ type querier interface {
 
 // scanEvidenceRow scans one execution_evidence row and re-verifies its
 // content hash: bytes that no longer hash to the stored content_hash are
-// refused rather than served, mirroring workitems.scanSnapshot.
+// refused rather than served, mirroring workitems.scanSnapshot. The
+// Amendment 2 columns are cross-checked against the envelope they were
+// written from: a disagreement is a corrupt row (an error), never a
+// silently preferred value.
 func scanEvidenceRow(row pgx.Row) (*Evidence, error) {
 	var e Evidence
 	var envelope []byte
+	var col subjectColumns
 	if err := row.Scan(&e.ID, &e.ContentHash, &e.APIVersion, &envelope, &e.ExecutionID, &e.RuntimeExecutionID,
-		&e.WorkItemID, &e.TraceID, &e.CreatedAt, &e.IngestedBy, &e.IngestedByPrincipalID, &e.IngestedAt); err != nil {
+		&e.WorkItemID, &e.TraceID, &e.CreatedAt, &e.IngestedBy, &e.IngestedByPrincipalID, &e.IngestedAt,
+		&col.kind, &col.repository, &col.ref, &col.revision, &col.authority, &col.observedAt, &col.supersedes); err != nil {
 		return nil, err
 	}
 	p, err := parseEnvelope(envelope)
@@ -187,11 +274,73 @@ func scanEvidenceRow(row pgx.Row) (*Evidence, error) {
 	if got := ContentHash(canonical); got != e.ContentHash {
 		return nil, fmt.Errorf("evidence: %s: stored bytes hash to %s, not %s", e.ID, got, e.ContentHash)
 	}
+	want, err := subjectColumnsOf(p)
+	if err != nil {
+		return nil, fmt.Errorf("evidence: stored envelope %s: %w", e.ID, err)
+	}
+	if !col.equal(want) {
+		return nil, fmt.Errorf("evidence: %s: subject/provenance columns disagree with the stored envelope", e.ID)
+	}
 	e.Envelope = envelope
 	e.CreatedAt = e.CreatedAt.UTC()
 	e.IngestedAt = e.IngestedAt.UTC()
 	e.PrimaryRefKind, e.PrimaryRefID = e.PrimaryExecutionRef()
+	if p.a2.subject != nil {
+		subject := *p.a2.subject
+		e.Subject = &subject
+	}
+	if p.a2.provenance != nil {
+		e.Authority = p.a2.provenance.Authority
+		e.Supersedes = p.a2.provenance.Supersedes
+		e.observedAtRaw = p.a2.provenance.ObservedAt
+		if want.observedAt != nil {
+			at := want.observedAt.UTC()
+			e.ObservedAt = &at
+		}
+	}
+	e.subjectRedacted = p.a2.subjectRedacted()
 	return &e, nil
+}
+
+// subjectColumns is the ADR 018 Amendment 2 column set of one row.
+type subjectColumns struct {
+	kind, repository, ref, revision string
+	authority                       string
+	observedAt                      *time.Time
+	supersedes                      string
+}
+
+func (c subjectColumns) equal(o subjectColumns) bool {
+	if c.kind != o.kind || c.repository != o.repository || c.ref != o.ref || c.revision != o.revision ||
+		c.authority != o.authority || c.supersedes != o.supersedes {
+		return false
+	}
+	if (c.observedAt == nil) != (o.observedAt == nil) {
+		return false
+	}
+	return c.observedAt == nil || c.observedAt.Equal(*o.observedAt)
+}
+
+// subjectColumnsOf derives the Amendment 2 columns from a parsed envelope:
+// what Ingest writes, and what scanEvidenceRow cross-checks.
+func subjectColumnsOf(p *parsedEnvelope) (subjectColumns, error) {
+	var c subjectColumns
+	if s := p.a2.subject; s != nil {
+		c.kind, c.repository, c.ref, c.revision = s.Kind, s.Repository, s.Ref, s.Revision
+	}
+	if pr := p.a2.provenance; pr != nil {
+		c.authority, c.supersedes = pr.Authority, pr.Supersedes
+		if pr.ObservedAt != "" {
+			at, err := time.Parse(time.RFC3339Nano, pr.ObservedAt)
+			if err != nil {
+				return c, fmt.Errorf("%w: provenance.observed_at %q is not a real UTC instant: %s",
+					ErrEvidenceInvalid, truncate(pr.ObservedAt), err)
+			}
+			at = at.UTC()
+			c.observedAt = &at
+		}
+	}
+	return c, nil
 }
 
 func scanRef(row pgx.Row) (*EvidenceRef, error) {

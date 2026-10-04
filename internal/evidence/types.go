@@ -108,6 +108,10 @@ var (
 	// ErrEvidenceSecret: the envelope's canonical bytes match a secret
 	// pattern.
 	ErrEvidenceSecret = errors.New("evidence envelope matches a secret pattern")
+	// ErrEvidenceSupersedesInvalid: provenance.supersedes names a stored
+	// envelope about another subject/revision, or one with a stronger
+	// authority (ADR 018 Amendment 2, Tier B checklist item 6).
+	ErrEvidenceSupersedesInvalid = errors.New("evidence supersedes link is invalid")
 )
 
 // evidenceEnvelopeKeys is the complete set of top-level keys Tier A's
@@ -117,6 +121,9 @@ var evidenceEnvelopeKeys = map[string]bool{
 	"created_at": true, "execution": true, "outcome": true, "policy_decisions": true,
 	"snapshot_refs": true, "execution_request": true, "usage": true, "approvals": true,
 	"artifacts": true, "gaps": true,
+	// ADR 018 Amendment 2 (mctlhq/mctl-agents#199): optional, absent when
+	// missing, null or [] (tool_calls), and hash-neutral when absent.
+	"versions": true, "subject": true, "tool_calls": true, "provenance": true,
 }
 
 // executionJoinKeys is the complete set of keys ExecutionJoin.from_dict
@@ -126,9 +133,14 @@ var executionJoinKeys = map[string]bool{
 	"execution_id": true, "work_item_id": true, "trace_id": true, "runtime_execution_id": true,
 }
 
-// blocksAllowingEmptyOmission are the optional top-level blocks that enter
-// the hashed payload only when present and non-empty (Tier A's
-// _content_payload rule, unchanged by Amendment 1).
+// optionalBlockKeys are the optional top-level blocks that enter the hashed
+// payload only when present and non-empty (Tier A's _content_payload rule,
+// unchanged by Amendment 1). The pre-amendment ones travel through as
+// received; the four Amendment 2 blocks (versions, subject, tool_calls,
+// provenance) follow the same
+// absent-when-missing/null/[] rule but are decoded and rebuilt through
+// their Tier A to_dict() shape (amendment2.go), because Tier B must
+// re-validate every one of their leaves.
 var optionalBlockKeys = []string{
 	"policy_decisions", "snapshot_refs", "execution_request", "usage", "approvals", "artifacts",
 }
@@ -166,6 +178,34 @@ type Evidence struct {
 	// Ref is the rebuildable derived projection, nil when it has not been
 	// (or could not be) resolved.
 	Ref *EvidenceRef `json:"ref,omitempty"`
+
+	// ADR 018 Amendment 2: what the evidence is about and how much to
+	// trust it, served from immutable columns written once at ingest (and
+	// cross-checked against the envelope on every read). Absent on every
+	// pre-amendment record, so its JSON is unchanged.
+	Subject    *SubjectRef `json:"subject,omitempty"`
+	Authority  string      `json:"authority,omitempty"`
+	ObservedAt *time.Time  `json:"observed_at,omitempty"`
+	Supersedes string      `json:"supersedes,omitempty"`
+	// SupersededBy is derived at read time, never stored: the ids of
+	// stored envelopes whose supersedes link to this one is VALID (same
+	// subject and revision, neither subject redacted, equal or stronger
+	// authority). A dangling or downward link never appears here.
+	SupersededBy []string `json:"superseded_by,omitempty"`
+
+	// observedAtRaw is provenance.observed_at exactly as sealed (the
+	// resolve_current ranking key); subjectRedacted reports a redacted_out
+	// gap on subject.
+	observedAtRaw   string
+	subjectRedacted bool
+}
+
+// candidate returns the resolve_current view of a stored record.
+func (e *Evidence) candidate() *Candidate {
+	return &Candidate{
+		ID: e.ID, ContentKey: e.ContentHash, Subject: e.Subject, SubjectRedacted: e.subjectRedacted,
+		Authority: e.Authority, ObservedAt: e.observedAtRaw, Supersedes: e.Supersedes, Record: e,
+	}
 }
 
 // PrimaryExecutionRef derives ("work", execution_id) when ExecutionID is
@@ -230,6 +270,10 @@ type parsedEnvelope struct {
 	// the leaf/omission rule applies) and the three excluded keys
 	// (evidence_id, content_hash, created_at).
 	contentFields map[string]any
+	// a2 holds the decoded ADR 018 Amendment 2 blocks and gaps (never nil
+	// after parseEnvelope; every block nil/empty on a pre-amendment
+	// envelope).
+	a2 *amendment2
 }
 
 // executionJoin is ADR 018 Amendment 1's ExecutionJoin: two distinct, typed
@@ -354,6 +398,11 @@ func parseEnvelope(raw []byte) (*parsedEnvelope, error) {
 	if gaps, ok := top["gaps"]; ok && !isEmptyBlock(gaps) {
 		contentFields["gaps"] = gaps
 	}
+	a2, err := parseAmendment2(top)
+	if err != nil {
+		return nil, err
+	}
+	a2.addContentFields(contentFields)
 
 	return &parsedEnvelope{
 		apiVersion:    apiVersion,
@@ -363,6 +412,7 @@ func parseEnvelope(raw []byte) (*parsedEnvelope, error) {
 		createdAt:     createdAt.UTC(),
 		execution:     join,
 		contentFields: contentFields,
+		a2:            a2,
 	}, nil
 }
 
@@ -696,6 +746,15 @@ func Validate(in IngestInput) (parsed *parsedEnvelope, contentHash, evidenceID s
 		return nil, "", "", err
 	}
 	if err := p.execution.validate(); err != nil {
+		return nil, "", "", err
+	}
+	// ADR 018 Amendment 2: re-validate, never trust (checklist item 2).
+	if err := p.a2.validate(p.evidenceID); err != nil {
+		return nil, "", "", err
+	}
+	// observed_at is stored as TIMESTAMPTZ: a pattern-valid but impossible
+	// instant (2026-02-30T...) is refused here rather than at INSERT.
+	if _, err := subjectColumnsOf(p); err != nil {
 		return nil, "", "", err
 	}
 	canonical, err := CanonicalContentJSON(p)

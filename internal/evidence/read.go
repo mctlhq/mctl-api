@@ -28,7 +28,7 @@ import (
 // to the "e" alias List uses, so an unqualified column that also exists on
 // execution_evidence_refs (work_item_id) is never ambiguous once the
 // filter joins that table in.
-var qualifiedEvidenceColumns = qualifyColumns("e", evidenceColumns)
+var qualifiedEvidenceColumns = qualifyColumns("e", evidenceRowColumns)
 
 func qualifyColumns(alias, columns string) string {
 	parts := strings.Split(columns, ",")
@@ -63,7 +63,7 @@ func clampLimit(limit int) int {
 // error that is deliberately NOT ErrEvidenceNotFound: the row exists but is
 // corrupt, which is a server-side fault (500), not an absence (404).
 func (s *Store) Get(ctx context.Context, id string) (*Evidence, error) {
-	e, err := scanEvidenceRow(s.pool.QueryRow(ctx, `SELECT `+evidenceColumns+` FROM execution_evidence WHERE id=$1`, id))
+	e, err := scanEvidenceRow(s.pool.QueryRow(ctx, `SELECT `+evidenceRowColumns+` FROM execution_evidence WHERE id=$1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("evidence: %s: %w", id, ErrEvidenceNotFound)
 	}
@@ -71,6 +71,9 @@ func (s *Store) Get(ctx context.Context, id string) (*Evidence, error) {
 		return nil, fmt.Errorf("evidence: get %s: %w", id, err)
 	}
 	if err := s.attachRef(ctx, e); err != nil {
+		return nil, err
+	}
+	if err := s.attachSupersededBy(ctx, []*Evidence{e}); err != nil {
 		return nil, err
 	}
 	return e, nil
@@ -92,7 +95,13 @@ type Filter struct {
 	Repository         string
 	IssueNumber        *int64
 	PRNumber           *int64
-	Limit              int
+	// ADR 018 Amendment 2 subject filters, matched on the immutable
+	// subject_* columns.
+	SubjectKind       string
+	SubjectRepository string
+	SubjectRef        string
+	SubjectRevision   string
+	Limit             int
 }
 
 // ListResult is a bounded page of evidence, newest first. Truncated is part
@@ -152,6 +161,18 @@ func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
 		needsRefJoin = true
 		add("r.pr_number = $%d", *f.PRNumber)
 	}
+	if f.SubjectKind != "" {
+		add("e.subject_kind = $%d", f.SubjectKind)
+	}
+	if f.SubjectRepository != "" {
+		add("e.subject_repository = $%d", f.SubjectRepository)
+	}
+	if f.SubjectRef != "" {
+		add("e.subject_ref = $%d", f.SubjectRef)
+	}
+	if f.SubjectRevision != "" {
+		add("e.subject_revision = $%d", f.SubjectRevision)
+	}
 
 	limit := clampLimit(f.Limit)
 	args = append(args, limit+1)
@@ -197,6 +218,9 @@ func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
 			return nil, err
 		}
 	}
+	if err := s.attachSupersededBy(ctx, out); err != nil {
+		return nil, err
+	}
 	res.Evidence = out
 	return res, nil
 }
@@ -204,8 +228,52 @@ func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
 // ByWorkItem lists the evidence attached to one work item, newest first.
 // Used by GET /api/v1/work-items/{id}/evidence, after the caller has
 // already checked visibility on the work item itself.
-func (s *Store) ByWorkItem(ctx context.Context, workItemID string, limit int) (*ListResult, error) {
-	return s.List(ctx, Filter{WorkItemID: workItemID, Limit: limit})
+//
+// f narrows the result further (its subject filters, ADR 018 Amendment 2);
+// f.WorkItemID is always overridden by workItemID.
+func (s *Store) ByWorkItem(ctx context.Context, workItemID string, f Filter) (*ListResult, error) {
+	f.WorkItemID = workItemID
+	return s.List(ctx, f)
+}
+
+// attachSupersededBy fills the read-time SupersededBy of every record in
+// recs: the stored envelopes whose provenance.supersedes names it through
+// a valid link (validLink — the same predicate resolve_current applies).
+// A row that fails to read is an error, never a shorter list.
+func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence) error {
+	if len(recs) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(recs))
+	byID := make(map[string][]*Evidence, len(recs))
+	for _, e := range recs {
+		e.SupersededBy = nil
+		if _, seen := byID[e.ID]; !seen {
+			ids = append(ids, e.ID)
+		}
+		byID[e.ID] = append(byID[e.ID], e)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+evidenceRowColumns+` FROM execution_evidence
+		WHERE supersedes = ANY($1) ORDER BY id`, ids)
+	if err != nil {
+		return fmt.Errorf("evidence: superseded_by: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		sup, err := scanEvidenceRow(rows)
+		if err != nil {
+			return fmt.Errorf("evidence: superseded_by scan: %w", err)
+		}
+		for _, target := range byID[sup.Supersedes] {
+			if validLink(sup.candidate(), target.candidate()) {
+				target.SupersededBy = append(target.SupersededBy, sup.ID)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("evidence: superseded_by rows: %w", err)
+	}
+	return nil
 }
 
 // PurgeOlderThan deletes whole evidence rows ingested more than maxAge ago

@@ -619,9 +619,13 @@ func NewRouter(opts Options) http.Handler {
 			// visibleWorkItem so evidence never leaks past what the caller
 			// could already see on the work item. Outside the write
 			// budget above like every other read in this block.
+			// /evidence/current (ADR 018 Amendment 2) is a static segment, so
+			// chi matches it before the /evidence/{id} pattern.
+			r.Get("/evidence/current", h.CurrentEvidence)
 			r.Get("/evidence/{id}", h.GetEvidence)
 			r.Get("/evidence", h.ListEvidence)
 			r.Get("/work-items/{id}/evidence", h.ListWorkItemEvidence)
+			r.Get("/work-items/{id}/evidence/current", h.CurrentWorkItemEvidence)
 
 			// Liveness read for one DevLoopWorkflow. Deliberately OUTSIDE the
 			// write group above: it has no side effects, and the shepherd
