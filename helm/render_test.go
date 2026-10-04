@@ -399,6 +399,40 @@ func TestDeploymentOIDCProvidersSecretConflictsWithLiteral(t *testing.T) {
 	}
 }
 
+func TestDeploymentEmptyZitadelLinkSecretRendersUnchanged(t *testing.T) {
+	_, defaultOut := renderDeployment(t)
+	_, emptyOut := renderDeployment(t, "--set", "zitadelLinkSecret=")
+
+	if !bytes.Equal(defaultOut, emptyOut) {
+		t.Error("empty zitadelLinkSecret should render byte-identical output to the default")
+	}
+}
+
+func TestDeploymentRendersZitadelLinkSecretEnv(t *testing.T) {
+	d, _ := renderDeployment(t, "--set", "zitadelLinkSecret=mctl-api-oidc-zitadel")
+	c := mainContainer(t, d)
+
+	for _, name := range []string{"ZITADEL_LINK_CLIENT_ID", "ZITADEL_LINK_CLIENT_SECRET"} {
+		if n := countEnv(c, name); n != 1 {
+			t.Fatalf("expected exactly one %s env entry, got %d", name, n)
+		}
+		env, _ := findEnv(c, name)
+		if env.Value != "" {
+			t.Errorf("%s.value = %q, want empty (no literal in the manifest)", name, env.Value)
+		}
+		if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("expected %s to be sourced from a secretKeyRef", name)
+		}
+		ref := env.ValueFrom.SecretKeyRef
+		if ref.Name != "mctl-api-oidc-zitadel" || ref.Key != name {
+			t.Errorf("%s secretKeyRef = %s/%s, want mctl-api-oidc-zitadel/%s", name, ref.Name, ref.Key, name)
+		}
+		if !ref.Optional {
+			t.Errorf("expected %s secretKeyRef.optional to be true", name)
+		}
+	}
+}
+
 func TestDeploymentUsagePricingKeyOverride(t *testing.T) {
 	d, _ := renderDeployment(t,
 		"--set", "usagePricingConfigMap=cm",
@@ -470,6 +504,7 @@ func TestHelmLintCleanAcrossOptionalValues(t *testing.T) {
 		{"--set", "usagePricingConfigMap=mctl-api-usage-pricing"},
 		{"--set", "surfaceTelegramTokenSecret=mctl-api-surface-telegram"},
 		{"--set", "oidcProvidersSecret=mctl-api-oidc-zitadel"},
+		{"--set", "zitadelLinkSecret=mctl-api-oidc-zitadel"},
 	}
 	for _, extra := range cases {
 		args := append([]string{"lint", "."}, extra...)

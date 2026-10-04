@@ -120,6 +120,24 @@ spec:
                   key: MCTL_OIDC_PROVIDERS
                   optional: true
             {{- end }}
+            {{- if .Values.zitadelLinkSecret }}
+            # The confidential ZITADEL client of identity linking
+            # (docs/principals.md, mctlhq/mctl-api#435), written by the
+            # zitadel-iac Job. Optional: without both keys the link flow
+            # answers 503 and nothing else changes.
+            - name: ZITADEL_LINK_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.zitadelLinkSecret }}
+                  key: ZITADEL_LINK_CLIENT_ID
+                  optional: true
+            - name: ZITADEL_LINK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.zitadelLinkSecret }}
+                  key: ZITADEL_LINK_CLIENT_SECRET
+                  optional: true
+            {{- end }}
             {{- if .Values.usagePricingConfigMap }}
             # The path, not the JSON. internal/usage/catalog_file.go reads this file
             # with os.ReadFile; a rate card is reviewed as a file in GitOps, and an env
