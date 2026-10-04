@@ -67,6 +67,61 @@ the redeem back. That is why both live in one database
 after an authentication provider (`github`, `dex`, `service`, `dev`): its
 mirror rows would collide with real identities.
 
+## Linking a ZITADEL identity (#435)
+
+A ZITADEL login seen for the first time becomes a **new** principal, like
+any unknown identity. Attaching it to the principal a person already has
+(their GitHub one) is an explicit act, never a match on a name or an
+e-mail:
+
+1. `GET /identity/link/zitadel` in a browser. mctl-api sets an httpOnly,
+   Secure, SameSite=Lax cookie with a random value (it keeps only the
+   SHA-256) and sends the browser to GitHub through its own OAuth app; the
+   registered `/oauth/github/callback` recognises the `link.` state.
+2. GitHub proves identity #1 (numeric id); it is provisioned as usual and
+   names the principal **P**.
+3. ZITADEL proves identity #2: authorization code with the confidential
+   client `ZITADEL_LINK_CLIENT_ID` / `ZITADEL_LINK_CLIENT_SECRET`, PKCE
+   S256, `state`, `nonce` and `prompt=login`. The ID token must carry the
+   nonce and an `auth_time` inside this session. Its `iss` and `sub` form
+   the identity, under the name of the `MCTL_OIDC_PROVIDERS` entry
+   `ZITADEL_LINK_PROVIDER` (default `zitadel`), so later ZITADEL tokens
+   resolve to it.
+4. A confirmation page shows both identities; its POST carries a CSRF
+   token tied to the session. Every step also checks the cookie, so a link
+   started in one browser cannot be finished in another, and each step is
+   single-use. Sessions live in memory for 10 minutes (one replica; a
+   restart cancels links in flight).
+
+Outcomes (`identity_links_total{provider,result}`, audit `identity.link`):
+
+| State of the ZITADEL identity | Result |
+|---|---|
+| unknown | linked to P |
+| already on P | `already_linked` (verified_at refreshed) |
+| revoked on P | refused; only an operator restores it |
+| on another principal Q | refused, 409 `identity_belongs_to_other_principal`, naming Q |
+| P holds a different live ZITADEL identity | refused, 409 `principal_already_linked` |
+
+Self-service never moves an identity between principals (owner decision on
+#435). An admin merges instead: `POST
+/api/v1/admin/principals/{from}/merge-into/{into}` (human admin acting
+directly; audit `principal.merge`, high risk) moves every identity of
+`from` onto `into` and disables `from`, which is kept because audit rows
+reference it. It is refused when both hold a live identity of the same
+provider and issuer, or either is not human, or `into` is disabled. Cached
+resolutions keep pointing at `from` for up to the resolver's 5-minute TTL,
+during which those requests are refused as a disabled principal.
+
+`GET /api/v1/identity/links` lists the caller's identities; `DELETE
+/api/v1/identity/links/{id}` revokes one of them (never the last live one;
+a revoked identity is refused at authentication). Without the link client
+the browser flow answers 503; without the principal store the API answers
+503 too.
+
+Proof of identity #1 is GitHub only for now; a Dex principal links through
+GitHub or not at all.
+
 ## Backfill
 
 Runs automatically after the first successful gitops sync, on every start,
