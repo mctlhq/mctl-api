@@ -117,7 +117,8 @@ func (h *Handlers) handleProtectedResourceMeta(w http.ResponseWriter, r *http.Re
 }
 
 // handleOAuthAuthorize initiates the OAuth Authorization Code flow.
-// It validates the request parameters, stores pending state, and redirects to GitHub.
+// It validates the request parameters, stores pending state, and redirects to
+// the upstream OAUTH_UPSTREAM selects (GitHub, ZITADEL, or a chooser).
 //
 // Required query params: client_id, redirect_uri, response_type=code, state,
 //
@@ -167,6 +168,15 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	}
 	if codeChallengeMethod != "S256" {
 		oauthError(w, redirectURI, state, "invalid_request", "only code_challenge_method=S256 is supported")
+		return
+	}
+
+	upstream, ok := h.pickOAuthUpstream(w, r)
+	if !ok {
+		return
+	}
+	if upstream == auth.UpstreamZitadel {
+		h.startZitadelAuthorize(w, r, clientID, redirectURI, state, codeChallenge)
 		return
 	}
 
@@ -234,9 +244,10 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Recover pending auth from state.
+	// Recover pending auth from state. Only an authorization started for
+	// GitHub, while GitHub is an allowed upstream, completes here.
 	pending, ok := o.LoadPendingAuth(combinedState)
-	if !ok {
+	if !ok || pending.Upstream != auth.UpstreamGitHub || !h.opts.OAuthUpstream.allows(auth.UpstreamGitHub) {
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
 		return
 	}
@@ -274,6 +285,7 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, "issued").Inc()
 
 	// Redirect back to client with code + state.
 	target, err := url.Parse(pending.RedirectURI)

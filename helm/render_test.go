@@ -474,6 +474,50 @@ func TestDeploymentRendersZitadelLinkSecretEnv(t *testing.T) {
 	}
 }
 
+// oauthZitadelSecret (mctl-api#467) follows zitadelLinkSecret exactly: one
+// secretKeyRef per key, optional, refused next to a literal, and inert when
+// empty.
+func TestDeploymentOAuthZitadelSecret(t *testing.T) {
+	helmPath := requireHelm(t)
+	for _, key := range []string{"OAUTH_ZITADEL_CLIENT_ID", "OAUTH_ZITADEL_CLIENT_SECRET"} {
+		// #nosec G204 -- helmPath is resolved via exec.LookPath("helm"), and the
+		// arguments are fixed literals.
+		cmd := exec.Command(helmPath, "template", "mctl-api", ".",
+			"--set", "oauthZitadelSecret=mctl-api-oidc-zitadel",
+			"--set-string", "env."+key+"=literal",
+		)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Run(); err == nil || !strings.Contains(out.String(), "not both") {
+			t.Errorf("%s: want a 'not both' failure next to oauthZitadelSecret, got err=%v\n%s", key, err, out.String())
+		}
+	}
+
+	_, defaultOut := renderDeployment(t)
+	_, emptyOut := renderDeployment(t, "--set", "oauthZitadelSecret=")
+	if !bytes.Equal(defaultOut, emptyOut) {
+		t.Error("empty oauthZitadelSecret should render byte-identical output to the default")
+	}
+
+	d, _ := renderDeployment(t, "--set", "oauthZitadelSecret=mctl-api-oidc-zitadel",
+		"--set-string", "env.OAUTH_ZITADEL_CLIENT_ID=")
+	c := mainContainer(t, d)
+	for _, name := range []string{"OAUTH_ZITADEL_CLIENT_ID", "OAUTH_ZITADEL_CLIENT_SECRET"} {
+		if n := countEnv(c, name); n != 1 {
+			t.Fatalf("expected exactly one %s env entry, got %d", name, n)
+		}
+		env, _ := findEnv(c, name)
+		if env.Value != "" || env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("%s = %+v, want a secretKeyRef and no literal", name, env)
+		}
+		ref := env.ValueFrom.SecretKeyRef
+		if ref.Name != "mctl-api-oidc-zitadel" || ref.Key != name || !ref.Optional {
+			t.Errorf("%s secretKeyRef = %s/%s optional=%v, want mctl-api-oidc-zitadel/%s optional", name, ref.Name, ref.Key, ref.Optional, name)
+		}
+	}
+}
+
 func TestDeploymentUsagePricingKeyOverride(t *testing.T) {
 	d, _ := renderDeployment(t,
 		"--set", "usagePricingConfigMap=cm",
@@ -546,6 +590,7 @@ func TestHelmLintCleanAcrossOptionalValues(t *testing.T) {
 		{"--set", "surfaceTelegramTokenSecret=mctl-api-surface-telegram"},
 		{"--set", "oidcProvidersSecret=mctl-api-oidc-zitadel"},
 		{"--set", "zitadelLinkSecret=mctl-api-oidc-zitadel"},
+		{"--set", "oauthZitadelSecret=mctl-api-oidc-zitadel"},
 	}
 	for _, extra := range cases {
 		args := append([]string{"lint", "."}, extra...)

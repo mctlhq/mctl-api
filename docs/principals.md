@@ -163,6 +163,50 @@ the browser flow answers 503; without the principal store the API answers
 Proof of identity #1 is GitHub only for now; a Dex principal links through
 GitHub or not at all.
 
+## Signing in to MCP clients with ZITADEL (#467)
+
+`OAUTH_UPSTREAM` decides where `GET /oauth/authorize` (every MCP connector)
+signs people in: `github` (the default, unchanged), `zitadel`, or `both`
+(a page offering ZITADEL first and GitHub as legacy; the choice comes back
+as the same authorization plus `upstream=`, a parameter only `both` reads).
+
+The ZITADEL leg uses its own confidential client
+(`OAUTH_ZITADEL_CLIENT_ID` / `OAUTH_ZITADEL_CLIENT_SECRET`, not the link
+client), redirect `<SELF_URL>/oauth/zitadel/callback`, PKCE S256 and a
+nonce, and no `prompt=login`: an existing ZITADEL session is the single
+sign-on this is for. The ID token is verified against the
+`MCTL_OIDC_PROVIDERS` entry `OAUTH_ZITADEL_PROVIDER` (default `zitadel`)
+with this client as audience, and `(provider, iss, sub)` is looked up
+read-only (`Store.LinkedGitHub`):
+
+| Lookup | Answer |
+|---|---|
+| linked to P, P has one live GitHub identity with a login | code for that login: `IssueCode(login, ResolveGroups(login))`, the same code, groups and admin decision (`ADMIN_USERS`) a GitHub sign-in of P yields |
+| no row, or a principal of its own with no GitHub identity | 403 page linking to `/identity/link/zitadel`; nothing issued or provisioned |
+| identity revoked, or P disabled | 403 |
+| P's GitHub login unknown (taken by another account) or two live GitHub identities | 409, nothing guessed |
+| store error, or no principal store | 503, never "not linked" |
+
+A pending authorization records its upstream: a GitHub callback cannot
+complete a ZITADEL authorization or the reverse, and an authorization whose
+upstream the current mode does not allow (one pending across a rollback)
+gets a 400. Sign-ins are counted in
+`oauth_upstream_signins_total{upstream,result}`. For `upstream="zitadel"`,
+`result` is `issued`, `unlinked`, `refused`, `store_unavailable`,
+`invalid_token`, `upstream_error` (ZITADEL redirected back with an error),
+`upstream_unreachable` (discovery failed), `exchange_failed`,
+`bad_request` or `internal_error`, so "ZITADEL is down" and "mctl is
+broken" stay apart.
+
+`zitadel` and `both` refuse startup when `OAUTH_JWT_SECRET`, the ZITADEL
+client, or the provider entry is missing, when that entry keys identities
+on a claim other than `sub` (links are written by `sub`), when
+`OAUTH_ZITADEL_PROVIDER` differs from `ZITADEL_LINK_PROVIDER` (sign-in
+reads links under the entry name linking writes them with), and, for `both`,
+without the GitHub app. Under `zitadel` the GitHub app stays optional; the
+link flow needs it, so without it linking answers 503. Rollback is
+`OAUTH_UPSTREAM=github`.
+
 ## Backfill
 
 Runs automatically after the first successful gitops sync, on every start,

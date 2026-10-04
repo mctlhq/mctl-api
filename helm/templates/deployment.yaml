@@ -43,13 +43,17 @@ spec:
             {{- if and .Values.zitadelLinkSecret (or .Values.env.ZITADEL_LINK_CLIENT_ID .Values.env.ZITADEL_LINK_CLIENT_SECRET) }}
             {{- fail "set ZITADEL_LINK_CLIENT_ID and ZITADEL_LINK_CLIENT_SECRET either in env or through zitadelLinkSecret, not both" }}
             {{- end }}
+            {{- if and .Values.oauthZitadelSecret (or .Values.env.OAUTH_ZITADEL_CLIENT_ID .Values.env.OAUTH_ZITADEL_CLIENT_SECRET) }}
+            {{- fail "set OAUTH_ZITADEL_CLIENT_ID and OAUTH_ZITADEL_CLIENT_SECRET either in env or through oauthZitadelSecret, not both" }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
-            {{- /* oidcProvidersSecret and zitadelLinkSecret supply these
-                   below; a literal entry (even an empty one) would otherwise
-                   render a second entry with the same name, which
-                   server-side apply refuses. */}}
+            {{- /* oidcProvidersSecret, zitadelLinkSecret and oauthZitadelSecret
+                   supply these below; a literal entry (even an empty one)
+                   would otherwise render a second entry with the same name,
+                   which server-side apply refuses. */}}
             {{- if not (or (and $.Values.oidcProvidersSecret (eq $key "MCTL_OIDC_PROVIDERS"))
-                           (and $.Values.zitadelLinkSecret (or (eq $key "ZITADEL_LINK_CLIENT_ID") (eq $key "ZITADEL_LINK_CLIENT_SECRET")))) }}
+                           (and $.Values.zitadelLinkSecret (or (eq $key "ZITADEL_LINK_CLIENT_ID") (eq $key "ZITADEL_LINK_CLIENT_SECRET")))
+                           (and $.Values.oauthZitadelSecret (or (eq $key "OAUTH_ZITADEL_CLIENT_ID") (eq $key "OAUTH_ZITADEL_CLIENT_SECRET")))) }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
@@ -141,6 +145,24 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.zitadelLinkSecret }}
                   key: ZITADEL_LINK_CLIENT_SECRET
+                  optional: true
+            {{- end }}
+            {{- if .Values.oauthZitadelSecret }}
+            # The confidential ZITADEL client of /oauth/authorize's ZITADEL
+            # upstream (mctlhq/mctl-api#467), written by the zitadel-iac Job.
+            # Optional: OAUTH_UPSTREAM=github ignores it, and zitadel or both
+            # refuse to boot without it.
+            - name: OAUTH_ZITADEL_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oauthZitadelSecret }}
+                  key: OAUTH_ZITADEL_CLIENT_ID
+                  optional: true
+            - name: OAUTH_ZITADEL_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oauthZitadelSecret }}
+                  key: OAUTH_ZITADEL_CLIENT_SECRET
                   optional: true
             {{- end }}
             {{- if .Values.usagePricingConfigMap }}

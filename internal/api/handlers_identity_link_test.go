@@ -99,10 +99,14 @@ type fakeIdP struct {
 	mu        sync.Mutex
 	challenge string
 	nonce     string
+	// clientID and clientSecret are the client the token endpoint accepts
+	// (the link client unless a test sets another).
+	clientID, clientSecret string
 	// overrides for negative cases
 	nonceOverride string
 	authTime      time.Time
 	audOverride   string
+	username      string // preferred_username; "dmitrii" when empty
 }
 
 const testLinkClientID, testLinkClientSecret = "link-client", "link-secret"
@@ -113,7 +117,8 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeIdP{t: t, jwk: jose.JSONWebKey{Key: &key.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}, authTime: time.Now()}
+	f := &fakeIdP{t: t, jwk: jose.JSONWebKey{Key: &key.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}, authTime: time.Now(),
+		clientID: testLinkClientID, clientSecret: testLinkClientSecret}
 	f.signer, err = jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: key, KeyID: "k1"}}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +171,7 @@ func (f *fakeIdP) token(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
-	if id != testLinkClientID || secret != testLinkClientSecret || r.PostForm.Get("code") != "z-code" ||
+	if id != f.clientID || secret != f.clientSecret || r.PostForm.Get("code") != "z-code" ||
 		base64.RawURLEncoding.EncodeToString(sum[:]) != f.challenge {
 		http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
 		return
@@ -175,15 +180,19 @@ func (f *fakeIdP) token(w http.ResponseWriter, r *http.Request) {
 	if f.nonceOverride != "" {
 		nonce = f.nonceOverride
 	}
-	aud := testLinkClientID
+	aud := f.clientID
 	if f.audOverride != "" {
 		aud = f.audOverride
+	}
+	username := "dmitrii"
+	if f.username != "" {
+		username = f.username
 	}
 	now := time.Now()
 	payload, _ := json.Marshal(map[string]any{
 		"iss": f.srv.URL, "sub": "z-sub", "aud": aud, "nonce": nonce,
 		"iat": now.Unix(), "exp": now.Add(time.Hour).Unix(), "auth_time": f.authTime.Unix(),
-		"preferred_username": "dmitrii",
+		"preferred_username": username,
 	})
 	sig, _ := f.signer.Sign(payload)
 	idToken, _ := sig.CompactSerialize()

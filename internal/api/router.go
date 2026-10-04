@@ -91,6 +91,11 @@ type Options struct {
 	// IdentityLink configures explicit identity linking (mctl-api#435,
 	// handlers_identity_link.go). Nil disables it (503).
 	IdentityLink *IdentityLinkOptions
+	// OAuthUpstream is where /oauth/authorize signs people in
+	// (OAUTH_UPSTREAM, mctl-api#467); the zero value is GitHub.
+	OAuthUpstream OAuthUpstreamMode
+	// OAuthZitadel configures the ZITADEL upstream; nil keeps it off.
+	OAuthZitadel *OAuthZitadelOptions
 	// AlertStore persists incident alerts to PostgreSQL (optional — nil disables incident endpoints).
 	AlertStore *alerts.Store
 	// DomainStore persists custom domain registrations to PostgreSQL
@@ -215,6 +220,7 @@ type Handlers struct {
 	openClawQuota       OpenClawQuotaConfig
 	openClawRateLimiter *saveRateLimiter
 	identityLink        *identityLinker
+	oauthZitadel        *oauthZitadel
 }
 
 // NewRouter creates the HTTP router with all API routes.
@@ -227,6 +233,9 @@ func NewRouter(opts Options) http.Handler {
 	}
 	if opts.IdentityLink != nil {
 		h.identityLink = newIdentityLinker(opts.IdentityLink)
+	}
+	if opts.OAuthZitadel != nil {
+		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel}
 	}
 
 	if opts.BackstageGithubAppConnectToken == "" {
@@ -293,6 +302,7 @@ func NewRouter(opts Options) http.Handler {
 		r.Get("/.well-known/oauth-protected-resource/mcp", h.handleProtectedResourceMeta)
 		r.Get("/oauth/authorize", h.handleOAuthAuthorize)
 		r.Get("/oauth/github/callback", h.handleOAuthGitHubCallback)
+		r.Get(oauthZitadelCallbackPath, h.handleOAuthZitadelCallback)
 		r.Post("/oauth/token", h.handleOAuthToken)
 		r.Post("/oauth/revoke", h.handleOAuthRevoke)
 		// Explicit identity linking, browser side (mctl-api#435). Public:

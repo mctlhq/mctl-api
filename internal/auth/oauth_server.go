@@ -1226,13 +1226,50 @@ func GenerateState() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// StoreAuthCode stores a pending authorization code entry keyed by opaque state,
+// Upstream identity providers an authorization can be started for. A
+// pending authorization records its upstream, and each callback completes
+// only its own (mctl-api#467).
+const (
+	UpstreamGitHub  = "github"
+	UpstreamZitadel = "zitadel"
+)
+
+// StorePendingAuth stores a pending authorization keyed by opaque state,
 // before the user has authenticated with GitHub.
 func (s *OAuthServer) StorePendingAuth(state, clientID, redirectURI, codeChallenge string) {
 	s.codes.storePending(state, pendingAuth{
+		Upstream:      UpstreamGitHub,
 		ClientID:      clientID,
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
+		CreatedAt:     time.Now(),
+	})
+}
+
+// PendingOIDCAuth is an authorization whose user signs in at an OIDC
+// upstream. Nonce and Verifier belong to that upstream leg; ClientState is
+// the client's own state, returned with the code.
+type PendingOIDCAuth struct {
+	Upstream      string
+	ClientID      string
+	RedirectURI   string
+	CodeChallenge string
+	ClientState   string
+	Nonce         string
+	Verifier      string
+}
+
+// StorePendingOIDCAuth stores a pending authorization under the state sent
+// to the OIDC upstream.
+func (s *OAuthServer) StorePendingOIDCAuth(state string, a PendingOIDCAuth) {
+	s.codes.storePending(state, pendingAuth{
+		Upstream:      a.Upstream,
+		ClientID:      a.ClientID,
+		RedirectURI:   a.RedirectURI,
+		CodeChallenge: a.CodeChallenge,
+		ClientState:   a.ClientState,
+		Nonce:         a.Nonce,
+		Verifier:      a.Verifier,
 		CreatedAt:     time.Now(),
 	})
 }
@@ -1515,10 +1552,17 @@ type authCodeEntry struct {
 }
 
 type pendingAuth struct {
+	// Upstream is the identity provider this authorization was sent to
+	// (UpstreamGitHub, UpstreamZitadel).
+	Upstream      string
 	ClientID      string
 	RedirectURI   string
 	CodeChallenge string
-	CreatedAt     time.Time
+	// ClientState, Nonce and Verifier are set for an OIDC upstream only.
+	ClientState string
+	Nonce       string
+	Verifier    string
+	CreatedAt   time.Time
 }
 
 type refreshTokenEntry struct {

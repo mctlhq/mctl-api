@@ -148,9 +148,12 @@ func main() {
 	// would serve 503s (or an in-memory fallback) until someone restarted it.
 	storeFailures := &storeInitFailures{}
 
-	// OAuth 2.0 server (optional — disabled if OAUTH_GITHUB_CLIENT_ID is unset).
+	// OAuth 2.0 server. Under OAUTH_UPSTREAM=github (the default) it is
+	// optional, disabled when OAUTH_GITHUB_CLIENT_ID is unset; zitadel and
+	// both are explicit choices that validate() already refused to boot
+	// without their configuration (mctl-api#467).
 	var oauthServer *auth.OAuthServer
-	if cfg.OAuthGitHubClientID != "" && cfg.OAuthJWTSecret != "" {
+	if cfg.oauthEnabled() {
 		oauthServer = auth.NewOAuthServer(
 			cfg.SelfURL,
 			cfg.OAuthGitHubClientID,
@@ -189,7 +192,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		slog.Info("OAuth 2.0 server enabled", "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL, "preregistered_clients", oauthServer.PreregisteredClientCount(), "groups_max_staleness", oauthServer.GroupsMaxStaleness, "groups_cache_ttl", oauthServer.GroupsCacheTTL)
+		slog.Info("OAuth 2.0 server enabled", "upstream", cfg.oauthUpstreamMode(), "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL, "preregistered_clients", oauthServer.PreregisteredClientCount(), "groups_max_staleness", oauthServer.GroupsMaxStaleness, "groups_cache_ttl", oauthServer.GroupsCacheTTL)
 
 		// Persistent refresh-token store: prefer OAUTH_DB_URL, fall back to AUDIT_DB_URL.
 		// When available, refresh tokens survive pod restarts; without it the in-memory
@@ -836,6 +839,8 @@ func main() {
 		AllowedOrigins:                 cfg.AllowedOrigins,
 		OAuthServer:                    oauthServer,
 		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
+		OAuthUpstream:                  cfg.oauthUpstreamMode(),
+		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
 		AlertStore:                     alertStore,
 		AgentRegistry:                  agentRegistryStore,
 		Lifecycle:                      lifecycleStore,
@@ -1062,6 +1067,15 @@ type config struct {
 	// OAuth 2.0 server settings for Claude.ai custom connector support.
 	OAuthGitHubClientID     string
 	OAuthGitHubClientSecret string
+	// OAuthUpstreamRaw is OAUTH_UPSTREAM as read (github, zitadel, both;
+	// empty is github), parsed by validate (mctl-api#467). The ZITADEL
+	// upstream has its own confidential client, not the link client, and
+	// takes its issuer from the MCTL_OIDC_PROVIDERS entry OAuthZitadelProvider
+	// names, the one the link flow writes identities for.
+	OAuthUpstreamRaw         string
+	OAuthZitadelClientID     string
+	OAuthZitadelClientSecret string
+	OAuthZitadelProvider     string
 	// ZITADEL client of the identity link flow (mctl-api#435): a
 	// confidential web app; both empty keeps the browser flow off.
 	// ZitadelLinkProvider names the MCTL_OIDC_PROVIDERS entry whose issuer
@@ -1166,6 +1180,10 @@ func loadConfig() config {
 		AllowedOrigins:                 origins,
 		OAuthGitHubClientID:            os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
 		OAuthGitHubClientSecret:        os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
+		OAuthUpstreamRaw:               os.Getenv("OAUTH_UPSTREAM"),
+		OAuthZitadelClientID:           os.Getenv("OAUTH_ZITADEL_CLIENT_ID"),
+		OAuthZitadelClientSecret:       os.Getenv("OAUTH_ZITADEL_CLIENT_SECRET"),
+		OAuthZitadelProvider:           envOr("OAUTH_ZITADEL_PROVIDER", "zitadel"),
 		ZitadelLinkClientID:            os.Getenv("ZITADEL_LINK_CLIENT_ID"),
 		ZitadelLinkClientSecret:        os.Getenv("ZITADEL_LINK_CLIENT_SECRET"),
 		ZitadelLinkProvider:            envOr("ZITADEL_LINK_PROVIDER", "zitadel"),
@@ -1431,7 +1449,10 @@ func (c config) validate() error {
 			return fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
 		}
 	}
-	oauthEnabled := c.OAuthGitHubClientID != "" && c.OAuthJWTSecret != ""
+	if err := c.validateOAuthUpstream(); err != nil {
+		return err
+	}
+	oauthEnabled := c.oauthEnabled()
 	if oauthEnabled && c.OAuthTokenTTL > maxOAuthTokenTTL {
 		return fmt.Errorf("OAUTH_TOKEN_TTL must not exceed %v, got %v — clients renew "+
 			"silently with the refresh_token grant, and access tokens cannot be revoked, "+
@@ -1454,6 +1475,116 @@ func (c config) validate() error {
 		return err
 	}
 	return nil
+}
+
+// oauthUpstreamMode is the parsed OAUTH_UPSTREAM. validate has already
+// refused an unknown value, so the fallback is never taken in main.
+func (c config) oauthUpstreamMode() mctlapi.OAuthUpstreamMode {
+	m, err := mctlapi.ParseOAuthUpstreamMode(c.OAuthUpstreamRaw)
+	if err != nil {
+		return mctlapi.OAuthUpstreamGitHub
+	}
+	return m
+}
+
+// oauthEnabled is the gate for constructing the OAuth server. github keeps
+// the pre-#467 rule; zitadel and both were validated complete.
+func (c config) oauthEnabled() bool {
+	if c.OAuthJWTSecret == "" {
+		return false
+	}
+	if c.oauthUpstreamMode() == mctlapi.OAuthUpstreamGitHub {
+		return c.OAuthGitHubClientID != ""
+	}
+	return true
+}
+
+// validateOAuthUpstream refuses a boot whose OAUTH_UPSTREAM is unknown, or
+// names an upstream whose configuration is incomplete: selecting zitadel or
+// both is a deliberate change, and a half-configured sign-in must not come
+// up. The MCTL_OIDC_PROVIDERS entry is read even while
+// MCTL_FEDERATION_DISABLED is on, because sign-in needs only its issuer.
+func (c config) validateOAuthUpstream() error {
+	mode, err := mctlapi.ParseOAuthUpstreamMode(c.OAuthUpstreamRaw)
+	if err != nil {
+		return err
+	}
+	if mode == mctlapi.OAuthUpstreamGitHub {
+		return nil
+	}
+	var missing []string
+	if c.OAuthJWTSecret == "" {
+		missing = append(missing, "OAUTH_JWT_SECRET")
+	}
+	if c.OAuthZitadelClientID == "" || c.OAuthZitadelClientSecret == "" {
+		missing = append(missing, "OAUTH_ZITADEL_CLIENT_ID and OAUTH_ZITADEL_CLIENT_SECRET (both)")
+	}
+	if mode == mctlapi.OAuthUpstreamBoth && (c.OAuthGitHubClientID == "" || c.OAuthGitHubClientSecret == "") {
+		missing = append(missing, "OAUTH_GITHUB_CLIENT_ID and OAUTH_GITHUB_CLIENT_SECRET (both, for the GitHub option)")
+	}
+	if _, err := c.oauthZitadelProvider(); err != nil {
+		missing = append(missing, err.Error())
+	}
+	// Sign-in reads linked rows by provider entry name, and linking writes
+	// them under ZITADEL_LINK_PROVIDER: two names would boot cleanly and then
+	// answer every sign-in "not linked", which re-linking cannot clear.
+	if c.OAuthZitadelProvider != c.ZitadelLinkProvider {
+		missing = append(missing, fmt.Sprintf("OAUTH_ZITADEL_PROVIDER (%q) to equal ZITADEL_LINK_PROVIDER (%q), the entry linking writes under", c.OAuthZitadelProvider, c.ZitadelLinkProvider))
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("OAUTH_UPSTREAM=%s needs %s", mode, strings.Join(missing, "; "))
+	}
+	return nil
+}
+
+// oauthZitadelProvider is the MCTL_OIDC_PROVIDERS entry the ZITADEL upstream
+// signs in against. Its identities are matched to linked rows by (iss, sub),
+// as the link flow writes them, so an entry that keys identities on another
+// claim is refused rather than silently matching nothing.
+func (c config) oauthZitadelProvider() (auth.OIDCProviderConfigEntry, error) {
+	entries, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw)
+	if err != nil {
+		return auth.OIDCProviderConfigEntry{}, err
+	}
+	for i := range entries {
+		e := &entries[i]
+		if e.Name != c.OAuthZitadelProvider {
+			continue
+		}
+		if e.SubjectClaim != "" && e.SubjectClaim != "sub" {
+			return auth.OIDCProviderConfigEntry{}, fmt.Errorf("MCTL_OIDC_PROVIDERS entry %q to key identities on sub, not %q", e.Name, e.SubjectClaim)
+		}
+		return *e, nil
+	}
+	return auth.OIDCProviderConfigEntry{}, fmt.Errorf("an MCTL_OIDC_PROVIDERS entry named %q (OAUTH_ZITADEL_PROVIDER)", c.OAuthZitadelProvider)
+}
+
+// oauthZitadelOptions wires the ZITADEL upstream when OAUTH_UPSTREAM selects
+// it. A missing principal store is not a boot failure (the store may only
+// be down): every ZITADEL sign-in then answers 503, never "not linked".
+func oauthZitadelOptions(cfg config, store *principals.Store, oauth *auth.OAuthServer) *mctlapi.OAuthZitadelOptions {
+	if oauth == nil || cfg.oauthUpstreamMode() == mctlapi.OAuthUpstreamGitHub {
+		return nil
+	}
+	entry, err := cfg.oauthZitadelProvider()
+	if err != nil {
+		// Unreachable after validate; keep the upstream off rather than half on.
+		slog.Error("OAuth ZITADEL upstream disabled", "error", err)
+		return nil
+	}
+	opts := &mctlapi.OAuthZitadelOptions{
+		ProviderName: entry.Name, Issuer: entry.Issuer,
+		ClientID: cfg.OAuthZitadelClientID, ClientSecret: cfg.OAuthZitadelClientSecret,
+	}
+	// Assigned only when non-nil: a nil *Store in the interface would not
+	// compare equal to nil and would be called.
+	if store != nil {
+		opts.Store = store
+	} else {
+		slog.Error("OAuth ZITADEL upstream has no principal store; ZITADEL sign-ins will answer 503")
+	}
+	slog.Info("OAuth ZITADEL upstream enabled", "provider", entry.Name, "issuer", entry.Issuer)
+	return opts
 }
 
 // buildFederationRegistry builds the federation registry from cfg, or
@@ -1771,7 +1902,7 @@ func identityLinkOptions(cfg config, store *principals.Store, cache *principals.
 	if cfg.ZitadelLinkClientID == "" || cfg.ZitadelLinkClientSecret == "" {
 		missing = append(missing, "ZITADEL_LINK_CLIENT_ID and ZITADEL_LINK_CLIENT_SECRET (both)")
 	}
-	if oauth == nil {
+	if oauth == nil || oauth.GitHubClientID == "" {
 		missing = append(missing, "the GitHub OAuth server (OAUTH_GITHUB_CLIENT_ID, OAUTH_JWT_SECRET)")
 	}
 	if gh == nil {
