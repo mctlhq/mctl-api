@@ -104,9 +104,14 @@ func (g *gateEnv) requestApprovalOn(executionID, key string) (id, intentHash str
 	id, intentHash = a["id"].(string), a["intent_hash"].(string)
 	g.t.Cleanup(func() {
 		ctx := context.Background()
-		if pool, err := pgxpool.New(ctx, g.connStr); err == nil {
-			_, _ = pool.Exec(ctx, `DELETE FROM action_approval_requests WHERE id=$1`, id)
-			pool.Close()
+		pool, err := pgxpool.New(ctx, g.connStr)
+		if err != nil {
+			g.t.Logf("cleanup: receipt %s left behind: %v", id, err)
+			return
+		}
+		defer pool.Close()
+		if _, err := pool.Exec(ctx, `DELETE FROM action_approval_requests WHERE id=$1`, id); err != nil {
+			g.t.Logf("cleanup: receipt %s left behind: %v", id, err)
 		}
 	})
 	return id, intentHash
