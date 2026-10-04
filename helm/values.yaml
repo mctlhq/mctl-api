@@ -127,6 +127,15 @@ evidenceWriterTokenSecret: ""
 # rather than failing the pod.
 surfaceTelegramTokenSecret: ""
 
+# Optional: Secret holding MCTL_SURFACE_PORTAL_TOKEN, the bearer token of the
+# surface:portal principal (mctlhq/mctl-portal#126). Same rules as the
+# telegram token above (surfaceTokenEnv, minSurfaceTokenLen = 32); it may
+# only speak for the portal surface. The key inside the Secret is
+# MCTL_SURFACE_PORTAL_TOKEN, which is what the mctl-gitops ExternalSecret
+# mctl-api-surface-portal produces. Optional, so an absent Secret leaves the
+# principal disabled rather than failing the pod.
+surfacePortalTokenSecret: ""
+
 # Optional: mount a versioned usage rate card from a ConfigMap.
 #
 # When set, the ConfigMap is mounted read-only at
