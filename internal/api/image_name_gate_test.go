@@ -11,8 +11,9 @@ import (
 
 // A tenant build pushes ghcr.io/mctlhq/<component_name> and a tenant service
 // runs it, so a non-admin may only use image names the reviewed list in
-// mctl-gitops does not reserve and no other team already has. Checked before
-// anything else about the build, and an unreadable list refuses.
+// mctl-gitops does not reserve and no other team already has, and only as
+// an existing tenant. Checked before anything else about the build, and an
+// unreadable list refuses.
 
 func imagePolicy(t *testing.T, list string, owners map[string]string) *gitops.ImageNamePolicy {
 	t.Helper()
@@ -20,6 +21,8 @@ func imagePolicy(t *testing.T, list string, owners map[string]string) *gitops.Im
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.AddTenant("tests")
+	p.AddTenant("karabu")
 	for name, team := range owners {
 		p.AddOwner(name, team)
 	}
@@ -27,10 +30,11 @@ func imagePolicy(t *testing.T, list string, owners map[string]string) *gitops.Im
 }
 
 const testImageList = `
+registry ghcr.io/mctlhq
 reserved-prefix mctl-
 reserved portfolio
 grant tests mctl-docs
-grant * openclaw
+shared openclaw
 `
 
 func imageGateRouter(t *testing.T, git *fakeGitReader) (http.Handler, *fakeExecutor, *gateFixture) {
@@ -86,7 +90,7 @@ func TestImageNameGate_RefusesPreviewOfReservedName(t *testing.T) {
 
 func TestImageNameGate_AllowsOwnGrantedAndNewNames(t *testing.T) {
 	git := &fakeGitReader{imagePolicy: imagePolicy(t, testImageList, map[string]string{"my-app": "tests", "shop": "karabu"})}
-	for _, name := range []string{"my-app", "mctl-docs", "openclaw", "brand-new"} {
+	for _, name := range []string{"my-app", "mctl-docs", "brand-new"} {
 		t.Run(name, func(t *testing.T) {
 			router, exec, _ := imageGateRouter(t, git)
 			w := postAs(t, router, deployPath, onboardAs(name), ownerUser)
@@ -118,5 +122,58 @@ func TestImageNameGate_AdminsAreNotChecked(t *testing.T) {
 	assertStatus(t, w, http.StatusAccepted)
 	if len(exec.submittedParams) != 1 {
 		t.Fatal("expected a submission")
+	}
+}
+
+// A shared name may be run by any tenant but built only by a granted one, and
+// "builds" follows the workflows: deploy-service with a dockerfile_repo
+// (except the openclaw template), preview-deploy with a git_ref.
+func TestImageNameGate_SharedNameRunsButDoesNotBuild(t *testing.T) {
+	git := &fakeGitReader{imagePolicy: imagePolicy(t, testImageList, nil)}
+	const previewPath = "/api/v1/operations/preview-deploy/execute"
+	runOpenclawTemplate := onboardAs("openclaw")
+	runOpenclawTemplate["service_template"] = "openclaw"
+	updateConfig := map[string]string{"action": "update-config", "team_name": "tests", "component_name": "openclaw", "dockerfile_repo": "myorg/my-app", "image_tag": "1.0.0"}
+	cases := []struct {
+		label string
+		path  string
+		input map[string]string
+		want  int
+	}{
+		{"onboard builds", deployPath, onboardAs("openclaw"), http.StatusForbidden},
+		{"openclaw template runs a fixed image", deployPath, runOpenclawTemplate, http.StatusAccepted},
+		{"update-config runs", deployPath, updateConfig, http.StatusAccepted},
+		{"preview of a tag runs", previewPath, map[string]string{"team_name": "tests", "component_name": "openclaw", "image_tag": "1.0.0"}, http.StatusAccepted},
+		{"preview of a branch builds", previewPath, map[string]string{"team_name": "tests", "component_name": "openclaw", "git_ref": "main", "dockerfile_repo": "myorg/my-app"}, http.StatusForbidden},
+	}
+	for _, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			router, exec, _ := imageGateRouter(t, git)
+			w := postAs(t, router, c.path, c.input, ownerUser)
+			assertStatus(t, w, c.want)
+			if submitted := len(exec.submittedParams) == 1; submitted != (c.want == http.StatusAccepted) {
+				t.Fatalf("submitted=%v for status %d", submitted, c.want)
+			}
+		})
+	}
+}
+
+// The team must be a tenant in the checkout the policy was read from, and
+// the list must govern the registry the workflows use.
+func TestImageNameGate_RefusesUnknownTenantAndForeignRegistry(t *testing.T) {
+	noTenant, err := gitops.ParseImageNames([]byte(testImageList))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRegistry := imagePolicy(t, strings.Replace(testImageList, "ghcr.io/mctlhq", "ghcr.io/elsewhere", 1), nil)
+	for label, p := range map[string]*gitops.ImageNamePolicy{"no tenant dir": noTenant, "other registry": otherRegistry} {
+		t.Run(label, func(t *testing.T) {
+			router, exec, _ := imageGateRouter(t, &fakeGitReader{imagePolicy: p})
+			w := postAs(t, router, deployPath, onboardAs("brand-new"), ownerUser)
+			assertStatus(t, w, http.StatusForbidden)
+			if len(exec.submittedParams) != 0 {
+				t.Fatal("refused build must not be submitted")
+			}
+		})
 	}
 }

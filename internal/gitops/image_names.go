@@ -12,12 +12,18 @@ import (
 	"time"
 )
 
-// ImageNamesFile is the reviewed list of reserved and granted image names
-// under ghcr.io/mctlhq, relative to the checkout root. The deploy-service and
+// ImageNamesFile is the reviewed list of reserved, shared and granted image
+// names under ImageRegistry, relative to the checkout root. The deploy-service and
 // preview-deploy validation and build-image.yaml apply the same list
 // (platform-gitops/argo-workflows/scripts/check-image-name.sh); this is the
 // API's copy of that rule, read from the same file.
 const ImageNamesFile = "platform-gitops/argo-workflows/config/image-names.txt"
+
+// ImageRegistry is where deploy-service and preview-deploy push and pull
+// (their container_registry default; the API never sends another, because
+// undeclared parameters are stripped). The list's `registry` line must name
+// it: a list that governs another registry says nothing about this one.
+const ImageRegistry = "ghcr.io/mctlhq"
 
 // ImageNamePolicyMaxAge bounds how old the checkout may be when the policy
 // is read. The checkout refreshes every minute; a last successful sync older
@@ -25,34 +31,48 @@ const ImageNamesFile = "platform-gitops/argo-workflows/config/image-names.txt"
 // "could not observe", not "allowed".
 const ImageNamePolicyMaxAge = 10 * time.Minute
 
-// ImageNamePolicy decides which team may build into and run
-// ghcr.io/mctlhq/<name>. Tenant builds push ghcr.io/mctlhq/<component_name>
-// and tenant services run it, so a component name is an image name.
+// ImageNamePolicy decides which tenant may build into and run
+// <registry>/<name>. Tenant builds push <registry>/<component_name> and
+// tenant services run it, so a component name is an image name.
 type ImageNamePolicy struct {
-	grants         map[string]map[string]bool // name -> team ("*" for any) -> granted
+	registry       string
+	grants         map[string]map[string]bool // name -> team -> granted
 	reserved       map[string]bool
 	reservedPrefix []string
+	shared         map[string]bool
 	// owners maps a name to the teams that have services/<team>/<name> or
-	// run ghcr.io/mctlhq/<name> from a values.yaml under services/<team>/.
+	// run <registry>/<name> from a values.yaml under services/<team>/.
 	owners map[string]map[string]bool
+	// tenants are the teams with platform-gitops/tenants/<team>/.
+	tenants map[string]bool
 }
 
 var imageNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
-var valuesRepositoryRE = regexp.MustCompile(`(?m)^[ \t]*repository:[ \t]*["']?ghcr\.io/mctlhq/([a-z0-9-]+)["']?[ \t]*$`)
+// valuesRepositoryRE matches a values.yaml line running <registry>/<name>,
+// line by line like the script's grep: [[:space:]] there never spans lines.
+func valuesRepositoryRE(registry string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^[ \t\r\f\v]*repository:[ \t\r\f\v]*["']?` +
+		regexp.QuoteMeta(registry) + `/([a-z0-9-]+)["']?[ \t\r\f\v]*$`)
+}
 
 // ErrImageNameRefused is wrapped by every refusal from Allowed.
 var ErrImageNameRefused = errors.New("image name refused")
 
 // ParseImageNames parses the list. Any line that is not a comment, blank, or
-// one of `grant <team|*> <name>`, `reserved <name>`, `reserved-prefix <p>`
-// is an error: an unreadable policy must refuse, not allow.
+// one of `grant <team> <name>`, `reserved <name>`, `reserved-prefix <p>`,
+// `shared <name>`, `registry <r>` is an error, as is a wildcard grant or
+// anything but exactly one registry line: an unreadable policy must refuse,
+// not allow.
 func ParseImageNames(data []byte) (*ImageNamePolicy, error) {
 	p := &ImageNamePolicy{
 		grants:   map[string]map[string]bool{},
 		reserved: map[string]bool{},
+		shared:   map[string]bool{},
 		owners:   map[string]map[string]bool{},
+		tenants:  map[string]bool{},
 	}
+	registries := 0
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	n := 0
 	for sc.Scan() {
@@ -63,7 +83,7 @@ func ParseImageNames(data []byte) (*ImageNamePolicy, error) {
 		}
 		f := strings.Fields(line)
 		switch {
-		case f[0] == "grant" && len(f) == 3:
+		case f[0] == "grant" && len(f) == 3 && f[1] != "*":
 			if p.grants[f[2]] == nil {
 				p.grants[f[2]] = map[string]bool{}
 			}
@@ -72,12 +92,20 @@ func ParseImageNames(data []byte) (*ImageNamePolicy, error) {
 			p.reserved[f[1]] = true
 		case f[0] == "reserved-prefix" && len(f) == 2:
 			p.reservedPrefix = append(p.reservedPrefix, f[1])
+		case f[0] == "shared" && len(f) == 2:
+			p.shared[f[1]] = true
+		case f[0] == "registry" && len(f) == 2:
+			registries++
+			p.registry = f[1]
 		default:
 			return nil, fmt.Errorf("%s line %d: unrecognised %q", ImageNamesFile, n, line)
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
+	}
+	if registries != 1 {
+		return nil, fmt.Errorf("%s needs exactly one registry line, has %d", ImageNamesFile, registries)
 	}
 	if len(p.reserved) == 0 && len(p.reservedPrefix) == 0 {
 		return nil, fmt.Errorf("%s reserves nothing", ImageNamesFile)
@@ -93,15 +121,28 @@ func (p *ImageNamePolicy) AddOwner(name, team string) {
 	p.owners[name][team] = true
 }
 
-// Allowed reports whether team may build into and run ghcr.io/mctlhq/<name>,
-// in the same order as check-image-name.sh: a grant allows; a reserved name
-// or prefix refuses; a name another team already has refuses; anything else
+// AddTenant records that team has platform-gitops/tenants/<team>/.
+func (p *ImageNamePolicy) AddTenant(team string) { p.tenants[team] = true }
+
+// Allowed reports whether tenant team may run ImageRegistry/<name>, and with
+// build also push to it. It is check-image-name.sh run as `--tenant
+// [--build] <checkout> ImageRegistry <team> <name>`, in the same order:
+// the list must govern ImageRegistry; team must be an existing tenant and
+// never "platform" (the API only checks tenant callers); then a grant
+// allows; a reserved name or prefix refuses; a shared name allows a run and
+// refuses a build; a name another team already has refuses; anything else
 // is allowed.
-func (p *ImageNamePolicy) Allowed(team, name string) error {
+func (p *ImageNamePolicy) Allowed(team, name string, build bool) error {
 	if !imageNameRE.MatchString(team) || !imageNameRE.MatchString(name) {
 		return fmt.Errorf("%w: invalid team %q or name %q", ErrImageNameRefused, team, name)
 	}
-	if g := p.grants[name]; g[team] || g["*"] {
+	if p.registry != ImageRegistry {
+		return fmt.Errorf("%w: %s governs %q, not %q", ErrImageNameRefused, ImageNamesFile, p.registry, ImageRegistry)
+	}
+	if team == "platform" || !p.tenants[team] {
+		return fmt.Errorf("%w: team %q is not an existing tenant", ErrImageNameRefused, team)
+	}
+	if p.grants[name][team] {
 		return nil
 	}
 	if p.reserved[name] {
@@ -112,6 +153,12 @@ func (p *ImageNamePolicy) Allowed(team, name string) error {
 			return fmt.Errorf("%w: image name %q is reserved for the platform", ErrImageNameRefused, name)
 		}
 	}
+	if p.shared[name] {
+		if build {
+			return fmt.Errorf("%w: image name %q is shared; only a granted team may build it", ErrImageNameRefused, name)
+		}
+		return nil
+	}
 	for owner := range p.owners[name] {
 		if owner != team {
 			return fmt.Errorf("%w: image name %q belongs to team %q", ErrImageNameRefused, name, owner)
@@ -120,8 +167,8 @@ func (p *ImageNamePolicy) Allowed(team, name string) error {
 	return nil
 }
 
-// ImageNamePolicy reads ImageNamesFile and the services tree from the same
-// checkout, under one read lock. Every read error is returned: a missing list,
+// ImageNamePolicy reads ImageNamesFile, the tenants and the services tree
+// from the same checkout, under one read lock. Every read error is returned: a missing list,
 // an unreadable services directory, or an unreadable values.yaml is not an
 // empty policy. So is a checkout that never synced, or whose last successful
 // sync is older than ImageNamePolicyMaxAge.
@@ -146,13 +193,25 @@ func (r *Reader) ImageNamePolicy() (*ImageNamePolicy, error) {
 		return nil, err
 	}
 
+	tenants, err := os.ReadDir(filepath.Join(r.localPath, "platform-gitops", "tenants"))
+	if err != nil {
+		return nil, fmt.Errorf("reading tenants dir: %w", err)
+	}
+	for _, t := range tenants {
+		if t.IsDir() {
+			p.AddTenant(t.Name())
+		}
+	}
+
+	repoRE := valuesRepositoryRE(p.registry)
 	servicesDir := filepath.Join(r.localPath, "platform-gitops", "services")
 	teams, err := os.ReadDir(servicesDir)
 	if err != nil {
 		return nil, fmt.Errorf("reading services dir: %w", err)
 	}
+	// Dot-entries are skipped as the script's globs skip them.
 	for _, t := range teams {
-		if !t.IsDir() {
+		if !t.IsDir() || strings.HasPrefix(t.Name(), ".") {
 			continue
 		}
 		apps, err := os.ReadDir(filepath.Join(servicesDir, t.Name()))
@@ -160,7 +219,7 @@ func (r *Reader) ImageNamePolicy() (*ImageNamePolicy, error) {
 			return nil, fmt.Errorf("reading services/%s: %w", t.Name(), err)
 		}
 		for _, a := range apps {
-			if !a.IsDir() {
+			if !a.IsDir() || strings.HasPrefix(a.Name(), ".") {
 				continue
 			}
 			p.AddOwner(a.Name(), t.Name())
@@ -171,7 +230,7 @@ func (r *Reader) ImageNamePolicy() (*ImageNamePolicy, error) {
 			if err != nil {
 				return nil, fmt.Errorf("reading services/%s/%s/values.yaml: %w", t.Name(), a.Name(), err)
 			}
-			for _, m := range valuesRepositoryRE.FindAllSubmatch(values, -1) {
+			for _, m := range repoRE.FindAllSubmatch(values, -1) {
 				p.AddOwner(string(m[1]), t.Name())
 			}
 		}

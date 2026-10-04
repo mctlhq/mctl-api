@@ -81,8 +81,8 @@ func (h *Handlers) checkBuildInputs(ctx context.Context, op operations.Operation
 }
 
 // imageParameters mark an operation whose component_name is an image name:
-// it builds ghcr.io/mctlhq/<component_name> (dockerfile_repo) or runs a
-// pre-built tag of it (image_tag).
+// it builds gitops.ImageRegistry/<component_name> (dockerfile_repo) or runs
+// a pre-built tag of it (image_tag).
 var imageParameters = []string{"dockerfile_repo", "image_tag"}
 
 // checkImageName refuses an operation whose component_name is an image name
@@ -111,10 +111,27 @@ func (h *Handlers) checkImageName(op operations.Operation, input map[string]stri
 	if err != nil {
 		return fmt.Errorf("%w: could not read the image name policy: %v", errBuildRepoRefused, err)
 	}
-	if err := policy.Allowed(team, strings.TrimSpace(input["component_name"])); err != nil {
+	if err := policy.Allowed(team, strings.TrimSpace(input["component_name"]), buildsImage(op, input)); err != nil {
 		return fmt.Errorf("%w: %v", errBuildRepoRefused, err)
 	}
 	return nil
+}
+
+// buildsImage reports whether the operation will push to
+// <registry>/<component_name>, mirroring the workflows' own conditions, which
+// tpl-validate-tenant's --build decision follows too: preview-deploy builds
+// when git_ref is set; deploy-service builds unless it only updates config,
+// has no dockerfile_repo, or uses the openclaw template (whose services run
+// a fixed image). Any other operation is taken to build, the stricter
+// answer.
+func buildsImage(op operations.Operation, input map[string]string) bool {
+	switch op.Name {
+	case "preview-deploy":
+		return input["git_ref"] != ""
+	case "deploy-service":
+		return input["action"] != "update-config" && input["dockerfile_repo"] != "" && input["service_template"] != "openclaw"
+	}
+	return true
 }
 
 // repoBoundToTeam asks the portal's github-app-connect plugin, the system of

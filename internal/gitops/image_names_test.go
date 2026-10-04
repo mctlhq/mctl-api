@@ -11,20 +11,24 @@ import (
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
 
 const policyList = `# comment
+registry ghcr.io/mctlhq
 reserved-prefix mctl-
 reserved portfolio
 grant labs portfolio
 grant labs mctl-telegram
-grant * openclaw
+grant platform mc
+reserved mc
+shared openclaw
+grant labs openclaw
 `
 
 // synced returns a Reader over root whose last successful sync was age ago.
@@ -38,14 +42,24 @@ func checkout(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, ImageNamesFile), policyList)
+	// "platform" refuses even with a directory: it is never a tenant.
+	for _, team := range []string{"labs", "ovk", "karabu", "platform"} {
+		if err := os.MkdirAll(filepath.Join(root, "platform-gitops", "tenants", team), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
 	svc := filepath.Join(root, "platform-gitops", "services")
 	writeFile(t, filepath.Join(svc, "labs", "portfolio", "values.yaml"), "image:\n  repository: ghcr.io/mctlhq/portfolio\n")
 	// a preview that runs another name than its directory
 	writeFile(t, filepath.Join(svc, "labs", "web-preview", "values.yaml"), "image:\n  repository: \"ghcr.io/mctlhq/web\"\n  tag: x\n")
-	// openclaw services exist in several teams; only the wildcard grant lets them share
+	// openclaw services exist in several teams; only the shared line lets them share
 	writeFile(t, filepath.Join(svc, "labs", "openclaw", "values.yaml"), "image:\n  repository: ghcr.io/mctlhq/mctl-openclaw\n")
+	// another registry's image of the same name takes nothing here
+	writeFile(t, filepath.Join(svc, "labs", "elsewhere", "values.yaml"), "image:\n  repository: ghcr.io/other/free\n")
+	// a dot-directory is not a team, as the script's globs skip it
+	writeFile(t, filepath.Join(svc, ".hidden", "taken", "values.yaml"), "x: 1\n")
 	// a service directory with no values yet still takes the name
-	if err := os.MkdirAll(filepath.Join(svc, "karabu", "draw"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(svc, "karabu", "draw"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	return root
@@ -59,25 +73,31 @@ func TestImageNamePolicy_Rule(t *testing.T) {
 	}
 	cases := []struct {
 		team, name string
-		ok         bool
+		build, ok  bool
 	}{
-		{"labs", "portfolio", true},     // granted
-		{"ovk", "portfolio", false},     // reserved, not granted to ovk
-		{"labs", "mctl-telegram", true}, // granted despite the prefix
-		{"ovk", "mctl-api", false},      // reserved prefix
-		{"karabu", "openclaw", true},    // labs has one too; granted to every team
-		{"labs", "draw", false},         // karabu's directory
-		{"karabu", "draw", true},        // own directory
-		{"ovk", "web", false},           // an image labs runs
-		{"labs", "web", true},
-		{"ovk", "brand-new", true},
-		{"ovk", "Bad_Name", false},
-		{"", "x", false},
+		{"labs", "portfolio", true, true},     // granted
+		{"ovk", "portfolio", false, false},    // reserved, not granted to ovk
+		{"labs", "mctl-telegram", true, true}, // granted despite the prefix
+		{"ovk", "mctl-api", false, false},     // reserved prefix
+		{"karabu", "openclaw", false, true},   // shared: any tenant may run it
+		{"karabu", "openclaw", true, false},   // ... but only a grant may build it
+		{"labs", "openclaw", true, true},      // the grant
+		{"labs", "draw", false, false},        // karabu's directory
+		{"karabu", "draw", true, true},        // own directory
+		{"ovk", "web", false, false},          // an image labs runs
+		{"labs", "web", true, true},
+		{"ovk", "free", true, true},  // labs runs it from another registry
+		{"ovk", "taken", true, true}, // only a dot-directory has it
+		{"ovk", "brand-new", true, true},
+		{"platform", "mc", true, false},     // the platform's grant is not a tenant's
+		{"ghost", "brand-new", true, false}, // no tenants/ghost/
+		{"ovk", "Bad_Name", false, false},
+		{"", "x", false, false},
 	}
 	for _, c := range cases {
-		err := p.Allowed(c.team, c.name)
+		err := p.Allowed(c.team, c.name, c.build)
 		if (err == nil) != c.ok {
-			t.Errorf("Allowed(%q, %q) = %v, want ok=%v", c.team, c.name, err, c.ok)
+			t.Errorf("Allowed(%q, %q, build=%v) = %v, want ok=%v", c.team, c.name, c.build, err, c.ok)
 		}
 		if err != nil && !errors.Is(err, ErrImageNameRefused) {
 			t.Errorf("refusal must wrap ErrImageNameRefused: %v", err)
@@ -95,6 +115,25 @@ func TestImageNamePolicy_FailsClosed(t *testing.T) {
 			t.Fatal("a missing list must be an error")
 		}
 	})
+	t.Run("missing tenants dir", func(t *testing.T) {
+		root := checkout(t)
+		if err := os.RemoveAll(filepath.Join(root, "platform-gitops", "tenants")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := synced(root, time.Minute).ImageNamePolicy(); err == nil {
+			t.Fatal("a missing tenants tree must be an error, not an empty one")
+		}
+	})
+	t.Run("other registry", func(t *testing.T) {
+		p, err := ParseImageNames([]byte(strings.Replace(policyList, "ghcr.io/mctlhq", "ghcr.io/other", 1)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.AddTenant("ovk")
+		if err := p.Allowed("ovk", "brand-new", false); err == nil {
+			t.Fatal("a list governing another registry must refuse")
+		}
+	})
 	t.Run("missing services dir", func(t *testing.T) {
 		root := checkout(t)
 		if err := os.RemoveAll(filepath.Join(root, "platform-gitops", "services")); err != nil {
@@ -105,10 +144,14 @@ func TestImageNamePolicy_FailsClosed(t *testing.T) {
 		}
 	})
 	for label, list := range map[string]string{
-		"unknown line":  "reserved-prefix mctl-\nallow labs x\n",
-		"short grant":   "reserved x\ngrant labs\n",
-		"reserves none": "# nothing\ngrant labs x\n",
-		"extra field":   "reserved x y\n",
+		"unknown line":    "registry r\nreserved-prefix mctl-\nallow labs x\n",
+		"short grant":     "registry r\nreserved x\ngrant labs\n",
+		"reserves none":   "registry r\n# nothing\ngrant labs x\n",
+		"extra field":     "registry r\nreserved x y\n",
+		"wildcard grant":  "registry r\nreserved x\ngrant * x\n",
+		"no registry":     "reserved x\n",
+		"two registries":  "registry r\nregistry s\nreserved x\n",
+		"shared too long": "registry r\nreserved x\nshared a b\n",
 	} {
 		t.Run(label, func(t *testing.T) {
 			if _, err := ParseImageNames([]byte(list)); err == nil {
