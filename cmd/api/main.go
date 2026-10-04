@@ -250,6 +250,7 @@ func main() {
 	var (
 		principalStore    *principals.Store
 		principalResolver auth.PrincipalResolver
+		principalCache    *principals.Resolver
 	)
 	principalDBURL := postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL"))
 	if principalDBURL == "" {
@@ -269,7 +270,8 @@ func main() {
 		} else {
 			principalStore = ps
 			defer ps.Close()
-			principalResolver = principals.NewResolver(ps, githubIDLookup(), os.Getenv("AUTH_REQUIRED") == "false")
+			principalCache = principals.NewResolver(ps, githubIDLookup(), os.Getenv("AUTH_REQUIRED") == "false")
+			principalResolver = principalCache
 		}
 	}
 
@@ -833,6 +835,7 @@ func main() {
 		BackstageGithubAppConnectToken: cfg.BackstageGithubAppConnectToken,
 		AllowedOrigins:                 cfg.AllowedOrigins,
 		OAuthServer:                    oauthServer,
+		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
 		AlertStore:                     alertStore,
 		AgentRegistry:                  agentRegistryStore,
 		Lifecycle:                      lifecycleStore,
@@ -1057,8 +1060,15 @@ type config struct {
 	// AllowedOrigins is a list of origins permitted by CORS policy.
 	AllowedOrigins []string
 	// OAuth 2.0 server settings for Claude.ai custom connector support.
-	OAuthGitHubClientID      string
-	OAuthGitHubClientSecret  string
+	OAuthGitHubClientID     string
+	OAuthGitHubClientSecret string
+	// ZITADEL client of the identity link flow (mctl-api#435): a
+	// confidential web app; both empty keeps the browser flow off.
+	// ZitadelLinkProvider names the MCTL_OIDC_PROVIDERS entry whose issuer
+	// the linked identity must carry.
+	ZitadelLinkClientID      string
+	ZitadelLinkClientSecret  string
+	ZitadelLinkProvider      string
 	OAuthJWTSecret           string
 	OAuthAllowedRedirectURIs []string
 	// OAuthPreregisteredClientsRaw is the OAUTH_PREREGISTERED_CLIENTS value as
@@ -1156,6 +1166,9 @@ func loadConfig() config {
 		AllowedOrigins:                 origins,
 		OAuthGitHubClientID:            os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
 		OAuthGitHubClientSecret:        os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
+		ZitadelLinkClientID:            os.Getenv("ZITADEL_LINK_CLIENT_ID"),
+		ZitadelLinkClientSecret:        os.Getenv("ZITADEL_LINK_CLIENT_SECRET"),
+		ZitadelLinkProvider:            envOr("ZITADEL_LINK_PROVIDER", "zitadel"),
 		OAuthJWTSecret:                 os.Getenv("OAUTH_JWT_SECRET"),
 		OAuthAllowedRedirectURIs:       oauthRedirectURIs,
 		OAuthPreregisteredClientsRaw:   os.Getenv("OAUTH_PREREGISTERED_CLIENTS"),
@@ -1736,4 +1749,59 @@ func startEvidenceRetentionSweep(ctx context.Context, store *evidence.Store) {
 			}
 		}
 	}()
+}
+
+// identityLinkOptions wires explicit identity linking (mctl-api#435). The
+// API side (list, unlink, admin merge) needs only the principal store; the
+// browser flow also needs the ZITADEL link client, the federation entry it
+// links into, and the GitHub OAuth app. Anything missing leaves that part
+// off (503) with one log line saying why, never a failed boot.
+func identityLinkOptions(cfg config, store *principals.Store, cache *principals.Resolver, oauth *auth.OAuthServer, gh *auth.GitHubValidator) *mctlapi.IdentityLinkOptions {
+	if store == nil {
+		return nil
+	}
+	opts := &mctlapi.IdentityLinkOptions{Store: store, BaseURL: cfg.SelfURL}
+	if cache != nil {
+		opts.ForgetPrincipals = cache.Forget
+	}
+	if cfg.ZitadelLinkClientID == "" && cfg.ZitadelLinkClientSecret == "" {
+		return opts
+	}
+	var missing []string
+	if cfg.ZitadelLinkClientID == "" || cfg.ZitadelLinkClientSecret == "" {
+		missing = append(missing, "ZITADEL_LINK_CLIENT_ID and ZITADEL_LINK_CLIENT_SECRET (both)")
+	}
+	if oauth == nil {
+		missing = append(missing, "the GitHub OAuth server (OAUTH_GITHUB_CLIENT_ID, OAUTH_JWT_SECRET)")
+	}
+	if gh == nil {
+		missing = append(missing, "the GitHub validator")
+	}
+	if cfg.FederationDisabled {
+		missing = append(missing, "the federation registry (MCTL_FEDERATION_DISABLED is on)")
+	} else if entries, err := auth.ParseOIDCProviders(cfg.OIDCProvidersRaw); err == nil {
+		for i := range entries {
+			if entries[i].Name == cfg.ZitadelLinkProvider {
+				opts.ProviderName, opts.Issuer = entries[i].Name, entries[i].Issuer
+			}
+		}
+	}
+	if opts.Issuer == "" && !cfg.FederationDisabled {
+		missing = append(missing, "an MCTL_OIDC_PROVIDERS entry named "+cfg.ZitadelLinkProvider)
+	}
+	if len(missing) > 0 {
+		slog.Error("identity link browser flow disabled", "missing", strings.Join(missing, "; "))
+		return opts
+	}
+	opts.ClientID, opts.ClientSecret = cfg.ZitadelLinkClientID, cfg.ZitadelLinkClientSecret
+	opts.GitHubClientID = oauth.GitHubClientID
+	opts.ProveGitHub = func(ctx context.Context, code, redirectURI string) (string, int64, error) {
+		token, err := mctlapi.ExchangeGitHubCode(ctx, oauth.GitHubClientID, oauth.GitHubClientSecret, code, redirectURI)
+		if err != nil {
+			return "", 0, err
+		}
+		return gh.ValidateIdentity(ctx, token)
+	}
+	slog.Info("identity link browser flow enabled", "provider", opts.ProviderName, "issuer", opts.Issuer)
+	return opts
 }

@@ -206,6 +206,12 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 // It exchanges the GitHub code for a GitHub token, resolves the user identity,
 // issues a mctl authorization code, and redirects back to the client.
 func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Request) {
+	// The identity link flow shares this registered callback; its states
+	// carry their own prefix and never reach the OAuth server's pending map.
+	if isIdentityLinkState(r.URL.Query().Get("state")) {
+		h.handleIdentityLinkGitHubCallback(w, r)
+		return
+	}
 	o := h.opts.OAuthServer
 	if o == nil {
 		http.Error(w, "OAuth not configured", http.StatusNotFound)
@@ -607,6 +613,12 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── GitHub OAuth helpers ─────────────────────────────────────────────────────
+
+// ExchangeGitHubCode is exchangeGitHubCode for callers outside the package
+// (the identity link flow's GitHub leg, wired in cmd/api).
+func ExchangeGitHubCode(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, error) {
+	return exchangeGitHubCode(ctx, clientID, clientSecret, code, redirectURI)
+}
 
 func exchangeGitHubCode(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, error) {
 	body := url.Values{}

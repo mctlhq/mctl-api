@@ -91,6 +91,10 @@ type Resolver struct {
 	mu        sync.Mutex
 	cache     map[string]cached
 	lastSweep time.Time
+	// gen counts Forget calls. A resolution caches its answer only if no
+	// Forget ran while it was reading the store, so a read from before an
+	// unlink or a merge cannot write the stale answer back after it.
+	gen uint64
 }
 
 type cached struct {
@@ -131,6 +135,7 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 	now := r.now()
 	r.mu.Lock()
 	c, ok := r.cache[key]
+	gen := r.gen
 	r.mu.Unlock()
 	switch {
 	case ok && c.failed && now.Sub(c.at) < r.failureTTL:
@@ -155,7 +160,9 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 	}
 	c = cached{principal: p.ID, disabled: p.Status == StatusDisabled, at: now}
 	r.mu.Lock()
-	r.cache[key] = c
+	if r.gen == gen {
+		r.cache[key] = c
+	}
 	r.sweepLocked(now)
 	r.mu.Unlock()
 	return answer(c)
@@ -171,6 +178,30 @@ func (r *Resolver) sweepLocked(now time.Time) {
 	r.lastSweep = now
 	for k, c := range r.cache {
 		if now.Sub(c.at) >= r.ttl {
+			delete(r.cache, k)
+		}
+	}
+}
+
+// Forget drops every cached resolution that answered with one of
+// principalIDs, so the next request re-reads the store. Linking calls it
+// after a merge or an unlink (mctl-api#435): without it a cached identity
+// keeps resolving to the merged-away principal, or an unlinked identity keeps
+// authenticating, for up to the cache TTL. It reaches this process only;
+// mctl-api runs one replica.
+func (r *Resolver) Forget(principalIDs ...string) {
+	if len(principalIDs) == 0 {
+		return
+	}
+	drop := make(map[string]struct{}, len(principalIDs))
+	for _, id := range principalIDs {
+		drop[id] = struct{}{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gen++
+	for k, c := range r.cache {
+		if _, ok := drop[c.principal]; ok && !c.failed {
 			delete(r.cache, k)
 		}
 	}

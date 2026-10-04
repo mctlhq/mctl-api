@@ -88,6 +88,9 @@ type Options struct {
 	// OAuthServer handles OAuth 2.0 Authorization Code + PKCE flow for Claude.ai connectors.
 	// If nil, all /oauth/* endpoints return 404.
 	OAuthServer *auth.OAuthServer
+	// IdentityLink configures explicit identity linking (mctl-api#435,
+	// handlers_identity_link.go). Nil disables it (503).
+	IdentityLink *IdentityLinkOptions
 	// AlertStore persists incident alerts to PostgreSQL (optional — nil disables incident endpoints).
 	AlertStore *alerts.Store
 	// DomainStore persists custom domain registrations to PostgreSQL
@@ -211,6 +214,7 @@ type Handlers struct {
 	// Pre-computed at router init so each save call is a plain map lookup.
 	openClawQuota       OpenClawQuotaConfig
 	openClawRateLimiter *saveRateLimiter
+	identityLink        *identityLinker
 }
 
 // NewRouter creates the HTTP router with all API routes.
@@ -220,6 +224,9 @@ func NewRouter(opts Options) http.Handler {
 		opts:                opts,
 		openClawQuota:       quota,
 		openClawRateLimiter: newSaveRateLimiter(quota.SaveRatePerHour),
+	}
+	if opts.IdentityLink != nil {
+		h.identityLink = newIdentityLinker(opts.IdentityLink)
 	}
 
 	if opts.BackstageGithubAppConnectToken == "" {
@@ -288,6 +295,11 @@ func NewRouter(opts Options) http.Handler {
 		r.Get("/oauth/github/callback", h.handleOAuthGitHubCallback)
 		r.Post("/oauth/token", h.handleOAuthToken)
 		r.Post("/oauth/revoke", h.handleOAuthRevoke)
+		// Explicit identity linking, browser side (mctl-api#435). Public:
+		// the person proves both identities inside the flow itself.
+		r.Get(linkStartPath, h.handleIdentityLinkStart)
+		r.Get(linkCallbackPath, h.handleIdentityLinkCallback)
+		r.Post(linkConfirmPath, h.handleIdentityLinkConfirm)
 	})
 	r.Group(func(r chi.Router) {
 		// Keyed by IP, so every process of one desktop MCP client shares the
@@ -364,6 +376,10 @@ func NewRouter(opts Options) http.Handler {
 		r.Route("/api/v1", func(r chi.Router) {
 			// Auth endpoints.
 			r.Get("/whoami", h.Whoami)
+			// The caller's linked identities (mctl-api#435).
+			r.Get("/identity/links", h.ListIdentityLinks)
+			r.Delete("/identity/links/{id}", h.UnlinkIdentity)
+			r.Post("/admin/principals/{from}/merge-into/{into}", h.MergePrincipals)
 			r.Post("/auth/logout", h.Logout)
 
 			// Read endpoints (safe, no side effects).
