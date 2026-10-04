@@ -79,7 +79,12 @@ e-mail:
    SHA-256) and sends the browser to GitHub through its own OAuth app; the
    registered `/oauth/github/callback` recognises the `link.` state.
 2. GitHub proves identity #1 (numeric id); it is provisioned as usual and
-   names the principal **P**.
+   names the principal **P**. A page then says what to enter at ZITADEL
+   (the invitation e-mail or the full login name, not the GitHub login)
+   and links to the ZITADEL leg. Under `prompt=login` ZITADEL always asks
+   for a name, and with `ignore_unknown_usernames` it answers an unknown
+   one with a password page that a passkey-only account cannot pass
+   (#462). The link carries this session's state, so step 3 checks it.
 3. ZITADEL proves identity #2: authorization code with the confidential
    client `ZITADEL_LINK_CLIENT_ID` / `ZITADEL_LINK_CLIENT_SECRET`, PKCE
    S256, `state`, `nonce`, `prompt=login` and `max_age=0` (which makes

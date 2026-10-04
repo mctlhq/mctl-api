@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -285,10 +286,20 @@ func (h *linkHarness) start() (*http.Cookie, string) {
 func (h *linkHarness) github(ck *http.Cookie, state string) string {
 	h.t.Helper()
 	rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(state), ck, nil)
-	if rec.Code != http.StatusFound {
-		h.t.Fatalf("github callback = %d %s", rec.Code, rec.Body.String())
+	return h.idp.authorize(h.t, zitadelContinue(h.t, rec))
+}
+
+var continueLink = regexp.MustCompile(`<a href="([^"]+)">Continue to ZITADEL sign-in</a>`)
+
+// zitadelContinue returns the ZITADEL authorize URL from the page the GitHub
+// leg renders in place of a redirect.
+func zitadelContinue(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	m := continueLink.FindStringSubmatch(rec.Body.String())
+	if rec.Code != http.StatusOK || m == nil {
+		t.Fatalf("github callback = %d, want the ZITADEL hint page: %s", rec.Code, rec.Body.String())
 	}
-	return h.idp.authorize(h.t, rec.Header().Get("Location"))
+	return html.UnescapeString(m[1])
 }
 
 var hiddenField = regexp.MustCompile(`name="(challenge|csrf)" value="([^"]+)"`)
@@ -453,9 +464,9 @@ func TestIdentityLinkRefusesAnExpiredChallengeAtEveryStep(t *testing.T) {
 		ck, state := h.start()
 		h.beforeProve = func() { h.advance(expired) }
 		rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(state), ck, nil)
-		if rec.Code != http.StatusBadRequest || rec.Header().Get("Location") != "" {
-			t.Fatalf("github callback whose challenge expired mid-call = %d (Location %q), want 400 and no ZITADEL redirect",
-				rec.Code, rec.Header().Get("Location"))
+		if rec.Code != http.StatusBadRequest || continueLink.MatchString(rec.Body.String()) {
+			t.Fatalf("github callback whose challenge expired mid-call = %d, want 400 and no ZITADEL link: %s",
+				rec.Code, rec.Body.String())
 		}
 	})
 	t.Run("zitadel callback", func(t *testing.T) {
@@ -540,10 +551,7 @@ func TestIdentityLinkCapKeepsProvenLinks(t *testing.T) {
 		h.advance(time.Second)
 		_, ck, st := h.startFrom(ip)
 		rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(st), ck, nil)
-		if rec.Code != http.StatusFound {
-			t.Fatalf("github callback %d = %d", i, rec.Code)
-		}
-		proven, authURLs = append(proven, ck), append(authURLs, rec.Header().Get("Location"))
+		proven, authURLs = append(proven, ck), append(authURLs, zitadelContinue(t, rec))
 	}
 	h.advance(time.Second)
 	_, waitCk, waitState := h.startFrom(ip)
@@ -608,8 +616,8 @@ func TestIdentityLinkGitHubLegRefusesADisabledPrincipal(t *testing.T) {
 	h.store.disabled = true
 	ck, state := h.start()
 	rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(state), ck, nil)
-	if rec.Code != http.StatusForbidden || rec.Header().Get("Location") != "" || !strings.Contains(rec.Body.String(), "disabled") {
-		t.Fatalf("GitHub leg for a disabled principal = %d (Location %q)", rec.Code, rec.Header().Get("Location"))
+	if rec.Code != http.StatusForbidden || continueLink.MatchString(rec.Body.String()) || !strings.Contains(rec.Body.String(), "disabled") {
+		t.Fatalf("GitHub leg for a disabled principal = %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -948,5 +956,48 @@ func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	}
 	if len(fr.calls) != 2 {
 		t.Fatalf("forget calls = %v, want one per successful merge (2) and none for failures", fr.calls)
+	}
+}
+
+// The GitHub leg stops on a page that says what to type at ZITADEL
+// (mctlhq/mctl-api#462) instead of redirecting: under prompt=login an
+// unknown name gets ZITADEL's password mask, which a passkey-only account
+// cannot pass. The link still carries prompt=login and max_age=0.
+func TestIdentityLinkGitHubLegShowsTheZitadelHint(t *testing.T) {
+	h := newLinkHarness(t)
+	ck, state := h.start()
+	rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(state), ck, nil)
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Fatalf("GitHub leg redirected to %q, want the hint page", loc)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"mashkovd", "e-mail address your MCTL invitation was sent to", "full ZITADEL login name", "Do not enter your GitHub login", "asks for a password"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("hint page lacks %q", want)
+		}
+	}
+	u, err := url.Parse(zitadelContinue(t, rec))
+	if err != nil || u.Query().Get("prompt") != "login" || u.Query().Get("max_age") != "0" {
+		t.Fatalf("continue link %v (err %v), want prompt=login and max_age=0", u, err)
+	}
+}
+
+// The continue link is the challenge's own ZITADEL state: it is refused in
+// another browser and works once.
+func TestIdentityLinkZitadelHintStaysBoundToTheChallenge(t *testing.T) {
+	h := newLinkHarness(t)
+	ck, state := h.start()
+	zState := h.github(ck, state)
+	other := &http.Cookie{Name: linkCookieName, Value: "another-browser"}
+	if rec, form := h.zitadel(other, zState); rec.Code != http.StatusBadRequest || form.Get("csrf") != "" {
+		t.Fatalf("continue from another browser = %d", rec.Code)
+	}
+	ck2, state2 := h.start()
+	zState2 := h.github(ck2, state2)
+	if rec, form := h.zitadel(ck2, zState2); rec.Code != http.StatusOK || form.Get("csrf") == "" {
+		t.Fatalf("continue in the same browser = %d", rec.Code)
+	}
+	if rec, _ := h.zitadel(ck2, zState2); rec.Code != http.StatusBadRequest {
+		t.Fatalf("second use of the continue link = %d, want 400", rec.Code)
 	}
 }
