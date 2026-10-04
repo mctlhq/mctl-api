@@ -56,6 +56,20 @@ type fakeGitReader struct {
 	platformPolicy         *gitops.PlatformSkillPolicy
 	humanInputFiles        []gitops.HumanInputRequestFile
 	humanInputErr          error
+	tenantExistsErr        error
+}
+
+// TenantExists answers from the fake's tenants, or fails with tenantExistsErr.
+func (f *fakeGitReader) TenantExists(name string) (bool, error) {
+	if f.tenantExistsErr != nil {
+		return false, f.tenantExistsErr
+	}
+	for i := range f.tenants {
+		if f.tenants[i].Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeGitReader) ListHumanInputRequests() ([]gitops.HumanInputRequestFile, error) {

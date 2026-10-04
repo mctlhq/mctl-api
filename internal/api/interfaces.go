@@ -36,6 +36,7 @@ type QuotaReader interface {
 type GitReader interface {
 	ListTenants() ([]gitops.Tenant, error)
 	GetTenant(name string) (*gitops.Tenant, error)
+	TenantExists(name string) (bool, error)
 	ListServices(teamFilter string) ([]gitops.Service, error)
 	GetService(team, app string) (*gitops.Service, error)
 	ListOpenClawSkills(team string) ([]gitops.OpenClawSkill, error)
