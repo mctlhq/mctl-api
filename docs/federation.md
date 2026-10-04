@@ -332,6 +332,15 @@ wholesale, and is not part of that pin.
 | `federation_groups_withheld_total` | `provider` | A verified token carried a non-empty groups claim that was dropped because the entry does not set `grant_groups`. What the entry *would* have granted. |
 | `federation_groups_claim_unreadable_total` | `provider` | A groups claim could not be fully read (wrong shape, non-string elements, or an object on the trusted Dex slot). Usually a misconfigured `groups_claim`. |
 
+`provider` is the provider's namespace, with one exception: mctl-issued
+OAuth JWTs (the local-OAuth provider, namespace `github`) are counted as
+`provider="mctl_oauth"`, so `provider="github", result="ok"` counts only
+raw GitHub tokens accepted as bearers. That series reaching zero is the
+gate for retiring `provider_github.go`; `result="invalid"` under `github`
+never will, because the GitHub provider is the catch-all for every
+unrecognised non-JWT bearer. The name `mctl_oauth` is reserved: a
+configured provider of that name is refused at boot.
+
 The two audience counters are deliberately distinct: "we never checked" and
 "we checked, it failed, we let it through" are different operational facts,
 and only the second can gate a flag day.
