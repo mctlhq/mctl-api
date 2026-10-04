@@ -136,6 +136,14 @@ surfaceTelegramTokenSecret: ""
 # principal disabled rather than failing the pod.
 surfacePortalTokenSecret: ""
 
+# Optional: Secret holding MCTL_OIDC_PROVIDERS, the JSON list of federated
+# OIDC providers (docs/federation.md, mctlhq/mctl-api#434). In production
+# mctl-gitops pre-creates it and the zitadel-iac Job writes the value, because
+# the ZITADEL client id used as the audience is generated there and is not
+# kept in git. Optional, so an absent Secret or key leaves the variable unset:
+# the Dex-only configuration, unchanged.
+oidcProvidersSecret: ""
+
 # Optional: mount a versioned usage rate card from a ConfigMap.
 #
 # When set, the ConfigMap is mounted read-only at
