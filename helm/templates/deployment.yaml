@@ -89,6 +89,17 @@ spec:
                   key: MCTL_SURFACE_TELEGRAM_TOKEN
                   optional: true
             {{- end }}
+            {{- if .Values.surfacePortalTokenSecret }}
+            # Optional for the same reason as the telegram token: a missing
+            # Secret leaves the surface:portal principal disabled. The key
+            # matches the ExternalSecret mctl-api-surface-portal's secretKey.
+            - name: MCTL_SURFACE_PORTAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.surfacePortalTokenSecret }}
+                  key: MCTL_SURFACE_PORTAL_TOKEN
+                  optional: true
+            {{- end }}
             {{- if .Values.usagePricingConfigMap }}
             # The path, not the JSON. internal/usage/catalog_file.go reads this file
             # with os.ReadFile; a rate card is reviewed as a file in GitOps, and an env
