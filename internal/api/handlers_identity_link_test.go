@@ -36,6 +36,7 @@ type fakeLinkStore struct {
 	unlinkFn func(pid, xid string) (*principals.ExternalIdentity, error)
 	merged   [][2]string
 	mergeErr error
+	listErr  error
 }
 
 func (f *fakeLinkStore) Provision(_ context.Context, id auth.Identity) (*principals.Principal, error) {
@@ -66,6 +67,9 @@ func (f *fakeLinkStore) MergePrincipals(_ context.Context, from, into string) (i
 }
 
 func (f *fakeLinkStore) Identities(_ context.Context, pid string) ([]principals.ExternalIdentity, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return []principals.ExternalIdentity{{ID: "xid_1", PrincipalID: pid, Provider: "github", Subject: "42"}}, nil
 }
 
@@ -124,7 +128,8 @@ func (f *fakeIdP) authorize(t *testing.T, authURL string) (state string) {
 		t.Fatalf("not sent to ZITADEL: %q", authURL)
 	}
 	q := u.Query()
-	if q.Get("client_id") != testLinkClientID || q.Get("code_challenge_method") != "S256" || q.Get("prompt") != "login" {
+	if q.Get("client_id") != testLinkClientID || q.Get("code_challenge_method") != "S256" || q.Get("prompt") != "login" ||
+		q.Get("max_age") != "0" {
 		t.Fatalf("authorize params: %v", q)
 	}
 	if q.Get("redirect_uri") != "https://api.example"+linkCallbackPath {
@@ -137,6 +142,7 @@ func (f *fakeIdP) authorize(t *testing.T, authURL string) (state string) {
 }
 
 func (f *fakeIdP) token(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	_ = r.ParseForm()
 	id, secret, ok := r.BasicAuth()
 	if !ok {
@@ -176,6 +182,19 @@ type linkHarness struct {
 	store  *fakeLinkStore
 	idp    *fakeIdP
 	audit  *audit.Logger
+
+	clockMu sync.Mutex
+	clock   time.Time
+	// beforeProve runs inside ProveGitHub, i.e. while the GitHub callback
+	// holds no lock and waits on the network.
+	beforeProve func()
+}
+
+// advance moves the linker's clock forward.
+func (h *linkHarness) advance(d time.Duration) {
+	h.clockMu.Lock()
+	h.clock = h.clock.Add(d)
+	h.clockMu.Unlock()
 }
 
 func newLinkHarness(t *testing.T) *linkHarness {
@@ -183,6 +202,7 @@ func newLinkHarness(t *testing.T) *linkHarness {
 	idp := newFakeIdP(t)
 	store := &fakeLinkStore{}
 	logger := audit.NewLogger()
+	h := &linkHarness{t: t, store: store, idp: idp, audit: logger, clock: time.Now()}
 	opts := &IdentityLinkOptions{
 		Store: store, ProviderName: "zitadel", Issuer: idp.srv.URL,
 		ClientID: testLinkClientID, ClientSecret: testLinkClientSecret,
@@ -191,11 +211,19 @@ func newLinkHarness(t *testing.T) *linkHarness {
 			if code != "gh-code" || redirect != "https://api.example"+githubCallbackPath {
 				return "", 0, errors.New("bad github code")
 			}
+			if h.beforeProve != nil {
+				h.beforeProve()
+			}
 			return "mashkovd", 42, nil
 		},
+		clock: func() time.Time {
+			h.clockMu.Lock()
+			defer h.clockMu.Unlock()
+			return h.clock
+		},
 	}
-	return &linkHarness{t: t, store: store, idp: idp, audit: logger,
-		router: NewRouter(Options{IdentityLink: opts, AuditLog: logger})}
+	h.router = NewRouter(Options{IdentityLink: opts, AuditLog: logger})
+	return h
 }
 
 func (h *linkHarness) do(method, target string, cookie *http.Cookie, form url.Values) *httptest.ResponseRecorder {
@@ -388,6 +416,73 @@ func TestIdentityLinkIsOffWithoutAClient(t *testing.T) {
 	}
 }
 
+// The 10-minute TTL holds at every step, and across the unlocked network
+// calls inside a step.
+func TestIdentityLinkRefusesAnExpiredChallengeAtEveryStep(t *testing.T) {
+	expired := linkChallengeTTL + time.Second
+
+	t.Run("github callback", func(t *testing.T) {
+		h := newLinkHarness(t)
+		ck, state := h.start()
+		h.advance(expired)
+		if rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(state), ck, nil); rec.Code != http.StatusBadRequest {
+			t.Fatalf("github callback after the TTL = %d, want 400", rec.Code)
+		}
+	})
+	t.Run("expires while GitHub is verified", func(t *testing.T) {
+		h := newLinkHarness(t)
+		ck, state := h.start()
+		h.beforeProve = func() { h.advance(expired) }
+		rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(state), ck, nil)
+		if rec.Code != http.StatusBadRequest || rec.Header().Get("Location") != "" {
+			t.Fatalf("github callback whose challenge expired mid-call = %d (Location %q), want 400 and no ZITADEL redirect",
+				rec.Code, rec.Header().Get("Location"))
+		}
+	})
+	t.Run("zitadel callback", func(t *testing.T) {
+		h := newLinkHarness(t)
+		ck, state := h.start()
+		zState := h.github(ck, state)
+		h.advance(expired)
+		if rec, form := h.zitadel(ck, zState); rec.Code != http.StatusBadRequest || form.Get("csrf") != "" {
+			t.Fatalf("zitadel callback after the TTL = %d, csrf issued = %v", rec.Code, form.Get("csrf") != "")
+		}
+	})
+	t.Run("confirm", func(t *testing.T) {
+		h := newLinkHarness(t)
+		ck, form := h.fullFlow()
+		h.advance(expired)
+		if rec := h.do(http.MethodPost, linkConfirmPath, ck, form); rec.Code != http.StatusBadRequest || len(h.store.linked) != 0 {
+			t.Fatalf("confirm after the TTL = %d, links = %d", rec.Code, len(h.store.linked))
+		}
+	})
+	t.Run("just inside the TTL", func(t *testing.T) {
+		h := newLinkHarness(t)
+		ck, form := h.fullFlow()
+		h.advance(linkChallengeTTL - time.Second)
+		if rec := h.do(http.MethodPost, linkConfirmPath, ck, form); rec.Code != http.StatusOK || len(h.store.linked) != 1 {
+			t.Fatalf("confirm inside the TTL = %d, links = %d", rec.Code, len(h.store.linked))
+		}
+	})
+}
+
+// No index may hold a challenge byID no longer does, or an expired one: the
+// linkMaxChallenges bound is checked against byID alone.
+func TestIdentityLinkSweepClearsEveryIndex(t *testing.T) {
+	l := newIdentityLinker(&IdentityLinkOptions{})
+	now := time.Now()
+	live := &linkChallenge{id: "live", githubState: "link.g1", zitadelState: "z1", expiresAt: now.Add(time.Minute)}
+	expired := &linkChallenge{id: "old", githubState: "link.g2", zitadelState: "z2", expiresAt: now.Add(-time.Second)}
+	orphan := &linkChallenge{id: "orphan", githubState: "link.g3", zitadelState: "z3", expiresAt: now.Add(time.Minute)}
+	l.byID["live"], l.byID["old"] = live, expired
+	l.byGitHub["link.g1"], l.byGitHub["link.g2"], l.byGitHub["link.g3"] = live, expired, orphan
+	l.byZState["z1"], l.byZState["z2"], l.byZState["z3"] = live, expired, orphan
+	l.sweepLocked(now)
+	if len(l.byID) != 1 || len(l.byGitHub) != 1 || len(l.byZState) != 1 || l.byZState["z1"] != live || l.byGitHub["link.g1"] != live {
+		t.Fatalf("after sweep: byID=%d byGitHub=%d byZState=%d, want only the live challenge in each", len(l.byID), len(l.byGitHub), len(l.byZState))
+	}
+}
+
 // A link state never reaches the OAuth server, and an OAuth state never
 // reaches linking: '.' is outside the base64url alphabet GenerateState uses.
 func TestOAuthStatesNeverLookLikeLinkStates(t *testing.T) {
@@ -431,9 +526,57 @@ func callAs(h *Handlers, u *auth.User, method, target string, params map[string]
 	return rec
 }
 
+func TestListIdentityLinksAnswersThePersonOnly(t *testing.T) {
+	store := &fakeLinkStore{}
+	h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store})}
+	u := userWithPrincipal(t, "mashkovd", nil, "prn_me")
+
+	rec := callAs(h, u, http.MethodGet, "/", nil, h.ListIdentityLinks)
+	var body struct {
+		PrincipalID string                        `json:"principal_id"`
+		Identities  []principals.ExternalIdentity `json:"identities"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); rec.Code != http.StatusOK || err != nil ||
+		body.PrincipalID != "prn_me" || len(body.Identities) != 1 || body.Identities[0].PrincipalID != "prn_me" {
+		t.Fatalf("list = %d %s", rec.Code, rec.Body.String())
+	}
+
+	surface := auth.NewSurfaceUser("telegram")
+	for name, caller := range map[string]*auth.User{
+		"surface": surface,
+		"relayed": auth.NewRelayedUser("mashkovd", nil, surface),
+		"service": auth.NewServiceUser(),
+		"agent":   auth.NewAgentUser("implementer", auth.AgentRun{}),
+	} {
+		if rec := callAs(h, caller, http.MethodGet, "/", nil, h.ListIdentityLinks); rec.Code != http.StatusForbidden {
+			t.Errorf("%s list = %d, want 403", name, rec.Code)
+		}
+		if rec := callAs(h, caller, http.MethodDelete, "/", map[string]string{"id": "xid_1"}, h.UnlinkIdentity); rec.Code != http.StatusForbidden {
+			t.Errorf("%s unlink = %d, want 403", name, rec.Code)
+		}
+	}
+	if rec := callAs(h, auth.NewGitHubUser("nobody", nil), http.MethodGet, "/", nil, h.ListIdentityLinks); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("list without a principal = %d, want 503", rec.Code)
+	}
+	store.listErr = errors.New("conn refused")
+	if rec := callAs(h, u, http.MethodGet, "/", nil, h.ListIdentityLinks); rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "conn refused") {
+		t.Errorf("list on a store error = %d %s, want 503 without the error text", rec.Code, rec.Body.String())
+	}
+	off := &Handlers{}
+	if rec := callAs(off, u, http.MethodGet, "/", nil, off.ListIdentityLinks); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("list unconfigured = %d, want 503", rec.Code)
+	}
+}
+
+// forgetRecorder stands in for principals.Resolver.Forget.
+type forgetRecorder struct{ calls [][]string }
+
+func (f *forgetRecorder) forget(ids ...string) { f.calls = append(f.calls, ids) }
+
 func TestUnlinkIdentityMapsTheStoreOutcomes(t *testing.T) {
 	store := &fakeLinkStore{}
-	h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store}), opts: Options{AuditLog: audit.NewLogger()}}
+	fr := &forgetRecorder{}
+	h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store, ForgetPrincipals: fr.forget}), opts: Options{AuditLog: audit.NewLogger()}}
 	u := userWithPrincipal(t, "mashkovd", nil, "prn_me")
 
 	store.unlinkFn = func(pid, xid string) (*principals.ExternalIdentity, error) {
@@ -453,14 +596,21 @@ func TestUnlinkIdentityMapsTheStoreOutcomes(t *testing.T) {
 	store.unlinkFn = func(_, xid string) (*principals.ExternalIdentity, error) {
 		return &principals.ExternalIdentity{ID: xid, Provider: "zitadel", RevokedAt: &now}, nil
 	}
+	if len(fr.calls) != 0 {
+		t.Fatalf("refused unlinks dropped cached answers: %v", fr.calls)
+	}
 	if rec := callAs(h, u, http.MethodDelete, "/", map[string]string{"id": "xid_2"}, h.UnlinkIdentity); rec.Code != http.StatusOK {
 		t.Fatalf("unlink = %d, want 200", rec.Code)
+	}
+	if len(fr.calls) != 1 || len(fr.calls[0]) != 1 || fr.calls[0][0] != "prn_me" {
+		t.Fatalf("forgot %v after an unlink, want [[prn_me]]", fr.calls)
 	}
 }
 
 func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	store := &fakeLinkStore{}
-	h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store}), opts: Options{AuditLog: audit.NewLogger()}}
+	fr := &forgetRecorder{}
+	h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store, ForgetPrincipals: fr.forget}), opts: Options{AuditLog: audit.NewLogger()}}
 	params := map[string]string{"from": "prn_q", "into": "prn_p"}
 
 	if rec := callAs(h, auth.NewGitHubUser("someone", []string{"team"}), http.MethodPost, "/", params, h.MergePrincipals); rec.Code != http.StatusForbidden {
@@ -479,8 +629,28 @@ func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	if e := h.opts.AuditLog.List(10); len(e) != 1 || e[0].Operation != "principal.merge" || e[0].Status != "succeeded" {
 		t.Fatalf("audit = %+v", e)
 	}
+	if len(fr.calls) != 1 || strings.Join(fr.calls[0], ",") != "prn_q,prn_p" {
+		t.Fatalf("forgot %v after a merge, want [[prn_q prn_p]]", fr.calls)
+	}
 	store.mergeErr = principals.ErrMergeConflict
 	if rec := callAs(h, auth.NewGitHubUser("boss", []string{"admins"}), http.MethodPost, "/", params, h.MergePrincipals); rec.Code != http.StatusConflict {
 		t.Fatalf("conflicting merge = %d, want 409", rec.Code)
+	}
+	// The audit row carries a classified reason, never the store's text.
+	store.mergeErr = errors.New("dial tcp 10.0.0.7:5432: connection refused")
+	if rec := callAs(h, auth.NewGitHubUser("boss", []string{"admins"}), http.MethodPost, "/", params, h.MergePrincipals); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("merge on a store error = %d, want 503", rec.Code)
+	}
+	e := h.opts.AuditLog.List(1)
+	if len(e) != 1 || e[0].Status != "failed" || e[0].Parameters["reason"] != "store_error" {
+		t.Fatalf("audit = %+v", e)
+	}
+	for k, v := range e[0].Parameters {
+		if strings.Contains(v, "10.0.0.7") {
+			t.Fatalf("audit parameter %s leaks the store error: %q", k, v)
+		}
+	}
+	if len(fr.calls) != 1 {
+		t.Fatalf("failed merges dropped cached answers: %v", fr.calls)
 	}
 }

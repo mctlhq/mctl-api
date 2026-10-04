@@ -176,6 +176,29 @@ func (r *Resolver) sweepLocked(now time.Time) {
 	}
 }
 
+// Forget drops every cached resolution that answered with one of
+// principalIDs, so the next request re-reads the store. Linking calls it
+// after a merge or an unlink (mctl-api#435): without it a cached identity
+// keeps resolving to the merged-away principal, or an unlinked identity keeps
+// authenticating, for up to the cache TTL. It reaches this process only;
+// mctl-api runs one replica.
+func (r *Resolver) Forget(principalIDs ...string) {
+	if len(principalIDs) == 0 {
+		return
+	}
+	drop := make(map[string]struct{}, len(principalIDs))
+	for _, id := range principalIDs {
+		drop[id] = struct{}{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, c := range r.cache {
+		if _, ok := drop[c.principal]; ok && !c.failed {
+			delete(r.cache, k)
+		}
+	}
+}
+
 func answer(c cached) (string, error) {
 	if c.disabled {
 		return "", auth.ErrPrincipalDisabled

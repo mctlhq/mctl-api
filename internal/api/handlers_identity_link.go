@@ -69,6 +69,20 @@ type IdentityLinkOptions struct {
 	GitHubClientID string
 	// ProveGitHub exchanges a GitHub code and returns who it proves.
 	ProveGitHub func(ctx context.Context, code, redirectURI string) (login string, id int64, err error)
+	// ForgetPrincipals drops the principal resolver's cached answers for
+	// these principals (principals.Resolver.Forget), so an unlink or a merge
+	// takes effect on the next request instead of after the cache TTL. Nil
+	// when there is no resolver cache.
+	ForgetPrincipals func(principalIDs ...string)
+
+	// clock replaces time.Now in tests.
+	clock func() time.Time
+}
+
+func (o *IdentityLinkOptions) forget(principalIDs ...string) {
+	if o.ForgetPrincipals != nil {
+		o.ForgetPrincipals(principalIDs...)
+	}
 }
 
 func (o *IdentityLinkOptions) browserFlowEnabled() bool {
@@ -149,12 +163,16 @@ type identityLinker struct {
 }
 
 func newIdentityLinker(opts *IdentityLinkOptions) *identityLinker {
+	now := time.Now
+	if opts.clock != nil {
+		now = opts.clock
+	}
 	return &identityLinker{
 		opts:     opts,
 		byID:     map[string]*linkChallenge{},
 		byGitHub: map[string]*linkChallenge{},
 		byZState: map[string]*linkChallenge{},
-		now:      time.Now,
+		now:      now,
 	}
 }
 
@@ -166,13 +184,30 @@ func randomLinkToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// sweepLocked drops expired challenges.
+// sweepLocked drops expired challenges from every index, and any index
+// entry whose challenge is no longer in byID, so no map can outgrow the
+// linkMaxChallenges bound that only byID is checked against.
 func (l *identityLinker) sweepLocked(now time.Time) {
 	for id, c := range l.byID {
 		if now.After(c.expiresAt) {
 			l.dropLocked(id, c)
 		}
 	}
+	for _, m := range []map[string]*linkChallenge{l.byGitHub, l.byZState} {
+		for k, c := range m {
+			if l.byID[c.id] != c || now.After(c.expiresAt) {
+				delete(m, k)
+			}
+		}
+	}
+}
+
+// liveLocked reports whether c is still the registered, unexpired challenge
+// in phase. A handler that released the lock for network calls re-checks
+// this before touching c again: the challenge may have expired, been swept,
+// or been used meanwhile.
+func (l *identityLinker) liveLocked(c *linkChallenge, phase linkPhase, now time.Time) bool {
+	return l.byID[c.id] == c && c.phase == phase && !now.After(c.expiresAt)
 }
 
 func (l *identityLinker) dropLocked(id string, c *linkChallenge) {
@@ -311,9 +346,10 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 	}
 	q := r.URL.Query()
 	l.mu.Lock()
-	l.sweepLocked(l.now())
+	now := l.now()
+	l.sweepLocked(now)
 	c, ok := l.byGitHub[q.Get("state")]
-	valid := ok && c.phase == linkStarted && browserMatches(r, c)
+	valid := ok && l.liveLocked(c, linkStarted, now) && browserMatches(r, c)
 	if valid {
 		// Single use: a replayed GitHub callback finds nothing.
 		delete(l.byGitHub, c.githubState)
@@ -362,16 +398,28 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 	verifier := oauth2.GenerateVerifier()
 
 	l.mu.Lock()
-	c.principalID, c.githubLogin, c.githubID = p.ID, login, ghID
-	c.zitadelState, c.nonce, c.verifier = zState, nonce, verifier
-	c.phase = linkGitHubProven
-	l.byZState[zState] = c
+	// The network calls above ran unlocked: publish the ZITADEL state only
+	// if the challenge is still live, or an expired one would sit in
+	// byZState past its TTL.
+	live := l.liveLocked(c, linkStarted, l.now())
+	if live {
+		c.principalID, c.githubLogin, c.githubID = p.ID, login, ghID
+		c.zitadelState, c.nonce, c.verifier = zState, nonce, verifier
+		c.phase = linkGitHubProven
+		l.byZState[zState] = c
+	}
 	l.mu.Unlock()
+	if !live {
+		linkFailed(w, http.StatusBadRequest, "This link session expired while GitHub was being verified.")
+		return
+	}
 
 	// prompt=login: the ZITADEL half is proven in this session, not taken
-	// from an older ZITADEL session in this browser.
+	// from an older ZITADEL session in this browser. max_age=0 makes
+	// auth_time a REQUIRED claim (OIDC Core 3.1.2.1), which the callback
+	// checks.
 	authURL := l.oauthConfig(prov).AuthCodeURL(zState, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce),
-		oauth2.SetAuthURLParam("prompt", "login"))
+		oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -384,9 +432,10 @@ func (h *Handlers) handleIdentityLinkCallback(w http.ResponseWriter, r *http.Req
 	}
 	q := r.URL.Query()
 	l.mu.Lock()
-	l.sweepLocked(l.now())
+	now := l.now()
+	l.sweepLocked(now)
 	c, ok := l.byZState[q.Get("state")]
-	valid := ok && c.phase == linkGitHubProven && browserMatches(r, c)
+	valid := ok && l.liveLocked(c, linkGitHubProven, now) && browserMatches(r, c)
 	if valid {
 		delete(l.byZState, c.zitadelState)
 	}
@@ -441,10 +490,17 @@ func (h *Handlers) handleIdentityLinkCallback(w http.ResponseWriter, r *http.Req
 		return
 	}
 	l.mu.Lock()
-	c.identity = auth.Identity{Provider: l.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display, Kind: auth.KindHuman}
-	c.csrfHash = sha256.Sum256([]byte(csrf))
-	c.phase = linkZitadelProven
+	live := l.liveLocked(c, linkGitHubProven, l.now())
+	if live {
+		c.identity = auth.Identity{Provider: l.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display, Kind: auth.KindHuman}
+		c.csrfHash = sha256.Sum256([]byte(csrf))
+		c.phase = linkZitadelProven
+	}
 	l.mu.Unlock()
+	if !live {
+		linkFailed(w, http.StatusBadRequest, "This link session expired while ZITADEL was being verified.")
+		return
+	}
 
 	renderLinkPage(w, http.StatusOK, linkPageData{
 		Title: "Link your ZITADEL identity",
@@ -471,9 +527,10 @@ func (h *Handlers) handleIdentityLinkConfirm(w http.ResponseWriter, r *http.Requ
 	}
 	csrfSum := sha256.Sum256([]byte(r.PostForm.Get("csrf")))
 	l.mu.Lock()
-	l.sweepLocked(l.now())
+	now := l.now()
+	l.sweepLocked(now)
 	c, ok := l.byID[r.PostForm.Get("challenge")]
-	valid := ok && c.phase == linkZitadelProven && browserMatches(r, c) &&
+	valid := ok && l.liveLocked(c, linkZitadelProven, now) && browserMatches(r, c) &&
 		subtle.ConstantTimeCompare(csrfSum[:], c.csrfHash[:]) == 1
 	if valid {
 		c.phase = linkUsed
@@ -542,11 +599,26 @@ func (h *Handlers) handleIdentityLinkConfirm(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+// isDirectPerson: a human calling with their own credentials, not a surface
+// (acting as itself or relaying for someone), a service, or an agent.
+func isDirectPerson(u *auth.User) bool {
+	_, relayed := u.RelaySurface()
+	_, surface := u.Surface()
+	return !relayed && !surface && !u.IsService() && !u.IsAgent()
+}
+
 // ListIdentityLinks: GET /api/v1/identity/links, the caller's identities.
+// Like UnlinkIdentity it answers the person only: the list names every
+// provider subject of the principal, which a surface or a service has no
+// need to read.
 func (h *Handlers) ListIdentityLinks(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	if h.identityLink == nil || h.identityLink.opts.Store == nil {
 		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "identity linking not configured", nil)
+		return
+	}
+	if !isDirectPerson(user) {
+		writeError(w, http.StatusForbidden, "identities are listed for the person, not through a surface, service or agent")
 		return
 	}
 	pid := user.PrincipalID()
@@ -570,8 +642,8 @@ func (h *Handlers) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "identity linking not configured", nil)
 		return
 	}
-	if _, relayed := user.RelaySurface(); relayed || user.IsService() {
-		writeError(w, http.StatusForbidden, "identities are unlinked by the person, not through a surface or service")
+	if !isDirectPerson(user) {
+		writeError(w, http.StatusForbidden, "identities are unlinked by the person, not through a surface, service or agent")
 		return
 	}
 	pid := user.PrincipalID()
@@ -592,6 +664,9 @@ func (h *Handlers) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "principal store unavailable", nil)
 		return
 	}
+	// The revoked identity must stop resolving now, not when the resolver's
+	// cached answer for it expires.
+	h.identityLink.opts.forget(pid)
 	h.logAudit(r, audit.Entry{
 		UserID: user.ID, Operation: "identity.unlink", Status: "succeeded", RiskLevel: string(operations.RiskMedium),
 		Parameters: map[string]string{"principal_id": pid, "identity_id": x.ID, "provider": x.Provider, "issuer": x.Issuer, "subject": x.Subject},
@@ -613,11 +688,18 @@ func (h *Handlers) MergePrincipals(w http.ResponseWriter, r *http.Request) {
 	}
 	from, into := chi.URLParam(r, "from"), chi.URLParam(r, "into")
 	moved, err := h.identityLink.opts.Store.MergePrincipals(r.Context(), from, into)
+	if err == nil {
+		// Cached answers still name from as an active principal; without
+		// this the moved identities keep acting as it for the cache TTL.
+		h.identityLink.opts.forget(from, into)
+	}
 	params := map[string]string{"from_principal_id": from, "into_principal_id": into, "moved": strconv.Itoa(moved)}
 	status := "succeeded"
 	if err != nil {
 		status = "failed"
-		params["error"] = err.Error()
+		// A classified reason, never the store's error text (connection
+		// detail does not belong in an audit row).
+		params["reason"] = mergeFailureReason(err)
 	}
 	h.logAudit(r, audit.Entry{
 		UserID: user.ID, Operation: "principal.merge", Status: status, RiskLevel: string(operations.RiskHigh), Parameters: params,
@@ -633,5 +715,20 @@ func (h *Handlers) MergePrincipals(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "principal store unavailable", nil)
+	}
+}
+
+func mergeFailureReason(err error) string {
+	switch {
+	case errors.Is(err, principals.ErrNotFound):
+		return "not_found"
+	case errors.Is(err, principals.ErrMergeConflict):
+		return linkCodeMergeConflict
+	case errors.Is(err, principals.ErrInvalid):
+		return "invalid"
+	case errors.Is(err, auth.ErrPrincipalDisabled):
+		return "principal_disabled"
+	default:
+		return "store_error"
 	}
 }

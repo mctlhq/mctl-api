@@ -235,3 +235,71 @@ func TestMergePrincipalsRefusesConflictsAndBadPairs(t *testing.T) {
 		t.Fatalf("missing err = %v, want ErrNotFound", err)
 	}
 }
+
+// A merge or an unlink takes effect on the next request, not after the
+// resolver cache expires: the caller forgets the affected principals.
+func TestResolverForgetsMergedAndUnlinkedPrincipals(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	r := NewResolver(s, nil, false)
+	p, _ := s.Provision(ctx, github(1, "alice"))
+	q, _ := s.Provision(ctx, zitadel("z1", "alice"))
+	if got, err := r.ResolvePrincipal(ctx, zitadel("z1", "alice")); err != nil || got != q.ID {
+		t.Fatalf("before merge = %q, %v; want %s", got, err, q.ID)
+	}
+	if _, err := s.MergePrincipals(ctx, q.ID, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Still cached: this is the window Forget closes.
+	if got, _ := r.ResolvePrincipal(ctx, zitadel("z1", "alice")); got != q.ID {
+		t.Fatalf("cached answer = %q, want the stale %s (else this test proves nothing)", got, q.ID)
+	}
+	r.Forget(q.ID, p.ID)
+	if got, err := r.ResolvePrincipal(ctx, zitadel("z1", "alice")); err != nil || got != p.ID {
+		t.Fatalf("after merge = %q, %v; want %s", got, err, p.ID)
+	}
+
+	ids, _ := s.Identities(ctx, p.ID)
+	var zid string
+	for _, x := range ids {
+		if x.Provider == "zitadel" {
+			zid = x.ID
+		}
+	}
+	if _, err := s.UnlinkIdentity(ctx, p.ID, zid); err != nil {
+		t.Fatal(err)
+	}
+	r.Forget(p.ID)
+	if _, err := r.ResolvePrincipal(ctx, zitadel("z1", "alice")); !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("after unlink err = %v, want ErrIdentityRefused", err)
+	}
+	if got, err := r.ResolvePrincipal(ctx, github(1, "alice")); err != nil || got != p.ID {
+		t.Fatalf("the remaining identity = %q, %v; want %s", got, err, p.ID)
+	}
+}
+
+func TestMergePrincipalsLeavesRevokedIdentitiesOnTheSource(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	p, _ := s.Provision(ctx, github(1, "alice"))
+	q, _ := s.Provision(ctx, zitadel("z1", "alice"))
+	if _, err := s.LinkIdentity(ctx, q.ID, github(9, "alice-old")); err != nil {
+		t.Fatal(err)
+	}
+	ids, _ := s.Identities(ctx, q.ID)
+	for _, x := range ids {
+		if x.Provider == auth.ProviderGitHub {
+			if _, err := s.UnlinkIdentity(ctx, q.ID, x.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	moved, err := s.MergePrincipals(ctx, q.ID, p.ID)
+	if err != nil || moved != 1 {
+		t.Fatalf("merge = %d, %v; want 1 live identity moved", moved, err)
+	}
+	left, _ := s.Identities(ctx, q.ID)
+	if len(left) != 1 || left[0].RevokedAt == nil {
+		t.Fatalf("source keeps %+v, want only its revoked identity", left)
+	}
+}

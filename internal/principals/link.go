@@ -148,7 +148,9 @@ func (s *Store) LinkIdentity(ctx context.Context, principalID string, id auth.Id
 
 // UnlinkIdentity revokes one of principalID's identities. Revoking an
 // already revoked identity is a no-op. The identity stays recorded (and
-// refused at authentication); only an operator restores it.
+// refused at authentication once the resolver re-reads it: the caller drops
+// principalID from Resolver's cache, see Resolver.Forget); only an operator
+// restores it.
 func (s *Store) UnlinkIdentity(ctx context.Context, principalID, identityID string) (*ExternalIdentity, error) {
 	var out ExternalIdentity
 	err := s.withTx(ctx, principalLockKey(principalID), func(tx pgx.Tx) error {
@@ -186,11 +188,14 @@ func (s *Store) UnlinkIdentity(ctx context.Context, principalID, identityID stri
 	return &out, nil
 }
 
-// MergePrincipals moves every identity of from onto into and disables from
-// (never deletes it: audit rows reference it). It is the admin operation
-// behind a refused self-service link (owner decision A on #435) and is not
-// reachable from self-service. Both must be human, into must be active, and
-// they must not both hold a live identity of the same provider and issuer.
+// MergePrincipals moves every live identity of from onto into and disables
+// from (never deletes it: audit rows reference it). Revoked identities stay
+// on from, where they were revoked: into never inherits an identity it could
+// not use, and moved counts only identities that now sign in as into. It is
+// the admin operation behind a refused self-service link (owner decision A
+// on #435) and is not reachable from self-service. Both must be human, into
+// must be active, and they must not both hold a live identity of the same
+// provider and issuer.
 func (s *Store) MergePrincipals(ctx context.Context, from, into string) (moved int, err error) {
 	if from == "" || into == "" || from == into {
 		return 0, fmt.Errorf("%w: merge needs two different principals", ErrInvalid)
@@ -233,7 +238,7 @@ func (s *Store) MergePrincipals(ctx context.Context, from, into string) (moved i
 	if conflicts > 0 {
 		return 0, ErrMergeConflict
 	}
-	tag, err := tx.Exec(ctx, `UPDATE external_identities SET principal_id=$2 WHERE principal_id=$1`, from, into)
+	tag, err := tx.Exec(ctx, `UPDATE external_identities SET principal_id=$2 WHERE principal_id=$1 AND revoked_at IS NULL`, from, into)
 	if err != nil {
 		return 0, err
 	}

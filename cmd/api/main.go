@@ -250,6 +250,7 @@ func main() {
 	var (
 		principalStore    *principals.Store
 		principalResolver auth.PrincipalResolver
+		principalCache    *principals.Resolver
 	)
 	principalDBURL := postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL"))
 	if principalDBURL == "" {
@@ -269,7 +270,8 @@ func main() {
 		} else {
 			principalStore = ps
 			defer ps.Close()
-			principalResolver = principals.NewResolver(ps, githubIDLookup(), os.Getenv("AUTH_REQUIRED") == "false")
+			principalCache = principals.NewResolver(ps, githubIDLookup(), os.Getenv("AUTH_REQUIRED") == "false")
+			principalResolver = principalCache
 		}
 	}
 
@@ -833,7 +835,7 @@ func main() {
 		BackstageGithubAppConnectToken: cfg.BackstageGithubAppConnectToken,
 		AllowedOrigins:                 cfg.AllowedOrigins,
 		OAuthServer:                    oauthServer,
-		IdentityLink:                   identityLinkOptions(cfg, principalStore, oauthServer, ghValidator),
+		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
 		AlertStore:                     alertStore,
 		AgentRegistry:                  agentRegistryStore,
 		Lifecycle:                      lifecycleStore,
@@ -1754,11 +1756,14 @@ func startEvidenceRetentionSweep(ctx context.Context, store *evidence.Store) {
 // browser flow also needs the ZITADEL link client, the federation entry it
 // links into, and the GitHub OAuth app. Anything missing leaves that part
 // off (503) with one log line saying why, never a failed boot.
-func identityLinkOptions(cfg config, store *principals.Store, oauth *auth.OAuthServer, gh *auth.GitHubValidator) *mctlapi.IdentityLinkOptions {
+func identityLinkOptions(cfg config, store *principals.Store, cache *principals.Resolver, oauth *auth.OAuthServer, gh *auth.GitHubValidator) *mctlapi.IdentityLinkOptions {
 	if store == nil {
 		return nil
 	}
 	opts := &mctlapi.IdentityLinkOptions{Store: store, BaseURL: cfg.SelfURL}
+	if cache != nil {
+		opts.ForgetPrincipals = cache.Forget
+	}
 	if cfg.ZitadelLinkClientID == "" && cfg.ZitadelLinkClientSecret == "" {
 		return opts
 	}

@@ -82,15 +82,17 @@ e-mail:
    names the principal **P**.
 3. ZITADEL proves identity #2: authorization code with the confidential
    client `ZITADEL_LINK_CLIENT_ID` / `ZITADEL_LINK_CLIENT_SECRET`, PKCE
-   S256, `state`, `nonce` and `prompt=login`. The ID token must carry the
-   nonce and an `auth_time` inside this session. Its `iss` and `sub` form
+   S256, `state`, `nonce`, `prompt=login` and `max_age=0` (which makes
+   `auth_time` a required claim). The ID token must carry the nonce and an
+   `auth_time` inside this session. Its `iss` and `sub` form
    the identity, under the name of the `MCTL_OIDC_PROVIDERS` entry
    `ZITADEL_LINK_PROVIDER` (default `zitadel`), so later ZITADEL tokens
    resolve to it.
 4. A confirmation page shows both identities; its POST carries a CSRF
    token tied to the session. Every step also checks the cookie, so a link
    started in one browser cannot be finished in another, and each step is
-   single-use. Sessions live in memory for 10 minutes (one replica; a
+   single-use. Sessions live in memory for 10 minutes, counted from the
+   start and checked again after every network call (one replica; a
    restart cancels links in flight).
 
 Outcomes (`identity_links_total{provider,result}`, audit `identity.link`):
@@ -106,16 +108,25 @@ Outcomes (`identity_links_total{provider,result}`, audit `identity.link`):
 Self-service never moves an identity between principals (owner decision on
 #435). An admin merges instead: `POST
 /api/v1/admin/principals/{from}/merge-into/{into}` (human admin acting
-directly; audit `principal.merge`, high risk) moves every identity of
-`from` onto `into` and disables `from`, which is kept because audit rows
-reference it. It is refused when both hold a live identity of the same
-provider and issuer, or either is not human, or `into` is disabled. Cached
-resolutions keep pointing at `from` for up to the resolver's 5-minute TTL,
-during which those requests are refused as a disabled principal.
+directly; audit `principal.merge`, high risk, with a classified `reason`
+on failure) moves every live identity of `from` onto `into` and disables
+`from`, which is kept because audit rows reference it; revoked identities
+stay on `from`, and `moved_identities` counts live ones only. It is refused
+when both hold a live identity of the same provider and issuer, or either
+is not human, or `into` is disabled.
+
+The resolver caches answers for 5 minutes, including the principal id and
+its disabled flag. A merge and an unlink therefore drop the cached answers
+for the principals involved (`Resolver.Forget`), so the next request
+re-reads the store: moved identities act as `into`, and an unlinked one is
+refused. This reaches the process that served the call, which is all of
+mctl-api while it runs one replica; with more replicas the others would
+keep their cached answer for up to the TTL.
 
 `GET /api/v1/identity/links` lists the caller's identities; `DELETE
 /api/v1/identity/links/{id}` revokes one of them (never the last live one;
-a revoked identity is refused at authentication). Without the link client
+a revoked identity is refused at authentication from the next request).
+Both answer the person only: relayed (surface) and service callers get 403. Without the link client
 the browser flow answers 503; without the principal store the API answers
 503 too.
 
