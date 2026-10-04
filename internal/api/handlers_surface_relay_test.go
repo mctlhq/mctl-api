@@ -16,6 +16,8 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +27,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
 )
 
@@ -96,6 +99,11 @@ func TestSurfaceRelay_FailsClosed(t *testing.T) {
 		{"POST", "/api/v1/work-items/wi_x/execution-requests"},
 		{"GET", "/api/v1/work-items/wi_x/execution-requests"},
 		{"GET", "/api/v1/work-items/wi_x/execution-requests/xr_x"},
+		{"GET", "/api/v1/work-items/wi_x/executions"},
+		{"GET", "/api/v1/work-items/wi_x/snapshots"},
+		{"GET", "/api/v1/work-items/wi_x/snapshots/cs_x"},
+		{"GET", "/api/v1/work-items/wi_x/events"},
+		{"GET", "/api/v1/work-items/wi_x/evidence"},
 	} {
 		if code, body := e.do("telegram", route[0], route[1], nil); code != http.StatusForbidden || body["code"] != sidCodeRelayRequired {
 			t.Errorf("%s %s without an actor = %d %v", route[0], route[1], code, body)
@@ -474,5 +482,103 @@ func TestSurfaceRelay_RecordsHumanAndSurfacePrincipals(t *testing.T) {
 	}
 	if !audited {
 		t.Fatal("the relayed create was not audited")
+	}
+}
+
+// mctl-api#436: a work item's history is relayed read-only, as the linked
+// human. A surface sees no more than that human would: another tenant's
+// item stays 404, a dead link is a typed 403, no write method rides on a
+// history path, and a relayed snapshot read never carries the bytes.
+func TestSurfaceRelay_WorkItemHistoryIsTheHumansReadOnlyView(t *testing.T) {
+	e := newSIDEnv(t)
+	e.link("alice", "telegram", "4242")
+	e.link("bob", "telegram", "555")
+	revoked := e.link("bob", "portal", "sub-bob")
+	if code, _ := e.do("bob", "POST", "/api/v1/surface-identities/"+revoked+"/revoke", nil); code != http.StatusOK {
+		t.Fatalf("revoke = %d", code)
+	}
+
+	_, body := e.relayCreate("telegram", "4242", nil)
+	id := body["work_item"].(map[string]any)["id"].(string)
+	code, body := e.do("service", "POST", "/api/v1/work-items/"+id+"/executions",
+		map[string]any{"engine": "temporal", "engine_ref": "dev-loop-436", "phase": "Running"})
+	if code != http.StatusCreated {
+		t.Fatalf("attach = %d %v", code, body)
+	}
+	execID := body["execution"].(map[string]any)["id"].(string)
+	canonical := `{"given":"what-the-execution-saw"}`
+	code, body = e.do("service", "POST", "/api/v1/work-items/"+id+"/executions/"+execID+"/snapshot", sealBody(canonical, 1))
+	if code != http.StatusCreated {
+		t.Fatalf("seal = %d %v", code, body)
+	}
+	snapID := body["snapshot"].(map[string]any)["id"].(string)
+	if _, _, err := e.ev.Ingest(context.Background(), evidence.IngestInput{
+		EnvelopeBytes: sealTestEnvelope(t, id, uniqueTrace()), IngestedBy: "test:writer",
+	}); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	base := "/api/v1/work-items/" + id
+	relayGet := func(externalID, surface, path string) (int, map[string]any, string) {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("X-Test-User", surface)
+		req.Header.Set(SurfaceActorHeader, externalID)
+		rec := httptest.NewRecorder()
+		e.router.ServeHTTP(rec, req)
+		var out map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out, rec.Body.String()
+	}
+	history := []string{base + "/executions", base + "/snapshots", base + "/snapshots/" + snapID, base + "/events", base + "/evidence"}
+
+	// The linked human's view, every route.
+	for path, check := range map[string]func(map[string]any) bool{
+		base + "/executions": func(b map[string]any) bool { l, _ := b["executions"].([]any); return len(l) == 1 },
+		base + "/snapshots":  func(b map[string]any) bool { l, _ := b["snapshots"].([]any); return len(l) == 1 },
+		base + "/snapshots/" + snapID: func(b map[string]any) bool {
+			s, _ := b["snapshot"].(map[string]any)
+			return s["id"] == snapID && s["content_hash"] != nil
+		},
+		base + "/events":   func(b map[string]any) bool { l, _ := b["events"].([]any); return len(l) >= 2 },
+		base + "/evidence": func(b map[string]any) bool { l, _ := b["evidence"].([]any); return len(l) == 1 },
+	} {
+		code, body, raw := relayGet("4242", "telegram", path)
+		if code != http.StatusOK || !check(body) {
+			t.Errorf("relayed GET %s = %d %s", path, code, raw)
+		}
+		// No relayed history read carries what an execution was given.
+		if strings.Contains(raw, "canonical_b64") || strings.Contains(raw, base64.StdEncoding.EncodeToString([]byte(canonical))) {
+			t.Errorf("relayed GET %s leaks snapshot content: %s", path, raw)
+		}
+	}
+	// A direct read is unchanged: the bytes stay with direct callers.
+	if code, body := e.do("root", "GET", base+"/snapshots/"+snapID, nil); code != http.StatusOK ||
+		body["snapshot"].(map[string]any)["canonical_b64"] == nil {
+		t.Errorf("direct snapshot read = %d %v", code, body)
+	}
+	// A missing snapshot stays a typed 404, not an empty answer.
+	if code, body, raw := relayGet("4242", "telegram", base+"/snapshots/cs_missing"); code != http.StatusNotFound || body["code"] != wiCodeSnapshotNotFound {
+		t.Errorf("relayed missing snapshot = %d %s", code, raw)
+	}
+
+	for _, path := range history {
+		// bob's tenants do not include alice's: the item does not exist for him.
+		if code, body, raw := relayGet("555", "telegram", path); code != http.StatusNotFound || body["code"] != wiCodeNotFound {
+			t.Errorf("relayed GET %s for another tenant = %d %s", path, code, raw)
+		}
+		if code, body, raw := relayGet("sub-bob", "portal", path); code != http.StatusForbidden || body["code"] != sidCodeLinkRevoked {
+			t.Errorf("relayed GET %s through a revoked link = %d %s", path, code, raw)
+		}
+		// Read-only: no other method rides on a history path, including
+		// POST .../executions, which exists for the execution platform.
+		for _, method := range []string{"POST", "PUT", "PATCH", "DELETE"} {
+			if code, body := e.do("telegram", method, path, map[string]any{}, SurfaceActorHeader, "4242"); code != http.StatusForbidden || body["code"] != sidCodeRouteNotAllowed {
+				t.Errorf("relayed %s %s = %d %v", method, path, code, body)
+			}
+		}
+	}
+	// The per-execution snapshot read serves the bytes: never a relay route.
+	if code, body := e.do("telegram", "GET", base+"/executions/"+execID+"/snapshot", nil, SurfaceActorHeader, "4242"); code != http.StatusForbidden || body["code"] != sidCodeRouteNotAllowed {
+		t.Errorf("relayed execution snapshot = %d %v", code, body)
 	}
 }

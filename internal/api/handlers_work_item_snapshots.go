@@ -151,6 +151,13 @@ func (h *Handlers) GetWorkItemSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeSnapshotError(w, err)
 		return
 	}
+	// A surface relays this read for its linked human (mctl-api#436) but
+	// never carries what an execution was given: metadata only, the list
+	// shape. The bytes stay with direct callers.
+	if _, relayed := user.RelaySurface(); relayed {
+		writeJSON(w, http.StatusOK, map[string]any{"schema_version": workitems.SchemaVersion, "snapshot": snap.Summary()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"schema_version": workitems.SchemaVersion, "snapshot": snap})
 }
 

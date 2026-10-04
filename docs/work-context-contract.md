@@ -387,7 +387,7 @@ shared 20/min budget it would starve the workflow triggers it feeds.
 | `GET /api/v1/work-items/{id}/intents/{intent_id}`                      | read one intent; an id of another item is 404 `intent_not_found` |
 | `GET|POST /api/v1/work-items/{id}/executions`                          | list / attach-correlate an execution |
 | `GET|POST /api/v1/work-items/{id}/executions/{execution_id}/snapshot`  | read / seal the execution's context snapshot |
-| `GET /api/v1/work-items/{id}/snapshots[/{snapshot_id}]`                | list / read sealed snapshots |
+| `GET /api/v1/work-items/{id}/snapshots[/{snapshot_id}]`                | list / read sealed snapshots (relayed: metadata only) |
 | `POST /api/v1/work-items/{id}/resume`                                  | start a new execution continuing a prior one (names the engine run: not a relay route) |
 | `GET|POST /api/v1/work-items/{id}/execution-requests`                  | list / request a `start` or `resume` (no engine identity accepted) |
 | `GET /api/v1/work-items/{id}/execution-requests/{request_id}`          | read one execution request |
@@ -498,8 +498,17 @@ the header gets 400. Relay routes: `GET /human-input`,
 `POST /work-items`, `GET /work-items/{id}`,
 `POST /work-items/{id}/intents|surface-refs`,
 `GET /work-items/{id}/intents[/{intent_id}]`,
-`GET|POST /work-items/{id}/execution-requests` and
-`GET /work-items/{id}/execution-requests/{request_id}`. No relay route
+`GET|POST /work-items/{id}/execution-requests`,
+`GET /work-items/{id}/execution-requests/{request_id}`, and the read-only
+history (mctl-api#436): `GET /work-items/{id}/executions`,
+`GET /work-items/{id}/snapshots[/{snapshot_id}]`,
+`GET /work-items/{id}/events` and `GET /work-items/{id}/evidence`. History
+reads are the linked human's view and nothing more: another tenant's item
+is 404, an unavailable store stays its error (never an empty list), and a
+relayed `GET /work-items/{id}/snapshots/{snapshot_id}` answers the
+`ContextSnapshotSummary` shape, without `canonical_b64`.
+`GET /work-items/{id}/executions/{execution_id}/snapshot` serves the bytes
+and is not a relay route; no write method on a history path is. No relay route
 accepts an engine, engine run or execution id: `POST /work-items/{id}/resume`
 left the allowlist with mctl-api#368, and a surface asks for a run with an
 execution request instead. A relayed request's
