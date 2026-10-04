@@ -772,3 +772,50 @@ func TestKillSwitchParity(t *testing.T) {
 		}
 	}
 }
+
+// mctl-issued JWTs and raw GitHub tokens share the "github" namespace but
+// not the metric label, so raw GitHub-token use can be shown to be zero
+// before provider_github.go is retired.
+func TestLocalOAuthJWTsAreCountedApartFromGitHubTokens(t *testing.T) {
+	oauth := NewOAuthServer("https://api.example", "gh", "gh-secret", []byte("k"), nil, NewGitHubValidator(nil))
+	jwtP := newLocalOAuthProvider(oauth)
+	gh := newGitHubProvider(NewGitHubValidator(nil), nil)
+	if got := metricLabel(gh); got != ProviderGitHub {
+		t.Fatalf("GitHub PAT provider label = %q, want %q", got, ProviderGitHub)
+	}
+	opaque := &fakeProvider{name: ProviderGitHub, verify: func(context.Context, string) (*Verified, error) {
+		return &Verified{Identity: Identity{Provider: ProviderGitHub, Subject: "42", Display: "mashkovd", Kind: KindHuman}}, nil
+	}}
+	r, err := NewRegistry(nil, []Provider{jwtP}, []Provider{opaque})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := oauth.IssueJWT("mashkovd", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := func(provider, result string) float64 {
+		return testutil.ToFloat64(federationVerifications.WithLabelValues(provider, result))
+	}
+	localOK, localBad, ghOK := count(MetricLabelLocalOAuth, "ok"), count(MetricLabelLocalOAuth, "invalid"), count(ProviderGitHub, "ok")
+
+	v, err := r.Verify(context.Background(), token)
+	if err != nil || v.Identity.Provider != ProviderGitHub || v.Identity.Display != "mashkovd" {
+		t.Fatalf("local JWT = %+v, %v; want the github-namespace identity, unchanged", v, err)
+	}
+	if _, err := r.Verify(context.Background(), token[:len(token)-2]+"xx"); err == nil {
+		t.Fatal("a tampered local JWT verified")
+	}
+	if _, err := r.Verify(context.Background(), "gho_opaque"); err != nil {
+		t.Fatal(err)
+	}
+	if d := count(MetricLabelLocalOAuth, "ok") - localOK; d != 1 {
+		t.Errorf("mctl_oauth ok moved %v, want 1", d)
+	}
+	if d := count(MetricLabelLocalOAuth, "invalid") - localBad; d != 1 {
+		t.Errorf("mctl_oauth invalid moved %v, want 1", d)
+	}
+	if d := count(ProviderGitHub, "ok") - ghOK; d != 1 {
+		t.Errorf("github ok moved %v, want exactly the raw token", d)
+	}
+}

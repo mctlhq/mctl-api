@@ -35,6 +35,15 @@ func newLocalOAuthProvider(o *OAuthServer) *localOAuthProvider {
 // NewRegistry).
 func (*localOAuthProvider) Name() string { return ProviderGitHub }
 
+// metricLabel separates mctl-issued JWTs from raw GitHub tokens in the
+// federation metrics; both are namespace "github", so without it
+// provider="github" counts the two together.
+func (*localOAuthProvider) metricLabel() string { return MetricLabelLocalOAuth }
+
+// MetricLabelLocalOAuth is the federation metrics' provider label for
+// mctl-issued OAuth JWTs (OAuthServer.IssueJWT).
+const MetricLabelLocalOAuth = "mctl_oauth"
+
 func (p *localOAuthProvider) issuerName() string {
 	if p.oauth == nil {
 		return ""

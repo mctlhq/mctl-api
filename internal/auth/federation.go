@@ -246,7 +246,7 @@ func (r *Registry) Verify(ctx context.Context, raw string) (*Verified, error) {
 		case errors.Is(err, ErrNoProvider):
 			continue
 		default:
-			recordVerification(p.Name(), "invalid", start)
+			recordVerification(metricLabel(p), "invalid", start)
 			return nil, err
 		}
 	}
@@ -269,7 +269,7 @@ func (r *Registry) Verify(ctx context.Context, raw string) (*Verified, error) {
 
 	v, err := candidate.Verify(ctx, raw)
 	if err != nil {
-		recordVerification(candidate.Name(), "invalid", start)
+		recordVerification(metricLabel(candidate), "invalid", start)
 		return nil, err
 	}
 	return r.finish(candidate, v, start)
@@ -279,12 +279,29 @@ func (r *Registry) Verify(ctx context.Context, raw string) (*Verified, error) {
 // the outcome.
 func (r *Registry) finish(p Provider, v *Verified, start time.Time) (*Verified, error) {
 	if err := checkProviderContract(p, v); err != nil {
-		federationContractViolations.WithLabelValues(p.Name()).Inc()
-		recordVerification(p.Name(), "invalid", start)
+		federationContractViolations.WithLabelValues(metricLabel(p)).Inc()
+		recordVerification(metricLabel(p), "invalid", start)
 		return nil, err
 	}
-	recordVerification(p.Name(), "ok", start)
+	recordVerification(metricLabel(p), "ok", start)
 	return v, nil
+}
+
+// metricLabeler is implemented by a provider counted under a label other
+// than its namespace. Only the local-OAuth provider does: it shares the
+// "github" namespace with the GitHub PAT provider, and the two must be told
+// apart in the metrics before raw GitHub tokens can be retired
+// (mctl-api#467 follow-up).
+type metricLabeler interface {
+	metricLabel() string
+}
+
+// metricLabel is the provider label of the federation metrics.
+func metricLabel(p Provider) string {
+	if m, ok := p.(metricLabeler); ok {
+		return m.metricLabel()
+	}
+	return p.Name()
 }
 
 func recordVerification(provider, result string, start time.Time) {
