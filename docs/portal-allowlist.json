@@ -471,23 +471,23 @@
     },
     {
       "name": "mctl_get_work_item",
-      "enabled": false,
-      "reason": "Read-only canonical WorkItem (state, state_version, tenant, latest execution and snapshot); visibility is the API's tenant check on the caller's own token. Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#341."
+      "enabled": true,
+      "reason": "Read-only canonical WorkItem (state, state_version, tenant, latest execution and snapshot ids). Enabled on the shared portal by owner decision 2026-10-04: the portal switch is user-blind, so the mctl API's tenant check on the caller's own token (canSeeWorkItem) is the access control; an item outside the caller's tenants answers 404 like an unknown id."
     },
     {
       "name": "mctl_list_work_item_executions",
-      "enabled": false,
-      "reason": "Read-only list of a WorkItem's executions with the engine identity the platform recorded; same tenant check as mctl_get_work_item. Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#341."
+      "enabled": true,
+      "reason": "Read-only executions of a WorkItem (engine identity the platform recorded, phases). Enabled by owner decision 2026-10-04 under the same per-call tenant check as mctl_get_work_item."
     },
     {
       "name": "mctl_list_work_item_snapshots",
-      "enabled": false,
-      "reason": "Read-only immutable ContextSnapshots of a WorkItem, which can carry investigation context; same tenant check as mctl_get_work_item. Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#341."
+      "enabled": true,
+      "reason": "Read-only immutable ContextSnapshots of a WorkItem; a full snapshot can carry investigation context (issue text, repo refs). Enabled by owner decision 2026-10-04 under the same per-call tenant check as mctl_get_work_item."
     },
     {
       "name": "mctl_list_work_item_execution_requests",
-      "enabled": false,
-      "reason": "Read-only execution requests of a WorkItem (kind, state, requested_by, surface); same tenant check as mctl_get_work_item. Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#341."
+      "enabled": true,
+      "reason": "Read-only execution requests of a WorkItem (kind, state, requested_by, surface). Enabled by owner decision 2026-10-04 under the same per-call tenant check as mctl_get_work_item."
     },
     {
       "name": "mctl_request_work_item_execution",
