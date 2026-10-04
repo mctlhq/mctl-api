@@ -58,9 +58,12 @@ func TestCreateTenant_NewTenantIsSubmitted(t *testing.T) {
 }
 
 func TestCreateTenant_UncheckableRefuses(t *testing.T) {
-	router, exec := createTenantRouter(t, &fakeGitReader{tenantExistsErr: errors.New("gitops checkout has never synced")})
+	router, exec := createTenantRouter(t, &fakeGitReader{tenantExistsErr: errors.New("checking tenant: lstat /srv/gitops/platform-gitops/tenants/fresh: permission denied")})
 	w := postAs(t, router, createTenantPath, map[string]string{"tenant_name": "fresh"}, newcomer)
 	assertStatus(t, w, http.StatusServiceUnavailable)
+	if strings.Contains(w.Body.String(), "/srv/gitops") || strings.Contains(w.Body.String(), "lstat") {
+		t.Errorf("the 503 must not expose the checkout error: %s", w.Body.String())
+	}
 	if len(exec.submitted) != 0 {
 		t.Fatalf("must not submit when existence cannot be checked: %v", exec.submitted)
 	}

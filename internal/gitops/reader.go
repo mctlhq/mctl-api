@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -602,12 +603,16 @@ func (r *Reader) GetTenant(name string) (*Tenant, error) {
 // a tenant created since, so it is an error rather than "absent".
 const TenantExistsMaxAge = 10 * time.Minute
 
+// tenantNameRE is create-tenant's tenant_name pattern (operations registry
+// and wft-create-tenant): a single DNS-safe path segment.
+var tenantNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
+
 // TenantExists reports whether platform-gitops/tenants/<name> exists in the
 // checkout, as a directory or anything else: that path is what create-tenant
 // would write. Only "no such file" is absent. Any other stat error, a checkout
 // that never synced, or one older than TenantExistsMaxAge is an error.
 func (r *Reader) TenantExists(name string) (bool, error) {
-	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
+	if !tenantNameRE.MatchString(name) {
 		return false, fmt.Errorf("invalid tenant name %q", name)
 	}
 	r.mu.RLock()
@@ -620,7 +625,14 @@ func (r *Reader) TenantExists(name string) (bool, error) {
 	if age := time.Since(last); age > TenantExistsMaxAge {
 		return false, fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), TenantExistsMaxAge)
 	}
-	_, err := os.Lstat(filepath.Join(r.localPath, "platform-gitops", "tenants", name))
+	// The pattern already admits one segment only; the containment check
+	// keeps that true for the path actually read.
+	root := filepath.Clean(filepath.Join(r.localPath, "platform-gitops", "tenants"))
+	path := filepath.Clean(filepath.Join(root, name))
+	if !filepath.IsLocal(name) || !strings.HasPrefix(path, root+string(os.PathSeparator)) {
+		return false, fmt.Errorf("invalid tenant name %q", name)
+	}
+	_, err := os.Lstat(path)
 	if err == nil {
 		return true, nil
 	}

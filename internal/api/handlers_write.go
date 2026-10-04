@@ -459,7 +459,10 @@ func (h *Handlers) checkTenantIsNew(tenant string) (status int, msg string) {
 	}
 	exists, err := h.opts.GitReader.TenantExists(tenant)
 	if err != nil {
-		return http.StatusServiceUnavailable, "cannot check whether workspace \"" + tenant + "\" exists: " + err.Error()
+		// The error can carry checkout paths; it goes to the log, not the
+		// caller.
+		slog.Error("create-tenant existence check failed", "tenant", tenant, "error", err)
+		return http.StatusServiceUnavailable, "cannot check whether workspace \"" + tenant + "\" exists right now; try again later"
 	}
 	if exists {
 		return http.StatusConflict, "workspace \"" + tenant + "\" already exists"

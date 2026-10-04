@@ -1598,7 +1598,7 @@ func TestTenantExists(t *testing.T) {
 			t.Errorf("TenantExists(%q) = %v, %v; want %v", name, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", ".", "..", "a/b", "../tenants"} {
+	for _, bad := range []string{"", ".", "..", "a/b", "../tenants", "Bad_Name", "-x", "x", "/etc"} {
 		if _, err := r.TenantExists(bad); err == nil {
 			t.Errorf("TenantExists(%q) must be an error", bad)
 		}
