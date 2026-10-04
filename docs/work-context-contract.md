@@ -566,6 +566,33 @@ schema (`work_item_execution_requests`):
   platform), cancellation by the requester, and the dispatcher that claims
   (mctl-agents#461).
 
+### MCP surface (mctl-api#341)
+
+MCP is the second surface, after Telegram (mctl-telegram#443).
+`internal/mcp/workitems.go` wraps the REST routes above with the caller's own
+token, so the API resolves the actor and checks tenant visibility on every
+call. Nothing is inherited from the surface that created the item.
+
+| Tool | Route |
+|---|---|
+| `mctl_get_work_item` | `GET /work-items/{id}` |
+| `mctl_list_work_item_executions` | `GET /work-items/{id}/executions` |
+| `mctl_list_work_item_snapshots` | `GET /work-items/{id}/snapshots[/{snapshot_id}]` |
+| `mctl_list_work_item_execution_requests` | `GET /work-items/{id}/execution-requests[/{request_id}]` |
+| `mctl_request_work_item_execution` | `POST /work-items/{id}/execution-requests` |
+
+- The write tool sends only `kind`, `expected_state_version`,
+  `resumed_from_execution_id`, `idempotency_key` (required) and
+  `surface: "mcp"`. It never sends an engine, a run, an execution id or an
+  actor, and the caller cannot set the surface label.
+- A 200 on create is the replay of the same key and comes back with
+  `"replayed": true`. Refusals keep the API's code and details, for example
+  `execution_request_open` with the open request's id.
+- For a direct caller, `surface` is a label, not an authenticated claim. Who
+  asked is `requested_by`, taken from the token.
+- All five tools are off on the shared portal (`docs/portal-allowlist.json`)
+  until the owner enables them.
+
 Not built yet, tracked as its own issue (#353 approvals and retention):
 
 - `GET .../approvals`, `POST .../approvals/{approval_id}/decision` and the
@@ -574,4 +601,3 @@ Not built yet, tracked as its own issue (#353 approvals and retention):
   relayed subject comes from the link, never from a body field.
 - The retention sweeper and `WORKITEM_SURFACE_RETENTION_DAYS` /
   `WORKITEM_RETENTION_DAYS` (step 3).
-- MCP tool wrappers and the first surface adapter (step 5).
