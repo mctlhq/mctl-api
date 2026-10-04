@@ -1571,3 +1571,55 @@ tenant:
 	}
 	r.mu.Unlock()
 }
+
+func TestTenantExists(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	if _, err := r.TenantExists("billing"); err == nil || !strings.Contains(err.Error(), "never synced") {
+		t.Fatalf("a checkout that never synced must not answer: %v", err)
+	}
+	r.lastSync.Store(time.Now().Add(-TenantExistsMaxAge - time.Minute).UnixNano())
+	if _, err := r.TenantExists("billing"); err == nil {
+		t.Fatal("a stale checkout must not answer")
+	}
+	r.lastSync.Store(time.Now().UnixNano())
+
+	writeTenantYAML(t, dir, "billing", "tenant:\n  name: billing\n")
+	// A directory without values.yaml is still a tenant directory the
+	// workflow would find.
+	if err := os.MkdirAll(filepath.Join(dir, "platform-gitops", "tenants", "half"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "platform-gitops", "tenants", "file"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"billing": true, "half": true, "file": true, "fresh": false} {
+		got, err := r.TenantExists(name)
+		if err != nil || got != want {
+			t.Errorf("TenantExists(%q) = %v, %v; want %v", name, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", ".", "..", "a/b", "../tenants"} {
+		if _, err := r.TenantExists(bad); err == nil {
+			t.Errorf("TenantExists(%q) must be an error", bad)
+		}
+	}
+}
+
+func TestTenantExists_UnreadableIsNotAbsent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir, r := setupTempRepo(t)
+	r.lastSync.Store(time.Now().UnixNano())
+	tenants := filepath.Join(dir, "platform-gitops", "tenants")
+	if err := os.MkdirAll(tenants, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tenants, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tenants, 0o750) }) //nolint:gosec // test cleanup
+	if got, err := r.TenantExists("billing"); err == nil {
+		t.Fatalf("an unreadable tenants dir must be an error, got exists=%v", got)
+	}
+}

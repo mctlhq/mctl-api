@@ -207,6 +207,27 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 
 	auditParams := redactSecrets(op, input)
 
+	// create-tenant makes a new tenant; it never joins one. For an existing
+	// name the workflow would skip writing the tenant and carry on
+	// provisioning, so a non-admin is refused here, before anything is
+	// submitted. Admins may re-run it to finish or redo a tenant's
+	// provisioning. A checkout that cannot answer refuses too: "could not
+	// check" is not "does not exist".
+	if opName == "create-tenant" && !user.IsAdmin() {
+		if status, msg := h.checkTenantIsNew(tenantParam); status != 0 {
+			h.logAudit(r, audit.Entry{
+				UserID:     user.ID,
+				Operation:  opName,
+				Parameters: auditParams,
+				Status:     "denied",
+				RiskLevel:  string(op.RiskLevel),
+				Message:    msg,
+			})
+			writeError(w, status, msg)
+			return
+		}
+	}
+
 	// For create-tenant: also notify Backstage for immediate catalog sync.
 	if opName == "create-tenant" && h.opts.BackstageURL != "" {
 		go h.notifyBackstage(input)
@@ -428,4 +449,20 @@ func filterNonAdmin(groups []string) []string {
 		}
 	}
 	return out
+}
+
+// checkTenantIsNew returns 0 when tenant does not exist in the gitops
+// checkout, 409 when it does, and 503 when the checkout cannot tell.
+func (h *Handlers) checkTenantIsNew(tenant string) (status int, msg string) {
+	if h.opts.GitReader == nil {
+		return http.StatusServiceUnavailable, "cannot check whether workspace \"" + tenant + "\" exists: gitops reader not configured"
+	}
+	exists, err := h.opts.GitReader.TenantExists(tenant)
+	if err != nil {
+		return http.StatusServiceUnavailable, "cannot check whether workspace \"" + tenant + "\" exists: " + err.Error()
+	}
+	if exists {
+		return http.StatusConflict, "workspace \"" + tenant + "\" already exists"
+	}
+	return 0, ""
 }

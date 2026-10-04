@@ -1679,6 +1679,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '409':
+          description: create-tenant for a tenant that already exists (non-admin callers); nothing was submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: create-tenant could not check whether the tenant exists (gitops checkout unavailable or stale); nothing was submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /api/v1/platform-skills:
     get:

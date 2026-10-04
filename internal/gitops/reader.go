@@ -597,6 +597,39 @@ func (r *Reader) GetTenant(name string) (*Tenant, error) {
 	return r.readTenant(name)
 }
 
+// TenantExistsMaxAge bounds how old the checkout may be when TenantExists
+// answers. The checkout refreshes every minute; an older last sync could miss
+// a tenant created since, so it is an error rather than "absent".
+const TenantExistsMaxAge = 10 * time.Minute
+
+// TenantExists reports whether platform-gitops/tenants/<name> exists in the
+// checkout, as a directory or anything else: that path is what create-tenant
+// would write. Only "no such file" is absent. Any other stat error, a checkout
+// that never synced, or one older than TenantExistsMaxAge is an error.
+func (r *Reader) TenantExists(name string) (bool, error) {
+	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
+		return false, fmt.Errorf("invalid tenant name %q", name)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	last := r.LastSync()
+	if last.IsZero() {
+		return false, errors.New("gitops checkout has never synced")
+	}
+	if age := time.Since(last); age > TenantExistsMaxAge {
+		return false, fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), TenantExistsMaxAge)
+	}
+	_, err := os.Lstat(filepath.Join(r.localPath, "platform-gitops", "tenants", name))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("checking tenant %q: %w", name, err)
+}
+
 func (r *Reader) readTenant(name string) (*Tenant, error) {
 	valuesPath := filepath.Join(r.localPath, "platform-gitops", "tenants", name, "values.yaml")
 	data, err := os.ReadFile(valuesPath) //nolint:gosec // path built from trusted repo root
