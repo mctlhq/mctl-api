@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.62.0](https://github.com/mctlhq/mctl-api/compare/4.61.0...4.62.0) (2026-10-04)
+
+
+### Features
+
+* **mcp:** expose canonical work items as a second surface ([d180de1](https://github.com/mctlhq/mctl-api/commit/d180de1252ee01e969093f080a2fecb20bcbf8ca))
+* **mcp:** expose canonical work items as a second surface ([f41e78b](https://github.com/mctlhq/mctl-api/commit/f41e78ba5bb90d1fc823ea6c786df4f042ebf4d3)), closes [#341](https://github.com/mctlhq/mctl-api/issues/341)
+
+
+### Bug Fixes
+
+* **api:** refuse create-tenant for a tenant that already exists ([7680577](https://github.com/mctlhq/mctl-api/commit/768057717c66732b079bbd53ee160e78c0c5b151))
+* **api:** refuse create-tenant for a tenant that already exists ([bb33ca3](https://github.com/mctlhq/mctl-api/commit/bb33ca33a1a5a08f66c2c57a40598ed9cdf70b07))
+* **gitops:** validate the tenant name before reading its path ([f3a18a8](https://github.com/mctlhq/mctl-api/commit/f3a18a89b760c6d7a47f6cb9c538171306ee2058))
+* **mcp:** keep work-item ids to one path segment, test the token ([e80cb06](https://github.com/mctlhq/mctl-api/commit/e80cb06b1862d029b6727d95f9146bf9cc953d40)), closes [#341](https://github.com/mctlhq/mctl-api/issues/341)
+
 ## [4.61.0](https://github.com/mctlhq/mctl-api/compare/4.60.0...4.61.0) (2026-10-04)
 
 
