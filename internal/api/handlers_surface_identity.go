@@ -100,6 +100,15 @@ var surfaceRoutes = []surfaceRoute{
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/execution-requests$`), true},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/execution-requests$`), true},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/execution-requests/[^/]+$`), true},
+	// Work-item history (mctl-api#436): read-only and relayed, so a surface
+	// sees exactly what the linked human sees. A relayed snapshot read is
+	// metadata only (GetWorkItemSnapshot); GET .../executions/{id}/snapshot
+	// stays off the allowlist because it serves the canonical bytes.
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/executions$`), true},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/snapshots$`), true},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/snapshots/[^/]+$`), true},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/events$`), true},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/evidence$`), true},
 }
 
 const (

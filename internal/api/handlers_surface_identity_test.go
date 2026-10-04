@@ -33,6 +33,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
@@ -42,6 +43,7 @@ type sidEnv struct {
 	router http.Handler
 	audit  *audit.Logger
 	pool   *pgxpool.Pool
+	ev     *evidence.Store
 	users  map[string]*auth.User
 	tenant string
 }
@@ -91,6 +93,10 @@ func newSIDEnvWith(t *testing.T, principals auth.PrincipalResolver) *sidEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ev, err := evidence.NewStore(ctx, connStr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tenant := fmt.Sprintf("sid-%d", time.Now().UnixNano())
 	t.Cleanup(func() {
 		wipe()
@@ -98,8 +104,9 @@ func newSIDEnvWith(t *testing.T, principals auth.PrincipalResolver) *sidEnv {
 		pool.Close()
 		store.Close()
 		items.Close()
+		ev.Close()
 	})
-	e := &sidEnv{t: t, audit: audit.NewLogger(), pool: pool, tenant: tenant, users: map[string]*auth.User{
+	e := &sidEnv{t: t, audit: audit.NewLogger(), pool: pool, ev: ev, tenant: tenant, users: map[string]*auth.User{
 		"alice":    auth.NewGitHubUser("alice", []string{"acme"}),
 		"bob":      auth.NewGitHubUser("bob", []string{"acme"}),
 		"carol":    auth.NewGitHubUser("carol", nil),
@@ -120,7 +127,7 @@ func newSIDEnvWith(t *testing.T, principals auth.PrincipalResolver) *sidEnv {
 		})
 	}
 	e.router = NewRouter(Options{
-		AuthMiddleware: fakeAuth, SurfaceIdentities: store, WorkItems: items, AuditLog: e.audit,
+		AuthMiddleware: fakeAuth, SurfaceIdentities: store, WorkItems: items, Evidence: ev, AuditLog: e.audit,
 		// alice is an admin in her own right; relaying must not carry it.
 		TenantResolver: sidTenants{"alice": {tenant, "admins"}, "bob": {"acme"}, "carol": {tenant}},
 		Principals:     principals,
@@ -268,7 +275,9 @@ func TestSurfaceIdentity_GateConfinesSurfacePrincipals(t *testing.T) {
 			{"GET", "/api/v1/work-items"},
 			{"PATCH", "/api/v1/work-items/wi_x"},
 			{"POST", "/api/v1/work-items/wi_x/executions"},
-			{"GET", "/api/v1/work-items/wi_x/events"},
+			// Events relay since mctl-api#436; this read serves snapshot
+			// bytes and never does.
+			{"GET", "/api/v1/work-items/wi_x/executions/we_x/snapshot"},
 		} {
 			if code, body := e.do(who, route[0], route[1], nil); code != http.StatusForbidden || body["code"] != "surface_route_not_allowed" {
 				t.Errorf("%s %s %s = %d %v", who, route[0], route[1], code, body)

@@ -387,6 +387,24 @@ type SnapshotSummary struct {
 	SchemaVersion     string    `json:"schema_version"`
 }
 
+// Summary is the snapshot's metadata without its bytes.
+func (c *ContextSnapshot) Summary() SnapshotSummary {
+	return SnapshotSummary{
+		ID:                c.ID,
+		WorkItemID:        c.WorkItemID,
+		ExecutionID:       c.ExecutionID,
+		ExecutionSequence: c.ExecutionSequence,
+		ContentHash:       c.ContentHash,
+		Strategy:          c.Strategy,
+		StrategyVersion:   c.StrategyVersion,
+		PriorExecutionID:  c.PriorExecutionID,
+		PriorSnapshotID:   c.PriorSnapshotID,
+		ProducedBy:        c.ProducedBy,
+		CreatedAt:         c.CreatedAt,
+		SchemaVersion:     c.SchemaVersion,
+	}
+}
+
 // Snapshots lists a work item's snapshots, oldest execution first, without
 // their bytes.
 func (s *Store) Snapshots(ctx context.Context, itemID string) ([]SnapshotSummary, error) {

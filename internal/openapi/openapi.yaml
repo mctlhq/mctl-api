@@ -3494,6 +3494,10 @@ paths:
   /api/v1/work-items/{id}/snapshots/{snapshot_id}:
     get:
       summary: One sealed context snapshot
+      description: |
+        A surface relaying for its linked human (mctl-api#436) gets the
+        snapshot's metadata only, the `ContextSnapshotSummary` shape without
+        `canonical_b64`; direct callers get the bytes.
       tags: [Work Items]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
@@ -3507,7 +3511,10 @@ paths:
                 type: object
                 properties:
                   schema_version: {type: string}
-                  snapshot: {$ref: '#/components/schemas/ContextSnapshot'}
+                  snapshot:
+                    oneOf:
+                      - {$ref: '#/components/schemas/ContextSnapshot'}
+                      - {$ref: '#/components/schemas/ContextSnapshotSummary'}
         '404': {description: 'work_item_not_found or snapshot_not_found', content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
 
   /api/v1/evidence/records:
@@ -4100,7 +4107,12 @@ tags:
       GET /api/v1/work-items/{id}/intents/{intent_id},
       POST /api/v1/work-items/{id}/surface-refs,
       GET|POST /api/v1/work-items/{id}/execution-requests,
-      GET /api/v1/work-items/{id}/execution-requests/{request_id}. No relay
+      GET /api/v1/work-items/{id}/execution-requests/{request_id}, and the
+      read-only history (mctl-api#436): GET /api/v1/work-items/{id}/executions,
+      GET /api/v1/work-items/{id}/snapshots,
+      GET /api/v1/work-items/{id}/snapshots/{snapshot_id} (metadata only,
+      no `canonical_b64`), GET /api/v1/work-items/{id}/events,
+      GET /api/v1/work-items/{id}/evidence. No relay
       route takes an engine, engine run or execution id: POST
       /api/v1/work-items/{id}/resume is not one (mctl-api#368).
       Unknown, revoked or expired links, another surface's link, or a missing
