@@ -136,6 +136,13 @@ surfaceTelegramTokenSecret: ""
 # principal disabled rather than failing the pod.
 surfacePortalTokenSecret: ""
 
+# Optional: Secret holding BACKSTAGE_GITHUB_APP_CONNECT_TOKEN, the static
+# token mctl-api sends to the portal's github-app-connect /repo-binding
+# lookup. The key inside the Secret is BACKSTAGE_GITHUB_APP_CONNECT_TOKEN,
+# which is what the mctl-gitops ExternalSecret mctl-api-repo-binding
+# produces. Optional: an absent Secret makes the lookup refuse, never allow.
+repoBindingTokenSecret: ""
+
 # Optional: Secret holding MCTL_OIDC_PROVIDERS, the JSON list of federated
 # OIDC providers (docs/federation.md, mctlhq/mctl-api#434). In production
 # mctl-gitops pre-creates it and the zitadel-iac Job writes the value, because
