@@ -15,13 +15,14 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
-	"net/url"
+	"regexp"
 	"strings"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -107,8 +108,12 @@ func (s *Server) toolListWorkItemSnapshots() (mcplib.Tool, server.ToolHandlerFun
 			return errResult, nil
 		}
 		path := "/api/v1/work-items/" + id + "/snapshots"
-		if sid := strings.TrimSpace(stringArg(req, "snapshot_id")); sid != "" {
-			path += "/" + url.PathEscape(sid)
+		sid, errResult := pathID(req, "snapshot_id", false)
+		if errResult != nil {
+			return errResult, nil
+		}
+		if sid != "" {
+			path += "/" + sid
 		}
 		return s.workItemCall(ctx, http.MethodGet, path, nil, "work item snapshots")
 	}
@@ -134,8 +139,12 @@ func (s *Server) toolListWorkItemExecutionRequests() (mcplib.Tool, server.ToolHa
 			return errResult, nil
 		}
 		path := "/api/v1/work-items/" + id + "/execution-requests"
-		if rid := strings.TrimSpace(stringArg(req, "request_id")); rid != "" {
-			path += "/" + url.PathEscape(rid)
+		rid, errResult := pathID(req, "request_id", false)
+		if errResult != nil {
+			return errResult, nil
+		}
+		if rid != "" {
+			path += "/" + rid
 		}
 		return s.workItemCall(ctx, http.MethodGet, path, nil, "work item execution requests")
 	}
@@ -150,7 +159,7 @@ func (s *Server) toolRequestWorkItemExecution() (mcplib.Tool, server.ToolHandler
 		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Asks the platform to start or resume one WorkItem. It records an execution REQUEST and nothing else: the execution platform claims it, runs it and attaches the new execution and its ContextSnapshot to the SAME WorkItem. The request names no engine, run or execution id; those are the platform's.
 
-You are the requester: requested_by is taken from your authentication, never from an argument, and your access to the item's tenant is checked now, whatever surface created the item. The request is recorded with surface "mcp".
+You are the requester: requested_by is taken from your authentication, never from an argument, and your access to the item's tenant is checked now, whatever surface created the item. The request is recorded with surface "mcp". A token that relays for another surface is refused here (400 invalid): that surface records its own requests.
 
 Fails closed rather than forking work:
 - expected_state_version must equal the item's current state_version (read it with mctl_get_work_item), or the call is refused;
@@ -186,8 +195,10 @@ Idempotent by idempotency_key: repeating the same call with the same key returns
 			return mcplib.NewToolResultError(`kind must be "start" or "resume"`), nil
 		}
 		version, ok := req.GetArguments()["expected_state_version"].(float64)
-		if !ok || version < 0 || version != math.Trunc(version) || version > math.MaxInt32 {
-			return mcplib.NewToolResultError("expected_state_version must be a non-negative integer"), nil
+		// State versions start at 1; 2^53 is where a float64 stops holding
+		// every integer.
+		if !ok || version < 1 || version != math.Trunc(version) || version > 1<<53 {
+			return mcplib.NewToolResultError("expected_state_version must be a positive integer"), nil
 		}
 		key := strings.TrimSpace(stringArg(req, "idempotency_key"))
 		if key == "" {
@@ -199,7 +210,11 @@ Idempotent by idempotency_key: repeating the same call with the same key returns
 			"surface":                workItemSurface,
 			"idempotency_key":        key,
 		}
-		if from := strings.TrimSpace(stringArg(req, "resumed_from_execution_id")); from != "" {
+		from, errResult := pathID(req, "resumed_from_execution_id", false)
+		if errResult != nil {
+			return errResult, nil
+		}
+		if from != "" {
 			body["resumed_from_execution_id"] = from
 		}
 		return s.workItemCall(ctx, http.MethodPost, "/api/v1/work-items/"+id+"/execution-requests", body, "request work item execution")
@@ -207,13 +222,27 @@ Idempotent by idempotency_key: repeating the same call with the same key returns
 	return tool, handler
 }
 
-// requiredPathArg returns a trimmed, path-escaped required argument.
-func requiredPathArg(req mcplib.CallToolRequest, name string) (string, *mcplib.CallToolResult) {
+// workItemIDPattern is the shape of every id these tools put in a path
+// (wi_, we_, cs_, xr_ ...). Escaping alone would let "." or ".." through as a
+// segment that a normalizing proxy resolves out of /work-items/{id}.
+var workItemIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// pathID returns a trimmed id that is safe as one path segment, or "" with
+// an error result.
+func pathID(req mcplib.CallToolRequest, name string, required bool) (string, *mcplib.CallToolResult) {
 	v := strings.TrimSpace(stringArg(req, name))
-	if v == "" {
+	switch {
+	case v == "" && required:
 		return "", mcplib.NewToolResultError("missing required argument: " + name)
+	case v != "" && !workItemIDPattern.MatchString(v):
+		return "", mcplib.NewToolResultError(name + " must be an id such as wi_..., made of letters, digits, '_' and '-'")
 	}
-	return url.PathEscape(v), nil
+	return v, nil
+}
+
+// requiredPathArg is pathID for a required argument.
+func requiredPathArg(req mcplib.CallToolRequest, name string) (string, *mcplib.CallToolResult) {
+	return pathID(req, name, true)
 }
 
 // workItemCall keeps the API's typed refusals intact. doRequest collapses an
@@ -227,7 +256,7 @@ func (s *Server) workItemCall(ctx context.Context, method, path string, body any
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to %s: %v", what, err)), nil
 		}
-		reader = strings.NewReader(string(raw))
+		reader = bytes.NewReader(raw)
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, method, s.apiURL+path, reader)
 	if err != nil {

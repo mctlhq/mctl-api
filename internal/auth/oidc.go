@@ -183,6 +183,12 @@ func WithUser(ctx context.Context, u *User) context.Context {
 	return context.WithValue(ctx, userContextKey, u)
 }
 
+// WithToken returns a context carrying a raw bearer token, as the auth
+// middleware stores it. Useful in tests.
+func WithToken(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, rawTokenKey, token)
+}
+
 // TokenFromContext returns the raw bearer token stored by the auth middleware.
 // Tool handlers use this to forward auth to downstream API calls.
 func TokenFromContext(ctx context.Context) string {

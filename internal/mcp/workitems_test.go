@@ -15,6 +15,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -25,6 +26,8 @@ import (
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 type workItemCallRecord struct {
@@ -68,8 +71,6 @@ func TestWorkItemReadToolsCallTheCanonicalAPI(t *testing.T) {
 		{(*Server).toolListWorkItemSnapshots, map[string]any{"work_item_id": "wi_1", "snapshot_id": "cs_2"}, "GET /api/v1/work-items/wi_1/snapshots/cs_2"},
 		{(*Server).toolListWorkItemExecutionRequests, map[string]any{"work_item_id": "wi_1"}, "GET /api/v1/work-items/wi_1/execution-requests"},
 		{(*Server).toolListWorkItemExecutionRequests, map[string]any{"work_item_id": "wi_1", "request_id": "xr_3"}, "GET /api/v1/work-items/wi_1/execution-requests/xr_3"},
-		// An id cannot climb out of its path segment.
-		{(*Server).toolGetWorkItem, map[string]any{"work_item_id": "../tenants"}, "GET /api/v1/work-items/..%2Ftenants"},
 	}
 	for _, c := range cases {
 		r := callRoadmapTool(t, c.build, ts.URL, c.args)
@@ -127,6 +128,8 @@ func TestRequestWorkItemExecutionRefusesBadArgumentsWithoutCalling(t *testing.T)
 		"no version":         func(a map[string]any) { delete(a, "expected_state_version") },
 		"string version":     func(a map[string]any) { a["expected_state_version"] = "1" },
 		"negative version":   func(a map[string]any) { a["expected_state_version"] = float64(-1) },
+		"zero version":       func(a map[string]any) { a["expected_state_version"] = float64(0) },
+		"dot-dot from":       func(a map[string]any) { a["resumed_from_execution_id"] = ".." },
 		"fractional version": func(a map[string]any) { a["expected_state_version"] = 1.5 },
 		"no key":             func(a map[string]any) { delete(a, "idempotency_key") },
 		"blank key":          func(a map[string]any) { a["idempotency_key"] = " " },
@@ -175,6 +178,55 @@ func TestWorkItemToolsKeepTheTypedRefusal(t *testing.T) {
 	for _, want := range []string{"HTTP 409", "execution_request_open", "xr_open"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("error %q lost %q", text, want)
+		}
+	}
+}
+
+// An id is one path segment whatever the input: "." and ".." pass
+// url.PathEscape untouched, and a normalizing proxy would resolve them out of
+// /work-items/{id}.
+func TestWorkItemToolsRefuseIDsThatAreNotOneSegment(t *testing.T) {
+	ts, calls := workItemBackend(t, http.StatusOK, `{}`)
+	for _, bad := range []string{"..", ".", "../tenants", "wi_1/executions", "wi 1", "wi_1?x=1"} {
+		for _, c := range []struct {
+			build func(*Server) (mcplib.Tool, server.ToolHandlerFunc)
+			args  map[string]any
+		}{
+			{(*Server).toolGetWorkItem, map[string]any{"work_item_id": bad}},
+			{(*Server).toolListWorkItemSnapshots, map[string]any{"work_item_id": "wi_1", "snapshot_id": bad}},
+			{(*Server).toolListWorkItemExecutionRequests, map[string]any{"work_item_id": "wi_1", "request_id": bad}},
+		} {
+			if r := callRoadmapTool(t, c.build, ts.URL, c.args); !r.IsError {
+				t.Errorf("%v accepted", c.args)
+			}
+		}
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("refused ids still reached the API: %v", *calls)
+	}
+}
+
+// The caller's token, not the server's, is what the API sees: identity and
+// tenant policy are evaluated for whoever is calling now.
+func TestWorkItemToolsForwardTheCallersToken(t *testing.T) {
+	ts, calls := workItemBackend(t, http.StatusCreated, `{}`)
+	ctx := auth.WithToken(context.Background(), "callers-token")
+	for _, c := range []struct {
+		build func(*Server) (mcplib.Tool, server.ToolHandlerFunc)
+		args  map[string]any
+	}{
+		{(*Server).toolGetWorkItem, map[string]any{"work_item_id": "wi_1"}},
+		{(*Server).toolRequestWorkItemExecution, map[string]any{
+			"work_item_id": "wi_1", "kind": "resume", "expected_state_version": float64(1), "idempotency_key": "k",
+		}},
+	} {
+		tool, handler := c.build(NewServer(ts.URL, "server-token"))
+		r, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: tool.Name, Arguments: c.args}})
+		if err != nil || r.IsError {
+			t.Fatalf("%s: %v %v", tool.Name, err, r)
+		}
+		if got := (*calls)[len(*calls)-1].auth; got != "Bearer callers-token" {
+			t.Errorf("%s: Authorization = %q, want the caller's token over the server's", tool.Name, got)
 		}
 	}
 }
