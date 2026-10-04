@@ -106,6 +106,7 @@ type fakeIdP struct {
 	nonceOverride string
 	authTime      time.Time
 	audOverride   string
+	username      string // preferred_username; "dmitrii" when empty
 }
 
 const testLinkClientID, testLinkClientSecret = "link-client", "link-secret"
@@ -183,11 +184,15 @@ func (f *fakeIdP) token(w http.ResponseWriter, r *http.Request) {
 	if f.audOverride != "" {
 		aud = f.audOverride
 	}
+	username := "dmitrii"
+	if f.username != "" {
+		username = f.username
+	}
 	now := time.Now()
 	payload, _ := json.Marshal(map[string]any{
 		"iss": f.srv.URL, "sub": "z-sub", "aud": aud, "nonce": nonce,
 		"iat": now.Unix(), "exp": now.Add(time.Hour).Unix(), "auth_time": f.authTime.Unix(),
-		"preferred_username": "dmitrii",
+		"preferred_username": username,
 	})
 	sig, _ := f.signer.Sign(payload)
 	idToken, _ := sig.CompactSerialize()

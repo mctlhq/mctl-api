@@ -30,6 +30,7 @@ func zitadelUpstreamConfig(mode string) config {
 	return config{
 		OAuthUpstreamRaw: mode, OAuthJWTSecret: "k", OAuthTokenTTL: time.Hour,
 		OAuthZitadelClientID: "zid", OAuthZitadelClientSecret: "zsecret", OAuthZitadelProvider: "zitadel",
+		ZitadelLinkProvider: "zitadel",
 		OIDCProvidersRaw:    testZitadelProviders,
 		OAuthGitHubClientID: "gh", OAuthGitHubClientSecret: "gh-secret",
 	}
@@ -79,6 +80,11 @@ func TestOAuthUpstreamRefusesIncompleteConfig(t *testing.T) {
 			"non-sub subject": {func(c *config) {
 				c.OIDCProvidersRaw = strings.Replace(testZitadelProviders, `"audiences"`, `"subject_claim":"email","audiences"`, 1)
 			}, "sub"},
+			// Both entries exist; only the names differ.
+			"link writes under another entry": {func(c *config) {
+				c.OIDCProvidersRaw = `[{"name":"zitadel","issuer":"https://auth.example","audiences":["api"]},{"name":"zitadel2","issuer":"https://auth.example","audiences":["api"]}]`
+				c.ZitadelLinkProvider = "zitadel2"
+			}, "ZITADEL_LINK_PROVIDER"},
 			"malformed entries": {func(c *config) { c.OIDCProvidersRaw = "{"; c.FederationDisabled = true }, "MCTL_OIDC_PROVIDERS"},
 		}
 		if mode == "both" {

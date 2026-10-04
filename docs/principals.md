@@ -191,11 +191,18 @@ A pending authorization records its upstream: a GitHub callback cannot
 complete a ZITADEL authorization or the reverse, and an authorization whose
 upstream the current mode does not allow (one pending across a rollback)
 gets a 400. Sign-ins are counted in
-`oauth_upstream_signins_total{upstream,result}`.
+`oauth_upstream_signins_total{upstream,result}`. For `upstream="zitadel"`,
+`result` is `issued`, `unlinked`, `refused`, `store_unavailable`,
+`invalid_token`, `upstream_error` (ZITADEL redirected back with an error),
+`upstream_unreachable` (discovery failed), `exchange_failed`,
+`bad_request` or `internal_error`, so "ZITADEL is down" and "mctl is
+broken" stay apart.
 
 `zitadel` and `both` refuse startup when `OAUTH_JWT_SECRET`, the ZITADEL
 client, or the provider entry is missing, when that entry keys identities
-on a claim other than `sub` (links are written by `sub`), and, for `both`,
+on a claim other than `sub` (links are written by `sub`), when
+`OAUTH_ZITADEL_PROVIDER` differs from `ZITADEL_LINK_PROVIDER` (sign-in
+reads links under the entry name linking writes them with), and, for `both`,
 without the GitHub app. Under `zitadel` the GitHub app stays optional; the
 link flow needs it, so without it linking answers 503. Rollback is
 `OAUTH_UPSTREAM=github`.

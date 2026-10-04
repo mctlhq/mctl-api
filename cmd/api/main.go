@@ -1525,6 +1525,12 @@ func (c config) validateOAuthUpstream() error {
 	if _, err := c.oauthZitadelProvider(); err != nil {
 		missing = append(missing, err.Error())
 	}
+	// Sign-in reads linked rows by provider entry name, and linking writes
+	// them under ZITADEL_LINK_PROVIDER: two names would boot cleanly and then
+	// answer every sign-in "not linked", which re-linking cannot clear.
+	if c.OAuthZitadelProvider != c.ZitadelLinkProvider {
+		missing = append(missing, fmt.Sprintf("OAUTH_ZITADEL_PROVIDER (%q) to equal ZITADEL_LINK_PROVIDER (%q), the entry linking writes under", c.OAuthZitadelProvider, c.ZitadelLinkProvider))
+	}
 	if len(missing) > 0 {
 		return fmt.Errorf("OAUTH_UPSTREAM=%s needs %s", mode, strings.Join(missing, "; "))
 	}

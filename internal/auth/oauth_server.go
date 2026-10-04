@@ -1246,18 +1246,30 @@ func (s *OAuthServer) StorePendingAuth(state, clientID, redirectURI, codeChallen
 	})
 }
 
-// StorePendingOIDCAuth stores a pending authorization whose user signs in
-// at an OIDC upstream. nonce and verifier belong to that upstream leg;
-// clientState is the client's own state, returned with the code.
-func (s *OAuthServer) StorePendingOIDCAuth(state, upstream, clientID, redirectURI, codeChallenge, clientState, nonce, verifier string) {
+// PendingOIDCAuth is an authorization whose user signs in at an OIDC
+// upstream. Nonce and Verifier belong to that upstream leg; ClientState is
+// the client's own state, returned with the code.
+type PendingOIDCAuth struct {
+	Upstream      string
+	ClientID      string
+	RedirectURI   string
+	CodeChallenge string
+	ClientState   string
+	Nonce         string
+	Verifier      string
+}
+
+// StorePendingOIDCAuth stores a pending authorization under the state sent
+// to the OIDC upstream.
+func (s *OAuthServer) StorePendingOIDCAuth(state string, a PendingOIDCAuth) {
 	s.codes.storePending(state, pendingAuth{
-		Upstream:      upstream,
-		ClientID:      clientID,
-		RedirectURI:   redirectURI,
-		CodeChallenge: codeChallenge,
-		ClientState:   clientState,
-		Nonce:         nonce,
-		Verifier:      verifier,
+		Upstream:      a.Upstream,
+		ClientID:      a.ClientID,
+		RedirectURI:   a.RedirectURI,
+		CodeChallenge: a.CodeChallenge,
+		ClientState:   a.ClientState,
+		Nonce:         a.Nonce,
+		Verifier:      a.Verifier,
 		CreatedAt:     time.Now(),
 	})
 }

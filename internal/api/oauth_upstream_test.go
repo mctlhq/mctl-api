@@ -293,6 +293,64 @@ func TestZitadelSigninStoreFailureIsNotUnlinked(t *testing.T) {
 	}
 }
 
+// preferred_username is chosen by whoever owns the ZITADEL account; the
+// page must carry it escaped. Asserted on the raw body.
+func TestZitadelSigninPageEscapesTheUsername(t *testing.T) {
+	h := newUpstreamHarness(t, OAuthUpstreamZitadel, &fakeLinkedStore{err: principals.ErrNotFound})
+	h.idp.username = `<script>alert(1)</script>`
+	rec := h.callback(h.toZitadel(h.get(authorizeQuery(""))))
+	if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "<script>") ||
+		!strings.Contains(rec.Body.String(), "&lt;script&gt;") {
+		t.Fatalf("callback = %d, want the username escaped: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The refusals that name a principal need one: a store that returns them
+// without it broke its contract, which is a failed read (503), not a panic.
+func TestZitadelSigninRefusalWithoutAPrincipalIsAFailedRead(t *testing.T) {
+	for _, err := range []error{principals.ErrNoGitHubIdentity, principals.ErrGitHubLoginUnknown, principals.ErrAmbiguousGitHubIdentity} {
+		t.Run(err.Error(), func(t *testing.T) {
+			h := newUpstreamHarness(t, OAuthUpstreamZitadel, &fakeLinkedStore{err: err})
+			rec := h.callback(h.toZitadel(h.get(authorizeQuery(""))))
+			if rec.Code != http.StatusServiceUnavailable || linkHref.MatchString(rec.Body.String()) {
+				t.Fatalf("callback = %d, want 503 without the link page", rec.Code)
+			}
+		})
+	}
+}
+
+// The canary reads this metric: ZITADEL being unreachable must not share a
+// bucket with mctl failing.
+func TestZitadelSigninMetricSeparatesFailures(t *testing.T) {
+	count := func(result string) float64 {
+		return testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, result))
+	}
+	t.Run("upstream_unreachable", func(t *testing.T) {
+		h := newUpstreamHarness(t, OAuthUpstreamZitadel, linkedTo("mashkovd"))
+		state := h.toZitadel(h.get(authorizeQuery("")))
+		// The pending authorization stays in h.oauth; a fresh router over it
+		// has not discovered yet, and the IdP is gone.
+		h.idp.srv.Close()
+		before := count("upstream_unreachable")
+		h3 := &upstreamHarness{t: t, oauth: h.oauth, idp: h.idp,
+			router: NewRouter(Options{OAuthServer: h.oauth, OAuthUpstream: OAuthUpstreamZitadel, OAuthZitadel: &OAuthZitadelOptions{
+				ProviderName: "zitadel", Issuer: h.idp.srv.URL, ClientID: testOAuthZClientID, ClientSecret: testOAuthZClientSecret, Store: linkedTo("mashkovd"),
+			}})}
+		if rec := h3.callback(state); rec.Code != http.StatusBadGateway || count("upstream_unreachable")-before != 1 {
+			t.Fatalf("callback = %d, upstream_unreachable +%v, want 502 and +1", rec.Code, count("upstream_unreachable")-before)
+		}
+	})
+	t.Run("exchange_failed", func(t *testing.T) {
+		h := newUpstreamHarness(t, OAuthUpstreamZitadel, linkedTo("mashkovd"))
+		state := h.toZitadel(h.get(authorizeQuery("")))
+		h.idp.clientSecret = "rotated"
+		before := count("exchange_failed")
+		if rec := h.callback(state); rec.Code != http.StatusBadGateway || count("exchange_failed")-before != 1 {
+			t.Fatalf("callback = %d, exchange_failed +%v, want 502 and +1", rec.Code, count("exchange_failed")-before)
+		}
+	})
+}
+
 func TestZitadelSigninRefusals(t *testing.T) {
 	p := &principals.Principal{ID: "prn_1", Status: principals.StatusActive}
 	cases := map[string]struct {
@@ -452,7 +510,10 @@ func TestZitadelCallbackFollowsTheMode(t *testing.T) {
 		h.idp.mu.Lock()
 		h.idp.challenge, h.idp.nonce = testChallenge(), "n1"
 		h.idp.mu.Unlock()
-		h.oauth.StorePendingOIDCAuth("z-state", auth.UpstreamZitadel, "client", testClientRedirect, testChallenge(), "client-state", "n1", testVerifier)
+		h.oauth.StorePendingOIDCAuth("z-state", auth.PendingOIDCAuth{
+			Upstream: auth.UpstreamZitadel, ClientID: "client", RedirectURI: testClientRedirect,
+			CodeChallenge: testChallenge(), ClientState: "client-state", Nonce: "n1", Verifier: testVerifier,
+		})
 		if rec := h.callback("z-state"); rec.Code != want {
 			t.Errorf("mode %s: ZITADEL callback = %d %s, want %d", mode, rec.Code, rec.Body.String(), want)
 		}

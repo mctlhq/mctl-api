@@ -77,7 +77,9 @@ func (m OAuthUpstreamMode) allows(upstream string) bool {
 }
 
 // LinkedPrincipalStore is the principal store as the ZITADEL upstream reads
-// it (principals.Store.LinkedGitHub).
+// it (principals.Store.LinkedGitHub). With ErrNoGitHubIdentity,
+// ErrGitHubLoginUnknown and ErrAmbiguousGitHubIdentity it also returns the
+// principal; one returned without it is treated as a failed read.
 type LinkedPrincipalStore interface {
 	LinkedGitHub(ctx context.Context, id auth.Identity) (*principals.Principal, *principals.ExternalIdentity, error)
 }
@@ -220,7 +222,10 @@ func (h *Handlers) startZitadelAuthorize(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	verifier := oauth2.GenerateVerifier()
-	o.StorePendingOIDCAuth(state, auth.UpstreamZitadel, clientID, redirectURI, codeChallenge, clientState, nonce, verifier)
+	o.StorePendingOIDCAuth(state, auth.PendingOIDCAuth{
+		Upstream: auth.UpstreamZitadel, ClientID: clientID, RedirectURI: redirectURI,
+		CodeChallenge: codeChallenge, ClientState: clientState, Nonce: nonce, Verifier: verifier,
+	})
 	// No prompt=login: an existing ZITADEL session is the single sign-on
 	// this upstream is for. Freshness matters to linking, not to sign-in.
 	authURL := z.oauthConfig(prov, o.BaseURL).AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce))
@@ -255,18 +260,21 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	}
 	code := q.Get("code")
 	if code == "" {
+		result = "bad_request"
 		http.Error(w, "missing code", http.StatusBadRequest)
 		return
 	}
 	prov, err := z.oidcProvider(r.Context())
 	if err != nil {
 		slog.Warn("oauth: ZITADEL discovery failed", "issuer", z.opts.Issuer, "error", err)
+		result = "upstream_unreachable"
 		http.Error(w, "ZITADEL is not reachable right now", http.StatusBadGateway)
 		return
 	}
 	tok, err := z.oauthConfig(prov, o.BaseURL).Exchange(r.Context(), code, oauth2.VerifierOption(pending.Verifier))
 	if err != nil {
 		slog.Warn("oauth: ZITADEL code exchange failed", "error", err)
+		result = "exchange_failed"
 		http.Error(w, "failed to exchange ZITADEL code", http.StatusBadGateway)
 		return
 	}
@@ -313,11 +321,13 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	mctlCode, err := o.IssueCode(login, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
 	if err != nil {
 		slog.Error("failed to issue auth code", "error", err)
+		result = "internal_error"
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	target, err := url.Parse(pending.RedirectURI)
 	if err != nil {
+		result = "internal_error"
 		http.Error(w, "invalid redirect_uri", http.StatusInternalServerError)
 		return
 	}
@@ -348,6 +358,10 @@ func (h *Handlers) refuseZitadelSignin(w http.ResponseWriter, display string, p 
 			Primary: linkHint,
 		})
 		return "unlinked"
+	case p == nil:
+		// The refusals below name the principal; without one the store broke
+		// its contract, which is a failed read, not a refusal.
+		return zitadelStoreUnavailable(w, err)
 	case errors.Is(err, principals.ErrNoGitHubIdentity):
 		renderOAuthPage(w, http.StatusForbidden, oauthPageData{
 			Title: "Your ZITADEL identity is not linked to your account",
@@ -373,10 +387,14 @@ func (h *Handlers) refuseZitadelSignin(w http.ResponseWriter, display string, p 
 		}})
 		return "refused"
 	default:
-		slog.Error("oauth: principal store lookup failed", "error", err)
-		renderOAuthPage(w, http.StatusServiceUnavailable, oauthPageData{Title: "Sign-in unavailable", Lines: []string{
-			"mctl cannot look up linked identities right now, so it cannot tell who you are. Try again later.",
-		}})
-		return "store_unavailable"
+		return zitadelStoreUnavailable(w, err)
 	}
+}
+
+func zitadelStoreUnavailable(w http.ResponseWriter, err error) string {
+	slog.Error("oauth: principal store lookup failed", "error", err)
+	renderOAuthPage(w, http.StatusServiceUnavailable, oauthPageData{Title: "Sign-in unavailable", Lines: []string{
+		"mctl cannot look up linked identities right now, so it cannot tell who you are. Try again later.",
+	}})
+	return "store_unavailable"
 }
