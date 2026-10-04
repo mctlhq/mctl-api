@@ -253,6 +253,18 @@ func (l *identityLinker) capSourceLocked(ip string) bool {
 	}
 }
 
+// abandon drops c if it is still registered. A callback consumes its state
+// before any failure return, which leaves c neither completable nor, for the
+// per-IP cap, droppable; every step that does not advance c ends it here so
+// a cancelled or failed sign-in frees its slot at once instead of at the TTL.
+func (l *identityLinker) abandon(c *linkChallenge) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.byID[c.id] == c {
+		l.dropLocked(c.id, c)
+	}
+}
+
 func (l *identityLinker) dropLocked(id string, c *linkChallenge) {
 	delete(l.byID, id)
 	delete(l.byGitHub, c.githubState)
@@ -408,6 +420,12 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 		linkFailed(w, http.StatusBadRequest, "This link session is unknown, expired, replaced by a newer link from the same network, or was started in another browser.")
 		return
 	}
+	advanced := false
+	defer func() {
+		if !advanced {
+			l.abandon(c)
+		}
+	}()
 	if e := q.Get("error"); e != "" {
 		linkFailed(w, http.StatusBadRequest, "GitHub refused the sign-in: "+e+".")
 		return
@@ -440,7 +458,7 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 	}
 	// Provision returns a disabled principal as a value, not an error. The
 	// confirm step would refuse it too; stop before the ZITADEL sign-in.
-	if p.Status == principals.StatusDisabled {
+	if p.Status != principals.StatusActive {
 		linkFailed(w, http.StatusForbidden, "Your mctl principal is disabled.")
 		return
 	}
@@ -469,6 +487,7 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 		c.zitadelState, c.nonce, c.verifier = zState, nonce, verifier
 		c.phase = linkGitHubProven
 		l.byZState[zState] = c
+		advanced = true
 	}
 	l.mu.Unlock()
 	if !live {
@@ -506,6 +525,12 @@ func (h *Handlers) handleIdentityLinkCallback(w http.ResponseWriter, r *http.Req
 		linkFailed(w, http.StatusBadRequest, "This link session is unknown, expired, or was started in another browser.")
 		return
 	}
+	advanced := false
+	defer func() {
+		if !advanced {
+			l.abandon(c)
+		}
+	}()
 	if e := q.Get("error"); e != "" {
 		linkFailed(w, http.StatusBadRequest, "ZITADEL refused the sign-in: "+e+".")
 		return
@@ -562,6 +587,7 @@ func (h *Handlers) handleIdentityLinkCallback(w http.ResponseWriter, r *http.Req
 		c.identity = auth.Identity{Provider: l.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display, Kind: auth.KindHuman}
 		c.csrfHash = sha256.Sum256([]byte(csrf))
 		c.phase = linkZitadelProven
+		advanced = true
 	}
 	l.mu.Unlock()
 	if !live {

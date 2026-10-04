@@ -569,6 +569,38 @@ func TestIdentityLinkCapKeepsProvenLinks(t *testing.T) {
 	}
 }
 
+// A sign-in cancelled or failed at either IdP ends its link at once: it
+// can never complete, so it must not hold one of its source's slots until
+// the TTL.
+func TestIdentityLinkFailedLegFreesItsSlot(t *testing.T) {
+	const ip = "198.51.100.1"
+	t.Run("github", func(t *testing.T) {
+		h := newLinkHarness(t)
+		for i := 0; i < linkMaxPerIP; i++ {
+			_, ck, st := h.startFrom(ip)
+			if rec := h.do(http.MethodGet, githubCallbackPath+"?error=access_denied&state="+url.QueryEscape(st), ck, nil); rec.Code != http.StatusBadRequest {
+				t.Fatalf("cancelled GitHub leg = %d", rec.Code)
+			}
+		}
+		if rec, ck, _ := h.startFrom(ip); ck == nil {
+			t.Fatalf("start after %d cancelled GitHub legs = %d, want a new link", linkMaxPerIP, rec.Code)
+		}
+	})
+	t.Run("zitadel", func(t *testing.T) {
+		h := newLinkHarness(t)
+		for i := 0; i < linkMaxPerIP; i++ {
+			_, ck, st := h.startFrom(ip)
+			zState := h.github(ck, st)
+			if rec := h.do(http.MethodGet, linkCallbackPath+"?error=access_denied&state="+url.QueryEscape(zState), ck, nil); rec.Code != http.StatusBadRequest {
+				t.Fatalf("cancelled ZITADEL leg = %d", rec.Code)
+			}
+		}
+		if rec, ck, _ := h.startFrom(ip); ck == nil {
+			t.Fatalf("start after %d cancelled ZITADEL legs = %d, want a new link", linkMaxPerIP, rec.Code)
+		}
+	})
+}
+
 // Provision answers a disabled principal with a value, not an error: the
 // GitHub leg must refuse it before sending the person to ZITADEL.
 func TestIdentityLinkGitHubLegRefusesADisabledPrincipal(t *testing.T) {
