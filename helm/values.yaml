@@ -144,6 +144,14 @@ surfacePortalTokenSecret: ""
 # the Dex-only configuration, unchanged.
 oidcProvidersSecret: ""
 
+# Optional: Secret holding ZITADEL_LINK_CLIENT_ID and
+# ZITADEL_LINK_CLIENT_SECRET, the confidential ZITADEL client of explicit
+# identity linking (docs/principals.md, mctlhq/mctl-api#435). In production
+# the zitadel-iac Job writes both into the same Secret as
+# MCTL_OIDC_PROVIDERS. Optional, so absent keys leave the link flow off
+# (503) rather than failing the pod.
+zitadelLinkSecret: ""
+
 # Optional: mount a versioned usage rate card from a ConfigMap.
 #
 # When set, the ConfigMap is mounted read-only at

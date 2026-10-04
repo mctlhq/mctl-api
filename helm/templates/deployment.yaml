@@ -40,11 +40,16 @@ spec:
             {{- if and .Values.oidcProvidersSecret .Values.env.MCTL_OIDC_PROVIDERS }}
             {{- fail "set MCTL_OIDC_PROVIDERS either in env or through oidcProvidersSecret, not both" }}
             {{- end }}
+            {{- if and .Values.zitadelLinkSecret (or .Values.env.ZITADEL_LINK_CLIENT_ID .Values.env.ZITADEL_LINK_CLIENT_SECRET) }}
+            {{- fail "set ZITADEL_LINK_CLIENT_ID and ZITADEL_LINK_CLIENT_SECRET either in env or through zitadelLinkSecret, not both" }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
-            {{- /* oidcProvidersSecret supplies it below; the empty default in
-                   values.yaml would otherwise render a second entry with the
-                   same name, which server-side apply refuses. */}}
-            {{- if not (and $.Values.oidcProvidersSecret (eq $key "MCTL_OIDC_PROVIDERS")) }}
+            {{- /* oidcProvidersSecret and zitadelLinkSecret supply these
+                   below; a literal entry (even an empty one) would otherwise
+                   render a second entry with the same name, which
+                   server-side apply refuses. */}}
+            {{- if not (or (and $.Values.oidcProvidersSecret (eq $key "MCTL_OIDC_PROVIDERS"))
+                           (and $.Values.zitadelLinkSecret (or (eq $key "ZITADEL_LINK_CLIENT_ID") (eq $key "ZITADEL_LINK_CLIENT_SECRET")))) }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
@@ -118,6 +123,24 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.oidcProvidersSecret }}
                   key: MCTL_OIDC_PROVIDERS
+                  optional: true
+            {{- end }}
+            {{- if .Values.zitadelLinkSecret }}
+            # The confidential ZITADEL client of identity linking
+            # (docs/principals.md, mctlhq/mctl-api#435), written by the
+            # zitadel-iac Job. Optional: without both keys the link flow
+            # answers 503 and nothing else changes.
+            - name: ZITADEL_LINK_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.zitadelLinkSecret }}
+                  key: ZITADEL_LINK_CLIENT_ID
+                  optional: true
+            - name: ZITADEL_LINK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.zitadelLinkSecret }}
+                  key: ZITADEL_LINK_CLIENT_SECRET
                   optional: true
             {{- end }}
             {{- if .Values.usagePricingConfigMap }}
