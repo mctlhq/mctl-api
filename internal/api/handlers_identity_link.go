@@ -417,7 +417,16 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 	})
 	if err != nil {
 		slog.Warn("identity link: GitHub principal unavailable", "login", login, "error", err)
-		linkFailed(w, http.StatusForbidden, "Your GitHub identity cannot be used for linking ("+err.Error()+").")
+		// Refusals are the person's to see; a store failure is not, and its
+		// text (hosts, connection detail) stays in the log.
+		switch {
+		case errors.Is(err, auth.ErrPrincipalDisabled):
+			linkFailed(w, http.StatusForbidden, "Your mctl principal is disabled.")
+		case errors.Is(err, auth.ErrIdentityRefused):
+			linkFailed(w, http.StatusForbidden, "Your GitHub identity is refused by mctl and cannot be used for linking.")
+		default:
+			linkFailed(w, http.StatusServiceUnavailable, "The principal store is unavailable; nothing was changed. Try again later.")
+		}
 		return
 	}
 
@@ -491,7 +500,12 @@ func (h *Handlers) handleIdentityLinkCallback(w http.ResponseWriter, r *http.Req
 		linkFailed(w, http.StatusBadGateway, "ZITADEL is not reachable right now.")
 		return
 	}
-	tok, err := l.oauthConfig(prov).Exchange(r.Context(), q.Get("code"), oauth2.VerifierOption(c.verifier))
+	code := q.Get("code")
+	if code == "" {
+		linkFailed(w, http.StatusBadRequest, "ZITADEL returned no code.")
+		return
+	}
+	tok, err := l.oauthConfig(prov).Exchange(r.Context(), code, oauth2.VerifierOption(c.verifier))
 	if err != nil {
 		slog.Warn("identity link: ZITADEL code exchange failed", "error", err)
 		linkFailed(w, http.StatusBadGateway, "Could not complete the ZITADEL sign-in.")

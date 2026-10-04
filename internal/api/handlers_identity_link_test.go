@@ -37,9 +37,13 @@ type fakeLinkStore struct {
 	merged   [][2]string
 	mergeErr error
 	listErr  error
+	provErr  error
 }
 
 func (f *fakeLinkStore) Provision(_ context.Context, id auth.Identity) (*principals.Principal, error) {
+	if f.provErr != nil {
+		return nil, f.provErr
+	}
 	return &principals.Principal{ID: "prn_" + id.Provider + "_" + id.Subject, Kind: auth.KindHuman, Status: principals.StatusActive}, nil
 }
 
@@ -513,6 +517,40 @@ func TestIdentityLinkCapsUnfinishedLinksPerSource(t *testing.T) {
 func TestIdentityLinkCookieIsHostPrefixed(t *testing.T) {
 	if !strings.HasPrefix(linkCookieName, "__Host-") {
 		t.Fatalf("link cookie %q lacks the __Host- prefix", linkCookieName)
+	}
+}
+
+// A store failure while proving GitHub is a 503 without its text; a refusal
+// is a 403 that says what was refused.
+func TestIdentityLinkGitHubLegClassifiesStoreErrors(t *testing.T) {
+	cases := map[string]struct {
+		err    error
+		status int
+	}{
+		"store down": {errors.New("dial tcp 10.0.0.7:5432: connection refused"), http.StatusServiceUnavailable},
+		"disabled":   {auth.ErrPrincipalDisabled, http.StatusForbidden},
+		"refused":    {auth.ErrIdentityRefused, http.StatusForbidden},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newLinkHarness(t)
+			h.store.provErr = tc.err
+			ck, state := h.start()
+			rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(state), ck, nil)
+			if rec.Code != tc.status || strings.Contains(rec.Body.String(), "10.0.0.7") {
+				t.Fatalf("GitHub leg = %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestIdentityLinkZitadelCallbackWithoutACode(t *testing.T) {
+	h := newLinkHarness(t)
+	ck, state := h.start()
+	zState := h.github(ck, state)
+	rec := h.do(http.MethodGet, linkCallbackPath+"?state="+url.QueryEscape(zState), ck, nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "no code") {
+		t.Fatalf("ZITADEL callback without a code = %d %s", rec.Code, rec.Body.String())
 	}
 }
 
