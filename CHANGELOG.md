@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.63.0](https://github.com/mctlhq/mctl-api/compare/4.62.0...4.63.0) (2026-10-04)
+
+
+### Features
+
+* **helm:** optional zitadelLinkSecret for the identity link client ([73569c4](https://github.com/mctlhq/mctl-api/commit/73569c43f38e414d273d7b9f8b70dda63163e98e))
+* **principals:** explicit ZITADEL identity linking and admin merge ([da9e54f](https://github.com/mctlhq/mctl-api/commit/da9e54fc987fd555d1dc8520fa5476ac7dfb228f))
+
 ## [4.62.0](https://github.com/mctlhq/mctl-api/compare/4.61.0...4.62.0) (2026-10-04)
 
 
