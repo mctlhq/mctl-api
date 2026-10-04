@@ -806,9 +806,16 @@ var builtinOperations = []Operation{
 			// DevLoop correlation identifiers (mctlhq/mctl-api#426,
 			// mctlhq/.github#50): dev_loop.py's investigate step sends these;
 			// cwft-mctl-agents-investigate declares all three.
-			// human_input_responses is deliberately NOT declared here: the CWFT
-			// does not declare it (mctl-api#372 item 3), so it stays in
-			// devLoopParamsPendingDeclaration.
+			// Human-input continuation (mctl-api#372 item 3, mctlhq/mctl-agents#473):
+			// dev_loop.py sends the accepted answers as a JSON array once a
+			// human answered a sealed question. cwft-mctl-agents-investigate
+			// declares it since mctlhq/mctl-gitops#1581. Opaque here: the
+			// investigator validates every entry (ids, hashes, bounded values)
+			// before any clone or model call; this only pins the array shape.
+			// OmitWhenEmpty so a run without answers keeps its exact argv.
+			{Name: "human_input_responses", Type: "string", Required: false, OmitWhenEmpty: true,
+				Description: "Optional. JSON array of accepted human-input answers for a DevLoop continuation (mctl-agents#473). Set only by the DevLoop; omit otherwise.",
+				Pattern:     `(?s)^\[.*\]$`},
 		}, append(agentPinParams("issue-investigator"),
 			devLoopCorrelationParams("temporal_workflow_id", "temporal_run_id", "execution_request_id")...)...),
 	},

@@ -3,6 +3,7 @@ package api_test
 import (
 	"net/http"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -58,6 +59,20 @@ var devLoopSubmissions = []struct {
 			"temporal_workflow_id": "dev-loop-mctlhq-mctl-agents-494",
 			"temporal_run_id":      "00000000-0000-0000-0000-000000000000",
 			"execution_request_id": "xr_0000",
+		},
+	},
+	{
+		// dev_loop.py human-input continuation (mctlhq/mctl-agents#473): the
+		// pinned, correlated investigate step plus the accepted answers.
+		name:      "investigate, human-input continuation",
+		operation: "mctl-agents-investigate",
+		params: map[string]string{
+			"issue_url":             "https://github.com/mctlhq/mctl-api/issues/372",
+			"agent_image":           pinImageByTag,
+			"agent_version":         "issue-investigator@1.54.0",
+			"temporal_workflow_id":  "dev-loop-mctlhq-mctl-agents-494",
+			"temporal_run_id":       "00000000-0000-0000-0000-000000000000",
+			"human_input_responses": `[{"request_id":"hir-0123456789abcdef","request_hash":"sha256:` + strings.Repeat("a", 64) + `","value":"library B","received_at":"2026-10-04T10:00:00Z"}]`,
 		},
 	},
 	{
@@ -218,9 +233,9 @@ var devLoopParamsPendingDeclaration = []struct {
 	param     string
 	value     string
 }{
-	// dev_loop.py human-input continuation; not declared by
-	// cwft-mctl-agents-investigate (mctlhq/mctl-api#372 item 3).
-	{"mctl-agents-investigate", "human_input_responses", `[{"request_id":"hir-0000000000000000"}]`},
+	// human_input_responses (mctl-api#372 item 3) moved to devLoopSubmissions
+	// above once cwft-mctl-agents-investigate declared it
+	// (mctlhq/mctl-gitops#1581).
 	// Loop identity (mctlhq/mctl-agents#461, #451) moved to devLoopSubmissions
 	// above: temporal_workflow_id, temporal_run_id and execution_request_id
 	// are now declared on all three DevLoop operations
@@ -320,4 +335,31 @@ func TestExecuteOperation_UncorrelatedCallerSendsNoCorrelationParams(t *testing.
 			}
 		})
 	}
+}
+
+// human_input_responses is opaque to mctl-api, but its shape is pinned: only
+// a JSON array reaches the investigator, and an empty value is an absence,
+// so a run without answers keeps the CWFT's exact argv (mctlhq/mctl-gitops#1581).
+func TestExecuteOperation_HumanInputResponsesShape(t *testing.T) {
+	const issue = "https://github.com/mctlhq/mctl-api/issues/372"
+	t.Run("non-array rejected", func(t *testing.T) {
+		router, exec := newTestRouter(t)
+		w := postAs(t, router, "/api/v1/operations/mctl-agents-investigate/execute", map[string]string{
+			"issue_url": issue, "human_input_responses": `{"request_id":"hir-0123456789abcdef"}`,
+		}, auth.NewServiceUser())
+		assertStatus(t, w, http.StatusBadRequest)
+		if len(exec.submittedParams) != 0 {
+			t.Fatal("a rejected submission reached the executor")
+		}
+	})
+	t.Run("empty omitted", func(t *testing.T) {
+		router, exec := newTestRouter(t)
+		w := postAs(t, router, "/api/v1/operations/mctl-agents-investigate/execute", map[string]string{
+			"issue_url": issue, "human_input_responses": "",
+		}, auth.NewServiceUser())
+		assertStatus(t, w, http.StatusAccepted)
+		if _, ok := exec.submittedParams[len(exec.submittedParams)-1]["human_input_responses"]; ok {
+			t.Error("an empty human_input_responses reached the executor; it must be omitted")
+		}
+	})
 }
