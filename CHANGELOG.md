@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.59.0](https://github.com/mctlhq/mctl-api/compare/4.58.0...4.59.0) (2026-10-04)
+
+
+### Features
+
+* **auth:** fail-closed groups for federated OIDC providers (ZITADEL) ([b81704e](https://github.com/mctlhq/mctl-api/commit/b81704e6b090ec3a30824a9497c77632e2b0b823)), closes [#434](https://github.com/mctlhq/mctl-api/issues/434)
+* **auth:** register ZITADEL as a federated OIDC provider with enforced audience ([eaf1895](https://github.com/mctlhq/mctl-api/commit/eaf1895958dfaa6682106bce29f57f2e68e63529))
+* **helm:** optional surfacePortalTokenSecret for the surface:portal principal ([ae9630a](https://github.com/mctlhq/mctl-api/commit/ae9630ab5edca987ad35a5790fa1f7d85e012548))
+* **helm:** optional surfacePortalTokenSecret for the surface:portal principal ([2d4a053](https://github.com/mctlhq/mctl-api/commit/2d4a0532f50d71d644be7c188e748989819a4cb3))
+
+
+### Bug Fixes
+
+* **auth:** keep Dex slot on array groups, count unreadable claims ([e9276cc](https://github.com/mctlhq/mctl-api/commit/e9276ccdcea4eae3bd5693fc44d04dc899b20117)), closes [#434](https://github.com/mctlhq/mctl-api/issues/434)
+* **auth:** read object-shaped groups claims, refuse grant_groups on Dex ([f796533](https://github.com/mctlhq/mctl-api/commit/f7965335deb542d7809ffce85d14b93886aba8a0)), closes [#434](https://github.com/mctlhq/mctl-api/issues/434)
+
 ## [4.58.0](https://github.com/mctlhq/mctl-api/compare/4.57.0...4.58.0) (2026-09-30)
 
 
