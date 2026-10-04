@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.61.0](https://github.com/mctlhq/mctl-api/compare/4.60.0...4.61.0) (2026-10-04)
+
+
+### Features
+
+* **dev-loop:** abandon a DevLoopWorkflow over REST and MCP ([d582573](https://github.com/mctlhq/mctl-api/commit/d582573c583a6c6b2040075bc6d6974a4335bcae))
+* **dev-loop:** abandon a DevLoopWorkflow over REST and MCP ([7ddfd4b](https://github.com/mctlhq/mctl-api/commit/7ddfd4b4a4e9887d42f1fedf56f50b6763eac9e4)), closes [#392](https://github.com/mctlhq/mctl-api/issues/392)
+* **work-items:** relay read-only work-item history to surfaces ([1169110](https://github.com/mctlhq/mctl-api/commit/116911090c1d96889bd645b3e1fdd59b89636554))
+* **work-items:** relay read-only work-item history to surfaces ([7c41730](https://github.com/mctlhq/mctl-api/commit/7c41730614805fb2176fbb5769f281275f650b71)), closes [#436](https://github.com/mctlhq/mctl-api/issues/436)
+
+
+### Bug Fixes
+
+* **dev-loop:** pin abandon signal to the described run ([238cdad](https://github.com/mctlhq/mctl-api/commit/238cdad382a254d2c46a41988213e358a40b8524))
+
 ## [4.60.0](https://github.com/mctlhq/mctl-api/compare/4.59.0...4.60.0) (2026-10-04)
 
 
