@@ -42,6 +42,10 @@ type fakeDevLoopClient struct {
 	approveErr            error
 	lastApprovedWorkflow  string
 	lastApprovePayload    map[string]string
+	abandonErr            error
+	abandonCalls          int
+	lastAbandonPayload    map[string]string
+	onAbandon             func(f *fakeDevLoopClient)
 	describeErr           error
 	describeStatus        string
 	lastDescribedWorkflow string
@@ -103,6 +107,15 @@ func (f *fakeDevLoopClient) SignalApprove(ctx context.Context, workflowID string
 	f.lastApprovedWorkflow = workflowID
 	f.lastApprovePayload = payload
 	return f.approveErr
+}
+
+func (f *fakeDevLoopClient) SignalAbandon(ctx context.Context, workflowID string, payload map[string]string) error {
+	f.abandonCalls++
+	f.lastAbandonPayload = payload
+	if f.onAbandon != nil {
+		f.onAbandon(f)
+	}
+	return f.abandonErr
 }
 
 // DescribeDevLoop prefers describeExec/describeExecErr (the richer fields)

@@ -5,6 +5,11 @@
   "default_disabled": true,
   "tools": [
     {
+      "name": "mctl_abandon_dev_loop",
+      "enabled": true,
+      "reason": "Signals abandon into a running DevLoopWorkflow, ending that loop for good; the counterpart of mctl_approve_dev_loop and the only MCP way to end a loop parked at approval (mctlhq/mctl-api#392). Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
+    },
+    {
       "name": "mctl_acknowledge_incident",
       "enabled": true,
       "reason": "Marks an incident acknowledged, changing platform incident state other operators read. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."

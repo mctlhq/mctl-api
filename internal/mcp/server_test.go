@@ -397,6 +397,101 @@ func TestToolApproveDevLoop_PostsToDevLoopApprovePath(t *testing.T) {
 	}
 }
 
+func callToolAbandonDevLoop(t *testing.T, apiURL string, args map[string]any) (*mcplib.CallToolResult, error) {
+	t.Helper()
+	srv := NewServer(apiURL, "test-token")
+	_, handler := srv.toolAbandonDevLoop()
+	return handler(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "mctl_abandon_dev_loop",
+			Arguments: args,
+		},
+	})
+}
+
+func TestToolAbandonDevLoop_PostsReasonToAbandonPath(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]interface{}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.EscapedPath()
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workflow_id":"dev-loop-mctlhq-seerrsense-73","outcome":"signalled"}`))
+	}))
+	defer backend.Close()
+
+	// "abandoned_by" is passed deliberately although the tool does not declare
+	// it: who abandoned the loop is the authenticated caller, established
+	// server-side, so the value must never reach the request body.
+	result, err := callToolAbandonDevLoop(t, backend.URL, map[string]any{
+		"workflow_id":  "dev-loop-mctlhq-seerrsense-73",
+		"reason":       "superseded by mctl-gitops#1363",
+		"abandoned_by": "someone-else",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("expected POST, got %s", gotMethod)
+	}
+	if want := "/api/v1/agents/dev-loop/dev-loop-mctlhq-seerrsense-73/abandon"; gotPath != want {
+		t.Errorf("path: got %q, want %q", gotPath, want)
+	}
+	if len(gotBody) != 1 || gotBody["reason"] != "superseded by mctl-gitops#1363" {
+		t.Errorf("body: got %+v, want only the reason", gotBody)
+	}
+}
+
+func TestToolAbandonDevLoop_RequiresWorkflowIDAndReason(t *testing.T) {
+	called := false
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	for name, args := range map[string]map[string]any{
+		"no reason":      {"workflow_id": "dev-loop-mctlhq-seerrsense-73"},
+		"blank reason":   {"workflow_id": "dev-loop-mctlhq-seerrsense-73", "reason": "  "},
+		"no workflow_id": {"reason": "superseded"},
+	} {
+		result, err := callToolAbandonDevLoop(t, backend.URL, args)
+		if err != nil {
+			t.Fatalf("%s: handler returned error: %v", name, err)
+		}
+		if !result.IsError {
+			t.Errorf("%s: expected an error result", name)
+		}
+	}
+	if called {
+		t.Error("an incomplete call reached the API")
+	}
+}
+
+// A non-2xx answer from the API (404 unknown workflow, 502 Temporal failure)
+// is a tool error, never a success.
+func TestToolAbandonDevLoop_APIErrorIsToolError(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"workflow not found"}`, http.StatusNotFound)
+	}))
+	defer backend.Close()
+
+	result, err := callToolAbandonDevLoop(t, backend.URL, map[string]any{
+		"workflow_id": "dev-loop-mctlhq-seerrsense-999",
+		"reason":      "superseded",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected an error result for a 404, got %+v", result.Content)
+	}
+}
+
 func TestToolApproveDevLoop_EscapesWorkflowID(t *testing.T) {
 	var gotPath string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

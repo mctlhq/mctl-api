@@ -77,6 +77,7 @@ type WorkflowExecutor interface {
 type DevLoopClient interface {
 	StartDevLoopWorkflow(ctx context.Context, issueURL string) (workflowID, runID string, err error)
 	SignalApprove(ctx context.Context, workflowID string, payload map[string]string) error
+	SignalAbandon(ctx context.Context, workflowID string, payload map[string]string) error
 	DescribeDevLoop(ctx context.Context, workflowID string) (status string, err error)
 	// DescribeDevLoopExecution is DescribeDevLoop's richer sibling: it also
 	// returns the existing execution's run id, which startDevLoop
