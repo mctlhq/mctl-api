@@ -399,6 +399,47 @@ func TestDeploymentOIDCProvidersSecretConflictsWithLiteral(t *testing.T) {
 	}
 }
 
+func TestDeploymentZitadelLinkSecretConflictsWithLiteral(t *testing.T) {
+	helmPath := requireHelm(t)
+
+	for _, key := range []string{"ZITADEL_LINK_CLIENT_ID", "ZITADEL_LINK_CLIENT_SECRET"} {
+		// #nosec G204 -- helmPath is resolved via exec.LookPath("helm"), and the
+		// arguments are fixed literals.
+		cmd := exec.Command(helmPath, "template", "mctl-api", ".",
+			"--set", "zitadelLinkSecret=mctl-api-oidc-zitadel",
+			"--set-string", "env."+key+"=literal",
+		)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Run(); err == nil {
+			t.Fatalf("expected helm template to fail when both env.%s and zitadelLinkSecret are set", key)
+		}
+		if !strings.Contains(out.String(), "not both") {
+			t.Errorf("%s: unexpected failure output:\n%s", key, out.String())
+		}
+	}
+}
+
+// An empty literal does not trip the guard, but must not render a second
+// entry next to the secretKeyRef either.
+func TestDeploymentZitadelLinkSecretSkipsAnEmptyLiteral(t *testing.T) {
+	d, _ := renderDeployment(t, "--set", "zitadelLinkSecret=mctl-api-oidc-zitadel",
+		"--set-string", "env.ZITADEL_LINK_CLIENT_ID=")
+	n := 0
+	for _, e := range d.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "ZITADEL_LINK_CLIENT_ID" {
+			n++
+			if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+				t.Errorf("ZITADEL_LINK_CLIENT_ID rendered as a literal: %+v", e)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("ZITADEL_LINK_CLIENT_ID rendered %d times, want 1", n)
+	}
+}
+
 func TestDeploymentEmptyZitadelLinkSecretRendersUnchanged(t *testing.T) {
 	_, defaultOut := renderDeployment(t)
 	_, emptyOut := renderDeployment(t, "--set", "zitadelLinkSecret=")
