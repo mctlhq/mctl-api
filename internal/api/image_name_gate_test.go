@@ -129,17 +129,23 @@ func TestImageNameGate_AdminsAreNotChecked(t *testing.T) {
 // "builds" follows the workflows: deploy-service with a dockerfile_repo
 // (except the openclaw template), preview-deploy with a git_ref.
 func TestImageNameGate_SharedNameRunsButDoesNotBuild(t *testing.T) {
-	git := &fakeGitReader{imagePolicy: imagePolicy(t, testImageList, nil)}
+	policy := imagePolicy(t, testImageList, nil)
+	// tests/openclaw runs mctl-openclaw, so deploy-service does not build it
+	// even when service_template is left at its default.
+	policy.AddRunsOther("tests", "openclaw")
+	git := &fakeGitReader{imagePolicy: policy}
 	const previewPath = "/api/v1/operations/preview-deploy/execute"
 	runOpenclawTemplate := onboardAs("openclaw")
 	runOpenclawTemplate["service_template"] = "openclaw"
 	updateConfig := map[string]string{"action": "update-config", "team_name": "tests", "component_name": "openclaw", "dockerfile_repo": "myorg/my-app", "image_tag": "1.0.0"}
+	deployExisting := map[string]string{"action": "deploy", "team_name": "tests", "component_name": "openclaw", "dockerfile_repo": "myorg/my-app", "git_tag": "v1.0.0"}
 	cases := []struct {
 		label string
 		path  string
 		input map[string]string
 		want  int
 	}{
+		{"deploy of a service running another image runs", deployPath, deployExisting, http.StatusAccepted},
 		{"onboard builds", deployPath, onboardAs("openclaw"), http.StatusForbidden},
 		{"openclaw template runs a fixed image", deployPath, runOpenclawTemplate, http.StatusAccepted},
 		{"update-config runs", deployPath, updateConfig, http.StatusAccepted},
@@ -175,5 +181,20 @@ func TestImageNameGate_RefusesUnknownTenantAndForeignRegistry(t *testing.T) {
 				t.Fatal("refused build must not be submitted")
 			}
 		})
+	}
+}
+
+// A deploy of an existing service that runs its own image builds it, so a
+// shared name is refused there as on onboard.
+func TestImageNameGate_DeployOfOwnImageBuilds(t *testing.T) {
+	git := &fakeGitReader{imagePolicy: imagePolicy(t, testImageList, nil)}
+	router, exec, _ := imageGateRouter(t, git)
+	w := postAs(t, router, deployPath, map[string]string{
+		"action": "deploy", "team_name": "tests", "component_name": "openclaw",
+		"dockerfile_repo": "myorg/my-app", "git_tag": "v1.0.0",
+	}, ownerUser)
+	assertStatus(t, w, http.StatusForbidden)
+	if len(exec.submittedParams) != 0 {
+		t.Fatal("refused build must not be submitted")
 	}
 }

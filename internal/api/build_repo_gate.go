@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
@@ -111,25 +112,24 @@ func (h *Handlers) checkImageName(op operations.Operation, input map[string]stri
 	if err != nil {
 		return fmt.Errorf("%w: could not read the image name policy: %v", errBuildRepoRefused, err)
 	}
-	if err := policy.Allowed(team, strings.TrimSpace(input["component_name"]), buildsImage(op, input)); err != nil {
+	name := strings.TrimSpace(input["component_name"])
+	if err := policy.Allowed(team, name, buildsImage(op, input, policy, team, name)); err != nil {
 		return fmt.Errorf("%w: %v", errBuildRepoRefused, err)
 	}
 	return nil
 }
 
 // buildsImage reports whether the operation will push to
-// <registry>/<component_name>, mirroring the workflows' own conditions, which
-// tpl-validate-tenant's --build decision follows too: preview-deploy builds
-// when git_ref is set; deploy-service builds unless it only updates config,
-// has no dockerfile_repo, or uses the openclaw template (whose services run
-// a fixed image). Any other operation is taken to build, the stricter
-// answer.
-func buildsImage(op operations.Operation, input map[string]string) bool {
+// <registry>/<component_name>, mirroring the workflows' own decision:
+// preview-deploy builds when git_ref is set; deploy-service as
+// ImageNamePolicy.DeployServiceBuilds says. Any other operation is taken to
+// build, the stricter answer.
+func buildsImage(op operations.Operation, input map[string]string, policy *gitops.ImageNamePolicy, team, name string) bool {
 	switch op.Name {
 	case "preview-deploy":
 		return input["git_ref"] != ""
 	case "deploy-service":
-		return input["action"] != "update-config" && input["dockerfile_repo"] != "" && input["service_template"] != "openclaw"
+		return policy.DeployServiceBuilds(input["action"], input["dockerfile_repo"], input["service_template"], team, name)
 	}
 	return true
 }

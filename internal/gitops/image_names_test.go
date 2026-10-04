@@ -56,6 +56,8 @@ func checkout(t *testing.T) string {
 	writeFile(t, filepath.Join(svc, "labs", "openclaw", "values.yaml"), "image:\n  repository: ghcr.io/mctlhq/mctl-openclaw\n")
 	// another registry's image of the same name takes nothing here
 	writeFile(t, filepath.Join(svc, "labs", "elsewhere", "values.yaml"), "image:\n  repository: ghcr.io/other/free\n")
+	// a service that names no image at all
+	writeFile(t, filepath.Join(svc, "labs", "no-image", "values.yaml"), "replicas: 1\n")
 	// a dot-directory is not a team, as the script's globs skip it
 	writeFile(t, filepath.Join(svc, ".hidden", "taken", "values.yaml"), "x: 1\n")
 	// a service directory with no values yet still takes the name
@@ -171,5 +173,51 @@ func TestImageNamePolicy_StaleCheckoutRefuses(t *testing.T) {
 	}
 	if _, err := synced(root, ImageNamePolicyMaxAge-time.Minute).ImageNamePolicy(); err != nil {
 		t.Fatalf("a fresh checkout must answer: %v", err)
+	}
+}
+
+func TestImageNamePolicy_RunsOtherImage(t *testing.T) {
+	p, err := synced(checkout(t), time.Minute).ImageNamePolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for svc, want := range map[string]bool{
+		"labs/portfolio":   false, // runs ghcr.io/mctlhq/portfolio
+		"labs/openclaw":    true,  // runs mctl-openclaw
+		"labs/web-preview": true,  // runs web
+		"labs/elsewhere":   true,  // runs an image from another registry
+		"labs/no-image":    false, // names no image
+		"karabu/draw":      false, // no values.yaml
+		"ovk/absent":       false, // no such service
+	} {
+		team, name, _ := strings.Cut(svc, "/")
+		if got := p.RunsOtherImage(team, name); got != want {
+			t.Errorf("RunsOtherImage(%s) = %v, want %v", svc, got, want)
+		}
+	}
+}
+
+func TestImageNamePolicy_DeployServiceBuilds(t *testing.T) {
+	p, err := synced(checkout(t), time.Minute).ImageNamePolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		action, repo, template, team, name string
+		want                               bool
+	}{
+		{"update-config", "o/r", "default", "labs", "portfolio", false},
+		{"deploy", "", "default", "labs", "portfolio", false},
+		{"onboard", "o/r", "default", "labs", "brand-new", true},
+		{"onboard", "o/r", "openclaw", "labs", "brand-new", false},
+		{"deploy", "o/r", "default", "labs", "portfolio", true},
+		{"deploy", "o/r", "default", "labs", "openclaw", false}, // runs mctl-openclaw
+		{"deploy", "o/r", "default", "labs", "no-image", true},
+		{"deploy", "o/r", "default", "karabu", "draw", true}, // no values.yaml
+	}
+	for _, c := range cases {
+		if got := p.DeployServiceBuilds(c.action, c.repo, c.template, c.team, c.name); got != c.want {
+			t.Errorf("DeployServiceBuilds(%+v) = %v", c, got)
+		}
 	}
 }

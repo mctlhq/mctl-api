@@ -45,9 +45,15 @@ type ImageNamePolicy struct {
 	owners map[string]map[string]bool
 	// tenants are the teams with platform-gitops/tenants/<team>/.
 	tenants map[string]bool
+	// runsOther holds "team/name" for each services/<team>/<name>/values.yaml
+	// that names an image and none of them is <registry>/<name>.
+	runsOther map[string]bool
 }
 
 var imageNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// anyRepositoryRE matches any values.yaml line naming an image.
+var anyRepositoryRE = regexp.MustCompile(`(?m)^[ \t\r\f\v]*repository:`)
 
 // valuesRepositoryRE matches a values.yaml line running <registry>/<name>,
 // line by line like the script's grep: [[:space:]] there never spans lines.
@@ -66,11 +72,12 @@ var ErrImageNameRefused = errors.New("image name refused")
 // not allow.
 func ParseImageNames(data []byte) (*ImageNamePolicy, error) {
 	p := &ImageNamePolicy{
-		grants:   map[string]map[string]bool{},
-		reserved: map[string]bool{},
-		shared:   map[string]bool{},
-		owners:   map[string]map[string]bool{},
-		tenants:  map[string]bool{},
+		grants:    map[string]map[string]bool{},
+		reserved:  map[string]bool{},
+		shared:    map[string]bool{},
+		owners:    map[string]map[string]bool{},
+		tenants:   map[string]bool{},
+		runsOther: map[string]bool{},
 	}
 	registries := 0
 	sc := bufio.NewScanner(bytes.NewReader(data))
@@ -119,6 +126,31 @@ func (p *ImageNamePolicy) AddOwner(name, team string) {
 		p.owners[name] = map[string]bool{}
 	}
 	p.owners[name][team] = true
+}
+
+// AddRunsOther records that services/<team>/<name> runs an image other than
+// <registry>/<name>.
+func (p *ImageNamePolicy) AddRunsOther(team, name string) { p.runsOther[team+"/"+name] = true }
+
+// RunsOtherImage reports whether the existing service team/name names an
+// image in its values.yaml and none of them is <registry>/<name>. Building
+// <registry>/<name> for it would push an image nothing runs, so
+// deploy-service does not (tpl-validate-tenant's build decision).
+func (p *ImageNamePolicy) RunsOtherImage(team, name string) bool { return p.runsOther[team+"/"+name] }
+
+// DeployServiceBuilds is deploy-service's build decision (the `builds`
+// output of tpl-validate-tenant's validate): never for update-config or
+// without a dockerfile_repo; on onboard, unless the template is openclaw
+// (whose services run a fixed image); on any other action, unless the
+// existing service runs another image.
+func (p *ImageNamePolicy) DeployServiceBuilds(action, dockerfileRepo, serviceTemplate, team, name string) bool {
+	if action == "update-config" || dockerfileRepo == "" {
+		return false
+	}
+	if action == "onboard" {
+		return serviceTemplate != "openclaw"
+	}
+	return !p.RunsOtherImage(team, name)
 }
 
 // AddTenant records that team has platform-gitops/tenants/<team>/.
@@ -230,8 +262,13 @@ func (r *Reader) ImageNamePolicy() (*ImageNamePolicy, error) {
 			if err != nil {
 				return nil, fmt.Errorf("reading services/%s/%s/values.yaml: %w", t.Name(), a.Name(), err)
 			}
+			runsOwn := false
 			for _, m := range repoRE.FindAllSubmatch(values, -1) {
 				p.AddOwner(string(m[1]), t.Name())
+				runsOwn = runsOwn || string(m[1]) == a.Name()
+			}
+			if !runsOwn && anyRepositoryRE.Match(values) {
+				p.AddRunsOther(t.Name(), a.Name())
 			}
 		}
 	}
