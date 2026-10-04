@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeFile(t *testing.T, path, content string) {
@@ -26,6 +27,13 @@ grant labs mctl-telegram
 grant * openclaw
 `
 
+// synced returns a Reader over root whose last successful sync was age ago.
+func synced(root string, age time.Duration) *Reader {
+	r := &Reader{localPath: root}
+	r.lastSync.Store(time.Now().Add(-age).UnixNano())
+	return r
+}
+
 func checkout(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -44,7 +52,7 @@ func checkout(t *testing.T) string {
 }
 
 func TestImageNamePolicy_Rule(t *testing.T) {
-	r := &Reader{localPath: checkout(t)}
+	r := synced(checkout(t), time.Minute)
 	p, err := r.ImageNamePolicy()
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +91,7 @@ func TestImageNamePolicy_FailsClosed(t *testing.T) {
 		if err := os.Remove(filepath.Join(root, ImageNamesFile)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := (&Reader{localPath: root}).ImageNamePolicy(); err == nil {
+		if _, err := synced(root, time.Minute).ImageNamePolicy(); err == nil {
 			t.Fatal("a missing list must be an error")
 		}
 	})
@@ -92,7 +100,7 @@ func TestImageNamePolicy_FailsClosed(t *testing.T) {
 		if err := os.RemoveAll(filepath.Join(root, "platform-gitops", "services")); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := (&Reader{localPath: root}).ImageNamePolicy(); err == nil {
+		if _, err := synced(root, time.Minute).ImageNamePolicy(); err == nil {
 			t.Fatal("a missing services tree must be an error, not an empty one")
 		}
 	})
@@ -107,5 +115,18 @@ func TestImageNamePolicy_FailsClosed(t *testing.T) {
 				t.Fatalf("%q must not parse", strings.TrimSpace(list))
 			}
 		})
+	}
+}
+
+func TestImageNamePolicy_StaleCheckoutRefuses(t *testing.T) {
+	root := checkout(t)
+	if _, err := (&Reader{localPath: root}).ImageNamePolicy(); err == nil || !strings.Contains(err.Error(), "never synced") {
+		t.Fatalf("a checkout that never synced must not answer: %v", err)
+	}
+	if _, err := synced(root, ImageNamePolicyMaxAge+time.Minute).ImageNamePolicy(); err == nil || !strings.Contains(err.Error(), "last synced") {
+		t.Fatalf("a stale checkout must not answer: %v", err)
+	}
+	if _, err := synced(root, ImageNamePolicyMaxAge-time.Minute).ImageNamePolicy(); err != nil {
+		t.Fatalf("a fresh checkout must answer: %v", err)
 	}
 }

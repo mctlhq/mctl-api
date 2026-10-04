@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // ImageNamesFile is the reviewed list of reserved and granted image names
@@ -17,6 +18,12 @@ import (
 // (platform-gitops/argo-workflows/scripts/check-image-name.sh); this is the
 // API's copy of that rule, read from the same file.
 const ImageNamesFile = "platform-gitops/argo-workflows/config/image-names.txt"
+
+// ImageNamePolicyMaxAge bounds how old the checkout may be when the policy
+// is read. The checkout refreshes every minute; a last successful sync older
+// than this means the API cannot see the current list or services, which is
+// "could not observe", not "allowed".
+const ImageNamePolicyMaxAge = 10 * time.Minute
 
 // ImageNamePolicy decides which team may build into and run
 // ghcr.io/mctlhq/<name>. Tenant builds push ghcr.io/mctlhq/<component_name>
@@ -116,10 +123,19 @@ func (p *ImageNamePolicy) Allowed(team, name string) error {
 // ImageNamePolicy reads ImageNamesFile and the services tree from the same
 // checkout, under one read lock. Every read error is returned: a missing list,
 // an unreadable services directory, or an unreadable values.yaml is not an
-// empty policy.
+// empty policy. So is a checkout that never synced, or whose last successful
+// sync is older than ImageNamePolicyMaxAge.
 func (r *Reader) ImageNamePolicy() (*ImageNamePolicy, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
+	last := r.LastSync()
+	if last.IsZero() {
+		return nil, errors.New("gitops checkout has never synced")
+	}
+	if age := time.Since(last); age > ImageNamePolicyMaxAge {
+		return nil, fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), ImageNamePolicyMaxAge)
+	}
 
 	data, err := os.ReadFile(filepath.Join(r.localPath, ImageNamesFile)) //nolint:gosec // fixed path inside the checkout
 	if err != nil {
