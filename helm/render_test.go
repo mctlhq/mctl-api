@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -327,6 +328,77 @@ func TestDeploymentBothSurfaceTokenSecretsRenderIndependently(t *testing.T) {
 	}
 }
 
+func TestDeploymentDefaultRenderKeepsOIDCProvidersLiteral(t *testing.T) {
+	d, _ := renderDeployment(t)
+	c := mainContainer(t, d)
+
+	// The empty default from values.yaml env, as before oidcProvidersSecret.
+	if n := countEnv(c, "MCTL_OIDC_PROVIDERS"); n != 1 {
+		t.Fatalf("expected exactly one MCTL_OIDC_PROVIDERS env entry, got %d", n)
+	}
+	env, _ := findEnv(c, "MCTL_OIDC_PROVIDERS")
+	if env.Value != "" || env.ValueFrom != nil {
+		t.Errorf("default MCTL_OIDC_PROVIDERS = %+v, want an empty literal", env)
+	}
+}
+
+func TestDeploymentEmptyOIDCProvidersRendersUnchanged(t *testing.T) {
+	_, defaultOut := renderDeployment(t)
+	_, emptyOut := renderDeployment(t, "--set", "oidcProvidersSecret=")
+
+	if !bytes.Equal(defaultOut, emptyOut) {
+		t.Error("empty oidcProvidersSecret should render byte-identical output to the default")
+	}
+}
+
+func TestDeploymentRendersOIDCProvidersEnv(t *testing.T) {
+	d, _ := renderDeployment(t, "--set", "oidcProvidersSecret=mctl-api-oidc-zitadel")
+	c := mainContainer(t, d)
+
+	if n := countEnv(c, "MCTL_OIDC_PROVIDERS"); n != 1 {
+		t.Fatalf("expected exactly one MCTL_OIDC_PROVIDERS env entry, got %d", n)
+	}
+	env, _ := findEnv(c, "MCTL_OIDC_PROVIDERS")
+	if env.Value != "" {
+		t.Errorf("MCTL_OIDC_PROVIDERS.value = %q, want empty (sourced from the Secret only)", env.Value)
+	}
+	if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+		t.Fatal("expected MCTL_OIDC_PROVIDERS to be sourced from a secretKeyRef")
+	}
+	ref := env.ValueFrom.SecretKeyRef
+	if ref.Name != "mctl-api-oidc-zitadel" {
+		t.Errorf("secretKeyRef.name = %q, want %q", ref.Name, "mctl-api-oidc-zitadel")
+	}
+	if ref.Key != "MCTL_OIDC_PROVIDERS" {
+		t.Errorf("secretKeyRef.key = %q, want %q", ref.Key, "MCTL_OIDC_PROVIDERS")
+	}
+	// The Job fills the Secret after Argo CD creates it empty: a required
+	// reference would hold the pod in CreateContainerConfigError until then.
+	if !ref.Optional {
+		t.Error("expected secretKeyRef.optional to be true")
+	}
+}
+
+func TestDeploymentOIDCProvidersSecretConflictsWithLiteral(t *testing.T) {
+	helmPath := requireHelm(t)
+
+	// #nosec G204 -- helmPath is resolved via exec.LookPath("helm"), and the
+	// arguments are fixed literals.
+	cmd := exec.Command(helmPath, "template", "mctl-api", ".",
+		"--set", "oidcProvidersSecret=mctl-api-oidc-zitadel",
+		"--set-string", "env.MCTL_OIDC_PROVIDERS=[]",
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected helm template to fail when both env.MCTL_OIDC_PROVIDERS and oidcProvidersSecret are set")
+	}
+	if !strings.Contains(out.String(), "not both") {
+		t.Errorf("unexpected failure output:\n%s", out.String())
+	}
+}
+
 func TestDeploymentUsagePricingKeyOverride(t *testing.T) {
 	d, _ := renderDeployment(t,
 		"--set", "usagePricingConfigMap=cm",
@@ -397,6 +469,7 @@ func TestHelmLintCleanAcrossOptionalValues(t *testing.T) {
 		nil,
 		{"--set", "usagePricingConfigMap=mctl-api-usage-pricing"},
 		{"--set", "surfaceTelegramTokenSecret=mctl-api-surface-telegram"},
+		{"--set", "oidcProvidersSecret=mctl-api-oidc-zitadel"},
 	}
 	for _, extra := range cases {
 		args := append([]string{"lint", "."}, extra...)

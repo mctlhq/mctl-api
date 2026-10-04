@@ -37,9 +37,17 @@ spec:
                 name: {{ .Values.envFromExtraSecret }}
             {{- end }}
           env:
+            {{- if and .Values.oidcProvidersSecret .Values.env.MCTL_OIDC_PROVIDERS }}
+            {{- fail "set MCTL_OIDC_PROVIDERS either in env or through oidcProvidersSecret, not both" }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
+            {{- /* oidcProvidersSecret supplies it below; the empty default in
+                   values.yaml would otherwise render a second entry with the
+                   same name, which server-side apply refuses. */}}
+            {{- if not (and $.Values.oidcProvidersSecret (eq $key "MCTL_OIDC_PROVIDERS")) }}
             - name: {{ $key }}
               value: {{ $value | quote }}
+            {{- end }}
             {{- end }}
             - name: PORT
               value: {{ .Values.service.port | quote }}
@@ -98,6 +106,18 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.surfacePortalTokenSecret }}
                   key: MCTL_SURFACE_PORTAL_TOKEN
+                  optional: true
+            {{- end }}
+            {{- if .Values.oidcProvidersSecret }}
+            # The federation registry (docs/federation.md). Optional on purpose:
+            # mctl-gitops pre-creates the Secret empty and the zitadel-iac Job
+            # fills it, so the key may be absent. An unset MCTL_OIDC_PROVIDERS
+            # is today's Dex-only configuration, not a failure.
+            - name: MCTL_OIDC_PROVIDERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oidcProvidersSecret }}
+                  key: MCTL_OIDC_PROVIDERS
                   optional: true
             {{- end }}
             {{- if .Values.usagePricingConfigMap }}
