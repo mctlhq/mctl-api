@@ -1,5 +1,15 @@
 # Changelog
 
+## [4.60.0](https://github.com/mctlhq/mctl-api/compare/4.59.0...4.60.0) (2026-10-04)
+
+
+### Features
+
+* **helm:** optional oidcProvidersSecret for MCTL_OIDC_PROVIDERS ([90d7eb7](https://github.com/mctlhq/mctl-api/commit/90d7eb76ef59ba24fecb8fd5cfd58ab39a0beeb4))
+* **helm:** optional oidcProvidersSecret for MCTL_OIDC_PROVIDERS ([8d6f11d](https://github.com/mctlhq/mctl-api/commit/8d6f11d2469ecb809d49ee8ccc4238548d370cf6)), closes [#434](https://github.com/mctlhq/mctl-api/issues/434)
+* **operations:** forward human_input_responses to investigate ([d3bcaaf](https://github.com/mctlhq/mctl-api/commit/d3bcaafa9a33867cd601e861401e31848c5e3aec))
+* **operations:** forward human_input_responses to investigate ([18994c5](https://github.com/mctlhq/mctl-api/commit/18994c5f2f240cafbf6bdab7d441955e87b3fda3))
+
 ## [4.59.0](https://github.com/mctlhq/mctl-api/compare/4.58.0...4.59.0) (2026-10-04)
 
 
