@@ -56,6 +56,14 @@ var (
 	ErrMergeConflict = errors.New("both principals hold an identity of the same provider")
 )
 
+// MergeResult is what MergePrincipals did. AlreadyMerged marks a retry: from
+// was already disabled with no live identity left, so nothing moved and
+// nothing changed.
+type MergeResult struct {
+	Moved         int
+	AlreadyMerged bool
+}
+
 // OwnedElsewhereError names the principal that holds the identity.
 type OwnedElsewhereError struct{ PrincipalID string }
 
@@ -196,13 +204,25 @@ func (s *Store) UnlinkIdentity(ctx context.Context, principalID, identityID stri
 // on #435) and is not reachable from self-service. Both must be human, into
 // must be active, and they must not both hold a live identity of the same
 // provider and issuer.
-func (s *Store) MergePrincipals(ctx context.Context, from, into string) (moved int, err error) {
+//
+// A retry is safe: a from that is already disabled and holds no live
+// identity (what a completed merge leaves, and nothing else does, since an
+// unlink never removes the last one) answers AlreadyMerged without changing
+// anything. The store does not record which principal it went into; the
+// principal.merge audit row does. A from that is disabled but still holds
+// live identities was disabled for another reason and is refused.
+func (s *Store) MergePrincipals(ctx context.Context, from, into string) (MergeResult, error) {
 	if from == "" || into == "" || from == into {
-		return 0, fmt.Errorf("%w: merge needs two different principals", ErrInvalid)
+		return MergeResult{}, fmt.Errorf("%w: merge needs two different principals", ErrInvalid)
 	}
+	return s.mergePrincipals(ctx, from, into)
+}
+
+func (s *Store) mergePrincipals(ctx context.Context, from, into string) (MergeResult, error) {
+	var none MergeResult
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("principals: begin: %w", err)
+		return none, fmt.Errorf("principals: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	// Both principal locks, in a fixed order, so two merges of the same pair
@@ -211,42 +231,53 @@ func (s *Store) MergePrincipals(ctx context.Context, from, into string) (moved i
 	sort.Strings(keys)
 	for _, k := range keys {
 		if err := lockPrincipalTx(ctx, tx, k); err != nil {
-			return 0, err
+			return none, err
 		}
 	}
 	src, err := getPrincipalTx(ctx, tx, from)
 	if err != nil {
-		return 0, err
+		return none, err
 	}
 	dst, err := getPrincipalTx(ctx, tx, into)
 	if err != nil {
-		return 0, err
+		return none, err
 	}
 	if src.Kind != auth.KindHuman || dst.Kind != auth.KindHuman {
-		return 0, fmt.Errorf("%w: only human principals are merged", ErrInvalid)
+		return none, fmt.Errorf("%w: only human principals are merged", ErrInvalid)
 	}
 	if dst.Status != StatusActive {
-		return 0, auth.ErrPrincipalDisabled
+		return none, fmt.Errorf("%w: merge target %s", auth.ErrPrincipalDisabled, into)
+	}
+	if src.Status != StatusActive {
+		var live int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM external_identities
+			WHERE principal_id=$1 AND revoked_at IS NULL`, from).Scan(&live); err != nil {
+			return none, err
+		}
+		if live > 0 {
+			return none, fmt.Errorf("%w: merge source %s is disabled", auth.ErrPrincipalDisabled, from)
+		}
+		return MergeResult{AlreadyMerged: true}, nil
 	}
 	var conflicts int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM external_identities a
 		JOIN external_identities b ON a.provider=b.provider AND a.issuer=b.issuer
 		WHERE a.principal_id=$1 AND b.principal_id=$2 AND a.revoked_at IS NULL AND b.revoked_at IS NULL`,
 		from, into).Scan(&conflicts); err != nil {
-		return 0, err
+		return none, err
 	}
 	if conflicts > 0 {
-		return 0, ErrMergeConflict
+		return none, ErrMergeConflict
 	}
 	tag, err := tx.Exec(ctx, `UPDATE external_identities SET principal_id=$2 WHERE principal_id=$1 AND revoked_at IS NULL`, from, into)
 	if err != nil {
-		return 0, err
+		return none, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE principals SET status=$2 WHERE id=$1`, from, StatusDisabled); err != nil {
-		return 0, err
+		return none, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("principals: commit: %w", err)
+		return none, fmt.Errorf("principals: commit: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	return MergeResult{Moved: int(tag.RowsAffected())}, nil
 }

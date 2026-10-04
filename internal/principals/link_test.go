@@ -192,9 +192,9 @@ func TestMergePrincipalsMovesIdentitiesAndDisablesTheSource(t *testing.T) {
 	p, _ := s.Provision(ctx, github(1, "alice"))
 	q, _ := s.Provision(ctx, zitadel("z1", "alice"))
 
-	moved, err := s.MergePrincipals(ctx, q.ID, p.ID)
-	if err != nil || moved != 1 {
-		t.Fatalf("merge = %d, %v; want 1 moved", moved, err)
+	res, err := s.MergePrincipals(ctx, q.ID, p.ID)
+	if err != nil || res.Moved != 1 || res.AlreadyMerged {
+		t.Fatalf("merge = %+v, %v; want 1 moved", res, err)
 	}
 	got, err := s.Provision(ctx, zitadel("z1", "alice"))
 	if err != nil || got.ID != p.ID {
@@ -294,12 +294,42 @@ func TestMergePrincipalsLeavesRevokedIdentitiesOnTheSource(t *testing.T) {
 			}
 		}
 	}
-	moved, err := s.MergePrincipals(ctx, q.ID, p.ID)
-	if err != nil || moved != 1 {
-		t.Fatalf("merge = %d, %v; want 1 live identity moved", moved, err)
+	res, err := s.MergePrincipals(ctx, q.ID, p.ID)
+	if err != nil || res.Moved != 1 {
+		t.Fatalf("merge = %+v, %v; want 1 live identity moved", res, err)
 	}
 	left, _ := s.Identities(ctx, q.ID)
 	if len(left) != 1 || left[0].RevokedAt == nil {
 		t.Fatalf("source keeps %+v, want only its revoked identity", left)
+	}
+}
+
+// An admin retrying a merge (a timeout, a double click) gets the same answer
+// and changes nothing; a source disabled for another reason is refused.
+func TestMergePrincipalsIsSafeToRetryAndRefusesADisabledSource(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	p, _ := s.Provision(ctx, github(1, "alice"))
+	q, _ := s.Provision(ctx, zitadel("z1", "alice"))
+	if res, err := s.MergePrincipals(ctx, q.ID, p.ID); err != nil || res.Moved != 1 {
+		t.Fatalf("merge = %+v, %v", res, err)
+	}
+	res, err := s.MergePrincipals(ctx, q.ID, p.ID)
+	if err != nil || !res.AlreadyMerged || res.Moved != 0 {
+		t.Fatalf("retry = %+v, %v; want already merged, nothing moved", res, err)
+	}
+	if got, _ := s.Provision(ctx, zitadel("z1", "alice")); got == nil || got.ID != p.ID {
+		t.Fatalf("after retry zitadel resolves to %+v, want %s", got, p.ID)
+	}
+
+	d, _ := s.Provision(ctx, github(2, "bob"))
+	if err := s.SetStatus(ctx, d.ID, StatusDisabled); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MergePrincipals(ctx, d.ID, p.ID); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("disabled source err = %v, want ErrPrincipalDisabled", err)
+	}
+	if ids, _ := s.Identities(ctx, d.ID); len(ids) != 1 || ids[0].PrincipalID != d.ID {
+		t.Fatalf("a refused merge moved identities: %+v", ids)
 	}
 }

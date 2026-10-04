@@ -93,7 +93,15 @@ e-mail:
    started in one browser cannot be finished in another, and each step is
    single-use. Sessions live in memory for 10 minutes, counted from the
    start and checked again after every network call (one replica; a
-   restart cancels links in flight).
+   restart cancels links in flight). With more than one replica, a step
+   that reaches a pod other than the one that started the link gets a 400
+   "start again", never a 500 or a link.
+
+   The `link.` prefix keeps the two users of `/oauth/github/callback`
+   apart in both directions: login states are base64url (no `.`) and go to
+   the OAuth server; link states go to linking before the OAuth server
+   looks anything up. Link states are bound to the cookie and single-use;
+   login states are single-use and bound to the MCP client by PKCE.
 
 Outcomes (`identity_links_total{provider,result}`, audit `identity.link`):
 
@@ -113,7 +121,12 @@ on failure) moves every live identity of `from` onto `into` and disables
 `from`, which is kept because audit rows reference it; revoked identities
 stay on `from`, and `moved_identities` counts live ones only. It is refused
 when both hold a live identity of the same provider and issuer, or either
-is not human, or `into` is disabled.
+is not human, or `into` is disabled, or `from` is disabled while still
+holding live identities. A retry is safe: when `from` is already disabled
+with no live identity left, the answer is 200 with `already_merged: true`
+and nothing changes (the store does not record which principal it went
+into; the audit row does). Every outcome, refusals included, is audited
+with the actor, `from` and `into`.
 
 The resolver caches answers for 5 minutes, including the principal id and
 its disabled flag. A merge and an unlink therefore drop the cached answers

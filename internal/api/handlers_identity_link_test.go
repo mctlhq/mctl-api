@@ -58,12 +58,17 @@ func (f *fakeLinkStore) UnlinkIdentity(_ context.Context, pid, xid string) (*pri
 	return f.unlinkFn(pid, xid)
 }
 
-func (f *fakeLinkStore) MergePrincipals(_ context.Context, from, into string) (int, error) {
+func (f *fakeLinkStore) MergePrincipals(_ context.Context, from, into string) (principals.MergeResult, error) {
 	if f.mergeErr != nil {
-		return 0, f.mergeErr
+		return principals.MergeResult{}, f.mergeErr
+	}
+	for _, m := range f.merged {
+		if m == [2]string{from, into} {
+			return principals.MergeResult{AlreadyMerged: true}, nil
+		}
 	}
 	f.merged = append(f.merged, [2]string{from, into})
-	return 1, nil
+	return principals.MergeResult{Moved: 1}, nil
 }
 
 func (f *fakeLinkStore) Identities(_ context.Context, pid string) ([]principals.ExternalIdentity, error) {
@@ -182,6 +187,7 @@ type linkHarness struct {
 	store  *fakeLinkStore
 	idp    *fakeIdP
 	audit  *audit.Logger
+	oauth  *auth.OAuthServer
 
 	clockMu sync.Mutex
 	clock   time.Time
@@ -202,7 +208,8 @@ func newLinkHarness(t *testing.T) *linkHarness {
 	idp := newFakeIdP(t)
 	store := &fakeLinkStore{}
 	logger := audit.NewLogger()
-	h := &linkHarness{t: t, store: store, idp: idp, audit: logger, clock: time.Now()}
+	h := &linkHarness{t: t, store: store, idp: idp, audit: logger, clock: time.Now(),
+		oauth: auth.NewOAuthServer("https://api.example", "gh-client", "gh-secret", []byte("test-secret"), nil, nil)}
 	opts := &IdentityLinkOptions{
 		Store: store, ProviderName: "zitadel", Issuer: idp.srv.URL,
 		ClientID: testLinkClientID, ClientSecret: testLinkClientSecret,
@@ -222,7 +229,7 @@ func newLinkHarness(t *testing.T) *linkHarness {
 			return h.clock
 		},
 	}
-	h.router = NewRouter(Options{IdentityLink: opts, AuditLog: logger})
+	h.router = NewRouter(Options{IdentityLink: opts, AuditLog: logger, OAuthServer: h.oauth})
 	return h
 }
 
@@ -483,6 +490,84 @@ func TestIdentityLinkSweepClearsEveryIndex(t *testing.T) {
 	}
 }
 
+// The login flow never consumes a link state: even a pending login stored
+// under the very same string is left alone, because the callback hands
+// link. states to linking before the OAuth server looks anything up.
+func TestLoginFlowNeverConsumesALinkState(t *testing.T) {
+	h := newLinkHarness(t)
+	ck, state := h.start()
+	h.oauth.StorePendingAuth(state, "client", "https://claude.ai/cb", "challenge")
+	h.github(ck, state) // the link proceeds to ZITADEL
+	if _, ok := h.oauth.LoadPendingAuth(state); !ok {
+		t.Fatal("the login flow consumed a link state")
+	}
+	// And the link state is single-use on its own side.
+	if rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(state), ck, nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("replayed link GitHub callback = %d, want 400", rec.Code)
+	}
+}
+
+// Linking never consumes a login state: it goes to the OAuth server, and
+// the link handler, reached directly, finds nothing under it either.
+func TestLinkFlowNeverConsumesALoginState(t *testing.T) {
+	h := newLinkHarness(t)
+	ck, linkState := h.start()
+	ghState, err := auth.GenerateState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := ghState + "|client-state"
+	h.oauth.StorePendingAuth(login, "client", "https://claude.ai/cb", "challenge")
+
+	// error= makes the OAuth server answer before it loads the pending entry,
+	// so the entry surviving below is down to linking alone.
+	rec := h.do(http.MethodGet, githubCallbackPath+"?error=access_denied&state="+url.QueryEscape(login), ck, nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "GitHub auth error") {
+		t.Fatalf("login callback = %d %q, want the OAuth server's answer", rec.Code, rec.Body.String())
+	}
+	hd := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{
+		Store: h.store, ProviderName: "zitadel", Issuer: "https://issuer.example", ClientID: "c", ClientSecret: "s",
+		BaseURL: "https://api.example", GitHubClientID: "gh-client",
+		ProveGitHub: func(context.Context, string, string) (string, int64, error) {
+			t.Fatal("linking acted on a login state")
+			return "", 0, nil
+		},
+	})}
+	req := httptest.NewRequest(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(login), nil)
+	req.AddCookie(ck)
+	direct := httptest.NewRecorder()
+	hd.handleIdentityLinkGitHubCallback(direct, req)
+	if direct.Code != http.StatusBadRequest {
+		t.Fatalf("link handler on a login state = %d, want 400", direct.Code)
+	}
+	if _, ok := h.oauth.LoadPendingAuth(login); !ok {
+		t.Fatal("a login state was consumed")
+	}
+	h.github(ck, linkState) // the link in flight is untouched
+}
+
+// mctl-api runs one replica and keeps challenges in memory. If that ever
+// changes, a step that lands on a pod which did not start the link must
+// fail safe: a 400 that says to start again, never a 500 or a link.
+func TestIdentityLinkOnAnotherPodSaysStartAgain(t *testing.T) {
+	a := newLinkHarness(t)
+	ck, state := a.start()
+	b := newLinkHarness(t) // the other pod: same config, its own memory
+	if rec := b.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(state), ck, nil); rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), "Start again from "+linkStartPath) {
+		t.Fatalf("GitHub callback on another pod = %d %s", rec.Code, rec.Body.String())
+	}
+	zState := a.github(ck, state)
+	if rec, _ := b.zitadel(ck, zState); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Start again") {
+		t.Fatalf("ZITADEL callback on another pod = %d %s", rec.Code, rec.Body.String())
+	}
+	_, form := a.zitadel(ck, zState)
+	if rec := b.do(http.MethodPost, linkConfirmPath, ck, form); rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), "Start again") || len(b.store.linked) != 0 {
+		t.Fatalf("confirm on another pod = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // A link state never reaches the OAuth server, and an OAuth state never
 // reaches linking: '.' is outside the base64url alphabet GenerateState uses.
 func TestOAuthStatesNeverLookLikeLinkStates(t *testing.T) {
@@ -622,23 +707,44 @@ func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	if len(store.merged) != 0 {
 		t.Fatal("a refused merge reached the store")
 	}
-	rec := callAs(h, auth.NewGitHubUser("boss", []string{"admins"}), http.MethodPost, "/", params, h.MergePrincipals)
+	admin := userWithPrincipal(t, "boss", []string{"admins"}, "prn_boss")
+	// Every merge outcome is audited with the actor, the source and the target.
+	auditNames := func(e audit.Entry) bool {
+		return e.Operation == "principal.merge" && e.UserID == "boss" && e.Parameters["actor_principal_id"] == "prn_boss" &&
+			e.Parameters["from_principal_id"] == "prn_q" && e.Parameters["into_principal_id"] == "prn_p"
+	}
+	rec := callAs(h, admin, http.MethodPost, "/", params, h.MergePrincipals)
 	if rec.Code != http.StatusOK || len(store.merged) != 1 || store.merged[0] != [2]string{"prn_q", "prn_p"} {
 		t.Fatalf("admin merge = %d, merged %v", rec.Code, store.merged)
 	}
-	if e := h.opts.AuditLog.List(10); len(e) != 1 || e[0].Operation != "principal.merge" || e[0].Status != "succeeded" {
+	if e := h.opts.AuditLog.List(10); len(e) != 1 || !auditNames(e[0]) || e[0].Status != "succeeded" || e[0].Parameters["moved"] != "1" {
 		t.Fatalf("audit = %+v", e)
 	}
-	if len(fr.calls) != 1 || strings.Join(fr.calls[0], ",") != "prn_q,prn_p" {
-		t.Fatalf("forgot %v after a merge, want [[prn_q prn_p]]", fr.calls)
+	// A retry answers 200 again and says so.
+	rec = callAs(h, admin, http.MethodPost, "/", params, h.MergePrincipals)
+	var retry struct {
+		AlreadyMerged bool `json:"already_merged"`
+		Moved         int  `json:"moved_identities"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &retry); rec.Code != http.StatusOK || err != nil || !retry.AlreadyMerged || retry.Moved != 0 {
+		t.Fatalf("retried merge = %d %s", rec.Code, rec.Body.String())
+	}
+	if e := h.opts.AuditLog.List(1); !auditNames(e[0]) || e[0].Parameters["already_merged"] != "true" {
+		t.Fatalf("retry audit = %+v", e)
+	}
+	if len(fr.calls) == 0 || strings.Join(fr.calls[0], ",") != "prn_q,prn_p" {
+		t.Fatalf("forgot %v after a merge, want [prn_q prn_p] first", fr.calls)
 	}
 	store.mergeErr = principals.ErrMergeConflict
-	if rec := callAs(h, auth.NewGitHubUser("boss", []string{"admins"}), http.MethodPost, "/", params, h.MergePrincipals); rec.Code != http.StatusConflict {
+	if rec := callAs(h, admin, http.MethodPost, "/", params, h.MergePrincipals); rec.Code != http.StatusConflict {
 		t.Fatalf("conflicting merge = %d, want 409", rec.Code)
+	}
+	if e := h.opts.AuditLog.List(1); !auditNames(e[0]) || e[0].Status != "failed" || e[0].Parameters["reason"] != "merge_conflict" {
+		t.Fatalf("409 audit = %+v", e)
 	}
 	// The audit row carries a classified reason, never the store's text.
 	store.mergeErr = errors.New("dial tcp 10.0.0.7:5432: connection refused")
-	if rec := callAs(h, auth.NewGitHubUser("boss", []string{"admins"}), http.MethodPost, "/", params, h.MergePrincipals); rec.Code != http.StatusServiceUnavailable {
+	if rec := callAs(h, admin, http.MethodPost, "/", params, h.MergePrincipals); rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("merge on a store error = %d, want 503", rec.Code)
 	}
 	e := h.opts.AuditLog.List(1)
@@ -650,7 +756,7 @@ func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 			t.Fatalf("audit parameter %s leaks the store error: %q", k, v)
 		}
 	}
-	if len(fr.calls) != 1 {
-		t.Fatalf("failed merges dropped cached answers: %v", fr.calls)
+	if len(fr.calls) != 2 {
+		t.Fatalf("forget calls = %v, want one per successful merge (2) and none for failures", fr.calls)
 	}
 }

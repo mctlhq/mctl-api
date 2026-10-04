@@ -46,7 +46,7 @@ type IdentityLinkStore interface {
 	Provision(ctx context.Context, id auth.Identity) (*principals.Principal, error)
 	LinkIdentity(ctx context.Context, principalID string, id auth.Identity) (string, error)
 	UnlinkIdentity(ctx context.Context, principalID, identityID string) (*principals.ExternalIdentity, error)
-	MergePrincipals(ctx context.Context, from, into string) (int, error)
+	MergePrincipals(ctx context.Context, from, into string) (principals.MergeResult, error)
 	Identities(ctx context.Context, principalID string) ([]principals.ExternalIdentity, error)
 }
 
@@ -152,6 +152,13 @@ type linkChallenge struct {
 type identityLinker struct {
 	opts *IdentityLinkOptions
 
+	// The challenge store is this process's memory, which is correct only
+	// while mctl-api runs one replica. It fails safe if that changes: a step
+	// that lands on a pod that did not start the link finds no challenge
+	// and answers 400 "unknown, expired ... Start again", never a 500 and
+	// never a link (TestIdentityLinkOnAnotherPodSaysStartAgain). More than
+	// one replica would make linking flaky, not unsafe; it would then need
+	// a shared store or session affinity.
 	mu       sync.Mutex
 	byID     map[string]*linkChallenge
 	byGitHub map[string]*linkChallenge
@@ -687,13 +694,17 @@ func (h *Handlers) MergePrincipals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	from, into := chi.URLParam(r, "from"), chi.URLParam(r, "into")
-	moved, err := h.identityLink.opts.Store.MergePrincipals(r.Context(), from, into)
+	res, err := h.identityLink.opts.Store.MergePrincipals(r.Context(), from, into)
 	if err == nil {
 		// Cached answers still name from as an active principal; without
 		// this the moved identities keep acting as it for the cache TTL.
 		h.identityLink.opts.forget(from, into)
 	}
-	params := map[string]string{"from_principal_id": from, "into_principal_id": into, "moved": strconv.Itoa(moved)}
+	// Actor, source and target on every outcome, refusals included.
+	params := map[string]string{
+		"actor_principal_id": user.PrincipalID(), "from_principal_id": from, "into_principal_id": into,
+		"moved": strconv.Itoa(res.Moved), "already_merged": strconv.FormatBool(res.AlreadyMerged),
+	}
 	status := "succeeded"
 	if err != nil {
 		status = "failed"
@@ -706,7 +717,10 @@ func (h *Handlers) MergePrincipals(w http.ResponseWriter, r *http.Request) {
 	})
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, map[string]interface{}{"from": from, "into": into, "moved_identities": moved, "from_status": principals.StatusDisabled})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"from": from, "into": into, "moved_identities": res.Moved, "already_merged": res.AlreadyMerged,
+			"from_status": principals.StatusDisabled,
+		})
 	case errors.Is(err, principals.ErrNotFound):
 		writeError(w, http.StatusNotFound, "principal not found")
 	case errors.Is(err, principals.ErrMergeConflict):
