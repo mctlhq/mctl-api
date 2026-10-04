@@ -228,6 +228,20 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A repository to build must belong to the caller's team (build_repo_gate.go).
+	if err := h.checkBuildRepos(r.Context(), op, input, user, tenantParam); err != nil {
+		h.logAudit(r, audit.Entry{
+			UserID:     user.ID,
+			Operation:  opName,
+			Parameters: auditParams,
+			Status:     "denied",
+			RiskLevel:  string(op.RiskLevel),
+			Message:    err.Error(),
+		})
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	// For create-tenant: also notify Backstage for immediate catalog sync.
 	if opName == "create-tenant" && h.opts.BackstageURL != "" {
 		go h.notifyBackstage(input)
