@@ -92,10 +92,15 @@ func (o *IdentityLinkOptions) browserFlowEnabled() bool {
 }
 
 const (
-	linkCookieName     = "mctl_identity_link"
-	linkGitHubPrefix   = "link."
-	linkChallengeTTL   = 10 * time.Minute
-	linkMaxChallenges  = 1000
+	// __Host-: Secure, Path=/ and no Domain, so no sibling *.mctl.ai host
+	// can plant this cookie in a browser.
+	linkCookieName    = "__Host-mctl_identity_link"
+	linkGitHubPrefix  = "link."
+	linkChallengeTTL  = 10 * time.Minute
+	linkMaxChallenges = 1000
+	// linkMaxPerIP bounds one source's unfinished links; starting another
+	// drops its oldest, so no single IP can fill linkMaxChallenges.
+	linkMaxPerIP       = 3
 	linkStartPath      = "/identity/link/zitadel"
 	linkCallbackPath   = "/identity/link/zitadel/callback"
 	linkConfirmPath    = "/identity/link/zitadel/confirm"
@@ -135,6 +140,7 @@ type linkChallenge struct {
 	phase       linkPhase
 
 	githubState string
+	clientIP    string
 
 	principalID string
 	githubLogin string
@@ -215,6 +221,29 @@ func (l *identityLinker) sweepLocked(now time.Time) {
 // or been used meanwhile.
 func (l *identityLinker) liveLocked(c *linkChallenge, phase linkPhase, now time.Time) bool {
 	return l.byID[c.id] == c && c.phase == phase && !now.After(c.expiresAt)
+}
+
+// capSourceLocked drops ip's oldest unfinished challenges until it has room
+// for one more.
+func (l *identityLinker) capSourceLocked(ip string) {
+	for {
+		var mine []*linkChallenge
+		for _, c := range l.byID {
+			if c.clientIP == ip {
+				mine = append(mine, c)
+			}
+		}
+		if len(mine) < linkMaxPerIP {
+			return
+		}
+		oldest := mine[0]
+		for _, c := range mine[1:] {
+			if c.startedAt.Before(oldest.startedAt) {
+				oldest = c
+			}
+		}
+		l.dropLocked(oldest.id, oldest)
+	}
 }
 
 func (l *identityLinker) dropLocked(id string, c *linkChallenge) {
@@ -316,12 +345,14 @@ func (h *Handlers) handleIdentityLinkStart(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	now := l.now()
+	ip, _ := keyByTrustedIP(r)
 	c := &linkChallenge{
 		id: id, browserHash: sha256.Sum256([]byte(browser)), expiresAt: now.Add(linkChallengeTTL),
-		githubState: linkGitHubPrefix + ghState, startedAt: now,
+		githubState: linkGitHubPrefix + ghState, startedAt: now, clientIP: ip,
 	}
 	l.mu.Lock()
 	l.sweepLocked(now)
+	l.capSourceLocked(ip)
 	if len(l.byID) >= linkMaxChallenges {
 		l.mu.Unlock()
 		linkFailed(w, http.StatusServiceUnavailable, "Too many links in progress; try again in a few minutes.")
@@ -609,6 +640,9 @@ func (h *Handlers) handleIdentityLinkConfirm(w http.ResponseWriter, r *http.Requ
 // isDirectPerson: a human calling with their own credentials, not a surface
 // (acting as itself or relaying for someone), a service, or an agent.
 func isDirectPerson(u *auth.User) bool {
+	if u == nil {
+		return false
+	}
 	_, relayed := u.RelaySurface()
 	_, surface := u.Surface()
 	return !relayed && !surface && !u.IsService() && !u.IsAgent()
@@ -717,10 +751,16 @@ func (h *Handlers) MergePrincipals(w http.ResponseWriter, r *http.Request) {
 	})
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, map[string]interface{}{
+		body := map[string]interface{}{
 			"from": from, "into": into, "moved_identities": res.Moved, "already_merged": res.AlreadyMerged,
 			"from_status": principals.StatusDisabled,
-		})
+		}
+		if res.AlreadyMerged {
+			// The store does not record where from went, so a retry cannot
+			// confirm it was this into; say so instead of implying it.
+			body["detail"] = "from was already merged earlier; the target of that merge is not recorded here and may differ from into. The principal.merge audit rows show where it went."
+		}
+		writeJSON(w, http.StatusOK, body)
 	case errors.Is(err, principals.ErrNotFound):
 		writeError(w, http.StatusNotFound, "principal not found")
 	case errors.Is(err, principals.ErrMergeConflict):

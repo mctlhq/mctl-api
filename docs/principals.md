@@ -75,7 +75,7 @@ any unknown identity. Attaching it to the principal a person already has
 e-mail:
 
 1. `GET /identity/link/zitadel` in a browser. mctl-api sets an httpOnly,
-   Secure, SameSite=Lax cookie with a random value (it keeps only the
+   Secure, SameSite=Lax `__Host-` cookie with a random value (it keeps only the
    SHA-256) and sends the browser to GitHub through its own OAuth app; the
    registered `/oauth/github/callback` recognises the `link.` state.
 2. GitHub proves identity #1 (numeric id); it is provisioned as usual and
@@ -93,7 +93,9 @@ e-mail:
    started in one browser cannot be finished in another, and each step is
    single-use. Sessions live in memory for 10 minutes, counted from the
    start and checked again after every network call (one replica; a
-   restart cancels links in flight). With more than one replica, a step
+   restart cancels links in flight). One source IP holds at most 3
+   unfinished links; a fourth drops its oldest, so no single source can
+   fill the global cap of 1000. With more than one replica, a step
    that reaches a pod other than the one that started the link gets a 400
    "start again", never a 500 or a link.
 
@@ -124,15 +126,18 @@ when both hold a live identity of the same provider and issuer, or either
 is not human, or `into` is disabled, or `from` is disabled while still
 holding live identities. A retry is safe: when `from` is already disabled
 with no live identity left, the answer is 200 with `already_merged: true`
-and nothing changes (the store does not record which principal it went
-into; the audit row does). Every outcome, refusals included, is audited
+and nothing changes. The store does not record which principal it went
+into, so the answer carries a `detail` saying the earlier target may
+differ from `into`; the audit rows record it. Every outcome, refusals included, is audited
 with the actor, `from` and `into`.
 
 The resolver caches answers for 5 minutes, including the principal id and
 its disabled flag. A merge and an unlink therefore drop the cached answers
 for the principals involved (`Resolver.Forget`), so the next request
 re-reads the store: moved identities act as `into`, and an unlinked one is
-refused. This reaches the process that served the call, which is all of
+refused. A resolution already reading the store when that happens returns
+its answer once but does not cache it, so it cannot write the pre-change
+answer back. This reaches the process that served the call, which is all of
 mctl-api while it runs one replica; with more replicas the others would
 keep their cached answer for up to the TTL.
 

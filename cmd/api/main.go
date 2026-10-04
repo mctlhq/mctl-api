@@ -1774,6 +1774,9 @@ func identityLinkOptions(cfg config, store *principals.Store, cache *principals.
 	if oauth == nil {
 		missing = append(missing, "the GitHub OAuth server (OAUTH_GITHUB_CLIENT_ID, OAUTH_JWT_SECRET)")
 	}
+	if gh == nil {
+		missing = append(missing, "the GitHub validator")
+	}
 	if cfg.FederationDisabled {
 		missing = append(missing, "the federation registry (MCTL_FEDERATION_DISABLED is on)")
 	} else if entries, err := auth.ParseOIDCProviders(cfg.OIDCProvidersRaw); err == nil {

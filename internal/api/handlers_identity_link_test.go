@@ -473,6 +473,49 @@ func TestIdentityLinkRefusesAnExpiredChallengeAtEveryStep(t *testing.T) {
 	})
 }
 
+// One source cannot hold linking shut: its oldest unfinished link gives way
+// to its newest, and other sources are untouched.
+func TestIdentityLinkCapsUnfinishedLinksPerSource(t *testing.T) {
+	h := newLinkHarness(t)
+	startFrom := func(ip string) (*http.Cookie, string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, linkStartPath, nil)
+		req.RemoteAddr = ip + ":40000"
+		rec := httptest.NewRecorder()
+		h.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("start from %s = %d", ip, rec.Code)
+		}
+		loc, _ := url.Parse(rec.Header().Get("Location"))
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == linkCookieName {
+				return c, loc.Query().Get("state")
+			}
+		}
+		t.Fatal("no link cookie")
+		return nil, ""
+	}
+	otherCk, otherState := startFrom("198.51.100.9")
+	var cks []*http.Cookie
+	var states []string
+	for i := 0; i <= linkMaxPerIP; i++ {
+		h.advance(time.Second)
+		ck, st := startFrom("198.51.100.1")
+		cks, states = append(cks, ck), append(states, st)
+	}
+	if rec := h.do(http.MethodGet, githubCallbackPath+"?code=gh-code&state="+url.QueryEscape(states[0]), cks[0], nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("the source's oldest link = %d, want 400 (dropped)", rec.Code)
+	}
+	h.github(cks[linkMaxPerIP], states[linkMaxPerIP])
+	h.github(otherCk, otherState)
+}
+
+func TestIdentityLinkCookieIsHostPrefixed(t *testing.T) {
+	if !strings.HasPrefix(linkCookieName, "__Host-") {
+		t.Fatalf("link cookie %q lacks the __Host- prefix", linkCookieName)
+	}
+}
+
 // No index may hold a challenge byID no longer does, or an expired one: the
 // linkMaxChallenges bound is checked against byID alone.
 func TestIdentityLinkSweepClearsEveryIndex(t *testing.T) {
@@ -647,6 +690,15 @@ func TestListIdentityLinksAnswersThePersonOnly(t *testing.T) {
 	if rec := callAs(h, u, http.MethodGet, "/", nil, h.ListIdentityLinks); rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "conn refused") {
 		t.Errorf("list on a store error = %d %s, want 503 without the error text", rec.Code, rec.Body.String())
 	}
+	// No user in the context (a route mounted outside auth) is refused, not
+	// a nil dereference.
+	for name, fn := range map[string]http.HandlerFunc{"list": h.ListIdentityLinks, "unlink": h.UnlinkIdentity} {
+		rec := httptest.NewRecorder()
+		fn(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s without a user = %d, want 403", name, rec.Code)
+		}
+	}
 	off := &Handlers{}
 	if rec := callAs(off, u, http.MethodGet, "/", nil, off.ListIdentityLinks); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("list unconfigured = %d, want 503", rec.Code)
@@ -723,10 +775,12 @@ func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	// A retry answers 200 again and says so.
 	rec = callAs(h, admin, http.MethodPost, "/", params, h.MergePrincipals)
 	var retry struct {
-		AlreadyMerged bool `json:"already_merged"`
-		Moved         int  `json:"moved_identities"`
+		AlreadyMerged bool   `json:"already_merged"`
+		Moved         int    `json:"moved_identities"`
+		Detail        string `json:"detail"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &retry); rec.Code != http.StatusOK || err != nil || !retry.AlreadyMerged || retry.Moved != 0 {
+	if err := json.Unmarshal(rec.Body.Bytes(), &retry); rec.Code != http.StatusOK || err != nil || !retry.AlreadyMerged || retry.Moved != 0 ||
+		!strings.Contains(retry.Detail, "may differ") {
 		t.Fatalf("retried merge = %d %s", rec.Code, rec.Body.String())
 	}
 	if e := h.opts.AuditLog.List(1); !auditNames(e[0]) || e[0].Parameters["already_merged"] != "true" {

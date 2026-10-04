@@ -91,6 +91,10 @@ type Resolver struct {
 	mu        sync.Mutex
 	cache     map[string]cached
 	lastSweep time.Time
+	// gen counts Forget calls. A resolution caches its answer only if no
+	// Forget ran while it was reading the store, so a read from before an
+	// unlink or a merge cannot write the stale answer back after it.
+	gen uint64
 }
 
 type cached struct {
@@ -131,6 +135,7 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 	now := r.now()
 	r.mu.Lock()
 	c, ok := r.cache[key]
+	gen := r.gen
 	r.mu.Unlock()
 	switch {
 	case ok && c.failed && now.Sub(c.at) < r.failureTTL:
@@ -155,7 +160,9 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 	}
 	c = cached{principal: p.ID, disabled: p.Status == StatusDisabled, at: now}
 	r.mu.Lock()
-	r.cache[key] = c
+	if r.gen == gen {
+		r.cache[key] = c
+	}
 	r.sweepLocked(now)
 	r.mu.Unlock()
 	return answer(c)
@@ -192,6 +199,7 @@ func (r *Resolver) Forget(principalIDs ...string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.gen++
 	for k, c := range r.cache {
 		if _, ok := drop[c.principal]; ok && !c.failed {
 			delete(r.cache, k)
