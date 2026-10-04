@@ -561,3 +561,51 @@ func TestHelmLintCleanAcrossOptionalValues(t *testing.T) {
 		}
 	}
 }
+
+// The identity-link browser flow lives under /identity (mctlhq/mctl-api#435);
+// without the path Traefik answers 404 before the request reaches mctl-api.
+// Both the values.yaml list and the template's fallback (paths unset) must
+// carry it.
+func TestIngressRoutesIdentityLinkPath(t *testing.T) {
+	helmPath := requireHelm(t)
+	for name, setArgs := range map[string][]string{
+		"values.yaml paths": nil,
+		"template fallback": {"--set", "ingress.paths=null"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := append([]string{"template", "mctl-api", ".", "--show-only", "templates/ingress.yaml"}, setArgs...)
+			// #nosec G204 -- helmPath comes from exec.LookPath("helm"); args are literals.
+			out, err := exec.Command(helmPath, args...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("helm template failed: %v\n%s", err, out)
+			}
+			var ing struct {
+				Spec struct {
+					Rules []struct {
+						Host string `yaml:"host"`
+						HTTP struct {
+							Paths []struct {
+								Path string `yaml:"path"`
+							} `yaml:"paths"`
+						} `yaml:"http"`
+					} `yaml:"rules"`
+				} `yaml:"spec"`
+			}
+			if err := yaml.Unmarshal(out, &ing); err != nil {
+				t.Fatalf("unmarshal ingress: %v\n%s", err, out)
+			}
+			if len(ing.Spec.Rules) == 0 {
+				t.Fatalf("no ingress rules rendered:\n%s", out)
+			}
+			for _, r := range ing.Spec.Rules {
+				found := false
+				for _, p := range r.HTTP.Paths {
+					found = found || p.Path == "/identity"
+				}
+				if !found {
+					t.Errorf("host %s has no /identity path", r.Host)
+				}
+			}
+		})
+	}
+}

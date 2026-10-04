@@ -28,6 +28,9 @@ ingress:
     - /docs
     - /.well-known
     - /oauth
+    # Browser half of ZITADEL identity linking (/identity/link/zitadel*,
+    # mctlhq/mctl-api#435).
+    - /identity
     - /api
     - /mcp
 
