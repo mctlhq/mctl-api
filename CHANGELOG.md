@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.65.0](https://github.com/mctlhq/mctl-api/compare/4.64.0...4.65.0) (2026-10-04)
+
+
+### Features
+
+* **auth:** count mctl-issued JWTs apart from GitHub tokens ([bfa3ef5](https://github.com/mctlhq/mctl-api/commit/bfa3ef519e7924b2168a88c11a4175e77775afa9))
+* **auth:** count mctl-issued JWTs apart from GitHub tokens ([dc0448f](https://github.com/mctlhq/mctl-api/commit/dc0448fa95410cf7c5f07981055df5103bb11629)), closes [#467](https://github.com/mctlhq/mctl-api/issues/467)
+* **oauth:** ZITADEL upstream for /oauth/authorize behind OAUTH_UPSTREAM ([d464e2a](https://github.com/mctlhq/mctl-api/commit/d464e2a83eea7fcad69d9ec257d4d82b3e3d7b66))
+
+
+### Bug Fixes
+
+* **api:** answer a revoked or disabled ZITADEL sign-in 403 again ([a761e75](https://github.com/mctlhq/mctl-api/commit/a761e75b8aff114ba92f2891d129352660fc093f)), closes [#467](https://github.com/mctlhq/mctl-api/issues/467)
+* **api:** refuse a ZITADEL provider name linking does not write under ([b645756](https://github.com/mctlhq/mctl-api/commit/b645756195e00b66ae3d29b44f75bbd7559d4a7d)), closes [#467](https://github.com/mctlhq/mctl-api/issues/467)
+* **auth:** reserve the mctl_oauth provider name ([79b2cc7](https://github.com/mctlhq/mctl-api/commit/79b2cc71b0db5d332c820a163b75d311fcd38214)), closes [#467](https://github.com/mctlhq/mctl-api/issues/467)
+
 ## [4.64.0](https://github.com/mctlhq/mctl-api/compare/4.63.1...4.64.0) (2026-10-04)
 
 
