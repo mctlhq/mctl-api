@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.64.0](https://github.com/mctlhq/mctl-api/compare/4.63.1...4.64.0) (2026-10-04)
+
+
+### Features
+
+* **portal:** enable the four read-only work-item tools on mcp ([6ff9e33](https://github.com/mctlhq/mctl-api/commit/6ff9e33b54ed40bb6563c0ba5f03e9c5382e0ac6))
+* **portal:** enable the four read-only work-item tools on mcp ([df37be3](https://github.com/mctlhq/mctl-api/commit/df37be3daf75390d99beed1fd81ad46abae0f22f)), closes [#341](https://github.com/mctlhq/mctl-api/issues/341)
+
+
+### Bug Fixes
+
+* **identity-link:** steer to the ZITADEL login name, not the e-mail ([404d539](https://github.com/mctlhq/mctl-api/commit/404d539832a16bbb72ba9c3c01c58461babb4679))
+* **identity-link:** steer to the ZITADEL login name, not the e-mail ([016ac97](https://github.com/mctlhq/mctl-api/commit/016ac97ac0ec39f114c05d44803553402d194d32)), closes [#462](https://github.com/mctlhq/mctl-api/issues/462)
+* **identity-link:** tell the person what to enter at ZITADEL ([c4a686b](https://github.com/mctlhq/mctl-api/commit/c4a686bd38e62693e088560f434535aee3f7b3a9))
+* **identity-link:** tell the person what to enter at ZITADEL ([02a8135](https://github.com/mctlhq/mctl-api/commit/02a813519afd78954a1256fca7bf25be10272a23)), closes [#462](https://github.com/mctlhq/mctl-api/issues/462)
+
 ## [4.63.1](https://github.com/mctlhq/mctl-api/compare/4.63.0...4.63.1) (2026-10-04)
 
 
