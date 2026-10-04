@@ -56,6 +56,8 @@ type fakeGitReader struct {
 	platformPolicy         *gitops.PlatformSkillPolicy
 	humanInputFiles        []gitops.HumanInputRequestFile
 	humanInputErr          error
+	imagePolicy            *gitops.ImageNamePolicy
+	imagePolicyErr         error
 	tenantExistsErr        error
 }
 
@@ -70,6 +72,22 @@ func (f *fakeGitReader) TenantExists(name string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// ImageNamePolicy returns the configured policy, or by default one that
+// reserves only the platform prefix and records the fake's own services.
+func (f *fakeGitReader) ImageNamePolicy() (*gitops.ImageNamePolicy, error) {
+	if f.imagePolicy != nil || f.imagePolicyErr != nil {
+		return f.imagePolicy, f.imagePolicyErr
+	}
+	p, err := gitops.ParseImageNames([]byte("reserved-prefix mctl-\n"))
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range f.services {
+		p.AddOwner(s.Name, s.Team)
+	}
+	return p, nil
 }
 
 func (f *fakeGitReader) ListHumanInputRequests() ([]gitops.HumanInputRequestFile, error) {

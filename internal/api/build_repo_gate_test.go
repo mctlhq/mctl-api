@@ -56,6 +56,13 @@ func githubAnswer(status int, body string) func(w http.ResponseWriter, r *http.R
 
 func newGateRouter(t *testing.T, token string) (http.Handler, *fakeExecutor, *gateFixture) {
 	t.Helper()
+	return newGateRouterWith(t, token, &fakeGitReader{tenants: []gitops.Tenant{
+		{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10"}},
+	}})
+}
+
+func newGateRouterWith(t *testing.T, token string, git *fakeGitReader) (http.Handler, *fakeExecutor, *gateFixture) {
+	t.Helper()
 	t.Setenv("AUTH_REQUIRED", "false")
 	f := &gateFixture{binding: bindingAnswer(false), github: githubAnswer(404, `{"message":"Not Found"}`)}
 	portal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,10 +82,8 @@ func newGateRouter(t *testing.T, token string) (http.Handler, *fakeExecutor, *ga
 
 	exec := &fakeExecutor{}
 	router := mctlapi.NewRouter(mctlapi.Options{
-		Registry: operations.NewRegistry(),
-		GitReader: &fakeGitReader{tenants: []gitops.Tenant{
-			{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10"}},
-		}},
+		Registry:                       operations.NewRegistry(),
+		GitReader:                      git,
 		ArgoCD:                         &fakeArgoCD{},
 		AuditLog:                       audit.NewLogger(),
 		Executor:                       exec,

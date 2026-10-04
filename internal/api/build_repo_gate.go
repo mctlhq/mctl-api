@@ -71,6 +71,52 @@ func (h *Handlers) checkBuildRepos(ctx context.Context, op operations.Operation,
 	return nil
 }
 
+// checkBuildInputs applies every build-input check: the build repository
+// (checkBuildRepos) and the image name (checkImageName).
+func (h *Handlers) checkBuildInputs(ctx context.Context, op operations.Operation, input map[string]string, user *auth.User, team string) error {
+	if err := h.checkImageName(op, input, user, team); err != nil {
+		return err
+	}
+	return h.checkBuildRepos(ctx, op, input, user, team)
+}
+
+// imageParameters mark an operation whose component_name is an image name:
+// it builds ghcr.io/mctlhq/<component_name> (dockerfile_repo) or runs a
+// pre-built tag of it (image_tag).
+var imageParameters = []string{"dockerfile_repo", "image_tag"}
+
+// checkImageName refuses an operation whose component_name is an image name
+// the caller's team does not own, by the reviewed list in mctl-gitops
+// (gitops.ImageNamesFile) and the services already there. Admins are not
+// checked. An unreadable or malformed policy refuses.
+func (h *Handlers) checkImageName(op operations.Operation, input map[string]string, user *auth.User, team string) error {
+	if user.IsAdmin() {
+		return nil
+	}
+	declared := map[string]bool{}
+	for _, p := range op.Parameters {
+		declared[p.Name] = true
+	}
+	usesImage := false
+	for _, name := range imageParameters {
+		usesImage = usesImage || declared[name]
+	}
+	if !usesImage || !declared["component_name"] {
+		return nil
+	}
+	if h.opts.GitReader == nil {
+		return fmt.Errorf("%w: image name policy unavailable", errBuildRepoRefused)
+	}
+	policy, err := h.opts.GitReader.ImageNamePolicy()
+	if err != nil {
+		return fmt.Errorf("%w: could not read the image name policy: %v", errBuildRepoRefused, err)
+	}
+	if err := policy.Allowed(team, strings.TrimSpace(input["component_name"])); err != nil {
+		return fmt.Errorf("%w: %v", errBuildRepoRefused, err)
+	}
+	return nil
+}
+
 // repoBoundToTeam asks the portal's github-app-connect plugin, the system of
 // record for repository connections.
 func (h *Handlers) repoBoundToTeam(ctx context.Context, team, repo string) (bool, error) {

@@ -228,8 +228,9 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A repository to build must belong to the caller's team (build_repo_gate.go).
-	if err := h.checkBuildRepos(r.Context(), op, input, user, tenantParam); err != nil {
+	// A repository to build must belong to the caller's team, and so must the
+	// image name it is built into and run from (build_repo_gate.go).
+	if err := h.checkBuildInputs(r.Context(), op, input, user, tenantParam); err != nil {
 		h.logAudit(r, audit.Entry{
 			UserID:     user.ID,
 			Operation:  opName,
