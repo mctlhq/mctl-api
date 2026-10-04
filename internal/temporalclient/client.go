@@ -196,11 +196,13 @@ func (c *Client) SignalApprove(ctx context.Context, workflowID string, payload m
 
 // SignalAbandon signals a running DevLoopWorkflow's abandon handler, which
 // ends the execution gracefully at its next observation point (the approval
-// park among them). payload carries {"reason": ..., "abandoned_by": ...};
+// park among them). runID pins the signal to the run the caller observed:
+// if that run closed and a new one started under the same workflow id,
+// Temporal answers NotFound instead of delivering to the new run. payload carries {"reason": ..., "abandoned_by": ...};
 // the workflow's defensive parser reads "reason" and falls back to a generic
 // one for any other shape, so the payload is always sent.
-func (c *Client) SignalAbandon(ctx context.Context, workflowID string, payload map[string]string) error {
-	if err := c.temporal.SignalWorkflow(ctx, workflowID, "", AbandonSignalName, payload); err != nil {
+func (c *Client) SignalAbandon(ctx context.Context, workflowID, runID string, payload map[string]string) error {
+	if err := c.temporal.SignalWorkflow(ctx, workflowID, runID, AbandonSignalName, payload); err != nil {
 		return fmt.Errorf("temporalclient: signal %s on %s: %w", AbandonSignalName, workflowID, err)
 	}
 	return nil

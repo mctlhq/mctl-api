@@ -3110,7 +3110,7 @@ func (s *Server) toolAbandonDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
 
 Use it for a loop that must not continue — typically one parked at the approval gate for a proposal that will never be approved. The workflow ends at its next observation point (the approval park observes it) and records "abandoned: <reason>" as its result. Unlike a Temporal terminate, it keeps the workflow's own cleanup, which releases the lifecycle-ownership row.
 
-Wraps POST /api/v1/agents/dev-loop/{workflow_id}/abandon. Returns outcome "signalled" for a running execution (status still reads "Running" at that moment; poll mctl_get_dev_loop for the terminal status) or "already_finished" with the final status for one that had already ended, in which case nothing is signalled. A 404 means no DevLoopWorkflow exists under that id. Who abandoned the loop is the authenticated caller, not an argument.
+Wraps POST /api/v1/agents/dev-loop/{workflow_id}/abandon. Returns outcome "signalled" for a running execution (status still reads "Running" at that moment; poll mctl_get_dev_loop for the terminal status) or "already_finished" with the final status for one that had already ended, in which case nothing is signalled. A 404 means no DevLoopWorkflow exists under that id. A 409 means the run that was looked at ended and a new run took the id before the signal; the new run was not abandoned, so call again if it should be. Who abandoned the loop is the authenticated caller, not an argument.
 
 This does not edit the proposal's .status.yaml.
 

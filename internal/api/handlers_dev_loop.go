@@ -109,7 +109,7 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 // purely to fetch the run id would be a redundant Temporal round trip:
 // DescribeDevLoopExecution already returns both fields from the one call.
 //
-//   - describe succeeds and status == "Running" -> already_running, existing
+//   - describe succeeds and status == devLoopStatusRunning -> already_running, existing
 //     run id, do NOT start.
 //   - describe succeeds with any other status (a closed execution) ->
 //     already_exists, existing run id, do NOT start (REJECT_DUPLICATE would
@@ -123,7 +123,7 @@ func classifyDevLoop(ctx context.Context, c DevLoopClient, workflowID string) de
 	case err != nil && !temporalclient.IsNotFound(err):
 		// Cannot tell whether it exists: do not start blind.
 		return devLoopStartResult{Outcome: devLoopOutcomeFailed, Err: fmt.Errorf("could not read the existing DevLoop: %w", err)}
-	case err == nil && exec.Status == "Running":
+	case err == nil && exec.Status == devLoopStatusRunning:
 		return devLoopStartResult{Outcome: devLoopOutcomeAlreadyRunning, Status: exec.Status, RunID: exec.RunID}
 	case err == nil:
 		// A closed DevLoop is not restarted (REJECT_DUPLICATE); report it.
@@ -424,9 +424,12 @@ const (
 //     workflow ends at its next observation point, so the status reported is
 //     still Running; mctl_get_dev_loop shows the terminal status after.
 //
-// Any Temporal error is a 502, never a success. A signal that finds the
-// execution gone (it closed between the describe and the signal) is answered
-// from a second describe rather than assumed either way.
+// Any Temporal error is a 502, never a success. The signal is pinned to the
+// run the describe observed, so a run that closed in between -- even one
+// already replaced by a new run under the same workflow id -- answers
+// NotFound rather than abandoning a loop nobody looked at. That NotFound is
+// answered from a second describe rather than assumed either way; a new
+// run found there is reported as a 409, not abandoned.
 func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.requireTemporalAdmin(w, r)
 	if !ok {
@@ -488,14 +491,16 @@ func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 		})
 	}
 	// describe answers with the execution, or writes the error response
-	// itself and returns nil.
-	describe := func() *temporalclient.DevLoopExecution {
+	// itself and returns nil. notFoundAudit is the audit message for a
+	// NotFound: on the second look the execution was observed moments ago,
+	// so "workflow not found" would misreport what happened.
+	describe := func(notFoundAudit string) *temporalclient.DevLoopExecution {
 		dctx, cancel := context.WithTimeout(r.Context(), devLoopDescribeTimeout)
 		defer cancel()
 		exec, err := h.opts.TemporalClient.DescribeDevLoopExecution(dctx, workflowID)
 		switch {
 		case temporalclient.IsNotFound(err):
-			fail(http.StatusNotFound, "workflow not found", "workflow not found: "+workflowID)
+			fail(http.StatusNotFound, notFoundAudit, "workflow not found: "+workflowID)
 			return nil
 		case err != nil:
 			fail(http.StatusBadGateway, "describe failed: "+err.Error(), "failed to describe workflow: "+err.Error())
@@ -510,28 +515,37 @@ func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 		return exec
 	}
 
-	exec := describe()
+	exec := describe("workflow not found")
 	if exec == nil {
 		return
 	}
-	if exec.Status != "Running" {
+	if exec.Status != devLoopStatusRunning {
 		finished(exec)
 		return
 	}
 
 	payload := map[string]string{"reason": reason, "abandoned_by": user.ID}
-	if err := h.opts.TemporalClient.SignalAbandon(r.Context(), workflowID, payload); err != nil {
+	if err := h.opts.TemporalClient.SignalAbandon(r.Context(), workflowID, exec.RunID, payload); err != nil {
 		if !temporalclient.IsNotFound(err) {
 			fail(http.StatusBadGateway, "signal failed: "+err.Error(), "failed to signal abandon: "+err.Error())
 			return
 		}
-		// Temporal answers NotFound for an execution that completed after
-		// the describe above. Look again instead of guessing.
-		after := describe()
+		// Temporal answers NotFound for the described run once it has
+		// completed, whether or not a new run has started since. Look again
+		// instead of guessing.
+		after := describe("execution vanished between describe and signal")
 		if after == nil {
 			return
 		}
-		if after.Status == "Running" {
+		if after.Status == devLoopStatusRunning {
+			if after.RunID != exec.RunID {
+				// The described run ended and a new one took the id. It was
+				// not the run anyone looked at, so it is not abandoned here.
+				fail(http.StatusConflict, "described run "+exec.RunID+" ended; new run "+after.RunID+" not signalled",
+					"run "+exec.RunID+" ended before the signal and a new run "+after.RunID+
+						" is running under the same workflow id; it was not abandoned. Re-issue the request to abandon it.")
+				return
+			}
 			fail(http.StatusBadGateway, "signal answered not found for a running execution",
 				"failed to signal abandon: "+err.Error())
 			return
@@ -614,10 +628,10 @@ func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 	// returns "Unknown" from its own default arm for an execution status it
 	// could not determine, so a read that determined nothing would otherwise
 	// answer known=true about a false it derived from nothing. The old
-	// `status == "Running"` covered that case by accident; this covers it on
+	// `status == devLoopStatusRunning` covered that case by accident; this covers it on
 	// purpose.
 	shepherdInLoopKnown := status != "Unknown"
-	if status == "Running" {
+	if status == devLoopStatusRunning {
 		qctx, cancel := context.WithTimeout(r.Context(), shepherdQueryTimeout)
 		inLoop, qerr := h.opts.TemporalClient.QueryShepherdInLoop(qctx, workflowID)
 		cancel()

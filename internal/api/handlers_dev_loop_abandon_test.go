@@ -125,6 +125,9 @@ func TestAbandonDevLoopWorkflow_RunningIsSignalledWithCallerAsActor(t *testing.T
 	if fake.abandonCalls != 1 {
 		t.Fatalf("expected exactly one abandon signal, got %d", fake.abandonCalls)
 	}
+	if fake.lastAbandonRunID != "run-1" {
+		t.Errorf("signal run id: got %q, want the described run run-1", fake.lastAbandonRunID)
+	}
 	// adminCtx authenticates as "tester".
 	if got := fake.lastAbandonPayload["abandoned_by"]; got != "tester" {
 		t.Errorf("abandoned_by: got %q, want the authenticated caller", got)
@@ -234,15 +237,20 @@ func TestAbandonDevLoopWorkflow_SignalFailureIs502(t *testing.T) {
 // answer NotFound. That is answered from a second look, never assumed.
 func TestAbandonDevLoopWorkflow_SignalNotFoundIsAnsweredFromASecondDescribe(t *testing.T) {
 	cases := map[string]struct {
-		after    *temporalclient.DevLoopExecution
-		afterErr error
-		wantCode int
-		wantOut  string
+		after     *temporalclient.DevLoopExecution
+		afterErr  error
+		wantCode  int
+		wantOut   string
+		wantAudit string
 	}{
 		"closed in between":      {after: &temporalclient.DevLoopExecution{Status: "Completed", RunID: "run-1"}, wantCode: http.StatusOK, wantOut: "already_finished"},
 		"still reported running": {after: &temporalclient.DevLoopExecution{Status: "Running", RunID: "run-1"}, wantCode: http.StatusBadGateway},
-		"gone entirely":          {afterErr: serviceerror.NewNotFound("workflow not found"), wantCode: http.StatusNotFound},
-		"second describe fails":  {afterErr: serviceerror.NewUnavailable("unreachable"), wantCode: http.StatusBadGateway},
+		// The described run closed and a new run took the workflow id: the
+		// pinned signal answered NotFound, and the new run is not abandoned.
+		"replaced by a new run": {after: &temporalclient.DevLoopExecution{Status: "Running", RunID: "run-2"}, wantCode: http.StatusConflict},
+		"gone entirely": {afterErr: serviceerror.NewNotFound("workflow not found"), wantCode: http.StatusNotFound,
+			wantAudit: "execution vanished between describe and signal"},
+		"second describe fails": {afterErr: serviceerror.NewUnavailable("unreachable"), wantCode: http.StatusBadGateway},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -254,11 +262,23 @@ func TestAbandonDevLoopWorkflow_SignalNotFoundIsAnsweredFromASecondDescribe(t *t
 					f.describeExecErr = tc.afterErr
 				},
 			}
-			h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: audit.NewLogger()}}
+			logger := audit.NewLogger()
+			h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 			rec := httptest.NewRecorder()
 			h.AbandonDevLoopWorkflow(rec, adminCtx(abandonRequest(`{"reason":"superseded"}`)))
 			if rec.Code != tc.wantCode {
 				t.Fatalf("expected %d, got %d: %s", tc.wantCode, rec.Code, rec.Body.String())
+			}
+			if fake.lastAbandonRunID != "run-1" {
+				t.Errorf("signal run id: got %q, want the described run run-1", fake.lastAbandonRunID)
+			}
+			if got := decodeAbandonResponse(t, rec); got["outcome"] == "signalled" || got["signalled"] != nil {
+				t.Errorf("a NotFound signal must never be reported as signalled: %+v", got)
+			}
+			if tc.wantAudit != "" {
+				if entries := logger.List(10); len(entries) != 1 || entries[0].Message != tc.wantAudit {
+					t.Errorf("audit: got %+v, want message %q", entries, tc.wantAudit)
+				}
 			}
 			if fake.describeExecCalls != 2 {
 				t.Errorf("expected a second describe after the NotFound signal, got %d describes", fake.describeExecCalls)

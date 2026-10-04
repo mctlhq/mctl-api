@@ -45,6 +45,7 @@ type fakeDevLoopClient struct {
 	abandonErr            error
 	abandonCalls          int
 	lastAbandonPayload    map[string]string
+	lastAbandonRunID      string
 	onAbandon             func(f *fakeDevLoopClient)
 	describeErr           error
 	describeStatus        string
@@ -109,8 +110,9 @@ func (f *fakeDevLoopClient) SignalApprove(ctx context.Context, workflowID string
 	return f.approveErr
 }
 
-func (f *fakeDevLoopClient) SignalAbandon(ctx context.Context, workflowID string, payload map[string]string) error {
+func (f *fakeDevLoopClient) SignalAbandon(ctx context.Context, workflowID, runID string, payload map[string]string) error {
 	f.abandonCalls++
+	f.lastAbandonRunID = runID
 	f.lastAbandonPayload = payload
 	if f.onAbandon != nil {
 		f.onAbandon(f)
