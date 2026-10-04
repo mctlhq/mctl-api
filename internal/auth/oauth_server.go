@@ -1226,13 +1226,38 @@ func GenerateState() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// StoreAuthCode stores a pending authorization code entry keyed by opaque state,
+// Upstream identity providers an authorization can be started for. A
+// pending authorization records its upstream, and each callback completes
+// only its own (mctl-api#467).
+const (
+	UpstreamGitHub  = "github"
+	UpstreamZitadel = "zitadel"
+)
+
+// StorePendingAuth stores a pending authorization keyed by opaque state,
 // before the user has authenticated with GitHub.
 func (s *OAuthServer) StorePendingAuth(state, clientID, redirectURI, codeChallenge string) {
 	s.codes.storePending(state, pendingAuth{
+		Upstream:      UpstreamGitHub,
 		ClientID:      clientID,
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
+		CreatedAt:     time.Now(),
+	})
+}
+
+// StorePendingOIDCAuth stores a pending authorization whose user signs in
+// at an OIDC upstream. nonce and verifier belong to that upstream leg;
+// clientState is the client's own state, returned with the code.
+func (s *OAuthServer) StorePendingOIDCAuth(state, upstream, clientID, redirectURI, codeChallenge, clientState, nonce, verifier string) {
+	s.codes.storePending(state, pendingAuth{
+		Upstream:      upstream,
+		ClientID:      clientID,
+		RedirectURI:   redirectURI,
+		CodeChallenge: codeChallenge,
+		ClientState:   clientState,
+		Nonce:         nonce,
+		Verifier:      verifier,
 		CreatedAt:     time.Now(),
 	})
 }
@@ -1515,10 +1540,17 @@ type authCodeEntry struct {
 }
 
 type pendingAuth struct {
+	// Upstream is the identity provider this authorization was sent to
+	// (UpstreamGitHub, UpstreamZitadel).
+	Upstream      string
 	ClientID      string
 	RedirectURI   string
 	CodeChallenge string
-	CreatedAt     time.Time
+	// ClientState, Nonce and Verifier are set for an OIDC upstream only.
+	ClientState string
+	Nonce       string
+	Verifier    string
+	CreatedAt   time.Time
 }
 
 type refreshTokenEntry struct {
