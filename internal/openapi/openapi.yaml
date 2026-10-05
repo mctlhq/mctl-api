@@ -1968,7 +1968,9 @@ paths:
         Idempotent by design — republishing the same name updates
         description/owner in place (blank fields leave the existing value
         untouched, so a caller that only knows the name can't wipe it out).
-        **Admin access required.**
+        **Admin access required**, or the registry-publisher principal
+        (`service:mctl-agents-registry-publisher`); see
+        docs/agent-platform-registry.md.
       tags: [Agent Registry]
       requestBody:
         required: true
@@ -2046,7 +2048,10 @@ paths:
       description: |
         Intended caller: CI, after `orchestrator/validate_manifest.py` has
         passed. `(agent, version)` is a once-only key — republishing the same
-        version is rejected, never overwritten. **Admin access required.**
+        version is rejected, never overwritten.
+        **Admin access required**, or the registry-publisher principal
+        (`service:mctl-agents-registry-publisher`); see
+        docs/agent-platform-registry.md.
       tags: [Agent Registry]
       parameters:
         - name: name
@@ -2120,7 +2125,9 @@ paths:
         from the promotion audit trail, not a separate pointer. The two are
         mutually exclusive: setting both is rejected. Takes effect for the
         next resolve; in-flight workflows keep whatever version they already
-        pinned. **Admin access required.**
+        pinned. **Admin access required**, or the registry-publisher principal
+        (`service:mctl-agents-registry-publisher`); see
+        docs/agent-platform-registry.md.
       tags: [Agent Registry]
       parameters:
         - name: name

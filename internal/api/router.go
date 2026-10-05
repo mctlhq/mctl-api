@@ -369,6 +369,9 @@ func NewRouter(opts Options) http.Handler {
 		// The evidence writer reaches one route and nothing else
 		// (mctl-api#409), the same shape as the usage writer above.
 		r.Use(evidenceWriterGate)
+		// The registry publisher reaches the registry publication routes and
+		// nothing else (mctlhq/mctl-agents#470).
+		r.Use(registryPublisherGate)
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
 		// Loopback is skipped so MCP's in-process REST to localhost:8080 does
@@ -456,7 +459,10 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/incidents/{id}/ack", h.AcknowledgeIncident)
 			r.Post("/incidents/{id}/resolve", h.ResolveIncident)
 
-			// Agent registry (mctl-agents AgentManifest versions/releases). Admin-only.
+			// Agent registry (mctl-agents AgentManifest versions/releases).
+			// Admin-only, except that the three publication routes (create,
+			// publish, promote) also admit the registry publisher: see
+			// handlers_agent_registry_publisher.go.
 			r.Post("/agents", h.CreateAgentDefinition)
 			r.Post("/agents/{name}/versions", h.PublishAgentVersion)
 			r.Get("/agents/{name}/versions", h.ListAgentVersions)

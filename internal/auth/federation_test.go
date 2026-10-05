@@ -675,6 +675,7 @@ func usersEqual(a, b *User) bool {
 		a.githubLogin == b.githubLogin &&
 		a.usageWriter == b.usageWriter &&
 		a.evidenceWriter == b.evidenceWriter &&
+		a.registryPublisher == b.registryPublisher &&
 		a.surface == b.surface &&
 		a.githubID == b.githubID &&
 		a.dexIssuer == b.dexIssuer &&
@@ -689,6 +690,7 @@ func TestCharacterization_ServiceSurfaceUsageWriterGitHubDev(t *testing.T) {
 	t.Setenv("MCTL_SURFACE_PORTAL_TOKEN", portalToken)
 	t.Setenv("MCTL_USAGE_WRITER_TOKEN", usageWriterToken32)
 	t.Setenv("MCTL_EVIDENCE_WRITER_TOKEN", evidenceWriterToken32)
+	t.Setenv("MCTL_REGISTRY_PUBLISHER_TOKEN", registryPublisherToken32)
 
 	v := NewGitHubValidator(nil)
 	v.cache["gho_alice"] = &githubUserInfo{Login: "alice", ID: 4242, CachedAt: time.Now()}
@@ -702,6 +704,7 @@ func TestCharacterization_ServiceSurfaceUsageWriterGitHubDev(t *testing.T) {
 		{"surface portal", portalToken},
 		{"usage writer", usageWriterToken32},
 		{"evidence writer", evidenceWriterToken32},
+		{"registry publisher", registryPublisherToken32},
 		{"github", "gho_alice"},
 	}
 	for _, c := range cases {

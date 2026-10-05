@@ -171,11 +171,13 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 	surfaces := surfaceTokens()
 	usageWriter := usageWriterToken()
 	evidenceWriter := evidenceWriterToken()
+	registryPublisher := registryPublisherToken()
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
 		newSurfaceProvider(func() map[string]string { return surfaces }),
 		newUsageWriterProvider(func() string { return usageWriter }),
 		newEvidenceWriterProvider(func() string { return evidenceWriter }),
+		newRegistryPublisherProvider(func() string { return registryPublisher }),
 	}
 
 	var jwtProviders []Provider

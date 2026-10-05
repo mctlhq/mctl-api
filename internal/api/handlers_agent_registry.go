@@ -113,7 +113,7 @@ func (h *Handlers) requireAgentRegistryAdmin(w http.ResponseWriter, r *http.Requ
 
 // CreateAgentDefinition handles POST /api/v1/agents.
 func (h *Handlers) CreateAgentDefinition(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireAgentRegistryAdmin(w, r); !ok {
+	if _, ok := h.requireAgentRegistryPublisherOrAdmin(w, r); !ok {
 		return
 	}
 
@@ -138,7 +138,7 @@ func (h *Handlers) CreateAgentDefinition(w http.ResponseWriter, r *http.Request)
 // PublishAgentVersion handles POST /api/v1/agents/{name}/versions. Intended
 // caller: CI, after orchestrator/validate_manifest.py has passed.
 func (h *Handlers) PublishAgentVersion(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.requireAgentRegistryAdmin(w, r)
+	user, ok := h.requireAgentRegistryPublisherOrAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -212,7 +212,7 @@ func (h *Handlers) ListAgentVersions(w http.ResponseWriter, r *http.Request) {
 // to an explicit version, or rolls back to the prior one when the request
 // sets rollback=true.
 func (h *Handlers) UpdateAgentRelease(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.requireAgentRegistryAdmin(w, r)
+	user, ok := h.requireAgentRegistryPublisherOrAdmin(w, r)
 	if !ok {
 		return
 	}

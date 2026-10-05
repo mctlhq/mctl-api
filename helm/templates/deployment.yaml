@@ -92,6 +92,17 @@ spec:
                   key: MCTL_EVIDENCE_WRITER_TOKEN
                   optional: true
             {{- end }}
+            {{- if .Values.registryPublisherTokenSecret }}
+            # Optional on purpose: a missing Secret leaves the
+            # registry-publisher principal disabled (only admins can publish
+            # to the agent registry), it does not keep the pod from starting.
+            - name: MCTL_REGISTRY_PUBLISHER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.registryPublisherTokenSecret }}
+                  key: MCTL_REGISTRY_PUBLISHER_TOKEN
+                  optional: true
+            {{- end }}
             {{- if .Values.surfaceTelegramTokenSecret }}
             # Optional on purpose, same as the usage writer above: the chart ships
             # before mctl-gitops flips surfaceTelegramToken.enabled, so the Secret may

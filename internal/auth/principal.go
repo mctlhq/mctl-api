@@ -35,8 +35,10 @@ const (
 	ProviderGitHub = "github"
 	// ProviderDex: issuer is the token's iss, subject its sub.
 	ProviderDex = "dex"
-	// ProviderService: subject is "mctl-agent", "surface:<name>" or the
-	// usage writer, "service:mctl-agents-usage".
+	// ProviderService: subject is "mctl-agent", "surface:<name>", the usage
+	// writer "service:mctl-agents-usage", the evidence writer
+	// "service:mctl-agents-evidence" or the registry publisher
+	// "service:mctl-agents-registry-publisher".
 	ProviderService = "service"
 	// ProviderDev: the dev-mode caller (AUTH_REQUIRED=false) only.
 	ProviderDev = "dev"
@@ -130,6 +132,8 @@ func (u *User) Identity() (Identity, bool) {
 		return Identity{Provider: ProviderService, Subject: UsageWriterUserID, Display: UsageWriterUserID, Kind: KindService}, true
 	case u.evidenceWriter:
 		return Identity{Provider: ProviderService, Subject: EvidenceWriterUserID, Display: EvidenceWriterUserID, Kind: KindService}, true
+	case u.registryPublisher:
+		return Identity{Provider: ProviderService, Subject: RegistryPublisherUserID, Display: RegistryPublisherUserID, Kind: KindService}, true
 	case u.dev:
 		return Identity{Provider: ProviderDev, Subject: u.ID, Display: u.ID, Kind: KindHuman}, true
 	case u.dexSubject != "":
