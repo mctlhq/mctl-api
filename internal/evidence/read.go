@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -276,15 +277,21 @@ func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence, scope 
 		}
 		byID[e.ID] = append(byID[e.ID], e)
 	}
-	// Bounded like the current read's pool: an unbounded fan-in would be
-	// materialized and serialized whole. Past the cap the read fails
-	// closed; a truncated list could leave a retired record reading live.
+	// Bounded per target, like the current read's pool: an unbounded
+	// fan-in would be materialized and serialized whole, and a truncated
+	// list could leave a retired record reading live, so past the cap the
+	// read fails closed. The query limit scales with the batch: if it is
+	// reached, some target must exceed maxCurrentPool (pigeonhole).
+	// supersedes <> '' repeats the partial index predicate so the planner
+	// can use it under a generic plan; order is applied in Go.
+	limit := len(ids)*maxCurrentPool + 1
 	rows, err := s.pool.Query(ctx, `SELECT `+evidenceRowColumns+` FROM execution_evidence
-		WHERE supersedes = ANY($1) AND subject_kind <> '' ORDER BY id LIMIT $2`, ids, maxCurrentPool+1)
+		WHERE supersedes = ANY($1) AND supersedes <> '' AND subject_kind <> '' LIMIT $2`, ids, limit)
 	if err != nil {
 		return fmt.Errorf("evidence: superseded_by: %w", err)
 	}
 	var superseders []*Evidence
+	perTarget := map[string]int{}
 	for rows.Next() {
 		sup, err := scanEvidenceRow(rows)
 		if err != nil {
@@ -292,14 +299,21 @@ func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence, scope 
 			return fmt.Errorf("evidence: superseded_by scan: %w", err)
 		}
 		superseders = append(superseders, sup)
+		perTarget[sup.Supersedes]++
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("evidence: superseded_by rows: %w", err)
 	}
-	if len(superseders) > maxCurrentPool {
-		return fmt.Errorf("evidence: %d+ superseding envelopes: %w", maxCurrentPool+1, ErrCurrentPoolTooLarge)
+	if len(superseders) >= limit {
+		return fmt.Errorf("evidence: superseding envelopes exceed %d per record: %w", maxCurrentPool, ErrCurrentPoolTooLarge)
 	}
+	for target, n := range perTarget {
+		if n > maxCurrentPool {
+			return fmt.Errorf("evidence: %s has more than %d superseding envelopes: %w", target, maxCurrentPool, ErrCurrentPoolTooLarge)
+		}
+	}
+	sort.Slice(superseders, func(i, j int) bool { return superseders[i].ID < superseders[j].ID })
 	if scope != "" {
 		// Resolve each superseder's projection once (a nil Ref after
 		// attachRef is a legitimate "no projection", not a retry signal).

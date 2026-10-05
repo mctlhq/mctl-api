@@ -739,3 +739,60 @@ func TestStoreA2CorruptStoredRowIsNotAClientError(t *testing.T) {
 		t.Fatalf("Get(corrupt row) = %v, want a server-side error (not invalid, not not-found)", err)
 	}
 }
+
+// The superseded_by cap is per record, not per page: a page whose records
+// each sit within the cap never fails because the page is large.
+func TestStoreA2SupersededByCapIsPerRecord(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	repo := "mctlhq/p" + uniqueSuffix()
+	for range 2 {
+		spec := uniqueSubject()
+		spec.repo = repo
+		target := mustIngest(t, s, a2Envelope(t, spec))
+		repl := spec
+		repl.supersedes, repl.observedAt = target.ID, "2026-10-04T11:00:00Z"
+		mustIngest(t, s, a2Envelope(t, repl))
+	}
+	var res *ListResult
+	_, err := withPoolCap(1, func() (*CurrentResult, error) {
+		var err error
+		res, err = s.List(ctx, Filter{SubjectRepository: repo})
+		return nil, err
+	})
+	if err != nil {
+		t.Fatalf("List(two records, one superseder each, cap 1) = %v, want success", err)
+	}
+	retired := 0
+	for _, e := range res.Evidence {
+		if e.Superseded {
+			retired++
+		}
+	}
+	if len(res.Evidence) != 4 || retired != 2 {
+		t.Fatalf("List: %d records, %d superseded, want 4 and 2", len(res.Evidence), retired)
+	}
+}
+
+// One record over the cap fails the page even when the page's total is
+// within the batch-scaled query limit.
+func TestStoreA2SupersededByCapCatchesOneHeavyRecord(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	repo := "mctlhq/q" + uniqueSuffix()
+	heavy := uniqueSubject()
+	heavy.repo = repo
+	target := mustIngest(t, s, a2Envelope(t, heavy))
+	for _, at := range []string{"2026-10-04T11:00:00Z", "2026-10-04T12:00:00Z"} {
+		repl := heavy
+		repl.supersedes, repl.observedAt = target.ID, at
+		mustIngest(t, s, a2Envelope(t, repl))
+	}
+	_, err := withPoolCap(1, func() (*CurrentResult, error) {
+		_, err := s.List(ctx, Filter{SubjectRepository: repo, SubjectRevision: heavy.revision, Limit: 3})
+		return nil, err
+	})
+	if !errors.Is(err, ErrCurrentPoolTooLarge) {
+		t.Fatalf("List(one record with 2 superseders, cap 1) = %v, want ErrCurrentPoolTooLarge", err)
+	}
+}
