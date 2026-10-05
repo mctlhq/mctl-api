@@ -587,3 +587,76 @@ func TestStoreA2CurrentForWorkItemNeedsTheWholePoolVisible(t *testing.T) {
 		t.Fatalf("CurrentForWorkItem(mixed pool) = %v, want ErrCurrentNotVisible", err)
 	}
 }
+
+// superseded_by never discloses another work item's evidence on the
+// work-item read: the link still marks the record superseded (a retired
+// record must not read as live), but only the admin read lists the id.
+func TestStoreA2SupersededByIsWorkItemScoped(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	mine := "wi_mine-" + uniqueSuffix()
+	spec := uniqueSubject()
+	spec.workItemID = mine
+	target := mustIngest(t, s, a2Envelope(t, spec))
+	theirs := spec
+	theirs.workItemID = "wi_theirs-" + uniqueSuffix()
+	theirs.supersedes = target.ID
+	theirs.observedAt = "2026-10-04T11:00:00Z"
+	foreign := mustIngest(t, s, a2Envelope(t, theirs))
+
+	scoped, err := s.ByWorkItem(ctx, mine, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scoped.Evidence) != 1 {
+		t.Fatalf("ByWorkItem: %d records, want 1", len(scoped.Evidence))
+	}
+	if got := scoped.Evidence[0]; !got.Superseded || len(got.SupersededBy) != 0 {
+		t.Fatalf("work-item read: superseded=%v superseded_by=%v, want true and no foreign ids", got.Superseded, got.SupersededBy)
+	}
+	admin, err := s.Get(ctx, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !admin.Superseded || !slices.Equal(admin.SupersededBy, []string{foreign.ID}) {
+		t.Fatalf("admin read: superseded=%v superseded_by=%v, want true [%s]", admin.Superseded, admin.SupersededBy, foreign.ID)
+	}
+
+	// A superseder in the same work item is listed on the scoped read.
+	own := spec
+	own.supersedes = target.ID
+	own.observedAt = "2026-10-04T12:00:00Z"
+	ownRec := mustIngest(t, s, a2Envelope(t, own))
+	scoped, err = s.ByWorkItem(ctx, mine, Filter{SubjectRevision: spec.revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range scoped.Evidence {
+		if e.ID == target.ID && !slices.Equal(e.SupersededBy, []string{ownRec.ID}) {
+			t.Fatalf("work-item read: superseded_by=%v, want only [%s]", e.SupersededBy, ownRec.ID)
+		}
+	}
+}
+
+// The stale-witness scan is bounded like the pool: past the cap without an
+// unredacted witness it fails closed instead of answering no_evidence.
+func TestStoreA2StaleWitnessScanIsBounded(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	ref := "wi_" + uniqueSuffix()
+	for _, revision := range []string{"v1", "v2"} {
+		mustIngest(t, s, a2Envelope(t, a2Spec{kind: "work_item", ref: ref, revision: revision, authority: "observed",
+			observedAt: "2026-10-04T10:00:00Z", declareSubjectRedaction: true}))
+	}
+	q := SubjectQuery{Kind: "work_item", Ref: ref, Revision: "v9"}
+	prev := maxCurrentPool
+	maxCurrentPool = 1
+	_, err := s.Current(ctx, q)
+	maxCurrentPool = prev
+	if !errors.Is(err, ErrCurrentPoolTooLarge) {
+		t.Fatalf("Current(witness scan over cap) = %v, want ErrCurrentPoolTooLarge", err)
+	}
+	if res, err := s.Current(ctx, q); err != nil || res.State != CurrentStateNoEvidence {
+		t.Fatalf("Current(within cap) = (%v, %v), want no_evidence", res, err)
+	}
+}

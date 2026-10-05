@@ -109,7 +109,7 @@ func (s *Store) Ingest(ctx context.Context, in IngestInput) (*Evidence, bool, er
 	if err := s.attachRef(ctx, out); err != nil {
 		return nil, false, err
 	}
-	if err := s.attachSupersededBy(ctx, []*Evidence{out}); err != nil {
+	if err := s.attachSupersededBy(ctx, []*Evidence{out}, ""); err != nil {
 		return nil, false, err
 	}
 	return out, created, nil

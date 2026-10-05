@@ -62,6 +62,12 @@ type CurrentResult struct {
 // Any read or verification error is returned as an error, never as
 // no_evidence.
 func (s *Store) Current(ctx context.Context, q SubjectQuery) (*CurrentResult, error) {
+	return s.current(ctx, q, "")
+}
+
+// current is Current with superseded_by scoped to scope (see
+// attachSupersededBy).
+func (s *Store) current(ctx context.Context, q SubjectQuery, scope string) (*CurrentResult, error) {
 	if err := ValidateSubjectQuery(q); err != nil {
 		return nil, err
 	}
@@ -103,7 +109,7 @@ func (s *Store) Current(ctx context.Context, q SubjectQuery) (*CurrentResult, er
 		if err := s.attachRef(ctx, rec); err != nil {
 			return nil, err
 		}
-		if err := s.attachSupersededBy(ctx, []*Evidence{rec}); err != nil {
+		if err := s.attachSupersededBy(ctx, []*Evidence{rec}, scope); err != nil {
 			return nil, err
 		}
 		res.Evidence = rec
@@ -120,7 +126,7 @@ func (s *Store) Current(ctx context.Context, q SubjectQuery) (*CurrentResult, er
 // Otherwise ErrCurrentNotVisible: an explicit refusal, never a fabricated
 // no_evidence and never another work item's evidence.
 func (s *Store) CurrentForWorkItem(ctx context.Context, q SubjectQuery, workItemID string) (*CurrentResult, error) {
-	res, err := s.Current(ctx, q)
+	res, err := s.current(ctx, q, workItemID)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +136,7 @@ func (s *Store) CurrentForWorkItem(ctx context.Context, q SubjectQuery, workItem
 				return nil, err
 			}
 		}
-		if e.WorkItemID != workItemID && (e.Ref == nil || e.Ref.WorkItemID != workItemID) {
+		if !attachedTo(e, workItemID) {
 			return nil, fmt.Errorf("evidence: work item %s: %w", workItemID, ErrCurrentNotVisible)
 		}
 	}
@@ -166,17 +172,23 @@ func (s *Store) loadPool(ctx context.Context, q SubjectQuery) ([]*Evidence, erro
 }
 
 // loadStaleWitness returns one envelope for the same subject key at another
-// revision whose subject is not redacted, or nil when there is none. Every
-// row it reads is verified; a row that fails is an error, not a skip.
+// revision whose subject is not redacted, or nil when there is none. Any
+// such envelope gives the same answer (resolve_current only asks whether
+// one exists), so the scan is unordered. It is bounded like the pool: past
+// maxCurrentPool redacted rows without a witness it fails with
+// ErrCurrentPoolTooLarge rather than guessing. Every row it reads is
+// verified; a row that fails is an error, not a skip.
 func (s *Store) loadStaleWitness(ctx context.Context, q SubjectQuery) (*Evidence, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+evidenceRowColumns+` FROM execution_evidence
 		WHERE subject_kind=$1 AND subject_repository=$2 AND subject_ref=$3 AND subject_revision<>$4
-		ORDER BY observed_at DESC, id`, q.Kind, q.Repository, q.Ref, q.Revision)
+		LIMIT $5`, q.Kind, q.Repository, q.Ref, q.Revision, maxCurrentPool+1)
 	if err != nil {
 		return nil, fmt.Errorf("evidence: stale witness: %w", err)
 	}
 	defer rows.Close()
+	scanned := 0
 	for rows.Next() {
+		scanned++
 		e, err := scanEvidenceRow(rows)
 		if err != nil {
 			return nil, fmt.Errorf("evidence: stale witness scan: %w", err)
@@ -187,6 +199,9 @@ func (s *Store) loadStaleWitness(ctx context.Context, q SubjectQuery) (*Evidence
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("evidence: stale witness rows: %w", err)
+	}
+	if scanned > maxCurrentPool {
+		return nil, fmt.Errorf("evidence: %d+ redacted envelopes at other revisions: %w", maxCurrentPool+1, ErrCurrentPoolTooLarge)
 	}
 	return nil, nil
 }

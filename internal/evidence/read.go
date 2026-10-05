@@ -73,7 +73,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Evidence, error) {
 	if err := s.attachRef(ctx, e); err != nil {
 		return nil, err
 	}
-	if err := s.attachSupersededBy(ctx, []*Evidence{e}); err != nil {
+	if err := s.attachSupersededBy(ctx, []*Evidence{e}, ""); err != nil {
 		return nil, err
 	}
 	return e, nil
@@ -117,6 +117,13 @@ type ListResult struct {
 // pr) joins through that table; work_item_id is matched on either table so
 // a row is found whether or not its projection is resolved.
 func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
+	return s.list(ctx, f, "")
+}
+
+// list is List with superseded_by scoped to supersedersScope ("" = every
+// superseder, the admin view; a work item id = only superseders attached to
+// that work item, see attachSupersededBy).
+func (s *Store) list(ctx context.Context, f Filter, supersedersScope string) (*ListResult, error) {
 	var clauses []string
 	var args []any
 	add := func(expr string, v any) {
@@ -218,7 +225,7 @@ func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
 			return nil, err
 		}
 	}
-	if err := s.attachSupersededBy(ctx, out); err != nil {
+	if err := s.attachSupersededBy(ctx, out, supersedersScope); err != nil {
 		return nil, err
 	}
 	res.Evidence = out
@@ -230,17 +237,32 @@ func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
 // already checked visibility on the work item itself.
 //
 // f narrows the result further (its subject filters, ADR 018 Amendment 2);
-// f.WorkItemID is always overridden by workItemID.
+// f.WorkItemID is always overridden by workItemID. superseded_by lists
+// only superseders attached to the same work item (attachSupersededBy).
 func (s *Store) ByWorkItem(ctx context.Context, workItemID string, f Filter) (*ListResult, error) {
 	f.WorkItemID = workItemID
-	return s.List(ctx, f)
+	return s.list(ctx, f, workItemID)
 }
 
-// attachSupersededBy fills the read-time SupersededBy of every record in
-// recs: the stored envelopes whose provenance.supersedes names it through
-// a valid link (validLink — the same predicate resolve_current applies).
-// A row that fails to read is an error, never a shorter list.
-func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence) error {
+// attachedTo reports whether e belongs to work item workItemID, on its own
+// join or on its derived projection — the same match List's work_item_id
+// filter makes. e.Ref must already be attached.
+func attachedTo(e *Evidence, workItemID string) bool {
+	return e.WorkItemID == workItemID || (e.Ref != nil && e.Ref.WorkItemID == workItemID)
+}
+
+// attachSupersededBy fills the read-time Superseded/SupersededBy of every
+// record in recs from the stored envelopes whose provenance.supersedes
+// names it through a valid link (validLink — the same predicate
+// resolve_current applies). A row that fails to read is an error, never a
+// shorter list.
+//
+// Superseded is set by every valid link, wherever the superseder lives: a
+// retired record must never read as live. SupersededBy carries ids, so
+// with a non-empty scope (the non-admin work-item read) it lists only
+// superseders attached to that work item; an id of evidence the caller
+// cannot see is never disclosed, mirroring CurrentForWorkItem's refusal.
+func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence, scope string) error {
 	if len(recs) == 0 {
 		return nil
 	}
@@ -248,6 +270,7 @@ func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence) error 
 	byID := make(map[string][]*Evidence, len(recs))
 	for _, e := range recs {
 		e.SupersededBy = nil
+		e.Superseded = false
 		if _, seen := byID[e.ID]; !seen {
 			ids = append(ids, e.ID)
 		}
@@ -258,20 +281,37 @@ func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence) error 
 	if err != nil {
 		return fmt.Errorf("evidence: superseded_by: %w", err)
 	}
-	defer rows.Close()
+	var superseders []*Evidence
 	for rows.Next() {
 		sup, err := scanEvidenceRow(rows)
 		if err != nil {
+			rows.Close()
 			return fmt.Errorf("evidence: superseded_by scan: %w", err)
 		}
-		for _, target := range byID[sup.Supersedes] {
-			if validLink(sup.candidate(), target.candidate()) {
-				target.SupersededBy = append(target.SupersededBy, sup.ID)
-			}
-		}
+		superseders = append(superseders, sup)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("evidence: superseded_by rows: %w", err)
+	}
+	for _, sup := range superseders {
+		for _, target := range byID[sup.Supersedes] {
+			if !validLink(sup.candidate(), target.candidate()) {
+				continue
+			}
+			target.Superseded = true
+			if scope != "" {
+				if sup.Ref == nil {
+					if err := s.attachRef(ctx, sup); err != nil {
+						return err
+					}
+				}
+				if !attachedTo(sup, scope) {
+					continue
+				}
+			}
+			target.SupersededBy = append(target.SupersededBy, sup.ID)
+		}
 	}
 	return nil
 }

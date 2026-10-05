@@ -37,10 +37,11 @@ const (
 	CurrentStateAmbiguous       = "ambiguous"
 )
 
-// ErrCurrentQueryInvalid: a current-read argument is malformed (an
-// abbreviated or uppercase SHA, a kind outside SUBJECT_KINDS, ...). A
-// caller bug, answered 400 — never no_evidence.
-var ErrCurrentQueryInvalid = errors.New("current-evidence query is invalid")
+// ErrCurrentQueryInvalid: an evidence query argument is malformed (an
+// abbreviated or uppercase SHA, a kind outside SUBJECT_KINDS, an unknown
+// or repeated current-read parameter, ...). A caller bug, answered 400
+// evidence_query_invalid — never no_evidence.
+var ErrCurrentQueryInvalid = errors.New("evidence query is invalid")
 
 // SubjectQuery names the subject and the revision the caller has just
 // observed it at.

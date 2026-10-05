@@ -172,6 +172,7 @@ func TestEvidenceA2_IngestAndCurrentRead(t *testing.T) {
 		"PR ref":          func(v url.Values) { v.Set("ref", "x") },
 		"missing repo":    func(v url.Values) { v.Del("repository") },
 		"repeated param":  func(v url.Values) { v.Add("revision", subj.revision) },
+		"unknown param":   func(v url.Values) { v.Set("subject_revision", subj.revision) },
 	} {
 		q := subj.query()
 		mutate(q)
@@ -213,8 +214,8 @@ func TestEvidenceA2_IngestAndCurrentRead(t *testing.T) {
 			t.Errorf("list by subject_repository: %s", rec.Body.String())
 		}
 	}
-	if rec := call(adminUser(), http.MethodGet, "/api/v1/evidence?subject_kind=commit", nil); rec.Code != http.StatusBadRequest {
-		t.Errorf("list by unknown subject_kind: got %d, want 400", rec.Code)
+	if rec := call(adminUser(), http.MethodGet, "/api/v1/evidence?subject_kind=commit", nil); rec.Code != http.StatusBadRequest || bodyCode(rec) != codeEvidenceQueryInvalid {
+		t.Errorf("list by unknown subject_kind: got %d %s, want 400 %s", rec.Code, rec.Body.String(), codeEvidenceQueryInvalid)
 	}
 }
 

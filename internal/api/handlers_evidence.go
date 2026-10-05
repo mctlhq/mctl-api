@@ -308,9 +308,20 @@ func subjectFilterFromQuery(r *http.Request, f *evidence.Filter) error {
 	f.SubjectRef = q.Get("subject_ref")
 	f.SubjectRevision = q.Get("subject_revision")
 	if f.SubjectKind != "" && !evidence.IsSubjectKind(f.SubjectKind) {
-		return errors.New("invalid subject_kind")
+		return fmt.Errorf("%w: invalid subject_kind", evidence.ErrCurrentQueryInvalid)
 	}
 	return nil
+}
+
+// writeFilterError answers a rejected list filter: a subject-filter
+// rejection carries the typed evidence_query_invalid code (the same one
+// the current read uses), every older filter error keeps its plain 400.
+func writeFilterError(w http.ResponseWriter, err error) {
+	if errors.Is(err, evidence.ErrCurrentQueryInvalid) {
+		writeEvidenceError(w, err)
+		return
+	}
+	writeError(w, http.StatusBadRequest, err.Error())
 }
 
 // ListEvidence handles GET /api/v1/evidence with any combination of the
@@ -322,7 +333,7 @@ func (h *Handlers) ListEvidence(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := evidenceFilterFromQuery(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFilterError(w, err)
 		return
 	}
 	res, err := h.opts.Evidence.List(r.Context(), f)
@@ -352,7 +363,7 @@ func (h *Handlers) ListWorkItemEvidence(w http.ResponseWriter, r *http.Request) 
 	}
 	var f evidence.Filter
 	if err := subjectFilterFromQuery(r, &f); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFilterError(w, err)
 		return
 	}
 	res, err := h.opts.Evidence.ByWorkItem(r.Context(), item.ID, f)
@@ -366,11 +377,18 @@ func (h *Handlers) ListWorkItemEvidence(w http.ResponseWriter, r *http.Request) 
 // currentQuery reads GET .../evidence/current's parameters. Validation is
 // the store's (ValidateSubjectQuery): a malformed value answers 400
 // evidence_query_invalid, never no_evidence. A repeated parameter is
-// malformed too, rather than silently first-wins.
+// malformed too, rather than silently first-wins, and so is an unknown one:
+// the list routes spell the same filters subject_ref/subject_revision, and
+// a misspelled revision silently dropped would resolve at the wrong
+// revision.
 func currentQuery(r *http.Request) (evidence.SubjectQuery, error) {
 	q := r.URL.Query()
-	for _, key := range []string{"subject_kind", "repository", "ref", "revision"} {
-		if len(q[key]) > 1 {
+	for key, values := range q {
+		if !currentQueryKeys[key] {
+			return evidence.SubjectQuery{}, fmt.Errorf("%w: unknown parameter %q (expected subject_kind, repository, ref, revision)",
+				evidence.ErrCurrentQueryInvalid, key)
+		}
+		if len(values) > 1 {
 			return evidence.SubjectQuery{}, fmt.Errorf("%w: %s given more than once", evidence.ErrCurrentQueryInvalid, key)
 		}
 	}
@@ -381,6 +399,8 @@ func currentQuery(r *http.Request) (evidence.SubjectQuery, error) {
 		Revision:   q.Get("revision"),
 	}, nil
 }
+
+var currentQueryKeys = map[string]bool{"subject_kind": true, "repository": true, "ref": true, "revision": true}
 
 // CurrentEvidence handles GET /api/v1/evidence/current
 // (?subject_kind=&repository=&ref=&revision=): ADR 018 Amendment 2's

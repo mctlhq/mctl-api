@@ -29,6 +29,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Subject kinds (Tier A SUBJECT_KINDS and its three subsets).
@@ -619,9 +620,14 @@ func (a *amendment2) validate(ownEvidenceID string) error {
 	return nil
 }
 
+// truncate bounds an echoed value to 80 bytes without splitting a rune.
 func truncate(s string) string {
-	if len(s) > 80 {
-		return s[:80]
+	if len(s) <= 80 {
+		return s
 	}
-	return s
+	cut := 80
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }

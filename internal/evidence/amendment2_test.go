@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // ADR 018 Amendment 2, Tier B checklist items 1-2: every new block is
@@ -525,5 +526,16 @@ func TestAmendment2BlocksHashInTheirFullTierAShape(t *testing.T) {
 	}
 	if hFull != hSparse {
 		t.Fatalf("sparse block hashes %s, full block %s: a present block must hash in its full Tier A shape", hSparse, hFull)
+	}
+}
+
+func TestTruncateNeverSplitsARune(t *testing.T) {
+	s := strings.Repeat("a", 79) + "é" + "tail"
+	got := truncate(s)
+	if !utf8.ValidString(got) || got != strings.Repeat("a", 79) {
+		t.Fatalf("truncate = %q, want 79 'a's and no split rune", got)
+	}
+	if short := "short"; truncate(short) != short {
+		t.Fatalf("truncate(short) changed it")
 	}
 }

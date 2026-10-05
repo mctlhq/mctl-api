@@ -202,12 +202,19 @@ the read rule only honours links inside a pool, so a dangling link retires
 nothing.
 
 **Exposed fields.** Every record carries `subject`, `authority`,
-`observed_at`, `supersedes` and a read-time `superseded_by` (valid links
-only: same subject and revision, neither subject redacted, equal or stronger
-authority). They are omitted on pre-amendment records, whose JSON is
-unchanged. `GET /api/v1/evidence` and `GET /api/v1/work-items/{id}/evidence`
+`observed_at`, `supersedes` and the read-time `superseded` / `superseded_by`
+(valid links only: same subject and revision, neither subject redacted,
+equal or stronger authority). `superseded` is `true` whenever any valid link
+retires the record, so a retired record never reads as live. On the admin
+routes `superseded_by` lists every superseding id; on the non-admin
+`GET /api/v1/work-items/{id}/evidence` it lists only superseders attached to
+that same work item, so it never discloses the id of evidence the caller
+cannot see (`superseded: true` with a shorter list is the signal that a
+superseder exists elsewhere). These fields are omitted on pre-amendment
+records, whose JSON is unchanged. `GET /api/v1/evidence` and `GET /api/v1/work-items/{id}/evidence`
 accept `subject_kind`, `subject_repository`, `subject_ref` and
-`subject_revision` filters (an unknown `subject_kind` is `400`).
+`subject_revision` filters (an unknown `subject_kind` is `400
+evidence_query_invalid`).
 
 ### Current vs historical
 
@@ -228,14 +235,15 @@ Authority outranks recency (`observed` > `derived` > `asserted`; among
 equals the later `observed_at` wins, the fraction normalized), and only an
 equal-or-stronger envelope in the same pool retires the one it supersedes.
 A malformed parameter (abbreviated or uppercase SHA, unknown kind, non-
-numeric PR ref, repeated parameter) answers `400 evidence_query_invalid`,
-never `no_evidence`.
+numeric PR ref, a repeated parameter, or any parameter other than the four)
+answers `400 evidence_query_invalid`, never `no_evidence`.
 
 Could not observe is never observed absent: the read loads the complete
 pool at (subject, revision) and, only when it holds no usable envelope, one
 unredacted envelope at another revision as the `stale_revision` witness;
-every row is hash-verified. A pool larger than `MaxCurrentPool` (1000)
-answers `500 evidence_current_pool_too_large`, and any read or verification
+every row is hash-verified. A pool larger than `MaxCurrentPool` (1000), or
+more than that many redacted other-revision rows without a witness, answers
+`500 evidence_current_pool_too_large`, and any read or verification
 error is a `5xx`, never a truncated `no_evidence`.
 
 `GET /api/v1/work-items/{id}/evidence/current` (behind `visibleWorkItem`)

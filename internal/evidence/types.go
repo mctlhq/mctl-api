@@ -192,6 +192,10 @@ type Evidence struct {
 	// subject and revision, neither subject redacted, equal or stronger
 	// authority). A dangling or downward link never appears here.
 	SupersededBy []string `json:"superseded_by,omitempty"`
+	// Superseded is true when any valid link retires this record, even one
+	// from evidence the caller may not see (the work-item read lists only
+	// visible ids in SupersededBy, never the others).
+	Superseded bool `json:"superseded,omitempty"`
 
 	// observedAtRaw is provenance.observed_at exactly as sealed (the
 	// resolve_current ranking key); subjectRedacted reports a redacted_out
