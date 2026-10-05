@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.66.0](https://github.com/mctlhq/mctl-api/compare/4.65.0...4.66.0) (2026-10-05)
+
+
+### Features
+
+* **evidence:** ADR 018 Amendment 2 Tier B follow-up ([798d08a](https://github.com/mctlhq/mctl-api/commit/798d08a47ca0d99c976d48d13b67836605b474d8))
+* **evidence:** implement ADR 018 Amendment 2 Tier B follow-up ([a113c3e](https://github.com/mctlhq/mctl-api/commit/a113c3e70a04cc790f57bbb5c12c8bdbb1d0f3fa))
+
+
+### Bug Fixes
+
+* **evidence:** add a total ceiling to the superseded_by scan ([e8eecea](https://github.com/mctlhq/mctl-api/commit/e8eecea0873a48aac152ca4cade54e06f3b24bab))
+* **evidence:** cap superseded_by per record and help the planner ([d4af0bb](https://github.com/mctlhq/mctl-api/commit/d4af0bba329ad099ef07eef4772d7572a3a74c0d))
+* **evidence:** never link two subject-less envelopes ([eba645b](https://github.com/mctlhq/mctl-api/commit/eba645bb79de37cdc8d369716356ef051cf4bf8f))
+* **evidence:** reject malformed query strings on evidence reads ([dbd45d2](https://github.com/mctlhq/mctl-api/commit/dbd45d297b80f247357573a33472d221f760b30b))
+* **evidence:** scope superseded_by on the work-item read ([3711935](https://github.com/mctlhq/mctl-api/commit/3711935a02c5025e2eea8ca51f5751feed243fc5))
+
 ## [4.65.0](https://github.com/mctlhq/mctl-api/compare/4.64.0...4.65.0) (2026-10-04)
 
 
