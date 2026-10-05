@@ -57,7 +57,8 @@ method must never derive identity, kind, groups or trust from it — only
 1. constant-time match against every static-secret provider, in order:
    `MCTL_AGENT_SERVICE_TOKEN`, each surface token
    (`MCTL_SURFACE_TELEGRAM_TOKEN` / `MCTL_SURFACE_PORTAL_TOKEN`),
-   `MCTL_USAGE_WRITER_TOKEN`;
+   `MCTL_USAGE_WRITER_TOKEN`, `MCTL_EVIDENCE_WRITER_TOKEN`,
+   `MCTL_REGISTRY_PUBLISHER_TOKEN`;
 2. for a JWT, exact match of the unverified `iss` against an issuer index
    built from every JWT-routed provider's own declared issuer (the local
    OAuth server's `BaseURL`, each configured OIDC provider's `issuer`);

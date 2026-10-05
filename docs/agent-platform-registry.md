@@ -86,7 +86,9 @@ cases are the ones to port.
 
 All routes below require an authenticated admin (`requireAgentRegistryAdmin`
 — 503 if the registry isn't configured, 401 unauthenticated, 403
-non-admin), same as every v1 agent-registry route.
+non-admin), same as the v1 agent-registry routes. The one exception is on
+the v1 side: its three publication routes also admit the registry publisher
+(see "Registry publisher principal" below). No v1alpha2 route does.
 
 ```
 GET    /api/v1/agents                                        -> catalog summary, every agent
@@ -468,6 +470,79 @@ through the v1 `agent_releases` path
 (`ISSUE_INVESTIGATOR_RESOLVER_MODE=legacy`), so a `shadow` binding gives
 `mctl-agents` something real to resolve against with zero blast radius on
 a running pipeline.
+
+## Registry publisher principal
+
+Publishing a release to the registry has a dedicated least-privilege
+principal, `service:mctl-agents-registry-publisher` (mctlhq/mctl-agents#470).
+It is the credential the `mctl-agents` release workflow is meant to publish
+with, in place of an admin one: a release needs to create a definition,
+publish a version and promote it, and this principal can do that and nothing
+else.
+
+It is built like the usage-writer and evidence-writer principals
+(`docs/model-usage-ledger.md`, `docs/execution-evidence.md`):
+
+- **Credential.** A static bearer token, `MCTL_REGISTRY_PUBLISHER_TOKEN`
+  (Helm: `registryPublisherTokenSecret`). At least 32 characters, compared in
+  constant time. A token that is too short, or equal to
+  `MCTL_AGENT_SERVICE_TOKEN`, to a surface token, or to either writer token,
+  is refused: the principal is disabled and the reason is logged. The
+  surface and writer tokens refuse equality with it in turn, so a shared
+  value disables both sides. None of this stops the process, and neither
+  does leaving the variable unset.
+- **Authority.** No groups, not an admin, no tenant, no named permission.
+- **Confinement.** `registryPublisherGate` answers
+  `403 registry_publisher_route_not_allowed` on every authenticated route
+  except these three, before any handler runs:
+
+  ```
+  POST /api/v1/agents                    create (or update) a definition
+  POST /api/v1/agents/{name}/versions    publish a version
+  POST /api/v1/agents/{name}/releases    promote, or roll back with rollback=true
+  ```
+
+  They are exactly the requests `mctl-agents`' `tools/publish_agent_release.py`
+  makes. That tool issues no `GET`: it learns that a definition is missing
+  from the `404` its own publish receives. So the publisher has **no read
+  access** to the registry: not `GET /agents`, `/agents/{name}/versions` or
+  `/agents/{name}/resolve`, none of the v1alpha2 routes, not
+  `/agents/executions`, and not `/mcp`. A request with a percent-encoded
+  path is refused as well, whatever it decodes to.
+- **Attribution.** Rows the publisher writes carry its name, distinct from
+  the agent service principal's `mctl-agent`: `agent_versions.created_by`,
+  `agent_releases.updated_by` and `agent_promotions.actor` (the promotion
+  audit trail, including rollbacks). `agent_definitions` records no actor
+  for anyone.
+
+### Who may publish
+
+`mayPublishToAgentRegistry` (`internal/api/handlers_agent_registry_publisher.go`)
+is the one place that decides, and `requireAgentRegistryPublisherOrAdmin` is
+used on the three routes above and nowhere else. Today it reads
+`admin OR registry publisher`: the publisher was added, and nobody was
+removed. Every other registry route, including every v1alpha2 mutation
+(`definition-versions`, profile versions, lifecycle transitions, bindings,
+binding rollback), stays on `requireAgentRegistryAdmin`, unchanged.
+
+### Staged rollout
+
+The split ships in four stages, each of which is safe to stop at:
+
+| Stage | Change | Where | If it goes wrong |
+|---|---|---|---|
+| 1 | Add the principal, its gate and the `admin OR publisher` guard | mctl-api (this section) | With the token unset the principal does not exist: its would-be token is `401`, and every existing caller is served exactly as before. A malformed or duplicated token disables the principal and logs why; the pod still starts. |
+| 2 | Seed the token in a store the agent runtime cannot read, and deliver it to mctl-api through an `ExternalSecret` (`registryPublisherTokenSecret`) | Vault, mctl-gitops | The Secret reference is optional. A missing or unsynced Secret leaves the variable unset, which is stage 1's closed state. Nothing publishes with the token yet, so a bad value breaks nothing. |
+| 3 | The release workflow publishes with the publisher token | mctl-agents | A publish that is refused fails that release's registry step loudly; the registry keeps resolving the versions already promoted. Reverting the workflow restores the previous behaviour, because admin access is still in place. |
+| 4 | Narrow `mayPublishToAgentRegistry` to `isHumanAdmin OR registry publisher`, and narrow the v1alpha2 mutation routes | mctl-api | A caller that is no longer admitted gets `403`; nothing is published or promoted on its behalf. |
+
+Stage 4 is a separate mctl-api release on purpose. Until stage 3 has
+shipped, the release workflow still publishes with an admin credential, so
+narrowing the guard first would refuse the next `mctl-agents` release.
+
+Each stage fails closed in the direction that matters: no stage can leave
+the publisher able to do more than the three routes, and no stage before 4
+takes access away from a caller that has it today.
 
 ## What this change does not do
 
