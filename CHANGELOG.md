@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.67.0](https://github.com/mctlhq/mctl-api/compare/4.66.0...4.67.0) (2026-10-05)
+
+
+### Features
+
+* **agent-registry:** add least-privilege registry-publisher principal ([84216b6](https://github.com/mctlhq/mctl-api/commit/84216b6f33b898c1e61fe4d7125bf2e8b56bcad0))
+* **agent-registry:** add registry-publisher principal ([cae7342](https://github.com/mctlhq/mctl-api/commit/cae73427a9e39ffa5116b12140857dc167d647f3))
+* **agent-registry:** confine the publisher to publication routes ([fd4669a](https://github.com/mctlhq/mctl-api/commit/fd4669ab96b6cceddacff103000fff53cd33a4d7))
+
 ## [4.66.0](https://github.com/mctlhq/mctl-api/compare/4.65.0...4.66.0) (2026-10-05)
 
 
