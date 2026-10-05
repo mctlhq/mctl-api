@@ -105,7 +105,10 @@ func readSourceFile(t *testing.T, path string) string {
 // (token, raw, presented, candidate, serviceToken and similar), in either
 // operand position. It intentionally does not flag comparisons against a
 // literal ("" or a constant), which are shape checks, not secret compares.
-var tokenEqualityPattern = regexp.MustCompile(`(?i)\b(token|raw|presented|candidate\w*|servicetoken)\b\s*(==|!=)\s*\w|\w\s*(==|!=)\s*\b(token|raw|presented|candidate\w*|servicetoken)\b`)
+// The left operand may end in ")" as well as a word character, so a call
+// result compared against the presented token (`p.token() != raw`) is
+// caught too.
+var tokenEqualityPattern = regexp.MustCompile(`(?i)\b(token|raw|presented|candidate\w*|servicetoken)\b\s*(==|!=)\s*\w|[\w)]\s*(==|!=)\s*\b(token|raw|presented|candidate\w*|servicetoken)\b`)
 
 func assertNoTokenEqualityCompare(t *testing.T, file, src string) {
 	t.Helper()

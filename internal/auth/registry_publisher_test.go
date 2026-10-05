@@ -98,6 +98,13 @@ func TestRegistryPublisherUnsetMeansUnauthenticated(t *testing.T) {
 			if code, reached := statusFor(t, registryPublisherToken32); code != http.StatusUnauthorized || reached {
 				t.Fatalf("unset publisher token: got %d reached=%v, want 401 and no handler", code, reached)
 			}
+			// An empty bearer must not match the empty, unset token.
+			if code, reached := statusFor(t, ""); code != http.StatusUnauthorized || reached {
+				t.Fatalf("empty bearer with the publisher unset: got %d reached=%v, want 401 and no handler", code, reached)
+			}
+			if u := authAs(t, ""); u.IsRegistryPublisher() {
+				t.Fatalf("an empty bearer minted the registry publisher: %+v", u)
+			}
 			if code, reached := statusFor(t, "svc-token-123"); code != http.StatusOK || !reached {
 				t.Fatalf("service token with the publisher unset: got %d reached=%v, want it served", code, reached)
 			}
