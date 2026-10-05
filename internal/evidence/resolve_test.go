@@ -306,3 +306,17 @@ func TestResolveCurrentOverTheGoldenSupersessionPair(t *testing.T) {
 		t.Fatal("validLink(superseding, original) = false, want true")
 	}
 }
+
+// Two subject-less envelopes never form a link: resolve_current's pool
+// holds no subject-less envelope, and every pre-amendment record is one.
+func TestValidLinkNeedsASubjectOnBothSides(t *testing.T) {
+	target := cand("1", withoutSubject(), by(""))
+	sup := cand("2", withoutSubject(), by("asserted"), supersedes(target.ID))
+	if validLink(sup, target) {
+		t.Fatal("validLink(nil subject, nil subject) = true, want false")
+	}
+	withSubject := cand("3", supersedes(target.ID))
+	if validLink(withSubject, target) {
+		t.Fatal("validLink(subject, nil subject) = true, want false")
+	}
+}

@@ -131,7 +131,10 @@ CREATE INDEX IF NOT EXISTS execution_evidence_refs_repo_pr
 //
 // Constraints are added under their own names inside DO blocks that
 // tolerate duplicate_object, so concurrent replicas applying the schema at
-// startup cannot fail each other.
+// startup cannot fail each other. They are added NOT VALID: every new row
+// is still checked, but startup skips a full-table validation scan under
+// ACCESS EXCLUSIVE — no existing row can violate them (every pre-amendment
+// row holds the column defaults).
 const schemaAmendment2 = `
 ALTER TABLE execution_evidence
     ADD COLUMN IF NOT EXISTS subject_kind       TEXT NOT NULL DEFAULT '',
@@ -174,7 +177,7 @@ BEGIN
     LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = c.name) THEN
             BEGIN
-                EXECUTE format('ALTER TABLE execution_evidence ADD CONSTRAINT %I CHECK (%s)', c.name, c.expr);
+                EXECUTE format('ALTER TABLE execution_evidence ADD CONSTRAINT %I CHECK (%s) NOT VALID', c.name, c.expr);
             EXCEPTION WHEN duplicate_object THEN
                 NULL;
             END;
@@ -265,18 +268,18 @@ func scanEvidenceRow(row pgx.Row) (*Evidence, error) {
 	}
 	p, err := parseEnvelope(envelope)
 	if err != nil {
-		return nil, fmt.Errorf("evidence: stored envelope %s no longer parses: %w", e.ID, err)
+		return nil, fmt.Errorf("evidence: stored envelope %s no longer parses: %v", e.ID, err) //nolint:errorlint // a corrupt stored row is a server fault: never carry ErrEvidenceInvalid (400) out of it
 	}
 	canonical, err := CanonicalContentJSON(p)
 	if err != nil {
-		return nil, fmt.Errorf("evidence: stored envelope %s no longer canonicalizes: %w", e.ID, err)
+		return nil, fmt.Errorf("evidence: stored envelope %s no longer canonicalizes: %v", e.ID, err) //nolint:errorlint // see above
 	}
 	if got := ContentHash(canonical); got != e.ContentHash {
 		return nil, fmt.Errorf("evidence: %s: stored bytes hash to %s, not %s", e.ID, got, e.ContentHash)
 	}
 	want, err := subjectColumnsOf(p)
 	if err != nil {
-		return nil, fmt.Errorf("evidence: stored envelope %s: %w", e.ID, err)
+		return nil, fmt.Errorf("evidence: stored envelope %s: %v", e.ID, err) //nolint:errorlint // see above
 	}
 	if !col.equal(want) {
 		return nil, fmt.Errorf("evidence: %s: subject/provenance columns disagree with the stored envelope", e.ID)

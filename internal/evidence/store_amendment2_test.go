@@ -663,3 +663,79 @@ func withPoolCap(limit int, fn func() (*CurrentResult, error)) (*CurrentResult, 
 	defer func() { maxCurrentPool = prev }()
 	return fn()
 }
+
+// A provenance-only (subject-less) envelope naming a legacy record never
+// marks it superseded: supersession is about a subject.
+func TestStoreA2SubjectlessLinkRetiresNothing(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	legacy := mustIngest(t, s, uniqueEnvelope(t, "wi_test-legacy-"+uniqueSuffix(), ""))
+	m := a2Base()
+	delete(m, "subject")
+	sub(m, "execution")["trace_id"] = "trace-" + uniqueSuffix()
+	m["provenance"] = map[string]any{"authority": "asserted", "observed_at": "2026-10-05T10:00:00Z", "supersedes": legacy.ID}
+	mustIngest(t, s, sealMap(t, m))
+	got, err := s.Get(ctx, legacy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Superseded || len(got.SupersededBy) != 0 {
+		t.Fatalf("legacy record: superseded=%v superseded_by=%v, want untouched", got.Superseded, got.SupersededBy)
+	}
+}
+
+// superseded_by is bounded: past the cap the read fails closed instead of
+// serializing an unbounded (or silently truncated) list.
+func TestStoreA2SupersededByIsBounded(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	spec := uniqueSubject()
+	target := mustIngest(t, s, a2Envelope(t, spec))
+	for _, at := range []string{"2026-10-04T11:00:00Z", "2026-10-04T12:00:00Z"} {
+		repl := spec
+		repl.supersedes, repl.observedAt = target.ID, at
+		mustIngest(t, s, a2Envelope(t, repl))
+	}
+	_, err := withPoolCap(1, func() (*CurrentResult, error) {
+		_, err := s.Get(ctx, target.ID)
+		return nil, err
+	})
+	if !errors.Is(err, ErrCurrentPoolTooLarge) {
+		t.Fatalf("Get(fan-in over cap) = %v, want ErrCurrentPoolTooLarge", err)
+	}
+	if got, err := s.Get(ctx, target.ID); err != nil || len(got.SupersededBy) != 2 {
+		t.Fatalf("Get(within cap) = (%v, %v), want two superseders", got, err)
+	}
+}
+
+// A corrupt stored row is a server fault: its error must never carry
+// ErrEvidenceInvalid, which the HTTP layer answers as a client 400.
+func TestStoreA2CorruptStoredRowIsNotAClientError(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	spec := uniqueSubject()
+	spec.observedAt = "2026-02-30T10:00:00Z" // pattern-valid, impossible instant
+	env := a2Envelope(t, spec)
+	p, err := parseEnvelope(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := CanonicalContentJSON(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := ContentHash(canonical)
+	id := EvidenceIDFor(hash)
+	now := time.Now().UTC()
+	if _, err := s.pool.Exec(ctx, `INSERT INTO execution_evidence (`+evidenceRowColumns+`)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+		id, hash, APIVersionV1Alpha1, env, "we_01J8ZQK7SHEP0000000000000", "ex-1122334455667788", "", "",
+		now, "test:planted", "", now, spec.kind, spec.repo, spec.ref, spec.revision, "observed", now, ""); err != nil {
+		t.Fatalf("plant: %v", err)
+	}
+	t.Cleanup(func() { _, _ = s.pool.Exec(ctx, `DELETE FROM execution_evidence WHERE id=$1`, id) })
+	_, err = s.Get(ctx, id)
+	if err == nil || errors.Is(err, ErrEvidenceInvalid) || errors.Is(err, ErrEvidenceNotFound) {
+		t.Fatalf("Get(corrupt row) = %v, want a server-side error (not invalid, not not-found)", err)
+	}
+}

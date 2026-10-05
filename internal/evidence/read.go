@@ -276,8 +276,11 @@ func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence, scope 
 		}
 		byID[e.ID] = append(byID[e.ID], e)
 	}
+	// Bounded like the current read's pool: an unbounded fan-in would be
+	// materialized and serialized whole. Past the cap the read fails
+	// closed; a truncated list could leave a retired record reading live.
 	rows, err := s.pool.Query(ctx, `SELECT `+evidenceRowColumns+` FROM execution_evidence
-		WHERE supersedes = ANY($1) ORDER BY id`, ids)
+		WHERE supersedes = ANY($1) AND subject_kind <> '' ORDER BY id LIMIT $2`, ids, maxCurrentPool+1)
 	if err != nil {
 		return fmt.Errorf("evidence: superseded_by: %w", err)
 	}
@@ -293,6 +296,9 @@ func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence, scope 
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("evidence: superseded_by rows: %w", err)
+	}
+	if len(superseders) > maxCurrentPool {
+		return fmt.Errorf("evidence: %d+ superseding envelopes: %w", maxCurrentPool+1, ErrCurrentPoolTooLarge)
 	}
 	if scope != "" {
 		// Resolve each superseder's projection once (a nil Ref after

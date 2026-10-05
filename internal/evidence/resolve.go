@@ -124,10 +124,13 @@ func validLink(superseder, target *Candidate) bool {
 	if superseder.SubjectRedacted || target.SubjectRedacted {
 		return false
 	}
-	if (superseder.Subject == nil) != (target.Subject == nil) {
+	// Supersession is about a subject: resolve_current's pool never holds
+	// a subject-less envelope, so a link between two of them (every
+	// pre-amendment record is one) retires nothing.
+	if superseder.Subject == nil || target.Subject == nil {
 		return false
 	}
-	if superseder.Subject != nil && *superseder.Subject != *target.Subject {
+	if *superseder.Subject != *target.Subject {
 		return false
 	}
 	return superseder.rank() >= target.rank()
