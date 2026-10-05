@@ -26,6 +26,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
@@ -70,6 +71,11 @@ type User struct {
 	// authenticated by MCTL_EVIDENCE_WRITER_TOKEN (mctl-api#409). Modelled
 	// one-for-one on usageWriter, and unexported for the same reason.
 	evidenceWriter bool
+
+	// registryPublisher is set only on the registry-publisher principal,
+	// authenticated by MCTL_REGISTRY_PUBLISHER_TOKEN (mctlhq/mctl-agents#470).
+	// Unexported for the same reason as service.
+	registryPublisher bool
 
 	// surface is set only on a per-surface service principal
 	// ("surface:telegram"), authenticated by that surface's own token
@@ -480,6 +486,9 @@ func usageWriterToken() string {
 	case service != "" && token == service:
 		slog.Error("usage-writer token equals MCTL_AGENT_SERVICE_TOKEN; usage-writer principal disabled", "env", usageWriterTokenEnv)
 		return ""
+	case token == strings.TrimSpace(os.Getenv(registryPublisherTokenEnv)):
+		slog.Error("usage-writer token equals MCTL_REGISTRY_PUBLISHER_TOKEN; usage-writer principal disabled", "env", usageWriterTokenEnv)
+		return ""
 	}
 	for _, env := range surfaceTokenEnv {
 		if strings.TrimSpace(os.Getenv(env)) == token {
@@ -538,6 +547,9 @@ func evidenceWriterToken() string {
 	case usage != "" && token == usage:
 		slog.Error("evidence-writer token equals MCTL_USAGE_WRITER_TOKEN; evidence-writer principal disabled", "env", evidenceWriterTokenEnv)
 		return ""
+	case token == strings.TrimSpace(os.Getenv(registryPublisherTokenEnv)):
+		slog.Error("evidence-writer token equals MCTL_REGISTRY_PUBLISHER_TOKEN; evidence-writer principal disabled", "env", evidenceWriterTokenEnv)
+		return ""
 	}
 	for _, env := range surfaceTokenEnv {
 		if strings.TrimSpace(os.Getenv(env)) == token {
@@ -546,6 +558,85 @@ func evidenceWriterToken() string {
 		}
 	}
 	return token
+}
+
+// Registry-publisher principal (mctlhq/mctl-agents#470), modelled on the two
+// writer principals above. Publishing a release to the agent registry gets
+// its own credential instead of an admin one: the release workflow needs to
+// create a definition, publish a version and promote it, and nothing else,
+// so that is all this principal can do, and every row it writes is
+// attributed to it by name.
+//
+// It carries no groups, is not an admin, belongs to no tenant, holds no
+// named permission (HasPermission answers false for everything), and is
+// confined to the registry publication routes by the API's
+// registry-publisher gate.
+const (
+	RegistryPublisherUserID   = "service:mctl-agents-registry-publisher"
+	registryPublisherTokenEnv = "MCTL_REGISTRY_PUBLISHER_TOKEN" //nolint:gosec // env var name, not a credential
+)
+
+// NewRegistryPublisherUser builds the registry-publisher principal. Exported
+// for tests, like NewUsageWriterUser; only the middleware mints it from a
+// token.
+func NewRegistryPublisherUser() *User {
+	return &User{ID: RegistryPublisherUserID, registryPublisher: true}
+}
+
+// IsRegistryPublisher reports whether this principal authenticated with the
+// registry-publisher token.
+func (u *User) IsRegistryPublisher() bool { return u != nil && u.registryPublisher }
+
+// registryPublisherUnsetLogged makes the "not configured" line below appear
+// once per process: the token is read by both Middleware and
+// BuildFederationRegistry, and an operator needs to see the state, not count
+// its readers.
+var registryPublisherUnsetLogged sync.Once
+
+// registryPublisherToken reads the registry-publisher token, refusing one
+// that is too short or equal to the mctl-agent service token, any surface
+// token, or either writer token -- it must prove exactly this principal and
+// nothing more. The other tokens refuse equality with it in turn
+// (usageWriterToken, evidenceWriterToken, surfaceTokens), so a shared value
+// disables both sides rather than letting provider order pick a winner.
+//
+// Every refusal disables the principal and logs why; none of them stops the
+// process, and neither does an unset variable. Like the writers, the
+// comparison tokens are re-read from the environment rather than taken from
+// their validated forms: a token that was itself refused must still not be
+// reusable here.
+func registryPublisherToken() string {
+	token := strings.TrimSpace(os.Getenv(registryPublisherTokenEnv))
+	if token == "" {
+		registryPublisherUnsetLogged.Do(func() {
+			slog.Info("registry-publisher token not set; registry-publisher principal disabled", "env", registryPublisherTokenEnv)
+		})
+		return ""
+	}
+	if len(token) < minSurfaceTokenLen {
+		slog.Error("registry-publisher token too short; registry-publisher principal disabled", "env", registryPublisherTokenEnv, "min_length", minSurfaceTokenLen)
+		return ""
+	}
+	others := []string{"MCTL_AGENT_SERVICE_TOKEN", usageWriterTokenEnv, evidenceWriterTokenEnv}
+	for _, env := range surfaceTokenEnv {
+		others = append(others, env)
+	}
+	for _, env := range others {
+		if strings.TrimSpace(os.Getenv(env)) == token {
+			slog.Error("registry-publisher token equals another principal's token; registry-publisher principal disabled", "env", registryPublisherTokenEnv, "equals", env)
+			return ""
+		}
+	}
+	return token
+}
+
+// registryPublisherUserFor matches a bearer token against the
+// registry-publisher token in constant time.
+func registryPublisherUserFor(configured, token string) *User {
+	if configured == "" || subtle.ConstantTimeCompare([]byte(configured), []byte(token)) != 1 {
+		return nil
+	}
+	return NewRegistryPublisherUser()
 }
 
 // evidenceWriterUserFor matches a bearer token against the evidence-writer
@@ -567,10 +658,12 @@ func usageWriterUserFor(configured, token string) *User {
 }
 
 // surfaceTokens reads the configured surface tokens. A token that is short,
-// shared by two surfaces, or equal to the mctl-agent service token is
-// refused: each must prove exactly one surface and nothing more.
+// shared by two surfaces, or equal to the mctl-agent service token or the
+// registry-publisher token is refused: each must prove exactly one surface
+// and nothing more.
 func surfaceTokens() map[string]string {
 	service := strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN"))
+	publisher := strings.TrimSpace(os.Getenv(registryPublisherTokenEnv))
 	byToken := map[string]string{}
 	refused := map[string]bool{}
 	for surface, env := range surfaceTokenEnv {
@@ -583,6 +676,9 @@ func surfaceTokens() map[string]string {
 			continue
 		case service != "" && token == service:
 			slog.Error("surface token equals MCTL_AGENT_SERVICE_TOKEN; surface principal disabled", "env", env)
+			continue
+		case token == publisher:
+			slog.Error("surface token equals MCTL_REGISTRY_PUBLISHER_TOKEN; surface principal disabled", "env", env)
 			continue
 		}
 		if _, dup := byToken[token]; dup || refused[token] {
@@ -652,6 +748,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	surfaces := surfaceTokens()
 	usageWriter := usageWriterToken()
 	evidenceWriter := evidenceWriterToken()
+	registryPublisher := registryPublisherToken()
 	var cfg middlewareConfig
 	for _, o := range opts {
 		o(&cfg)
@@ -660,7 +757,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	federationDisabled := federationKillSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED"))
 	registry := cfg.federationRegistry
 	if !federationDisabled && registry == nil {
-		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter)
+		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter, registryPublisher)
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -736,6 +833,8 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					user = uw
 				} else if ew := evidenceWriterUserFor(evidenceWriter, token); ew != nil {
 					user = ew
+				} else if rp := registryPublisherUserFor(registryPublisher, token); rp != nil {
+					user = rp
 				} else if isJWT(token) {
 					// Peek at the JWT issuer to route to the correct verifier.
 					if oauth != nil && jwtIssuer(token) == oauth.BaseURL {
@@ -856,12 +955,13 @@ func federationKillSwitchOn(v string) bool {
 // federation_config.go, with audience enforcement); this default is what
 // every existing caller of Middleware -- including every test in this
 // package -- exercises unchanged.
-func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter string) *Registry {
+func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher string) *Registry {
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
 		newSurfaceProvider(func() map[string]string { return surfaces }),
 		newUsageWriterProvider(func() string { return usageWriter }),
 		newEvidenceWriterProvider(func() string { return evidenceWriter }),
+		newRegistryPublisherProvider(func() string { return registryPublisher }),
 	}
 	var jwtProviders []Provider
 	if oauth != nil && oauth.BaseURL != "" {
@@ -933,6 +1033,8 @@ func userFromVerified(v *Verified) *User {
 		return NewUsageWriterUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == EvidenceWriterUserID:
 		return NewEvidenceWriterUser()
+	case v.Identity.Provider == ProviderService && v.Identity.Subject == RegistryPublisherUserID:
+		return NewRegistryPublisherUser()
 	case v.Identity.Provider == ProviderGitHub:
 		u := NewGitHubUser(v.Identity.Display, v.Claims.Groups)
 		if v.Identity.Subject != "" {
