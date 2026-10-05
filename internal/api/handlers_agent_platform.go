@@ -16,8 +16,10 @@
 // AgentDefinition/ExecutionProfile versions and append-only ReleaseBinding
 // revisions per (agent, environment). See design.md's "REST surface"
 // section for the route table and docs/agent-platform-registry.md for the
-// consumer contract. Every handler below reuses requireAgentRegistryAdmin
-// (handlers_agent_registry.go) and extends the SAME *agentregistry.Store —
+// consumer contract. The reads below reuse requireAgentRegistryAdmin
+// (handlers_agent_registry.go); the mutations are on
+// requireAgentRegistryHumanAdmin (handlers_agent_registry_publisher.go).
+// All of them extend the SAME *agentregistry.Store —
 // no v1 route, request field or response shape changes as a result of this
 // file existing.
 package api
@@ -209,7 +211,7 @@ func (h *Handlers) GetAgent(w http.ResponseWriter, r *http.Request) {
 
 // PublishDefinitionVersion handles POST /api/v1/agents/{name}/definition-versions.
 func (h *Handlers) PublishDefinitionVersion(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.requireAgentRegistryAdmin(w, r)
+	user, ok := h.requireAgentRegistryHumanAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -283,7 +285,7 @@ func (h *Handlers) ListDefinitionVersions(w http.ResponseWriter, r *http.Request
 // SetDefinitionVersionLifecycle handles
 // POST /api/v1/agents/{name}/definition-versions/{version}/lifecycle.
 func (h *Handlers) SetDefinitionVersionLifecycle(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.requireAgentRegistryAdmin(w, r)
+	user, ok := h.requireAgentRegistryHumanAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -310,7 +312,7 @@ func (h *Handlers) SetDefinitionVersionLifecycle(w http.ResponseWriter, r *http.
 
 // PublishProfileVersion handles POST /api/v1/agent-profiles/{profile}/versions.
 func (h *Handlers) PublishProfileVersion(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.requireAgentRegistryAdmin(w, r)
+	user, ok := h.requireAgentRegistryHumanAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -382,7 +384,7 @@ func (h *Handlers) ListProfileVersions(w http.ResponseWriter, r *http.Request) {
 // SetProfileVersionLifecycle handles
 // POST /api/v1/agent-profiles/{profile}/versions/{version}/lifecycle.
 func (h *Handlers) SetProfileVersionLifecycle(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.requireAgentRegistryAdmin(w, r)
+	user, ok := h.requireAgentRegistryHumanAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -409,7 +411,7 @@ func (h *Handlers) SetProfileVersionLifecycle(w http.ResponseWriter, r *http.Req
 
 // CreateBinding handles POST /api/v1/agents/{name}/bindings.
 func (h *Handlers) CreateBinding(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.requireAgentRegistryAdmin(w, r)
+	user, ok := h.requireAgentRegistryHumanAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -555,7 +557,7 @@ func (h *Handlers) ResolveBinding(w http.ResponseWriter, r *http.Request) {
 
 // RollbackBinding handles POST /api/v1/agents/{name}/bindings/rollback.
 func (h *Handlers) RollbackBinding(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.requireAgentRegistryAdmin(w, r)
+	user, ok := h.requireAgentRegistryHumanAdmin(w, r)
 	if !ok {
 		return
 	}

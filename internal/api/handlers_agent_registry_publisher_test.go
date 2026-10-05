@@ -307,16 +307,17 @@ func TestRegistryPublisherGate_LeavesOtherCallersAlone(t *testing.T) {
 	}
 }
 
-// Stage 1 adds the publisher and removes nobody: on the three publication
-// routes an admin of either kind is still admitted, and everyone who was
-// refused before still is.
-func TestAgentRegistryPublication_AdmitsAdminsAndThePublisherOnly(t *testing.T) {
+// On the three publication routes a human admin and the publisher are
+// admitted and nobody else is. The agent service principal is the case that
+// matters: it carries the admins group and was admitted until the release
+// pipeline moved to the publisher (mctlhq/mctl-agents#470).
+func TestAgentRegistryPublication_AdmitsHumanAdminsAndThePublisherOnly(t *testing.T) {
 	for name, c := range map[string]struct {
 		u    *auth.User
 		want bool
 	}{
 		"registry publisher": {auth.NewRegistryPublisherUser(), true},
-		"agent service":      {auth.NewServiceUser(), true},
+		"agent service":      {auth.NewServiceUser(), false},
 		"human admin":        {&auth.User{ID: "root", Groups: []string{"admins"}}, true},
 		"tenant member":      {&auth.User{ID: "t", Groups: []string{"some-tenant"}}, false},
 		"usage writer":       {auth.NewUsageWriterUser(), false},
@@ -350,32 +351,47 @@ func TestRegistryPublisher_HandlerGuards(t *testing.T) {
 	}
 	name := map[string]string{"name": "mentor", "profile": "standard", "version": "1.0.0", "revision": "1"}
 
+	// Reads, and the execution record the worker writes: the publisher is
+	// refused, the agent service principal still gets past the guard (any
+	// answer but 401/403).
 	for label, fn := range map[string]http.HandlerFunc{
-		"ListAgentVersions":             h.ListAgentVersions,
-		"ResolveAgentRelease":           h.ResolveAgentRelease,
-		"RecordAgentExecution":          h.RecordAgentExecution,
-		"ListAgentExecutions":           h.ListAgentExecutions,
-		"ListAgents":                    h.ListAgents,
-		"GetAgent":                      h.GetAgent,
-		"PublishDefinitionVersion":      h.PublishDefinitionVersion,
-		"ListDefinitionVersions":        h.ListDefinitionVersions,
-		"SetDefinitionVersionLifecycle": h.SetDefinitionVersionLifecycle,
-		"PublishProfileVersion":         h.PublishProfileVersion,
-		"ListProfileVersions":           h.ListProfileVersions,
-		"SetProfileVersionLifecycle":    h.SetProfileVersionLifecycle,
-		"CreateBinding":                 h.CreateBinding,
-		"ListBindings":                  h.ListBindings,
-		"GetBinding":                    h.GetBinding,
-		"ResolveBinding":                h.ResolveBinding,
-		"RollbackBinding":               h.RollbackBinding,
+		"ListAgentVersions":      h.ListAgentVersions,
+		"ResolveAgentRelease":    h.ResolveAgentRelease,
+		"RecordAgentExecution":   h.RecordAgentExecution,
+		"ListAgentExecutions":    h.ListAgentExecutions,
+		"ListAgents":             h.ListAgents,
+		"GetAgent":               h.GetAgent,
+		"ListDefinitionVersions": h.ListDefinitionVersions,
+		"ListProfileVersions":    h.ListProfileVersions,
+		"ListBindings":           h.ListBindings,
+		"GetBinding":             h.GetBinding,
+		"ResolveBinding":         h.ResolveBinding,
 	} {
 		if code := call(registryPublisher(t), fn, http.MethodPost, "/api/v1/agents/mentor/x", name); code != http.StatusForbidden {
 			t.Errorf("%s as the registry publisher: got %d, want 403", label, code)
 		}
-		// Unchanged for the service principal: it gets past the guard (any
-		// answer but 401/403).
 		if code := call(auth.NewServiceUser(), fn, http.MethodPost, "/api/v1/agents/mentor/x", name); code == http.StatusForbidden || code == http.StatusUnauthorized {
 			t.Errorf("%s as the agent service: got %d, want it past the guard", label, code)
+		}
+	}
+	// The v1alpha2 mutations: a human admin only. The publisher and the
+	// agent service principal are both refused; the human gets past the
+	// guard.
+	for label, fn := range map[string]http.HandlerFunc{
+		"PublishDefinitionVersion":      h.PublishDefinitionVersion,
+		"SetDefinitionVersionLifecycle": h.SetDefinitionVersionLifecycle,
+		"PublishProfileVersion":         h.PublishProfileVersion,
+		"SetProfileVersionLifecycle":    h.SetProfileVersionLifecycle,
+		"CreateBinding":                 h.CreateBinding,
+		"RollbackBinding":               h.RollbackBinding,
+	} {
+		for who, u := range map[string]*auth.User{"registry publisher": registryPublisher(t), "agent service": auth.NewServiceUser()} {
+			if code := call(u, fn, http.MethodPost, "/api/v1/agents/mentor/x", name); code != http.StatusForbidden {
+				t.Errorf("%s as the %s: got %d, want 403", label, who, code)
+			}
+		}
+		if code := call(adminUser(), fn, http.MethodPost, "/api/v1/agents/mentor/x", name); code == http.StatusForbidden || code == http.StatusUnauthorized {
+			t.Errorf("%s as a human admin: got %d, want it past the guard", label, code)
 		}
 	}
 	for label, fn := range map[string]http.HandlerFunc{
@@ -385,10 +401,15 @@ func TestRegistryPublisher_HandlerGuards(t *testing.T) {
 	} {
 		// "{}" fails each handler's own validation with 400, which only a
 		// caller past the guard can see.
-		for who, u := range map[string]*auth.User{"registry publisher": registryPublisher(t), "agent service": auth.NewServiceUser(), "human admin": adminUser()} {
+		for who, u := range map[string]*auth.User{"registry publisher": registryPublisher(t), "human admin": adminUser()} {
 			if code := call(u, fn, http.MethodPost, "/api/v1/agents/mentor/x", name); code != http.StatusBadRequest {
 				t.Errorf("%s as %s: got %d, want 400 from the handler", label, who, code)
 			}
+		}
+		// The agent service principal carries the admins group and is
+		// refused all the same (mctlhq/mctl-agents#470).
+		if code := call(auth.NewServiceUser(), fn, http.MethodPost, "/api/v1/agents/mentor/x", name); code != http.StatusForbidden {
+			t.Errorf("%s as the agent service: got %d, want 403", label, code)
 		}
 		if code := call(&auth.User{ID: "t", Groups: []string{"some-tenant"}}, fn, http.MethodPost, "/api/v1/agents/mentor/x", name); code != http.StatusForbidden {
 			t.Errorf("%s as a tenant member: got %d, want 403", label, code)
@@ -469,24 +490,18 @@ func TestRegistryPublisher_PublishesAndIsRecordedAsItself(t *testing.T) {
 		}
 	}
 
-	// The same calls as the agent service principal are still admitted, and
-	// still recorded under its own, different name.
+	// The same calls as the agent service principal are refused, and leave
+	// nothing behind: no definition, no version, no release.
 	service := routerAs(auth.NewServiceUser())
-	do(service, http.MethodPost, "/api/v1/agents", `{"name":"svc-agent","owner":"mctl-agents"}`, http.StatusCreated)
-	var sv agentregistry.AgentVersion
-	if err := json.Unmarshal(do(service, http.MethodPost, "/api/v1/agents/svc-agent/versions", version("1.0.0"), http.StatusCreated), &sv); err != nil {
-		t.Fatalf("version body: %v", err)
+	do(service, http.MethodPost, "/api/v1/agents", `{"name":"svc-agent","owner":"mctl-agents"}`, http.StatusForbidden)
+	do(service, http.MethodPost, "/api/v1/agents/pub-agent/versions", version("9.9.9"), http.StatusForbidden)
+	do(service, http.MethodPost, "/api/v1/agents/pub-agent/releases", `{"environment":"production","version":"1.0.0"}`, http.StatusForbidden)
+	if versions, err := store.ListVersions(ctx, "svc-agent"); err != nil || len(versions) != 0 {
+		t.Fatalf("the refused service calls left versions behind: %v %+v", err, versions)
 	}
-	rel := release(service, "svc-agent", `{"environment":"production","version":"1.0.0"}`)
-	if sv.CreatedBy != auth.ServiceUserID || rel.UpdatedBy != auth.ServiceUserID {
-		t.Fatalf("service attribution = %q / %q, want %q", sv.CreatedBy, rel.UpdatedBy, auth.ServiceUserID)
-	}
-	if auth.ServiceUserID == auth.RegistryPublisherUserID {
-		t.Fatal("the publisher and the service principal share a name")
-	}
-	servicePromotions, err := store.ListPromotions(ctx, "svc-agent", "production")
-	if err != nil || len(servicePromotions) != 1 || servicePromotions[0].Actor != auth.ServiceUserID {
-		t.Fatalf("service promotions: %v %+v", err, servicePromotions)
+	after, err := store.ListPromotions(ctx, "pub-agent", "production")
+	if err != nil || len(after) != len(promotions) {
+		t.Fatalf("the refused service promotion changed the ledger: %v, %d rows, want %d", err, len(after), len(promotions))
 	}
 
 	// With the registry real, the publisher still reads nothing back.
