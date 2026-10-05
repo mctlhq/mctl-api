@@ -116,7 +116,7 @@ func (s *Store) populateRef(ctx context.Context, ref *EvidenceRef, e *Evidence) 
 // execution_evidence row: only execution_evidence_refs is rewritten.
 func (s *Store) RebuildRefs(ctx context.Context, ids []string) error {
 	for _, id := range ids {
-		e, err := scanEvidenceRow(s.pool.QueryRow(ctx, `SELECT `+evidenceColumns+` FROM execution_evidence WHERE id=$1`, id))
+		e, err := scanEvidenceRow(s.pool.QueryRow(ctx, `SELECT `+evidenceRowColumns+` FROM execution_evidence WHERE id=$1`, id))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				continue

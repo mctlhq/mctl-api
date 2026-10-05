@@ -60,7 +60,7 @@ func (s *Store) Ingest(ctx context.Context, in IngestInput) (*Evidence, bool, er
 				return fmt.Errorf("evidence: id %s: %w (stored %s, submitted %s)",
 					evidenceID, ErrEvidenceDivergence, storedHash, contentHash)
 			}
-			existing, readErr := scanEvidenceRow(tx.QueryRow(ctx, `SELECT `+evidenceColumns+`
+			existing, readErr := scanEvidenceRow(tx.QueryRow(ctx, `SELECT `+evidenceRowColumns+`
 				FROM execution_evidence WHERE id=$1`, evidenceID))
 			if readErr != nil {
 				return fmt.Errorf("evidence: read existing %s: %w", evidenceID, readErr)
@@ -71,11 +71,20 @@ func (s *Store) Ingest(ctx context.Context, in IngestInput) (*Evidence, bool, er
 			return fmt.Errorf("evidence: find: %w", getErr)
 		}
 
+		cols, colErr := subjectColumnsOf(p)
+		if colErr != nil {
+			return colErr
+		}
+		if err := checkSupersedesTarget(ctx, tx, cols); err != nil {
+			return err
+		}
+
 		now := s.now()
-		inserted, insErr := scanEvidenceRow(tx.QueryRow(ctx, `INSERT INTO execution_evidence (`+evidenceColumns+`)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING `+evidenceColumns,
+		inserted, insErr := scanEvidenceRow(tx.QueryRow(ctx, `INSERT INTO execution_evidence (`+evidenceRowColumns+`)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING `+evidenceRowColumns,
 			evidenceID, contentHash, p.APIVersion(), in.EnvelopeBytes, p.ExecutionID(), p.RuntimeExecutionID(),
-			p.WorkItemID(), p.TraceID(), p.CreatedAt(), in.IngestedBy, in.IngestedByPrincipalID, now))
+			p.WorkItemID(), p.TraceID(), p.CreatedAt(), in.IngestedBy, in.IngestedByPrincipalID, now,
+			cols.kind, cols.repository, cols.ref, cols.revision, cols.authority, cols.observedAt, cols.supersedes))
 		if insErr != nil {
 			return fmt.Errorf("evidence: insert: %w", insErr)
 		}
@@ -100,7 +109,43 @@ func (s *Store) Ingest(ctx context.Context, in IngestInput) (*Evidence, bool, er
 	if err := s.attachRef(ctx, out); err != nil {
 		return nil, false, err
 	}
+	if err := s.attachSupersededBy(ctx, []*Evidence{out}, ""); err != nil {
+		return nil, false, err
+	}
 	return out, created, nil
+}
+
+// checkSupersedesTarget enforces ADR 018 Amendment 2 Tier B checklist item
+// 6. When the envelope names an earlier one in provenance.supersedes and
+// that envelope is stored, it must be about the same (subject_kind,
+// subject_repository, subject_ref, subject_revision) and carry an
+// authority no stronger than the new one, else
+// ErrEvidenceSupersedesInvalid (422). A target that does not exist (yet) is
+// accepted: the producer never blocks on ordering, and the read rule only
+// honours links inside a pool, so a dangling link retires nothing.
+func checkSupersedesTarget(ctx context.Context, tx pgx.Tx, cols subjectColumns) error {
+	if cols.supersedes == "" {
+		return nil
+	}
+	var target subjectColumns
+	err := tx.QueryRow(ctx, `SELECT subject_kind, subject_repository, subject_ref, subject_revision, authority
+		FROM execution_evidence WHERE id=$1`, cols.supersedes).
+		Scan(&target.kind, &target.repository, &target.ref, &target.revision, &target.authority)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("evidence: read supersedes target %s: %w", cols.supersedes, err)
+	}
+	if target.kind != cols.kind || target.repository != cols.repository || target.ref != cols.ref ||
+		target.revision != cols.revision {
+		return fmt.Errorf("%w: %s is about a different subject or revision", ErrEvidenceSupersedesInvalid, cols.supersedes)
+	}
+	if AuthorityRank(target.authority) > AuthorityRank(cols.authority) {
+		return fmt.Errorf("%w: %s carries a stronger authority (%s) than the superseding envelope (%s)",
+			ErrEvidenceSupersedesInvalid, cols.supersedes, target.authority, cols.authority)
+	}
+	return nil
 }
 
 // deriveUnderSavepoint runs deriveAndStoreRef inside a savepoint of tx and

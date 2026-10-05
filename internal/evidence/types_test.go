@@ -43,6 +43,11 @@ var goldenHashes = map[string]string{
 	"shepherd-evidence.json":     "sha256:13362a728651f5ffaa2b899b238545c6aaa77c7dac903cc43c39634700603dd7",
 	"non-ascii-evidence.json":    "sha256:e47cf92c53c7b45a5c4001d6c1ed71e594cfe2929272ec817da29d256e8e0e04",
 	"html-chars-evidence.json":   "sha256:6d30924febe84beeb1af004991302a24c843a710841ddbf028412cd5ff7c7430",
+	// ADR 018 Amendment 2 (mctlhq/mctl-agents#575 at 1dd721c5): byte-for-byte
+	// copies of tests/fixtures/evidence/, literal hashes from the ADR's
+	// golden-vector table.
+	"shepherd-pr-evidence.json":             "sha256:df6d015f8ddf64ac6f1955649883708402c7185618a09b1c07b7276fa32c7cc8",
+	"shepherd-pr-superseding-evidence.json": "sha256:5a7500c45dd74b8b0d46388115813a3b9576237c5523679d0f254e0994c4b282",
 }
 
 func TestGoldenVectorConformance(t *testing.T) {
@@ -105,8 +110,8 @@ func TestGoldenVectorConformance(t *testing.T) {
 	if found == 0 {
 		t.Fatal("no golden vectors found in testdata/")
 	}
-	if found < 5 {
-		t.Fatalf("expected at least 5 golden vectors (investigator/implementer/shepherd/non-ascii/html), found %d", found)
+	if found < len(goldenHashes) {
+		t.Fatalf("expected all %d pinned golden vectors, found %d", len(goldenHashes), found)
 	}
 }
 

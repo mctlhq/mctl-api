@@ -29,8 +29,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
@@ -62,6 +64,11 @@ const (
 	codeEvidenceNotFound              = "evidence_not_found"
 	codeEvidenceStoreUnavailable      = "evidence_store_unavailable"
 	codeEvidenceWriterForbidden       = "evidence_writer_route_not_allowed"
+	// ADR 018 Amendment 2.
+	codeEvidenceSupersedesInvalid   = "evidence_supersedes_invalid"
+	codeEvidenceQueryInvalid        = "evidence_query_invalid"
+	codeEvidenceCurrentPoolTooLarge = "evidence_current_pool_too_large"
+	codeEvidenceCurrentNotVisible   = "evidence_current_not_visible"
 )
 
 // evidenceWriterGate confines the evidence-writer principal (mctl-api#409)
@@ -139,6 +146,17 @@ func writeEvidenceError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusConflict, codeEvidenceDivergence, err.Error(), nil)
 	case errors.Is(err, evidence.ErrEvidenceNotFound):
 		writeErrorCode(w, http.StatusNotFound, codeEvidenceNotFound, "evidence not found", nil)
+	case errors.Is(err, evidence.ErrEvidenceSupersedesInvalid):
+		writeErrorCode(w, http.StatusUnprocessableEntity, codeEvidenceSupersedesInvalid, err.Error(), nil)
+	case errors.Is(err, evidence.ErrCurrentQueryInvalid):
+		writeErrorCode(w, http.StatusBadRequest, codeEvidenceQueryInvalid, err.Error(), nil)
+	case errors.Is(err, evidence.ErrCurrentPoolTooLarge):
+		// Never a truncated no_evidence: the complete pool could not be
+		// loaded, so the server cannot answer.
+		writeErrorCode(w, http.StatusInternalServerError, codeEvidenceCurrentPoolTooLarge, err.Error(), nil)
+	case errors.Is(err, evidence.ErrCurrentNotVisible):
+		writeErrorCode(w, http.StatusForbidden, codeEvidenceCurrentNotVisible,
+			"the current evidence for this subject depends on evidence outside this work item", nil)
 	default:
 		slog.Error("evidence store error", "error", err)
 		writeError(w, http.StatusInternalServerError, "evidence store error")
@@ -243,6 +261,9 @@ func evidenceFilterFromQuery(r *http.Request) (evidence.Filter, error) {
 		EngineRef:          q.Get("engine_ref"),
 		Repository:         q.Get("repository"),
 	}
+	if err := subjectFilterFromQuery(r, &f); err != nil {
+		return f, err
+	}
 	parseInt := func(key string) (*int64, error) {
 		raw := q.Get(key)
 		if raw == "" {
@@ -277,6 +298,48 @@ func evidenceFilterFromQuery(r *http.Request) (evidence.Filter, error) {
 	return f, nil
 }
 
+// subjectFilterFromQuery reads the ADR 018 Amendment 2 subject filters
+// (subject_kind, subject_repository, subject_ref, subject_revision). An
+// unknown subject_kind is an error rather than a filter that silently
+// matches nothing.
+func subjectFilterFromQuery(r *http.Request, f *evidence.Filter) error {
+	q, err := strictQuery(r)
+	if err != nil {
+		return err
+	}
+	f.SubjectKind = q.Get("subject_kind")
+	f.SubjectRepository = q.Get("subject_repository")
+	f.SubjectRef = q.Get("subject_ref")
+	f.SubjectRevision = q.Get("subject_revision")
+	if f.SubjectKind != "" && !evidence.IsSubjectKind(f.SubjectKind) {
+		return fmt.Errorf("%w: invalid subject_kind", evidence.ErrCurrentQueryInvalid)
+	}
+	return nil
+}
+
+// strictQuery parses the raw query and fails on a malformed one.
+// (*url.URL).Query() discards ParseQuery's error and silently drops the
+// offending pair (revision=%zz), which would resolve or filter at the wrong
+// revision instead of answering 400.
+func strictQuery(r *http.Request) (url.Values, error) {
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, fmt.Errorf("%w: malformed query string: %s", evidence.ErrCurrentQueryInvalid, err)
+	}
+	return q, nil
+}
+
+// writeFilterError answers a rejected list filter: a subject-filter
+// rejection carries the typed evidence_query_invalid code (the same one
+// the current read uses), every older filter error keeps its plain 400.
+func writeFilterError(w http.ResponseWriter, err error) {
+	if errors.Is(err, evidence.ErrCurrentQueryInvalid) {
+		writeEvidenceError(w, err)
+		return
+	}
+	writeError(w, http.StatusBadRequest, err.Error())
+}
+
 // ListEvidence handles GET /api/v1/evidence with any combination of the
 // supported filters. Admin-only. The response shape does not depend on
 // which filters were supplied.
@@ -286,7 +349,7 @@ func (h *Handlers) ListEvidence(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := evidenceFilterFromQuery(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFilterError(w, err)
 		return
 	}
 	res, err := h.opts.Evidence.List(r.Context(), f)
@@ -314,7 +377,97 @@ func (h *Handlers) ListWorkItemEvidence(w http.ResponseWriter, r *http.Request) 
 		writeErrorCode(w, http.StatusServiceUnavailable, codeEvidenceStoreUnavailable, "evidence store not configured", nil)
 		return
 	}
-	res, err := h.opts.Evidence.ByWorkItem(r.Context(), item.ID, 0)
+	var f evidence.Filter
+	if err := subjectFilterFromQuery(r, &f); err != nil {
+		writeFilterError(w, err)
+		return
+	}
+	res, err := h.opts.Evidence.ByWorkItem(r.Context(), item.ID, f)
+	if err != nil {
+		writeEvidenceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// currentQuery reads GET .../evidence/current's parameters. Validation is
+// the store's (ValidateSubjectQuery): a malformed value answers 400
+// evidence_query_invalid, never no_evidence. A repeated parameter is
+// malformed too, rather than silently first-wins, and so is an unknown one:
+// the list routes spell the same filters subject_ref/subject_revision, and
+// a misspelled revision silently dropped would resolve at the wrong
+// revision.
+func currentQuery(r *http.Request) (evidence.SubjectQuery, error) {
+	q, err := strictQuery(r)
+	if err != nil {
+		return evidence.SubjectQuery{}, err
+	}
+	for key, values := range q {
+		if !currentQueryKeys[key] {
+			return evidence.SubjectQuery{}, fmt.Errorf("%w: unknown parameter %q (expected subject_kind, repository, ref, revision)",
+				evidence.ErrCurrentQueryInvalid, key)
+		}
+		if len(values) > 1 {
+			return evidence.SubjectQuery{}, fmt.Errorf("%w: %s given more than once", evidence.ErrCurrentQueryInvalid, key)
+		}
+	}
+	return evidence.SubjectQuery{
+		Kind:       q.Get("subject_kind"),
+		Repository: q.Get("repository"),
+		Ref:        q.Get("ref"),
+		Revision:   q.Get("revision"),
+	}, nil
+}
+
+var currentQueryKeys = map[string]bool{"subject_kind": true, "repository": true, "ref": true, "revision": true}
+
+// CurrentEvidence handles GET /api/v1/evidence/current
+// (?subject_kind=&repository=&ref=&revision=): ADR 018 Amendment 2's
+// resolve_current over the complete stored pool, answering {state,
+// evidence}. Admin-only, like GET /api/v1/evidence.
+func (h *Handlers) CurrentEvidence(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireEvidenceAdmin(w, r); !ok {
+		return
+	}
+	q, err := currentQuery(r)
+	if err != nil {
+		writeEvidenceError(w, err)
+		return
+	}
+	res, err := h.opts.Evidence.Current(r.Context(), q)
+	if err != nil {
+		writeEvidenceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// CurrentWorkItemEvidence handles GET
+// /api/v1/work-items/{id}/evidence/current: the work-item-scoped variant,
+// behind visibleWorkItem (404 for an item the caller may not see). It
+// resolves over the same complete pool as CurrentEvidence and answers only
+// when every record that answer depends on is attached to this work item
+// (403 evidence_current_not_visible otherwise) — evidence never leaks past
+// the work item, and a partial pool is never resolved.
+func (h *Handlers) CurrentWorkItemEvidence(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.workItemsUser(w, r)
+	if !ok {
+		return
+	}
+	item, ok := h.visibleWorkItem(w, r, user)
+	if !ok {
+		return
+	}
+	if h.opts.Evidence == nil {
+		writeErrorCode(w, http.StatusServiceUnavailable, codeEvidenceStoreUnavailable, "evidence store not configured", nil)
+		return
+	}
+	q, err := currentQuery(r)
+	if err != nil {
+		writeEvidenceError(w, err)
+		return
+	}
+	res, err := h.opts.Evidence.CurrentForWorkItem(r.Context(), q, item.ID)
 	if err != nil {
 		writeEvidenceError(w, err)
 		return
