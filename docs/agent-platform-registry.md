@@ -519,11 +519,21 @@ It is built like the usage-writer and evidence-writer principals
 
 `mayPublishToAgentRegistry` (`internal/api/handlers_agent_registry_publisher.go`)
 is the one place that decides, and `requireAgentRegistryPublisherOrAdmin` is
-used on the three routes above and nowhere else. Today it reads
-`admin OR registry publisher`: the publisher was added, and nobody was
-removed. Every other registry route, including every v1alpha2 mutation
-(`definition-versions`, profile versions, lifecycle transitions, bindings,
-binding rollback), stays on `requireAgentRegistryAdmin`, unchanged.
+used on the three routes above and nowhere else. It reads
+`human admin OR registry publisher` (stage 4 below): a person in the admins
+group acting directly, or the release pipeline's publisher.
+
+The agent service principal (`mctl-agent`) is refused, although it carries
+the admins group. Its token is what every agent pod runs with, so admitting
+it meant an agent could publish and promote a definition, its own included,
+on its own authority (mctlhq/mctl-agents#470).
+
+The v1alpha2 mutations (`definition-versions`, profile versions, lifecycle
+transitions, bindings, binding rollback) are on
+`requireAgentRegistryHumanAdmin`: a human admin only, neither the publisher
+nor the agent service principal. Reads, and `POST /agents/executions` (the
+record the worker writes after a run), stay on `requireAgentRegistryAdmin`,
+which still admits the agent service principal.
 
 ### Staged rollout
 
@@ -536,13 +546,15 @@ The split ships in four stages, each of which is safe to stop at:
 | 3 | The release workflow publishes with the publisher token | mctl-agents | A publish that is refused fails that release's registry step loudly; the registry keeps resolving the versions already promoted. Reverting the workflow restores the previous behaviour, because admin access is still in place. |
 | 4 | Narrow `mayPublishToAgentRegistry` to `isHumanAdmin OR registry publisher`, and narrow the v1alpha2 mutation routes | mctl-api | A caller that is no longer admitted gets `403`; nothing is published or promoted on its behalf. |
 
-Stage 4 is a separate mctl-api release on purpose. Until stage 3 has
-shipped, the release workflow still publishes with an admin credential, so
-narrowing the guard first would refuse the next `mctl-agents` release.
+Stage 4 is a separate mctl-api release on purpose. Until stage 3 had
+shipped, the release workflow still published with an admin credential, so
+narrowing the guard first would have refused the next `mctl-agents` release.
+Stage 3 shipped in mctl-agents 1.68.3, whose six publications and
+promotions are recorded under `service:mctl-agents-registry-publisher`.
 
 Each stage fails closed in the direction that matters: no stage can leave
 the publisher able to do more than the three routes, and no stage before 4
-takes access away from a caller that has it today.
+takes access away from a caller that had it before.
 
 ## What this change does not do
 

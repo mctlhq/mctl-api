@@ -88,29 +88,50 @@ func registryPublisherGate(next http.Handler) http.Handler {
 }
 
 // mayPublishToAgentRegistry is the one place that decides who may create a
-// definition, publish a version, or promote and roll back a release.
+// definition, publish a version, or promote and roll back a release: a
+// person who is an admin, acting directly, or the registry publisher the
+// mctl-agents release pipeline authenticates as.
 //
-// Stage 1 of the credential split (mctlhq/mctl-agents#470) only ADDS the
-// registry publisher: every admin keeps the access it has today, so nothing
-// changes for any existing caller, and nothing changes at all until
-// MCTL_REGISTRY_PUBLISHER_TOKEN is set.
-//
-// Stage 4 narrows this to `isHumanAdmin(u) || u.IsRegistryPublisher()`, and
-// it is a separate release on purpose. The mctl-agents release workflow
-// publishes with an admin credential until it has been switched to the
-// publisher token (stage 3), which in turn needs the token to exist where
-// that workflow can read it (stage 2). Narrowing here before both have
-// shipped would refuse the next mctl-agents release.
+// Not the agent service principal, although it carries the admins group
+// (mctlhq/mctl-agents#470). That token is what every agent pod runs with,
+// so admitting it here meant an agent could publish and promote a
+// definition -- its own included -- on its own authority. The release
+// pipeline has published as the registry publisher since mctl-agents
+// 1.68.3; nothing else called these routes with the service token.
 func mayPublishToAgentRegistry(u *auth.User) bool {
-	return u.IsAdmin() || u.IsRegistryPublisher()
+	return isHumanAdmin(u) || u.IsRegistryPublisher()
+}
+
+// requireAgentRegistryHumanAdmin guards the v1alpha2 mutations: publishing
+// a definition or profile version, moving one through its lifecycle, and
+// creating or rolling back a release binding. Same answers as
+// requireAgentRegistryAdmin, but only a person who is an admin gets past
+// it. These activate an agent as surely as the publication routes do, so
+// the agent service principal is refused here for the same reason; the
+// registry publisher never reaches them (registryPublisherGate).
+func (h *Handlers) requireAgentRegistryHumanAdmin(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
+	if h.opts.AgentRegistry == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent registry not configured")
+		return nil, false
+	}
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return nil, false
+	}
+	if !isHumanAdmin(user) {
+		writeError(w, http.StatusForbidden, "agent registry changes need a human admin")
+		return nil, false
+	}
+	return user, true
 }
 
 // requireAgentRegistryPublisherOrAdmin guards the three publication routes
 // and only those. Same checks and same answers as requireAgentRegistryAdmin
 // -- 503 unconfigured, 401 unauthenticated, 403 otherwise -- with
-// mayPublishToAgentRegistry deciding the last one. Every other registry
-// handler, including all v1alpha2 mutations, stays on
-// requireAgentRegistryAdmin.
+// mayPublishToAgentRegistry deciding the last one. The v1alpha2 mutations
+// are on requireAgentRegistryHumanAdmin; every read, and
+// RecordAgentExecution, stays on requireAgentRegistryAdmin.
 func (h *Handlers) requireAgentRegistryPublisherOrAdmin(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
 	if h.opts.AgentRegistry == nil {
 		writeError(w, http.StatusServiceUnavailable, "agent registry not configured")
@@ -122,7 +143,7 @@ func (h *Handlers) requireAgentRegistryPublisherOrAdmin(w http.ResponseWriter, r
 		return nil, false
 	}
 	if !mayPublishToAgentRegistry(user) {
-		writeError(w, http.StatusForbidden, "agent registry is admin-only")
+		writeError(w, http.StatusForbidden, "agent registry publication needs a human admin or the registry publisher")
 		return nil, false
 	}
 	return user, true
