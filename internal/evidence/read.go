@@ -280,11 +280,13 @@ func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence, scope 
 	// Bounded per target, like the current read's pool: an unbounded
 	// fan-in would be materialized and serialized whole, and a truncated
 	// list could leave a retired record reading live, so past the cap the
-	// read fails closed. The query limit scales with the batch: if it is
-	// reached, some target must exceed maxCurrentPool (pigeonhole).
+	// read fails closed. The query limit scales with the batch (so page
+	// size alone never trips it) up to a total ceiling of
+	// maxSupersedersPerRead, so one request cannot fan out into an
+	// unbounded number of hash verifications.
 	// supersedes <> '' repeats the partial index predicate so the planner
 	// can use it under a generic plan; order is applied in Go.
-	limit := len(ids)*maxCurrentPool + 1
+	limit := min(len(ids)*maxCurrentPool, maxSupersedersPerRead) + 1
 	rows, err := s.pool.Query(ctx, `SELECT `+evidenceRowColumns+` FROM execution_evidence
 		WHERE supersedes = ANY($1) AND supersedes <> '' AND subject_kind <> '' LIMIT $2`, ids, limit)
 	if err != nil {
@@ -305,13 +307,14 @@ func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence, scope 
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("evidence: superseded_by rows: %w", err)
 	}
-	if len(superseders) >= limit {
-		return fmt.Errorf("evidence: superseding envelopes exceed %d per record: %w", maxCurrentPool, ErrCurrentPoolTooLarge)
-	}
+	// Per record first, so an over-cap record is named in the error.
 	for target, n := range perTarget {
 		if n > maxCurrentPool {
 			return fmt.Errorf("evidence: %s has more than %d superseding envelopes: %w", target, maxCurrentPool, ErrCurrentPoolTooLarge)
 		}
+	}
+	if len(superseders) >= limit {
+		return fmt.Errorf("evidence: more than %d superseding envelopes in one read: %w", limit-1, ErrCurrentPoolTooLarge)
 	}
 	sort.Slice(superseders, func(i, j int) bool { return superseders[i].ID < superseders[j].ID })
 	if scope != "" {

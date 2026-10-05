@@ -211,7 +211,8 @@ routes `superseded_by` lists every superseding id; on the non-admin
 that same work item, so it never discloses the id of evidence the caller
 cannot see (`superseded: true` with a shorter list is the signal that a
 superseder exists elsewhere). Both are bounded per record: a record with more than
-`MaxCurrentPool` superseding envelopes fails the read with `500
+`MaxCurrentPool` superseding envelopes, or a read loading more than
+`MaxSupersedersPerRead` (10000) in total, fails with `500
 evidence_current_pool_too_large` rather than serving a truncated list. These fields are omitted on pre-amendment
 records, whose JSON is unchanged. `GET /api/v1/evidence` and `GET /api/v1/work-items/{id}/evidence`
 accept `subject_kind`, `subject_repository`, `subject_ref` and

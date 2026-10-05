@@ -29,6 +29,14 @@ const MaxCurrentPool = 1000
 // maxCurrentPool is MaxCurrentPool, overridable by tests.
 var maxCurrentPool = MaxCurrentPool
 
+// MaxSupersedersPerRead bounds the superseding envelopes one read loads
+// for superseded_by across all its records (each record is also capped at
+// MaxCurrentPool on its own).
+const MaxSupersedersPerRead = 10 * MaxCurrentPool
+
+// maxSupersedersPerRead is MaxSupersedersPerRead, overridable by tests.
+var maxSupersedersPerRead = MaxSupersedersPerRead
+
 var (
 	// ErrCurrentPoolTooLarge: more than MaxCurrentPool envelopes share the
 	// subject and revision, so the complete pool cannot be loaded.

@@ -796,3 +796,25 @@ func TestStoreA2SupersededByCapCatchesOneHeavyRecord(t *testing.T) {
 		t.Fatalf("List(one record with 2 superseders, cap 1) = %v, want ErrCurrentPoolTooLarge", err)
 	}
 }
+
+// A total ceiling bounds one read even when every record is within its own
+// cap.
+func TestStoreA2SupersededByHasATotalCeiling(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	repo := "mctlhq/r" + uniqueSuffix()
+	for range 2 {
+		spec := uniqueSubject()
+		spec.repo = repo
+		target := mustIngest(t, s, a2Envelope(t, spec))
+		repl := spec
+		repl.supersedes, repl.observedAt = target.ID, "2026-10-04T11:00:00Z"
+		mustIngest(t, s, a2Envelope(t, repl))
+	}
+	prev := maxSupersedersPerRead
+	maxSupersedersPerRead = 1
+	defer func() { maxSupersedersPerRead = prev }()
+	if _, err := s.List(ctx, Filter{SubjectRepository: repo}); !errors.Is(err, ErrCurrentPoolTooLarge) {
+		t.Fatalf("List(2 superseders, total ceiling 1) = %v, want ErrCurrentPoolTooLarge", err)
+	}
+}
