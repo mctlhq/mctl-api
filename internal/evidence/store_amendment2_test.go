@@ -486,10 +486,7 @@ func TestStoreA2CurrentFailsClosed(t *testing.T) {
 	for range 3 {
 		mustIngest(t, s, a2Envelope(t, spec))
 	}
-	prev := maxCurrentPool
-	maxCurrentPool = 2
-	_, err := s.Current(ctx, spec.query())
-	maxCurrentPool = prev
+	_, err := withPoolCap(2, func() (*CurrentResult, error) { return s.Current(ctx, spec.query()) })
 	if !errors.Is(err, ErrCurrentPoolTooLarge) {
 		t.Fatalf("Current(pool over cap) = %v, want ErrCurrentPoolTooLarge", err)
 	}
@@ -649,14 +646,20 @@ func TestStoreA2StaleWitnessScanIsBounded(t *testing.T) {
 			observedAt: "2026-10-04T10:00:00Z", declareSubjectRedaction: true}))
 	}
 	q := SubjectQuery{Kind: "work_item", Ref: ref, Revision: "v9"}
-	prev := maxCurrentPool
-	maxCurrentPool = 1
-	_, err := s.Current(ctx, q)
-	maxCurrentPool = prev
+	_, err := withPoolCap(1, func() (*CurrentResult, error) { return s.Current(ctx, q) })
 	if !errors.Is(err, ErrCurrentPoolTooLarge) {
 		t.Fatalf("Current(witness scan over cap) = %v, want ErrCurrentPoolTooLarge", err)
 	}
 	if res, err := s.Current(ctx, q); err != nil || res.State != CurrentStateNoEvidence {
 		t.Fatalf("Current(within cap) = (%v, %v), want no_evidence", res, err)
 	}
+}
+
+// withPoolCap runs fn with maxCurrentPool overridden, restoring it even if
+// fn panics.
+func withPoolCap(limit int, fn func() (*CurrentResult, error)) (*CurrentResult, error) {
+	prev := maxCurrentPool
+	maxCurrentPool = limit
+	defer func() { maxCurrentPool = prev }()
+	return fn()
 }

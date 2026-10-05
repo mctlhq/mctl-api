@@ -294,21 +294,23 @@ func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence, scope 
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("evidence: superseded_by rows: %w", err)
 	}
+	if scope != "" {
+		// Resolve each superseder's projection once (a nil Ref after
+		// attachRef is a legitimate "no projection", not a retry signal).
+		for _, sup := range superseders {
+			if err := s.attachRef(ctx, sup); err != nil {
+				return err
+			}
+		}
+	}
 	for _, sup := range superseders {
 		for _, target := range byID[sup.Supersedes] {
 			if !validLink(sup.candidate(), target.candidate()) {
 				continue
 			}
 			target.Superseded = true
-			if scope != "" {
-				if sup.Ref == nil {
-					if err := s.attachRef(ctx, sup); err != nil {
-						return err
-					}
-				}
-				if !attachedTo(sup, scope) {
-					continue
-				}
+			if scope != "" && !attachedTo(sup, scope) {
+				continue
 			}
 			target.SupersededBy = append(target.SupersededBy, sup.ID)
 		}

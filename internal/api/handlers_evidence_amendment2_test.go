@@ -181,6 +181,14 @@ func TestEvidenceA2_IngestAndCurrentRead(t *testing.T) {
 		}
 	}
 
+	// A malformed percent-encoding is 400, never a silently dropped key.
+	if rec := call(adminUser(), http.MethodGet, "/api/v1/evidence/current?"+subj.query().Encode()+"&revision=%zz", nil); rec.Code != http.StatusBadRequest || bodyCode(rec) != codeEvidenceQueryInvalid {
+		t.Errorf("malformed query: got %d %s, want 400 %s", rec.Code, rec.Body.String(), codeEvidenceQueryInvalid)
+	}
+	if rec := call(adminUser(), http.MethodGet, "/api/v1/evidence?subject_revision=%zz", nil); rec.Code != http.StatusBadRequest || bodyCode(rec) != codeEvidenceQueryInvalid {
+		t.Errorf("malformed list query: got %d %s, want 400 %s", rec.Code, rec.Body.String(), codeEvidenceQueryInvalid)
+	}
+
 	// Non-admins are refused, like GET /api/v1/evidence.
 	member := auth.NewGitHubUser("alice", []string{"some-tenant"})
 	if rec := call(member, http.MethodGet, "/api/v1/evidence/current?"+subj.query().Encode(), nil); rec.Code != http.StatusForbidden {

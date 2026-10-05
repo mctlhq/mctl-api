@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
@@ -302,7 +303,10 @@ func evidenceFilterFromQuery(r *http.Request) (evidence.Filter, error) {
 // unknown subject_kind is an error rather than a filter that silently
 // matches nothing.
 func subjectFilterFromQuery(r *http.Request, f *evidence.Filter) error {
-	q := r.URL.Query()
+	q, err := strictQuery(r)
+	if err != nil {
+		return err
+	}
 	f.SubjectKind = q.Get("subject_kind")
 	f.SubjectRepository = q.Get("subject_repository")
 	f.SubjectRef = q.Get("subject_ref")
@@ -311,6 +315,18 @@ func subjectFilterFromQuery(r *http.Request, f *evidence.Filter) error {
 		return fmt.Errorf("%w: invalid subject_kind", evidence.ErrCurrentQueryInvalid)
 	}
 	return nil
+}
+
+// strictQuery parses the raw query and fails on a malformed one.
+// (*url.URL).Query() discards ParseQuery's error and silently drops the
+// offending pair (revision=%zz), which would resolve or filter at the wrong
+// revision instead of answering 400.
+func strictQuery(r *http.Request) (url.Values, error) {
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, fmt.Errorf("%w: malformed query string: %s", evidence.ErrCurrentQueryInvalid, err)
+	}
+	return q, nil
 }
 
 // writeFilterError answers a rejected list filter: a subject-filter
@@ -382,7 +398,10 @@ func (h *Handlers) ListWorkItemEvidence(w http.ResponseWriter, r *http.Request) 
 // a misspelled revision silently dropped would resolve at the wrong
 // revision.
 func currentQuery(r *http.Request) (evidence.SubjectQuery, error) {
-	q := r.URL.Query()
+	q, err := strictQuery(r)
+	if err != nil {
+		return evidence.SubjectQuery{}, err
+	}
 	for key, values := range q {
 		if !currentQueryKeys[key] {
 			return evidence.SubjectQuery{}, fmt.Errorf("%w: unknown parameter %q (expected subject_kind, repository, ref, revision)",
