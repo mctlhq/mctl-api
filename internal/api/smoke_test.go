@@ -63,7 +63,7 @@ type fakeGitReader struct {
 
 // MemberRoles answers from the fake's tenants the way gitops.Reader does
 // (legacy tenants only), or fails with memberRolesErr.
-func (f *fakeGitReader) MemberRoles(namespace, login string) ([]string, error) {
+func (f *fakeGitReader) MemberRoles(namespace, login string) ([][]string, error) {
 	f.memberRolesCalls++
 	if f.memberRolesErr != nil {
 		return nil, f.memberRolesErr
@@ -79,7 +79,10 @@ func (f *fakeGitReader) MemberRoles(namespace, login string) ([]string, error) {
 			}
 		}
 	}
-	return roles, nil
+	if len(roles) == 0 {
+		return nil, nil
+	}
+	return [][]string{roles}, nil
 }
 
 // TenantExists answers from the fake's tenants, or fails with tenantExistsErr.

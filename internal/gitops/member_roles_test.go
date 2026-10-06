@@ -41,19 +41,19 @@ func TestMemberRoles(t *testing.T) {
 
 	tests := []struct {
 		namespace, login string
-		want             []string
+		want             [][]string
 	}{
-		{"erpact", "alice", []string{"owner"}}, // login match ignores case, as membership does
-		{"erpact", "bob", []string{"developer"}},
-		{"erpact", "carol", []string{"viewer"}},
-		{"erpact", "dave", []string{""}},           // a member with no role: reported, not dropped
-		{"erpact", "erin", []string{"maintainer"}}, // returned as written; ranking is the caller's
-		{"erpact", "twice", []string{"owner", "viewer"}},
+		{"erpact", "alice", [][]string{{"owner"}}}, // login match ignores case, as membership does
+		{"erpact", "bob", [][]string{{"developer"}}},
+		{"erpact", "carol", [][]string{{"viewer"}}},
+		{"erpact", "dave", [][]string{{""}}},                 // a member with no role: reported, not dropped
+		{"erpact", "erin", [][]string{{"maintainer"}}},       // returned as written; ranking is the caller's
+		{"erpact", "twice", [][]string{{"owner", "viewer"}}}, // one list, both entries
 		{"erpact", "mallory", nil},
-		{"other", "bob", []string{"owner"}}, // a role in one tenant
-		{"other", "alice", nil},             // is not a role in another
-		{"ghost", "alice", nil},             // no such tenant
-		{"erpact-web", "alice", nil},        // not a team of a legacy tenant
+		{"other", "bob", [][]string{{"owner"}}}, // a role in one tenant
+		{"other", "alice", nil},                 // is not a role in another
+		{"ghost", "alice", nil},                 // no such tenant
+		{"erpact-web", "alice", nil},            // not a team of a legacy tenant
 	}
 	for _, tt := range tests {
 		got, err := r.MemberRoles(tt.namespace, tt.login)
@@ -90,14 +90,16 @@ func TestMemberRoles_MultiTeam(t *testing.T) {
 `)
 	tests := []struct {
 		namespace, login string
-		want             []string
+		want             [][]string
 	}{
-		{"acme-web", "boss", []string{"owner"}}, // tenant-level members reach every team
-		{"acme-data", "boss", []string{"owner"}},
-		{"acme-web", "dev", []string{"developer"}},
+		{"acme-web", "boss", [][]string{{"owner"}}}, // tenant-level members reach every team
+		{"acme-data", "boss", [][]string{{"owner"}}},
+		{"acme-web", "dev", [][]string{{"developer"}}},
 		{"acme-data", "dev", nil}, // a team role stays in its team
-		{"acme-web", "both", []string{"owner", "viewer"}},
-		{"acme-data", "analyst", []string{"viewer"}},
+		// Two lists, kept apart: the tenant-level grant and the team's.
+		{"acme-web", "both", [][]string{{"owner"}, {"viewer"}}},
+		{"acme-data", "both", [][]string{{"owner"}}},
+		{"acme-data", "analyst", [][]string{{"viewer"}}},
 		{"acme", "boss", nil}, // the bare tenant name is not a namespace of a multi-team tenant
 	}
 	for _, tt := range tests {
@@ -201,7 +203,7 @@ func TestMemberRoles_DirectoryWithoutValuesIsNotATenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := r.MemberRoles("erpact", "bob")
-	if err != nil || !reflect.DeepEqual(got, []string{"developer"}) {
+	if err != nil || !reflect.DeepEqual(got, [][]string{{"developer"}}) {
 		t.Fatalf("MemberRoles = %q, %v; want [developer]", got, err)
 	}
 }

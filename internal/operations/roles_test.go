@@ -155,3 +155,35 @@ func TestLeastTenantRole(t *testing.T) {
 		})
 	}
 }
+
+func TestEffectiveTenantRole(t *testing.T) {
+	tests := []struct {
+		name   string
+		scopes [][]string
+		want   Role
+		known  bool
+	}{
+		{"not a member", nil, "", false},
+		{"one list", [][]string{{"developer"}}, RoleDeveloper, true},
+		{"one list, listed twice: the lesser", [][]string{{"owner", "viewer"}}, RoleViewer, true},
+		// The review case: a tenant-wide owner also listed on a team.
+		{"tenant owner, team viewer: owner", [][]string{{"owner"}, {"viewer"}}, RoleOwner, true},
+		{"tenant viewer, team developer: developer", [][]string{{"viewer"}, {"developer"}}, RoleDeveloper, true},
+		{"order of the lists does not matter", [][]string{{"viewer"}, {"owner"}}, RoleOwner, true},
+		// Within a list still the lesser, then the greater of the lists.
+		{"tenant owner+viewer, team developer", [][]string{{"owner", "viewer"}, {"developer"}}, RoleDeveloper, true},
+		// An unreadable entry is never outvoted by a good one elsewhere.
+		{"tenant owner, team role empty", [][]string{{"owner"}, {""}}, "", false},
+		{"tenant role unknown, team owner", [][]string{{"maintainer"}, {"owner"}}, "", false},
+		{"tenant owner twice, one unreadable", [][]string{{"owner", ""}}, "", false},
+		{"an empty list is not a role", [][]string{{}}, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, known := EffectiveTenantRole(tt.scopes)
+			if got != tt.want || known != tt.known {
+				t.Fatalf("EffectiveTenantRole(%q) = %q, %v; want %q, %v", tt.scopes, got, known, tt.want, tt.known)
+			}
+		})
+	}
+}

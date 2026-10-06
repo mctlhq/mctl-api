@@ -66,7 +66,7 @@ type openClawIdentitySaveRequest struct {
 func (h *Handlers) ListOpenClawIdentity(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	team := strings.TrimSpace(chi.URLParam(r, "team"))
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+	if _, denied := h.requireOpenClawOwnerForRead(w, user, team); denied {
 		return
 	}
 
@@ -87,7 +87,7 @@ func (h *Handlers) ListOpenClawIdentity(w http.ResponseWriter, r *http.Request) 
 func (h *Handlers) GetOpenClawIdentity(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	team := strings.TrimSpace(chi.URLParam(r, "team"))
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+	if _, denied := h.requireOpenClawOwnerForRead(w, user, team); denied {
 		return
 	}
 
@@ -122,7 +122,7 @@ func (h *Handlers) SaveOpenClawIdentity(w http.ResponseWriter, r *http.Request) 
 	team := strings.TrimSpace(chi.URLParam(r, "team"))
 
 	// Ownership gate runs before any body parse to avoid leaking probe signals.
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+	if _, denied := h.requireOpenClawOwner(w, r, user, team, "openclaw-identity-save"); denied {
 		return
 	}
 
@@ -230,7 +230,7 @@ func (h *Handlers) SaveOpenClawIdentity(w http.ResponseWriter, r *http.Request) 
 func (h *Handlers) DeleteOpenClawIdentity(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	team := strings.TrimSpace(chi.URLParam(r, "team"))
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+	if _, denied := h.requireOpenClawOwner(w, r, user, team, "openclaw-identity-delete"); denied {
 		return
 	}
 

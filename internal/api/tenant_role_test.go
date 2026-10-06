@@ -26,6 +26,11 @@ func erpactRoles() *stubRoles {
 		"erpact/vic-viewer=viewer",
 		"erpact/nora-norole=",
 		"erpact/dup=owner", "erpact/dup=viewer",
+		// Multi-team shapes: tenant-level role | role in the team's list.
+		"erpact/wide-owner=owner|viewer",
+		"erpact/team-dev=viewer|developer",
+		"erpact/team-blank=owner|",
+		"erpact/tenant-blank=|owner",
 	)
 }
 
@@ -50,6 +55,14 @@ func TestCheckTenantRole(t *testing.T) {
 		{"viewer below developer", erpactMember("vic-viewer"), operations.RoleDeveloper, http.StatusForbidden, "denied"},
 		{"empty role is not even a viewer", erpactMember("nora-norole"), operations.RoleViewer, http.StatusForbidden, "denied"},
 		{"listed twice counts as the lesser", erpactMember("dup"), operations.RoleDeveloper, http.StatusForbidden, "denied"},
+		// A tenant-level grant and a team-level one add up; neither lowers
+		// the other. An entry that cannot be read still denies, wherever
+		// it is.
+		{"tenant owner also a team viewer is an owner", erpactMember("wide-owner"), operations.RoleOwner, 0, ""},
+		{"tenant viewer also a team developer is a developer", erpactMember("team-dev"), operations.RoleDeveloper, 0, ""},
+		{"and not more than a developer", erpactMember("team-dev"), operations.RoleOwner, http.StatusForbidden, "denied"},
+		{"tenant owner with an empty team role", erpactMember("team-blank"), operations.RoleViewer, http.StatusForbidden, "denied"},
+		{"team owner with an empty tenant role", erpactMember("tenant-blank"), operations.RoleViewer, http.StatusForbidden, "denied"},
 		{"not listed", erpactMember("gone"), operations.RoleViewer, http.StatusForbidden, "denied"},
 		{"unproven identity", &auth.User{ID: "olga-owner", Groups: []string{"erpact"}}, operations.RoleViewer, http.StatusForbidden, "denied"},
 		{"surface principal itself", telegram, operations.RoleViewer, http.StatusForbidden, "denied"},

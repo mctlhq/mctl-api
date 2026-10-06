@@ -166,7 +166,7 @@ func (h *Handlers) StartOpenClawDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenant, denied := h.requireOpenClawOwner(w, r, user, req.TeamName)
+	tenant, denied := h.requireOpenClawOwner(w, r, user, req.TeamName, "openclaw-deploy")
 	if denied {
 		return
 	}
@@ -226,7 +226,7 @@ func (h *Handlers) ResumeOpenClawDeploy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	tenant, denied := h.requireOpenClawOwner(w, r, user, req.TeamName)
+	tenant, denied := h.requireOpenClawOwner(w, r, user, req.TeamName, "openclaw-deploy-resume")
 	if denied {
 		return
 	}
@@ -387,7 +387,7 @@ func (h *Handlers) ApplyOpenClawResourceProfile(w http.ResponseWriter, r *http.R
 
 	team := chi.URLParam(r, "team")
 	app := chi.URLParam(r, "app")
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+	if _, denied := h.requireOpenClawOwner(w, r, user, team, "openclaw-resource-profile"); denied {
 		return
 	}
 	if _, err := h.opts.GitReader.GetService(team, app); err != nil {
@@ -442,7 +442,9 @@ func (h *Handlers) ApplyOpenClawResourceProfile(w http.ResponseWriter, r *http.R
 	})
 }
 
-func (h *Handlers) requireOpenClawOwner(w http.ResponseWriter, r *http.Request, user *auth.User, team string) (*gitops.Tenant, bool) {
+// openClawTenant is what the two owner gates below share: the caller is
+// authenticated, has access to the team, and the team's tenant exists.
+func (h *Handlers) openClawTenant(w http.ResponseWriter, user *auth.User, team string) (*gitops.Tenant, bool) {
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return nil, true
@@ -457,15 +459,62 @@ func (h *Handlers) requireOpenClawOwner(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusNotFound, "tenant not found: "+team)
 		return nil, true
 	}
-	// The shared tenant role gate (mctl-api#478), not a private copy of it:
-	// same proven-login rule, same strict read, same audit entry. Before, a
-	// caller's ID was matched against the members list whatever had proved
-	// it, so a Dex username equal to an owner's GitHub login passed as that
-	// owner.
-	if !h.requireTenantRole(w, r, user, team, operations.RoleOwner, "openclaw", operations.RiskLow) {
+	return tenant, false
+}
+
+// requireOpenClawOwner gates an OpenClaw action that changes something, on
+// the shared tenant role gate (mctl-api#478) rather than a private copy of
+// it: same proven-login rule, same strict read, same audit entry, recorded
+// under operation, the name of the action being refused.
+func (h *Handlers) requireOpenClawOwner(w http.ResponseWriter, r *http.Request, user *auth.User, team, operation string) (*gitops.Tenant, bool) {
+	tenant, denied := h.openClawTenant(w, user, team)
+	if denied {
+		return nil, true
+	}
+	if !h.requireTenantRole(w, r, user, team, operations.RoleOwner, operation, operations.RiskLow) {
 		return nil, true
 	}
 	return tenant, false
+}
+
+// requireOpenClawOwnerForRead gates the OpenClaw reads (listing and reading
+// a tenant's skills and identity files), which are owner-only as well.
+//
+// It asks for the same owner role, keyed on the same proven GitHub login,
+// but it is not the write gate. The role comes from the tenant the handler
+// has just read and is about to answer from, so the decision is exactly as
+// fresh as the answer: the write gate's bound on the checkout's age would
+// only refuse the owner a read that a platform admin is served from the
+// same files, and protect nothing. And a refused read writes no audit
+// entry: a page polling these lists for a non-owner would otherwise add a
+// row per poll.
+//
+// What it keeps from the write gate is the part that is about identity, not
+// freshness: a caller's ID is not looked up in the members list unless
+// authentication proved it is a GitHub login, so a Dex username equal to an
+// owner's login is not that owner.
+func (h *Handlers) requireOpenClawOwnerForRead(w http.ResponseWriter, user *auth.User, team string) (*gitops.Tenant, bool) {
+	tenant, denied := h.openClawTenant(w, user, team)
+	if denied {
+		return nil, true
+	}
+	if user.IsAdmin() {
+		return tenant, false
+	}
+	if login, proven := user.GitHubLogin(); proven {
+		var written []string
+		for _, m := range tenant.Members {
+			if strings.EqualFold(m.UserID, login) {
+				written = append(written, m.Role)
+			}
+		}
+		// Listed twice with different roles: the lesser, as everywhere.
+		if role, known := operations.LeastTenantRole(written); known && role.Satisfies(operations.RoleOwner) {
+			return tenant, false
+		}
+	}
+	writeError(w, http.StatusForbidden, "owner role is required for this OpenClaw action")
+	return nil, true
 }
 
 func validateOpenClawPreflight(tenant *gitops.Tenant) []map[string]string {
@@ -565,7 +614,7 @@ type openClawSkillSaveRequest struct {
 func (h *Handlers) ListOpenClawSkills(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	team := strings.TrimSpace(chi.URLParam(r, "team"))
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+	if _, denied := h.requireOpenClawOwnerForRead(w, user, team); denied {
 		return
 	}
 
@@ -585,7 +634,7 @@ func (h *Handlers) ListOpenClawSkills(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) GetOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	team := strings.TrimSpace(chi.URLParam(r, "team"))
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+	if _, denied := h.requireOpenClawOwnerForRead(w, user, team); denied {
 		return
 	}
 
@@ -620,7 +669,7 @@ func (h *Handlers) SaveOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 
 	// Gate on ownership before any body parsing or validation so unauthorized
 	// callers don't get to probe payload-size or name-format behavior.
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+	if _, denied := h.requireOpenClawOwner(w, r, user, team, "openclaw-skill-save"); denied {
 		return
 	}
 
@@ -744,7 +793,7 @@ func openClawRateKey(team, userID string) string {
 func (h *Handlers) DeleteOpenClawSkill(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	team := strings.TrimSpace(chi.URLParam(r, "team"))
-	if _, denied := h.requireOpenClawOwner(w, r, user, team); denied {
+	if _, denied := h.requireOpenClawOwner(w, r, user, team, "openclaw-skill-delete"); denied {
 		return
 	}
 

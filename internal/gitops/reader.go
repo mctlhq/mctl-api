@@ -158,19 +158,29 @@ func (t *Tenant) UserNamespaces(login string) []string {
 	return ns
 }
 
-// memberRoles returns the role of every members entry that makes login a
-// member of namespace, and whether this tenant owns that namespace at all.
-// The match is the one UserNamespaces grants access on, so a caller who
-// holds the namespace as a group finds the entries that granted it: for a
-// legacy tenant the tenant's members, for a multi-team tenant its
-// tenant-level members plus the members of the team the namespace belongs
-// to. A role is returned exactly as written, empty included.
-func (t *Tenant) memberRoles(namespace, login string) (roles []string, owns bool) {
+// memberRoles returns the roles under which login is a member of namespace,
+// one list per members list that names the login, and whether this tenant
+// owns that namespace at all. The lists are the ones UserNamespaces grants
+// access on: for a legacy tenant the tenant's members, for a multi-team
+// tenant its tenant-level members and the members of the team the namespace
+// belongs to.
+//
+// The lists are kept apart because they mean different things. Two entries
+// for one login inside one list contradict each other. An entry in the
+// tenant-level list and one in a team's list do not: each grants on its own,
+// so a tenant-wide owner who is also a viewer of one team is still an owner
+// there. A list that does not name the login is left out. A role is
+// returned exactly as written, empty included.
+func (t *Tenant) memberRoles(namespace, login string) (scopes [][]string, owns bool) {
 	collect := func(members []TenantMember) {
+		var roles []string
 		for _, m := range members {
 			if strings.EqualFold(m.UserID, login) {
 				roles = append(roles, m.Role)
 			}
+		}
+		if len(roles) > 0 {
+			scopes = append(scopes, roles)
 		}
 	}
 	if !t.IsMultiTeam() {
@@ -178,7 +188,7 @@ func (t *Tenant) memberRoles(namespace, login string) (roles []string, owns bool
 			return nil, false
 		}
 		collect(t.Members)
-		return roles, true
+		return scopes, true
 	}
 	for _, team := range t.Teams {
 		if t.Name+"-"+team.Name != namespace {
@@ -186,7 +196,7 @@ func (t *Tenant) memberRoles(namespace, login string) (roles []string, owns bool
 		}
 		collect(t.Members)
 		collect(team.Members)
-		return roles, true
+		return scopes, true
 	}
 	return nil, false
 }
@@ -683,8 +693,10 @@ const MemberRolesMaxAge = TenantExistsMaxAge
 
 // MemberRoles returns the members[].role values under which login is a
 // member of namespace (a tenant name, or {tenant}-{team} for a multi-team
-// tenant), exactly as written in the tenant's values.yaml. An empty result
-// with a nil error means the checkout was read and login is not a member.
+// tenant), exactly as written in the tenant's values.yaml: one list per
+// members list that names the login (see Tenant.memberRoles for why they
+// are not merged). An empty result with a nil error means the checkout was
+// read and login is not a member.
 //
 // Unlike ListTenants, it never skips what it could not read. A checkout that
 // never synced or is older than MemberRolesMaxAge, a tenants directory that
@@ -693,7 +705,7 @@ const MemberRolesMaxAge = TenantExistsMaxAge
 // role" must never come back looking like "not a member", and still less
 // like a role. Only a tenant directory with no values.yaml is skipped,
 // because that is not a tenant.
-func (r *Reader) MemberRoles(namespace, login string) ([]string, error) {
+func (r *Reader) MemberRoles(namespace, login string) ([][]string, error) {
 	if namespace == "" || login == "" {
 		return nil, errors.New("member roles: namespace and login are required")
 	}
@@ -714,7 +726,7 @@ func (r *Reader) MemberRoles(namespace, login string) ([]string, error) {
 		return nil, fmt.Errorf("reading tenants dir: %w", err)
 	}
 
-	var roles []string
+	var roles [][]string
 	owner := ""
 	for _, entry := range entries {
 		if !entry.IsDir() {

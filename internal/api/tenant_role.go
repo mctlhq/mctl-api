@@ -123,7 +123,7 @@ func (h *Handlers) checkTenantRole(user *auth.User, tenant string, min operation
 			detail:      fmt.Sprintf("user %q is not in the members of tenant %q; %q required", login, tenant, min),
 		}
 	}
-	role, known := operations.LeastTenantRole(written)
+	role, known := operations.EffectiveTenantRole(written)
 	if !known {
 		return roleRefusal{
 			status:      http.StatusForbidden,

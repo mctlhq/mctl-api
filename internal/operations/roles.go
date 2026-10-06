@@ -102,3 +102,28 @@ func LeastTenantRole(values []string) (Role, bool) {
 	}
 	return least, least != ""
 }
+
+// EffectiveTenantRole decides the one role a member holds from the roles
+// each members list gives them (gitops.Reader.MemberRoles): the tenant-level
+// list and, for a multi-team tenant, the list of the team in question.
+//
+// Inside a list, entries for one login contradict each other, so a list
+// counts as its least privileged entry (LeastTenantRole). Across lists the
+// grants add up, so the member holds the greatest of them: a tenant-wide
+// owner is not lowered by also being a viewer of one team. It answers false
+// when no list names the member, and when any list that does carries an
+// entry that is not a tenant role, whichever list would otherwise have won:
+// an unreadable entry is never outvoted.
+func EffectiveTenantRole(scopes [][]string) (Role, bool) {
+	var best Role
+	for _, scope := range scopes {
+		r, ok := LeastTenantRole(scope)
+		if !ok {
+			return "", false
+		}
+		if tenantRoleRank[r] > tenantRoleRank[best] {
+			best = r
+		}
+	}
+	return best, best != ""
+}

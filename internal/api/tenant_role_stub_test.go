@@ -10,13 +10,14 @@ import (
 // to be checked against (mctl-api#478).
 type stubRoles struct {
 	GitReader
-	// roles is tenant -> login -> members[].role values, as written.
-	roles map[string]map[string][]string
+	// roles is tenant -> login -> one list of members[].role values per
+	// members list naming the login, as written.
+	roles map[string]map[string][][]string
 	err   error
 	calls int
 }
 
-func (s *stubRoles) MemberRoles(namespace, login string) ([]string, error) {
+func (s *stubRoles) MemberRoles(namespace, login string) ([][]string, error) {
 	s.calls++
 	if s.err != nil {
 		return nil, s.err
@@ -29,16 +30,25 @@ func (s *stubRoles) MemberRoles(namespace, login string) ([]string, error) {
 	return nil, nil
 }
 
-// rolesOf builds a stubRoles from "tenant/login=role" entries.
+// rolesOf builds a stubRoles from "tenant/login=role" entries. Repeating a
+// login lists it twice in the tenant's one members list; a role written
+// "a|b" puts a in the tenant-level list and b in a team's list.
 func rolesOf(entries ...string) *stubRoles {
-	s := &stubRoles{roles: map[string]map[string][]string{}}
+	s := &stubRoles{roles: map[string]map[string][][]string{}}
 	for _, e := range entries {
 		key, role, _ := strings.Cut(e, "=")
 		tenant, login, _ := strings.Cut(key, "/")
 		if s.roles[tenant] == nil {
-			s.roles[tenant] = map[string][]string{}
+			s.roles[tenant] = map[string][][]string{}
 		}
-		s.roles[tenant][login] = append(s.roles[tenant][login], role)
+		have := s.roles[tenant][login]
+		for i, r := range strings.Split(role, "|") {
+			if i >= len(have) {
+				have = append(have, nil)
+			}
+			have[i] = append(have[i], r)
+		}
+		s.roles[tenant][login] = have
 	}
 	return s
 }

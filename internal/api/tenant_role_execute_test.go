@@ -253,37 +253,95 @@ func TestExecuteOperation_NonMemberStillDeniedBeforeTheRoleGate(t *testing.T) {
 
 // ── OpenClaw ─────────────────────────────────────────────────────────────────
 
-// The OpenClaw owner actions use the same gate. A developer was already
-// refused; what changes is that a name equal to the owner's login no longer
-// passes unless authentication proved that login.
-func TestOpenClaw_OwnerGateUsesTheSharedRoleGate(t *testing.T) {
-	f := newRoleFixture(t)
-	const path = "/api/v1/openclaw/erpact/skills"
+const openClawSkillsPath = "/api/v1/openclaw/erpact/skills"
 
-	if w := getAs(t, f.router, path, member("olga-owner")); w.Code != http.StatusOK {
-		t.Fatalf("owner: status %d, want 200; body: %s", w.Code, w.Body.String())
-	}
-	for name, user := range map[string]*auth.User{
-		"developer":                        member("dan-dev"),
-		"viewer":                           member("vic-viewer"),
-		"listed twice":                     member("dup"),
+var openClawSkillBody = map[string]string{"name": "my-skill", "content": "---\nname: my-skill\ndescription: d\n---\n# body"}
+
+func notOwners() map[string]*auth.User {
+	return map[string]*auth.User{
+		"developer":    member("dan-dev"),
+		"viewer":       member("vic-viewer"),
+		"no role":      member("nora-norole"),
+		"listed twice": member("dup"),
+		// A name equal to the owner's login is the owner only if
+		// authentication proved a GitHub login.
 		"unproven identity named as owner": {ID: "olga-owner", Groups: []string{"erpact"}},
-	} {
-		w := getAs(t, f.router, path, user)
-		if w.Code != http.StatusForbidden {
-			t.Errorf("%s: status %d, want 403; body: %s", name, w.Code, w.Body.String())
-		}
-		save := postAs(t, f.router, path, map[string]string{"name": "my-skill", "content": "---\nname: my-skill\ndescription: d\n---\n# body"}, user)
-		if save.Code != http.StatusForbidden {
-			t.Errorf("%s: save status %d, want 403; body: %s", name, save.Code, save.Body.String())
-		}
+	}
+}
+
+// The OpenClaw actions that change something use the shared write gate, and
+// a refusal is audited under the name of the action refused.
+func TestOpenClaw_WritesUseTheSharedRoleGate(t *testing.T) {
+	for name, user := range notOwners() {
+		t.Run(name, func(t *testing.T) {
+			f := newRoleFixture(t)
+			w := postAs(t, f.router, openClawSkillsPath, openClawSkillBody, user)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("save: status %d, want 403; body: %s", w.Code, w.Body.String())
+			}
+			if e := f.lastAudit(t); e.Status != "denied" || e.Operation != "openclaw-skill-save" || e.UserID != user.ID {
+				t.Fatalf("audit entry = {%q, %q, %q}; want a denied openclaw-skill-save", e.UserID, e.Operation, e.Status)
+			}
+			del := deleteAs(t, f.router, openClawSkillsPath+"/my-skill", user)
+			if del.Code != http.StatusForbidden {
+				t.Fatalf("delete: status %d, want 403; body: %s", del.Code, del.Body.String())
+			}
+			if e := f.lastAudit(t); e.Operation != "openclaw-skill-delete" {
+				t.Fatalf("delete audited as %q", e.Operation)
+			}
+			if len(f.exec.submitted) != 0 {
+				t.Fatalf("a refused write submitted a workflow: %v", f.exec.submitted)
+			}
+		})
+	}
+
+	// A write is not decided on a role that could not be read, the owner's
+	// included.
+	f := newRoleFixture(t)
+	f.git.memberRolesErr = errors.New("checkout is stale")
+	w := postAs(t, f.router, openClawSkillsPath, openClawSkillBody, member("olga-owner"))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unreadable role: status %d, want 503; body: %s", w.Code, w.Body.String())
+	}
+	if e := f.lastAudit(t); e.Status != "error" || e.Operation != "openclaw-skill-save" {
+		t.Fatalf("audit entry = {%q, %q}", e.Operation, e.Status)
 	}
 	if len(f.exec.submitted) != 0 {
-		t.Fatalf("a refused save submitted a workflow: %v", f.exec.submitted)
+		t.Fatalf("submitted without a role: %v", f.exec.submitted)
 	}
+}
 
-	f.git.memberRolesErr = errors.New("checkout unreadable")
-	if w := getAs(t, f.router, path, member("olga-owner")); w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("unreadable role: status %d, want 503; body: %s", w.Code, w.Body.String())
+// The OpenClaw reads are owner-only too, but they are not behind the write
+// gate: the role comes from the tenant being read, so a checkout too stale
+// for a write still serves its owner, and a refused read leaves no audit
+// row. The proven-login rule holds for reads as for writes.
+func TestOpenClaw_ReadsAreOwnerOnlyWithoutTheWriteGate(t *testing.T) {
+	reads := []string{
+		openClawSkillsPath,
+		openClawSkillsPath + "/my-skill",
+		"/api/v1/openclaw/erpact/identity",
+		"/api/v1/openclaw/erpact/identity/AGENTS.md",
+	}
+	for _, path := range reads {
+		t.Run(path, func(t *testing.T) {
+			f := newRoleFixture(t)
+			// What the write gate would refuse with 503.
+			f.git.memberRolesErr = errors.New("checkout is stale")
+
+			if w := getAs(t, f.router, path, member("olga-owner")); w.Code == http.StatusForbidden || w.Code >= 500 {
+				t.Fatalf("owner: status %d; body: %s", w.Code, w.Body.String())
+			}
+			for name, user := range notOwners() {
+				if w := getAs(t, f.router, path, user); w.Code != http.StatusForbidden {
+					t.Errorf("%s: status %d, want 403; body: %s", name, w.Code, w.Body.String())
+				}
+			}
+			if f.git.memberRolesCalls != 0 {
+				t.Errorf("a read went through the write gate's role lookup %d time(s)", f.git.memberRolesCalls)
+			}
+			if n := len(f.audit.List(100)); n != 0 {
+				t.Errorf("reads wrote %d audit entries, want none", n)
+			}
+		})
 	}
 }
