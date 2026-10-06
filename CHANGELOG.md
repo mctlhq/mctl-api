@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.68.1](https://github.com/mctlhq/mctl-api/compare/4.68.0...4.68.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **authz:** enforce tenant member role on write operations ([9e60909](https://github.com/mctlhq/mctl-api/commit/9e60909c09217321614236f1e992803c216e51be))
+* **authz:** enforce tenant member role on write operations ([890b675](https://github.com/mctlhq/mctl-api/commit/890b675d085604c63e5f346474163dbc15020f7b)), closes [#478](https://github.com/mctlhq/mctl-api/issues/478)
+* **authz:** keep scoped roles apart; take OpenClaw reads off the write gate ([538d022](https://github.com/mctlhq/mctl-api/commit/538d022ca7c7dc38ee1a36aba5451c5dfd1a55a4)), closes [#478](https://github.com/mctlhq/mctl-api/issues/478)
+
 ## [4.68.0](https://github.com/mctlhq/mctl-api/compare/4.67.0...4.68.0) (2026-10-05)
 
 
