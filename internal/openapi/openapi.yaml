@@ -213,6 +213,14 @@ components:
           enum: [low, medium, high]
         requiresConfirm:
           type: boolean
+        minRole:
+          type: string
+          enum: [viewer, developer, owner, admin, authenticated]
+          description: >-
+            Minimum standing needed to run the operation. developer and owner
+            are roles on the target tenant (members[].role); admin is a
+            platform admin; authenticated is create-tenant only. Platform
+            admins pass every minimum. A caller below it gets 403.
         parameters:
           type: array
           items:

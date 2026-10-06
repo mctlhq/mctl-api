@@ -57,6 +57,29 @@ type fakeGitReader struct {
 	humanInputFiles        []gitops.HumanInputRequestFile
 	humanInputErr          error
 	tenantExistsErr        error
+	memberRolesErr         error
+	memberRolesCalls       int
+}
+
+// MemberRoles answers from the fake's tenants the way gitops.Reader does
+// (legacy tenants only), or fails with memberRolesErr.
+func (f *fakeGitReader) MemberRoles(namespace, login string) ([]string, error) {
+	f.memberRolesCalls++
+	if f.memberRolesErr != nil {
+		return nil, f.memberRolesErr
+	}
+	var roles []string
+	for i := range f.tenants {
+		if f.tenants[i].Name != namespace {
+			continue
+		}
+		for _, m := range f.tenants[i].Members {
+			if strings.EqualFold(m.UserID, login) {
+				roles = append(roles, m.Role)
+			}
+		}
+	}
+	return roles, nil
 }
 
 // TenantExists answers from the fake's tenants, or fails with tenantExistsErr.
@@ -322,7 +345,7 @@ func getAs(t *testing.T, router http.Handler, path string, user *auth.User) *htt
 
 // adminUser is a pre-built admin user for test helpers.
 var adminUser = &auth.User{ID: "test-admin", Groups: []string{"admins"}}
-var ownerUser = &auth.User{ID: "test-owner", Groups: []string{"tests"}}
+var ownerUser = auth.NewGitHubUser("test-owner", []string{"tests"})
 
 // postAs sends POST with a user injected into context.
 func postAs(t *testing.T, router http.Handler, path string, body interface{}, user *auth.User) *httptest.ResponseRecorder {

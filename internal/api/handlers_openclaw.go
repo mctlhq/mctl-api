@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/secretscan"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -456,16 +457,15 @@ func (h *Handlers) requireOpenClawOwner(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusNotFound, "tenant not found: "+team)
 		return nil, true
 	}
-	if user.IsAdmin() {
-		return tenant, false
+	// The shared tenant role gate (mctl-api#478), not a private copy of it:
+	// same proven-login rule, same strict read, same audit entry. Before, a
+	// caller's ID was matched against the members list whatever had proved
+	// it, so a Dex username equal to an owner's GitHub login passed as that
+	// owner.
+	if !h.requireTenantRole(w, r, user, team, operations.RoleOwner, "openclaw", operations.RiskLow) {
+		return nil, true
 	}
-	for _, member := range tenant.Members {
-		if strings.EqualFold(member.UserID, user.ID) && strings.EqualFold(member.Role, "owner") {
-			return tenant, false
-		}
-	}
-	writeError(w, http.StatusForbidden, "owner role is required for this OpenClaw action")
-	return nil, true
+	return tenant, false
 }
 
 func validateOpenClawPreflight(tenant *gitops.Tenant) []map[string]string {

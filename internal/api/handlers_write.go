@@ -144,6 +144,16 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Membership is not permission (mctl-api#478). Being a member of the
+	// tenant got the caller this far; what they may do to it is decided by
+	// their role there against the operation's minimum. Before this check a
+	// developer, or a read-only viewer, could delete the tenant they belong
+	// to. create-tenant is the one operation with no tenant to hold a role
+	// in; its own rules are the branch above.
+	if opName != "create-tenant" && !h.requireTenantRole(w, r, user, tenantParam, op.MinRole, opName, op.RiskLevel) {
+		return
+	}
+
 	if opName == "preview-deploy" {
 		if err := operations.PreparePreviewDeployInput(input); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())

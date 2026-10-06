@@ -53,6 +53,12 @@ type Operation struct {
 	// execute handler bypasses the tenant-access check for these and uses
 	// the sentinel team "platform" when constructing the workflow.
 	AdminOnly bool `json:"adminOnly,omitempty"`
+	// MinRole is the least standing a caller needs on the operation's tenant
+	// (mctl-api#478). Every operation declares one: the zero value is not
+	// "anyone", it is a misconfiguration the execute path refuses. Platform
+	// admins satisfy every MinRole. RoleAdmin is what AdminOnly operations
+	// carry; RoleAuthenticated belongs to create-tenant alone.
+	MinRole Role `json:"minRole"`
 }
 
 // ParameterDef describes a single operation parameter.
@@ -317,6 +323,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "deploy-service",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{component_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "action", Type: "string", Required: true, Description: "Operation type", Enum: []string{"onboard", "deploy", "update-config"}},
@@ -350,6 +357,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "create-tenant",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  true,
+		MinRole:          RoleAuthenticated,
 		// Every path is tenant-scoped: since mctl-gitops#1431, Argo CD RBAC
 		// lives in a per-tenant fragment, not in the shared argocd/values.yaml.
 		ModifiesPaths: []string{
@@ -385,6 +393,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "provision-database",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  true,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{"platform-gitops/cnpg-clusters/shared/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -398,6 +407,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "retire-service",
 		RiskLevel:        RiskHigh,
 		RequiresConfirm:  true,
+		MinRole:          RoleOwner,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{component_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -413,6 +423,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "delete-tenant-safe",
 		RiskLevel:        RiskHigh,
 		RequiresConfirm:  true,
+		MinRole:          RoleOwner,
 		// What delete-tenant-safe removes. The CNPG shared files are the only
 		// non-tenant-scoped paths: the tenant's database entries are cut out
 		// of them.
@@ -435,6 +446,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "rollback-service",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{component_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -449,6 +461,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "preview-deploy",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -467,6 +480,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "preview-delete",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -481,6 +495,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "smoke-test",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		ModifiesPaths:    []string{},
 		Parameters:       []ParameterDef{},
 	},
@@ -491,6 +506,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "add-custom-domain",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{service_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -505,6 +521,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "remove-custom-domain",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleOwner,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{service_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -519,6 +536,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "openclaw-skill-save",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleOwner,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
 		Parameters: []ParameterDef{
@@ -535,6 +553,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "openclaw-skill-delete",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleOwner,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
 		Parameters: []ParameterDef{
@@ -550,6 +569,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "openclaw-identity-save",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleOwner,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/identity/"},
 		Parameters: []ParameterDef{
@@ -566,6 +586,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "platform-skill-publish",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/catalog/{skill_name}/"},
@@ -583,6 +604,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "platform-skill-deprecate",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/catalog/{skill_name}/metadata.yaml"},
@@ -598,6 +620,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "platform-skill-enable",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/bindings/tenants/{tenant_name}.yaml"},
@@ -614,6 +637,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "platform-skill-disable",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/bindings/tenants/{tenant_name}.yaml"},
@@ -647,6 +671,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-run",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/"},
 		Parameters: []ParameterDef{
@@ -661,6 +686,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-run",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/_mentor/digest/"},
 		Parameters: []ParameterDef{
@@ -675,6 +701,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-run",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/"},
 		Parameters: []ParameterDef{
@@ -696,6 +723,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-run",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/incident-{id}/"},
 		Parameters: append([]ParameterDef{
@@ -717,6 +745,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-implement",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch>"},
 		Parameters: append([]ParameterDef{
@@ -750,6 +779,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-shepherd",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch> (follow-up commits or merge)"},
 		Parameters: append([]ParameterDef{
@@ -786,6 +816,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-investigate",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/"},
 		Parameters: append([]ParameterDef{
@@ -834,6 +865,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-approve",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml"},
 		Parameters: []ParameterDef{
@@ -870,6 +902,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-reconcile",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch> (PR creation only, for an already-pushed branch)"},
 		Parameters: []ParameterDef{
@@ -884,6 +917,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "openclaw-identity-delete",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleOwner,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/identity/"},
 		Parameters: []ParameterDef{
