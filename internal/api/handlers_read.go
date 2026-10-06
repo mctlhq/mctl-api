@@ -131,11 +131,21 @@ func (h *Handlers) GetTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "tenant not found: "+name)
 		return
 	}
-	services, _ := h.opts.GitReader.ListServices(name)
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"tenant":   tenant,
-		"services": services,
-	})
+	listing, err := h.listServiceEntries(user, name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list services: "+err.Error())
+		return
+	}
+	resp := map[string]interface{}{
+		"tenant":           tenant,
+		"services":         listing.Items,
+		"servicesComplete": listing.complete(),
+		"servicesArgocd":   listing.ArgoState,
+	}
+	if listing.Warning != "" {
+		resp["servicesWarning"] = listing.Warning
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handlers) ListServices(w http.ResponseWriter, r *http.Request) {
@@ -145,27 +155,24 @@ func (h *Handlers) ListServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	teamFilter := r.URL.Query().Get("team")
-	all, err := h.opts.GitReader.ListServices(teamFilter)
+	listing, err := h.listServiceEntries(user, r.URL.Query().Get("team"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list services: "+err.Error())
 		return
 	}
 
-	var services []interface{}
-	for _, svc := range all {
-		if !user.IsAdmin() && !user.HasTenantAccess(svc.Team) {
-			continue
-		}
-		services = append(services, svc)
+	// "complete" is false when ArgoCD was not read. A count of 0 then means
+	// "none in the catalogue", not "none deployed"; the warning says so.
+	resp := map[string]interface{}{
+		"items":    listing.Items,
+		"count":    len(listing.Items),
+		"complete": listing.complete(),
+		"argocd":   listing.ArgoState,
 	}
-	if services == nil {
-		services = []interface{}{}
+	if listing.Warning != "" {
+		resp["warning"] = listing.Warning
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"items": services,
-		"count": len(services),
-	})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handlers) GetService(w http.ResponseWriter, r *http.Request) {

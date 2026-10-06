@@ -45,6 +45,7 @@ var workflowGroupResource = schema.GroupResource{Group: "argoproj.io", Resource:
 // ── fakes ────────────────────────────────────────────────────────────────────
 
 type fakeGitReader struct {
+	listTenantsErr         error
 	tenants                []gitops.Tenant
 	services               []gitops.Service
 	skills                 map[string]map[string]string // team -> name -> content
@@ -102,7 +103,7 @@ func (f *fakeGitReader) ListHumanInputRequests() ([]gitops.HumanInputRequestFile
 	return f.humanInputFiles, f.humanInputErr
 }
 
-func (f *fakeGitReader) ListTenants() ([]gitops.Tenant, error) { return f.tenants, nil }
+func (f *fakeGitReader) ListTenants() ([]gitops.Tenant, error) { return f.tenants, f.listTenantsErr }
 func (f *fakeGitReader) GetTenant(name string) (*gitops.Tenant, error) {
 	for i := range f.tenants {
 		if f.tenants[i].Name == name {
@@ -186,7 +187,13 @@ func (f *fakeGitReader) GetPlatformPolicy() (*gitops.PlatformSkillPolicy, error)
 }
 
 type fakeArgoCD struct {
-	apps map[string]*argocd.AppStatus
+	apps         map[string]*argocd.AppStatus
+	workloads    []argocd.Workload
+	workloadsErr error
+}
+
+func (f *fakeArgoCD) ListWorkloads() ([]argocd.Workload, error) {
+	return f.workloads, f.workloadsErr
 }
 
 func (f *fakeArgoCD) GetAppStatus(name string) (*argocd.AppStatus, error) {

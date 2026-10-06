@@ -110,6 +110,52 @@ components:
         hasDatabase:
           type: boolean
 
+    ServiceEntry:
+      description: A catalogue service, an ArgoCD application in a tenant namespace, or both merged.
+      allOf:
+        - $ref: '#/components/schemas/Service'
+        - type: object
+          properties:
+            managed:
+              type: string
+              enum: [catalogue, external, platform]
+              description: |
+                `catalogue`: onboarded through mctl; deploy, rollback and scale apply.
+                `external`: deployed by the tenant's own ArgoCD project; read-only.
+                `platform`: deployed by the platform into the tenant namespace; read-only.
+            argoApp:
+              type: string
+              description: |
+                ArgoCD application name. The status and logs endpoints work for a
+                row exactly when this equals `{team}-{name}`.
+              example: billing-payment-api
+            deployed:
+              type: boolean
+              description: Absent when ArgoCD was not read (unknown, not false).
+            health:
+              type: string
+              example: Healthy
+            syncStatus:
+              type: string
+              example: Synced
+            hosts:
+              type: array
+              items:
+                type: string
+              example: [payment-api.mctl.ai]
+            images:
+              type: array
+              items:
+                type: string
+            source:
+              type: object
+              description: Where ArgoCD takes the manifests from. Omitted for `platform` rows unless the caller is a platform admin.
+              properties:
+                repo:
+                  type: string
+                path:
+                  type: string
+
     ArgoStatus:
       type: object
       properties:
@@ -1156,7 +1202,16 @@ paths:
                   services:
                     type: array
                     items:
-                      $ref: '#/components/schemas/Service'
+                      $ref: '#/components/schemas/ServiceEntry'
+                  servicesComplete:
+                    type: boolean
+                    description: False when ArgoCD was not read and `services` holds catalogue rows only.
+                  servicesArgocd:
+                    type: string
+                    enum: [ok, unavailable, not_configured]
+                  servicesWarning:
+                    type: string
+                    description: Present only when `servicesComplete` is false.
         '404':
           description: Tenant not found
           content:
@@ -1167,7 +1222,14 @@ paths:
   /api/v1/services:
     get:
       summary: List deployed services
-      description: Returns all deployed services. Optionally filter by team.
+      description: |
+        Returns catalogue services merged with every ArgoCD application deployed
+        into a tenant namespace, limited to the tenants the caller belongs to.
+        Optionally filter by team.
+
+        When `complete` is false ArgoCD was not read: only catalogue rows are
+        returned, `deployed`, `health`, `syncStatus` and `hosts` are absent, and
+        a `count` of 0 means "none in the catalogue", not "none deployed".
       tags: [Services]
       parameters:
         - name: team
@@ -1188,9 +1250,18 @@ paths:
                   items:
                     type: array
                     items:
-                      $ref: '#/components/schemas/Service'
+                      $ref: '#/components/schemas/ServiceEntry'
                   count:
                     type: integer
+                  complete:
+                    type: boolean
+                    description: False when ArgoCD was not read and the listing is partial.
+                  argocd:
+                    type: string
+                    enum: [ok, unavailable, not_configured]
+                  warning:
+                    type: string
+                    description: Present only when `complete` is false.
 
   /api/v1/services/{team}/{app}:
     get:

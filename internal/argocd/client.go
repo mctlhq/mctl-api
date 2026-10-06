@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
+	"sort"
 	"time"
 )
 
@@ -160,6 +162,121 @@ func (c *Client) ListApps(project string) ([]AppStatus, error) {
 		})
 	}
 	return apps, nil
+}
+
+// Workload is an ArgoCD Application as the service listing needs it: where it
+// deploys, what it exposes and where it comes from. It is separate from
+// AppStatus because the source fields must not leak through the endpoints
+// that return AppStatus to tenant members.
+type Workload struct {
+	Name          string
+	Project       string
+	DestNamespace string
+	Health        string
+	SyncStatus    string
+	Hosts         []string
+	Images        []string
+	SourceRepo    string
+	SourcePath    string
+}
+
+// workloadFields trims the list response to what Workload needs; the full
+// Application objects carry every managed resource and are large.
+const workloadFields = "items.metadata.name,items.spec.project,items.spec.destination.namespace," +
+	"items.spec.source.repoURL,items.spec.source.path,items.spec.sources," +
+	"items.status.health.status,items.status.sync.status,items.status.summary"
+
+// ListWorkloads lists every ArgoCD application the token can read, across all
+// projects. An error means the listing could not be observed; callers must not
+// treat it as an empty list.
+func (c *Client) ListWorkloads() ([]Workload, error) {
+	body, err := c.doGet(fmt.Sprintf("%s/api/v1/applications?fields=%s", c.baseURL, neturl.QueryEscape(workloadFields)))
+	if err != nil {
+		return nil, err
+	}
+
+	type source struct {
+		RepoURL string `json:"repoURL"`
+		Path    string `json:"path"`
+	}
+	var raw struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				Project     string `json:"project"`
+				Destination struct {
+					Namespace string `json:"namespace"`
+				} `json:"destination"`
+				Source  *source  `json:"source"`
+				Sources []source `json:"sources"`
+			} `json:"spec"`
+			Status struct {
+				Health struct {
+					Status string `json:"status"`
+				} `json:"health"`
+				Sync struct {
+					Status string `json:"status"`
+				} `json:"sync"`
+				Summary struct {
+					ExternalURLs []string `json:"externalURLs"`
+					Images       []string `json:"images"`
+				} `json:"summary"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("parsing argocd list response: %w", err)
+	}
+
+	workloads := make([]Workload, 0, len(raw.Items))
+	for i := range raw.Items {
+		item := &raw.Items[i]
+		if item.Metadata.Name == "" {
+			// A nameless item cannot be attributed to anything. Dropping it
+			// would turn a malformed body into a shorter list.
+			return nil, fmt.Errorf("parsing argocd list response: item %d has no metadata.name", i)
+		}
+		w := Workload{
+			Name:          item.Metadata.Name,
+			Project:       item.Spec.Project,
+			DestNamespace: item.Spec.Destination.Namespace,
+			Health:        item.Status.Health.Status,
+			SyncStatus:    item.Status.Sync.Status,
+			Hosts:         hostsFromURLs(item.Status.Summary.ExternalURLs),
+			Images:        item.Status.Summary.Images,
+		}
+		switch {
+		case item.Spec.Source != nil:
+			w.SourceRepo, w.SourcePath = item.Spec.Source.RepoURL, item.Spec.Source.Path
+		case len(item.Spec.Sources) > 0:
+			w.SourceRepo, w.SourcePath = item.Spec.Sources[0].RepoURL, item.Spec.Sources[0].Path
+		}
+		workloads = append(workloads, w)
+	}
+	return workloads, nil
+}
+
+// hostsFromURLs reduces ArgoCD's externalURLs to a sorted set of host names.
+// ArgoCD derives the scheme from the Ingress TLS block, which says nothing
+// about what the edge serves, so the scheme and path are dropped.
+func hostsFromURLs(urls []string) []string {
+	seen := make(map[string]struct{}, len(urls))
+	var hosts []string
+	for _, raw := range urls {
+		u, err := neturl.Parse(raw)
+		if err != nil || u.Hostname() == "" {
+			continue
+		}
+		if _, ok := seen[u.Hostname()]; ok {
+			continue
+		}
+		seen[u.Hostname()] = struct{}{}
+		hosts = append(hosts, u.Hostname())
+	}
+	sort.Strings(hosts)
+	return hosts
 }
 
 func (c *Client) doGet(url string) ([]byte, error) {
