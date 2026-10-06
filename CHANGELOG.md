@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.68.0](https://github.com/mctlhq/mctl-api/compare/4.67.0...4.68.0) (2026-10-05)
+
+
+### Features
+
+* **agent-registry:** refuse the agent service token on mutations ([ae98314](https://github.com/mctlhq/mctl-api/commit/ae9831463c377892191860ab97b88902e3fc4f2d))
+* **agent-registry:** refuse the agent service token on mutations ([4a2829e](https://github.com/mctlhq/mctl-api/commit/4a2829e0222b734949e4f5b2fd987ae0daf8d214))
+
 ## [4.67.0](https://github.com/mctlhq/mctl-api/compare/4.66.0...4.67.0) (2026-10-05)
 
 
