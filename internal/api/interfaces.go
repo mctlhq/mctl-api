@@ -37,6 +37,11 @@ type GitReader interface {
 	ListTenants() ([]gitops.Tenant, error)
 	GetTenant(name string) (*gitops.Tenant, error)
 	TenantExists(name string) (bool, error)
+	// MemberRoles returns the members[].role values under which login is a
+	// member of namespace, as written, one list per members list naming the
+	// login. Empty with a nil error is "read, and not a member"; anything it
+	// could not read is an error (mctl-api#478).
+	MemberRoles(namespace, login string) ([][]string, error)
 	ListServices(teamFilter string) ([]gitops.Service, error)
 	GetService(team, app string) (*gitops.Service, error)
 	ListOpenClawSkills(team string) ([]gitops.OpenClawSkill, error)

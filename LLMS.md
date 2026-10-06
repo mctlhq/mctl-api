@@ -17,6 +17,7 @@
 - **Dual Auth**: Supports Bearer tokens for both Dex OIDC (user JWTs) and GitHub Personal Access Tokens (PATs).
 - **Service Account Auth**: `MCTL_AGENT_SERVICE_TOKEN` allows trusted in-cluster automation (e.g. `mctl-agent`) to act with `admins` group privileges.
 - **Tenant Scope**: Requests are scoped to tenant groups (`admins`, `labs`, `ovk`, etc.) resolved via `internal/auth/tenant.go`.
+- **Tenant Role**: Membership grants visibility; a tenant write also needs a minimum role (`viewer` < `developer` < `owner`) declared per operation as `MinRole` in `internal/operations/registry.go` and enforced by `internal/api/tenant_role.go`. The role is read per request from the tenant's `members[].role` in the gitops checkout, keyed on a GitHub login that authentication proved. An unknown or missing role is refused (403); a role that could not be read is 503. Platform admins pass every minimum.
 
 ## Key REST API Endpoints
 

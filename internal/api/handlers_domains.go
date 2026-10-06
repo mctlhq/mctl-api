@@ -31,6 +31,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/domains"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
 // mctl-api is the system of record for custom domains: it persists
@@ -259,6 +260,9 @@ func (h *Handlers) AddDomain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied to team")
 		return
 	}
+	if !h.requireTenantRole(w, r, user, req.Team, h.operationMinRole("add-custom-domain", operations.RoleDeveloper), "add-custom-domain", operations.RiskLow) {
+		return
+	}
 	if err := validateHostname(req.Domain); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -368,6 +372,19 @@ func (h *Handlers) resolveDomainForMutation(w http.ResponseWriter, r *http.Reque
 	return d, true
 }
 
+// requireDomainRole gates a domain mutation on the minimum role of the
+// operation it stands for, on the domain's team. The caller has already
+// passed the team-access check, so a 403 here discloses nothing about a
+// team the caller cannot see.
+func (h *Handlers) requireDomainRole(w http.ResponseWriter, r *http.Request, team, operation string, fallback operations.Role) bool {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return false
+	}
+	return h.requireTenantRole(w, r, user, normalizeIdentifier(team), h.operationMinRole(operation, fallback), operation, operations.RiskLow)
+}
+
 // VerifyDomain triggers DNS verification for a domain by id.
 // POST /api/v1/domains/:id/verify?team=X (team optional)
 func (h *Handlers) VerifyDomain(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +396,9 @@ func (h *Handlers) VerifyDomain(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	d, ok := h.resolveDomainForMutation(w, r, id)
 	if !ok {
+		return
+	}
+	if !h.requireDomainRole(w, r, d.Team, "add-custom-domain", operations.RoleDeveloper) {
 		return
 	}
 
@@ -419,6 +439,9 @@ func (h *Handlers) VerifyDomainByName(w http.ResponseWriter, r *http.Request) {
 	}
 	if !user.IsAdmin() && !user.HasTenantAccess(req.Team) {
 		writeError(w, http.StatusForbidden, "access denied to team")
+		return
+	}
+	if !h.requireDomainRole(w, r, req.Team, "add-custom-domain", operations.RoleDeveloper) {
 		return
 	}
 
@@ -513,6 +536,12 @@ func (h *Handlers) DeleteDomain(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	d, ok := h.resolveDomainForMutation(w, r, id)
 	if !ok {
+		return
+	}
+	// This handler submits remove-custom-domain itself, so it answers to
+	// that operation's minimum role here: the generic execute path's gate
+	// never sees this call (mctl-api#478).
+	if !h.requireDomainRole(w, r, d.Team, "remove-custom-domain", operations.RoleOwner) {
 		return
 	}
 

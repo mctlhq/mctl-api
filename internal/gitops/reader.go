@@ -158,6 +158,49 @@ func (t *Tenant) UserNamespaces(login string) []string {
 	return ns
 }
 
+// memberRoles returns the roles under which login is a member of namespace,
+// one list per members list that names the login, and whether this tenant
+// owns that namespace at all. The lists are the ones UserNamespaces grants
+// access on: for a legacy tenant the tenant's members, for a multi-team
+// tenant its tenant-level members and the members of the team the namespace
+// belongs to.
+//
+// The lists are kept apart because they mean different things. Two entries
+// for one login inside one list contradict each other. An entry in the
+// tenant-level list and one in a team's list do not: each grants on its own,
+// so a tenant-wide owner who is also a viewer of one team is still an owner
+// there. A list that does not name the login is left out. A role is
+// returned exactly as written, empty included.
+func (t *Tenant) memberRoles(namespace, login string) (scopes [][]string, owns bool) {
+	collect := func(members []TenantMember) {
+		var roles []string
+		for _, m := range members {
+			if strings.EqualFold(m.UserID, login) {
+				roles = append(roles, m.Role)
+			}
+		}
+		if len(roles) > 0 {
+			scopes = append(scopes, roles)
+		}
+	}
+	if !t.IsMultiTeam() {
+		if t.Name != namespace {
+			return nil, false
+		}
+		collect(t.Members)
+		return scopes, true
+	}
+	for _, team := range t.Teams {
+		if t.Name+"-"+team.Name != namespace {
+			continue
+		}
+		collect(t.Members)
+		collect(team.Members)
+		return scopes, true
+	}
+	return nil, false
+}
+
 // Service represents a deployed service read from the GitOps repo.
 type Service struct {
 	Team          string `json:"team"`
@@ -640,6 +683,73 @@ func (r *Reader) TenantExists(name string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("checking tenant %q: %w", name, err)
+}
+
+// MemberRolesMaxAge bounds how old the checkout may be when MemberRoles
+// answers. A role decides whether a destructive operation runs, so an
+// answer from a checkout that stopped refreshing is refused rather than
+// trusted: it could still show a role that has since been taken away.
+const MemberRolesMaxAge = TenantExistsMaxAge
+
+// MemberRoles returns the members[].role values under which login is a
+// member of namespace (a tenant name, or {tenant}-{team} for a multi-team
+// tenant), exactly as written in the tenant's values.yaml: one list per
+// members list that names the login (see Tenant.memberRoles for why they
+// are not merged). An empty result with a nil error means the checkout was
+// read and login is not a member.
+//
+// Unlike ListTenants, it never skips what it could not read. A checkout that
+// never synced or is older than MemberRolesMaxAge, a tenants directory that
+// cannot be listed, a values.yaml that cannot be read or parsed, and a
+// namespace two tenants both claim are all errors: "could not read the
+// role" must never come back looking like "not a member", and still less
+// like a role. Only a tenant directory with no values.yaml is skipped,
+// because that is not a tenant.
+func (r *Reader) MemberRoles(namespace, login string) ([][]string, error) {
+	if namespace == "" || login == "" {
+		return nil, errors.New("member roles: namespace and login are required")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	last := r.LastSync()
+	if last.IsZero() {
+		return nil, errors.New("gitops checkout has never synced")
+	}
+	if age := time.Since(last); age > MemberRolesMaxAge {
+		return nil, fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), MemberRolesMaxAge)
+	}
+
+	tenantsDir := filepath.Join(r.localPath, "platform-gitops", "tenants")
+	entries, err := os.ReadDir(tenantsDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading tenants dir: %w", err)
+	}
+
+	var roles [][]string
+	owner := ""
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		t, err := r.readTenant(entry.Name())
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading tenant %q: %w", entry.Name(), err)
+		}
+		found, owns := t.memberRoles(namespace, login)
+		if !owns {
+			continue
+		}
+		if owner != "" {
+			return nil, fmt.Errorf("namespace %q is claimed by tenants %q and %q", namespace, owner, entry.Name())
+		}
+		owner = entry.Name()
+		roles = found
+	}
+	return roles, nil
 }
 
 func (r *Reader) readTenant(name string) (*Tenant, error) {
