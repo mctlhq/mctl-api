@@ -103,17 +103,21 @@ func (c *Client) CreateSite(ctx context.Context, name string) (host string, err 
 	}
 	body, status, err := c.do(ctx, http.MethodPost, "/site/new", reqBody)
 	if err != nil {
-		if status == http.StatusBadRequest {
-			var detail struct {
-				Detail string `json:"detail"`
-			}
-			_ = json.Unmarshal(body, &detail)
-			if strings.Contains(detail.Detail, "already exists") {
-				return "", fmt.Errorf("%w: %s", ErrSiteExists, detail.Detail)
-			}
-			if strings.Contains(detail.Detail, "busy") {
-				return "", fmt.Errorf("%w: %s", ErrBusy, detail.Detail)
-			}
+		// Checked against the body regardless of status: the deployer's
+		// own "already exists"/"busy" wording has only been observed on
+		// 400, but nothing guarantees it stays there, and misclassifying a
+		// real conflict as a generic 503 would make a caller retry a
+		// create that will only ever fail the same way.
+		var detail struct {
+			Detail string `json:"detail"`
+		}
+		_ = json.Unmarshal(body, &detail)
+		switch {
+		case strings.Contains(detail.Detail, "already exists"):
+			return "", fmt.Errorf("%w: %s", ErrSiteExists, detail.Detail)
+		case strings.Contains(detail.Detail, "busy"):
+			return "", fmt.Errorf("%w: %s", ErrBusy, detail.Detail)
+		case status == http.StatusBadRequest:
 			return "", fmt.Errorf("erpact deployer refused site %q: %s", name, detail.Detail)
 		}
 		return "", err
@@ -152,7 +156,11 @@ func (c *Client) do(ctx context.Context, method, path string, jsonBody any) ([]b
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(resp.Body)
+	// Bounded: this is the tenant's own deployer, not an attacker-controlled
+	// endpoint, but nothing stops an unbounded read on a misbehaving
+	// response from growing without limit either.
+	const maxResponseBytes = 1 << 20 // 1 MiB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("reading erpact deployer response: %w", err)
 	}

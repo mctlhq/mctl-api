@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -95,13 +96,18 @@ func validateErpactSiteName(name string) (string, error) {
 	return name, nil
 }
 
-// erpactBaseHost is the shared namespace's own base host, which the
-// deployer's GET /sites/shared always lists first alongside real tenant
-// sites. It carries no lifecycle status (erpactsites.Site.Status is empty
-// for it) because it is infrastructure, not a site anyone created — listing
-// or counting it as a tenant site would both confuse a reader and let it
-// eat one slot of erpactSiteCap for nothing.
-func erpactIsBaseHost(s erpactsites.Site) bool { return s.Status == "" }
+// erpactBaseHostName is the shared namespace's own infrastructure host,
+// which the deployer's GET /sites/shared always lists alongside real tenant
+// sites. Matched by this explicit name rather than by Site.Status being
+// empty: a real site the deployer happens to report with no status yet
+// would otherwise be hidden from the listing, excluded from erpactSiteCap's
+// count, and 404 from a status lookup during exactly the create-then-poll
+// window a caller needs it most (review finding on mctl-api#497).
+const erpactBaseHostName = "erpact-shared-stteam.mctl.ai"
+
+func erpactIsBaseHost(s erpactsites.Site) bool {
+	return strings.EqualFold(s.Name, erpactBaseHostName)
+}
 
 // requireErpactAccess gates every erpact-sites route on authentication and
 // tenant membership. A member of another tenant gets the same 404 a
@@ -109,11 +115,13 @@ func erpactIsBaseHost(s erpactsites.Site) bool { return s.Status == "" }
 // secret, but a cross-tenant caller must not learn anything about whether
 // a particular feature is enabled for it beyond what every other
 // /api/v1/tenants/{name} route already discloses.
+//
+// The membership check runs BEFORE the deployer-configured check, and
+// deliberately so: checking configuration first would mean a non-member's
+// response (503 vs. 404) depends on whether the feature happens to be
+// enabled on the platform — the exact disclosure this function exists to
+// avoid.
 func (h *Handlers) requireErpactAccess(w http.ResponseWriter, r *http.Request) *auth.User {
-	if h.opts.ErpactDeployer == nil {
-		writeError(w, http.StatusServiceUnavailable, "erpact site tools are not configured")
-		return nil
-	}
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "authentication required")
@@ -121,6 +129,10 @@ func (h *Handlers) requireErpactAccess(w http.ResponseWriter, r *http.Request) *
 	}
 	if !user.IsAdmin() && !user.HasTenantAccess(erpactTenant) {
 		writeError(w, http.StatusNotFound, "tenant not found")
+		return nil
+	}
+	if h.opts.ErpactDeployer == nil {
+		writeError(w, http.StatusServiceUnavailable, "erpact site tools are not configured")
 		return nil
 	}
 	return user
@@ -152,7 +164,11 @@ func (h *Handlers) ListErpactSites(w http.ResponseWriter, r *http.Request) {
 
 	sites, err := h.opts.ErpactDeployer.ListSites(r.Context())
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "could not read erpact sites: "+err.Error())
+		// The deployer's raw error can carry its response body verbatim
+		// (internal/erpactsites/client.go); logged here, not returned to
+		// the caller, per the convention in tenant_role.go.
+		slog.Error("erpact deployer list failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "could not read erpact sites")
 		return
 	}
 
@@ -195,13 +211,12 @@ func (h *Handlers) CreateErpactSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Creating, starting or stopping a site is an owner-level write (the
-	// issue's "tenant admin-level role"; mctl-api has no tenant role literally
-	// named "admin" — RoleAdmin is platform-only — so RoleOwner, the highest
-	// tenant role, is what satisfies it).
+	auditParams := map[string]string{"tenant": erpactTenant, "site": name}
+
 	existing, err := h.opts.ErpactDeployer.ListSites(r.Context())
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "could not check the erpact site cap: "+err.Error())
+		slog.Error("erpact deployer list failed (cap check)", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "could not check the erpact site cap")
 		return
 	}
 	count := 0
@@ -211,19 +226,35 @@ func (h *Handlers) CreateErpactSite(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if count >= erpactSiteCap {
+		h.logAudit(r, audit.Entry{
+			UserID:     user.ID,
+			Operation:  "erpact.create_site",
+			Parameters: auditParams,
+			Status:     "failed",
+			RiskLevel:  string(operations.RiskMedium),
+			Message:    fmt.Sprintf("cap of %d reached", erpactSiteCap),
+		})
 		writeError(w, http.StatusConflict, fmt.Sprintf("tenant %q has reached its cap of %d erpact sites", erpactTenant, erpactSiteCap))
 		return
 	}
 
 	host, err := h.opts.ErpactDeployer.CreateSite(r.Context(), name)
-	auditParams := map[string]string{"tenant": erpactTenant, "site": name}
 	if err != nil {
+		// The deployer's raw error can carry its response body verbatim
+		// (internal/erpactsites/client.go); logged here, not returned to
+		// the caller, per the convention in tenant_role.go. Only the two
+		// sentinel cases get a caller-facing detail, since their message is
+		// static and does not echo the body.
+		slog.Error("erpact deployer create failed", "site", name, "error", err)
 		status := http.StatusServiceUnavailable
+		message := "could not create erpact site"
 		switch {
 		case errors.Is(err, erpactsites.ErrSiteExists):
 			status = http.StatusConflict
+			message = fmt.Sprintf("erpact site %q already exists", name)
 		case errors.Is(err, erpactsites.ErrBusy):
 			status = http.StatusConflict
+			message = "erpact deployer is busy, try again later"
 		}
 		h.logAudit(r, audit.Entry{
 			UserID:     user.ID,
@@ -233,7 +264,7 @@ func (h *Handlers) CreateErpactSite(w http.ResponseWriter, r *http.Request) {
 			RiskLevel:  string(operations.RiskMedium),
 			Message:    err.Error(),
 		})
-		writeError(w, status, "could not create erpact site: "+err.Error())
+		writeError(w, status, message)
 		return
 	}
 
@@ -265,7 +296,8 @@ func (h *Handlers) GetErpactSiteStatus(w http.ResponseWriter, r *http.Request) {
 	name := strings.ToLower(chi.URLParam(r, "name"))
 	sites, err := h.opts.ErpactDeployer.ListSites(r.Context())
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "could not read erpact sites: "+err.Error())
+		slog.Error("erpact deployer list failed (status lookup)", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "could not read erpact sites")
 		return
 	}
 	for _, s := range sites {

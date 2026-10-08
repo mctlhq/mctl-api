@@ -451,3 +451,53 @@ func TestValidateErpactSiteName(t *testing.T) {
 		})
 	}
 }
+
+// A real site the deployer reports without a status yet must not be mistaken
+// for the base host: it is listed, found by the status lookup, and counts
+// against the cap.
+func TestErpactSite_StatuslessRealSiteIsNotTheBaseHost(t *testing.T) {
+	fresh := erpactsites.Site{Name: "erpact-fresh.mctl.ai", Enabled: true}
+
+	t.Run("listed", func(t *testing.T) {
+		h := erpactTestHandlers(&fakeErpactDeployer{sites: []erpactsites.Site{erpactBaseHostSite, fresh}}, erpactRoles())
+		req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites", nil), erpactViewer())
+		w := httptest.NewRecorder()
+		h.ListErpactSites(w, req)
+		var resp struct {
+			Sites []erpactSiteResponse `json:"sites"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(resp.Sites) != 1 || resp.Sites[0].Name != "erpact-fresh" {
+			t.Fatalf("statusless real site missing from listing: %+v", resp.Sites)
+		}
+	})
+
+	t.Run("status lookup finds it", func(t *testing.T) {
+		h := erpactTestHandlers(&fakeErpactDeployer{sites: []erpactsites.Site{erpactBaseHostSite, fresh}}, erpactRoles())
+		req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-fresh/status", nil), erpactViewer())
+		req = withURLParam(req, "name", "erpact-fresh")
+		w := httptest.NewRecorder()
+		h.GetErpactSiteStatus(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("got %d, want 200: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("counts against the cap", func(t *testing.T) {
+		sites := []erpactsites.Site{erpactBaseHostSite}
+		for i := 0; i < erpactSiteCap-1; i++ {
+			sites = append(sites, erpactsites.Site{Name: fmt.Sprintf("erpact-s%d.mctl.ai", i), Enabled: true, Status: "ACTIVE"})
+		}
+		sites = append(sites, fresh)
+		dep := &fakeErpactDeployer{sites: sites, createHost: "erpact-new.mctl.ai"}
+		h := erpactTestHandlers(dep, erpactRoles())
+		req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/tenants/erpact/sites", strings.NewReader(`{"name":"erpact-new"}`)), erpactOwner())
+		w := httptest.NewRecorder()
+		h.CreateErpactSite(w, req)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("got %d, want 409 (cap): %s", w.Code, w.Body.String())
+		}
+	})
+}

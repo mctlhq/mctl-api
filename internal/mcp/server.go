@@ -1961,7 +1961,7 @@ func (s *Server) toolErpactSiteStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		name, _ := req.GetArguments()["name"].(string)
-		body, err := s.apiGet(ctx, "/api/v1/tenants/erpact/sites/"+url.QueryEscape(name)+"/status")
+		body, err := s.apiGet(ctx, "/api/v1/tenants/erpact/sites/"+url.PathEscape(name)+"/status")
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get erpact site status: %v", err)), nil
 		}

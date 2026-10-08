@@ -794,6 +794,8 @@ func main() {
 		} else if token := erpactSecret["DEPLOYER_API_TOKEN"]; token != "" {
 			erpactDeployer = erpactsites.NewClient(cfg.ErpactDeployerURL, token)
 			slog.Info("erpact deployer client enabled", "url", cfg.ErpactDeployerURL)
+		} else {
+			slog.Warn("erpact deployer secret has no DEPLOYER_API_TOKEN property, erpact site tools disabled")
 		}
 	}
 
