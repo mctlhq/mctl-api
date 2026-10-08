@@ -111,6 +111,11 @@ type Options struct {
 	// equal to or ending in "."+PlatformDomain are rejected by AddDomain —
 	// those stay GitOps-only via ingress.hosts. Defaults to "mctl.ai" when empty.
 	PlatformDomain string
+	// ErpactDeployer is the ERPact site-deployer client (mctl-api#486). A
+	// temporary, tenant-`erpact`-only stopgap: nil makes every
+	// /api/v1/tenants/erpact/sites* route 503, which is also how the feature
+	// is switched off entirely (no deployer token configured).
+	ErpactDeployer ErpactDeployer
 	// AgentRegistry persists mctl-agents AgentManifest versions/releases to
 	// PostgreSQL (optional — nil disables the agent registry endpoints).
 	AgentRegistry *agentregistry.Store
@@ -448,6 +453,13 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/domains/{id}/verify", h.VerifyDomain)
 			r.Delete("/domains/{id}", h.DeleteDomain)
 			r.Patch("/domains/{id}", h.UpdateDomainStatus)
+
+			// ERPact site tools (mctl-api#486): a temporary, tenant-`erpact`-only
+			// stopgap in front of the tenant's own site-deployer. See
+			// internal/erpactsites's package comment and handlers_erpact_sites.go.
+			r.Get("/tenants/erpact/sites", h.ListErpactSites)
+			r.Post("/tenants/erpact/sites", h.CreateErpactSite)
+			r.Get("/tenants/erpact/sites/{name}/status", h.GetErpactSiteStatus)
 
 			// Incident endpoints (alert store).
 			r.Get("/incidents/summary", h.IncidentSummary)

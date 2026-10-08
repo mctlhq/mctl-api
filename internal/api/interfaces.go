@@ -21,6 +21,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/argoarchive"
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
+	"github.com/mctlhq/mctl-api/internal/erpactsites"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/loki"
 	"github.com/mctlhq/mctl-api/internal/operations"
@@ -61,6 +62,14 @@ type ArgoStatusClient interface {
 	GetAppStatus(name string) (*argocd.AppStatus, error)
 	ListApps(project string) ([]argocd.AppStatus, error)
 	ListWorkloads() ([]argocd.Workload, error)
+}
+
+// ErpactDeployer is the subset of erpactsites.Client the erpact site
+// handlers use (mctl-api#486). A stopgap for tenant `erpact` only — see
+// internal/erpactsites's package comment.
+type ErpactDeployer interface {
+	ListSites(ctx context.Context) ([]erpactsites.Site, error)
+	CreateSite(ctx context.Context, name string) (host string, err error)
 }
 
 // WorkflowExecutor is the subset of operations.Executor used by API handlers.

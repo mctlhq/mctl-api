@@ -42,6 +42,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
+	"github.com/mctlhq/mctl-api/internal/erpactsites"
 	"github.com/mctlhq/mctl-api/internal/events"
 	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/ghactions"
@@ -313,6 +314,14 @@ func main() {
 		auth.WithAgentRunResolver(agentRunResolver))
 
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
+
+	// ERPact site tools (mctl-api#486): off unless a deployer token is
+	// configured. See internal/erpactsites's package comment — this is a
+	// temporary, tenant-`erpact`-only stopgap, not a generic mechanism.
+	var erpactDeployer mctlapi.ErpactDeployer
+	if cfg.ErpactDeployerToken != "" {
+		erpactDeployer = erpactsites.NewClient(cfg.ErpactDeployerURL, cfg.ErpactDeployerToken)
+	}
 
 	var auditLog audit.Log
 	if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
@@ -851,6 +860,7 @@ func main() {
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,
+		ErpactDeployer:                 erpactDeployer,
 		TemporalClient:                 devLoopClient,
 		HumanInputLedger:               humanInputLedger,
 		WorkItems:                      workItemsStore,
@@ -1028,11 +1038,16 @@ type config struct {
 	GitOpsSSHKnownHostsPath string // Path to a known_hosts file for SSH host-key pinning (optional; empty uses the shipped default)
 	ArgoCDURL               string
 	ArgoCDToken             string
-	GitHubOrg               string
-	AdminUsers              []string
-	BackstageURL            string
-	BackstageToken          string
-	BackstageInternalURL    string
+	// ErpactDeployerURL and ErpactDeployerToken configure the mctl-api#486
+	// stopgap (internal/erpactsites). ErpactDeployerToken empty is how the
+	// feature is switched off: nothing else needs to change.
+	ErpactDeployerURL    string
+	ErpactDeployerToken  string
+	GitHubOrg            string
+	AdminUsers           []string
+	BackstageURL         string
+	BackstageToken       string
+	BackstageInternalURL string
 	// BackstageGithubAppConnectToken authorizes calls to Backstage's
 	// github-app-connect plugin (repos list/sync/install-url), scoped
 	// separately from BackstageToken (which now only authorizes
@@ -1163,6 +1178,8 @@ func loadConfig() config {
 		GitOpsSSHKeyPath:               os.Getenv("GITOPS_SSH_KEY_PATH"),
 		GitOpsSSHKnownHostsPath:        os.Getenv("GITOPS_SSH_KNOWN_HOSTS_PATH"),
 		ArgoCDURL:                      envOr("ARGOCD_URL", "https://ops.mctl.ai"),
+		ErpactDeployerURL:              envOr("ERPACT_DEPLOYER_URL", "http://erpact-deployer.erpact.svc.cluster.local:8000"),
+		ErpactDeployerToken:            os.Getenv("ERPACT_DEPLOYER_TOKEN"),
 		ArgoCDToken:                    os.Getenv("ARGOCD_TOKEN"),
 		GitHubOrg:                      envOr("GITHUB_ORG", "mctlhq"),
 		AdminUsers:                     adminList,
