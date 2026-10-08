@@ -47,7 +47,7 @@ func TestListWorkloads(t *testing.T) {
 	  {"metadata":{"name":"acme-shared"},
 	   "spec":{"project":"acme","destination":{"namespace":"acme"},"source":{"repoURL":"https://git.example.test/acme/apps","path":"shared"}},
 	   "status":{"health":{"status":"Healthy"},"sync":{"status":"Synced"},
-	     "summary":{"externalURLs":["http://b.example.test/","https://a.example.test/x","http://b.example.test/hooks","::bad::","c.example.test","d.example.test/path","e.example.test:8443/x"],"images":["bench:15"]}}},
+	     "summary":{"externalURLs":["http://b.example.test/","https://a.example.test/x","http://b.example.test/hooks","::bad::","c.example.test","d.example.test/path","e.example.test:8443/x","mailto:ops@example.test"],"images":["bench:15"]}}},
 	  {"metadata":{"name":"multi"},
 	   "spec":{"project":"platform","destination":{"namespace":"acme"},"sources":[{"repoURL":"https://charts.example.test","path":""},{"repoURL":"https://git.example.test/values"}]},
 	   "status":{}}

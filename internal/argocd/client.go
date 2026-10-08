@@ -22,6 +22,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -190,6 +191,13 @@ const workloadFields = "items.metadata.name,items.spec.project,items.spec.destin
 // ListWorkloads lists every ArgoCD application the token can read, across all
 // projects. An error means the listing could not be observed; callers must not
 // treat it as an empty list.
+//
+// Application names are unique here because this cluster's ArgoCD does not
+// enable "applications in any namespace" (application.namespaces is unset):
+// every Application lives in the argocd namespace, where a name is unique by
+// definition. If that mode is ever turned on, a name stops being unique
+// across namespaces and this function needs items.metadata.namespace to tell
+// two same-named applications apart.
 func (c *Client) ListWorkloads() ([]Workload, error) {
 	body, err := c.doGet(fmt.Sprintf("%s/api/v1/applications?fields=%s", c.baseURL, neturl.QueryEscape(workloadFields)))
 	if err != nil {
@@ -275,8 +283,16 @@ func hostsFromURLs(urls []string) []string {
 			// A bare "host", "host/path" or "host:port", as an external-link
 			// annotation may carry, parses as a path or as an opaque scheme
 			// rather than as a URL with an authority.
-			host, _, _ = strings.Cut(raw, "/")
-			host, _, _ = strings.Cut(host, ":")
+			rest, _, _ := strings.Cut(raw, "/")
+			if h, port, ok := strings.Cut(rest, ":"); ok {
+				// Only a numeric port is a host:port; "mailto:x@y" or
+				// "slack:channel" is a scheme, not a bare host.
+				if _, err := strconv.Atoi(port); err == nil {
+					host = h
+				}
+			} else {
+				host = rest
+			}
 		}
 		if host == "" {
 			continue

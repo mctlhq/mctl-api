@@ -152,7 +152,11 @@ components:
                 type: string
             source:
               type: object
-              description: Where ArgoCD takes the manifests from. Omitted for `platform` rows unless the caller is a platform admin.
+              description: >-
+                Where ArgoCD takes the manifests from. Returned to a tenant member only when
+                the application sits in the tenant's own ArgoCD project or namespace; the
+                platform's own manifest locations — including on a `catalogue` row the
+                platform deploys from elsewhere — are returned to platform admins only.
               properties:
                 repo:
                   type: string
