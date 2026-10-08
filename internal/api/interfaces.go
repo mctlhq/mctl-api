@@ -60,6 +60,7 @@ type GitReader interface {
 type ArgoStatusClient interface {
 	GetAppStatus(name string) (*argocd.AppStatus, error)
 	ListApps(project string) ([]argocd.AppStatus, error)
+	ListWorkloads() ([]argocd.Workload, error)
 }
 
 // WorkflowExecutor is the subset of operations.Executor used by API handlers.

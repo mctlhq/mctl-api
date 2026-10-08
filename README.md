@@ -466,7 +466,7 @@ go install github.com/mctlhq/mctl-api/cmd/mcp@latest
 | Tool | Description |
 |------|-------------|
 | `mctl_list_tenants` | List all team workspaces with quotas |
-| `mctl_list_services` | List services, optional team filter |
+| `mctl_list_services` | List catalogue services and ArgoCD applications in a team's namespace, optional team filter |
 | `mctl_get_tenant` | Get workspace details and members |
 | `mctl_get_service_status` | ArgoCD health + sync state |
 | `mctl_get_service_config` | Full service config from GitOps repo |

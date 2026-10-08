@@ -282,7 +282,7 @@
     {
       "name": "mctl_list_services",
       "enabled": true,
-      "reason": "Deployed services with team, image tag, host and database flag; operational metadata, tenant-filtered by the upstream."
+      "reason": "Catalogue services and the ArgoCD applications in a team's namespace: image tag, hosts, images, sync and health; operational metadata, tenant-filtered by the upstream, and the manifest source is withheld from non-admins whenever the application is not the tenant's own, including a catalogue row the platform deploys from elsewhere."
     },
     {
       "name": "mctl_list_tenant_skill_bindings",

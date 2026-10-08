@@ -365,7 +365,16 @@ func (s *Server) toolListServices() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("List Services"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription("List deployed services on the platform. Shows service name, team, image tag, host, and database status. Optionally filter by team name."),
+		mcplib.WithDescription(`List the services of a team: catalogue services and every ArgoCD application deployed into the team's namespace.
+
+Each row has "managed":
+- "catalogue": onboarded through mctl; deploy, rollback and scale apply.
+- "external": deployed by the team's own ArgoCD project; read-only here.
+- "platform": deployed by the platform into the team's namespace; read-only.
+
+Rows carry sync status, health, the public hosts and the images in use. For a row whose "argoApp" equals "{team}-{name}", pass team and name to mctl_get_service_status and mctl_get_service_logs.
+
+If "complete" is false, ArgoCD could not be read: only catalogue rows are listed and the result must not be reported as "no services". Optionally filter by team name.`),
 		mcplib.WithString("team",
 			mcplib.Description("Filter by team name (optional). If omitted, lists all services."),
 		),
@@ -1289,7 +1298,7 @@ func (s *Server) toolGetTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Get Workspace Details"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription("Get details of a specific team workspace: members, quotas, and deployed services."),
+		mcplib.WithDescription("Get details of a specific team workspace: members, quotas, and services (same rows as mctl_list_services). If servicesComplete is false, ArgoCD could not be read and services deployed outside the catalogue are missing from the list."),
 		mcplib.WithString("name",
 			mcplib.Required(),
 			mcplib.Description("Tenant (workspace) name"),
