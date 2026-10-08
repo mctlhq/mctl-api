@@ -95,6 +95,21 @@
       "reason": "Binds a platform skill to a tenant, granting its agent a new capability. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
+      "name": "mctl_erpact_list_sites",
+      "enabled": false,
+      "reason": "Lists tenant erpact's sites from its own site-deployer. A provisional, tenant-erpact-only stopgap (mctl-api#486, removed once Option B ships) -- not meant for the shared, user-blind portal surface even though it is read-only."
+    },
+    {
+      "name": "mctl_erpact_create_site",
+      "enabled": false,
+      "reason": "Creates a new site for tenant erpact via its site-deployer. A provisional, tenant-erpact-only stopgap (mctl-api#486, removed once Option B ships) -- not meant for the shared, user-blind portal surface."
+    },
+    {
+      "name": "mctl_erpact_site_status",
+      "enabled": false,
+      "reason": "Reads one erpact site's creation status from its site-deployer. A provisional, tenant-erpact-only stopgap (mctl-api#486, removed once Option B ships) -- not meant for the shared, user-blind portal surface."
+    },
+    {
       "name": "mctl_get_agent",
       "enabled": false,
       "reason": "Admin-only read of one agent's registry entry: owner, every definition version with its lifecycle, and the active binding per environment. Read-only, but it exposes the agent registry's internals; not yet enabled on the shared portal, an owner decision."

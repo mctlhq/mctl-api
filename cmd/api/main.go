@@ -42,6 +42,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
+	"github.com/mctlhq/mctl-api/internal/erpactsites"
 	"github.com/mctlhq/mctl-api/internal/events"
 	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/ghactions"
@@ -772,6 +773,32 @@ func main() {
 		slog.Info("vault client enabled", "addr", cfg.VaultAddr, "auth", "static-token")
 	}
 
+	// ERPact site tools (mctl-api#486): off unless the deployer token can be
+	// read from Vault. The token lives at Vault path teams/erpact/deployer
+	// (property DEPLOYER_API_TOKEN), read directly through vaultReader --
+	// the same pattern handlers_openclaw.go uses for a tenant's Telegram bot
+	// token -- rather than through an ExternalSecret into an env var. The
+	// cluster-wide vault-backend ClusterSecretStore (which mctl-api-secrets
+	// uses for every other env-var secret) is deliberately denied all of
+	// secret/data/teams/* (see mctl-gitops
+	// vault-policy-external-secrets-read.hcl): any tenant path readable
+	// there would be readable by every other tenant's namespace too.
+	// Reading it here instead needs only a narrow Vault policy on the
+	// mctl-api Kubernetes auth role for this one path, mirroring
+	// vault-policy-mctl-api-openclaw-read.hcl.
+	var erpactDeployer mctlapi.ErpactDeployer
+	if vaultReader != nil {
+		erpactSecret, err := vaultReader.ReadKV(initCtx, "teams/erpact/deployer")
+		if err != nil {
+			slog.Warn("erpact deployer token could not be read from vault, erpact site tools disabled", "error", err)
+		} else if token := erpactSecret["DEPLOYER_API_TOKEN"]; token != "" {
+			erpactDeployer = erpactsites.NewClient(cfg.ErpactDeployerURL, token)
+			slog.Info("erpact deployer client enabled", "url", cfg.ErpactDeployerURL)
+		} else {
+			slog.Warn("erpact deployer secret has no DEPLOYER_API_TOKEN property, erpact site tools disabled")
+		}
+	}
+
 	// VictoriaMetrics client (optional — used for OpenClaw sizing recommendations).
 	var metricsQuerier mctlapi.MetricsQuerier
 	if cfg.VictoriaMetricsURL != "" {
@@ -851,6 +878,7 @@ func main() {
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,
+		ErpactDeployer:                 erpactDeployer,
 		TemporalClient:                 devLoopClient,
 		HumanInputLedger:               humanInputLedger,
 		WorkItems:                      workItemsStore,
@@ -1028,11 +1056,17 @@ type config struct {
 	GitOpsSSHKnownHostsPath string // Path to a known_hosts file for SSH host-key pinning (optional; empty uses the shipped default)
 	ArgoCDURL               string
 	ArgoCDToken             string
-	GitHubOrg               string
-	AdminUsers              []string
-	BackstageURL            string
-	BackstageToken          string
-	BackstageInternalURL    string
+	// ErpactDeployerURL configures the mctl-api#486 stopgap
+	// (internal/erpactsites). The deployer token is read directly from
+	// Vault (teams/erpact/deployer), not from env -- see its construction
+	// near vaultReader above. No vault reader configured is how the
+	// feature is switched off entirely.
+	ErpactDeployerURL    string
+	GitHubOrg            string
+	AdminUsers           []string
+	BackstageURL         string
+	BackstageToken       string
+	BackstageInternalURL string
 	// BackstageGithubAppConnectToken authorizes calls to Backstage's
 	// github-app-connect plugin (repos list/sync/install-url), scoped
 	// separately from BackstageToken (which now only authorizes
@@ -1163,6 +1197,7 @@ func loadConfig() config {
 		GitOpsSSHKeyPath:               os.Getenv("GITOPS_SSH_KEY_PATH"),
 		GitOpsSSHKnownHostsPath:        os.Getenv("GITOPS_SSH_KNOWN_HOSTS_PATH"),
 		ArgoCDURL:                      envOr("ARGOCD_URL", "https://ops.mctl.ai"),
+		ErpactDeployerURL:              envOr("ERPACT_DEPLOYER_URL", "http://erpact-deployer.erpact.svc.cluster.local:8000"),
 		ArgoCDToken:                    os.Getenv("ARGOCD_TOKEN"),
 		GitHubOrg:                      envOr("GITHUB_ORG", "mctlhq"),
 		AdminUsers:                     adminList,

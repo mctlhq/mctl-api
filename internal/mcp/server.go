@@ -228,6 +228,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolRemoveCustomDomain())
 	srv.AddTool(s.toolListDomains())
 	srv.AddTool(s.toolVerifyDomain())
+	srv.AddTool(s.toolErpactListSites())
+	srv.AddTool(s.toolErpactCreateSite())
+	srv.AddTool(s.toolErpactSiteStatus())
 
 	// Incident tools.
 	srv.AddTool(s.toolListIncidents())
@@ -1886,6 +1889,83 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 			results = append(results, fmt.Sprintf("%s: %s", d.Domain, string(vBody)))
 		}
 		return mcplib.NewToolResultText(strings.Join(results, "\n")), nil
+	}
+
+	return tool, handler
+}
+
+// ERPact site tools (mctl-api#486, owner decision 2026-10-06): a temporary,
+// tenant-`erpact`-only stopgap in front of the tenant's own site-deployer —
+// see internal/api/handlers_erpact_sites.go. Provisional: removed once
+// Option B (an MCP endpoint in the deployer itself) ships.
+
+func (s *Server) toolErpactListSites() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_erpact_list_sites",
+		mcplib.WithTitleAnnotation("List ERPact Sites"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription("ERPact-specific and provisional (mctl-api#486): list tenant erpact's sites, with each one's lifecycle status (creating, active). Only works for tenant erpact; fails for anyone else. A failed read of the deployer is reported as an error, never as an empty list."),
+	)
+
+	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiGet(ctx, "/api/v1/tenants/erpact/sites")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list erpact sites: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolErpactCreateSite() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_erpact_create_site",
+		mcplib.WithTitleAnnotation("Create ERPact Site"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`ERPact-specific and provisional (mctl-api#486): create a new site for tenant erpact. Requires the owner role on tenant erpact; only works for tenant erpact.
+
+Creation is long-running (end to end, minutes): this call only starts it and returns immediately with status "creating". Poll mctl_erpact_site_status with the same name to follow it to "active". There is a cap on how many sites tenant erpact may have through this tool.
+
+name must start with "erpact-", contain only lowercase letters, digits and hyphens, and not already exist.`),
+		mcplib.WithString("name",
+			mcplib.Required(),
+			mcplib.Description(`Site name, e.g. "erpact-acme". Must start with "erpact-".`),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		name, _ := req.GetArguments()["name"].(string)
+		body, err := s.apiPostJSON(ctx, "/api/v1/tenants/erpact/sites", map[string]string{"name": name})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create erpact site: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolErpactSiteStatus() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_erpact_site_status",
+		mcplib.WithTitleAnnotation("Get ERPact Site Status"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription("ERPact-specific and provisional (mctl-api#486): the lifecycle status of one tenant-erpact site (creating, active), for following up on mctl_erpact_create_site. Only works for tenant erpact."),
+		mcplib.WithString("name",
+			mcplib.Required(),
+			mcplib.Description(`Site name, as passed to mctl_erpact_create_site, e.g. "erpact-acme".`),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		name, _ := req.GetArguments()["name"].(string)
+		body, err := s.apiGet(ctx, "/api/v1/tenants/erpact/sites/"+url.PathEscape(name)+"/status")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get erpact site status: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
 	}
 
 	return tool, handler
