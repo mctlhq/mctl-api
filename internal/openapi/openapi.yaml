@@ -1205,10 +1205,15 @@ paths:
                       $ref: '#/components/schemas/ServiceEntry'
                   servicesComplete:
                     type: boolean
-                    description: False when ArgoCD was not read and `services` holds catalogue rows only.
+                    description: >-
+                      False when ArgoCD was not read and `services` holds catalogue rows only, or when
+                      the service list could not be read at all and `services` is empty.
                   servicesArgocd:
                     type: string
-                    enum: [ok, unavailable, not_configured]
+                    enum: [ok, unavailable, not_configured, unknown]
+                    description: >-
+                      `unknown` means the service list failed before ArgoCD was consulted; the tenant
+                      itself is still returned.
                   servicesWarning:
                     type: string
                     description: Present only when `servicesComplete` is false.

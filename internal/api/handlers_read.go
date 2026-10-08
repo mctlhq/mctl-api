@@ -131,10 +131,12 @@ func (h *Handlers) GetTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "tenant not found: "+name)
 		return
 	}
+	// Members and quotas do not depend on the services read, so a failure
+	// there is reported in the services fields and the tenant is still served.
 	listing, err := h.listServiceEntries(user, name)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list services: "+err.Error())
-		return
+		slog.Warn("listing services for tenant failed", "tenant", name, "error", err)
+		listing = &serviceListing{Items: []ServiceEntry{}, ArgoState: argoStateUnknown, Warning: servicesUnreadWarning}
 	}
 	resp := map[string]interface{}{
 		"tenant":           tenant,

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -266,14 +267,23 @@ func hostsFromURLs(urls []string) []string {
 	var hosts []string
 	for _, raw := range urls {
 		u, err := neturl.Parse(raw)
-		if err != nil || u.Hostname() == "" {
+		if err != nil {
 			continue
 		}
-		if _, ok := seen[u.Hostname()]; ok {
+		host := u.Hostname()
+		if host == "" && u.Scheme == "" {
+			// A bare "host" or "host/path", as an external-link annotation
+			// may carry, parses as a path rather than a URL.
+			host, _, _ = strings.Cut(raw, "/")
+		}
+		if host == "" {
 			continue
 		}
-		seen[u.Hostname()] = struct{}{}
-		hosts = append(hosts, u.Hostname())
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
 	}
 	sort.Strings(hosts)
 	return hosts

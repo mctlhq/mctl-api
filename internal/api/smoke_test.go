@@ -46,6 +46,7 @@ var workflowGroupResource = schema.GroupResource{Group: "argoproj.io", Resource:
 
 type fakeGitReader struct {
 	listTenantsErr         error
+	listServicesErr        error
 	tenants                []gitops.Tenant
 	services               []gitops.Service
 	skills                 map[string]map[string]string // team -> name -> content
@@ -113,6 +114,9 @@ func (f *fakeGitReader) GetTenant(name string) (*gitops.Tenant, error) {
 	return nil, fmt.Errorf("tenant not found: %s", name)
 }
 func (f *fakeGitReader) ListServices(teamFilter string) ([]gitops.Service, error) {
+	if f.listServicesErr != nil {
+		return nil, f.listServicesErr
+	}
 	if teamFilter == "" {
 		return f.services, nil
 	}

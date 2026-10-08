@@ -170,6 +170,101 @@ func TestListServices_NameDoesNotAttribute(t *testing.T) {
 	}
 }
 
+// The guard must not depend on a tenant's AppProject carrying the tenant's
+// name: the namespace an application lands in decides, whatever the project.
+func TestListServices_NameDoesNotAttributeUnderAnyProjectName(t *testing.T) {
+	git, argo := listingFixture()
+	for i := range argo.workloads {
+		if argo.workloads[i].Name == "labs-ghost" {
+			argo.workloads[i].Project = "acme-apps"
+		}
+	}
+	w := getAs(t, listingRouter(t, git, argo), "/api/v1/services", adminUser)
+	assertStatus(t, w, http.StatusOK)
+	rows := rowsByKey(t, decodeJSON(t, w)["items"])
+
+	ghost := rows["labs/ghost"]
+	if ghost == nil {
+		t.Fatalf("labs/ghost missing: %v", keysOf(rows))
+	}
+	if ghost["deployed"] != false {
+		t.Errorf("labs/ghost deployed=%v, want false", ghost["deployed"])
+	}
+	if _, has := ghost["hosts"]; has {
+		t.Errorf("labs/ghost took the hosts of an application in namespace acme: %v", ghost["hosts"])
+	}
+	if row := rows["acme/labs-ghost"]; row == nil || row["argoApp"] != "labs-ghost" {
+		t.Errorf("the application is not listed under the tenant it deploys into: %v", keysOf(rows))
+	}
+}
+
+// {team}/{name} is the key clients address a service by, so two rows must
+// never share one. rowsByKey fails the test on a duplicate.
+func TestListServices_RowKeysStayUnique(t *testing.T) {
+	git, argo := listingFixture()
+	git.services = append(git.services, gitops.Service{Team: "acme", Name: "web"})
+	argo.workloads = append(argo.workloads,
+		// Shares the short name of the undeployed catalogue service acme/web.
+		argocd.Workload{Name: "web", Project: "acme", DestNamespace: "acme", Health: "Healthy", SyncStatus: "Synced"},
+		// Both of these shorten to "site".
+		argocd.Workload{Name: "acme-site", Project: "acme", DestNamespace: "acme", Health: "Healthy", SyncStatus: "Synced"},
+		argocd.Workload{Name: "site", Project: "acme", DestNamespace: "acme", Health: "Healthy", SyncStatus: "Synced"},
+	)
+	w := getAs(t, listingRouter(t, git, argo), "/api/v1/services?team=acme", adminUser)
+	assertStatus(t, w, http.StatusOK)
+	body := decodeJSON(t, w)
+	rows := rowsByKey(t, body["items"])
+
+	apps := map[string]bool{}
+	for _, row := range rows {
+		if app, ok := row["argoApp"].(string); ok {
+			apps[app] = true
+		}
+	}
+	for _, app := range []string{"web", "acme-site", "site", "acme-shared", "tenant-acme", "labs-ghost"} {
+		if !apps[app] {
+			t.Errorf("application %s is missing from the listing: %v", app, keysOf(rows))
+		}
+	}
+	if web := rows["acme/web"]; web == nil || web["managed"] != "catalogue" || web["deployed"] != false {
+		t.Errorf("acme/web = %v, want the undeployed catalogue row", web)
+	}
+	for key, app := range map[string]string{"acme/web@argocd": "web", "acme/site": "site", "acme/acme-site": "acme-site", "acme/shared": "acme-shared"} {
+		if row := rows[key]; row == nil || row["argoApp"] != app {
+			t.Errorf("%s = %v, want application %s", key, row, app)
+		}
+	}
+	if got, want := int(body["count"].(float64)), 7; got != want {
+		t.Errorf("count=%d, want %d: %v", got, want, keysOf(rows))
+	}
+}
+
+// labs-a/b and labs/a-b both resolve to the application name labs-a-b. The
+// row of the tenant the application deploys into is the one that is running.
+func TestListServices_SharedApplicationNamePicksByNamespace(t *testing.T) {
+	for _, order := range [][]gitops.Service{
+		{{Team: "labs-a", Name: "b"}, {Team: "labs", Name: "a-b"}},
+		{{Team: "labs", Name: "a-b"}, {Team: "labs-a", Name: "b"}},
+	} {
+		git := &fakeGitReader{
+			tenants:  []gitops.Tenant{{Name: "labs"}, {Name: "labs-a"}},
+			services: order,
+		}
+		argo := &fakeArgoCD{workloads: []argocd.Workload{
+			{Name: "labs-a-b", Project: "apps", DestNamespace: "labs", Health: "Healthy", SyncStatus: "Synced"},
+		}}
+		w := getAs(t, listingRouter(t, git, argo), "/api/v1/services", adminUser)
+		assertStatus(t, w, http.StatusOK)
+		rows := rowsByKey(t, decodeJSON(t, w)["items"])
+		if rows["labs/a-b"]["deployed"] != true {
+			t.Errorf("catalogue order %v: labs/a-b deployed=%v, want true", order, rows["labs/a-b"]["deployed"])
+		}
+		if rows["labs-a/b"]["deployed"] != false {
+			t.Errorf("catalogue order %v: labs-a/b deployed=%v, want false", order, rows["labs-a/b"]["deployed"])
+		}
+	}
+}
+
 func TestListServices_MemberSeesOnlyOwnTenant(t *testing.T) {
 	git, argo := listingFixture()
 	member := &auth.User{ID: "acme-dev", Groups: []string{"acme"}}
@@ -320,6 +415,35 @@ func TestGetTenant_ListsServicesOutsideCatalogue(t *testing.T) {
 	}
 	if _, ok := body["servicesWarning"]; !ok {
 		t.Error("no servicesWarning after an ArgoCD failure")
+	}
+}
+
+// Members and quotas do not depend on the services read: when it fails the
+// tenant is still served and the services are reported as unknown.
+func TestGetTenant_ServiceReadFailureKeepsTheTenant(t *testing.T) {
+	for name, breakIt := range map[string]func(*fakeGitReader){
+		"catalogue":   func(g *fakeGitReader) { g.listServicesErr = errors.New("gitops checkout unreadable") },
+		"tenant list": func(g *fakeGitReader) { g.listTenantsErr = errors.New("gitops checkout unreadable") },
+	} {
+		git, argo := listingFixture()
+		breakIt(git)
+		member := &auth.User{ID: "acme-dev", Groups: []string{"acme"}}
+		w := getAs(t, listingRouter(t, git, argo), "/api/v1/tenants/acme", member)
+		assertStatus(t, w, http.StatusOK)
+		body := decodeJSON(t, w)
+		if tenant, _ := body["tenant"].(map[string]interface{}); tenant["name"] != "acme" {
+			t.Errorf("%s unreadable: tenant=%v, want acme", name, body["tenant"])
+		}
+		if body["servicesComplete"] != false || body["servicesArgocd"] != "unknown" {
+			t.Errorf("%s unreadable: servicesComplete=%v servicesArgocd=%v, want false and unknown",
+				name, body["servicesComplete"], body["servicesArgocd"])
+		}
+		if warning, _ := body["servicesWarning"].(string); !strings.Contains(warning, "not an empty one") {
+			t.Errorf("%s unreadable: servicesWarning=%q", name, warning)
+		}
+		if list, ok := body["services"].([]interface{}); !ok || len(list) != 0 {
+			t.Errorf("%s unreadable: services=%v, want an empty list", name, body["services"])
+		}
 	}
 }
 
