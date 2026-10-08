@@ -373,6 +373,44 @@ func TestListServices_TenantListFailureIsAnError(t *testing.T) {
 	git.listTenantsErr = errors.New("gitops checkout unreadable")
 	w := getAs(t, listingRouter(t, git, argo), "/api/v1/services", adminUser)
 	assertStatus(t, w, http.StatusInternalServerError)
+	if !strings.Contains(w.Body.String(), "tenant list") {
+		t.Errorf("the error does not name the read that failed: %s", w.Body.String())
+	}
+}
+
+// A catalogue service the platform deploys from its own repository into a
+// namespace of its own is still a catalogue row, and its source is still not
+// the tenant's to read.
+func TestListServices_PlatformDeployedCatalogueRowHidesSource(t *testing.T) {
+	git, argo := listingFixture()
+	git.services = append(git.services, gitops.Service{Team: "labs", Name: "mon"})
+	argo.workloads = append(argo.workloads, argocd.Workload{
+		Name: "labs-mon", Project: "platform", DestNamespace: "monitoring", Health: "Healthy", SyncStatus: "Synced",
+		SourceRepo: "https://git.example.test/platform", SourcePath: "infra/monitoring",
+	})
+	router := listingRouter(t, git, argo)
+
+	member := &auth.User{ID: "labs-dev", Groups: []string{"labs"}}
+	w := getAs(t, router, "/api/v1/services", member)
+	assertStatus(t, w, http.StatusOK)
+	rows := rowsByKey(t, decodeJSON(t, w)["items"])
+	if rows["labs/mon"]["deployed"] != true {
+		t.Fatalf("labs/mon = %v, want the merged row", rows["labs/mon"])
+	}
+	if _, has := rows["labs/mon"]["source"]; has {
+		t.Errorf("a member sees the platform's source on labs/mon: %v", rows["labs/mon"]["source"])
+	}
+	// The tenant's own catalogue deployment keeps its source.
+	if src, _ := rows["labs/tg"]["source"].(map[string]interface{}); src["path"] != "services/labs/tg" {
+		t.Errorf("labs/tg lost its source: %v", rows["labs/tg"])
+	}
+
+	w = getAs(t, router, "/api/v1/services?team=labs", adminUser)
+	assertStatus(t, w, http.StatusOK)
+	rows = rowsByKey(t, decodeJSON(t, w)["items"])
+	if src, _ := rows["labs/mon"]["source"].(map[string]interface{}); src["path"] != "infra/monitoring" {
+		t.Errorf("an admin does not see the source on labs/mon: %v", rows["labs/mon"])
+	}
 }
 
 func TestListServices_CatalogueOnlyTenantUnchanged(t *testing.T) {

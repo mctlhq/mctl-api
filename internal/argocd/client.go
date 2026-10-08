@@ -271,10 +271,12 @@ func hostsFromURLs(urls []string) []string {
 			continue
 		}
 		host := u.Hostname()
-		if host == "" && u.Scheme == "" {
-			// A bare "host" or "host/path", as an external-link annotation
-			// may carry, parses as a path rather than a URL.
+		if host == "" && !strings.Contains(raw, "//") {
+			// A bare "host", "host/path" or "host:port", as an external-link
+			// annotation may carry, parses as a path or as an opaque scheme
+			// rather than as a URL with an authority.
 			host, _, _ = strings.Cut(raw, "/")
+			host, _, _ = strings.Cut(host, ":")
 		}
 		if host == "" {
 			continue

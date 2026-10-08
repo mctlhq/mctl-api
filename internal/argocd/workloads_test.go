@@ -47,7 +47,7 @@ func TestListWorkloads(t *testing.T) {
 	  {"metadata":{"name":"acme-shared"},
 	   "spec":{"project":"acme","destination":{"namespace":"acme"},"source":{"repoURL":"https://git.example.test/acme/apps","path":"shared"}},
 	   "status":{"health":{"status":"Healthy"},"sync":{"status":"Synced"},
-	     "summary":{"externalURLs":["http://b.example.test/","https://a.example.test/x","http://b.example.test/hooks","::bad::","c.example.test","d.example.test/path"],"images":["bench:15"]}}},
+	     "summary":{"externalURLs":["http://b.example.test/","https://a.example.test/x","http://b.example.test/hooks","::bad::","c.example.test","d.example.test/path","e.example.test:8443/x"],"images":["bench:15"]}}},
 	  {"metadata":{"name":"multi"},
 	   "spec":{"project":"platform","destination":{"namespace":"acme"},"sources":[{"repoURL":"https://charts.example.test","path":""},{"repoURL":"https://git.example.test/values"}]},
 	   "status":{}}
@@ -59,7 +59,7 @@ func TestListWorkloads(t *testing.T) {
 	}
 	want := []Workload{
 		{Name: "acme-shared", Project: "acme", DestNamespace: "acme", Health: "Healthy", SyncStatus: "Synced",
-			Hosts: []string{"a.example.test", "b.example.test", "c.example.test", "d.example.test"}, Images: []string{"bench:15"},
+			Hosts: []string{"a.example.test", "b.example.test", "c.example.test", "d.example.test", "e.example.test"}, Images: []string{"bench:15"},
 			SourceRepo: "https://git.example.test/acme/apps", SourcePath: "shared"},
 		{Name: "multi", Project: "platform", DestNamespace: "acme", SourceRepo: "https://charts.example.test"},
 	}

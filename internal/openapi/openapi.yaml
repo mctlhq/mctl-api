@@ -111,7 +111,10 @@ components:
           type: boolean
 
     ServiceEntry:
-      description: A catalogue service, an ArgoCD application in a tenant namespace, or both merged.
+      description: >-
+        A catalogue service, an ArgoCD application in a tenant namespace, or both merged.
+        The fields inherited from Service, `hasDatabase` among them, describe the catalogue
+        entry and carry no information on `external` and `platform` rows.
       allOf:
         - $ref: '#/components/schemas/Service'
         - type: object

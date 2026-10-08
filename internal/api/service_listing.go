@@ -16,6 +16,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -74,6 +75,10 @@ type ServiceEntry struct {
 	Hosts      []string       `json:"hosts,omitempty"`
 	Images     []string       `json:"images,omitempty"`
 	Source     *ServiceSource `json:"source,omitempty"`
+
+	// sourceIsTenants is set when the application sits in the tenant's own
+	// project or namespace. Only then is its source the tenant's to read.
+	sourceIsTenants bool
 }
 
 // serviceListing is a set of rows together with how much of it was observed.
@@ -94,7 +99,7 @@ func (l *serviceListing) complete() bool { return l.ArgoState == argoStateOK }
 func (h *Handlers) listServiceEntries(user *auth.User, teamFilter string) (*serviceListing, error) {
 	catalogue, err := h.opts.GitReader.ListServices(teamFilter)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading the service catalogue: %w", err)
 	}
 
 	entries := make([]ServiceEntry, 0, len(catalogue))
@@ -124,7 +129,7 @@ func (h *Handlers) listServiceEntries(user *auth.User, teamFilter string) (*serv
 	if listing.complete() {
 		tenants, err := h.opts.GitReader.ListTenants()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("reading the tenant list: %w", err)
 		}
 		isTenant := make(map[string]bool, len(tenants))
 		for i := range tenants {
@@ -154,6 +159,7 @@ func (h *Handlers) listServiceEntries(user *auth.User, teamFilter string) (*serv
 				e.Health, e.SyncStatus = w.Health, w.SyncStatus
 				e.Hosts, e.Images = w.Hosts, w.Images
 				e.Source = sourceOf(w)
+				e.sourceIsTenants = w.Project == e.Team || w.DestNamespace == e.Team
 				continue
 			}
 			// Outside the catalogue an application belongs to the tenant it
@@ -202,6 +208,9 @@ func (h *Handlers) listServiceEntries(user *auth.User, teamFilter string) (*serv
 				Hosts:      w.Hosts,
 				Images:     w.Images,
 				Source:     sourceOf(w),
+				// The platform deploys into the tenant namespace too; that
+				// does not make its manifests the tenant's.
+				sourceIsTenants: managed == managedExternal,
 			})
 		}
 	} else {
@@ -214,8 +223,9 @@ func (h *Handlers) listServiceEntries(user *auth.User, teamFilter string) (*serv
 		if !user.IsAdmin() && !user.HasTenantAccess(e.Team) {
 			continue
 		}
-		// Where the platform keeps its own manifests is not a tenant's business.
-		if e.Managed == managedPlatform && !user.IsAdmin() {
+		// Where the platform keeps its own manifests is not a tenant's
+		// business, on a platform row and on a catalogue row alike.
+		if !e.sourceIsTenants && !user.IsAdmin() {
 			e.Source = nil
 		}
 		listing.Items = append(listing.Items, *e)
