@@ -17,6 +17,7 @@ package operations
 import (
 	"context"
 	"fmt"
+	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"log/slog"
 	"os"
 	"strings"
@@ -169,6 +170,13 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 		"mctl.ai/team":       team,
 	}
 	wf.SetLabels(labels)
+	// Trace correlation: inert metadata, set only when a trace context exists.
+	if tp := telemetry.TraceparentFrom(ctx); tp != "" {
+		wf.SetAnnotations(map[string]string{
+			"mctl.ai/traceparent": tp,
+			"mctl.ai/trace-id":    telemetry.TraceIDFrom(ctx),
+		})
+	}
 	wf.Object["spec"] = map[string]interface{}{
 		"workflowTemplateRef": map[string]interface{}{
 			"name":         op.WorkflowTemplate,

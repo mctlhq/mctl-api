@@ -52,6 +52,10 @@ resources:
     memory: 256Mi
 
 env:
+  # Tracing (vendor-neutral OTLP): set OTEL_EXPORTER_OTLP_ENDPOINT to export
+  # spans; unset (default) means no exporter, propagation still works.
+  # OTEL_SDK_DISABLED=true forces export off. OTEL_MCTL_RECORD_ENDUSER=true
+  # adds mctl.actor.* span attributes. A down Collector never affects responses.
   GITOPS_REPO_URL: https://github.com/mctlhq/mctl-gitops.git
   GITOPS_BRANCH: main
   GITOPS_LOCAL_PATH: /data/mctl-gitops

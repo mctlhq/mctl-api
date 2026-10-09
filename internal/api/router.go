@@ -261,6 +261,7 @@ func NewRouter(opts Options) http.Handler {
 	// chi's middleware.RealIP is deliberately absent — it rewrites RemoteAddr
 	// from an attacker-supplied header and now has no consumer here.
 	r.Use(middleware.RequestID)
+	r.Use(tracingMiddleware())
 	r.Use(clientMetaMiddleware(opts.TrustedProxyCIDRs))
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders())

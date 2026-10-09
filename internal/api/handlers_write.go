@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"io"
 	"log/slog"
 	"net/http"
@@ -36,6 +37,11 @@ import (
 // ExecuteOperation validates input, enforces RBAC, and submits an Argo Workflow.
 func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	opName := chi.URLParam(r, "name")
+
+	ctx, span := telemetry.Tracer().Start(r.Context(), "operation.execute "+opName)
+	defer span.End()
+	span.SetAttributes(telemetry.OperationName(opName))
+	r = r.WithContext(ctx)
 
 	op, ok := h.opts.Registry.Get(opName)
 	if !ok {
@@ -267,11 +273,15 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		RiskLevel:    string(op.RiskLevel),
 	})
 
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	resp := map[string]any{
 		"message":   fmt.Sprintf("Operation submitted. Track progress: GET /api/v1/workflows/%s", result.WorkflowName),
 		"operation": opName,
 		"workflow":  result,
-	})
+	}
+	if tid := telemetry.TraceIDFrom(r.Context()); tid != "" {
+		resp["trace_id"] = tid
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 // ArgoCompletionPayload represents the notification payload sent by Argo when a workflow completes.
