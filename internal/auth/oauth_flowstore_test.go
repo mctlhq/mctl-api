@@ -172,10 +172,12 @@ func TestFlowStoreClientStateRoundTripsBytes(t *testing.T) {
 // deadlineStore records whether each call's context carried a deadline.
 type deadlineStore struct {
 	*memFlowStore
+	calls   int
 	missing []string
 }
 
 func (d *deadlineStore) Put(ctx context.Context, kind, key string, p []byte, ttl time.Duration) error {
+	d.calls++
 	if _, ok := ctx.Deadline(); !ok {
 		d.missing = append(d.missing, "put "+kind)
 	}
@@ -183,6 +185,7 @@ func (d *deadlineStore) Put(ctx context.Context, kind, key string, p []byte, ttl
 }
 
 func (d *deadlineStore) Take(ctx context.Context, kind, key string) ([]byte, bool, error) {
+	d.calls++
 	if _, ok := ctx.Deadline(); !ok {
 		d.missing = append(d.missing, "take "+kind)
 	}
@@ -199,7 +202,13 @@ func TestFlowStoreCallsAreBounded(t *testing.T) {
 	_ = s.StorePendingAuth(ctx, "s", "client-1", "https://client.example/callback", "ch")
 	_, _, _ = s.LoadPendingAuth(ctx, "s")
 	code, _ := s.IssueCode(ctx, "u", "client-1", "https://client.example/callback", testPKCEChallenge(t, "v"), nil)
-	_, _, _ = s.ExchangeCode(ctx, code, "v", "client-1", "https://client.example/callback")
+	if _, _, err := s.ExchangeCode(ctx, code, "v", "client-1", "https://client.example/callback"); err != nil {
+		t.Fatalf("ExchangeCode: %v", err)
+	}
+	// Both directions: every call is checked, and all four reached the store.
+	if st.calls != 4 {
+		t.Fatalf("store calls = %d, want 4 (two puts, two takes)", st.calls)
+	}
 	if len(st.missing) != 0 {
 		t.Fatalf("store calls without a deadline: %v", st.missing)
 	}
