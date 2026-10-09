@@ -17,9 +17,10 @@
 // site-deployer HTTP API with a fixed, narrow allowlist of operations: list
 // sites and create one. It exists only so the feature does not wait for
 // Option B (an MCP endpoint in the deployer itself, signing in through
-// ZITADEL), which remains the target; this package is removed once that
-// ships. No other tenant's operations belong here — a second tenant with its
-// own deployer needs its own package, not an extension of this one.
+// ZITADEL), which remains the target (tracked in mctl-api#499); this package
+// is removed once that ships. No other tenant's operations belong here — a
+// second tenant with its own deployer needs its own package, not an extension
+// of this one.
 package erpactsites
 
 import (
