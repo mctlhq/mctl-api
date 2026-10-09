@@ -180,7 +180,17 @@ func TestStoreIngestDivergence(t *testing.T) {
 	// -- simulating a collision Ingest's own hashing could never produce
 	// from two real envelopes, but which the id column alone cannot rule
 	// out.
-	fakeHash := "sha256:" + "ab" + contentHash[9:]
+	// Flip the first hex digit rather than overwrite it with a constant: a
+	// constant prefix equals the real hash whenever the random envelope's
+	// digest already starts with it (1 run in 256 for "ab").
+	first := byte('0')
+	if contentHash[7] == '0' {
+		first = '1'
+	}
+	fakeHash := contentHash[:7] + string(first) + contentHash[8:]
+	if fakeHash == contentHash {
+		t.Fatalf("fake hash %q must differ from the real one", fakeHash)
+	}
 	now := time.Now().UTC()
 	_, err = s.pool.Exec(ctx, `INSERT INTO execution_evidence (`+evidenceColumns+`)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
