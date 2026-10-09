@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.69.1](https://github.com/mctlhq/mctl-api/compare/4.69.0...4.69.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **api:** read the erpact deployer token on a live context, close review tails ([6f299e6](https://github.com/mctlhq/mctl-api/commit/6f299e6243ca014206b0df5ac3120fc8c43a4d00))
+* **api:** read the erpact deployer token on a live context, close review tails ([97014ce](https://github.com/mctlhq/mctl-api/commit/97014ce3c5ff2dc73072f36e0f1f3eaca18f74fa))
+
 ## [4.69.0](https://github.com/mctlhq/mctl-api/compare/4.68.1...4.69.0) (2026-10-08)
 
 
