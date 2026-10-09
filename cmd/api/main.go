@@ -1961,6 +1961,9 @@ func identityLinkOptions(cfg config, store *principals.Store, cache *principals.
 	return opts
 }
 
+// erpactVaultReadTimeout bounds the one startup read of the deployer token.
+const erpactVaultReadTimeout = 10 * time.Second
+
 // newErpactDeployer builds the ERPact site-deployer client from the token in
 // Vault, or returns nil (feature off) when it cannot. It makes its own
 // bounded context on purpose: startup's initCtx is cancelled once the stores
@@ -1970,7 +1973,7 @@ func newErpactDeployer(reader mctlapi.VaultReader, deployerURL string) mctlapi.E
 	if reader == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), erpactVaultReadTimeout)
 	defer cancel()
 	secret, err := reader.ReadKV(ctx, "teams/erpact/deployer")
 	if err != nil {

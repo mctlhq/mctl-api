@@ -48,7 +48,10 @@ const erpactSiteCap = 10
 // erpactCreateMu serializes the cap check and the create call, so two
 // concurrent requests cannot both see "9 of 10" and both create. It covers
 // one mctl-api process; across replicas the deployer's own single-flight
-// lock (ErrBusy) is what refuses the second create.
+// lock (ErrBusy) is what refuses the second create. It is held across two
+// HTTP calls (list, then create), each bounded by the client's 15s timeout,
+// so a slow deployer queues other creates for up to ~30s; acceptable for a
+// rare, owner-only operation.
 var erpactCreateMu sync.Mutex
 
 // erpactMainDomain mirrors the deployer's own MAIN_DOMAIN env var. The
