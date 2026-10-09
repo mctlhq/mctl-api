@@ -49,7 +49,7 @@ const erpactSiteCap = 10
 // concurrent requests cannot both see "9 of 10" and both create. It covers
 // one mctl-api process; across replicas the deployer's own single-flight
 // lock (ErrBusy) is what refuses the second create. It is held across two
-// HTTP calls (list, then create), each bounded by the client's 15s timeout,
+// HTTP calls (list, then create), bounded by the request's own 30s timeout,
 // so a slow deployer queues other creates for up to ~30s; acceptable for a
 // rare, owner-only operation.
 var erpactCreateMu sync.Mutex
@@ -68,6 +68,14 @@ const erpactMainDomain = "mctl.ai"
 func erpactShortName(host string) string {
 	return strings.TrimSuffix(host, "."+erpactMainDomain)
 }
+
+// erpactSiteHostPrefix mirrors the deployer's SITE_HOST_PREFIX env var. The
+// running deployer (its argocd_controller.py comes from a ConfigMap override
+// in erpact/mctl-apps, not from site-deployer main) builds a host as
+// SITE_HOST_PREFIX + name + "." + MAIN_DOMAIN, so it is sent the label
+// without this prefix. Sending the full name created
+// "erpact-erpact-<label>" in prod on 2026-10-09.
+const erpactSiteHostPrefix = "erpact-"
 
 // erpactSiteNamePattern mirrors the deployer's own validate_site_name
 // (app/argocd_controller.py: `^[A-Za-z\-0-9]*$`), narrowed to lowercase
@@ -254,7 +262,31 @@ func (h *Handlers) CreateErpactSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host, err := h.opts.ErpactDeployer.CreateSite(r.Context(), name)
+	for _, s := range existing {
+		if !erpactIsBaseHost(s) && strings.EqualFold(erpactShortName(s.Name), name) {
+			writeError(w, http.StatusConflict, fmt.Sprintf("erpact site %q already exists", name))
+			return
+		}
+	}
+
+	host, err := h.opts.ErpactDeployer.CreateSite(r.Context(), strings.TrimPrefix(name, erpactSiteHostPrefix))
+	if errors.Is(err, erpactsites.ErrOutcomeUnknown) {
+		slog.Warn("erpact deployer create outcome unknown", "site", name, "error", err)
+		h.logAudit(r, audit.Entry{
+			UserID:     user.ID,
+			Operation:  "erpact.create_site",
+			Parameters: auditParams,
+			Status:     "unknown",
+			RiskLevel:  string(operations.RiskMedium),
+			Message:    err.Error(),
+		})
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"name":    name,
+			"status":  "unknown",
+			"message": "the deployer did not answer in time; the site may still be created, check its status before retrying",
+		})
+		return
+	}
 	if err != nil {
 		// The deployer's raw error can carry its response body verbatim
 		// (internal/erpactsites/client.go); logged here, not returned to

@@ -366,8 +366,11 @@ func TestCreateErpactSite_HappyPathAudited(t *testing.T) {
 	if resp["name"] != "erpact-acme" || resp["host"] != "erpact-acme.mctl.ai" || resp["status"] != "creating" {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
-	if len(dep.createdNames) != 1 || dep.createdNames[0] != "erpact-acme" {
-		t.Fatalf("deployer received %v, want [erpact-acme] (name must be lowercased)", dep.createdNames)
+	// The deployer prefixes its own SITE_HOST_PREFIX ("erpact-"), so it
+	// must get the bare label: sending the full name created
+	// "erpact-erpact-..." in prod on 2026-10-09.
+	if len(dep.createdNames) != 1 || dep.createdNames[0] != "acme" {
+		t.Fatalf("deployer received %v, want [acme] (lowercased, without the erpact- prefix)", dep.createdNames)
 	}
 
 	entries := auditLog.List(10)
@@ -603,5 +606,56 @@ func TestErpactSiteRoutes_ThroughNewRouter(t *testing.T) {
 	}
 	if c := do(as(nonErpactMember()), http.MethodGet, "/api/v1/tenants/erpact/sites", ""); c != http.StatusNotFound {
 		t.Fatalf("list as outsider: got %d, want 404", c)
+	}
+}
+
+// --- Create: an answer that never came is "unknown", not "failed". The
+// deployer commits and pushes before it answers, so a timed-out create can
+// still produce a site (prod, 2026-10-09).
+
+func TestCreateErpactSite_TimeoutIsUnknownNotFailed(t *testing.T) {
+	dep := &fakeErpactDeployer{createErr: fmt.Errorf("%w: deadline", erpactsites.ErrOutcomeUnknown)}
+	auditLog := audit.NewLogger()
+	h := &Handlers{opts: Options{ErpactDeployer: dep, GitReader: erpactRoles(), AuditLog: auditLog}}
+
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/tenants/erpact/sites", strings.NewReader(`{"name":"erpact-acme"}`)), erpactOwner())
+	w := httptest.NewRecorder()
+	h.CreateErpactSite(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got %d, want 202: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["status"] != "unknown" || resp["name"] != "erpact-acme" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	entries := auditLog.List(10)
+	if len(entries) != 1 || entries[0].Status != "unknown" {
+		t.Fatalf("want one audit entry with status unknown, got %+v", entries)
+	}
+}
+
+// --- Create: a name already in the listing is refused before the deployer
+// is asked, so the answer does not depend on the deployer's error wording.
+
+func TestCreateErpactSite_ExistingNameRefusedWithoutCallingDeployer(t *testing.T) {
+	dep := &fakeErpactDeployer{sites: []erpactsites.Site{
+		erpactBaseHostSite,
+		{Name: "erpact-acme.mctl.ai", Status: "ACTIVE"},
+	}}
+	h := erpactTestHandlers(dep, erpactRoles())
+
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/tenants/erpact/sites", strings.NewReader(`{"name":"ERPACT-ACME"}`)), erpactOwner())
+	w := httptest.NewRecorder()
+	h.CreateErpactSite(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("got %d, want 409: %s", w.Code, w.Body.String())
+	}
+	if len(dep.createdNames) != 0 {
+		t.Fatalf("deployer must not be called, got %v", dep.createdNames)
 	}
 }
