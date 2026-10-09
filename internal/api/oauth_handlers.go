@@ -194,7 +194,10 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	combinedState := ghState + "|" + state
 
 	// Persist all pending auth details keyed by combined state.
-	o.StorePendingAuth(combinedState, clientID, redirectURI, codeChallenge)
+	if err := o.StorePendingAuth(r.Context(), combinedState, clientID, redirectURI, codeChallenge); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 
 	// Build GitHub OAuth authorization URL.
 	ghAuthURL := url.URL{
@@ -246,7 +249,11 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 
 	// Recover pending auth from state. Only an authorization started for
 	// GitHub, while GitHub is an allowed upstream, completes here.
-	pending, ok := o.LoadPendingAuth(combinedState)
+	pending, ok, err := o.LoadPendingAuth(r.Context(), combinedState)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	if !ok || pending.Upstream != auth.UpstreamGitHub || !h.opts.OAuthUpstream.allows(auth.UpstreamGitHub) {
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
 		return

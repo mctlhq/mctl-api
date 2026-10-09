@@ -11,6 +11,15 @@ imagePullSecrets:
 service:
   type: ClusterIP
   port: 8080
+  # Extra Service annotations, e.g. Traefik sticky sessions. With more than
+  # one replica the identity link flow (mctlhq/mctl-api#435) needs session
+  # affinity: its challenges live in the memory of the pod that started them.
+  # OAuth sign-ins do not: they use the shared flow store (OAUTH_DB_URL).
+  annotations: {}
+
+# Spread replicas across nodes, so one node going away does not take every
+# replica with it. Empty renders nothing.
+topologySpreadConstraints: []
 
 ingress:
   enabled: true

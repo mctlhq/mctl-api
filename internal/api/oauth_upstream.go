@@ -222,10 +222,13 @@ func (h *Handlers) startZitadelAuthorize(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	verifier := oauth2.GenerateVerifier()
-	o.StorePendingOIDCAuth(state, auth.PendingOIDCAuth{
+	if err := o.StorePendingOIDCAuth(r.Context(), state, auth.PendingOIDCAuth{
 		Upstream: auth.UpstreamZitadel, ClientID: clientID, RedirectURI: redirectURI,
 		CodeChallenge: codeChallenge, ClientState: clientState, Nonce: nonce, Verifier: verifier,
-	})
+	}); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	// No prompt=login: an existing ZITADEL session is the single sign-on
 	// this upstream is for. Freshness matters to linking, not to sign-in.
 	authURL := z.oauthConfig(prov, o.BaseURL).AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce))
@@ -244,7 +247,11 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	q := r.URL.Query()
 	// Consumed before anything else, so a replayed or failed callback can
 	// never be retried with the same state.
-	pending, ok := o.LoadPendingAuth(q.Get("state"))
+	pending, ok, err := o.LoadPendingAuth(r.Context(), q.Get("state"))
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	if !ok || pending.Upstream != auth.UpstreamZitadel || !h.opts.OAuthUpstream.allows(auth.UpstreamZitadel) {
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
 		return

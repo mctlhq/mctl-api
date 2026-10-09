@@ -159,13 +159,16 @@ type linkChallenge struct {
 type identityLinker struct {
 	opts *IdentityLinkOptions
 
-	// The challenge store is this process's memory, which is correct only
-	// while mctl-api runs one replica. It fails safe if that changes: a step
-	// that lands on a pod that did not start the link finds no challenge
-	// and answers 400 "unknown, expired ... Start again", never a 500 and
-	// never a link (TestIdentityLinkOnAnotherPodSaysStartAgain). More than
-	// one replica would make linking flaky, not unsafe; it would then need
-	// a shared store or session affinity.
+	// The challenge store is this process's memory. Every step of a link is
+	// a browser request, so with more than one replica the deployment gives
+	// the Service cookie-based session affinity (chart service.annotations)
+	// and a link stays on the pod that started it. Without affinity, or when
+	// that pod is replaced mid-link, it fails safe: a step that lands on a
+	// pod that did not start the link finds no challenge and answers 400
+	// "unknown, expired ... Start again", never a 500 and never a link
+	// (TestIdentityLinkOnAnotherPodSaysStartAgain). OAuth sign-ins do not
+	// rely on affinity: their token exchange is server-to-server, so their
+	// state is in the shared flow store instead.
 	mu       sync.Mutex
 	byID     map[string]*linkChallenge
 	byGitHub map[string]*linkChallenge

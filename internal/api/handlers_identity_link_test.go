@@ -692,9 +692,9 @@ func TestIdentityLinkSweepClearsEveryIndex(t *testing.T) {
 func TestLoginFlowNeverConsumesALinkState(t *testing.T) {
 	h := newLinkHarness(t)
 	ck, state := h.start()
-	h.oauth.StorePendingAuth(state, "client", "https://claude.ai/cb", "challenge")
+	_ = h.oauth.StorePendingAuth(context.Background(), state, "client", "https://claude.ai/cb", "challenge")
 	h.github(ck, state) // the link proceeds to ZITADEL
-	if _, ok := h.oauth.LoadPendingAuth(state); !ok {
+	if _, ok, _ := h.oauth.LoadPendingAuth(context.Background(), state); !ok {
 		t.Fatal("the login flow consumed a link state")
 	}
 	// And the link state is single-use on its own side.
@@ -713,7 +713,7 @@ func TestLinkFlowNeverConsumesALoginState(t *testing.T) {
 		t.Fatal(err)
 	}
 	login := ghState + "|client-state"
-	h.oauth.StorePendingAuth(login, "client", "https://claude.ai/cb", "challenge")
+	_ = h.oauth.StorePendingAuth(context.Background(), login, "client", "https://claude.ai/cb", "challenge")
 
 	// error= makes the OAuth server answer before it loads the pending entry,
 	// so the entry surviving below is down to linking alone.
@@ -736,7 +736,7 @@ func TestLinkFlowNeverConsumesALoginState(t *testing.T) {
 	if direct.Code != http.StatusBadRequest {
 		t.Fatalf("link handler on a login state = %d, want 400", direct.Code)
 	}
-	if _, ok := h.oauth.LoadPendingAuth(login); !ok {
+	if _, ok, _ := h.oauth.LoadPendingAuth(context.Background(), login); !ok {
 		t.Fatal("a login state was consumed")
 	}
 	h.github(ck, linkState) // the link in flight is untouched
