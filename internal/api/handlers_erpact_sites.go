@@ -15,6 +15,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -159,6 +160,48 @@ func (h *Handlers) requireErpactAccess(w http.ResponseWriter, r *http.Request) *
 	return user
 }
 
+// requireErpactOwner is requireErpactAccess plus the owner role: the erpact
+// site tools are an owner-only surface (mctl-api#486, owner decision
+// 2026-10-09), so a mere member (viewer or editor) is refused with 403 after
+// the same 404 for non-members. The role is read per request by
+// checkTenantRole; platform admins pass. A role that cannot be read is 503,
+// never a pass.
+func (h *Handlers) requireErpactOwner(w http.ResponseWriter, r *http.Request, operation string) *auth.User {
+	user := h.requireErpactAccess(w, r)
+	if user == nil {
+		return nil
+	}
+	if !h.requireTenantRole(w, r, user, erpactTenant, operations.RoleOwner, operation, operations.RiskLow) {
+		return nil
+	}
+	return user
+}
+
+// IsTenantOwner reports whether user holds the owner role on tenant (or is a
+// platform admin). It backs the MCP tools/list filter, which hides the
+// owner-only erpact tools from everyone else. A role that could not be read
+// is an error, distinct from a decided "no", and the caller must treat both
+// as hidden.
+func (h *Handlers) IsTenantOwner(_ context.Context, user *auth.User, tenant string) (bool, error) {
+	if user == nil {
+		return false, nil
+	}
+	// Same precheck as requireErpactAccess, so visibility never outruns
+	// callability, and a non-member costs no gitops scan.
+	if !user.IsAdmin() && !user.HasTenantAccess(tenant) {
+		return false, nil
+	}
+	d := h.checkTenantRole(user, tenant, operations.RoleOwner, "tenant owner check")
+	switch {
+	case !d.refused():
+		return true, nil
+	case d.status == http.StatusForbidden:
+		return false, nil
+	default:
+		return false, fmt.Errorf("tenant owner check: %s", d.detail)
+	}
+}
+
 // erpactSiteResponse hides the deployer's internal "enabled" flag, which
 // exists for the shared ingress template, not for a caller of this API.
 type erpactSiteResponse struct {
@@ -179,7 +222,7 @@ func erpactSiteResponseFor(s erpactsites.Site) erpactSiteResponse {
 // "there are no sites" (mctl-api AGENTS.md, "could not observe is never
 // observed absent").
 func (h *Handlers) ListErpactSites(w http.ResponseWriter, r *http.Request) {
-	if h.requireErpactAccess(w, r) == nil {
+	if h.requireErpactOwner(w, r, "erpact.list_sites") == nil {
 		return
 	}
 
@@ -347,7 +390,7 @@ func (h *Handlers) CreateErpactSite(w http.ResponseWriter, r *http.Request) {
 // the deployer back).
 // GET /api/v1/tenants/erpact/sites/{name}/status
 func (h *Handlers) GetErpactSiteStatus(w http.ResponseWriter, r *http.Request) {
-	if h.requireErpactAccess(w, r) == nil {
+	if h.requireErpactOwner(w, r, "erpact.site_status") == nil {
 		return
 	}
 

@@ -78,6 +78,7 @@ var mutatingOnPortal = map[string]string{
 	"mctl_deprecate_platform_skill":         "what tenants are offered going forward",
 	"mctl_disable_tenant_skill":             "removes a capability from a tenant agent",
 	"mctl_enable_tenant_skill":              "grants a capability to a tenant agent",
+	"mctl_erpact_create_site":               "a site, its database and disk on tenant erpact's shared bench; owner-only, capped at 10",
 	"mctl_grant_repo_access":                "repository authorization for a tenant",
 	"mctl_promote_agent":                    "which agent version tenants resolve to",
 	"mctl_provision_database":               "creates persistent state and wires credentials",

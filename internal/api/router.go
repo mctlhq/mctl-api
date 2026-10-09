@@ -770,6 +770,7 @@ func NewRouter(opts Options) http.Handler {
 		// GET  /mcp  → listen stream (no session binding under stateless mode)
 		// Auth: Authorization: Bearer <token> on every request.
 		if opts.MCPServer != nil {
+			opts.MCPServer.SetTenantOwnerChecker(h)
 			mcpH := opts.MCPServer.NewStreamableHTTPHandler()
 			r.Post("/mcp", mcpH.ServeHTTP)
 			r.Get("/mcp", mcpH.ServeHTTP)

@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -42,6 +43,10 @@ type Server struct {
 	apiToken   string
 	httpClient *http.Client
 	mcpServer  *server.MCPServer
+
+	// ownerChecker answers the tools/list filter for owner-only tools. Unset
+	// (stdio) means no filtering; see ownerOnlyToolFilter.
+	ownerChecker atomic.Pointer[TenantOwnerChecker]
 }
 
 // NewServer creates a new MCP server. publicURL defaults to the trimmed
@@ -166,6 +171,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		// deliver notifications/resources/updated to, so the capability would
 		// be advertised and undeliverable.
 		server.WithResourceCapabilities(false, false),
+		// mcp-go applies the filter to tools/list and again to tools/call, so
+		// a hidden tool is also not callable (it answers "not found").
+		server.WithToolFilter(s.ownerOnlyToolFilter),
 	)
 	s.mcpServer = srv
 
@@ -1904,7 +1912,7 @@ func (s *Server) toolErpactListSites() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("List ERPact Sites"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription("ERPact-specific and provisional (mctl-api#486): list tenant erpact's sites, with each one's lifecycle status (creating, active). Only works for tenant erpact; fails for anyone else. A failed read of the deployer is reported as an error, never as an empty list."),
+		mcplib.WithDescription("ERPact-specific and provisional (mctl-api#486): list tenant erpact's sites, with each one's lifecycle status (creating, active). Visible to and callable by tenant erpact's owners and platform admins only. A failed read of the deployer is reported as an error, never as an empty list."),
 	)
 
 	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -1952,7 +1960,7 @@ func (s *Server) toolErpactSiteStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Get ERPact Site Status"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription("ERPact-specific and provisional (mctl-api#486): the lifecycle status of one tenant-erpact site (creating, active), for following up on mctl_erpact_create_site. Only works for tenant erpact."),
+		mcplib.WithDescription("ERPact-specific and provisional (mctl-api#486): the lifecycle status of one tenant-erpact site (creating, active), for following up on mctl_erpact_create_site. Visible to and callable by tenant erpact's owners and platform admins only."),
 		mcplib.WithString("name",
 			mcplib.Required(),
 			mcplib.Description(`Site name, as passed to mctl_erpact_create_site, e.g. "erpact-acme".`),

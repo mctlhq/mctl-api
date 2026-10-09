@@ -96,18 +96,18 @@
     },
     {
       "name": "mctl_erpact_list_sites",
-      "enabled": false,
-      "reason": "Lists tenant erpact's sites from its own site-deployer. A provisional, tenant-erpact-only stopgap (mctl-api#486, removed once Option B ships) -- not meant for the shared, user-blind portal surface even though it is read-only."
+      "enabled": true,
+      "reason": "Lists tenant erpact's sites from its own site-deployer. Visible and callable only for tenant erpact's owners and platform admins: the MCP tools/list filter hides it from everyone else and the REST handler re-checks the owner role. Enabled on the portal by owner decision 2026-10-09. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
     },
     {
       "name": "mctl_erpact_create_site",
-      "enabled": false,
-      "reason": "Creates a new site for tenant erpact via its site-deployer. A provisional, tenant-erpact-only stopgap (mctl-api#486, removed once Option B ships) -- not meant for the shared, user-blind portal surface."
+      "enabled": true,
+      "reason": "Creates a new site for tenant erpact via its site-deployer. Visible and callable only for tenant erpact's owners and platform admins: the MCP tools/list filter hides it from everyone else and the REST handler re-checks the owner role. Enabled on the portal by owner decision 2026-10-09. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
     },
     {
       "name": "mctl_erpact_site_status",
-      "enabled": false,
-      "reason": "Reads one erpact site's creation status from its site-deployer. A provisional, tenant-erpact-only stopgap (mctl-api#486, removed once Option B ships) -- not meant for the shared, user-blind portal surface."
+      "enabled": true,
+      "reason": "Reads one erpact site's creation status from its site-deployer. Visible and callable only for tenant erpact's owners and platform admins: the MCP tools/list filter hides it from everyone else and the REST handler re-checks the owner role. Enabled on the portal by owner decision 2026-10-09. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
     },
     {
       "name": "mctl_get_agent",
