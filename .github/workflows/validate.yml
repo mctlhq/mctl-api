@@ -47,7 +47,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
 
       - name: go build & test
         env:
