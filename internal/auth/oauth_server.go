@@ -1287,6 +1287,8 @@ func (s *OAuthServer) storePending(ctx context.Context, state string, p pendingA
 		s.codes.storePending(state, p)
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, flowStoreTimeout)
+	defer cancel()
 	rec := pendingRecord{pendingAuth: p, ClientState: []byte(p.ClientState)}
 	if err := putFlow(ctx, s.FlowStore, flowstore.KindPending, state, rec, pendingAuthTTL); err != nil {
 		slog.Error("oauth: flow store put pending failed", "error", err)
@@ -1304,6 +1306,8 @@ func (s *OAuthServer) LoadPendingAuth(ctx context.Context, state string) (pendin
 		p, ok := s.codes.loadPending(state)
 		return p, ok, nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, flowStoreTimeout)
+	defer cancel()
 	var rec pendingRecord
 	ok, err := takeFlow(ctx, s.FlowStore, flowstore.KindPending, state, &rec)
 	if err != nil {

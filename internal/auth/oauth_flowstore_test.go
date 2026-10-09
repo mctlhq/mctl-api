@@ -168,3 +168,39 @@ func TestFlowStoreClientStateRoundTripsBytes(t *testing.T) {
 		t.Fatalf("ClientState = %q, %v, %v; want %q", p.ClientState, ok, err, raw)
 	}
 }
+
+// deadlineStore records whether each call's context carried a deadline.
+type deadlineStore struct {
+	*memFlowStore
+	missing []string
+}
+
+func (d *deadlineStore) Put(ctx context.Context, kind, key string, p []byte, ttl time.Duration) error {
+	if _, ok := ctx.Deadline(); !ok {
+		d.missing = append(d.missing, "put "+kind)
+	}
+	return d.memFlowStore.Put(ctx, kind, key, p, ttl)
+}
+
+func (d *deadlineStore) Take(ctx context.Context, kind, key string) ([]byte, bool, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		d.missing = append(d.missing, "take "+kind)
+	}
+	return d.memFlowStore.Take(ctx, kind, key)
+}
+
+// Every shared-store round trip is bounded, even when the caller's context
+// has no deadline: a hung database must not hold a sign-in open forever.
+func TestFlowStoreCallsAreBounded(t *testing.T) {
+	s := newTestOAuthServer(t)
+	st := &deadlineStore{memFlowStore: newMemFlowStore()}
+	s.FlowStore = st
+	ctx := context.Background()
+	_ = s.StorePendingAuth(ctx, "s", "client-1", "https://client.example/callback", "ch")
+	_, _, _ = s.LoadPendingAuth(ctx, "s")
+	code, _ := s.IssueCode(ctx, "u", "client-1", "https://client.example/callback", testPKCEChallenge(t, "v"), nil)
+	_, _, _ = s.ExchangeCode(ctx, code, "v", "client-1", "https://client.example/callback")
+	if len(st.missing) != 0 {
+		t.Fatalf("store calls without a deadline: %v", st.missing)
+	}
+}

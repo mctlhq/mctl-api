@@ -571,8 +571,13 @@ func TestFlowStoreFailureIsAServerErrorNotABadState(t *testing.T) {
 			t.Errorf("mode %s: authorize = %d Location=%q, want a server_error redirect to the client", tc.mode, rec.Code, rec.Header().Get("Location"))
 		}
 
+		counter := oauthUpstreamSignins.WithLabelValues(string(tc.mode), "flow_store_unavailable")
+		before := testutil.ToFloat64(counter)
 		if rec := tc.callback(h); rec.Code != http.StatusInternalServerError {
 			t.Errorf("mode %s: callback = %d %s, want 500", tc.mode, rec.Code, rec.Body.String())
+		}
+		if got := testutil.ToFloat64(counter) - before; got != 1 {
+			t.Errorf("mode %s: flow_store_unavailable += %v, want 1", tc.mode, got)
 		}
 	}
 }
