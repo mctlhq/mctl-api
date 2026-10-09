@@ -26,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/erpactsites"
@@ -709,9 +708,7 @@ func TestErpactListAndStatus_OwnerOrAdminOnly(t *testing.T) {
 		})
 		t.Run("status/"+c.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-acme/status", nil)
-			rctx := chi.NewRouteContext()
-			rctx.URLParams.Add("name", "erpact-acme")
-			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+			req = withURLParam(req, "name", "erpact-acme")
 			if c.user != nil {
 				req = withUser(req, c.user)
 			}
@@ -740,9 +737,7 @@ func TestErpactListAndStatus_RoleReadFailureIsNotAPass(t *testing.T) {
 	}
 
 	req = withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-acme/status", nil), erpactOwner())
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("name", "erpact-acme")
-	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	req = withURLParam(req, "name", "erpact-acme")
 	w = httptest.NewRecorder()
 	h.GetErpactSiteStatus(w, req)
 	if w.Code != http.StatusServiceUnavailable || dep.listCalls != 0 {

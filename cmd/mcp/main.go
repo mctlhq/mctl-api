@@ -15,6 +15,11 @@ func main() {
 	}
 	apiToken := os.Getenv("MCTL_API_TOKEN")
 
+	// SetTenantOwnerChecker is deliberately not called here: the stdio binary
+	// has one shared token and no per-caller identity, so the owner-only
+	// erpact tools stay visible and the REST owner gate (requireErpactOwner)
+	// is the enforcement. Production HTTP enforcement is the
+	// SetTenantOwnerChecker call in internal/api/router.go.
 	mcpServer := mctlmcp.NewServer(apiURL, apiToken).NewMCPServer()
 	if err := server.ServeStdio(mcpServer); err != nil {
 		log.Fatal(err)

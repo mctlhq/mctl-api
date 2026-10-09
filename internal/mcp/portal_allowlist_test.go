@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -39,12 +40,48 @@ type portalAllowlist struct {
 // rejects a placeholder, not a short sentence.
 const minReasonLen = 40
 
-// sharedProvenance is the sentence every mutating entry carries to record the
-// decision. It is six times minReasonLen on its own, so measuring the whole
-// reason against the floor would accept a future entry that is boilerplate and
-// nothing else. The floor applies to what is left after removing it: the part
-// that says what THIS tool exposes or changes.
-const sharedProvenance = "Enabled on the shared portal by owner decision 2026-09-12"
+// provenanceSentence matches the sentence entries carry to record the owner
+// decision, whatever its date and with or without the trailing issue
+// reference: "Enabled on the shared portal by owner decision 2026-09-12
+// (mctlhq/.github#NN)" and "Enabled on the portal by owner decision
+// 2026-10-09". It is longer than minReasonLen on its own, so measuring the
+// whole reason against the floor would accept a future entry that is
+// boilerplate and nothing else. A literal date here once let the erpact
+// entries, which restate the sentence with a later date, count it as
+// tool-specific text. The optional last group swallows the shared
+// continuation (": the portal switch is user-blind, so ... visibility.") up to
+// its sentence end, so the full shared boilerplate cannot clear the floor
+// either; it needs the leading colon, so a tail like ". Provisional Option A
+// stopgap" still counts as specific.
+var provenanceSentence = regexp.MustCompile(
+	`Enabled on the (?:shared )?portal by owner decision \d{4}-\d{2}-\d{2}(?: \(mctlhq/\.github#\d+\))?(?::[^.]*user-blind[^.]*\.?)?`)
+
+// specificReason is what is left of a reason after removing the provenance
+// sentence: the part that says what THIS tool exposes or changes.
+func specificReason(reason string) string {
+	return strings.TrimSpace(provenanceSentence.ReplaceAllString(reason, ""))
+}
+
+func TestSpecificReason_ProvenanceBoilerplateDoesNotCount(t *testing.T) {
+	cases := []struct {
+		name, reason string
+		passes       bool
+	}{
+		{"shared, other date, issue ref", "Enabled on the shared portal by owner decision 2026-11-30 (mctlhq/.github#99)", false},
+		{"unshared wording, other date", "Enabled on the portal by owner decision 2026-10-09", false},
+		{"original date", "Enabled on the shared portal by owner decision 2026-09-12", false},
+		{"full shared sentence verbatim", "Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility.", false},
+		{"full shared sentence, work-item variant", "Enabled on the shared portal by owner decision 2026-10-04: the portal switch is user-blind, so the mctl API's tenant check on the caller's own token (canSeeWorkItem) is the access control; an item outside the caller's tenants answers 404 like an unknown id.", false},
+		{"boilerplate twice", "Enabled on the portal by owner decision 2026-10-09. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#1)", false},
+		{"specific text plus boilerplate", "Lists tenant erpact's sites from its own site-deployer, owners only. Enabled on the portal by owner decision 2026-10-09", true},
+		{"specific text only", "Reads one item and returns its public fields only, nothing about other tenants", true},
+	}
+	for _, c := range cases {
+		if got := len(specificReason(c.reason)) >= minReasonLen; got != c.passes {
+			t.Errorf("%s: passes floor = %v, want %v (specific part %q)", c.name, got, c.passes, specificReason(c.reason))
+		}
+	}
+}
 
 // mutatingOnPortal names the tools that change platform state and are
 // nevertheless exposed on the shared portal, by owner decision 2026-09-12
@@ -162,10 +199,7 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 			continue
 		}
 		listed[tool.Name] = *tool.Enabled
-		specific := tool.Reason
-		if i := strings.Index(specific, sharedProvenance); i >= 0 {
-			specific = specific[:i]
-		}
+		specific := specificReason(tool.Reason)
 		// The floor applies to disabled entries too: mctl-gitops vendors this
 		// file and rejects an entry without a reason, and a placeholder such
 		// as "todo" would satisfy a bare emptiness check.
