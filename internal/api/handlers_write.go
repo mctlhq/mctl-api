@@ -38,16 +38,18 @@ import (
 func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	opName := chi.URLParam(r, "name")
 
-	ctx, span := telemetry.Tracer().Start(r.Context(), "operation.execute "+opName)
-	defer span.End()
-	span.SetAttributes(telemetry.OperationName(opName))
-	r = r.WithContext(ctx)
-
 	op, ok := h.opts.Registry.Get(opName)
 	if !ok {
 		writeError(w, http.StatusNotFound, "operation not found: "+opName)
 		return
 	}
+
+	// Span is started only for a registered operation so the caller-controlled
+	// name never reaches span names or attributes unvalidated.
+	ctx, span := telemetry.Tracer().Start(r.Context(), "operation.execute "+opName)
+	defer span.End()
+	span.SetAttributes(telemetry.OperationName(opName))
+	r = r.WithContext(ctx)
 
 	// HandlerOnly operations skip this generic execute path on purpose — the
 	// dedicated REST handler enforces owner-gate / quota / secret-scan /

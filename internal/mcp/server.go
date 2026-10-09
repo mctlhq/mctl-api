@@ -61,7 +61,8 @@ func NewServer(apiURL, apiToken string) *Server {
 		publicURL: trimmed,
 		apiToken:  apiToken,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: tracingTransport{base: http.DefaultTransport},
 		},
 	}
 }

@@ -2,11 +2,13 @@ package mcp
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -48,7 +50,7 @@ func runTool(t *testing.T, httpTP, metaTP string) tracetest.SpanStub {
 		for _, k := range telemetry.AllowedKeys() {
 			allowed = allowed || string(a.Key) == k
 		}
-		if !allowed || a.Value.Emit() == "SENTINEL" {
+		if !allowed || a.Value.AsString() == "SENTINEL" {
 			t.Fatalf("unexpected attribute %v", a)
 		}
 	}
@@ -91,5 +93,43 @@ func TestToolSpanParenting(t *testing.T) {
 	sp = runTool(t, "", metaTP)
 	if sp.SpanContext.TraceID().String() != metaTID {
 		t.Fatal("expected _meta parent")
+	}
+}
+
+type rtFunc func(*http.Request) (*http.Response, error)
+
+func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestTracingTransportInjectsTraceparent(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	oldTP, oldProp := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	defer func() { otel.SetTracerProvider(oldTP); otel.SetTextMapPropagator(oldProp) }()
+
+	var got string
+	tr := tracingTransport{base: rtFunc(func(r *http.Request) (*http.Response, error) {
+		got = r.Header.Get("traceparent")
+		return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
+	})}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://localhost/x?secret=1", nil)
+	if _, err := tr.RoundTrip(req); err != nil {
+		t.Fatal(err)
+	}
+	if got == "" {
+		t.Fatal("traceparent not injected")
+	}
+	if req.Header.Get("traceparent") != "" {
+		t.Fatal("original request mutated")
+	}
+	if n := len(exp.GetSpans()); n != 1 {
+		t.Fatalf("spans = %d", n)
+	}
+}
+
+func TestNewServerWiresTracingTransport(t *testing.T) {
+	if _, ok := NewServer("http://x", "").httpClient.Transport.(tracingTransport); !ok {
+		t.Fatal("httpClient transport is not tracingTransport")
 	}
 }
