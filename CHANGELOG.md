@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.70.1](https://github.com/mctlhq/mctl-api/compare/4.70.0...4.70.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **vault:** do not panic when the default transport is replaced ([4a0967f](https://github.com/mctlhq/mctl-api/commit/4a0967fd93e1bd2d4f443ced260cde2ae24b6330))
+* **vault:** do not panic when the default transport is replaced ([d14beb8](https://github.com/mctlhq/mctl-api/commit/d14beb8d385cf556c39115479f19e45ed81c356a))
+
 ## [4.70.0](https://github.com/mctlhq/mctl-api/compare/4.69.2...4.70.0) (2026-10-09)
 
 
