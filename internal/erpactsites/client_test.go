@@ -17,9 +17,11 @@ package erpactsites
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestListSites_HappyPath(t *testing.T) {
@@ -145,5 +147,59 @@ func TestCreateSite_SentinelsDoNotDependOnHTTP400(t *testing.T) {
 				t.Fatalf("got %v, want %v", err, c.want)
 			}
 		})
+	}
+}
+
+// A create whose answer never arrives is ErrOutcomeUnknown: the deployer may
+// have pushed the site already. A read that times out is a plain failure.
+func TestCreateSite_TimeoutIsOutcomeUnknown(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	c := NewClient(srv.URL, "tok")
+	c.createClient.Timeout = 50 * time.Millisecond
+	c.httpClient.Timeout = 50 * time.Millisecond
+
+	if _, err := c.CreateSite(context.Background(), "acme"); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("CreateSite: want ErrOutcomeUnknown, got %v", err)
+	}
+	if _, err := c.ListSites(context.Background()); err == nil || errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("ListSites: want a plain error, got %v", err)
+	}
+}
+
+// A refused connection means nothing was sent: that is a failure, not unknown.
+func TestCreateSite_ConnectionRefusedIsNotUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	c := NewClient(url, "tok")
+	_, err := c.CreateSite(context.Background(), "acme")
+	if err == nil || errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("want a plain error, got %v", err)
+	}
+}
+
+// A timeout while still connecting means no request byte was sent, so nothing
+// can be running on the deployer: a plain failure, not unknown. Only a timeout
+// after the request went out is unknown.
+func TestCreateSite_DialTimeoutIsNotUnknown(t *testing.T) {
+	c := NewClient("http://deployer.invalid", "tok")
+	c.createClient = &http.Client{
+		Timeout: 50 * time.Millisecond,
+		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}},
+	}
+
+	_, err := c.CreateSite(context.Background(), "acme")
+	if err == nil || errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("want a plain error for a dial timeout, got %v", err)
 	}
 }
