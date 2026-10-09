@@ -63,9 +63,15 @@ var ownerOnlyTools = map[string]string{
 // token is used and there is no per-caller identity) nothing is filtered:
 // the API enforces the role when the tool is called. Where a checker is set
 // (the HTTP server) it fails closed: no caller or a failed lookup hides the
-// tools. On tools/list the role is resolved at most once per tenant. On
-// tools/call it is read twice (here, then in ownerOnlyCallMiddleware), and a
-// third time by the REST handler's own owner gate behind the tool.
+// tools.
+//
+// The role is resolved lazily (mctl-api#513): only for a tenant that owns a
+// tool actually present in the slice. A tools/call of an unrelated tool, or
+// a list without owner-only tools, never reaches the checker (and so never
+// reads the gitops tenants tree). On tools/list the role is resolved at most
+// once per tenant. On a tools/call of an owner-only tool it is read twice
+// (here, then in ownerOnlyCallMiddleware), and a third time by the REST
+// handler's own owner gate behind the tool.
 //
 // mcp-go applies this filter to tools/list (the whole tool list) and again
 // to tools/call (a one-element slice holding only the called tool). A failed
@@ -75,15 +81,18 @@ var ownerOnlyTools = map[string]string{
 // decided "not an owner" is filtered on both paths.
 func (s *Server) ownerOnlyToolFilter(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
 	cp := s.ownerChecker.Load()
-	if cp == nil {
+	if cp == nil || !hasOwnerOnlyTool(tools) {
 		return tools
 	}
 	checker := *cp
 	user := auth.UserFromContext(ctx)
 	// tools/list passes every registered tool; tools/call passes only the
-	// called one. Derived from the registry rather than a literal 1, so a
-	// registry that shrinks to one tool cannot make a list look like a call.
-	isCall := len(tools) < len(s.mcpServer.ListTools())
+	// called one. The registered count is a snapshot taken once at the end of
+	// NewMCPServer, so no request reads the live registry back. Exactly one
+	// tool out of more than one registered is a call; anything else (a full
+	// list, a server with a single tool, or no snapshot yet) is treated as a
+	// list, which fails closed on a lookup error.
+	isCall := len(tools) == 1 && s.registeredTools.Load() > 1
 	verdict := map[string]bool{}
 	allowed := func(tool, tenant string) bool {
 		if v, done := verdict[tenant]; done {
@@ -110,6 +119,17 @@ func (s *Server) ownerOnlyToolFilter(ctx context.Context, tools []mcp.Tool) []mc
 		out = append(out, tools[i])
 	}
 	return out
+}
+
+// hasOwnerOnlyTool reports whether any tool in the slice is owner-only, so
+// the filter can return early without resolving a role.
+func hasOwnerOnlyTool(tools []mcp.Tool) bool {
+	for i := range tools {
+		if _, restricted := ownerOnlyTools[tools[i].Name]; restricted {
+			return true
+		}
+	}
+	return false
 }
 
 // ownerOnlyCallMiddleware runs after the tool filter on tools/call. It is the

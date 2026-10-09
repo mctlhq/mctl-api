@@ -21,7 +21,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
@@ -203,5 +206,141 @@ func TestToolsCall_OwnerReachesHandler(t *testing.T) {
 	got := callErpactTool(t, s, ctx)
 	if !strings.Contains(got, "erpact-acme") || strings.Contains(got, `"isError":true`) || strings.Contains(got, `"error"`) {
 		t.Fatalf("owner call did not reach the handler: %.300s", got)
+	}
+}
+
+// countingOwnerChecker counts role lookups per tenant; safe under -race.
+type countingOwnerChecker struct {
+	mu     sync.Mutex
+	calls  map[string]int
+	owners map[string]bool
+	err    error
+}
+
+func (c *countingOwnerChecker) IsTenantOwner(_ context.Context, u *auth.User, tenant string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.calls == nil {
+		c.calls = map[string]int{}
+	}
+	c.calls[tenant]++
+	if c.err != nil {
+		return false, c.err
+	}
+	return c.owners[u.ID], nil
+}
+
+func (c *countingOwnerChecker) total() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, v := range c.calls {
+		n += v
+	}
+	return n
+}
+
+// mctl-api#513: the role (a gitops tenants-tree read in production) is
+// resolved only when an owner-only tool is in play. A tools/call of an
+// unrelated tool must not reach the checker at all; tools/list resolves it
+// at most once per tenant.
+func TestOwnerFilter_ResolvesRoleLazily(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+	ctx := auth.WithUser(context.Background(), auth.NewGitHubUser("vic-viewer", []string{"erpact"}))
+
+	t.Run("unrelated tools/call makes zero lookups", func(t *testing.T) {
+		c := &countingOwnerChecker{}
+		s := NewServer(backend.URL, "")
+		s.SetTenantOwnerChecker(c)
+		resp := s.NewMCPServer().HandleMessage(ctx, json.RawMessage(
+			`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mctl_whoami","arguments":{}}}`))
+		b, _ := json.Marshal(resp)
+		if strings.Contains(string(b), "not found") {
+			t.Fatalf("unrelated tool was refused: %.300s", b)
+		}
+		if n := c.total(); n != 0 {
+			t.Fatalf("unrelated tools/call made %d role lookups, want 0", n)
+		}
+	})
+	t.Run("tools/list makes at most one lookup per tenant", func(t *testing.T) {
+		c := &countingOwnerChecker{}
+		s := NewServer(backend.URL, "")
+		s.SetTenantOwnerChecker(c)
+		_ = listToolNames(t, s, ctx)
+		tenants := map[string]bool{}
+		for _, tenant := range ownerOnlyTools {
+			tenants[tenant] = true
+		}
+		for tenant := range tenants {
+			if n := c.calls[tenant]; n != 1 {
+				t.Errorf("tools/list resolved tenant %q %d times, want exactly 1", tenant, n)
+			}
+		}
+		if n := c.total(); n != len(tenants) {
+			t.Errorf("tools/list made %d lookups, want %d (one per owner-only tenant)", n, len(tenants))
+		}
+	})
+	t.Run("owner-only tools/call still resolves the role", func(t *testing.T) {
+		c := &countingOwnerChecker{}
+		s := NewServer(backend.URL, "")
+		s.SetTenantOwnerChecker(c)
+		if got := callErpactTool(t, s, ctx); !strings.Contains(got, "not found") {
+			t.Fatalf("non-owner erpact call: want not found, got %.300s", got)
+		}
+		if c.calls["erpact"] == 0 {
+			t.Fatalf("owner-only tools/call never resolved the role")
+		}
+	})
+}
+
+// mctl-api#513 addendum: the filter tells a call from a list by a tool count
+// snapshotted in NewMCPServer, never by reading the registry per request, and
+// only a single tool out of a larger registry counts as a call. On a lookup
+// error a call defers to the middleware (tool kept) while anything else,
+// including a partial page of a list, fails closed (tool hidden).
+func TestOwnerFilter_CallDetectionUsesSnapshot(t *testing.T) {
+	ctx := auth.WithUser(context.Background(), auth.NewGitHubUser("olga-owner", []string{"erpact"}))
+	erpact := mcp.Tool{Name: "mctl_erpact_list_sites"}
+	whoami := mcp.Tool{Name: "mctl_whoami"}
+	cases := []struct {
+		name       string
+		registered int64
+		tools      []mcp.Tool
+		kept       bool
+	}{
+		{"no snapshot yet fails closed", 0, []mcp.Tool{erpact}, false},
+		{"single-tool registry is a list", 1, []mcp.Tool{erpact}, false},
+		{"one tool of many is a call", 50, []mcp.Tool{erpact}, true},
+		{"partial page is a list", 50, []mcp.Tool{whoami, erpact}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// No NewMCPServer: s.mcpServer stays nil, so any registry read
+			// from the filter would panic here.
+			s := NewServer("http://localhost:8080", "")
+			s.SetTenantOwnerChecker(&countingOwnerChecker{err: errors.New("gitops unreadable")})
+			s.registeredTools.Store(c.registered)
+			kept := false
+			for _, tl := range s.ownerOnlyToolFilter(ctx, c.tools) {
+				if tl.Name == erpact.Name {
+					kept = true
+				}
+			}
+			if kept != c.kept {
+				t.Fatalf("erpact tool kept=%v, want %v", kept, c.kept)
+			}
+		})
+	}
+}
+
+// The snapshot is taken from the real registry once NewMCPServer returns.
+func TestNewMCPServer_SnapshotsRegisteredTools(t *testing.T) {
+	s := NewServer("http://localhost:8080", "")
+	srv := s.NewMCPServer()
+	if got, want := s.registeredTools.Load(), int64(len(srv.ListTools())); got != want || got < 2 {
+		t.Fatalf("registeredTools=%d, want %d (>1)", got, want)
 	}
 }
