@@ -646,7 +646,8 @@ func TestCreateErpactSite_ExistingNameRefusedWithoutCallingDeployer(t *testing.T
 		erpactBaseHostSite,
 		{Name: "erpact-acme.mctl.ai", Status: "ACTIVE"},
 	}}
-	h := erpactTestHandlers(dep, erpactRoles())
+	auditLog := audit.NewLogger()
+	h := &Handlers{opts: Options{ErpactDeployer: dep, GitReader: erpactRoles(), AuditLog: auditLog}}
 
 	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/tenants/erpact/sites", strings.NewReader(`{"name":"ERPACT-ACME"}`)), erpactOwner())
 	w := httptest.NewRecorder()
@@ -657,5 +658,10 @@ func TestCreateErpactSite_ExistingNameRefusedWithoutCallingDeployer(t *testing.T
 	}
 	if len(dep.createdNames) != 0 {
 		t.Fatalf("deployer must not be called, got %v", dep.createdNames)
+	}
+	// A refused attempt is still an audited attempt, like the cap refusal.
+	entries := auditLog.List(10)
+	if len(entries) != 1 || entries[0].Status != "failed" {
+		t.Fatalf("want one failed audit entry for the refused duplicate, got %+v", entries)
 	}
 }

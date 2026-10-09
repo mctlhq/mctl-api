@@ -31,7 +31,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -163,7 +165,12 @@ func (c *Client) do(ctx context.Context, httpClient *http.Client, method, path s
 		}
 		reqReader = strings.NewReader(string(data))
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqReader)
+	// Records whether any request bytes left this process. A timeout before
+	// that point (dial, DNS, TLS) cannot have started anything on the
+	// deployer, so it is a plain failure and not an unknown outcome.
+	var sent atomic.Bool
+	trace := &httptrace.ClientTrace{WroteHeaders: func() { sent.Store(true) }}
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), method, c.baseURL+path, reqReader)
 	if err != nil {
 		return nil, 0, fmt.Errorf("creating erpact deployer request: %w", err)
 	}
@@ -175,9 +182,10 @@ func (c *Client) do(ctx context.Context, httpClient *http.Client, method, path s
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		// A write that timed out or was cancelled may have reached the
-		// deployer and be in progress; only a read is safe to call failed.
-		if method != http.MethodGet && isTimeoutOrCancel(err) {
+		// A write that timed out or was cancelled AFTER the request went out
+		// may have reached the deployer and be in progress; a read, or a
+		// write that never left this process, is safe to call failed.
+		if method != http.MethodGet && sent.Load() && isTimeoutOrCancel(err) {
 			return nil, 0, fmt.Errorf("%w: %v", ErrOutcomeUnknown, err)
 		}
 		return nil, 0, fmt.Errorf("erpact deployer request failed: %w", err)

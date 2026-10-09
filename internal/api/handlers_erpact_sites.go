@@ -244,9 +244,14 @@ func (h *Handlers) CreateErpactSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	count := 0
+	duplicate := false
 	for _, s := range existing {
-		if !erpactIsBaseHost(s) {
-			count++
+		if erpactIsBaseHost(s) {
+			continue
+		}
+		count++
+		if strings.EqualFold(erpactShortName(s.Name), name) {
+			duplicate = true
 		}
 	}
 	if count >= erpactSiteCap {
@@ -261,12 +266,17 @@ func (h *Handlers) CreateErpactSite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, fmt.Sprintf("tenant %q has reached its cap of %d erpact sites", erpactTenant, erpactSiteCap))
 		return
 	}
-
-	for _, s := range existing {
-		if !erpactIsBaseHost(s) && strings.EqualFold(erpactShortName(s.Name), name) {
-			writeError(w, http.StatusConflict, fmt.Sprintf("erpact site %q already exists", name))
-			return
-		}
+	if duplicate {
+		h.logAudit(r, audit.Entry{
+			UserID:     user.ID,
+			Operation:  "erpact.create_site",
+			Parameters: auditParams,
+			Status:     "failed",
+			RiskLevel:  string(operations.RiskMedium),
+			Message:    fmt.Sprintf("site %q already exists", name),
+		})
+		writeError(w, http.StatusConflict, fmt.Sprintf("erpact site %q already exists", name))
+		return
 	}
 
 	host, err := h.opts.ErpactDeployer.CreateSite(r.Context(), strings.TrimPrefix(name, erpactSiteHostPrefix))

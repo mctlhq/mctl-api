@@ -17,6 +17,7 @@ package erpactsites
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -181,5 +182,24 @@ func TestCreateSite_ConnectionRefusedIsNotUnknown(t *testing.T) {
 	_, err := c.CreateSite(context.Background(), "acme")
 	if err == nil || errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatalf("want a plain error, got %v", err)
+	}
+}
+
+// A timeout while still connecting means no request byte was sent, so nothing
+// can be running on the deployer: a plain failure, not unknown. Only a timeout
+// after the request went out is unknown.
+func TestCreateSite_DialTimeoutIsNotUnknown(t *testing.T) {
+	c := NewClient("http://deployer.invalid", "tok")
+	c.createClient = &http.Client{
+		Timeout: 50 * time.Millisecond,
+		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}},
+	}
+
+	_, err := c.CreateSite(context.Background(), "acme")
+	if err == nil || errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("want a plain error for a dial timeout, got %v", err)
 	}
 }
