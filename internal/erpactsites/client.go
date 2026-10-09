@@ -45,10 +45,10 @@ var ErrBusy = errors.New("erpact deployer is busy")
 // token.
 var ErrUnauthenticated = errors.New("erpact deployer token invalid or expired")
 
-// Site is one entry of the deployer's shared-sites list. Status is empty for
-// the shared namespace's own base host, which the deployer lists alongside
-// real tenant sites but never assigns a lifecycle status to (see
-// filterBaseHost).
+// Site is one entry of the deployer's shared-sites list. The list also holds
+// the shared namespace's own base host, which carries no lifecycle status;
+// callers identify it by name, not by an empty Status, because a real site
+// can be reported without a status too.
 type Site struct {
 	Name    string `json:"name"`
 	Enabled bool   `json:"enabled"`
