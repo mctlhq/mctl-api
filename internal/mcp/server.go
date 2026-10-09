@@ -47,6 +47,12 @@ type Server struct {
 	// ownerChecker answers the tools/list filter for owner-only tools. Unset
 	// (stdio) means no filtering; see ownerOnlyToolFilter.
 	ownerChecker atomic.Pointer[TenantOwnerChecker]
+
+	// registeredTools is the tool count snapshotted at the end of
+	// NewMCPServer. ownerOnlyToolFilter uses it to tell a tools/call (one
+	// tool) from a tools/list without reading the live registry back through
+	// mcpServer on every request. Zero until the snapshot is taken.
+	registeredTools atomic.Int64
 }
 
 // NewServer creates a new MCP server. publicURL defaults to the trimmed
@@ -308,6 +314,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 
 	// Prompts (explicit skill invocation, e.g. /mctl:platform-skill in Claude Code).
 	srv.AddPrompt(s.promptPlatformSkill())
+
+	// Snapshot once, after the last AddTool: the filter reads only this.
+	s.registeredTools.Store(int64(len(srv.ListTools())))
 
 	return srv
 }
