@@ -285,3 +285,25 @@ func TestClient_Health_RecoversAfterHungProbe(t *testing.T) {
 		t.Fatalf("second probe must succeed after a hung one: %v", err)
 	}
 }
+
+type wrappedTransport struct{ http.RoundTripper }
+
+// A wrapped http.DefaultTransport must not make the client constructor panic,
+// and the probe client must keep its one-connection-per-probe and time cap.
+func TestNewHealthClient_NonStandardDefaultTransport(t *testing.T) {
+	orig := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = orig })
+	http.DefaultTransport = wrappedTransport{orig}
+
+	c := newHealthClient()
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("health transport is %T, want *http.Transport", c.Transport)
+	}
+	if !tr.DisableKeepAlives {
+		t.Fatal("health transport must disable keep-alives")
+	}
+	if c.Timeout != healthTimeout {
+		t.Fatalf("timeout = %v, want %v", c.Timeout, healthTimeout)
+	}
+}
