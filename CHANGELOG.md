@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.71.0](https://github.com/mctlhq/mctl-api/compare/4.70.1...4.71.0) (2026-10-09)
+
+
+### Features
+
+* **mcp:** show erpact site tools to tenant owners and admins only ([456f2a7](https://github.com/mctlhq/mctl-api/commit/456f2a797e638dc596a2b2a9050b3fa5558914f1))
+* **mcp:** show erpact site tools to tenant owners and admins only ([3910d22](https://github.com/mctlhq/mctl-api/commit/3910d22dc5e68825348110b9fa8608ba843be8c4))
+
+
+### Bug Fixes
+
+* **mcp:** one role lookup per tools/list, no filter without a checker ([e6324da](https://github.com/mctlhq/mctl-api/commit/e6324da9898663e7ae83c0e743e0f37acd3d7f66))
+* **mcp:** test the production filter wiring, align visibility with the REST gate ([dcf31c7](https://github.com/mctlhq/mctl-api/commit/dcf31c7ad8554f786ee91f9f47328e3b4a63f7f7))
+
 ## [4.70.1](https://github.com/mctlhq/mctl-api/compare/4.70.0...4.70.1) (2026-10-09)
 
 
