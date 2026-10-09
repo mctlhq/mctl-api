@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.70.0](https://github.com/mctlhq/mctl-api/compare/4.69.2...4.70.0) (2026-10-09)
+
+
+### Features
+
+* **auth:** share pending authorizations and codes across replicas ([3596f0e](https://github.com/mctlhq/mctl-api/commit/3596f0e322d65441c007730a59555b2600dd1c2f))
+
+
+### Bug Fixes
+
+* **auth:** bound the pending-authorization store round trips ([4e7d184](https://github.com/mctlhq/mctl-api/commit/4e7d184edd004e8969ee06164c84055953c05b35))
+* **readyz:** probe Vault on a fresh connection with a hard cap ([d33bb69](https://github.com/mctlhq/mctl-api/commit/d33bb69d112a4de9540a1854e9b5f32ce903fda0))
+* **readyz:** probe Vault on a fresh connection with a hard cap ([0ba2cac](https://github.com/mctlhq/mctl-api/commit/0ba2caceb59982e62ab56593947d54f18dfe61f8))
+
 ## [4.69.2](https://github.com/mctlhq/mctl-api/compare/4.69.1...4.69.2) (2026-10-09)
 
 
