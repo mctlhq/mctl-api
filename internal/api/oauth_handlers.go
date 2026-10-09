@@ -195,7 +195,9 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 
 	// Persist all pending auth details keyed by combined state.
 	if err := o.StorePendingAuth(r.Context(), combinedState, clientID, redirectURI, codeChallenge); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		// redirect_uri is allowlisted by now, so the client hears about it
+		// as an OAuth error instead of waiting on a callback.
+		oauthError(w, redirectURI, state, "server_error", "the authorization could not be started; try again")
 		return
 	}
 
@@ -251,6 +253,9 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 	// GitHub, while GitHub is an allowed upstream, completes here.
 	pending, ok, err := o.LoadPendingAuth(r.Context(), combinedState)
 	if err != nil {
+		// The pending entry holds the redirect URI, so there is nowhere
+		// to send an OAuth error: answer here, and count it.
+		oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, "store_unavailable").Inc()
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

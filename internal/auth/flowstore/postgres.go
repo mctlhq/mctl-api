@@ -64,11 +64,11 @@ func keyHash(key string) []byte {
 
 // Put stores a new entry. Keys are random, so a conflict means a reused key,
 // which is refused rather than overwritten.
-func (s *PostgresStore) Put(ctx context.Context, kind, key string, payload []byte, expiresAt time.Time) error {
+func (s *PostgresStore) Put(ctx context.Context, kind, key string, payload []byte, ttl time.Duration) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO oauth_flow_entries (kind, key_hash, payload, expires_at)
-		 VALUES ($1, $2, $3, $4)`,
-		kind, keyHash(key), payload, expiresAt)
+		 VALUES ($1, $2, $3, now() + $4::bigint * interval '1 microsecond')`,
+		kind, keyHash(key), payload, ttl.Microseconds())
 	if err != nil {
 		return fmt.Errorf("oauth flow store: put %s: %w", kind, err)
 	}

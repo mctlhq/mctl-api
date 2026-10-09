@@ -36,9 +36,11 @@ const (
 
 // Store keeps one-time entries until they are taken or expire.
 type Store interface {
-	// Put stores payload under (kind, key) until expiresAt. The key is a
-	// bearer secret (a code, a state); the store keeps only its hash.
-	Put(ctx context.Context, kind, key string, payload []byte, expiresAt time.Time) error
+	// Put stores payload under (kind, key) for ttl. The key is a bearer
+	// secret (a code, a state); the store keeps only its hash. Expiry is
+	// measured on the store's clock alone, so replicas whose clocks disagree
+	// still agree on whether an entry is live.
+	Put(ctx context.Context, kind, key string, payload []byte, ttl time.Duration) error
 
 	// Take atomically removes the entry and returns its payload. found is
 	// false when no entry exists or it has expired; err is set only when the

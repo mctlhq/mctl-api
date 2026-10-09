@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -526,6 +527,52 @@ func TestZitadelCallbackFollowsTheMode(t *testing.T) {
 		}
 		if want == http.StatusBadRequest && len(store.calls) != 0 {
 			t.Errorf("mode %s: a refused callback reached the principal store", mode)
+		}
+	}
+}
+
+// ─── shared flow store failures ───────────────────────────────────────────
+
+// failingFlowStore is a flow store whose database is down.
+type failingFlowStore struct{}
+
+func (failingFlowStore) Put(context.Context, string, string, []byte, time.Duration) error {
+	return errors.New("db down")
+}
+
+func (failingFlowStore) Take(context.Context, string, string) ([]byte, bool, error) {
+	return nil, false, errors.New("db down")
+}
+
+func (failingFlowStore) GC(context.Context) error { return nil }
+
+// A store that cannot be written ends the authorize leg with an OAuth
+// server_error at the client, and one that cannot be read answers 500 on
+// the callback, never the 400 "invalid or expired state" of an unknown one.
+func TestFlowStoreFailureIsAServerErrorNotABadState(t *testing.T) {
+	for _, tc := range []struct {
+		mode     OAuthUpstreamMode
+		callback func(h *upstreamHarness) *httptest.ResponseRecorder
+	}{
+		{OAuthUpstreamGitHub, func(h *upstreamHarness) *httptest.ResponseRecorder {
+			return h.get(githubCallbackPath + "?code=gh-code&state=gh-state%7Cclient-state")
+		}},
+		{OAuthUpstreamZitadel, func(h *upstreamHarness) *httptest.ResponseRecorder {
+			return h.callback("z-state")
+		}},
+	} {
+		h := newUpstreamHarness(t, tc.mode, linkedTo("mashkovd"))
+		h.oauth.FlowStore = failingFlowStore{}
+
+		rec := h.get(authorizeQuery(""))
+		loc, _ := url.Parse(rec.Header().Get("Location"))
+		if rec.Code != http.StatusFound || loc == nil || !strings.HasPrefix(loc.String(), testClientRedirect) ||
+			loc.Query().Get("error") != "server_error" || loc.Query().Get("state") != "client-state" {
+			t.Errorf("mode %s: authorize = %d Location=%q, want a server_error redirect to the client", tc.mode, rec.Code, rec.Header().Get("Location"))
+		}
+
+		if rec := tc.callback(h); rec.Code != http.StatusInternalServerError {
+			t.Errorf("mode %s: callback = %d %s, want 500", tc.mode, rec.Code, rec.Body.String())
 		}
 	}
 }

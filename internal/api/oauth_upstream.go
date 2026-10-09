@@ -226,7 +226,7 @@ func (h *Handlers) startZitadelAuthorize(w http.ResponseWriter, r *http.Request,
 		Upstream: auth.UpstreamZitadel, ClientID: clientID, RedirectURI: redirectURI,
 		CodeChallenge: codeChallenge, ClientState: clientState, Nonce: nonce, Verifier: verifier,
 	}); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		oauthError(w, redirectURI, clientState, "server_error", "the authorization could not be started; try again")
 		return
 	}
 	// No prompt=login: an existing ZITADEL session is the single sign-on
@@ -249,6 +249,9 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	// never be retried with the same state.
 	pending, ok, err := o.LoadPendingAuth(r.Context(), q.Get("state"))
 	if err != nil {
+		// The pending entry holds the redirect URI, so there is nowhere
+		// to send an OAuth error: answer here, and count it.
+		oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "store_unavailable").Inc()
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

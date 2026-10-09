@@ -25,7 +25,7 @@ func newMemFlowStore() *memFlowStore {
 	return &memFlowStore{entries: map[string][]byte{}, exp: map[string]time.Time{}}
 }
 
-func (m *memFlowStore) Put(_ context.Context, kind, key string, payload []byte, expiresAt time.Time) error {
+func (m *memFlowStore) Put(_ context.Context, kind, key string, payload []byte, ttl time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.putErr != nil {
@@ -35,7 +35,7 @@ func (m *memFlowStore) Put(_ context.Context, kind, key string, payload []byte, 
 	if _, dup := m.entries[k]; dup {
 		return errors.New("duplicate key")
 	}
-	m.entries[k], m.exp[k] = payload, expiresAt
+	m.entries[k], m.exp[k] = payload, time.Now().Add(ttl)
 	return nil
 }
 
@@ -136,7 +136,7 @@ func TestFlowStoreFailuresAreServerErrors(t *testing.T) {
 
 func TestFlowStoreUndecodablePayloadIsServerError(t *testing.T) {
 	a, _, st := twoReplicas(t)
-	_ = st.Put(context.Background(), flowstore.KindCode, "code", []byte("not json"), time.Now().Add(time.Minute))
+	_ = st.Put(context.Background(), flowstore.KindCode, "code", []byte("not json"), time.Minute)
 	if _, _, err := a.ExchangeCode("code", "v", "c", "https://client.example/callback"); !errors.Is(err, ErrServerError) {
 		t.Fatalf("ExchangeCode on corrupt payload = %v; want ErrServerError", err)
 	}
@@ -151,5 +151,20 @@ func TestFlowStoreKeepsCodeAndStateApart(t *testing.T) {
 	}
 	if _, ok, err := a.LoadPendingAuth(ctx, code); ok || err != nil {
 		t.Fatalf("a code redeemed as a state = %v, %v; want not found", ok, err)
+	}
+}
+
+// The client's state is returned byte for byte, even when it is not UTF-8,
+// which encoding/json would otherwise rewrite.
+func TestFlowStoreClientStateRoundTripsBytes(t *testing.T) {
+	a, b, _ := twoReplicas(t)
+	ctx := context.Background()
+	raw := "st\xff\xfe-\x00ok"
+	if err := a.StorePendingOIDCAuth(ctx, "z", PendingOIDCAuth{Upstream: UpstreamZitadel, ClientState: raw}); err != nil {
+		t.Fatal(err)
+	}
+	p, ok, err := b.LoadPendingAuth(ctx, "z")
+	if err != nil || !ok || p.ClientState != raw {
+		t.Fatalf("ClientState = %q, %v, %v; want %q", p.ClientState, ok, err, raw)
 	}
 }

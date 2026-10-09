@@ -45,7 +45,7 @@ func TestPutTakeOnce(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	key := t.Name()
-	if err := s.Put(ctx, KindCode, key, []byte(`{"a":1}`), time.Now().Add(time.Minute)); err != nil {
+	if err := s.Put(ctx, KindCode, key, []byte(`{"a":1}`), time.Minute); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	got, found, err := s.Take(ctx, KindCode, key)
@@ -61,7 +61,7 @@ func TestTakeIsScopedByKind(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	key := t.Name()
-	if err := s.Put(ctx, KindPending, key, []byte("p"), time.Now().Add(time.Minute)); err != nil {
+	if err := s.Put(ctx, KindPending, key, []byte("p"), time.Minute); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	if _, found, err := s.Take(ctx, KindCode, key); err != nil || found {
@@ -76,7 +76,7 @@ func TestTakeExpiredIsNotFoundAndRemoved(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	key := t.Name()
-	if err := s.Put(ctx, KindCode, key, []byte("x"), time.Now().Add(-time.Second)); err != nil {
+	if err := s.Put(ctx, KindCode, key, []byte("x"), -time.Second); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	if _, found, err := s.Take(ctx, KindCode, key); err != nil || found {
@@ -92,7 +92,7 @@ func TestPutRefusesReusedKey(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	key := t.Name()
-	exp := time.Now().Add(time.Minute)
+	exp := time.Minute
 	if err := s.Put(ctx, KindCode, key, []byte("first"), exp); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestConcurrentTakeReturnsOnce(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	key := t.Name()
-	if err := s.Put(ctx, KindCode, key, []byte("x"), time.Now().Add(time.Minute)); err != nil {
+	if err := s.Put(ctx, KindCode, key, []byte("x"), time.Minute); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	var wins atomic.Int32
@@ -133,10 +133,10 @@ func TestConcurrentTakeReturnsOnce(t *testing.T) {
 func TestGCDeletesOnlyExpired(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.Put(ctx, KindCode, "old", []byte("x"), time.Now().Add(-time.Minute)); err != nil {
+	if err := s.Put(ctx, KindCode, "old", []byte("x"), -time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put(ctx, KindCode, "live", []byte("y"), time.Now().Add(time.Minute)); err != nil {
+	if err := s.Put(ctx, KindCode, "live", []byte("y"), time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.GC(ctx); err != nil {

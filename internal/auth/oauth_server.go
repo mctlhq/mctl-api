@@ -1287,7 +1287,8 @@ func (s *OAuthServer) storePending(ctx context.Context, state string, p pendingA
 		s.codes.storePending(state, p)
 		return nil
 	}
-	if err := putFlow(ctx, s.FlowStore, flowstore.KindPending, state, p, p.CreatedAt.Add(pendingAuthTTL)); err != nil {
+	rec := pendingRecord{pendingAuth: p, ClientState: []byte(p.ClientState)}
+	if err := putFlow(ctx, s.FlowStore, flowstore.KindPending, state, rec, pendingAuthTTL); err != nil {
 		slog.Error("oauth: flow store put pending failed", "error", err)
 		return fmt.Errorf("store pending authorization: %w", ErrServerError)
 	}
@@ -1303,16 +1304,27 @@ func (s *OAuthServer) LoadPendingAuth(ctx context.Context, state string) (pendin
 		p, ok := s.codes.loadPending(state)
 		return p, ok, nil
 	}
-	var p pendingAuth
-	ok, err := takeFlow(ctx, s.FlowStore, flowstore.KindPending, state, &p)
+	var rec pendingRecord
+	ok, err := takeFlow(ctx, s.FlowStore, flowstore.KindPending, state, &rec)
 	if err != nil {
 		slog.Error("oauth: flow store take pending failed", "error", err)
 		return pendingAuth{}, false, fmt.Errorf("load pending authorization: %w", ErrServerError)
 	}
-	if !ok || time.Since(p.CreatedAt) > pendingAuthTTL {
+	if !ok {
 		return pendingAuth{}, false, nil
 	}
+	p := rec.pendingAuth
+	p.ClientState = string(rec.ClientState)
 	return p, true, nil
+}
+
+// pendingRecord is a pendingAuth as the shared store keeps it. ClientState
+// is the client's raw state, which need not be UTF-8, and encoding/json
+// would replace invalid bytes in a string; as []byte it is base64 and comes
+// back byte for byte. It shadows the embedded string field.
+type pendingRecord struct {
+	pendingAuth
+	ClientState []byte
 }
 
 // IssueCode generates a random authorization code for a GitHub login.
@@ -1337,7 +1349,7 @@ func (s *OAuthServer) IssueCode(login, clientID, redirectURI, codeChallenge stri
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), flowStoreTimeout)
 	defer cancel()
-	if err := putFlow(ctx, s.FlowStore, flowstore.KindCode, code, entry, entry.CreatedAt.Add(authCodeTTL)); err != nil {
+	if err := putFlow(ctx, s.FlowStore, flowstore.KindCode, code, entry, authCodeTTL); err != nil {
 		slog.Error("oauth: flow store put code failed", "error", err)
 		return "", fmt.Errorf("store authorization code: %w", ErrServerError)
 	}
@@ -1358,7 +1370,7 @@ func (s *OAuthServer) takeCode(code string) (authCodeEntry, bool, error) {
 		slog.Error("oauth: flow store take code failed", "error", err)
 		return authCodeEntry{}, false, fmt.Errorf("redeem authorization code: %w", ErrServerError)
 	}
-	if !ok || time.Since(e.CreatedAt) > authCodeTTL {
+	if !ok {
 		return authCodeEntry{}, false, nil
 	}
 	return e, true, nil
@@ -1367,12 +1379,12 @@ func (s *OAuthServer) takeCode(code string) (authCodeEntry, bool, error) {
 // flowStoreTimeout bounds one shared-store round trip on the sign-in path.
 const flowStoreTimeout = 5 * time.Second
 
-func putFlow(ctx context.Context, st flowstore.Store, kind, key string, v any, expiresAt time.Time) error {
+func putFlow(ctx context.Context, st flowstore.Store, kind, key string, v any, ttl time.Duration) error {
 	payload, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", kind, err)
 	}
-	return st.Put(ctx, kind, key, payload, expiresAt)
+	return st.Put(ctx, kind, key, payload, ttl)
 }
 
 // takeFlow decodes a taken entry into v. A payload that does not decode is a
