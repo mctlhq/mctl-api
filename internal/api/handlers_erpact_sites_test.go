@@ -22,7 +22,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -500,4 +502,106 @@ func TestErpactSite_StatuslessRealSiteIsNotTheBaseHost(t *testing.T) {
 			t.Fatalf("got %d, want 409 (cap): %s", w.Code, w.Body.String())
 		}
 	})
+}
+
+func TestValidateErpactSiteName_BaseHostIsReserved(t *testing.T) {
+	if _, err := validateErpactSiteName("erpact-shared-stteam"); err == nil {
+		t.Fatal("the shared base host's own name must not be creatable")
+	}
+}
+
+// Two concurrent creates at 9 of 10 must not both succeed.
+type racingDeployer struct {
+	mu    sync.Mutex
+	sites []erpactsites.Site
+}
+
+func (d *racingDeployer) ListSites(context.Context) ([]erpactsites.Site, error) {
+	d.mu.Lock()
+	out := append([]erpactsites.Site(nil), d.sites...)
+	d.mu.Unlock()
+	time.Sleep(20 * time.Millisecond) // widen the check-then-act window
+	return out, nil
+}
+
+func (d *racingDeployer) CreateSite(_ context.Context, name string) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.sites = append(d.sites, erpactsites.Site{Name: name + ".mctl.ai", Enabled: true, Status: "CREATING"})
+	return name + ".mctl.ai", nil
+}
+
+func TestCreateErpactSite_CapHoldsUnderConcurrency(t *testing.T) {
+	d := &racingDeployer{sites: []erpactsites.Site{erpactBaseHostSite}}
+	for i := 0; i < erpactSiteCap-1; i++ {
+		d.sites = append(d.sites, erpactsites.Site{Name: fmt.Sprintf("erpact-s%d.mctl.ai", i), Status: "ACTIVE"})
+	}
+	h := &Handlers{opts: Options{ErpactDeployer: d, GitReader: erpactRoles(), AuditLog: audit.NewLogger()}}
+
+	var wg sync.WaitGroup
+	codes := make([]int, 2)
+	for i := range codes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"name":"erpact-race%d"}`, i)
+			req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/tenants/erpact/sites", strings.NewReader(body)), erpactOwner())
+			w := httptest.NewRecorder()
+			h.CreateErpactSite(w, req)
+			codes[i] = w.Code
+		}()
+	}
+	wg.Wait()
+	created := 0
+	for _, c := range codes {
+		if c == http.StatusAccepted {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Fatalf("got %d successful creates (codes %v), want exactly 1 at the cap boundary", created, codes)
+	}
+}
+
+// The three routes, reached through the real router rather than by calling
+// the handlers directly.
+func TestErpactSiteRoutes_ThroughNewRouter(t *testing.T) {
+	dep := &fakeErpactDeployer{
+		sites:      []erpactsites.Site{erpactBaseHostSite, {Name: "erpact-acme.mctl.ai", Status: "ACTIVE"}},
+		createHost: "erpact-new.mctl.ai",
+	}
+	as := func(u *auth.User) http.Handler {
+		return NewRouter(Options{
+			ErpactDeployer: dep,
+			GitReader:      erpactRoles(),
+			AuditLog:       audit.NewLogger(),
+			AuthMiddleware: func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), u)))
+				})
+			},
+		})
+	}
+	do := func(h http.Handler, method, path, body string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	if c := do(as(erpactViewer()), http.MethodGet, "/api/v1/tenants/erpact/sites", ""); c != http.StatusOK {
+		t.Fatalf("list: got %d, want 200", c)
+	}
+	if c := do(as(erpactViewer()), http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-acme/status", ""); c != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", c)
+	}
+	if c := do(as(erpactViewer()), http.MethodPost, "/api/v1/tenants/erpact/sites", `{"name":"erpact-new"}`); c != http.StatusForbidden {
+		t.Fatalf("create as viewer: got %d, want 403", c)
+	}
+	if c := do(as(erpactOwner()), http.MethodPost, "/api/v1/tenants/erpact/sites", `{"name":"erpact-new"}`); c != http.StatusAccepted {
+		t.Fatalf("create as owner: got %d, want 202", c)
+	}
+	if c := do(as(nonErpactMember()), http.MethodGet, "/api/v1/tenants/erpact/sites", ""); c != http.StatusNotFound {
+		t.Fatalf("list as outsider: got %d, want 404", c)
+	}
 }

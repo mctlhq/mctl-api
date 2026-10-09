@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/audit"
@@ -43,6 +44,12 @@ import (
 // 2026-10-08: cap is 10).
 const erpactTenant = "erpact"
 const erpactSiteCap = 10
+
+// erpactCreateMu serializes the cap check and the create call, so two
+// concurrent requests cannot both see "9 of 10" and both create. It covers
+// one mctl-api process; across replicas the deployer's own single-flight
+// lock (ErrBusy) is what refuses the second create.
+var erpactCreateMu sync.Mutex
 
 // erpactMainDomain mirrors the deployer's own MAIN_DOMAIN env var. The
 // deployer's listing reports each site by its full host (name+"."+MAIN_DOMAIN);
@@ -90,6 +97,9 @@ func validateErpactSiteName(name string) (string, error) {
 	if !erpactSiteNamePattern.MatchString(name) {
 		return "", fmt.Errorf("site name %q must start with \"erpact-\", contain only lowercase letters, digits and hyphens, and be at most 47 characters", name)
 	}
+	if strings.EqualFold(name+"."+erpactMainDomain, erpactBaseHostName) {
+		return "", fmt.Errorf("site name %q is reserved", name)
+	}
 	if erpactSystemNames[strings.TrimPrefix(name, "erpact-")] {
 		return "", fmt.Errorf("site name %q is reserved", name)
 	}
@@ -103,7 +113,7 @@ func validateErpactSiteName(name string) (string, error) {
 // would otherwise be hidden from the listing, excluded from erpactSiteCap's
 // count, and 404 from a status lookup during exactly the create-then-poll
 // window a caller needs it most (review finding on mctl-api#497).
-const erpactBaseHostName = "erpact-shared-stteam.mctl.ai"
+const erpactBaseHostName = "erpact-shared-stteam." + erpactMainDomain
 
 func erpactIsBaseHost(s erpactsites.Site) bool {
 	return strings.EqualFold(s.Name, erpactBaseHostName)
@@ -212,6 +222,9 @@ func (h *Handlers) CreateErpactSite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	auditParams := map[string]string{"tenant": erpactTenant, "site": name}
+
+	erpactCreateMu.Lock()
+	defer erpactCreateMu.Unlock()
 
 	existing, err := h.opts.ErpactDeployer.ListSites(r.Context())
 	if err != nil {

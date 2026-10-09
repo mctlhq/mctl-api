@@ -119,3 +119,31 @@ func TestCreateSite_BusyIsSentinel(t *testing.T) {
 		t.Fatalf("got %v, want ErrBusy", err)
 	}
 }
+
+// The deployer's wording has only been seen on 400, but the sentinels must
+// not depend on it: a real conflict misread as a generic failure invites a
+// pointless retry.
+func TestCreateSite_SentinelsDoNotDependOnHTTP400(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   error
+	}{
+		{"exists on 409", http.StatusConflict, `{"detail":"Site app template already exists"}`, ErrSiteExists},
+		{"busy on 503", http.StatusServiceUnavailable, `{"detail":"Deployer is busy. Try again later"}`, ErrBusy},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(c.status)
+				_, _ = w.Write([]byte(c.body))
+			}))
+			defer srv.Close()
+			_, err := NewClient(srv.URL, "tok").CreateSite(context.Background(), "erpact-acme")
+			if !errors.Is(err, c.want) {
+				t.Fatalf("got %v, want %v", err, c.want)
+			}
+		})
+	}
+}

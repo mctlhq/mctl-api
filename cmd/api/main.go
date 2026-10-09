@@ -786,18 +786,7 @@ func main() {
 	// Reading it here instead needs only a narrow Vault policy on the
 	// mctl-api Kubernetes auth role for this one path, mirroring
 	// vault-policy-mctl-api-openclaw-read.hcl.
-	var erpactDeployer mctlapi.ErpactDeployer
-	if vaultReader != nil {
-		erpactSecret, err := vaultReader.ReadKV(initCtx, "teams/erpact/deployer")
-		if err != nil {
-			slog.Warn("erpact deployer token could not be read from vault, erpact site tools disabled", "error", err)
-		} else if token := erpactSecret["DEPLOYER_API_TOKEN"]; token != "" {
-			erpactDeployer = erpactsites.NewClient(cfg.ErpactDeployerURL, token)
-			slog.Info("erpact deployer client enabled", "url", cfg.ErpactDeployerURL)
-		} else {
-			slog.Warn("erpact deployer secret has no DEPLOYER_API_TOKEN property, erpact site tools disabled")
-		}
-	}
+	erpactDeployer := newErpactDeployer(vaultReader, cfg.ErpactDeployerURL)
 
 	// VictoriaMetrics client (optional — used for OpenClaw sizing recommendations).
 	var metricsQuerier mctlapi.MetricsQuerier
@@ -1970,4 +1959,29 @@ func identityLinkOptions(cfg config, store *principals.Store, cache *principals.
 	}
 	slog.Info("identity link browser flow enabled", "provider", opts.ProviderName, "issuer", opts.Issuer)
 	return opts
+}
+
+// newErpactDeployer builds the ERPact site-deployer client from the token in
+// Vault, or returns nil (feature off) when it cannot. It makes its own
+// bounded context on purpose: startup's initCtx is cancelled once the stores
+// are built, and a read on it fails with "context canceled" and silently
+// disables the feature (seen in prod on 4.69.0).
+func newErpactDeployer(reader mctlapi.VaultReader, deployerURL string) mctlapi.ErpactDeployer {
+	if reader == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	secret, err := reader.ReadKV(ctx, "teams/erpact/deployer")
+	if err != nil {
+		slog.Warn("erpact deployer token could not be read from vault, erpact site tools disabled", "error", err)
+		return nil
+	}
+	token := secret["DEPLOYER_API_TOKEN"]
+	if token == "" {
+		slog.Warn("erpact deployer secret has no DEPLOYER_API_TOKEN property, erpact site tools disabled")
+		return nil
+	}
+	slog.Info("erpact deployer client enabled", "url", deployerURL)
+	return erpactsites.NewClient(deployerURL, token)
 }

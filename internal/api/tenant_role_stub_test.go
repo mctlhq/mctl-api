@@ -2,6 +2,7 @@ package api
 
 import (
 	"strings"
+	"sync/atomic"
 )
 
 // stubRoles is a GitReader that answers MemberRoles only: every other
@@ -14,11 +15,11 @@ type stubRoles struct {
 	// members list naming the login, as written.
 	roles map[string]map[string][][]string
 	err   error
-	calls int
+	calls atomic.Int64
 }
 
 func (s *stubRoles) MemberRoles(namespace, login string) ([][]string, error) {
-	s.calls++
+	s.calls.Add(1)
 	if s.err != nil {
 		return nil, s.err
 	}
