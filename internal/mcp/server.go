@@ -174,6 +174,8 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		// mcp-go applies the filter to tools/list and again to tools/call, so
 		// a hidden tool is also not callable (it answers "not found").
 		server.WithToolFilter(s.ownerOnlyToolFilter),
+		// Reports a failed role lookup on tools/call explicitly.
+		server.WithToolHandlerMiddleware(s.ownerOnlyCallMiddleware),
 	)
 	s.mcpServer = srv
 

@@ -140,3 +140,44 @@ func TestToolsList_OneLookupPerList(t *testing.T) {
 		t.Fatalf("visible=%v lookups=%d, want visible with exactly 1 lookup", names["mctl_erpact_list_sites"], n)
 	}
 }
+
+func callErpactTool(t *testing.T, s *Server, ctx context.Context) string {
+	t.Helper()
+	resp := s.NewMCPServer().HandleMessage(ctx, json.RawMessage(
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mctl_erpact_list_sites","arguments":{}}}`))
+	b, _ := json.Marshal(resp)
+	return string(b)
+}
+
+// "Could not observe" must not be reported as "observed absent": a failed
+// role lookup on tools/call is an explicit could-not-verify, never "not found",
+// while a decided non-owner still gets "not found" and tools/list stays hidden.
+func TestToolsCall_RoleLookupErrorIsNotReportedAsNotFound(t *testing.T) {
+	ctx := auth.WithUser(context.Background(), auth.NewGitHubUser("olga-owner", []string{"erpact"}))
+
+	t.Run("non-owner call is not found", func(t *testing.T) {
+		s := NewServer("http://localhost:8080", "")
+		s.SetTenantOwnerChecker(fakeOwnerChecker{owners: map[string]bool{}})
+		if got := callErpactTool(t, s, ctx); !strings.Contains(got, "not found") {
+			t.Fatalf("non-owner call: want not found, got %.300s", got)
+		}
+	})
+	t.Run("lookup error on call is an explicit could-not-verify", func(t *testing.T) {
+		s := NewServer("http://localhost:8080", "")
+		s.SetTenantOwnerChecker(fakeOwnerChecker{err: errors.New("gitops unreadable")})
+		got := callErpactTool(t, s, ctx)
+		if strings.Contains(got, "not found") || !strings.Contains(got, "could not verify your role") {
+			t.Fatalf("lookup error on call: want could-not-verify and not 'not found', got %.300s", got)
+		}
+	})
+	t.Run("lookup error on list stays hidden", func(t *testing.T) {
+		s := NewServer("http://localhost:8080", "")
+		s.SetTenantOwnerChecker(fakeOwnerChecker{err: errors.New("gitops unreadable")})
+		names := listToolNames(t, s, ctx)
+		for _, n := range erpactToolNames {
+			if names[n] {
+				t.Errorf("%s visible on tools/list despite a failed role lookup", n)
+			}
+		}
+	})
+}
