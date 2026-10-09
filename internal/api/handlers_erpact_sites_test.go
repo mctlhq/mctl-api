@@ -160,7 +160,7 @@ func TestListErpactSites_FiltersBaseHostAndMapsShortName(t *testing.T) {
 	}}
 	h := erpactTestHandlers(dep, erpactRoles())
 
-	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites", nil), erpactViewer())
+	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites", nil), erpactOwner())
 	w := httptest.NewRecorder()
 	h.ListErpactSites(w, req)
 
@@ -185,7 +185,7 @@ func TestListErpactSites_DeployerErrorIsNotAnEmptyList(t *testing.T) {
 	dep := &fakeErpactDeployer{listErr: errors.New("connection refused")}
 	h := erpactTestHandlers(dep, erpactRoles())
 
-	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites", nil), erpactViewer())
+	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites", nil), erpactOwner())
 	w := httptest.NewRecorder()
 	h.ListErpactSites(w, req)
 
@@ -389,7 +389,7 @@ func TestGetErpactSiteStatus_FindsByShortName(t *testing.T) {
 	}}
 	h := erpactTestHandlers(dep, erpactRoles())
 
-	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/ERPACT-ACME/status", nil), erpactViewer())
+	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/ERPACT-ACME/status", nil), erpactOwner())
 	req = withURLParam(req, "name", "ERPACT-ACME")
 	w := httptest.NewRecorder()
 	h.GetErpactSiteStatus(w, req)
@@ -410,7 +410,7 @@ func TestGetErpactSiteStatus_UnknownNameNotFound(t *testing.T) {
 	dep := &fakeErpactDeployer{sites: []erpactsites.Site{erpactBaseHostSite}}
 	h := erpactTestHandlers(dep, erpactRoles())
 
-	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-ghost/status", nil), erpactViewer())
+	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-ghost/status", nil), erpactOwner())
 	req = withURLParam(req, "name", "erpact-ghost")
 	w := httptest.NewRecorder()
 	h.GetErpactSiteStatus(w, req)
@@ -465,7 +465,7 @@ func TestErpactSite_StatuslessRealSiteIsNotTheBaseHost(t *testing.T) {
 
 	t.Run("listed", func(t *testing.T) {
 		h := erpactTestHandlers(&fakeErpactDeployer{sites: []erpactsites.Site{erpactBaseHostSite, fresh}}, erpactRoles())
-		req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites", nil), erpactViewer())
+		req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites", nil), erpactOwner())
 		w := httptest.NewRecorder()
 		h.ListErpactSites(w, req)
 		var resp struct {
@@ -481,7 +481,7 @@ func TestErpactSite_StatuslessRealSiteIsNotTheBaseHost(t *testing.T) {
 
 	t.Run("status lookup finds it", func(t *testing.T) {
 		h := erpactTestHandlers(&fakeErpactDeployer{sites: []erpactsites.Site{erpactBaseHostSite, fresh}}, erpactRoles())
-		req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-fresh/status", nil), erpactViewer())
+		req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-fresh/status", nil), erpactOwner())
 		req = withURLParam(req, "name", "erpact-fresh")
 		w := httptest.NewRecorder()
 		h.GetErpactSiteStatus(w, req)
@@ -592,11 +592,18 @@ func TestErpactSiteRoutes_ThroughNewRouter(t *testing.T) {
 		return w.Code
 	}
 
-	if c := do(as(erpactViewer()), http.MethodGet, "/api/v1/tenants/erpact/sites", ""); c != http.StatusOK {
-		t.Fatalf("list: got %d, want 200", c)
+	if c := do(as(erpactOwner()), http.MethodGet, "/api/v1/tenants/erpact/sites", ""); c != http.StatusOK {
+		t.Fatalf("list as owner: got %d, want 200", c)
 	}
-	if c := do(as(erpactViewer()), http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-acme/status", ""); c != http.StatusOK {
-		t.Fatalf("status: got %d, want 200", c)
+	if c := do(as(erpactOwner()), http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-acme/status", ""); c != http.StatusOK {
+		t.Fatalf("status as owner: got %d, want 200", c)
+	}
+	// Owner-only since 2026-10-09: a member who is not an owner is refused.
+	if c := do(as(erpactViewer()), http.MethodGet, "/api/v1/tenants/erpact/sites", ""); c != http.StatusForbidden {
+		t.Fatalf("list as viewer: got %d, want 403", c)
+	}
+	if c := do(as(erpactViewer()), http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-acme/status", ""); c != http.StatusForbidden {
+		t.Fatalf("status as viewer: got %d, want 403", c)
 	}
 	if c := do(as(erpactViewer()), http.MethodPost, "/api/v1/tenants/erpact/sites", `{"name":"erpact-new"}`); c != http.StatusForbidden {
 		t.Fatalf("create as viewer: got %d, want 403", c)
@@ -663,5 +670,84 @@ func TestCreateErpactSite_ExistingNameRefusedWithoutCallingDeployer(t *testing.T
 	entries := auditLog.List(10)
 	if len(entries) != 1 || entries[0].Status != "failed" {
 		t.Fatalf("want one failed audit entry for the refused duplicate, got %+v", entries)
+	}
+}
+
+// --- List and status are owner-or-admin (2026-10-09): 404 for a non-member,
+// 403 for a member who is not an owner, 503 when the role cannot be read.
+
+func TestErpactListAndStatus_OwnerOrAdminOnly(t *testing.T) {
+	dep := &fakeErpactDeployer{sites: []erpactsites.Site{{Name: "erpact-acme.mctl.ai", Status: "ACTIVE"}}}
+	h := erpactTestHandlers(dep, erpactRoles())
+	admin := auth.NewGitHubUser("some-admin", []string{"admins"})
+
+	cases := []struct {
+		name string
+		user *auth.User
+		want int
+	}{
+		{"owner", erpactOwner(), http.StatusOK},
+		{"admin", admin, http.StatusOK},
+		{"developer", erpactDeveloper(), http.StatusForbidden},
+		{"viewer", erpactViewer(), http.StatusForbidden},
+		{"outsider", nonErpactMember(), http.StatusNotFound},
+		{"anonymous", nil, http.StatusUnauthorized},
+	}
+	for _, c := range cases {
+		t.Run("list/"+c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites", nil)
+			if c.user != nil {
+				req = withUser(req, c.user)
+			}
+			w := httptest.NewRecorder()
+			h.ListErpactSites(w, req)
+			if w.Code != c.want {
+				t.Fatalf("got %d, want %d: %s", w.Code, c.want, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestErpactListAndStatus_RoleReadFailureIsNotAPass(t *testing.T) {
+	dep := &fakeErpactDeployer{sites: []erpactsites.Site{{Name: "erpact-acme.mctl.ai", Status: "ACTIVE"}}}
+	// No GitReader: the role cannot be read.
+	h := &Handlers{opts: Options{ErpactDeployer: dep, AuditLog: audit.NewLogger()}}
+
+	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites", nil), erpactOwner())
+	w := httptest.NewRecorder()
+	h.ListErpactSites(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("list: got %d, want 503", w.Code)
+	}
+	if dep.listCalls != 0 {
+		t.Fatalf("deployer was queried despite an unreadable role")
+	}
+}
+
+func TestIsTenantOwner(t *testing.T) {
+	h := erpactTestHandlers(&fakeErpactDeployer{}, erpactRoles())
+	admin := auth.NewGitHubUser("some-admin", []string{"admins"})
+	cases := []struct {
+		name string
+		user *auth.User
+		want bool
+	}{
+		{"owner", erpactOwner(), true},
+		{"admin", admin, true},
+		{"developer", erpactDeveloper(), false},
+		{"viewer", erpactViewer(), false},
+		{"outsider", nonErpactMember(), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		got, err := h.IsTenantOwner(c.user, erpactTenant)
+		if err != nil || got != c.want {
+			t.Errorf("%s: got (%v, %v), want (%v, nil)", c.name, got, err, c.want)
+		}
+	}
+
+	noReader := &Handlers{opts: Options{}}
+	if got, err := noReader.IsTenantOwner(erpactOwner(), erpactTenant); got || err == nil {
+		t.Errorf("unreadable role: got (%v, %v), want (false, error)", got, err)
 	}
 }
