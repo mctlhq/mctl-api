@@ -1,5 +1,24 @@
 # Changelog
 
+## [4.69.0](https://github.com/mctlhq/mctl-api/compare/4.68.1...4.69.0) (2026-10-08)
+
+
+### Features
+
+* **api:** list tenant workloads deployed outside the catalogue ([12acbaa](https://github.com/mctlhq/mctl-api/commit/12acbaa2974f96a6248ae6f2438411a4286c5560))
+* **api:** list tenant workloads deployed outside the catalogue ([be89400](https://github.com/mctlhq/mctl-api/commit/be894007eb50d4f1e5ae2305c9fe8c62ec50e787)), closes [#485](https://github.com/mctlhq/mctl-api/issues/485)
+* **api:** tenant erpact site tools (list, create, status) ([61421c4](https://github.com/mctlhq/mctl-api/commit/61421c4619abba8eb55013f1bafdefa9644639c3))
+* **api:** tenant erpact site tools (list, create, status) ([96b9511](https://github.com/mctlhq/mctl-api/commit/96b95110a2ccbd71401ec269e99daeb711a9541d)), closes [#486](https://github.com/mctlhq/mctl-api/issues/486)
+
+
+### Bug Fixes
+
+* **api:** address review findings on erpact site tools ([060acab](https://github.com/mctlhq/mctl-api/commit/060acab462101c15c210a8de9ee2887ba8fba8ae))
+* **api:** attribute by namespace, keep row keys unique, log ArgoCD failures ([199443f](https://github.com/mctlhq/mctl-api/commit/199443f7d9c475b06ad9e7844427799262105761))
+* **api:** read the erpact deployer token from Vault, not env ([c69e848](https://github.com/mctlhq/mctl-api/commit/c69e848ac83ffd7d4fc2e944561678e4e56351bf))
+* **api:** stop opaque schemes from being read as a host ([4e043e4](https://github.com/mctlhq/mctl-api/commit/4e043e445424ab24d487565a3c337cf08bc05d7f))
+* **api:** withhold platform sources on merged rows, name the failed read ([672db07](https://github.com/mctlhq/mctl-api/commit/672db0794d78f5b5a27d873d8eaa923f4184b8b5))
+
 ## [4.68.1](https://github.com/mctlhq/mctl-api/compare/4.68.0...4.68.1) (2026-10-06)
 
 
