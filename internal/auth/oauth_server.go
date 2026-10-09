@@ -1329,7 +1329,7 @@ type pendingRecord struct {
 
 // IssueCode generates a random authorization code for a GitHub login.
 // The code is stored alongside the PKCE challenge for later verification.
-func (s *OAuthServer) IssueCode(login, clientID, redirectURI, codeChallenge string, groups []string) (string, error) {
+func (s *OAuthServer) IssueCode(ctx context.Context, login, clientID, redirectURI, codeChallenge string, groups []string) (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate code: %w", err)
@@ -1347,7 +1347,7 @@ func (s *OAuthServer) IssueCode(login, clientID, redirectURI, codeChallenge stri
 		s.codes.store(code, entry)
 		return code, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), flowStoreTimeout)
+	ctx, cancel := context.WithTimeout(ctx, flowStoreTimeout)
 	defer cancel()
 	if err := putFlow(ctx, s.FlowStore, flowstore.KindCode, code, entry, authCodeTTL); err != nil {
 		slog.Error("oauth: flow store put code failed", "error", err)
@@ -1357,12 +1357,12 @@ func (s *OAuthServer) IssueCode(login, clientID, redirectURI, codeChallenge stri
 }
 
 // takeCode consumes an authorization code from whichever store holds codes.
-func (s *OAuthServer) takeCode(code string) (authCodeEntry, bool, error) {
+func (s *OAuthServer) takeCode(ctx context.Context, code string) (authCodeEntry, bool, error) {
 	if s.FlowStore == nil {
 		e, ok := s.codes.loadAndDelete(code)
 		return e, ok, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), flowStoreTimeout)
+	ctx, cancel := context.WithTimeout(ctx, flowStoreTimeout)
 	defer cancel()
 	var e authCodeEntry
 	ok, err := takeFlow(ctx, s.FlowStore, flowstore.KindCode, code, &e)
@@ -1402,8 +1402,8 @@ func takeFlow(ctx context.Context, st flowstore.Store, kind, key string, v any) 
 
 // ExchangeCode validates an authorization code + PKCE verifier and returns a signed JWT.
 // The code is consumed (one-time use).
-func (s *OAuthServer) ExchangeCode(code, codeVerifier, clientID, redirectURI string) (string, string, error) {
-	entry, ok, err := s.takeCode(code)
+func (s *OAuthServer) ExchangeCode(ctx context.Context, code, codeVerifier, clientID, redirectURI string) (string, string, error) {
+	entry, ok, err := s.takeCode(ctx, code)
 	if err != nil {
 		return "", "", err
 	}

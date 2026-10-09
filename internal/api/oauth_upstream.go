@@ -251,7 +251,7 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		// The pending entry holds the redirect URI, so there is nowhere
 		// to send an OAuth error: answer here, and count it.
-		oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "store_unavailable").Inc()
+		oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "flow_store_unavailable").Inc()
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -328,7 +328,7 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	// principal's GitHub login: same groups, same admin decision, same code.
 	login := gh.Display
 	groups := o.ResolveGroups(login)
-	mctlCode, err := o.IssueCode(login, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
+	mctlCode, err := o.IssueCode(r.Context(), login, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
 	if err != nil {
 		slog.Error("failed to issue auth code", "error", err)
 		result = "internal_error"

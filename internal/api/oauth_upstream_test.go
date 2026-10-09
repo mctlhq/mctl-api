@@ -220,7 +220,7 @@ func TestZitadelSigninIssuesTheLinkedGitHubLoginsCode(t *testing.T) {
 		t.Fatalf("store looked up %+v, want %+v", store.calls, want)
 	}
 
-	access, _, err := h.oauth.ExchangeCode(loc.Query().Get("code"), testVerifier, "client", testClientRedirect)
+	access, _, err := h.oauth.ExchangeCode(context.Background(), loc.Query().Get("code"), testVerifier, "client", testClientRedirect)
 	if err != nil {
 		t.Fatal(err)
 	}

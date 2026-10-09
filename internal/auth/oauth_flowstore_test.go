@@ -91,19 +91,19 @@ func TestFlowStorePendingAuthCrossesReplicas(t *testing.T) {
 
 func TestFlowStoreCodeCrossesReplicas(t *testing.T) {
 	a, b, _ := twoReplicas(t)
-	code, err := a.IssueCode("dmitrii", "client-1", "https://client.example/callback",
+	code, err := a.IssueCode(context.Background(), "dmitrii", "client-1", "https://client.example/callback",
 		testPKCEChallenge(t, "verifier-1"), []string{"my-team"})
 	if err != nil {
 		t.Fatalf("IssueCode: %v", err)
 	}
-	access, _, err := b.ExchangeCode(code, "verifier-1", "client-1", "https://client.example/callback")
+	access, _, err := b.ExchangeCode(context.Background(), code, "verifier-1", "client-1", "https://client.example/callback")
 	if err != nil {
 		t.Fatalf("ExchangeCode on the other replica: %v", err)
 	}
 	if got := mustIssuedGroups(t, b, access); len(got) != 1 || got[0] != "my-team" {
 		t.Fatalf("groups = %v, want [my-team]", got)
 	}
-	if _, _, err := a.ExchangeCode(code, "verifier-1", "client-1", "https://client.example/callback"); err == nil ||
+	if _, _, err := a.ExchangeCode(context.Background(), code, "verifier-1", "client-1", "https://client.example/callback"); err == nil ||
 		!strings.Contains(err.Error(), "invalid or expired") {
 		t.Fatalf("replayed code = %v; want invalid or expired", err)
 	}
@@ -120,7 +120,7 @@ func TestFlowStoreFailuresAreServerErrors(t *testing.T) {
 	if err := a.StorePendingAuth(ctx, "s", "c", "https://client.example/callback", "ch"); !errors.Is(err, ErrServerError) {
 		t.Fatalf("StorePendingAuth on put failure = %v; want ErrServerError", err)
 	}
-	if _, err := a.IssueCode("u", "c", "https://client.example/callback", "ch", nil); !errors.Is(err, ErrServerError) {
+	if _, err := a.IssueCode(context.Background(), "u", "c", "https://client.example/callback", "ch", nil); !errors.Is(err, ErrServerError) {
 		t.Fatalf("IssueCode on put failure = %v; want ErrServerError", err)
 	}
 
@@ -129,7 +129,7 @@ func TestFlowStoreFailuresAreServerErrors(t *testing.T) {
 	if _, ok, err := a.LoadPendingAuth(ctx, "s"); ok || !errors.Is(err, ErrServerError) {
 		t.Fatalf("LoadPendingAuth on take failure = %v, %v; want ErrServerError", ok, err)
 	}
-	if _, _, err := a.ExchangeCode("code", "v", "c", "https://client.example/callback"); !errors.Is(err, ErrServerError) {
+	if _, _, err := a.ExchangeCode(context.Background(), "code", "v", "c", "https://client.example/callback"); !errors.Is(err, ErrServerError) {
 		t.Fatalf("ExchangeCode on take failure = %v; want ErrServerError", err)
 	}
 }
@@ -137,7 +137,7 @@ func TestFlowStoreFailuresAreServerErrors(t *testing.T) {
 func TestFlowStoreUndecodablePayloadIsServerError(t *testing.T) {
 	a, _, st := twoReplicas(t)
 	_ = st.Put(context.Background(), flowstore.KindCode, "code", []byte("not json"), time.Minute)
-	if _, _, err := a.ExchangeCode("code", "v", "c", "https://client.example/callback"); !errors.Is(err, ErrServerError) {
+	if _, _, err := a.ExchangeCode(context.Background(), "code", "v", "c", "https://client.example/callback"); !errors.Is(err, ErrServerError) {
 		t.Fatalf("ExchangeCode on corrupt payload = %v; want ErrServerError", err)
 	}
 }
@@ -145,7 +145,7 @@ func TestFlowStoreUndecodablePayloadIsServerError(t *testing.T) {
 func TestFlowStoreKeepsCodeAndStateApart(t *testing.T) {
 	a, _, _ := twoReplicas(t)
 	ctx := context.Background()
-	code, err := a.IssueCode("u", "c", "https://client.example/callback", "ch", nil)
+	code, err := a.IssueCode(context.Background(), "u", "c", "https://client.example/callback", "ch", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

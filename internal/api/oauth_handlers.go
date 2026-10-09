@@ -255,7 +255,7 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		// The pending entry holds the redirect URI, so there is nowhere
 		// to send an OAuth error: answer here, and count it.
-		oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, "store_unavailable").Inc()
+		oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, "flow_store_unavailable").Inc()
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -291,7 +291,7 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 	groups := o.ResolveGroups(login)
 
 	// Issue a mctl authorization code.
-	mctlCode, err := o.IssueCode(login, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
+	mctlCode, err := o.IssueCode(r.Context(), login, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
 	if err != nil {
 		slog.Error("failed to issue auth code", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -351,7 +351,7 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			tokenError(w, "invalid_request", "code, code_verifier, client_id and redirect_uri are required")
 			return
 		}
-		accessToken, refreshToken, err = o.ExchangeCode(code, codeVerifier, clientID, redirectURI)
+		accessToken, refreshToken, err = o.ExchangeCode(r.Context(), code, codeVerifier, clientID, redirectURI)
 	case "refresh_token":
 		refreshGrant := r.FormValue("refresh_token")
 		if refreshGrant == "" || clientID == "" {
