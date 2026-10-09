@@ -26,9 +26,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/erpactsites"
+	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 )
 
 // fakeErpactDeployer is an ErpactDeployer test double. listErr/createErr let
@@ -705,6 +707,20 @@ func TestErpactListAndStatus_OwnerOrAdminOnly(t *testing.T) {
 				t.Fatalf("got %d, want %d: %s", w.Code, c.want, w.Body.String())
 			}
 		})
+		t.Run("status/"+c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-acme/status", nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("name", "erpact-acme")
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+			if c.user != nil {
+				req = withUser(req, c.user)
+			}
+			w := httptest.NewRecorder()
+			h.GetErpactSiteStatus(w, req)
+			if w.Code != c.want {
+				t.Fatalf("got %d, want %d: %s", w.Code, c.want, w.Body.String())
+			}
+		})
 	}
 }
 
@@ -721,6 +737,61 @@ func TestErpactListAndStatus_RoleReadFailureIsNotAPass(t *testing.T) {
 	}
 	if dep.listCalls != 0 {
 		t.Fatalf("deployer was queried despite an unreadable role")
+	}
+
+	req = withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-acme/status", nil), erpactOwner())
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("name", "erpact-acme")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w = httptest.NewRecorder()
+	h.GetErpactSiteStatus(w, req)
+	if w.Code != http.StatusServiceUnavailable || dep.listCalls != 0 {
+		t.Fatalf("status: got %d (deployer calls %d), want 503 and 0", w.Code, dep.listCalls)
+	}
+}
+
+// A GitHub-proven owner listed in the gitops members but without the erpact
+// group claim is refused by the REST gate (404), so the tool must not be
+// shown to them either.
+func TestIsTenantOwner_NoGroupNoVisibility(t *testing.T) {
+	h := erpactTestHandlers(&fakeErpactDeployer{}, erpactRoles())
+	noGroup := auth.NewGitHubUser("olga-owner", []string{"acme"})
+	if got, err := h.IsTenantOwner(context.Background(), noGroup, erpactTenant); got || err != nil {
+		t.Fatalf("got (%v, %v), want (false, nil)", got, err)
+	}
+}
+
+// Production wiring: the owner filter is installed by NewRouter on the MCP
+// server it mounts. Deleting that one line must fail this test.
+func TestNewRouter_MCPToolsListHidesErpactToolsFromNonOwners(t *testing.T) {
+	list := func(u *auth.User) string {
+		h := NewRouter(Options{
+			MCPServer: mctlmcp.NewServer("http://127.0.0.1:1", ""),
+			GitReader: erpactRoles(),
+			AuditLog:  audit.NewLogger(),
+			AuthMiddleware: func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), u)))
+				})
+			},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "mctl_whoami") {
+			t.Fatalf("tools/list: %d %.200s", w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+	if body := list(erpactOwner()); !strings.Contains(body, "mctl_erpact_list_sites") || !strings.Contains(body, "mctl_erpact_create_site") {
+		t.Fatalf("owner does not see the erpact tools")
+	}
+	for name, u := range map[string]*auth.User{"viewer": erpactViewer(), "outsider": nonErpactMember()} {
+		if body := list(u); strings.Contains(body, "mctl_erpact_") {
+			t.Fatalf("%s sees erpact tools through the real router", name)
+		}
 	}
 }
 

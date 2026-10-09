@@ -97,17 +97,17 @@
     {
       "name": "mctl_erpact_list_sites",
       "enabled": true,
-      "reason": "Lists tenant erpact's sites from its own site-deployer. Enabled on the shared portal by owner decision 2026-10-09: the portal switch is user-blind, so the mctl API's own authentication, tenant membership and owner-role checks are the access control -- the portal only decides visibility. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
+      "reason": "Lists tenant erpact's sites from its own site-deployer. Visible and callable only for tenant erpact's owners and platform admins: the MCP tools/list filter hides it from everyone else and the REST handler re-checks the owner role. Enabled on the portal by owner decision 2026-10-09. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
     },
     {
       "name": "mctl_erpact_create_site",
       "enabled": true,
-      "reason": "Creates a new site for tenant erpact via its site-deployer. Enabled on the shared portal by owner decision 2026-10-09: the portal switch is user-blind, so the mctl API's own authentication, tenant membership and owner-role checks are the access control -- the portal only decides visibility. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
+      "reason": "Creates a new site for tenant erpact via its site-deployer. Visible and callable only for tenant erpact's owners and platform admins: the MCP tools/list filter hides it from everyone else and the REST handler re-checks the owner role. Enabled on the portal by owner decision 2026-10-09. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
     },
     {
       "name": "mctl_erpact_site_status",
       "enabled": true,
-      "reason": "Reads one erpact site's creation status from its site-deployer. Enabled on the shared portal by owner decision 2026-10-09: the portal switch is user-blind, so the mctl API's own authentication, tenant membership and owner-role checks are the access control -- the portal only decides visibility. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
+      "reason": "Reads one erpact site's creation status from its site-deployer. Visible and callable only for tenant erpact's owners and platform admins: the MCP tools/list filter hides it from everyone else and the REST handler re-checks the owner role. Enabled on the portal by owner decision 2026-10-09. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
     },
     {
       "name": "mctl_get_agent",

@@ -186,6 +186,11 @@ func (h *Handlers) IsTenantOwner(_ context.Context, user *auth.User, tenant stri
 	if user == nil {
 		return false, nil
 	}
+	// Same precheck as requireErpactAccess, so visibility never outruns
+	// callability, and a non-member costs no gitops scan.
+	if !user.IsAdmin() && !user.HasTenantAccess(tenant) {
+		return false, nil
+	}
 	d := h.checkTenantRole(user, tenant, operations.RoleOwner, "tenant owner check")
 	switch {
 	case !d.refused():
