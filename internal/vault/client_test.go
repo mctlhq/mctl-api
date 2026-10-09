@@ -3,10 +3,12 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type recordingProvider struct {
@@ -206,5 +208,80 @@ func TestClient_Health_FailsSealed(t *testing.T) {
 	c := NewClient(srv.URL, "s.unused")
 	if err := c.Health(context.Background()); err == nil {
 		t.Fatal("expected sealed vault to fail health")
+	}
+}
+
+// A hung Vault must fail the probe within the client's own cap, not hang on
+// until the kubelet gives up.
+func TestClient_Health_HungServerFailsFast(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	c := NewClient(srv.URL, "s.unused")
+	c.health.Timeout = 100 * time.Millisecond
+
+	start := time.Now()
+	if err := c.Health(context.Background()); err == nil {
+		t.Fatal("expected a hung vault to fail health")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("probe took %v, want it bounded by the client timeout", d)
+	}
+	if healthTimeout >= 5*time.Second {
+		t.Fatalf("healthTimeout %v must stay below the kubelet's 5s probe timeout", healthTimeout)
+	}
+}
+
+// Every probe must dial its own connection. A pooled connection that has gone
+// bad (prod 2026-10-09) otherwise fails every later probe, and a cancelled
+// request does not evict it.
+func TestClient_Health_NeverReusesAConnection(t *testing.T) {
+	var conns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "s.unused")
+	for i := 0; i < 3; i++ {
+		if err := c.Health(context.Background()); err != nil {
+			t.Fatalf("probe %d: %v", i, err)
+		}
+	}
+	if got := conns.Load(); got != 3 {
+		t.Fatalf("3 probes used %d connections, want 3 (one each)", got)
+	}
+}
+
+// A probe that timed out must not affect the next one.
+func TestClient_Health_RecoversAfterHungProbe(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			<-release
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	c := NewClient(srv.URL, "s.unused")
+	c.health.Timeout = 100 * time.Millisecond
+	if err := c.Health(context.Background()); err == nil {
+		t.Fatal("first probe should time out")
+	}
+	if err := c.Health(context.Background()); err != nil {
+		t.Fatalf("second probe must succeed after a hung one: %v", err)
 	}
 }
