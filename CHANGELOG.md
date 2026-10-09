@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.69.2](https://github.com/mctlhq/mctl-api/compare/4.69.1...4.69.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* **erpact:** audit refused duplicates, dial timeout is not unknown ([242e32f](https://github.com/mctlhq/mctl-api/commit/242e32fd7408c1a05e8173ee20091f0fbf4a4378))
+* **erpact:** send the deployer the bare label, report a timed-out create as unknown ([93b15dd](https://github.com/mctlhq/mctl-api/commit/93b15dd7b121b0a7799c4a7dc100f8f76957f48b))
+* **erpact:** send the deployer the bare label, report a timed-out create as unknown ([c7ff729](https://github.com/mctlhq/mctl-api/commit/c7ff7290548ed3882b88c7e919fd559e747ad710))
+
 ## [4.69.1](https://github.com/mctlhq/mctl-api/compare/4.69.0...4.69.1) (2026-10-09)
 
 
