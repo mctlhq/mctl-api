@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -219,7 +220,7 @@ func TestZitadelSigninIssuesTheLinkedGitHubLoginsCode(t *testing.T) {
 		t.Fatalf("store looked up %+v, want %+v", store.calls, want)
 	}
 
-	access, _, err := h.oauth.ExchangeCode(loc.Query().Get("code"), testVerifier, "client", testClientRedirect)
+	access, _, err := h.oauth.ExchangeCode(context.Background(), loc.Query().Get("code"), testVerifier, "client", testClientRedirect)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +426,7 @@ func TestUpstreamStatesDoNotCross(t *testing.T) {
 	h := newUpstreamHarness(t, OAuthUpstreamBoth, linkedTo("mashkovd"))
 
 	// A GitHub authorization cannot be completed by a ZITADEL callback.
-	h.oauth.StorePendingAuth("gh-state|client-state", "client", testClientRedirect, testChallenge())
+	_ = h.oauth.StorePendingAuth(context.Background(), "gh-state|client-state", "client", testClientRedirect, testChallenge())
 	if rec := h.callback("gh-state|client-state"); rec.Code != http.StatusBadRequest || len(h.store.calls) != 0 {
 		t.Fatalf("ZITADEL callback on a GitHub state = %d, want 400", rec.Code)
 	}
@@ -449,7 +450,7 @@ func TestGitHubCallbackFollowsTheMode(t *testing.T) {
 		OAuthUpstreamBoth:    http.StatusBadGateway,
 	} {
 		h := newUpstreamHarness(t, mode, linkedTo("mashkovd"))
-		h.oauth.StorePendingAuth("gh-state|client-state", "client", testClientRedirect, testChallenge())
+		_ = h.oauth.StorePendingAuth(context.Background(), "gh-state|client-state", "client", testClientRedirect, testChallenge())
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		req := httptest.NewRequest(http.MethodGet, githubCallbackPath+"?code=gh-code&state=gh-state%7Cclient-state", nil).WithContext(ctx)
@@ -517,7 +518,7 @@ func TestZitadelCallbackFollowsTheMode(t *testing.T) {
 		h.idp.mu.Lock()
 		h.idp.challenge, h.idp.nonce = testChallenge(), "n1"
 		h.idp.mu.Unlock()
-		h.oauth.StorePendingOIDCAuth("z-state", auth.PendingOIDCAuth{
+		_ = h.oauth.StorePendingOIDCAuth(context.Background(), "z-state", auth.PendingOIDCAuth{
 			Upstream: auth.UpstreamZitadel, ClientID: "client", RedirectURI: testClientRedirect,
 			CodeChallenge: testChallenge(), ClientState: "client-state", Nonce: "n1", Verifier: testVerifier,
 		})
@@ -526,6 +527,57 @@ func TestZitadelCallbackFollowsTheMode(t *testing.T) {
 		}
 		if want == http.StatusBadRequest && len(store.calls) != 0 {
 			t.Errorf("mode %s: a refused callback reached the principal store", mode)
+		}
+	}
+}
+
+// ─── shared flow store failures ───────────────────────────────────────────
+
+// failingFlowStore is a flow store whose database is down.
+type failingFlowStore struct{}
+
+func (failingFlowStore) Put(context.Context, string, string, []byte, time.Duration) error {
+	return errors.New("db down")
+}
+
+func (failingFlowStore) Take(context.Context, string, string) ([]byte, bool, error) {
+	return nil, false, errors.New("db down")
+}
+
+func (failingFlowStore) GC(context.Context) error { return nil }
+
+// A store that cannot be written ends the authorize leg with an OAuth
+// server_error at the client, and one that cannot be read answers 500 on
+// the callback, never the 400 "invalid or expired state" of an unknown one.
+func TestFlowStoreFailureIsAServerErrorNotABadState(t *testing.T) {
+	for _, tc := range []struct {
+		mode     OAuthUpstreamMode
+		callback func(h *upstreamHarness) *httptest.ResponseRecorder
+	}{
+		{OAuthUpstreamGitHub, func(h *upstreamHarness) *httptest.ResponseRecorder {
+			return h.get(githubCallbackPath + "?code=gh-code&state=gh-state%7Cclient-state")
+		}},
+		{OAuthUpstreamZitadel, func(h *upstreamHarness) *httptest.ResponseRecorder {
+			return h.callback("z-state")
+		}},
+	} {
+		h := newUpstreamHarness(t, tc.mode, linkedTo("mashkovd"))
+		h.oauth.FlowStore = failingFlowStore{}
+
+		rec := h.get(authorizeQuery(""))
+		loc, _ := url.Parse(rec.Header().Get("Location"))
+		if rec.Code != http.StatusFound || loc == nil || !strings.HasPrefix(loc.String(), testClientRedirect) ||
+			loc.Query().Get("error") != "server_error" || loc.Query().Get("state") != "client-state" {
+			t.Errorf("mode %s: authorize = %d Location=%q, want a server_error redirect to the client", tc.mode, rec.Code, rec.Header().Get("Location"))
+		}
+
+		counter := oauthUpstreamSignins.WithLabelValues(string(tc.mode), "flow_store_unavailable")
+		before := testutil.ToFloat64(counter)
+		if rec := tc.callback(h); rec.Code != http.StatusInternalServerError {
+			t.Errorf("mode %s: callback = %d %s, want 500", tc.mode, rec.Code, rec.Body.String())
+		}
+		if got := testutil.ToFloat64(counter) - before; got != 1 {
+			t.Errorf("mode %s: flow_store_unavailable += %v, want 1", tc.mode, got)
 		}
 	}
 }

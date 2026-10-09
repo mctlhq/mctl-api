@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"testing"
@@ -19,7 +20,7 @@ func TestOAuthServerExchangeCodeReturnsRefreshToken(t *testing.T) {
 	server.AccessTokenTTL = time.Hour
 	server.RefreshTokenTTL = 24 * time.Hour
 
-	code, err := server.IssueCode(
+	code, err := server.IssueCode(context.Background(),
 		"dmitrii",
 		"client-1",
 		"https://client.example/callback",
@@ -30,7 +31,7 @@ func TestOAuthServerExchangeCodeReturnsRefreshToken(t *testing.T) {
 		t.Fatalf("IssueCode failed: %v", err)
 	}
 
-	accessToken, refreshToken, err := server.ExchangeCode(
+	accessToken, refreshToken, err := server.ExchangeCode(context.Background(),
 		code,
 		"verifier-1",
 		"client-1",

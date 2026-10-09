@@ -194,7 +194,12 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	combinedState := ghState + "|" + state
 
 	// Persist all pending auth details keyed by combined state.
-	o.StorePendingAuth(combinedState, clientID, redirectURI, codeChallenge)
+	if err := o.StorePendingAuth(r.Context(), combinedState, clientID, redirectURI, codeChallenge); err != nil {
+		// redirect_uri is allowlisted by now, so the client hears about it
+		// as an OAuth error instead of waiting on a callback.
+		oauthError(w, redirectURI, state, "server_error", "the authorization could not be started; try again")
+		return
+	}
 
 	// Build GitHub OAuth authorization URL.
 	ghAuthURL := url.URL{
@@ -246,7 +251,14 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 
 	// Recover pending auth from state. Only an authorization started for
 	// GitHub, while GitHub is an allowed upstream, completes here.
-	pending, ok := o.LoadPendingAuth(combinedState)
+	pending, ok, err := o.LoadPendingAuth(r.Context(), combinedState)
+	if err != nil {
+		// The pending entry holds the redirect URI, so there is nowhere
+		// to send an OAuth error: answer here, and count it.
+		oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, "flow_store_unavailable").Inc()
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	if !ok || pending.Upstream != auth.UpstreamGitHub || !h.opts.OAuthUpstream.allows(auth.UpstreamGitHub) {
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
 		return
@@ -279,7 +291,7 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 	groups := o.ResolveGroups(login)
 
 	// Issue a mctl authorization code.
-	mctlCode, err := o.IssueCode(login, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
+	mctlCode, err := o.IssueCode(r.Context(), login, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
 	if err != nil {
 		slog.Error("failed to issue auth code", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -339,7 +351,7 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			tokenError(w, "invalid_request", "code, code_verifier, client_id and redirect_uri are required")
 			return
 		}
-		accessToken, refreshToken, err = o.ExchangeCode(code, codeVerifier, clientID, redirectURI)
+		accessToken, refreshToken, err = o.ExchangeCode(r.Context(), code, codeVerifier, clientID, redirectURI)
 	case "refresh_token":
 		refreshGrant := r.FormValue("refresh_token")
 		if refreshGrant == "" || clientID == "" {

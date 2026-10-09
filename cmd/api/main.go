@@ -38,6 +38,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
+	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/delegation"
@@ -240,6 +241,30 @@ func main() {
 						if err := oauthServer.GCPersistedClients(); err != nil {
 							slog.Warn("oauth client store gc failed", "error", err)
 						}
+					}
+				}()
+			}
+			// Pending authorizations and authorization codes, same database.
+			// Shared across replicas: authorize, the upstream callback and
+			// the token exchange may each reach a different pod.
+			fs, fsErr := initStore(initCtx, storeFailures, "oauth flow", func(ctx context.Context) (*flowstore.PostgresStore, error) {
+				return flowstore.NewPostgresStore(ctx, oauthDBURL)
+			})
+			if fsErr != nil {
+				// As above: recorded in storeFailures, so the pod stays
+				// not-ready rather than serving on per-pod memory.
+				slog.Error("oauth flow store init failed; pod will report not-ready (GET /readyz 503) until restarted", "error", fsErr)
+			} else {
+				oauthServer.FlowStore = fs
+				go func() {
+					ticker := time.NewTicker(5 * time.Minute)
+					defer ticker.Stop()
+					for range ticker.C {
+						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						if err := fs.GC(ctx); err != nil {
+							slog.Warn("oauth flow store gc failed", "error", err)
+						}
+						cancel()
 					}
 				}()
 			}
