@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.71.2](https://github.com/mctlhq/mctl-api/compare/4.71.1...4.71.2) (2026-10-09)
+
+
+### Performance Improvements
+
+* **mcp:** snapshot tool count for the owner-only filter ([437167d](https://github.com/mctlhq/mctl-api/commit/437167d8e40985b6346ecc7ab2db48487dec2803))
+* **mcp:** snapshot tool count for the owner-only filter ([ca80fa4](https://github.com/mctlhq/mctl-api/commit/ca80fa48ff42a2970851607f885a74caac7b349e)), closes [#513](https://github.com/mctlhq/mctl-api/issues/513)
+
 ## [4.71.1](https://github.com/mctlhq/mctl-api/compare/4.71.0...4.71.1) (2026-10-09)
 
 
