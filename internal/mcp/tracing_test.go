@@ -114,9 +114,11 @@ func TestTracingTransportInjectsTraceparent(t *testing.T) {
 		return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
 	})}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://localhost/x?secret=1", nil)
-	if _, err := tr.RoundTrip(req); err != nil {
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
 		t.Fatal(err)
 	}
+	_ = resp.Body.Close()
 	if got == "" {
 		t.Fatal("traceparent not injected")
 	}

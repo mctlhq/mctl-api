@@ -31,7 +31,12 @@ func tracingMiddleware() func(http.Handler) http.Handler {
 				return true
 			}),
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
-				return r.Method + " " + "request"
+				// otelhttp re-invokes the formatter after the handler when
+				// r.Pattern is set; keep the route pattern in that case.
+				if r.Pattern != "" {
+					return r.Method + " " + r.Pattern
+				}
+				return r.Method + " request"
 			}),
 		)
 	}
