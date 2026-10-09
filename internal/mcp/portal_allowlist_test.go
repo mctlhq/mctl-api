@@ -48,9 +48,13 @@ const minReasonLen = 40
 // whole reason against the floor would accept a future entry that is
 // boilerplate and nothing else. A literal date here once let the erpact
 // entries, which restate the sentence with a later date, count it as
-// tool-specific text.
+// tool-specific text. The optional last group swallows the shared
+// continuation (": the portal switch is user-blind, so ... visibility.") up to
+// its sentence end, so the full shared boilerplate cannot clear the floor
+// either; it needs the leading colon, so a tail like ". Provisional Option A
+// stopgap" still counts as specific.
 var provenanceSentence = regexp.MustCompile(
-	`Enabled on the (?:shared )?portal by owner decision \d{4}-\d{2}-\d{2}(?: \(mctlhq/\.github#\d+\))?`)
+	`Enabled on the (?:shared )?portal by owner decision \d{4}-\d{2}-\d{2}(?: \(mctlhq/\.github#\d+\))?(?::[^.]*user-blind[^.]*\.?)?`)
 
 // specificReason is what is left of a reason after removing the provenance
 // sentence: the part that says what THIS tool exposes or changes.
@@ -66,6 +70,8 @@ func TestSpecificReason_ProvenanceBoilerplateDoesNotCount(t *testing.T) {
 		{"shared, other date, issue ref", "Enabled on the shared portal by owner decision 2026-11-30 (mctlhq/.github#99)", false},
 		{"unshared wording, other date", "Enabled on the portal by owner decision 2026-10-09", false},
 		{"original date", "Enabled on the shared portal by owner decision 2026-09-12", false},
+		{"full shared sentence verbatim", "Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility.", false},
+		{"full shared sentence, work-item variant", "Enabled on the shared portal by owner decision 2026-10-04: the portal switch is user-blind, so the mctl API's tenant check on the caller's own token (canSeeWorkItem) is the access control; an item outside the caller's tenants answers 404 like an unknown id.", false},
 		{"boilerplate twice", "Enabled on the portal by owner decision 2026-10-09. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#1)", false},
 		{"specific text plus boilerplate", "Lists tenant erpact's sites from its own site-deployer, owners only. Enabled on the portal by owner decision 2026-10-09", true},
 		{"specific text only", "Reads one item and returns its public fields only, nothing about other tenants", true},

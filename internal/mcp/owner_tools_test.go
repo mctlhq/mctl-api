@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -180,4 +182,26 @@ func TestToolsCall_RoleLookupErrorIsNotReportedAsNotFound(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A decided owner must get through the middleware to the tool handler: the
+// refusal tests alone would stay green if the gate dropped owners too.
+func TestToolsCall_OwnerReachesHandler(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/tenants/erpact/sites" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"sites":["erpact-acme"]}`))
+	}))
+	defer backend.Close()
+
+	s := NewServer(backend.URL, "")
+	s.SetTenantOwnerChecker(fakeOwnerChecker{owners: map[string]bool{"olga-owner": true}})
+	ctx := auth.WithUser(context.Background(), auth.NewGitHubUser("olga-owner", []string{"erpact"}))
+
+	got := callErpactTool(t, s, ctx)
+	if !strings.Contains(got, "erpact-acme") || strings.Contains(got, `"isError":true`) || strings.Contains(got, `"error"`) {
+		t.Fatalf("owner call did not reach the handler: %.300s", got)
+	}
 }

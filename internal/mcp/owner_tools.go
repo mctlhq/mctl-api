@@ -63,7 +63,9 @@ var ownerOnlyTools = map[string]string{
 // token is used and there is no per-caller identity) nothing is filtered:
 // the API enforces the role when the tool is called. Where a checker is set
 // (the HTTP server) it fails closed: no caller or a failed lookup hides the
-// tools. The role is resolved at most once per tenant per call.
+// tools. On tools/list the role is resolved at most once per tenant. On
+// tools/call it is read twice (here, then in ownerOnlyCallMiddleware), and a
+// third time by the REST handler's own owner gate behind the tool.
 //
 // mcp-go applies this filter to tools/list (the whole tool list) and again
 // to tools/call (a one-element slice holding only the called tool). A failed
@@ -78,7 +80,10 @@ func (s *Server) ownerOnlyToolFilter(ctx context.Context, tools []mcp.Tool) []mc
 	}
 	checker := *cp
 	user := auth.UserFromContext(ctx)
-	isCall := len(tools) == 1
+	// tools/list passes every registered tool; tools/call passes only the
+	// called one. Derived from the registry rather than a literal 1, so a
+	// registry that shrinks to one tool cannot make a list look like a call.
+	isCall := len(tools) < len(s.mcpServer.ListTools())
 	verdict := map[string]bool{}
 	allowed := func(tool, tenant string) bool {
 		if v, done := verdict[tenant]; done {
@@ -113,7 +118,10 @@ func (s *Server) ownerOnlyToolFilter(ctx context.Context, tools []mcp.Tool) []mc
 // re-checks the role, so an unreadable role answers "could not verify" rather
 // than "tool not found". A decided non-owner never gets here, the filter has
 // already refused it; if the second lookup now decides "no", it is refused
-// the same way.
+// the same way. Those refusals are therefore only reachable when the checker
+// or the verdict changes between the two reads; they are not the primary
+// non-owner refusal. As handler errors they carry the INTERNAL_ERROR code,
+// not the library's INVALID_PARAMS; only the filter path produces the latter.
 func (s *Server) ownerOnlyCallMiddleware(next server.ToolHandlerFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		tenant, restricted := ownerOnlyTools[req.Params.Name]
