@@ -266,10 +266,9 @@ Surface-local (the adapter owns it, mctl-api never stores it):
 
 Enforcement: intent text is capped at 8 KiB and is required to pass through
 `secretscan.Scan` (`internal/secretscan/secretscan.go`) before insert — the
-same gate `handlers_openclaw.go`, `handlers_openclaw_identity.go` and
-`handlers_platform_skills.go` already apply to other free-text input — so a
-request with a matching secret pattern is rejected with HTTP 400 and never
-persisted. This is what keeps the contract from quietly becoming a
+same gate `handlers_platform_skills.go` already applies to other free-text
+input — so a request with a matching secret pattern is rejected with HTTP 400
+and never persisted. This is what keeps the contract from quietly becoming a
 transcript sink.
 
 ## Identity and authorization
@@ -297,11 +296,9 @@ transcript sink.
   tenant (`user.HasTenantAccess`).
 - A surface-native identity (a Telegram user ID, an MCP client ID) resolves
   to a principal only through an explicit `SurfaceIdentityLink` created by
-  an authenticated call from that principal. A deployment allowlist such as
-  `telegram_owner_ids` (`internal/api/handlers_openclaw.go`,
-  `parseTelegramOwnerIDs`) remains exactly what it is today — an allowlist
-  for who mctl-managed OpenClaw responds to — and is never treated as proof
-  of identity for work-item attribution.
+  an authenticated call from that principal. A deployment allowlist of
+  surface-native IDs (who a bot responds to) is never treated as proof of
+  identity for work-item attribution.
 - The service principal (`auth.User.IsService()`) may attach executions,
   snapshots and approval requests, but is forbidden from recording an
   approval *decision* on a human's behalf.

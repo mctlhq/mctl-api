@@ -61,7 +61,6 @@ import (
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/vault"
-	"github.com/mctlhq/mctl-api/internal/vmetrics"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -800,34 +799,17 @@ func main() {
 
 	// ERPact site tools (mctl-api#486): off unless the deployer token can be
 	// read from Vault. The token lives at Vault path teams/erpact/deployer
-	// (property DEPLOYER_API_TOKEN), read directly through vaultReader --
-	// the same pattern handlers_openclaw.go uses for a tenant's Telegram bot
-	// token -- rather than through an ExternalSecret into an env var. The
+	// (property DEPLOYER_API_TOKEN), read directly through vaultReader
+	// rather than through an ExternalSecret into an env var. The
 	// cluster-wide vault-backend ClusterSecretStore (which mctl-api-secrets
 	// uses for every other env-var secret) is deliberately denied all of
 	// secret/data/teams/* (see mctl-gitops
 	// vault-policy-external-secrets-read.hcl): any tenant path readable
 	// there would be readable by every other tenant's namespace too.
 	// Reading it here instead needs only a narrow Vault policy on the
-	// mctl-api Kubernetes auth role for this one path, mirroring
-	// vault-policy-mctl-api-openclaw-read.hcl.
+	// mctl-api Kubernetes auth role for this one path
+	// (vault-policy-mctl-api-erpact-deployer-read.hcl).
 	erpactDeployer := newErpactDeployer(vaultReader, cfg.ErpactDeployerURL)
-
-	// VictoriaMetrics client (optional — used for OpenClaw sizing recommendations).
-	var metricsQuerier mctlapi.MetricsQuerier
-	if cfg.VictoriaMetricsURL != "" {
-		metricsQuerier = vmetrics.NewClient(cfg.VictoriaMetricsURL)
-		slog.Info("victoriametrics client enabled", "url", cfg.VictoriaMetricsURL)
-	}
-
-	openClawQuota := mctlapi.OpenClawQuotaConfig{
-		MaxPerSkillBytes:          parseIntEnv("OPENCLAW_SKILLS_MAX_PER_SKILL_BYTES", 0),
-		MaxSkillsPerTenant:        parseIntEnv("OPENCLAW_SKILLS_MAX_PER_TENANT", 0),
-		MaxSkillsTotalBytes:       parseIntEnv("OPENCLAW_SKILLS_MAX_TOTAL_BYTES", 0),
-		MaxIdentityFilesPerTenant: parseIntEnv("OPENCLAW_IDENTITY_MAX_PER_TENANT", 0),
-		MaxIdentityTotalBytes:     parseIntEnv("OPENCLAW_IDENTITY_MAX_TOTAL_BYTES", 0),
-		SaveRatePerHour:           parseIntEnv("OPENCLAW_SKILLS_SAVE_RATE_PER_HOUR", 0),
-	}
 
 	gitopsReady := func(ctx context.Context) error {
 		if gitReader.LastSync().IsZero() {
@@ -870,9 +852,6 @@ func main() {
 		QuotaReader:                    quotaReader,
 		LogQuerier:                     logQuerier,
 		WorkflowLogArchive:             workflowLogArchive,
-		VaultReader:                    vaultReader,
-		MetricsQuerier:                 metricsQuerier,
-		OpenClaw:                       openClawQuota,
 		BackstageURL:                   cfg.BackstageURL,
 		BackstageToken:                 cfg.BackstageToken,
 		BackstageInternalURL:           cfg.BackstageInternalURL,
@@ -1143,7 +1122,6 @@ type config struct {
 	VaultToken                   string
 	VaultKubernetesRole          string
 	VaultKubernetesAuthPath      string
-	VictoriaMetricsURL           string
 	ArgoWebhookSecret            string
 	GitHubWebhookSecret          string
 	GitHubWebhookOwners          []string
@@ -1245,7 +1223,6 @@ func loadConfig() config {
 		VaultToken:                     os.Getenv("VAULT_TOKEN"),
 		VaultKubernetesRole:            os.Getenv("VAULT_KUBERNETES_ROLE"),
 		VaultKubernetesAuthPath:        os.Getenv("VAULT_KUBERNETES_AUTH_PATH"),
-		VictoriaMetricsURL:             envOr("VICTORIA_METRICS_URL", "http://vmsingle-monitoring-victoria-metrics-k8s-stack.monitoring.svc:8428"),
 		ArgoWebhookSecret:              os.Getenv("ARGO_WEBHOOK_SECRET"),
 		GitHubWebhookSecret:            os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		GitHubWebhookOwners:            splitCSV(envOr("GITHUB_WEBHOOK_OWNERS", "mctlhq")),
@@ -1661,21 +1638,6 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
-}
-
-// parseIntEnv reads a positive integer from the given env var. Returns the
-// fallback when the var is unset, empty, non-numeric, or non-positive; zero
-// means "use package default" downstream.
-func parseIntEnv(key string, fallback int) int {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return fallback
-	}
-	return n
 }
 
 // preregisteredClient is one entry of OAUTH_PREREGISTERED_CLIENTS.

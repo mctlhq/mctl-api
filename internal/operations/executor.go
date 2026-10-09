@@ -77,9 +77,6 @@ func NewExecutor() *Executor {
 // Most workflows execute in the tenant's namespace where team-scoped secrets live.
 // Tenant lifecycle operations (create/delete) run in argo-workflows namespace
 // because the tenant namespace may not exist yet (create) or is being removed (delete).
-// OpenClaw skill and identity workflows (save/delete) also run in argo-workflows:
-// they only need the gitops deploy key secret (cluster-wide) and would otherwise
-// contend with the tenant's running OpenClaw pod for its CPU quota.
 // mctl-agents-run is platform-scoped and lives in argo-workflows ns where its
 // secrets (mctl-agents-secrets, ghcr-credentials, mctl-gitops-deploy-key) are.
 // mctl-agents-implement (Tier 2) shares the same secrets and runs in the same ns.
@@ -98,8 +95,6 @@ func WorkflowNamespace(workflowTemplate, team string) string {
 		// workflows only mount platform-level secrets (deploy key,
 		// backstage-workflow-token) that live in argo-workflows.
 		"add-custom-domain", "remove-custom-domain",
-		"openclaw-skill-save", "openclaw-skill-delete",
-		"openclaw-identity-save", "openclaw-identity-delete",
 		"platform-skill-publish", "platform-skill-deprecate",
 		"platform-skill-enable", "platform-skill-disable",
 		"mctl-agents-run",

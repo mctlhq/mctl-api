@@ -21,12 +21,6 @@ var wantMinRole = map[string]Role{
 	"retire-service":       RoleOwner,
 	"delete-tenant":        RoleOwner,
 
-	// HandlerOnly: reachable only through handlers that require the owner.
-	"openclaw-skill-save":      RoleOwner,
-	"openclaw-skill-delete":    RoleOwner,
-	"openclaw-identity-save":   RoleOwner,
-	"openclaw-identity-delete": RoleOwner,
-
 	// No tenant yet.
 	"create-tenant": RoleAuthenticated,
 

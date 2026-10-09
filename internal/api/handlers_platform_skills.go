@@ -379,8 +379,9 @@ func (h *Handlers) validateTenantSkillEnable(tenant string, skill gitops.Platfor
 		return fmt.Errorf("skill %q is denied for tenant %q by policy", skill.Metadata.Name, tenant)
 	}
 	// An absent tenant key means unrestricted; a present key — even an empty
-	// list — is an exhaustive allowlist (deny-all when empty). Must match the
-	// materializer semantics in mctl-gitops/scripts/materialize-openclaw-platform-skills.py.
+	// list — is an exhaustive allowlist (deny-all when empty). These are the
+	// semantics the OpenClaw skills materializer in mctl-gitops applied; keep
+	// them for any future consumer of the policy.
 	if allowed, ok := policy.TenantAllowlist[tenant]; ok && !containsString(allowed, skill.Metadata.Name) {
 		return fmt.Errorf("skill %q is not allowed for tenant %q by policy", skill.Metadata.Name, tenant)
 	}

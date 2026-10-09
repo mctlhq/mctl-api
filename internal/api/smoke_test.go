@@ -49,8 +49,6 @@ type fakeGitReader struct {
 	listServicesErr        error
 	tenants                []gitops.Tenant
 	services               []gitops.Service
-	skills                 map[string]map[string]string // team -> name -> content
-	identity               map[string]map[string]string // team -> fileName -> content
 	platformSkills         []gitops.PlatformSkill
 	platformSkillContent   map[string]string
 	platformTenantBindings []gitops.PlatformSkillBinding
@@ -135,36 +133,6 @@ func (f *fakeGitReader) GetService(team, app string) (*gitops.Service, error) {
 		}
 	}
 	return nil, fmt.Errorf("service not found: %s/%s", team, app)
-}
-func (f *fakeGitReader) ListOpenClawSkills(team string) ([]gitops.OpenClawSkill, error) {
-	out := make([]gitops.OpenClawSkill, 0)
-	for name, content := range f.skills[team] {
-		out = append(out, gitops.OpenClawSkill{Name: name, Size: int64(len(content))})
-	}
-	return out, nil
-}
-func (f *fakeGitReader) ReadOpenClawSkill(team, name string) (string, error) {
-	if byName, ok := f.skills[team]; ok {
-		if content, ok := byName[name]; ok {
-			return content, nil
-		}
-	}
-	return "", fs.ErrNotExist
-}
-func (f *fakeGitReader) ListOpenClawIdentity(team string) ([]gitops.OpenClawIdentityFile, error) {
-	out := make([]gitops.OpenClawIdentityFile, 0)
-	for name, content := range f.identity[team] {
-		out = append(out, gitops.OpenClawIdentityFile{Name: name, Size: int64(len(content))})
-	}
-	return out, nil
-}
-func (f *fakeGitReader) ReadOpenClawIdentity(team, fileName string) (string, error) {
-	if byName, ok := f.identity[team]; ok {
-		if content, ok := byName[fileName]; ok {
-			return content, nil
-		}
-	}
-	return "", fs.ErrNotExist
 }
 func (f *fakeGitReader) ListPlatformSkills() ([]gitops.PlatformSkill, error) {
 	return f.platformSkills, nil
@@ -256,22 +224,6 @@ func (f *fakeExecutor) ListCronAgentRuns(_ context.Context, _, _ string, _ time.
 	return f.cronAgentRuns, nil
 }
 
-type fakeVaultReader struct {
-	paths map[string]map[string]string
-}
-
-func (f *fakeVaultReader) ReadKV(_ context.Context, path string) (map[string]string, error) {
-	return f.paths[path], nil
-}
-
-type fakeMetricsQuerier struct {
-	stats mctlapi.ContainerUsageStats
-}
-
-func (f *fakeMetricsQuerier) GetContainerUsage(_ context.Context, namespace, app, container string, lookback time.Duration) (mctlapi.ContainerUsageStats, error) {
-	return f.stats, nil
-}
-
 // ── test fixtures ─────────────────────────────────────────────────────────────
 
 func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
@@ -289,11 +241,11 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 		services: []gitops.Service{
 			{Team: "admins", Name: "mctl-web", ImageTag: "2.1.0", ComponentType: "base-service"},
 			{Team: "tests", Name: "my-app", ImageTag: "1.0.0", ComponentType: "base-service"},
-			{Team: "tests", Name: "openclaw", ImageTag: "2026.3.22-beta.2", ComponentType: "base-service"},
+			{Team: "tests", Name: "my-worker", ImageTag: "2.0.0", ComponentType: "base-service"},
 		},
 		platformSkills: []gitops.PlatformSkill{
 			{Metadata: gitops.PlatformSkillMetadata{Name: "public-skill", Title: "Public Skill", Description: "Visible to all users", Visibility: "public", Status: "active", Owner: "platform", Runtimes: []string{"mcp"}}},
-			{Metadata: gitops.PlatformSkillMetadata{Name: "tenant-skill", Title: "Tenant Skill", Description: "Tenant-bound skill", Visibility: "tenant", Status: "active", Owner: "platform", Runtimes: []string{"mcp", "openclaw"}}},
+			{Metadata: gitops.PlatformSkillMetadata{Name: "tenant-skill", Title: "Tenant Skill", Description: "Tenant-bound skill", Visibility: "tenant", Status: "active", Owner: "platform", Runtimes: []string{"mcp", "codex"}}},
 			{Metadata: gitops.PlatformSkillMetadata{Name: "admin-skill", Title: "Admin Skill", Description: "Admin-only skill", Visibility: "admin", Status: "active", Owner: "platform", Runtimes: []string{"codex"}}},
 			{Metadata: gitops.PlatformSkillMetadata{Name: "draft-skill", Title: "Draft Skill", Description: "Draft skill", Visibility: "tenant", Status: "draft", Owner: "platform", Runtimes: []string{"mcp"}}},
 			{Metadata: gitops.PlatformSkillMetadata{Name: "internal-skill", Title: "Internal Skill", Description: "Platform internal skill", Visibility: "platform-internal", Status: "active", Owner: "platform", Runtimes: []string{"mcp"}}},
@@ -317,21 +269,11 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 	exec := &fakeExecutor{}
 
 	router := mctlapi.NewRouter(mctlapi.Options{
-		Registry:  operations.NewRegistry(),
-		GitReader: gitReader,
-		ArgoCD:    argoClient,
-		AuditLog:  audit.NewLogger(),
-		Executor:  exec,
-		VaultReader: &fakeVaultReader{paths: map[string]map[string]string{
-			"teams/tests/openclaw/telegram": {"telegram-bot-token": "secret"},
-		}},
-		MetricsQuerier: &fakeMetricsQuerier{stats: mctlapi.ContainerUsageStats{
-			MemoryMaxBytes: 2.6 * 1024 * 1024 * 1024,
-			MemoryP95Bytes: 1.8 * 1024 * 1024 * 1024,
-			CPUMaxCores:    1.3,
-			CPUP95Cores:    0.8,
-			SampleCount:    12,
-		}},
+		Registry:     operations.NewRegistry(),
+		GitReader:    gitReader,
+		ArgoCD:       argoClient,
+		AuditLog:     audit.NewLogger(),
+		Executor:     exec,
 		BackstageURL: "https://app.mctl.ai",
 	})
 	return router, exec
@@ -454,78 +396,6 @@ func TestSmoke_Operations(t *testing.T) {
 	t.Run("get unknown operation returns 404", func(t *testing.T) {
 		w := get(t, router, "/api/v1/operations/does-not-exist")
 		assertStatus(t, w, http.StatusNotFound)
-	})
-}
-
-func TestSmoke_OpenClawFlows(t *testing.T) {
-	router, exec := newTestRouter(t)
-
-	t.Run("start returns secure intake url", func(t *testing.T) {
-		w := postAs(t, router, "/api/v1/openclaw/deploy/start", map[string]string{
-			"team_name":         "tests",
-			"component_name":    "openclaw-new",
-			"telegram_owner_id": "12345",
-		}, ownerUser)
-		assertStatus(t, w, http.StatusOK)
-		body := decodeJSON(t, w)
-		if !strings.Contains(fmt.Sprint(body["botTokenIntakeURL"]), "/api/vault-secrets/openclaw/intake") {
-			t.Fatalf("expected intake URL, got: %v", body["botTokenIntakeURL"])
-		}
-	})
-
-	t.Run("resume submits database and deploy workflows", func(t *testing.T) {
-		w := postAs(t, router, "/api/v1/openclaw/deploy/resume", map[string]string{
-			"team_name":         "tests",
-			"component_name":    "openclaw",
-			"telegram_owner_id": "12345",
-		}, adminUser)
-		assertStatus(t, w, http.StatusAccepted)
-		if len(exec.submitted) < 2 || exec.submitted[len(exec.submitted)-2] != "provision-database" || exec.submitted[len(exec.submitted)-1] != "deploy-service" {
-			t.Fatalf("expected provision-database then deploy-service submission, got %v", exec.submitted)
-		}
-		deployParams := exec.submittedParams[len(exec.submittedParams)-1]
-		if deployParams["dockerfile_repo"] != "mctlhq/mctl-openclaw" {
-			t.Fatalf("expected deploy-service dockerfile_repo=mctlhq/mctl-openclaw, got %q", deployParams["dockerfile_repo"])
-		}
-		if deployParams["service_template"] != "openclaw" {
-			t.Fatalf("expected deploy-service service_template=openclaw, got %q", deployParams["service_template"])
-		}
-		if deployParams["telegram_owner_ids_json"] != `["12345"]` {
-			t.Fatalf("expected legacy single ID wrapped as JSON array, got %q", deployParams["telegram_owner_ids_json"])
-		}
-	})
-
-	t.Run("resume with multi-owner list emits JSON array", func(t *testing.T) {
-		w := postAs(t, router, "/api/v1/openclaw/deploy/resume", map[string]string{
-			"team_name":          "tests",
-			"component_name":     "openclaw",
-			"telegram_owner_ids": "210408407,317748297",
-		}, adminUser)
-		assertStatus(t, w, http.StatusAccepted)
-		deployParams := exec.submittedParams[len(exec.submittedParams)-1]
-		if deployParams["telegram_owner_ids_json"] != `["210408407","317748297"]` {
-			t.Fatalf("expected multi-owner JSON array, got %q", deployParams["telegram_owner_ids_json"])
-		}
-		if deployParams["telegram_owner_id"] != "210408407" {
-			t.Fatalf("expected legacy single-id param to be first of list, got %q", deployParams["telegram_owner_id"])
-		}
-	})
-
-	t.Run("resume rejects empty owner list", func(t *testing.T) {
-		w := postAs(t, router, "/api/v1/openclaw/deploy/resume", map[string]string{
-			"team_name":      "tests",
-			"component_name": "openclaw",
-		}, adminUser)
-		assertStatus(t, w, http.StatusBadRequest)
-	})
-
-	t.Run("sizing recommendation maps to startup", func(t *testing.T) {
-		w := getAs(t, router, "/api/v1/openclaw/tests/openclaw/sizing?lookback_hours=24", adminUser)
-		assertStatus(t, w, http.StatusOK)
-		body := decodeJSON(t, w)
-		if body["profile"] != "startup" {
-			t.Fatalf("expected startup profile, got %v", body["profile"])
-		}
 	})
 }
 
@@ -742,16 +612,12 @@ func TestSmoke_ExecuteOperation(t *testing.T) {
 		assertStatus(t, w, http.StatusNotFound)
 	})
 
-	// HandlerOnly-flagged operations (openclaw skill/identity save + delete)
+	// HandlerOnly-flagged operations (platform-skill publish/deprecate/enable/disable)
 	// must NOT be reachable via the generic execute path — the dedicated
 	// REST handlers enforce owner-gate / quota / secret-scan / rate-limit
 	// checks the generic path does not.
 	t.Run("HandlerOnly operation rejected via generic execute", func(t *testing.T) {
 		for _, op := range []string{
-			"openclaw-skill-save",
-			"openclaw-skill-delete",
-			"openclaw-identity-save",
-			"openclaw-identity-delete",
 			"platform-skill-publish",
 			"platform-skill-deprecate",
 			"platform-skill-enable",
