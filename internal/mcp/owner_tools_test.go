@@ -27,9 +27,13 @@ import (
 type fakeOwnerChecker struct {
 	owners map[string]bool
 	err    error
+	calls  *int
 }
 
-func (f fakeOwnerChecker) IsTenantOwner(u *auth.User, tenant string) (bool, error) {
+func (f fakeOwnerChecker) IsTenantOwner(_ context.Context, u *auth.User, tenant string) (bool, error) {
+	if f.calls != nil {
+		*f.calls++
+	}
 	if f.err != nil {
 		// (true, err) on purpose: the filter must hide on the error alone.
 		return true, f.err
@@ -84,7 +88,8 @@ func TestToolsList_ErpactToolsOwnerOnly(t *testing.T) {
 		{"outsider", outsider, checker, false},
 		{"anonymous", nil, checker, false},
 		{"lookup-error", owner, fakeOwnerChecker{err: errors.New("gitops unreadable")}, false},
-		{"nil-checker", owner, nil, false},
+		// No checker (stdio): not filtered, the API enforces at call time.
+		{"no-checker-stdio", owner, nil, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -121,5 +126,17 @@ func TestToolsCall_HiddenErpactToolIsRefused(t *testing.T) {
 	b, _ := json.Marshal(resp)
 	if !strings.Contains(string(b), `"error"`) || !strings.Contains(string(b), "not found") {
 		t.Fatalf("tools/call on a hidden tool was not refused: %.300s", b)
+	}
+}
+
+// One role lookup per tools/list, not one per restricted tool.
+func TestToolsList_OneLookupPerList(t *testing.T) {
+	n := 0
+	s := NewServer("http://localhost:8080", "")
+	s.SetTenantOwnerChecker(fakeOwnerChecker{owners: map[string]bool{"olga-owner": true}, calls: &n})
+	ctx := auth.WithUser(context.Background(), auth.NewGitHubUser("olga-owner", []string{"erpact"}))
+	names := listToolNames(t, s, ctx)
+	if !names["mctl_erpact_list_sites"] || n != 1 {
+		t.Fatalf("visible=%v lookups=%d, want visible with exactly 1 lookup", names["mctl_erpact_list_sites"], n)
 	}
 }

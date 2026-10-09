@@ -740,14 +740,14 @@ func TestIsTenantOwner(t *testing.T) {
 		{"nil", nil, false},
 	}
 	for _, c := range cases {
-		got, err := h.IsTenantOwner(c.user, erpactTenant)
+		got, err := h.IsTenantOwner(context.Background(), c.user, erpactTenant)
 		if err != nil || got != c.want {
 			t.Errorf("%s: got (%v, %v), want (%v, nil)", c.name, got, err, c.want)
 		}
 	}
 
 	noReader := &Handlers{opts: Options{}}
-	if got, err := noReader.IsTenantOwner(erpactOwner(), erpactTenant); got || err == nil {
+	if got, err := noReader.IsTenantOwner(context.Background(), erpactOwner(), erpactTenant); got || err == nil {
 		t.Errorf("unreadable role: got (%v, %v), want (false, error)", got, err)
 	}
 }

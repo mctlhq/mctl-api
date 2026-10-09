@@ -15,6 +15,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -181,7 +182,7 @@ func (h *Handlers) requireErpactOwner(w http.ResponseWriter, r *http.Request, op
 // owner-only erpact tools from everyone else. A role that could not be read
 // is an error, distinct from a decided "no", and the caller must treat both
 // as hidden.
-func (h *Handlers) IsTenantOwner(user *auth.User, tenant string) (bool, error) {
+func (h *Handlers) IsTenantOwner(_ context.Context, user *auth.User, tenant string) (bool, error) {
 	if user == nil {
 		return false, nil
 	}

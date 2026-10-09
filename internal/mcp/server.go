@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -43,9 +44,9 @@ type Server struct {
 	httpClient *http.Client
 	mcpServer  *server.MCPServer
 
-	// ownerChecker answers the tools/list filter for owner-only tools. Nil
-	// means "cannot tell", which hides them.
-	ownerChecker TenantOwnerChecker
+	// ownerChecker answers the tools/list filter for owner-only tools. Unset
+	// (stdio) means no filtering; see ownerOnlyToolFilter.
+	ownerChecker atomic.Pointer[TenantOwnerChecker]
 }
 
 // NewServer creates a new MCP server. publicURL defaults to the trimmed

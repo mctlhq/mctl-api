@@ -26,15 +26,22 @@ import (
 // TenantOwnerChecker answers whether a caller owns a tenant. It is injected
 // because internal/api imports this package, not the other way round.
 // (true, nil) means owner or platform admin; (false, nil) is a decided no;
-// an error means the role could not be read. Callers treat both of the
+// an error means the role could not be read. The filter treats both of the
 // latter as "not an owner".
 type TenantOwnerChecker interface {
-	IsTenantOwner(user *auth.User, tenant string) (bool, error)
+	IsTenantOwner(ctx context.Context, user *auth.User, tenant string) (bool, error)
 }
 
 // SetTenantOwnerChecker wires the role lookup behind the owner-only tool
-// filter. It must be called before NewStreamableHTTPHandler.
-func (s *Server) SetTenantOwnerChecker(c TenantOwnerChecker) { s.ownerChecker = c }
+// filter. The in-process HTTP server sets it while the router is built,
+// before any request is served; the atomic keeps a late set race-free.
+func (s *Server) SetTenantOwnerChecker(c TenantOwnerChecker) {
+	if c == nil {
+		s.ownerChecker.Store(nil)
+		return
+	}
+	s.ownerChecker.Store(&c)
+}
 
 // ownerOnlyTools maps a tool to the tenant whose owners alone may see and
 // call it. The erpact site tools are the Option A stopgap of mctl-api#486:
@@ -47,28 +54,43 @@ var ownerOnlyTools = map[string]string{
 }
 
 // ownerOnlyToolFilter drops the owner-only tools unless the caller is an
-// owner of the tool's tenant or a platform admin. It fails closed: no
-// caller, no checker or a failed lookup all hide the tools.
+// owner of the tool's tenant or a platform admin.
+//
+// With no checker configured (the stdio binary, cmd/mcp, where one shared
+// token is used and there is no per-caller identity) nothing is filtered:
+// the API enforces the role when the tool is called. Where a checker is set
+// (the HTTP server) it fails closed: no caller or a failed lookup hides the
+// tools. The role is resolved at most once per tenant per call.
 func (s *Server) ownerOnlyToolFilter(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
+	cp := s.ownerChecker.Load()
+	if cp == nil {
+		return tools
+	}
+	checker := *cp
 	user := auth.UserFromContext(ctx)
+	verdict := map[string]bool{}
+	allowed := func(tool, tenant string) bool {
+		if v, done := verdict[tenant]; done {
+			return v
+		}
+		ok := false
+		if user != nil {
+			var err error
+			ok, err = checker.IsTenantOwner(ctx, user, tenant)
+			if err != nil {
+				slog.Warn("owner-only tools hidden: role lookup failed", "tool", tool, "tenant", tenant, "error", err)
+				ok = false
+			}
+		}
+		verdict[tenant] = ok
+		return ok
+	}
 	out := make([]mcp.Tool, 0, len(tools))
-	for _, t := range tools {
-		tenant, restricted := ownerOnlyTools[t.Name]
-		if !restricted {
-			out = append(out, t)
+	for i := range tools {
+		if tenant, restricted := ownerOnlyTools[tools[i].Name]; restricted && !allowed(tools[i].Name, tenant) {
 			continue
 		}
-		if user == nil || s.ownerChecker == nil {
-			continue
-		}
-		ok, err := s.ownerChecker.IsTenantOwner(user, tenant)
-		if err != nil {
-			slog.Warn("owner-only tool hidden: role lookup failed", "tool", t.Name, "tenant", tenant, "error", err)
-			continue
-		}
-		if ok {
-			out = append(out, t)
-		}
+		out = append(out, tools[i])
 	}
 	return out
 }
