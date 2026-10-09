@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -29,7 +30,18 @@ type Client struct {
 const healthTimeout = 3 * time.Second
 
 func newHealthClient() *http.Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
+	var tr *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		tr = base.Clone()
+	} else {
+		// Something (an instrumentation wrapper, a test) replaced the default
+		// transport. Build an equivalent one instead of panicking at startup.
+		tr = &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			DialContext:         (&net.Dialer{Timeout: healthTimeout}).DialContext,
+			TLSHandshakeTimeout: healthTimeout,
+		}
+	}
 	// A new connection per probe: one probe per 10s is cheap, and it means a
 	// probe can only fail because Vault is unreachable now, never because a
 	// previous connection went bad.
