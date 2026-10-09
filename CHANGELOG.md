@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.71.1](https://github.com/mctlhq/mctl-api/compare/4.71.0...4.71.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **mcp:** address review on owner-only call gate and provenance guard ([20b2fc4](https://github.com/mctlhq/mctl-api/commit/20b2fc43b9fd965a469aa32f3accd9bf0001677c))
+* **mcp:** report a failed role lookup on erpact tool calls explicitly ([1fa6f42](https://github.com/mctlhq/mctl-api/commit/1fa6f42f5aa12f604b7cd93badbb803a1278fe4f))
+* **mcp:** report a failed role lookup on erpact tool calls explicitly ([c108a28](https://github.com/mctlhq/mctl-api/commit/c108a2810f9a7685863b37ff38e6608f0ae620f9))
+
 ## [4.71.0](https://github.com/mctlhq/mctl-api/compare/4.70.1...4.71.0) (2026-10-09)
 
 
