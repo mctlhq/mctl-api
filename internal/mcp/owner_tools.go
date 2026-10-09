@@ -90,8 +90,13 @@ func (s *Server) ownerOnlyToolFilter(ctx context.Context, tools []mcp.Tool) []mc
 	// called one. The registered count is a snapshot taken once at the end of
 	// NewMCPServer, so no request reads the live registry back. Exactly one
 	// tool out of more than one registered is a call; anything else (a full
-	// list, a server with a single tool, or no snapshot yet) is treated as a
-	// list, which fails closed on a lookup error.
+	// list, a page of two or more tools, a server with a single tool, or no
+	// snapshot yet) is treated as a list, which fails closed on a lookup
+	// error. This holds only while tools/list is not paginated: mcp-go slices
+	// the list only under server.WithPaginationLimit, which this server does
+	// not set. Enabling it would make a one-tool page look like a call (and
+	// keep an owner-only tool on a lookup error), so this heuristic must
+	// change together with it.
 	isCall := len(tools) == 1 && s.registeredTools.Load() > 1
 	verdict := map[string]bool{}
 	allowed := func(tool, tenant string) bool {

@@ -230,6 +230,12 @@ func (c *countingOwnerChecker) IsTenantOwner(_ context.Context, u *auth.User, te
 	return c.owners[u.ID], nil
 }
 
+func (c *countingOwnerChecker) count(tenant string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls[tenant]
+}
+
 func (c *countingOwnerChecker) total() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -275,7 +281,7 @@ func TestOwnerFilter_ResolvesRoleLazily(t *testing.T) {
 			tenants[tenant] = true
 		}
 		for tenant := range tenants {
-			if n := c.calls[tenant]; n != 1 {
+			if n := c.count(tenant); n != 1 {
 				t.Errorf("tools/list resolved tenant %q %d times, want exactly 1", tenant, n)
 			}
 		}
@@ -290,7 +296,7 @@ func TestOwnerFilter_ResolvesRoleLazily(t *testing.T) {
 		if got := callErpactTool(t, s, ctx); !strings.Contains(got, "not found") {
 			t.Fatalf("non-owner erpact call: want not found, got %.300s", got)
 		}
-		if c.calls["erpact"] == 0 {
+		if c.count("erpact") == 0 {
 			t.Fatalf("owner-only tools/call never resolved the role")
 		}
 	})
