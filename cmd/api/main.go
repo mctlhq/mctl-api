@@ -961,6 +961,14 @@ func main() {
 	// kill the process outright rather than be swallowed by a handler that has
 	// already done its job.
 	stopSignals()
+
+	// Keep serving for SHUTDOWN_DRAIN_DELAY with /readyz answering 503
+	// (checks.shutdown=draining) before the listener closes, so the kubelet
+	// and Traefik can take this pod out of rotation while requests routed to
+	// it in the meantime still get an answer instead of a refused connection.
+	drainDelay := parseDuration(os.Getenv("SHUTDOWN_DRAIN_DELAY"), 5*time.Second)
+	slog.Info("draining before shutdown", "delay", drainDelay)
+	time.Sleep(drainDelay)
 	slog.Info("shutting down")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)

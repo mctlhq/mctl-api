@@ -109,6 +109,7 @@ docker run -p 8080:8080 mctl-api
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `PORT` | HTTP server port | `8080` | No |
+| `SHUTDOWN_DRAIN_DELAY` | Go duration the pod keeps serving after SIGTERM with `/readyz` at 503 (`checks.shutdown=draining`) before the listener closes. Keep it plus the 10s shutdown timeout below the pod's `terminationGracePeriodSeconds`. Invalid or non-positive values use the default. | `5s` | No |
 | `AUTH_REQUIRED` | Enable authentication | `true` | No |
 | `ADMIN_USERS` | Admin GitHub usernames (comma-separated) | — | No |
 | `GITOPS_REPO_URL` | GitOps repository URL | `https://github.com/mctlhq/mctl-gitops.git` | No |
