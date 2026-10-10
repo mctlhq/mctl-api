@@ -58,6 +58,10 @@ type Options struct {
 	QuotaReader QuotaReader
 	// LogQuerier queries Loki for service logs (optional — nil outside cluster).
 	LogQuerier LogQuerier
+	// ComponentSourceRepos answers which repository is registered for a
+	// component, for CI deploys (mctl-api#530). Nil refuses every CI deploy
+	// with 503.
+	ComponentSourceRepos ComponentSourceRepoReader
 	// WorkflowLogArchive reads archived Argo step logs from object storage
 	// (optional — nil when the archive env vars are unset).
 	WorkflowLogArchive WorkflowLogArchive
@@ -362,6 +366,9 @@ func NewRouter(opts Options) http.Handler {
 		// The registry publisher reaches the registry publication routes and
 		// nothing else (mctlhq/mctl-agents#470).
 		r.Use(registryPublisherGate)
+		// A GitHub Actions principal reaches the deploy route and nothing
+		// else (mctl-api#530).
+		r.Use(ciPrincipalGate)
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
 		// Loopback is skipped so MCP's in-process REST to localhost:8080 does

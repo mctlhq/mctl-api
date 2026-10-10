@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
@@ -173,5 +174,49 @@ func TestSubmitSetsTraceAnnotations(t *testing.T) {
 	wf, _ = dyn.Resource(workflowGVR).Namespace(res.Namespace).Get(context.Background(), res.WorkflowName, metav1.GetOptions{})
 	if len(wf.GetAnnotations()) != 0 {
 		t.Errorf("annotations without trace = %v", wf.GetAnnotations())
+	}
+}
+
+// A caller ID that is not a label value must not make the apiserver reject
+// the Workflow (mctl-api#531 review): the CI principal is "ci:owner/repo",
+// and an OIDC display can be an email.
+func TestSubmitLabelsAreValidForAnyCaller(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{workflowGVR: "WorkflowList"})
+	e := &Executor{dynamicClient: dyn}
+	op := Operation{Name: "deploy-service", WorkflowTemplate: "wft-x"}
+
+	seen := map[string]string{}
+	for _, user := range []string{
+		"ci:mctlhq/mctl-telegram", "ci:mctlhq/mctl-telegrax", "ci.mctlhq.mctl-telegram", "someone@example.com",
+		strings.Repeat("a/", 60), ":::", "-lead", "",
+	} {
+		res, err := e.Submit(context.Background(), op, map[string]string{}, user, "labs")
+		if err != nil {
+			t.Fatal(err)
+		}
+		wf, err := dyn.Resource(workflowGVR).Namespace(res.Namespace).Get(context.Background(), res.WorkflowName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range wf.GetLabels() {
+			if errs := validation.IsValidLabelValue(v); len(errs) > 0 {
+				t.Errorf("user %q: label %s=%q is invalid: %v", user, k, v, errs)
+			}
+		}
+		got := wf.GetLabels()["mctl.ai/user"]
+		if other, dup := seen[got]; dup && other != user {
+			t.Errorf("%q and %q share the label %q", other, user, got)
+		}
+		seen[got] = user
+	}
+
+	// A value that is already valid is not touched: existing selectors on
+	// GitHub logins keep matching.
+	for _, ok := range []string{"mashkovd", "mctl-agent", "a.b_c-d"} {
+		if got := labelValue(ok); got != ok {
+			t.Errorf("labelValue(%q) = %q", ok, got)
+		}
 	}
 }

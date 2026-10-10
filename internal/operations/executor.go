@@ -16,6 +16,8 @@ package operations
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"log/slog"
@@ -27,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -161,8 +164,8 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 	labels := map[string]string{
 		"mctl.ai/operation":  op.Name,
 		"mctl.ai/request-id": requestID,
-		"mctl.ai/user":       userID,
-		"mctl.ai/team":       team,
+		"mctl.ai/user":       labelValue(userID),
+		"mctl.ai/team":       labelValue(team),
 	}
 	wf.SetLabels(labels)
 	// Trace correlation: inert metadata, set only when a trace context exists.
@@ -368,6 +371,39 @@ func trimWorkflowStatus(obj map[string]interface{}) map[string]interface{} {
 	}
 
 	return result
+}
+
+// labelValue makes s usable as a Kubernetes label value. A value that is
+// already valid is returned unchanged, so existing selectors keep matching.
+// Anything else -- a CI principal "ci:owner/repo" (mctl-api#530), an OIDC
+// display that is an email -- would make the apiserver reject the whole
+// Workflow, so it is rewritten: invalid characters become '.', the result is
+// cut to fit, and a short hash of the original keeps two distinct callers
+// distinct. The unaltered value is still logged and audited elsewhere.
+func labelValue(s string) string {
+	if len(validation.IsValidLabelValue(s)) == 0 {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('.')
+		}
+	}
+	sum := sha256.Sum256([]byte(s))
+	suffix := hex.EncodeToString(sum[:4])
+	body := b.String()
+	if max := validation.LabelValueMaxLength - len(suffix) - 1; len(body) > max {
+		body = body[:max]
+	}
+	body = strings.Trim(body, "-_.")
+	if body == "" {
+		return "x" + suffix
+	}
+	return body + "-" + suffix
 }
 
 func buildArgoParams(params map[string]string) []interface{} {
