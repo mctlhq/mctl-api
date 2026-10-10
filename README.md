@@ -184,7 +184,7 @@ Three authentication methods are supported:
 | Dex/OIDC JWT | 3 dot-separated parts | JWKS validation → groups from claims |
 | OAuth 2.0 + PKCE | Authorization Code flow | For Claude.ai custom connectors |
 
-Get a token: run `gh auth token` or visit [mctl.ai/mcp](https://mctl.ai/mcp) to sign in and copy a pre-filled config. Your GitHub account must be a member of the `mctlhq` organization.
+Get a token: sign in with the mctl CLI (`mctl auth login`, browser sign-in through auth.mctl.ai; see [REST API](#rest-api) for using it with curl), or visit [mctl.ai/mcp](https://mctl.ai/mcp) to connect an MCP client through OAuth. A GitHub token as the bearer still works but is deprecated and will stop being accepted (mctlhq/mctl-api#525).
 
 ### Authorization group freshness
 
@@ -267,21 +267,29 @@ silently stripping every session's access.
 # Health check
 curl https://api.mctl.ai/healthz
 
+# Sign in once with the mctl CLI (mctl-gitops cli/mctl): browser sign-in
+# through auth.mctl.ai. `mctl auth status` renews an expired access token.
+mctl auth login
+mctl auth status
+# The access token is stored in <user config dir>/mctl/api-token.json:
+# ~/Library/Application Support/mctl on macOS, ~/.config/mctl on Linux.
+TOKEN=$(jq -r .token.access_token "$HOME/.config/mctl/api-token.json")
+
 # List tenants
-curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/tenants
+curl -H "Authorization: Bearer $TOKEN" https://api.mctl.ai/api/v1/tenants
 
 # List services
-curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/services
+curl -H "Authorization: Bearer $TOKEN" https://api.mctl.ai/api/v1/services
 
 # Service status
-curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/status/billing/payment-api
+curl -H "Authorization: Bearer $TOKEN" https://api.mctl.ai/api/v1/status/billing/payment-api
 
 # Service logs (last 50 lines, past 30 minutes)
-curl -H "Authorization: Bearer $(gh auth token)" \
+curl -H "Authorization: Bearer $TOKEN" \
      "https://api.mctl.ai/api/v1/logs/billing/payment-api?lines=50&since=30m"
 
 # Trigger a deploy
-curl -H "Authorization: Bearer $(gh auth token)" \
+curl -H "Authorization: Bearer $TOKEN" \
      -H "Content-Type: application/json" \
      -d '{"team_name":"billing","component_name":"payment-api","action":"deploy","git_tag":"v1.2.0"}' \
      https://api.mctl.ai/api/v1/operations/deploy-service/execute
