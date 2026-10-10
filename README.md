@@ -32,7 +32,7 @@ REST API (/api/v1/*)  ◄── Backstage / CLI / HTTP clients
 | Language | Go 1.25 |
 | HTTP Router | chi v5.2 |
 | MCP Server | mcp-go v0.31 (Streamable HTTP transport) |
-| Auth | GitHub token resolution, Dex/OIDC JWT, OAuth 2.0 PKCE |
+| Auth | OAuth 2.1 + PKCE (sign-in through ZITADEL), federated OIDC JWTs, static service tokens |
 | Database | PostgreSQL via pgx v5.9 (audit logs) |
 | Kubernetes | client-go v0.32 (quota reader) |
 | Rate Limiting | httprate v0.15 (300 req/min authenticated including POST /mcp, loopback MCP-internal REST excluded from that cap, 20 req/min write) |
@@ -176,13 +176,14 @@ docker run -p 8080:8080 mctl-api
 
 ### Authentication
 
-Three authentication methods are supported:
+Bearer tokens are verified by the federation registry ([docs/federation.md](docs/federation.md)):
 
 | Method | Detection | Validation |
 |--------|-----------|------------|
-| GitHub personal token | No dots in token | GitHub API → resolve org membership |
-| Dex/OIDC JWT | 3 dot-separated parts | JWKS validation → groups from claims |
-| OAuth 2.0 + PKCE | Authorization Code flow | For Claude.ai custom connectors |
+| MCTL OAuth access token (MCP clients, `mctl auth login`) | JWT whose `iss` is this server | Local signing key; groups re-resolved from gitops (see below) |
+| ZITADEL OIDC JWT | JWT whose `iss` is `auth.mctl.ai` | JWKS and audience (`MCTL_OIDC_PROVIDERS`) |
+| Service and surface tokens | Exact match of a configured static secret | Constant-time comparison |
+| GitHub token (deprecated, mctlhq/mctl-api#525) | Opaque token no static secret matches | GitHub API |
 
 Get a token: sign in with the mctl CLI (`mctl auth login`, browser sign-in through auth.mctl.ai; see [REST API](#rest-api) for using it with curl), or visit [mctl.ai/mcp](https://mctl.ai/mcp) to connect an MCP client through OAuth. A GitHub token as the bearer still works but is deprecated and will stop being accepted (mctlhq/mctl-api#525).
 
@@ -369,37 +370,53 @@ Surfaces correlate to it; they never own its lifecycle.
 
 ### MCP Setup
 
-The MCP endpoint is available at `https://api.mctl.ai/mcp` (Streamable HTTP). All clients use the same auth — a GitHub token passed as a Bearer header.
+The MCP endpoint is `https://api.mctl.ai/mcp` (Streamable HTTP). Clients connect with the URL alone and sign in through MCTL (auth.mctl.ai) with the standard MCP authorization flow (OAuth 2.1, PKCE, dynamic client registration). No config carries a token, and no Client ID or Secret is needed. The same per-client steps are on [docs.mctl.ai](https://docs.mctl.ai/mcp/connecting). A GitHub token as the bearer is deprecated (mctlhq/mctl-api#525).
 
-**Copilot CLI** — add to `~/.copilot/mcp-config.json`:
+**Claude.ai** and **Claude Desktop**: Settings → Connectors → Add custom connector, URL `https://api.mctl.ai/mcp`, leave the OAuth Client ID and Secret empty, then Connect. A connector added on Claude.ai shows up in Claude Desktop too.
+
+**Claude Code**:
+
+```bash
+claude mcp add --transport http mctl https://api.mctl.ai/mcp
+```
+
+Then run `/mcp`, choose **mctl** → Authenticate.
+
+**Cursor**: add to `~/.cursor/mcp.json` (or Cursor Settings → MCP → Add server), then sign in to **mctl** in Cursor's MCP settings:
 
 ```json
 {
   "mcpServers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": { "Authorization": "Bearer <your-github-token>" }
-    }
+    "mctl": { "url": "https://api.mctl.ai/mcp" }
   }
 }
 ```
 
-**Claude Desktop** (Streamable HTTP) — add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+**VS Code**: create `.vscode/mcp.json`, start the server from the file and accept the sign-in prompt (needs a recent VS Code with GitHub Copilot Chat):
+
+```json
+{
+  "servers": {
+    "mctl": { "type": "http", "url": "https://api.mctl.ai/mcp" }
+  }
+}
+```
+
+**Gemini CLI**: add to `~/.gemini/settings.json`, then run `/mcp auth mctl`. The sign-in needs a browser on the same machine, so it does not work over SSH.
 
 ```json
 {
   "mcpServers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": { "Authorization": "Bearer <your-github-token>" }
-    }
+    "mctl": { "httpUrl": "https://api.mctl.ai/mcp", "trust": true }
   }
 }
 ```
 
-**Claude Desktop** (stdio, local binary):
+**Windsurf** and **Copilot CLI**: MCTL sign-in is not enabled for them yet. Until it is, connect from Claude Code, Cursor, VS Code or Gemini CLI.
+
+**Other clients**: any client that implements MCP authorization finds the sign-in on its own from the first `401` (discovery: `https://api.mctl.ai/.well-known/oauth-protected-resource`). Clients without it cannot connect. Continue.dev has not been tested with MCTL sign-in.
+
+**Local stdio binary** (development): `cmd/mcp` serves the same tools over stdio and forwards each call to the REST API with the token in `MCTL_API_TOKEN`, for example the access token from `mctl auth login` (see [REST API](#rest-api); it expires, so refresh it with `mctl auth status`).
 
 ```bash
 go install github.com/mctlhq/mctl-api/cmd/mcp@latest
@@ -410,60 +427,9 @@ go install github.com/mctlhq/mctl-api/cmd/mcp@latest
   "mcpServers": {
     "mctl": {
       "command": "/Users/<you>/go/bin/mcp",
-      "env": { "MCTL_API_URL": "https://api.mctl.ai" }
+      "env": { "MCTL_API_URL": "https://api.mctl.ai", "MCTL_API_TOKEN": "<access token>" }
     }
   }
-}
-```
-
-**Cursor** — Settings → Cursor Settings → MCP → Add server (same JSON as Copilot CLI).
-
-**VS Code** — create `.vscode/mcp.json`:
-
-```json
-{
-  "servers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": { "Authorization": "Bearer ${input:mctlToken}" }
-    }
-  },
-  "inputs": [
-    { "id": "mctlToken", "type": "promptString", "description": "GitHub token (run: gh auth token)", "password": true }
-  ]
-}
-```
-
-**Windsurf** — Settings → Windsurf Settings → MCP → Add server (same JSON as Copilot CLI).
-
-**Gemini CLI** — add to `~/.gemini/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "mctl": {
-      "httpUrl": "https://api.mctl.ai/mcp",
-      "headers": { "Authorization": "Bearer <your-github-token>" }
-    }
-  }
-}
-```
-
-**Continue.dev** — add to `~/.continue/config.json`:
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "mctl",
-      "transport": {
-        "type": "streamable-http",
-        "url": "https://api.mctl.ai/mcp",
-        "headers": { "Authorization": "Bearer <your-github-token>" }
-      }
-    }
-  ]
 }
 ```
 
