@@ -260,6 +260,13 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 			}
 		}
 	}
+	// create-tenant: a name that collides with a platform namespace is refused
+	// here, with a plain validation error, instead of after submission inside
+	// the workflow. Executor.Submit repeats the check for callers that do not
+	// come through this function.
+	if createsTenant(op) && IsReservedTenantName(input["tenant_name"]) {
+		errors = append(errors, reservedTenantNameMessage(input["tenant_name"]))
+	}
 	return errors
 }
 
