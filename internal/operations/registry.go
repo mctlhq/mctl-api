@@ -657,7 +657,7 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/"},
 		Parameters: []ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "single-service", Description: "Run mode (locked to 'single-service')", Enum: []string{"single-service"}},
-			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: []string{"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}},
+			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: []string{"mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}},
 		},
 	},
 	{
@@ -700,7 +700,7 @@ var builtinOperations = []Operation{
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch>"},
 		Parameters: append([]ParameterDef{
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
 			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
 			{Name: "max_proposals", Type: "string", Required: false, Default: "1", Description: "Safety bound. The API permits exactly one proposal per run.", Enum: []string{"1"}},
 			// Release pin (mctlhq/mctl-api#372): the DevLoop's implement step sends
@@ -742,7 +742,7 @@ var builtinOperations = []Operation{
 			// tier3-shepherd PRs landing now); the shepherd must drive those
 			// to merge too. If the implementer's allowlist ever changes,
 			// mirror the change here.
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
 			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
 			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to evaluate decide() for every matched proposal and print the decision WITHOUT calling the implementer or merging anything. Default 'false'.", Enum: []string{"true", "false"}},
 			// Release pin (mctlhq/mctl-api#372): the DevLoop's in-loop shepherd tick
@@ -820,7 +820,7 @@ var builtinOperations = []Operation{
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml"},
 		Parameters: []ParameterDef{
-			{Name: "service", Type: "string", Required: true, Description: "Service owning the proposal.", Enum: []string{"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
+			{Name: "service", Type: "string", Required: true, Description: "Service owning the proposal.", Enum: []string{"mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
 			{Name: "slug", Type: "string", Required: true, Description: "Proposal slug (directory name under proposals/), e.g. issue-42-fix-foo.", Pattern: "^[a-z0-9][a-z0-9-]{0,120}$"},
 			// No Default: "unknown" is not an identity, and a field that manufactures
 			// one is worse than an absent field — the implementer refuses an approval
@@ -857,7 +857,7 @@ var builtinOperations = []Operation{
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch> (PR creation only, for an already-pushed branch)"},
 		Parameters: []ParameterDef{
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Reconcile only this service. Leave empty to sweep every service.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Reconcile only this service. Leave empty to sweep every service.", Enum: []string{"", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
 			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to print every would-be flip without writing .status.yaml or opening any PR. Default 'false'.", Enum: []string{"true", "false"}},
 		},
 	},
