@@ -1,11 +1,18 @@
 package api_test
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 
+	mctlapi "github.com/mctlhq/mctl-api/internal/api"
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
 // A reserved tenant name is refused with a 400 before anything is submitted,
@@ -45,4 +52,46 @@ func TestCreateTenant_NearMissNameIsSubmitted(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The reasons are in "error" itself, not only in validationErrors: the MCP
+// tools' doRequest reads only "error", so mctl_create_tenant would otherwise
+// report a bare "validation failed".
+func TestCreateTenant_ReservedNameReasonIsInErrorField(t *testing.T) {
+	router, _ := createTenantRouter(t, &fakeGitReader{})
+	w := postAs(t, router, createTenantPath, map[string]string{"tenant_name": "kube-system"}, newcomer)
+	assertStatus(t, w, http.StatusBadRequest)
+	var body struct {
+		Error            string   `json:"error"`
+		ValidationErrors []string `json:"validationErrors"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(body.Error, "validation failed") || !strings.Contains(body.Error, "reserved") {
+		t.Errorf("error = %q, want the validation failed prefix and the reserved reason", body.Error)
+	}
+	if len(body.ValidationErrors) != 1 || !strings.Contains(body.ValidationErrors[0], "reserved") {
+		t.Errorf("validationErrors = %v", body.ValidationErrors)
+	}
+}
+
+// refusingExecutor stands in for an Executor whose Submit-level backstop
+// fires. Reaching it through the handler needs a name ValidateInput lets by,
+// so this pins only the status mapping.
+type refusingExecutor struct{ fakeExecutor }
+
+func (refusingExecutor) Submit(_ context.Context, _ operations.Operation, _ map[string]string, _, _ string) (*operations.SubmitResult, error) {
+	return nil, fmt.Errorf("submit: %w", operations.ErrReservedTenantName)
+}
+
+func TestCreateTenant_SubmitBackstopMapsTo400(t *testing.T) {
+	router := mctlapi.NewRouter(mctlapi.Options{
+		Registry:  operations.NewRegistry(),
+		GitReader: &fakeGitReader{tenants: []gitops.Tenant{}},
+		AuditLog:  audit.NewLogger(),
+		Executor:  &refusingExecutor{},
+	})
+	w := postAs(t, router, createTenantPath, map[string]string{"tenant_name": "fresh"}, newcomer)
+	assertStatus(t, w, http.StatusBadRequest)
 }
