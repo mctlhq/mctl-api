@@ -512,8 +512,11 @@ Pre-conditions (BEFORE calling onboard):
   .github/workflows/ci.yml with a "deploy" job that POSTs to
   https://api.mctl.ai/api/v1/operations/deploy-service/execute on push to main.
   The same scaffolding guide ships the canonical SemVer-bumping job snippet.
-- That job needs a GitHub Actions secret MCTL_GITHUB_TOKEN — a classic
-  GitHub PAT with scope "read:user" — to authenticate to mctl-api.
+- That job authenticates with its own GitHub Actions OIDC token
+  (permissions: id-token: write, audience https://api.mctl.ai); no secret is
+  stored. It may only deploy a tag of the component onboarded with
+  dockerfile_repo set to that same repository, sending a flat body with
+  dockerfile_path too when the Dockerfile is not at the repo root.
 
 Order of operations for a brand-new repo:
 1. (One-time) mctl_grant_repo_access — install the GitHub App if mctl_list_repos doesn't see the repo.
@@ -1121,7 +1124,7 @@ After the browser flow completes, run mctl_sync_repos to register the newly acce
 
 For a fresh service the typical next step after sync is mctl_deploy_service action=onboard. That call
 expects the repo to already contain a Dockerfile (and, for auto-deploy on push, a .github/workflows/ci.yml
-with the canonical deploy job and the MCTL_GITHUB_TOKEN secret). If those are missing, see the
+with the canonical deploy job, which authenticates with its GitHub Actions OIDC token). If those are missing, see the
 copy-paste templates and onboard checklist at https://docs.mctl.ai/guides/scaffolding before calling onboard.`),
 		mcplib.WithString("team",
 			mcplib.Required(),
