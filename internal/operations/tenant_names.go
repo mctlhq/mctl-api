@@ -28,6 +28,8 @@ var reservedTenantNames = map[string]struct{}{
 	"backstage": {}, "minio": {}, "database": {}, "forgejo": {},
 	"zitadel": {}, "local-path-storage": {}, "system-upgrade": {},
 	"observability-eval": {},
+	// Platform group and sentinel team names.
+	"admins": {}, "platform": {},
 }
 
 var (

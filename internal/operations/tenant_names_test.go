@@ -21,8 +21,8 @@ func TestIsReservedTenantName(t *testing.T) {
 		exact = append(exact, n)
 	}
 	sort.Strings(exact)
-	if len(exact) != 21 {
-		t.Fatalf("expected 21 exact names, got %d", len(exact))
+	if len(exact) != 23 {
+		t.Fatalf("expected 23 exact names, got %d", len(exact))
 	}
 	for _, n := range exact {
 		if !IsReservedTenantName(n) {
