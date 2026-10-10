@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.72.0](https://github.com/mctlhq/mctl-api/compare/4.71.2...4.72.0) (2026-10-10)
+
+
+### Features
+
+* **agents:** issue-285-feat-mcp-propagate-otel-span-context-thr ([931162b](https://github.com/mctlhq/mctl-api/commit/931162b3fa8c3697b2a28ad1eeb3637ebeccb618))
+* **auth:** no default Dex issuer; unset DEX_ISSUER_URL turns Dex off ([aa4bdd2](https://github.com/mctlhq/mctl-api/commit/aa4bdd2a8acbd8d0b2f4b01102069596ac7bfff7))
+* **auth:** no default Dex issuer; unset DEX_ISSUER_URL turns Dex off ([e9f6e26](https://github.com/mctlhq/mctl-api/commit/e9f6e269d84a714791b2b257142bd208b97e2280))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-285-feat-mcp-propagate-otel-span-context-thr ([6a75b6d](https://github.com/mctlhq/mctl-api/commit/6a75b6dea50d1c193c77b1c4d8a06993ed8fb7de))
+* **agents:** address P1/P2 codex findings on issue-285-feat-mcp-propagate-otel-span-context-thr ([bc1401f](https://github.com/mctlhq/mctl-api/commit/bc1401f346f237ee2a1da75638a804e1a13fed70))
+* **ci:** fix failing required checks on issue-285-feat-mcp-propagate-otel-span-context-thr ([baeadcd](https://github.com/mctlhq/mctl-api/commit/baeadcd7d1535d4a370a14e3ac814ecec21f7116))
+
 ## [4.71.2](https://github.com/mctlhq/mctl-api/compare/4.71.1...4.71.2) (2026-10-09)
 
 
