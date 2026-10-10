@@ -115,13 +115,16 @@ from `internal/api/handlers_surface_identity.go`).
 - **Duplicate normalized issuer** among the same set (trailing `/`
   stripped): two providers claiming one issuer would make routing
   order-dependent.
-- **Reserved provider name**: `github`, `service`, `dev`, `agent` may never
+- **Reserved provider name**: `github`, `service`, `dev`, `agent`,
+  `github-actions` may never
   be used by a *configured* `MCTL_OIDC_PROVIDERS` entry. `agent` is reserved
   because mctl-api#376 introduces `auth.ProviderAgent = "agent"` for
   delegated agent identity — a federation provider must never be able to
   mint an `(agent, ...)` identity ahead of that work landing. (The
   local-OAuth provider is the one built-in exception allowed to declare
-  `github` — see above.) `dex` is **not** reserved: it is how an operator
+  `github` — see above — and the GitHub Actions provider the one allowed to
+  declare `github-actions`, see "GitHub Actions" below.) `dex` is **not**
+  reserved: it is how an operator
   replaces the legacy shim while keeping existing `external_identities`
   rows (`provider='dex'`) resolving.
 - **Collision with a registered surface name** (`telegram`, `portal`,
@@ -276,6 +279,138 @@ env change: remove the entry from `MCTL_OIDC_PROVIDERS` (or unset the
 variable if it is the only one). ZITADEL tokens are then unclaimed (401) and
 nothing else changes. If `auth.mctl.ai` is unreachable at boot, the entry is
 logged and omitted; mctl-api still starts.
+
+## GitHub Actions: CI deploys (mctl-api#530)
+
+A tenant's CI deploys with the job's own GitHub Actions OIDC token instead of
+a personal access token. The token proves which repository, event and ref the
+job ran for and expires within minutes. The principal it yields can do
+exactly one thing: deploy a new tag of the component registered to that
+repository.
+
+### Configuration: `MCTL_GITHUB_ACTIONS_OIDC`
+
+Off unless set. When it is unset, a GitHub Actions token is unclaimed (401).
+
+```json
+{
+  "audience": "https://api.mctl.ai",
+  "repository_owners": ["mctlhq"],
+  "repository_owner_ids": ["123456"],
+  "branches": ["refs/heads/main"]
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `repository_owners` | yes, non-empty | GitHub owners (org or user logins) whose repositories may deploy. Case-insensitive. |
+| `audience` | no, default `https://api.mctl.ai` | The token's `aud` must contain it. Always enforced; there is no audit mode. |
+| `repository_owner_ids` | no | When set, `repository_owner_id` must also be one of these immutable ids. |
+| `branches` | no, default `["refs/heads/main"]` | Full branch refs a token may come from. Tags (`refs/tags/*`) are always accepted. No wildcards. |
+
+These all refuse startup: a malformed value, `null`, an unknown field, a
+missing or empty `repository_owners`, or a branch that is not a full
+`refs/heads/...` ref. The exception is while `MCTL_FEDERATION_DISABLED` is on.
+
+The issuer is fixed: `https://token.actions.githubusercontent.com`, with its
+JWKS read through OIDC discovery. If discovery fails at boot, the provider is
+left out and logged, the same as an unreachable `MCTL_OIDC_PROVIDERS` entry.
+
+### Token policy
+
+The policy runs after the signature, expiry and audience checks. Every rule
+fails closed; a missing or non-string claim is a refusal.
+
+- `repository`, `repository_id`, `repository_owner`, `repository_owner_id`,
+  `event_name`, `ref` and `ref_type` must all be present. The ids must be
+  numeric, and `repository` must be `<repository_owner>/<name>`.
+- `repository_owner` must be in `repository_owners`, and its id must be in
+  `repository_owner_ids` when that is set.
+- `event_name` must be `push`, `workflow_dispatch` or `release`.
+  `pull_request` and `pull_request_target` are refused because they run fork
+  and unmerged code. Every other event is refused too: `schedule`,
+  `workflow_run`, `issue_comment` and the rest can be steered by people
+  without write access.
+- `ref` must be a tag (`ref_type: tag`, `refs/tags/<something>`) or one of
+  `branches` (`ref_type: branch`).
+
+Each refusal logs `github actions token refused` with a `reason` (`issuer`,
+`audience`, `claims`, `owner`, `owner_id`, `event`, `ref`). It counts as
+`federation_token_verifications_total{provider="github-actions",result="invalid"}`.
+
+### The principal
+
+| Field | Value |
+|---|---|
+| Identity | provider `github-actions`, issuer as above, subject = `repository_id` (immutable), kind `service` |
+| `User.ID` / display | `ci:<owner>/<repo>`; this is what the audit log records |
+| Groups | none: no tenant membership and no admin, whatever the token carries |
+
+### What it may call
+
+- **Route gate** (`ciPrincipalGate`). Every route except
+  `POST /api/v1/operations/deploy-service/execute` answers
+  `403 ci_route_not_allowed`. That includes `/mcp`, every read and every
+  other operation. An encoded path is refused.
+- **Request policy** (`authorizeCIDeploy`, on the raw request before
+  defaults). This replaces the tenant role check for this principal only.
+  Every refusal is a `403 ci_deploy_denied` (or 503, see below) and an audit
+  entry with `status=denied`.
+  - `action` must be `deploy`. `onboard` and `update-config` are refused.
+  - Parameters are limited to `action`, `team_name`, `component_name`,
+    `dockerfile_repo`, `git_tag` and `dockerfile_path`. Any other parameter
+    is refused: env vars, secrets, `clear_*`, host, port, scaling, database,
+    template, `image_tag`.
+  - `dockerfile_repo` must equal the token's `repository`.
+  - The component's `github.com/source-repo` annotation must equal it too.
+    The annotation lives in
+    `platform-gitops/services/<team>/<component>/catalog-info.yaml` and is
+    written by the `onboard` action, which only a tenant developer can run.
+    That annotation is the registration.
+  - All comparisons are case-insensitive.
+  - The component missing, its file missing, or the annotation missing gives
+    403.
+  - A checkout that cannot be read, a symlink or non-regular entry on the
+    path, or a file that does not parse gives 503. "Could not read" is
+    neither "not registered" nor "matches".
+
+### Residual risk: repository names are mutable
+
+mctl-api stores no repository ids, and the registration records the
+repository by name. Two things contain what that allows:
+
+1. **The owner allowlist.** Under an org owner, only org members can create a
+   repository with a freed name.
+2. **`repository_owner_ids`.** This covers the owner account itself being
+   renamed or deleted and its login re-registered.
+
+Every deploy is attributed to the immutable `repository_id`, so a recreated
+repository shows up as a new principal.
+
+### CI usage
+
+```yaml
+deploy:
+  if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  runs-on: ubuntu-latest
+  permissions:
+    contents: write   # push the tag
+    id-token: write   # mint the OIDC token
+  steps:
+    # ... compute and push TAG as before ...
+    - name: Trigger mctl deploy-service
+      run: |
+        set -euo pipefail
+        TOKEN=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.mctl.ai" | jq -r .value)
+        curl -fsS -X POST https://api.mctl.ai/api/v1/operations/deploy-service/execute \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Content-Type: application/json" \
+          -d "{\"action\":\"deploy\",\"team_name\":\"<team>\",\"component_name\":\"<service>\",\"dockerfile_repo\":\"${GITHUB_REPOSITORY}\",\"git_tag\":\"${TAG}\"}"
+```
+
+No repository secret is needed. The body must stay flat (no nested
+`parameters` object) and must not carry any field outside the allowlist.
 
 ## `MCTL_FEDERATION_DISABLED`: the kill switch
 
