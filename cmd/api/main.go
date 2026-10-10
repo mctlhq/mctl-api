@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -852,6 +853,8 @@ func main() {
 		slog.Warn("TRUSTED_PROXY_CIDRS parse failed; X-Forwarded-For will not be trusted", "error", tpErr)
 	}
 
+	var draining atomic.Bool
+
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Registry:                       registry,
 		GitReader:                      gitReader,
@@ -897,6 +900,7 @@ func main() {
 		DexReady:                       dexReady,
 		VaultReady:                     vaultReady,
 		StoreInitFailures:              storeFailures.List,
+		Draining:                       draining.Load,
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
 		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,
 		GitHubWebhookOwners:            cfg.GitHubWebhookOwners,
@@ -950,6 +954,7 @@ func main() {
 	// Graceful shutdown, driven by the same root registration that guarded
 	// startup — so the FIRST signal drains, whenever it arrives.
 	<-rootCtx.Done()
+	draining.Store(true)
 
 	// Restore default disposition: a second SIGTERM during a slow drain should
 	// kill the process outright rather than be swallowed by a handler that has

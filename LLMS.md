@@ -21,7 +21,7 @@
 
 ## Key REST API Endpoints
 
-- `GET /healthz`, `GET /readyz`: Liveness and readiness health checks.
+- `GET /healthz`, `GET /readyz`: Liveness and readiness health checks. `/readyz` returns 503 only on store init failure or drain; dependency health is in the body (`checks`, `dependencies`) and the `mctl_api_dependency_up{check}` metric.
 - `GET /api/v1/services`: List services across tenants.
 - `GET /api/v1/workflows/{name}/logs`: Retrieve live or S3/R2 archived workflow logs.
 - `POST /api/v1/incidents`: Register platform incidents (`type: workflow_failed`, `status: analyzing`).

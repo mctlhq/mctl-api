@@ -22,12 +22,28 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+// dependencyUp reports each configured /readyz dependency probe (1 ok, 0 failed).
+// Probes run only when /readyz is called, so the value is as fresh as the last
+// kubelet readiness call. Unconfigured probes have no series.
+var dependencyUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "mctl_api_dependency_up",
+	Help: "Whether a configured dependency probe succeeded on the last /readyz call (1 up, 0 down).",
+}, []string{"check"})
+
+func init() {
+	prometheus.MustRegister(dependencyUp)
+}
 
 const readyCheckTimeout = 2 * time.Second
 
 // ReadyCheck is a named dependency probe for /readyz. A nil Check means the
-// dependency is not configured and is omitted from the fail-the-pod decision.
+// dependency is not configured. Probe results are reported in the /readyz body
+// and in mctl_api_dependency_up only; they never fail readiness, because every
+// replica shares the same dependencies and failing them would drain all pods.
 type ReadyCheck func(ctx context.Context) error
 
 // HTTPReady returns a probe that GETs url and succeeds on 2xx/3xx.
@@ -89,8 +105,10 @@ func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 			if err := p.check(ctx); err != nil {
 				slog.Warn("readyz probe failed", "check", p.name, "error", err)
 				results[i] = result{status: "unavailable", fail: true}
+				dependencyUp.WithLabelValues(p.name).Set(0)
 				return
 			}
+			dependencyUp.WithLabelValues(p.name).Set(1)
 			results[i] = result{status: "ok"}
 		}()
 	}
@@ -98,10 +116,16 @@ func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 
 	checks := make(map[string]string, len(probes)+1)
 	ready := true
+	dependencies := "not_configured"
 	for i, p := range probes {
 		checks[p.name] = results[i].status
+		if results[i].status == "not_configured" {
+			continue
+		}
 		if results[i].fail {
-			ready = false
+			dependencies = "degraded"
+		} else if dependencies == "not_configured" {
+			dependencies = "ok"
 		}
 	}
 
@@ -120,6 +144,11 @@ func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		checks["stores"] = "ok"
 	}
 
+	if h.opts.Draining != nil && h.opts.Draining() {
+		checks["shutdown"] = "draining"
+		ready = false
+	}
+
 	status := "ready"
 	code := http.StatusOK
 	if !ready {
@@ -128,5 +157,6 @@ func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	}
 	body["status"] = status
 	body["checks"] = checks
+	body["dependencies"] = dependencies
 	writeJSON(w, code, body)
 }
