@@ -220,3 +220,61 @@ func TestSubmitLabelsAreValidForAnyCaller(t *testing.T) {
 		}
 	}
 }
+
+// TestTrimWorkflowStatusReportsTheTraceID covers the workflow -> trace hop
+// of mctlhq/mctl-agent#97: a caller that holds only a workflow name must get
+// the trace it ran in, from the `traceparent` argument first (the parent the
+// pod's spans are under) and the submit annotation second, and must never
+// get a malformed or all-zero id passed off as one.
+func TestTrimWorkflowStatusReportsTheTraceID(t *testing.T) {
+	const devloop = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const submit = "0af7651916cd43dd8448eb211c80319c"
+	wf := func(param string, annotation string) map[string]interface{} {
+		meta := map[string]interface{}{"name": "wf"}
+		if annotation != "" {
+			meta["annotations"] = map[string]interface{}{"mctl.ai/trace-id": annotation, "other": "dropped"}
+		}
+		spec := map[string]interface{}{}
+		if param != "" {
+			spec["arguments"] = map[string]interface{}{"parameters": []interface{}{
+				map[string]interface{}{"name": "issue_url", "value": "https://github.com/x/y/issues/1"},
+				map[string]interface{}{"name": "traceparent", "value": param},
+			}}
+		}
+		return map[string]interface{}{"metadata": meta, "spec": spec, "status": map[string]interface{}{"phase": "Failed"}}
+	}
+	cases := []struct {
+		name, param, annotation, wantID, wantSource string
+	}{
+		{"argument wins", "00-" + devloop + "-00f067aa0ba902b7-01", submit, devloop, "traceparent-argument"},
+		{"unsampled argument still names the trace", "00-" + devloop + "-00f067aa0ba902b7-00", "", devloop, "traceparent-argument"},
+		{"annotation is the fallback", "", submit, submit, "submit-annotation"},
+		{"empty argument falls back", "", submit, submit, "submit-annotation"},
+		{"malformed argument falls back", "00-NOTHEX-00f067aa0ba902b7-01", submit, submit, "submit-annotation"},
+		{"all-zero argument falls back", "00-" + strings.Repeat("0", 32) + "-00f067aa0ba902b7-01", submit, submit, "submit-annotation"},
+		{"all-zero annotation is not a trace", "", strings.Repeat("0", 32), "", ""},
+		{"malformed annotation is not a trace", "", "abc", "", ""},
+		{"nothing known, no trace key", "", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			trimmed := trimWorkflowStatus(wf(tc.param, tc.annotation))
+			trace, present := trimmed["trace"].(map[string]interface{})
+			if tc.wantID == "" {
+				if _, any := trimmed["trace"]; any {
+					t.Fatalf("trace reported where none is known: %#v", trimmed["trace"])
+				}
+				return
+			}
+			if !present {
+				t.Fatalf("trace missing: %#v", trimmed)
+			}
+			if trace["trace_id"] != tc.wantID || trace["source"] != tc.wantSource {
+				t.Errorf("trace = %#v, want %s from %s", trace, tc.wantID, tc.wantSource)
+			}
+			if meta := trimmed["metadata"].(map[string]interface{}); meta["annotations"] != nil {
+				t.Errorf("annotations must stay trimmed: %#v", meta)
+			}
+		})
+	}
+}

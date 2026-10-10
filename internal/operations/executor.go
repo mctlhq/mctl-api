@@ -22,6 +22,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -370,7 +371,58 @@ func trimWorkflowStatus(obj map[string]interface{}) map[string]interface{} {
 		result["status"] = trimmedStatus
 	}
 
+	if traceID, source := workflowTraceID(obj); traceID != "" {
+		result["trace"] = map[string]interface{}{"trace_id": traceID, "source": source}
+	}
+
 	return result
+}
+
+var (
+	w3cTraceparent = regexp.MustCompile(`^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$`)
+	w3cTraceID     = regexp.MustCompile(`^[0-9a-f]{32}$`)
+)
+
+// workflowTraceID names the trace a workflow belongs to, so a caller holding
+// only a workflow name (an ArgoWorkflowFailed alert, a ticket) can open the
+// trace in Tempo and from there the logs (mctlhq/mctl-agent#97).
+//
+// The `traceparent` argument wins: it is the parent the pod's own spans are
+// recorded under, which is the execution trace a DevLoop run lives in
+// (mctlhq/mctl-agents#195). The `mctl.ai/trace-id` annotation, the trace of
+// the mctl-api request that submitted the workflow, is the fallback. A value
+// that is not a well-formed, non-zero W3C trace id is ignored rather than
+// passed on, and no trace at all is reported as no `trace` key: a caller
+// must read its absence as "not known", never as "no trace exists".
+func workflowTraceID(obj map[string]interface{}) (string, string) {
+	if spec, ok := obj["spec"].(map[string]interface{}); ok {
+		if args, ok := spec["arguments"].(map[string]interface{}); ok {
+			params, _ := args["parameters"].([]interface{})
+			for _, p := range params {
+				param, ok := p.(map[string]interface{})
+				if !ok || param["name"] != "traceparent" {
+					continue
+				}
+				value, _ := param["value"].(string)
+				if m := w3cTraceparent.FindStringSubmatch(value); len(m) == 2 && !allZero(m[1]) {
+					return m[1], "traceparent-argument"
+				}
+			}
+		}
+	}
+	if meta, ok := obj["metadata"].(map[string]interface{}); ok {
+		if ann, ok := meta["annotations"].(map[string]interface{}); ok {
+			value, _ := ann["mctl.ai/trace-id"].(string)
+			if w3cTraceID.MatchString(value) && !allZero(value) {
+				return value, "submit-annotation"
+			}
+		}
+	}
+	return "", ""
+}
+
+func allZero(s string) bool {
+	return strings.Trim(s, "0") == ""
 }
 
 // labelValue makes s usable as a Kubernetes label value. A value that is
