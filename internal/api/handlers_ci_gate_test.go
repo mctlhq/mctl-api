@@ -20,6 +20,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
+
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
@@ -87,3 +90,28 @@ func TestCIPrincipalGate_IgnoresOtherPrincipals(t *testing.T) {
 		t.Fatalf("the CI gate refused a human: %s", rec.Body.String())
 	}
 }
+
+// Behind the gate no other operation reaches the handler; the handler
+// refuses one on its own all the same, so the gate is not the only check.
+func TestCIDeploy_HandlerRefusesOtherOperationsWithoutTheGate(t *testing.T) {
+	h := &Handlers{opts: Options{
+		Registry: operations.NewRegistry(), AuditLog: audit.NewLogger(),
+		ComponentSourceRepos: staticSourceRepo("mctlhq/mctl-telegram"),
+	}}
+	r := chi.NewRouter()
+	r.Use(injectUser(auth.NewCIUser("mctlhq/mctl-telegram", "1001")))
+	r.Post("/api/v1/operations/{name}/execute", h.ExecuteOperation)
+	for _, op := range []string{"retire-service", "rollback-service", "provision-database"} {
+		rec := httptest.NewRecorder()
+		// A body every other CI rule accepts, so only the operation is wrong.
+		body := `{"action":"deploy","team_name":"labs","component_name":"mctl-telegram","dockerfile_repo":"mctlhq/mctl-telegram","git_tag":"1.0.0"}`
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/operations/"+op+"/execute", bytes.NewReader([]byte(body))))
+		if rec.Code != http.StatusForbidden || bodyCode(rec) != codeCIDeployDenied {
+			t.Errorf("%s: got %d %s, want 403 %s", op, rec.Code, rec.Body.String(), codeCIDeployDenied)
+		}
+	}
+}
+
+type staticSourceRepo string
+
+func (s staticSourceRepo) ComponentSourceRepo(string, string) (string, error) { return string(s), nil }

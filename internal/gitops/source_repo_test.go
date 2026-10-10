@@ -56,6 +56,18 @@ func TestComponentSourceRepo(t *testing.T) {
 		t.Fatalf("an unsynced checkout answered %v; it must be an error, not 'not registered'", err)
 	}
 
+	// Files on disk without a checkout behind them are not an answer either.
+	loose := filepath.Join(root, "loose")
+	if err := os.MkdirAll(filepath.Join(loose, "platform-gitops", "services", "labs", "tg"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(loose, "platform-gitops", "services", "labs", "tg", "catalog-info.yaml"), []byte("metadata:\n  annotations:\n    github.com/source-repo: mctlhq/mctl-telegram\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := (&Reader{localPath: loose}).ComponentSourceRepo("labs", "tg"); err == nil {
+		t.Fatalf("a directory that is not a synced checkout answered %q", got)
+	}
+
 	r := &Reader{repoURL: remote, branch: "main", localPath: cache}
 	if err := r.refresh(); err != nil {
 		t.Fatal(err)
