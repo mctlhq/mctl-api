@@ -79,3 +79,17 @@ func TestCreateTenant_AdminMayRerun(t *testing.T) {
 		t.Fatalf("expected a submission, got %v", exec.submitted)
 	}
 }
+
+func TestCreateTenant_ReservedNameRejected(t *testing.T) {
+	for _, u := range []*auth.User{newcomer, adminUser} {
+		router, exec := createTenantRouter(t, &fakeGitReader{})
+		w := postAs(t, router, createTenantPath, map[string]string{"tenant_name": "argocd"}, u)
+		assertStatus(t, w, http.StatusBadRequest)
+		if !strings.Contains(w.Body.String(), "validationErrors") || !strings.Contains(w.Body.String(), "reserved") {
+			t.Errorf("unexpected body: %s", w.Body.String())
+		}
+		if len(exec.submitted) != 0 {
+			t.Fatalf("reserved name must not be submitted: %v", exec.submitted)
+		}
+	}
+}

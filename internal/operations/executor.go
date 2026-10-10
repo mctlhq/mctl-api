@@ -124,6 +124,9 @@ func WorkflowNamespace(workflowTemplate, team string) string {
 
 // Submit creates an Argo Workflow CR referencing the ClusterWorkflowTemplate.
 func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]string, userID string, team string) (*SubmitResult, error) {
+	if err := checkReservedTenantName(op, params); err != nil {
+		return nil, err
+	}
 	if team == "" {
 		return nil, fmt.Errorf("team is required for workflow submission")
 	}

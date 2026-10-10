@@ -242,6 +242,9 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 			}
 		}
 	}
+	if err := checkReservedTenantName(op, input); err != nil {
+		errors = append(errors, err.Error())
+	}
 	return errors
 }
 

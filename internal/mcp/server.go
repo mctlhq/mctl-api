@@ -671,6 +671,7 @@ This provisions:
 - SSO access to Argo Workflows UI
 
 The workspace name must be unique, DNS-safe (lowercase letters, numbers, hyphens).
+Platform namespace names (e.g. kube-*, argo*, *-system, vault) are reserved.
 
 Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track progress.`),
 		mcplib.WithString("tenant_name",
