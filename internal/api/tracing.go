@@ -9,7 +9,7 @@ import (
 )
 
 // tracingMiddleware starts a server span per request, continuing an incoming
-// W3C traceparent. Probe and metrics paths are filtered out; headers and
+// W3C traceparent. Probe and metrics paths and the long-lived GET /mcp listen stream are filtered out; headers and
 // bodies are never captured. The span is renamed to the chi route pattern once
 // routing has happened, so path parameters do not explode cardinality.
 func tracingMiddleware() func(http.Handler) http.Handler {
@@ -27,6 +27,12 @@ func tracingMiddleware() func(http.Handler) http.Handler {
 				switch r.URL.Path {
 				case "/healthz", "/readyz", "/metrics":
 					return false
+				case "/mcp":
+					// The MCP listen stream stays open for the life of the
+					// connection; a span would never end. POST /mcp is traced.
+					if r.Method == http.MethodGet {
+						return false
+					}
 				}
 				return true
 			}),

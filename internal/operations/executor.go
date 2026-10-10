@@ -375,8 +375,8 @@ func trimWorkflowStatus(obj map[string]interface{}) map[string]interface{} {
 	return result
 }
 
-func buildArgoParams(params map[string]string) []map[string]interface{} {
-	result := make([]map[string]interface{}, 0, len(params))
+func buildArgoParams(params map[string]string) []interface{} {
+	result := make([]interface{}, 0, len(params))
 	for k, v := range params {
 		result = append(result, map[string]interface{}{"name": k, "value": v})
 	}

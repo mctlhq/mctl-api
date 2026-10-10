@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 // config_patch is the parameter that motivated the filter (gitops#997): it is a
@@ -90,5 +93,31 @@ func TestExecuteOperation_UndeclaredParamsAreNotProcessedBeforeAuth(t *testing.T
 	}
 	if len(exec.submittedParams) != 0 {
 		t.Errorf("an unauthenticated request reached the executor: %v", exec.submittedParams)
+	}
+}
+
+func TestExecuteOperation_202BodyCarriesTraceID(t *testing.T) {
+	tp := sdktrace.NewTracerProvider()
+	oldTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	defer otel.SetTracerProvider(oldTP)
+
+	router, _ := newTestRouter(t)
+	w := postAs(t, router, "/api/v1/operations/deploy-service/execute", map[string]string{
+		"action":          "onboard",
+		"team_name":       "tests",
+		"component_name":  "my-app",
+		"dockerfile_repo": "myorg/my-app",
+		"git_tag":         "v1.0.0",
+	}, adminUser)
+	assertStatus(t, w, http.StatusAccepted)
+
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	tid, _ := body["trace_id"].(string)
+	if len(tid) != 32 {
+		t.Fatalf("trace_id = %q, want 32 hex chars", tid)
 	}
 }
