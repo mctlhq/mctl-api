@@ -404,7 +404,7 @@ func workflowTraceID(obj map[string]interface{}) (string, string) {
 					continue
 				}
 				value, _ := param["value"].(string)
-				if m := w3cTraceparent.FindStringSubmatch(value); m != nil && !allZero(m[1]) {
+				if m := w3cTraceparent.FindStringSubmatch(value); len(m) == 2 && !allZero(m[1]) {
 					return m[1], "traceparent-argument"
 				}
 			}
