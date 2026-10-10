@@ -631,8 +631,8 @@ func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Reques
 		"domain":       d.Domain,
 	}
 
-	// Every other Submit call site (ExecuteOperation in handlers_write.go,
-	// the openclaw handlers) validates against the registry's declared
+	// The generic Submit call site (ExecuteOperation in handlers_write.go)
+	// validates against the registry's declared
 	// parameter patterns first. AddDomain only checks team/service are
 	// non-empty — the store column is plain TEXT — so without this check a
 	// caller-supplied service like "../../../platform-gitops/services/other-team/api"

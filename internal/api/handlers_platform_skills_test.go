@@ -35,10 +35,10 @@ func (r policyOnlyGitReader) GetPlatformPolicy() (*gitops.PlatformSkillPolicy, e
 	return &gitops.PlatformSkillPolicy{}, nil
 }
 
-// The allowlist semantics must match the materializer in
-// mctl-gitops/scripts/materialize-openclaw-platform-skills.py: an absent
-// tenant key is unrestricted, a present key — even an empty list — is an
-// exhaustive allowlist (deny-all when empty).
+// The allowlist semantics (those the since-removed OpenClaw skills
+// materializer in mctl-gitops applied): an absent tenant key is
+// unrestricted, a present key — even an empty list — is an exhaustive
+// allowlist (deny-all when empty).
 func TestValidateTenantSkillEnable_AllowlistSemantics(t *testing.T) {
 	activeTenantSkill := gitops.PlatformSkill{
 		Metadata: gitops.PlatformSkillMetadata{

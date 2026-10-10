@@ -255,13 +255,14 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 // registry does not therefore became settable by any caller of the generic
 // /operations/{name}/execute path. That is how config_patch — a raw yq
 // expression evaluated against values.yaml by tpl-git-commit, and intended
-// only to be built server-side by the OpenClaw handler — was reachable from an
-// arbitrary request body (gitops#997).
+// only to be built server-side by a dedicated handler (the since-removed
+// OpenClaw handler) — was reachable from an arbitrary request body
+// (gitops#997).
 //
 // Filtering here rather than at each call site keeps the property true for
 // every operation, including ones added later: the generic path can only ever
 // submit parameters the registry describes. Handlers that build their params
-// server-side and call Executor.Submit directly (handlers_openclaw.go) are
+// server-side and call Executor.Submit directly are
 // deliberately unaffected — they are the legitimate producers of the
 // undeclared-but-real workflow parameters.
 func (r *Registry) StripUndeclared(op Operation, input map[string]string) (map[string]string, []string) {
@@ -527,56 +528,6 @@ var builtinOperations = []Operation{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "service_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "domain", Type: "string", Required: true, Description: "Custom domain to remove"},
-		},
-	},
-	{
-		Name:             "openclaw-skill-save",
-		DisplayName:      "Save OpenClaw Skill to GitOps",
-		Description:      "Back up a single OpenClaw SKILL.md file to the gitops repo. Writes platform-gitops/services/{team}/openclaw/skills/{skill_name}.md from a base64-encoded payload. Overwrites an existing file. Commits with the triggering user recorded in the commit body.",
-		WorkflowTemplate: "openclaw-skill-save",
-		RiskLevel:        RiskLow,
-		RequiresConfirm:  false,
-		MinRole:          RoleOwner,
-		HandlerOnly:      true,
-		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
-		Parameters: []ParameterDef{
-			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name (kebab-case, 1-64 chars)", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
-			{Name: "content_b64", Type: "string", Required: true, Description: "Base64-encoded SKILL.md content"},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
-		},
-	},
-	{
-		Name:             "openclaw-skill-delete",
-		DisplayName:      "Remove OpenClaw Skill from GitOps",
-		Description:      "Remove a single SKILL.md file from the gitops backup. Idempotent — succeeds with a no-op if the file is already absent. Does not touch the tenant's runtime workspace.",
-		WorkflowTemplate: "openclaw-skill-delete",
-		RiskLevel:        RiskLow,
-		RequiresConfirm:  false,
-		MinRole:          RoleOwner,
-		HandlerOnly:      true,
-		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
-		Parameters: []ParameterDef{
-			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
-		},
-	},
-	{
-		Name:             "openclaw-identity-save",
-		DisplayName:      "Save OpenClaw Identity File to GitOps",
-		Description:      "Back up a single OpenClaw identity override (AGENTS.md / SOUL.md / IDENTITY.md / USER.md / TOOLS.md) to the gitops repo. Writes platform-gitops/services/{team}/openclaw/identity/{file_name} from a base64-encoded payload. Overwrites an existing file. Commits with the triggering user recorded in the commit body.",
-		WorkflowTemplate: "openclaw-identity-save",
-		RiskLevel:        RiskLow,
-		RequiresConfirm:  false,
-		MinRole:          RoleOwner,
-		HandlerOnly:      true,
-		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/identity/"},
-		Parameters: []ParameterDef{
-			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "file_name", Type: "string", Required: true, Description: "Identity file name (one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md)", Enum: []string{"AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md"}},
-			{Name: "content_b64", Type: "string", Required: true, Description: "Base64-encoded identity file content"},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
 		},
 	},
 	{
@@ -908,22 +859,6 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Reconcile only this service. Leave empty to sweep every service.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
 			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to print every would-be flip without writing .status.yaml or opening any PR. Default 'false'.", Enum: []string{"true", "false"}},
-		},
-	},
-	{
-		Name:             "openclaw-identity-delete",
-		DisplayName:      "Remove OpenClaw Identity File from GitOps",
-		Description:      "Remove a single identity override (AGENTS.md / SOUL.md / IDENTITY.md / USER.md / TOOLS.md) from the gitops backup. Idempotent — succeeds with a no-op if the file is already absent. The tenant reverts to the image-shipped default at the next sidecar reconcile.",
-		WorkflowTemplate: "openclaw-identity-delete",
-		RiskLevel:        RiskLow,
-		RequiresConfirm:  false,
-		MinRole:          RoleOwner,
-		HandlerOnly:      true,
-		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/identity/"},
-		Parameters: []ParameterDef{
-			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "file_name", Type: "string", Required: true, Description: "Identity file name (one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md)", Enum: []string{"AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md"}},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
 		},
 	},
 }

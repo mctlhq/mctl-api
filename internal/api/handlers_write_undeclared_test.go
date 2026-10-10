@@ -13,8 +13,9 @@ import (
 // values.yaml, it is NOT declared in the deploy-service registry entry, and
 // wft-deploy-service does declare it as a workflow parameter — so before the
 // filter it travelled from an arbitrary request body all the way into the yq
-// call. Its only legitimate producer is handlers_openclaw.go, which builds it
-// server-side and calls Executor.Submit directly, bypassing this path.
+// call. Its only legitimate producer was the since-removed OpenClaw handler,
+// which built it server-side and called Executor.Submit directly; nothing in
+// mctl-api sets it any more.
 func TestExecuteOperation_UndeclaredParamNeverReachesArgo(t *testing.T) {
 	router, exec := newTestRouter(t)
 

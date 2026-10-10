@@ -61,10 +61,6 @@ type Options struct {
 	// WorkflowLogArchive reads archived Argo step logs from object storage
 	// (optional — nil when the archive env vars are unset).
 	WorkflowLogArchive WorkflowLogArchive
-	// VaultReader checks persisted secrets for onboarding preflight (optional — nil outside cluster).
-	VaultReader VaultReader
-	// MetricsQuerier fetches historical runtime usage for right-sizing decisions (optional).
-	MetricsQuerier MetricsQuerier
 	// Optional Backstage integration for immediate catalog sync.
 	BackstageURL string
 	// BackstageToken authorizes notifyBackstage's tenant catalog sync POST
@@ -181,9 +177,6 @@ type Options struct {
 	// secret behind a required reviewer, so this process can ask for that
 	// apply without ever being able to perform it.
 	WorkflowDispatcher WorkflowDispatcher
-	// OpenClaw controls quota and rate limits on the skill/identity save handlers.
-	// Zero values fall back to defaults (see OpenClawQuotaDefaults).
-	OpenClaw OpenClawQuotaConfig
 	// GitopsReady / PostgresReady / DexReady / VaultReady are optional
 	// dependency probes for GET /readyz. A nil check is reported as
 	// not_configured and does not fail readiness (tests, local without Vault).
@@ -219,23 +212,14 @@ type Options struct {
 
 // Handlers holds all API handler dependencies.
 type Handlers struct {
-	opts Options
-	// openClawQuota is the effective quota config after default fill-in.
-	// Pre-computed at router init so each save call is a plain map lookup.
-	openClawQuota       OpenClawQuotaConfig
-	openClawRateLimiter *saveRateLimiter
-	identityLink        *identityLinker
-	oauthZitadel        *oauthZitadel
+	opts         Options
+	identityLink *identityLinker
+	oauthZitadel *oauthZitadel
 }
 
 // NewRouter creates the HTTP router with all API routes.
 func NewRouter(opts Options) http.Handler {
-	quota := opts.OpenClaw.withDefaults()
-	h := &Handlers{
-		opts:                opts,
-		openClawQuota:       quota,
-		openClawRateLimiter: newSaveRateLimiter(quota.SaveRatePerHour),
-	}
+	h := &Handlers{opts: opts}
 	if opts.IdentityLink != nil {
 		h.identityLink = newIdentityLinker(opts.IdentityLink)
 	}
@@ -428,20 +412,6 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/repos", h.ListRepos)
 			r.Get("/repos/install-url", h.GetRepoInstallURL)
 			r.Post("/repos/sync", h.SyncRepos)
-
-			// OpenClaw self-service onboarding and right-sizing.
-			r.Post("/openclaw/deploy/start", h.StartOpenClawDeploy)
-			r.Post("/openclaw/deploy/resume", h.ResumeOpenClawDeploy)
-			r.Get("/openclaw/{team}/{app}/sizing", h.GetOpenClawSizingRecommendation)
-			r.Post("/openclaw/{team}/{app}/resource-profile", h.ApplyOpenClawResourceProfile)
-			r.Get("/openclaw/{team}/skills", h.ListOpenClawSkills)
-			r.Get("/openclaw/{team}/skills/{name}", h.GetOpenClawSkill)
-			r.Post("/openclaw/{team}/skills", h.SaveOpenClawSkill)
-			r.Delete("/openclaw/{team}/skills/{name}", h.DeleteOpenClawSkill)
-			r.Get("/openclaw/{team}/identity", h.ListOpenClawIdentity)
-			r.Get("/openclaw/{team}/identity/{name}", h.GetOpenClawIdentity)
-			r.Post("/openclaw/{team}/identity", h.SaveOpenClawIdentity)
-			r.Delete("/openclaw/{team}/identity/{name}", h.DeleteOpenClawIdentity)
 
 			// Custom domains (mctl-api's own PostgreSQL-backed registry —
 			// see internal/domains). No chi conflict between the two verify
