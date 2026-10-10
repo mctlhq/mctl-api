@@ -244,3 +244,20 @@ func TestSubmitOtherOperationsUnaffected(t *testing.T) {
 		t.Fatalf("deploy-service must not apply the create-tenant check: %v", err)
 	}
 }
+
+// An oversized name is not reflected in full: the reserved check runs
+// independently of the length pattern.
+func TestReservedTenantNameMessageIsBounded(t *testing.T) {
+	long := "mctl-" + strings.Repeat("a", 100000)
+	msg := reservedTenantNameMessage(long)
+	if len(msg) > 200 {
+		t.Errorf("message is %d bytes; the caller's name must be truncated", len(msg))
+	}
+	if !strings.Contains(msg, "reserved") {
+		t.Errorf("message = %q", msg)
+	}
+	err := checkCreateTenantName(Operation{Name: "create-tenant"}, map[string]string{"tenant_name": long})
+	if !errors.Is(err, ErrReservedTenantName) || len(err.Error()) > 200 {
+		t.Errorf("err = %v", err)
+	}
+}

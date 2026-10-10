@@ -47,6 +47,10 @@ import (
 // So look-alikes are NOT accepted: "kube-system-team" is reserved (prefix
 // "kube-"), "my-system" is reserved (suffix "-system"), while "team-kube" or
 // "systems" are not. The wildcards only match at the stated end.
+//
+// There is deliberately no admin bypass. The workflow's own check has none
+// either (reprovision=true does not skip it), so letting an admin past this
+// layer would only move the refusal back into the workflow.
 var reservedTenantNames = map[string]struct{}{
 	"argocd":             {},
 	"argo-workflows":     {},
@@ -113,22 +117,34 @@ func createsTenant(op Operation) bool {
 	return op.Name == "create-tenant" || op.WorkflowTemplate == "create-tenant"
 }
 
+// maxEchoedTenantName bounds how much of a caller-supplied name is echoed
+// back. The reserved check runs independently of the length pattern, so an
+// oversized "mctl-..." name must not be reflected in full.
+const maxEchoedTenantName = 64
+
+func echoTenantName(name string) string {
+	if len(name) > maxEchoedTenantName {
+		return name[:maxEchoedTenantName] + "..."
+	}
+	return name
+}
+
 // reservedTenantNameMessage is the caller-facing text; it names no list.
 func reservedTenantNameMessage(name string) string {
-	return fmt.Sprintf("tenant_name: %q is reserved for platform use; choose a different name", name)
+	return fmt.Sprintf("tenant_name: %q is reserved for platform use; choose a different name", echoTenantName(name))
 }
 
 // checkCreateTenantName returns a wrapped ErrReservedTenantName when op
-// creates a tenant and params name a reserved one. It is the single check
-// behind both Registry.ValidateInput (the clear 400) and Executor.Submit (the
-// backstop for any caller that does not go through the REST handler).
+// creates a tenant and params name a reserved one. Executor.Submit uses it as
+// the backstop for any caller that does not go through the REST handler;
+// Registry.ValidateInput applies the same predicate for the clear 400.
 func checkCreateTenantName(op Operation, params map[string]string) error {
 	if !createsTenant(op) {
 		return nil
 	}
 	name := params["tenant_name"]
 	if IsReservedTenantName(name) {
-		return fmt.Errorf("%w: %q", ErrReservedTenantName, name)
+		return fmt.Errorf("%w: %q", ErrReservedTenantName, echoTenantName(name))
 	}
 	return nil
 }
