@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.76.0](https://github.com/mctlhq/mctl-api/compare/4.75.0...4.76.0) (2026-10-10)
+
+
+### Features
+
+* **agents:** issue-536-fix-api-readyz-must-not-drain-every-repl ([f5baa07](https://github.com/mctlhq/mctl-api/commit/f5baa070ba0f94d648554fa4c171530b26b6a827))
+
+
+### Bug Fixes
+
+* **api:** keep /readyz 503 until this pod's gitops checkout has synced ([b6bf390](https://github.com/mctlhq/mctl-api/commit/b6bf39015a0b8d05a63b2ad4ef9b90e4f856b31c))
+* **api:** serve for a drain delay before closing the listener ([97cc871](https://github.com/mctlhq/mctl-api/commit/97cc87166b00d878b06abd1a87fdb7086cbb2ad3))
+* **operations:** reject reserved tenant names in create-tenant validation ([598c515](https://github.com/mctlhq/mctl-api/commit/598c51564a81ab07fe1e7d7e7266c9ef2266b58e))
+
 ## [4.75.0](https://github.com/mctlhq/mctl-api/compare/4.74.1...4.75.0) (2026-10-10)
 
 
