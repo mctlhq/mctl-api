@@ -1093,6 +1093,10 @@ type config struct {
 	// so results do not depend on cluster split-horizon DNS.
 	DNSResolverAddr string
 	// Dex OIDC issuer for JWT validation (dual-token auth alongside GitHub tokens).
+	// No default: Dex is being retired (mctlhq/mctl-gitops#1500 phase 4). Unset
+	// means no Dex verifier, no legacy "dex" federation shim and no Dex
+	// readiness check, so Dex can be removed once the deployment stops setting
+	// it without /readyz failing on a dead issuer.
 	DexIssuerURL string
 	// DexClientID is the expected audience for Dex JWTs. If empty, audience check is skipped.
 	DexClientID string
@@ -1217,7 +1221,7 @@ func loadConfig() config {
 		PlatformDomain:                 envOr("PLATFORM_DOMAIN", "mctl.ai"),
 		DNSResolverAddr:                envOr("DNS_RESOLVER_ADDR", "1.1.1.1:53"),
 		BackstageGithubAppConnectToken: os.Getenv("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN"),
-		DexIssuerURL:                   envOr("DEX_ISSUER_URL", "https://ops.mctl.ai/api/dex"),
+		DexIssuerURL:                   os.Getenv("DEX_ISSUER_URL"),
 		DexClientID:                    os.Getenv("DEX_CLIENT_ID"),
 		OIDCProvidersRaw:               os.Getenv("MCTL_OIDC_PROVIDERS"),
 		FederationDisabled:             killSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED")),
