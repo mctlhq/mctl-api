@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"io"
@@ -227,8 +228,12 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// Apply defaults then validate.
 	input = h.opts.Registry.ApplyDefaults(op, input)
 	if errs := h.opts.Registry.ValidateInput(op, input); len(errs) > 0 {
+		// The reasons go into "error" as well as validationErrors: callers
+		// that read only "error" (the MCP tools' doRequest, shell clients)
+		// would otherwise report a bare "validation failed". The prefix is
+		// unchanged for anything that matches on it.
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":            "validation failed",
+			"error":            "validation failed: " + strings.Join(errs, "; "),
 			"validationErrors": errs,
 		})
 		return
@@ -273,6 +278,13 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			RiskLevel:  string(op.RiskLevel),
 			Message:    "submit failed: " + err.Error(),
 		})
+		// Executor.Submit refuses a reserved tenant name on its own. The
+		// validation above normally gets there first; mapping it here keeps
+		// the backstop from masquerading as a platform fault.
+		if errors.Is(err, operations.ErrReservedTenantName) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to submit workflow: "+err.Error())
 		return
 	}

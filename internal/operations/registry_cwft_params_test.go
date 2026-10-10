@@ -32,12 +32,13 @@ var cwftDeclaredParams = map[string][]string{
 		"issue_url", "agent_image", "agent_version",
 		"work_item_id", "execution_id",
 		"temporal_workflow_id", "temporal_run_id", "execution_request_id",
-		"human_input_responses",
+		"human_input_responses", "traceparent",
 	},
 	"mctl-agents-implement": {
 		"service", "slug", "force", "max_proposals", "agent_image", "agent_version",
 		"work_item_id", "execution_id",
 		"temporal_workflow_id", "temporal_run_id", "execution_request_id",
+		"traceparent",
 	},
 	"mctl-agents-shepherd": {
 		"service", "slug", "dry_run", "agent_image", "agent_version",

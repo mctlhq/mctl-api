@@ -147,6 +147,24 @@ var devLoopCorrelationParamPatterns = map[string]string{
 	"execution_id":         correlationIDPattern,
 }
 
+// traceparentParam declares the W3C trace context a traced mctl-agents worker
+// sends behind MCTL_TRACE_ARGO_PARAM (mctlhq/mctl-agents#195), so
+// StripUndeclared stops dropping it on the way to Argo. The CWFT maps it onto
+// the pod's TRACEPARENT env, never into a script (mctlhq/mctl-gitops, the
+// investigate and implement templates). Opaque here and correlation only: a
+// version-00 traceparent with lowercase hex ids, nothing else, and
+// OmitWhenEmpty so an untraced submit keeps its exact arguments.
+func traceparentParam() ParameterDef {
+	return ParameterDef{
+		Name:          "traceparent",
+		Type:          "string",
+		Required:      false,
+		OmitWhenEmpty: true,
+		Description:   "Optional. W3C traceparent of the submitting Temporal activity, for execution traces only (mctl-agents#195). Set by a traced DevLoop worker; omit otherwise.",
+		Pattern:       `^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`,
+	}
+}
+
 // devLoopCorrelationParams declares the DevLoopWorkflow's correlation
 // identifiers named by names: temporal_workflow_id, temporal_run_id,
 // execution_request_id, work_item_id and/or execution_id, exactly as the
@@ -241,6 +259,13 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 				errors = append(errors, p.Name+": must match pattern "+p.Pattern)
 			}
 		}
+	}
+	// create-tenant: a name that collides with a platform namespace is refused
+	// here, with a plain validation error, instead of after submission inside
+	// the workflow. Executor.Submit repeats the check for callers that do not
+	// come through this function.
+	if createsTenant(op) && IsReservedTenantName(input["tenant_name"]) {
+		errors = append(errors, reservedTenantNameMessage(input["tenant_name"]))
 	}
 	return errors
 }
@@ -711,6 +736,7 @@ var builtinOperations = []Operation{
 			// cwft-mctl-agents-implement also declares a "force" parameter that
 			// mctl-api deliberately does not expose here (see
 			// cwftParamsNotSettableViaAPI in registry_cwft_params_test.go).
+			traceparentParam(),
 		}, append(agentPinParams("implementer"),
 			devLoopCorrelationParams("temporal_workflow_id", "temporal_run_id", "execution_request_id", "work_item_id", "execution_id")...)...),
 	},
@@ -798,6 +824,7 @@ var builtinOperations = []Operation{
 			{Name: "human_input_responses", Type: "string", Required: false, OmitWhenEmpty: true,
 				Description: "Optional. JSON array of accepted human-input answers for a DevLoop continuation (mctl-agents#473). Set only by the DevLoop; omit otherwise.",
 				Pattern:     `(?s)^\[.*\]$`},
+			traceparentParam(),
 		}, append(agentPinParams("issue-investigator"),
 			devLoopCorrelationParams("temporal_workflow_id", "temporal_run_id", "execution_request_id")...)...),
 	},

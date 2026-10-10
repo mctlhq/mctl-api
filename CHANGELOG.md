@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.75.0](https://github.com/mctlhq/mctl-api/compare/4.74.1...4.75.0) (2026-10-10)
+
+
+### Features
+
+* **operations:** declare traceparent on investigate and implement ([4e87f20](https://github.com/mctlhq/mctl-api/commit/4e87f20524af467fc2194abf15b3654538d362dc))
+* **operations:** declare traceparent on investigate and implement ([72f3603](https://github.com/mctlhq/mctl-api/commit/72f360365b6a494205ed9fd209267a4dbb512e6c))
+* **workflows:** report a workflow's trace id in its status ([6314860](https://github.com/mctlhq/mctl-api/commit/63148604b0ea177fd872d056cb55be2496c9dc66))
+* **workflows:** report a workflow's trace id in its status ([a925548](https://github.com/mctlhq/mctl-api/commit/a9255484fb739974ef94995afaed38a436a983d1))
+
+
+### Bug Fixes
+
+* **workflows:** satisfy gocritic weakCond on the traceparent match ([91852a5](https://github.com/mctlhq/mctl-api/commit/91852a582010e2b81bdc40e780894a0ee2866618))
+
 ## [4.74.1](https://github.com/mctlhq/mctl-api/compare/4.74.0...4.74.1) (2026-10-10)
 
 
