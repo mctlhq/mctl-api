@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.74.1](https://github.com/mctlhq/mctl-api/compare/4.74.0...4.74.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* **mcp:** onboarding text points CI deploys at Actions OIDC ([30a3b1a](https://github.com/mctlhq/mctl-api/commit/30a3b1a62196ca1f198e6eb8b7a72d83374806ce))
+* **mcp:** onboarding text points CI deploys at Actions OIDC ([3bc792e](https://github.com/mctlhq/mctl-api/commit/3bc792e467c726b207f66c6dfc8d45e72420562d))
+
 ## [4.74.0](https://github.com/mctlhq/mctl-api/compare/4.73.0...4.74.0) (2026-10-10)
 
 
