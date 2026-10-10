@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestReadyz_NoProbesConfiguredIsReady(t *testing.T) {
@@ -62,29 +63,65 @@ func TestReadyz_AllProbesOK(t *testing.T) {
 	}
 }
 
-func TestReadyz_FailedProbeReturns503(t *testing.T) {
+// mctl-api#536: every replica probes the same shared dependencies, so a
+// dependency outage must not fail readiness, or all replicas go not-Ready at
+// once and the Service loses every endpoint.
+func TestReadyz_AllDependenciesFailingStaysReady(t *testing.T) {
+	fail := func(context.Context) error { return fmt.Errorf("down") }
+	h := &Handlers{opts: Options{
+		GitopsReady:       fail,
+		PostgresReady:     fail,
+		DexReady:          fail,
+		VaultReady:        fail,
+		StoreInitFailures: func() []string { return nil },
+	}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeReady(t, rec)
+	if body.Status != "ready" {
+		t.Errorf("status = %q, want ready", body.Status)
+	}
+	for _, name := range []string{"gitops", "postgres", "dex", "vault"} {
+		if body.Checks[name] != "unavailable" {
+			t.Errorf("checks[%s] = %q, want unavailable (still observable)", name, body.Checks[name])
+		}
+	}
+	if got := fmt.Sprint(body.DegradedDependencies); got != "[gitops postgres dex vault]" {
+		t.Errorf("degraded_dependencies = %s, want all four named", got)
+	}
+	if body.Checks["stores"] != "ok" {
+		t.Errorf("checks[stores] = %q, want ok", body.Checks["stores"])
+	}
+}
+
+func TestReadyz_OneFailedDependencyIsReportedAndStaysReady(t *testing.T) {
 	h := &Handlers{opts: Options{
 		GitopsReady:   func(context.Context) error { return fmt.Errorf("never synced") },
 		PostgresReady: func(context.Context) error { return nil },
 	}}
 	rec := httptest.NewRecorder()
 	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := decodeReady(t, rec)
-	if body.Status != "not ready" {
-		t.Errorf("status = %q, want not ready", body.Status)
-	}
 	if body.Checks["gitops"] != "unavailable" {
 		t.Errorf("gitops = %q, want unavailable", body.Checks["gitops"])
 	}
 	if body.Checks["postgres"] != "ok" {
 		t.Errorf("postgres = %q, want ok", body.Checks["postgres"])
 	}
+	if got := fmt.Sprint(body.DegradedDependencies); got != "[gitops]" {
+		t.Errorf("degraded_dependencies = %s, want [gitops]", got)
+	}
 }
 
-func TestReadyz_SlowProbeDoesNotStarveOthers(t *testing.T) {
+// A hanging dependency must not slow the response beyond the per-check
+// timeout, and must not make a sibling probe inherit its deadline.
+func TestReadyz_HangingProbeIsBoundedAndDoesNotStarveOthers(t *testing.T) {
 	h := &Handlers{opts: Options{
 		GitopsReady: func(ctx context.Context) error {
 			<-ctx.Done()
@@ -98,9 +135,13 @@ func TestReadyz_SlowProbeDoesNotStarveOthers(t *testing.T) {
 		},
 	}}
 	rec := httptest.NewRecorder()
+	start := time.Now()
 	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rec.Code)
+	if elapsed := time.Since(start); elapsed > readyCheckTimeout+time.Second {
+		t.Errorf("handler took %s, want about readyCheckTimeout (%s)", elapsed, readyCheckTimeout)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := decodeReady(t, rec)
 	if body.Checks["gitops"] != "unavailable" {
@@ -133,6 +174,8 @@ type readyBody struct {
 	Status       string            `json:"status"`
 	Checks       map[string]string `json:"checks"`
 	FailedStores []string          `json:"failed_stores"`
+
+	DegradedDependencies []string `json:"degraded_dependencies"`
 }
 
 func decodeReady(t *testing.T, rec *httptest.ResponseRecorder) readyBody {
@@ -170,6 +213,24 @@ func TestReadyz_FailedStoreInitIsNotReady(t *testing.T) {
 	}
 	if got := fmt.Sprint(body.FailedStores); got != "[surface identities agent registry]" {
 		t.Errorf("failed_stores = %s, want both stores named", got)
+	}
+}
+
+// Both at once: the store init failure alone decides the 503, and the failing
+// dependency is still reported.
+func TestReadyz_StoreInitFailureWithFailingDependencyIsNotReady(t *testing.T) {
+	h := &Handlers{opts: Options{
+		VaultReady:        func(context.Context) error { return fmt.Errorf("hang") },
+		StoreInitFailures: func() []string { return []string{"agent registry"} },
+	}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeReady(t, rec)
+	if body.Checks["vault"] != "unavailable" || body.Checks["stores"] != "init_failed" {
+		t.Errorf("checks = %v, want vault unavailable and stores init_failed", body.Checks)
 	}
 }
 

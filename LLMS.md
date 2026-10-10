@@ -21,7 +21,7 @@
 
 ## Key REST API Endpoints
 
-- `GET /healthz`, `GET /readyz`: Liveness and readiness health checks.
+- `GET /healthz`, `GET /readyz`: Liveness and readiness health checks. `/readyz` fails (503) only on pod-local conditions (store init failure); shared dependency state (gitops, postgres, dex, vault) is reported in the body but never changes the status code.
 - `GET /api/v1/services`: List services across tenants.
 - `GET /api/v1/workflows/{name}/logs`: Retrieve live or S3/R2 archived workflow logs.
 - `POST /api/v1/incidents`: Register platform incidents (`type: workflow_failed`, `status: analyzing`).

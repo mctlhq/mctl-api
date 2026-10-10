@@ -27,7 +27,13 @@ import (
 const readyCheckTimeout = 2 * time.Second
 
 // ReadyCheck is a named dependency probe for /readyz. A nil Check means the
-// dependency is not configured and is omitted from the fail-the-pod decision.
+// dependency is not configured and is reported as not_configured.
+//
+// Dependency probes are informational: their outcome is reported in the
+// /readyz body but never changes the status code (mctl-api#536). Every replica
+// probes the same shared dependencies, so letting a probe fail readiness would
+// turn one dependency outage into a simultaneous not-Ready on all replicas and
+// a total outage, including of endpoints that do not need that dependency.
 type ReadyCheck func(ctx context.Context) error
 
 // HTTPReady returns a probe that GETs url and succeeds on 2xx/3xx.
@@ -58,6 +64,17 @@ func HTTPReadyWithClient(url string, client *http.Client) ReadyCheck {
 	}
 }
 
+// handleReadyz answers the kubelet readiness probe.
+//
+// The status code reflects only conditions local to this pod that a restart or
+// reschedule could plausibly fix: a store whose one startup init failed
+// (mctl-api#387). A pod that is shutting down needs no flag here: the HTTP
+// server closes its listener first, so the probe is refused.
+//
+// The state of shared dependencies (gitops, postgres, dex, vault) is reported
+// in the body under "checks", with the names of unavailable ones in
+// "degraded_dependencies", so monitoring can still see it, but it does not
+// affect the status code.
 func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	type named struct {
 		name  string
@@ -70,40 +87,39 @@ func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		{"vault", h.opts.VaultReady},
 	}
 
-	type result struct {
-		status string
-		fail   bool
-	}
-	results := make([]result, len(probes))
+	results := make([]string, len(probes))
 	var wg sync.WaitGroup
 	for i, p := range probes {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if p.check == nil {
-				results[i] = result{status: "not_configured"}
+				results[i] = "not_configured"
 				return
 			}
 			ctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
 			defer cancel()
 			if err := p.check(ctx); err != nil {
-				slog.Warn("readyz probe failed", "check", p.name, "error", err)
-				results[i] = result{status: "unavailable", fail: true}
+				slog.Warn("readyz dependency probe failed", "check", p.name, "error", err)
+				results[i] = "unavailable"
 				return
 			}
-			results[i] = result{status: "ok"}
+			results[i] = "ok"
 		}()
 	}
 	wg.Wait()
 
 	checks := make(map[string]string, len(probes)+1)
-	ready := true
+	degraded := []string{}
 	for i, p := range probes {
-		checks[p.name] = results[i].status
-		if results[i].fail {
-			ready = false
+		checks[p.name] = results[i]
+		if results[i] == "unavailable" {
+			degraded = append(degraded, p.name)
 		}
 	}
+
+	// ready is decided only by local conditions below.
+	ready := true
 
 	// Stores are not probed live: a store that failed its one startup init
 	// stays nil until the pod restarts (mctl-api#387), so the only honest
@@ -128,5 +144,6 @@ func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	}
 	body["status"] = status
 	body["checks"] = checks
+	body["degraded_dependencies"] = degraded
 	writeJSON(w, code, body)
 }
