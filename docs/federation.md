@@ -343,7 +343,7 @@ Each refusal logs `github actions token refused` with a `reason` (`issuer`,
 | Field | Value |
 |---|---|
 | Identity | provider `github-actions`, issuer as above, subject = `repository_id` (immutable), kind `service` |
-| `User.ID` / display | `ci:<owner>/<repo>`; this is what the audit log records |
+| `User.ID` / display | `ci:<owner>/<repo>`, lowercased; this is what the audit log records. The Workflow's `mctl.ai/user` label carries a label-safe form of it (`ci.<owner>.<repo>-<hash>`). |
 | Groups | none: no tenant membership and no admin, whatever the token carries |
 
 ### What it may call
@@ -361,6 +361,11 @@ Each refusal logs `github actions token refused` with a `reason` (`issuer`,
     `dockerfile_repo`, `git_tag` and `dockerfile_path`. Any other parameter
     is refused: env vars, secrets, `clear_*`, host, port, scaling, database,
     template, `image_tag`.
+  - `git_tag` is required and must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`.
+    Any tag of the repository may be deployed: the token's ref is not tied
+    to it.
+  - `dockerfile_path`, if sent, must be a relative path inside the
+    repository with no `.`, `..` or empty segments.
   - `dockerfile_repo` must equal the token's `repository`.
   - The component's `github.com/source-repo` annotation must equal it too.
     The annotation lives in

@@ -231,3 +231,66 @@ func TestCIDeploy_HumansAreUnaffected(t *testing.T) {
 		t.Fatalf("status %d; body %s", w.Code, w.Body.String())
 	}
 }
+
+func TestCIDeploy_GitTagIsRequiredAndShaped(t *testing.T) {
+	for name, tag := range map[string]*string{
+		"missing":   nil,
+		"empty":     ptr(""),
+		"slash":     ptr("release/1.0"),
+		"leading .": ptr(".1"),
+		"space":     ptr("1.0 ; x"),
+		"too long":  ptr(strings.Repeat("a", 129)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newCIFixture(t, defaultRepos())
+			body := ciBody()
+			if tag == nil {
+				delete(body, "git_tag")
+			} else {
+				body["git_tag"] = *tag
+			}
+			f.refused(t, body, http.StatusBadRequest, "git_tag is required")
+		})
+	}
+}
+
+func TestCIDeploy_DockerfilePathStaysInTheRepository(t *testing.T) {
+	for _, p := range []string{"../Dockerfile", "a/../../Dockerfile", "/etc/Dockerfile", "a//Dockerfile", "./Dockerfile", "", "a/..", "a b"} {
+		t.Run(p, func(t *testing.T) {
+			f := newCIFixture(t, defaultRepos())
+			body := ciBody()
+			body["dockerfile_path"] = p
+			f.refused(t, body, http.StatusBadRequest, "dockerfile_path must be a relative path")
+		})
+	}
+	f := newCIFixture(t, defaultRepos())
+	body := ciBody()
+	body["dockerfile_path"] = "deploy/api.Dockerfile"
+	if w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, ciUser()); w.Code != http.StatusAccepted {
+		t.Fatalf("a plain relative path was refused: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCIDeploy_DenialRecordsWhatWasAsked(t *testing.T) {
+	f := newCIFixture(t, defaultRepos())
+	body := ciBody()
+	body["component_name"] = "seerrsense"
+	body["secret_env_vars"] = "TOKEN=x"
+	_ = postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, ciUser())
+	e := f.audit.List(1)[0]
+	if e.Parameters["team_name"] != "labs" || e.Parameters["component_name"] != "seerrsense" || e.Parameters["git_tag"] != "0.80.0" {
+		t.Fatalf("parameters %v", e.Parameters)
+	}
+	if _, leaked := e.Parameters["secret_env_vars"]; leaked {
+		t.Fatal("a refused secret was written to the audit log")
+	}
+}
+
+func TestCIDeploy_IdentityIsLowercase(t *testing.T) {
+	u := auth.NewCIUser("MCTLHQ/Mctl-Telegram", "1001")
+	if u.ID != "ci:mctlhq/mctl-telegram" || u.CIRepository() != "mctlhq/mctl-telegram" {
+		t.Fatalf("got %q / %q", u.ID, u.CIRepository())
+	}
+}
+
+func ptr(s string) *string { return &s }

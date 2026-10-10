@@ -31,8 +31,11 @@ import (
 )
 
 // The CI principal (mctl-api#530): one GitHub Actions job, authenticated by
-// its OIDC token, deploying a new tag of the component bound to its own
-// repository. See docs/federation.md, "GitHub Actions (CI deploys)".
+// its OIDC token, deploying a tag of its own repository to the component
+// registered to that repository. Which tag is the job's choice: the token's
+// ref is not tied to git_tag, since any tag of the repository is within the
+// repository's own authority. See docs/federation.md, "GitHub Actions: CI
+// deploys".
 
 const (
 	codeCIRouteForbidden = "ci_route_not_allowed"
@@ -48,7 +51,15 @@ const (
 // shipping a new build, and stays with the tenant's humans.
 var ciDeployParams = []string{"action", "team_name", "component_name", "dockerfile_repo", "git_tag", "dockerfile_path"}
 
-var ciNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}$`)
+var (
+	ciNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}$`)
+	// ciGitTagRe is what a tag must look like to be built: the characters a
+	// container image tag allows, so it maps onto one without rewriting.
+	ciGitTagRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	// ciDockerfilePathRe is a relative path inside the repository; ".."
+	// segments are refused separately.
+	ciDockerfilePathRe = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._/-]{0,199}$`)
+)
 
 // ComponentSourceRepoReader answers which repository is registered for a
 // component. *gitops.Reader implements it.
@@ -80,12 +91,22 @@ func ciPrincipalGate(next http.Handler) http.Handler {
 func (h *Handlers) authorizeCIDeploy(w http.ResponseWriter, r *http.Request, user *auth.User, opName string, op operations.Operation, input map[string]string) bool {
 	repo := user.CIRepository()
 	deny := func(status int, msg string) bool {
+		// What was asked for, so a refused CI deploy can be read back. Only
+		// the identifying fields: the rest is either refused or not secret
+		// to begin with, and secret_env_vars is never echoed.
+		params := map[string]string{}
+		for _, k := range []string{"action", "team_name", "component_name", "dockerfile_repo", "git_tag"} {
+			if v, ok := input[k]; ok {
+				params[k] = v
+			}
+		}
 		h.logAudit(r, audit.Entry{
-			UserID:    user.ID,
-			Operation: opName,
-			Status:    "denied",
-			RiskLevel: string(op.RiskLevel),
-			Message:   "ci deploy refused: " + msg,
+			UserID:     user.ID,
+			Operation:  opName,
+			Parameters: params,
+			Status:     "denied",
+			RiskLevel:  string(op.RiskLevel),
+			Message:    "ci deploy refused: " + msg,
 		})
 		writeErrorCode(w, status, codeCIDeployDenied, "CI deploy refused: "+msg, nil)
 		return false
@@ -112,7 +133,15 @@ func (h *Handlers) authorizeCIDeploy(w http.ResponseWriter, r *http.Request, use
 	}
 	team, component := input["team_name"], input["component_name"]
 	if !ciNameRe.MatchString(team) || !ciNameRe.MatchString(component) {
-		return deny(http.StatusBadRequest, "team_name and component_name are required")
+		return deny(http.StatusBadRequest, "team_name and component_name must be lowercase names matching "+ciNameRe.String())
+	}
+	// git_tag decides what is built, so it is required; it and
+	// dockerfile_path are the only free-form values this principal sends.
+	if !ciGitTagRe.MatchString(input["git_tag"]) {
+		return deny(http.StatusBadRequest, "git_tag is required and must match "+ciGitTagRe.String())
+	}
+	if p, ok := input["dockerfile_path"]; ok && !ciRelativePath(p) {
+		return deny(http.StatusBadRequest, "dockerfile_path must be a relative path inside the repository, without .. segments")
 	}
 	if !strings.EqualFold(input["dockerfile_repo"], repo) {
 		return deny(http.StatusForbidden, fmt.Sprintf("dockerfile_repo must be the token's repository %s", repo))
@@ -132,6 +161,18 @@ func (h *Handlers) authorizeCIDeploy(w http.ResponseWriter, r *http.Request, use
 		return deny(http.StatusServiceUnavailable, "the component registry could not be read")
 	case !strings.EqualFold(registered, repo):
 		return deny(http.StatusForbidden, fmt.Sprintf("%s/%s is not registered to %s", team, component, repo))
+	}
+	return true
+}
+
+func ciRelativePath(p string) bool {
+	if !ciDockerfilePathRe.MatchString(p) {
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
 	}
 	return true
 }
