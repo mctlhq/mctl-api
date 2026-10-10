@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -852,6 +853,8 @@ func main() {
 		slog.Warn("TRUSTED_PROXY_CIDRS parse failed; X-Forwarded-For will not be trusted", "error", tpErr)
 	}
 
+	var draining atomic.Bool
+
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Registry:                       registry,
 		GitReader:                      gitReader,
@@ -897,6 +900,8 @@ func main() {
 		DexReady:                       dexReady,
 		VaultReady:                     vaultReady,
 		StoreInitFailures:              storeFailures.List,
+		GitopsSynced:                   func() bool { return !gitReader.LastSync().IsZero() },
+		Draining:                       draining.Load,
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
 		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,
 		GitHubWebhookOwners:            cfg.GitHubWebhookOwners,
@@ -950,11 +955,20 @@ func main() {
 	// Graceful shutdown, driven by the same root registration that guarded
 	// startup — so the FIRST signal drains, whenever it arrives.
 	<-rootCtx.Done()
+	draining.Store(true)
 
 	// Restore default disposition: a second SIGTERM during a slow drain should
 	// kill the process outright rather than be swallowed by a handler that has
 	// already done its job.
 	stopSignals()
+
+	// Keep serving for SHUTDOWN_DRAIN_DELAY with /readyz answering 503
+	// (checks.shutdown=draining) before the listener closes, so the kubelet
+	// and Traefik can take this pod out of rotation while requests routed to
+	// it in the meantime still get an answer instead of a refused connection.
+	drainDelay := parseDuration(os.Getenv("SHUTDOWN_DRAIN_DELAY"), 5*time.Second)
+	slog.Info("draining before shutdown", "delay", drainDelay)
+	time.Sleep(drainDelay)
 	slog.Info("shutting down")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)

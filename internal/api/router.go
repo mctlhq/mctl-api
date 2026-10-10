@@ -182,8 +182,10 @@ type Options struct {
 	// apply without ever being able to perform it.
 	WorkflowDispatcher WorkflowDispatcher
 	// GitopsReady / PostgresReady / DexReady / VaultReady are optional
-	// dependency probes for GET /readyz. A nil check is reported as
-	// not_configured and does not fail readiness (tests, local without Vault).
+	// dependency probes for GET /readyz. Results are reported in the body and
+	// in mctl_api_dependency_up but never fail readiness (a shared dependency
+	// outage must not drain every replica). A nil check is reported as
+	// not_configured (tests, local without Vault).
 	GitopsReady   ReadyCheck
 	PostgresReady ReadyCheck
 	DexReady      ReadyCheck
@@ -193,6 +195,15 @@ type Options struct {
 	// entry keeps GET /readyz at 503 and names the store; liveness (/healthz)
 	// is unaffected. Nil means not wired (tests) and is not_configured.
 	StoreInitFailures func() []string
+	// GitopsSynced reports whether this pod's own gitops checkout has synced
+	// at least once. Unlike the shared dependencies above it is pod-local: a
+	// fresh pod that has not cloned yet would serve an empty catalogue, so
+	// GET /readyz answers 503 with checks.gitops_sync=never_synced until the
+	// first sync lands. Nil means not wired (tests) and is not reported.
+	GitopsSynced func() bool
+	// Draining reports that graceful shutdown has begun; GET /readyz then
+	// answers 503 with checks.shutdown=draining. Nil means never draining.
+	Draining func() bool
 	// ArgoWebhookSecret authenticates POST /api/v1/workflows/events/argo-complete.
 	// Fail-closed: an empty secret rejects every callback.
 	ArgoWebhookSecret string

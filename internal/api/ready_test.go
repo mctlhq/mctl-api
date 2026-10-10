@@ -17,10 +17,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestReadyz_NoProbesConfiguredIsReady(t *testing.T) {
@@ -62,19 +66,19 @@ func TestReadyz_AllProbesOK(t *testing.T) {
 	}
 }
 
-func TestReadyz_FailedProbeReturns503(t *testing.T) {
+func TestReadyz_FailedProbeStaysReady(t *testing.T) {
 	h := &Handlers{opts: Options{
 		GitopsReady:   func(context.Context) error { return fmt.Errorf("never synced") },
 		PostgresReady: func(context.Context) error { return nil },
 	}}
 	rec := httptest.NewRecorder()
 	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := decodeReady(t, rec)
-	if body.Status != "not ready" {
-		t.Errorf("status = %q, want not ready", body.Status)
+	if body.Status != "ready" {
+		t.Errorf("status = %q, want ready", body.Status)
 	}
 	if body.Checks["gitops"] != "unavailable" {
 		t.Errorf("gitops = %q, want unavailable", body.Checks["gitops"])
@@ -98,9 +102,13 @@ func TestReadyz_SlowProbeDoesNotStarveOthers(t *testing.T) {
 		},
 	}}
 	rec := httptest.NewRecorder()
+	start := time.Now()
 	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rec.Code)
+	if elapsed := time.Since(start); elapsed > readyCheckTimeout+time.Second {
+		t.Errorf("elapsed = %s, hanging probe slowed the response", elapsed)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := decodeReady(t, rec)
 	if body.Checks["gitops"] != "unavailable" {
@@ -133,6 +141,7 @@ type readyBody struct {
 	Status       string            `json:"status"`
 	Checks       map[string]string `json:"checks"`
 	FailedStores []string          `json:"failed_stores"`
+	Dependencies string            `json:"dependencies"`
 }
 
 func decodeReady(t *testing.T, rec *httptest.ResponseRecorder) readyBody {
@@ -195,5 +204,128 @@ func TestReadyz_StoresNotWiredIsNotConfigured(t *testing.T) {
 	}
 	if got := decodeReady(t, rec).Checks["stores"]; got != "not_configured" {
 		t.Errorf("checks[stores] = %q, want not_configured", got)
+	}
+}
+
+func TestReadyz_AllDependenciesFailingStoresOKIsReady(t *testing.T) {
+	bad := func(context.Context) error { return fmt.Errorf("down") }
+	h := &Handlers{opts: Options{
+		GitopsReady: bad, PostgresReady: bad, DexReady: bad, VaultReady: bad,
+		StoreInitFailures: func() []string { return nil },
+	}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeReady(t, rec)
+	if body.Status != "ready" || body.Checks["stores"] != "ok" || body.Dependencies != "degraded" {
+		t.Errorf("body = %+v", body)
+	}
+	for _, name := range []string{"gitops", "postgres", "dex", "vault"} {
+		if body.Checks[name] != "unavailable" {
+			t.Errorf("checks[%s] = %q, want unavailable", name, body.Checks[name])
+		}
+	}
+}
+
+func TestReadyz_StoreInitFailureWithFailingDepsIs503(t *testing.T) {
+	bad := func(context.Context) error { return fmt.Errorf("down") }
+	h := &Handlers{opts: Options{
+		GitopsReady: bad, PostgresReady: bad, DexReady: bad, VaultReady: bad,
+		StoreInitFailures: func() []string { return []string{"agent registry"} },
+	}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if body := decodeReady(t, rec); fmt.Sprint(body.FailedStores) != "[agent registry]" {
+		t.Errorf("failed_stores = %v", body.FailedStores)
+	}
+}
+
+func TestReadyz_DrainingIs503(t *testing.T) {
+	ok := func(context.Context) error { return nil }
+	h := &Handlers{opts: Options{GitopsReady: ok, Draining: func() bool { return true }}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if got := decodeReady(t, rec).Checks["shutdown"]; got != "draining" {
+		t.Errorf("checks[shutdown] = %q, want draining", got)
+	}
+}
+
+// A pod whose own gitops checkout has never synced would serve an empty
+// catalogue. That is pod-local, so it must keep /readyz at 503 even though the
+// shared gitops dependency probe no longer gates readiness.
+func TestReadyz_GitopsNeverSyncedIs503(t *testing.T) {
+	ok := func(context.Context) error { return nil }
+	h := &Handlers{opts: Options{GitopsReady: ok, GitopsSynced: func() bool { return false }}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	body := decodeReady(t, rec)
+	if got := body.Checks["gitops_sync"]; got != "never_synced" {
+		t.Errorf("checks[gitops_sync] = %q, want never_synced", got)
+	}
+	if body.Status != "not ready" {
+		t.Errorf("status = %q, want not ready", body.Status)
+	}
+}
+
+// Once synced, a failing shared gitops probe (e.g. ListTenants erroring during a
+// GitHub outage) is reported but does not fail readiness.
+func TestReadyz_GitopsSyncedWithFailingProbeIsReady(t *testing.T) {
+	fail := func(context.Context) error { return errors.New("list tenants failed") }
+	h := &Handlers{opts: Options{GitopsReady: fail, GitopsSynced: func() bool { return true }}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := decodeReady(t, rec)
+	if body.Checks["gitops_sync"] != "ok" || body.Checks["gitops"] != "unavailable" {
+		t.Errorf("checks = %v, want gitops_sync=ok gitops=unavailable", body.Checks)
+	}
+}
+
+func TestReadyz_DependencyGauge(t *testing.T) {
+	dependencyUp.Reset()
+	h := &Handlers{opts: Options{
+		GitopsReady:   func(context.Context) error { return fmt.Errorf("down") },
+		PostgresReady: func(context.Context) error { return nil },
+	}}
+	h.handleReadyz(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if got := testutil.ToFloat64(dependencyUp.WithLabelValues("gitops")); got != 0 {
+		t.Errorf("gitops gauge = %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(dependencyUp.WithLabelValues("postgres")); got != 1 {
+		t.Errorf("postgres gauge = %v, want 1", got)
+	}
+	if n := testutil.CollectAndCount(dependencyUp); n != 2 {
+		t.Errorf("series = %d, want 2 (unconfigured probes have none)", n)
+	}
+}
+
+func TestReadyz_DependenciesAggregate(t *testing.T) {
+	ok := func(context.Context) error { return nil }
+	for _, tc := range []struct {
+		opts Options
+		want string
+	}{
+		{Options{GitopsReady: ok, VaultReady: ok}, "ok"},
+		{Options{}, "not_configured"},
+	} {
+		h := &Handlers{opts: tc.opts}
+		rec := httptest.NewRecorder()
+		h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if got := decodeReady(t, rec).Dependencies; got != tc.want {
+			t.Errorf("dependencies = %q, want %q", got, tc.want)
+		}
 	}
 }
