@@ -72,6 +72,17 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A CI principal has no tenant membership or role: it is authorized
+	// here, on the raw input before anything is stripped or defaulted, and
+	// only that decision lets it past the tenant checks below (mctl-api#530).
+	ciAuthorized := false
+	if user.IsCI() {
+		if !h.authorizeCIDeploy(w, r, user, opName, op, input) {
+			return
+		}
+		ciAuthorized = true
+	}
+
 	// Drop anything the operation does not declare, before RBAC reads the
 	// input and before it reaches Argo — but AFTER the authentication check,
 	// so an unauthenticated caller cannot spend the server's CPU sorting keys
@@ -140,7 +151,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 		// Force creator_user_id from the authenticated session (prevent spoofing).
 		input["creator_user_id"] = user.ID
-	} else if !user.HasTenantAccess(tenantParam) {
+	} else if !ciAuthorized && !user.HasTenantAccess(tenantParam) {
 		h.logAudit(r, audit.Entry{
 			UserID:    user.ID,
 			Operation: opName,
@@ -158,7 +169,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// developer, or a read-only viewer, could delete the tenant they belong
 	// to. create-tenant is the one operation with no tenant to hold a role
 	// in; its own rules are the branch above.
-	if opName != "create-tenant" && !h.requireTenantRole(w, r, user, tenantParam, op.MinRole, opName, op.RiskLevel) {
+	if opName != "create-tenant" && !ciAuthorized && !h.requireTenantRole(w, r, user, tenantParam, op.MinRole, opName, op.RiskLevel) {
 		return
 	}
 

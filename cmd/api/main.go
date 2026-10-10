@@ -855,6 +855,7 @@ func main() {
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Registry:                       registry,
 		GitReader:                      gitReader,
+		ComponentSourceRepos:           gitReader,
 		ArgoCD:                         argoClient,
 		AuditLog:                       auditLog,
 		Executor:                       executor,
@@ -1105,6 +1106,10 @@ type config struct {
 	// by auth.ParseOIDCProviders. Unset or blank means only the legacy Dex
 	// shim (DexIssuerURL/DexClientID above) applies.
 	OIDCProvidersRaw string
+	// GitHubActionsOIDCRaw is MCTL_GITHUB_ACTIONS_OIDC (mctl-api#530): the
+	// GitHub Actions OIDC provider for CI deploys, parsed by
+	// auth.ParseGitHubActionsOIDC. Unset means the provider is off.
+	GitHubActionsOIDCRaw string
 	// FederationDisabled is MCTL_FEDERATION_DISABLED (mctl-api#374's kill
 	// switch). While it is on, MCTL_OIDC_PROVIDERS is neither validated nor
 	// built into a registry, and auth.Middleware runs the pre-registry chain.
@@ -1224,6 +1229,7 @@ func loadConfig() config {
 		DexIssuerURL:                   os.Getenv("DEX_ISSUER_URL"),
 		DexClientID:                    os.Getenv("DEX_CLIENT_ID"),
 		OIDCProvidersRaw:               os.Getenv("MCTL_OIDC_PROVIDERS"),
+		GitHubActionsOIDCRaw:           os.Getenv("MCTL_GITHUB_ACTIONS_OIDC"),
 		FederationDisabled:             killSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED")),
 		SelfURL:                        envOr("SELF_URL", "https://api.mctl.ai"),
 		AllowedOrigins:                 origins,
@@ -1522,6 +1528,9 @@ func (c config) validate() error {
 	if _, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw); err != nil {
 		return err
 	}
+	if _, err := auth.ParseGitHubActionsOIDC(c.GitHubActionsOIDCRaw); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1648,6 +1657,7 @@ func buildFederationRegistry(ctx context.Context, cfg config, validator *auth.Gi
 		OIDCProvidersRaw: cfg.OIDCProvidersRaw,
 		DexIssuerURL:     cfg.DexIssuerURL,
 		DexClientID:      cfg.DexClientID,
+		GitHubActionsRaw: cfg.GitHubActionsOIDCRaw,
 	}, validator, resolver, oauth)
 }
 

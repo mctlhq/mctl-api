@@ -77,6 +77,15 @@ type User struct {
 	// Unexported for the same reason as service.
 	registryPublisher bool
 
+	// ci is set only on a GitHub Actions OIDC principal (mctl-api#530):
+	// one CI job of ciRepository, whose immutable repository id is
+	// ciRepositoryID. It carries no groups; the API confines it to one
+	// route and one action (internal/api ciPrincipalGate and
+	// authorizeCIDeploy). Unexported for the same reason as service.
+	ci             bool
+	ciRepository   string
+	ciRepositoryID string
+
 	// surface is set only on a per-surface service principal
 	// ("surface:telegram"), authenticated by that surface's own token
 	// (mctl-api#350). Unexported for the same reason as service.
@@ -587,6 +596,26 @@ func NewRegistryPublisherUser() *User {
 // registry-publisher token.
 func (u *User) IsRegistryPublisher() bool { return u != nil && u.registryPublisher }
 
+// NewCIUser is the principal of one GitHub Actions job of repository
+// ("owner/repo"), whose immutable id is repositoryID (mctl-api#530).
+// Production builds it only from a verified token (userFromVerified).
+func NewCIUser(repository, repositoryID string) *User {
+	return &User{ID: "ci:" + repository, ci: true, ciRepository: repository, ciRepositoryID: repositoryID}
+}
+
+// IsCI reports whether this principal authenticated with a GitHub Actions
+// OIDC token (mctl-api#530).
+func (u *User) IsCI() bool { return u != nil && u.ci }
+
+// CIRepository is the "owner/repo" a CI principal's token was minted for,
+// empty for every other principal.
+func (u *User) CIRepository() string {
+	if !u.IsCI() {
+		return ""
+	}
+	return u.ciRepository
+}
+
 // registryPublisherUnsetLogged makes the "not configured" line below appear
 // once per process: the token is read by both Middleware and
 // BuildFederationRegistry, and an operator needs to see the state, not count
@@ -1042,6 +1071,14 @@ func userFromVerified(v *Verified) *User {
 				u.githubID = id
 			}
 		}
+		return u
+	case v.Identity.Provider == ProviderGitHubActions:
+		// No groups, whatever the token held: a CI job is not a tenant
+		// member. Marked ci even if a claim were somehow empty, so the
+		// route gate still confines it; authorizeCIDeploy refuses an empty
+		// repository.
+		u := NewCIUser(v.Claims.CIRepository, v.Identity.Subject)
+		u.ID = v.Identity.Display
 		return u
 	case v.Identity.Provider == ProviderDex:
 		return &User{ID: v.Identity.Display, Groups: v.Claims.Groups, dexIssuer: v.Identity.Issuer, dexSubject: v.Identity.Subject}

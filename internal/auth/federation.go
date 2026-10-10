@@ -68,6 +68,10 @@ type Claims struct {
 	// (the GitHub PAT provider always; the local-OAuth provider only once
 	// slice B mints ghid).
 	GitHubID int64
+	// CIRepository is the "owner/repo" a GitHub Actions OIDC token was
+	// minted for (githubActionsProvider only). Authorization compares it to
+	// the deploy request and the component's registered source repository.
+	CIRepository string
 }
 
 // tokenShape is computed once per request from the existing isJWT/jwtIssuer
@@ -150,6 +154,22 @@ var reservedProviderNames = map[string]bool{
 	ProviderService: true,
 	ProviderDev:     true,
 	ProviderAgent:   true,
+	// Only githubActionsProvider may declare it (NewRegistry exempts that
+	// type), so no MCTL_OIDC_PROVIDERS entry can mint a CI principal.
+	ProviderGitHubActions: true,
+}
+
+// reservedNameExempt reports whether p is one of the built-in JWT providers
+// that own a reserved namespace: the local-OAuth provider ("github", design.md
+// "The contract") and the GitHub Actions provider ("github-actions").
+func reservedNameExempt(p Provider) bool {
+	switch q := p.(type) {
+	case *localOAuthProvider:
+		return true
+	case *githubActionsProvider:
+		return q.Name() == ProviderGitHubActions
+	}
+	return false
 }
 
 // Registry routes a bearer token to at most one provider and enforces the
@@ -202,10 +222,11 @@ func NewRegistry(static, jwt, opaque []Provider) (*Registry, error) {
 		}
 		seenNames[name] = true
 
-		// The local-OAuth provider is the one modelled exception that may
-		// declare the reserved namespace "github" (design.md "The
-		// contract"); every other JWT provider is refused.
-		if _, exempt := p.(*localOAuthProvider); !exempt && reservedProviderNames[name] {
+		// The local-OAuth provider ("github", design.md "The contract") and
+		// the GitHub Actions provider ("github-actions") are the modelled
+		// exceptions that may declare a reserved namespace; every other JWT
+		// provider is refused.
+		if !reservedNameExempt(p) && reservedProviderNames[name] {
 			return nil, fmt.Errorf("federation: provider name %q is reserved", name)
 		}
 		if surfaceid.IsSurface(name) {

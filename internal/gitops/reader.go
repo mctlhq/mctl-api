@@ -1030,6 +1030,81 @@ func (r *Reader) ReadFiles(names ...string) (map[string][]byte, string, error) {
 	return out, rev, nil
 }
 
+// ErrSourceRepoNotRegistered is ComponentSourceRepo's answer when the
+// checkout was read and the component, its catalog-info.yaml or the
+// github.com/source-repo annotation is absent. Every other error means the
+// binding could not be read, which is not the same thing.
+var ErrSourceRepoNotRegistered = errors.New("component has no registered source repository")
+
+// sourceRepoAnnotation is written into catalog-info.yaml from dockerfile_repo
+// by deploy-service's onboard action (argo-workflows/file-templates/
+// catalog-info.yaml.tpl).
+const sourceRepoAnnotation = "github.com/source-repo"
+
+var serviceNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+// ComponentSourceRepo returns the "owner/repo" registered for team/component:
+// the github.com/source-repo annotation of
+// platform-gitops/services/<team>/<component>/catalog-info.yaml
+// (mctl-api#530). It is the record a CI token's repository is checked
+// against, so it fails closed: a checkout that cannot be read, a symlink or
+// non-regular entry anywhere on the path, or a file that does not parse is
+// an error; only a read checkout without the component, the file or the
+// annotation is ErrSourceRepoNotRegistered.
+func (r *Reader) ComponentSourceRepo(team, component string) (string, error) {
+	if !serviceNameRe.MatchString(team) || !serviceNameRe.MatchString(component) {
+		return "", fmt.Errorf("invalid team or component name %q/%q", team, component)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, err := r.revisionLocked(); err != nil {
+		return "", fmt.Errorf("gitops checkout unavailable: %w", err)
+	}
+
+	services := filepath.Join(r.localPath, "platform-gitops", "services")
+	steps := []struct {
+		path string
+		dir  bool
+	}{
+		{services, true},
+		{filepath.Join(services, team), true},
+		{filepath.Join(services, team, component), true},
+		{filepath.Join(services, team, component, "catalog-info.yaml"), false},
+	}
+	for i, st := range steps {
+		info, err := os.Lstat(st.path)
+		if errors.Is(err, fs.ErrNotExist) && i > 0 {
+			// The services directory itself missing is a broken checkout,
+			// not an unregistered component.
+			return "", ErrSourceRepoNotRegistered
+		}
+		if err != nil {
+			return "", err
+		}
+		if st.dir && !info.IsDir() || !st.dir && !info.Mode().IsRegular() {
+			return "", fmt.Errorf("%s is not a plain %s", st.path, map[bool]string{true: "directory", false: "file"}[st.dir])
+		}
+	}
+
+	data, err := os.ReadFile(steps[len(steps)-1].path) //nolint:gosec // validated names, regular file inside the checkout
+	if err != nil {
+		return "", err
+	}
+	var doc struct {
+		Metadata struct {
+			Annotations map[string]string `yaml:"annotations"`
+		} `yaml:"metadata"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return "", fmt.Errorf("parsing catalog-info.yaml of %s/%s: %w", team, component, err)
+	}
+	repo := strings.TrimSpace(doc.Metadata.Annotations[sourceRepoAnnotation])
+	if repo == "" {
+		return "", ErrSourceRepoNotRegistered
+	}
+	return repo, nil
+}
+
 // ListPlatformSkills reads all platform-wide skills from
 // platform-gitops/platform-skills/catalog.
 func (r *Reader) ListPlatformSkills() ([]PlatformSkill, error) {

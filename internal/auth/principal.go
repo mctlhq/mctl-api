@@ -47,6 +47,11 @@ const (
 	// configured external provider can mint into this namespace; the only
 	// producer is an agent run token resolved by auth.Middleware.
 	ProviderAgent = "agent"
+	// ProviderGitHubActions: subject is the immutable numeric repository id
+	// of a GitHub Actions OIDC token, display "ci:<owner>/<repo>"
+	// (mctl-api#530). Reserved like ProviderAgent: only the dedicated
+	// provider in provider_github_actions.go may mint into it.
+	ProviderGitHubActions = "github-actions"
 )
 
 // Principal kinds.
@@ -134,6 +139,8 @@ func (u *User) Identity() (Identity, bool) {
 		return Identity{Provider: ProviderService, Subject: EvidenceWriterUserID, Display: EvidenceWriterUserID, Kind: KindService}, true
 	case u.registryPublisher:
 		return Identity{Provider: ProviderService, Subject: RegistryPublisherUserID, Display: RegistryPublisherUserID, Kind: KindService}, true
+	case u.ci:
+		return Identity{Provider: ProviderGitHubActions, Issuer: GitHubActionsIssuer, Subject: u.ciRepositoryID, Display: u.ID, Kind: KindService}, true
 	case u.dev:
 		return Identity{Provider: ProviderDev, Subject: u.ID, Display: u.ID, Kind: KindHuman}, true
 	case u.dexSubject != "":
