@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.74.0](https://github.com/mctlhq/mctl-api/compare/4.73.0...4.74.0) (2026-10-10)
+
+
+### Features
+
+* **auth:** GitHub Actions OIDC principal for CI deploys ([2b33b34](https://github.com/mctlhq/mctl-api/commit/2b33b34287f416dbacdf05c995831078e44e1e92))
+* **auth:** GitHub Actions OIDC principal for CI deploys ([fb12ce2](https://github.com/mctlhq/mctl-api/commit/fb12ce29c380928a5738557bd491c2d5058ed5e8)), closes [#530](https://github.com/mctlhq/mctl-api/issues/530) [#525](https://github.com/mctlhq/mctl-api/issues/525)
+
+
+### Bug Fixes
+
+* **api:** require and shape git_tag and dockerfile_path for CI deploys ([2d8d972](https://github.com/mctlhq/mctl-api/commit/2d8d972435833a1d1a3f6fdce463b207ee1b5f45)), closes [#530](https://github.com/mctlhq/mctl-api/issues/530)
+* **operations:** keep Workflow labels valid for any caller ID ([cd1f31d](https://github.com/mctlhq/mctl-api/commit/cd1f31d78f90f91afc0ff7981c0519c7e20b44d4)), closes [#530](https://github.com/mctlhq/mctl-api/issues/530)
+
 ## [4.73.0](https://github.com/mctlhq/mctl-api/compare/4.72.0...4.73.0) (2026-10-10)
 
 
