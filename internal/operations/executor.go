@@ -126,6 +126,13 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 	if team == "" {
 		return nil, fmt.Errorf("team is required for workflow submission")
 	}
+	// Backstop for every caller of Submit, not only the REST handler (which
+	// has already rejected the name through Registry.ValidateInput): a
+	// reserved tenant name never reaches the workflow.
+	if err := checkCreateTenantName(op, params); err != nil {
+		slog.Warn("refusing to submit create-tenant", "user", userID, "error", err)
+		return nil, err
+	}
 	namespace := WorkflowNamespace(op.WorkflowTemplate, team)
 	requestID := uuid.New().String()[:8]
 	workflowName := fmt.Sprintf("%s-%s", op.WorkflowTemplate, requestID)
