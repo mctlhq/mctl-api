@@ -525,9 +525,6 @@ vault kv put platform/mctl-api/argocd-token token="<token>"
 
 # Backstage service token
 vault kv put platform/mctl-api/backstage-token token="<token>"
-
-# Dex SSO client secret
-vault kv put platform/mctl-api/sso client-id="mctl-api" client-secret="<secret>"
 ```
 
 ## Release Process
