@@ -879,7 +879,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					writeErr("no identity provider is configured on this server")
 					return
 				}
-				v, verr := registry.Verify(r.Context(), token)
+				v, verr := registry.Verify(withUserAgent(r.Context(), r.UserAgent()), token)
 				if verr != nil {
 					slog.Warn("federation auth failed", "error", verr, "path", r.URL.Path)
 					writeErr(verr.Error())
