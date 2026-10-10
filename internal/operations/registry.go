@@ -246,7 +246,7 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 	// here, with a plain validation error, instead of after submission inside
 	// the workflow. Executor.Submit repeats the check for callers that do not
 	// come through this function.
-	if checkCreateTenantName(op, input) != nil {
+	if createsTenant(op) && IsReservedTenantName(input["tenant_name"]) {
 		errors = append(errors, reservedTenantNameMessage(input["tenant_name"]))
 	}
 	return errors
@@ -605,7 +605,7 @@ var builtinOperations = []Operation{
 			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator"},
 		},
 	},
-	// ─── mctl-agents triggers ───────────────────────────────────────────────────────────────
+	// ─── mctl-agents triggers ─────────────────────────────────────────────
 	// Six platform-scoped (AdminOnly) operations that submit Workflows in
 	// the argo-workflows namespace (mctl-gitops repo holds the CWFTs):
 	//   - mctl-agents-run / mctl-agents-mentor-only / mctl-agents-single-service /
