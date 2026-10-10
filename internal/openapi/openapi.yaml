@@ -49,6 +49,24 @@ components:
       description: GitHub personal access token or Dex JWT
 
   schemas:
+    ReadyzResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, not ready]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+        degraded_dependencies:
+          type: array
+          items:
+            type: string
+        failed_stores:
+          type: array
+          items:
+            type: string
     Tenant:
       type: object
       properties:
@@ -1048,40 +1066,29 @@ paths:
     get:
       summary: Readiness check
       description: |
-        Returns 200 when configured dependencies (gitops, postgres, Dex, Vault)
-        pass their probes. Unconfigured dependencies are reported as
-        `not_configured` and do not fail readiness. No authentication required.
+        Returns 200 unless a condition local to this pod makes it unfit to serve:
+        a store failed its startup init (`failed_stores`). The state of shared
+        dependencies (gitops, postgres, Dex, Vault) is reported under `checks`
+        as `ok`, `unavailable` or `not_configured`, and unavailable ones are
+        listed in `degraded_dependencies`, but it never changes the status
+        code: every replica shares those dependencies, so failing readiness on
+        them would remove all endpoints from the Service at once. No
+        authentication required.
       security: []
       tags: [Health]
       responses:
         '200':
-          description: Server is ready
+          description: Server is ready (dependencies may still be degraded)
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: ready
-                  checks:
-                    type: object
-                    additionalProperties:
-                      type: string
+                $ref: '#/components/schemas/ReadyzResponse'
         '503':
-          description: A configured dependency probe failed
+          description: A local condition makes this pod not ready
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: not ready
-                  checks:
-                    type: object
-                    additionalProperties:
-                      type: string
+                $ref: '#/components/schemas/ReadyzResponse'
 
   /openapi.yaml:
     get:
