@@ -58,6 +58,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/principals"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
+	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/vault"
@@ -68,6 +69,16 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+
+	// Vendor-neutral tracing: W3C propagation always, OTLP export only when an
+	// OTEL_EXPORTER_OTLP_* endpoint is set. A setup failure never blocks start.
+	var otelShutdown func(context.Context) error
+	if tel, err := telemetry.Setup(context.Background(), telemetry.Config{ServiceName: "mctl-api"}); err != nil {
+		slog.Warn("telemetry setup failed; tracing export disabled", "error", err)
+	} else {
+		otelShutdown = tel.Shutdown
+		slog.Info("telemetry initialised", "exporting", tel.Exporting)
+	}
 
 	// One signal registration for the whole process, established before
 	// anything that can block — the Dex verifier below makes a network call,
@@ -949,6 +960,13 @@ func main() {
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
+	}
+	if otelShutdown != nil {
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer flushCancel()
+		if err := otelShutdown(flushCtx); err != nil {
+			slog.Warn("telemetry flush error", "error", err)
+		}
 	}
 }
 

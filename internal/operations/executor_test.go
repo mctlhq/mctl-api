@@ -8,7 +8,17 @@
 
 package operations
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+)
 
 func TestWorkflowNamespace(t *testing.T) {
 	tests := []struct {
@@ -125,5 +135,43 @@ func TestTrimWorkflowStatusKeepsHostNodeNameAndTemplateRef(t *testing.T) {
 	}
 	if _, present := trimmed["spec"]; present {
 		t.Errorf("spec should be dropped: %#v", trimmed)
+	}
+}
+
+func TestSubmitSetsTraceAnnotations(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{workflowGVR: "WorkflowList"})
+	e := &Executor{dynamicClient: dyn}
+	op := Operation{Name: "x", WorkflowTemplate: "wft-x"}
+
+	tp := sdktrace.NewTracerProvider()
+	ctx, span := tp.Tracer("t").Start(context.Background(), "s")
+	defer span.End()
+
+	res, err := e.Submit(ctx, op, map[string]string{}, "u", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, err := dyn.Resource(workflowGVR).Namespace(res.Namespace).Get(ctx, res.WorkflowName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ann := wf.GetAnnotations()
+	if ann["mctl.ai/trace-id"] != span.SpanContext().TraceID().String() {
+		t.Errorf("trace-id annotation = %q", ann["mctl.ai/trace-id"])
+	}
+	if !strings.Contains(ann["mctl.ai/traceparent"], span.SpanContext().TraceID().String()) {
+		t.Errorf("traceparent annotation = %q", ann["mctl.ai/traceparent"])
+	}
+
+	// No trace context: no annotations.
+	res, err = e.Submit(context.Background(), op, map[string]string{}, "u", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, _ = dyn.Resource(workflowGVR).Namespace(res.Namespace).Get(context.Background(), res.WorkflowName, metav1.GetOptions{})
+	if len(wf.GetAnnotations()) != 0 {
+		t.Errorf("annotations without trace = %v", wf.GetAnnotations())
 	}
 }

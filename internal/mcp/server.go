@@ -67,7 +67,8 @@ func NewServer(apiURL, apiToken string) *Server {
 		publicURL: trimmed,
 		apiToken:  apiToken,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: tracingTransport{base: http.DefaultTransport},
 		},
 	}
 }
@@ -182,6 +183,8 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		server.WithToolFilter(s.ownerOnlyToolFilter),
 		// Reports a failed role lookup on tools/call explicitly.
 		server.WithToolHandlerMiddleware(s.ownerOnlyCallMiddleware),
+		// Outermost-last: spans every tool call, continuing _meta/HTTP trace context.
+		server.WithToolHandlerMiddleware(s.tracingMiddleware),
 	)
 	s.mcpServer = srv
 

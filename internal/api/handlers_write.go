@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"io"
 	"log/slog"
 	"net/http"
@@ -42,6 +43,13 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "operation not found: "+opName)
 		return
 	}
+
+	// Span is started only for a registered operation so the caller-controlled
+	// name never reaches span names or attributes unvalidated.
+	ctx, span := telemetry.Tracer().Start(r.Context(), "operation.execute "+opName)
+	defer span.End()
+	span.SetAttributes(telemetry.OperationName(opName))
+	r = r.WithContext(ctx)
 
 	// HandlerOnly operations skip this generic execute path on purpose — the
 	// dedicated REST handler enforces owner-gate / quota / secret-scan /
@@ -267,11 +275,15 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		RiskLevel:    string(op.RiskLevel),
 	})
 
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	resp := map[string]any{
 		"message":   fmt.Sprintf("Operation submitted. Track progress: GET /api/v1/workflows/%s", result.WorkflowName),
 		"operation": opName,
 		"workflow":  result,
-	})
+	}
+	if tid := telemetry.TraceIDFrom(r.Context()); tid != "" {
+		resp["trace_id"] = tid
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 // ArgoCompletionPayload represents the notification payload sent by Argo when a workflow completes.
