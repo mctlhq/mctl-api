@@ -17,10 +17,15 @@ package auth
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
@@ -83,25 +88,57 @@ func TestGitHubProviderCountsAndLogsOK(t *testing.T) {
 	}
 }
 
-func TestGitHubProviderCountsInvalidWithoutLogging(t *testing.T) {
-	buf := captureLog(t)
-	p := newGitHubProvider(NewGitHubValidator(nil), nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // fails the GitHub lookup without reaching the network
+type roundTripFunc func(*http.Request) (*http.Response, error)
 
-	okBefore := testutil.ToFloat64(githubTokenVerifications.WithLabelValues("classic_pat", "ok"))
-	invalidBefore := testutil.ToFloat64(githubTokenVerifications.WithLabelValues("classic_pat", "invalid"))
-	if _, err := p.Verify(ctx, "ghp_notavalidtoken"); err == nil {
-		t.Fatal("Verify succeeded on a failed lookup")
-	}
-	if got := testutil.ToFloat64(githubTokenVerifications.WithLabelValues("classic_pat", "invalid")) - invalidBefore; got != 1 {
-		t.Fatalf("invalid counter delta = %v, want 1", got)
-	}
-	if got := testutil.ToFloat64(githubTokenVerifications.WithLabelValues("classic_pat", "ok")) - okBefore; got != 0 {
-		t.Fatalf("ok counter delta = %v, want 0", got)
-	}
-	if strings.Contains(buf.String(), "github token verified") {
-		t.Fatalf("a failed verification was logged as verified: %s", buf.String())
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestGitHubProviderCountsFailuresWithoutLogging(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name   string
+		ctx    context.Context
+		status int // 0: the lookup never gets a response
+		want   string
+	}{
+		{"rejected by GitHub", context.Background(), http.StatusUnauthorized, "invalid"},
+		{"GitHub error", context.Background(), http.StatusBadGateway, "unavailable"},
+		{"lookup failed", cancelled, 0, "unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureLog(t)
+			v := NewGitHubValidator(nil)
+			v.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if err := r.Context().Err(); err != nil {
+					return nil, err
+				}
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader("{}")), Request: r}, nil
+			})}
+			p := newGitHubProvider(v, nil)
+
+			counter := func(result string) float64 {
+				return testutil.ToFloat64(githubTokenVerifications.WithLabelValues("classic_pat", result))
+			}
+			before := map[string]float64{}
+			for _, r := range []string{"ok", "invalid", "unavailable"} {
+				before[r] = counter(r)
+			}
+			if _, err := p.Verify(tc.ctx, "ghp_notavalidtoken"); err == nil {
+				t.Fatal("Verify succeeded on a failed lookup")
+			}
+			for r, b := range before {
+				want := 0.0
+				if r == tc.want {
+					want = 1
+				}
+				if got := counter(r) - b; got != want {
+					t.Errorf("result=%s delta = %v, want %v", r, got, want)
+				}
+			}
+			if strings.Contains(buf.String(), "github token verified") {
+				t.Fatalf("a failed verification was logged as verified: %s", buf.String())
+			}
+		})
 	}
 }
 
@@ -111,11 +148,41 @@ func TestSightingLogRelogsAfterInterval(t *testing.T) {
 	s := sightingLog{now: func() time.Time { return now }}
 	s.log("octocat", "classic_pat", "curl/8")
 	s.log("octocat", "classic_pat", "curl/8")
-	s.log("octocat", "classic_pat", "python-requests/2") // another caller
+	s.log("octocat", "classic_pat", "python-requests/2") // another client
 	now = now.Add(sightingInterval)
 	s.log("octocat", "classic_pat", "curl/8")
 	if n := strings.Count(buf.String(), "github token verified"); n != 3 {
 		t.Fatalf("log lines = %d, want 3:\n%s", n, buf.String())
+	}
+}
+
+func TestSightingLogCapsAgentsPerCaller(t *testing.T) {
+	buf := captureLog(t)
+	s := sightingLog{}
+	for i := 0; i < 50; i++ {
+		s.log("octocat", "classic_pat", fmt.Sprintf("bot/%d", i)) // a nonce per request
+	}
+	if n := strings.Count(buf.String(), "github token verified"); n != maxAgentsPerCaller {
+		t.Fatalf("log lines = %d, want %d", n, maxAgentsPerCaller)
+	}
+}
+
+// The middleware is what puts the User-Agent into the context; without it
+// every logged user_agent is empty.
+func TestMiddlewareLogsGitHubTokenUserAgent(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	t.Setenv("MCTL_FEDERATION_DISABLED", "")
+	buf := captureLog(t)
+	v := NewGitHubValidator(nil)
+	v.cache["gho_uatoken"] = &githubUserInfo{Login: "ua-tester", ID: 7, CachedAt: time.Now()}
+	h := Middleware(v, nil, nil, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	req.Header.Set("Authorization", "Bearer gho_uatoken")
+	req.Header.Set("User-Agent", "mctl-cli/9.9.9")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	out := buf.String()
+	if !strings.Contains(out, "login=ua-tester") || !strings.Contains(out, "user_agent=mctl-cli/9.9.9") {
+		t.Fatalf("sighting line lacks the request User-Agent:\n%s", out)
 	}
 }
 
@@ -126,5 +193,10 @@ func TestUserAgentFromContextTruncates(t *testing.T) {
 	long := strings.Repeat("a", maxLoggedUserAgent+50)
 	if got := userAgentFromContext(withUserAgent(context.Background(), long)); len(got) != maxLoggedUserAgent {
 		t.Fatalf("len = %d, want %d", len(got), maxLoggedUserAgent)
+	}
+	// A cut through a multi-byte rune must not leave invalid UTF-8.
+	split := strings.Repeat("a", maxLoggedUserAgent-1) + "étail"
+	if got := userAgentFromContext(withUserAgent(context.Background(), split)); !utf8.ValidString(got) {
+		t.Fatalf("truncated user agent is not valid UTF-8: %q", got)
 	}
 }

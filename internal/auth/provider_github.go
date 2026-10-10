@@ -16,6 +16,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -58,7 +59,7 @@ type githubProvider struct {
 }
 
 func newGitHubProvider(validator *GitHubValidator, groups GroupSource) *githubProvider {
-	return &githubProvider{validator: validator, groups: groups, sightings: sightingLog{seen: map[string]time.Time{}}}
+	return &githubProvider{validator: validator, groups: groups}
 }
 
 func (*githubProvider) Name() string { return ProviderGitHub }
@@ -72,7 +73,7 @@ func (p *githubProvider) Verify(ctx context.Context, raw string) (*Verified, err
 	kind := githubTokenKind(raw)
 	login, id, err := p.validator.ValidateIdentity(ctx, raw)
 	if err != nil {
-		githubTokenVerifications.WithLabelValues(kind, "invalid").Inc()
+		githubTokenVerifications.WithLabelValues(kind, githubFailureResult(err)).Inc()
 		return nil, err
 	}
 	githubTokenVerifications.WithLabelValues(kind, "ok").Inc()
@@ -100,6 +101,16 @@ var githubTokenPrefixes = []struct{ prefix, kind string }{
 	{"ghs_", "app_installation"},
 }
 
+// githubFailureResult separates GitHub refusing the token (invalid) from the
+// lookup failing (unavailable: timeout, 5xx, cancelled request), so an outage
+// does not read as callers presenting dead tokens.
+func githubFailureResult(err error) string {
+	if errors.Is(err, errGitHubTokenRejected) {
+		return "invalid"
+	}
+	return "unavailable"
+}
+
 func githubTokenKind(raw string) string {
 	for _, t := range githubTokenPrefixes {
 		if strings.HasPrefix(raw, t.prefix) {
@@ -111,7 +122,7 @@ func githubTokenKind(raw string) string {
 
 var githubTokenVerifications = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "github_token_verifications_total",
-	Help: "Raw GitHub tokens verified by the GitHub provider, by token kind (from the documented prefix) and result (ok, invalid).",
+	Help: "Opaque bearer tokens verified as GitHub tokens, by kind (from the documented prefix) and result (ok, invalid = refused by GitHub, unavailable = lookup failed). Every non-JWT token no static provider claims lands here, so kind=other is mostly not GitHub traffic.",
 }, []string{"kind", "result"})
 
 func init() {
@@ -130,28 +141,38 @@ func withUserAgent(ctx context.Context, ua string) context.Context {
 func userAgentFromContext(ctx context.Context) string {
 	ua, _ := ctx.Value(userAgentKey).(string)
 	if len(ua) > maxLoggedUserAgent {
-		ua = ua[:maxLoggedUserAgent]
+		ua = strings.ToValidUTF8(ua[:maxLoggedUserAgent], "")
 	}
 	return ua
 }
 
 const (
 	maxLoggedUserAgent = 200
-	// sightingInterval bounds the log to one line per caller per hour: an
-	// automation burst (hundreds of calls in minutes) is one line, not
-	// hundreds, while the counter still counts every call.
+	// sightingInterval is the dedupe window: an automation burst (hundreds
+	// of calls in minutes) is one line, not hundreds, while the counter
+	// still counts every call.
 	sightingInterval = time.Hour
+	// maxAgentsPerCaller bounds the lines per (login, kind) per window. The
+	// User-Agent is client-controlled, so keying on it alone would let a
+	// caller that varies it per request log on every request.
+	maxAgentsPerCaller = 4
 	// maxSightings caps the dedupe map; past it the map is reset, which only
 	// costs a few repeated lines.
 	maxSightings = 1024
 )
 
-// sightingLog logs a successful GitHub-token verification once per (login,
-// kind, user agent) per sightingInterval.
+// sightingLog logs a successful GitHub-token verification once per distinct
+// user agent per (login, kind) per sightingInterval, at most
+// maxAgentsPerCaller lines per window.
 type sightingLog struct {
 	mu   sync.Mutex
-	seen map[string]time.Time
+	seen map[string]*sighting
 	now  func() time.Time
+}
+
+type sighting struct {
+	start  time.Time
+	agents map[string]struct{}
 }
 
 func (s *sightingLog) log(login, kind, ua string) {
@@ -159,17 +180,22 @@ func (s *sightingLog) log(login, kind, ua string) {
 	if s.now != nil {
 		now = s.now
 	}
-	key := login + "\x00" + kind + "\x00" + ua
+	key := login + "\x00" + kind
+	t := now()
 	s.mu.Lock()
 	if s.seen == nil || len(s.seen) >= maxSightings {
-		s.seen = map[string]time.Time{}
+		s.seen = map[string]*sighting{}
 	}
-	t := now()
-	if last, ok := s.seen[key]; ok && t.Sub(last) < sightingInterval {
+	w, ok := s.seen[key]
+	if !ok || t.Sub(w.start) >= sightingInterval {
+		w = &sighting{start: t, agents: map[string]struct{}{}}
+		s.seen[key] = w
+	}
+	if _, dup := w.agents[ua]; dup || len(w.agents) >= maxAgentsPerCaller {
 		s.mu.Unlock()
 		return
 	}
-	s.seen[key] = t
+	w.agents[ua] = struct{}{}
 	s.mu.Unlock()
 	slog.Info("github token verified", "login", login, "kind", kind, "user_agent", ua)
 }
