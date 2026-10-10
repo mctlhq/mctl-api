@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.73.0](https://github.com/mctlhq/mctl-api/compare/4.72.0...4.73.0) (2026-10-10)
+
+
+### Features
+
+* **auth:** attribute raw GitHub token verifications by kind ([cddfb5d](https://github.com/mctlhq/mctl-api/commit/cddfb5deb49c4870817bef8b06d31b21efba1fe4))
+* **auth:** attribute raw GitHub token verifications by kind ([b721c96](https://github.com/mctlhq/mctl-api/commit/b721c967dcf4cfecdaa5d153febc6ba81a9e52ab))
+
+
+### Bug Fixes
+
+* **auth:** address review of GitHub token attribution ([dceb645](https://github.com/mctlhq/mctl-api/commit/dceb645edb5b488f5c9cd4129de5788b78f7c063))
+* **auth:** count GitHub rate limits as unavailable, sweep sightings ([6ecc4ee](https://github.com/mctlhq/mctl-api/commit/6ecc4ee2825fc9bd8e17417cfcbeac6f71856545))
+
 ## [4.72.0](https://github.com/mctlhq/mctl-api/compare/4.71.2...4.72.0) (2026-10-10)
 
 
