@@ -115,6 +115,11 @@ func (v *GitHubValidator) fetchUser(ctx context.Context, token string) (string, 
 	defer resp.Body.Close() //nolint:errcheck
 
 	body, _ := io.ReadAll(resp.Body)
+	// GitHub's primary rate limit is a 403 with X-RateLimit-Remaining: 0;
+	// the token may be fine, so that is not a rejection.
+	if resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		return "", 0, fmt.Errorf("GitHub API rate limit exceeded (HTTP %d)", resp.StatusCode)
+	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return "", 0, fmt.Errorf("%w (HTTP %d)", errGitHubTokenRejected, resp.StatusCode)
 	}

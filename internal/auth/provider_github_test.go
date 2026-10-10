@@ -99,11 +99,14 @@ func TestGitHubProviderCountsFailuresWithoutLogging(t *testing.T) {
 		name   string
 		ctx    context.Context
 		status int // 0: the lookup never gets a response
+		header http.Header
 		want   string
 	}{
-		{"rejected by GitHub", context.Background(), http.StatusUnauthorized, "invalid"},
-		{"GitHub error", context.Background(), http.StatusBadGateway, "unavailable"},
-		{"lookup failed", cancelled, 0, "unavailable"},
+		{"rejected by GitHub", context.Background(), http.StatusUnauthorized, nil, "invalid"},
+		{"forbidden", context.Background(), http.StatusForbidden, nil, "invalid"},
+		{"rate limited", context.Background(), http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}}, "unavailable"},
+		{"GitHub error", context.Background(), http.StatusBadGateway, nil, "unavailable"},
+		{"lookup failed", cancelled, 0, nil, "unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			buf := captureLog(t)
@@ -112,7 +115,7 @@ func TestGitHubProviderCountsFailuresWithoutLogging(t *testing.T) {
 				if err := r.Context().Err(); err != nil {
 					return nil, err
 				}
-				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader("{}")), Request: r}, nil
+				return &http.Response{StatusCode: tc.status, Header: tc.header, Body: io.NopCloser(strings.NewReader("{}")), Request: r}, nil
 			})}
 			p := newGitHubProvider(v, nil)
 
@@ -167,6 +170,24 @@ func TestSightingLogCapsAgentsPerCaller(t *testing.T) {
 	}
 }
 
+func TestSightingLogSweepsFinishedWindowsAtCap(t *testing.T) {
+	now := time.Unix(0, 0)
+	s := sightingLog{now: func() time.Time { return now }}
+	s.log("live", "classic_pat", "curl/8")
+	now = now.Add(sightingInterval / 2)
+	for i := 0; i < maxSightings-1; i++ {
+		s.log(fmt.Sprintf("old-%d", i), "classic_pat", "curl/8")
+	}
+	now = now.Add(sightingInterval / 2) // the first window ended, the rest are live
+	s.log("new", "classic_pat", "curl/8")
+	if _, ok := s.seen["old-0\x00classic_pat"]; !ok {
+		t.Fatal("a live window was dropped at the cap; only finished ones should be swept")
+	}
+	if _, ok := s.seen["live\x00classic_pat"]; ok {
+		t.Fatal("a finished window survived the sweep")
+	}
+}
+
 // The middleware is what puts the User-Agent into the context; without it
 // every logged user_agent is empty.
 func TestMiddlewareLogsGitHubTokenUserAgent(t *testing.T) {
@@ -193,6 +214,9 @@ func TestUserAgentFromContextTruncates(t *testing.T) {
 	long := strings.Repeat("a", maxLoggedUserAgent+50)
 	if got := userAgentFromContext(withUserAgent(context.Background(), long)); len(got) != maxLoggedUserAgent {
 		t.Fatalf("len = %d, want %d", len(got), maxLoggedUserAgent)
+	}
+	if got := userAgentFromContext(withUserAgent(context.Background(), "bad\xffagent")); got != "badagent" {
+		t.Fatalf("invalid UTF-8 user agent = %q, want %q", got, "badagent")
 	}
 	// A cut through a multi-byte rune must not leave invalid UTF-8.
 	split := strings.Repeat("a", maxLoggedUserAgent-1) + "étail"

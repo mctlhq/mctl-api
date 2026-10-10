@@ -141,9 +141,9 @@ func withUserAgent(ctx context.Context, ua string) context.Context {
 func userAgentFromContext(ctx context.Context) string {
 	ua, _ := ctx.Value(userAgentKey).(string)
 	if len(ua) > maxLoggedUserAgent {
-		ua = strings.ToValidUTF8(ua[:maxLoggedUserAgent], "")
+		ua = ua[:maxLoggedUserAgent]
 	}
-	return ua
+	return strings.ToValidUTF8(ua, "")
 }
 
 const (
@@ -156,8 +156,8 @@ const (
 	// User-Agent is client-controlled, so keying on it alone would let a
 	// caller that varies it per request log on every request.
 	maxAgentsPerCaller = 4
-	// maxSightings caps the dedupe map; past it the map is reset, which only
-	// costs a few repeated lines.
+	// maxSightings caps the dedupe map. At the cap, finished windows are
+	// swept first; only if every window is still live is the map reset.
 	maxSightings = 1024
 )
 
@@ -183,6 +183,13 @@ func (s *sightingLog) log(login, kind, ua string) {
 	key := login + "\x00" + kind
 	t := now()
 	s.mu.Lock()
+	if len(s.seen) >= maxSightings {
+		for k, w := range s.seen {
+			if t.Sub(w.start) >= sightingInterval {
+				delete(s.seen, k)
+			}
+		}
+	}
 	if s.seen == nil || len(s.seen) >= maxSightings {
 		s.seen = map[string]*sighting{}
 	}
