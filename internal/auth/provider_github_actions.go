@@ -219,6 +219,9 @@ func (p *githubActionsProvider) Verify(ctx context.Context, raw string) (*Verifi
 		return nil, p.refuse("ref", "repository", repo, "ref", ref, "ref_type", refType)
 	}
 
+	// GitHub names are case-insensitive: one repository is one display and
+	// one rate-limit bucket however the token spells it.
+	repo = strings.ToLower(repo)
 	return &Verified{
 		Identity: Identity{
 			Provider: ProviderGitHubActions,

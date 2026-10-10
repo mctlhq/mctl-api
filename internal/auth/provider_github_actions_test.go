@@ -83,8 +83,13 @@ func TestGitHubActions_AcceptsTagsAndOtherAllowedEvents(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c := ghaClaims()
 			mut(c)
-			if _, err := ghaVerify(t, ghaConfig(), []string{DefaultGitHubActionsAudience}, c); err != nil {
+			v, err := ghaVerify(t, ghaConfig(), []string{DefaultGitHubActionsAudience}, c)
+			if err != nil {
 				t.Fatal(err)
+			}
+			// One repository is one identity however the token spells it.
+			if v.Identity.Display != "ci:mctlhq/mctl-telegram" || v.Claims.CIRepository != "mctlhq/mctl-telegram" {
+				t.Fatalf("got %q / %q", v.Identity.Display, v.Claims.CIRepository)
 			}
 		})
 	}

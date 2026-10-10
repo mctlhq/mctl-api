@@ -600,6 +600,7 @@ func (u *User) IsRegistryPublisher() bool { return u != nil && u.registryPublish
 // ("owner/repo"), whose immutable id is repositoryID (mctl-api#530).
 // Production builds it only from a verified token (userFromVerified).
 func NewCIUser(repository, repositoryID string) *User {
+	repository = strings.ToLower(repository)
 	return &User{ID: "ci:" + repository, ci: true, ciRepository: repository, ciRepositoryID: repositoryID}
 }
 
