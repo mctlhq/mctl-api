@@ -17,6 +17,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -254,6 +255,42 @@ func TestReadyz_DrainingIs503(t *testing.T) {
 	}
 	if got := decodeReady(t, rec).Checks["shutdown"]; got != "draining" {
 		t.Errorf("checks[shutdown] = %q, want draining", got)
+	}
+}
+
+// A pod whose own gitops checkout has never synced would serve an empty
+// catalogue. That is pod-local, so it must keep /readyz at 503 even though the
+// shared gitops dependency probe no longer gates readiness.
+func TestReadyz_GitopsNeverSyncedIs503(t *testing.T) {
+	ok := func(context.Context) error { return nil }
+	h := &Handlers{opts: Options{GitopsReady: ok, GitopsSynced: func() bool { return false }}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	body := decodeReady(t, rec)
+	if got := body.Checks["gitops_sync"]; got != "never_synced" {
+		t.Errorf("checks[gitops_sync] = %q, want never_synced", got)
+	}
+	if body.Status != "not ready" {
+		t.Errorf("status = %q, want not ready", body.Status)
+	}
+}
+
+// Once synced, a failing shared gitops probe (e.g. ListTenants erroring during a
+// GitHub outage) is reported but does not fail readiness.
+func TestReadyz_GitopsSyncedWithFailingProbeIsReady(t *testing.T) {
+	fail := func(context.Context) error { return errors.New("list tenants failed") }
+	h := &Handlers{opts: Options{GitopsReady: fail, GitopsSynced: func() bool { return true }}}
+	rec := httptest.NewRecorder()
+	h.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := decodeReady(t, rec)
+	if body.Checks["gitops_sync"] != "ok" || body.Checks["gitops"] != "unavailable" {
+		t.Errorf("checks = %v, want gitops_sync=ok gitops=unavailable", body.Checks)
 	}
 }
 

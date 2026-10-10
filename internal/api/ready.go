@@ -144,6 +144,17 @@ func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		checks["stores"] = "ok"
 	}
 
+	// A checkout that has never synced is local to this pod, not a shared
+	// outage: other replicas keep serving while this one finishes cloning.
+	if h.opts.GitopsSynced != nil {
+		if h.opts.GitopsSynced() {
+			checks["gitops_sync"] = "ok"
+		} else {
+			checks["gitops_sync"] = "never_synced"
+			ready = false
+		}
+	}
+
 	if h.opts.Draining != nil && h.opts.Draining() {
 		checks["shutdown"] = "draining"
 		ready = false

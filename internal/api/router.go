@@ -195,6 +195,12 @@ type Options struct {
 	// entry keeps GET /readyz at 503 and names the store; liveness (/healthz)
 	// is unaffected. Nil means not wired (tests) and is not_configured.
 	StoreInitFailures func() []string
+	// GitopsSynced reports whether this pod's own gitops checkout has synced
+	// at least once. Unlike the shared dependencies above it is pod-local: a
+	// fresh pod that has not cloned yet would serve an empty catalogue, so
+	// GET /readyz answers 503 with checks.gitops_sync=never_synced until the
+	// first sync lands. Nil means not wired (tests) and is not reported.
+	GitopsSynced func() bool
 	// Draining reports that graceful shutdown has begun; GET /readyz then
 	// answers 503 with checks.shutdown=draining. Nil means never draining.
 	Draining func() bool

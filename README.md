@@ -531,4 +531,4 @@ Apache 2.0
 
 ## Health endpoints
 
-`GET /healthz` is liveness. `GET /readyz` returns 503 only when a store failed its startup init or the pod is draining on shutdown; dependency probe failures (gitops, postgres, dex, vault) never fail readiness because every replica shares them. Dependency health is reported in the `/readyz` body (`checks`, `dependencies`) and in the `mctl_api_dependency_up{check}` gauge.
+`GET /healthz` is liveness. `GET /readyz` returns 503 only when a store failed its startup init, the pod's own gitops checkout has never synced (`checks.gitops_sync=never_synced`), or the pod is draining on shutdown; dependency probe failures (gitops, postgres, dex, vault) never fail readiness because every replica shares them. Dependency health is reported in the `/readyz` body (`checks`, `dependencies`) and in the `mctl_api_dependency_up{check}` gauge.

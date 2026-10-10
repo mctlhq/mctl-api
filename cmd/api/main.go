@@ -900,6 +900,7 @@ func main() {
 		DexReady:                       dexReady,
 		VaultReady:                     vaultReady,
 		StoreInitFailures:              storeFailures.List,
+		GitopsSynced:                   func() bool { return !gitReader.LastSync().IsZero() },
 		Draining:                       draining.Load,
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
 		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,

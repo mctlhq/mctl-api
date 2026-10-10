@@ -1048,9 +1048,16 @@ paths:
     get:
       summary: Readiness check
       description: |
-        Returns 200 when configured dependencies (gitops, postgres, Dex, Vault)
-        pass their probes. Unconfigured dependencies are reported as
-        `not_configured` and do not fail readiness. No authentication required.
+        Readiness of this pod only. Returns 503 when a store failed its
+        startup init (`checks.stores = init_failed`, `failed_stores`), when
+        this pod's gitops checkout has never synced
+        (`checks.gitops_sync = never_synced`), or while the pod is draining on
+        shutdown (`checks.shutdown = draining`). Shared dependency probes
+        (gitops, postgres, Dex, Vault) are reported in `checks` and summarised
+        in `dependencies` (`ok`, `degraded`, `not_configured`) but never fail
+        readiness, so a shared outage cannot drain every replica. The same
+        probes are exported as the `mctl_api_dependency_up{check}` gauge.
+        No authentication required.
       security: []
       tags: [Health]
       responses:
@@ -1068,8 +1075,11 @@ paths:
                     type: object
                     additionalProperties:
                       type: string
+                  dependencies:
+                    type: string
+                    enum: [ok, degraded, not_configured]
         '503':
-          description: A configured dependency probe failed
+          description: A store failed its startup init, the gitops checkout has never synced, or the pod is draining
           content:
             application/json:
               schema:
