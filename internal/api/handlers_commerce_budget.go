@@ -317,3 +317,60 @@ func (h *Handlers) ReconcileCommerceExpired(w http.ResponseWriter, r *http.Reque
 		RiskLevel: string(operations.RiskHigh), Parameters: params})
 	writeJSON(w, http.StatusOK, res)
 }
+
+type dispatchRequest struct {
+	Note string `json:"note,omitempty"`
+}
+
+// DispatchCommerceInvocation is step 9 of ADR 020 sec. 7 (C4,
+// mctl-agents#619): it persists the dispatch intent under its fence and
+// returns the signed authorization the provider verifies at its ingress. A
+// repeat on a dispatching row returns the identical authorization; any
+// other phase is a phase conflict, because past dispatching only the
+// provider's outcome lookup is safe.
+func (h *Handlers) DispatchCommerceInvocation(w http.ResponseWriter, r *http.Request) {
+	userID, actor, tenant, id, ok := h.moneyActor(w, r)
+	if !ok {
+		return
+	}
+	var req dispatchRequest
+	if !decodeOptionalCommerceBody(w, r, &req) {
+		return
+	}
+	res, err := h.opts.Commerce.Dispatch(r.Context(), commerce.DispatchInput{TenantID: tenant, InvocationID: id, Actor: actor, Note: req.Note})
+	params := map[string]string{"tenant": tenant, "invocation_id": id, "actor": actor}
+	if err != nil {
+		h.logAudit(r, audit.Entry{UserID: userID, Operation: "commerce-dispatch", Status: "failed",
+			RiskLevel: string(operations.RiskHigh), Parameters: params, Message: err.Error()})
+		writeCommerceError(w, err)
+		return
+	}
+	params["provider_id"] = res.Authorization.ProviderID
+	params["dispatch_deadline"] = res.Authorization.DispatchDeadline
+	params["key_id"] = res.Authorization.KeyID
+	// A replay hands out the same signed authorization again, so it is
+	// audited too, under its own status: the log shows one "succeeded" and
+	// N "replayed" per invocation, never a second fence.
+	status := "succeeded"
+	if res.Replayed {
+		status = "replayed"
+	}
+	h.logAudit(r, audit.Entry{UserID: userID, Operation: "commerce-dispatch", Status: status,
+		RiskLevel: string(operations.RiskHigh), Parameters: params})
+	writeJSON(w, http.StatusOK, res)
+}
+
+// ListCommerceDispatchKeys returns the public keys paid providers verify
+// invocation authorizations with. Public halves only; any authenticated
+// caller may read them.
+func (h *Handlers) ListCommerceDispatchKeys(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireCommerce(w, r); !ok {
+		return
+	}
+	keys, err := h.opts.Commerce.DispatchKeys()
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
+}

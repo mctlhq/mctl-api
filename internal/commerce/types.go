@@ -159,6 +159,8 @@ var (
 	ErrTermsRetired         = errors.New("commerce: terms retired")
 	ErrPhaseConflict        = errors.New("commerce: phase conflict")
 	ErrTerminal             = errors.New("commerce: invocation is terminal")
+	// ErrApprovalBound: the approval already belongs to another invocation.
+	ErrApprovalBound = errors.New("commerce: approval is bound to another invocation")
 )
 
 func invalid(format string, args ...any) error {
@@ -507,6 +509,9 @@ type Invocation struct {
 	// released rows carry their moment in updated_at.
 	FinalizedAt *time.Time `json:"finalized_at,omitempty"`
 	Version     int64      `json:"version"`
+	// DispatchDeadline is the fence written by the reserved -> dispatching
+	// edge (C4); every authorization for this row carries exactly it.
+	DispatchDeadline *time.Time `json:"dispatch_deadline,omitempty"`
 }
 
 // ProviderOperationKey is the stable key a provider dedupes on (ADR 020
@@ -717,10 +722,15 @@ func checkFactCombination(phase, charge, payment string) error {
 
 // ListFilter scopes an invocation listing to one tenant (ADR 020 sec. 12).
 type ListFilter struct {
-	TenantID     string
-	CapabilityID string
-	Phase        string
-	Since        time.Time
-	Until        time.Time
-	Limit        int
+	TenantID string
+	// PrincipalID and IdempotencyKey find one invocation by its idempotency
+	// scope, which is how a restarted gateway resumes the invocation it
+	// accepted before it crashed. The key filter requires the principal.
+	PrincipalID    string
+	IdempotencyKey string
+	CapabilityID   string
+	Phase          string
+	Since          time.Time
+	Until          time.Time
+	Limit          int
 }

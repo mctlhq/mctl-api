@@ -392,7 +392,7 @@ func TestCommerceHandlers_AcceptReplayAndConflictOverHTTP(t *testing.T) {
 		t.Fatalf("owner transition: want 403, got %d", rec.Code)
 	}
 	admin := commerceAdmin(t)
-	rec = f.call(t, admin, "POST", path, map[string]any{"expected_phase": "reserved", "to_phase": "dispatching"}, params, f.h.TransitionCommerceInvocation)
+	rec = f.call(t, admin, "POST", path, map[string]any{"expected_phase": "reserved", "to_phase": "refused", "reason_code": "budget-exhausted"}, params, f.h.TransitionCommerceInvocation)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("wrong expected phase: want 409, got %d %s", rec.Code, rec.Body.String())
 	}

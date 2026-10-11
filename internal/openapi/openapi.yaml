@@ -1110,6 +1110,7 @@ components:
             provider_operation_key: {type: string, description: 'mctl-op/v1:<invocation_id> (ADR 020 sec. 6)'}
             reservation_deadline: {type: string, format: date-time}
             reconciliation_deadline: {type: string, format: date-time}
+            dispatch_deadline: {type: string, format: date-time, description: 'The dispatch fence: written once on reserved → dispatching and never moved (ADR 020 sec. 9)'}
             created_at: {type: string, format: date-time}
             updated_at: {type: string, format: date-time}
             finalized_at: {type: string, format: date-time}
@@ -1135,7 +1136,8 @@ components:
           type: string
           enum: [invalid-request, identity-unresolved, commerce-terms-unknown, quote-expired, quote-stale,
                  quote-mismatch, idempotency-conflict, funds-mode-unavailable, phase-conflict, terms-retired,
-                 budget-exhausted, currency-mismatch, payment-denied, payment-unknown]
+                 budget-exhausted, currency-mismatch, payment-denied, payment-unknown, policy-denied,
+                 dispatch-unavailable]
     CommerceBudget:
       type: object
       description: |
@@ -1234,6 +1236,32 @@ components:
         refused: {type: array, items: {type: string}}
         released: {type: array, items: {type: string}}
         unresolved: {type: array, items: {type: string}}
+    CommerceDispatchAuthorization:
+      type: object
+      description: |
+        The signed instruction a provider's ingress requires before it executes
+        a paid call (ADR 020 sec. 9). Ed25519 over the mctl-commerce-dispatch/v1
+        length-prefixed encoding of the fields from key_id to dispatch_deadline,
+        in that order. Deterministic: a replay returns the identical object.
+        Carries no arguments, results, prices or payment proofs.
+      properties:
+        schema_version: {type: integer, enum: [1]}
+        key_id: {type: string}
+        invocation_id: {type: string}
+        provider_operation_key: {type: string, description: 'mctl-op/v1:<invocation_id>; the provider dedupes on it'}
+        provider_id: {type: string}
+        capability_id: {type: string}
+        input_schema_hash: {type: string}
+        args_digest: {type: string}
+        tenant_id: {type: string}
+        dispatch_deadline: {type: string, description: 'RFC 3339 UTC with second precision and a Z suffix; the provider refuses to start after it'}
+        signature: {type: string, description: 'base64url without padding'}
+    CommerceDispatchResult:
+      type: object
+      properties:
+        invocation: {$ref: '#/components/schemas/CommerceInvocation'}
+        authorization: {$ref: '#/components/schemas/CommerceDispatchAuthorization'}
+        replayed: {type: boolean}
 
 paths:
   /healthz:
@@ -4673,6 +4701,14 @@ paths:
         - {name: since, in: query, schema: {type: string, format: date-time}}
         - {name: until, in: query, schema: {type: string, format: date-time}}
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500}}
+        - name: idempotency_key
+          in: query
+          description: |
+            Finds the caller's own invocation under this key. The idempotency
+            scope is (tenant, principal, key), so the filter always applies the
+            caller's principal: another principal's row under the same key is
+            not returned. The gateway uses it to resume after a restart.
+          schema: {type: string}
       responses:
         '200':
           description: Newest first
@@ -4731,7 +4767,7 @@ paths:
         '401': {description: Authentication required}
         '403': {description: Below the tenant role, or no canonical principal, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
         '404': {description: No such quote in this tenant}
-        '409': {description: 'quote-expired, quote-stale, quote-mismatch or idempotency-conflict', content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '409': {description: 'quote-expired, quote-stale, quote-mismatch, idempotency-conflict, or policy-denied when approval_id is already bound to another invocation', content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
         '422': {description: Live funds, or the terms are gone, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
         '503': {description: Commerce ledger not configured}
 
@@ -4960,6 +4996,64 @@ paths:
         '409': {description: Row settled or not reservable (phase-conflict), payment state still unknown (payment-unknown), or an idempotency conflict at the adapter, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
         '422': {description: Denied and final — budget-exhausted, currency-mismatch, quote-expired, funds-mode-unavailable or payment-denied; the invocation is refused (or, for a denial resolved after an unknown authorization, released) and a retry answers the same, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
         '503': {description: Commerce ledger not configured}
+  /api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/dispatch:
+    post:
+      summary: Fence a reserved invocation and sign its dispatch authorization
+      description: |
+        ADR 020 sec. 7 step 9. Moves a `reserved` row to `dispatching`, writes
+        the dispatch fence (now plus 60 s, to the second) exactly once, and
+        returns the Ed25519 authorization the provider's ingress verifies. A
+        repeat on a fenced `dispatching` row returns the identical
+        authorization with `replayed: true`; the provider dedupes on
+        `provider_operation_key`. Refused with 409 `phase-conflict` from any
+        other phase, past the reservation deadline, or on a row that reached
+        `dispatching` without a fence; 409 `payment-unknown` while the hold's
+        authorization is unconfirmed. The generic transitions route does not
+        own this edge. Platform-only.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: invocation_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                note: {type: string, maxLength: 1024}
+      responses:
+        '200': {description: Dispatched, or replayed, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceDispatchResult'}}}}
+        '400': {description: Invalid body, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '404': {description: No such invocation in this tenant}
+        '409': {description: phase-conflict or payment-unknown, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: 'Commerce ledger not configured, or no dispatch signing key (dispatch-unavailable)', content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+  /api/v1/commerce/dispatch-keys:
+    get:
+      summary: List the public keys that verify dispatch authorizations
+      description: Readable by any authenticated caller; providers pin these to verify the authorization at ingress.
+      tags: [Commerce]
+      responses:
+        '200':
+          description: The active keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key_id: {type: string}
+                        algorithm: {type: string, enum: [ed25519]}
+                        public_key: {type: string, description: 'base64url without padding, 32 bytes'}
+        '401': {description: Authentication required}
+        '503': {description: 'Commerce ledger not configured, or no dispatch signing key (dispatch-unavailable)'}
   /api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/finalize:
     post:
       summary: Capture or release the hold on an observed outcome
