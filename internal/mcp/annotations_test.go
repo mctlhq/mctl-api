@@ -240,13 +240,12 @@ func TestEveryToolDeclaresBothHintsInSource(t *testing.T) {
 func TestReadOnlyToolsAreTheRecordedSet(t *testing.T) {
 	want := []string{
 		"mctl_erpact_list_sites", "mctl_erpact_site_status",
-		"mctl_get_agent", "mctl_get_dev_loop", "mctl_get_epic_status", "mctl_get_incident",
+		"mctl_get_agent", "mctl_get_commerce_budget", "mctl_get_commerce_receipt", "mctl_get_dev_loop", "mctl_get_epic_status", "mctl_get_incident",
 		"mctl_get_lifecycle_ownership", "mctl_get_operation",
 		"mctl_get_ready_work_items", "mctl_get_resource_usage", "mctl_get_service_config", "mctl_get_service_logs",
-		"mctl_get_commerce_budget", "mctl_get_commerce_receipt", "mctl_list_commerce_invocations",
 		"mctl_get_service_status", "mctl_get_tenant", "mctl_get_work_item", "mctl_get_workflow_logs",
 		"mctl_get_workflow_status", "mctl_incident_summary", "mctl_inspect_lifecycle_conflict",
-		"mctl_list_agent_executions", "mctl_list_agent_versions", "mctl_list_agents", "mctl_list_domains",
+		"mctl_list_agent_executions", "mctl_list_agent_versions", "mctl_list_agents", "mctl_list_commerce_invocations", "mctl_list_domains",
 		"mctl_list_incidents", "mctl_list_operations",
 		"mctl_list_platform_skills", "mctl_list_previews", "mctl_list_recent_agent_runs",
 		"mctl_list_recent_operations", "mctl_list_repos", "mctl_list_services", "mctl_list_tenant_skill_bindings",

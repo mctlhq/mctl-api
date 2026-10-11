@@ -437,7 +437,7 @@ func TestCommerceReceipt_ReadsAndHidesForeignRows(t *testing.T) {
 	if acc == nil {
 		t.Fatal("accept failed")
 	}
-	id := acc.Invocation.InvocationID
+	id := acc.InvocationID
 	get := func(u *auth.User, tenant, inv string) *httptest.ResponseRecorder {
 		return f.call(t, u, "GET", "/api/v1/commerce/tenants/"+tenant+"/invocations/"+inv+"/receipt", nil,
 			map[string]string{"tenant": tenant, "invocation_id": inv}, f.h.GetCommerceReceipt)
@@ -479,8 +479,8 @@ func TestCommerceInvocationReads_CarryNoExternalRef(t *testing.T) {
 	}
 	for _, rec := range []*httptest.ResponseRecorder{
 		f.call(t, owner, "GET", "/api/v1/commerce/tenants/acme/invocations", nil, map[string]string{"tenant": "acme"}, f.h.ListCommerceInvocations),
-		f.call(t, owner, "GET", "/api/v1/commerce/tenants/acme/invocations/"+acc.Invocation.InvocationID, nil,
-			map[string]string{"tenant": "acme", "invocation_id": acc.Invocation.InvocationID}, f.h.GetCommerceInvocation),
+		f.call(t, owner, "GET", "/api/v1/commerce/tenants/acme/invocations/"+acc.InvocationID, nil,
+			map[string]string{"tenant": "acme", "invocation_id": acc.InvocationID}, f.h.GetCommerceInvocation),
 	} {
 		for _, banned := range []string{"external_ref", "\"args\"", "\"result\"", "payment_proof", "authorization_id", "capture_id"} {
 			if strings.Contains(rec.Body.String(), banned) {

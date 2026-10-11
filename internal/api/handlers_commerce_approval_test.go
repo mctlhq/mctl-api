@@ -16,6 +16,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/commerce"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
@@ -144,5 +146,61 @@ func TestCommerceAccept_UnreadableApprovalIsUnavailableNotRefused(t *testing.T) 
 	// Without an approval the store is not needed.
 	if rec, acc := f.accept(t, owner, "acme", q, "k-plain"); acc == nil {
 		t.Fatalf("plain accept: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The receipt's policy decision reference comes from the invocation's action
+// approval: recorded carries its rule id and version, and a vanished approval
+// is "missing", never "none".
+func TestCommerceReceipt_PolicyDecisionRecordedAndMissing(t *testing.T) {
+	f := newCommerceFixture(t)
+	f.publish(t)
+	owner := tenantUser(t, "acme-owner", "acme", "prn_owner")
+	receipt := func(invID string) commerce.Receipt {
+		rec := f.call(t, owner, "GET", "/api/v1/commerce/tenants/acme/invocations/"+invID+"/receipt", nil,
+			map[string]string{"tenant": "acme", "invocation_id": invID}, f.h.GetCommerceReceipt)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("receipt: %d %s", rec.Code, rec.Body.String())
+		}
+		var rc commerce.Receipt
+		if err := json.Unmarshal(rec.Body.Bytes(), &rc); err != nil {
+			t.Fatal(err)
+		}
+		return rc
+	}
+	acceptWith := func(approval, key string) string {
+		_, q := f.mint(t, owner, "acme", nil)
+		if q == nil {
+			t.Fatal("mint failed")
+		}
+		rec := f.call(t, owner, "POST", "/api/v1/commerce/tenants/acme/invocations", map[string]any{
+			"quote_id": q.QuoteID, "quote_digest": q.QuoteDigest, "idempotency_key": key, "args_digest": q.ArgsDigest,
+			"execution_id": q.ExecutionID, "approval_id": approval,
+		}, map[string]string{"tenant": "acme"}, f.h.AcceptCommerceInvocation)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("accept: %d %s", rec.Code, rec.Body.String())
+		}
+		var res acceptInvocationResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+			t.Fatal(err)
+		}
+		return res.InvocationID
+	}
+
+	approval := f.approval(t, principalOf(owner), commerceTestExecutionID, true)
+	pd := receipt(acceptWith(approval, "k-pd-recorded")).PolicyDecision
+	if pd.Status != commerce.PolicyRecorded || pd.ApprovalID != approval ||
+		pd.PolicyRuleID != "paid-approve" || pd.PolicyVersion != "test/v1" {
+		t.Fatalf("recorded: %+v", pd)
+	}
+
+	gone := f.approval(t, principalOf(owner), commerceTestExecutionID, true)
+	id := acceptWith(gone, "k-pd-missing")
+	if _, err := f.pool.Exec(context.Background(), `DELETE FROM action_approval_requests WHERE id = $1`, gone); err != nil {
+		t.Fatal(err)
+	}
+	pd = receipt(id).PolicyDecision
+	if pd.Status != commerce.PolicyMissing || pd.ApprovalID != gone {
+		t.Fatalf("missing: %+v", pd)
 	}
 }
