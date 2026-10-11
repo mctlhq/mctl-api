@@ -32,6 +32,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
@@ -260,6 +261,30 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, msg)
 			return
 		}
+	}
+
+	// A repository to build must belong to the caller's team, and so must the
+	// image name it is built into and run from (build_repo_gate.go).
+	// A refusal of the input is shown as is (403). Anything else is a check
+	// that could not be made: its detail can carry internal URLs and
+	// checkout paths, so it goes to the log and the caller gets a generic
+	// 503. Both refuse.
+	if err := h.checkBuildInputs(r.Context(), op, input, user, tenantParam, ciAuthorized); err != nil {
+		status, msg := http.StatusForbidden, err.Error()
+		if !errors.Is(err, errBuildRepoRefused) && !errors.Is(err, gitops.ErrImageNameRefused) {
+			slog.Error("build input check could not be made", "operation", opName, "team", tenantParam, "error", err)
+			status, msg = http.StatusServiceUnavailable, errBuildCheckUnavailable.Error()
+		}
+		h.logAudit(r, audit.Entry{
+			UserID:     user.ID,
+			Operation:  opName,
+			Parameters: auditParams,
+			Status:     "denied",
+			RiskLevel:  string(op.RiskLevel),
+			Message:    msg,
+		})
+		writeError(w, status, msg)
+		return
 	}
 
 	// A new tenant name must not share an Application name space with an

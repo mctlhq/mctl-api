@@ -58,6 +58,7 @@ type GitReader interface {
 	ListPlatformRoleBindings() ([]gitops.PlatformSkillBinding, error)
 	GetPlatformPolicy() (*gitops.PlatformSkillPolicy, error)
 	ListHumanInputRequests() ([]gitops.HumanInputRequestFile, error)
+	ImageNamePolicy() (*gitops.ImageNamePolicy, error)
 }
 
 // ArgoStatusClient is the subset of argocd.Client used by API handlers.

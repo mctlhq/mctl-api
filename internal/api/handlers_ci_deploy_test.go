@@ -17,7 +17,9 @@ package api_test
 import (
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/audit"
@@ -59,12 +61,31 @@ func newCIFixture(t *testing.T, repos *fakeSourceRepos) *ciFixture {
 	t.Helper()
 	t.Setenv("AUTH_REQUIRED", "false")
 	f := &ciFixture{exec: &fakeExecutor{}, audit: audit.NewLogger(), repos: repos}
+	// The build gates apply to a CI principal like any non-admin: its
+	// repositories are public here, and labs is granted the platform-prefixed
+	// names it deploys.
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"private":false}`))
+	}))
+	t.Cleanup(github.Close)
+	portal := httptest.NewServer(http.HandlerFunc(bindingAnswer(true)))
+	t.Cleanup(portal.Close)
+	policy, err := gitops.ParseImageNames([]byte("registry ghcr.io/mctlhq\nreserved-prefix mctl-\ngrant labs mctl-telegram\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.AddTenant("labs")
+	policy.AddOwner("mctl-telegram", "labs")
 	opts := mctlapi.Options{
-		Registry: operations.NewRegistry(),
+		GitHubAPIBaseURL:               github.URL,
+		BackstageInternalURL:           portal.URL,
+		BackstageGithubAppConnectToken: "gac-token",
+		Registry:                       operations.NewRegistry(),
 		// No members at all: a CI deploy must not depend on tenant roles.
 		GitReader: &fakeGitReader{
-			tenants:  []gitops.Tenant{{Name: "labs"}},
-			services: []gitops.Service{{Team: "labs", Name: "mctl-telegram"}},
+			tenants:     []gitops.Tenant{{Name: "labs"}},
+			services:    []gitops.Service{{Team: "labs", Name: "mctl-telegram"}},
+			imagePolicy: policy,
 		},
 		AuditLog: f.audit,
 		Executor: f.exec,
@@ -225,13 +246,21 @@ func TestCIDeploy_EmptyRepositoryRefused(t *testing.T) {
 // A tenant member's deploy is untouched by any of this: no CI rule applies,
 // and an extra parameter still passes as before.
 func TestCIDeploy_HumansAreUnaffected(t *testing.T) {
-	f := newRoleFixture(t)
-	body := ciBody()
-	body["team_name"] = "erpact"
+	// A human developer deploys through the same gates as before: member of
+	// the tenant, a repository the team may build, an image name it may use.
+	git := &fakeGitReader{
+		tenants: []gitops.Tenant{{Name: "tests", Members: []gitops.TenantMember{{UserID: "dan-dev", Role: "developer"}}}},
+	}
+	router, exec, f := newGateRouterWith(t, "gac-token", git)
+	f.binding = bindingAnswer(true)
+	body := onboard("myorg/my-app")
 	body["env_vars"] = "A=1"
-	w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, member("dan-dev"))
+	w := postAs(t, router, "/api/v1/operations/deploy-service/execute", body, auth.NewGitHubUser("dan-dev", []string{"tests"}))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status %d; body %s", w.Code, w.Body.String())
+	}
+	if len(exec.submitted) != 1 {
+		t.Fatalf("submitted %v", exec.submitted)
 	}
 }
 
@@ -297,3 +326,64 @@ func TestCIDeploy_IdentityIsLowercase(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// A CI principal's dockerfile_repo is pinned by authorizeCIDeploy to its
+// token's repository and to the source repository registered in gitops, so
+// the portal binding is not consulted: a private registered repository that
+// was never connected in the portal still deploys, and neither the portal nor
+// GitHub is asked. The image name is still checked: without the grant,
+// mctl-telegram is under the reserved mctl- prefix and is refused.
+func TestCIDeploy_RegisteredRepoSkipsTheBindingGate(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "false")
+	for name, c := range map[string]struct {
+		imageNames string
+		status     int
+	}{
+		"granted image name":     {"registry ghcr.io/mctlhq\nreserved-prefix mctl-\ngrant labs mctl-telegram\n", http.StatusAccepted},
+		"not granted image name": {"registry ghcr.io/mctlhq\nreserved-prefix mctl-\n", http.StatusForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var portalHits, githubHits atomic.Int32
+			portal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				portalHits.Add(1)
+				w.WriteHeader(http.StatusBadGateway)
+			}))
+			t.Cleanup(portal.Close)
+			github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				githubHits.Add(1)
+				_, _ = w.Write([]byte(`{"private":true}`))
+			}))
+			t.Cleanup(github.Close)
+			policy, err := gitops.ParseImageNames([]byte(c.imageNames))
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy.AddTenant("labs")
+			exec := &fakeExecutor{}
+			router := mctlapi.NewRouter(mctlapi.Options{
+				Registry: operations.NewRegistry(),
+				GitReader: &fakeGitReader{
+					tenants:     []gitops.Tenant{{Name: "labs"}},
+					services:    []gitops.Service{{Team: "labs", Name: "mctl-telegram"}},
+					imagePolicy: policy,
+				},
+				AuditLog:                       audit.NewLogger(),
+				Executor:                       exec,
+				ComponentSourceRepos:           defaultRepos(),
+				GitHubAPIBaseURL:               github.URL,
+				BackstageInternalURL:           portal.URL,
+				BackstageGithubAppConnectToken: "gac-token",
+			})
+			w := postAs(t, router, "/api/v1/operations/deploy-service/execute", ciBody(), ciUser())
+			if w.Code != c.status {
+				t.Fatalf("status %d, want %d; body: %s", w.Code, c.status, w.Body.String())
+			}
+			if (c.status == http.StatusAccepted) != (len(exec.submitted) == 1) {
+				t.Errorf("submitted %d workflows for status %d", len(exec.submitted), c.status)
+			}
+			if portalHits.Load() != 0 || githubHits.Load() != 0 {
+				t.Errorf("a CI deploy must not consult the binding or GitHub: portal %d, github %d", portalHits.Load(), githubHits.Load())
+			}
+		})
+	}
+}

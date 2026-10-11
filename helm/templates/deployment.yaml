@@ -132,6 +132,19 @@ spec:
                   key: MCTL_SURFACE_PORTAL_TOKEN
                   optional: true
             {{- end }}
+            {{- if .Values.repoBindingTokenSecret }}
+            # Optional on purpose: without it the build-repo gate's binding
+            # lookup refuses (internal/api/build_repo_gate.go), so a missing
+            # Secret fails closed for non-admin builds of non-public
+            # repositories instead of holding the pod. The key matches the
+            # ExternalSecret mctl-api-repo-binding's secretKey.
+            - name: BACKSTAGE_GITHUB_APP_CONNECT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.repoBindingTokenSecret }}
+                  key: BACKSTAGE_GITHUB_APP_CONNECT_TOKEN
+                  optional: true
+            {{- end }}
             {{- if .Values.oidcProvidersSecret }}
             # The federation registry (docs/federation.md). Optional on purpose:
             # mctl-gitops pre-creates the Secret empty and the zitadel-iac Job

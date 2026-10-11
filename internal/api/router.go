@@ -76,6 +76,9 @@ type Options struct {
 	// BackstageInternalURL is the cluster-internal URL for Backstage (e.g. http://backstage.backstage.svc:7007).
 	// Used for proxying repo operations to the github-app-connect plugin.
 	BackstageInternalURL string
+	// GitHubAPIBaseURL overrides https://api.github.com for the build
+	// repository gate's public-repository check (tests only).
+	GitHubAPIBaseURL string
 	// BackstageGithubAppConnectToken authorizes calls to Backstage's
 	// github-app-connect plugin (repos list/sync/install-url). Deliberately
 	// distinct from BackstageToken so the two credentials have independent
