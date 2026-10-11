@@ -316,6 +316,18 @@ func TestSecretEnvKeyNames(t *testing.T) {
 	if _, err := secretEnvKeyNames("FOO-BAR=1"); err == nil {
 		t.Error("invalid key accepted")
 	}
+	// An empty key is not a blank line: refused, not skipped, so a value
+	// is never dropped while the submit reports success.
+	for _, in := range []string{"=" + handoffValueA, "A=1\n  =" + handoffValueA} {
+		_, err := secretEnvKeyNames(in)
+		if err == nil {
+			t.Errorf("empty key accepted: %q", in)
+			continue
+		}
+		if strings.Contains(err.Error(), handoffValueA) {
+			t.Errorf("error echoes the value: %v", err)
+		}
+	}
 }
 
 // Every Secret parameter in the registry must have a projection, or the

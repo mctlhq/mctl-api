@@ -84,9 +84,10 @@ var secretProjections = map[string]func(string) (string, error){
 
 // secretEnvKeyNames returns the key names of newline-separated KEY=value
 // lines, one per line, parsed the way the deploy-service template parses
-// them: blank lines and lines whose key starts with '#' are skipped, and
-// keys are trimmed. Every other line must contain '=' and a key that is an
-// environment variable name (the template refuses other keys too).
+// them: blank lines and lines starting with '#' are skipped, and keys are
+// trimmed. Every other line must contain '=' and a key that is an
+// environment variable name; an empty key is refused like any other
+// invalid one.
 //
 // The projection is published on the Workflow, so it must never carry a
 // value. A line without '=' is refused because it can only be a value: a
@@ -96,11 +97,15 @@ var secretProjections = map[string]func(string) (string, error){
 func secretEnvKeyNames(value string) (string, error) {
 	var keys []string
 	for i, line := range strings.Split(value, "\n") {
-		key, _, found := strings.Cut(line, "=")
-		key = strings.TrimSpace(key)
-		if key == "" || strings.HasPrefix(key, "#") {
+		// Blank and comment lines are judged on the whole line: a line
+		// such as "=value" has an empty key but is not blank, and must
+		// be refused, not skipped.
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
+		key, _, found := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
 		if !found {
 			return "", fmt.Errorf("secret_env_vars line %d: not a KEY=value line (multi-line values are not supported)", i+1)
 		}
