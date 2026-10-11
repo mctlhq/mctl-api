@@ -176,7 +176,7 @@ func TestSubmitKeepsSecretValuesOutOfTheWorkflow(t *testing.T) {
 // Nothing secret to hand off: no Secret, no suspension, and the clear
 // sentinel reaches the template as before.
 func TestSubmitWithoutSecretValuesIsUnchanged(t *testing.T) {
-	for _, value := range []string{"", clearSentinel} {
+	for _, value := range []string{"", ClearSentinel} {
 		c := newHandoffCluster(t, "action")
 		e := &Executor{dynamicClient: c.dyn}
 		params := map[string]string{"action": "update-config", "secret_env_vars": value, SecretHandoffParam: "someone-elses-secret"}
@@ -295,13 +295,47 @@ func TestSecretEnvKeyNames(t *testing.T) {
 	if got != "A\nD_E" {
 		t.Errorf("key names = %q", got)
 	}
-	// A line without '=' may be a stray value: refused, and not echoed.
-	_, err = secretEnvKeyNames("A=1\n" + handoffValueA + "-no-equals!")
-	if err == nil {
-		t.Fatal("invalid key accepted")
+	// A line without '=' can only be a value. Refused, and not echoed,
+	// whether or not it happens to look like an identifier.
+	for _, stray := range []string{
+		"STRAY_SECRET_TOKEN_0123",          // identifier-shaped
+		handoffValueA + "-no-equals!",      // not identifier-shaped
+		"-----BEGIN PRIVATE KEY-----",      // first line of a PEM block
+		"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC", // PEM continuation
+	} {
+		_, err = secretEnvKeyNames("A=1\n" + stray)
+		if err == nil {
+			t.Errorf("line without '=' accepted: %q", stray)
+			continue
+		}
+		if strings.Contains(err.Error(), stray) {
+			t.Errorf("error echoes the line: %v", err)
+		}
 	}
-	if strings.Contains(err.Error(), handoffValueA) {
-		t.Errorf("error echoes the line: %v", err)
+	// An '=' with a key that is not an environment variable name.
+	if _, err := secretEnvKeyNames("FOO-BAR=1"); err == nil {
+		t.Error("invalid key accepted")
+	}
+}
+
+// Every Secret parameter in the registry must have a projection, or the
+// operation can never be submitted with a value. Fails when the parameter
+// is added, not when a caller first uses it.
+func TestEverySecretParameterHasAProjection(t *testing.T) {
+	found := 0
+	for _, op := range NewRegistry().List() {
+		for _, p := range op.Parameters {
+			if !p.Secret {
+				continue
+			}
+			found++
+			if secretProjections[p.Name] == nil {
+				t.Errorf("%s.%s is Secret with no handoff projection", op.Name, p.Name)
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("registry has no Secret parameters; this test checks nothing")
 	}
 }
 

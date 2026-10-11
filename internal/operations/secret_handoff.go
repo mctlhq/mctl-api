@@ -57,9 +57,10 @@ import (
 // is stored under the parameter's own name as the Secret data key.
 const SecretHandoffParam = "secret_env_secret"
 
-// clearSentinel is the value mctl-api's MCP layer sends to clear existing
-// secrets. It is an instruction, not a secret, and travels as-is.
-const clearSentinel = "__CLEAR__"
+// ClearSentinel is the env_vars / secret_env_vars value that tells the
+// deploy-service template to clear the existing values. It is an
+// instruction, not a secret, and travels as-is. The MCP layer sends it.
+const ClearSentinel = "__CLEAR__"
 
 var (
 	secretGVR = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
@@ -84,16 +85,24 @@ var secretProjections = map[string]func(string) (string, error){
 // secretEnvKeyNames returns the key names of newline-separated KEY=value
 // lines, one per line, parsed the way the deploy-service template parses
 // them: blank lines and lines whose key starts with '#' are skipped, and
-// keys are trimmed. A key that is not an environment variable name is
-// refused: the template would refuse it too, and a line without '=' may be
-// a stray value, which must not be echoed back as a "key".
+// keys are trimmed. Every other line must contain '=' and a key that is an
+// environment variable name (the template refuses other keys too).
+//
+// The projection is published on the Workflow, so it must never carry a
+// value. A line without '=' is refused because it can only be a value: a
+// stray token, or a continuation line of a multi-line value such as a PEM
+// block. A continuation line that itself looks like KEY=... cannot be told
+// apart from a real pair, and its prefix is published as a key name.
 func secretEnvKeyNames(value string) (string, error) {
 	var keys []string
 	for i, line := range strings.Split(value, "\n") {
-		key, _, _ := strings.Cut(line, "=")
+		key, _, found := strings.Cut(line, "=")
 		key = strings.TrimSpace(key)
 		if key == "" || strings.HasPrefix(key, "#") {
 			continue
+		}
+		if !found {
+			return "", fmt.Errorf("secret_env_vars line %d: not a KEY=value line (multi-line values are not supported)", i+1)
 		}
 		if !envVarName.MatchString(key) {
 			return "", fmt.Errorf("secret_env_vars line %d: key is not a valid environment variable name", i+1)
@@ -123,7 +132,7 @@ func splitSecretParams(op Operation, params map[string]string) (map[string]strin
 			continue
 		}
 		v, ok := params[p.Name]
-		if !ok || v == "" || v == clearSentinel {
+		if !ok || v == "" || v == ClearSentinel {
 			continue
 		}
 		project, ok := secretProjections[p.Name]
