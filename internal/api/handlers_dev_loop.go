@@ -525,6 +525,9 @@ func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 	}
 
 	payload := map[string]string{"reason": reason, "abandoned_by": user.ID}
+	// The signal has no deadline of its own: it is bounded only by the
+	// request context, as SignalApprove is in ApproveDevLoopWorkflow. Change
+	// both together if a deadline is ever added.
 	if err := h.opts.TemporalClient.SignalAbandon(r.Context(), workflowID, exec.RunID, payload); err != nil {
 		if !temporalclient.IsNotFound(err) {
 			fail(http.StatusBadGateway, "signal failed: "+err.Error(), "failed to signal abandon: "+err.Error())
@@ -539,6 +542,12 @@ func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 		}
 		if after.Status == devLoopStatusRunning {
 			if after.RunID != exec.RunID {
+				// A DevLoopWorkflow continue-as-new also lands here: the
+				// described run closes as ContinuedAsNew, its successor is
+				// Running under the same workflow id, and this second describe
+				// sees the successor. The 409 is the intended answer, not
+				// evidence of an unexpected restart; the caller only has to
+				// re-issue the request.
 				// The described run ended and a new one took the id. It was
 				// not the run anyone looked at, so it is not abandoned here.
 				fail(http.StatusConflict, "described run "+exec.RunID+" ended; new run "+after.RunID+" not signalled",
@@ -554,12 +563,17 @@ func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// A separate map keeps the other paths' audit parameters unchanged.
+	signalledParams := map[string]string{
+		"abandoned_by": user.ID, "reason": reason, "run_id": exec.RunID,
+	}
 	h.logAudit(r, audit.Entry{
 		UserID:       user.ID,
 		Operation:    "dev-loop-abandon",
-		Parameters:   auditParams,
+		Parameters:   signalledParams,
 		WorkflowName: workflowID,
 		Status:       "succeeded",
+		Message:      "signalled: abandon (run " + exec.RunID + ")",
 		RiskLevel:    string(operations.RiskMedium),
 	})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -624,13 +638,13 @@ func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 	// finished DevLoopWorkflow, which is the same absent/negative collapse
 	// this field exists to remove.
 	//
-	// `status != "Unknown"` rather than an unconditional true: DescribeDevLoop
-	// returns "Unknown" from its own default arm for an execution status it
+	// `status != devLoopStatusUnknown` rather than an unconditional true: DescribeDevLoop
+	// returns "Unknown" from its own default arm of statusName for an execution status it
 	// could not determine, so a read that determined nothing would otherwise
 	// answer known=true about a false it derived from nothing. The old
-	// `status == devLoopStatusRunning` covered that case by accident; this covers it on
+	// `status == "Running"` covered that case by accident; this covers it on
 	// purpose.
-	shepherdInLoopKnown := status != "Unknown"
+	shepherdInLoopKnown := status != devLoopStatusUnknown
 	if status == devLoopStatusRunning {
 		qctx, cancel := context.WithTimeout(r.Context(), shepherdQueryTimeout)
 		inLoop, qerr := h.opts.TemporalClient.QueryShepherdInLoop(qctx, workflowID)

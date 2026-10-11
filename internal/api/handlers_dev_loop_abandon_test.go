@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/audit"
@@ -149,6 +150,9 @@ func TestAbandonDevLoopWorkflow_RunningIsSignalledWithCallerAsActor(t *testing.T
 	}
 	if e.Parameters["abandoned_by"] != "tester" || e.Parameters["reason"] != "superseded by mctl-gitops#1363" {
 		t.Errorf("unexpected audit parameters: %+v", e.Parameters)
+	}
+	if e.Parameters["run_id"] != "run-1" || !strings.Contains(e.Message, "run-1") {
+		t.Errorf("audit entry should name the signalled run: %+v %q", e.Parameters, e.Message)
 	}
 }
 
