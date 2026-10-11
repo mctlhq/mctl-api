@@ -156,6 +156,11 @@ func TestOperationParametersAcceptCurrentRealValues(t *testing.T) {
 		{"create-tenant", map[string]string{"tenant_name": "abc", "quota_cpu_req": "500m", "quota_cpu_lim": "2", "quota_memory_req": "1500Mi", "quota_memory_lim": "5Gi", "quota_pods": "30", "creator_user_id": "octocat"}},
 		{"preview-deploy", map[string]string{"team_name": "a", "component_name": "b", "image_tag": GeneratePreviewTag("feat/my-feature")}},
 		{"mctl-agents-implement", map[string]string{"slug": "go-chi-v5.3.2-router-upgrade"}},
+		// A punycode TLD passes validateHostname and can sit in the domains
+		// store, so its teardown must validate too.
+		{"remove-custom-domain", map[string]string{"team_name": "a", "service_name": "b", "domain": "shop.xn--p1ai"}},
+		{"add-custom-domain", map[string]string{"team_name": "a", "service_name": "b", "domain": "app.example.co.uk"}},
+		{"deploy-service", map[string]string{"action": "deploy", "team_name": "a", "component_name": "b", "host": "shop.xn--p1ai"}},
 		{"mctl-agents-approve", map[string]string{"service": "mctl-api", "slug": "issue-559-hardening-constrain-every-operation-para", "approver": "agent:implementer"}},
 	}
 	for _, c := range cases {
@@ -192,6 +197,10 @@ func TestOperationParametersRejectInjectionShapes(t *testing.T) {
 		{"deploy-service", "dockerfile_path", "-f"},
 		{"deploy-service", "dockerfile_path", strings.Repeat("a", 257)},
 		{"preview-deploy", "dockerfile_path", "x/.."},
+		{"add-custom-domain", "domain", "a..x.com"},
+		{"add-custom-domain", "domain", "a.-b.com"},
+		{"remove-custom-domain", "domain", "a.com/x"},
+		{"deploy-service", "host", "a.b-.com"},
 	}
 	for _, c := range cases {
 		op := opByName(t, c.op)

@@ -72,6 +72,8 @@ type ParameterDef struct {
 	Enum        []string `json:"enum,omitempty"`
 	Pattern     string   `json:"pattern,omitempty"`
 	// MaxLength bounds the value in bytes. Checked before Enum and Pattern.
+	// int32 rather than int keeps ParameterDef at 120 bytes, below gocritic's
+	// rangeValCopy threshold for the many loops over op.Parameters.
 	MaxLength int32 `json:"maxLength,omitempty"`
 	Secret    bool  `json:"secret,omitempty"` // true = never echo in logs/responses
 	// OmitWhenEmpty marks an optional parameter whose absence must reach Argo
@@ -372,8 +374,13 @@ const (
 	// "-" are all refused, matching ciRelativePath in the CI deploy path.
 	// Length is bounded by the parameters' MaxLength.
 	repoPathPattern = `^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$`
-	// hostnameCore: add-custom-domain and tpl-git-commit host check.
-	hostnameCore    = `[a-z0-9]([a-z0-9.-]*[a-z0-9])?(\.[a-z]{2,})+`
+	// hostnameLabel and hostnameCore: add/remove-custom-domain and
+	// deploy-service host check. Label for label the same rule as
+	// validateHostname in internal/api, which gates what the domains store
+	// holds, so a stored domain (punycode TLDs such as xn--p1ai included) is
+	// never refused on its own teardown path. Length is bounded by MaxLength.
+	hostnameLabel   = `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`
+	hostnameCore    = hostnameLabel + `(\.` + hostnameLabel + `)+`
 	hostnamePattern = `^` + hostnameCore + `$`
 	// envBlockPattern: newline-separated KEY=value lines; no CR, NUL or other
 	// control characters (tab allowed in values).
