@@ -55,7 +55,7 @@ import (
 // SecretHandoffParam is the workflow parameter that names the Kubernetes
 // Secret carrying the values of an operation's secret parameters. Each value
 // is stored under the parameter's own name as the Secret data key.
-const SecretHandoffParam = "secret_env_secret"
+const SecretHandoffParam = "secret_env_secret" //nolint:gosec // G101: the name of a workflow parameter, not a credential
 
 // ClearSentinel is the env_vars / secret_env_vars value that tells the
 // deploy-service template to clear the existing values. It is an
