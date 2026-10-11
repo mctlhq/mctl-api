@@ -641,10 +641,17 @@ func (r *Reader) GetTenant(name string) (*Tenant, error) {
 	return r.readTenant(name)
 }
 
+// CheckoutMaxAge bounds how old the checkout may be when a reader that a
+// security decision rests on answers (TenantExists, TenantNames,
+// ServiceExists, MemberRoles). The checkout refreshes every minute; an older
+// last sync could miss a change made since, so it is an error rather than an
+// answer.
+const CheckoutMaxAge = 10 * time.Minute
+
 // TenantExistsMaxAge bounds how old the checkout may be when TenantExists
 // answers. The checkout refreshes every minute; an older last sync could miss
 // a tenant created since, so it is an error rather than "absent".
-const TenantExistsMaxAge = 10 * time.Minute
+const TenantExistsMaxAge = CheckoutMaxAge
 
 // tenantNameRE is create-tenant's tenant_name pattern (operations registry
 // and wft-create-tenant): a single DNS-safe path segment.
@@ -682,15 +689,15 @@ func (r *Reader) TenantExists(name string) (bool, error) {
 }
 
 // checkFreshLocked returns an error unless the checkout has synced within
-// TenantExistsMaxAge. An answer from a checkout that never synced, or that
+// CheckoutMaxAge. An answer from a checkout that never synced, or that
 // stopped refreshing, is not one a security decision may rest on.
 func (r *Reader) checkFreshLocked() error {
 	last := r.LastSync()
 	if last.IsZero() {
 		return errors.New("gitops checkout has never synced")
 	}
-	if age := time.Since(last); age > TenantExistsMaxAge {
-		return fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), TenantExistsMaxAge)
+	if age := time.Since(last); age > CheckoutMaxAge {
+		return fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), CheckoutMaxAge)
 	}
 	return nil
 }
@@ -740,6 +747,21 @@ func (r *Reader) ServiceExists(team, component string) (bool, error) {
 		return false, err
 	}
 
+	path, err := r.statServiceFileLocked(team, component, "values.yaml")
+	if err != nil {
+		return false, fmt.Errorf("checking service %s/%s: %w", team, component, err)
+	}
+	return path != "", nil
+}
+
+// statServiceFileLocked walks platform-gitops/services/<team>/<component>/
+// <file> with Lstat and returns the file's path, or "" when a path element
+// below the services directory does not exist. Every directory on the path
+// must be a plain directory and the file a regular file: a symlink or any
+// other kind of entry is an error, as is the services directory itself
+// missing (a broken checkout, not a missing service) and any other stat
+// error. Names must already be validated. The caller holds r.mu.
+func (r *Reader) statServiceFileLocked(team, component, file string) (string, error) {
 	services := filepath.Join(r.localPath, "platform-gitops", "services")
 	steps := []struct {
 		path string
@@ -748,24 +770,21 @@ func (r *Reader) ServiceExists(team, component string) (bool, error) {
 		{services, true},
 		{filepath.Join(services, team), true},
 		{filepath.Join(services, team, component), true},
-		{filepath.Join(services, team, component, "values.yaml"), false},
+		{filepath.Join(services, team, component, file), false},
 	}
 	for i, st := range steps {
 		info, err := os.Lstat(st.path)
 		if errors.Is(err, fs.ErrNotExist) && i > 0 {
-			// The services directory itself missing is a broken checkout,
-			// not a missing service.
-			return false, nil
+			return "", nil
 		}
 		if err != nil {
-			return false, fmt.Errorf("checking service %s/%s: %w", team, component, err)
+			return "", err
 		}
 		if st.dir && !info.IsDir() || !st.dir && !info.Mode().IsRegular() {
-			return false, fmt.Errorf("checking service %s/%s: %s is not a plain %s",
-				team, component, st.path, map[bool]string{true: "directory", false: "file"}[st.dir])
+			return "", fmt.Errorf("%s is not a plain %s", st.path, map[bool]string{true: "directory", false: "file"}[st.dir])
 		}
 	}
-	return true, nil
+	return steps[len(steps)-1].path, nil
 }
 
 // MemberRolesMaxAge bounds how old the checkout may be when MemberRoles
@@ -1144,32 +1163,15 @@ func (r *Reader) ComponentSourceRepo(team, component string) (string, error) {
 		return "", fmt.Errorf("gitops checkout unavailable: %w", err)
 	}
 
-	services := filepath.Join(r.localPath, "platform-gitops", "services")
-	steps := []struct {
-		path string
-		dir  bool
-	}{
-		{services, true},
-		{filepath.Join(services, team), true},
-		{filepath.Join(services, team, component), true},
-		{filepath.Join(services, team, component, "catalog-info.yaml"), false},
+	path, err := r.statServiceFileLocked(team, component, "catalog-info.yaml")
+	if err != nil {
+		return "", err
 	}
-	for i, st := range steps {
-		info, err := os.Lstat(st.path)
-		if errors.Is(err, fs.ErrNotExist) && i > 0 {
-			// The services directory itself missing is a broken checkout,
-			// not an unregistered component.
-			return "", ErrSourceRepoNotRegistered
-		}
-		if err != nil {
-			return "", err
-		}
-		if st.dir && !info.IsDir() || !st.dir && !info.Mode().IsRegular() {
-			return "", fmt.Errorf("%s is not a plain %s", st.path, map[bool]string{true: "directory", false: "file"}[st.dir])
-		}
+	if path == "" {
+		return "", ErrSourceRepoNotRegistered
 	}
 
-	data, err := os.ReadFile(steps[len(steps)-1].path) //nolint:gosec // validated names, regular file inside the checkout
+	data, err := os.ReadFile(path) //nolint:gosec // validated names, regular file inside the checkout
 	if err != nil {
 		return "", err
 	}

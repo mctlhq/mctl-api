@@ -555,20 +555,20 @@ func (h *Handlers) checkTenantIsNew(tenant string) (status int, msg string) {
 	return 0, ""
 }
 
-// requiresExistingService reports whether opName acts on a service that must
-// already exist. deploy-service's onboard action creates one, so it is the
-// exception; provision-database may run before a service is onboarded and
-// preview-delete must still clean up after one is retired, and neither acts
-// on the <team>-<component> Application.
+// requiresExistingService reports whether opName, which names a service,
+// acts on one that must already exist. It is fail-closed: every such
+// operation is gated unless listed here. deploy-service's onboard action
+// creates the service; provision-database may run before a service is
+// onboarded and preview-delete must still clean up after one is retired, and
+// neither acts on the <team>-<component> Application.
 func requiresExistingService(opName string, input map[string]string) bool {
 	switch opName {
-	case "retire-service", "rollback-service", "preview-deploy",
-		"add-custom-domain", "remove-custom-domain":
-		return true
+	case "provision-database", "preview-delete":
+		return false
 	case "deploy-service":
 		return input["action"] != "onboard"
 	}
-	return false
+	return true
 }
 
 // checkServiceExists returns 0 when team/component is a service in the

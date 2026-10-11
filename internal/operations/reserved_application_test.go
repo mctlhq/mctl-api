@@ -159,14 +159,12 @@ func TestIsReservedServiceApplication(t *testing.T) {
 func TestValidateInputRejectsReservedServiceApplication(t *testing.T) {
 	reg := NewRegistry()
 	bodies := map[string]map[string]string{
-		"retire-service":       {"team_name": "root", "component_name": "app"},
-		"rollback-service":     {"team_name": "root", "component_name": "app", "target_tag": "1.0.0"},
-		"deploy-service":       {"action": "onboard", "team_name": "labs", "component_name": "oidc-zitadel"},
-		"preview-deploy":       {"team_name": "shared", "component_name": "pg", "image_tag": "1"},
-		"preview-delete":       {"team_name": "shared", "component_name": "pg", "preview_id": "x"},
-		"provision-database":   {"team_name": "root", "app_name": "app"},
-		"add-custom-domain":    {"team_name": "erpact", "service_name": "control", "domain": "a.example.com"},
-		"remove-custom-domain": {"team_name": "erpact", "service_name": "control", "domain": "a.example.com"},
+		"retire-service":     {"team_name": "root", "component_name": "app"},
+		"rollback-service":   {"team_name": "root", "component_name": "app", "target_tag": "1.0.0"},
+		"deploy-service":     {"action": "onboard", "team_name": "labs", "component_name": "oidc-zitadel"},
+		"preview-deploy":     {"team_name": "shared", "component_name": "pg", "image_tag": "1"},
+		"provision-database": {"team_name": "root", "app_name": "app"},
+		"add-custom-domain":  {"team_name": "erpact", "service_name": "control", "domain": "a.example.com"},
 	}
 	for name, body := range bodies {
 		op, ok := reg.Get(name)
@@ -226,5 +224,35 @@ func TestTenantNameCollision(t *testing.T) {
 	// The reverse direction: a new name that an existing tenant extends.
 	if other, got := TenantNameCollision("acme", []string{"acme-dev"}); !got || other != "acme-dev" {
 		t.Errorf(`"acme" next to "acme-dev" = %q, %v; want a collision`, other, got)
+	}
+}
+
+// Teardown operations are exempt: a record that exists for a reserved pair
+// must stay removable (DELETE /domains keeps a row whose teardown fails).
+func TestTeardownOperationsSkipReservedPairCheck(t *testing.T) {
+	reg := NewRegistry()
+	for name, body := range map[string]map[string]string{
+		"remove-custom-domain": {"team_name": "erpact", "service_name": "control", "domain": "a.example.com"},
+		"preview-delete":       {"team_name": "shared", "component_name": "pg", "preview_id": "abc123"},
+	} {
+		op, _ := reg.Get(name)
+		if errs := reg.ValidateInput(op, reg.ApplyDefaults(op, body)); len(errs) != 0 {
+			t.Errorf("%s: teardown refused: %v", name, errs)
+		}
+		if err := checkServiceApplication(op, body); err != nil {
+			t.Errorf("%s: Submit backstop refused teardown: %v", name, err)
+		}
+	}
+}
+
+func TestPreviewIDIsPatterned(t *testing.T) {
+	reg := NewRegistry()
+	op, _ := reg.Get("preview-delete")
+	for id, ok := range map[string]bool{"abc123": true, "x": true, "../x": false, "a-b": false, "": false, "ABC": false} {
+		body := map[string]string{"team_name": "acme", "component_name": "web", "preview_id": id}
+		errs := reg.ValidateInput(op, body)
+		if (len(errs) == 0) != ok {
+			t.Errorf("preview_id %q: errs=%v, want ok=%v", id, errs, ok)
+		}
 	}
 }

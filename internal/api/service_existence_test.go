@@ -10,6 +10,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
 // Operations on an existing service act on the Argo CD Application
@@ -234,5 +235,40 @@ func TestCreateTenant_ExistingTenantNamesStayValidForAdmins(t *testing.T) {
 				t.Fatalf("status %d; body %s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+// Every registry operation that names a service is classified here, so an
+// operation added later fails this test until someone decides whether it is
+// gated. The gate is fail-closed: unlisted operations are gated.
+func TestServiceOps_GatingTableCoversRegistry(t *testing.T) {
+	notGated := map[string]bool{"provision-database": true, "preview-delete": true}
+	fill := map[string]string{
+		"team_name": "erpact", "component_name": "missing", "service_name": "missing", "app_name": "missing",
+		"action": "deploy", "target_tag": "1.2.3", "image_tag": "1.2.3", "domain": "app.example.com",
+		"preview_id": "abc123",
+	}
+	reg := operations.NewRegistry()
+	seen := 0
+	for _, op := range reg.List() {
+		if _, _, ok := operations.ServiceTarget(op, fill); !ok || op.HandlerOnly {
+			continue
+		}
+		seen++
+		body := map[string]string{}
+		for _, p := range op.Parameters {
+			if v, ok := fill[p.Name]; ok {
+				body[p.Name] = v
+			}
+		}
+		f := newRoleFixture(t)
+		w := postAs(t, f.router, "/api/v1/operations/"+op.Name+"/execute", body, member("olga-owner"))
+		gated := w.Code == http.StatusNotFound
+		if gated == notGated[op.Name] {
+			t.Errorf("%s: status %d, gated=%v, want gated=%v; body %s", op.Name, w.Code, gated, !notGated[op.Name], w.Body.String())
+		}
+	}
+	if seen < 8 {
+		t.Errorf("only %d service operations found; the table walk is broken", seen)
 	}
 }

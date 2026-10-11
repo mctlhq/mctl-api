@@ -35,6 +35,25 @@ var reservedComponentNames = map[string]struct{}{
 	"openclaw-skills": {},
 }
 
+// teardownOperations remove what a tenant already has, inside its own
+// paths and namespaces, without acting on the <team>-<component> Argo CD
+// Application: remove-custom-domain edits services/<team>/<service>, and
+// preview-delete uninstalls a Helm release in <team>-preview or <team>. The
+// reserved-pair check does not apply to them, so a record that exists can
+// always be cleaned up (DELETE /domains keeps a row whose teardown fails).
+var teardownOperations = map[string]struct{}{
+	"remove-custom-domain": {},
+	"preview-delete":       {},
+}
+
+// ChecksReservedPair reports whether op is refused for a reserved
+// <team>-<component> pair: every operation that names a service, except the
+// teardown operations above.
+func ChecksReservedPair(op Operation) bool {
+	_, teardown := teardownOperations[op.Name]
+	return !teardown
+}
+
 // ServiceTarget returns the team and component an operation acts on, when it
 // takes both. ok is false for operations that do not address a service.
 func ServiceTarget(op Operation, params map[string]string) (team, component string, ok bool) {
@@ -99,7 +118,7 @@ func reservedServiceApplicationMessage(team, component string) string {
 // same predicate for the clear 400.
 func checkServiceApplication(op Operation, params map[string]string) error {
 	team, component, ok := ServiceTarget(op, params)
-	if !ok || !IsReservedServiceApplication(team, component) {
+	if !ok || !ChecksReservedPair(op) || !IsReservedServiceApplication(team, component) {
 		return nil
 	}
 	return fmt.Errorf("%w: %q", ErrReservedServiceApplication, echoTenantName(team+"-"+component))
