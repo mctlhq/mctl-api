@@ -29,6 +29,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/commerce"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 // Commerce ledger endpoints (mctl-api#547), implementing ADR 020 secs. 4-6,
@@ -208,6 +209,14 @@ func writeCommerceError(w http.ResponseWriter, err error) {
 		// one naming it is refused like any other approval that does not
 		// cover the action.
 		writeErrorCode(w, http.StatusConflict, "policy-denied", "the approval is already bound to another invocation", nil)
+	case errors.Is(err, errApprovalNotOwned):
+		// The same answer for an approval that does not exist and for one
+		// that belongs to another call: the refusal is no existence oracle.
+		writeErrorCode(w, http.StatusConflict, "policy-denied", "the approval does not belong to this call", nil)
+	case errors.Is(err, errApprovalUnobservable):
+		// Could not read the approval is not "not owned": retryable, and
+		// never a pass.
+		writeErrorCode(w, http.StatusServiceUnavailable, "approval-unavailable", "the approval could not be read; try again", nil)
 	case errors.Is(err, commerce.ErrDispatchUnavailable):
 		writeErrorCode(w, http.StatusServiceUnavailable, "dispatch-unavailable", "commerce dispatch signing is not configured", nil)
 	case errors.Is(err, commerce.ErrReservationMissing):
@@ -442,11 +451,16 @@ func (h *Handlers) AcceptCommerceInvocation(w http.ResponseWriter, r *http.Reque
 	if !decodeCommerceBody(w, r, &req) {
 		return
 	}
-	res, err := h.opts.Commerce.AcceptInvocation(r.Context(), commerce.AcceptInvocationInput{
-		QuoteID: req.QuoteID, QuoteDigest: req.QuoteDigest, IdempotencyKey: req.IdempotencyKey,
-		Identities: resolveIdentities(user, tenant, req.commerceIdentityRequest), ArgsDigest: req.ArgsDigest,
-		ApprovalID: req.ApprovalID, TermsBinding: req.TermsBinding,
-	})
+	ids := resolveIdentities(user, tenant, req.commerceIdentityRequest)
+	var res *commerce.AcceptResult
+	err := h.checkApprovalOwner(r, user, req.ApprovalID, ids.ExecutionID)
+	if err == nil {
+		res, err = h.opts.Commerce.AcceptInvocation(r.Context(), commerce.AcceptInvocationInput{
+			QuoteID: req.QuoteID, QuoteDigest: req.QuoteDigest, IdempotencyKey: req.IdempotencyKey,
+			Identities: ids, ArgsDigest: req.ArgsDigest,
+			ApprovalID: req.ApprovalID, TermsBinding: req.TermsBinding,
+		})
+	}
 	if err != nil {
 		h.logAudit(r, audit.Entry{
 			UserID: user.ID, Operation: "commerce-invocation-accept", Status: "failed", RiskLevel: string(operations.RiskMedium),
@@ -470,6 +484,46 @@ func (h *Handlers) AcceptCommerceInvocation(w http.ResponseWriter, r *http.Reque
 		})
 	}
 	writeJSON(w, status, acceptInvocationResponse{Invocation: res.Invocation, Replayed: res.Replayed})
+}
+
+var (
+	errApprovalNotOwned     = errors.New("approval does not belong to this call")
+	errApprovalUnobservable = errors.New("approval could not be read")
+)
+
+// checkApprovalOwner binds a caller-supplied approval_id to the call that
+// names it (mctl-agents#626 item 6). The ledger's (tenant, approval_id)
+// index makes an approval authorize one invocation, but approval_id is
+// caller input: without this check another execution in the same tenant
+// could bind someone else's approval first and refuse the real call. An
+// action approval is requested by a service for one execution, so the
+// approval must have been requested by this caller (the same principal
+// rendering the approval routes use) for this execution. Its state is not
+// checked here: the gateway consumes it after accept, so a replayed accept
+// legitimately names a consumed approval.
+//
+// A failed read is errApprovalUnobservable, never "not owned" and never a
+// pass. Approvals carry no tenant yet; binding one to a tenant is
+// mctl-api#489 / mctl-agents#631.
+func (h *Handlers) checkApprovalOwner(r *http.Request, user *auth.User, approvalID, executionID string) error {
+	if approvalID == "" {
+		return nil
+	}
+	if h.opts.WorkItems == nil {
+		return errApprovalUnobservable
+	}
+	a, err := h.opts.WorkItems.ActionApproval(r.Context(), approvalID)
+	if errors.Is(err, workitems.ErrApprovalNotFound) {
+		return errApprovalNotOwned
+	}
+	if err != nil {
+		slog.Error("commerce accept: action approval not read", "approval_id", approvalID, "error", err)
+		return errApprovalUnobservable
+	}
+	if a.RequestedBy != principalOf(user) || a.ExecutionID != executionID || executionID == "" {
+		return errApprovalNotOwned
+	}
+	return nil
 }
 
 // GetCommerceInvocation returns one receipt of the path tenant.
