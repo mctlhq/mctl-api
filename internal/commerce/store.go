@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -273,8 +274,8 @@ type Store struct {
 	now  func() time.Time
 	auth PaymentAuthorizer
 	// signer signs dispatch authorizations (dispatch.go); nil disables
-	// dispatch.
-	signer *DispatchSigner
+	// dispatch. Atomic so installing it cannot race a request in flight.
+	signer atomic.Pointer[DispatchSigner]
 }
 
 // NewStore connects, applies the schema and returns the store with the
