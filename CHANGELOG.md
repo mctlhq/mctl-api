@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.80.1](https://github.com/mctlhq/mctl-api/compare/4.80.0...4.80.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* **api:** answer an unmade build check 503 without internal detail ([33803ba](https://github.com/mctlhq/mctl-api/commit/33803bae253507cd7ba6b95e60b892093bfed81f))
+* **api:** check build repositories and image names against the caller's team ([402aa51](https://github.com/mctlhq/mctl-api/commit/402aa51e57f7203161c5e1013f20a12bd8b7998f))
+
 ## [4.80.0](https://github.com/mctlhq/mctl-api/compare/4.79.0...4.80.0) (2026-10-11)
 
 
