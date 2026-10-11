@@ -262,6 +262,46 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A new tenant name must not share an Application name space with an
+	// existing tenant: "labs-x" next to "labs" (or the reverse) would let one
+	// tenant's <tenant>-<service> spell the other's Application. This applies
+	// to admins too; re-running create-tenant for the same name is not a
+	// collision. A tenant list that cannot be read refuses.
+	if opName == "create-tenant" {
+		if status, msg := h.checkTenantNameCollision(tenantParam); status != 0 {
+			h.logAudit(r, audit.Entry{
+				UserID:     user.ID,
+				Operation:  opName,
+				Parameters: auditParams,
+				Status:     "denied",
+				RiskLevel:  string(op.RiskLevel),
+				Message:    msg,
+			})
+			writeError(w, status, msg)
+			return
+		}
+	}
+
+	// An operation on an existing service must name one that exists for this
+	// team in gitops. The workflows build the Argo CD Application name as
+	// <team>-<component> and act on it, so without this check the pair is
+	// only as safe as the caller's choice of it. A checkout that cannot
+	// answer refuses: "could not check" is not "exists".
+	if team, component, ok := operations.ServiceTarget(op, input); ok && requiresExistingService(opName, input) {
+		if status, msg := h.checkServiceExists(team, component); status != 0 {
+			h.logAudit(r, audit.Entry{
+				UserID:     user.ID,
+				Operation:  opName,
+				Parameters: auditParams,
+				Status:     "denied",
+				RiskLevel:  string(op.RiskLevel),
+				Message:    msg,
+			})
+			writeError(w, status, msg)
+			return
+		}
+	}
+
 	// For create-tenant: also notify Backstage for immediate catalog sync.
 	if opName == "create-tenant" && h.opts.BackstageURL != "" {
 		go h.notifyBackstage(input)
@@ -281,7 +321,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		// Executor.Submit refuses a reserved tenant name on its own. The
 		// validation above normally gets there first; mapping it here keeps
 		// the backstop from masquerading as a platform fault.
-		if errors.Is(err, operations.ErrReservedTenantName) {
+		if errors.Is(err, operations.ErrReservedTenantName) || errors.Is(err, operations.ErrReservedServiceApplication) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -511,6 +551,60 @@ func (h *Handlers) checkTenantIsNew(tenant string) (status int, msg string) {
 	}
 	if exists {
 		return http.StatusConflict, "workspace \"" + tenant + "\" already exists"
+	}
+	return 0, ""
+}
+
+// requiresExistingService reports whether opName acts on a service that must
+// already exist. deploy-service's onboard action creates one, so it is the
+// exception; provision-database may run before a service is onboarded and
+// preview-delete must still clean up after one is retired, and neither acts
+// on the <team>-<component> Application.
+func requiresExistingService(opName string, input map[string]string) bool {
+	switch opName {
+	case "retire-service", "rollback-service", "preview-deploy",
+		"add-custom-domain", "remove-custom-domain":
+		return true
+	case "deploy-service":
+		return input["action"] != "onboard"
+	}
+	return false
+}
+
+// checkServiceExists returns 0 when team/component is a service in the
+// gitops checkout, 404 when the checkout says it is not, and 503 when the
+// checkout cannot tell.
+func (h *Handlers) checkServiceExists(team, component string) (status int, msg string) {
+	if h.opts.GitReader == nil {
+		return http.StatusServiceUnavailable, "cannot check whether service \"" + team + "/" + component + "\" exists: gitops reader not configured"
+	}
+	exists, err := h.opts.GitReader.ServiceExists(team, component)
+	if err != nil {
+		// The error can carry checkout paths; it goes to the log, not the
+		// caller.
+		slog.Error("service existence check failed", "team", team, "component", component, "error", err)
+		return http.StatusServiceUnavailable, "cannot check whether service \"" + team + "/" + component + "\" exists right now; try again later"
+	}
+	if !exists {
+		return http.StatusNotFound, "service \"" + component + "\" not found in workspace \"" + team + "\" (a service created in the last minute may not be visible yet)"
+	}
+	return 0, ""
+}
+
+// checkTenantNameCollision returns 0 when tenant shares no hyphen prefix with
+// an existing tenant, 400 when it does, and 503 when the tenant list cannot
+// be read.
+func (h *Handlers) checkTenantNameCollision(tenant string) (status int, msg string) {
+	if h.opts.GitReader == nil {
+		return http.StatusServiceUnavailable, "cannot check workspace name \"" + tenant + "\": gitops reader not configured"
+	}
+	names, err := h.opts.GitReader.TenantNames()
+	if err != nil {
+		slog.Error("create-tenant name collision check failed", "tenant", tenant, "error", err)
+		return http.StatusServiceUnavailable, "cannot check workspace name \"" + tenant + "\" right now; try again later"
+	}
+	if other, collides := operations.TenantNameCollision(tenant, names); collides {
+		return http.StatusBadRequest, "tenant_name: \"" + tenant + "\" overlaps the name of existing workspace \"" + other + "\"; choose a name that neither extends nor is extended by another workspace name"
 	}
 	return 0, ""
 }

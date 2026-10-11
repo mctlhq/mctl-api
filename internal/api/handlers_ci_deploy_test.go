@@ -62,9 +62,12 @@ func newCIFixture(t *testing.T, repos *fakeSourceRepos) *ciFixture {
 	opts := mctlapi.Options{
 		Registry: operations.NewRegistry(),
 		// No members at all: a CI deploy must not depend on tenant roles.
-		GitReader: &fakeGitReader{tenants: []gitops.Tenant{{Name: "labs"}}},
-		AuditLog:  f.audit,
-		Executor:  f.exec,
+		GitReader: &fakeGitReader{
+			tenants:  []gitops.Tenant{{Name: "labs"}},
+			services: []gitops.Service{{Team: "labs", Name: "mctl-telegram"}},
+		},
+		AuditLog: f.audit,
+		Executor: f.exec,
 	}
 	if repos != nil {
 		opts.ComponentSourceRepos = repos

@@ -43,7 +43,10 @@ func newRoleFixture(t *testing.T) *roleFixture {
 				{UserID: "dup", Role: "owner"},
 				{UserID: "dup", Role: "viewer"},
 			},
-		}}},
+		}}, services: []gitops.Service{
+			{Team: "erpact", Name: "web"},
+			{Team: "erpact", Name: "mctl-telegram"},
+		}},
 		exec:  &fakeExecutor{},
 		audit: audit.NewLogger(),
 	}

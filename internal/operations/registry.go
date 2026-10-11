@@ -267,6 +267,12 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 	if createsTenant(op) && IsReservedTenantName(input["tenant_name"]) {
 		errors = append(errors, reservedTenantNameMessage(input["tenant_name"]))
 	}
+	// A service whose Argo CD Application name (<team>-<component>) is
+	// platform-owned is refused for every operation that addresses one.
+	// Executor.Submit repeats this check as well.
+	if team, component, ok := ServiceTarget(op, input); ok && IsReservedServiceApplication(team, component) {
+		errors = append(errors, reservedServiceApplicationMessage(team, component))
+	}
 	return errors
 }
 

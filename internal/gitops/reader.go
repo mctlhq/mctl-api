@@ -661,12 +661,8 @@ func (r *Reader) TenantExists(name string) (bool, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	last := r.LastSync()
-	if last.IsZero() {
-		return false, errors.New("gitops checkout has never synced")
-	}
-	if age := time.Since(last); age > TenantExistsMaxAge {
-		return false, fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), TenantExistsMaxAge)
+	if err := r.checkFreshLocked(); err != nil {
+		return false, err
 	}
 	// The pattern already admits one segment only; the containment check
 	// keeps that true for the path actually read.
@@ -683,6 +679,93 @@ func (r *Reader) TenantExists(name string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("checking tenant %q: %w", name, err)
+}
+
+// checkFreshLocked returns an error unless the checkout has synced within
+// TenantExistsMaxAge. An answer from a checkout that never synced, or that
+// stopped refreshing, is not one a security decision may rest on.
+func (r *Reader) checkFreshLocked() error {
+	last := r.LastSync()
+	if last.IsZero() {
+		return errors.New("gitops checkout has never synced")
+	}
+	if age := time.Since(last); age > TenantExistsMaxAge {
+		return fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), TenantExistsMaxAge)
+	}
+	return nil
+}
+
+// TenantNames returns the name of every entry in platform-gitops/tenants,
+// whatever its kind: each is a name create-tenant would treat as taken.
+//
+// Unlike ListTenants it never skips what it could not read. A checkout that
+// never synced or is stale, and a tenants directory that is missing or
+// cannot be listed, are errors: the caller decides whether a new tenant name
+// collides with an existing one, and "could not list" must not read as
+// "there are none".
+func (r *Reader) TenantNames() ([]string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.checkFreshLocked(); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(r.localPath, "platform-gitops", "tenants"))
+	if err != nil {
+		return nil, fmt.Errorf("listing tenants: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
+// ServiceExists reports whether team has a service named component: a plain
+// directory platform-gitops/services/<team>/<component> holding a regular
+// values.yaml. That directory is what the apps ApplicationSet turns into the
+// Argo CD Application <team>-<component>, so it is the record of which
+// Applications a tenant's service operations may act on.
+//
+// Only a path that does not exist is (false, nil). A checkout that never
+// synced or is stale, a symlink or other non-plain entry on the path, and any
+// other stat error are errors, so a failed read cannot pass for "absent" and
+// still less for "present".
+func (r *Reader) ServiceExists(team, component string) (bool, error) {
+	if !serviceNameRe.MatchString(team) || !serviceNameRe.MatchString(component) {
+		return false, fmt.Errorf("invalid team or component name %q/%q", team, component)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.checkFreshLocked(); err != nil {
+		return false, err
+	}
+
+	services := filepath.Join(r.localPath, "platform-gitops", "services")
+	steps := []struct {
+		path string
+		dir  bool
+	}{
+		{services, true},
+		{filepath.Join(services, team), true},
+		{filepath.Join(services, team, component), true},
+		{filepath.Join(services, team, component, "values.yaml"), false},
+	}
+	for i, st := range steps {
+		info, err := os.Lstat(st.path)
+		if errors.Is(err, fs.ErrNotExist) && i > 0 {
+			// The services directory itself missing is a broken checkout,
+			// not a missing service.
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("checking service %s/%s: %w", team, component, err)
+		}
+		if st.dir && !info.IsDir() || !st.dir && !info.Mode().IsRegular() {
+			return false, fmt.Errorf("checking service %s/%s: %s is not a plain %s",
+				team, component, st.path, map[bool]string{true: "directory", false: "file"}[st.dir])
+		}
+	}
+	return true, nil
 }
 
 // MemberRolesMaxAge bounds how old the checkout may be when MemberRoles

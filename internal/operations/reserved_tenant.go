@@ -76,9 +76,102 @@ var reservedTenantNames = map[string]struct{}{
 }
 
 var (
-	reservedTenantPrefixes = []string{"kube-", "argo", "platform-", "mctl-", "grafana-", "vault"}
+	reservedTenantPrefixes = []string{"kube-", "argo", "platform-", "mctl-", "grafana-", "vault", "tenant-", "otel-"}
 	reservedTenantSuffixes = []string{"-system"}
 )
+
+// Tenant names that would collide with Argo CD Application names.
+//
+// A tenant's services become Argo CD Applications named <tenant>-<service>
+// (the "apps" ApplicationSet), and the tenant itself becomes tenant-<tenant>
+// (the "tenants" ApplicationSet). Every Application lives in the argocd
+// namespace, so the names share one space with the platform's own
+// Applications. A tenant name that is a platform Application name, or a
+// hyphen-prefix of one, would let that tenant's service names spell the
+// platform Application's name. The rule is therefore structural over the list
+// below: name N is reserved when N == P or P starts with N+"-" for some P in
+// platformApplicationNames. "tenant" and the "tenant-" prefix are reserved
+// outright for the tenants ApplicationSet.
+//
+// The list is the set of Argo CD Applications that are not tenant services
+// and whose names do not start with an existing tenant's name. Derive it
+// read-only from the cluster:
+//
+//	kubectl get applications -n argocd -o name
+//
+// and drop the generated ones: tenant-<x> (tenants ApplicationSet),
+// <tenant>-<service> for every platform-gitops/services/<tenant>/<service>
+// directory (apps ApplicationSet), <tenant>-openclaw-skills, and the
+// platform Applications that sit under an existing tenant's prefix, which
+// are listed in tenantScopedPlatformApplications instead. Also check
+// platform-gitops/bootstrap/templates in mctl-gitops for Applications that
+// are declared but not currently deployed. When this list changes, mirror
+// the change in tenant_name_reserved in wft-create-tenant.yaml.
+//
+// Snapshot taken 2026-10-11 from the live cluster and bootstrap templates.
+var platformApplicationNames = []string{
+	"argo-rollouts",
+	"argo-workflows",
+	"argo-workflows-config",
+	"argocd-self-managed",
+	"cloudnative-pg",
+	"external-secrets",
+	"forgejo",
+	"grafana-iac",
+	"loki-stack",
+	"minio",
+	"monitoring",
+	"otel-collector",
+	"otel-eval-tempo",
+	"reflector",
+	"root-app",
+	"shared-pg",
+	"temporal",
+	"temporal-web",
+	"valkey",
+	"vault",
+	"vault-human-auth-iac",
+	"zitadel",
+}
+
+// tenantScopedPlatformApplications are platform-managed Argo CD Applications
+// whose names start with an existing tenant's name (admins, erpact, labs,
+// mctl). They cannot feed the tenant-name rule above without reserving the
+// existing tenants themselves, which would break re-running create-tenant for
+// them. They are protected instead at the service level: no tenant operation
+// may target <team>-<component> equal to one of them (see
+// IsReservedServiceApplication), and the API refuses a new tenant name that
+// is a hyphen-prefix extension of an existing tenant (TenantNameCollision).
+var tenantScopedPlatformApplications = []string{
+	"admins-mctl-agent",
+	"admins-mctl-api",
+	"admins-mctl-portal",
+	"erpact-control",
+	"erpact-deployer",
+	"erpact-infra",
+	"erpact-oidc-zitadel",
+	"erpact-shared",
+	"labs-oidc-zitadel",
+	"mctl-portal-oidc-zitadel",
+}
+
+// reservedTenantExact are names reserved outright beyond the platform list:
+// "tenant" would make the tenants ApplicationSet's tenant-<x> Applications
+// reachable as <tenant>-<service>.
+var reservedTenantExact = map[string]struct{}{
+	"tenant": {},
+}
+
+// collidesWithPlatformApplication reports whether n equals a platform
+// Application name or is a hyphen-prefix of one.
+func collidesWithPlatformApplication(n string) bool {
+	for _, p := range platformApplicationNames {
+		if n == p || strings.HasPrefix(p, n+"-") {
+			return true
+		}
+	}
+	return false
+}
 
 // ErrReservedTenantName is returned (wrapped) when create-tenant is asked for
 // a name that collides with a platform namespace.
@@ -95,6 +188,12 @@ var ErrReservedTenantName = errors.New("tenant name is reserved for platform use
 func IsReservedTenantName(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
 	if _, ok := reservedTenantNames[n]; ok {
+		return true
+	}
+	if _, ok := reservedTenantExact[n]; ok {
+		return true
+	}
+	if collidesWithPlatformApplication(n) {
 		return true
 	}
 	for _, p := range reservedTenantPrefixes {
