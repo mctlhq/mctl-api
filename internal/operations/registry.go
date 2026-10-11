@@ -368,7 +368,7 @@ var builtinOperations = []Operation{
 			{Name: "port", Type: "string", Default: "8080", Description: "Service port"},
 			{Name: "host", Type: "string", Description: "Ingress hostname (e.g. my-app.example.com). Omit for background workers."},
 			{Name: "env_vars", Type: "string", Description: "Plaintext environment variables, newline-separated KEY=value"},
-			{Name: "secret_env_vars", Type: "string", Description: "Secret environment variables stored in Vault, newline-separated KEY=value", Secret: true},
+			{Name: "secret_env_vars", Type: "string", Description: "Secret environment variables stored in Vault, newline-separated KEY=value. Keys must be environment variable names; values are single-line", Secret: true},
 			{Name: "clear_env", Type: "string", Default: "false", Description: "Clear existing plaintext environment variables", Enum: []string{"true", "false"}},
 			{Name: "clear_secrets", Type: "string", Default: "false", Description: "Clear existing secret environment variables", Enum: []string{"true", "false"}},
 			{Name: "provision_database", Type: "string", Default: "false", Description: "Also provision a PostgreSQL database", Enum: []string{"true", "false"}},

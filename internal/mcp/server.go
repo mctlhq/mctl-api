@@ -574,7 +574,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			mcplib.Description("Plaintext environment variables, newline-separated KEY=value"),
 		),
 		mcplib.WithString("secret_env_vars",
-			mcplib.Description("Secret environment variables, newline-separated KEY=value. Stored in Vault, never echoed back in logs or responses."),
+			mcplib.Description("Secret environment variables, newline-separated KEY=value. Each key must be an environment variable name ([A-Za-z_][A-Za-z0-9_]*); values are single-line. Stored in Vault, never echoed back in logs or responses."),
 		),
 		mcplib.WithString("skip_health_check",
 			mcplib.Description("Skip the post-deploy health check: 'true' or 'false' (default: false). Only set 'true' for a worker-service that has no HTTP health endpoint."),
@@ -632,12 +632,12 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		if params["action"] == "update-config" || params["action"] == "deploy" {
 			if v, ok := req.GetArguments()["env_vars"]; ok {
 				if s, _ := v.(string); s == "" {
-					params["env_vars"] = "__CLEAR__"
+					params["env_vars"] = operations.ClearSentinel
 				}
 			}
 			if v, ok := req.GetArguments()["secret_env_vars"]; ok {
 				if s, _ := v.(string); s == "" {
-					params["secret_env_vars"] = "__CLEAR__"
+					params["secret_env_vars"] = operations.ClearSentinel
 				}
 			}
 		}
