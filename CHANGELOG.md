@@ -1,5 +1,30 @@
 # Changelog
 
+## [4.77.0](https://github.com/mctlhq/mctl-api/compare/4.76.1...4.77.0) (2026-10-11)
+
+
+### Features
+
+* **agents:** issue-457-mcp-work-items-refuse-non-string-optiona ([d314811](https://github.com/mctlhq/mctl-api/commit/d3148117609695aef04fb2edbd54139fbcc889ea))
+* **commerce:** durable commerce ledger for ADR 020 (C2) ([362df56](https://github.com/mctlhq/mctl-api/commit/362df561fe36fad60a36fcf3808f277694ec24cb))
+* **commerce:** enforce atomic tenant budgets with simulated authorization ([d815867](https://github.com/mctlhq/mctl-api/commit/d81586790beba06acfdc1d4564da64474bb0a4c5))
+* **commerce:** enforce atomic tenant budgets with simulated authorization ([46a5b01](https://github.com/mctlhq/mctl-api/commit/46a5b012d3ed58017b8ee6e28705936a462384c0)), closes [#548](https://github.com/mctlhq/mctl-api/issues/548)
+
+
+### Bug Fixes
+
+* **agents:** issue-457-mcp-work-items-refuse-non-string-optiona ([a4fe424](https://github.com/mctlhq/mctl-api/commit/a4fe42418b6d6b60f387c472e17537e763c9ef7d))
+* **commerce:** guard dispatch on the stored payment fact, close the error vocabulary ([bfef1f9](https://github.com/mctlhq/mctl-api/commit/bfef1f941fee3ced0dcf1b2b8d78f766e170c242)), closes [#548](https://github.com/mctlhq/mctl-api/issues/548)
+* **commerce:** refuse a captured payment on the refused phase ([d89a462](https://github.com/mctlhq/mctl-api/commit/d89a4624212d2760c113bd2eca94c33fd485ebb5))
+* **commerce:** settle review findings on budget reserve and unknown holds ([6f9b8f1](https://github.com/mctlhq/mctl-api/commit/6f9b8f1e961245b6ebe0e0b0e78e0407a3134bad)), closes [#548](https://github.com/mctlhq/mctl-api/issues/548)
+* **operations:** keep secret parameter values out of Workflow specs ([84a6927](https://github.com/mctlhq/mctl-api/commit/84a692739e57b35a199f2936dab655601b919bb8))
+* **operations:** keep secret parameter values out of Workflow specs ([61da418](https://github.com/mctlhq/mctl-api/commit/61da41859f2bc4c2adc6d7eec24b7c763f2bb973))
+* **operations:** mark the handoff parameter name as not a credential ([044340c](https://github.com/mctlhq/mctl-api/commit/044340c40ccf1105ff862a774adf6d3bf8c4f29d))
+* **operations:** refuse secret_env_vars lines with an empty key ([dde57e0](https://github.com/mctlhq/mctl-api/commit/dde57e09783dc8ea3317ecaa67077abbcb522ab3))
+* **operations:** refuse secret_env_vars lines without '=' ([bccbb1c](https://github.com/mctlhq/mctl-api/commit/bccbb1cd2d93130530c8b456d8ab36307492985e))
+* **operations:** reserve tenant name sync ([5a5d67b](https://github.com/mctlhq/mctl-api/commit/5a5d67b62664b5d6ac91c3fc00c0404101c7646f))
+* **operations:** reserve tenant name sync ([fca42f8](https://github.com/mctlhq/mctl-api/commit/fca42f883dda7292f4b0e9fcdae8bf0bf77cab7a))
+
 ## [4.76.1](https://github.com/mctlhq/mctl-api/compare/4.76.0...4.76.1) (2026-10-11)
 
 
