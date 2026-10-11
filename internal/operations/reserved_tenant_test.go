@@ -76,6 +76,35 @@ var reservedCases = []struct {
 	{"Kube-System", true, "case-insensitive"},
 	{"ARGOCD", true, "case-insensitive"},
 
+	// Platform Argo CD Application names and their hyphen-prefixes: a tenant
+	// with one of these names could spell the Application as
+	// <tenant>-<service>.
+	{"root", true, "platform app root-app"},
+	{"root-app", true, "platform app root-app"},
+	{"shared", true, "platform app shared-pg"},
+	{"shared-pg", true, "platform app shared-pg"},
+	{"cloudnative", true, "platform app cloudnative-pg"},
+	{"external", true, "platform app external-secrets"},
+	{"grafana", true, "platform app grafana-iac"},
+	{"loki", true, "platform app loki-stack"},
+	{"otel", true, "platform app otel-collector"},
+	{"otel-eval", true, "platform app otel-eval-tempo"},
+	{"otel-anything", true, "prefix otel-"},
+	{"reflector", true, "platform app reflector"},
+	{"valkey", true, "platform app valkey"},
+	{"temporal-web", true, "platform app temporal-web"},
+	{"tenant", true, "tenants ApplicationSet"},
+	{"tenant-x", true, "prefix tenant-"},
+
+	// The existing tenants stay valid: none of them is a hyphen-prefix of a
+	// platform Application in platformApplicationNames.
+	{"admins", false, "existing tenant"},
+	{"erpact", false, "existing tenant"},
+	{"karabu", false, "existing tenant"},
+	{"labs", false, "existing tenant"},
+	{"mctl", false, "existing tenant"},
+	{"ovk", false, "existing tenant"},
+
 	// Allowed: no pattern matches, including near-misses on the boundaries.
 	{"billing", false, "normal"},
 	{"data-team", false, "normal"},
@@ -86,9 +115,7 @@ var reservedCases = []struct {
 	{"team-argo", false, "argo is a prefix rule only"},
 	{"my-platform", false, "platform- is a prefix rule only"},
 	{"platform", false, "platform- needs the hyphen"},
-	{"mctl", false, "mctl- needs the hyphen"},
 	{"mctlhq", false, "mctl- needs the hyphen"},
-	{"grafana", false, "grafana- needs the hyphen"},
 	{"team-vault", false, "vault is a prefix rule only"},
 	{"system", false, "-system needs the hyphen"},
 	{"systems", false, "suffix -system must end the name"},
@@ -100,6 +127,10 @@ var reservedCases = []struct {
 	{"my-monitoring", false, "exact match only"},
 	{"minio2", false, "exact match only"},
 	{"temporal-labs", false, "exact match only"},
+	{"rooted", false, "root-app needs root followed by a hyphen"},
+	{"sharedteam", false, "shared-pg needs shared followed by a hyphen"},
+	{"team-root", false, "platform-app rule is a prefix rule only"},
+	{"tenants", false, "tenant- needs the hyphen"},
 }
 
 func TestIsReservedTenantName(t *testing.T) {

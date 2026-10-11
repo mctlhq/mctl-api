@@ -38,6 +38,13 @@ type GitReader interface {
 	ListTenants() ([]gitops.Tenant, error)
 	GetTenant(name string) (*gitops.Tenant, error)
 	TenantExists(name string) (bool, error)
+	// TenantNames lists every tenant name in the checkout; any read failure
+	// is an error, never a shorter list.
+	TenantNames() ([]string, error)
+	// ServiceExists reports whether services/<team>/<component> is a
+	// service in the checkout. Only a missing path is (false, nil); a read
+	// that failed is an error.
+	ServiceExists(team, component string) (bool, error)
 	// MemberRoles returns the members[].role values under which login is a
 	// member of namespace, as written, one list per members list naming the
 	// login. Empty with a nil error is "read, and not a member"; anything it

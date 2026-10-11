@@ -134,6 +134,10 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 		slog.Warn("refusing to submit create-tenant", "user", userID, "error", err)
 		return nil, err
 	}
+	if err := checkServiceApplication(op, params); err != nil {
+		slog.Warn("refusing to submit service operation", "operation", op.Name, "user", userID, "error", err)
+		return nil, err
+	}
 	namespace := WorkflowNamespace(op.WorkflowTemplate, team)
 	requestID := uuid.New().String()[:8]
 	workflowName := fmt.Sprintf("%s-%s", op.WorkflowTemplate, requestID)

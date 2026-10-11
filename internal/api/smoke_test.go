@@ -57,6 +57,9 @@ type fakeGitReader struct {
 	humanInputFiles        []gitops.HumanInputRequestFile
 	humanInputErr          error
 	tenantExistsErr        error
+	tenantNamesErr         error
+	serviceExistsErr       error
+	serviceExistsCalls     int
 	memberRolesErr         error
 	memberRolesCalls       int
 }
@@ -92,6 +95,33 @@ func (f *fakeGitReader) TenantExists(name string) (bool, error) {
 	}
 	for i := range f.tenants {
 		if f.tenants[i].Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// TenantNames answers from the fake's tenants, or fails with tenantNamesErr.
+func (f *fakeGitReader) TenantNames() ([]string, error) {
+	if f.tenantNamesErr != nil {
+		return nil, f.tenantNamesErr
+	}
+	names := make([]string, 0, len(f.tenants))
+	for i := range f.tenants {
+		names = append(names, f.tenants[i].Name)
+	}
+	return names, nil
+}
+
+// ServiceExists answers from the fake's services, or fails with
+// serviceExistsErr.
+func (f *fakeGitReader) ServiceExists(team, component string) (bool, error) {
+	f.serviceExistsCalls++
+	if f.serviceExistsErr != nil {
+		return false, f.serviceExistsErr
+	}
+	for _, s := range f.services {
+		if s.Team == team && s.Name == component {
 			return true, nil
 		}
 	}

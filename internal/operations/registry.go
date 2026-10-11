@@ -267,6 +267,13 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 	if createsTenant(op) && IsReservedTenantName(input["tenant_name"]) {
 		errors = append(errors, reservedTenantNameMessage(input["tenant_name"]))
 	}
+	// A service whose Argo CD Application name (<team>-<component>) is
+	// platform-owned is refused for every operation that addresses one,
+	// except teardown (see teardownOperations).
+	// Executor.Submit repeats this check as well.
+	if team, name, reserved := ReservedServiceTarget(op, input); reserved {
+		errors = append(errors, reservedServiceApplicationMessage(team, name))
+	}
 	return errors
 }
 
@@ -511,7 +518,7 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "preview_id", Type: "string", Required: true, Description: "Preview ID returned by preview-deploy"},
+			{Name: "preview_id", Type: "string", Required: true, Description: "Preview ID returned by preview-deploy", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 		},
 	},
 	{

@@ -641,10 +641,12 @@ func (r *Reader) GetTenant(name string) (*Tenant, error) {
 	return r.readTenant(name)
 }
 
-// TenantExistsMaxAge bounds how old the checkout may be when TenantExists
-// answers. The checkout refreshes every minute; an older last sync could miss
-// a tenant created since, so it is an error rather than "absent".
-const TenantExistsMaxAge = 10 * time.Minute
+// CheckoutMaxAge bounds how old the checkout may be when a reader that a
+// security decision rests on answers (TenantExists, TenantNames,
+// ServiceExists, MemberRoles). The checkout refreshes every minute; an older
+// last sync could miss a change made since, so it is an error rather than an
+// answer.
+const CheckoutMaxAge = 10 * time.Minute
 
 // tenantNameRE is create-tenant's tenant_name pattern (operations registry
 // and wft-create-tenant): a single DNS-safe path segment.
@@ -653,7 +655,7 @@ var tenantNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
 // TenantExists reports whether platform-gitops/tenants/<name> exists in the
 // checkout, as a directory or anything else: that path is what create-tenant
 // would write. Only "no such file" is absent. Any other stat error, a checkout
-// that never synced, or one older than TenantExistsMaxAge is an error.
+// that never synced, or one older than CheckoutMaxAge is an error.
 func (r *Reader) TenantExists(name string) (bool, error) {
 	if !tenantNameRE.MatchString(name) {
 		return false, fmt.Errorf("invalid tenant name %q", name)
@@ -661,12 +663,8 @@ func (r *Reader) TenantExists(name string) (bool, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	last := r.LastSync()
-	if last.IsZero() {
-		return false, errors.New("gitops checkout has never synced")
-	}
-	if age := time.Since(last); age > TenantExistsMaxAge {
-		return false, fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), TenantExistsMaxAge)
+	if err := r.checkFreshLocked(); err != nil {
+		return false, err
 	}
 	// The pattern already admits one segment only; the containment check
 	// keeps that true for the path actually read.
@@ -685,11 +683,104 @@ func (r *Reader) TenantExists(name string) (bool, error) {
 	return false, fmt.Errorf("checking tenant %q: %w", name, err)
 }
 
-// MemberRolesMaxAge bounds how old the checkout may be when MemberRoles
-// answers. A role decides whether a destructive operation runs, so an
-// answer from a checkout that stopped refreshing is refused rather than
-// trusted: it could still show a role that has since been taken away.
-const MemberRolesMaxAge = TenantExistsMaxAge
+// checkFreshLocked returns an error unless the checkout has synced within
+// CheckoutMaxAge. An answer from a checkout that never synced, or that
+// stopped refreshing, is not one a security decision may rest on.
+func (r *Reader) checkFreshLocked() error {
+	last := r.LastSync()
+	if last.IsZero() {
+		return errors.New("gitops checkout has never synced")
+	}
+	if age := time.Since(last); age > CheckoutMaxAge {
+		return fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), CheckoutMaxAge)
+	}
+	return nil
+}
+
+// TenantNames returns the name of every entry in platform-gitops/tenants,
+// whatever its kind: each is a name create-tenant would treat as taken.
+//
+// Unlike ListTenants it never skips what it could not read. A checkout that
+// never synced or is stale, and a tenants directory that is missing or
+// cannot be listed, are errors: the caller decides whether a new tenant name
+// collides with an existing one, and "could not list" must not read as
+// "there are none".
+func (r *Reader) TenantNames() ([]string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.checkFreshLocked(); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(r.localPath, "platform-gitops", "tenants"))
+	if err != nil {
+		return nil, fmt.Errorf("listing tenants: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
+// ServiceExists reports whether team has a service named component: a plain
+// directory platform-gitops/services/<team>/<component> holding a regular
+// values.yaml. That directory is what the apps ApplicationSet turns into the
+// Argo CD Application <team>-<component>, so it is the record of which
+// Applications a tenant's service operations may act on.
+//
+// Only a path that does not exist is (false, nil). A checkout that never
+// synced or is stale, a symlink or other non-plain entry on the path, and any
+// other stat error are errors, so a failed read cannot pass for "absent" and
+// still less for "present".
+func (r *Reader) ServiceExists(team, component string) (bool, error) {
+	if !serviceNameRe.MatchString(team) || !serviceNameRe.MatchString(component) {
+		return false, fmt.Errorf("invalid team or component name %q/%q", team, component)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.checkFreshLocked(); err != nil {
+		return false, err
+	}
+
+	path, err := r.statServiceFileLocked(team, component, "values.yaml")
+	if err != nil {
+		return false, fmt.Errorf("checking service %s/%s: %w", team, component, err)
+	}
+	return path != "", nil
+}
+
+// statServiceFileLocked walks platform-gitops/services/<team>/<component>/
+// <file> with Lstat and returns the file's path, or "" when a path element
+// below the services directory does not exist. Every directory on the path
+// must be a plain directory and the file a regular file: a symlink or any
+// other kind of entry is an error, as is the services directory itself
+// missing (a broken checkout, not a missing service) and any other stat
+// error. Names must already be validated. The caller holds r.mu.
+func (r *Reader) statServiceFileLocked(team, component, file string) (string, error) {
+	services := filepath.Join(r.localPath, "platform-gitops", "services")
+	steps := []struct {
+		path string
+		dir  bool
+	}{
+		{services, true},
+		{filepath.Join(services, team), true},
+		{filepath.Join(services, team, component), true},
+		{filepath.Join(services, team, component, file), false},
+	}
+	for i, st := range steps {
+		info, err := os.Lstat(st.path)
+		if errors.Is(err, fs.ErrNotExist) && i > 0 {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if st.dir && !info.IsDir() || !st.dir && !info.Mode().IsRegular() {
+			return "", fmt.Errorf("%s is not a plain %s", st.path, map[bool]string{true: "directory", false: "file"}[st.dir])
+		}
+	}
+	return steps[len(steps)-1].path, nil
+}
 
 // MemberRoles returns the members[].role values under which login is a
 // member of namespace (a tenant name, or {tenant}-{team} for a multi-team
@@ -699,7 +790,7 @@ const MemberRolesMaxAge = TenantExistsMaxAge
 // read and login is not a member.
 //
 // Unlike ListTenants, it never skips what it could not read. A checkout that
-// never synced or is older than MemberRolesMaxAge, a tenants directory that
+// never synced or is older than CheckoutMaxAge, a tenants directory that
 // cannot be listed, a values.yaml that cannot be read or parsed, and a
 // namespace two tenants both claim are all errors: "could not read the
 // role" must never come back looking like "not a member", and still less
@@ -712,12 +803,8 @@ func (r *Reader) MemberRoles(namespace, login string) ([][]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	last := r.LastSync()
-	if last.IsZero() {
-		return nil, errors.New("gitops checkout has never synced")
-	}
-	if age := time.Since(last); age > MemberRolesMaxAge {
-		return nil, fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), MemberRolesMaxAge)
+	if err := r.checkFreshLocked(); err != nil {
+		return nil, err
 	}
 
 	tenantsDir := filepath.Join(r.localPath, "platform-gitops", "tenants")
@@ -1061,32 +1148,15 @@ func (r *Reader) ComponentSourceRepo(team, component string) (string, error) {
 		return "", fmt.Errorf("gitops checkout unavailable: %w", err)
 	}
 
-	services := filepath.Join(r.localPath, "platform-gitops", "services")
-	steps := []struct {
-		path string
-		dir  bool
-	}{
-		{services, true},
-		{filepath.Join(services, team), true},
-		{filepath.Join(services, team, component), true},
-		{filepath.Join(services, team, component, "catalog-info.yaml"), false},
+	path, err := r.statServiceFileLocked(team, component, "catalog-info.yaml")
+	if err != nil {
+		return "", err
 	}
-	for i, st := range steps {
-		info, err := os.Lstat(st.path)
-		if errors.Is(err, fs.ErrNotExist) && i > 0 {
-			// The services directory itself missing is a broken checkout,
-			// not an unregistered component.
-			return "", ErrSourceRepoNotRegistered
-		}
-		if err != nil {
-			return "", err
-		}
-		if st.dir && !info.IsDir() || !st.dir && !info.Mode().IsRegular() {
-			return "", fmt.Errorf("%s is not a plain %s", st.path, map[bool]string{true: "directory", false: "file"}[st.dir])
-		}
+	if path == "" {
+		return "", ErrSourceRepoNotRegistered
 	}
 
-	data, err := os.ReadFile(steps[len(steps)-1].path) //nolint:gosec // validated names, regular file inside the checkout
+	data, err := os.ReadFile(path) //nolint:gosec // validated names, regular file inside the checkout
 	if err != nil {
 		return "", err
 	}
