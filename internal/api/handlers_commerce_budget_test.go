@@ -168,10 +168,13 @@ func TestCommerceBudget_MoneyEdgesOverHTTP(t *testing.T) {
 	if rec = f.money(t, "reserve", "acme", first, nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"replayed":true`) {
 		t.Fatalf("reserve replay: %d %s", rec.Code, rec.Body.String())
 	}
-	for _, step := range [][2]string{{"reserved", "dispatching"}, {"dispatching", "dispatched"}} {
-		if rec = f.transition(t, "acme", first, step[0], step[1]); rec.Code != http.StatusOK {
-			t.Fatalf("%s -> %s: %d %s", step[0], step[1], rec.Code, rec.Body.String())
-		}
+	// Dispatching is owned by the signed dispatch endpoint.
+	f.store.UseDispatchSigner(testDispatchSigner(t))
+	if rec = f.dispatch(t, "acme", first); rec.Code != http.StatusOK {
+		t.Fatalf("dispatch: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = f.transition(t, "acme", first, "dispatching", "dispatched"); rec.Code != http.StatusOK {
+		t.Fatalf("dispatching -> dispatched: %d %s", rec.Code, rec.Body.String())
 	}
 	if rec = f.transition(t, "acme", first, "dispatched", "finalized"); rec.Code != http.StatusBadRequest {
 		t.Fatalf("generic transition to finalized: %d %s", rec.Code, rec.Body.String())
@@ -225,8 +228,11 @@ func TestCommerceBudget_MoneyEdgesOverHTTP(t *testing.T) {
 	rec = f.call(t, commerceAdmin(t), "POST", "/api/v1/commerce/tenants/acme/invocations/"+unknown+"/transitions",
 		map[string]any{"expected_phase": "reserved", "to_phase": "dispatching", "payment_status": "authorized"},
 		map[string]string{"tenant": "acme", "invocation_id": unknown}, f.h.TransitionCommerceInvocation)
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "payment-unknown") {
-		t.Fatalf("dispatch with a claimed payment_status: want 409 payment-unknown, got %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("generic dispatch with a claimed payment_status: want 400, got %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = f.dispatch(t, "acme", unknown); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "payment-unknown") {
+		t.Fatalf("dispatch of an unknown authorization: want 409 payment-unknown, got %d %s", rec.Code, rec.Body.String())
 	}
 	rec = f.call(t, owner, "GET", "/api/v1/commerce/tenants/acme/invocations/"+unknown, nil,
 		map[string]string{"tenant": "acme", "invocation_id": unknown}, f.h.GetCommerceInvocation)

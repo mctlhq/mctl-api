@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -499,6 +500,16 @@ func main() {
 		} else {
 			commerceStore = cs
 			defer cs.Close()
+			// The dispatch signing key (C4, mctl-agents#619). Without it
+			// nothing can be dispatched to a paid provider: dispatch
+			// answers 503 and reserved rows are released by the reconciler.
+			// A key that is set but unusable is logged and left off rather
+			// than failing the whole API.
+			if signer, err := commerceDispatchSigner(os.Getenv("COMMERCE_DISPATCH_KEY_ID"), os.Getenv("COMMERCE_DISPATCH_SIGNING_KEY")); err != nil {
+				slog.Error("commerce dispatch signing key unusable; dispatch will return 503", "error", err)
+			} else if signer != nil {
+				cs.UseDispatchSigner(signer)
+			}
 		}
 	}
 
@@ -2049,4 +2060,28 @@ func newErpactDeployer(reader mctlapi.VaultReader, deployerURL string) mctlapi.E
 	}
 	slog.Info("erpact deployer client enabled", "url", deployerURL)
 	return erpactsites.NewClient(deployerURL, token)
+}
+
+// commerceDispatchSigner reads the Ed25519 dispatch signing key: a key id
+// and a base64 (standard or URL, padded or not) 32-byte seed. Both unset is
+// "not configured" (nil, nil); one without the other is an error.
+func commerceDispatchSigner(keyID, seedB64 string) (*commerce.DispatchSigner, error) {
+	keyID, seedB64 = strings.TrimSpace(keyID), strings.TrimSpace(seedB64)
+	if keyID == "" && seedB64 == "" {
+		return nil, nil
+	}
+	if keyID == "" || seedB64 == "" {
+		return nil, errors.New("COMMERCE_DISPATCH_KEY_ID and COMMERCE_DISPATCH_SIGNING_KEY must be set together")
+	}
+	var seed []byte
+	var err error
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if seed, err = enc.DecodeString(seedB64); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return nil, errors.New("COMMERCE_DISPATCH_SIGNING_KEY is not base64")
+	}
+	return commerce.NewDispatchSigner(keyID, seed)
 }

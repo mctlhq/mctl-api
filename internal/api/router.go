@@ -743,6 +743,8 @@ func NewRouter(opts Options) http.Handler {
 				// are platform operations; the balance, its history and
 				// the non-binding precheck are tenant reads.
 				r.Post("/reconcile/expired", h.ReconcileCommerceExpired)
+				// The public halves of the dispatch signing key (C4).
+				r.Get("/dispatch-keys", h.ListCommerceDispatchKeys)
 				r.Route("/tenants/{tenant}", func(r chi.Router) {
 					r.Put("/budget", h.SetCommerceBudget)
 					r.Get("/budget", h.GetCommerceBudget)
@@ -756,6 +758,7 @@ func NewRouter(opts Options) http.Handler {
 					r.Get("/invocations/{invocation_id}/transitions", h.ListCommerceInvocationTransitions)
 					r.Post("/invocations/{invocation_id}/transitions", h.TransitionCommerceInvocation)
 					r.Post("/invocations/{invocation_id}/reserve", h.ReserveCommerceInvocation)
+					r.Post("/invocations/{invocation_id}/dispatch", h.DispatchCommerceInvocation)
 					r.Post("/invocations/{invocation_id}/finalize", h.FinalizeCommerceInvocation)
 					r.Post("/invocations/{invocation_id}/release", h.ReleaseCommerceInvocation)
 				})

@@ -2,7 +2,8 @@
 
 Implements `mctlhq/mctl-api#547` (C2 of Agent Commerce, `mctlhq/.github#173`)
 and `mctlhq/mctl-api#548` (C3: tenant budgets, holds and the simulated
-`PaymentAuthorizer`).
+`PaymentAuthorizer`), plus the server half of `mctlhq/mctl-agents#619`
+(C4: the dispatch fence and its signed authorization).
 The contract is ADR 020 in `mctlhq/mctl-agents`
 (`docs/adr/020-capability-commerce-contract.md`); this document covers only
 what is specific to running the ledger in mctl-api.
@@ -23,6 +24,8 @@ authorizations, captures and voids in the same database.
 |---|---|
 | `COMMERCE_DB_URL` | Postgres for the ledger. Falls back to `AUDIT_DB_URL`. |
 | `COMMERCE_DISABLED` | Kill switch, same values as the other kill switches. Routes answer 503. |
+| `COMMERCE_DISPATCH_KEY_ID` | Identifier of the dispatch signing key, carried in every authorization so a provider knows which pinned key verifies it. |
+| `COMMERCE_DISPATCH_SIGNING_KEY` | Ed25519 seed, 32 bytes, base64 (standard or URL alphabet, padded or not). Set both or neither: one without the other is logged and dispatch stays off. Without them `…/dispatch` and `/dispatch-keys` answer 503 `dispatch-unavailable`. |
 
 Without a database every `/api/v1/commerce*` route answers 503: "the ledger
 is off" and "this tenant was not charged" must never be the same answer.
@@ -124,17 +127,21 @@ becomes spendable because time passed.
 | `GET /api/v1/commerce/invocations/overdue` | platform admin |
 | `POST /api/v1/commerce/tenants/{tenant}/quotes`, `GET …/quotes/{id}` | tenant owner or admin, resolved principal |
 | `POST /api/v1/commerce/tenants/{tenant}/invocations`, `GET …/invocations`, `GET …/invocations/{id}`, `GET …/invocations/{id}/transitions` | tenant owner or admin, resolved principal |
-| `POST /api/v1/commerce/tenants/{tenant}/invocations/{id}/transitions` | platform admin (the gateway, C4); a tenant never moves its own charge. Refuses `to_phase` of `reserved`, `released` or `finalized` with 400 naming the owning endpoint below |
+| `POST /api/v1/commerce/tenants/{tenant}/invocations/{id}/transitions` | platform admin (the gateway, C4); a tenant never moves its own charge. Refuses `to_phase` of `reserved`, `dispatching`, `released` or `finalized` with 400 naming the owning endpoint below |
 | `PUT /api/v1/commerce/tenants/{tenant}/budget` | platform admin, audited at high risk; a limit is granted, never self-granted |
 | `GET /api/v1/commerce/tenants/{tenant}/budget`, `GET …/budget/changes`, `POST …/budget/precheck` | tenant owner or admin, resolved principal |
-| `POST …/invocations/{id}/reserve`, `POST …/invocations/{id}/finalize`, `POST …/invocations/{id}/release` | platform admin (the gateway, C4) |
+| `POST …/invocations/{id}/reserve`, `POST …/invocations/{id}/dispatch`, `POST …/invocations/{id}/finalize`, `POST …/invocations/{id}/release` | platform admin (the gateway, C4) |
+| `GET /api/v1/commerce/dispatch-keys` | any authenticated caller; public keys only |
 | `POST /api/v1/commerce/reconcile/expired` | platform admin (the reconciler), audited |
 
 Reason codes on refusals are those of ADR 020 sec. 13 (`identity-unresolved`,
 `commerce-terms-unknown`, `quote-expired`, `quote-stale`, `quote-mismatch`,
 `idempotency-conflict`, `funds-mode-unavailable`, `budget-exhausted`,
 `currency-mismatch`, `payment-denied`), plus `phase-conflict`, `terms-retired`,
-`payment-unknown` and `invalid-request` for this API's own shapes. Every
+`payment-unknown`, `dispatch-unavailable` and `invalid-request` for this
+API's own shapes. Accepting with an `approval_id` that another invocation
+already carries is 409 `policy-denied`: one approval authorizes one
+invocation. Every
 denial `…/reserve` commits is 422 with the row's reason, `quote-expired`
 included: unlike the 409 of accept, there is no new quote to retry with.
 `reservation-expired` is a reason code the reconciler stamps on a released
@@ -233,6 +240,41 @@ refused at install. The only adapter is `SimulatedAuthorizer`, which writes
 `funds-mode-unavailable`; a capture above the authorized amount fails.
 Simulated captures are recorded `settled`.
 
+## Dispatch
+
+`POST …/invocations/{id}/dispatch` is step 9 of ADR 020 sec. 7. In one
+transaction under the invocation lock it moves a `reserved` row to
+`dispatching`, writes `dispatch_deadline` (now plus 60 s, truncated to the
+second) and returns a signed authorization. The fence is written exactly
+once and never moved. A repeat on a fenced `dispatching` row returns the
+identical authorization with `replayed: true`, because Ed25519 signing is
+deterministic; the provider dedupes on `provider_operation_key`, so a retry
+after a lost response cannot execute twice. Every other phase is
+`phase-conflict`: past `dispatching`, only the provider's outcome lookup is
+safe. A reservation past its deadline is refused too, since the reconciler
+may release it at any moment. So is a `reserved` row that already carries a
+fence, or a `dispatching` row without one; both were moved behind the API.
+
+The authorization is Ed25519 over the `mctl-commerce-dispatch/v1`
+length-prefixed encoding (the same `field:len:value` form as the quote
+digest) of `key_id`, `invocation_id`, `provider_operation_key`,
+`provider_id`, `capability_id`, `input_schema_hash`, `args_digest`,
+`tenant_id` and `dispatch_deadline`, in that order. The deadline is RFC 3339
+UTC with a `Z` suffix and second precision. It binds the exact call the
+ledger reserved for: a provider that recomputes the arguments' digest and
+finds a different one, or a deadline in the past, refuses before any side
+effect. It carries no arguments, results, prices or payment proofs. Providers
+pin the public key from `GET /api/v1/commerce/dispatch-keys`; the golden
+vector in `internal/commerce/dispatch_test.go` is reproduced by the Python
+verifier in mctl-agents.
+
+The gateway resumes after a restart with
+`GET …/invocations?idempotency_key=…`, which always applies the caller's
+principal: the idempotency scope is (tenant, principal, key), and another
+principal's row under the same key is never returned. A unique index on
+`approval_id` lets the gateway read "the approval is consumed and this
+invocation carries it" as "consumed for this invocation".
+
 ## Tests
 
 `internal/commerce` and the handler tests run against `TEST_DATABASE_URL`
@@ -244,4 +286,9 @@ confirm their tests fail. The budget tests were verified the same way: the
 available check, the held-only-this-period sum, the budget lock, the
 unknown-is-denied shortcut, the money-edge guard on `…/transitions`, the
 per-request maximum and a reconciler that also touches `dispatching` rows
-were each put back once and each made its test fail.
+were each put back once and each made its test fail. The dispatch tests were
+verified the same way: the replay branch, the `dispatch_deadline IS NULL`
+guard on the fence write, the refusal of an unfenced `dispatching` row, the
+`approval_id` unique index and its error mapping, the principal on the
+idempotency-key filter, the `dispatching` entry among the owned edges and
+the signature check were each removed once and each made a test fail.

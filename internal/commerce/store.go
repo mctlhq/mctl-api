@@ -127,6 +127,18 @@ CREATE INDEX IF NOT EXISTS commerce_invocations_open
     ON commerce_invocations (reconciliation_deadline)
     WHERE phase NOT IN ('refused', 'released', 'finalized');
 
+-- C4 (mctl-agents#619): the dispatch fence and the approval binding.
+-- dispatch_deadline is written once, by the reserved -> dispatching edge, and
+-- every signed invocation authorization for the row carries exactly it, so a
+-- second dispatcher can only ever present the same authorization and never
+-- a later deadline. An approval is consumed by one invocation (ADR 020
+-- sec. 8): the partial unique index makes a second row naming the same
+-- approval impossible, which is what lets the gateway read "consumed, and
+-- this invocation carries it" as "consumed for this invocation".
+ALTER TABLE commerce_invocations ADD COLUMN IF NOT EXISTS dispatch_deadline TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS commerce_invocations_approval
+    ON commerce_invocations (approval_id) WHERE approval_id <> '';
+
 -- The vocabulary CHECKs are added by name outside CREATE TABLE so that a
 -- table created by an earlier build of this package gets them too:
 -- CREATE TABLE IF NOT EXISTS is a no-op once the table exists, and the second
@@ -252,6 +264,9 @@ type Store struct {
 	pool *pgxpool.Pool
 	now  func() time.Time
 	auth PaymentAuthorizer
+	// signer signs dispatch authorizations (dispatch.go); nil disables
+	// dispatch.
+	signer *DispatchSigner
 }
 
 // NewStore connects, applies the schema and returns the store with the
@@ -343,6 +358,14 @@ func newULID(t time.Time) (string, error) {
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// uniqueViolationOn reports a unique violation of one named constraint or
+// index, so two different uniqueness rules on one insert keep their own
+// answers.
+func uniqueViolationOn(err error, constraint string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == constraint
 }
 
 // ---- terms --------------------------------------------------------------
@@ -594,7 +617,7 @@ const invocationColumns = `invocation_id, quote_id, quote_digest, quote_expires_
 	payer_account_id, execution_id, idempotency_key, args_digest, price_mode, currency, amount_minor,
 	funds_mode, phase, execution_outcome, usage_quantity, charge_status, payment_status, settlement_status,
 	reason_code, approval_id, reservation_deadline, reconciliation_deadline, created_at, updated_at,
-	finalized_at, version`
+	finalized_at, version, dispatch_deadline`
 
 func scanInvocation(row pgx.Row) (*Invocation, error) {
 	var v Invocation
@@ -603,7 +626,7 @@ func scanInvocation(row pgx.Row) (*Invocation, error) {
 		&v.PayerAccountID, &v.ExecutionID, &v.IdempotencyKey, &v.ArgsDigest, &v.PriceMode, &v.Price.Currency,
 		&v.Price.AmountMinor, &v.FundsMode, &v.Phase, &v.ExecutionOutcome, &v.UsageQuantity, &v.ChargeStatus,
 		&v.PaymentStatus, &v.SettlementStatus, &v.ReasonCode, &v.ApprovalID, &v.ReservationDeadline,
-		&v.ReconciliationDeadline, &v.CreatedAt, &v.UpdatedAt, &v.FinalizedAt, &v.Version); err != nil {
+		&v.ReconciliationDeadline, &v.CreatedAt, &v.UpdatedAt, &v.FinalizedAt, &v.Version, &v.DispatchDeadline); err != nil {
 		return nil, err
 	}
 	v.SchemaVersion = SchemaVersion
@@ -726,7 +749,7 @@ func (s *Store) AcceptInvocation(ctx context.Context, in AcceptInvocationInput) 
 		}
 		row := tx.QueryRow(ctx, `INSERT INTO commerce_invocations (`+invocationColumns+`)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-			        $21,$22,NULL,$23,$24,$25,'',$26,NULL,$27,$28,$28,NULL,1)
+			        $21,$22,NULL,$23,$24,$25,'',$26,NULL,$27,$28,$28,NULL,1,NULL)
 			RETURNING `+invocationColumns,
 			v.InvocationID, v.QuoteID, v.QuoteDigest, v.QuoteExpiresAt, v.TermsID, v.TermsVersion,
 			v.CapabilityID, v.ProviderID, v.TenantID, v.PrincipalID, v.SubjectPrincipalID, v.DelegationGrantID,
@@ -734,6 +757,12 @@ func (s *Store) AcceptInvocation(ctx context.Context, in AcceptInvocationInput) 
 			v.Price.AmountMinor, v.FundsMode, v.Phase, v.ExecutionOutcome, v.ChargeStatus, v.PaymentStatus,
 			v.SettlementStatus, v.ApprovalID, v.ReconciliationDeadline, now)
 		stored, err := scanInvocation(row)
+		if uniqueViolationOn(err, "commerce_invocations_approval") {
+			// The approval already belongs to another invocation: it is
+			// consumed by one invocation and never authorizes a second
+			// (ADR 020 sec. 8).
+			return ErrApprovalBound
+		}
 		if isUniqueViolation(err) {
 			// The quote is consumed by another idempotency key: a quote
 			// binds one invocation (ADR 020 sec. 5).
@@ -911,6 +940,15 @@ func (s *Store) ListInvocations(ctx context.Context, f ListFilter) ([]Invocation
 	add := func(clause string, v any) {
 		args = append(args, v)
 		fmt.Fprintf(&sb, " AND %s $%d", clause, len(args))
+	}
+	if f.IdempotencyKey != "" {
+		// The idempotency scope is (tenant, principal, key): a key alone
+		// names nothing, so the lookup always carries the principal.
+		if f.PrincipalID == "" {
+			return nil, invalid("idempotency_key filter requires the caller's principal")
+		}
+		add("principal_id =", f.PrincipalID)
+		add("idempotency_key =", f.IdempotencyKey)
 	}
 	if f.CapabilityID != "" {
 		add("capability_id =", f.CapabilityID)

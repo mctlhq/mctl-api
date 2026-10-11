@@ -17,6 +17,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -141,6 +142,25 @@ func decodeCommerceBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
+// decodeOptionalCommerceBody is decodeCommerceBody for a body that may be
+// absent: an empty body leaves v at its zero value, anything else is held
+// to the same strictness.
+func decodeOptionalCommerceBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, commerceMaxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil && !errors.Is(err, io.EOF) {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "body exceeds "+strconv.Itoa(commerceMaxBodyBytes)+" bytes")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return false
+	}
+	return true
+}
+
 // writeCommerceError maps store errors to the reason codes of ADR 020
 // sec. 13. Every refusal is a code the gateway can carry verbatim.
 func writeCommerceError(w http.ResponseWriter, err error) {
@@ -183,6 +203,13 @@ func writeCommerceError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusConflict, "payment-unknown", err.Error(), nil)
 	case errors.Is(err, commerce.ErrPaymentConflict):
 		writeErrorCode(w, http.StatusConflict, commerce.ReasonIdempotencyConflict, err.Error(), nil)
+	case errors.Is(err, commerce.ErrApprovalBound):
+		// An approval authorizes one invocation (ADR 020 sec. 8); a second
+		// one naming it is refused like any other approval that does not
+		// cover the action.
+		writeErrorCode(w, http.StatusConflict, "policy-denied", "the approval is already bound to another invocation", nil)
+	case errors.Is(err, commerce.ErrDispatchUnavailable):
+		writeErrorCode(w, http.StatusServiceUnavailable, "dispatch-unavailable", "commerce dispatch signing is not configured", nil)
 	case errors.Is(err, commerce.ErrReservationMissing):
 		// A reserved row with no hold is an invariant broken behind the
 		// API, never a caller's mistake.
@@ -462,12 +489,19 @@ func (h *Handlers) GetCommerceInvocation(w http.ResponseWriter, r *http.Request)
 // ListCommerceInvocations lists the path tenant's receipts, filtered by
 // capability, phase or period.
 func (h *Handlers) ListCommerceInvocations(w http.ResponseWriter, r *http.Request) {
-	_, tenant, ok := h.requireCommerceTenant(w, r, "commerce-invocation-read")
+	user, tenant, ok := h.requireCommerceTenant(w, r, "commerce-invocation-read")
 	if !ok {
 		return
 	}
 	q := r.URL.Query()
 	f := commerce.ListFilter{TenantID: tenant, CapabilityID: q.Get("capability_id"), Phase: q.Get("phase")}
+	if key := q.Get("idempotency_key"); key != "" {
+		// The idempotency scope is (tenant, principal, key), and the
+		// principal is always the caller's own: a key never finds another
+		// principal's invocation (ADR 020 sec. 6).
+		f.IdempotencyKey = key
+		f.PrincipalID = user.PrincipalID()
+	}
 	for _, p := range []struct {
 		name string
 		dst  *time.Time
@@ -524,19 +558,22 @@ type transitionRequest struct {
 	ReservationDeadline *time.Time `json:"reservation_deadline,omitempty"`
 }
 
-// moneyEdges are the phases only the budget endpoints may enter: reserved
-// holds budget, released and finalized settle it. Entering one through the
-// generic transition would bypass the atomic check or leave a hold behind,
-// so the generic route refuses them and names the endpoint that owns each.
-var moneyEdges = map[string]string{
-	commerce.PhaseReserved:  "reserve",
-	commerce.PhaseReleased:  "release",
-	commerce.PhaseFinalized: "finalize",
+// ownedEdges are the phases only a dedicated endpoint may enter: reserved
+// holds budget, released and finalized settle it, and dispatching writes the
+// dispatch fence and signs the authorization (C4). Entering one through the
+// generic transition would bypass the atomic check, leave a hold behind or
+// produce a dispatching row with no fence, so the generic route refuses them
+// and names the endpoint that owns each.
+var ownedEdges = map[string]string{
+	commerce.PhaseReserved:    "reserve",
+	commerce.PhaseDispatching: "dispatch",
+	commerce.PhaseReleased:    "release",
+	commerce.PhaseFinalized:   "finalize",
 }
 
 // TransitionCommerceInvocation applies one phase change (ADR 020 sec. 11).
 // Platform-only: a tenant must not finalize or release its own charge. The
-// edges that move budget are not accepted here (see moneyEdges).
+// edges a dedicated endpoint owns are not accepted here (see ownedEdges).
 func (h *Handlers) TransitionCommerceInvocation(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.requireCommerceAdmin(w, r)
 	if !ok {
@@ -548,9 +585,9 @@ func (h *Handlers) TransitionCommerceInvocation(w http.ResponseWriter, r *http.R
 	if !decodeCommerceBody(w, r, &req) {
 		return
 	}
-	if owner, money := moneyEdges[req.ToPhase]; money {
+	if owner, owned := ownedEdges[req.ToPhase]; owned {
 		writeErrorCode(w, http.StatusBadRequest, "invalid-request",
-			"to_phase "+req.ToPhase+" moves budget and is owned by POST .../invocations/{invocation_id}/"+owner, nil)
+			"to_phase "+req.ToPhase+" is owned by POST .../invocations/{invocation_id}/"+owner, nil)
 		return
 	}
 	actor := user.PrincipalID()
