@@ -1346,6 +1346,35 @@ func TestToolVerifyDomain_SkipsWorkflowTriggerForAlreadyActiveDomain(t *testing.
 	}
 }
 
+// A legacy row spelled with capitals or a root dot verifies (DNS is
+// case-insensitive) and must reach add-custom-domain normalized, since the
+// registry pattern on domain is lowercase with no root dot.
+func TestToolVerifyDomain_NormalizesLegacyDomainForWorkflow(t *testing.T) {
+	var got map[string]string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/domains":
+			_, _ = w.Write([]byte(`{"domains":[{"id":"d1","domain":"API.Example.com.","status":"pending"}]}`))
+		case strings.HasPrefix(r.URL.Path, "/api/v1/domains/d1/verify"):
+			_, _ = w.Write([]byte(`{"verified":true,"method":"txt"}`))
+		case strings.Contains(r.URL.Path, "/operations/add-custom-domain/execute"):
+			_ = json.NewDecoder(r.Body).Decode(&got)
+			_, _ = w.Write([]byte(`{"workflowName":"wf"}`))
+		default:
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	if _, err := callToolVerifyDomain(t, backend.URL, map[string]any{"team": "labs", "service": "svc"}); err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if got["domain"] != "api.example.com" {
+		t.Fatalf("submitted domain = %q, want api.example.com (params %v)", got["domain"], got)
+	}
+}
+
 // TestToolVerifyDomain_TriggersWorkflowOnFreshVerification is the positive
 // counterpart: a domain that verifies true and is NOT already active must
 // still trigger the workflow — this is the only place that now happens

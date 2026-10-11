@@ -1496,10 +1496,15 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 			// a distinct in-progress status or a trigger timestamp on the
 			// row — which is more than this fix is scoped to do.
 			if json.Unmarshal(vBody, &vResult) == nil && vResult.Verified && d.Status != domains.StatusActive { //nolint:nilerr
+				// d.Domain is the raw store value; the registry pattern on
+				// add-custom-domain's domain is lowercase with no root dot,
+				// so a legacy row must be normalized the way the API's
+				// remove path does, or it verifies and then never gets an
+				// ingress.
 				wfParams := map[string]string{
 					"team_name":    team,
 					"service_name": service,
-					"domain":       d.Domain,
+					"domain":       strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d.Domain)), "."),
 				}
 				wfBody, wfErr := s.apiPost(ctx, "/api/v1/operations/add-custom-domain/execute", wfParams)
 				if wfErr != nil {
