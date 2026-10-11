@@ -15,6 +15,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -538,6 +539,45 @@ func (h *Handlers) GetCommerceInvocation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, inv)
+}
+
+// policyDecisionOf reads the policy decision reference of an invocation from
+// its action approval. A failed read is reported as "unavailable", never as
+// "none": the ledger facts stay readable, and the reference is never blanked.
+func (h *Handlers) policyDecisionOf(ctx context.Context, approvalID string) commerce.PolicyDecisionRef {
+	if approvalID == "" {
+		return commerce.PolicyDecisionRef{Status: commerce.PolicyNone}
+	}
+	if h.opts.WorkItems == nil {
+		return commerce.PolicyDecisionRef{Status: commerce.PolicyUnavailable, ApprovalID: approvalID}
+	}
+	a, err := h.opts.WorkItems.ActionApproval(ctx, approvalID)
+	if errors.Is(err, workitems.ErrApprovalNotFound) {
+		return commerce.PolicyDecisionRef{Status: commerce.PolicyMissing, ApprovalID: approvalID}
+	}
+	if err != nil {
+		slog.Error("commerce receipt: action approval not read", "approval_id", approvalID, "error", err)
+		return commerce.PolicyDecisionRef{Status: commerce.PolicyUnavailable, ApprovalID: approvalID}
+	}
+	return commerce.PolicyDecisionRef{
+		Status: commerce.PolicyRecorded, ApprovalID: approvalID,
+		PolicyRuleID: a.PolicyRuleID, PolicyVersion: a.PolicyVersion,
+	}
+}
+
+// GetCommerceReceipt returns the ADR 020 sec. 12 receipt of one invocation of
+// the path tenant. A foreign tenant and a missing id answer identically.
+func (h *Handlers) GetCommerceReceipt(w http.ResponseWriter, r *http.Request) {
+	_, tenant, ok := h.requireCommerceTenant(w, r, "commerce-invocation-read")
+	if !ok {
+		return
+	}
+	inv, err := h.opts.Commerce.GetInvocation(r.Context(), tenant, chi.URLParam(r, "invocation_id"))
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, commerce.ReceiptOf(*inv, h.policyDecisionOf(r.Context(), inv.ApprovalID)))
 }
 
 // ListCommerceInvocations lists the path tenant's receipts, filtered by

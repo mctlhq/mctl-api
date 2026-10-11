@@ -758,6 +758,7 @@ func NewRouter(opts Options) http.Handler {
 					r.Post("/invocations", h.AcceptCommerceInvocation)
 					r.Get("/invocations", h.ListCommerceInvocations)
 					r.Get("/invocations/{invocation_id}", h.GetCommerceInvocation)
+					r.Get("/invocations/{invocation_id}/receipt", h.GetCommerceReceipt)
 					r.Get("/invocations/{invocation_id}/transitions", h.ListCommerceInvocationTransitions)
 					r.Post("/invocations/{invocation_id}/transitions", h.TransitionCommerceInvocation)
 					r.Post("/invocations/{invocation_id}/reserve", h.ReserveCommerceInvocation)

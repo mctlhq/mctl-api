@@ -1,5 +1,37 @@
 # Changelog
 
+## [4.80.0](https://github.com/mctlhq/mctl-api/compare/4.79.0...4.80.0) (2026-10-11)
+
+
+### Features
+
+* **agents:** issue-569-feat-commerce-receipt-read-and-mcp-tools ([757797a](https://github.com/mctlhq/mctl-api/commit/757797ab451addf30c24c15b523500c8d0f21a5f))
+* **agents:** issue-569-feat-commerce-receipt-read-and-mcp-tools ([f8ee316](https://github.com/mctlhq/mctl-api/commit/f8ee3166c90a61c8d3b794682a680d9ecc7fbb89))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-569-feat-commerce-receipt-read-and-mcp-tools ([393fa36](https://github.com/mctlhq/mctl-api/commit/393fa36478dd72ef279d8b93be4921170bee6578))
+
+## [4.79.0](https://github.com/mctlhq/mctl-api/compare/4.78.0...4.79.0) (2026-10-11)
+
+
+### Features
+
+* **agents:** issue-454-dev-loop-abandon-deferred-p3s-from-the-4 ([e60e051](https://github.com/mctlhq/mctl-api/commit/e60e051d8a9e7248ac1401cda925946fc0cbce35))
+* **agents:** issue-454-dev-loop-abandon-deferred-p3s-from-the-4 ([e4a4496](https://github.com/mctlhq/mctl-api/commit/e4a4496fff178e30598a948d92503d4f9302e7da))
+* **agents:** issue-559-hardening-constrain-every-operation-para ([a02d885](https://github.com/mctlhq/mctl-api/commit/a02d88513a35f5484bd830bb8ef60bd9b377b73b))
+
+
+### Bug Fixes
+
+* **api:** normalize the stored domain before remove-custom-domain ([1f375be](https://github.com/mctlhq/mctl-api/commit/1f375bea160218794e8e8b72c14700ed2af6f9a9))
+* **mcp:** normalize every hostname submitted to a domain workflow ([d41a4b7](https://github.com/mctlhq/mctl-api/commit/d41a4b73f8b72b7b915266f11e0de2908b091ebb))
+* **mcp:** normalize the stored domain before add-custom-domain ([6279ce1](https://github.com/mctlhq/mctl-api/commit/6279ce193e350a7a1943c81b55c3e3478883738d))
+* **operations:** match hostname pattern to the domains store rule ([ba5b111](https://github.com/mctlhq/mctl-api/commit/ba5b1117187fb882140abc780056d23f07deae53))
+* **operations:** reserve the tenant name platform ([a444c29](https://github.com/mctlhq/mctl-api/commit/a444c2939d007175d8fb4f2afad31c4a234add79))
+* **operations:** reserve the tenant name platform ([e11682d](https://github.com/mctlhq/mctl-api/commit/e11682dee46ba9d3a93d53a7437c7bf5f78526a9))
+
 ## [4.78.0](https://github.com/mctlhq/mctl-api/compare/4.77.0...4.78.0) (2026-10-11)
 
 

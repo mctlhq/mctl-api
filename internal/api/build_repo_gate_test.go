@@ -208,14 +208,18 @@ func TestBuildRepoGate_UnconfiguredTokenRefuses(t *testing.T) {
 
 func TestBuildRepoGate_RefusesMalformedRepo(t *testing.T) {
 	// Padded values are refused as received, not trimmed: the repository
-	// checked must be the one the workflow builds.
+	// checked must be the one the workflow builds. The operation's parameter
+	// pattern now refuses these first (400); the gate's own name check
+	// (403) is covered directly in build_repo_gate_internal_test.go.
 	for _, repo := range []string{"../etc", "owner", "a/b/c", "owner/..", "../..", " myorg/my-app", "myorg/my-app ", "myorg/my-app\n"} {
 		t.Run(repo, func(t *testing.T) {
 			router, exec, f := newGateRouter(t, "gac-token")
 			f.binding = bindingAnswer(true)
 			w := postAs(t, router, deployPath, onboard(repo), ownerUser)
-			assertStatus(t, w, http.StatusForbidden)
-			if len(exec.submittedParams) != 0 || len(f.bindingCalls()) != 0 {
+			if w.Code != http.StatusBadRequest && w.Code != http.StatusForbidden {
+				t.Fatalf("expected 400 or 403, got %d; body: %s", w.Code, w.Body.String())
+			}
+			if len(exec.submittedParams) != 0 || len(f.bindingCalls()) != 0 || len(f.githubCalls()) != 0 {
 				t.Error("a malformed repository must be refused before any lookup")
 			}
 		})

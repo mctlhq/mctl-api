@@ -55,7 +55,7 @@ var (
 	ciNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}$`)
 	// ciGitTagRe is what a tag must look like to be built: the characters a
 	// container image tag allows, so it maps onto one without rewriting.
-	ciGitTagRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	ciGitTagRe = regexp.MustCompile(operations.GitTagPattern)
 	// ciDockerfilePathRe is a relative path inside the repository; ".."
 	// segments are refused separately.
 	ciDockerfilePathRe = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._/-]{0,199}$`)

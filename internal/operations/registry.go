@@ -15,6 +15,7 @@
 package operations
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 )
@@ -70,7 +71,11 @@ type ParameterDef struct {
 	Description string   `json:"description,omitempty"`
 	Enum        []string `json:"enum,omitempty"`
 	Pattern     string   `json:"pattern,omitempty"`
-	Secret      bool     `json:"secret,omitempty"` // true = never echo in logs/responses
+	// MaxLength bounds the value in bytes. Checked before Enum and Pattern.
+	// int32 rather than int keeps ParameterDef at 120 bytes, below gocritic's
+	// rangeValCopy threshold for the many loops over op.Parameters.
+	MaxLength int32 `json:"maxLength,omitempty"`
+	Secret    bool  `json:"secret,omitempty"` // true = never echo in logs/responses
 	// OmitWhenEmpty marks an optional parameter whose absence must reach Argo
 	// as an absence, not as "". ApplyDefaults normally fills every missing
 	// parameter with Default, and Executor.Submit forwards the whole map, so a
@@ -233,13 +238,18 @@ func (r *Registry) List() []Operation {
 // ValidateInput checks that all required parameters are present and valid.
 func (r *Registry) ValidateInput(op Operation, input map[string]string) []string {
 	var errors []string
-	for _, p := range op.Parameters {
+	for i := range op.Parameters {
+		p := &op.Parameters[i]
 		val, exists := input[p.Name]
 		if p.Required && (!exists || val == "") {
 			errors = append(errors, "missing required parameter: "+p.Name)
 			continue
 		}
 		if !exists || val == "" {
+			continue
+		}
+		if p.MaxLength > 0 && len(val) > int(p.MaxLength) {
+			errors = append(errors, fmt.Sprintf("%s: must be at most %d bytes", p.Name, p.MaxLength))
 			continue
 		}
 		if len(p.Enum) > 0 {
@@ -348,6 +358,71 @@ func joinStrings(ss []string) string {
 	return out
 }
 
+// Shared parameter patterns. Each mirrors the check the matching
+// ClusterWorkflowTemplate in mctl-gitops makes (or should make) on the value.
+const (
+	// ociTagPattern: rollback, preview and tpl-git-commit image_tag check.
+	ociTagPattern = `^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`
+	// GitTagPattern is the shape of a git tag that may be built; shared with
+	// the CI deploy path.
+	GitTagPattern = `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
+	// githubRepoPattern: tpl-git-commit and preview-deploy repo check.
+	githubRepoPattern = `^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`
+	// repoPathPattern: deploy-service and preview-deploy dockerfile_path
+	// check. Every segment starts with a letter, digit or underscore, so
+	// "." and ".." segments, empty segments, absolute paths and a leading
+	// "-" are all refused, matching ciRelativePath in the CI deploy path.
+	// Length is bounded by the parameters' MaxLength.
+	repoPathPattern = `^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$`
+	// hostnameLabel and hostnameCore: add/remove-custom-domain and
+	// deploy-service host check. Label for label the same rule as
+	// validateHostname in internal/api, which gates what the domains store
+	// holds, so a stored domain (punycode TLDs such as xn--p1ai included) is
+	// never refused on its own teardown path. Length is bounded by MaxLength.
+	hostnameLabel   = `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`
+	hostnameCore    = hostnameLabel + `(\.` + hostnameLabel + `)+`
+	hostnamePattern = `^` + hostnameCore + `$`
+	// envBlockPattern: newline-separated KEY=value lines; no CR, NUL or other
+	// control characters (tab allowed in values).
+	envBlockPattern = `^(__CLEAR__|(([A-Za-z_][A-Za-z0-9_]*=[^\x00-\x08\x0a-\x1f\x7f]*)?\n)*([A-Za-z_][A-Za-z0-9_]*=[^\x00-\x08\x0a-\x1f\x7f]*)?)$`
+	// quotedTextPattern: create-tenant rejects '"' and newline in text fields.
+	quotedTextPattern = `^[^\x00-\x1f\x7f"]*$`
+	// identityPattern: an authenticated identity (GitHub login, Dex name,
+	// ci:<repo>, agent:<name>).
+	identityPattern = `^[^\x00-\x1f\x7f]{1,256}$`
+	base64Pattern   = `^[A-Za-z0-9+/]*={0,2}$`
+	emailPattern    = `^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}$`
+	// cpuQuantityPattern / memoryQuantityPattern: Kubernetes quantities,
+	// tighter than the template's ^[0-9][0-9A-Za-z.]*$.
+	cpuQuantityPattern    = `^[0-9]{1,6}(\.[0-9]{1,3})?m?$`
+	memoryQuantityPattern = `^[0-9]{1,9}(\.[0-9]{1,3})?(Ki|Mi|Gi|Ti|k|M|G|T)?$`
+	// slugPattern: proposal directory name (some contain dots).
+	slugPattern = `^[a-z0-9][a-z0-9.-]{0,120}$`
+)
+
+// mctlAgentsServiceEnum lists the services mctl-agents knows, plus "" for
+// "all / unused".
+var mctlAgentsServiceEnum = []string{"", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}
+
+// freeTextParameters lists the parameters that stay free text. Each carries a
+// MaxLength and a control-character-excluding Pattern. Workflow templates must
+// pass them to scripts only through env:, never inline
+// (mctlhq/mctl-gitops#992).
+var freeTextParameters = map[string]map[string]string{
+	"create-tenant":            {"display_name": "human-readable name", "description": "team description"},
+	"deploy-service":           {"env_vars": "plaintext KEY=value block; values are arbitrary"},
+	"platform-skill-publish":   {"actor": "authenticated identity"},
+	"platform-skill-deprecate": {"actor": "authenticated identity"},
+	"platform-skill-enable":    {"actor": "authenticated identity"},
+	"platform-skill-disable":   {"actor": "authenticated identity"},
+	"mctl-agents-approve":      {"approver": "authenticated identity"},
+}
+
+// unconstrainedParameters lists parameters exempt from Enum/Pattern.
+var unconstrainedParameters = map[string]map[string]string{
+	"deploy-service": {"secret_env_vars": "validated by splitSecretParams; never enters the Workflow spec"}, //nolint:gosec // G101: a parameter name, not a credential
+}
+
 var builtinOperations = []Operation{
 	{
 		Name:             "deploy-service",
@@ -363,24 +438,24 @@ var builtinOperations = []Operation{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team (workspace) name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "component_type", Type: "string", Default: "base-service", Description: "Chart type", Enum: []string{"base-service", "worker-service"}},
-			{Name: "dockerfile_repo", Type: "string", Description: "GitHub repo (owner/name) containing the Dockerfile"},
-			{Name: "git_tag", Type: "string", Description: "Git tag to build (e.g. v1.0.0)"},
-			{Name: "port", Type: "string", Default: "8080", Description: "Service port"},
-			{Name: "host", Type: "string", Description: "Ingress hostname (e.g. my-app.example.com). Omit for background workers."},
-			{Name: "env_vars", Type: "string", Description: "Plaintext environment variables, newline-separated KEY=value"},
-			{Name: "secret_env_vars", Type: "string", Description: "Secret environment variables stored in Vault, newline-separated KEY=value. Keys must be environment variable names; values are single-line", Secret: true},
+			{Name: "dockerfile_repo", Type: "string", Description: "GitHub repo (owner/name) containing the Dockerfile", Pattern: githubRepoPattern},
+			{Name: "git_tag", Type: "string", Description: "Git tag to build (e.g. v1.0.0)", Pattern: GitTagPattern},
+			{Name: "port", Type: "string", Default: "8080", Description: "Service port", Pattern: `^[0-9]{1,5}$`},
+			{Name: "host", Type: "string", Description: "Ingress hostname (e.g. my-app.example.com). Omit for background workers.", Pattern: `^(none|auto|` + hostnameCore + `)$`, MaxLength: 253},
+			{Name: "env_vars", Type: "string", Description: "Plaintext environment variables, newline-separated KEY=value. Free text; passed to the workflow via env only.", Pattern: envBlockPattern, MaxLength: 65536},
+			{Name: "secret_env_vars", Type: "string", Description: "Secret environment variables stored in Vault, newline-separated KEY=value. Keys must be environment variable names; values are single-line", Secret: true, MaxLength: 65536},
 			{Name: "clear_env", Type: "string", Default: "false", Description: "Clear existing plaintext environment variables", Enum: []string{"true", "false"}},
 			{Name: "clear_secrets", Type: "string", Default: "false", Description: "Clear existing secret environment variables", Enum: []string{"true", "false"}},
 			{Name: "provision_database", Type: "string", Default: "false", Description: "Also provision a PostgreSQL database", Enum: []string{"true", "false"}},
 			{Name: "skip_health_check", Type: "string", Default: "false", Description: "Skip post-deploy health check", Enum: []string{"true", "false"}},
-			{Name: "health_check_path", Type: "string", Default: "", Description: "Override the liveness/readiness probe HTTP path (default: chart default /healthz + /readyz). Empty = unchanged."},
-			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Description: "Path to Dockerfile in the repo"},
-			{Name: "image_tag", Type: "string", Description: "Explicit image tag override (default: derived from git_tag)"},
+			{Name: "health_check_path", Type: "string", Default: "", Description: "Override the liveness/readiness probe HTTP path (default: chart default /healthz + /readyz). Empty = unchanged.", Pattern: `^/[A-Za-z0-9._~/-]{0,255}$`},
+			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Description: "Path to Dockerfile in the repo", Pattern: repoPathPattern, MaxLength: 256},
+			{Name: "image_tag", Type: "string", Description: "Explicit image tag override (default: derived from git_tag)", Pattern: ociTagPattern},
 			{Name: "autoscaling_enabled", Type: "string", Default: "false", Description: "Enable HPA autoscaling", Enum: []string{"true", "false"}},
-			{Name: "min_replicas", Type: "string", Default: "1", Description: "Minimum replica count (autoscaling)"},
-			{Name: "max_replicas", Type: "string", Default: "5", Description: "Maximum replica count (autoscaling)"},
-			{Name: "cpu_threshold", Type: "string", Default: "80", Description: "CPU utilization % to trigger scale-up"},
-			{Name: "service_template", Type: "string", Default: "default", Description: "Service template preset. Any template name from service-templates/ in mctl-gitops. Unknown names fall back to 'default'."},
+			{Name: "min_replicas", Type: "string", Default: "1", Description: "Minimum replica count (autoscaling)", Pattern: `^[0-9]{1,3}$`},
+			{Name: "max_replicas", Type: "string", Default: "5", Description: "Maximum replica count (autoscaling)", Pattern: `^[0-9]{1,3}$`},
+			{Name: "cpu_threshold", Type: "string", Default: "80", Description: "CPU utilization % to trigger scale-up", Pattern: `^[0-9]{1,3}$`},
+			{Name: "service_template", Type: "string", Default: "default", Description: "Service template preset. Any template name from service-templates/ in mctl-gitops. Unknown names fall back to 'default'.", Pattern: `^[a-z0-9][a-z0-9-]{0,62}$`},
 		},
 	},
 	{
@@ -400,13 +475,13 @@ var builtinOperations = []Operation{
 		},
 		Parameters: []ParameterDef{
 			{Name: "tenant_name", Type: "string", Required: true, Description: "Workspace name (DNS-safe, lowercase)", Pattern: "^[a-z0-9][a-z0-9-]{1,62}$"},
-			{Name: "display_name", Type: "string", Description: "Human-readable team name"},
-			{Name: "description", Type: "string", Description: "Team description"},
-			{Name: "quota_cpu_req", Type: "string", Default: "500m", Description: "CPU request quota"},
-			{Name: "quota_cpu_lim", Type: "string", Default: "3", Description: "CPU limit quota"},
-			{Name: "quota_memory_req", Type: "string", Default: "1280Mi", Description: "Memory request quota"},
-			{Name: "quota_memory_lim", Type: "string", Default: "4Gi", Description: "Memory limit quota"},
-			{Name: "quota_pods", Type: "string", Default: "10", Description: "Maximum pods"},
+			{Name: "display_name", Type: "string", Description: "Human-readable team name. Free text; passed to the workflow via env only.", Pattern: quotedTextPattern, MaxLength: 128},
+			{Name: "description", Type: "string", Description: "Team description. Free text; passed to the workflow via env only.", Pattern: quotedTextPattern, MaxLength: 1024},
+			{Name: "quota_cpu_req", Type: "string", Default: "500m", Description: "CPU request quota", Pattern: cpuQuantityPattern},
+			{Name: "quota_cpu_lim", Type: "string", Default: "3", Description: "CPU limit quota", Pattern: cpuQuantityPattern},
+			{Name: "quota_memory_req", Type: "string", Default: "1280Mi", Description: "Memory request quota", Pattern: memoryQuantityPattern},
+			{Name: "quota_memory_lim", Type: "string", Default: "4Gi", Description: "Memory limit quota", Pattern: memoryQuantityPattern},
+			{Name: "quota_pods", Type: "string", Default: "10", Description: "Maximum pods", Pattern: `^[0-9]{1,4}$`},
 			// Closed by default, matching the tenant chart's
 			// networking.allowInternetEgress (false) and the create-tenant
 			// WorkflowTemplate's own default. mctl-api was the one component
@@ -415,8 +490,8 @@ var builtinOperations = []Operation{
 			// access unconditionally via allow-workflow-internet-egress, so
 			// builds and deploys work either way.
 			{Name: "allow_internet_egress", Type: "string", Default: "false", Description: "Allow outbound internet egress from tenant pods (default: false)", Enum: []string{"true", "false"}},
-			{Name: "contact_email", Type: "string", Description: "Team contact email"},
-			{Name: "creator_user_id", Type: "string", Description: "GitHub user ID of the workspace creator"},
+			{Name: "contact_email", Type: "string", Description: "Team contact email", Pattern: emailPattern, MaxLength: 254},
+			{Name: "creator_user_id", Type: "string", Description: "GitHub user ID of the workspace creator", Pattern: `^[A-Za-z0-9._@-]{1,256}$`},
 		},
 	},
 	{
@@ -484,7 +559,7 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "target_tag", Type: "string", Required: true, Description: "Image tag to roll back to (e.g. '1.2.3')"},
+			{Name: "target_tag", Type: "string", Required: true, Description: "Image tag to roll back to (e.g. '1.2.3')", Pattern: ociTagPattern},
 		},
 	},
 	{
@@ -499,11 +574,11 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "image_tag", Type: "string", Description: "Image tag to deploy. Required unless git_ref is set — PreparePreviewDeployInput then auto-generates it."},
-			{Name: "ttl_hours", Type: "string", Default: "24", Description: "Preview lifetime in hours (default: 24)"},
-			{Name: "git_ref", Type: "string", Default: "", Pattern: `^[A-Za-z0-9._/-]+$`, Description: "Branch, SHA, or tag to build from. Leave empty to deploy an existing image_tag."},
-			{Name: "dockerfile_repo", Type: "string", Default: "", Pattern: `^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`, Description: "Source repo in org/repo format. Required when git_ref is set."},
-			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Pattern: `^[A-Za-z0-9][A-Za-z0-9._/-]*$`, Description: "Path to Dockerfile inside dockerfile_repo (default: Dockerfile)"},
+			{Name: "image_tag", Type: "string", Description: "Image tag to deploy. Required unless git_ref is set — PreparePreviewDeployInput then auto-generates it.", Pattern: ociTagPattern},
+			{Name: "ttl_hours", Type: "string", Default: "24", Description: "Preview lifetime in hours (default: 24)", Pattern: `^[0-9]{1,4}$`},
+			{Name: "git_ref", Type: "string", Default: "", Pattern: `^[A-Za-z0-9._/-]{1,255}$`, Description: "Branch, SHA, or tag to build from. Leave empty to deploy an existing image_tag."},
+			{Name: "dockerfile_repo", Type: "string", Default: "", Pattern: githubRepoPattern, Description: "Source repo in org/repo format. Required when git_ref is set."},
+			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Pattern: repoPathPattern, Description: "Path to Dockerfile inside dockerfile_repo (default: Dockerfile)", MaxLength: 256},
 		},
 	},
 	{
@@ -544,7 +619,7 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "service_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "domain", Type: "string", Required: true, Description: "Custom domain to add (e.g. api.mycompany.com)"},
+			{Name: "domain", Type: "string", Required: true, Description: "Custom domain to add (e.g. api.mycompany.com)", Pattern: hostnamePattern, MaxLength: 253},
 		},
 	},
 	{
@@ -559,7 +634,7 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "service_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "domain", Type: "string", Required: true, Description: "Custom domain to remove"},
+			{Name: "domain", Type: "string", Required: true, Description: "Custom domain to remove", Pattern: hostnamePattern, MaxLength: 253},
 		},
 	},
 	{
@@ -575,9 +650,9 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/catalog/{skill_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
-			{Name: "metadata_b64", Type: "string", Required: true, Description: "Base64-encoded metadata JSON"},
-			{Name: "content_b64", Type: "string", Required: true, Description: "Base64-encoded SKILL.md content"},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator"},
+			{Name: "metadata_b64", Type: "string", Required: true, Description: "Base64-encoded metadata JSON", Pattern: base64Pattern, MaxLength: 16384},
+			{Name: "content_b64", Type: "string", Required: true, Description: "Base64-encoded SKILL.md content", Pattern: base64Pattern, MaxLength: 350000},
+			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator. Free text; passed to the workflow via env only.", Pattern: identityPattern, MaxLength: 256},
 		},
 	},
 	{
@@ -593,7 +668,7 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/catalog/{skill_name}/metadata.yaml"},
 		Parameters: []ParameterDef{
 			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator"},
+			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator. Free text; passed to the workflow via env only.", Pattern: identityPattern, MaxLength: 256},
 		},
 	},
 	{
@@ -610,7 +685,7 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "tenant_name", Type: "string", Required: true, Description: "Tenant name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
 			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator"},
+			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator. Free text; passed to the workflow via env only.", Pattern: identityPattern, MaxLength: 256},
 		},
 	},
 	{
@@ -627,7 +702,7 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "tenant_name", Type: "string", Required: true, Description: "Tenant name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
 			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator"},
+			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator. Free text; passed to the workflow via env only.", Pattern: identityPattern, MaxLength: 256},
 		},
 	},
 	// ─── mctl-agents triggers ─────────────────────────────────────────────
@@ -659,7 +734,7 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/agents-state/"},
 		Parameters: []ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "full", Description: "Run mode (locked to 'full' for this operation)", Enum: []string{"full"}},
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for full mode"},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for full mode", Enum: mctlAgentsServiceEnum},
 		},
 	},
 	{
@@ -674,7 +749,7 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/agents-state/_mentor/digest/"},
 		Parameters: []ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "mentor-only", Description: "Run mode (locked to 'mentor-only')", Enum: []string{"mentor-only"}},
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for mentor-only mode"},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for mentor-only mode", Enum: mctlAgentsServiceEnum},
 		},
 	},
 	{
@@ -711,7 +786,7 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/incident-{id}/"},
 		Parameters: append([]ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "incident-responder", Description: "Run mode (locked to 'incident-responder')", Enum: []string{"incident-responder"}},
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for incident-responder mode"},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for incident-responder mode", Enum: mctlAgentsServiceEnum},
 			// Release pin (mctlhq/mctl-api#372): mctl-agents' IncidentResponderWorkflow
 			// sends it; cwft-mctl-agents-run declares both.
 		}, agentPinParams("incident-responder")...),
@@ -732,8 +807,8 @@ var builtinOperations = []Operation{
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch>"},
 		Parameters: append([]ParameterDef{
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
-			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: mctlAgentsServiceEnum},
+			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set).", Pattern: slugPattern},
 			{Name: "max_proposals", Type: "string", Required: false, Default: "1", Description: "Safety bound. The API permits exactly one proposal per run.", Enum: []string{"1"}},
 			// Release pin (mctlhq/mctl-api#372): the DevLoop's implement step sends
 			// it; cwft-mctl-agents-implement declares both.
@@ -775,8 +850,8 @@ var builtinOperations = []Operation{
 			// tier3-shepherd PRs landing now); the shepherd must drive those
 			// to merge too. If the implementer's allowlist ever changes,
 			// mirror the change here.
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
-			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: mctlAgentsServiceEnum},
+			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set).", Pattern: slugPattern},
 			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to evaluate decide() for every matched proposal and print the decision WITHOUT calling the implementer or merging anything. Default 'false'.", Enum: []string{"true", "false"}},
 			// Release pin (mctlhq/mctl-api#372): the DevLoop's in-loop shepherd tick
 			// sends it; cwft-mctl-agents-shepherd declares both.
@@ -855,12 +930,12 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml"},
 		Parameters: []ParameterDef{
 			{Name: "service", Type: "string", Required: true, Description: "Service owning the proposal.", Enum: []string{"mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
-			{Name: "slug", Type: "string", Required: true, Description: "Proposal slug (directory name under proposals/), e.g. issue-42-fix-foo.", Pattern: "^[a-z0-9][a-z0-9-]{0,120}$"},
+			{Name: "slug", Type: "string", Required: true, Description: "Proposal slug (directory name under proposals/), e.g. issue-42-fix-foo.", Pattern: slugPattern},
 			// No Default: "unknown" is not an identity, and a field that manufactures
 			// one is worse than an absent field — the implementer refuses an approval
 			// naming nobody (gitops#986). Human callers never reach the default anyway:
 			// the handler overwrites this with the authenticated caller.
-			{Name: "approver", Type: "string", Required: false, Description: "Identity of whoever approved (recorded in .status.yaml and the commit message). Taken from the authenticated caller; only the mctl-agent service principal may relay someone else's."},
+			{Name: "approver", Type: "string", Required: false, Description: "Identity of whoever approved (recorded in .status.yaml and the commit message). Taken from the authenticated caller; only the mctl-agent service principal may relay someone else's. Free text; passed to the workflow via env only.", Pattern: identityPattern, MaxLength: 256},
 		},
 	},
 	{
@@ -891,7 +966,7 @@ var builtinOperations = []Operation{
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch> (PR creation only, for an already-pushed branch)"},
 		Parameters: []ParameterDef{
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Reconcile only this service. Leave empty to sweep every service.", Enum: []string{"", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Reconcile only this service. Leave empty to sweep every service.", Enum: mctlAgentsServiceEnum},
 			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to print every would-be flip without writing .status.yaml or opening any PR. Default 'false'.", Enum: []string{"true", "false"}},
 		},
 	},

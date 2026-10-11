@@ -1115,6 +1115,51 @@ components:
             updated_at: {type: string, format: date-time}
             finalized_at: {type: string, format: date-time}
             version: {type: integer, format: int64}
+    CommerceReceipt:
+      type: object
+      description: The receipt of one invocation (ADR 020 sec. 12). Every amount is an integer in minor units.
+      properties:
+        schema_version: {type: integer, enum: [1]}
+        invocation_id: {type: string}
+        quote_id: {type: string}
+        quote_digest: {type: string}
+        terms_id: {type: string}
+        terms_version: {type: integer, format: int64}
+        capability_id: {type: string}
+        provider_id: {type: string}
+        tenant_id: {type: string}
+        payer_account_id: {type: string}
+        principal_id: {type: string}
+        subject_principal_id: {type: string}
+        delegation_grant_id: {type: string}
+        execution_id: {type: string}
+        approval_id: {type: string}
+        price_mode: {type: string, enum: [free, per_call, per_successful_call]}
+        price: {$ref: '#/components/schemas/CommerceMoney'}
+        funds_mode: {type: string, enum: [simulated, live]}
+        phase: {type: string, enum: [accepted, refused, reserved, dispatching, dispatched, outcome_unknown, released, finalized]}
+        reason_code: {type: string}
+        execution_outcome: {type: string, enum: [not_dispatched, succeeded, failed, unknown]}
+        usage_quantity: {type: integer, format: int64}
+        charge_status: {type: string, enum: [none, reserved, captured, released]}
+        payment_status: {type: string, enum: [none, not_required, authorized, denied, captured, voided, unknown]}
+        settlement_status: {type: string, enum: [not_applicable, pending, settled, failed]}
+        quote_expires_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        reconciliation_deadline: {type: string, format: date-time}
+        reservation_deadline: {type: string, format: date-time}
+        dispatch_deadline: {type: string, format: date-time}
+        finalized_at: {type: string, format: date-time}
+        policy_decision:
+          type: object
+          description: Reference to the action approval that covered the invocation, read at receipt time. unavailable means it could not be read, not that there is none.
+          required: [status]
+          properties:
+            status: {type: string, enum: [none, recorded, missing, unavailable]}
+            approval_id: {type: string}
+            policy_rule_id: {type: string}
+            policy_version: {type: string}
     CommerceTransition:
       type: object
       description: One append-only history row (ADR 020 sec. 11).
@@ -4781,6 +4826,21 @@ paths:
         - {name: invocation_id, in: path, required: true, schema: {type: string}}
       responses:
         '200': {description: The receipt, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceInvocation'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Below the tenant role, or no canonical principal}
+        '404': {description: No such invocation in this tenant}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/receipt:
+    get:
+      summary: Read the receipt of one invocation
+      description: ADR 020 sec. 12 projection with a policy decision reference. Amounts are integer minor units. Never idempotency keys, argument digests, provider operation keys, reservation references, arguments, results, payment proofs or external_ref contents. A foreign tenant and a missing id answer the same 404.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: invocation_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: The receipt, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceReceipt'}}}}
         '401': {description: Authentication required}
         '403': {description: Below the tenant role, or no canonical principal}
         '404': {description: No such invocation in this tenant}

@@ -1234,6 +1234,47 @@ func TestDeleteDomain_LegacyMixedCaseServiceStillDeletes(t *testing.T) {
 	}
 }
 
+// TestDeleteDomain_LegacyMixedCaseDomainStillDeletes: the registry pattern on
+// remove-custom-domain's domain is lowercase-only with no root dot, and the
+// store column is plain TEXT, so a legacy row spelled "Legacy.Example.COM."
+// must be normalized before validation or it could never be deleted.
+func TestDeleteDomain_LegacyMixedCaseDomainStillDeletes(t *testing.T) {
+	store := newTestDomainStore(t)
+	exec := &fakeDomainExecutor{}
+	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
+		DomainStore:    store,
+		PlatformDomain: "mctl.ai",
+		Executor:       exec,
+		Registry:       operations.NewRegistry(),
+	}}
+
+	created, err := store.Create(context.Background(), &domains.Domain{
+		ID:                uuid.New().String(),
+		Team:              "labs",
+		Service:           "svc",
+		Domain:            "Legacy.Example.COM.",
+		Status:            domains.StatusActive,
+		VerificationToken: "test-token",
+		CreatedBy:         "u1",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID+"?team=labs", nil), owner), "id", created.ID)
+	rec := httptest.NewRecorder()
+	h.DeleteDomain(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	if len(exec.submitted) != 1 || exec.submitted[0]["domain"] != "legacy.example.com" {
+		t.Fatalf("submitted = %v, want one submission with domain=legacy.example.com", exec.submitted)
+	}
+}
+
 // TestDeleteDomain_SkipsTeardownForPendingRow pins the status gate: only a
 // row that is neither active, verified, nor failed skips teardown. A
 // freshly-added row defaults to pending, which never passed DNS

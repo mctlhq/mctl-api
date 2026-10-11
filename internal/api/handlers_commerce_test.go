@@ -406,3 +406,86 @@ func TestCommerceHandlers_AcceptReplayAndConflictOverHTTP(t *testing.T) {
 		t.Fatalf("history: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestCommerceReceipt_NilStoreIs503(t *testing.T) {
+	h := &Handlers{opts: Options{}}
+	rec := httptest.NewRecorder()
+	h.GetCommerceReceipt(rec, adminCtx(httptest.NewRequest("GET", "/api/v1/commerce/tenants/acme/invocations/inv_1/receipt", nil)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503, got %d", rec.Code)
+	}
+}
+
+func TestPolicyDecisionOf_WithoutApprovalStore(t *testing.T) {
+	h := &Handlers{opts: Options{}}
+	if got := h.policyDecisionOf(context.Background(), ""); got.Status != commerce.PolicyNone {
+		t.Fatalf("no approval: %+v", got)
+	}
+	got := h.policyDecisionOf(context.Background(), "aar_1")
+	if got.Status != commerce.PolicyUnavailable || got.ApprovalID != "aar_1" {
+		t.Fatalf("no store: %+v", got)
+	}
+}
+
+func TestCommerceReceipt_ReadsAndHidesForeignRows(t *testing.T) {
+	f := newCommerceFixture(t)
+	f.publish(t)
+	owner := tenantUser(t, "acme-owner", "acme", "prn_owner")
+	other := tenantUser(t, "beta-owner", "beta", "prn_beta")
+	_, q := f.mint(t, owner, "acme", nil)
+	_, acc := f.accept(t, owner, "acme", q, "k-receipt")
+	if acc == nil {
+		t.Fatal("accept failed")
+	}
+	id := acc.InvocationID
+	get := func(u *auth.User, tenant, inv string) *httptest.ResponseRecorder {
+		return f.call(t, u, "GET", "/api/v1/commerce/tenants/"+tenant+"/invocations/"+inv+"/receipt", nil,
+			map[string]string{"tenant": tenant, "invocation_id": inv}, f.h.GetCommerceReceipt)
+	}
+	rec := get(owner, "acme", id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("own receipt: %d %s", rec.Code, rec.Body.String())
+	}
+	var rc commerce.Receipt
+	if err := json.Unmarshal(rec.Body.Bytes(), &rc); err != nil {
+		t.Fatal(err)
+	}
+	if rc.InvocationID != id || rc.Phase != commerce.PhaseAccepted || rc.QuoteDigest == "" || rc.PolicyDecision.Status != commerce.PolicyNone {
+		t.Fatalf("receipt = %+v", rc)
+	}
+	for _, banned := range []string{"idempotency_key", "args_digest", "provider_operation_key"} {
+		if strings.Contains(rec.Body.String(), banned) {
+			t.Errorf("receipt leaks %s", banned)
+		}
+	}
+	foreign := get(other, "acme", id)         // no access to the tenant
+	crossTenant := get(other, "beta", id)     // real id, other tenant
+	missing := get(owner, "acme", "inv_nope") // no such id
+	for name, r := range map[string]*httptest.ResponseRecorder{"foreign": foreign, "cross": crossTenant, "missing": missing} {
+		if r.Code != http.StatusNotFound || r.Body.String() != missing.Body.String() {
+			t.Errorf("%s: %d %q differs from missing %q", name, r.Code, r.Body.String(), missing.Body.String())
+		}
+	}
+}
+
+func TestCommerceInvocationReads_CarryNoExternalRef(t *testing.T) {
+	f := newCommerceFixture(t)
+	f.publish(t)
+	owner := tenantUser(t, "acme-owner", "acme", "prn_owner")
+	_, q := f.mint(t, owner, "acme", nil)
+	_, acc := f.accept(t, owner, "acme", q, "k-hygiene")
+	if acc == nil {
+		t.Fatal("accept failed")
+	}
+	for _, rec := range []*httptest.ResponseRecorder{
+		f.call(t, owner, "GET", "/api/v1/commerce/tenants/acme/invocations", nil, map[string]string{"tenant": "acme"}, f.h.ListCommerceInvocations),
+		f.call(t, owner, "GET", "/api/v1/commerce/tenants/acme/invocations/"+acc.InvocationID, nil,
+			map[string]string{"tenant": "acme", "invocation_id": acc.InvocationID}, f.h.GetCommerceInvocation),
+	} {
+		for _, banned := range []string{"external_ref", "\"args\"", "\"result\"", "payment_proof", "authorization_id", "capture_id"} {
+			if strings.Contains(rec.Body.String(), banned) {
+				t.Errorf("read leaks %s: %s", banned, rec.Body.String())
+			}
+		}
+	}
+}
