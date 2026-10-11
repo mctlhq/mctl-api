@@ -143,8 +143,6 @@ CREATE INDEX IF NOT EXISTS commerce_invocations_open
 -- the store, so every commerce route answers 503: deliberate, because
 -- accepting paid calls without the binding is the worse failure.
 ALTER TABLE commerce_invocations ADD COLUMN IF NOT EXISTS dispatch_deadline TIMESTAMPTZ;
--- An earlier draft of this change created a global index under this name.
-DROP INDEX IF EXISTS commerce_invocations_approval;
 CREATE UNIQUE INDEX IF NOT EXISTS commerce_invocations_tenant_approval
     ON commerce_invocations (tenant_id, approval_id) WHERE approval_id <> '';
 
