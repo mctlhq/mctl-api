@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.80.0](https://github.com/mctlhq/mctl-api/compare/4.79.0...4.80.0) (2026-10-11)
+
+
+### Features
+
+* **agents:** issue-569-feat-commerce-receipt-read-and-mcp-tools ([757797a](https://github.com/mctlhq/mctl-api/commit/757797ab451addf30c24c15b523500c8d0f21a5f))
+* **agents:** issue-569-feat-commerce-receipt-read-and-mcp-tools ([f8ee316](https://github.com/mctlhq/mctl-api/commit/f8ee3166c90a61c8d3b794682a680d9ecc7fbb89))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-569-feat-commerce-receipt-read-and-mcp-tools ([393fa36](https://github.com/mctlhq/mctl-api/commit/393fa36478dd72ef279d8b93be4921170bee6578))
+
 ## [4.79.0](https://github.com/mctlhq/mctl-api/compare/4.78.0...4.79.0) (2026-10-11)
 
 
