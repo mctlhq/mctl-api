@@ -750,20 +750,26 @@ type ReserveResult struct {
 	Replayed    bool         `json:"replayed"`
 }
 
+// reserveRefusals are the reasons Reserve itself refuses with, each with the
+// error a retry answers. It is the one place this vocabulary lives: the
+// handler's error envelope and refusedError both read it.
+var reserveRefusals = map[string]error{
+	ReasonBudgetExhausted:      ErrBudgetExhausted,
+	ReasonPaymentDenied:        ErrPaymentDenied,
+	ReasonQuoteExpired:         ErrQuoteExpired,
+	ReasonCurrencyMismatch:     ErrCurrencyMismatch,
+	ReasonFundsModeUnavailable: ErrFundsModeUnavailable,
+}
+
+// IsReserveRefusal reports whether reason is one Reserve refuses with, as
+// opposed to a reason some other caller stamped on a refused row.
+func IsReserveRefusal(reason string) bool { return reserveRefusals[reason] != nil }
+
 // refusedError maps a refused row back to the error its refusal was, so a
 // retry of Reserve answers the same thing the first call did.
 func refusedError(reason string) error {
-	switch reason {
-	case ReasonBudgetExhausted:
-		return ErrBudgetExhausted
-	case ReasonPaymentDenied:
-		return ErrPaymentDenied
-	case ReasonQuoteExpired:
-		return ErrQuoteExpired
-	case ReasonCurrencyMismatch:
-		return ErrCurrencyMismatch
-	case ReasonFundsModeUnavailable:
-		return ErrFundsModeUnavailable
+	if err := reserveRefusals[reason]; err != nil {
+		return err
 	}
 	return fmt.Errorf("%w: %s", ErrTerminal, PhaseRefused)
 }
@@ -918,7 +924,7 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 // and reports the denial; still unknown leaves everything as it was. Until
 // this resolves, applyTransition refuses to dispatch the row.
 func (s *Store) resolveUnknownHold(ctx context.Context, tx pgx.Tx, in ReserveInput, cur *Invocation, rsv *Reservation, res *ReserveResult, refusal *error) error {
-	authID, denied, err := s.resolveAuthorization(ctx, tx, cur, rsv)
+	_, denied, err := s.resolveAuthorization(ctx, tx, cur, rsv) // the id is written onto rsv
 	if err != nil {
 		return err
 	}
@@ -953,7 +959,6 @@ func (s *Store) resolveUnknownHold(ctx context.Context, tx pgx.Tx, in ReserveInp
 		cur.InvocationID, PhaseReserved, in.Actor, "authorization resolved by status lookup", now); err != nil {
 		return fmt.Errorf("commerce: insert transition: %w", err)
 	}
-	_ = authID // already written onto rsv by resolveAuthorization
 	*res = ReserveResult{Invocation: inv, Reservation: rsv, Replayed: true}
 	return nil
 }
@@ -1276,7 +1281,10 @@ func (s *Store) ExpireStale(ctx context.Context, actor string, limit int) (*Expi
 			}
 			refs = append(refs, r)
 		}
-		return refs, rows.Err()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("commerce: list stale: %w", err)
+		}
+		return refs, nil
 	}
 	accepted, err := list(`SELECT tenant_id, invocation_id FROM commerce_invocations
 		WHERE phase = $3 AND quote_expires_at < $1 ORDER BY quote_expires_at LIMIT $2`, PhaseAccepted)

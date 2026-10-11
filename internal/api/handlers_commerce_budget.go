@@ -160,17 +160,6 @@ func (h *Handlers) moneyActor(w http.ResponseWriter, r *http.Request) (userID, a
 	return user.ID, actor, tenant, chi.URLParam(r, "invocation_id"), true
 }
 
-// reserveRefusalCodes are the reasons reserve itself refuses with; they are
-// the only reason codes the reserve error envelope carries, so it stays
-// inside the CommerceError.code vocabulary of the OpenAPI document.
-var reserveRefusalCodes = map[string]bool{
-	commerce.ReasonBudgetExhausted:      true,
-	commerce.ReasonCurrencyMismatch:     true,
-	commerce.ReasonQuoteExpired:         true,
-	commerce.ReasonPaymentDenied:        true,
-	commerce.ReasonFundsModeUnavailable: true,
-}
-
 // ReserveCommerceInvocation is step 8 of ADR 020 sec. 7: in one transaction
 // it compares committed plus held against the limit, holds the quoted
 // amount and authorizes payment. A denial is 422 with the reason and the
@@ -188,7 +177,7 @@ func (h *Handlers) ReserveCommerceInvocation(w http.ResponseWriter, r *http.Requ
 		}
 		h.logAudit(r, audit.Entry{UserID: userID, Operation: "commerce-reserve", Status: "denied",
 			RiskLevel: string(operations.RiskHigh), Parameters: params, Message: err.Error()})
-		if res != nil && res.Invocation != nil && res.Invocation.Phase == commerce.PhaseRefused && reserveRefusalCodes[res.Invocation.ReasonCode] {
+		if res != nil && res.Invocation != nil && res.Invocation.Phase == commerce.PhaseRefused && commerce.IsReserveRefusal(res.Invocation.ReasonCode) {
 			// Every denial reserve commits is final: the row is refused
 			// with its reason, and a retry answers the same. 422 for all
 			// of them, including quote-expired, which elsewhere (accept)
