@@ -126,13 +126,29 @@ becomes spendable because time passed.
 | `GET /api/v1/commerce/terms`, `GET …/terms/{id}/versions/{v}` | any authenticated caller |
 | `GET /api/v1/commerce/invocations/overdue` | platform admin |
 | `POST /api/v1/commerce/tenants/{tenant}/quotes`, `GET …/quotes/{id}` | tenant owner or admin, resolved principal |
-| `POST /api/v1/commerce/tenants/{tenant}/invocations`, `GET …/invocations`, `GET …/invocations/{id}`, `GET …/invocations/{id}/transitions` | tenant owner or admin, resolved principal |
+| `POST /api/v1/commerce/tenants/{tenant}/invocations`, `GET …/invocations`, `GET …/invocations/{id}`, `GET …/invocations/{id}/receipt`, `GET …/invocations/{id}/transitions` | tenant owner or admin, resolved principal |
 | `POST /api/v1/commerce/tenants/{tenant}/invocations/{id}/transitions` | platform admin (the gateway, C4); a tenant never moves its own charge. Refuses `to_phase` of `reserved`, `dispatching`, `released` or `finalized` with 400 naming the owning endpoint below |
 | `PUT /api/v1/commerce/tenants/{tenant}/budget` | platform admin, audited at high risk; a limit is granted, never self-granted |
 | `GET /api/v1/commerce/tenants/{tenant}/budget`, `GET …/budget/changes`, `POST …/budget/precheck` | tenant owner or admin, resolved principal |
 | `POST …/invocations/{id}/reserve`, `POST …/invocations/{id}/dispatch`, `POST …/invocations/{id}/finalize`, `POST …/invocations/{id}/release` | platform admin (the gateway, C4) |
 | `GET /api/v1/commerce/dispatch-keys` | any authenticated caller; public keys only |
 | `POST /api/v1/commerce/reconcile/expired` | platform admin (the reconciler), audited |
+
+## Receipts
+
+`GET …/invocations/{id}/receipt` returns the ADR 020 sec. 12 projection of one
+invocation: ids, terms version, quote digest, price in integer minor units,
+the five facts, phase, reason code, timestamps and a `policy_decision`
+reference (`none`, `recorded`, `missing` or `unavailable`) read from the
+action approval named by `approval_id`. `unavailable` means the approval could
+not be read, never that there is none. The receipt is an explicit allowlist
+type and never carries `idempotency_key`, `args_digest`,
+`provider_operation_key`, reservation `authorization_id` or `capture_id`,
+arguments, results, payment proofs or `external_ref` contents. A foreign
+tenant and a missing id answer the same 404 `not found`.
+
+The MCP tools `mctl_get_commerce_budget`, `mctl_list_commerce_invocations` and
+`mctl_get_commerce_receipt` read these routes with the caller's own token.
 
 Reason codes on refusals are those of ADR 020 sec. 13 (`identity-unresolved`,
 `commerce-terms-unknown`, `quote-expired`, `quote-stale`, `quote-mismatch`,

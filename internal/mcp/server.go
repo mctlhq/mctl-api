@@ -280,6 +280,11 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListWorkItemExecutionRequests())
 	srv.AddTool(s.toolRequestWorkItemExecution())
 
+	// Tenant-scoped commerce reads (mctl-api#569).
+	srv.AddTool(s.toolGetCommerceBudget())
+	srv.AddTool(s.toolListCommerceInvocations())
+	srv.AddTool(s.toolGetCommerceReceipt())
+
 	// Cloudflare MCP portal (dispatch only — no Cloudflare credential here).
 	srv.AddTool(s.toolTriggerPortalServerAuthApply())
 
