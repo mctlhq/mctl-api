@@ -72,8 +72,8 @@ type ParameterDef struct {
 	Enum        []string `json:"enum,omitempty"`
 	Pattern     string   `json:"pattern,omitempty"`
 	// MaxLength bounds the value in bytes. Checked before Enum and Pattern.
-	MaxLength int  `json:"maxLength,omitempty"`
-	Secret    bool `json:"secret,omitempty"` // true = never echo in logs/responses
+	MaxLength int32 `json:"maxLength,omitempty"`
+	Secret    bool  `json:"secret,omitempty"` // true = never echo in logs/responses
 	// OmitWhenEmpty marks an optional parameter whose absence must reach Argo
 	// as an absence, not as "". ApplyDefaults normally fills every missing
 	// parameter with Default, and Executor.Submit forwards the whole map, so a
@@ -246,7 +246,7 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 		if !exists || val == "" {
 			continue
 		}
-		if p.MaxLength > 0 && len(val) > p.MaxLength {
+		if p.MaxLength > 0 && len(val) > int(p.MaxLength) {
 			errors = append(errors, fmt.Sprintf("%s: must be at most %d bytes", p.Name, p.MaxLength))
 			continue
 		}
@@ -412,8 +412,8 @@ var freeTextParameters = map[string]map[string]string{
 }
 
 // unconstrainedParameters lists parameters exempt from Enum/Pattern.
-var unconstrainedParameters = map[string]map[string]string{ //nolint:gosec // parameter names and reasons, not credentials
-	"deploy-service": {"secret_env_vars": "validated by splitSecretParams; never enters the Workflow spec"},
+var unconstrainedParameters = map[string]map[string]string{
+	"deploy-service": {"secret_env_vars": "validated by splitSecretParams; never enters the Workflow spec"}, //nolint:gosec // G101: a parameter name, not a credential
 }
 
 var builtinOperations = []Operation{
