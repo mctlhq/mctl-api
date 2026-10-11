@@ -131,6 +131,9 @@ func TestRequestWorkItemExecutionRefusesBadArgumentsWithoutCalling(t *testing.T)
 		"zero version":       func(a map[string]any) { a["expected_state_version"] = float64(0) },
 		"dot-dot from":       func(a map[string]any) { a["resumed_from_execution_id"] = ".." },
 		"fractional version": func(a map[string]any) { a["expected_state_version"] = 1.5 },
+		"numeric from":       func(a map[string]any) { a["resumed_from_execution_id"] = float64(5) },
+		"null from":          func(a map[string]any) { a["resumed_from_execution_id"] = nil },
+		"numeric work item":  func(a map[string]any) { a["work_item_id"] = float64(1) },
 		"no key":             func(a map[string]any) { delete(a, "idempotency_key") },
 		"blank key":          func(a map[string]any) { a["idempotency_key"] = " " },
 	} {
@@ -228,5 +231,32 @@ func TestWorkItemToolsForwardTheCallersToken(t *testing.T) {
 		if got := (*calls)[len(*calls)-1].auth; got != "Bearer callers-token" {
 			t.Errorf("%s: Authorization = %q, want the caller's token over the server's", tool.Name, got)
 		}
+	}
+}
+
+func TestWorkItemToolsRefuseNonStringOptionalIDs(t *testing.T) {
+	ts, calls := workItemBackend(t, http.StatusOK, `{}`)
+	for _, bad := range []any{float64(5), true, nil, map[string]any{}, []any{"cs_1"}} {
+		for tool, key := range map[string]string{"snapshot_id": "snapshot_id", "request_id": "request_id"} {
+			fn := (*Server).toolListWorkItemSnapshots
+			if tool == "request_id" {
+				fn = (*Server).toolListWorkItemExecutionRequests
+			}
+			r := callRoadmapTool(t, fn, ts.URL, map[string]any{"work_item_id": "wi_1", key: bad})
+			if !r.IsError || !strings.Contains(resultText(t, r), key) {
+				t.Errorf("%s=%v accepted or unnamed", key, bad)
+			}
+		}
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("refused calls reached the API: %v", *calls)
+	}
+	for _, empty := range []map[string]any{{"work_item_id": "wi_1"}, {"work_item_id": "wi_1", "snapshot_id": ""}} {
+		if r := callRoadmapTool(t, (*Server).toolListWorkItemSnapshots, ts.URL, empty); r.IsError {
+			t.Fatal(resultText(t, r))
+		}
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("want 2 list calls, got %v", *calls)
 	}
 }
