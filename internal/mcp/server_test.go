@@ -1472,6 +1472,42 @@ func TestRemoveCustomDomain_DeletesRegistryRow(t *testing.T) {
 	}
 }
 
+// TestRemoveCustomDomain_FallbackNormalizesHostname: the legacy fallback
+// submits a caller-supplied hostname to remove-custom-domain, whose domain
+// parameter only accepts lowercase with no root dot.
+func TestRemoveCustomDomain_FallbackNormalizesHostname(t *testing.T) {
+	var got map[string]string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/domains":
+			_, _ = w.Write([]byte(`{"domains":[]}`))
+		case strings.Contains(r.URL.Path, "/operations/remove-custom-domain/execute"):
+			_ = json.NewDecoder(r.Body).Decode(&got)
+			_, _ = w.Write([]byte(`{"workflowName":"wf"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	result, err := callToolRemoveCustomDomain(t, backend.URL, map[string]any{
+		"team":    "labs",
+		"service": "svc",
+		"domain":  " Legacy.Example.COM. ",
+		"confirm": "yes",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a successful result, got error content: %+v", result.Content)
+	}
+	if got["domain"] != "legacy.example.com" {
+		t.Fatalf("submitted domain = %q, want legacy.example.com (params %v)", got["domain"], got)
+	}
+}
+
 // TestRemoveCustomDomain_FallsBackForUnregisteredHostname pins the legacy
 // fallback: when the domains list has no matching row (or is empty), the
 // tool must still fall back to the operations execute path so a

@@ -1380,9 +1380,9 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 			if err := json.Unmarshal(listBody, &listResp); err != nil {
 				listWarn = fmt.Errorf("parse domains list: %w", err)
 			} else {
-				wantDomain := strings.TrimSuffix(domain, ".")
+				wantDomain := normalizeDomain(domain)
 				for _, d := range listResp.Domains {
-					if strings.EqualFold(strings.TrimSuffix(d.Domain, "."), wantDomain) {
+					if normalizeDomain(d.Domain) == wantDomain {
 						delBody, delErr := s.apiDelete(ctx, "/api/v1/domains/"+d.ID+"?team="+url.QueryEscape(team))
 						if delErr != nil {
 							return mcplib.NewToolResultError(fmt.Sprintf("Failed to remove domain: %v", delErr)), nil
@@ -1402,10 +1402,13 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 		// unparseable body) silently takes the legacy-fallback path, tears
 		// down ingress, and leaves a real registry row behind pointing at a
 		// domain that no longer resolves.
+		// The hostname is caller-supplied; normalize it so a legacy host
+		// spelled with capitals or a root dot still passes
+		// remove-custom-domain's lowercase-only pattern.
 		wfParams := map[string]string{
 			"team_name":    team,
 			"service_name": service,
-			"domain":       domain,
+			"domain":       normalizeDomain(domain),
 		}
 		body, err := s.apiPost(ctx, "/api/v1/operations/remove-custom-domain/execute", wfParams)
 		if err != nil {
@@ -1418,6 +1421,14 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 	}
 
 	return tool, handler
+}
+
+// normalizeDomain mirrors normalizeHostname in internal/api: lowercase,
+// trim surrounding whitespace, strip a root dot. Every hostname this
+// package submits to a domain workflow goes through it, because the
+// registry patterns on those parameters accept only that form.
+func normalizeDomain(domain string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
 }
 
 func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
@@ -1496,15 +1507,13 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 			// a distinct in-progress status or a trigger timestamp on the
 			// row — which is more than this fix is scoped to do.
 			if json.Unmarshal(vBody, &vResult) == nil && vResult.Verified && d.Status != domains.StatusActive { //nolint:nilerr
-				// d.Domain is the raw store value; the registry pattern on
-				// add-custom-domain's domain is lowercase with no root dot,
-				// so a legacy row must be normalized the way the API's
-				// remove path does, or it verifies and then never gets an
-				// ingress.
+				// d.Domain is the raw store value; a legacy row may still
+				// carry capitals or a root dot that add-custom-domain's
+				// pattern rejects.
 				wfParams := map[string]string{
 					"team_name":    team,
 					"service_name": service,
-					"domain":       strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d.Domain)), "."),
+					"domain":       normalizeDomain(d.Domain),
 				}
 				wfBody, wfErr := s.apiPost(ctx, "/api/v1/operations/add-custom-domain/execute", wfParams)
 				if wfErr != nil {
