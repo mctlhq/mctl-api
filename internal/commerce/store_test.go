@@ -482,6 +482,7 @@ func TestTransitionsAreCheckedAndAppendOnly(t *testing.T) {
 	qty = int64(1)
 	for _, bad := range []TransitionInput{
 		{ExpectedPhase: PhaseAccepted, ToPhase: PhaseRefused, ReasonCode: ReasonQuoteExpired, ChargeStatus: ChargeReserved},
+		{ExpectedPhase: PhaseAccepted, ToPhase: PhaseRefused, ReasonCode: ReasonQuoteExpired, PaymentStatus: PaymentCaptured},
 		{ExpectedPhase: PhaseAccepted, ToPhase: PhaseReserved, ReservationDeadline: &deadline, ChargeStatus: ChargeReserved},
 		{ExpectedPhase: PhaseReserved, ToPhase: PhaseReleased, ReasonCode: ReasonPaymentDenied, ChargeStatus: ChargeCaptured},
 		{ExpectedPhase: PhaseReserved, ToPhase: PhaseReleased, ReasonCode: ReasonPaymentDenied, PaymentStatus: PaymentCaptured},

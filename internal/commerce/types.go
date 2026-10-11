@@ -692,6 +692,9 @@ func checkFactCombination(phase, charge, payment string) error {
 		if charge != ChargeNone {
 			return invalid("refused requires charge_status none, got %q", charge)
 		}
+		if payment == PaymentCaptured {
+			return invalid("refused cannot carry payment_status captured")
+		}
 	case PhaseReleased:
 		if charge == ChargeCaptured {
 			return invalid("released cannot keep charge_status captured")

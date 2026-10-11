@@ -95,8 +95,8 @@ refused rather than stored. The constraints are added by name on every start
 build gets them too. Combinations the phase implies are closed as well, on
 the values about to be stored (an omitted fact inherits the row's value and
 must satisfy the same rule): a
-`refused` row holds no charge, a `released` row cannot keep a `captured`
-charge or payment, `outcome_unknown` cannot carry a known outcome, and
+`refused` row holds no charge and no `captured` payment, a `released` row
+cannot keep a `captured` charge or payment, `outcome_unknown` cannot carry a known outcome, and
 a `finalized` row cannot pair `captured` with a `denied`/`voided` payment or
 `released` with a `captured` one. `finalized_at` is set only on `finalized`;
 refused and released rows carry their moment in `updated_at`. `finalized` requires
