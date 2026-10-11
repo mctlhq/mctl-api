@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/audit"
@@ -150,6 +151,9 @@ func TestAbandonDevLoopWorkflow_RunningIsSignalledWithCallerAsActor(t *testing.T
 	if e.Parameters["abandoned_by"] != "tester" || e.Parameters["reason"] != "superseded by mctl-gitops#1363" {
 		t.Errorf("unexpected audit parameters: %+v", e.Parameters)
 	}
+	if e.Parameters["run_id"] != "run-1" || !strings.Contains(e.Message, "run-1") {
+		t.Errorf("audit entry should name the signalled run: %+v %q", e.Parameters, e.Message)
+	}
 }
 
 // A retry against an execution that has already ended answers with its final
@@ -173,6 +177,18 @@ func TestAbandonDevLoopWorkflow_FinishedExecutionIsReportedNotSignalled(t *testi
 	}
 	if _, ok := got["signalled"]; ok {
 		t.Errorf("a finished execution's answer must not claim a signal: %+v", got)
+	}
+	// The signalled path's run_id lives in its own map; the shared audit
+	// parameters must not have picked it up.
+	entries := logger.List(10)
+	if len(entries) != 1 {
+		t.Fatalf("expected one audit entry, got %+v", entries)
+	}
+	if _, ok := entries[0].Parameters["run_id"]; ok {
+		t.Errorf("a not-signalled audit entry must not carry run_id: %+v", entries[0].Parameters)
+	}
+	if want := "not signalled: already finished (run run-1, status Completed)"; entries[0].Message != want {
+		t.Errorf("audit message: got %q, want %q", entries[0].Message, want)
 	}
 }
 
@@ -247,7 +263,8 @@ func TestAbandonDevLoopWorkflow_SignalNotFoundIsAnsweredFromASecondDescribe(t *t
 		"still reported running": {after: &temporalclient.DevLoopExecution{Status: "Running", RunID: "run-1"}, wantCode: http.StatusBadGateway},
 		// The described run closed and a new run took the workflow id: the
 		// pinned signal answered NotFound, and the new run is not abandoned.
-		"replaced by a new run": {after: &temporalclient.DevLoopExecution{Status: "Running", RunID: "run-2"}, wantCode: http.StatusConflict},
+		"replaced by a new run": {after: &temporalclient.DevLoopExecution{Status: "Running", RunID: "run-2"}, wantCode: http.StatusConflict,
+			wantAudit: "described run run-1 ended; new run run-2 not signalled"},
 		"gone entirely": {afterErr: serviceerror.NewNotFound("workflow not found"), wantCode: http.StatusNotFound,
 			wantAudit: "execution vanished between describe and signal"},
 		"second describe fails": {afterErr: serviceerror.NewUnavailable("unreachable"), wantCode: http.StatusBadGateway},
@@ -278,6 +295,11 @@ func TestAbandonDevLoopWorkflow_SignalNotFoundIsAnsweredFromASecondDescribe(t *t
 			if tc.wantAudit != "" {
 				if entries := logger.List(10); len(entries) != 1 || entries[0].Message != tc.wantAudit {
 					t.Errorf("audit: got %+v, want message %q", entries, tc.wantAudit)
+				}
+			}
+			for _, e := range logger.List(10) {
+				if _, ok := e.Parameters["run_id"]; ok {
+					t.Errorf("only the signalled audit entry carries run_id: %+v", e)
 				}
 			}
 			if fake.describeExecCalls != 2 {
