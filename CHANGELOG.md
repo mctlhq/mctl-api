@@ -1,5 +1,15 @@
 # Changelog
 
+## [4.76.1](https://github.com/mctlhq/mctl-api/compare/4.76.0...4.76.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* **api:** check preview-delete's composed name, widen preview_id ([d227fa2](https://github.com/mctlhq/mctl-api/commit/d227fa29e448a42ac41bca9582364b41be663071))
+* **api:** keep domain teardown working for reserved service pairs ([691b02a](https://github.com/mctlhq/mctl-api/commit/691b02aa80db37efff4b87669f50941b83ded5c2))
+* **api:** verify service ownership and reserve platform app names ([69c4f86](https://github.com/mctlhq/mctl-api/commit/69c4f86ac3de266fdaaf537fa863d2c319d61885))
+* **api:** verify service ownership and reserve platform app names ([1fbbc2e](https://github.com/mctlhq/mctl-api/commit/1fbbc2e6d2410cb1a7d3e8f19f5786a023163b0a))
+
 ## [4.76.0](https://github.com/mctlhq/mctl-api/compare/4.75.0...4.76.0) (2026-10-10)
 
 
