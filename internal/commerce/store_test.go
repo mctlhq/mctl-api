@@ -484,6 +484,7 @@ func TestTransitionsAreCheckedAndAppendOnly(t *testing.T) {
 		{ExpectedPhase: PhaseAccepted, ToPhase: PhaseRefused, ReasonCode: ReasonQuoteExpired, ChargeStatus: ChargeReserved},
 		{ExpectedPhase: PhaseAccepted, ToPhase: PhaseReserved, ReservationDeadline: &deadline, ChargeStatus: ChargeReserved},
 		{ExpectedPhase: PhaseReserved, ToPhase: PhaseReleased, ReasonCode: ReasonPaymentDenied, ChargeStatus: ChargeCaptured},
+		{ExpectedPhase: PhaseReserved, ToPhase: PhaseReleased, ReasonCode: ReasonPaymentDenied, PaymentStatus: PaymentCaptured},
 	} {
 		bad.InvocationID, bad.Actor = inv3.InvocationID, "a"
 		_, err := s.Transition(ctx, "acme", bad)
@@ -511,7 +512,13 @@ func TestTransitionsAreCheckedAndAppendOnly(t *testing.T) {
 			t.Fatalf("%s: %v", step.ToPhase, err)
 		}
 	}
-	// The row is dispatched: explicit contradictory pairs on finalize are refused.
+	// The row is dispatched: naming a known outcome on the outcome_unknown
+	// edge is a contradiction, not a value to overwrite.
+	if _, err := s.Transition(ctx, "acme", TransitionInput{InvocationID: inv3.InvocationID, Actor: "a",
+		ExpectedPhase: PhaseDispatched, ToPhase: PhaseOutcomeUnknown, ExecutionOutcome: OutcomeSucceeded}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("outcome_unknown with succeeded accepted: %v", err)
+	}
+	// Explicit contradictory pairs on finalize are refused.
 	for _, bad := range []TransitionInput{
 		{ChargeStatus: ChargeCaptured, PaymentStatus: PaymentDenied},
 		{ChargeStatus: ChargeCaptured, PaymentStatus: PaymentVoided},

@@ -665,6 +665,12 @@ func (in TransitionInput) validate() error {
 			return invalid("finalized requires usage_quantity")
 		}
 	}
+	// outcome_unknown records that the outcome is unknown; a caller who
+	// names a different outcome on this edge is contradicting the phase, and
+	// the contradiction is refused rather than quietly discarded.
+	if in.ToPhase == PhaseOutcomeUnknown && in.ExecutionOutcome != "" && in.ExecutionOutcome != OutcomeUnknown {
+		return invalid("outcome_unknown cannot carry execution_outcome %s", in.ExecutionOutcome)
+	}
 	if in.ToPhase == PhaseReserved && in.ReservationDeadline == nil {
 		return invalid("reserved requires reservation_deadline")
 	}
@@ -689,6 +695,9 @@ func checkFactCombination(phase, charge, payment string) error {
 	case PhaseReleased:
 		if charge == ChargeCaptured {
 			return invalid("released cannot keep charge_status captured")
+		}
+		if payment == PaymentCaptured {
+			return invalid("released cannot carry payment_status captured")
 		}
 	case PhaseFinalized:
 		if charge == ChargeCaptured && (payment == PaymentDenied || payment == PaymentVoided) {
