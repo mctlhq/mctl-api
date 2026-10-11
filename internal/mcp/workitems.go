@@ -60,7 +60,7 @@ func (s *Server) toolGetWorkItem() (mcplib.Tool, server.ToolHandlerFunc) {
 		workItemIDArg,
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		id, errResult := requiredPathArg(req, "work_item_id")
+		id, errResult := requiredIDArg(req, "work_item_id")
 		if errResult != nil {
 			return errResult, nil
 		}
@@ -80,7 +80,7 @@ func (s *Server) toolListWorkItemExecutions() (mcplib.Tool, server.ToolHandlerFu
 		workItemIDArg,
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		id, errResult := requiredPathArg(req, "work_item_id")
+		id, errResult := requiredIDArg(req, "work_item_id")
 		if errResult != nil {
 			return errResult, nil
 		}
@@ -103,7 +103,7 @@ func (s *Server) toolListWorkItemSnapshots() (mcplib.Tool, server.ToolHandlerFun
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		id, errResult := requiredPathArg(req, "work_item_id")
+		id, errResult := requiredIDArg(req, "work_item_id")
 		if errResult != nil {
 			return errResult, nil
 		}
@@ -134,7 +134,7 @@ func (s *Server) toolListWorkItemExecutionRequests() (mcplib.Tool, server.ToolHa
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		id, errResult := requiredPathArg(req, "work_item_id")
+		id, errResult := requiredIDArg(req, "work_item_id")
 		if errResult != nil {
 			return errResult, nil
 		}
@@ -186,7 +186,7 @@ Idempotent by idempotency_key: repeating the same call with the same key returns
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		id, errResult := requiredPathArg(req, "work_item_id")
+		id, errResult := requiredIDArg(req, "work_item_id")
 		if errResult != nil {
 			return errResult, nil
 		}
@@ -230,7 +230,12 @@ var workItemIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 // idArg returns a trimmed id argument of the expected shape, which is also
 // safe as one path segment, or "" with an error result.
 func idArg(req mcplib.CallToolRequest, name string, required bool) (string, *mcplib.CallToolResult) {
-	v := strings.TrimSpace(stringArg(req, name))
+	raw, present := req.GetArguments()[name]
+	str, isString := raw.(string)
+	if present && !isString {
+		return "", mcplib.NewToolResultError(name + " must be a string id")
+	}
+	v := strings.TrimSpace(str)
 	switch {
 	case v == "" && required:
 		return "", mcplib.NewToolResultError("missing required argument: " + name)
@@ -240,8 +245,8 @@ func idArg(req mcplib.CallToolRequest, name string, required bool) (string, *mcp
 	return v, nil
 }
 
-// requiredPathArg is idArg for a required argument.
-func requiredPathArg(req mcplib.CallToolRequest, name string) (string, *mcplib.CallToolResult) {
+// requiredIDArg is idArg for a required argument.
+func requiredIDArg(req mcplib.CallToolRequest, name string) (string, *mcplib.CallToolResult) {
 	return idArg(req, name, true)
 }
 
