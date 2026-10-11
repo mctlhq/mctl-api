@@ -48,6 +48,9 @@ import (
 // "kube-"), "my-system" is reserved (suffix "-system"), while "team-kube" or
 // "systems" are not. The wildcards only match at the stated end.
 //
+// "platform" is the team mctl-gitops config/image-names.txt grants the
+// platform's own images to (mctl-gitops#1648), so it must never be a tenant.
+//
 // There is deliberately no admin bypass. The workflow's own check has none
 // either (reprovision=true does not skip it), so letting an admin past this
 // layer would only move the refusal back into the workflow.
@@ -64,6 +67,7 @@ var reservedTenantNames = map[string]struct{}{
 	"vault":              {},
 	"external-secrets":   {},
 	"monitoring":         {},
+	"platform":           {},
 	"temporal":           {},
 	"backstage":          {},
 	"minio":              {},

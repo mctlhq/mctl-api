@@ -46,6 +46,7 @@ var reservedCases = []struct {
 	{"vault", true, "exact"},
 	{"external-secrets", true, "exact"},
 	{"monitoring", true, "exact"},
+	{"platform", true, "exact"}, // image-names.txt team, mctl-gitops#1648
 	{"temporal", true, "exact"},
 	{"backstage", true, "exact"},
 	{"minio", true, "exact"},
@@ -116,7 +117,7 @@ var reservedCases = []struct {
 	{"kubernetes", false, "kube- needs the hyphen"},
 	{"team-argo", false, "argo is a prefix rule only"},
 	{"my-platform", false, "platform- is a prefix rule only"},
-	{"platform", false, "platform- needs the hyphen"},
+	{"platforms", false, "platform is exact, platform- needs the hyphen"},
 	{"mctlhq", false, "mctl- needs the hyphen"},
 	{"team-vault", false, "vault is a prefix rule only"},
 	{"system", false, "-system needs the hyphen"},
