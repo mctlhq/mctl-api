@@ -8,7 +8,7 @@ The contract is ADR 020 in `mctlhq/mctl-agents`
 (`docs/adr/020-capability-commerce-contract.md`); this document covers only
 what is specific to running the ledger in mctl-api.
 
-The ledger holds customer spend: commerce terms, quotes, invocation receipts
+The ledger holds customer spend: commerce terms, quotes, invocation records
 and their transition history. It is a sibling of the model-usage ledger
 (`docs/model-usage-ledger.md`), which holds platform expense. The two are
 never summed (ADR 020 sec. 1).
@@ -149,6 +149,10 @@ tenant and a missing id answer the same 404 `not found`.
 
 The MCP tools `mctl_get_commerce_budget`, `mctl_list_commerce_invocations` and
 `mctl_get_commerce_receipt` read these routes with the caller's own token.
+They normalize the tenant the way the routes do (trimmed and lowercased; it
+is an IdP group name, not a DNS label) and refuse only a value that cannot be
+one path segment. They also refuse a non-string filter instead of dropping it,
+and a `limit` outside the route's `1..500`, before calling the API.
 
 Reason codes on refusals are those of ADR 020 sec. 13 (`identity-unresolved`,
 `commerce-terms-unknown`, `quote-expired`, `quote-stale`, `quote-mismatch`,

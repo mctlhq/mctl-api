@@ -1083,7 +1083,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/CommerceIdentities'
         - type: object
-          description: The receipt. The five facts of ADR 020 sec. 1 are separate fields beside phase.
+          description: The invocation record, ledger fields included (the redacted receipt is CommerceReceipt). The five facts of ADR 020 sec. 1 are separate fields beside phase.
           properties:
             schema_version: {type: integer, enum: [1]}
             invocation_id: {type: string, description: 'inv_<ulid>'}
@@ -4737,7 +4737,7 @@ paths:
 
   /api/v1/commerce/tenants/{tenant}/invocations:
     get:
-      summary: List the tenant's invocation receipts
+      summary: List the tenant's invocation records
       tags: [Commerce]
       parameters:
         - {name: tenant, in: path, required: true, schema: {type: string}}
@@ -4818,14 +4818,14 @@ paths:
 
   /api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}:
     get:
-      summary: Read one invocation receipt
+      summary: Read one invocation record
       description: Ids, terms version, quote digest, the five facts, phase, reason code and timestamps. Never arguments, results or payment proofs.
       tags: [Commerce]
       parameters:
         - {name: tenant, in: path, required: true, schema: {type: string}}
         - {name: invocation_id, in: path, required: true, schema: {type: string}}
       responses:
-        '200': {description: The receipt, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceInvocation'}}}}
+        '200': {description: The invocation record, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceInvocation'}}}}
         '401': {description: Authentication required}
         '403': {description: Below the tenant role, or no canonical principal}
         '404': {description: No such invocation in this tenant}
@@ -5241,4 +5241,4 @@ tags:
   - name: Action Approvals
     description: actionapproval/v1 durable single-use approvals of runtime agent side effects (mctl-api#366)
   - name: Commerce
-    description: ADR 020 commerce ledger — terms, quotes, invocation receipts and history (mctl-api#547); tenant budgets, holds and the simulated PaymentAuthorizer (mctl-api#548)
+    description: ADR 020 commerce ledger — terms, quotes, invocation records, receipts and history (mctl-api#547); tenant budgets, holds and the simulated PaymentAuthorizer (mctl-api#548)

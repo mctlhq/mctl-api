@@ -19,9 +19,9 @@ import (
 	"math"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -34,7 +34,11 @@ import (
 
 const commerceReadNote = `Read-only. A tenant outside your authority answers "not found", exactly like a missing id. Amounts are integer minor units of the stated currency.`
 
-var commerceTenantPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+// commerceListLimitMax is the bound ListCommerceInvocations enforces; the
+// tool refuses a larger limit itself rather than relaying the API's 400.
+const commerceListLimitMax = 500
+
+var commerceLimitRange = "1.." + strconv.Itoa(commerceListLimitMax)
 
 var commerceTenantArg = mcplib.WithString("tenant",
 	mcplib.Required(),
@@ -42,15 +46,38 @@ var commerceTenantArg = mcplib.WithString("tenant",
 )
 
 // commerceTenantPath validates tenant and returns its commerce route prefix.
+// Tenants are IdP group names, not DNS labels, so it applies the API's own
+// normalization (normalizeIdentifier: trim and lowercase) and refuses only
+// what cannot be one path segment; anything else is the API's to answer.
 func commerceTenantPath(req mcplib.CallToolRequest) (string, *mcplib.CallToolResult) {
-	tenant := strings.TrimSpace(stringArg(req, "tenant"))
-	if tenant == "" {
-		return "", mcplib.NewToolResultError("missing required argument: tenant")
+	raw, errResult := strictStringArg(req, "tenant")
+	if errResult != nil {
+		return "", errResult
 	}
-	if !commerceTenantPattern.MatchString(tenant) {
-		return "", mcplib.NewToolResultError("tenant must be a lowercase DNS-safe name (letters, digits and '-')")
+	tenant := strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case tenant == "":
+		return "", mcplib.NewToolResultError("missing required argument: tenant")
+	case tenant == "." || tenant == ".." || strings.ContainsAny(tenant, `/\`) ||
+		strings.IndexFunc(tenant, unicode.IsControl) >= 0:
+		return "", mcplib.NewToolResultError("tenant must be one path segment: no '/', '\\', control characters, '.' or '..'")
 	}
 	return "/api/v1/commerce/tenants/" + url.PathEscape(tenant), nil
+}
+
+// strictStringArg is stringArg that refuses a present non-string value
+// instead of reading it as empty: for a filter, empty means "no filter", so
+// a mistyped value would widen the result while reporting success.
+func strictStringArg(req mcplib.CallToolRequest, name string) (string, *mcplib.CallToolResult) {
+	raw, present := req.GetArguments()[name]
+	if !present || raw == nil {
+		return "", nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return "", mcplib.NewToolResultError(name + " must be a string")
+	}
+	return s, nil
 }
 
 func (s *Server) toolGetCommerceBudget() (mcplib.Tool, server.ToolHandlerFunc) {
@@ -86,7 +113,7 @@ func (s *Server) toolListCommerceInvocations() (mcplib.Tool, server.ToolHandlerF
 		mcplib.WithString("phase", mcplib.Description("Only invocations in this phase, e.g. accepted, finalized, refused.")),
 		mcplib.WithString("since", mcplib.Description("Only invocations created at or after this RFC 3339 time.")),
 		mcplib.WithString("until", mcplib.Description("Only invocations created before this RFC 3339 time.")),
-		mcplib.WithNumber("limit", mcplib.Description("Maximum rows to return.")),
+		mcplib.WithNumber("limit", mcplib.Description("Maximum rows to return, "+commerceLimitRange+".")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		base, errResult := commerceTenantPath(req)
@@ -95,14 +122,18 @@ func (s *Server) toolListCommerceInvocations() (mcplib.Tool, server.ToolHandlerF
 		}
 		q := url.Values{}
 		for _, name := range []string{"capability_id", "phase", "since", "until"} {
-			if v := strings.TrimSpace(stringArg(req, name)); v != "" {
+			raw, errResult := strictStringArg(req, name)
+			if errResult != nil {
+				return errResult, nil
+			}
+			if v := strings.TrimSpace(raw); v != "" {
 				q.Set(name, v)
 			}
 		}
 		if raw, present := req.GetArguments()["limit"]; present && raw != nil {
 			n, ok := raw.(float64)
-			if !ok || n < 1 || n != math.Trunc(n) || n > 1<<31 {
-				return mcplib.NewToolResultError("limit must be a positive integer"), nil
+			if !ok || n < 1 || n != math.Trunc(n) || n > commerceListLimitMax {
+				return mcplib.NewToolResultError("limit must be an integer in " + commerceLimitRange), nil
 			}
 			q.Set("limit", strconv.FormatInt(int64(n), 10))
 		}
