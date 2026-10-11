@@ -248,11 +248,37 @@ func TestTeardownOperationsSkipReservedPairCheck(t *testing.T) {
 func TestPreviewIDIsPatterned(t *testing.T) {
 	reg := NewRegistry()
 	op, _ := reg.Get("preview-delete")
-	for id, ok := range map[string]bool{"abc123": true, "x": true, "../x": false, "a-b": false, "": false, "ABC": false} {
+	for id, ok := range map[string]bool{"abc123": true, "x": true, "pr-42": true, "../x": false, "-x": false, "": false, "ABC": false} {
 		body := map[string]string{"team_name": "acme", "component_name": "web", "preview_id": id}
 		errs := reg.ValidateInput(op, body)
 		if (len(errs) == 0) != ok {
 			t.Errorf("preview_id %q: errs=%v, want ok=%v", id, errs, ok)
+		}
+	}
+}
+
+// preview-delete skips the pair check but not the name it composes: the
+// hyphen joining component and preview_id is in neither parameter.
+func TestPreviewDeleteComposedNameIsChecked(t *testing.T) {
+	reg := NewRegistry()
+	op, _ := reg.Get("preview-delete")
+	for _, tc := range []struct {
+		component, id string
+		reserved      bool
+	}{
+		{"oidc", "zitadel", true}, // labs-oidc-zitadel
+		{"mctl", "api", false},    // labs-mctl-api is not platform-owned
+		{"web", "abc123", false},
+		{"oidc-zitadel", "abc123", false}, // the pair itself is exempt for teardown
+	} {
+		body := map[string]string{"team_name": "labs", "component_name": tc.component, "preview_id": tc.id}
+		errs := reg.ValidateInput(op, body)
+		got := strings.Contains(strings.Join(errs, ";"), "reserved for platform use")
+		if got != tc.reserved {
+			t.Errorf("%s + %s: refused=%v, want %v (%v)", tc.component, tc.id, got, tc.reserved, errs)
+		}
+		if err := checkServiceApplication(op, body); errors.Is(err, ErrReservedServiceApplication) != tc.reserved {
+			t.Errorf("%s + %s: Submit backstop err=%v, want reserved=%v", tc.component, tc.id, err, tc.reserved)
 		}
 	}
 }

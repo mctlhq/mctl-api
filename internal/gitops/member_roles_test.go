@@ -128,7 +128,7 @@ func TestMemberRoles_UnreadableIsNeverAnAnswer(t *testing.T) {
 	t.Run("stale checkout", func(t *testing.T) {
 		dir, r := setupTempRepo(t)
 		writeTenantYAML(t, dir, "erpact", erpactYAML)
-		r.lastSync.Store(time.Now().Add(-MemberRolesMaxAge - time.Minute).UnixNano())
+		r.lastSync.Store(time.Now().Add(-CheckoutMaxAge - time.Minute).UnixNano())
 		if got, err := r.MemberRoles("erpact", "alice"); err == nil {
 			t.Fatalf("a stale checkout answered %q", got)
 		}

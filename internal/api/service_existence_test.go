@@ -263,9 +263,12 @@ func TestServiceOps_GatingTableCoversRegistry(t *testing.T) {
 		}
 		f := newRoleFixture(t)
 		w := postAs(t, f.router, "/api/v1/operations/"+op.Name+"/execute", body, member("olga-owner"))
-		gated := w.Code == http.StatusNotFound
-		if gated == notGated[op.Name] {
-			t.Errorf("%s: status %d, gated=%v, want gated=%v; body %s", op.Name, w.Code, gated, !notGated[op.Name], w.Body.String())
+		want := http.StatusNotFound
+		if notGated[op.Name] {
+			want = http.StatusAccepted
+		}
+		if w.Code != want {
+			t.Errorf("%s: status %d, want %d (gated=%v); body %s", op.Name, w.Code, want, !notGated[op.Name], w.Body.String())
 		}
 	}
 	if seen < 8 {

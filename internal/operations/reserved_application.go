@@ -117,11 +117,32 @@ func reservedServiceApplicationMessage(team, component string) string {
 // Executor.Submit uses it as the backstop; Registry.ValidateInput applies the
 // same predicate for the clear 400.
 func checkServiceApplication(op Operation, params map[string]string) error {
-	team, component, ok := ServiceTarget(op, params)
-	if !ok || !ChecksReservedPair(op) || !IsReservedServiceApplication(team, component) {
-		return nil
+	if team, name, reserved := ReservedServiceTarget(op, params); reserved {
+		return fmt.Errorf("%w: %q", ErrReservedServiceApplication, echoTenantName(team+"-"+name))
 	}
-	return fmt.Errorf("%w: %q", ErrReservedServiceApplication, echoTenantName(team+"-"+component))
+	return nil
+}
+
+// ReservedServiceTarget reports whether op, called with params, names a
+// reserved <team>-<name>, and which name. For most operations name is the
+// service. Teardown operations skip the pair itself, but preview-delete is
+// still checked on the name it composes from the service and preview_id:
+// the hyphen between them is not in either parameter, so neither pattern
+// stops the pair from spelling a platform name. A real preview is never
+// named after a platform Application, so this refuses nothing legitimate.
+func ReservedServiceTarget(op Operation, params map[string]string) (team, name string, reserved bool) {
+	team, component, ok := ServiceTarget(op, params)
+	if !ok {
+		return "", "", false
+	}
+	if ChecksReservedPair(op) {
+		return team, component, IsReservedServiceApplication(team, component)
+	}
+	if id := params["preview_id"]; id != "" && declares(op, "preview_id") {
+		composed := component + "-" + id
+		return team, composed, IsReservedServiceApplication(team, composed)
+	}
+	return team, component, false
 }
 
 // TenantNameCollision returns the existing tenant a new tenant name would

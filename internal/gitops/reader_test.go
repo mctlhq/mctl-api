@@ -1577,7 +1577,7 @@ func TestTenantExists(t *testing.T) {
 	if _, err := r.TenantExists("billing"); err == nil || !strings.Contains(err.Error(), "never synced") {
 		t.Fatalf("a checkout that never synced must not answer: %v", err)
 	}
-	r.lastSync.Store(time.Now().Add(-TenantExistsMaxAge - time.Minute).UnixNano())
+	r.lastSync.Store(time.Now().Add(-CheckoutMaxAge - time.Minute).UnixNano())
 	if _, err := r.TenantExists("billing"); err == nil {
 		t.Fatal("a stale checkout must not answer")
 	}
@@ -1640,7 +1640,7 @@ func TestServiceExists(t *testing.T) {
 	if _, err := r.ServiceExists("labs", "web"); err == nil || !strings.Contains(err.Error(), "never synced") {
 		t.Fatalf("a checkout that never synced must not answer: %v", err)
 	}
-	r.lastSync.Store(time.Now().Add(-TenantExistsMaxAge - time.Minute).UnixNano())
+	r.lastSync.Store(time.Now().Add(-CheckoutMaxAge - time.Minute).UnixNano())
 	if _, err := r.ServiceExists("labs", "web"); err == nil {
 		t.Fatal("a stale checkout must not answer")
 	}

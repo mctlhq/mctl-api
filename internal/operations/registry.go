@@ -271,8 +271,8 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 	// platform-owned is refused for every operation that addresses one,
 	// except teardown (see teardownOperations).
 	// Executor.Submit repeats this check as well.
-	if team, component, ok := ServiceTarget(op, input); ok && ChecksReservedPair(op) && IsReservedServiceApplication(team, component) {
-		errors = append(errors, reservedServiceApplicationMessage(team, component))
+	if team, name, reserved := ReservedServiceTarget(op, input); reserved {
+		errors = append(errors, reservedServiceApplicationMessage(team, name))
 	}
 	return errors
 }
@@ -518,7 +518,7 @@ var builtinOperations = []Operation{
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "preview_id", Type: "string", Required: true, Description: "Preview ID returned by preview-deploy", Pattern: "^[a-z0-9]{1,16}$"},
+			{Name: "preview_id", Type: "string", Required: true, Description: "Preview ID returned by preview-deploy", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 		},
 	},
 	{

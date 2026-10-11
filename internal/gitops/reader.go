@@ -648,11 +648,6 @@ func (r *Reader) GetTenant(name string) (*Tenant, error) {
 // answer.
 const CheckoutMaxAge = 10 * time.Minute
 
-// TenantExistsMaxAge bounds how old the checkout may be when TenantExists
-// answers. The checkout refreshes every minute; an older last sync could miss
-// a tenant created since, so it is an error rather than "absent".
-const TenantExistsMaxAge = CheckoutMaxAge
-
 // tenantNameRE is create-tenant's tenant_name pattern (operations registry
 // and wft-create-tenant): a single DNS-safe path segment.
 var tenantNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
@@ -660,7 +655,7 @@ var tenantNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
 // TenantExists reports whether platform-gitops/tenants/<name> exists in the
 // checkout, as a directory or anything else: that path is what create-tenant
 // would write. Only "no such file" is absent. Any other stat error, a checkout
-// that never synced, or one older than TenantExistsMaxAge is an error.
+// that never synced, or one older than CheckoutMaxAge is an error.
 func (r *Reader) TenantExists(name string) (bool, error) {
 	if !tenantNameRE.MatchString(name) {
 		return false, fmt.Errorf("invalid tenant name %q", name)
@@ -787,12 +782,6 @@ func (r *Reader) statServiceFileLocked(team, component, file string) (string, er
 	return steps[len(steps)-1].path, nil
 }
 
-// MemberRolesMaxAge bounds how old the checkout may be when MemberRoles
-// answers. A role decides whether a destructive operation runs, so an
-// answer from a checkout that stopped refreshing is refused rather than
-// trusted: it could still show a role that has since been taken away.
-const MemberRolesMaxAge = TenantExistsMaxAge
-
 // MemberRoles returns the members[].role values under which login is a
 // member of namespace (a tenant name, or {tenant}-{team} for a multi-team
 // tenant), exactly as written in the tenant's values.yaml: one list per
@@ -801,7 +790,7 @@ const MemberRolesMaxAge = TenantExistsMaxAge
 // read and login is not a member.
 //
 // Unlike ListTenants, it never skips what it could not read. A checkout that
-// never synced or is older than MemberRolesMaxAge, a tenants directory that
+// never synced or is older than CheckoutMaxAge, a tenants directory that
 // cannot be listed, a values.yaml that cannot be read or parsed, and a
 // namespace two tenants both claim are all errors: "could not read the
 // role" must never come back looking like "not a member", and still less
@@ -814,12 +803,8 @@ func (r *Reader) MemberRoles(namespace, login string) ([][]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	last := r.LastSync()
-	if last.IsZero() {
-		return nil, errors.New("gitops checkout has never synced")
-	}
-	if age := time.Since(last); age > MemberRolesMaxAge {
-		return nil, fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), MemberRolesMaxAge)
+	if err := r.checkFreshLocked(); err != nil {
+		return nil, err
 	}
 
 	tenantsDir := filepath.Join(r.localPath, "platform-gitops", "tenants")
