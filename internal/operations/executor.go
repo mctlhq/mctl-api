@@ -150,7 +150,8 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 
 	// Log params, redacting secrets.
 	logParams := make(map[string]string, len(params))
-	for _, p := range op.Parameters {
+	for i := range op.Parameters {
+		p := &op.Parameters[i]
 		if v, ok := params[p.Name]; ok {
 			if p.Secret {
 				logParams[p.Name] = "[REDACTED]"

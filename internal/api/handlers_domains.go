@@ -625,10 +625,12 @@ func (h *Handlers) triggerRemoveCustomDomain(ctx context.Context, r *http.Reques
 	// row's raw, possibly differently-cased, team value.
 	team := normalizeIdentifier(d.Team)
 	service := normalizeIdentifier(d.Service)
+	// domain gets the same treatment: the registry now constrains it to
+	// lowercase labels with no root dot, and a legacy row can hold either.
 	params := map[string]string{
 		"team_name":    team,
 		"service_name": service,
-		"domain":       d.Domain,
+		"domain":       normalizeHostname(d.Domain),
 	}
 
 	// The generic Submit call site (ExecuteOperation in handlers_write.go)
