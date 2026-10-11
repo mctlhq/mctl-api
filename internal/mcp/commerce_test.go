@@ -17,6 +17,7 @@ package mcp
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -147,6 +148,24 @@ func TestListCommerceInvocationsAcceptsTheAPILimitBound(t *testing.T) {
 		"tenant": "acme", "limit": float64(500),
 	}); r.IsError || raw != "limit=500" {
 		t.Fatalf("limit 500: error=%v query=%q", r.IsError, raw)
+	}
+}
+
+// Review of #577: a mistyped id is named as such, not reported missing, and
+// the limit bound the caller reads comes from the one constant.
+func TestCommerceToolsNameTheMistypedArgument(t *testing.T) {
+	ts, _ := workItemBackend(t, http.StatusOK, `{}`)
+	r := callRoadmapTool(t, (*Server).toolGetCommerceReceipt, ts.URL, map[string]any{"tenant": "acme", "invocation_id": float64(7)})
+	if !r.IsError || !strings.Contains(resultText(t, r), "invocation_id must be a string") {
+		t.Fatalf("numeric invocation_id: %s", resultText(t, r))
+	}
+	r = callRoadmapTool(t, (*Server).toolListCommerceInvocations, ts.URL, map[string]any{"tenant": "acme", "phase": float64(42)})
+	if !r.IsError || !strings.Contains(resultText(t, r), "phase must be a string") {
+		t.Fatalf("numeric phase: %s", resultText(t, r))
+	}
+	r = callRoadmapTool(t, (*Server).toolListCommerceInvocations, ts.URL, map[string]any{"tenant": "acme", "limit": float64(501)})
+	if !strings.Contains(resultText(t, r), "1.."+strconv.Itoa(commerceListLimitMax)) {
+		t.Fatalf("limit message: %s", resultText(t, r))
 	}
 }
 

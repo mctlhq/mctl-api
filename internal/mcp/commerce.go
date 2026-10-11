@@ -38,6 +38,8 @@ const commerceReadNote = `Read-only. A tenant outside your authority answers "no
 // tool refuses a larger limit itself rather than relaying the API's 400.
 const commerceListLimitMax = 500
 
+var commerceLimitRange = "1.." + strconv.Itoa(commerceListLimitMax)
+
 var commerceTenantArg = mcplib.WithString("tenant",
 	mcplib.Required(),
 	mcplib.Description("Tenant (workspace) name, e.g. 'billing'."),
@@ -111,7 +113,7 @@ func (s *Server) toolListCommerceInvocations() (mcplib.Tool, server.ToolHandlerF
 		mcplib.WithString("phase", mcplib.Description("Only invocations in this phase, e.g. accepted, finalized, refused.")),
 		mcplib.WithString("since", mcplib.Description("Only invocations created at or after this RFC 3339 time.")),
 		mcplib.WithString("until", mcplib.Description("Only invocations created before this RFC 3339 time.")),
-		mcplib.WithNumber("limit", mcplib.Description("Maximum rows to return, 1..500.")),
+		mcplib.WithNumber("limit", mcplib.Description("Maximum rows to return, "+commerceLimitRange+".")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		base, errResult := commerceTenantPath(req)
@@ -131,7 +133,7 @@ func (s *Server) toolListCommerceInvocations() (mcplib.Tool, server.ToolHandlerF
 		if raw, present := req.GetArguments()["limit"]; present && raw != nil {
 			n, ok := raw.(float64)
 			if !ok || n < 1 || n != math.Trunc(n) || n > commerceListLimitMax {
-				return mcplib.NewToolResultError("limit must be an integer in 1..500"), nil
+				return mcplib.NewToolResultError("limit must be an integer in " + commerceLimitRange), nil
 			}
 			q.Set("limit", strconv.FormatInt(int64(n), 10))
 		}
