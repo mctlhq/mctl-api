@@ -174,15 +174,88 @@ CREATE TABLE IF NOT EXISTS commerce_invocation_transitions (
 );
 CREATE INDEX IF NOT EXISTS commerce_invocation_transitions_invocation
     ON commerce_invocation_transitions (invocation_id, seq);
+
+-- C3 (mctl-api#548): budgets, their change history, reservations and the
+-- payment operations the simulated adapter records. A budget is a limit;
+-- no table holds a balance that could be topped up.
+CREATE TABLE IF NOT EXISTS commerce_budgets (
+    tenant_id             TEXT        NOT NULL,
+    payer_account_id      TEXT        NOT NULL,
+    currency              TEXT        NOT NULL,
+    funds_mode            TEXT        NOT NULL CHECK (funds_mode = 'simulated'),
+    monthly_limit_minor   BIGINT      NOT NULL CHECK (monthly_limit_minor >= 0),
+    per_request_max_minor BIGINT      NOT NULL CHECK (per_request_max_minor >= 1),
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    version               BIGINT      NOT NULL DEFAULT 1,
+    PRIMARY KEY (tenant_id, payer_account_id)
+);
+
+CREATE TABLE IF NOT EXISTS commerce_budget_changes (
+    seq                       BIGSERIAL   PRIMARY KEY,
+    tenant_id                 TEXT        NOT NULL,
+    payer_account_id          TEXT        NOT NULL,
+    actor                     TEXT        NOT NULL,
+    reason                    TEXT        NOT NULL,
+    old_currency              TEXT,
+    old_monthly_limit_minor   BIGINT,
+    old_per_request_max_minor BIGINT,
+    new_currency              TEXT        NOT NULL,
+    new_monthly_limit_minor   BIGINT      NOT NULL,
+    new_per_request_max_minor BIGINT      NOT NULL,
+    recorded_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS commerce_budget_changes_account
+    ON commerce_budget_changes (tenant_id, payer_account_id, seq);
+
+CREATE TABLE IF NOT EXISTS commerce_reservations (
+    reservation_id   TEXT        PRIMARY KEY,
+    invocation_id    TEXT        NOT NULL UNIQUE REFERENCES commerce_invocations (invocation_id),
+    tenant_id        TEXT        NOT NULL,
+    payer_account_id TEXT        NOT NULL,
+    period           TEXT        NOT NULL,
+    currency         TEXT        NOT NULL,
+    amount_minor     BIGINT      NOT NULL CHECK (amount_minor >= 0),
+    status           TEXT        NOT NULL CHECK (status IN ('held', 'captured', 'released')),
+    authorization_id TEXT        NOT NULL DEFAULT '',
+    capture_id       TEXT        NOT NULL DEFAULT '',
+    deadline         TIMESTAMPTZ NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS commerce_reservations_account
+    ON commerce_reservations (tenant_id, payer_account_id, status, period);
+
+CREATE TABLE IF NOT EXISTS commerce_payment_operations (
+    op_key            TEXT        PRIMARY KEY,
+    invocation_id     TEXT        NOT NULL,
+    operation         TEXT        NOT NULL CHECK (operation IN ('authorize', 'capture', 'void')),
+    tenant_id         TEXT        NOT NULL,
+    payer_account_id  TEXT        NOT NULL,
+    currency          TEXT        NOT NULL,
+    amount_minor      BIGINT      NOT NULL CHECK (amount_minor >= 0),
+    funds_mode        TEXT        NOT NULL,
+    quote_digest      TEXT        NOT NULL DEFAULT '',
+    authorization_id  TEXT        NOT NULL DEFAULT '',
+    result            TEXT        NOT NULL CHECK (result IN ('authorized', 'denied', 'captured', 'voided', 'failed', 'unknown')),
+    result_id         TEXT        NOT NULL DEFAULT '',
+    reason            TEXT        NOT NULL DEFAULT '',
+    settlement_status TEXT        NOT NULL,
+    recorded_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS commerce_payment_operations_authorization
+    ON commerce_payment_operations (result_id) WHERE operation = 'authorize';
 `
 
 // Store is the Postgres-backed commerce ledger.
 type Store struct {
 	pool *pgxpool.Pool
 	now  func() time.Time
+	auth PaymentAuthorizer
 }
 
-// NewStore connects, applies the schema and returns the store.
+// NewStore connects, applies the schema and returns the store with the
+// simulated payment adapter installed.
 func NewStore(ctx context.Context, connStr string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, connStr)
 	if err != nil {
@@ -196,7 +269,14 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("commerce: schema: %w", err)
 	}
-	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
+	s := &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}
+	// The adapter reads the store clock through the closure, so a test
+	// that moves s.now moves the adapter too.
+	if err := s.UseAuthorizer(SimulatedAuthorizer{now: func() time.Time { return s.now() }}); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 // Close releases the pool.
@@ -690,13 +770,41 @@ func (s *Store) Transition(ctx context.Context, tenantID string, in TransitionIn
 	}
 	var out *Invocation
 	err := s.withTx(ctx, "commerce:inv:"+in.InvocationID, func(tx pgx.Tx) error {
-		cur, err := scanInvocation(tx.QueryRow(ctx, `SELECT `+invocationColumns+` FROM commerce_invocations
-			WHERE invocation_id = $1 AND tenant_id = $2 FOR UPDATE`, in.InvocationID, tenantID))
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrInvocationNotFound
-		}
+		next, err := s.applyTransition(ctx, tx, tenantID, in)
 		if err != nil {
-			return fmt.Errorf("commerce: lock invocation: %w", err)
+			return err
+		}
+		out = next
+		return nil
+	})
+	return out, err
+}
+
+// lockInvocation loads one tenant's row FOR UPDATE inside a transaction.
+func (s *Store) lockInvocation(ctx context.Context, tx pgx.Tx, tenantID, invocationID string) (*Invocation, error) {
+	cur, err := scanInvocation(tx.QueryRow(ctx, `SELECT `+invocationColumns+` FROM commerce_invocations
+		WHERE invocation_id = $1 AND tenant_id = $2 FOR UPDATE`, invocationID, tenantID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrInvocationNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("commerce: lock invocation: %w", err)
+	}
+	return cur, nil
+}
+
+// applyTransition is the body of Transition inside a caller's transaction,
+// so Reserve, Finalize and Release write their phase change and history row
+// in the same commit as the hold they move.
+func (s *Store) applyTransition(ctx context.Context, tx pgx.Tx, tenantID string, in TransitionInput) (*Invocation, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	var out *Invocation
+	err := func() error {
+		cur, err := s.lockInvocation(ctx, tx, tenantID, in.InvocationID)
+		if err != nil {
+			return err
 		}
 		if IsTerminal(cur.Phase) {
 			return fmt.Errorf("%w: %s", ErrTerminal, cur.Phase)
@@ -751,7 +859,7 @@ func (s *Store) Transition(ctx context.Context, tenantID string, in TransitionIn
 		}
 		out = next
 		return nil
-	})
+	}()
 	return out, err
 }
 

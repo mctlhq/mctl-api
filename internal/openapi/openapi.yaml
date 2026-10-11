@@ -1134,7 +1134,106 @@ components:
         code:
           type: string
           enum: [invalid-request, identity-unresolved, commerce-terms-unknown, quote-expired, quote-stale,
-                 quote-mismatch, idempotency-conflict, funds-mode-unavailable, phase-conflict, terms-retired]
+                 quote-mismatch, idempotency-conflict, funds-mode-unavailable, phase-conflict, terms-retired,
+                 budget-exhausted, currency-mismatch, payment-denied, payment-unknown, reservation-expired]
+    CommerceBudget:
+      type: object
+      description: |
+        A tenant's spending limit (mctl-api#548). A limit, never a balance: nothing is
+        deposited, nothing is redeemable, and funds_mode is always simulated.
+      properties:
+        schema_version: {type: integer, enum: [1]}
+        tenant_id: {type: string}
+        payer_account_id: {type: string}
+        currency: {type: string}
+        funds_mode: {type: string, enum: [simulated]}
+        monthly_limit_minor: {type: integer, format: int64, description: Cap on committed plus held spend per UTC month}
+        per_request_max_minor: {type: integer, format: int64, description: Largest single hold}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        version: {type: integer, format: int64}
+    CommerceBalance:
+      type: object
+      description: |
+        The tenant budget read of ADR 020 sec. 12 for the current UTC month.
+        committed = captured holds of this period; reserved = open holds whose
+        invocation has a known state (any period); pending_liability = open holds
+        of invocations in outcome_unknown (any period). available = limit minus
+        all three, floored at zero. A hold never resets into spendable because a
+        month ended.
+      properties:
+        schema_version: {type: integer, enum: [1]}
+        tenant_id: {type: string}
+        payer_account_id: {type: string}
+        currency: {type: string}
+        funds_mode: {type: string, enum: [simulated]}
+        period: {type: string, description: 'YYYY-MM in UTC'}
+        monthly_limit_minor: {type: integer, format: int64}
+        per_request_max_minor: {type: integer, format: int64}
+        committed_minor: {type: integer, format: int64}
+        reserved_minor: {type: integer, format: int64}
+        pending_liability_minor: {type: integer, format: int64}
+        available_minor: {type: integer, format: int64}
+        as_of: {type: string, format: date-time}
+    CommerceBudgetChange:
+      type: object
+      description: One audited budget change; every change names its actor and reason.
+      properties:
+        seq: {type: integer, format: int64}
+        tenant_id: {type: string}
+        payer_account_id: {type: string}
+        actor: {type: string}
+        reason: {type: string}
+        old_currency: {type: string}
+        old_monthly_limit_minor: {type: integer, format: int64}
+        old_per_request_max_minor: {type: integer, format: int64}
+        new_currency: {type: string}
+        new_monthly_limit_minor: {type: integer, format: int64}
+        new_per_request_max_minor: {type: integer, format: int64}
+        recorded_at: {type: string, format: date-time}
+    CommerceReservation:
+      type: object
+      description: One hold against a budget, bound to exactly one invocation. A capture is attributed to the period the hold was taken in.
+      properties:
+        schema_version: {type: integer, enum: [1]}
+        reservation_id: {type: string, description: 'rsv_<ulid>'}
+        invocation_id: {type: string}
+        tenant_id: {type: string}
+        payer_account_id: {type: string}
+        period: {type: string, description: 'YYYY-MM in UTC'}
+        currency: {type: string}
+        amount_minor: {type: integer, format: int64}
+        status: {type: string, enum: [held, captured, released]}
+        authorization_id: {type: string}
+        capture_id: {type: string}
+        deadline: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CommerceMoneyResult:
+      type: object
+      description: The answer of reserve, finalize and release. replayed is true when the call found the edge already applied and changed nothing.
+      properties:
+        invocation: {$ref: '#/components/schemas/CommerceInvocation'}
+        reservation: {$ref: '#/components/schemas/CommerceReservation'}
+        replayed: {type: boolean}
+    CommercePrecheck:
+      type: object
+      description: The non-binding answer of ADR 020 sec. 7 step 4. It holds nothing; reserve decides again.
+      properties:
+        sufficient: {type: boolean}
+        reason_code: {type: string, enum: [budget-exhausted]}
+        balance: {$ref: '#/components/schemas/CommerceBalance'}
+    CommerceExpireResult:
+      type: object
+      description: |
+        What one reconciler pass did. refused: accepted rows past quote expiry;
+        released: reserved rows past their reservation deadline whose authorization
+        could be voided; unresolved: reserved rows past deadline whose payment state
+        the adapter could not confirm, kept as liability for the next pass.
+      properties:
+        refused: {type: array, items: {type: string}}
+        released: {type: array, items: {type: string}}
+        unresolved: {type: array, items: {type: string}}
 
 paths:
   /healthz:
@@ -4679,6 +4778,12 @@ paths:
         `expected_phase`, and a mismatch is 409 `phase-conflict`, never a
         blind write; a terminal row never moves. Each call appends one history
         row naming the actor.
+
+        The money edges are not reachable here: `to_phase` of `reserved`,
+        `released` or `finalized` is refused with 400 naming the owning
+        endpoint (`…/reserve`, `…/release`, `…/finalize`), because those
+        edges must move the hold and the authorization in the same
+        transaction (mctl-api#548).
       tags: [Commerce]
       parameters:
         - {name: tenant, in: path, required: true, schema: {type: string}}
@@ -4709,6 +4814,214 @@ paths:
         '403': {description: Not a platform admin}
         '404': {description: No such invocation in this tenant}
         '409': {description: Phase does not match expected_phase, or the row is terminal, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/reconcile/expired:
+    post:
+      summary: Reconcile invocations time has made stale
+      description: |
+        ADR 020 sec. 11, the two states time alone may move. An `accepted` row
+        past its quote expiry is refused `quote-expired`. A `reserved` row past
+        its reservation deadline has its authorization voided and its hold
+        released with `reservation-expired`; one whose payment state the adapter
+        cannot confirm is listed as `unresolved` and keeps its hold. Rows in
+        `dispatching`, `dispatched` or `outcome_unknown` are never touched:
+        unknown liability does not become spendable because time passed.
+        Platform-only, audited.
+      tags: [Commerce]
+      parameters:
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 500, default: 100}, description: Rows per state per pass}
+      responses:
+        '200': {description: Pass applied, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceExpireResult'}}}}
+        '400': {description: limit outside 1..500}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '503': {description: Commerce ledger not configured}
+  /api/v1/commerce/tenants/{tenant}/budget:
+    put:
+      summary: Grant or change a tenant's budget
+      description: |
+        Platform-only and audited at high risk: a limit is granted, never
+        self-granted (mctl-api#548). The call upserts the budget and appends a
+        budget-change row naming the actor and the reason. The currency cannot
+        change while the tenant has any reservation. This is a limit, not a
+        deposit: there is no top-up, nothing is redeemable, and `funds_mode`
+        is always `simulated`.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                currency: {type: string, description: ISO 4217 code known to the ledger}
+                monthly_limit_minor: {type: integer, format: int64, minimum: 0}
+                per_request_max_minor: {type: integer, format: int64, minimum: 1}
+                reason: {type: string, description: Why the limit changes; recorded in the change history}
+              required: [currency, monthly_limit_minor, per_request_max_minor, reason]
+      responses:
+        '200': {description: The budget as stored, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceBudget'}}}}
+        '400': {description: Invalid body, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '422': {description: Currency change while reservations exist (currency-mismatch), content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+    get:
+      summary: Read the tenant budget and its current-period balance
+      description: ADR 020 sec. 12. Tenant owner or platform admin with a resolved canonical principal.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Balance, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceBalance'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Below the tenant role, or no canonical principal}
+        '404': {description: No budget granted to this tenant}
+        '503': {description: Commerce ledger not configured}
+  /api/v1/commerce/tenants/{tenant}/budget/changes:
+    get:
+      summary: List the audited budget changes of a tenant
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: In order of seq
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  changes: {type: array, items: {$ref: '#/components/schemas/CommerceBudgetChange'}}
+        '401': {description: Authentication required}
+        '403': {description: Below the tenant role, or no canonical principal}
+        '503': {description: Commerce ledger not configured}
+  /api/v1/commerce/tenants/{tenant}/budget/precheck:
+    post:
+      summary: Non-binding budget precheck
+      description: |
+        ADR 020 sec. 7 step 4. Answers whether an amount would be admitted
+        right now, holding nothing; the binding decision is made again inside
+        `…/reserve`. A currency other than the budget's is 422
+        `currency-mismatch`.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                amount: {$ref: '#/components/schemas/CommerceMoney'}
+              required: [amount]
+      responses:
+        '200': {description: Answer and the balance it was computed from, content: {application/json: {schema: {$ref: '#/components/schemas/CommercePrecheck'}}}}
+        '400': {description: Invalid body, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Below the tenant role, or no canonical principal}
+        '404': {description: No budget granted to this tenant}
+        '422': {description: Currency mismatch, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+  /api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/reserve:
+    post:
+      summary: Reserve budget and authorize payment atomically
+      description: |
+        ADR 020 sec. 7 step 8, in one transaction under the tenant's budget
+        lock: compares committed plus held against the monthly limit and the
+        per-request maximum, takes the hold, asks the PaymentAuthorizer for an
+        authorization, and moves the invocation `accepted → reserved`. Any
+        denial refuses the invocation for good with its reason code and holds
+        nothing; the refusal is committed before the error is returned. A
+        repeat on a reserved row returns the existing hold with `replayed:
+        true`. An authorization the adapter cannot confirm is never treated as
+        denied: the hold stays, `payment_status` is `unknown` and the answer is
+        409 `payment-unknown`. Platform-only.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: invocation_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Reserved, or replayed, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceMoneyResult'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '404': {description: No such invocation in this tenant, or no budget granted}
+        '409': {description: Row not in accepted or reserved (phase-conflict), payment state unknown (payment-unknown), or an idempotency conflict at the adapter, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '422': {description: Denied — budget-exhausted, currency-mismatch, quote-expired or payment-denied; the invocation is now refused, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+  /api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/finalize:
+    post:
+      summary: Capture or release the hold on an observed outcome
+      description: |
+        Moves a `dispatched` or `outcome_unknown` row to `finalized` exactly
+        once. `per_call` captures on any outcome; `per_successful_call`
+        captures on `succeeded` and voids on `failed`; `free` finalizes a zero
+        hold. A capture is attributed to the period the hold was taken in. A
+        hold whose authorization is still unknown is confirmed with the adapter
+        first and the call is 409 `payment-unknown` if it still cannot be.
+        A repeat returns the finalized row with `replayed: true`. Platform-only.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: invocation_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                execution_outcome: {type: string, enum: [succeeded, failed]}
+                usage_quantity: {type: integer, format: int64, minimum: 0}
+                note: {type: string, maxLength: 1024}
+              required: [execution_outcome]
+      responses:
+        '200': {description: Finalized, or replayed, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceMoneyResult'}}}}
+        '400': {description: Invalid body, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '404': {description: No such invocation in this tenant}
+        '409': {description: Row not in dispatched or outcome_unknown, or payment state unknown, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '500': {description: A reserved row without its hold; the ledger refuses to guess}
+        '503': {description: Commerce ledger not configured}
+  /api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/release:
+    post:
+      summary: Void the authorization and release the hold before dispatch
+      description: |
+        Moves a `reserved` or `dispatching` row to `released`. A `dispatched`
+        row cannot be released (too late to cancel): its outcome must be
+        observed and finalized, and the call is 409 `phase-conflict`. A hold
+        whose authorization turned out denied is released without a void. A
+        repeat returns the released row with `replayed: true`. Platform-only.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: invocation_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason_code: {type: string}
+                note: {type: string, maxLength: 1024}
+              required: [reason_code]
+      responses:
+        '200': {description: Released, or replayed, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceMoneyResult'}}}}
+        '400': {description: Invalid body, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '404': {description: No such invocation in this tenant}
+        '409': {description: Row already dispatched or terminal, or payment state unknown, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
         '503': {description: Commerce ledger not configured}
 
 tags:
@@ -4767,4 +5080,4 @@ tags:
   - name: Action Approvals
     description: actionapproval/v1 durable single-use approvals of runtime agent side effects (mctl-api#366)
   - name: Commerce
-    description: ADR 020 commerce ledger — terms, quotes, invocation receipts and history (mctl-api#547)
+    description: ADR 020 commerce ledger — terms, quotes, invocation receipts and history (mctl-api#547); tenant budgets, holds and the simulated PaymentAuthorizer (mctl-api#548)

@@ -89,6 +89,12 @@ func newCommerceFixture(t *testing.T) *commerceFixture {
 		t.Fatalf("cleanup pool: %v", err)
 	}
 	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM commerce_payment_operations WHERE invocation_id IN
+			(SELECT invocation_id FROM commerce_invocations WHERE capability_id = $1)`, capID)
+		_, _ = pool.Exec(ctx, `DELETE FROM commerce_reservations WHERE invocation_id IN
+			(SELECT invocation_id FROM commerce_invocations WHERE capability_id = $1)`, capID)
+		_, _ = pool.Exec(ctx, `DELETE FROM commerce_budget_changes WHERE tenant_id IN ('acme', 'beta')`)
+		_, _ = pool.Exec(ctx, `DELETE FROM commerce_budgets WHERE tenant_id IN ('acme', 'beta')`)
 		_, _ = pool.Exec(ctx, `DELETE FROM commerce_invocation_transitions WHERE invocation_id IN
 			(SELECT invocation_id FROM commerce_invocations WHERE capability_id = $1)`, capID)
 		_, _ = pool.Exec(ctx, `DELETE FROM commerce_invocations WHERE capability_id = $1`, capID)
