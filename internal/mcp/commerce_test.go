@@ -126,12 +126,13 @@ func TestCommerceToolsRefuseBadArgumentsWithoutCalling(t *testing.T) {
 // API's normalization instead of a DNS-label pattern the route never had.
 func TestCommerceToolsNormalizeTenantsLikeTheAPI(t *testing.T) {
 	ts, calls := workItemBackend(t, http.StatusOK, `{}`)
-	for tenant, want := range map[string]string{
-		" Acme ":                "GET /api/v1/commerce/tenants/acme/budget",
-		"team_one":              "GET /api/v1/commerce/tenants/team_one/budget",
-		"a.b":                   "GET /api/v1/commerce/tenants/a.b/budget",
-		strings.Repeat("x", 70): "GET /api/v1/commerce/tenants/" + strings.Repeat("x", 70) + "/budget",
+	for _, c := range []struct{ tenant, want string }{
+		{" Acme ", "GET /api/v1/commerce/tenants/acme/budget"},
+		{"team_one", "GET /api/v1/commerce/tenants/team_one/budget"},
+		{"a.b", "GET /api/v1/commerce/tenants/a.b/budget"},
+		{strings.Repeat("x", 70), "GET /api/v1/commerce/tenants/" + strings.Repeat("x", 70) + "/budget"},
 	} {
+		tenant, want := c.tenant, c.want
 		if r := callRoadmapTool(t, (*Server).toolGetCommerceBudget, ts.URL, map[string]any{"tenant": tenant}); r.IsError {
 			t.Fatalf("%q refused: %s", tenant, resultText(t, r))
 		}
@@ -164,7 +165,7 @@ func TestCommerceToolsNameTheMistypedArgument(t *testing.T) {
 		t.Fatalf("numeric phase: %s", resultText(t, r))
 	}
 	r = callRoadmapTool(t, (*Server).toolListCommerceInvocations, ts.URL, map[string]any{"tenant": "acme", "limit": float64(501)})
-	if !strings.Contains(resultText(t, r), "1.."+strconv.Itoa(commerceListLimitMax)) {
+	if !r.IsError || !strings.Contains(resultText(t, r), "1.."+strconv.Itoa(commerceListLimitMax)) {
 		t.Fatalf("limit message: %s", resultText(t, r))
 	}
 }
