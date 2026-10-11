@@ -262,7 +262,7 @@ func TestCommerceHandlers_IdentityIsServerResolved(t *testing.T) {
 	owner := tenantUser(t, "acme-owner", "acme", "prn_owner")
 
 	// Body fields naming identity are unknown fields: rejected, not ignored.
-	for _, field := range []string{"tenant_id", "principal_id", "payer_account_id"} {
+	for _, field := range []string{"tenant_id", "principal_id", "payer_account_id", "subject_principal_id", "delegation_grant_id"} {
 		rec, _ := f.mint(t, owner, "acme", map[string]any{field: "attacker"})
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("body %s: want 400, got %d %s", field, rec.Code, rec.Body.String())
@@ -308,6 +308,13 @@ func TestCommerceHandlers_IdentityIsServerResolved(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("own quote read: %d %s", rec.Code, rec.Body.String())
 	}
+	// An admin writing under a case variant of the tenant lands in the
+	// tenant's own rows, not in an unreachable "ACME".
+	rec, uq := f.mint(t, commerceAdmin(t), "ACME", nil)
+	if uq == nil || uq.TenantID != "acme" {
+		t.Fatalf("case-variant tenant: %d %s", rec.Code, rec.Body.String())
+	}
+
 	// The service principal (admins group) passes without a tenant role.
 	svc := auth.NewServiceUser()
 	if err := auth.AttachPrincipal(context.Background(), fixedPrincipal("prn_service"), svc); err != nil {

@@ -35,8 +35,12 @@ import (
 //
 // Identity binding (ADR 020 sec. 3): tenant_id comes from the path,
 // principal_id from the canonical principal the auth middleware resolved,
-// payer_account_id is derived from the tenant. None of them is read from a
-// request body. A caller whose principal is unresolved is refused with
+// payer_account_id is derived from the tenant, and the subject is the
+// principal itself. None of them is read from a request body; a body naming
+// one is an unknown field. Delegated subjects (subject_principal_id with a
+// delegation_grant_id) are not accepted yet: they must come from
+// internal/delegation.Resolver, never from a caller, and C3/C4 wire that
+// when the gateway starts minting on behalf of a subject. A caller whose principal is unresolved is refused with
 // identity-unresolved: a quote with no canonical principal cannot be
 // idempotent, cannot be approved and cannot be charged, so it is never
 // minted.
@@ -92,7 +96,10 @@ func (h *Handlers) requireCommerceTenant(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return nil, "", false
 	}
-	tenant := chi.URLParam(r, "tenant")
+	// Normalized like every other tenant path param: an admin passes
+	// HasTenantAccess for any string, and a case variant would store rows
+	// no tenant-scoped read could find.
+	tenant := normalizeIdentifier(chi.URLParam(r, "tenant"))
 	if tenant == "" {
 		writeError(w, http.StatusBadRequest, "tenant is required")
 		return nil, "", false
@@ -142,6 +149,10 @@ func writeCommerceError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusBadRequest, "invalid-request", err.Error(), nil)
 	case errors.Is(err, commerce.ErrTermsNotFound):
 		writeErrorCode(w, http.StatusUnprocessableEntity, commerce.ReasonTermsUnknown, "no commerce terms resolve for this capability", nil)
+	case errors.Is(err, commerce.ErrTermsVersionMissing):
+		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, commerce.ErrTermsRetired):
+		writeErrorCode(w, http.StatusConflict, "terms-retired", "this terms version is already retired", nil)
 	case errors.Is(err, commerce.ErrQuoteNotFound), errors.Is(err, commerce.ErrInvocationNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, commerce.ErrIdempotencyConflict):
@@ -288,24 +299,19 @@ func (h *Handlers) GetCommerceTerms(w http.ResponseWriter, r *http.Request) {
 
 // ---- quotes -------------------------------------------------------------
 
-// commerceIdentityRequest is the part of a body a caller may say about who
-// the call is for. Everything else about identity is resolved server-side.
+// commerceIdentityRequest is the only thing a body may say about the call's
+// context: which execution it belongs to. Every party is resolved
+// server-side.
 type commerceIdentityRequest struct {
-	ExecutionID        string `json:"execution_id"`
-	SubjectPrincipalID string `json:"subject_principal_id,omitempty"`
-	DelegationGrantID  string `json:"delegation_grant_id,omitempty"`
+	ExecutionID string `json:"execution_id"`
 }
 
 func resolveIdentities(user *auth.User, tenant string, req commerceIdentityRequest) commerce.Identities {
-	subject := req.SubjectPrincipalID
-	if subject == "" {
-		subject = user.PrincipalID()
-	}
+	principal := user.PrincipalID()
 	return commerce.Identities{
 		TenantID:           tenant,
-		PrincipalID:        user.PrincipalID(),
-		SubjectPrincipalID: subject,
-		DelegationGrantID:  req.DelegationGrantID,
+		PrincipalID:        principal,
+		SubjectPrincipalID: principal,
 		PayerAccountID:     payerAccountFor(tenant),
 		ExecutionID:        req.ExecutionID,
 	}
@@ -504,7 +510,7 @@ func (h *Handlers) TransitionCommerceInvocation(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	tenant := chi.URLParam(r, "tenant")
+	tenant := normalizeIdentifier(chi.URLParam(r, "tenant"))
 	id := chi.URLParam(r, "invocation_id")
 	var req transitionRequest
 	if !decodeCommerceBody(w, r, &req) {

@@ -1053,7 +1053,7 @@ components:
         created_at: {type: string, format: date-time}
     CommerceIdentities:
       type: object
-      description: Server-resolved parties of a quote or invocation (ADR 020 sec. 3). None is read from a body.
+      description: Server-resolved parties of a quote or invocation (ADR 020 sec. 3). None is read from a body; the subject is the principal until delegated subjects arrive through internal/delegation (C3/C4).
       properties:
         tenant_id: {type: string}
         principal_id: {type: string, description: 'prn_<ulid> of the authenticated caller'}
@@ -1134,7 +1134,7 @@ components:
         code:
           type: string
           enum: [invalid-request, identity-unresolved, commerce-terms-unknown, quote-expired, quote-stale,
-                 quote-mismatch, idempotency-conflict, funds-mode-unavailable, phase-conflict]
+                 quote-mismatch, idempotency-conflict, funds-mode-unavailable, phase-conflict, terms-retired]
 
 paths:
   /healthz:
@@ -4476,7 +4476,7 @@ paths:
       responses:
         '200': {description: The version, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceTerms'}}}}
         '401': {description: Authentication required}
-        '422': {description: No such version, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '404': {description: No such terms version}
         '503': {description: Commerce ledger not configured}
 
   /api/v1/commerce/terms/{terms_id}/versions/{version}/retire:
@@ -4491,7 +4491,8 @@ paths:
         '200': {description: Retired, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceTerms'}}}}
         '401': {description: Authentication required}
         '403': {description: Not a platform admin}
-        '422': {description: No such active version, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '404': {description: No such terms version}
+        '409': {description: Already retired, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
         '503': {description: Commerce ledger not configured}
 
   /api/v1/commerce/invocations/overdue:
@@ -4538,8 +4539,6 @@ paths:
                 input_schema_hash: {type: string}
                 args_digest: {type: string, description: 'sha256 of canonical_json(arguments)'}
                 execution_id: {type: string}
-                subject_principal_id: {type: string, description: Only with delegation_grant_id}
-                delegation_grant_id: {type: string}
               required: [capability_id, input_schema_hash, args_digest, execution_id]
       responses:
         '201': {description: Minted, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceQuote'}}}}
@@ -4614,8 +4613,6 @@ paths:
                 idempotency_key: {type: string, pattern: '^[A-Za-z0-9._:-]{1,128}$'}
                 args_digest: {type: string}
                 execution_id: {type: string}
-                subject_principal_id: {type: string}
-                delegation_grant_id: {type: string}
                 approval_id: {type: string}
                 terms_binding: {type: string}
               required: [quote_id, quote_digest, idempotency_key, args_digest, execution_id]

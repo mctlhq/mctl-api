@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -146,6 +147,7 @@ const (
 var (
 	ErrInvalid              = errors.New("commerce: invalid")
 	ErrTermsNotFound        = errors.New("commerce: terms not found")
+	ErrTermsVersionMissing  = errors.New("commerce: no such terms version")
 	ErrQuoteNotFound        = errors.New("commerce: quote not found")
 	ErrInvocationNotFound   = errors.New("commerce: invocation not found")
 	ErrIdempotencyConflict  = errors.New("commerce: idempotency conflict")
@@ -501,8 +503,10 @@ type Invocation struct {
 	ReconciliationDeadline time.Time  `json:"reconciliation_deadline"`
 	CreatedAt              time.Time  `json:"created_at"`
 	UpdatedAt              time.Time  `json:"updated_at"`
-	FinalizedAt            *time.Time `json:"finalized_at,omitempty"`
-	Version                int64      `json:"version"`
+	// FinalizedAt is set only when the phase became finalized; refused and
+	// released rows carry their moment in updated_at.
+	FinalizedAt *time.Time `json:"finalized_at,omitempty"`
+	Version     int64      `json:"version"`
 }
 
 // ProviderOperationKey is the stable key a provider dedupes on (ADR 020
@@ -623,6 +627,25 @@ func (in TransitionInput) validate() error {
 	}
 	if (in.ToPhase == PhaseRefused || in.ToPhase == PhaseReleased) && in.ReasonCode == "" {
 		return invalid("reason_code is required for %s", in.ToPhase)
+	}
+	// Every one of the four facts is checked against its vocabulary on every
+	// edge, not only on finalized: a typo from a programmatic caller must
+	// never become a row in the ledger of record.
+	for _, f := range []struct {
+		name, value string
+		allowed     []string
+	}{
+		{"execution_outcome", in.ExecutionOutcome, []string{OutcomeNotDispatched, OutcomeSucceeded, OutcomeFailed, OutcomeUnknown}},
+		{"charge_status", in.ChargeStatus, []string{ChargeNone, ChargeReserved, ChargeCaptured, ChargeReleased}},
+		{"payment_status", in.PaymentStatus, []string{PaymentNone, PaymentNotRequired, PaymentAuthorized, PaymentDenied, PaymentCaptured, PaymentVoided, PaymentUnknown}},
+		{"settlement_status", in.SettlementStatus, []string{SettlementNotApplicable, SettlementPending, SettlementSettled, SettlementFailed}},
+	} {
+		if f.value == "" {
+			continue
+		}
+		if !slices.Contains(f.allowed, f.value) {
+			return invalid("%s %q is not one of %s", f.name, f.value, strings.Join(f.allowed, ", "))
+		}
 	}
 	if in.ToPhase == PhaseFinalized {
 		switch in.ExecutionOutcome {

@@ -52,7 +52,11 @@ func newTestStore(t *testing.T) *Store {
 var schemaHash = "sha256:" + strings.Repeat("ab", 32)
 
 func testCapability(t *testing.T) string {
-	return "mctl://test-commerce/" + strings.ToLower(t.Name()) + "/" + newULID(time.Now())
+	id, err := newULID(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "mctl://test-commerce/" + strings.ToLower(t.Name()) + "/" + id
 }
 
 func publish(t *testing.T, s *Store, cap string, mode string, amount int64) *Terms {
@@ -147,6 +151,19 @@ func TestTermsAreImmutableAndVersioned(t *testing.T) {
 	list, err := s.ListTerms(ctx, cap)
 	if err != nil || len(list) != 2 || list[0].TermsVersion != 2 {
 		t.Fatalf("ListTerms = %+v, %v", list, err)
+	}
+	// "No such version" and "already retired" are different answers.
+	if _, err := s.GetTerms(ctx, v1.TermsID, 9); !errors.Is(err, ErrTermsVersionMissing) {
+		t.Fatalf("missing version: %v", err)
+	}
+	if _, err := s.RetireTerms(ctx, v1.TermsID, 1); err != nil {
+		t.Fatalf("retire v1: %v", err)
+	}
+	if _, err := s.RetireTerms(ctx, v1.TermsID, 1); !errors.Is(err, ErrTermsRetired) {
+		t.Fatalf("double retire: %v", err)
+	}
+	if _, err := s.RetireTerms(ctx, v1.TermsID, 9); !errors.Is(err, ErrTermsVersionMissing) {
+		t.Fatalf("retire missing version: %v", err)
 	}
 }
 
@@ -439,6 +456,24 @@ func TestTransitionsAreCheckedAndAppendOnly(t *testing.T) {
 		ToPhase: PhaseReleased, ReasonCode: ReasonPaymentDenied, PaymentStatus: PaymentVoided, Actor: "a"})
 	if err != nil || rel.ChargeStatus != ChargeReleased || rel.ExecutionOutcome != OutcomeNotDispatched {
 		t.Fatalf("release = %+v, %v", rel, err)
+	}
+	if rel.FinalizedAt != nil {
+		t.Fatalf("released row carries finalized_at: %+v", rel)
+	}
+
+	// A typo in any of the four facts is refused, never stored.
+	inv3 := accept(t, s, mint(t, s, cap, id), "t3").Invocation
+	for _, bad := range []TransitionInput{
+		{PaymentStatus: "capturd"}, {SettlementStatus: "yolo"}, {ChargeStatus: "held"}, {ExecutionOutcome: "ok"},
+	} {
+		bad.InvocationID, bad.ExpectedPhase, bad.ToPhase, bad.Actor, bad.ReservationDeadline = inv3.InvocationID, PhaseAccepted, PhaseReserved, "a", &deadline
+		if _, err := s.Transition(ctx, "acme", bad); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("typo %+v accepted: %v", bad, err)
+		}
+	}
+	got, _ := s.GetInvocation(ctx, "acme", inv3.InvocationID)
+	if got.Phase != PhaseAccepted || got.Version != 1 {
+		t.Fatalf("row changed by a refused transition: %+v", got)
 	}
 }
 

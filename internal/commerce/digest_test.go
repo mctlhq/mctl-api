@@ -129,7 +129,10 @@ func TestHashedTimeIsSecondPrecisionUTCWithZ(t *testing.T) {
 }
 
 func TestNewULIDShape(t *testing.T) {
-	id := newULID(time.Now())
+	id, err := newULID(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(id) != 26 {
 		t.Fatalf("ulid length %d: %q", len(id), id)
 	}
@@ -141,7 +144,7 @@ func TestNewULIDShape(t *testing.T) {
 	if id[0] > '7' {
 		t.Fatalf("ulid first char must encode 2 zero bits: %q", id)
 	}
-	if newULID(time.Now()) == id {
+	if other, _ := newULID(time.Now()); other == id {
 		t.Fatal("two ulids collided")
 	}
 }

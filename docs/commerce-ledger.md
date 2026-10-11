@@ -45,10 +45,14 @@ proofs or `external_ref` contents.
 
 ## Identity binding
 
-`tenant_id` comes from the path, `principal_id` from the canonical principal
-(`prn_…`) the auth middleware resolved, `payer_account_id` is derived
-server-side (`acct_tenant_<tenant>` in the simulated milestone). A body that
-names any of them is refused as an unknown field. A caller with no resolved
+`tenant_id` comes from the path (normalized), `principal_id` from the
+canonical principal (`prn_…`) the auth middleware resolved,
+`subject_principal_id` is that same principal, and `payer_account_id` is
+derived server-side (`acct_tenant_<tenant>` in the simulated milestone). A
+body that names any of them, or a `delegation_grant_id`, is refused as an
+unknown field. Delegated subjects are not accepted yet: when the gateway
+starts minting on behalf of a subject (C3/C4), the subject and grant come
+from `internal/delegation.Resolver`, never from a caller. A caller with no resolved
 principal is refused with `identity-unresolved` before any row exists: a
 quote with no canonical principal cannot be idempotent, approved or charged.
 
@@ -83,7 +87,11 @@ accepted ──► reserved ──► dispatching ──► dispatched ──►
 ```
 
 `Transition` locks the row, compares its phase with `expected_phase`, and
-rejects a mismatch (`phase-conflict`) or a terminal row. `finalized` requires
+rejects a mismatch (`phase-conflict`) or a terminal row. Each of the four
+facts is validated against its vocabulary on every edge, and the columns
+carry matching `CHECK` constraints, so a typo from a programmatic caller is
+refused rather than stored. `finalized_at` is set only on `finalized`;
+refused and released rows carry their moment in `updated_at`. `finalized` requires
 `execution_outcome` of `succeeded` or `failed`, a `charge_status` of
 `captured` or `released`, and a `usage_quantity`. `reserved` requires a
 `reservation_deadline`. `refused` and `released` require a `reason_code`.
@@ -110,8 +118,10 @@ becomes spendable because time passed.
 
 Reason codes on refusals are those of ADR 020 sec. 13 (`identity-unresolved`,
 `commerce-terms-unknown`, `quote-expired`, `quote-stale`, `quote-mismatch`,
-`idempotency-conflict`, `funds-mode-unavailable`), plus `phase-conflict` and
-`invalid-request` for this API's own shapes. `funds_mode: live` is refused
+`idempotency-conflict`, `funds-mode-unavailable`), plus `phase-conflict`,
+`terms-retired` and `invalid-request` for this API's own shapes. A missing
+terms version is a plain 404; only an unresolvable capability is
+`commerce-terms-unknown`. `funds_mode: live` is refused
 everywhere (ADR 020 sec. 2).
 
 ## Tests

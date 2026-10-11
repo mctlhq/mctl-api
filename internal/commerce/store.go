@@ -104,12 +104,12 @@ CREATE TABLE IF NOT EXISTS commerce_invocations (
     currency                TEXT        NOT NULL,
     amount_minor            BIGINT      NOT NULL CHECK (amount_minor >= 0),
     funds_mode              TEXT        NOT NULL,
-    phase                   TEXT        NOT NULL,
-    execution_outcome       TEXT        NOT NULL,
-    usage_quantity          BIGINT,
-    charge_status           TEXT        NOT NULL,
-    payment_status          TEXT        NOT NULL,
-    settlement_status       TEXT        NOT NULL,
+    phase                   TEXT        NOT NULL CHECK (phase IN ('accepted','refused','reserved','dispatching','dispatched','outcome_unknown','released','finalized')),
+    execution_outcome       TEXT        NOT NULL CHECK (execution_outcome IN ('not_dispatched','succeeded','failed','unknown')),
+    usage_quantity          BIGINT      CHECK (usage_quantity IS NULL OR usage_quantity >= 0),
+    charge_status           TEXT        NOT NULL CHECK (charge_status IN ('none','reserved','captured','released')),
+    payment_status          TEXT        NOT NULL CHECK (payment_status IN ('none','not_required','authorized','denied','captured','voided','unknown')),
+    settlement_status       TEXT        NOT NULL CHECK (settlement_status IN ('not_applicable','pending','settled','failed')),
     reason_code             TEXT        NOT NULL DEFAULT '',
     approval_id             TEXT        NOT NULL DEFAULT '',
     reservation_deadline    TIMESTAMPTZ,
@@ -191,14 +191,14 @@ func (s *Store) withTx(ctx context.Context, lockKey string, fn func(pgx.Tx) erro
 // newULID is Crockford base32 of 48 bits of milliseconds and 80 random
 // bits, the same shape internal/principals mints. It is copied rather than
 // imported so this package does not depend on the principals store.
-func newULID(t time.Time) string {
+func newULID(t time.Time) (string, error) {
 	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 	var raw [16]byte
 	// 48 bits of milliseconds, big-endian, in raw[0:6]; the shift leaves
 	// raw[6:8] zero for the random tail to overwrite.
 	binary.BigEndian.PutUint64(raw[0:8], uint64(t.UnixMilli())<<16) //nolint:gosec // UnixMilli is positive for every date this runs on
 	if _, err := rand.Read(raw[6:]); err != nil {
-		panic("commerce: crypto/rand: " + err.Error())
+		return "", fmt.Errorf("commerce: crypto/rand: %w", err)
 	}
 	var out [26]byte
 	// Encode 128 bits as 26 base32 characters, most significant first,
@@ -221,7 +221,7 @@ func newULID(t time.Time) string {
 		acc >>= 5
 		pos--
 	}
-	return string(out[:])
+	return string(out[:]), nil
 }
 
 func isUniqueViolation(err error) bool {
@@ -263,7 +263,11 @@ func (s *Store) PublishTerms(ctx context.Context, in PublishTermsInput) (*Terms,
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			if in.TermsID == "" {
-				in.TermsID = TermsIDPrefix + newULID(s.now())
+				id, err := newULID(s.now())
+				if err != nil {
+					return err
+				}
+				in.TermsID = TermsIDPrefix + id
 			} else {
 				var n int
 				if err := tx.QueryRow(ctx, `SELECT count(*) FROM commerce_terms WHERE terms_id = $1`, in.TermsID).Scan(&n); err != nil {
@@ -306,7 +310,13 @@ func (s *Store) RetireTerms(ctx context.Context, termsID string, version int64) 
 		RETURNING `+termsColumns, termsID, version, s.now())
 	t, err := scanTerms(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrTermsNotFound
+		// Nothing changed: either the version never existed or it was
+		// already retired. Tell the two apart so a double retire does not
+		// read as "never existed".
+		if _, gerr := s.getTerms(ctx, s.pool, termsID, version); gerr != nil {
+			return nil, gerr
+		}
+		return nil, ErrTermsRetired
 	}
 	if err != nil {
 		return nil, fmt.Errorf("commerce: retire terms: %w", err)
@@ -329,7 +339,7 @@ func (s *Store) getTerms(ctx context.Context, q querier, termsID string, version
 	t, err := scanTerms(q.QueryRow(ctx, `SELECT `+termsColumns+` FROM commerce_terms
 		WHERE terms_id = $1 AND terms_version = $2`, termsID, version))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrTermsNotFound
+		return nil, ErrTermsVersionMissing
 	}
 	if err != nil {
 		return nil, fmt.Errorf("commerce: get terms: %w", err)
@@ -413,9 +423,13 @@ func (s *Store) MintQuote(ctx context.Context, in MintQuoteInput) (*Quote, error
 	if err := checkFundsMode(t.FundsMode); err != nil {
 		return nil, err
 	}
+	quoteID, err := newULID(now)
+	if err != nil {
+		return nil, err
+	}
 	q := Quote{
 		SchemaVersion:   SchemaVersion,
-		QuoteID:         QuoteIDPrefix + newULID(now),
+		QuoteID:         QuoteIDPrefix + quoteID,
 		TermsID:         t.TermsID,
 		TermsVersion:    t.TermsVersion,
 		CapabilityID:    t.CapabilityID,
@@ -567,8 +581,12 @@ func (s *Store) AcceptInvocation(ctx context.Context, in AcceptInvocationInput) 
 		if q.PriceMode == PriceModeFree {
 			paymentStatus = PaymentNotRequired
 		}
+		invID, err := newULID(now)
+		if err != nil {
+			return err
+		}
 		v := Invocation{
-			InvocationID:           InvocationIDPrefix + newULID(now),
+			InvocationID:           InvocationIDPrefix + invID,
 			QuoteID:                q.QuoteID,
 			QuoteDigest:            q.QuoteDigest,
 			QuoteExpiresAt:         q.ExpiresAt,
@@ -665,7 +683,7 @@ func (s *Store) Transition(ctx context.Context, tenantID string, in TransitionIn
 			reservation = &d
 		}
 		var finalized *time.Time
-		if IsTerminal(in.ToPhase) {
+		if in.ToPhase == PhaseFinalized {
 			finalized = &now
 		}
 		if in.ToPhase == PhaseReleased && charge == ChargeReserved {
