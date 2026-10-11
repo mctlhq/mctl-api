@@ -199,6 +199,11 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 			"clusterScope": true,
 		},
 	}
+	// Secret handoff prerequisites, both kept in mctl-gitops: mctl-api reads
+	// ClusterWorkflowTemplates through ClusterRole mctl-api-cwt-reader
+	// (bootstrap/templates/mctl-platform/mctl-api-rbac.yaml), and the
+	// deploy-service template declares SecretHandoffParam with default "",
+	// so the parameter is set here only when there is something to hand off.
 	handoff := len(secretValues) > 0
 	secretName := handoffSecretName(workflowName)
 	if handoff {
