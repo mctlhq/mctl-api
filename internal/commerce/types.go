@@ -591,11 +591,11 @@ type TransitionInput struct {
 	ReservationDeadline *time.Time
 }
 
-// allowedTransitions is the state machine of ADR 020 sec. 11. A pair absent
-// here is a phase conflict, never a silent write.
 // Phases is the closed vocabulary of invocation phases, in lifecycle order.
 var Phases = []string{PhaseAccepted, PhaseRefused, PhaseReserved, PhaseDispatching, PhaseDispatched, PhaseOutcomeUnknown, PhaseReleased, PhaseFinalized}
 
+// allowedTransitions is the state machine of ADR 020 sec. 11. A pair absent
+// here is a phase conflict, never a silent write.
 var allowedTransitions = map[string]map[string]bool{
 	PhaseAccepted:       {PhaseRefused: true, PhaseReserved: true},
 	PhaseReserved:       {PhaseDispatching: true, PhaseReleased: true},
@@ -650,20 +650,7 @@ func (in TransitionInput) validate() error {
 			return invalid("%s %q is not one of %s", f.name, f.value, strings.Join(f.allowed, ", "))
 		}
 	}
-	// The facts are closed per field above; these rules close the
-	// combinations the phase machine implies. A refused invocation never
-	// held a charge, a released one does not keep a captured charge, and a
-	// captured charge cannot sit beside a denied or voided payment.
-	switch in.ToPhase {
-	case PhaseRefused:
-		if in.ChargeStatus != "" && in.ChargeStatus != ChargeNone {
-			return invalid("refused requires charge_status none, got %q", in.ChargeStatus)
-		}
-	case PhaseReleased:
-		if in.ChargeStatus == ChargeCaptured {
-			return invalid("released cannot keep charge_status captured")
-		}
-	case PhaseFinalized:
+	if in.ToPhase == PhaseFinalized {
 		switch in.ExecutionOutcome {
 		case OutcomeSucceeded, OutcomeFailed:
 		default:
@@ -677,18 +664,39 @@ func (in TransitionInput) validate() error {
 		if in.UsageQuantity == nil {
 			return invalid("finalized requires usage_quantity")
 		}
-		if in.ChargeStatus == ChargeCaptured && (in.PaymentStatus == PaymentDenied || in.PaymentStatus == PaymentVoided) {
-			return invalid("finalized with charge_status captured cannot carry payment_status %s", in.PaymentStatus)
-		}
-		if in.ChargeStatus == ChargeReleased && in.PaymentStatus == PaymentCaptured {
-			return invalid("finalized with charge_status released cannot carry payment_status captured")
-		}
 	}
 	if in.ToPhase == PhaseReserved && in.ReservationDeadline == nil {
 		return invalid("reserved requires reservation_deadline")
 	}
 	if in.UsageQuantity != nil && *in.UsageQuantity < 0 {
 		return invalid("usage_quantity must be >= 0")
+	}
+	return nil
+}
+
+// checkFactCombination closes the combinations the phase implies, on the
+// values that are about to be stored rather than on the request alone: a
+// fact the caller omitted is inherited from the row, and an inherited value
+// must satisfy the same rule as a supplied one. A refused invocation never
+// held a charge, a released one does not keep a captured charge, and a
+// captured charge cannot sit beside a denied or voided payment.
+func checkFactCombination(phase, charge, payment string) error {
+	switch phase {
+	case PhaseRefused:
+		if charge != ChargeNone {
+			return invalid("refused requires charge_status none, got %q", charge)
+		}
+	case PhaseReleased:
+		if charge == ChargeCaptured {
+			return invalid("released cannot keep charge_status captured")
+		}
+	case PhaseFinalized:
+		if charge == ChargeCaptured && (payment == PaymentDenied || payment == PaymentVoided) {
+			return invalid("finalized with charge_status captured cannot carry payment_status %s", payment)
+		}
+		if charge == ChargeReleased && payment == PaymentCaptured {
+			return invalid("finalized with charge_status released cannot carry payment_status captured")
+		}
 	}
 	return nil
 }

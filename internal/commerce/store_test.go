@@ -481,9 +481,9 @@ func TestTransitionsAreCheckedAndAppendOnly(t *testing.T) {
 	// held a reservation, a captured charge beside a denied payment.
 	qty = int64(1)
 	for _, bad := range []TransitionInput{
+		{ExpectedPhase: PhaseAccepted, ToPhase: PhaseRefused, ReasonCode: ReasonQuoteExpired, ChargeStatus: ChargeReserved},
 		{ExpectedPhase: PhaseAccepted, ToPhase: PhaseReserved, ReservationDeadline: &deadline, ChargeStatus: ChargeReserved},
 		{ExpectedPhase: PhaseReserved, ToPhase: PhaseReleased, ReasonCode: ReasonPaymentDenied, ChargeStatus: ChargeCaptured},
-		{ExpectedPhase: PhaseAccepted, ToPhase: PhaseRefused, ReasonCode: ReasonQuoteExpired, ChargeStatus: ChargeReserved},
 	} {
 		bad.InvocationID, bad.Actor = inv3.InvocationID, "a"
 		_, err := s.Transition(ctx, "acme", bad)
@@ -494,6 +494,24 @@ func TestTransitionsAreCheckedAndAppendOnly(t *testing.T) {
 			t.Fatalf("combination %+v accepted: %v", bad, err)
 		}
 	}
+	got, _ = s.GetInvocation(ctx, "acme", inv3.InvocationID)
+	if got.Phase != PhaseReserved || got.ChargeStatus != ChargeReserved || got.Version != 2 {
+		t.Fatalf("row changed by a refused combination: %+v", got)
+	}
+
+	// The rule binds the stored row, not the request: a payment_status denied
+	// written on an earlier edge and then omitted is still denied when the
+	// charge is captured on finalize.
+	for _, step := range []TransitionInput{
+		{ExpectedPhase: PhaseReserved, ToPhase: PhaseDispatching, PaymentStatus: PaymentDenied},
+		{ExpectedPhase: PhaseDispatching, ToPhase: PhaseDispatched},
+	} {
+		step.InvocationID, step.Actor = inv3.InvocationID, "a"
+		if _, err := s.Transition(ctx, "acme", step); err != nil {
+			t.Fatalf("%s: %v", step.ToPhase, err)
+		}
+	}
+	// The row is dispatched: explicit contradictory pairs on finalize are refused.
 	for _, bad := range []TransitionInput{
 		{ChargeStatus: ChargeCaptured, PaymentStatus: PaymentDenied},
 		{ChargeStatus: ChargeCaptured, PaymentStatus: PaymentVoided},
@@ -505,9 +523,14 @@ func TestTransitionsAreCheckedAndAppendOnly(t *testing.T) {
 			t.Fatalf("combination %+v accepted: %v", bad, err)
 		}
 	}
+	inherited := TransitionInput{InvocationID: inv3.InvocationID, Actor: "a", ExpectedPhase: PhaseDispatched, ToPhase: PhaseFinalized,
+		ExecutionOutcome: OutcomeSucceeded, ChargeStatus: ChargeCaptured, UsageQuantity: &qty}
+	if _, err := s.Transition(ctx, "acme", inherited); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("inherited denied payment beside captured charge accepted: %v", err)
+	}
 	got, _ = s.GetInvocation(ctx, "acme", inv3.InvocationID)
-	if got.Phase != PhaseReserved || got.ChargeStatus != ChargeReserved || got.Version != 2 {
-		t.Fatalf("row changed by a refused combination: %+v", got)
+	if got.Phase != PhaseDispatched || got.PaymentStatus != PaymentDenied {
+		t.Fatalf("row changed by a refused inherited combination: %+v", got)
 	}
 }
 

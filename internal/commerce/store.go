@@ -131,33 +131,35 @@ CREATE INDEX IF NOT EXISTS commerce_invocations_open
 -- table created by an earlier build of this package gets them too:
 -- CREATE TABLE IF NOT EXISTS is a no-op once the table exists, and the second
 -- line of defence behind TransitionInput.validate must hold wherever the
--- table came from. Each block is idempotent via pg_constraint.
+-- table came from. The pg_constraint test keeps the common path cheap and the
+-- duplicate_object handler covers two processes applying the schema at once.
 DO $$
+DECLARE c RECORD;
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_phase_check') THEN
-        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_phase_check
-            CHECK (phase IN ('accepted','refused','reserved','dispatching','dispatched','outcome_unknown','released','finalized'));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_execution_outcome_check') THEN
-        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_execution_outcome_check
-            CHECK (execution_outcome IN ('not_dispatched','succeeded','failed','unknown'));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_usage_quantity_check') THEN
-        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_usage_quantity_check
-            CHECK (usage_quantity IS NULL OR usage_quantity >= 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_charge_status_check') THEN
-        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_charge_status_check
-            CHECK (charge_status IN ('none','reserved','captured','released'));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_payment_status_check') THEN
-        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_payment_status_check
-            CHECK (payment_status IN ('none','not_required','authorized','denied','captured','voided','unknown'));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_settlement_status_check') THEN
-        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_settlement_status_check
-            CHECK (settlement_status IN ('not_applicable','pending','settled','failed'));
-    END IF;
+    FOR c IN SELECT * FROM (VALUES
+        ('commerce_invocations_phase_check',
+         $c$phase IN ('accepted','refused','reserved','dispatching','dispatched','outcome_unknown','released','finalized')$c$),
+        ('commerce_invocations_execution_outcome_check',
+         $c$execution_outcome IN ('not_dispatched','succeeded','failed','unknown')$c$),
+        ('commerce_invocations_usage_quantity_check',
+         $c$usage_quantity IS NULL OR usage_quantity >= 0$c$),
+        ('commerce_invocations_charge_status_check',
+         $c$charge_status IN ('none','reserved','captured','released')$c$),
+        ('commerce_invocations_payment_status_check',
+         $c$payment_status IN ('none','not_required','authorized','denied','captured','voided','unknown')$c$),
+        ('commerce_invocations_settlement_status_check',
+         $c$settlement_status IN ('not_applicable','pending','settled','failed')$c$)
+    ) AS t(name, expr)
+    LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = c.name) THEN
+            BEGIN
+                EXECUTE format('ALTER TABLE commerce_invocations ADD CONSTRAINT %I CHECK (%s)', c.name, c.expr);
+            EXCEPTION WHEN duplicate_object THEN
+                -- Two processes cold-started together; the other one won.
+                NULL;
+            END;
+        END IF;
+    END LOOP;
 END $$;
 
 CREATE TABLE IF NOT EXISTS commerce_invocation_transitions (
@@ -725,6 +727,9 @@ func (s *Store) Transition(ctx context.Context, tenantID string, in TransitionIn
 		}
 		if in.ToPhase == PhaseOutcomeUnknown {
 			outcome = OutcomeUnknown
+		}
+		if err := checkFactCombination(in.ToPhase, charge, payment); err != nil {
+			return err
 		}
 		row := tx.QueryRow(ctx, `UPDATE commerce_invocations SET
 			phase = $3, execution_outcome = $4, usage_quantity = $5, charge_status = $6,

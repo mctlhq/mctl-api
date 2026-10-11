@@ -92,7 +92,9 @@ facts is validated against its vocabulary on every edge, and the columns
 carry matching `CHECK` constraints, so a typo from a programmatic caller is
 refused rather than stored. The constraints are added by name on every start
 (guarded `ALTER TABLE ... ADD CONSTRAINT`), so a table created by an earlier
-build gets them too. Combinations the phase implies are closed as well: a
+build gets them too. Combinations the phase implies are closed as well, on
+the values about to be stored (an omitted fact inherits the row's value and
+must satisfy the same rule): a
 `refused` row holds no charge, a `released` row cannot keep `captured`, and
 a `finalized` row cannot pair `captured` with a `denied`/`voided` payment or
 `released` with a `captured` one. `finalized_at` is set only on `finalized`;
