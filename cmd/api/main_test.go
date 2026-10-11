@@ -309,6 +309,30 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			// mctlhq/mctl-agents#626 item 5: an unusable dispatch key
+			// refuses the boot instead of leaving dispatch off.
+			name:    "a half-configured commerce dispatch key is refused",
+			cfg:     config{CommerceDispatchKeyID: "kid-1"},
+			wantErr: true,
+			wantVar: "COMMERCE_DISPATCH_SIGNING_KEY",
+		},
+		{
+			name:    "a commerce dispatch seed of the wrong length is refused",
+			cfg:     config{CommerceDispatchKeyID: "kid-1", CommerceDispatchSigningKey: "AAAA"},
+			wantErr: true,
+			wantVar: "COMMERCE_DISPATCH_SIGNING_KEY",
+		},
+		{
+			name:    "an unusable commerce dispatch key is not validated while COMMERCE_DISABLED is on",
+			cfg:     config{CommerceDispatchKeyID: "kid-1", CommerceDisabled: true},
+			wantErr: false,
+		},
+		{
+			name:    "a well-formed commerce dispatch key is accepted",
+			cfg:     config{CommerceDispatchKeyID: "kid-1", CommerceDispatchSigningKey: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="},
+			wantErr: false,
+		},
+		{
 			name:    "well-formed MCTL_OIDC_PROVIDERS is accepted",
 			cfg:     config{OIDCProvidersRaw: `[{"name":"acme","issuer":"https://acme.example","audiences":["mctl-api"],"audience_enforcement":"audit"}]`},
 			wantErr: false,

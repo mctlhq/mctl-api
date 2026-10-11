@@ -487,7 +487,7 @@ func main() {
 		commerceDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
 	}
 	switch {
-	case killSwitchOn(os.Getenv("COMMERCE_DISABLED")):
+	case cfg.CommerceDisabled:
 		slog.Warn("COMMERCE_DISABLED is set; /api/v1/commerce* routes will return 503")
 	case commerceDBURL == "":
 		slog.Warn("no COMMERCE_DB_URL or AUDIT_DB_URL; /api/v1/commerce* routes will return 503")
@@ -503,9 +503,9 @@ func main() {
 			// The dispatch signing key (C4, mctl-agents#619). Without it
 			// nothing can be dispatched to a paid provider: dispatch
 			// answers 503 and reserved rows are released by the reconciler.
-			// A key that is set but unusable is logged and left off rather
-			// than failing the whole API.
-			if signer, err := commerceDispatchSigner(os.Getenv("COMMERCE_DISPATCH_KEY_ID"), os.Getenv("COMMERCE_DISPATCH_SIGNING_KEY")); err != nil {
+			// A key that is set but unusable already refused the boot in
+			// config.validate, so this parse cannot fail.
+			if signer, err := commerceDispatchSigner(cfg.CommerceDispatchKeyID, cfg.CommerceDispatchSigningKey); err != nil {
 				slog.Error("commerce dispatch signing key unusable; dispatch will return 503", "error", err)
 			} else if signer != nil {
 				cs.UseDispatchSigner(signer)
@@ -1210,6 +1210,12 @@ type config struct {
 	EventsValkeyPassword         string
 	OAuthRegistrationToken       string
 	TrustedProxyCIDRs            string
+	// The commerce dispatch signing key (COMMERCE_DISPATCH_KEY_ID,
+	// COMMERCE_DISPATCH_SIGNING_KEY) and the COMMERCE_DISABLED kill switch.
+	// A key that is set but unusable refuses the boot (validate).
+	CommerceDispatchKeyID      string
+	CommerceDispatchSigningKey string
+	CommerceDisabled           bool
 }
 
 func loadConfig() config {
@@ -1312,6 +1318,9 @@ func loadConfig() config {
 		EventsValkeyPassword:           os.Getenv("EVENTS_VALKEY_PASSWORD"),
 		OAuthRegistrationToken:         os.Getenv("OAUTH_REGISTRATION_TOKEN"),
 		TrustedProxyCIDRs:              os.Getenv("TRUSTED_PROXY_CIDRS"),
+		CommerceDispatchKeyID:          os.Getenv("COMMERCE_DISPATCH_KEY_ID"),
+		CommerceDispatchSigningKey:     os.Getenv("COMMERCE_DISPATCH_SIGNING_KEY"),
+		CommerceDisabled:               killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
 	}
 }
 
@@ -1565,6 +1574,18 @@ func (c config) validate() error {
 		return fmt.Errorf("OAUTH_TOKEN_TTL must not exceed %v, got %v — clients renew "+
 			"silently with the refresh_token grant, and access tokens cannot be revoked, "+
 			"so a longer lifetime only widens the window on a leak", maxOAuthTokenTTL, c.OAuthTokenTTL)
+	}
+
+	// The commerce dispatch signing key (mctlhq/mctl-agents#626 item 5): a
+	// key that is set but unusable refuses this boot. Left off at runtime it
+	// would only show as dispatch answering 503 while every reservation
+	// expired. Both unset is "not configured", which stays allowed. Skipped
+	// while COMMERCE_DISABLED is on, so the kill switch can roll back a bad
+	// key without a crash loop.
+	if !c.CommerceDisabled {
+		if _, err := commerceDispatchSigner(c.CommerceDispatchKeyID, c.CommerceDispatchSigningKey); err != nil {
+			return err
+		}
 	}
 
 	// MCTL_OIDC_PROVIDERS (mctl-api#374): shape-validated here, in the same
@@ -2083,5 +2104,9 @@ func commerceDispatchSigner(keyID, seedB64 string) (*commerce.DispatchSigner, er
 	if err != nil {
 		return nil, errors.New("COMMERCE_DISPATCH_SIGNING_KEY is not base64")
 	}
-	return commerce.NewDispatchSigner(keyID, seed)
+	signer, err := commerce.NewDispatchSigner(keyID, seed)
+	if err != nil {
+		return nil, fmt.Errorf("COMMERCE_DISPATCH_KEY_ID/COMMERCE_DISPATCH_SIGNING_KEY: %w", err)
+	}
+	return signer, nil
 }
