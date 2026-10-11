@@ -236,7 +236,8 @@ func (r *Registry) List() []Operation {
 // ValidateInput checks that all required parameters are present and valid.
 func (r *Registry) ValidateInput(op Operation, input map[string]string) []string {
 	var errors []string
-	for _, p := range op.Parameters {
+	for i := range op.Parameters {
+		p := &op.Parameters[i]
 		val, exists := input[p.Name]
 		if p.Required && (!exists || val == "") {
 			errors = append(errors, "missing required parameter: "+p.Name)
@@ -411,7 +412,7 @@ var freeTextParameters = map[string]map[string]string{
 }
 
 // unconstrainedParameters lists parameters exempt from Enum/Pattern.
-var unconstrainedParameters = map[string]map[string]string{
+var unconstrainedParameters = map[string]map[string]string{ //nolint:gosec // parameter names and reasons, not credentials
 	"deploy-service": {"secret_env_vars": "validated by splitSecretParams; never enters the Workflow spec"},
 }
 

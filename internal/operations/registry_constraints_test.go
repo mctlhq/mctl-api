@@ -19,7 +19,8 @@ func isConstrained(p ParameterDef) bool {
 func constraintViolations(ops []Operation, free, exempt map[string]map[string]string) []string {
 	var out []string
 	index := map[string]map[string]ParameterDef{}
-	for _, op := range ops {
+	for i := range ops {
+		op := &ops[i]
 		if op.WorkflowTemplate == "" {
 			continue
 		}
@@ -132,9 +133,9 @@ func TestEveryParameterPatternCompiles(t *testing.T) {
 }
 
 func opByName(t *testing.T, name string) Operation {
-	for _, op := range builtinOperations {
-		if op.Name == name {
-			return op
+	for i := range builtinOperations {
+		if builtinOperations[i].Name == name {
+			return builtinOperations[i]
 		}
 	}
 	t.Fatalf("no op %s", name)

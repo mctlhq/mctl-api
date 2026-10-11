@@ -508,7 +508,8 @@ func extractTenantParam(op operations.Operation, input map[string]string) string
 
 func redactSecrets(op operations.Operation, input map[string]string) map[string]string {
 	secretFields := make(map[string]bool)
-	for _, p := range op.Parameters {
+	for i := range op.Parameters {
+		p := &op.Parameters[i]
 		if p.Secret {
 			secretFields[p.Name] = true
 		}
