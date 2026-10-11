@@ -1,5 +1,317 @@
 # Changelog
 
+## [4.77.0](https://github.com/mctlhq/mctl-api/compare/4.76.1...4.77.0) (2026-10-11)
+
+
+### Features
+
+* **agents:** issue-457-mcp-work-items-refuse-non-string-optiona ([d314811](https://github.com/mctlhq/mctl-api/commit/d3148117609695aef04fb2edbd54139fbcc889ea))
+* **commerce:** durable commerce ledger for ADR 020 (C2) ([362df56](https://github.com/mctlhq/mctl-api/commit/362df561fe36fad60a36fcf3808f277694ec24cb))
+* **commerce:** enforce atomic tenant budgets with simulated authorization ([d815867](https://github.com/mctlhq/mctl-api/commit/d81586790beba06acfdc1d4564da64474bb0a4c5))
+* **commerce:** enforce atomic tenant budgets with simulated authorization ([46a5b01](https://github.com/mctlhq/mctl-api/commit/46a5b012d3ed58017b8ee6e28705936a462384c0)), closes [#548](https://github.com/mctlhq/mctl-api/issues/548)
+
+
+### Bug Fixes
+
+* **agents:** issue-457-mcp-work-items-refuse-non-string-optiona ([a4fe424](https://github.com/mctlhq/mctl-api/commit/a4fe42418b6d6b60f387c472e17537e763c9ef7d))
+* **commerce:** guard dispatch on the stored payment fact, close the error vocabulary ([bfef1f9](https://github.com/mctlhq/mctl-api/commit/bfef1f941fee3ced0dcf1b2b8d78f766e170c242)), closes [#548](https://github.com/mctlhq/mctl-api/issues/548)
+* **commerce:** refuse a captured payment on the refused phase ([d89a462](https://github.com/mctlhq/mctl-api/commit/d89a4624212d2760c113bd2eca94c33fd485ebb5))
+* **commerce:** settle review findings on budget reserve and unknown holds ([6f9b8f1](https://github.com/mctlhq/mctl-api/commit/6f9b8f1e961245b6ebe0e0b0e78e0407a3134bad)), closes [#548](https://github.com/mctlhq/mctl-api/issues/548)
+* **operations:** keep secret parameter values out of Workflow specs ([84a6927](https://github.com/mctlhq/mctl-api/commit/84a692739e57b35a199f2936dab655601b919bb8))
+* **operations:** keep secret parameter values out of Workflow specs ([61da418](https://github.com/mctlhq/mctl-api/commit/61da41859f2bc4c2adc6d7eec24b7c763f2bb973))
+* **operations:** mark the handoff parameter name as not a credential ([044340c](https://github.com/mctlhq/mctl-api/commit/044340c40ccf1105ff862a774adf6d3bf8c4f29d))
+* **operations:** refuse secret_env_vars lines with an empty key ([dde57e0](https://github.com/mctlhq/mctl-api/commit/dde57e09783dc8ea3317ecaa67077abbcb522ab3))
+* **operations:** refuse secret_env_vars lines without '=' ([bccbb1c](https://github.com/mctlhq/mctl-api/commit/bccbb1cd2d93130530c8b456d8ab36307492985e))
+* **operations:** reserve tenant name sync ([5a5d67b](https://github.com/mctlhq/mctl-api/commit/5a5d67b62664b5d6ac91c3fc00c0404101c7646f))
+* **operations:** reserve tenant name sync ([fca42f8](https://github.com/mctlhq/mctl-api/commit/fca42f883dda7292f4b0e9fcdae8bf0bf77cab7a))
+
+## [4.76.1](https://github.com/mctlhq/mctl-api/compare/4.76.0...4.76.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* **api:** check preview-delete's composed name, widen preview_id ([d227fa2](https://github.com/mctlhq/mctl-api/commit/d227fa29e448a42ac41bca9582364b41be663071))
+* **api:** keep domain teardown working for reserved service pairs ([691b02a](https://github.com/mctlhq/mctl-api/commit/691b02aa80db37efff4b87669f50941b83ded5c2))
+* **api:** verify service ownership and reserve platform app names ([69c4f86](https://github.com/mctlhq/mctl-api/commit/69c4f86ac3de266fdaaf537fa863d2c319d61885))
+* **api:** verify service ownership and reserve platform app names ([1fbbc2e](https://github.com/mctlhq/mctl-api/commit/1fbbc2e6d2410cb1a7d3e8f19f5786a023163b0a))
+
+## [4.76.0](https://github.com/mctlhq/mctl-api/compare/4.75.0...4.76.0) (2026-10-10)
+
+
+### Features
+
+* **agents:** issue-536-fix-api-readyz-must-not-drain-every-repl ([f5baa07](https://github.com/mctlhq/mctl-api/commit/f5baa070ba0f94d648554fa4c171530b26b6a827))
+
+
+### Bug Fixes
+
+* **api:** keep /readyz 503 until this pod's gitops checkout has synced ([b6bf390](https://github.com/mctlhq/mctl-api/commit/b6bf39015a0b8d05a63b2ad4ef9b90e4f856b31c))
+* **api:** serve for a drain delay before closing the listener ([97cc871](https://github.com/mctlhq/mctl-api/commit/97cc87166b00d878b06abd1a87fdb7086cbb2ad3))
+* **operations:** reject reserved tenant names in create-tenant validation ([598c515](https://github.com/mctlhq/mctl-api/commit/598c51564a81ab07fe1e7d7e7266c9ef2266b58e))
+
+## [4.75.0](https://github.com/mctlhq/mctl-api/compare/4.74.1...4.75.0) (2026-10-10)
+
+
+### Features
+
+* **operations:** declare traceparent on investigate and implement ([4e87f20](https://github.com/mctlhq/mctl-api/commit/4e87f20524af467fc2194abf15b3654538d362dc))
+* **operations:** declare traceparent on investigate and implement ([72f3603](https://github.com/mctlhq/mctl-api/commit/72f360365b6a494205ed9fd209267a4dbb512e6c))
+* **workflows:** report a workflow's trace id in its status ([6314860](https://github.com/mctlhq/mctl-api/commit/63148604b0ea177fd872d056cb55be2496c9dc66))
+* **workflows:** report a workflow's trace id in its status ([a925548](https://github.com/mctlhq/mctl-api/commit/a9255484fb739974ef94995afaed38a436a983d1))
+
+
+### Bug Fixes
+
+* **workflows:** satisfy gocritic weakCond on the traceparent match ([91852a5](https://github.com/mctlhq/mctl-api/commit/91852a582010e2b81bdc40e780894a0ee2866618))
+
+## [4.74.1](https://github.com/mctlhq/mctl-api/compare/4.74.0...4.74.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* **mcp:** onboarding text points CI deploys at Actions OIDC ([30a3b1a](https://github.com/mctlhq/mctl-api/commit/30a3b1a62196ca1f198e6eb8b7a72d83374806ce))
+* **mcp:** onboarding text points CI deploys at Actions OIDC ([3bc792e](https://github.com/mctlhq/mctl-api/commit/3bc792e467c726b207f66c6dfc8d45e72420562d))
+
+## [4.74.0](https://github.com/mctlhq/mctl-api/compare/4.73.0...4.74.0) (2026-10-10)
+
+
+### Features
+
+* **auth:** GitHub Actions OIDC principal for CI deploys ([2b33b34](https://github.com/mctlhq/mctl-api/commit/2b33b34287f416dbacdf05c995831078e44e1e92))
+* **auth:** GitHub Actions OIDC principal for CI deploys ([fb12ce2](https://github.com/mctlhq/mctl-api/commit/fb12ce29c380928a5738557bd491c2d5058ed5e8)), closes [#530](https://github.com/mctlhq/mctl-api/issues/530) [#525](https://github.com/mctlhq/mctl-api/issues/525)
+
+
+### Bug Fixes
+
+* **api:** require and shape git_tag and dockerfile_path for CI deploys ([2d8d972](https://github.com/mctlhq/mctl-api/commit/2d8d972435833a1d1a3f6fdce463b207ee1b5f45)), closes [#530](https://github.com/mctlhq/mctl-api/issues/530)
+* **operations:** keep Workflow labels valid for any caller ID ([cd1f31d](https://github.com/mctlhq/mctl-api/commit/cd1f31d78f90f91afc0ff7981c0519c7e20b44d4)), closes [#530](https://github.com/mctlhq/mctl-api/issues/530)
+
+## [4.73.0](https://github.com/mctlhq/mctl-api/compare/4.72.0...4.73.0) (2026-10-10)
+
+
+### Features
+
+* **auth:** attribute raw GitHub token verifications by kind ([cddfb5d](https://github.com/mctlhq/mctl-api/commit/cddfb5deb49c4870817bef8b06d31b21efba1fe4))
+* **auth:** attribute raw GitHub token verifications by kind ([b721c96](https://github.com/mctlhq/mctl-api/commit/b721c967dcf4cfecdaa5d153febc6ba81a9e52ab))
+
+
+### Bug Fixes
+
+* **auth:** address review of GitHub token attribution ([dceb645](https://github.com/mctlhq/mctl-api/commit/dceb645edb5b488f5c9cd4129de5788b78f7c063))
+* **auth:** count GitHub rate limits as unavailable, sweep sightings ([6ecc4ee](https://github.com/mctlhq/mctl-api/commit/6ecc4ee2825fc9bd8e17417cfcbeac6f71856545))
+
+## [4.72.0](https://github.com/mctlhq/mctl-api/compare/4.71.2...4.72.0) (2026-10-10)
+
+
+### Features
+
+* **agents:** issue-285-feat-mcp-propagate-otel-span-context-thr ([931162b](https://github.com/mctlhq/mctl-api/commit/931162b3fa8c3697b2a28ad1eeb3637ebeccb618))
+* **auth:** no default Dex issuer; unset DEX_ISSUER_URL turns Dex off ([aa4bdd2](https://github.com/mctlhq/mctl-api/commit/aa4bdd2a8acbd8d0b2f4b01102069596ac7bfff7))
+* **auth:** no default Dex issuer; unset DEX_ISSUER_URL turns Dex off ([e9f6e26](https://github.com/mctlhq/mctl-api/commit/e9f6e269d84a714791b2b257142bd208b97e2280))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-285-feat-mcp-propagate-otel-span-context-thr ([6a75b6d](https://github.com/mctlhq/mctl-api/commit/6a75b6dea50d1c193c77b1c4d8a06993ed8fb7de))
+* **agents:** address P1/P2 codex findings on issue-285-feat-mcp-propagate-otel-span-context-thr ([bc1401f](https://github.com/mctlhq/mctl-api/commit/bc1401f346f237ee2a1da75638a804e1a13fed70))
+* **ci:** fix failing required checks on issue-285-feat-mcp-propagate-otel-span-context-thr ([baeadcd](https://github.com/mctlhq/mctl-api/commit/baeadcd7d1535d4a370a14e3ac814ecec21f7116))
+
+## [4.71.2](https://github.com/mctlhq/mctl-api/compare/4.71.1...4.71.2) (2026-10-09)
+
+
+### Performance Improvements
+
+* **mcp:** snapshot tool count for the owner-only filter ([437167d](https://github.com/mctlhq/mctl-api/commit/437167d8e40985b6346ecc7ab2db48487dec2803))
+* **mcp:** snapshot tool count for the owner-only filter ([ca80fa4](https://github.com/mctlhq/mctl-api/commit/ca80fa48ff42a2970851607f885a74caac7b349e)), closes [#513](https://github.com/mctlhq/mctl-api/issues/513)
+
+## [4.71.1](https://github.com/mctlhq/mctl-api/compare/4.71.0...4.71.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **mcp:** address review on owner-only call gate and provenance guard ([20b2fc4](https://github.com/mctlhq/mctl-api/commit/20b2fc43b9fd965a469aa32f3accd9bf0001677c))
+* **mcp:** report a failed role lookup on erpact tool calls explicitly ([1fa6f42](https://github.com/mctlhq/mctl-api/commit/1fa6f42f5aa12f604b7cd93badbb803a1278fe4f))
+* **mcp:** report a failed role lookup on erpact tool calls explicitly ([c108a28](https://github.com/mctlhq/mctl-api/commit/c108a2810f9a7685863b37ff38e6608f0ae620f9))
+
+## [4.71.0](https://github.com/mctlhq/mctl-api/compare/4.70.1...4.71.0) (2026-10-09)
+
+
+### Features
+
+* **mcp:** show erpact site tools to tenant owners and admins only ([456f2a7](https://github.com/mctlhq/mctl-api/commit/456f2a797e638dc596a2b2a9050b3fa5558914f1))
+* **mcp:** show erpact site tools to tenant owners and admins only ([3910d22](https://github.com/mctlhq/mctl-api/commit/3910d22dc5e68825348110b9fa8608ba843be8c4))
+
+
+### Bug Fixes
+
+* **mcp:** one role lookup per tools/list, no filter without a checker ([e6324da](https://github.com/mctlhq/mctl-api/commit/e6324da9898663e7ae83c0e743e0f37acd3d7f66))
+* **mcp:** test the production filter wiring, align visibility with the REST gate ([dcf31c7](https://github.com/mctlhq/mctl-api/commit/dcf31c7ad8554f786ee91f9f47328e3b4a63f7f7))
+
+## [4.70.1](https://github.com/mctlhq/mctl-api/compare/4.70.0...4.70.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **vault:** do not panic when the default transport is replaced ([4a0967f](https://github.com/mctlhq/mctl-api/commit/4a0967fd93e1bd2d4f443ced260cde2ae24b6330))
+* **vault:** do not panic when the default transport is replaced ([d14beb8](https://github.com/mctlhq/mctl-api/commit/d14beb8d385cf556c39115479f19e45ed81c356a))
+
+## [4.70.0](https://github.com/mctlhq/mctl-api/compare/4.69.2...4.70.0) (2026-10-09)
+
+
+### Features
+
+* **auth:** share pending authorizations and codes across replicas ([3596f0e](https://github.com/mctlhq/mctl-api/commit/3596f0e322d65441c007730a59555b2600dd1c2f))
+
+
+### Bug Fixes
+
+* **auth:** bound the pending-authorization store round trips ([4e7d184](https://github.com/mctlhq/mctl-api/commit/4e7d184edd004e8969ee06164c84055953c05b35))
+* **readyz:** probe Vault on a fresh connection with a hard cap ([d33bb69](https://github.com/mctlhq/mctl-api/commit/d33bb69d112a4de9540a1854e9b5f32ce903fda0))
+* **readyz:** probe Vault on a fresh connection with a hard cap ([0ba2cac](https://github.com/mctlhq/mctl-api/commit/0ba2caceb59982e62ab56593947d54f18dfe61f8))
+
+## [4.69.2](https://github.com/mctlhq/mctl-api/compare/4.69.1...4.69.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* **erpact:** audit refused duplicates, dial timeout is not unknown ([242e32f](https://github.com/mctlhq/mctl-api/commit/242e32fd7408c1a05e8173ee20091f0fbf4a4378))
+* **erpact:** send the deployer the bare label, report a timed-out create as unknown ([93b15dd](https://github.com/mctlhq/mctl-api/commit/93b15dd7b121b0a7799c4a7dc100f8f76957f48b))
+* **erpact:** send the deployer the bare label, report a timed-out create as unknown ([c7ff729](https://github.com/mctlhq/mctl-api/commit/c7ff7290548ed3882b88c7e919fd559e747ad710))
+
+## [4.69.1](https://github.com/mctlhq/mctl-api/compare/4.69.0...4.69.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **api:** read the erpact deployer token on a live context, close review tails ([6f299e6](https://github.com/mctlhq/mctl-api/commit/6f299e6243ca014206b0df5ac3120fc8c43a4d00))
+* **api:** read the erpact deployer token on a live context, close review tails ([97014ce](https://github.com/mctlhq/mctl-api/commit/97014ce3c5ff2dc73072f36e0f1f3eaca18f74fa))
+
+## [4.69.0](https://github.com/mctlhq/mctl-api/compare/4.68.1...4.69.0) (2026-10-08)
+
+
+### Features
+
+* **api:** list tenant workloads deployed outside the catalogue ([12acbaa](https://github.com/mctlhq/mctl-api/commit/12acbaa2974f96a6248ae6f2438411a4286c5560))
+* **api:** list tenant workloads deployed outside the catalogue ([be89400](https://github.com/mctlhq/mctl-api/commit/be894007eb50d4f1e5ae2305c9fe8c62ec50e787)), closes [#485](https://github.com/mctlhq/mctl-api/issues/485)
+* **api:** tenant erpact site tools (list, create, status) ([61421c4](https://github.com/mctlhq/mctl-api/commit/61421c4619abba8eb55013f1bafdefa9644639c3))
+* **api:** tenant erpact site tools (list, create, status) ([96b9511](https://github.com/mctlhq/mctl-api/commit/96b95110a2ccbd71401ec269e99daeb711a9541d)), closes [#486](https://github.com/mctlhq/mctl-api/issues/486)
+
+
+### Bug Fixes
+
+* **api:** address review findings on erpact site tools ([060acab](https://github.com/mctlhq/mctl-api/commit/060acab462101c15c210a8de9ee2887ba8fba8ae))
+* **api:** attribute by namespace, keep row keys unique, log ArgoCD failures ([199443f](https://github.com/mctlhq/mctl-api/commit/199443f7d9c475b06ad9e7844427799262105761))
+* **api:** read the erpact deployer token from Vault, not env ([c69e848](https://github.com/mctlhq/mctl-api/commit/c69e848ac83ffd7d4fc2e944561678e4e56351bf))
+* **api:** stop opaque schemes from being read as a host ([4e043e4](https://github.com/mctlhq/mctl-api/commit/4e043e445424ab24d487565a3c337cf08bc05d7f))
+* **api:** withhold platform sources on merged rows, name the failed read ([672db07](https://github.com/mctlhq/mctl-api/commit/672db0794d78f5b5a27d873d8eaa923f4184b8b5))
+
+## [4.68.1](https://github.com/mctlhq/mctl-api/compare/4.68.0...4.68.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **authz:** enforce tenant member role on write operations ([9e60909](https://github.com/mctlhq/mctl-api/commit/9e60909c09217321614236f1e992803c216e51be))
+* **authz:** enforce tenant member role on write operations ([890b675](https://github.com/mctlhq/mctl-api/commit/890b675d085604c63e5f346474163dbc15020f7b)), closes [#478](https://github.com/mctlhq/mctl-api/issues/478)
+* **authz:** keep scoped roles apart; take OpenClaw reads off the write gate ([538d022](https://github.com/mctlhq/mctl-api/commit/538d022ca7c7dc38ee1a36aba5451c5dfd1a55a4)), closes [#478](https://github.com/mctlhq/mctl-api/issues/478)
+
+## [4.68.0](https://github.com/mctlhq/mctl-api/compare/4.67.0...4.68.0) (2026-10-05)
+
+
+### Features
+
+* **agent-registry:** refuse the agent service token on mutations ([ae98314](https://github.com/mctlhq/mctl-api/commit/ae9831463c377892191860ab97b88902e3fc4f2d))
+* **agent-registry:** refuse the agent service token on mutations ([4a2829e](https://github.com/mctlhq/mctl-api/commit/4a2829e0222b734949e4f5b2fd987ae0daf8d214))
+
+## [4.67.0](https://github.com/mctlhq/mctl-api/compare/4.66.0...4.67.0) (2026-10-05)
+
+
+### Features
+
+* **agent-registry:** add least-privilege registry-publisher principal ([84216b6](https://github.com/mctlhq/mctl-api/commit/84216b6f33b898c1e61fe4d7125bf2e8b56bcad0))
+* **agent-registry:** add registry-publisher principal ([cae7342](https://github.com/mctlhq/mctl-api/commit/cae73427a9e39ffa5116b12140857dc167d647f3))
+* **agent-registry:** confine the publisher to publication routes ([fd4669a](https://github.com/mctlhq/mctl-api/commit/fd4669ab96b6cceddacff103000fff53cd33a4d7))
+
+## [4.66.0](https://github.com/mctlhq/mctl-api/compare/4.65.0...4.66.0) (2026-10-05)
+
+
+### Features
+
+* **evidence:** ADR 018 Amendment 2 Tier B follow-up ([798d08a](https://github.com/mctlhq/mctl-api/commit/798d08a47ca0d99c976d48d13b67836605b474d8))
+* **evidence:** implement ADR 018 Amendment 2 Tier B follow-up ([a113c3e](https://github.com/mctlhq/mctl-api/commit/a113c3e70a04cc790f57bbb5c12c8bdbb1d0f3fa))
+
+
+### Bug Fixes
+
+* **evidence:** add a total ceiling to the superseded_by scan ([e8eecea](https://github.com/mctlhq/mctl-api/commit/e8eecea0873a48aac152ca4cade54e06f3b24bab))
+* **evidence:** cap superseded_by per record and help the planner ([d4af0bb](https://github.com/mctlhq/mctl-api/commit/d4af0bba329ad099ef07eef4772d7572a3a74c0d))
+* **evidence:** never link two subject-less envelopes ([eba645b](https://github.com/mctlhq/mctl-api/commit/eba645bb79de37cdc8d369716356ef051cf4bf8f))
+* **evidence:** reject malformed query strings on evidence reads ([dbd45d2](https://github.com/mctlhq/mctl-api/commit/dbd45d297b80f247357573a33472d221f760b30b))
+* **evidence:** scope superseded_by on the work-item read ([3711935](https://github.com/mctlhq/mctl-api/commit/3711935a02c5025e2eea8ca51f5751feed243fc5))
+
+## [4.65.0](https://github.com/mctlhq/mctl-api/compare/4.64.0...4.65.0) (2026-10-04)
+
+
+### Features
+
+* **auth:** count mctl-issued JWTs apart from GitHub tokens ([bfa3ef5](https://github.com/mctlhq/mctl-api/commit/bfa3ef519e7924b2168a88c11a4175e77775afa9))
+* **auth:** count mctl-issued JWTs apart from GitHub tokens ([dc0448f](https://github.com/mctlhq/mctl-api/commit/dc0448fa95410cf7c5f07981055df5103bb11629)), closes [#467](https://github.com/mctlhq/mctl-api/issues/467)
+* **oauth:** ZITADEL upstream for /oauth/authorize behind OAUTH_UPSTREAM ([d464e2a](https://github.com/mctlhq/mctl-api/commit/d464e2a83eea7fcad69d9ec257d4d82b3e3d7b66))
+
+
+### Bug Fixes
+
+* **api:** answer a revoked or disabled ZITADEL sign-in 403 again ([a761e75](https://github.com/mctlhq/mctl-api/commit/a761e75b8aff114ba92f2891d129352660fc093f)), closes [#467](https://github.com/mctlhq/mctl-api/issues/467)
+* **api:** refuse a ZITADEL provider name linking does not write under ([b645756](https://github.com/mctlhq/mctl-api/commit/b645756195e00b66ae3d29b44f75bbd7559d4a7d)), closes [#467](https://github.com/mctlhq/mctl-api/issues/467)
+* **auth:** reserve the mctl_oauth provider name ([79b2cc7](https://github.com/mctlhq/mctl-api/commit/79b2cc71b0db5d332c820a163b75d311fcd38214)), closes [#467](https://github.com/mctlhq/mctl-api/issues/467)
+
+## [4.64.0](https://github.com/mctlhq/mctl-api/compare/4.63.1...4.64.0) (2026-10-04)
+
+
+### Features
+
+* **portal:** enable the four read-only work-item tools on mcp ([6ff9e33](https://github.com/mctlhq/mctl-api/commit/6ff9e33b54ed40bb6563c0ba5f03e9c5382e0ac6))
+* **portal:** enable the four read-only work-item tools on mcp ([df37be3](https://github.com/mctlhq/mctl-api/commit/df37be3daf75390d99beed1fd81ad46abae0f22f)), closes [#341](https://github.com/mctlhq/mctl-api/issues/341)
+
+
+### Bug Fixes
+
+* **identity-link:** steer to the ZITADEL login name, not the e-mail ([404d539](https://github.com/mctlhq/mctl-api/commit/404d539832a16bbb72ba9c3c01c58461babb4679))
+* **identity-link:** steer to the ZITADEL login name, not the e-mail ([016ac97](https://github.com/mctlhq/mctl-api/commit/016ac97ac0ec39f114c05d44803553402d194d32)), closes [#462](https://github.com/mctlhq/mctl-api/issues/462)
+* **identity-link:** tell the person what to enter at ZITADEL ([c4a686b](https://github.com/mctlhq/mctl-api/commit/c4a686bd38e62693e088560f434535aee3f7b3a9))
+* **identity-link:** tell the person what to enter at ZITADEL ([02a8135](https://github.com/mctlhq/mctl-api/commit/02a813519afd78954a1256fca7bf25be10272a23)), closes [#462](https://github.com/mctlhq/mctl-api/issues/462)
+
+## [4.63.1](https://github.com/mctlhq/mctl-api/compare/4.63.0...4.63.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **helm:** route /identity through the ingress ([270c990](https://github.com/mctlhq/mctl-api/commit/270c99096b2f40e459844d8bfea0afbb91fafb39))
+* **helm:** route /identity through the ingress ([d86cb1f](https://github.com/mctlhq/mctl-api/commit/d86cb1f5b63c078dedea9adca8fdfbaaa7dd8a77))
+
+## [4.63.0](https://github.com/mctlhq/mctl-api/compare/4.62.0...4.63.0) (2026-10-04)
+
+
+### Features
+
+* **helm:** optional zitadelLinkSecret for the identity link client ([73569c4](https://github.com/mctlhq/mctl-api/commit/73569c43f38e414d273d7b9f8b70dda63163e98e))
+* **principals:** explicit ZITADEL identity linking and admin merge ([da9e54f](https://github.com/mctlhq/mctl-api/commit/da9e54fc987fd555d1dc8520fa5476ac7dfb228f))
+
+## [4.62.0](https://github.com/mctlhq/mctl-api/compare/4.61.0...4.62.0) (2026-10-04)
+
+
+### Features
+
+* **mcp:** expose canonical work items as a second surface ([d180de1](https://github.com/mctlhq/mctl-api/commit/d180de1252ee01e969093f080a2fecb20bcbf8ca))
+* **mcp:** expose canonical work items as a second surface ([f41e78b](https://github.com/mctlhq/mctl-api/commit/f41e78ba5bb90d1fc823ea6c786df4f042ebf4d3)), closes [#341](https://github.com/mctlhq/mctl-api/issues/341)
+
+
+### Bug Fixes
+
+* **api:** refuse create-tenant for a tenant that already exists ([7680577](https://github.com/mctlhq/mctl-api/commit/768057717c66732b079bbd53ee160e78c0c5b151))
+* **api:** refuse create-tenant for a tenant that already exists ([bb33ca3](https://github.com/mctlhq/mctl-api/commit/bb33ca33a1a5a08f66c2c57a40598ed9cdf70b07))
+* **gitops:** validate the tenant name before reading its path ([f3a18a8](https://github.com/mctlhq/mctl-api/commit/f3a18a89b760c6d7a47f6cb9c538171306ee2058))
+* **mcp:** keep work-item ids to one path segment, test the token ([e80cb06](https://github.com/mctlhq/mctl-api/commit/e80cb06b1862d029b6727d95f9146bf9cc953d40)), closes [#341](https://github.com/mctlhq/mctl-api/issues/341)
+
 ## [4.61.0](https://github.com/mctlhq/mctl-api/compare/4.60.0...4.61.0) (2026-10-04)
 
 

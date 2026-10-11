@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,7 +29,7 @@ import (
 // to the "e" alias List uses, so an unqualified column that also exists on
 // execution_evidence_refs (work_item_id) is never ambiguous once the
 // filter joins that table in.
-var qualifiedEvidenceColumns = qualifyColumns("e", evidenceColumns)
+var qualifiedEvidenceColumns = qualifyColumns("e", evidenceRowColumns)
 
 func qualifyColumns(alias, columns string) string {
 	parts := strings.Split(columns, ",")
@@ -63,7 +64,7 @@ func clampLimit(limit int) int {
 // error that is deliberately NOT ErrEvidenceNotFound: the row exists but is
 // corrupt, which is a server-side fault (500), not an absence (404).
 func (s *Store) Get(ctx context.Context, id string) (*Evidence, error) {
-	e, err := scanEvidenceRow(s.pool.QueryRow(ctx, `SELECT `+evidenceColumns+` FROM execution_evidence WHERE id=$1`, id))
+	e, err := scanEvidenceRow(s.pool.QueryRow(ctx, `SELECT `+evidenceRowColumns+` FROM execution_evidence WHERE id=$1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("evidence: %s: %w", id, ErrEvidenceNotFound)
 	}
@@ -71,6 +72,9 @@ func (s *Store) Get(ctx context.Context, id string) (*Evidence, error) {
 		return nil, fmt.Errorf("evidence: get %s: %w", id, err)
 	}
 	if err := s.attachRef(ctx, e); err != nil {
+		return nil, err
+	}
+	if err := s.attachSupersededBy(ctx, []*Evidence{e}, ""); err != nil {
 		return nil, err
 	}
 	return e, nil
@@ -92,7 +96,13 @@ type Filter struct {
 	Repository         string
 	IssueNumber        *int64
 	PRNumber           *int64
-	Limit              int
+	// ADR 018 Amendment 2 subject filters, matched on the immutable
+	// subject_* columns.
+	SubjectKind       string
+	SubjectRepository string
+	SubjectRef        string
+	SubjectRevision   string
+	Limit             int
 }
 
 // ListResult is a bounded page of evidence, newest first. Truncated is part
@@ -108,6 +118,13 @@ type ListResult struct {
 // pr) joins through that table; work_item_id is matched on either table so
 // a row is found whether or not its projection is resolved.
 func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
+	return s.list(ctx, f, "")
+}
+
+// list is List with superseded_by scoped to supersedersScope ("" = every
+// superseder, the admin view; a work item id = only superseders attached to
+// that work item, see attachSupersededBy).
+func (s *Store) list(ctx context.Context, f Filter, supersedersScope string) (*ListResult, error) {
 	var clauses []string
 	var args []any
 	add := func(expr string, v any) {
@@ -151,6 +168,18 @@ func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
 	if f.PRNumber != nil {
 		needsRefJoin = true
 		add("r.pr_number = $%d", *f.PRNumber)
+	}
+	if f.SubjectKind != "" {
+		add("e.subject_kind = $%d", f.SubjectKind)
+	}
+	if f.SubjectRepository != "" {
+		add("e.subject_repository = $%d", f.SubjectRepository)
+	}
+	if f.SubjectRef != "" {
+		add("e.subject_ref = $%d", f.SubjectRef)
+	}
+	if f.SubjectRevision != "" {
+		add("e.subject_revision = $%d", f.SubjectRevision)
 	}
 
 	limit := clampLimit(f.Limit)
@@ -197,6 +226,9 @@ func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
 			return nil, err
 		}
 	}
+	if err := s.attachSupersededBy(ctx, out, supersedersScope); err != nil {
+		return nil, err
+	}
 	res.Evidence = out
 	return res, nil
 }
@@ -204,8 +236,109 @@ func (s *Store) List(ctx context.Context, f Filter) (*ListResult, error) {
 // ByWorkItem lists the evidence attached to one work item, newest first.
 // Used by GET /api/v1/work-items/{id}/evidence, after the caller has
 // already checked visibility on the work item itself.
-func (s *Store) ByWorkItem(ctx context.Context, workItemID string, limit int) (*ListResult, error) {
-	return s.List(ctx, Filter{WorkItemID: workItemID, Limit: limit})
+//
+// f narrows the result further (its subject filters, ADR 018 Amendment 2);
+// f.WorkItemID is always overridden by workItemID. superseded_by lists
+// only superseders attached to the same work item (attachSupersededBy).
+func (s *Store) ByWorkItem(ctx context.Context, workItemID string, f Filter) (*ListResult, error) {
+	f.WorkItemID = workItemID
+	return s.list(ctx, f, workItemID)
+}
+
+// attachedTo reports whether e belongs to work item workItemID, on its own
+// join or on its derived projection — the same match List's work_item_id
+// filter makes. e.Ref must already be attached.
+func attachedTo(e *Evidence, workItemID string) bool {
+	return e.WorkItemID == workItemID || (e.Ref != nil && e.Ref.WorkItemID == workItemID)
+}
+
+// attachSupersededBy fills the read-time Superseded/SupersededBy of every
+// record in recs from the stored envelopes whose provenance.supersedes
+// names it through a valid link (validLink — the same predicate
+// resolve_current applies). A row that fails to read is an error, never a
+// shorter list.
+//
+// Superseded is set by every valid link, wherever the superseder lives: a
+// retired record must never read as live. SupersededBy carries ids, so
+// with a non-empty scope (the non-admin work-item read) it lists only
+// superseders attached to that work item; an id of evidence the caller
+// cannot see is never disclosed, mirroring CurrentForWorkItem's refusal.
+func (s *Store) attachSupersededBy(ctx context.Context, recs []*Evidence, scope string) error {
+	if len(recs) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(recs))
+	byID := make(map[string][]*Evidence, len(recs))
+	for _, e := range recs {
+		e.SupersededBy = nil
+		e.Superseded = false
+		if _, seen := byID[e.ID]; !seen {
+			ids = append(ids, e.ID)
+		}
+		byID[e.ID] = append(byID[e.ID], e)
+	}
+	// Bounded per target, like the current read's pool: an unbounded
+	// fan-in would be materialized and serialized whole, and a truncated
+	// list could leave a retired record reading live, so past the cap the
+	// read fails closed. The query limit scales with the batch (so page
+	// size alone never trips it) up to a total ceiling of
+	// maxSupersedersPerRead, so one request cannot fan out into an
+	// unbounded number of hash verifications.
+	// supersedes <> '' repeats the partial index predicate so the planner
+	// can use it under a generic plan; order is applied in Go.
+	limit := min(len(ids)*maxCurrentPool, maxSupersedersPerRead) + 1
+	rows, err := s.pool.Query(ctx, `SELECT `+evidenceRowColumns+` FROM execution_evidence
+		WHERE supersedes = ANY($1) AND supersedes <> '' AND subject_kind <> '' LIMIT $2`, ids, limit)
+	if err != nil {
+		return fmt.Errorf("evidence: superseded_by: %w", err)
+	}
+	var superseders []*Evidence
+	perTarget := map[string]int{}
+	for rows.Next() {
+		sup, err := scanEvidenceRow(rows)
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("evidence: superseded_by scan: %w", err)
+		}
+		superseders = append(superseders, sup)
+		perTarget[sup.Supersedes]++
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("evidence: superseded_by rows: %w", err)
+	}
+	// Per record first, so an over-cap record is named in the error.
+	for target, n := range perTarget {
+		if n > maxCurrentPool {
+			return fmt.Errorf("evidence: %s has more than %d superseding envelopes: %w", target, maxCurrentPool, ErrCurrentPoolTooLarge)
+		}
+	}
+	if len(superseders) >= limit {
+		return fmt.Errorf("evidence: more than %d superseding envelopes in one read: %w", limit-1, ErrCurrentPoolTooLarge)
+	}
+	sort.Slice(superseders, func(i, j int) bool { return superseders[i].ID < superseders[j].ID })
+	if scope != "" {
+		// Resolve each superseder's projection once (a nil Ref after
+		// attachRef is a legitimate "no projection", not a retry signal).
+		for _, sup := range superseders {
+			if err := s.attachRef(ctx, sup); err != nil {
+				return err
+			}
+		}
+	}
+	for _, sup := range superseders {
+		for _, target := range byID[sup.Supersedes] {
+			if !validLink(sup.candidate(), target.candidate()) {
+				continue
+			}
+			target.Superseded = true
+			if scope != "" && !attachedTo(sup, scope) {
+				continue
+			}
+			target.SupersededBy = append(target.SupersededBy, sup.ID)
+		}
+	}
+	return nil
 }
 
 // PurgeOlderThan deletes whole evidence rows ingested more than maxAge ago

@@ -143,6 +143,9 @@ type FederationProvidersConfig struct {
 	OIDCProvidersRaw string
 	DexIssuerURL     string
 	DexClientID      string
+	// GitHubActionsRaw is MCTL_GITHUB_ACTIONS_OIDC (mctl-api#530). Unset
+	// leaves the GitHub Actions provider unregistered.
+	GitHubActionsRaw string
 }
 
 // BuildFederationRegistry builds the full production Registry: the three
@@ -167,15 +170,21 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 	if err != nil {
 		return nil, err
 	}
+	ghActions, err := ParseGitHubActionsOIDC(cfg.GitHubActionsRaw)
+	if err != nil {
+		return nil, err
+	}
 
 	surfaces := surfaceTokens()
 	usageWriter := usageWriterToken()
 	evidenceWriter := evidenceWriterToken()
+	registryPublisher := registryPublisherToken()
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
 		newSurfaceProvider(func() map[string]string { return surfaces }),
 		newUsageWriterProvider(func() string { return usageWriter }),
 		newEvidenceWriterProvider(func() string { return evidenceWriter }),
+		newRegistryPublisherProvider(func() string { return registryPublisher }),
 	}
 
 	var jwtProviders []Provider
@@ -243,6 +252,18 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 			slog.Warn("dex OIDC init failed — JWT auth disabled for dex", "issuer", cfg.DexIssuerURL, "error", err)
 		} else {
 			slog.Info("dex provider: using legacy DEX_ISSUER_URL/DEX_CLIENT_ID shim", "issuer", cfg.DexIssuerURL)
+			jwtProviders = append(jwtProviders, p)
+		}
+	}
+
+	if ghActions != nil {
+		// Same degradation as an OIDC entry: an unreachable issuer at boot
+		// leaves the provider out, and its tokens are then unclaimed (401).
+		p, err := newGitHubActionsProviderFn(ctx, *ghActions)
+		if err != nil {
+			slog.Warn("github actions provider init failed; provider disabled", "error", err)
+		} else {
+			slog.Info("github actions provider enabled", "audience", ghActions.Audience, "repository_owners", ghActions.RepositoryOwners, "branches", ghActions.Branches)
 			jwtProviders = append(jwtProviders, p)
 		}
 	}

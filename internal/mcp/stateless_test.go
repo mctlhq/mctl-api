@@ -77,6 +77,7 @@ func TestStreamableHTTPHandler_IsStateless(t *testing.T) {
 	if env.Error != nil || env.Result == nil {
 		t.Fatalf("tools/list without a session was not served: %.200s", body)
 	}
+	// No owner checker is set here, so nothing is filtered.
 	if len(env.Result.Tools) != len(recordedHints) {
 		t.Fatalf("tools/list returned %d tools, the record has %d", len(env.Result.Tools), len(recordedHints))
 	}

@@ -20,11 +20,6 @@
       "reason": "Registers a tenant custom domain and mints a DNS ownership challenge; changes routing intent. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
-      "name": "mctl_apply_openclaw_resource_profile",
-      "enabled": true,
-      "reason": "Rewrites an OpenClaw agent's CPU/memory profile in gitops; changes what the tenant's pod gets scheduled with. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
-    },
-    {
       "name": "mctl_approve_dev_loop",
       "enabled": true,
       "reason": "Signals approval into a running DevLoopWorkflow, releasing an agent to act on a repository. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
@@ -50,16 +45,6 @@
       "reason": "Creates a tenant: namespace, quota and gitops scaffolding. A structural change to the platform. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
-      "name": "mctl_delete_openclaw_identity",
-      "enabled": true,
-      "reason": "Deletes a tenant identity override file from gitops; the agent falls back to image defaults. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
-    },
-    {
-      "name": "mctl_delete_openclaw_skill",
-      "enabled": true,
-      "reason": "Deletes a tenant skill from gitops, removing a capability from the running agent. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
-    },
-    {
       "name": "mctl_delete_preview",
       "enabled": true,
       "reason": "Destroys a preview environment and its workloads. Irreversible for that preview. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
@@ -68,11 +53,6 @@
       "name": "mctl_delete_tenant",
       "enabled": true,
       "reason": "Deletes a tenant with its namespace, database and gitops entries. The most destructive call on this surface. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
-    },
-    {
-      "name": "mctl_deploy_openclaw",
-      "enabled": true,
-      "reason": "Deploys an OpenClaw agent for a tenant, changing what runs for that tenant. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
       "name": "mctl_deploy_service",
@@ -93,6 +73,21 @@
       "name": "mctl_enable_tenant_skill",
       "enabled": true,
       "reason": "Binds a platform skill to a tenant, granting its agent a new capability. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
+    },
+    {
+      "name": "mctl_erpact_list_sites",
+      "enabled": true,
+      "reason": "Lists tenant erpact's sites from its own site-deployer. Visible and callable only for tenant erpact's owners and platform admins: the MCP tools/list filter hides it from everyone else and the REST handler re-checks the owner role. Enabled on the portal by owner decision 2026-10-09. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
+    },
+    {
+      "name": "mctl_erpact_create_site",
+      "enabled": true,
+      "reason": "Creates a new site for tenant erpact via its site-deployer. Visible and callable only for tenant erpact's owners and platform admins: the MCP tools/list filter hides it from everyone else and the REST handler re-checks the owner role. Enabled on the portal by owner decision 2026-10-09. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
+    },
+    {
+      "name": "mctl_erpact_site_status",
+      "enabled": true,
+      "reason": "Reads one erpact site's creation status from its site-deployer. Visible and callable only for tenant erpact's owners and platform admins: the MCP tools/list filter hides it from everyone else and the REST handler re-checks the owner role. Enabled on the portal by owner decision 2026-10-09. Provisional Option A stopgap (mctl-api#486, removed once Option B ships)"
     },
     {
       "name": "mctl_get_agent",
@@ -158,11 +153,6 @@
       "name": "mctl_retry_lifecycle_handoff",
       "enabled": false,
       "reason": "Human-operator lifecycle recovery transition that re-arms a stalled handoff; disabled on the shared portal pending operational experience with the new recovery surface."
-    },
-    {
-      "name": "mctl_get_openclaw_sizing_recommendation",
-      "enabled": true,
-      "reason": "Aggregated VictoriaMetrics resource history and a recommended profile for one OpenClaw service; numbers only, tenant-scoped upstream."
     },
     {
       "name": "mctl_get_operation",
@@ -240,16 +230,6 @@
       "reason": "Incident list with status, severity and one-line summary; summaries are alert titles, tenant-filtered by the upstream."
     },
     {
-      "name": "mctl_list_openclaw_identity",
-      "enabled": true,
-      "reason": "File names of a team's OpenClaw identity overrides in GitOps; names only, tenant-scoped upstream."
-    },
-    {
-      "name": "mctl_list_openclaw_skills",
-      "enabled": true,
-      "reason": "File names of a team's OpenClaw skills in GitOps; names only, tenant-scoped upstream."
-    },
-    {
       "name": "mctl_list_operations",
       "enabled": true,
       "reason": "Catalogue of platform operations with parameters and risk levels; discovery metadata, no tenant data."
@@ -282,12 +262,12 @@
     {
       "name": "mctl_list_services",
       "enabled": true,
-      "reason": "Deployed services with team, image tag, host and database flag; operational metadata, tenant-filtered by the upstream."
+      "reason": "Catalogue services and the ArgoCD applications in a team's namespace: image tag, hosts, images, sync and health; operational metadata, tenant-filtered by the upstream, and the manifest source is withheld from non-admins whenever the application is not the tenant's own, including a catalogue row the platform deploys from elsewhere."
     },
     {
       "name": "mctl_list_tenant_skill_bindings",
       "enabled": true,
-      "reason": "Skill bindings per tenant; admins see all, members their own \u2014 the upstream applies that filter, the tool exposes only binding names."
+      "reason": "Skill bindings per tenant; admins see all, members their own — the upstream applies that filter, the tool exposes only binding names."
     },
     {
       "name": "mctl_list_tenants",
@@ -330,16 +310,6 @@
       "reason": "Publishes a platform skill, offering it to every tenant that binds it. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
-      "name": "mctl_read_openclaw_identity",
-      "enabled": true,
-      "reason": "Raw content of one identity override file (AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md) from the team's GitOps directory; prompt text the team authored, tenant-scoped upstream."
-    },
-    {
-      "name": "mctl_read_openclaw_skill",
-      "enabled": true,
-      "reason": "Raw content of one OpenClaw skill file from the team's GitOps directory; team-authored text, tenant-scoped upstream."
-    },
-    {
       "name": "mctl_read_platform_skill",
       "enabled": true,
       "reason": "Content of a platform-wide skill from the GitOps catalogue, subject to the caller's visibility; catalogue text, no tenant data."
@@ -360,11 +330,6 @@
       "reason": "Closes an incident, changing the state other operators and alerts read. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
-      "name": "mctl_resume_openclaw_deploy",
-      "enabled": true,
-      "reason": "Resumes a paused OpenClaw deployment, letting a held rollout proceed. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
-    },
-    {
       "name": "mctl_retire_service",
       "enabled": true,
       "reason": "Retires a service: removes its workloads and gitops entry. Recovery means re-deploying it. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
@@ -383,16 +348,6 @@
       "name": "mctl_rollback_service",
       "enabled": true,
       "reason": "Rolls a service back to a prior image tag, changing production. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
-    },
-    {
-      "name": "mctl_save_openclaw_identity",
-      "enabled": true,
-      "reason": "Writes a tenant identity override into gitops; the live agent picks it up within minutes. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
-    },
-    {
-      "name": "mctl_save_openclaw_skill",
-      "enabled": true,
-      "reason": "Writes a tenant skill into gitops, adding a capability to the running agent. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
       "name": "mctl_scale_service",
@@ -467,7 +422,32 @@
     {
       "name": "mctl_whoami",
       "enabled": true,
-      "reason": "Returns only the caller's own user id, admin flag, teams and namespaces \u2014 the identity probe the aggregate portal's A\u2260B check calls; nothing about anyone else."
+      "reason": "Returns only the caller's own user id, admin flag, teams and namespaces — the identity probe the aggregate portal's A≠B check calls; nothing about anyone else."
+    },
+    {
+      "name": "mctl_get_work_item",
+      "enabled": true,
+      "reason": "Read-only canonical WorkItem (state, state_version, tenant, latest execution and snapshot ids). Enabled on the shared portal by owner decision 2026-10-04: the portal switch is user-blind, so the mctl API's tenant check on the caller's own token (canSeeWorkItem) is the access control; an item outside the caller's tenants answers 404 like an unknown id."
+    },
+    {
+      "name": "mctl_list_work_item_executions",
+      "enabled": true,
+      "reason": "Read-only executions of a WorkItem (engine identity the platform recorded, phases). Enabled by owner decision 2026-10-04 under the same per-call tenant check as mctl_get_work_item."
+    },
+    {
+      "name": "mctl_list_work_item_snapshots",
+      "enabled": true,
+      "reason": "Read-only immutable ContextSnapshots of a WorkItem; a full snapshot can carry investigation context (issue text, repo refs). Enabled by owner decision 2026-10-04 under the same per-call tenant check as mctl_get_work_item."
+    },
+    {
+      "name": "mctl_list_work_item_execution_requests",
+      "enabled": true,
+      "reason": "Read-only execution requests of a WorkItem (kind, state, requested_by, surface). Enabled by owner decision 2026-10-04 under the same per-call tenant check as mctl_get_work_item."
+    },
+    {
+      "name": "mctl_request_work_item_execution",
+      "enabled": false,
+      "reason": "Records an execution request that the dispatcher turns into a DevLoop/investigator run on an existing WorkItem; consumes agent budget. Requester is the caller's token, the service principal is refused. Mutating: enabling it here also needs an entry in mutatingOnPortal. Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#341."
     }
   ]
 }

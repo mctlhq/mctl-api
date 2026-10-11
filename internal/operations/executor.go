@@ -16,9 +16,13 @@ package operations
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -77,9 +82,6 @@ func NewExecutor() *Executor {
 // Most workflows execute in the tenant's namespace where team-scoped secrets live.
 // Tenant lifecycle operations (create/delete) run in argo-workflows namespace
 // because the tenant namespace may not exist yet (create) or is being removed (delete).
-// OpenClaw skill and identity workflows (save/delete) also run in argo-workflows:
-// they only need the gitops deploy key secret (cluster-wide) and would otherwise
-// contend with the tenant's running OpenClaw pod for its CPU quota.
 // mctl-agents-run is platform-scoped and lives in argo-workflows ns where its
 // secrets (mctl-agents-secrets, ghcr-credentials, mctl-gitops-deploy-key) are.
 // mctl-agents-implement (Tier 2) shares the same secrets and runs in the same ns.
@@ -98,8 +100,6 @@ func WorkflowNamespace(workflowTemplate, team string) string {
 		// workflows only mount platform-level secrets (deploy key,
 		// backstage-workflow-token) that live in argo-workflows.
 		"add-custom-domain", "remove-custom-domain",
-		"openclaw-skill-save", "openclaw-skill-delete",
-		"openclaw-identity-save", "openclaw-identity-delete",
 		"platform-skill-publish", "platform-skill-deprecate",
 		"platform-skill-enable", "platform-skill-disable",
 		"mctl-agents-run",
@@ -126,6 +126,23 @@ func WorkflowNamespace(workflowTemplate, team string) string {
 func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]string, userID string, team string) (*SubmitResult, error) {
 	if team == "" {
 		return nil, fmt.Errorf("team is required for workflow submission")
+	}
+	// Backstop for every caller of Submit, not only the REST handler (which
+	// has already rejected the name through Registry.ValidateInput): a
+	// reserved tenant name never reaches the workflow.
+	if err := checkCreateTenantName(op, params); err != nil {
+		slog.Warn("refusing to submit create-tenant", "user", userID, "error", err)
+		return nil, err
+	}
+	if err := checkServiceApplication(op, params); err != nil {
+		slog.Warn("refusing to submit service operation", "operation", op.Name, "user", userID, "error", err)
+		return nil, err
+	}
+	// Secret values never enter the Workflow spec (secret_handoff.go).
+	submitParams, secretValues, err := splitSecretParams(op, params)
+	if err != nil {
+		slog.Warn("refusing to submit operation with secret parameters", "operation", op.Name, "user", userID, "error", err)
+		return nil, err
 	}
 	namespace := WorkflowNamespace(op.WorkflowTemplate, team)
 	requestID := uuid.New().String()[:8]
@@ -165,23 +182,58 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 	labels := map[string]string{
 		"mctl.ai/operation":  op.Name,
 		"mctl.ai/request-id": requestID,
-		"mctl.ai/user":       userID,
-		"mctl.ai/team":       team,
+		"mctl.ai/user":       labelValue(userID),
+		"mctl.ai/team":       labelValue(team),
 	}
 	wf.SetLabels(labels)
-	wf.Object["spec"] = map[string]interface{}{
+	// Trace correlation: inert metadata, set only when a trace context exists.
+	if tp := telemetry.TraceparentFrom(ctx); tp != "" {
+		wf.SetAnnotations(map[string]string{
+			"mctl.ai/traceparent": tp,
+			"mctl.ai/trace-id":    telemetry.TraceIDFrom(ctx),
+		})
+	}
+	spec := map[string]interface{}{
 		"workflowTemplateRef": map[string]interface{}{
 			"name":         op.WorkflowTemplate,
 			"clusterScope": true,
 		},
-		"arguments": map[string]interface{}{
-			"parameters": buildArgoParams(params),
-		},
 	}
+	// Secret handoff prerequisites, both kept in mctl-gitops: mctl-api reads
+	// ClusterWorkflowTemplates through ClusterRole mctl-api-cwt-reader
+	// (bootstrap/templates/mctl-platform/mctl-api-rbac.yaml), and the
+	// deploy-service template declares SecretHandoffParam with default "",
+	// so the parameter is set here only when there is something to hand off.
+	handoff := len(secretValues) > 0
+	secretName := handoffSecretName(workflowName)
+	if handoff {
+		if err := e.checkSecretHandoffSupport(ctx, op.WorkflowTemplate); err != nil {
+			slog.Warn("refusing to submit workflow", "operation", op.Name, "workflow", workflowName, "error", err)
+			return nil, err
+		}
+		submitParams[SecretHandoffParam] = secretName
+		// Nothing runs until the Secret exists: resumed below.
+		spec["suspend"] = true
+	}
+	spec["arguments"] = map[string]interface{}{
+		"parameters": buildArgoParams(submitParams),
+	}
+	wf.Object["spec"] = spec
 
-	_, err := e.dynamicClient.Resource(workflowGVR).Namespace(namespace).Create(ctx, wf, metav1.CreateOptions{})
+	created, err := e.dynamicClient.Resource(workflowGVR).Namespace(namespace).Create(ctx, wf, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("create workflow %s: %w", workflowName, err)
+	}
+
+	if handoff {
+		if err := e.createHandoffSecret(ctx, created, secretName, secretValues, labels); err != nil {
+			e.abortWorkflow(ctx, namespace, workflowName)
+			return nil, fmt.Errorf("hand off secret parameters for workflow %s: %w", workflowName, err)
+		}
+		if err := e.resumeWorkflow(ctx, namespace, workflowName); err != nil {
+			e.abortWorkflow(ctx, namespace, workflowName)
+			return nil, fmt.Errorf("hand off secret parameters for workflow %s: %w", workflowName, err)
+		}
 	}
 
 	slog.Info("workflow created", "workflow", workflowName, "namespace", namespace)
@@ -364,11 +416,95 @@ func trimWorkflowStatus(obj map[string]interface{}) map[string]interface{} {
 		result["status"] = trimmedStatus
 	}
 
+	if traceID, source := workflowTraceID(obj); traceID != "" {
+		result["trace"] = map[string]interface{}{"trace_id": traceID, "source": source}
+	}
+
 	return result
 }
 
-func buildArgoParams(params map[string]string) []map[string]interface{} {
-	result := make([]map[string]interface{}, 0, len(params))
+var (
+	w3cTraceparent = regexp.MustCompile(`^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$`)
+	w3cTraceID     = regexp.MustCompile(`^[0-9a-f]{32}$`)
+)
+
+// workflowTraceID names the trace a workflow belongs to, so a caller holding
+// only a workflow name (an ArgoWorkflowFailed alert, a ticket) can open the
+// trace in Tempo and from there the logs (mctlhq/mctl-agent#97).
+//
+// The `traceparent` argument wins: it is the parent the pod's own spans are
+// recorded under, which is the execution trace a DevLoop run lives in
+// (mctlhq/mctl-agents#195). The `mctl.ai/trace-id` annotation, the trace of
+// the mctl-api request that submitted the workflow, is the fallback. A value
+// that is not a well-formed, non-zero W3C trace id is ignored rather than
+// passed on, and no trace at all is reported as no `trace` key: a caller
+// must read its absence as "not known", never as "no trace exists".
+func workflowTraceID(obj map[string]interface{}) (string, string) {
+	if spec, ok := obj["spec"].(map[string]interface{}); ok {
+		if args, ok := spec["arguments"].(map[string]interface{}); ok {
+			params, _ := args["parameters"].([]interface{})
+			for _, p := range params {
+				param, ok := p.(map[string]interface{})
+				if !ok || param["name"] != "traceparent" {
+					continue
+				}
+				value, _ := param["value"].(string)
+				if m := w3cTraceparent.FindStringSubmatch(value); len(m) == 2 && !allZero(m[1]) {
+					return m[1], "traceparent-argument"
+				}
+			}
+		}
+	}
+	if meta, ok := obj["metadata"].(map[string]interface{}); ok {
+		if ann, ok := meta["annotations"].(map[string]interface{}); ok {
+			value, _ := ann["mctl.ai/trace-id"].(string)
+			if w3cTraceID.MatchString(value) && !allZero(value) {
+				return value, "submit-annotation"
+			}
+		}
+	}
+	return "", ""
+}
+
+func allZero(s string) bool {
+	return strings.Trim(s, "0") == ""
+}
+
+// labelValue makes s usable as a Kubernetes label value. A value that is
+// already valid is returned unchanged, so existing selectors keep matching.
+// Anything else -- a CI principal "ci:owner/repo" (mctl-api#530), an OIDC
+// display that is an email -- would make the apiserver reject the whole
+// Workflow, so it is rewritten: invalid characters become '.', the result is
+// cut to fit, and a short hash of the original keeps two distinct callers
+// distinct. The unaltered value is still logged and audited elsewhere.
+func labelValue(s string) string {
+	if len(validation.IsValidLabelValue(s)) == 0 {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('.')
+		}
+	}
+	sum := sha256.Sum256([]byte(s))
+	suffix := hex.EncodeToString(sum[:4])
+	body := b.String()
+	if max := validation.LabelValueMaxLength - len(suffix) - 1; len(body) > max {
+		body = body[:max]
+	}
+	body = strings.Trim(body, "-_.")
+	if body == "" {
+		return "x" + suffix
+	}
+	return body + "-" + suffix
+}
+
+func buildArgoParams(params map[string]string) []interface{} {
+	result := make([]interface{}, 0, len(params))
 	for k, v := range params {
 		result = append(result, map[string]interface{}{"name": k, "value": v})
 	}

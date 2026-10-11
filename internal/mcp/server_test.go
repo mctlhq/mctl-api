@@ -170,6 +170,7 @@ func TestAllToolsHaveTitleAnnotation(t *testing.T) {
 		t.Fatalf("failed to unmarshal tools/list response: %v", err)
 	}
 
+	// No owner checker is set (the stdio shape), so nothing is filtered.
 	if len(result.Result.Tools) != len(recordedHints) {
 		t.Errorf("tools/list returned %d tools, the record has %d",
 			len(result.Result.Tools), len(recordedHints))

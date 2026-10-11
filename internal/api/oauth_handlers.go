@@ -117,7 +117,8 @@ func (h *Handlers) handleProtectedResourceMeta(w http.ResponseWriter, r *http.Re
 }
 
 // handleOAuthAuthorize initiates the OAuth Authorization Code flow.
-// It validates the request parameters, stores pending state, and redirects to GitHub.
+// It validates the request parameters, stores pending state, and redirects to
+// the upstream OAUTH_UPSTREAM selects (GitHub, ZITADEL, or a chooser).
 //
 // Required query params: client_id, redirect_uri, response_type=code, state,
 //
@@ -170,6 +171,15 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	upstream, ok := h.pickOAuthUpstream(w, r)
+	if !ok {
+		return
+	}
+	if upstream == auth.UpstreamZitadel {
+		h.startZitadelAuthorize(w, r, clientID, redirectURI, state, codeChallenge)
+		return
+	}
+
 	// Generate a random state for the GitHub OAuth leg (different from client state).
 	ghState, err := auth.GenerateState()
 	if err != nil {
@@ -184,7 +194,12 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	combinedState := ghState + "|" + state
 
 	// Persist all pending auth details keyed by combined state.
-	o.StorePendingAuth(combinedState, clientID, redirectURI, codeChallenge)
+	if err := o.StorePendingAuth(r.Context(), combinedState, clientID, redirectURI, codeChallenge); err != nil {
+		// redirect_uri is allowlisted by now, so the client hears about it
+		// as an OAuth error instead of waiting on a callback.
+		oauthError(w, redirectURI, state, "server_error", "the authorization could not be started; try again")
+		return
+	}
 
 	// Build GitHub OAuth authorization URL.
 	ghAuthURL := url.URL{
@@ -206,6 +221,12 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 // It exchanges the GitHub code for a GitHub token, resolves the user identity,
 // issues a mctl authorization code, and redirects back to the client.
 func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Request) {
+	// The identity link flow shares this registered callback; its states
+	// carry their own prefix and never reach the OAuth server's pending map.
+	if isIdentityLinkState(r.URL.Query().Get("state")) {
+		h.handleIdentityLinkGitHubCallback(w, r)
+		return
+	}
 	o := h.opts.OAuthServer
 	if o == nil {
 		http.Error(w, "OAuth not configured", http.StatusNotFound)
@@ -228,9 +249,17 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Recover pending auth from state.
-	pending, ok := o.LoadPendingAuth(combinedState)
-	if !ok {
+	// Recover pending auth from state. Only an authorization started for
+	// GitHub, while GitHub is an allowed upstream, completes here.
+	pending, ok, err := o.LoadPendingAuth(r.Context(), combinedState)
+	if err != nil {
+		// The pending entry holds the redirect URI, so there is nowhere
+		// to send an OAuth error: answer here, and count it.
+		oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, "flow_store_unavailable").Inc()
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !ok || pending.Upstream != auth.UpstreamGitHub || !h.opts.OAuthUpstream.allows(auth.UpstreamGitHub) {
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
 		return
 	}
@@ -262,12 +291,13 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 	groups := o.ResolveGroups(login)
 
 	// Issue a mctl authorization code.
-	mctlCode, err := o.IssueCode(login, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
+	mctlCode, err := o.IssueCode(r.Context(), login, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
 	if err != nil {
 		slog.Error("failed to issue auth code", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, "issued").Inc()
 
 	// Redirect back to client with code + state.
 	target, err := url.Parse(pending.RedirectURI)
@@ -321,7 +351,7 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			tokenError(w, "invalid_request", "code, code_verifier, client_id and redirect_uri are required")
 			return
 		}
-		accessToken, refreshToken, err = o.ExchangeCode(code, codeVerifier, clientID, redirectURI)
+		accessToken, refreshToken, err = o.ExchangeCode(r.Context(), code, codeVerifier, clientID, redirectURI)
 	case "refresh_token":
 		refreshGrant := r.FormValue("refresh_token")
 		if refreshGrant == "" || clientID == "" {
@@ -607,6 +637,12 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── GitHub OAuth helpers ─────────────────────────────────────────────────────
+
+// ExchangeGitHubCode is exchangeGitHubCode for callers outside the package
+// (the identity link flow's GitHub leg, wired in cmd/api).
+func ExchangeGitHubCode(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, error) {
+	return exchangeGitHubCode(ctx, clientID, clientSecret, code, redirectURI)
+}
 
 func exchangeGitHubCode(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, error) {
 	body := url.Values{}

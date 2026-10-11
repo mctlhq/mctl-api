@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
+	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 )
 
@@ -221,6 +222,13 @@ type OAuthServer struct {
 	// MaxRegisteredClients (least recently seen evicted) and by
 	// PersistedClientRetention. Inject via main.go after construction.
 	ClientStore clientstore.Store
+
+	// FlowStore is an optional shared store for pending authorizations and
+	// issued authorization codes. When nil they live in this process's
+	// memory, which is correct only while mctl-api runs one replica: the
+	// authorize request, the upstream callback and the token exchange can
+	// each land on a different pod. Inject via main.go after construction.
+	FlowStore flowstore.Store
 
 	// PersistedClientRetention is how long a persisted registration survives
 	// without being seen (registered again, or used for a token exchange or
@@ -1226,10 +1234,19 @@ func GenerateState() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// StoreAuthCode stores a pending authorization code entry keyed by opaque state,
+// Upstream identity providers an authorization can be started for. A
+// pending authorization records its upstream, and each callback completes
+// only its own (mctl-api#467).
+const (
+	UpstreamGitHub  = "github"
+	UpstreamZitadel = "zitadel"
+)
+
+// StorePendingAuth stores a pending authorization keyed by opaque state,
 // before the user has authenticated with GitHub.
-func (s *OAuthServer) StorePendingAuth(state, clientID, redirectURI, codeChallenge string) {
-	s.codes.storePending(state, pendingAuth{
+func (s *OAuthServer) StorePendingAuth(ctx context.Context, state, clientID, redirectURI, codeChallenge string) error {
+	return s.storePending(ctx, state, pendingAuth{
+		Upstream:      UpstreamGitHub,
 		ClientID:      clientID,
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
@@ -1237,34 +1254,163 @@ func (s *OAuthServer) StorePendingAuth(state, clientID, redirectURI, codeChallen
 	})
 }
 
-// LoadPendingAuth returns and removes the pending auth entry for a state value.
-func (s *OAuthServer) LoadPendingAuth(state string) (pendingAuth, bool) {
-	return s.codes.loadPending(state)
+// PendingOIDCAuth is an authorization whose user signs in at an OIDC
+// upstream. Nonce and Verifier belong to that upstream leg; ClientState is
+// the client's own state, returned with the code.
+type PendingOIDCAuth struct {
+	Upstream      string
+	ClientID      string
+	RedirectURI   string
+	CodeChallenge string
+	ClientState   string
+	Nonce         string
+	Verifier      string
+}
+
+// StorePendingOIDCAuth stores a pending authorization under the state sent
+// to the OIDC upstream.
+func (s *OAuthServer) StorePendingOIDCAuth(ctx context.Context, state string, a PendingOIDCAuth) error {
+	return s.storePending(ctx, state, pendingAuth{
+		Upstream:      a.Upstream,
+		ClientID:      a.ClientID,
+		RedirectURI:   a.RedirectURI,
+		CodeChallenge: a.CodeChallenge,
+		ClientState:   a.ClientState,
+		Nonce:         a.Nonce,
+		Verifier:      a.Verifier,
+		CreatedAt:     time.Now(),
+	})
+}
+
+func (s *OAuthServer) storePending(ctx context.Context, state string, p pendingAuth) error {
+	if s.FlowStore == nil {
+		s.codes.storePending(state, p)
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, flowStoreTimeout)
+	defer cancel()
+	rec := pendingRecord{pendingAuth: p, ClientState: []byte(p.ClientState)}
+	if err := putFlow(ctx, s.FlowStore, flowstore.KindPending, state, rec, pendingAuthTTL); err != nil {
+		slog.Error("oauth: flow store put pending failed", "error", err)
+		return fmt.Errorf("store pending authorization: %w", ErrServerError)
+	}
+	return nil
+}
+
+// LoadPendingAuth returns and removes the pending auth entry for a state
+// value. ok is false for an unknown or expired state; err is set only when
+// the shared store could not be read, which is not the same answer and maps
+// to a server error rather than "invalid state".
+func (s *OAuthServer) LoadPendingAuth(ctx context.Context, state string) (pendingAuth, bool, error) {
+	if s.FlowStore == nil {
+		p, ok := s.codes.loadPending(state)
+		return p, ok, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, flowStoreTimeout)
+	defer cancel()
+	var rec pendingRecord
+	ok, err := takeFlow(ctx, s.FlowStore, flowstore.KindPending, state, &rec)
+	if err != nil {
+		slog.Error("oauth: flow store take pending failed", "error", err)
+		return pendingAuth{}, false, fmt.Errorf("load pending authorization: %w", ErrServerError)
+	}
+	if !ok {
+		return pendingAuth{}, false, nil
+	}
+	p := rec.pendingAuth
+	p.ClientState = string(rec.ClientState)
+	return p, true, nil
+}
+
+// pendingRecord is a pendingAuth as the shared store keeps it. ClientState
+// is the client's raw state, which need not be UTF-8, and encoding/json
+// would replace invalid bytes in a string; as []byte it is base64 and comes
+// back byte for byte. It shadows the embedded string field.
+type pendingRecord struct {
+	pendingAuth
+	ClientState []byte
 }
 
 // IssueCode generates a random authorization code for a GitHub login.
 // The code is stored alongside the PKCE challenge for later verification.
-func (s *OAuthServer) IssueCode(login, clientID, redirectURI, codeChallenge string, groups []string) (string, error) {
+func (s *OAuthServer) IssueCode(ctx context.Context, login, clientID, redirectURI, codeChallenge string, groups []string) (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate code: %w", err)
 	}
 	code := base64.RawURLEncoding.EncodeToString(b)
-	s.codes.store(code, authCodeEntry{
+	entry := authCodeEntry{
 		Login:         login,
 		Groups:        groups,
 		ClientID:      clientID,
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
 		CreatedAt:     time.Now(),
-	})
+	}
+	if s.FlowStore == nil {
+		s.codes.store(code, entry)
+		return code, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, flowStoreTimeout)
+	defer cancel()
+	if err := putFlow(ctx, s.FlowStore, flowstore.KindCode, code, entry, authCodeTTL); err != nil {
+		slog.Error("oauth: flow store put code failed", "error", err)
+		return "", fmt.Errorf("store authorization code: %w", ErrServerError)
+	}
 	return code, nil
+}
+
+// takeCode consumes an authorization code from whichever store holds codes.
+func (s *OAuthServer) takeCode(ctx context.Context, code string) (authCodeEntry, bool, error) {
+	if s.FlowStore == nil {
+		e, ok := s.codes.loadAndDelete(code)
+		return e, ok, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, flowStoreTimeout)
+	defer cancel()
+	var e authCodeEntry
+	ok, err := takeFlow(ctx, s.FlowStore, flowstore.KindCode, code, &e)
+	if err != nil {
+		slog.Error("oauth: flow store take code failed", "error", err)
+		return authCodeEntry{}, false, fmt.Errorf("redeem authorization code: %w", ErrServerError)
+	}
+	if !ok {
+		return authCodeEntry{}, false, nil
+	}
+	return e, true, nil
+}
+
+// flowStoreTimeout bounds one shared-store round trip on the sign-in path.
+const flowStoreTimeout = 5 * time.Second
+
+func putFlow(ctx context.Context, st flowstore.Store, kind, key string, v any, ttl time.Duration) error {
+	payload, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", kind, err)
+	}
+	return st.Put(ctx, kind, key, payload, ttl)
+}
+
+// takeFlow decodes a taken entry into v. A payload that does not decode is a
+// failed read, not an absent entry.
+func takeFlow(ctx context.Context, st flowstore.Store, kind, key string, v any) (bool, error) {
+	payload, ok, err := st.Take(ctx, kind, key)
+	if err != nil || !ok {
+		return false, err
+	}
+	if err := json.Unmarshal(payload, v); err != nil {
+		return false, fmt.Errorf("decode %s: %w", kind, err)
+	}
+	return true, nil
 }
 
 // ExchangeCode validates an authorization code + PKCE verifier and returns a signed JWT.
 // The code is consumed (one-time use).
-func (s *OAuthServer) ExchangeCode(code, codeVerifier, clientID, redirectURI string) (string, string, error) {
-	entry, ok := s.codes.loadAndDelete(code)
+func (s *OAuthServer) ExchangeCode(ctx context.Context, code, codeVerifier, clientID, redirectURI string) (string, string, error) {
+	entry, ok, err := s.takeCode(ctx, code)
+	if err != nil {
+		return "", "", err
+	}
 	if !ok {
 		return "", "", errors.New("invalid or expired authorization code")
 	}
@@ -1515,10 +1661,17 @@ type authCodeEntry struct {
 }
 
 type pendingAuth struct {
+	// Upstream is the identity provider this authorization was sent to
+	// (UpstreamGitHub, UpstreamZitadel).
+	Upstream      string
 	ClientID      string
 	RedirectURI   string
 	CodeChallenge string
-	CreatedAt     time.Time
+	// ClientState, Nonce and Verifier are set for an OIDC upstream only.
+	ClientState string
+	Nonce       string
+	Verifier    string
+	CreatedAt   time.Time
 }
 
 type refreshTokenEntry struct {

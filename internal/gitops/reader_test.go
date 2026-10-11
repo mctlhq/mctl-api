@@ -1577,7 +1577,7 @@ func TestTenantExists(t *testing.T) {
 	if _, err := r.TenantExists("billing"); err == nil || !strings.Contains(err.Error(), "never synced") {
 		t.Fatalf("a checkout that never synced must not answer: %v", err)
 	}
-	r.lastSync.Store(time.Now().Add(-TenantExistsMaxAge - time.Minute).UnixNano())
+	r.lastSync.Store(time.Now().Add(-CheckoutMaxAge - time.Minute).UnixNano())
 	if _, err := r.TenantExists("billing"); err == nil {
 		t.Fatal("a stale checkout must not answer")
 	}
@@ -1621,5 +1621,122 @@ func TestTenantExists_UnreadableIsNotAbsent(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(tenants, 0o750) }) //nolint:gosec // test cleanup
 	if got, err := r.TenantExists("billing"); err == nil {
 		t.Fatalf("an unreadable tenants dir must be an error, got exists=%v", got)
+	}
+}
+
+func writeServiceValues(t *testing.T, dir, team, component string) {
+	t.Helper()
+	d := filepath.Join(dir, "platform-gitops", "services", team, component)
+	if err := os.MkdirAll(d, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "values.yaml"), []byte("image:\n  tag: 1.0.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceExists(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	if _, err := r.ServiceExists("labs", "web"); err == nil || !strings.Contains(err.Error(), "never synced") {
+		t.Fatalf("a checkout that never synced must not answer: %v", err)
+	}
+	r.lastSync.Store(time.Now().Add(-CheckoutMaxAge - time.Minute).UnixNano())
+	if _, err := r.ServiceExists("labs", "web"); err == nil {
+		t.Fatal("a stale checkout must not answer")
+	}
+	r.lastSync.Store(time.Now().UnixNano())
+
+	// No services directory at all is a broken checkout, not "absent".
+	if _, err := r.ServiceExists("labs", "web"); err == nil {
+		t.Fatal("a checkout without platform-gitops/services must be an error")
+	}
+
+	writeServiceValues(t, dir, "labs", "web")
+	// A service directory without values.yaml is not a service.
+	if err := os.MkdirAll(filepath.Join(dir, "platform-gitops", "services", "labs", "half"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		team, component string
+		want            bool
+	}{
+		{"labs", "web", true},
+		{"labs", "half", false},
+		{"labs", "missing", false},
+		{"root", "app", false},
+		{"other", "web", false},
+	} {
+		got, err := r.ServiceExists(tc.team, tc.component)
+		if err != nil || got != tc.want {
+			t.Errorf("ServiceExists(%q, %q) = %v, %v; want %v", tc.team, tc.component, got, err, tc.want)
+		}
+	}
+	for _, bad := range [][2]string{{"", "web"}, {"labs", ""}, {"..", "web"}, {"labs", "../x"}, {"labs", "a/b"}, {"Labs", "web"}} {
+		if _, err := r.ServiceExists(bad[0], bad[1]); err == nil {
+			t.Errorf("ServiceExists(%q, %q) must be an error", bad[0], bad[1])
+		}
+	}
+}
+
+// A symlink anywhere on the path is not taken as a service, and is not
+// silently "absent" either.
+func TestServiceExists_SymlinkIsAnError(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	r.lastSync.Store(time.Now().UnixNano())
+	writeServiceValues(t, dir, "labs", "web")
+	if err := os.Symlink(filepath.Join(dir, "platform-gitops", "services", "labs"),
+		filepath.Join(dir, "platform-gitops", "services", "evil")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.ServiceExists("evil", "web"); err == nil {
+		t.Fatalf("a symlinked team directory must be an error, got exists=%v", got)
+	}
+}
+
+func TestServiceExists_UnreadableIsNotAbsent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir, r := setupTempRepo(t)
+	r.lastSync.Store(time.Now().UnixNano())
+	writeServiceValues(t, dir, "labs", "web")
+	team := filepath.Join(dir, "platform-gitops", "services", "labs")
+	if err := os.Chmod(team, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(team, 0o750) }) //nolint:gosec // test cleanup
+	if got, err := r.ServiceExists("labs", "other"); err == nil {
+		t.Fatalf("an unreadable team dir must be an error, got exists=%v", got)
+	}
+}
+
+func TestTenantNames(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	if _, err := r.TenantNames(); err == nil {
+		t.Fatal("a checkout that never synced must not answer")
+	}
+	r.lastSync.Store(time.Now().UnixNano())
+	if _, err := r.TenantNames(); err == nil {
+		t.Fatal("a missing tenants directory must be an error, not an empty list")
+	}
+	writeTenantYAML(t, dir, "labs", "tenant:\n  name: labs\n")
+	// A tenant directory whose values.yaml does not parse is still a name.
+	writeTenantYAML(t, dir, "broken", ":\n  - [\n")
+	names, err := r.TenantNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(names, ",") != "broken,labs" {
+		t.Errorf("TenantNames = %v", names)
+	}
+	tenants := filepath.Join(dir, "platform-gitops", "tenants")
+	if os.Geteuid() != 0 {
+		if err := os.Chmod(tenants, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(tenants, 0o750) }) //nolint:gosec // test cleanup
+		if _, err := r.TenantNames(); err == nil {
+			t.Fatal("an unreadable tenants dir must be an error")
+		}
 	}
 }

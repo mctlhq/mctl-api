@@ -22,7 +22,7 @@ import "testing"
 // read the same copy: a service added to one but not the other would otherwise
 // be enumerated as present while never being exercised through validation.
 var wantServices = []string{
-	"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal",
+	"mctl-web", "mctl-docs", "mctl-api", "mctl-portal",
 	"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github",
 	"newton-mcp-gateway",
 }
@@ -702,6 +702,43 @@ func TestDevLoopCorrelationParamsStayOptional(t *testing.T) {
 		}
 		if errs := registry.ValidateInput(op, base); len(errs) != 0 {
 			t.Errorf("%s: ValidateInput(%v) without correlation params returned errors, want none: %v", opName, base, errs)
+		}
+	}
+}
+
+// TestTraceparentDeclaredOnTracedAgentOperations pins mctlhq/mctl-agents#195:
+// the two operations a traced DevLoop submits keep a valid traceparent through
+// StripUndeclared and ValidateInput, and a value that is anything but a
+// version-00 W3C traceparent is refused rather than forwarded to Argo.
+func TestTraceparentDeclaredOnTracedAgentOperations(t *testing.T) {
+	r := NewRegistry()
+	const valid = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	for _, name := range []string{"mctl-agents-investigate", "mctl-agents-implement"} {
+		op, ok := r.Get(name)
+		if !ok {
+			t.Fatalf("%s not registered", name)
+		}
+		in := map[string]string{"traceparent": valid}
+		if name == "mctl-agents-investigate" {
+			in["issue_url"] = "https://github.com/mctlhq/mctl-api/issues/1"
+		}
+		kept, dropped := r.StripUndeclared(op, in)
+		if kept["traceparent"] != valid || len(dropped) != 0 {
+			t.Errorf("%s: traceparent dropped (kept=%v dropped=%v)", name, kept, dropped)
+		}
+		if errs := r.ValidateInput(op, kept); len(errs) != 0 {
+			t.Errorf("%s: valid traceparent rejected: %v", name, errs)
+		}
+		for _, bad := range []string{
+			"01-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+			"00-0AF7651916CD43DD8448EB211C80319C-B7AD6B7169203331-01",
+			valid + "\n$(id)",
+			"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331",
+		} {
+			kept["traceparent"] = bad
+			if errs := r.ValidateInput(op, kept); len(errs) == 0 {
+				t.Errorf("%s: accepted malformed traceparent %q", name, bad)
+			}
 		}
 	}
 }

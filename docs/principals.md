@@ -67,6 +67,146 @@ the redeem back. That is why both live in one database
 after an authentication provider (`github`, `dex`, `service`, `dev`): its
 mirror rows would collide with real identities.
 
+## Linking a ZITADEL identity (#435)
+
+A ZITADEL login seen for the first time becomes a **new** principal, like
+any unknown identity. Attaching it to the principal a person already has
+(their GitHub one) is an explicit act, never a match on a name or an
+e-mail:
+
+1. `GET /identity/link/zitadel` in a browser. mctl-api sets an httpOnly,
+   Secure, SameSite=Lax `__Host-` cookie with a random value (it keeps only the
+   SHA-256) and sends the browser to GitHub through its own OAuth app; the
+   registered `/oauth/github/callback` recognises the `link.` state.
+2. GitHub proves identity #1 (numeric id); it is provisioned as usual and
+   names the principal **P**. A page then says what to enter at ZITADEL
+   (the login name from the invitation e-mail, not the e-mail address and
+   not the GitHub login) and links to the ZITADEL leg. Under
+   `prompt=login` ZITADEL always asks for a name, and with
+   `ignore_unknown_usernames` it answers an unknown one with a password
+   page that a passkey-only account cannot pass. An e-mail address fails
+   too: Login V2 v4.19.x opens the passkey session with it as a login
+   name, which the API does not resolve (zitadel/zitadel#12852). See #462.
+   The link carries this session's state, so step 3 checks it.
+3. ZITADEL proves identity #2: authorization code with the confidential
+   client `ZITADEL_LINK_CLIENT_ID` / `ZITADEL_LINK_CLIENT_SECRET`, PKCE
+   S256, `state`, `nonce`, `prompt=login` and `max_age=0` (which makes
+   `auth_time` a required claim). The ID token must carry the nonce and an
+   `auth_time` inside this session. Its `iss` and `sub` form
+   the identity, under the name of the `MCTL_OIDC_PROVIDERS` entry
+   `ZITADEL_LINK_PROVIDER` (default `zitadel`), so later ZITADEL tokens
+   resolve to it.
+4. A confirmation page shows both identities; its POST carries a CSRF
+   token tied to the session. Every step also checks the cookie, so a link
+   started in one browser cannot be finished in another, and each step is
+   single-use. Sessions live in memory for 10 minutes, counted from the
+   start and checked again after every network call (one replica; a
+   restart cancels links in flight). One source IP holds at most 3
+   unfinished links; a fourth drops the oldest one still waiting for
+   GitHub, so no single source can fill the global cap of 1000. A link
+   that has left for GitHub or proven an identity is never dropped (on a
+   shared egress IP it is usually someone else's): when all 3 are past
+   that point, the new start gets a 429. A sign-in cancelled or failed at
+   either IdP ends its link at once, so it never holds a slot. With more than one replica, a step
+   that reaches a pod other than the one that started the link gets a 400
+   "start again", never a 500 or a link.
+
+   The `link.` prefix keeps the two users of `/oauth/github/callback`
+   apart in both directions: login states are base64url (no `.`) and go to
+   the OAuth server; link states go to linking before the OAuth server
+   looks anything up. Link states are bound to the cookie and single-use;
+   login states are single-use and bound to the MCP client by PKCE.
+
+Outcomes (`identity_links_total{provider,result}`, audit `identity.link`):
+
+| State of the ZITADEL identity | Result |
+|---|---|
+| unknown | linked to P |
+| already on P | `already_linked` (verified_at refreshed) |
+| revoked on P | refused; only an operator restores it |
+| on another principal Q | refused, 409 `identity_belongs_to_other_principal`, naming Q |
+| P holds a different live ZITADEL identity | refused, 409 `principal_already_linked` |
+
+Self-service never moves an identity between principals (owner decision on
+#435). An admin merges instead: `POST
+/api/v1/admin/principals/{from}/merge-into/{into}` (human admin acting
+directly; audit `principal.merge`, high risk, with a classified `reason`
+on failure) moves every live identity of `from` onto `into` and disables
+`from`, which is kept because audit rows reference it; revoked identities
+stay on `from`, and `moved_identities` counts live ones only. It is refused
+when both hold a live identity of the same provider and issuer, or either
+is not human, or `into` is disabled, or `from` is disabled while still
+holding live identities. A retry is safe: when `from` is already disabled
+with no live identity left, the answer is 200 with `already_merged: true`
+and nothing changes. The store does not record which principal it went
+into, so the answer carries a `detail` saying the earlier target may
+differ from `into`; the audit rows record it. Every outcome, refusals included, is audited
+with the actor, `from` and `into`.
+
+The resolver caches answers for 5 minutes, including the principal id and
+its disabled flag. A merge and an unlink therefore drop the cached answers
+for the principals involved (`Resolver.Forget`), so the next request
+re-reads the store: moved identities act as `into`, and an unlinked one is
+refused. A resolution already reading the store when that happens returns
+its answer once but does not cache it, so it cannot write the pre-change
+answer back. This reaches the process that served the call, which is all of
+mctl-api while it runs one replica; with more replicas the others would
+keep their cached answer for up to the TTL.
+
+`GET /api/v1/identity/links` lists the caller's identities; `DELETE
+/api/v1/identity/links/{id}` revokes one of them (never the last live one;
+a revoked identity is refused at authentication from the next request).
+Both answer the person only: relayed (surface) and service callers get 403. Without the link client
+the browser flow answers 503; without the principal store the API answers
+503 too.
+
+Proof of identity #1 is GitHub only for now; a Dex principal links through
+GitHub or not at all.
+
+## Signing in to MCP clients with ZITADEL (#467)
+
+`OAUTH_UPSTREAM` decides where `GET /oauth/authorize` (every MCP connector)
+signs people in: `github` (the default, unchanged), `zitadel`, or `both`
+(a page offering ZITADEL first and GitHub as legacy; the choice comes back
+as the same authorization plus `upstream=`, a parameter only `both` reads).
+
+The ZITADEL leg uses its own confidential client
+(`OAUTH_ZITADEL_CLIENT_ID` / `OAUTH_ZITADEL_CLIENT_SECRET`, not the link
+client), redirect `<SELF_URL>/oauth/zitadel/callback`, PKCE S256 and a
+nonce, and no `prompt=login`: an existing ZITADEL session is the single
+sign-on this is for. The ID token is verified against the
+`MCTL_OIDC_PROVIDERS` entry `OAUTH_ZITADEL_PROVIDER` (default `zitadel`)
+with this client as audience, and `(provider, iss, sub)` is looked up
+read-only (`Store.LinkedGitHub`):
+
+| Lookup | Answer |
+|---|---|
+| linked to P, P has one live GitHub identity with a login | code for that login: `IssueCode(login, ResolveGroups(login))`, the same code, groups and admin decision (`ADMIN_USERS`) a GitHub sign-in of P yields |
+| no row, or a principal of its own with no GitHub identity | 403 page linking to `/identity/link/zitadel`; nothing issued or provisioned |
+| identity revoked, or P disabled | 403 |
+| P's GitHub login unknown (taken by another account) or two live GitHub identities | 409, nothing guessed |
+| store error, or no principal store | 503, never "not linked" |
+
+A pending authorization records its upstream: a GitHub callback cannot
+complete a ZITADEL authorization or the reverse, and an authorization whose
+upstream the current mode does not allow (one pending across a rollback)
+gets a 400. Sign-ins are counted in
+`oauth_upstream_signins_total{upstream,result}`. For `upstream="zitadel"`,
+`result` is `issued`, `unlinked`, `refused`, `store_unavailable`,
+`invalid_token`, `upstream_error` (ZITADEL redirected back with an error),
+`upstream_unreachable` (discovery failed), `exchange_failed`,
+`bad_request` or `internal_error`, so "ZITADEL is down" and "mctl is
+broken" stay apart.
+
+`zitadel` and `both` refuse startup when `OAUTH_JWT_SECRET`, the ZITADEL
+client, or the provider entry is missing, when that entry keys identities
+on a claim other than `sub` (links are written by `sub`), when
+`OAUTH_ZITADEL_PROVIDER` differs from `ZITADEL_LINK_PROVIDER` (sign-in
+reads links under the entry name linking writes them with), and, for `both`,
+without the GitHub app. Under `zitadel` the GitHub app stays optional; the
+link flow needs it, so without it linking answers 503. Rollback is
+`OAUTH_UPSTREAM=github`.
+
 ## Backfill
 
 Runs automatically after the first successful gitops sync, on every start,

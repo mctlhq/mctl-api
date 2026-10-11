@@ -24,7 +24,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
+
+// incidentWriteRole is the tenant role needed to create or change an
+// incident. Incidents are operational records, so the bar is the ordinary
+// write role: a developer may acknowledge and resolve them, a read-only
+// member may not (mctl-api#478).
+const incidentWriteRole = operations.RoleDeveloper
 
 // CreateIncident handles POST /api/v1/incidents.
 func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
@@ -52,6 +59,9 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 
 	if !user.IsAdmin() && !user.HasTenantAccess(a.Tenant) {
 		writeError(w, http.StatusForbidden, "access denied to tenant: "+a.Tenant)
+		return
+	}
+	if !h.requireTenantRole(w, r, user, a.Tenant, incidentWriteRole, "incident-create", operations.RiskLow) {
 		return
 	}
 
@@ -106,6 +116,9 @@ func (h *Handlers) ResolveIncidentByFingerprint(w http.ResponseWriter, r *http.R
 
 	if !user.IsAdmin() && !user.HasTenantAccess(body.Tenant) {
 		writeError(w, http.StatusForbidden, "access denied to tenant: "+body.Tenant)
+		return
+	}
+	if !h.requireTenantRole(w, r, user, body.Tenant, incidentWriteRole, "incident-resolve", operations.RiskLow) {
 		return
 	}
 
@@ -232,6 +245,9 @@ func (h *Handlers) UpdateIncident(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
+	if !h.requireTenantRole(w, r, user, existing.Tenant, incidentWriteRole, "incident-update", operations.RiskLow) {
+		return
+	}
 
 	var patch struct {
 		Status      *string `json:"status"`
@@ -297,6 +313,9 @@ func (h *Handlers) AcknowledgeIncident(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
+	if !h.requireTenantRole(w, r, user, existing.Tenant, incidentWriteRole, "incident-ack", operations.RiskLow) {
+		return
+	}
 
 	userID := user.ID
 
@@ -335,6 +354,9 @@ func (h *Handlers) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 
 	if !user.IsAdmin() && !user.HasTenantAccess(existing.Tenant) {
 		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	if !h.requireTenantRole(w, r, user, existing.Tenant, incidentWriteRole, "incident-resolve", operations.RiskLow) {
 		return
 	}
 

@@ -45,6 +45,13 @@ import (
 // TEST_DATABASE_URL-gated pattern used across this repo (see
 // internal/api/handlers_alerts_test.go) — there is no Postgres service in
 // CI, so these tests only run when pointed at a local/ephemeral instance.
+// domainTestRoles is the members list these tests run against: u1 owns
+// labs, which is who almost every test acts as. Role-specific cases build
+// their own.
+func domainTestRoles() *stubRoles {
+	return rolesOf("labs/u1=owner", "seerrsense/u1=owner", "infra/u2=owner")
+}
+
 func newTestDomainStore(t *testing.T) *domains.Store {
 	t.Helper()
 	connStr := os.Getenv("TEST_DATABASE_URL")
@@ -121,7 +128,7 @@ func TestDomainRoutes_NilStore503(t *testing.T) {
 
 func TestListDomains_NilUserUnauthorized(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store}}
 
 	rec := httptest.NewRecorder()
 	h.ListDomains(rec, httptest.NewRequest(http.MethodGet, "/api/v1/domains?team=labs", nil))
@@ -133,7 +140,7 @@ func TestListDomains_NilUserUnauthorized(t *testing.T) {
 
 func TestAddDomain_NilUserUnauthorized(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store}}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"a.example.com"}`))
@@ -147,11 +154,11 @@ func TestAddDomain_NilUserUnauthorized(t *testing.T) {
 
 func TestAddDomain_NonMemberForbidden(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store}}
 
 	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"a.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"other-team"}})
+		auth.NewGitHubUser("u1", []string{"other-team"}))
 	rec := httptest.NewRecorder()
 	h.AddDomain(rec, req)
 
@@ -209,11 +216,11 @@ func TestValidateHostname(t *testing.T) {
 
 func TestAddDomain_PlatformDomainRejected(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
 
 	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"seerrsense","service":"web","domain":"seerrsense.mctl.ai"}`)),
-		&auth.User{ID: "u1", Groups: []string{"seerrsense"}})
+		auth.NewGitHubUser("u1", []string{"seerrsense"}))
 	rec := httptest.NewRecorder()
 	h.AddDomain(rec, req)
 
@@ -227,11 +234,11 @@ func TestAddDomain_PlatformDomainRejected(t *testing.T) {
 
 func TestAddDomain_PlatformDomainRoot_Rejected(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
 
 	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"web","domain":"mctl.ai"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}})
+		auth.NewGitHubUser("u1", []string{"labs"}))
 	rec := httptest.NewRecorder()
 	h.AddDomain(rec, req)
 
@@ -247,11 +254,11 @@ func TestAddDomain_PlatformDomainRoot_Rejected(t *testing.T) {
 // inside the platform domain, exactly what the guard exists to prevent.
 func TestAddDomain_PlatformDomainTrailingDotRejected(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
 
 	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"web","domain":"api.mctl.ai."}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}})
+		auth.NewGitHubUser("u1", []string{"labs"}))
 	rec := httptest.NewRecorder()
 	h.AddDomain(rec, req)
 
@@ -269,11 +276,11 @@ func TestAddDomain_PlatformDomainTrailingDotRejected(t *testing.T) {
 // platformDomain() stopped normalizing.
 func TestAddDomain_UnnormalizedPlatformDomainConfigStillGuards(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "MCTL.AI."}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "MCTL.AI."}}
 
 	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"web","domain":"api.mctl.ai"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}})
+		auth.NewGitHubUser("u1", []string{"labs"}))
 	rec := httptest.NewRecorder()
 	h.AddDomain(rec, req)
 
@@ -284,11 +291,11 @@ func TestAddDomain_UnnormalizedPlatformDomainConfigStillGuards(t *testing.T) {
 
 func TestAddDomain_InvalidHostnameRejected(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
 
 	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"web","domain":"foo bar"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}})
+		auth.NewGitHubUser("u1", []string{"labs"}))
 	rec := httptest.NewRecorder()
 	h.AddDomain(rec, req)
 
@@ -299,11 +306,11 @@ func TestAddDomain_InvalidHostnameRejected(t *testing.T) {
 
 func TestAddDomain_HappyPath(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
 
 	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"genai-leader","domain":"genai-leader.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}})
+		auth.NewGitHubUser("u1", []string{"labs"}))
 	rec := httptest.NewRecorder()
 	h.AddDomain(rec, req)
 
@@ -334,8 +341,8 @@ func TestAddDomain_HappyPath(t *testing.T) {
 
 func TestAddDomain_IdempotentReRegistration(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
-	user := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
+	user := auth.NewGitHubUser("u1", []string{"labs"})
 
 	body := `{"team":"labs","service":"svc","domain":"idempotent.example.com"}`
 
@@ -354,12 +361,12 @@ func TestAddDomain_IdempotentReRegistration(t *testing.T) {
 
 func TestAddDomain_CrossTeamConflict(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
 
 	rec1 := httptest.NewRecorder()
 	h.AddDomain(rec1, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"conflict.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}}))
+		auth.NewGitHubUser("u1", []string{"labs"})))
 	if rec1.Code != http.StatusCreated {
 		t.Fatalf("first call status = %d, want 201; body=%q", rec1.Code, rec1.Body.String())
 	}
@@ -367,7 +374,7 @@ func TestAddDomain_CrossTeamConflict(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	h.AddDomain(rec2, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"infra","service":"other","domain":"conflict.example.com"}`)),
-		&auth.User{ID: "u2", Groups: []string{"infra"}}))
+		auth.NewGitHubUser("u2", []string{"infra"})))
 	if rec2.Code != http.StatusConflict {
 		t.Fatalf("second call status = %d, want 409; body=%q", rec2.Code, rec2.Body.String())
 	}
@@ -378,8 +385,8 @@ func TestAddDomain_CrossTeamConflict(t *testing.T) {
 
 func TestListDomains_FiltersByTeamAndAccess(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	h.AddDomain(httptest.NewRecorder(), withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"list.example.com"}`)), owner))
@@ -395,7 +402,7 @@ func TestListDomains_FiltersByTeamAndAccess(t *testing.T) {
 
 	forbidden := httptest.NewRecorder()
 	h.ListDomains(forbidden, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/domains?team=labs", nil),
-		&auth.User{ID: "u2", Groups: []string{"other-team"}}))
+		auth.NewGitHubUser("u2", []string{"other-team"})))
 	if forbidden.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body=%q", forbidden.Code, forbidden.Body.String())
 	}
@@ -403,7 +410,7 @@ func TestListDomains_FiltersByTeamAndAccess(t *testing.T) {
 
 func TestVerifyDomain_NilUserUnauthorized(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store}}
 
 	req := withURLParam(httptest.NewRequest(http.MethodPost, "/api/v1/domains/abc/verify", nil), "id", "abc")
 	rec := httptest.NewRecorder()
@@ -416,10 +423,10 @@ func TestVerifyDomain_NilUserUnauthorized(t *testing.T) {
 
 func TestVerifyDomain_UnknownIDNotFound(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
 
 	req := withURLParam(withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/does-not-exist/verify?team=labs", nil),
-		&auth.User{ID: "u1", Groups: []string{"labs"}}), "id", "does-not-exist")
+		auth.NewGitHubUser("u1", []string{"labs"})), "id", "does-not-exist")
 	rec := httptest.NewRecorder()
 	h.VerifyDomain(rec, req)
 
@@ -430,18 +437,18 @@ func TestVerifyDomain_UnknownIDNotFound(t *testing.T) {
 
 func TestVerifyDomain_CrossTeamNotFound(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"crossteam.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}}))
+		auth.NewGitHubUser("u1", []string{"labs"})))
 	var created map[string]interface{}
 	_ = json.Unmarshal(addRec.Body.Bytes(), &created)
 	id, _ := created["id"].(string)
 
 	req := withURLParam(withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/"+id+"/verify?team=other-team", nil),
-		&auth.User{ID: "u2", Groups: []string{"other-team"}}), "id", id)
+		auth.NewGitHubUser("u2", []string{"other-team"})), "id", id)
 	rec := httptest.NewRecorder()
 	h.VerifyDomain(rec, req)
 
@@ -465,15 +472,15 @@ func (negativeResolver) LookupCNAME(context.Context, string) (string, error) {
 
 func TestVerifyDomainByName_NegativeVerdictIsNotAnError(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
 
 	h.AddDomain(httptest.NewRecorder(), withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"verify-negative.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}}))
+		auth.NewGitHubUser("u1", []string{"labs"})))
 
 	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/verify",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"verify-negative.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}})
+		auth.NewGitHubUser("u1", []string{"labs"}))
 	rec := httptest.NewRecorder()
 	h.VerifyDomainByName(rec, req)
 
@@ -500,15 +507,15 @@ func TestVerifyDomainByName_NegativeVerdictIsNotAnError(t *testing.T) {
 // just created.
 func TestVerifyDomainByName_TrimsTeamAndServiceWhitespace(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
 
 	h.AddDomain(httptest.NewRecorder(), withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"verify-whitespace.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}}))
+		auth.NewGitHubUser("u1", []string{"labs"})))
 
 	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/verify",
 		strings.NewReader(`{"team":"labs ","service":" svc","domain":"verify-whitespace.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}})
+		auth.NewGitHubUser("u1", []string{"labs"}))
 	rec := httptest.NewRecorder()
 	h.VerifyDomainByName(rec, req)
 
@@ -519,12 +526,12 @@ func TestVerifyDomainByName_TrimsTeamAndServiceWhitespace(t *testing.T) {
 
 func TestUpdateDomainStatus_HumanForbidden(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"patch.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}}))
+		auth.NewGitHubUser("u1", []string{"labs"})))
 	var created map[string]interface{}
 	_ = json.Unmarshal(addRec.Body.Bytes(), &created)
 	id, _ := created["id"].(string)
@@ -541,12 +548,12 @@ func TestUpdateDomainStatus_HumanForbidden(t *testing.T) {
 
 func TestUpdateDomainStatus_ServicePrincipalAllowed(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"patch-ok.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}}))
+		auth.NewGitHubUser("u1", []string{"labs"})))
 	var created map[string]interface{}
 	_ = json.Unmarshal(addRec.Body.Bytes(), &created)
 	id, _ := created["id"].(string)
@@ -563,12 +570,12 @@ func TestUpdateDomainStatus_ServicePrincipalAllowed(t *testing.T) {
 
 func TestUpdateDomainStatus_InvalidStatusBadRequest(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"patch-bad.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}}))
+		auth.NewGitHubUser("u1", []string{"labs"})))
 	var created map[string]interface{}
 	_ = json.Unmarshal(addRec.Body.Bytes(), &created)
 	id, _ := created["id"].(string)
@@ -585,7 +592,7 @@ func TestUpdateDomainStatus_InvalidStatusBadRequest(t *testing.T) {
 
 func TestDeleteDomain_NilUserUnauthorized(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store}}
 
 	req := withURLParam(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/abc", nil), "id", "abc")
 	rec := httptest.NewRecorder()
@@ -598,8 +605,8 @@ func TestDeleteDomain_NilUserUnauthorized(t *testing.T) {
 
 func TestDeleteDomain_OwnTeamSucceeds(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -641,6 +648,7 @@ func (r cnameResolver) LookupCNAME(context.Context, string) (string, error) {
 func TestVerifyDomain_PositiveVerdictMarksVerified(t *testing.T) {
 	store := newTestDomainStore(t)
 	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
 		DomainStore:    store,
 		PlatformDomain: "mctl.ai",
 		DomainVerifier: domains.NewVerifierWithResolver(cnameResolver{target: "labs-svc.mctl.ai"}),
@@ -649,7 +657,7 @@ func TestVerifyDomain_PositiveVerdictMarksVerified(t *testing.T) {
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"verify-positive.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}}))
+		auth.NewGitHubUser("u1", []string{"labs"})))
 	var created map[string]interface{}
 	if err := json.Unmarshal(addRec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode add response: %v", err)
@@ -660,7 +668,7 @@ func TestVerifyDomain_PositiveVerdictMarksVerified(t *testing.T) {
 	}
 
 	req := withURLParam(withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains/"+id+"/verify?team=labs", nil),
-		&auth.User{ID: "u1", Groups: []string{"labs"}}), "id", id)
+		auth.NewGitHubUser("u1", []string{"labs"})), "id", id)
 	rec := httptest.NewRecorder()
 	h.VerifyDomain(rec, req)
 
@@ -704,8 +712,8 @@ func (r txtResolver) LookupCNAME(context.Context, string) (string, error) {
 // branch of Verify at all.
 func TestVerifyDomain_TXTPathMarksVerified(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
-	user := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
+	user := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -751,8 +759,8 @@ func TestVerifyDomain_TXTPathMarksVerified(t *testing.T) {
 // instead of VerifyDomain.
 func TestVerifyDomainByName_HappyPathMarksVerified(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
-	user := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
+	user := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -798,8 +806,8 @@ func TestVerifyDomainByName_HappyPathMarksVerified(t *testing.T) {
 // ownership gate must not have relaxed.
 func TestVerifyDomainByName_ServiceMismatchNotFound(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
-	user := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
+	user := auth.NewGitHubUser("u1", []string{"labs"})
 
 	h.AddDomain(httptest.NewRecorder(), withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"service-mismatch.example.com"}`)), user))
@@ -819,8 +827,8 @@ func TestVerifyDomainByName_ServiceMismatchNotFound(t *testing.T) {
 // still be reachable by verify-by-name using lowercase values.
 func TestVerifyDomainByName_MixedCaseTeamServiceStillMatches(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
-	user := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
+	user := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -844,8 +852,8 @@ func TestVerifyDomainByName_MixedCaseTeamServiceStillMatches(t *testing.T) {
 // rather than substring presence somewhere in the body.
 func TestListDomains_IncludesChallengeForPending(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	h.AddDomain(httptest.NewRecorder(), withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"list-pending.example.com"}`)), owner))
@@ -882,8 +890,8 @@ func TestListDomains_IncludesChallengeForPending(t *testing.T) {
 // cname_target must still be present.
 func TestListDomains_OmitsChallengeForActive(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -984,12 +992,13 @@ func TestDeleteDomain_TriggersRemoveCustomDomain(t *testing.T) {
 	store := newTestDomainStore(t)
 	exec := &fakeDomainExecutor{}
 	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
 		DomainStore:    store,
 		PlatformDomain: "mctl.ai",
 		Executor:       exec,
 		Registry:       operations.NewRegistry(),
 	}}
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -1051,12 +1060,13 @@ func TestDeleteDomain_SubmitFailureKeepsRow(t *testing.T) {
 	store := newTestDomainStore(t)
 	exec := &fakeDomainExecutor{err: errors.New("submit failed")}
 	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
 		DomainStore:    store,
 		PlatformDomain: "mctl.ai",
 		Executor:       exec,
 		Registry:       operations.NewRegistry(),
 	}}
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -1093,6 +1103,7 @@ func TestDeleteDomain_InvalidServiceNeverReachesSubmit(t *testing.T) {
 	store := newTestDomainStore(t)
 	exec := &fakeDomainExecutor{}
 	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
 		DomainStore:    store,
 		PlatformDomain: "mctl.ai",
 		Executor:       exec,
@@ -1112,7 +1123,7 @@ func TestDeleteDomain_InvalidServiceNeverReachesSubmit(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID, nil), owner), "id", created.ID)
 	rec := httptest.NewRecorder()
 	h.DeleteDomain(rec, req)
@@ -1136,11 +1147,11 @@ func TestDeleteDomain_InvalidServiceNeverReachesSubmit(t *testing.T) {
 // making the row invisible to list and 404-ing on delete.
 func TestDomainLifecycle_MixedCaseTeamRoundTrips(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
 	// Group membership is always canonical lowercase in practice (GitHub/Dex
 	// group names); the mixed case being pinned here is in what the CALLER
 	// types in the request body/query, not in group membership itself.
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -1183,6 +1194,7 @@ func TestDeleteDomain_LegacyMixedCaseServiceStillDeletes(t *testing.T) {
 	store := newTestDomainStore(t)
 	exec := &fakeDomainExecutor{}
 	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
 		DomainStore:    store,
 		PlatformDomain: "mctl.ai",
 		Executor:       exec,
@@ -1205,7 +1217,7 @@ func TestDeleteDomain_LegacyMixedCaseServiceStillDeletes(t *testing.T) {
 	// ?team=labs, not the row's own "Labs" spelling: this exercises
 	// resolveDomainForMutation's EqualFold comparison against a caller who
 	// (correctly) doesn't know this particular row predates normalization.
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID+"?team=labs", nil), owner), "id", created.ID)
 	rec := httptest.NewRecorder()
 	h.DeleteDomain(rec, req)
@@ -1233,12 +1245,13 @@ func TestDeleteDomain_SkipsTeardownForPendingRow(t *testing.T) {
 	store := newTestDomainStore(t)
 	exec := &fakeDomainExecutor{}
 	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
 		DomainStore:    store,
 		PlatformDomain: "mctl.ai",
 		Executor:       exec,
 		Registry:       operations.NewRegistry(),
 	}}
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -1283,12 +1296,13 @@ func TestDeleteDomain_FailedRowStillSubmitsTeardown(t *testing.T) {
 	store := newTestDomainStore(t)
 	exec := &fakeDomainExecutor{}
 	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
 		DomainStore:    store,
 		PlatformDomain: "mctl.ai",
 		Executor:       exec,
 		Registry:       operations.NewRegistry(),
 	}}
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -1334,8 +1348,8 @@ func TestDeleteDomain_FailedRowStillSubmitsTeardown(t *testing.T) {
 // additionally asserts on the new ingress_cleanup response field.
 func TestDeleteDomain_NilExecutorSkipsCleanup(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai"}}
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -1375,12 +1389,13 @@ func TestDeleteDomain_MissingOperationIsMisconfigured(t *testing.T) {
 	store := newTestDomainStore(t)
 	exec := &fakeDomainExecutor{}
 	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
 		DomainStore:    store,
 		PlatformDomain: "mctl.ai",
 		Executor:       exec,
 		Registry:       operations.NewRegistryWithout("remove-custom-domain"),
 	}}
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -1422,6 +1437,7 @@ func TestDeleteDomain_NormalizesSubmitTeamArgument(t *testing.T) {
 	store := newTestDomainStore(t)
 	exec := &fakeDomainExecutor{}
 	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
 		DomainStore:    store,
 		PlatformDomain: "mctl.ai",
 		Executor:       exec,
@@ -1444,7 +1460,7 @@ func TestDeleteDomain_NormalizesSubmitTeamArgument(t *testing.T) {
 		t.Fatalf("set status active: %v", err)
 	}
 
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID+"?team=labs", nil), owner), "id", created.ID)
 	rec := httptest.NewRecorder()
 	h.DeleteDomain(rec, req)
@@ -1469,6 +1485,7 @@ func TestDeleteDomain_MixedCaseRowWithoutTeamParamResolves(t *testing.T) {
 	store := newTestDomainStore(t)
 	exec := &fakeDomainExecutor{}
 	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
 		DomainStore:    store,
 		PlatformDomain: "mctl.ai",
 		Executor:       exec,
@@ -1488,7 +1505,7 @@ func TestDeleteDomain_MixedCaseRowWithoutTeamParamResolves(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	owner := &auth.User{ID: "u1", Groups: []string{"labs"}}
+	owner := auth.NewGitHubUser("u1", []string{"labs"})
 	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID, nil), owner), "id", created.ID)
 	rec := httptest.NewRecorder()
 	h.DeleteDomain(rec, req)
@@ -1506,6 +1523,7 @@ func TestDeleteDomain_MixedCaseRowWithoutTeamParamOtherGroupStill404s(t *testing
 	store := newTestDomainStore(t)
 	exec := &fakeDomainExecutor{}
 	h := &Handlers{opts: Options{
+		GitReader:      domainTestRoles(),
 		DomainStore:    store,
 		PlatformDomain: "mctl.ai",
 		Executor:       exec,
@@ -1525,7 +1543,7 @@ func TestDeleteDomain_MixedCaseRowWithoutTeamParamOtherGroupStill404s(t *testing
 		t.Fatalf("create: %v", err)
 	}
 
-	outsider := &auth.User{ID: "u2", Groups: []string{"other"}}
+	outsider := auth.NewGitHubUser("u2", []string{"other"})
 	req := withURLParam(withUser(httptest.NewRequest(http.MethodDelete, "/api/v1/domains/"+created.ID, nil), outsider), "id", created.ID)
 	rec := httptest.NewRecorder()
 	h.DeleteDomain(rec, req)
@@ -1537,12 +1555,12 @@ func TestDeleteDomain_MixedCaseRowWithoutTeamParamOtherGroupStill404s(t *testing
 
 func TestVerifyDomainAdminBypassesOwnershipCheck(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai", DomainVerifier: domains.NewVerifierWithResolver(&negativeResolver{})}}
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
 		strings.NewReader(`{"team":"labs","service":"svc","domain":"admin-bypass.example.com"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}}))
+		auth.NewGitHubUser("u1", []string{"labs"})))
 	var created map[string]interface{}
 	_ = json.Unmarshal(addRec.Body.Bytes(), &created)
 	id, _ := created["id"].(string)

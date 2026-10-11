@@ -125,3 +125,22 @@ func (p *evidenceWriterProvider) Verify(_ context.Context, raw string) (*Verifie
 	}
 	return &Verified{Identity: Identity{Provider: ProviderService, Subject: EvidenceWriterUserID, Display: EvidenceWriterUserID, Kind: KindService}}, nil
 }
+
+// registryPublisherProvider is the static-secret provider for
+// MCTL_REGISTRY_PUBLISHER_TOKEN (mctlhq/mctl-agents#470), the same shape as
+// the two writer providers above.
+type registryPublisherProvider struct{ token func() string }
+
+func newRegistryPublisherProvider(token func() string) *registryPublisherProvider {
+	return &registryPublisherProvider{token: token}
+}
+
+func (*registryPublisherProvider) Name() string           { return ProviderService }
+func (*registryPublisherProvider) Claims(tokenShape) bool { return true }
+
+func (p *registryPublisherProvider) Verify(_ context.Context, raw string) (*Verified, error) {
+	if !secretMatches(p.token(), raw) {
+		return nil, ErrNoProvider
+	}
+	return &Verified{Identity: Identity{Provider: ProviderService, Subject: RegistryPublisherUserID, Display: RegistryPublisherUserID, Kind: KindService}}, nil
+}

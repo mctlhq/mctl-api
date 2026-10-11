@@ -43,8 +43,8 @@ func TestWorkflowIDForIssueURL(t *testing.T) {
 		},
 		{
 			name: "repo with dots and dashes",
-			url:  "https://github.com/mctlhq/mctl-openclaw/issues/1",
-			want: "dev-loop-mctlhq-mctl-openclaw-1",
+			url:  "https://github.com/mctlhq/newton-mcp-gateway/issues/1",
+			want: "dev-loop-mctlhq-newton-mcp-gateway-1",
 		},
 		{name: "wrong org", url: "https://github.com/other-org/repo/issues/1", wantErr: true},
 		{name: "not an issue URL", url: "https://github.com/mctlhq/mctl-telegram/pull/296", wantErr: true},

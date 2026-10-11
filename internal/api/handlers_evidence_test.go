@@ -111,6 +111,8 @@ func TestEvidenceWriter_IsConfinedToAppendingRecords(t *testing.T) {
 		{http.MethodGet, "/api/v1/evidence"},
 		{http.MethodGet, "/api/v1/evidence/ev-0123456789abcdef"},
 		{http.MethodGet, "/api/v1/work-items/wi_x/evidence"},
+		{http.MethodGet, "/api/v1/evidence/current"},
+		{http.MethodGet, "/api/v1/work-items/wi_x/evidence/current"},
 		{http.MethodGet, "/api/v1/usage/records"},
 		{http.MethodPost, "/api/v1/usage/records"},
 		{http.MethodGet, "/api/v1/whoami"},
@@ -141,7 +143,9 @@ func TestEvidence_UnconfiguredStoreAnswers503(t *testing.T) {
 	r.Post("/api/v1/evidence/records", h.IngestEvidence)
 	r.Get("/api/v1/evidence", h.ListEvidence)
 	r.Get("/api/v1/evidence/{id}", h.GetEvidence)
+	r.Get("/api/v1/evidence/current", h.CurrentEvidence)
 	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/evidence/current"},
 		{http.MethodPost, "/api/v1/evidence/records"},
 		{http.MethodGet, "/api/v1/evidence"},
 		{http.MethodGet, "/api/v1/evidence/ev-0123456789abcdef"},

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -15,6 +16,37 @@ type Client struct {
 	addr   string
 	tokens TokenProvider
 	http   *http.Client
+	// health is separate from http on purpose: a probe that reuses the
+	// pooled connection of the read client inherits whatever is wrong with
+	// it. Production 2026-10-09: one half-dead connection to Cloudflare kept
+	// every /readyz Vault probe timing out for hours (the pod sat 0/1, so
+	// api.mctl.ai answered 503) while a fresh wget from the same pod
+	// succeeded. A cancelled request does not evict such a connection.
+	health *http.Client
+}
+
+// healthTimeout is a hard cap on one health probe, below the kubelet's 5s
+// readiness probe timeout so the answer is ours, not a kubelet timeout.
+const healthTimeout = 3 * time.Second
+
+func newHealthClient() *http.Client {
+	var tr *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		tr = base.Clone()
+	} else {
+		// Something (an instrumentation wrapper, a test) replaced the default
+		// transport. Build an equivalent one instead of panicking at startup.
+		tr = &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			DialContext:         (&net.Dialer{Timeout: healthTimeout}).DialContext,
+			TLSHandshakeTimeout: healthTimeout,
+		}
+	}
+	// A new connection per probe: one probe per 10s is cheap, and it means a
+	// probe can only fail because Vault is unreachable now, never because a
+	// previous connection went bad.
+	tr.DisableKeepAlives = true
+	return &http.Client{Transport: tr, Timeout: healthTimeout}
 }
 
 // NewClient constructs a Vault client for KV v2 reads, authenticating with a
@@ -30,6 +62,7 @@ func NewClientWithTokenProvider(addr string, tokens TokenProvider) *Client {
 		addr:   strings.TrimRight(addr, "/"),
 		tokens: tokens,
 		http:   &http.Client{Timeout: 15 * time.Second},
+		health: newHealthClient(),
 	}
 }
 
@@ -90,7 +123,7 @@ func (c *Client) Health(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.health.Do(req)
 	if err != nil {
 		return fmt.Errorf("vault health: %w", err)
 	}

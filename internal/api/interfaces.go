@@ -21,6 +21,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/argoarchive"
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
+	"github.com/mctlhq/mctl-api/internal/erpactsites"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/loki"
 	"github.com/mctlhq/mctl-api/internal/operations"
@@ -37,12 +38,20 @@ type GitReader interface {
 	ListTenants() ([]gitops.Tenant, error)
 	GetTenant(name string) (*gitops.Tenant, error)
 	TenantExists(name string) (bool, error)
+	// TenantNames lists every tenant name in the checkout; any read failure
+	// is an error, never a shorter list.
+	TenantNames() ([]string, error)
+	// ServiceExists reports whether services/<team>/<component> is a
+	// service in the checkout. Only a missing path is (false, nil); a read
+	// that failed is an error.
+	ServiceExists(team, component string) (bool, error)
+	// MemberRoles returns the members[].role values under which login is a
+	// member of namespace, as written, one list per members list naming the
+	// login. Empty with a nil error is "read, and not a member"; anything it
+	// could not read is an error (mctl-api#478).
+	MemberRoles(namespace, login string) ([][]string, error)
 	ListServices(teamFilter string) ([]gitops.Service, error)
 	GetService(team, app string) (*gitops.Service, error)
-	ListOpenClawSkills(team string) ([]gitops.OpenClawSkill, error)
-	ReadOpenClawSkill(team, name string) (string, error)
-	ListOpenClawIdentity(team string) ([]gitops.OpenClawIdentityFile, error)
-	ReadOpenClawIdentity(team, fileName string) (string, error)
 	ListPlatformSkills() ([]gitops.PlatformSkill, error)
 	GetPlatformSkill(name string) (*gitops.PlatformSkill, string, error)
 	ListPlatformTenantBindings() ([]gitops.PlatformSkillBinding, error)
@@ -56,6 +65,15 @@ type GitReader interface {
 type ArgoStatusClient interface {
 	GetAppStatus(name string) (*argocd.AppStatus, error)
 	ListApps(project string) ([]argocd.AppStatus, error)
+	ListWorkloads() ([]argocd.Workload, error)
+}
+
+// ErpactDeployer is the subset of erpactsites.Client the erpact site
+// handlers use (mctl-api#486). A stopgap for tenant `erpact` only — see
+// internal/erpactsites's package comment.
+type ErpactDeployer interface {
+	ListSites(ctx context.Context) ([]erpactsites.Site, error)
+	CreateSite(ctx context.Context, name string) (host string, err error)
 }
 
 // WorkflowExecutor is the subset of operations.Executor used by API handlers.
@@ -119,21 +137,8 @@ type WorkflowLogArchive interface {
 	GetStep(ctx context.Context, key string, tailLines int) (string, error)
 }
 
-// VaultReader exposes the subset of Vault reads needed by onboarding flows.
+// VaultReader exposes the subset of Vault reads mctl-api needs (the ERPact
+// deployer token; see cmd/api/main.go).
 type VaultReader interface {
 	ReadKV(ctx context.Context, path string) (map[string]string, error)
-}
-
-// MetricsQuerier fetches historical container usage stats for right-sizing decisions.
-type MetricsQuerier interface {
-	GetContainerUsage(ctx context.Context, namespace, app, container string, lookback time.Duration) (ContainerUsageStats, error)
-}
-
-// ContainerUsageStats summarizes recent runtime consumption for a single container.
-type ContainerUsageStats struct {
-	MemoryMaxBytes float64 `json:"memoryMaxBytes"`
-	MemoryP95Bytes float64 `json:"memoryP95Bytes"`
-	CPUMaxCores    float64 `json:"cpuMaxCores"`
-	CPUP95Cores    float64 `json:"cpuP95Cores"`
-	SampleCount    int     `json:"sampleCount"`
 }

@@ -8,7 +8,18 @@
 
 package operations
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+)
 
 func TestWorkflowNamespace(t *testing.T) {
 	tests := []struct {
@@ -22,8 +33,6 @@ func TestWorkflowNamespace(t *testing.T) {
 		{"tenant lifecycle delete (safe)", "delete-tenant-safe", "acme", "argo-workflows"},
 		{"add custom domain runs centrally", "add-custom-domain", "acme", "argo-workflows"},
 		{"remove custom domain runs centrally", "remove-custom-domain", "acme", "argo-workflows"},
-		{"skill save runs centrally", "openclaw-skill-save", "acme", "argo-workflows"},
-		{"skill delete runs centrally", "openclaw-skill-delete", "acme", "argo-workflows"},
 		{"mctl-agents-run runs centrally", "mctl-agents-run", "acme", "argo-workflows"},
 		{"mctl-agents-implement runs centrally", "mctl-agents-implement", "acme", "argo-workflows"},
 		{"mctl-agents-shepherd runs centrally", "mctl-agents-shepherd", "acme", "argo-workflows"},
@@ -127,5 +136,145 @@ func TestTrimWorkflowStatusKeepsHostNodeNameAndTemplateRef(t *testing.T) {
 	}
 	if _, present := trimmed["spec"]; present {
 		t.Errorf("spec should be dropped: %#v", trimmed)
+	}
+}
+
+func TestSubmitSetsTraceAnnotations(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{workflowGVR: "WorkflowList"})
+	e := &Executor{dynamicClient: dyn}
+	op := Operation{Name: "x", WorkflowTemplate: "wft-x"}
+
+	tp := sdktrace.NewTracerProvider()
+	ctx, span := tp.Tracer("t").Start(context.Background(), "s")
+	defer span.End()
+
+	res, err := e.Submit(ctx, op, map[string]string{}, "u", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, err := dyn.Resource(workflowGVR).Namespace(res.Namespace).Get(ctx, res.WorkflowName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ann := wf.GetAnnotations()
+	if ann["mctl.ai/trace-id"] != span.SpanContext().TraceID().String() {
+		t.Errorf("trace-id annotation = %q", ann["mctl.ai/trace-id"])
+	}
+	if !strings.Contains(ann["mctl.ai/traceparent"], span.SpanContext().TraceID().String()) {
+		t.Errorf("traceparent annotation = %q", ann["mctl.ai/traceparent"])
+	}
+
+	// No trace context: no annotations.
+	res, err = e.Submit(context.Background(), op, map[string]string{}, "u", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, _ = dyn.Resource(workflowGVR).Namespace(res.Namespace).Get(context.Background(), res.WorkflowName, metav1.GetOptions{})
+	if len(wf.GetAnnotations()) != 0 {
+		t.Errorf("annotations without trace = %v", wf.GetAnnotations())
+	}
+}
+
+// A caller ID that is not a label value must not make the apiserver reject
+// the Workflow (mctl-api#531 review): the CI principal is "ci:owner/repo",
+// and an OIDC display can be an email.
+func TestSubmitLabelsAreValidForAnyCaller(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{workflowGVR: "WorkflowList"})
+	e := &Executor{dynamicClient: dyn}
+	op := Operation{Name: "deploy-service", WorkflowTemplate: "wft-x"}
+
+	seen := map[string]string{}
+	for _, user := range []string{
+		"ci:mctlhq/mctl-telegram", "ci:mctlhq/mctl-telegrax", "ci.mctlhq.mctl-telegram", "someone@example.com",
+		strings.Repeat("a/", 60), ":::", "-lead", "",
+	} {
+		res, err := e.Submit(context.Background(), op, map[string]string{}, user, "labs")
+		if err != nil {
+			t.Fatal(err)
+		}
+		wf, err := dyn.Resource(workflowGVR).Namespace(res.Namespace).Get(context.Background(), res.WorkflowName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range wf.GetLabels() {
+			if errs := validation.IsValidLabelValue(v); len(errs) > 0 {
+				t.Errorf("user %q: label %s=%q is invalid: %v", user, k, v, errs)
+			}
+		}
+		got := wf.GetLabels()["mctl.ai/user"]
+		if other, dup := seen[got]; dup && other != user {
+			t.Errorf("%q and %q share the label %q", other, user, got)
+		}
+		seen[got] = user
+	}
+
+	// A value that is already valid is not touched: existing selectors on
+	// GitHub logins keep matching.
+	for _, ok := range []string{"mashkovd", "mctl-agent", "a.b_c-d"} {
+		if got := labelValue(ok); got != ok {
+			t.Errorf("labelValue(%q) = %q", ok, got)
+		}
+	}
+}
+
+// TestTrimWorkflowStatusReportsTheTraceID covers the workflow -> trace hop
+// of mctlhq/mctl-agent#97: a caller that holds only a workflow name must get
+// the trace it ran in, from the `traceparent` argument first (the parent the
+// pod's spans are under) and the submit annotation second, and must never
+// get a malformed or all-zero id passed off as one.
+func TestTrimWorkflowStatusReportsTheTraceID(t *testing.T) {
+	const devloop = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const submit = "0af7651916cd43dd8448eb211c80319c"
+	wf := func(param string, annotation string) map[string]interface{} {
+		meta := map[string]interface{}{"name": "wf"}
+		if annotation != "" {
+			meta["annotations"] = map[string]interface{}{"mctl.ai/trace-id": annotation, "other": "dropped"}
+		}
+		spec := map[string]interface{}{}
+		if param != "" {
+			spec["arguments"] = map[string]interface{}{"parameters": []interface{}{
+				map[string]interface{}{"name": "issue_url", "value": "https://github.com/x/y/issues/1"},
+				map[string]interface{}{"name": "traceparent", "value": param},
+			}}
+		}
+		return map[string]interface{}{"metadata": meta, "spec": spec, "status": map[string]interface{}{"phase": "Failed"}}
+	}
+	cases := []struct {
+		name, param, annotation, wantID, wantSource string
+	}{
+		{"argument wins", "00-" + devloop + "-00f067aa0ba902b7-01", submit, devloop, "traceparent-argument"},
+		{"unsampled argument still names the trace", "00-" + devloop + "-00f067aa0ba902b7-00", "", devloop, "traceparent-argument"},
+		{"annotation is the fallback", "", submit, submit, "submit-annotation"},
+		{"empty argument falls back", "", submit, submit, "submit-annotation"},
+		{"malformed argument falls back", "00-NOTHEX-00f067aa0ba902b7-01", submit, submit, "submit-annotation"},
+		{"all-zero argument falls back", "00-" + strings.Repeat("0", 32) + "-00f067aa0ba902b7-01", submit, submit, "submit-annotation"},
+		{"all-zero annotation is not a trace", "", strings.Repeat("0", 32), "", ""},
+		{"malformed annotation is not a trace", "", "abc", "", ""},
+		{"nothing known, no trace key", "", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			trimmed := trimWorkflowStatus(wf(tc.param, tc.annotation))
+			trace, present := trimmed["trace"].(map[string]interface{})
+			if tc.wantID == "" {
+				if _, any := trimmed["trace"]; any {
+					t.Fatalf("trace reported where none is known: %#v", trimmed["trace"])
+				}
+				return
+			}
+			if !present {
+				t.Fatalf("trace missing: %#v", trimmed)
+			}
+			if trace["trace_id"] != tc.wantID || trace["source"] != tc.wantSource {
+				t.Errorf("trace = %#v, want %s from %s", trace, tc.wantID, tc.wantSource)
+			}
+			if meta := trimmed["metadata"].(map[string]interface{}); meta["annotations"] != nil {
+				t.Errorf("annotations must stay trimmed: %#v", meta)
+			}
+		})
 	}
 }

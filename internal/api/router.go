@@ -28,6 +28,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/agentregistry"
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/commerce"
 	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/evidence"
@@ -58,13 +59,13 @@ type Options struct {
 	QuotaReader QuotaReader
 	// LogQuerier queries Loki for service logs (optional — nil outside cluster).
 	LogQuerier LogQuerier
+	// ComponentSourceRepos answers which repository is registered for a
+	// component, for CI deploys (mctl-api#530). Nil refuses every CI deploy
+	// with 503.
+	ComponentSourceRepos ComponentSourceRepoReader
 	// WorkflowLogArchive reads archived Argo step logs from object storage
 	// (optional — nil when the archive env vars are unset).
 	WorkflowLogArchive WorkflowLogArchive
-	// VaultReader checks persisted secrets for onboarding preflight (optional — nil outside cluster).
-	VaultReader VaultReader
-	// MetricsQuerier fetches historical runtime usage for right-sizing decisions (optional).
-	MetricsQuerier MetricsQuerier
 	// Optional Backstage integration for immediate catalog sync.
 	BackstageURL string
 	// BackstageToken authorizes notifyBackstage's tenant catalog sync POST
@@ -91,6 +92,14 @@ type Options struct {
 	// OAuthServer handles OAuth 2.0 Authorization Code + PKCE flow for Claude.ai connectors.
 	// If nil, all /oauth/* endpoints return 404.
 	OAuthServer *auth.OAuthServer
+	// IdentityLink configures explicit identity linking (mctl-api#435,
+	// handlers_identity_link.go). Nil disables it (503).
+	IdentityLink *IdentityLinkOptions
+	// OAuthUpstream is where /oauth/authorize signs people in
+	// (OAUTH_UPSTREAM, mctl-api#467); the zero value is GitHub.
+	OAuthUpstream OAuthUpstreamMode
+	// OAuthZitadel configures the ZITADEL upstream; nil keeps it off.
+	OAuthZitadel *OAuthZitadelOptions
 	// AlertStore persists incident alerts to PostgreSQL (optional — nil disables incident endpoints).
 	AlertStore *alerts.Store
 	// DomainStore persists custom domain registrations to PostgreSQL
@@ -106,6 +115,11 @@ type Options struct {
 	// equal to or ending in "."+PlatformDomain are rejected by AddDomain —
 	// those stay GitOps-only via ingress.hosts. Defaults to "mctl.ai" when empty.
 	PlatformDomain string
+	// ErpactDeployer is the ERPact site-deployer client (mctl-api#486). A
+	// temporary, tenant-`erpact`-only stopgap: nil makes every
+	// /api/v1/tenants/erpact/sites* route 503, which is also how the feature
+	// is switched off entirely (no deployer token configured).
+	ErpactDeployer ErpactDeployer
 	// AgentRegistry persists mctl-agents AgentManifest versions/releases to
 	// PostgreSQL (optional — nil disables the agent registry endpoints).
 	AgentRegistry *agentregistry.Store
@@ -143,6 +157,11 @@ type Options struct {
 	// must read as "the ledger is unavailable" and never as "nothing was
 	// spent".
 	Usage *usage.Store
+	// Commerce is the durable commerce ledger of ADR 020 (mctl-api#547):
+	// terms, quotes, invocations and their history. Optional — nil makes the
+	// commerce endpoints 503, which is "the ledger is unavailable", never
+	// "this tenant was not charged".
+	Commerce *commerce.Store
 	// TemporalClient starts/signals DevLoopWorkflow runs on the dev-workflow
 	// control plane's Temporal deployment (optional — nil disables
 	// mctl_trigger_issue's use_temporal path; callers fall back to the
@@ -171,12 +190,11 @@ type Options struct {
 	// secret behind a required reviewer, so this process can ask for that
 	// apply without ever being able to perform it.
 	WorkflowDispatcher WorkflowDispatcher
-	// OpenClaw controls quota and rate limits on the skill/identity save handlers.
-	// Zero values fall back to defaults (see OpenClawQuotaDefaults).
-	OpenClaw OpenClawQuotaConfig
 	// GitopsReady / PostgresReady / DexReady / VaultReady are optional
-	// dependency probes for GET /readyz. A nil check is reported as
-	// not_configured and does not fail readiness (tests, local without Vault).
+	// dependency probes for GET /readyz. Results are reported in the body and
+	// in mctl_api_dependency_up but never fail readiness (a shared dependency
+	// outage must not drain every replica). A nil check is reported as
+	// not_configured (tests, local without Vault).
 	GitopsReady   ReadyCheck
 	PostgresReady ReadyCheck
 	DexReady      ReadyCheck
@@ -186,6 +204,15 @@ type Options struct {
 	// entry keeps GET /readyz at 503 and names the store; liveness (/healthz)
 	// is unaffected. Nil means not wired (tests) and is not_configured.
 	StoreInitFailures func() []string
+	// GitopsSynced reports whether this pod's own gitops checkout has synced
+	// at least once. Unlike the shared dependencies above it is pod-local: a
+	// fresh pod that has not cloned yet would serve an empty catalogue, so
+	// GET /readyz answers 503 with checks.gitops_sync=never_synced until the
+	// first sync lands. Nil means not wired (tests) and is not reported.
+	GitopsSynced func() bool
+	// Draining reports that graceful shutdown has begun; GET /readyz then
+	// answers 503 with checks.shutdown=draining. Nil means never draining.
+	Draining func() bool
 	// ArgoWebhookSecret authenticates POST /api/v1/workflows/events/argo-complete.
 	// Fail-closed: an empty secret rejects every callback.
 	ArgoWebhookSecret string
@@ -209,20 +236,19 @@ type Options struct {
 
 // Handlers holds all API handler dependencies.
 type Handlers struct {
-	opts Options
-	// openClawQuota is the effective quota config after default fill-in.
-	// Pre-computed at router init so each save call is a plain map lookup.
-	openClawQuota       OpenClawQuotaConfig
-	openClawRateLimiter *saveRateLimiter
+	opts         Options
+	identityLink *identityLinker
+	oauthZitadel *oauthZitadel
 }
 
 // NewRouter creates the HTTP router with all API routes.
 func NewRouter(opts Options) http.Handler {
-	quota := opts.OpenClaw.withDefaults()
-	h := &Handlers{
-		opts:                opts,
-		openClawQuota:       quota,
-		openClawRateLimiter: newSaveRateLimiter(quota.SaveRatePerHour),
+	h := &Handlers{opts: opts}
+	if opts.IdentityLink != nil {
+		h.identityLink = newIdentityLinker(opts.IdentityLink)
+	}
+	if opts.OAuthZitadel != nil {
+		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel}
 	}
 
 	if opts.BackstageGithubAppConnectToken == "" {
@@ -243,6 +269,7 @@ func NewRouter(opts Options) http.Handler {
 	// chi's middleware.RealIP is deliberately absent — it rewrites RemoteAddr
 	// from an attacker-supplied header and now has no consumer here.
 	r.Use(middleware.RequestID)
+	r.Use(tracingMiddleware())
 	r.Use(clientMetaMiddleware(opts.TrustedProxyCIDRs))
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders())
@@ -289,8 +316,14 @@ func NewRouter(opts Options) http.Handler {
 		r.Get("/.well-known/oauth-protected-resource/mcp", h.handleProtectedResourceMeta)
 		r.Get("/oauth/authorize", h.handleOAuthAuthorize)
 		r.Get("/oauth/github/callback", h.handleOAuthGitHubCallback)
+		r.Get(oauthZitadelCallbackPath, h.handleOAuthZitadelCallback)
 		r.Post("/oauth/token", h.handleOAuthToken)
 		r.Post("/oauth/revoke", h.handleOAuthRevoke)
+		// Explicit identity linking, browser side (mctl-api#435). Public:
+		// the person proves both identities inside the flow itself.
+		r.Get(linkStartPath, h.handleIdentityLinkStart)
+		r.Get(linkCallbackPath, h.handleIdentityLinkCallback)
+		r.Post(linkConfirmPath, h.handleIdentityLinkConfirm)
 	})
 	r.Group(func(r chi.Router) {
 		// Keyed by IP, so every process of one desktop MCP client shares the
@@ -350,6 +383,12 @@ func NewRouter(opts Options) http.Handler {
 		// The evidence writer reaches one route and nothing else
 		// (mctl-api#409), the same shape as the usage writer above.
 		r.Use(evidenceWriterGate)
+		// The registry publisher reaches the registry publication routes and
+		// nothing else (mctlhq/mctl-agents#470).
+		r.Use(registryPublisherGate)
+		// A GitHub Actions principal reaches the deploy route and nothing
+		// else (mctl-api#530).
+		r.Use(ciPrincipalGate)
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
 		// Loopback is skipped so MCP's in-process REST to localhost:8080 does
@@ -367,6 +406,10 @@ func NewRouter(opts Options) http.Handler {
 		r.Route("/api/v1", func(r chi.Router) {
 			// Auth endpoints.
 			r.Get("/whoami", h.Whoami)
+			// The caller's linked identities (mctl-api#435).
+			r.Get("/identity/links", h.ListIdentityLinks)
+			r.Delete("/identity/links/{id}", h.UnlinkIdentity)
+			r.Post("/admin/principals/{from}/merge-into/{into}", h.MergePrincipals)
 			r.Post("/auth/logout", h.Logout)
 
 			// Read endpoints (safe, no side effects).
@@ -398,20 +441,6 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/repos/install-url", h.GetRepoInstallURL)
 			r.Post("/repos/sync", h.SyncRepos)
 
-			// OpenClaw self-service onboarding and right-sizing.
-			r.Post("/openclaw/deploy/start", h.StartOpenClawDeploy)
-			r.Post("/openclaw/deploy/resume", h.ResumeOpenClawDeploy)
-			r.Get("/openclaw/{team}/{app}/sizing", h.GetOpenClawSizingRecommendation)
-			r.Post("/openclaw/{team}/{app}/resource-profile", h.ApplyOpenClawResourceProfile)
-			r.Get("/openclaw/{team}/skills", h.ListOpenClawSkills)
-			r.Get("/openclaw/{team}/skills/{name}", h.GetOpenClawSkill)
-			r.Post("/openclaw/{team}/skills", h.SaveOpenClawSkill)
-			r.Delete("/openclaw/{team}/skills/{name}", h.DeleteOpenClawSkill)
-			r.Get("/openclaw/{team}/identity", h.ListOpenClawIdentity)
-			r.Get("/openclaw/{team}/identity/{name}", h.GetOpenClawIdentity)
-			r.Post("/openclaw/{team}/identity", h.SaveOpenClawIdentity)
-			r.Delete("/openclaw/{team}/identity/{name}", h.DeleteOpenClawIdentity)
-
 			// Custom domains (mctl-api's own PostgreSQL-backed registry —
 			// see internal/domains). No chi conflict between the two verify
 			// routes: /domains/verify is two segments, /domains/{id}/verify
@@ -423,6 +452,13 @@ func NewRouter(opts Options) http.Handler {
 			r.Delete("/domains/{id}", h.DeleteDomain)
 			r.Patch("/domains/{id}", h.UpdateDomainStatus)
 
+			// ERPact site tools (mctl-api#486): a temporary, tenant-`erpact`-only
+			// stopgap in front of the tenant's own site-deployer. See
+			// internal/erpactsites's package comment and handlers_erpact_sites.go.
+			r.Get("/tenants/erpact/sites", h.ListErpactSites)
+			r.Post("/tenants/erpact/sites", h.CreateErpactSite)
+			r.Get("/tenants/erpact/sites/{name}/status", h.GetErpactSiteStatus)
+
 			// Incident endpoints (alert store).
 			r.Get("/incidents/summary", h.IncidentSummary)
 			r.Get("/incidents", h.ListIncidents)
@@ -433,7 +469,10 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/incidents/{id}/ack", h.AcknowledgeIncident)
 			r.Post("/incidents/{id}/resolve", h.ResolveIncident)
 
-			// Agent registry (mctl-agents AgentManifest versions/releases). Admin-only.
+			// Agent registry (mctl-agents AgentManifest versions/releases).
+			// Admin-only, except that the three publication routes (create,
+			// publish, promote) also admit the registry publisher: see
+			// handlers_agent_registry_publisher.go.
 			r.Post("/agents", h.CreateAgentDefinition)
 			r.Post("/agents/{name}/versions", h.PublishAgentVersion)
 			r.Get("/agents/{name}/versions", h.ListAgentVersions)
@@ -596,9 +635,13 @@ func NewRouter(opts Options) http.Handler {
 			// visibleWorkItem so evidence never leaks past what the caller
 			// could already see on the work item. Outside the write
 			// budget above like every other read in this block.
+			// /evidence/current (ADR 018 Amendment 2) is a static segment, so
+			// chi matches it before the /evidence/{id} pattern.
+			r.Get("/evidence/current", h.CurrentEvidence)
 			r.Get("/evidence/{id}", h.GetEvidence)
 			r.Get("/evidence", h.ListEvidence)
 			r.Get("/work-items/{id}/evidence", h.ListWorkItemEvidence)
+			r.Get("/work-items/{id}/evidence/current", h.CurrentWorkItemEvidence)
 
 			// Liveness read for one DevLoopWorkflow. Deliberately OUTSIDE the
 			// write group above: it has no side effects, and the shepherd
@@ -686,6 +729,44 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/usage/records", h.ListUsageRecords)
 			r.Get("/usage/summary", h.GetUsageSummary)
 
+			// Commerce ledger (mctl-api#547, ADR 020). Like usage, the writes
+			// are single short Postgres transactions, one per quote or
+			// accepted invocation, and they stay off the 20/min group for
+			// the same reason. Terms and transitions are platform
+			// operations; quotes, invocations and receipts are tenant-scoped
+			// under /commerce/tenants/{tenant}.
+			r.Route("/commerce", func(r chi.Router) {
+				r.Post("/terms", h.PublishCommerceTerms)
+				r.Get("/terms", h.ListCommerceTerms)
+				r.Get("/terms/{terms_id}/versions/{version}", h.GetCommerceTerms)
+				r.Post("/terms/{terms_id}/versions/{version}/retire", h.RetireCommerceTerms)
+				r.Get("/invocations/overdue", h.ListOverdueCommerceInvocations)
+				// Budgets and the money edges (mctl-api#548). Setting a
+				// budget, reserve, finalize, release and the reconciler
+				// are platform operations; the balance, its history and
+				// the non-binding precheck are tenant reads.
+				r.Post("/reconcile/expired", h.ReconcileCommerceExpired)
+				// The public halves of the dispatch signing key (C4).
+				r.Get("/dispatch-keys", h.ListCommerceDispatchKeys)
+				r.Route("/tenants/{tenant}", func(r chi.Router) {
+					r.Put("/budget", h.SetCommerceBudget)
+					r.Get("/budget", h.GetCommerceBudget)
+					r.Get("/budget/changes", h.ListCommerceBudgetChanges)
+					r.Post("/budget/precheck", h.PrecheckCommerceBudget)
+					r.Post("/quotes", h.MintCommerceQuote)
+					r.Get("/quotes/{quote_id}", h.GetCommerceQuote)
+					r.Post("/invocations", h.AcceptCommerceInvocation)
+					r.Get("/invocations", h.ListCommerceInvocations)
+					r.Get("/invocations/{invocation_id}", h.GetCommerceInvocation)
+					r.Get("/invocations/{invocation_id}/transitions", h.ListCommerceInvocationTransitions)
+					r.Post("/invocations/{invocation_id}/transitions", h.TransitionCommerceInvocation)
+					r.Post("/invocations/{invocation_id}/reserve", h.ReserveCommerceInvocation)
+					r.Post("/invocations/{invocation_id}/dispatch", h.DispatchCommerceInvocation)
+					r.Post("/invocations/{invocation_id}/finalize", h.FinalizeCommerceInvocation)
+					r.Post("/invocations/{invocation_id}/release", h.ReleaseCommerceInvocation)
+				})
+			})
+
 			// Human-operator lifecycle RECOVERY -- fence a dead claim,
 			// escalate a stuck owner into a handoff, retry a stalled
 			// handoff, or request reconciliation. A SEPARATE group and a
@@ -725,6 +806,7 @@ func NewRouter(opts Options) http.Handler {
 		// GET  /mcp  → listen stream (no session binding under stateless mode)
 		// Auth: Authorization: Bearer <token> on every request.
 		if opts.MCPServer != nil {
+			opts.MCPServer.SetTenantOwnerChecker(h)
 			mcpH := opts.MCPServer.NewStreamableHTTPHandler()
 			r.Post("/mcp", mcpH.ServeHTTP)
 			r.Get("/mcp", mcpH.ServeHTTP)

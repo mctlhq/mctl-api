@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,10 +40,13 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
+	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
+	"github.com/mctlhq/mctl-api/internal/commerce"
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
+	"github.com/mctlhq/mctl-api/internal/erpactsites"
 	"github.com/mctlhq/mctl-api/internal/events"
 	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/ghactions"
@@ -56,10 +61,10 @@ import (
 	"github.com/mctlhq/mctl-api/internal/principals"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
+	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/vault"
-	"github.com/mctlhq/mctl-api/internal/vmetrics"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -67,6 +72,16 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+
+	// Vendor-neutral tracing: W3C propagation always, OTLP export only when an
+	// OTEL_EXPORTER_OTLP_* endpoint is set. A setup failure never blocks start.
+	var otelShutdown func(context.Context) error
+	if tel, err := telemetry.Setup(context.Background(), telemetry.Config{ServiceName: "mctl-api"}); err != nil {
+		slog.Warn("telemetry setup failed; tracing export disabled", "error", err)
+	} else {
+		otelShutdown = tel.Shutdown
+		slog.Info("telemetry initialised", "exporting", tel.Exporting)
+	}
 
 	// One signal registration for the whole process, established before
 	// anything that can block — the Dex verifier below makes a network call,
@@ -148,9 +163,12 @@ func main() {
 	// would serve 503s (or an in-memory fallback) until someone restarted it.
 	storeFailures := &storeInitFailures{}
 
-	// OAuth 2.0 server (optional — disabled if OAUTH_GITHUB_CLIENT_ID is unset).
+	// OAuth 2.0 server. Under OAUTH_UPSTREAM=github (the default) it is
+	// optional, disabled when OAUTH_GITHUB_CLIENT_ID is unset; zitadel and
+	// both are explicit choices that validate() already refused to boot
+	// without their configuration (mctl-api#467).
 	var oauthServer *auth.OAuthServer
-	if cfg.OAuthGitHubClientID != "" && cfg.OAuthJWTSecret != "" {
+	if cfg.oauthEnabled() {
 		oauthServer = auth.NewOAuthServer(
 			cfg.SelfURL,
 			cfg.OAuthGitHubClientID,
@@ -189,7 +207,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		slog.Info("OAuth 2.0 server enabled", "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL, "preregistered_clients", oauthServer.PreregisteredClientCount(), "groups_max_staleness", oauthServer.GroupsMaxStaleness, "groups_cache_ttl", oauthServer.GroupsCacheTTL)
+		slog.Info("OAuth 2.0 server enabled", "upstream", cfg.oauthUpstreamMode(), "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL, "preregistered_clients", oauthServer.PreregisteredClientCount(), "groups_max_staleness", oauthServer.GroupsMaxStaleness, "groups_cache_ttl", oauthServer.GroupsCacheTTL)
 
 		// Persistent refresh-token store: prefer OAUTH_DB_URL, fall back to AUDIT_DB_URL.
 		// When available, refresh tokens survive pod restarts; without it the in-memory
@@ -239,6 +257,30 @@ func main() {
 					}
 				}()
 			}
+			// Pending authorizations and authorization codes, same database.
+			// Shared across replicas: authorize, the upstream callback and
+			// the token exchange may each reach a different pod.
+			fs, fsErr := initStore(initCtx, storeFailures, "oauth flow", func(ctx context.Context) (*flowstore.PostgresStore, error) {
+				return flowstore.NewPostgresStore(ctx, oauthDBURL)
+			})
+			if fsErr != nil {
+				// As above: recorded in storeFailures, so the pod stays
+				// not-ready rather than serving on per-pod memory.
+				slog.Error("oauth flow store init failed; pod will report not-ready (GET /readyz 503) until restarted", "error", fsErr)
+			} else {
+				oauthServer.FlowStore = fs
+				go func() {
+					ticker := time.NewTicker(5 * time.Minute)
+					defer ticker.Stop()
+					for range ticker.C {
+						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						if err := fs.GC(ctx); err != nil {
+							slog.Warn("oauth flow store gc failed", "error", err)
+						}
+						cancel()
+					}
+				}()
+			}
 		}
 	}
 
@@ -250,6 +292,7 @@ func main() {
 	var (
 		principalStore    *principals.Store
 		principalResolver auth.PrincipalResolver
+		principalCache    *principals.Resolver
 	)
 	principalDBURL := postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL"))
 	if principalDBURL == "" {
@@ -269,7 +312,8 @@ func main() {
 		} else {
 			principalStore = ps
 			defer ps.Close()
-			principalResolver = principals.NewResolver(ps, githubIDLookup(), os.Getenv("AUTH_REQUIRED") == "false")
+			principalCache = principals.NewResolver(ps, githubIDLookup(), os.Getenv("AUTH_REQUIRED") == "false")
+			principalResolver = principalCache
 		}
 	}
 
@@ -429,6 +473,43 @@ func main() {
 			slog.Error("usage ledger store init failed; usage endpoints will return 503", "error", usErr)
 		} else {
 			usageStore = us
+		}
+	}
+
+	// Commerce ledger (mctl-api#547, ADR 020). Optional — enabled when
+	// COMMERCE_DB_URL or AUDIT_DB_URL is set and COMMERCE_DISABLED is not.
+	// Without it every commerce route is 503. Merging and deploying it
+	// enables no payment behaviour: nothing mints a quote until C4 wires the
+	// gateway, and no terms exist until an admin publishes them.
+	var commerceStore *commerce.Store
+	commerceDBURL := postgresURL(os.Getenv("COMMERCE_DB_URL"))
+	if commerceDBURL == "" {
+		commerceDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+	}
+	switch {
+	case killSwitchOn(os.Getenv("COMMERCE_DISABLED")):
+		slog.Warn("COMMERCE_DISABLED is set; /api/v1/commerce* routes will return 503")
+	case commerceDBURL == "":
+		slog.Warn("no COMMERCE_DB_URL or AUDIT_DB_URL; /api/v1/commerce* routes will return 503")
+	default:
+		cs, csErr := initStore(initCtx, storeFailures, "commerce ledger", func(ctx context.Context) (*commerce.Store, error) {
+			return commerce.NewStore(ctx, commerceDBURL)
+		})
+		if csErr != nil {
+			slog.Error("commerce ledger store init failed; /api/v1/commerce* routes will return 503", "error", csErr)
+		} else {
+			commerceStore = cs
+			defer cs.Close()
+			// The dispatch signing key (C4, mctl-agents#619). Without it
+			// nothing can be dispatched to a paid provider: dispatch
+			// answers 503 and reserved rows are released by the reconciler.
+			// A key that is set but unusable is logged and left off rather
+			// than failing the whole API.
+			if signer, err := commerceDispatchSigner(os.Getenv("COMMERCE_DISPATCH_KEY_ID"), os.Getenv("COMMERCE_DISPATCH_SIGNING_KEY")); err != nil {
+				slog.Error("commerce dispatch signing key unusable; dispatch will return 503", "error", err)
+			} else if signer != nil {
+				cs.UseDispatchSigner(signer)
+			}
 		}
 	}
 
@@ -767,21 +848,19 @@ func main() {
 		slog.Info("vault client enabled", "addr", cfg.VaultAddr, "auth", "static-token")
 	}
 
-	// VictoriaMetrics client (optional — used for OpenClaw sizing recommendations).
-	var metricsQuerier mctlapi.MetricsQuerier
-	if cfg.VictoriaMetricsURL != "" {
-		metricsQuerier = vmetrics.NewClient(cfg.VictoriaMetricsURL)
-		slog.Info("victoriametrics client enabled", "url", cfg.VictoriaMetricsURL)
-	}
-
-	openClawQuota := mctlapi.OpenClawQuotaConfig{
-		MaxPerSkillBytes:          parseIntEnv("OPENCLAW_SKILLS_MAX_PER_SKILL_BYTES", 0),
-		MaxSkillsPerTenant:        parseIntEnv("OPENCLAW_SKILLS_MAX_PER_TENANT", 0),
-		MaxSkillsTotalBytes:       parseIntEnv("OPENCLAW_SKILLS_MAX_TOTAL_BYTES", 0),
-		MaxIdentityFilesPerTenant: parseIntEnv("OPENCLAW_IDENTITY_MAX_PER_TENANT", 0),
-		MaxIdentityTotalBytes:     parseIntEnv("OPENCLAW_IDENTITY_MAX_TOTAL_BYTES", 0),
-		SaveRatePerHour:           parseIntEnv("OPENCLAW_SKILLS_SAVE_RATE_PER_HOUR", 0),
-	}
+	// ERPact site tools (mctl-api#486): off unless the deployer token can be
+	// read from Vault. The token lives at Vault path teams/erpact/deployer
+	// (property DEPLOYER_API_TOKEN), read directly through vaultReader
+	// rather than through an ExternalSecret into an env var. The
+	// cluster-wide vault-backend ClusterSecretStore (which mctl-api-secrets
+	// uses for every other env-var secret) is deliberately denied all of
+	// secret/data/teams/* (see mctl-gitops
+	// vault-policy-external-secrets-read.hcl): any tenant path readable
+	// there would be readable by every other tenant's namespace too.
+	// Reading it here instead needs only a narrow Vault policy on the
+	// mctl-api Kubernetes auth role for this one path
+	// (vault-policy-mctl-api-erpact-deployer-read.hcl).
+	erpactDeployer := newErpactDeployer(vaultReader, cfg.ErpactDeployerURL)
 
 	gitopsReady := func(ctx context.Context) error {
 		if gitReader.LastSync().IsZero() {
@@ -813,9 +892,12 @@ func main() {
 		slog.Warn("TRUSTED_PROXY_CIDRS parse failed; X-Forwarded-For will not be trusted", "error", tpErr)
 	}
 
+	var draining atomic.Bool
+
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Registry:                       registry,
 		GitReader:                      gitReader,
+		ComponentSourceRepos:           gitReader,
 		ArgoCD:                         argoClient,
 		AuditLog:                       auditLog,
 		Executor:                       executor,
@@ -824,25 +906,27 @@ func main() {
 		QuotaReader:                    quotaReader,
 		LogQuerier:                     logQuerier,
 		WorkflowLogArchive:             workflowLogArchive,
-		VaultReader:                    vaultReader,
-		MetricsQuerier:                 metricsQuerier,
-		OpenClaw:                       openClawQuota,
 		BackstageURL:                   cfg.BackstageURL,
 		BackstageToken:                 cfg.BackstageToken,
 		BackstageInternalURL:           cfg.BackstageInternalURL,
 		BackstageGithubAppConnectToken: cfg.BackstageGithubAppConnectToken,
 		AllowedOrigins:                 cfg.AllowedOrigins,
 		OAuthServer:                    oauthServer,
+		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
+		OAuthUpstream:                  cfg.oauthUpstreamMode(),
+		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
 		AlertStore:                     alertStore,
 		AgentRegistry:                  agentRegistryStore,
 		Lifecycle:                      lifecycleStore,
 		Roadmap:                        roadmapReader,
 		RoadmapWaveMaxAge:              roadmapWaveMaxAge,
 		Usage:                          usageStore,
+		Commerce:                       commerceStore,
 		Evidence:                       evidenceStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,
+		ErpactDeployer:                 erpactDeployer,
 		TemporalClient:                 devLoopClient,
 		HumanInputLedger:               humanInputLedger,
 		WorkItems:                      workItemsStore,
@@ -856,6 +940,8 @@ func main() {
 		DexReady:                       dexReady,
 		VaultReady:                     vaultReady,
 		StoreInitFailures:              storeFailures.List,
+		GitopsSynced:                   func() bool { return !gitReader.LastSync().IsZero() },
+		Draining:                       draining.Load,
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
 		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,
 		GitHubWebhookOwners:            cfg.GitHubWebhookOwners,
@@ -909,17 +995,33 @@ func main() {
 	// Graceful shutdown, driven by the same root registration that guarded
 	// startup — so the FIRST signal drains, whenever it arrives.
 	<-rootCtx.Done()
+	draining.Store(true)
 
 	// Restore default disposition: a second SIGTERM during a slow drain should
 	// kill the process outright rather than be swallowed by a handler that has
 	// already done its job.
 	stopSignals()
+
+	// Keep serving for SHUTDOWN_DRAIN_DELAY with /readyz answering 503
+	// (checks.shutdown=draining) before the listener closes, so the kubelet
+	// and Traefik can take this pod out of rotation while requests routed to
+	// it in the meantime still get an answer instead of a refused connection.
+	drainDelay := parseDuration(os.Getenv("SHUTDOWN_DRAIN_DELAY"), 5*time.Second)
+	slog.Info("draining before shutdown", "delay", drainDelay)
+	time.Sleep(drainDelay)
 	slog.Info("shutting down")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
+	}
+	if otelShutdown != nil {
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer flushCancel()
+		if err := otelShutdown(flushCtx); err != nil {
+			slog.Warn("telemetry flush error", "error", err)
+		}
 	}
 }
 
@@ -1020,11 +1122,17 @@ type config struct {
 	GitOpsSSHKnownHostsPath string // Path to a known_hosts file for SSH host-key pinning (optional; empty uses the shipped default)
 	ArgoCDURL               string
 	ArgoCDToken             string
-	GitHubOrg               string
-	AdminUsers              []string
-	BackstageURL            string
-	BackstageToken          string
-	BackstageInternalURL    string
+	// ErpactDeployerURL configures the mctl-api#486 stopgap
+	// (internal/erpactsites). The deployer token is read directly from
+	// Vault (teams/erpact/deployer), not from env -- see its construction
+	// near vaultReader above. No vault reader configured is how the
+	// feature is switched off entirely.
+	ErpactDeployerURL    string
+	GitHubOrg            string
+	AdminUsers           []string
+	BackstageURL         string
+	BackstageToken       string
+	BackstageInternalURL string
 	// BackstageGithubAppConnectToken authorizes calls to Backstage's
 	// github-app-connect plugin (repos list/sync/install-url), scoped
 	// separately from BackstageToken (which now only authorizes
@@ -1040,6 +1148,10 @@ type config struct {
 	// so results do not depend on cluster split-horizon DNS.
 	DNSResolverAddr string
 	// Dex OIDC issuer for JWT validation (dual-token auth alongside GitHub tokens).
+	// No default: Dex is being retired (mctlhq/mctl-gitops#1500 phase 4). Unset
+	// means no Dex verifier, no legacy "dex" federation shim and no Dex
+	// readiness check, so Dex can be removed once the deployment stops setting
+	// it without /readyz failing on a dead issuer.
 	DexIssuerURL string
 	// DexClientID is the expected audience for Dex JWTs. If empty, audience check is skipped.
 	DexClientID string
@@ -1048,6 +1160,10 @@ type config struct {
 	// by auth.ParseOIDCProviders. Unset or blank means only the legacy Dex
 	// shim (DexIssuerURL/DexClientID above) applies.
 	OIDCProvidersRaw string
+	// GitHubActionsOIDCRaw is MCTL_GITHUB_ACTIONS_OIDC (mctl-api#530): the
+	// GitHub Actions OIDC provider for CI deploys, parsed by
+	// auth.ParseGitHubActionsOIDC. Unset means the provider is off.
+	GitHubActionsOIDCRaw string
 	// FederationDisabled is MCTL_FEDERATION_DISABLED (mctl-api#374's kill
 	// switch). While it is on, MCTL_OIDC_PROVIDERS is neither validated nor
 	// built into a registry, and auth.Middleware runs the pre-registry chain.
@@ -1057,8 +1173,24 @@ type config struct {
 	// AllowedOrigins is a list of origins permitted by CORS policy.
 	AllowedOrigins []string
 	// OAuth 2.0 server settings for Claude.ai custom connector support.
-	OAuthGitHubClientID      string
-	OAuthGitHubClientSecret  string
+	OAuthGitHubClientID     string
+	OAuthGitHubClientSecret string
+	// OAuthUpstreamRaw is OAUTH_UPSTREAM as read (github, zitadel, both;
+	// empty is github), parsed by validate (mctl-api#467). The ZITADEL
+	// upstream has its own confidential client, not the link client, and
+	// takes its issuer from the MCTL_OIDC_PROVIDERS entry OAuthZitadelProvider
+	// names, the one the link flow writes identities for.
+	OAuthUpstreamRaw         string
+	OAuthZitadelClientID     string
+	OAuthZitadelClientSecret string
+	OAuthZitadelProvider     string
+	// ZITADEL client of the identity link flow (mctl-api#435): a
+	// confidential web app; both empty keeps the browser flow off.
+	// ZitadelLinkProvider names the MCTL_OIDC_PROVIDERS entry whose issuer
+	// the linked identity must carry.
+	ZitadelLinkClientID      string
+	ZitadelLinkClientSecret  string
+	ZitadelLinkProvider      string
 	OAuthJWTSecret           string
 	OAuthAllowedRedirectURIs []string
 	// OAuthPreregisteredClientsRaw is the OAUTH_PREREGISTERED_CLIENTS value as
@@ -1071,7 +1203,6 @@ type config struct {
 	VaultToken                   string
 	VaultKubernetesRole          string
 	VaultKubernetesAuthPath      string
-	VictoriaMetricsURL           string
 	ArgoWebhookSecret            string
 	GitHubWebhookSecret          string
 	GitHubWebhookOwners          []string
@@ -1139,6 +1270,7 @@ func loadConfig() config {
 		GitOpsSSHKeyPath:               os.Getenv("GITOPS_SSH_KEY_PATH"),
 		GitOpsSSHKnownHostsPath:        os.Getenv("GITOPS_SSH_KNOWN_HOSTS_PATH"),
 		ArgoCDURL:                      envOr("ARGOCD_URL", "https://ops.mctl.ai"),
+		ErpactDeployerURL:              envOr("ERPACT_DEPLOYER_URL", "http://erpact-deployer.erpact.svc.cluster.local:8000"),
 		ArgoCDToken:                    os.Getenv("ARGOCD_TOKEN"),
 		GitHubOrg:                      envOr("GITHUB_ORG", "mctlhq"),
 		AdminUsers:                     adminList,
@@ -1148,14 +1280,22 @@ func loadConfig() config {
 		PlatformDomain:                 envOr("PLATFORM_DOMAIN", "mctl.ai"),
 		DNSResolverAddr:                envOr("DNS_RESOLVER_ADDR", "1.1.1.1:53"),
 		BackstageGithubAppConnectToken: os.Getenv("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN"),
-		DexIssuerURL:                   envOr("DEX_ISSUER_URL", "https://ops.mctl.ai/api/dex"),
+		DexIssuerURL:                   os.Getenv("DEX_ISSUER_URL"),
 		DexClientID:                    os.Getenv("DEX_CLIENT_ID"),
 		OIDCProvidersRaw:               os.Getenv("MCTL_OIDC_PROVIDERS"),
+		GitHubActionsOIDCRaw:           os.Getenv("MCTL_GITHUB_ACTIONS_OIDC"),
 		FederationDisabled:             killSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED")),
 		SelfURL:                        envOr("SELF_URL", "https://api.mctl.ai"),
 		AllowedOrigins:                 origins,
 		OAuthGitHubClientID:            os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
 		OAuthGitHubClientSecret:        os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
+		OAuthUpstreamRaw:               os.Getenv("OAUTH_UPSTREAM"),
+		OAuthZitadelClientID:           os.Getenv("OAUTH_ZITADEL_CLIENT_ID"),
+		OAuthZitadelClientSecret:       os.Getenv("OAUTH_ZITADEL_CLIENT_SECRET"),
+		OAuthZitadelProvider:           envOr("OAUTH_ZITADEL_PROVIDER", "zitadel"),
+		ZitadelLinkClientID:            os.Getenv("ZITADEL_LINK_CLIENT_ID"),
+		ZitadelLinkClientSecret:        os.Getenv("ZITADEL_LINK_CLIENT_SECRET"),
+		ZitadelLinkProvider:            envOr("ZITADEL_LINK_PROVIDER", "zitadel"),
 		OAuthJWTSecret:                 os.Getenv("OAUTH_JWT_SECRET"),
 		OAuthAllowedRedirectURIs:       oauthRedirectURIs,
 		OAuthPreregisteredClientsRaw:   os.Getenv("OAUTH_PREREGISTERED_CLIENTS"),
@@ -1165,7 +1305,6 @@ func loadConfig() config {
 		VaultToken:                     os.Getenv("VAULT_TOKEN"),
 		VaultKubernetesRole:            os.Getenv("VAULT_KUBERNETES_ROLE"),
 		VaultKubernetesAuthPath:        os.Getenv("VAULT_KUBERNETES_AUTH_PATH"),
-		VictoriaMetricsURL:             envOr("VICTORIA_METRICS_URL", "http://vmsingle-monitoring-victoria-metrics-k8s-stack.monitoring.svc:8428"),
 		ArgoWebhookSecret:              os.Getenv("ARGO_WEBHOOK_SECRET"),
 		GitHubWebhookSecret:            os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		GitHubWebhookOwners:            splitCSV(envOr("GITHUB_WEBHOOK_OWNERS", "mctlhq")),
@@ -1418,7 +1557,10 @@ func (c config) validate() error {
 			return fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
 		}
 	}
-	oauthEnabled := c.OAuthGitHubClientID != "" && c.OAuthJWTSecret != ""
+	if err := c.validateOAuthUpstream(); err != nil {
+		return err
+	}
+	oauthEnabled := c.oauthEnabled()
 	if oauthEnabled && c.OAuthTokenTTL > maxOAuthTokenTTL {
 		return fmt.Errorf("OAUTH_TOKEN_TTL must not exceed %v, got %v — clients renew "+
 			"silently with the refresh_token grant, and access tokens cannot be revoked, "+
@@ -1440,7 +1582,120 @@ func (c config) validate() error {
 	if _, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw); err != nil {
 		return err
 	}
+	if _, err := auth.ParseGitHubActionsOIDC(c.GitHubActionsOIDCRaw); err != nil {
+		return err
+	}
 	return nil
+}
+
+// oauthUpstreamMode is the parsed OAUTH_UPSTREAM. validate has already
+// refused an unknown value, so the fallback is never taken in main.
+func (c config) oauthUpstreamMode() mctlapi.OAuthUpstreamMode {
+	m, err := mctlapi.ParseOAuthUpstreamMode(c.OAuthUpstreamRaw)
+	if err != nil {
+		return mctlapi.OAuthUpstreamGitHub
+	}
+	return m
+}
+
+// oauthEnabled is the gate for constructing the OAuth server. github keeps
+// the pre-#467 rule; zitadel and both were validated complete.
+func (c config) oauthEnabled() bool {
+	if c.OAuthJWTSecret == "" {
+		return false
+	}
+	if c.oauthUpstreamMode() == mctlapi.OAuthUpstreamGitHub {
+		return c.OAuthGitHubClientID != ""
+	}
+	return true
+}
+
+// validateOAuthUpstream refuses a boot whose OAUTH_UPSTREAM is unknown, or
+// names an upstream whose configuration is incomplete: selecting zitadel or
+// both is a deliberate change, and a half-configured sign-in must not come
+// up. The MCTL_OIDC_PROVIDERS entry is read even while
+// MCTL_FEDERATION_DISABLED is on, because sign-in needs only its issuer.
+func (c config) validateOAuthUpstream() error {
+	mode, err := mctlapi.ParseOAuthUpstreamMode(c.OAuthUpstreamRaw)
+	if err != nil {
+		return err
+	}
+	if mode == mctlapi.OAuthUpstreamGitHub {
+		return nil
+	}
+	var missing []string
+	if c.OAuthJWTSecret == "" {
+		missing = append(missing, "OAUTH_JWT_SECRET")
+	}
+	if c.OAuthZitadelClientID == "" || c.OAuthZitadelClientSecret == "" {
+		missing = append(missing, "OAUTH_ZITADEL_CLIENT_ID and OAUTH_ZITADEL_CLIENT_SECRET (both)")
+	}
+	if mode == mctlapi.OAuthUpstreamBoth && (c.OAuthGitHubClientID == "" || c.OAuthGitHubClientSecret == "") {
+		missing = append(missing, "OAUTH_GITHUB_CLIENT_ID and OAUTH_GITHUB_CLIENT_SECRET (both, for the GitHub option)")
+	}
+	if _, err := c.oauthZitadelProvider(); err != nil {
+		missing = append(missing, err.Error())
+	}
+	// Sign-in reads linked rows by provider entry name, and linking writes
+	// them under ZITADEL_LINK_PROVIDER: two names would boot cleanly and then
+	// answer every sign-in "not linked", which re-linking cannot clear.
+	if c.OAuthZitadelProvider != c.ZitadelLinkProvider {
+		missing = append(missing, fmt.Sprintf("OAUTH_ZITADEL_PROVIDER (%q) to equal ZITADEL_LINK_PROVIDER (%q), the entry linking writes under", c.OAuthZitadelProvider, c.ZitadelLinkProvider))
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("OAUTH_UPSTREAM=%s needs %s", mode, strings.Join(missing, "; "))
+	}
+	return nil
+}
+
+// oauthZitadelProvider is the MCTL_OIDC_PROVIDERS entry the ZITADEL upstream
+// signs in against. Its identities are matched to linked rows by (iss, sub),
+// as the link flow writes them, so an entry that keys identities on another
+// claim is refused rather than silently matching nothing.
+func (c config) oauthZitadelProvider() (auth.OIDCProviderConfigEntry, error) {
+	entries, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw)
+	if err != nil {
+		return auth.OIDCProviderConfigEntry{}, err
+	}
+	for i := range entries {
+		e := &entries[i]
+		if e.Name != c.OAuthZitadelProvider {
+			continue
+		}
+		if e.SubjectClaim != "" && e.SubjectClaim != "sub" {
+			return auth.OIDCProviderConfigEntry{}, fmt.Errorf("MCTL_OIDC_PROVIDERS entry %q to key identities on sub, not %q", e.Name, e.SubjectClaim)
+		}
+		return *e, nil
+	}
+	return auth.OIDCProviderConfigEntry{}, fmt.Errorf("an MCTL_OIDC_PROVIDERS entry named %q (OAUTH_ZITADEL_PROVIDER)", c.OAuthZitadelProvider)
+}
+
+// oauthZitadelOptions wires the ZITADEL upstream when OAUTH_UPSTREAM selects
+// it. A missing principal store is not a boot failure (the store may only
+// be down): every ZITADEL sign-in then answers 503, never "not linked".
+func oauthZitadelOptions(cfg config, store *principals.Store, oauth *auth.OAuthServer) *mctlapi.OAuthZitadelOptions {
+	if oauth == nil || cfg.oauthUpstreamMode() == mctlapi.OAuthUpstreamGitHub {
+		return nil
+	}
+	entry, err := cfg.oauthZitadelProvider()
+	if err != nil {
+		// Unreachable after validate; keep the upstream off rather than half on.
+		slog.Error("OAuth ZITADEL upstream disabled", "error", err)
+		return nil
+	}
+	opts := &mctlapi.OAuthZitadelOptions{
+		ProviderName: entry.Name, Issuer: entry.Issuer,
+		ClientID: cfg.OAuthZitadelClientID, ClientSecret: cfg.OAuthZitadelClientSecret,
+	}
+	// Assigned only when non-nil: a nil *Store in the interface would not
+	// compare equal to nil and would be called.
+	if store != nil {
+		opts.Store = store
+	} else {
+		slog.Error("OAuth ZITADEL upstream has no principal store; ZITADEL sign-ins will answer 503")
+	}
+	slog.Info("OAuth ZITADEL upstream enabled", "provider", entry.Name, "issuer", entry.Issuer)
+	return opts
 }
 
 // buildFederationRegistry builds the federation registry from cfg, or
@@ -1456,6 +1711,7 @@ func buildFederationRegistry(ctx context.Context, cfg config, validator *auth.Gi
 		OIDCProvidersRaw: cfg.OIDCProvidersRaw,
 		DexIssuerURL:     cfg.DexIssuerURL,
 		DexClientID:      cfg.DexClientID,
+		GitHubActionsRaw: cfg.GitHubActionsOIDCRaw,
 	}, validator, resolver, oauth)
 }
 
@@ -1468,21 +1724,6 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
-}
-
-// parseIntEnv reads a positive integer from the given env var. Returns the
-// fallback when the var is unset, empty, non-numeric, or non-positive; zero
-// means "use package default" downstream.
-func parseIntEnv(key string, fallback int) int {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return fallback
-	}
-	return n
 }
 
 // preregisteredClient is one entry of OAUTH_PREREGISTERED_CLIENTS.
@@ -1736,4 +1977,111 @@ func startEvidenceRetentionSweep(ctx context.Context, store *evidence.Store) {
 			}
 		}
 	}()
+}
+
+// identityLinkOptions wires explicit identity linking (mctl-api#435). The
+// API side (list, unlink, admin merge) needs only the principal store; the
+// browser flow also needs the ZITADEL link client, the federation entry it
+// links into, and the GitHub OAuth app. Anything missing leaves that part
+// off (503) with one log line saying why, never a failed boot.
+func identityLinkOptions(cfg config, store *principals.Store, cache *principals.Resolver, oauth *auth.OAuthServer, gh *auth.GitHubValidator) *mctlapi.IdentityLinkOptions {
+	if store == nil {
+		return nil
+	}
+	opts := &mctlapi.IdentityLinkOptions{Store: store, BaseURL: cfg.SelfURL}
+	if cache != nil {
+		opts.ForgetPrincipals = cache.Forget
+	}
+	if cfg.ZitadelLinkClientID == "" && cfg.ZitadelLinkClientSecret == "" {
+		return opts
+	}
+	var missing []string
+	if cfg.ZitadelLinkClientID == "" || cfg.ZitadelLinkClientSecret == "" {
+		missing = append(missing, "ZITADEL_LINK_CLIENT_ID and ZITADEL_LINK_CLIENT_SECRET (both)")
+	}
+	if oauth == nil || oauth.GitHubClientID == "" {
+		missing = append(missing, "the GitHub OAuth server (OAUTH_GITHUB_CLIENT_ID, OAUTH_JWT_SECRET)")
+	}
+	if gh == nil {
+		missing = append(missing, "the GitHub validator")
+	}
+	if cfg.FederationDisabled {
+		missing = append(missing, "the federation registry (MCTL_FEDERATION_DISABLED is on)")
+	} else if entries, err := auth.ParseOIDCProviders(cfg.OIDCProvidersRaw); err == nil {
+		for i := range entries {
+			if entries[i].Name == cfg.ZitadelLinkProvider {
+				opts.ProviderName, opts.Issuer = entries[i].Name, entries[i].Issuer
+			}
+		}
+	}
+	if opts.Issuer == "" && !cfg.FederationDisabled {
+		missing = append(missing, "an MCTL_OIDC_PROVIDERS entry named "+cfg.ZitadelLinkProvider)
+	}
+	if len(missing) > 0 {
+		slog.Error("identity link browser flow disabled", "missing", strings.Join(missing, "; "))
+		return opts
+	}
+	opts.ClientID, opts.ClientSecret = cfg.ZitadelLinkClientID, cfg.ZitadelLinkClientSecret
+	opts.GitHubClientID = oauth.GitHubClientID
+	opts.ProveGitHub = func(ctx context.Context, code, redirectURI string) (string, int64, error) {
+		token, err := mctlapi.ExchangeGitHubCode(ctx, oauth.GitHubClientID, oauth.GitHubClientSecret, code, redirectURI)
+		if err != nil {
+			return "", 0, err
+		}
+		return gh.ValidateIdentity(ctx, token)
+	}
+	slog.Info("identity link browser flow enabled", "provider", opts.ProviderName, "issuer", opts.Issuer)
+	return opts
+}
+
+// erpactVaultReadTimeout bounds the one startup read of the deployer token.
+const erpactVaultReadTimeout = 10 * time.Second
+
+// newErpactDeployer builds the ERPact site-deployer client from the token in
+// Vault, or returns nil (feature off) when it cannot. It makes its own
+// bounded context on purpose: startup's initCtx is cancelled once the stores
+// are built, and a read on it fails with "context canceled" and silently
+// disables the feature (seen in prod on 4.69.0).
+func newErpactDeployer(reader mctlapi.VaultReader, deployerURL string) mctlapi.ErpactDeployer {
+	if reader == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), erpactVaultReadTimeout)
+	defer cancel()
+	secret, err := reader.ReadKV(ctx, "teams/erpact/deployer")
+	if err != nil {
+		slog.Warn("erpact deployer token could not be read from vault, erpact site tools disabled", "error", err)
+		return nil
+	}
+	token := secret["DEPLOYER_API_TOKEN"]
+	if token == "" {
+		slog.Warn("erpact deployer secret has no DEPLOYER_API_TOKEN property, erpact site tools disabled")
+		return nil
+	}
+	slog.Info("erpact deployer client enabled", "url", deployerURL)
+	return erpactsites.NewClient(deployerURL, token)
+}
+
+// commerceDispatchSigner reads the Ed25519 dispatch signing key: a key id
+// and a base64 (standard or URL, padded or not) 32-byte seed. Both unset is
+// "not configured" (nil, nil); one without the other is an error.
+func commerceDispatchSigner(keyID, seedB64 string) (*commerce.DispatchSigner, error) {
+	keyID, seedB64 = strings.TrimSpace(keyID), strings.TrimSpace(seedB64)
+	if keyID == "" && seedB64 == "" {
+		return nil, nil
+	}
+	if keyID == "" || seedB64 == "" {
+		return nil, errors.New("COMMERCE_DISPATCH_KEY_ID and COMMERCE_DISPATCH_SIGNING_KEY must be set together")
+	}
+	var seed []byte
+	var err error
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if seed, err = enc.DecodeString(seedB64); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return nil, errors.New("COMMERCE_DISPATCH_SIGNING_KEY is not base64")
+	}
+	return commerce.NewDispatchSigner(keyID, seed)
 }

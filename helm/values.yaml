@@ -11,6 +11,15 @@ imagePullSecrets:
 service:
   type: ClusterIP
   port: 8080
+  # Extra Service annotations, e.g. Traefik sticky sessions. With more than
+  # one replica the identity link flow (mctlhq/mctl-api#435) needs session
+  # affinity: its challenges live in the memory of the pod that started them.
+  # OAuth sign-ins do not: they use the shared flow store (OAUTH_DB_URL).
+  annotations: {}
+
+# Spread replicas across nodes, so one node going away does not take every
+# replica with it. Empty renders nothing.
+topologySpreadConstraints: []
 
 ingress:
   enabled: true
@@ -28,6 +37,9 @@ ingress:
     - /docs
     - /.well-known
     - /oauth
+    # Browser half of ZITADEL identity linking (/identity/link/zitadel*,
+    # mctlhq/mctl-api#435).
+    - /identity
     - /api
     - /mcp
 
@@ -40,6 +52,10 @@ resources:
     memory: 256Mi
 
 env:
+  # Tracing (vendor-neutral OTLP): set OTEL_EXPORTER_OTLP_ENDPOINT to export
+  # spans; unset (default) means no exporter, propagation still works.
+  # OTEL_SDK_DISABLED=true forces export off. OTEL_MCTL_RECORD_ENDUSER=true
+  # adds mctl.actor.* span attributes. A down Collector never affects responses.
   GITOPS_REPO_URL: https://github.com/mctlhq/mctl-gitops.git
   GITOPS_BRANCH: main
   GITOPS_LOCAL_PATH: /data/mctl-gitops
@@ -55,27 +71,6 @@ env:
   # authentication chain.
   MCTL_OIDC_PROVIDERS: ""
   MCTL_FEDERATION_DISABLED: ""
-
-# OpenClaw skill/identity save caps. Enforced in the save handlers
-# (internal/api/handlers_openclaw.go) before any workflow submission.
-# Aligns with the layered-skills plan (/docs/plans/openclaw-layered-skills.md):
-# the K8s ConfigMap 1 MiB limit is the hard ceiling; these leave headroom for
-# keys/metadata and protect the tenant from runaway agent edits.
-openclaw:
-  skills:
-    # Max bytes in a single SKILL.md / identity file.
-    maxPerSkillBytes: 102400
-    # Max number of skill files per tenant.
-    maxPerTenant: 100
-    # Max total skill-file bytes per tenant (≤ ConfigMap 1 MiB headroom).
-    maxTotalBytes: 921600
-    # Max saves/deletes per hour per (team, user) — shared with identity.
-    saveRatePerHour: 30
-  identity:
-    # Max identity overrides per tenant (hard cap is the 5-file allowlist).
-    maxPerTenant: 5
-    # Max total identity-file bytes per tenant.
-    maxTotalBytes: 512000
 
 # Optional CNPG CA for sslmode=verify-full. When set, ca.crt is mounted at
 # /etc/cnpg/ca.crt and the process upgrades AUDIT_DB_URL to verify-full.
@@ -117,6 +112,13 @@ usageWriterTokenSecret: ""
 # rather than failing the pod.
 evidenceWriterTokenSecret: ""
 
+# Optional: Secret holding MCTL_REGISTRY_PUBLISHER_TOKEN, the bearer token of
+# the registry-publisher principal (service:mctl-agents-registry-publisher,
+# mctlhq/mctl-agents#470). It may only create an agent definition, publish a
+# version and promote or roll back a release. The reference is optional, so
+# an absent Secret leaves the principal disabled rather than failing the pod.
+registryPublisherTokenSecret: ""
+
 # Optional: Secret holding MCTL_SURFACE_TELEGRAM_TOKEN, the bearer token of
 # the surface:telegram principal (mctlhq/mctl-telegram#443). mctl-api
 # authenticates it in internal/auth/oidc.go (surfaceTokenEnv,
@@ -150,6 +152,21 @@ repoBindingTokenSecret: ""
 # kept in git. Optional, so an absent Secret or key leaves the variable unset:
 # the Dex-only configuration, unchanged.
 oidcProvidersSecret: ""
+
+# Optional: Secret holding ZITADEL_LINK_CLIENT_ID and
+# ZITADEL_LINK_CLIENT_SECRET, the confidential ZITADEL client of explicit
+# identity linking (docs/principals.md, mctlhq/mctl-api#435). In production
+# the zitadel-iac Job writes both into the same Secret as
+# MCTL_OIDC_PROVIDERS. Optional, so absent keys leave the link flow off
+# (503) rather than failing the pod.
+zitadelLinkSecret: ""
+
+# Optional: Secret holding OAUTH_ZITADEL_CLIENT_ID and
+# OAUTH_ZITADEL_CLIENT_SECRET, the confidential ZITADEL client (mctl-api-oauth)
+# that /oauth/authorize signs people in with when OAUTH_UPSTREAM is zitadel
+# or both (mctlhq/mctl-api#467). Optional keys: under the default
+# OAUTH_UPSTREAM=github nothing reads them.
+oauthZitadelSecret: ""
 
 # Optional: mount a versioned usage rate card from a ConfigMap.
 #

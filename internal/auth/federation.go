@@ -68,6 +68,10 @@ type Claims struct {
 	// (the GitHub PAT provider always; the local-OAuth provider only once
 	// slice B mints ghid).
 	GitHubID int64
+	// CIRepository is the "owner/repo" a GitHub Actions OIDC token was
+	// minted for (githubActionsProvider only). Authorization compares it to
+	// the deploy request and the component's registered source repository.
+	CIRepository string
 }
 
 // tokenShape is computed once per request from the existing isJWT/jwtIssuer
@@ -150,6 +154,22 @@ var reservedProviderNames = map[string]bool{
 	ProviderService: true,
 	ProviderDev:     true,
 	ProviderAgent:   true,
+	// Only githubActionsProvider may declare it (NewRegistry exempts that
+	// type), so no MCTL_OIDC_PROVIDERS entry can mint a CI principal.
+	ProviderGitHubActions: true,
+}
+
+// reservedNameExempt reports whether p is one of the built-in JWT providers
+// that own a reserved namespace: the local-OAuth provider ("github", design.md
+// "The contract") and the GitHub Actions provider ("github-actions").
+func reservedNameExempt(p Provider) bool {
+	switch q := p.(type) {
+	case *localOAuthProvider:
+		return true
+	case *githubActionsProvider:
+		return q.Name() == ProviderGitHubActions
+	}
+	return false
 }
 
 // Registry routes a bearer token to at most one provider and enforces the
@@ -182,6 +202,17 @@ func NewRegistry(static, jwt, opaque []Provider) (*Registry, error) {
 		return nil, fmt.Errorf("federation: more than one opaque-token provider registered (%s): an opaque token carries nothing to route on", strings.Join(names, ", "))
 	}
 
+	// A provider named like the local-OAuth metric label would be counted
+	// in mctl-issued JWTs' series, which is the conflation the label exists
+	// to remove.
+	for _, set := range [][]Provider{static, jwt, opaque} {
+		for _, p := range set {
+			if p.Name() == metricLabelLocalOAuth {
+				return nil, fmt.Errorf("federation: provider name %q is reserved for mctl-issued OAuth JWTs' metrics", metricLabelLocalOAuth)
+			}
+		}
+	}
+
 	seenNames := map[string]bool{}
 	seenIssuers := map[string]string{} // normalized issuer -> provider name
 	for _, p := range jwt {
@@ -191,10 +222,11 @@ func NewRegistry(static, jwt, opaque []Provider) (*Registry, error) {
 		}
 		seenNames[name] = true
 
-		// The local-OAuth provider is the one modelled exception that may
-		// declare the reserved namespace "github" (design.md "The
-		// contract"); every other JWT provider is refused.
-		if _, exempt := p.(*localOAuthProvider); !exempt && reservedProviderNames[name] {
+		// The local-OAuth provider ("github", design.md "The contract") and
+		// the GitHub Actions provider ("github-actions") are the modelled
+		// exceptions that may declare a reserved namespace; every other JWT
+		// provider is refused.
+		if !reservedNameExempt(p) && reservedProviderNames[name] {
 			return nil, fmt.Errorf("federation: provider name %q is reserved", name)
 		}
 		if surfaceid.IsSurface(name) {
@@ -246,7 +278,7 @@ func (r *Registry) Verify(ctx context.Context, raw string) (*Verified, error) {
 		case errors.Is(err, ErrNoProvider):
 			continue
 		default:
-			recordVerification(p.Name(), "invalid", start)
+			recordVerification(metricLabel(p), "invalid", start)
 			return nil, err
 		}
 	}
@@ -269,7 +301,7 @@ func (r *Registry) Verify(ctx context.Context, raw string) (*Verified, error) {
 
 	v, err := candidate.Verify(ctx, raw)
 	if err != nil {
-		recordVerification(candidate.Name(), "invalid", start)
+		recordVerification(metricLabel(candidate), "invalid", start)
 		return nil, err
 	}
 	return r.finish(candidate, v, start)
@@ -279,12 +311,32 @@ func (r *Registry) Verify(ctx context.Context, raw string) (*Verified, error) {
 // the outcome.
 func (r *Registry) finish(p Provider, v *Verified, start time.Time) (*Verified, error) {
 	if err := checkProviderContract(p, v); err != nil {
-		federationContractViolations.WithLabelValues(p.Name()).Inc()
-		recordVerification(p.Name(), "invalid", start)
+		federationContractViolations.WithLabelValues(metricLabel(p)).Inc()
+		recordVerification(metricLabel(p), "invalid", start)
 		return nil, err
 	}
-	recordVerification(p.Name(), "ok", start)
+	recordVerification(metricLabel(p), "ok", start)
 	return v, nil
+}
+
+// metricLabeler is implemented by a provider counted under a label other
+// than its namespace. Only the local-OAuth provider does: it shares the
+// "github" namespace with the GitHub PAT provider, and the two must be told
+// apart in the metrics before raw GitHub tokens can be retired
+// (mctl-api#467 follow-up).
+type metricLabeler interface {
+	metricLabel() string
+}
+
+// metricLabel is the provider label of the registry-owned federation
+// metrics (verifications, duration, contract violations). The audience and
+// groups counters are emitted by OIDC providers themselves under their own
+// name; none of them relabels, so the two never disagree.
+func metricLabel(p Provider) string {
+	if m, ok := p.(metricLabeler); ok {
+		return m.metricLabel()
+	}
+	return p.Name()
 }
 
 func recordVerification(provider, result string, start time.Time) {

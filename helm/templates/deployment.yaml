@@ -16,6 +16,10 @@ spec:
         app.kubernetes.io/name: {{ .Chart.Name }}
     spec:
       serviceAccountName: {{ .Chart.Name }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.imagePullSecrets | nindent 8 }}
@@ -40,11 +44,20 @@ spec:
             {{- if and .Values.oidcProvidersSecret .Values.env.MCTL_OIDC_PROVIDERS }}
             {{- fail "set MCTL_OIDC_PROVIDERS either in env or through oidcProvidersSecret, not both" }}
             {{- end }}
+            {{- if and .Values.zitadelLinkSecret (or .Values.env.ZITADEL_LINK_CLIENT_ID .Values.env.ZITADEL_LINK_CLIENT_SECRET) }}
+            {{- fail "set ZITADEL_LINK_CLIENT_ID and ZITADEL_LINK_CLIENT_SECRET either in env or through zitadelLinkSecret, not both" }}
+            {{- end }}
+            {{- if and .Values.oauthZitadelSecret (or .Values.env.OAUTH_ZITADEL_CLIENT_ID .Values.env.OAUTH_ZITADEL_CLIENT_SECRET) }}
+            {{- fail "set OAUTH_ZITADEL_CLIENT_ID and OAUTH_ZITADEL_CLIENT_SECRET either in env or through oauthZitadelSecret, not both" }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
-            {{- /* oidcProvidersSecret supplies it below; the empty default in
-                   values.yaml would otherwise render a second entry with the
-                   same name, which server-side apply refuses. */}}
-            {{- if not (and $.Values.oidcProvidersSecret (eq $key "MCTL_OIDC_PROVIDERS")) }}
+            {{- /* oidcProvidersSecret, zitadelLinkSecret and oauthZitadelSecret
+                   supply these below; a literal entry (even an empty one)
+                   would otherwise render a second entry with the same name,
+                   which server-side apply refuses. */}}
+            {{- if not (or (and $.Values.oidcProvidersSecret (eq $key "MCTL_OIDC_PROVIDERS"))
+                           (and $.Values.zitadelLinkSecret (or (eq $key "ZITADEL_LINK_CLIENT_ID") (eq $key "ZITADEL_LINK_CLIENT_SECRET")))
+                           (and $.Values.oauthZitadelSecret (or (eq $key "OAUTH_ZITADEL_CLIENT_ID") (eq $key "OAUTH_ZITADEL_CLIENT_SECRET")))) }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
@@ -81,6 +94,17 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.evidenceWriterTokenSecret }}
                   key: MCTL_EVIDENCE_WRITER_TOKEN
+                  optional: true
+            {{- end }}
+            {{- if .Values.registryPublisherTokenSecret }}
+            # Optional on purpose: a missing Secret leaves the
+            # registry-publisher principal disabled (only admins can publish
+            # to the agent registry), it does not keep the pod from starting.
+            - name: MCTL_REGISTRY_PUBLISHER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.registryPublisherTokenSecret }}
+                  key: MCTL_REGISTRY_PUBLISHER_TOKEN
                   optional: true
             {{- end }}
             {{- if .Values.surfaceTelegramTokenSecret }}
@@ -133,6 +157,42 @@ spec:
                   key: MCTL_OIDC_PROVIDERS
                   optional: true
             {{- end }}
+            {{- if .Values.zitadelLinkSecret }}
+            # The confidential ZITADEL client of identity linking
+            # (docs/principals.md, mctlhq/mctl-api#435), written by the
+            # zitadel-iac Job. Optional: without both keys the link flow
+            # answers 503 and nothing else changes.
+            - name: ZITADEL_LINK_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.zitadelLinkSecret }}
+                  key: ZITADEL_LINK_CLIENT_ID
+                  optional: true
+            - name: ZITADEL_LINK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.zitadelLinkSecret }}
+                  key: ZITADEL_LINK_CLIENT_SECRET
+                  optional: true
+            {{- end }}
+            {{- if .Values.oauthZitadelSecret }}
+            # The confidential ZITADEL client of /oauth/authorize's ZITADEL
+            # upstream (mctlhq/mctl-api#467), written by the zitadel-iac Job.
+            # Optional: OAUTH_UPSTREAM=github ignores it, and zitadel or both
+            # refuse to boot without it.
+            - name: OAUTH_ZITADEL_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oauthZitadelSecret }}
+                  key: OAUTH_ZITADEL_CLIENT_ID
+                  optional: true
+            - name: OAUTH_ZITADEL_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oauthZitadelSecret }}
+                  key: OAUTH_ZITADEL_CLIENT_SECRET
+                  optional: true
+            {{- end }}
             {{- if .Values.usagePricingConfigMap }}
             # The path, not the JSON. internal/usage/catalog_file.go reads this file
             # with os.ReadFile; a rate card is reviewed as a file in GitOps, and an env
@@ -140,36 +200,6 @@ spec:
             # past the env size a card will grow into.
             - name: USAGE_PRICING_CATALOG
               value: /etc/mctl-api/usage-pricing/catalog.json
-            {{- end }}
-            {{- with .Values.openclaw }}
-            {{- with .skills }}
-            {{- if .maxPerSkillBytes }}
-            - name: OPENCLAW_SKILLS_MAX_PER_SKILL_BYTES
-              value: {{ .maxPerSkillBytes | quote }}
-            {{- end }}
-            {{- if .maxPerTenant }}
-            - name: OPENCLAW_SKILLS_MAX_PER_TENANT
-              value: {{ .maxPerTenant | quote }}
-            {{- end }}
-            {{- if .maxTotalBytes }}
-            - name: OPENCLAW_SKILLS_MAX_TOTAL_BYTES
-              value: {{ .maxTotalBytes | quote }}
-            {{- end }}
-            {{- if .saveRatePerHour }}
-            - name: OPENCLAW_SKILLS_SAVE_RATE_PER_HOUR
-              value: {{ .saveRatePerHour | quote }}
-            {{- end }}
-            {{- end }}
-            {{- with .identity }}
-            {{- if .maxPerTenant }}
-            - name: OPENCLAW_IDENTITY_MAX_PER_TENANT
-              value: {{ .maxPerTenant | quote }}
-            {{- end }}
-            {{- if .maxTotalBytes }}
-            - name: OPENCLAW_IDENTITY_MAX_TOTAL_BYTES
-              value: {{ .maxTotalBytes | quote }}
-            {{- end }}
-            {{- end }}
             {{- end }}
           livenessProbe:
             httpGet:

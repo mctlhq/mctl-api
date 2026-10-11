@@ -32,7 +32,7 @@ REST API (/api/v1/*)  ◄── Backstage / CLI / HTTP clients
 | Language | Go 1.25 |
 | HTTP Router | chi v5.2 |
 | MCP Server | mcp-go v0.31 (Streamable HTTP transport) |
-| Auth | GitHub token resolution, Dex/OIDC JWT, OAuth 2.0 PKCE |
+| Auth | OAuth 2.1 + PKCE (sign-in through ZITADEL), federated OIDC JWTs, static service tokens |
 | Database | PostgreSQL via pgx v5.9 (audit logs) |
 | Kubernetes | client-go v0.32 (quota reader) |
 | Rate Limiting | httprate v0.15 (300 req/min authenticated including POST /mcp, loopback MCP-internal REST excluded from that cap, 20 req/min write) |
@@ -109,6 +109,7 @@ docker run -p 8080:8080 mctl-api
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `PORT` | HTTP server port | `8080` | No |
+| `SHUTDOWN_DRAIN_DELAY` | Go duration the pod keeps serving after SIGTERM with `/readyz` at 503 (`checks.shutdown=draining`) before the listener closes. Keep it plus the 10s shutdown timeout below the pod's `terminationGracePeriodSeconds`. Invalid or non-positive values use the default. | `5s` | No |
 | `AUTH_REQUIRED` | Enable authentication | `true` | No |
 | `ADMIN_USERS` | Admin GitHub usernames (comma-separated) | — | No |
 | `GITOPS_REPO_URL` | GitOps repository URL | `https://github.com/mctlhq/mctl-gitops.git` | No |
@@ -123,25 +124,34 @@ docker run -p 8080:8080 mctl-api
 | `ARGOCD_TOKEN` | ArgoCD auth token (from Vault) | — | Yes |
 | `ARGO_WORKFLOWS_NAMESPACE` | Kubernetes namespace for workflows | `argo-workflows` | No |
 | `GITHUB_ORG` | Required GitHub organization | `mctlhq` | No |
-| `DEX_ISSUER_URL` | OIDC issuer URL | `https://ops.mctl.ai/api/dex` | No |
-| `DEX_CLIENT_ID` | JWT audience for Dex. Empty skips the audience check (compatibility) and counts `federation_audience_check_skipped_total{provider="dex"}` on every verification. | — | No |
+| `DEX_ISSUER_URL` | **Legacy, unset in production** since Dex was removed (mctl-gitops#1741). Dex OIDC issuer URL; still read by the legacy `dex` federation shim. Unset turns Dex off: no Dex JWTs, no `dex` federation shim, no Dex check in `/readyz`. | — | No |
+| `DEX_CLIENT_ID` | **Legacy, unset in production** (see `DEX_ISSUER_URL`). JWT audience for Dex. Empty skips the audience check (compatibility) and counts `federation_audience_check_skipped_total{provider="dex"}` on every verification. | — | No |
 | `MCTL_OIDC_PROVIDERS` | JSON array of federation identity providers (mctl-api#374, see [docs/federation.md](docs/federation.md)): `[{"name":"dex","issuer":"https://…","audiences":["mctl-api"],"audience_enforcement":"audit"}]`. An entry **named `dex`** replaces the legacy shim built from `DEX_ISSUER_URL`/`DEX_CLIENT_ID` above, whatever its issuer; an entry under any other name on the `DEX_ISSUER_URL` issuer collides with the shim and refuses startup. `audiences` is required, `audience_enforcement` is `audit` or `enforce` (default `enforce`). A malformed value, a missing `audiences`, an invalid `audience_enforcement` or `kind`, a reserved or surface-colliding name, or a duplicate name/issuer refuses startup — unless `MCTL_FEDERATION_DISABLED` is on. | — | No |
 | `MCTL_FEDERATION_DISABLED` | Kill switch (mctl-api#374): any value except `false`/`f`/`0`/`no`/`off` restores the pre-registry authentication chain unchanged, including its plain (non-constant-time) service-token compare. While it is on, `MCTL_OIDC_PROVIDERS` is neither validated nor built, so it also recovers a value that would otherwise refuse startup. Same shape as `PRINCIPALS_DISABLED`. | unset | No |
+| `MCTL_GITHUB_ACTIONS_OIDC` | JSON object enabling GitHub Actions OIDC for CI deploys (mctl-api#530, see [docs/federation.md](docs/federation.md#github-actions-ci-deploys-mctl-api530)): `{"repository_owners":["mctlhq"],"audience":"https://api.mctl.ai","branches":["refs/heads/main"]}`. The principal `ci:<owner>/<repo>` may only call `POST /api/v1/operations/deploy-service/execute` with `action=deploy` for a component whose gitops `github.com/source-repo` is that repository. `repository_owners` is required; a malformed value refuses startup. Unset: the provider is off and such tokens get 401. | unset | No |
 | `SELF_URL` | Public base URL | `https://api.mctl.ai` | No |
 | `ALLOWED_ORIGINS` | CORS allowed origins | — | No |
 | `OAUTH_GITHUB_CLIENT_ID` | GitHub OAuth app client ID | — | No |
 | `OAUTH_GITHUB_CLIENT_SECRET` | GitHub OAuth app client secret | — | No |
 | `OAUTH_JWT_SECRET` | JWT signing secret for OAuth tokens | — | No |
+| `OAUTH_UPSTREAM` | Where `/oauth/authorize` signs people in (mctl-api#467, see [docs/principals.md](docs/principals.md)): `github`, `zitadel` (as the linked principal's GitHub login), or `both` (a chooser, ZITADEL first). `zitadel`/`both` refuse startup without `OAUTH_JWT_SECRET`, both `OAUTH_ZITADEL_CLIENT_*` and the provider entry, and `both` also without both `OAUTH_GITHUB_CLIENT_*`. An unknown value refuses startup | `github` | No |
+| `OAUTH_ZITADEL_CLIENT_ID` / `OAUTH_ZITADEL_CLIENT_SECRET` | Confidential ZITADEL client of the ZITADEL upstream (redirect `<SELF_URL>/oauth/zitadel/callback`); not the link client. Helm: `oauthZitadelSecret` | — | No |
+| `OAUTH_ZITADEL_PROVIDER` | `MCTL_OIDC_PROVIDERS` entry whose issuer the ZITADEL upstream verifies against; must be the one linking writes (`ZITADEL_LINK_PROVIDER`) | `zitadel` | No |
 | `OAUTH_ALLOWED_REDIRECT_URIS` | Comma-separated redirect URIs accepted at `/oauth/authorize` and by Dynamic Client Registration (`POST /oauth/register`). An entry is an **exact** string compare unless it ends in `/*`, which makes it a prefix match; prefer exact entries (the Cloudflare MCP portal's `https://mcp.mctl.ai/servers-callback` and its dashboard `…/mcp-server/oauth-callback/api` callback are listed exactly, never as a `dash.cloudflare.com/*` prefix). Loopback `http://` callbacks are always accepted (RFC 8252). A registration naming any other URI gets `400 invalid_redirect_uri` | glama, smithery, `chatgpt.com/connector/oauth/*` | No |
-| `OAUTH_DB_URL` | PostgreSQL for OAuth refresh tokens and dynamic client registrations (falls back to `AUDIT_DB_URL`). With a database, a client registered through `POST /oauth/register` survives restarts, and registration is idempotent: the same `client_name` and redirect-URI set get the same `client_id` back. Registrations that have never completed a token exchange are capped at 1000 (least recently seen evicted); a client that has completed one is never evicted by the cap. Any row is dropped after 90 days unseen, where a registration, token exchange or refresh counts as seen. Without one, registrations are in-memory and lost on restart. Every registration is granted scope `mctl`, the only scope | `AUDIT_DB_URL` | No |
+| `OAUTH_DB_URL` | PostgreSQL for OAuth refresh tokens, dynamic client registrations, and the pending authorizations and authorization codes of sign-ins in flight (table `oauth_flow_entries`, shared by every replica) (falls back to `AUDIT_DB_URL`). With a database, a client registered through `POST /oauth/register` survives restarts, and registration is idempotent: the same `client_name` and redirect-URI set get the same `client_id` back. Registrations that have never completed a token exchange are capped at 1000 (least recently seen evicted); a client that has completed one is never evicted by the cap. Any row is dropped after 90 days unseen, where a registration, token exchange or refresh counts as seen. Without one, registrations are in-memory and lost on restart. Every registration is granted scope `mctl`, the only scope | `AUDIT_DB_URL` | No |
 | `OAUTH_PREREGISTERED_CLIENTS` | JSON array of static public OAuth clients for counterparts that cannot register dynamically (the Cloudflare MCP portal): `[{"client_id":"…","client_name":"…","redirect_uris":["https://…"]}]`. Exact redirect match, no secret field, never evicted; a malformed value or an unknown key refuses startup | — | No |
 | `OAUTH_GROUPS_MAX_STALENESS` | Strict mode for tenant-group resolution (mctl-api#411, see "Authorization group freshness" below): a Go duration beyond which a gitops checkout that has not synced recently is treated as a **failed** resolution instead of merely a logged warning. Unset (or malformed) disables strict mode. | unset | No |
 | `OAUTH_GROUPS_CACHE_TTL` | How long a successful tenant-group resolution is memoized per login, bounding the added cost of re-resolving on every JWT validation. Unset or malformed falls back to the default. | `30s` | No |
 | `AUDIT_DB_URL` | PostgreSQL connection string (falls back to in-memory). `sslmode=disable` is upgraded to `require`, or `verify-full` when a CNPG CA is mounted. | — | No |
 | `HUMAN_INPUT_DB_URL` | PostgreSQL for the human-input delivery ledger (`POST /api/v1/human-input/{request_id}/response`). Falls back to `AUDIT_DB_URL`; with neither, that endpoint answers 503 (there is no in-memory fallback). The raw answer is kept only until its delivery resolves, or until the request expires. | — | No |
 | `WORK_ITEMS_DB_URL` | PostgreSQL for the `workitem/v1` store (`/api/v1/work-items*`). Falls back to `AUDIT_DB_URL`; with neither, every work-items route answers 503. | — | No |
+| `COMMERCE_DB_URL` | PostgreSQL for the commerce ledger of ADR 020 (mctl-api#547 and #548, see [docs/commerce-ledger.md](docs/commerce-ledger.md)): terms, quotes, invocation receipts and history, tenant budgets, holds and the simulated payment operations. Falls back to `AUDIT_DB_URL`; with neither, `/api/v1/commerce*` answers 503. Deploying it enables no payment behaviour: no terms exist until an admin publishes them, no budget exists until an admin grants one, a budget is a limit and never a balance, and `funds_mode: live` is refused everywhere. | — | No |
+| `COMMERCE_DISABLED` | Kill switch for the commerce ledger: routes answer 503 without touching `AUDIT_DB_URL` for other stores. Same values as the other kill switches. | unset | No |
+| `COMMERCE_DISPATCH_KEY_ID` | Identifier of the Ed25519 key that signs dispatch authorizations for paid capabilities (ADR 020 sec. 9, mctl-agents#619). Set together with `COMMERCE_DISPATCH_SIGNING_KEY`. | unset | No |
+| `COMMERCE_DISPATCH_SIGNING_KEY` | Base64 Ed25519 seed (32 bytes) for dispatch authorizations. Without both values, `…/invocations/{id}/dispatch` and `/api/v1/commerce/dispatch-keys` answer 503 `dispatch-unavailable`, and no paid call can be dispatched. Enables no payment behaviour by itself. | unset | No |
 | `WORK_ITEMS_DISABLED` | Kill switch: any value except `false`/`f`/`0`/`no`/`off` leaves the work-items store off (routes answer 503) without touching `AUDIT_DB_URL` for other stores. | unset | No |
 | `MCTL_SURFACE_TELEGRAM_TOKEN` / `MCTL_SURFACE_PORTAL_TOKEN` | Bearer tokens of the per-surface principals `surface:telegram` / `surface:portal` (mctl-api#350): non-admin, no tenant, confined to the surface routes. At least 32 characters; a token shared by two surfaces or equal to `MCTL_AGENT_SERVICE_TOKEN` is refused. | — | No |
+| `MCTL_REGISTRY_PUBLISHER_TOKEN` | Bearer token of the registry-publisher principal `service:mctl-agents-registry-publisher` (mctlhq/mctl-agents#470): not an admin, and may call only `POST /api/v1/agents`, `POST /api/v1/agents/{name}/versions` and `POST /api/v1/agents/{name}/releases` (see [docs/agent-platform-registry.md](docs/agent-platform-registry.md#registry-publisher-principal)). At least 32 characters; a token equal to `MCTL_AGENT_SERVICE_TOKEN`, a surface token or a writer token is refused. Unset: the principal does not exist and only admins can publish. | — | No |
 | `MCTL_USAGE_WRITER_TOKEN` | Bearer token of the usage-writer principal `service:mctl-agents-usage` (mctlhq/.github#50): holds only `usage:write` and may call only `POST /api/v1/usage/records` (see [docs/model-usage-ledger.md](docs/model-usage-ledger.md)). At least 32 characters; a token equal to `MCTL_AGENT_SERVICE_TOKEN` or to a surface token is refused. Unset: only admins can write usage. | — | No |
 | `SURFACE_IDENTITY_DB_URL` | PostgreSQL for surface identity links and challenges, and for the canonical principal model (`principals`, `external_identities`; see [docs/principals.md](docs/principals.md)), which mirrors links in the same transaction. Falls back to `AUDIT_DB_URL`; with neither, `/api/v1/surface-identities*` answers 503 and callers carry no principal id. | — | No |
 | `SURFACE_LINK_TTL` | Go duration after which a new link expires (e.g. `2160h`); unset means until revoked. Malformed disables the feature. | unset | No |
@@ -172,15 +182,16 @@ docker run -p 8080:8080 mctl-api
 
 ### Authentication
 
-Three authentication methods are supported:
+Bearer tokens are verified by the federation registry ([docs/federation.md](docs/federation.md)):
 
 | Method | Detection | Validation |
 |--------|-----------|------------|
-| GitHub personal token | No dots in token | GitHub API → resolve org membership |
-| Dex/OIDC JWT | 3 dot-separated parts | JWKS validation → groups from claims |
-| OAuth 2.0 + PKCE | Authorization Code flow | For Claude.ai custom connectors |
+| MCTL OAuth access token (MCP clients, `mctl auth login`) | JWT whose `iss` is this server | Local signing key; groups re-resolved from gitops (see below) |
+| ZITADEL OIDC JWT | JWT whose `iss` is `auth.mctl.ai` | JWKS and audience (`MCTL_OIDC_PROVIDERS`) |
+| Service and surface tokens | Exact match of a configured static secret | Constant-time comparison |
+| GitHub token (deprecated, mctlhq/mctl-api#525) | Opaque token no static secret matches | GitHub API |
 
-Get a token: run `gh auth token` or visit [mctl.ai/mcp](https://mctl.ai/mcp) to sign in and copy a pre-filled config. Your GitHub account must be a member of the `mctlhq` organization.
+Get a token: sign in with the mctl CLI (`mctl auth login`, browser sign-in through auth.mctl.ai; see [REST API](#rest-api) for using it with curl), or visit [mctl.ai/mcp](https://mctl.ai/mcp) to connect an MCP client through OAuth. A GitHub token as the bearer still works but is deprecated and will stop being accepted (mctlhq/mctl-api#525).
 
 ### Authorization group freshness
 
@@ -263,21 +274,29 @@ silently stripping every session's access.
 # Health check
 curl https://api.mctl.ai/healthz
 
+# Sign in once with the mctl CLI (mctl-gitops cli/mctl): browser sign-in
+# through auth.mctl.ai. `mctl auth status` renews an expired access token.
+mctl auth login
+mctl auth status
+# The access token is stored in <user config dir>/mctl/api-token.json:
+# ~/Library/Application Support/mctl on macOS, ~/.config/mctl on Linux.
+TOKEN=$(jq -r .token.access_token "$HOME/.config/mctl/api-token.json")
+
 # List tenants
-curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/tenants
+curl -H "Authorization: Bearer $TOKEN" https://api.mctl.ai/api/v1/tenants
 
 # List services
-curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/services
+curl -H "Authorization: Bearer $TOKEN" https://api.mctl.ai/api/v1/services
 
 # Service status
-curl -H "Authorization: Bearer $(gh auth token)" https://api.mctl.ai/api/v1/status/billing/payment-api
+curl -H "Authorization: Bearer $TOKEN" https://api.mctl.ai/api/v1/status/billing/payment-api
 
 # Service logs (last 50 lines, past 30 minutes)
-curl -H "Authorization: Bearer $(gh auth token)" \
+curl -H "Authorization: Bearer $TOKEN" \
      "https://api.mctl.ai/api/v1/logs/billing/payment-api?lines=50&since=30m"
 
 # Trigger a deploy
-curl -H "Authorization: Bearer $(gh auth token)" \
+curl -H "Authorization: Bearer $TOKEN" \
      -H "Content-Type: application/json" \
      -d '{"team_name":"billing","component_name":"payment-api","action":"deploy","git_tag":"v1.2.0"}' \
      https://api.mctl.ai/api/v1/operations/deploy-service/execute
@@ -357,37 +376,53 @@ Surfaces correlate to it; they never own its lifecycle.
 
 ### MCP Setup
 
-The MCP endpoint is available at `https://api.mctl.ai/mcp` (Streamable HTTP). All clients use the same auth — a GitHub token passed as a Bearer header.
+The MCP endpoint is `https://api.mctl.ai/mcp` (Streamable HTTP). Clients connect with the URL alone and sign in through MCTL (auth.mctl.ai) with the standard MCP authorization flow (OAuth 2.1, PKCE, dynamic client registration). No config carries a token, and no Client ID or Secret is needed. The same per-client steps are on [docs.mctl.ai](https://docs.mctl.ai/mcp/connecting). A GitHub token as the bearer is deprecated (mctlhq/mctl-api#525).
 
-**Copilot CLI** — add to `~/.copilot/mcp-config.json`:
+**Claude.ai** and **Claude Desktop**: Settings → Connectors → Add custom connector, URL `https://api.mctl.ai/mcp`, leave the OAuth Client ID and Secret empty, then Connect. A connector added on Claude.ai shows up in Claude Desktop too.
+
+**Claude Code**:
+
+```bash
+claude mcp add --transport http mctl https://api.mctl.ai/mcp
+```
+
+Then run `/mcp`, choose **mctl** → Authenticate.
+
+**Cursor**: add to `~/.cursor/mcp.json` (or Cursor Settings → MCP → Add server), then sign in to **mctl** in Cursor's MCP settings:
 
 ```json
 {
   "mcpServers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": { "Authorization": "Bearer <your-github-token>" }
-    }
+    "mctl": { "url": "https://api.mctl.ai/mcp" }
   }
 }
 ```
 
-**Claude Desktop** (Streamable HTTP) — add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+**VS Code**: create `.vscode/mcp.json`, start the server from the file and accept the sign-in prompt (needs a recent VS Code with GitHub Copilot Chat):
+
+```json
+{
+  "servers": {
+    "mctl": { "type": "http", "url": "https://api.mctl.ai/mcp" }
+  }
+}
+```
+
+**Gemini CLI**: add to `~/.gemini/settings.json`, then run `/mcp auth mctl`. The sign-in needs a browser on the same machine, so it does not work over SSH.
 
 ```json
 {
   "mcpServers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": { "Authorization": "Bearer <your-github-token>" }
-    }
+    "mctl": { "httpUrl": "https://api.mctl.ai/mcp", "trust": true }
   }
 }
 ```
 
-**Claude Desktop** (stdio, local binary):
+**Windsurf** and **Copilot CLI**: MCTL sign-in is not enabled for them yet. Until it is, connect from Claude Code, Cursor, VS Code or Gemini CLI.
+
+**Other clients**: any client that implements MCP authorization finds the sign-in on its own from the first `401` (discovery: `https://api.mctl.ai/.well-known/oauth-protected-resource`). Clients without it cannot connect. Continue.dev has not been tested with MCTL sign-in.
+
+**Local stdio binary** (development): `cmd/mcp` serves the same tools over stdio and forwards each call to the REST API with the token in `MCTL_API_TOKEN`, for example the access token from `mctl auth login` (see [REST API](#rest-api); it expires, so refresh it with `mctl auth status`).
 
 ```bash
 go install github.com/mctlhq/mctl-api/cmd/mcp@latest
@@ -398,60 +433,9 @@ go install github.com/mctlhq/mctl-api/cmd/mcp@latest
   "mcpServers": {
     "mctl": {
       "command": "/Users/<you>/go/bin/mcp",
-      "env": { "MCTL_API_URL": "https://api.mctl.ai" }
+      "env": { "MCTL_API_URL": "https://api.mctl.ai", "MCTL_API_TOKEN": "<access token>" }
     }
   }
-}
-```
-
-**Cursor** — Settings → Cursor Settings → MCP → Add server (same JSON as Copilot CLI).
-
-**VS Code** — create `.vscode/mcp.json`:
-
-```json
-{
-  "servers": {
-    "mctl": {
-      "type": "http",
-      "url": "https://api.mctl.ai/mcp",
-      "headers": { "Authorization": "Bearer ${input:mctlToken}" }
-    }
-  },
-  "inputs": [
-    { "id": "mctlToken", "type": "promptString", "description": "GitHub token (run: gh auth token)", "password": true }
-  ]
-}
-```
-
-**Windsurf** — Settings → Windsurf Settings → MCP → Add server (same JSON as Copilot CLI).
-
-**Gemini CLI** — add to `~/.gemini/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "mctl": {
-      "httpUrl": "https://api.mctl.ai/mcp",
-      "headers": { "Authorization": "Bearer <your-github-token>" }
-    }
-  }
-}
-```
-
-**Continue.dev** — add to `~/.continue/config.json`:
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "mctl",
-      "transport": {
-        "type": "streamable-http",
-        "url": "https://api.mctl.ai/mcp",
-        "headers": { "Authorization": "Bearer <your-github-token>" }
-      }
-    }
-  ]
 }
 ```
 
@@ -462,7 +446,7 @@ go install github.com/mctlhq/mctl-api/cmd/mcp@latest
 | Tool | Description |
 |------|-------------|
 | `mctl_list_tenants` | List all team workspaces with quotas |
-| `mctl_list_services` | List services, optional team filter |
+| `mctl_list_services` | List catalogue services and ArgoCD applications in a team's namespace, optional team filter |
 | `mctl_get_tenant` | Get workspace details and members |
 | `mctl_get_service_status` | ArgoCD health + sync state |
 | `mctl_get_service_config` | Full service config from GitOps repo |
@@ -521,9 +505,6 @@ vault kv put platform/mctl-api/argocd-token token="<token>"
 
 # Backstage service token
 vault kv put platform/mctl-api/backstage-token token="<token>"
-
-# Dex SSO client secret
-vault kv put platform/mctl-api/sso client-id="mctl-api" client-secret="<secret>"
 ```
 
 ## Release Process
@@ -552,3 +533,7 @@ Apache 2.0
 ## Portal tool allowlist
 
 `api.mctl.ai/mcp` is one upstream of the private aggregate portal `mcp.mctl.ai` (mctlhq/.github#35). The portal exposes a tool only when its mapping carries an explicit `enabled: true` for it and hides one it has an entry for with `enabled: false`; the mapping is kept at `default_disabled: true` plus an explicit entry for every tool. `docs/portal-allowlist.json` is the source of truth; `internal/mcp/portal_allowlist_test.go` fails the build when the set of registered tools differs from the file, when an enabled tool carries no `reason`, or when an enabled tool that is not recorded read-only in `internal/mcp/annotations_test.go` is missing from the `mutatingOnPortal` map in that test. Exposing a mutating tool is therefore a reviewed Go change naming what it changes, not a JSON edit — and it grants visibility only: the API's own authentication, team scope and role checks decide whether the call succeeds. Publishing the decision is automatic. When a change to `docs/portal-allowlist.json` lands on `main`, `.github/workflows/portal-allowlist-dispatch.yml` sends the file to mctlhq/mctl-gitops. There it is vendored byte-identical and opened as a PR whose `cloudflare-plan` names every tool that flips; the portal changes only when that PR merges and an approved `cloudflare-apply` runs (mctlhq/mctl-gitops#1370). Nothing in this repository talks to Cloudflare any more. The gitops side refuses a file that leaves a synced tool undecided, lets a widening through only once a human edits its `baseline.json` in that PR, and checks nightly that its vendored copy still matches this file. A portal access token carries the tool set as of its issuance; re-issue tokens after the apply.
+
+## Health endpoints
+
+`GET /healthz` is liveness. `GET /readyz` returns 503 only when a store failed its startup init, the pod's own gitops checkout has never synced (`checks.gitops_sync=never_synced`), or the pod is draining on shutdown; dependency probe failures (gitops, postgres, dex, vault) never fail readiness because every replica shares them. Dependency health is reported in the `/readyz` body (`checks`, `dependencies`) and in the `mctl_api_dependency_up{check}` gauge.

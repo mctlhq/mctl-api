@@ -16,7 +16,8 @@ import (
 // global-workflow-completion-hook reads ARGO_WEBHOOK_SECRET from an
 // ExternalSecret that exists only in the argo-workflows namespace, and exits
 // silently when it is absent. operations.WorkflowNamespace sends only
-// create-tenant, delete-tenant*, openclaw-*, platform-skill-* and mctl-agents-*
+// create-tenant, delete-tenant*, add/remove-custom-domain, platform-skill-* and
+// mctl-agents-*
 // there. Everything else — deploy-service, provision-database, retire-service,
 // preview-deploy, scale-service, rollback-service — runs in the tenant's own
 // namespace, where the secret does not exist and the hook therefore never

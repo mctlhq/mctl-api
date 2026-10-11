@@ -35,10 +35,15 @@ type fakeBackend struct {
 	err        error
 	provisions []auth.Identity
 	logins     []string
+	// during runs inside Provision, while the resolver holds no lock.
+	during func()
 }
 
 func (f *fakeBackend) Provision(_ context.Context, id auth.Identity) (*Principal, error) {
 	f.provisions = append(f.provisions, id)
+	if f.during != nil {
+		f.during()
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -306,5 +311,27 @@ func TestResolverRemembersAFailureBriefly(t *testing.T) {
 	}
 	if len(b.provisions) != 2 {
 		t.Fatalf("the store was not asked again after the window")
+	}
+}
+
+// A Forget that lands while a resolution is reading the store must win: the
+// in-flight read may predate the unlink or merge that prompted the Forget,
+// so its answer is returned once but not cached.
+func TestResolverForgetBeatsAnInFlightResolution(t *testing.T) {
+	b := &fakeBackend{}
+	r := newResolver(b, nil, false)
+	b.during = func() { r.Forget("prn_" + githubAlice.Provider + "|" + githubAlice.Issuer + "|" + githubAlice.Subject) }
+	if _, err := r.ResolvePrincipal(context.Background(), githubAlice); err != nil {
+		t.Fatal(err)
+	}
+	b.during = nil
+	if _, err := r.ResolvePrincipal(context.Background(), githubAlice); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.provisions) != 2 {
+		t.Fatalf("store reads = %d, want 2: the answer read across a Forget was cached", len(b.provisions))
+	}
+	if _, err := r.ResolvePrincipal(context.Background(), githubAlice); err != nil || len(b.provisions) != 2 {
+		t.Fatalf("store reads = %d (%v), want the clean read cached", len(b.provisions), err)
 	}
 }

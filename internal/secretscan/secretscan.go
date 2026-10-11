@@ -13,8 +13,9 @@
 // limitations under the License.
 
 // Package secretscan provides best-effort regex detection of common secret
-// patterns in text payloads. Used by the OpenClaw skill/identity save handlers
-// to reject content that appears to embed credentials.
+// patterns in text payloads. Used by the platform-skill publish, work-item
+// input and evidence handlers to reject content that appears to embed
+// credentials.
 package secretscan
 
 import "regexp"

@@ -117,12 +117,13 @@ func TestAgentPrincipalGate_NonAgentWithHeaderIsRefused(t *testing.T) {
 
 	telegram := auth.NewSurfaceUser("telegram")
 	for name, u := range map[string]*auth.User{
-		"human":             auth.NewGitHubUser("alice", nil),
-		"surface principal": telegram,
-		"relayed subject":   auth.NewRelayedUser("alice", nil, telegram),
-		"service principal": auth.NewServiceUser(),
-		"usage writer":      auth.NewUsageWriterUser(),
-		"evidence writer":   auth.NewEvidenceWriterUser(),
+		"human":              auth.NewGitHubUser("alice", nil),
+		"surface principal":  telegram,
+		"relayed subject":    auth.NewRelayedUser("alice", nil, telegram),
+		"service principal":  auth.NewServiceUser(),
+		"usage writer":       auth.NewUsageWriterUser(),
+		"evidence writer":    auth.NewEvidenceWriterUser(),
+		"registry publisher": auth.NewRegistryPublisherUser(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec, next := runGate(h, delegatedReq(http.MethodGet, allowlistedRoute, u, "xr_1"))

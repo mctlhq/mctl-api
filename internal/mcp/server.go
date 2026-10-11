@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -42,6 +43,16 @@ type Server struct {
 	apiToken   string
 	httpClient *http.Client
 	mcpServer  *server.MCPServer
+
+	// ownerChecker answers the tools/list filter for owner-only tools. Unset
+	// (stdio) means no filtering; see ownerOnlyToolFilter.
+	ownerChecker atomic.Pointer[TenantOwnerChecker]
+
+	// registeredTools is the tool count snapshotted at the end of
+	// NewMCPServer. ownerOnlyToolFilter uses it to tell a tools/call (one
+	// tool) from a tools/list without reading the live registry back through
+	// mcpServer on every request. Zero until the snapshot is taken.
+	registeredTools atomic.Int64
 }
 
 // NewServer creates a new MCP server. publicURL defaults to the trimmed
@@ -56,7 +67,8 @@ func NewServer(apiURL, apiToken string) *Server {
 		publicURL: trimmed,
 		apiToken:  apiToken,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: tracingTransport{base: http.DefaultTransport},
 		},
 	}
 }
@@ -166,6 +178,13 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		// deliver notifications/resources/updated to, so the capability would
 		// be advertised and undeliverable.
 		server.WithResourceCapabilities(false, false),
+		// mcp-go applies the filter to tools/list and again to tools/call, so
+		// a hidden tool is also not callable (it answers "not found").
+		server.WithToolFilter(s.ownerOnlyToolFilter),
+		// Reports a failed role lookup on tools/call explicitly.
+		server.WithToolHandlerMiddleware(s.ownerOnlyCallMiddleware),
+		// Outermost-last: spans every tool call, continuing _meta/HTTP trace context.
+		server.WithToolHandlerMiddleware(s.tracingMiddleware),
 	)
 	s.mcpServer = srv
 
@@ -197,14 +216,6 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	// Write tools (trigger workflows).
 	srv.AddTool(s.toolScaleService())
 	srv.AddTool(s.toolDeployService())
-	srv.AddTool(s.toolDeployOpenClaw())
-	srv.AddTool(s.toolResumeOpenClawDeploy())
-	srv.AddTool(s.toolGetOpenClawSizingRecommendation())
-	srv.AddTool(s.toolApplyOpenClawResourceProfile())
-	srv.AddTool(s.toolListOpenClawSkills())
-	srv.AddTool(s.toolReadOpenClawSkill())
-	srv.AddTool(s.toolSaveOpenClawSkill())
-	srv.AddTool(s.toolDeleteOpenClawSkill())
 	srv.AddTool(s.toolListPlatformSkills())
 	srv.AddTool(s.toolReadPlatformSkill())
 	srv.AddTool(s.toolListTenantSkillBindings())
@@ -212,10 +223,6 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolDisableTenantSkill())
 	srv.AddTool(s.toolPublishPlatformSkill())
 	srv.AddTool(s.toolDeprecatePlatformSkill())
-	srv.AddTool(s.toolListOpenClawIdentity())
-	srv.AddTool(s.toolReadOpenClawIdentity())
-	srv.AddTool(s.toolSaveOpenClawIdentity())
-	srv.AddTool(s.toolDeleteOpenClawIdentity())
 	srv.AddTool(s.toolCreateTenant())
 	srv.AddTool(s.toolProvisionDatabase())
 	srv.AddTool(s.toolRetireService())
@@ -228,6 +235,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolRemoveCustomDomain())
 	srv.AddTool(s.toolListDomains())
 	srv.AddTool(s.toolVerifyDomain())
+	srv.AddTool(s.toolErpactListSites())
+	srv.AddTool(s.toolErpactCreateSite())
+	srv.AddTool(s.toolErpactSiteStatus())
 
 	// Incident tools.
 	srv.AddTool(s.toolListIncidents())
@@ -263,6 +273,13 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolPlanEpicWave())
 	srv.AddTool(s.toolStartEpicWave())
 
+	// Canonical WorkItems: MCP as a second surface (mctl-api#341).
+	srv.AddTool(s.toolGetWorkItem())
+	srv.AddTool(s.toolListWorkItemExecutions())
+	srv.AddTool(s.toolListWorkItemSnapshots())
+	srv.AddTool(s.toolListWorkItemExecutionRequests())
+	srv.AddTool(s.toolRequestWorkItemExecution())
+
 	// Cloudflare MCP portal (dispatch only — no Cloudflare credential here).
 	srv.AddTool(s.toolTriggerPortalServerAuthApply())
 
@@ -288,6 +305,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 
 	// Prompts (explicit skill invocation, e.g. /mctl:platform-skill in Claude Code).
 	srv.AddPrompt(s.promptPlatformSkill())
+
+	// Snapshot once, after the last AddTool: the filter reads only this.
+	s.registeredTools.Store(int64(len(srv.ListTools())))
 
 	return srv
 }
@@ -358,7 +378,16 @@ func (s *Server) toolListServices() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("List Services"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription("List deployed services on the platform. Shows service name, team, image tag, host, and database status. Optionally filter by team name."),
+		mcplib.WithDescription(`List the services of a team: catalogue services and every ArgoCD application deployed into the team's namespace.
+
+Each row has "managed":
+- "catalogue": onboarded through mctl; deploy, rollback and scale apply.
+- "external": deployed by the team's own ArgoCD project; read-only here.
+- "platform": deployed by the platform into the team's namespace; read-only.
+
+Rows carry sync status, health, the public hosts and the images in use. For a row whose "argoApp" equals "{team}-{name}", pass team and name to mctl_get_service_status and mctl_get_service_logs.
+
+If "complete" is false, ArgoCD could not be read: only catalogue rows are listed and the result must not be reported as "no services". Optionally filter by team name.`),
 		mcplib.WithString("team",
 			mcplib.Description("Filter by team name (optional). If omitted, lists all services."),
 		),
@@ -483,8 +512,11 @@ Pre-conditions (BEFORE calling onboard):
   .github/workflows/ci.yml with a "deploy" job that POSTs to
   https://api.mctl.ai/api/v1/operations/deploy-service/execute on push to main.
   The same scaffolding guide ships the canonical SemVer-bumping job snippet.
-- That job needs a GitHub Actions secret MCTL_GITHUB_TOKEN — a classic
-  GitHub PAT with scope "read:user" — to authenticate to mctl-api.
+- That job authenticates with its own GitHub Actions OIDC token
+  (permissions: id-token: write, audience https://api.mctl.ai); no secret is
+  stored. It may only deploy a tag of the component onboarded with
+  dockerfile_repo set to that same repository, sending a flat body with
+  dockerfile_path too when the Dockerfile is not at the repo root.
 
 Order of operations for a brand-new repo:
 1. (One-time) mctl_grant_repo_access — install the GitHub App if mctl_list_repos doesn't see the repo.
@@ -542,7 +574,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			mcplib.Description("Plaintext environment variables, newline-separated KEY=value"),
 		),
 		mcplib.WithString("secret_env_vars",
-			mcplib.Description("Secret environment variables, newline-separated KEY=value. Stored in Vault, never echoed back in logs or responses."),
+			mcplib.Description("Secret environment variables, newline-separated KEY=value. Each key must be an environment variable name ([A-Za-z_][A-Za-z0-9_]*); values are single-line. Stored in Vault, never echoed back in logs or responses."),
 		),
 		mcplib.WithString("skip_health_check",
 			mcplib.Description("Skip the post-deploy health check: 'true' or 'false' (default: false). Only set 'true' for a worker-service that has no HTTP health endpoint."),
@@ -600,12 +632,12 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		if params["action"] == "update-config" || params["action"] == "deploy" {
 			if v, ok := req.GetArguments()["env_vars"]; ok {
 				if s, _ := v.(string); s == "" {
-					params["env_vars"] = "__CLEAR__"
+					params["env_vars"] = operations.ClearSentinel
 				}
 			}
 			if v, ok := req.GetArguments()["secret_env_vars"]; ok {
 				if s, _ := v.(string); s == "" {
-					params["secret_env_vars"] = "__CLEAR__"
+					params["secret_env_vars"] = operations.ClearSentinel
 				}
 			}
 		}
@@ -681,271 +713,6 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		body, err := s.apiPost(ctx, "/api/v1/operations/create-tenant/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create tenant: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
-func (s *Server) toolDeployOpenClaw() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_deploy_openclaw",
-		mcplib.WithTitleAnnotation("Start OpenClaw Onboarding"),
-		mcplib.WithReadOnlyHintAnnotation(false),
-		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithIdempotentHintAnnotation(false),
-		mcplib.WithDescription(`Prepare a self-service OpenClaw deployment for a team.
-
-This does not deploy immediately. It performs preflight checks, returns a secure Telegram bot-token intake URL,
-and tells you how to resume once the secret has been saved in Vault.
-
-After the later resume step finishes and the dashboard is healthy, the user should open the OpenClaw dashboard and connect Codex in one of two ways:
-- Overview -> Connect OpenAI Codex
-- chat command: /connect codex
-
-Use this for Claude-assisted OpenClaw onboarding instead of raw deploy-service.`),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name that will own the OpenClaw service")),
-		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
-		mcplib.WithString("telegram_owner_ids", mcplib.Description("Comma-separated list of Telegram user IDs authorized for the bot (e.g. \"210408407,317748297\"). At least one of telegram_owner_ids or telegram_owner_id is required.")),
-		mcplib.WithString("telegram_owner_id", mcplib.Description("Deprecated: single Telegram user ID. Prefer telegram_owner_ids for multi-owner support.")),
-		mcplib.WithString("default_model", mcplib.Description("Default primary model (default: openai-codex/gpt-5.4)")),
-		mcplib.WithString("host", mcplib.Description("Explicit host override; defaults to {team}-{service}.mctl.ai")),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		params := map[string]string{
-			"team_name":          stringArg(req, "team_name"),
-			"component_name":     stringArg(req, "component_name"),
-			"telegram_owner_ids": stringArg(req, "telegram_owner_ids"),
-			"telegram_owner_id":  stringArg(req, "telegram_owner_id"),
-			"default_model":      stringArg(req, "default_model"),
-			"host":               stringArg(req, "host"),
-		}
-		body, err := s.apiPost(ctx, "/api/v1/openclaw/deploy/start", params)
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to start OpenClaw onboarding: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
-func (s *Server) toolResumeOpenClawDeploy() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_resume_openclaw_deploy",
-		mcplib.WithTitleAnnotation("Resume OpenClaw Onboarding"),
-		mcplib.WithReadOnlyHintAnnotation(false),
-		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithIdempotentHintAnnotation(false),
-		mcplib.WithDescription(`Resume OpenClaw onboarding after the Telegram bot token has been saved through the secure browser form.
-
-This provisions the database if needed and submits the normal deploy-service workflow using the hardened openclaw template.
-
-When this succeeds, tell the user exactly how to connect Codex:
-- open the dashboard
-- either go to Overview -> Connect OpenAI Codex
-- or type /connect codex in the OpenClaw chat`),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name that owns the service")),
-		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
-		mcplib.WithString("telegram_owner_ids", mcplib.Description("Comma-separated list of Telegram user IDs authorized for the bot (e.g. \"210408407,317748297\"). At least one of telegram_owner_ids or telegram_owner_id is required.")),
-		mcplib.WithString("telegram_owner_id", mcplib.Description("Deprecated: single Telegram user ID. Prefer telegram_owner_ids for multi-owner support.")),
-		mcplib.WithString("default_model", mcplib.Description("Default primary model (default: openai-codex/gpt-5.4)")),
-		mcplib.WithString("host", mcplib.Description("Explicit host override; defaults to {team}-{service}.mctl.ai")),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		params := map[string]string{
-			"team_name":          stringArg(req, "team_name"),
-			"component_name":     stringArg(req, "component_name"),
-			"telegram_owner_ids": stringArg(req, "telegram_owner_ids"),
-			"telegram_owner_id":  stringArg(req, "telegram_owner_id"),
-			"default_model":      stringArg(req, "default_model"),
-			"host":               stringArg(req, "host"),
-		}
-		body, err := s.apiPost(ctx, "/api/v1/openclaw/deploy/resume", params)
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to resume OpenClaw onboarding: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
-func (s *Server) toolGetOpenClawSizingRecommendation() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_get_openclaw_sizing_recommendation",
-		mcplib.WithTitleAnnotation("Get OpenClaw Sizing Recommendation"),
-		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription("Read VictoriaMetrics history for an OpenClaw service and return the recommended resource profile."),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
-		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
-		mcplib.WithString("lookback_hours", mcplib.Description("History window in hours (default: 24)")),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		team := stringArg(req, "team_name")
-		component := stringArg(req, "component_name")
-		if component == "" {
-			component = "openclaw"
-		}
-		path := fmt.Sprintf("/api/v1/openclaw/%s/%s/sizing", url.PathEscape(team), url.PathEscape(component))
-		if lookback := stringArg(req, "lookback_hours"); lookback != "" {
-			path += "?lookback_hours=" + url.QueryEscape(lookback)
-		}
-		body, err := s.apiGet(ctx, path)
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get OpenClaw sizing recommendation: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
-func (s *Server) toolApplyOpenClawResourceProfile() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_apply_openclaw_resource_profile",
-		mcplib.WithTitleAnnotation("Apply OpenClaw Resource Profile"),
-		mcplib.WithReadOnlyHintAnnotation(false),
-		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithIdempotentHintAnnotation(true),
-		mcplib.WithDescription("Apply one of the named OpenClaw runtime profiles by patching the service values through GitOps."),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
-		mcplib.WithString("component_name", mcplib.Description("Service name (default: openclaw)")),
-		mcplib.WithString("profile",
-			mcplib.Required(),
-			mcplib.Description("Named profile to apply"),
-			mcplib.Enum("startup", "steady-medium", "steady-small"),
-		),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		team := stringArg(req, "team_name")
-		component := stringArg(req, "component_name")
-		if component == "" {
-			component = "openclaw"
-		}
-		body, err := s.apiPost(ctx, fmt.Sprintf("/api/v1/openclaw/%s/%s/resource-profile", url.PathEscape(team), url.PathEscape(component)), map[string]string{
-			"profile": stringArg(req, "profile"),
-		})
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to apply OpenClaw resource profile: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
-func (s *Server) toolListOpenClawSkills() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_list_openclaw_skills",
-		mcplib.WithTitleAnnotation("List OpenClaw Skills"),
-		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription(`List OpenClaw skills managed in gitops for a team.
-
-Reads platform-gitops/services/{team}/openclaw/skills/*.md. These files drive the per-tenant {team}-openclaw-skills ConfigMap; ArgoCD plus a pod-side sidecar fan them out into the live agent workspace within ~1-2 minutes of commit.
-
-Requires owner role on the team.`),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		team := stringArg(req, "team_name")
-		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/openclaw/%s/skills", url.PathEscape(team)))
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list OpenClaw skills: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
-func (s *Server) toolReadOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_read_openclaw_skill",
-		mcplib.WithTitleAnnotation("Read OpenClaw Skill"),
-		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription(`Return the raw content of a single skill from gitops.
-
-Reads platform-gitops/services/{team}/openclaw/skills/{skill_name}.md. This is the source of truth that feeds the tenant's openclaw-skills ConfigMap and, via the sidecar fan-out, the running agent's workspace.
-
-Requires owner role on the team.`),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
-		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name (kebab-case, without .md)")),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		team := stringArg(req, "team_name")
-		name := stringArg(req, "skill_name")
-		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/openclaw/%s/skills/%s", url.PathEscape(team), url.PathEscape(name)))
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to read OpenClaw skill: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
-func (s *Server) toolSaveOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_save_openclaw_skill",
-		mcplib.WithTitleAnnotation("Save OpenClaw Skill"),
-		mcplib.WithReadOnlyHintAnnotation(false),
-		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithIdempotentHintAnnotation(true),
-		mcplib.WithDescription(`Saves a skill to the tenant's OpenClaw agent.
-
-Commits to gitops at platform-gitops/services/{team}/openclaw/skills/{skill_name}.md; ArgoCD syncs a per-tenant {team}-openclaw-skills ConfigMap which a pod-side sidecar fans out into the live workspace. New skills become available in the running agent within ~1-2 minutes of commit.
-
-Returns workflow_name — wait for it to succeed before reporting the save to the operator.
-
-Requires owner role on the team. Per-skill content cap: 100 KB. Per-tenant caps: 100 skills, 900 KB total. Write rate limit: 30 per hour per user (shared with identity saves). Content must not embed secrets — saves are rejected on regex match (GitHub PATs, AWS keys, JWTs, private keys, etc.); use mctl_* runtime tools for credentials.`),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
-		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name (kebab-case, 2-64 chars)")),
-		mcplib.WithString("content", mcplib.Required(), mcplib.Description("Full SKILL.md content as Markdown (UTF-8, ≤100 KB)")),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		team := stringArg(req, "team_name")
-		params := map[string]string{
-			"skill_name": stringArg(req, "skill_name"),
-			"content":    stringArg(req, "content"),
-		}
-		body, err := s.apiPost(ctx, fmt.Sprintf("/api/v1/openclaw/%s/skills", url.PathEscape(team)), params)
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to save OpenClaw skill: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
-func (s *Server) toolDeleteOpenClawSkill() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_delete_openclaw_skill",
-		mcplib.WithTitleAnnotation("Remove OpenClaw Skill"),
-		mcplib.WithReadOnlyHintAnnotation(false),
-		mcplib.WithDestructiveHintAnnotation(true),
-		mcplib.WithIdempotentHintAnnotation(true),
-		mcplib.WithDescription(`Removes a skill from the tenant's OpenClaw agent.
-
-Deletes platform-gitops/services/{team}/openclaw/skills/{skill_name}.md. ArgoCD removes the key from the {team}-openclaw-skills ConfigMap; the pod-side sidecar prunes the workspace file. The skill disappears from the running agent within ~1-2 minutes of commit.
-
-Idempotent — succeeds with a no-op commit skip if the file is already absent.
-
-Requires owner role on the team.`),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
-		mcplib.WithString("skill_name", mcplib.Required(), mcplib.Description("Skill name")),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		team := stringArg(req, "team_name")
-		name := stringArg(req, "skill_name")
-		body, err := s.apiDelete(ctx, fmt.Sprintf("/api/v1/openclaw/%s/skills/%s", url.PathEscape(team), url.PathEscape(name)))
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete OpenClaw skill: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}
@@ -1065,7 +832,7 @@ func (s *Server) toolPublishPlatformSkill() (mcplib.Tool, server.ToolHandlerFunc
 		mcplib.WithString("visibility", mcplib.Required(), mcplib.Enum("public", "tenant", "admin", "platform-internal"), mcplib.Description("Skill visibility")),
 		mcplib.WithString("status", mcplib.Enum("draft", "active", "deprecated"), mcplib.Description("Skill status, default active")),
 		mcplib.WithString("owner", mcplib.Required(), mcplib.Description("Owning team or group")),
-		mcplib.WithString("runtimes", mcplib.Description("Comma-separated runtimes, for example mcp,codex,openclaw")),
+		mcplib.WithString("runtimes", mcplib.Description("Comma-separated runtimes, for example mcp,codex")),
 		mcplib.WithString("content", mcplib.Required(), mcplib.Description("Full SKILL.md content")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -1113,131 +880,6 @@ func (s *Server) toolDeprecatePlatformSkill() (mcplib.Tool, server.ToolHandlerFu
 	return tool, handler
 }
 
-// openClawIdentityFileEnum is the fixed set of identity override filenames a
-// tenant can manage. Matches the allowlist enforced by the HTTP handler and
-// workflow templates as defense-in-depth.
-var openClawIdentityFileEnum = []string{"AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md"}
-
-func (s *Server) toolListOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_list_openclaw_identity",
-		mcplib.WithTitleAnnotation("List OpenClaw Identity Overrides"),
-		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription(`List OpenClaw identity override files managed in gitops for a team.
-
-Reads platform-gitops/services/{team}/openclaw/identity/*.md. These files drive the per-tenant {team}-openclaw-identity ConfigMap; ArgoCD plus a pod-side sidecar fan them out into the live agent workspace within ~1-2 minutes of commit. An empty list means the tenant is on the image-shipped defaults.
-
-Requires owner role on the team.`),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		team := stringArg(req, "team_name")
-		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/openclaw/%s/identity", url.PathEscape(team)))
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list OpenClaw identity files: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
-func (s *Server) toolReadOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_read_openclaw_identity",
-		mcplib.WithTitleAnnotation("Read OpenClaw Identity Override"),
-		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription(`Return the raw content of a single identity override file from gitops.
-
-Reads platform-gitops/services/{team}/openclaw/identity/{file_name}. file_name must be one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md — any other value returns 400. Returns 404 if the tenant has not saved an override for that filename (agent is using the image default).
-
-Requires owner role on the team.`),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
-		mcplib.WithString("file_name", mcplib.Required(), mcplib.Enum(openClawIdentityFileEnum...), mcplib.Description("Identity filename (AGENTS.md | SOUL.md | IDENTITY.md | USER.md | TOOLS.md)")),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		team := stringArg(req, "team_name")
-		name := stringArg(req, "file_name")
-		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/openclaw/%s/identity/%s", url.PathEscape(team), url.PathEscape(name)))
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to read OpenClaw identity file: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
-func (s *Server) toolSaveOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_save_openclaw_identity",
-		mcplib.WithTitleAnnotation("Save OpenClaw Identity Override"),
-		mcplib.WithReadOnlyHintAnnotation(false),
-		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithIdempotentHintAnnotation(true),
-		mcplib.WithDescription(`Saves an identity override to the tenant's OpenClaw agent.
-
-Commits to gitops at platform-gitops/services/{team}/openclaw/identity/{file_name}; ArgoCD syncs a per-tenant {team}-openclaw-identity ConfigMap which a pod-side sidecar fans out into the live workspace, overriding the image-shipped default. Changes become visible in the running agent within ~1-2 minutes of commit.
-
-file_name must be one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md — any other value is rejected (400).
-
-Returns workflow_name — wait for it to succeed before reporting the save to the operator.
-
-Requires owner role on the team. Per-file content cap: 100 KB. Write rate limit: 30 per hour per user (shared with skill saves). Content must not embed secrets — saves are rejected on regex match; use mctl_* runtime tools for credentials.`),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
-		mcplib.WithString("file_name", mcplib.Required(), mcplib.Enum(openClawIdentityFileEnum...), mcplib.Description("Identity filename (AGENTS.md | SOUL.md | IDENTITY.md | USER.md | TOOLS.md)")),
-		mcplib.WithString("content", mcplib.Required(), mcplib.Description("Full file content as Markdown (UTF-8, ≤100 KB)")),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		team := stringArg(req, "team_name")
-		params := map[string]string{
-			"file_name": stringArg(req, "file_name"),
-			"content":   stringArg(req, "content"),
-		}
-		body, err := s.apiPost(ctx, fmt.Sprintf("/api/v1/openclaw/%s/identity", url.PathEscape(team)), params)
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to save OpenClaw identity file: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
-func (s *Server) toolDeleteOpenClawIdentity() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_delete_openclaw_identity",
-		mcplib.WithTitleAnnotation("Remove OpenClaw Identity Override"),
-		mcplib.WithReadOnlyHintAnnotation(false),
-		mcplib.WithDestructiveHintAnnotation(true),
-		mcplib.WithIdempotentHintAnnotation(true),
-		mcplib.WithDescription(`Removes an identity override from the tenant's OpenClaw agent.
-
-Deletes platform-gitops/services/{team}/openclaw/identity/{file_name}. ArgoCD removes the key from the {team}-openclaw-identity ConfigMap; the pod-side sidecar prunes the override and the agent falls back to the image-shipped default file within ~1-2 minutes of commit.
-
-file_name must be one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md.
-
-Idempotent — succeeds with a no-op commit skip if the file is already absent.
-
-Requires owner role on the team.`),
-		mcplib.WithString("team_name", mcplib.Required(), mcplib.Description("Team name")),
-		mcplib.WithString("file_name", mcplib.Required(), mcplib.Enum(openClawIdentityFileEnum...), mcplib.Description("Identity filename (AGENTS.md | SOUL.md | IDENTITY.md | USER.md | TOOLS.md)")),
-	)
-
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		team := stringArg(req, "team_name")
-		name := stringArg(req, "file_name")
-		body, err := s.apiDelete(ctx, fmt.Sprintf("/api/v1/openclaw/%s/identity/%s", url.PathEscape(team), url.PathEscape(name)))
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete OpenClaw identity file: %v", err)), nil
-		}
-		return mcplib.NewToolResultText(string(body)), nil
-	}
-
-	return tool, handler
-}
-
 func (s *Server) toolProvisionDatabase() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_provision_database",
 		mcplib.WithTitleAnnotation("Provision Database"),
@@ -1282,7 +924,7 @@ func (s *Server) toolGetTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Get Workspace Details"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription("Get details of a specific team workspace: members, quotas, and deployed services."),
+		mcplib.WithDescription("Get details of a specific team workspace: members, quotas, and services (same rows as mctl_list_services). If servicesComplete is false, ArgoCD could not be read and services deployed outside the catalogue are missing from the list."),
 		mcplib.WithString("name",
 			mcplib.Required(),
 			mcplib.Description("Tenant (workspace) name"),
@@ -1482,7 +1124,7 @@ After the browser flow completes, run mctl_sync_repos to register the newly acce
 
 For a fresh service the typical next step after sync is mctl_deploy_service action=onboard. That call
 expects the repo to already contain a Dockerfile (and, for auto-deploy on push, a .github/workflows/ci.yml
-with the canonical deploy job and the MCTL_GITHUB_TOKEN secret). If those are missing, see the
+with the canonical deploy job, which authenticates with its GitHub Actions OIDC token). If those are missing, see the
 copy-paste templates and onboard checklist at https://docs.mctl.ai/guides/scaffolding before calling onboard.`),
 		mcplib.WithString("team",
 			mcplib.Required(),
@@ -1870,6 +1512,83 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 			results = append(results, fmt.Sprintf("%s: %s", d.Domain, string(vBody)))
 		}
 		return mcplib.NewToolResultText(strings.Join(results, "\n")), nil
+	}
+
+	return tool, handler
+}
+
+// ERPact site tools (mctl-api#486, owner decision 2026-10-06): a temporary,
+// tenant-`erpact`-only stopgap in front of the tenant's own site-deployer —
+// see internal/api/handlers_erpact_sites.go. Provisional: removed once
+// Option B (an MCP endpoint in the deployer itself) ships.
+
+func (s *Server) toolErpactListSites() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_erpact_list_sites",
+		mcplib.WithTitleAnnotation("List ERPact Sites"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription("ERPact-specific and provisional (mctl-api#486): list tenant erpact's sites, with each one's lifecycle status (creating, active). Visible to and callable by tenant erpact's owners and platform admins only. A failed read of the deployer is reported as an error, never as an empty list."),
+	)
+
+	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiGet(ctx, "/api/v1/tenants/erpact/sites")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list erpact sites: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolErpactCreateSite() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_erpact_create_site",
+		mcplib.WithTitleAnnotation("Create ERPact Site"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`ERPact-specific and provisional (mctl-api#486): create a new site for tenant erpact. Requires the owner role on tenant erpact; only works for tenant erpact.
+
+Creation is long-running (end to end, minutes): this call only starts it and returns immediately with status "creating". Poll mctl_erpact_site_status with the same name to follow it to "active". There is a cap on how many sites tenant erpact may have through this tool.
+
+name must start with "erpact-", contain only lowercase letters, digits and hyphens, and not already exist.`),
+		mcplib.WithString("name",
+			mcplib.Required(),
+			mcplib.Description(`Site name, e.g. "erpact-acme". Must start with "erpact-".`),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		name, _ := req.GetArguments()["name"].(string)
+		body, err := s.apiPostJSON(ctx, "/api/v1/tenants/erpact/sites", map[string]string{"name": name})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create erpact site: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolErpactSiteStatus() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_erpact_site_status",
+		mcplib.WithTitleAnnotation("Get ERPact Site Status"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription("ERPact-specific and provisional (mctl-api#486): the lifecycle status of one tenant-erpact site (creating, active), for following up on mctl_erpact_create_site. Visible to and callable by tenant erpact's owners and platform admins only."),
+		mcplib.WithString("name",
+			mcplib.Required(),
+			mcplib.Description(`Site name, as passed to mctl_erpact_create_site, e.g. "erpact-acme".`),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		name, _ := req.GetArguments()["name"].(string)
+		body, err := s.apiGet(ctx, "/api/v1/tenants/erpact/sites/"+url.PathEscape(name)+"/status")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get erpact site status: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
 	}
 
 	return tool, handler
@@ -2741,7 +2460,7 @@ Admin-only. Returns workflow_name.`),
 		mcplib.WithString("service",
 			mcplib.Required(),
 			mcplib.Description("Which service-agent to run"),
-			mcplib.Enum("mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"),
+			mcplib.Enum("mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -2798,7 +2517,7 @@ Optional service/slug filters narrow the run scope. There is no force or unbound
 Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
 		mcplib.WithString("service",
 			mcplib.Description("Optional. Filter to one service. Leave empty to consider all services."),
-			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
+			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
 		),
 		mcplib.WithString("slug",
 			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
@@ -2839,7 +2558,7 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_re
 			// shepherd PRs); the shepherd must drive those to merge too.
 			// Keep aligned with internal/operations/registry.go entry for
 			// `mctl-agents-shepherd` and with the implementer's enum.
-			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
+			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
 		),
 		mcplib.WithString("slug",
 			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
@@ -2884,7 +2603,7 @@ Optional service filter narrows the sweep; dry_run=true prints every decision an
 Admin-only.`),
 		mcplib.WithString("service",
 			mcplib.Description("Optional. Reconcile only this service. Leave empty to sweep every service."),
-			mcplib.Enum("", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
+			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
 		),
 		mcplib.WithString("dry_run",
 			mcplib.Description("Set to 'true' to print every would-be flip without writing .status.yaml or opening any PR. Default 'false'."),
@@ -2983,7 +2702,7 @@ Admin-only.`),
 		mcplib.WithString("service",
 			mcplib.Required(),
 			mcplib.Description("Service owning the proposal."),
-			mcplib.Enum("mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
+			mcplib.Enum("mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
 		),
 		mcplib.WithString("slug",
 			mcplib.Required(),

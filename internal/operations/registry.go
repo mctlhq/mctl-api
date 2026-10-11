@@ -53,6 +53,12 @@ type Operation struct {
 	// execute handler bypasses the tenant-access check for these and uses
 	// the sentinel team "platform" when constructing the workflow.
 	AdminOnly bool `json:"adminOnly,omitempty"`
+	// MinRole is the least standing a caller needs on the operation's tenant
+	// (mctl-api#478). Every operation declares one: the zero value is not
+	// "anyone", it is a misconfiguration the execute path refuses. Platform
+	// admins satisfy every MinRole. RoleAdmin is what AdminOnly operations
+	// carry; RoleAuthenticated belongs to create-tenant alone.
+	MinRole Role `json:"minRole"`
 }
 
 // ParameterDef describes a single operation parameter.
@@ -139,6 +145,24 @@ var devLoopCorrelationParamPatterns = map[string]string{
 	"execution_request_id": correlationIDPattern,
 	"work_item_id":         correlationIDPattern,
 	"execution_id":         correlationIDPattern,
+}
+
+// traceparentParam declares the W3C trace context a traced mctl-agents worker
+// sends behind MCTL_TRACE_ARGO_PARAM (mctlhq/mctl-agents#195), so
+// StripUndeclared stops dropping it on the way to Argo. The CWFT maps it onto
+// the pod's TRACEPARENT env, never into a script (mctlhq/mctl-gitops, the
+// investigate and implement templates). Opaque here and correlation only: a
+// version-00 traceparent with lowercase hex ids, nothing else, and
+// OmitWhenEmpty so an untraced submit keeps its exact arguments.
+func traceparentParam() ParameterDef {
+	return ParameterDef{
+		Name:          "traceparent",
+		Type:          "string",
+		Required:      false,
+		OmitWhenEmpty: true,
+		Description:   "Optional. W3C traceparent of the submitting Temporal activity, for execution traces only (mctl-agents#195). Set by a traced DevLoop worker; omit otherwise.",
+		Pattern:       `^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`,
+	}
 }
 
 // devLoopCorrelationParams declares the DevLoopWorkflow's correlation
@@ -236,6 +260,20 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 			}
 		}
 	}
+	// create-tenant: a name that collides with a platform namespace is refused
+	// here, with a plain validation error, instead of after submission inside
+	// the workflow. Executor.Submit repeats the check for callers that do not
+	// come through this function.
+	if createsTenant(op) && IsReservedTenantName(input["tenant_name"]) {
+		errors = append(errors, reservedTenantNameMessage(input["tenant_name"]))
+	}
+	// A service whose Argo CD Application name (<team>-<component>) is
+	// platform-owned is refused for every operation that addresses one,
+	// except teardown (see teardownOperations).
+	// Executor.Submit repeats this check as well.
+	if team, name, reserved := ReservedServiceTarget(op, input); reserved {
+		errors = append(errors, reservedServiceApplicationMessage(team, name))
+	}
 	return errors
 }
 
@@ -249,13 +287,14 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 // registry does not therefore became settable by any caller of the generic
 // /operations/{name}/execute path. That is how config_patch — a raw yq
 // expression evaluated against values.yaml by tpl-git-commit, and intended
-// only to be built server-side by the OpenClaw handler — was reachable from an
-// arbitrary request body (gitops#997).
+// only to be built server-side by a dedicated handler (the since-removed
+// OpenClaw handler) — was reachable from an arbitrary request body
+// (gitops#997).
 //
 // Filtering here rather than at each call site keeps the property true for
 // every operation, including ones added later: the generic path can only ever
 // submit parameters the registry describes. Handlers that build their params
-// server-side and call Executor.Submit directly (handlers_openclaw.go) are
+// server-side and call Executor.Submit directly are
 // deliberately unaffected — they are the legitimate producers of the
 // undeclared-but-real workflow parameters.
 func (r *Registry) StripUndeclared(op Operation, input map[string]string) (map[string]string, []string) {
@@ -317,6 +356,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "deploy-service",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{component_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "action", Type: "string", Required: true, Description: "Operation type", Enum: []string{"onboard", "deploy", "update-config"}},
@@ -328,7 +368,7 @@ var builtinOperations = []Operation{
 			{Name: "port", Type: "string", Default: "8080", Description: "Service port"},
 			{Name: "host", Type: "string", Description: "Ingress hostname (e.g. my-app.example.com). Omit for background workers."},
 			{Name: "env_vars", Type: "string", Description: "Plaintext environment variables, newline-separated KEY=value"},
-			{Name: "secret_env_vars", Type: "string", Description: "Secret environment variables stored in Vault, newline-separated KEY=value", Secret: true},
+			{Name: "secret_env_vars", Type: "string", Description: "Secret environment variables stored in Vault, newline-separated KEY=value. Keys must be environment variable names; values are single-line", Secret: true},
 			{Name: "clear_env", Type: "string", Default: "false", Description: "Clear existing plaintext environment variables", Enum: []string{"true", "false"}},
 			{Name: "clear_secrets", Type: "string", Default: "false", Description: "Clear existing secret environment variables", Enum: []string{"true", "false"}},
 			{Name: "provision_database", Type: "string", Default: "false", Description: "Also provision a PostgreSQL database", Enum: []string{"true", "false"}},
@@ -350,6 +390,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "create-tenant",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  true,
+		MinRole:          RoleAuthenticated,
 		// Every path is tenant-scoped: since mctl-gitops#1431, Argo CD RBAC
 		// lives in a per-tenant fragment, not in the shared argocd/values.yaml.
 		ModifiesPaths: []string{
@@ -385,6 +426,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "provision-database",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  true,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{"platform-gitops/cnpg-clusters/shared/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -398,6 +440,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "retire-service",
 		RiskLevel:        RiskHigh,
 		RequiresConfirm:  true,
+		MinRole:          RoleOwner,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{component_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -413,6 +456,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "delete-tenant-safe",
 		RiskLevel:        RiskHigh,
 		RequiresConfirm:  true,
+		MinRole:          RoleOwner,
 		// What delete-tenant-safe removes. The CNPG shared files are the only
 		// non-tenant-scoped paths: the tenant's database entries are cut out
 		// of them.
@@ -435,6 +479,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "rollback-service",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{component_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -449,6 +494,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "preview-deploy",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -467,11 +513,12 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "preview-delete",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "preview_id", Type: "string", Required: true, Description: "Preview ID returned by preview-deploy"},
+			{Name: "preview_id", Type: "string", Required: true, Description: "Preview ID returned by preview-deploy", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 		},
 	},
 	{
@@ -481,6 +528,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "smoke-test",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		ModifiesPaths:    []string{},
 		Parameters:       []ParameterDef{},
 	},
@@ -491,6 +539,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "add-custom-domain",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleDeveloper,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{service_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
@@ -505,58 +554,12 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "remove-custom-domain",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleOwner,
 		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{service_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "service_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "domain", Type: "string", Required: true, Description: "Custom domain to remove"},
-		},
-	},
-	{
-		Name:             "openclaw-skill-save",
-		DisplayName:      "Save OpenClaw Skill to GitOps",
-		Description:      "Back up a single OpenClaw SKILL.md file to the gitops repo. Writes platform-gitops/services/{team}/openclaw/skills/{skill_name}.md from a base64-encoded payload. Overwrites an existing file. Commits with the triggering user recorded in the commit body.",
-		WorkflowTemplate: "openclaw-skill-save",
-		RiskLevel:        RiskLow,
-		RequiresConfirm:  false,
-		HandlerOnly:      true,
-		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
-		Parameters: []ParameterDef{
-			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name (kebab-case, 1-64 chars)", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
-			{Name: "content_b64", Type: "string", Required: true, Description: "Base64-encoded SKILL.md content"},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
-		},
-	},
-	{
-		Name:             "openclaw-skill-delete",
-		DisplayName:      "Remove OpenClaw Skill from GitOps",
-		Description:      "Remove a single SKILL.md file from the gitops backup. Idempotent — succeeds with a no-op if the file is already absent. Does not touch the tenant's runtime workspace.",
-		WorkflowTemplate: "openclaw-skill-delete",
-		RiskLevel:        RiskLow,
-		RequiresConfirm:  false,
-		HandlerOnly:      true,
-		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/skills/"},
-		Parameters: []ParameterDef{
-			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "skill_name", Type: "string", Required: true, Description: "Skill name", Pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
-		},
-	},
-	{
-		Name:             "openclaw-identity-save",
-		DisplayName:      "Save OpenClaw Identity File to GitOps",
-		Description:      "Back up a single OpenClaw identity override (AGENTS.md / SOUL.md / IDENTITY.md / USER.md / TOOLS.md) to the gitops repo. Writes platform-gitops/services/{team}/openclaw/identity/{file_name} from a base64-encoded payload. Overwrites an existing file. Commits with the triggering user recorded in the commit body.",
-		WorkflowTemplate: "openclaw-identity-save",
-		RiskLevel:        RiskLow,
-		RequiresConfirm:  false,
-		HandlerOnly:      true,
-		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/identity/"},
-		Parameters: []ParameterDef{
-			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "file_name", Type: "string", Required: true, Description: "Identity file name (one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md)", Enum: []string{"AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md"}},
-			{Name: "content_b64", Type: "string", Required: true, Description: "Base64-encoded identity file content"},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
 		},
 	},
 	{
@@ -566,6 +569,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "platform-skill-publish",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/catalog/{skill_name}/"},
@@ -583,6 +587,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "platform-skill-deprecate",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/catalog/{skill_name}/metadata.yaml"},
@@ -598,6 +603,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "platform-skill-enable",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/bindings/tenants/{tenant_name}.yaml"},
@@ -614,6 +620,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "platform-skill-disable",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		HandlerOnly:      true,
 		ModifiesPaths:    []string{"platform-gitops/platform-skills/bindings/tenants/{tenant_name}.yaml"},
@@ -647,6 +654,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-run",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/"},
 		Parameters: []ParameterDef{
@@ -661,6 +669,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-run",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/_mentor/digest/"},
 		Parameters: []ParameterDef{
@@ -675,11 +684,12 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-run",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/"},
 		Parameters: []ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "single-service", Description: "Run mode (locked to 'single-service')", Enum: []string{"single-service"}},
-			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: []string{"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}},
+			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: []string{"mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}},
 		},
 	},
 	{
@@ -696,6 +706,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-run",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/incident-{id}/"},
 		Parameters: append([]ParameterDef{
@@ -717,10 +728,11 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-implement",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch>"},
 		Parameters: append([]ParameterDef{
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
 			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
 			{Name: "max_proposals", Type: "string", Required: false, Default: "1", Description: "Safety bound. The API permits exactly one proposal per run.", Enum: []string{"1"}},
 			// Release pin (mctlhq/mctl-api#372): the DevLoop's implement step sends
@@ -731,6 +743,7 @@ var builtinOperations = []Operation{
 			// cwft-mctl-agents-implement also declares a "force" parameter that
 			// mctl-api deliberately does not expose here (see
 			// cwftParamsNotSettableViaAPI in registry_cwft_params_test.go).
+			traceparentParam(),
 		}, append(agentPinParams("implementer"),
 			devLoopCorrelationParams("temporal_workflow_id", "temporal_run_id", "execution_request_id", "work_item_id", "execution_id")...)...),
 	},
@@ -750,6 +763,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-shepherd",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch> (follow-up commits or merge)"},
 		Parameters: append([]ParameterDef{
@@ -761,7 +775,7 @@ var builtinOperations = []Operation{
 			// tier3-shepherd PRs landing now); the shepherd must drive those
 			// to merge too. If the implementer's allowlist ever changes,
 			// mirror the change here.
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one service. Leave empty to consider all services.", Enum: []string{"", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
 			{Name: "slug", Type: "string", Required: false, Default: "", Description: "Optional. Filter to one proposal slug (across services unless service is also set)."},
 			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to evaluate decide() for every matched proposal and print the decision WITHOUT calling the implementer or merging anything. Default 'false'.", Enum: []string{"true", "false"}},
 			// Release pin (mctlhq/mctl-api#372): the DevLoop's in-loop shepherd tick
@@ -786,6 +800,7 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-investigate",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/"},
 		Parameters: append([]ParameterDef{
@@ -816,6 +831,7 @@ var builtinOperations = []Operation{
 			{Name: "human_input_responses", Type: "string", Required: false, OmitWhenEmpty: true,
 				Description: "Optional. JSON array of accepted human-input answers for a DevLoop continuation (mctl-agents#473). Set only by the DevLoop; omit otherwise.",
 				Pattern:     `(?s)^\[.*\]$`},
+			traceparentParam(),
 		}, append(agentPinParams("issue-investigator"),
 			devLoopCorrelationParams("temporal_workflow_id", "temporal_run_id", "execution_request_id")...)...),
 	},
@@ -834,10 +850,11 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-approve",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml"},
 		Parameters: []ParameterDef{
-			{Name: "service", Type: "string", Required: true, Description: "Service owning the proposal.", Enum: []string{"mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
+			{Name: "service", Type: "string", Required: true, Description: "Service owning the proposal.", Enum: []string{"mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
 			{Name: "slug", Type: "string", Required: true, Description: "Proposal slug (directory name under proposals/), e.g. issue-42-fix-foo.", Pattern: "^[a-z0-9][a-z0-9-]{0,120}$"},
 			// No Default: "unknown" is not an identity, and a field that manufactures
 			// one is worse than an absent field — the implementer refuses an approval
@@ -870,26 +887,12 @@ var builtinOperations = []Operation{
 		WorkflowTemplate: "mctl-agents-reconcile",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
+		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml", "mctlhq/{service}/<feat-branch> (PR creation only, for an already-pushed branch)"},
 		Parameters: []ParameterDef{
-			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Reconcile only this service. Leave empty to sweep every service.", Enum: []string{"", "mctl-web", "mctl-openclaw", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
+			{Name: "service", Type: "string", Required: false, Default: "", Description: "Optional. Reconcile only this service. Leave empty to sweep every service.", Enum: []string{"", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"}},
 			{Name: "dry_run", Type: "string", Required: false, Default: "false", Description: "Set to 'true' to print every would-be flip without writing .status.yaml or opening any PR. Default 'false'.", Enum: []string{"true", "false"}},
-		},
-	},
-	{
-		Name:             "openclaw-identity-delete",
-		DisplayName:      "Remove OpenClaw Identity File from GitOps",
-		Description:      "Remove a single identity override (AGENTS.md / SOUL.md / IDENTITY.md / USER.md / TOOLS.md) from the gitops backup. Idempotent — succeeds with a no-op if the file is already absent. The tenant reverts to the image-shipped default at the next sidecar reconcile.",
-		WorkflowTemplate: "openclaw-identity-delete",
-		RiskLevel:        RiskLow,
-		RequiresConfirm:  false,
-		HandlerOnly:      true,
-		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/openclaw/identity/"},
-		Parameters: []ParameterDef{
-			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
-			{Name: "file_name", Type: "string", Required: true, Description: "Identity file name (one of AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md)", Enum: []string{"AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md"}},
-			{Name: "actor", Type: "string", Required: false, Default: "unknown", Description: "User ID of the triggering operator (recorded in the commit body)"},
 		},
 	},
 }

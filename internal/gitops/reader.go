@@ -158,6 +158,49 @@ func (t *Tenant) UserNamespaces(login string) []string {
 	return ns
 }
 
+// memberRoles returns the roles under which login is a member of namespace,
+// one list per members list that names the login, and whether this tenant
+// owns that namespace at all. The lists are the ones UserNamespaces grants
+// access on: for a legacy tenant the tenant's members, for a multi-team
+// tenant its tenant-level members and the members of the team the namespace
+// belongs to.
+//
+// The lists are kept apart because they mean different things. Two entries
+// for one login inside one list contradict each other. An entry in the
+// tenant-level list and one in a team's list do not: each grants on its own,
+// so a tenant-wide owner who is also a viewer of one team is still an owner
+// there. A list that does not name the login is left out. A role is
+// returned exactly as written, empty included.
+func (t *Tenant) memberRoles(namespace, login string) (scopes [][]string, owns bool) {
+	collect := func(members []TenantMember) {
+		var roles []string
+		for _, m := range members {
+			if strings.EqualFold(m.UserID, login) {
+				roles = append(roles, m.Role)
+			}
+		}
+		if len(roles) > 0 {
+			scopes = append(scopes, roles)
+		}
+	}
+	if !t.IsMultiTeam() {
+		if t.Name != namespace {
+			return nil, false
+		}
+		collect(t.Members)
+		return scopes, true
+	}
+	for _, team := range t.Teams {
+		if t.Name+"-"+team.Name != namespace {
+			continue
+		}
+		collect(t.Members)
+		collect(team.Members)
+		return scopes, true
+	}
+	return nil, false
+}
+
 // Service represents a deployed service read from the GitOps repo.
 type Service struct {
 	Team          string `json:"team"`
@@ -598,10 +641,12 @@ func (r *Reader) GetTenant(name string) (*Tenant, error) {
 	return r.readTenant(name)
 }
 
-// TenantExistsMaxAge bounds how old the checkout may be when TenantExists
-// answers. The checkout refreshes every minute; an older last sync could miss
-// a tenant created since, so it is an error rather than "absent".
-const TenantExistsMaxAge = 10 * time.Minute
+// CheckoutMaxAge bounds how old the checkout may be when a reader that a
+// security decision rests on answers (TenantExists, TenantNames,
+// ServiceExists, MemberRoles). The checkout refreshes every minute; an older
+// last sync could miss a change made since, so it is an error rather than an
+// answer.
+const CheckoutMaxAge = 10 * time.Minute
 
 // tenantNameRE is create-tenant's tenant_name pattern (operations registry
 // and wft-create-tenant): a single DNS-safe path segment.
@@ -610,7 +655,7 @@ var tenantNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
 // TenantExists reports whether platform-gitops/tenants/<name> exists in the
 // checkout, as a directory or anything else: that path is what create-tenant
 // would write. Only "no such file" is absent. Any other stat error, a checkout
-// that never synced, or one older than TenantExistsMaxAge is an error.
+// that never synced, or one older than CheckoutMaxAge is an error.
 func (r *Reader) TenantExists(name string) (bool, error) {
 	if !tenantNameRE.MatchString(name) {
 		return false, fmt.Errorf("invalid tenant name %q", name)
@@ -618,12 +663,8 @@ func (r *Reader) TenantExists(name string) (bool, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	last := r.LastSync()
-	if last.IsZero() {
-		return false, errors.New("gitops checkout has never synced")
-	}
-	if age := time.Since(last); age > TenantExistsMaxAge {
-		return false, fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), TenantExistsMaxAge)
+	if err := r.checkFreshLocked(); err != nil {
+		return false, err
 	}
 	// The pattern already admits one segment only; the containment check
 	// keeps that true for the path actually read.
@@ -640,6 +681,162 @@ func (r *Reader) TenantExists(name string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("checking tenant %q: %w", name, err)
+}
+
+// checkFreshLocked returns an error unless the checkout has synced within
+// CheckoutMaxAge. An answer from a checkout that never synced, or that
+// stopped refreshing, is not one a security decision may rest on.
+func (r *Reader) checkFreshLocked() error {
+	last := r.LastSync()
+	if last.IsZero() {
+		return errors.New("gitops checkout has never synced")
+	}
+	if age := time.Since(last); age > CheckoutMaxAge {
+		return fmt.Errorf("gitops checkout last synced %s ago (limit %s)", age.Round(time.Second), CheckoutMaxAge)
+	}
+	return nil
+}
+
+// TenantNames returns the name of every entry in platform-gitops/tenants,
+// whatever its kind: each is a name create-tenant would treat as taken.
+//
+// Unlike ListTenants it never skips what it could not read. A checkout that
+// never synced or is stale, and a tenants directory that is missing or
+// cannot be listed, are errors: the caller decides whether a new tenant name
+// collides with an existing one, and "could not list" must not read as
+// "there are none".
+func (r *Reader) TenantNames() ([]string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.checkFreshLocked(); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(r.localPath, "platform-gitops", "tenants"))
+	if err != nil {
+		return nil, fmt.Errorf("listing tenants: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
+// ServiceExists reports whether team has a service named component: a plain
+// directory platform-gitops/services/<team>/<component> holding a regular
+// values.yaml. That directory is what the apps ApplicationSet turns into the
+// Argo CD Application <team>-<component>, so it is the record of which
+// Applications a tenant's service operations may act on.
+//
+// Only a path that does not exist is (false, nil). A checkout that never
+// synced or is stale, a symlink or other non-plain entry on the path, and any
+// other stat error are errors, so a failed read cannot pass for "absent" and
+// still less for "present".
+func (r *Reader) ServiceExists(team, component string) (bool, error) {
+	if !serviceNameRe.MatchString(team) || !serviceNameRe.MatchString(component) {
+		return false, fmt.Errorf("invalid team or component name %q/%q", team, component)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.checkFreshLocked(); err != nil {
+		return false, err
+	}
+
+	path, err := r.statServiceFileLocked(team, component, "values.yaml")
+	if err != nil {
+		return false, fmt.Errorf("checking service %s/%s: %w", team, component, err)
+	}
+	return path != "", nil
+}
+
+// statServiceFileLocked walks platform-gitops/services/<team>/<component>/
+// <file> with Lstat and returns the file's path, or "" when a path element
+// below the services directory does not exist. Every directory on the path
+// must be a plain directory and the file a regular file: a symlink or any
+// other kind of entry is an error, as is the services directory itself
+// missing (a broken checkout, not a missing service) and any other stat
+// error. Names must already be validated. The caller holds r.mu.
+func (r *Reader) statServiceFileLocked(team, component, file string) (string, error) {
+	services := filepath.Join(r.localPath, "platform-gitops", "services")
+	steps := []struct {
+		path string
+		dir  bool
+	}{
+		{services, true},
+		{filepath.Join(services, team), true},
+		{filepath.Join(services, team, component), true},
+		{filepath.Join(services, team, component, file), false},
+	}
+	for i, st := range steps {
+		info, err := os.Lstat(st.path)
+		if errors.Is(err, fs.ErrNotExist) && i > 0 {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if st.dir && !info.IsDir() || !st.dir && !info.Mode().IsRegular() {
+			return "", fmt.Errorf("%s is not a plain %s", st.path, map[bool]string{true: "directory", false: "file"}[st.dir])
+		}
+	}
+	return steps[len(steps)-1].path, nil
+}
+
+// MemberRoles returns the members[].role values under which login is a
+// member of namespace (a tenant name, or {tenant}-{team} for a multi-team
+// tenant), exactly as written in the tenant's values.yaml: one list per
+// members list that names the login (see Tenant.memberRoles for why they
+// are not merged). An empty result with a nil error means the checkout was
+// read and login is not a member.
+//
+// Unlike ListTenants, it never skips what it could not read. A checkout that
+// never synced or is older than CheckoutMaxAge, a tenants directory that
+// cannot be listed, a values.yaml that cannot be read or parsed, and a
+// namespace two tenants both claim are all errors: "could not read the
+// role" must never come back looking like "not a member", and still less
+// like a role. Only a tenant directory with no values.yaml is skipped,
+// because that is not a tenant.
+func (r *Reader) MemberRoles(namespace, login string) ([][]string, error) {
+	if namespace == "" || login == "" {
+		return nil, errors.New("member roles: namespace and login are required")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if err := r.checkFreshLocked(); err != nil {
+		return nil, err
+	}
+
+	tenantsDir := filepath.Join(r.localPath, "platform-gitops", "tenants")
+	entries, err := os.ReadDir(tenantsDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading tenants dir: %w", err)
+	}
+
+	var roles [][]string
+	owner := ""
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		t, err := r.readTenant(entry.Name())
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading tenant %q: %w", entry.Name(), err)
+		}
+		found, owns := t.memberRoles(namespace, login)
+		if !owns {
+			continue
+		}
+		if owner != "" {
+			return nil, fmt.Errorf("namespace %q is claimed by tenants %q and %q", namespace, owner, entry.Name())
+		}
+		owner = entry.Name()
+		roles = found
+	}
+	return roles, nil
 }
 
 func (r *Reader) readTenant(name string) (*Tenant, error) {
@@ -920,6 +1117,64 @@ func (r *Reader) ReadFiles(names ...string) (map[string][]byte, string, error) {
 	return out, rev, nil
 }
 
+// ErrSourceRepoNotRegistered is ComponentSourceRepo's answer when the
+// checkout was read and the component, its catalog-info.yaml or the
+// github.com/source-repo annotation is absent. Every other error means the
+// binding could not be read, which is not the same thing.
+var ErrSourceRepoNotRegistered = errors.New("component has no registered source repository")
+
+// sourceRepoAnnotation is written into catalog-info.yaml from dockerfile_repo
+// by deploy-service's onboard action (argo-workflows/file-templates/
+// catalog-info.yaml.tpl).
+const sourceRepoAnnotation = "github.com/source-repo"
+
+var serviceNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+// ComponentSourceRepo returns the "owner/repo" registered for team/component:
+// the github.com/source-repo annotation of
+// platform-gitops/services/<team>/<component>/catalog-info.yaml
+// (mctl-api#530). It is the record a CI token's repository is checked
+// against, so it fails closed: a checkout that cannot be read, a symlink or
+// non-regular entry anywhere on the path, or a file that does not parse is
+// an error; only a read checkout without the component, the file or the
+// annotation is ErrSourceRepoNotRegistered.
+func (r *Reader) ComponentSourceRepo(team, component string) (string, error) {
+	if !serviceNameRe.MatchString(team) || !serviceNameRe.MatchString(component) {
+		return "", fmt.Errorf("invalid team or component name %q/%q", team, component)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, err := r.revisionLocked(); err != nil {
+		return "", fmt.Errorf("gitops checkout unavailable: %w", err)
+	}
+
+	path, err := r.statServiceFileLocked(team, component, "catalog-info.yaml")
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", ErrSourceRepoNotRegistered
+	}
+
+	data, err := os.ReadFile(path) //nolint:gosec // validated names, regular file inside the checkout
+	if err != nil {
+		return "", err
+	}
+	var doc struct {
+		Metadata struct {
+			Annotations map[string]string `yaml:"annotations"`
+		} `yaml:"metadata"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return "", fmt.Errorf("parsing catalog-info.yaml of %s/%s: %w", team, component, err)
+	}
+	repo := strings.TrimSpace(doc.Metadata.Annotations[sourceRepoAnnotation])
+	if repo == "" {
+		return "", ErrSourceRepoNotRegistered
+	}
+	return repo, nil
+}
+
 // ListPlatformSkills reads all platform-wide skills from
 // platform-gitops/platform-skills/catalog.
 func (r *Reader) ListPlatformSkills() ([]PlatformSkill, error) {
@@ -1128,147 +1383,6 @@ func (r *Reader) GetPlatformPolicy() (*PlatformSkillPolicy, error) {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
 	return &policy, nil
-}
-
-// OpenClawSkill describes a single SKILL.md file backed up in the gitops repo.
-type OpenClawSkill struct {
-	Name         string    `json:"name"`
-	Size         int64     `json:"size"`
-	LastModified time.Time `json:"lastModified"`
-}
-
-// ListOpenClawSkills lists .md files under platform-gitops/services/{team}/openclaw/skills/.
-// Returns an empty slice (not an error) if the directory does not exist.
-func (r *Reader) ListOpenClawSkills(team string) ([]OpenClawSkill, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	dir := filepath.Join(r.localPath, "platform-gitops", "services", team, "openclaw", "skills")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []OpenClawSkill{}, nil
-		}
-		return nil, fmt.Errorf("reading %s: %w", dir, err)
-	}
-
-	out := make([]OpenClawSkill, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".md") || name == "README.md" {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		out = append(out, OpenClawSkill{
-			Name:         strings.TrimSuffix(name, ".md"),
-			Size:         info.Size(),
-			LastModified: info.ModTime().UTC(),
-		})
-	}
-	return out, nil
-}
-
-// ReadOpenClawSkill returns the raw text content of
-// platform-gitops/services/{team}/openclaw/skills/{name}.md.
-// Returns os.ErrNotExist wrapped if the file is missing.
-func (r *Reader) ReadOpenClawSkill(team, name string) (string, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	path := filepath.Join(r.localPath, "platform-gitops", "services", team, "openclaw", "skills", name+".md")
-	data, err := os.ReadFile(path) //nolint:gosec // path built from validated components
-	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", path, err)
-	}
-	return string(data), nil
-}
-
-// OpenClawIdentityFile describes a single identity override file backed up in
-// the gitops repo (one of AGENTS.md / SOUL.md / IDENTITY.md / USER.md /
-// TOOLS.md). Naming mirrors OpenClawSkill but the filename is kept verbatim
-// (including .md) since identity files are a fixed allowlist, not kebab-case
-// slugs.
-type OpenClawIdentityFile struct {
-	Name         string    `json:"name"`
-	Size         int64     `json:"size"`
-	LastModified time.Time `json:"lastModified"`
-}
-
-// openClawIdentityFilenames is the fixed allowlist of identity override files
-// a tenant can own. Kept in sync with openClawIdentityFileAllowlist in the api
-// package (defense-in-depth also lives in the workflow templates). Mirrored
-// here so the reader returns identity files consistently regardless of any
-// stray markdown files a manual gitops edit might have dropped into the
-// identity/ directory — otherwise the quota sum would drift against what
-// save/delete paths actually manipulate.
-var openClawIdentityFilenames = map[string]struct{}{
-	"AGENTS.md":   {},
-	"SOUL.md":     {},
-	"IDENTITY.md": {},
-	"USER.md":     {},
-	"TOOLS.md":    {},
-}
-
-// ListOpenClawIdentity lists allowlisted identity override files under
-// platform-gitops/services/{team}/openclaw/identity/.
-// Returns an empty slice (not an error) if the directory does not exist —
-// tenants without any overrides fall back to image defaults.
-func (r *Reader) ListOpenClawIdentity(team string) ([]OpenClawIdentityFile, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	dir := filepath.Join(r.localPath, "platform-gitops", "services", team, "openclaw", "identity")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []OpenClawIdentityFile{}, nil
-		}
-		return nil, fmt.Errorf("reading %s: %w", dir, err)
-	}
-
-	out := make([]OpenClawIdentityFile, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if _, ok := openClawIdentityFilenames[name]; !ok {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		out = append(out, OpenClawIdentityFile{
-			Name:         name,
-			Size:         info.Size(),
-			LastModified: info.ModTime().UTC(),
-		})
-	}
-	return out, nil
-}
-
-// ReadOpenClawIdentity returns the raw text content of
-// platform-gitops/services/{team}/openclaw/identity/{fileName}.
-// fileName must be validated by the caller against the identity allowlist
-// before being passed in — this function does no validation of its own.
-// Returns os.ErrNotExist wrapped if the file is missing.
-func (r *Reader) ReadOpenClawIdentity(team, fileName string) (string, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	path := filepath.Join(r.localPath, "platform-gitops", "services", team, "openclaw", "identity", fileName)
-	data, err := os.ReadFile(path) //nolint:gosec // path built from validated components
-	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", path, err)
-	}
-	return string(data), nil
 }
 
 // maxHumanInputRequestBytes caps one request.json. mctl-agents reads the

@@ -289,6 +289,19 @@ func TestConfigValidate(t *testing.T) {
 			wantVar: "MCTL_OIDC_PROVIDERS",
 		},
 		{
+			// mctl-api#530: the GitHub Actions provider refuses boot on a
+			// policy nobody wrote, rather than registering without one.
+			name:    "MCTL_GITHUB_ACTIONS_OIDC without repository_owners is refused",
+			cfg:     config{GitHubActionsOIDCRaw: `{"audience":"https://api.mctl.ai"}`},
+			wantErr: true,
+			wantVar: "MCTL_GITHUB_ACTIONS_OIDC",
+		},
+		{
+			name:    "well-formed MCTL_GITHUB_ACTIONS_OIDC is accepted",
+			cfg:     config{GitHubActionsOIDCRaw: `{"repository_owners":["mctlhq"]}`},
+			wantErr: false,
+		},
+		{
 			// The kill switch is the rollback for a value that refuses boot,
 			// so it must not be refused by that same value.
 			name:    "malformed MCTL_OIDC_PROVIDERS is not validated while MCTL_FEDERATION_DISABLED is on",

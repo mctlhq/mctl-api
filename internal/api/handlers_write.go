@@ -20,7 +20,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"io"
 	"log/slog"
 	"net/http"
@@ -43,6 +45,13 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Span is started only for a registered operation so the caller-controlled
+	// name never reaches span names or attributes unvalidated.
+	ctx, span := telemetry.Tracer().Start(r.Context(), "operation.execute "+opName)
+	defer span.End()
+	span.SetAttributes(telemetry.OperationName(opName))
+	r = r.WithContext(ctx)
+
 	// HandlerOnly operations skip this generic execute path on purpose — the
 	// dedicated REST handler enforces owner-gate / quota / secret-scan /
 	// rate-limit checks that are not part of the generic path's RBAC, so
@@ -62,6 +71,17 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
+	}
+
+	// A CI principal has no tenant membership or role: it is authorized
+	// here, on the raw input before anything is stripped or defaulted, and
+	// only that decision lets it past the tenant checks below (mctl-api#530).
+	ciAuthorized := false
+	if user.IsCI() {
+		if !h.authorizeCIDeploy(w, r, user, opName, op, input) {
+			return
+		}
+		ciAuthorized = true
 	}
 
 	// Drop anything the operation does not declare, before RBAC reads the
@@ -132,7 +152,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 		// Force creator_user_id from the authenticated session (prevent spoofing).
 		input["creator_user_id"] = user.ID
-	} else if !user.HasTenantAccess(tenantParam) {
+	} else if !ciAuthorized && !user.HasTenantAccess(tenantParam) {
 		h.logAudit(r, audit.Entry{
 			UserID:    user.ID,
 			Operation: opName,
@@ -141,6 +161,16 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			Message:   fmt.Sprintf("user %q cannot operate on tenant %q", user.ID, tenantParam),
 		})
 		writeError(w, http.StatusForbidden, "access denied: you don't have access to tenant "+tenantParam)
+		return
+	}
+
+	// Membership is not permission (mctl-api#478). Being a member of the
+	// tenant got the caller this far; what they may do to it is decided by
+	// their role there against the operation's minimum. Before this check a
+	// developer, or a read-only viewer, could delete the tenant they belong
+	// to. create-tenant is the one operation with no tenant to hold a role
+	// in; its own rules are the branch above.
+	if opName != "create-tenant" && !ciAuthorized && !h.requireTenantRole(w, r, user, tenantParam, op.MinRole, opName, op.RiskLevel) {
 		return
 	}
 
@@ -198,8 +228,12 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// Apply defaults then validate.
 	input = h.opts.Registry.ApplyDefaults(op, input)
 	if errs := h.opts.Registry.ValidateInput(op, input); len(errs) > 0 {
+		// The reasons go into "error" as well as validationErrors: callers
+		// that read only "error" (the MCP tools' doRequest, shell clients)
+		// would otherwise report a bare "validation failed". The prefix is
+		// unchanged for anything that matches on it.
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":            "validation failed",
+			"error":            "validation failed: " + strings.Join(errs, "; "),
 			"validationErrors": errs,
 		})
 		return
@@ -215,6 +249,46 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// check" is not "does not exist".
 	if opName == "create-tenant" && !user.IsAdmin() {
 		if status, msg := h.checkTenantIsNew(tenantParam); status != 0 {
+			h.logAudit(r, audit.Entry{
+				UserID:     user.ID,
+				Operation:  opName,
+				Parameters: auditParams,
+				Status:     "denied",
+				RiskLevel:  string(op.RiskLevel),
+				Message:    msg,
+			})
+			writeError(w, status, msg)
+			return
+		}
+	}
+
+	// A new tenant name must not share an Application name space with an
+	// existing tenant: "labs-x" next to "labs" (or the reverse) would let one
+	// tenant's <tenant>-<service> spell the other's Application. This applies
+	// to admins too; re-running create-tenant for the same name is not a
+	// collision. A tenant list that cannot be read refuses.
+	if opName == "create-tenant" {
+		if status, msg := h.checkTenantNameCollision(tenantParam); status != 0 {
+			h.logAudit(r, audit.Entry{
+				UserID:     user.ID,
+				Operation:  opName,
+				Parameters: auditParams,
+				Status:     "denied",
+				RiskLevel:  string(op.RiskLevel),
+				Message:    msg,
+			})
+			writeError(w, status, msg)
+			return
+		}
+	}
+
+	// An operation on an existing service must name one that exists for this
+	// team in gitops. The workflows build the Argo CD Application name as
+	// <team>-<component> and act on it, so without this check the pair is
+	// only as safe as the caller's choice of it. A checkout that cannot
+	// answer refuses: "could not check" is not "exists".
+	if team, component, ok := operations.ServiceTarget(op, input); ok && requiresExistingService(opName, input) {
+		if status, msg := h.checkServiceExists(team, component); status != 0 {
 			h.logAudit(r, audit.Entry{
 				UserID:     user.ID,
 				Operation:  opName,
@@ -259,6 +333,13 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			RiskLevel:  string(op.RiskLevel),
 			Message:    "submit failed: " + err.Error(),
 		})
+		// Executor.Submit refuses a reserved tenant name on its own. The
+		// validation above normally gets there first; mapping it here keeps
+		// the backstop from masquerading as a platform fault.
+		if errors.Is(err, operations.ErrReservedTenantName) || errors.Is(err, operations.ErrReservedServiceApplication) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to submit workflow: "+err.Error())
 		return
 	}
@@ -272,11 +353,15 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		RiskLevel:    string(op.RiskLevel),
 	})
 
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	resp := map[string]any{
 		"message":   fmt.Sprintf("Operation submitted. Track progress: GET /api/v1/workflows/%s", result.WorkflowName),
 		"operation": opName,
 		"workflow":  result,
-	})
+	}
+	if tid := telemetry.TraceIDFrom(r.Context()); tid != "" {
+		resp["trace_id"] = tid
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 // ArgoCompletionPayload represents the notification payload sent by Argo when a workflow completes.
@@ -481,6 +566,60 @@ func (h *Handlers) checkTenantIsNew(tenant string) (status int, msg string) {
 	}
 	if exists {
 		return http.StatusConflict, "workspace \"" + tenant + "\" already exists"
+	}
+	return 0, ""
+}
+
+// requiresExistingService reports whether opName, which names a service,
+// acts on one that must already exist. It is fail-closed: every such
+// operation is gated unless listed here. deploy-service's onboard action
+// creates the service; provision-database may run before a service is
+// onboarded and preview-delete must still clean up after one is retired, and
+// neither acts on the <team>-<component> Application.
+func requiresExistingService(opName string, input map[string]string) bool {
+	switch opName {
+	case "provision-database", "preview-delete":
+		return false
+	case "deploy-service":
+		return input["action"] != "onboard"
+	}
+	return true
+}
+
+// checkServiceExists returns 0 when team/component is a service in the
+// gitops checkout, 404 when the checkout says it is not, and 503 when the
+// checkout cannot tell.
+func (h *Handlers) checkServiceExists(team, component string) (status int, msg string) {
+	if h.opts.GitReader == nil {
+		return http.StatusServiceUnavailable, "cannot check whether service \"" + team + "/" + component + "\" exists: gitops reader not configured"
+	}
+	exists, err := h.opts.GitReader.ServiceExists(team, component)
+	if err != nil {
+		// The error can carry checkout paths; it goes to the log, not the
+		// caller.
+		slog.Error("service existence check failed", "team", team, "component", component, "error", err)
+		return http.StatusServiceUnavailable, "cannot check whether service \"" + team + "/" + component + "\" exists right now; try again later"
+	}
+	if !exists {
+		return http.StatusNotFound, "service \"" + component + "\" not found in workspace \"" + team + "\" (a service created in the last minute may not be visible yet)"
+	}
+	return 0, ""
+}
+
+// checkTenantNameCollision returns 0 when tenant shares no hyphen prefix with
+// an existing tenant, 400 when it does, and 503 when the tenant list cannot
+// be read.
+func (h *Handlers) checkTenantNameCollision(tenant string) (status int, msg string) {
+	if h.opts.GitReader == nil {
+		return http.StatusServiceUnavailable, "cannot check workspace name \"" + tenant + "\": gitops reader not configured"
+	}
+	names, err := h.opts.GitReader.TenantNames()
+	if err != nil {
+		slog.Error("create-tenant name collision check failed", "tenant", tenant, "error", err)
+		return http.StatusServiceUnavailable, "cannot check workspace name \"" + tenant + "\" right now; try again later"
+	}
+	if other, collides := operations.TenantNameCollision(tenant, names); collides {
+		return http.StatusBadRequest, "tenant_name: \"" + tenant + "\" overlaps the name of existing workspace \"" + other + "\"; choose a name that neither extends nor is extended by another workspace name"
 	}
 	return 0, ""
 }

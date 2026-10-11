@@ -17,10 +17,11 @@
 - **Dual Auth**: Supports Bearer tokens for both Dex OIDC (user JWTs) and GitHub Personal Access Tokens (PATs).
 - **Service Account Auth**: `MCTL_AGENT_SERVICE_TOKEN` allows trusted in-cluster automation (e.g. `mctl-agent`) to act with `admins` group privileges.
 - **Tenant Scope**: Requests are scoped to tenant groups (`admins`, `labs`, `ovk`, etc.) resolved via `internal/auth/tenant.go`.
+- **Tenant Role**: Membership grants visibility; a tenant write also needs a minimum role (`viewer` < `developer` < `owner`) declared per operation as `MinRole` in `internal/operations/registry.go` and enforced by `internal/api/tenant_role.go`. The role is read per request from the tenant's `members[].role` in the gitops checkout, keyed on a GitHub login that authentication proved. An unknown or missing role is refused (403); a role that could not be read is 503. Platform admins pass every minimum.
 
 ## Key REST API Endpoints
 
-- `GET /healthz`, `GET /readyz`: Liveness and readiness health checks.
+- `GET /healthz`, `GET /readyz`: Liveness and readiness health checks. `/readyz` returns 503 only on store init failure, a never-synced gitops checkout, or drain; dependency health is in the body (`checks`, `dependencies`) and the `mctl_api_dependency_up{check}` metric.
 - `GET /api/v1/services`: List services across tenants.
 - `GET /api/v1/workflows/{name}/logs`: Retrieve live or S3/R2 archived workflow logs.
 - `POST /api/v1/incidents`: Register platform incidents (`type: workflow_failed`, `status: analyzing`).
