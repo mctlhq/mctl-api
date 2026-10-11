@@ -139,7 +139,7 @@ func TestCommerceAccept_ApprovalBindsOneInvocationOverHTTP(t *testing.T) {
 	f := newCommerceFixture(t)
 	f.publish(t)
 	owner := tenantUser(t, "acme-owner", "acme", "prn_owner")
-	approval := "aar_" + strings.ToLower(t.Name())
+	approval := f.approval(t, principalOf(owner), commerceTestExecutionID, false)
 	acceptWith := func(key string) (int, string) {
 		_, q := f.mint(t, owner, "acme", nil)
 		rec := f.call(t, owner, "POST", "/api/v1/commerce/tenants/acme/invocations", map[string]any{
