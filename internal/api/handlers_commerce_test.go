@@ -369,6 +369,11 @@ func TestCommerceHandlers_AcceptReplayAndConflictOverHTTP(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("cross-tenant receipt: want 404, got %d", rec.Code)
 	}
+	rec = f.call(t, owner, "GET", "/api/v1/commerce/tenants/acme/invocations?phase=finalised", nil,
+		map[string]string{"tenant": "acme"}, f.h.ListCommerceInvocations)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("phase typo must be 400, got %d %s", rec.Code, rec.Body.String())
+	}
 
 	// Transitions are platform-only: the tenant owner cannot move money
 	// state, the admin can, and a wrong expected phase is a conflict.

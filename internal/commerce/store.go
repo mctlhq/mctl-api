@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -104,12 +105,12 @@ CREATE TABLE IF NOT EXISTS commerce_invocations (
     currency                TEXT        NOT NULL,
     amount_minor            BIGINT      NOT NULL CHECK (amount_minor >= 0),
     funds_mode              TEXT        NOT NULL,
-    phase                   TEXT        NOT NULL CHECK (phase IN ('accepted','refused','reserved','dispatching','dispatched','outcome_unknown','released','finalized')),
-    execution_outcome       TEXT        NOT NULL CHECK (execution_outcome IN ('not_dispatched','succeeded','failed','unknown')),
-    usage_quantity          BIGINT      CHECK (usage_quantity IS NULL OR usage_quantity >= 0),
-    charge_status           TEXT        NOT NULL CHECK (charge_status IN ('none','reserved','captured','released')),
-    payment_status          TEXT        NOT NULL CHECK (payment_status IN ('none','not_required','authorized','denied','captured','voided','unknown')),
-    settlement_status       TEXT        NOT NULL CHECK (settlement_status IN ('not_applicable','pending','settled','failed')),
+    phase                   TEXT        NOT NULL,
+    execution_outcome       TEXT        NOT NULL,
+    usage_quantity          BIGINT,
+    charge_status           TEXT        NOT NULL,
+    payment_status          TEXT        NOT NULL,
+    settlement_status       TEXT        NOT NULL,
     reason_code             TEXT        NOT NULL DEFAULT '',
     approval_id             TEXT        NOT NULL DEFAULT '',
     reservation_deadline    TIMESTAMPTZ,
@@ -125,6 +126,39 @@ CREATE INDEX IF NOT EXISTS commerce_invocations_tenant_created
 CREATE INDEX IF NOT EXISTS commerce_invocations_open
     ON commerce_invocations (reconciliation_deadline)
     WHERE phase NOT IN ('refused', 'released', 'finalized');
+
+-- The vocabulary CHECKs are added by name outside CREATE TABLE so that a
+-- table created by an earlier build of this package gets them too:
+-- CREATE TABLE IF NOT EXISTS is a no-op once the table exists, and the second
+-- line of defence behind TransitionInput.validate must hold wherever the
+-- table came from. Each block is idempotent via pg_constraint.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_phase_check') THEN
+        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_phase_check
+            CHECK (phase IN ('accepted','refused','reserved','dispatching','dispatched','outcome_unknown','released','finalized'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_execution_outcome_check') THEN
+        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_execution_outcome_check
+            CHECK (execution_outcome IN ('not_dispatched','succeeded','failed','unknown'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_usage_quantity_check') THEN
+        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_usage_quantity_check
+            CHECK (usage_quantity IS NULL OR usage_quantity >= 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_charge_status_check') THEN
+        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_charge_status_check
+            CHECK (charge_status IN ('none','reserved','captured','released'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_payment_status_check') THEN
+        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_payment_status_check
+            CHECK (payment_status IN ('none','not_required','authorized','denied','captured','voided','unknown'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_invocations_settlement_status_check') THEN
+        ALTER TABLE commerce_invocations ADD CONSTRAINT commerce_invocations_settlement_status_check
+            CHECK (settlement_status IN ('not_applicable','pending','settled','failed'));
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS commerce_invocation_transitions (
     seq           BIGSERIAL   PRIMARY KEY,
@@ -740,6 +774,11 @@ func (s *Store) GetInvocation(ctx context.Context, tenantID, invocationID string
 func (s *Store) ListInvocations(ctx context.Context, f ListFilter) ([]Invocation, error) {
 	if err := checkText("tenant_id", f.TenantID, MaxIDBytes, true); err != nil {
 		return nil, err
+	}
+	// An unknown phase is a refused filter, not an empty listing: a typo must
+	// never read as "this tenant has no such invocations" over money rows.
+	if f.Phase != "" && !slices.Contains(Phases, f.Phase) {
+		return nil, invalid("phase %q is not one of %s", f.Phase, strings.Join(Phases, ", "))
 	}
 	limit := f.Limit
 	if limit <= 0 || limit > 500 {

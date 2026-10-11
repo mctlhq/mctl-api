@@ -90,7 +90,12 @@ accepted ──► reserved ──► dispatching ──► dispatched ──►
 rejects a mismatch (`phase-conflict`) or a terminal row. Each of the four
 facts is validated against its vocabulary on every edge, and the columns
 carry matching `CHECK` constraints, so a typo from a programmatic caller is
-refused rather than stored. `finalized_at` is set only on `finalized`;
+refused rather than stored. The constraints are added by name on every start
+(guarded `ALTER TABLE ... ADD CONSTRAINT`), so a table created by an earlier
+build gets them too. Combinations the phase implies are closed as well: a
+`refused` row holds no charge, a `released` row cannot keep `captured`, and
+a `finalized` row cannot pair `captured` with a `denied`/`voided` payment or
+`released` with a `captured` one. `finalized_at` is set only on `finalized`;
 refused and released rows carry their moment in `updated_at`. `finalized` requires
 `execution_outcome` of `succeeded` or `failed`, a `charge_status` of
 `captured` or `released`, and a `usage_quantity`. `reserved` requires a
@@ -119,7 +124,8 @@ becomes spendable because time passed.
 Reason codes on refusals are those of ADR 020 sec. 13 (`identity-unresolved`,
 `commerce-terms-unknown`, `quote-expired`, `quote-stale`, `quote-mismatch`,
 `idempotency-conflict`, `funds-mode-unavailable`), plus `phase-conflict`,
-`terms-retired` and `invalid-request` for this API's own shapes. A missing
+`terms-retired` and `invalid-request` for this API's own shapes. A `phase` filter outside the
+vocabulary is `invalid-request` too, never an empty listing. A missing
 terms version is a plain 404; only an unresolvable capability is
 `commerce-terms-unknown`. `funds_mode: live` is refused
 everywhere (ADR 020 sec. 2).

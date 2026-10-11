@@ -593,6 +593,9 @@ type TransitionInput struct {
 
 // allowedTransitions is the state machine of ADR 020 sec. 11. A pair absent
 // here is a phase conflict, never a silent write.
+// Phases is the closed vocabulary of invocation phases, in lifecycle order.
+var Phases = []string{PhaseAccepted, PhaseRefused, PhaseReserved, PhaseDispatching, PhaseDispatched, PhaseOutcomeUnknown, PhaseReleased, PhaseFinalized}
+
 var allowedTransitions = map[string]map[string]bool{
 	PhaseAccepted:       {PhaseRefused: true, PhaseReserved: true},
 	PhaseReserved:       {PhaseDispatching: true, PhaseReleased: true},
@@ -647,7 +650,20 @@ func (in TransitionInput) validate() error {
 			return invalid("%s %q is not one of %s", f.name, f.value, strings.Join(f.allowed, ", "))
 		}
 	}
-	if in.ToPhase == PhaseFinalized {
+	// The facts are closed per field above; these rules close the
+	// combinations the phase machine implies. A refused invocation never
+	// held a charge, a released one does not keep a captured charge, and a
+	// captured charge cannot sit beside a denied or voided payment.
+	switch in.ToPhase {
+	case PhaseRefused:
+		if in.ChargeStatus != "" && in.ChargeStatus != ChargeNone {
+			return invalid("refused requires charge_status none, got %q", in.ChargeStatus)
+		}
+	case PhaseReleased:
+		if in.ChargeStatus == ChargeCaptured {
+			return invalid("released cannot keep charge_status captured")
+		}
+	case PhaseFinalized:
 		switch in.ExecutionOutcome {
 		case OutcomeSucceeded, OutcomeFailed:
 		default:
@@ -660,6 +676,12 @@ func (in TransitionInput) validate() error {
 		}
 		if in.UsageQuantity == nil {
 			return invalid("finalized requires usage_quantity")
+		}
+		if in.ChargeStatus == ChargeCaptured && (in.PaymentStatus == PaymentDenied || in.PaymentStatus == PaymentVoided) {
+			return invalid("finalized with charge_status captured cannot carry payment_status %s", in.PaymentStatus)
+		}
+		if in.ChargeStatus == ChargeReleased && in.PaymentStatus == PaymentCaptured {
+			return invalid("finalized with charge_status released cannot carry payment_status captured")
 		}
 	}
 	if in.ToPhase == PhaseReserved && in.ReservationDeadline == nil {

@@ -475,6 +475,68 @@ func TestTransitionsAreCheckedAndAppendOnly(t *testing.T) {
 	if got.Phase != PhaseAccepted || got.Version != 1 {
 		t.Fatalf("row changed by a refused transition: %+v", got)
 	}
+
+	// Every word is in its vocabulary, but the combination contradicts the
+	// phase: a released row keeping a captured charge, a refused row that
+	// held a reservation, a captured charge beside a denied payment.
+	qty = int64(1)
+	for _, bad := range []TransitionInput{
+		{ExpectedPhase: PhaseAccepted, ToPhase: PhaseReserved, ReservationDeadline: &deadline, ChargeStatus: ChargeReserved},
+		{ExpectedPhase: PhaseReserved, ToPhase: PhaseReleased, ReasonCode: ReasonPaymentDenied, ChargeStatus: ChargeCaptured},
+		{ExpectedPhase: PhaseAccepted, ToPhase: PhaseRefused, ReasonCode: ReasonQuoteExpired, ChargeStatus: ChargeReserved},
+	} {
+		bad.InvocationID, bad.Actor = inv3.InvocationID, "a"
+		_, err := s.Transition(ctx, "acme", bad)
+		switch {
+		case bad.ToPhase == PhaseReserved && err != nil:
+			t.Fatalf("reserve: %v", err)
+		case bad.ToPhase != PhaseReserved && !errors.Is(err, ErrInvalid):
+			t.Fatalf("combination %+v accepted: %v", bad, err)
+		}
+	}
+	for _, bad := range []TransitionInput{
+		{ChargeStatus: ChargeCaptured, PaymentStatus: PaymentDenied},
+		{ChargeStatus: ChargeCaptured, PaymentStatus: PaymentVoided},
+		{ChargeStatus: ChargeReleased, PaymentStatus: PaymentCaptured},
+	} {
+		bad.InvocationID, bad.Actor, bad.ExpectedPhase, bad.ToPhase = inv3.InvocationID, "a", PhaseDispatched, PhaseFinalized
+		bad.ExecutionOutcome, bad.UsageQuantity = OutcomeSucceeded, &qty
+		if _, err := s.Transition(ctx, "acme", bad); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("combination %+v accepted: %v", bad, err)
+		}
+	}
+	got, _ = s.GetInvocation(ctx, "acme", inv3.InvocationID)
+	if got.Phase != PhaseReserved || got.ChargeStatus != ChargeReserved || got.Version != 2 {
+		t.Fatalf("row changed by a refused combination: %+v", got)
+	}
+}
+
+// A table created by an earlier build of this package has no vocabulary
+// CHECKs; CREATE TABLE IF NOT EXISTS would never add them. The schema must
+// install them by name on every start, wherever the table came from.
+func TestSchemaAddsVocabularyChecksToExistingTable(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const con = "commerce_invocations_payment_status_check"
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE commerce_invocations DROP CONSTRAINT `+con); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	again, err := NewStore(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("NewStore on existing table: %v", err)
+	}
+	defer again.Close()
+	var n int
+	if err := again.pool.QueryRow(ctx, `SELECT count(*) FROM pg_constraint WHERE conname = $1`, con).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("constraint %s after restart: n=%d err=%v", con, n, err)
+	}
+	cap := testCapability(t)
+	publish(t, again, cap, PriceModePerCall, 5)
+	inv := accept(t, again, mint(t, again, cap, ids("acme")), "k").Invocation
+	_, err = again.pool.Exec(ctx, `UPDATE commerce_invocations SET payment_status = 'capturd' WHERE invocation_id = $1`, inv.InvocationID)
+	if err == nil || !strings.Contains(err.Error(), "23514") {
+		t.Fatalf("CHECK did not fire on the re-created constraint: %v", err)
+	}
 }
 
 func TestConcurrentAcceptsOfOneKeyYieldOneRow(t *testing.T) {
@@ -539,5 +601,9 @@ func TestListFilters(t *testing.T) {
 	got, err = s.ListInvocations(ctx, ListFilter{TenantID: "acme", CapabilityID: cap, Until: time.Now().Add(-time.Hour)})
 	if err != nil || len(got) != 0 {
 		t.Fatalf("until filter = %d, %v", len(got), err)
+	}
+	// A misspelled phase is a refused filter, never an empty listing.
+	if _, err := s.ListInvocations(ctx, ListFilter{TenantID: "acme", Phase: "finalised"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("phase typo = %v", err)
 	}
 }
