@@ -41,6 +41,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
+	"github.com/mctlhq/mctl-api/internal/commerce"
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
@@ -474,6 +475,33 @@ func main() {
 		}
 	}
 
+	// Commerce ledger (mctl-api#547, ADR 020). Optional — enabled when
+	// COMMERCE_DB_URL or AUDIT_DB_URL is set and COMMERCE_DISABLED is not.
+	// Without it every commerce route is 503. Merging and deploying it
+	// enables no payment behaviour: nothing mints a quote until C4 wires the
+	// gateway, and no terms exist until an admin publishes them.
+	var commerceStore *commerce.Store
+	commerceDBURL := postgresURL(os.Getenv("COMMERCE_DB_URL"))
+	if commerceDBURL == "" {
+		commerceDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+	}
+	switch {
+	case killSwitchOn(os.Getenv("COMMERCE_DISABLED")):
+		slog.Warn("COMMERCE_DISABLED is set; /api/v1/commerce* routes will return 503")
+	case commerceDBURL == "":
+		slog.Warn("no COMMERCE_DB_URL or AUDIT_DB_URL; /api/v1/commerce* routes will return 503")
+	default:
+		cs, csErr := initStore(initCtx, storeFailures, "commerce ledger", func(ctx context.Context) (*commerce.Store, error) {
+			return commerce.NewStore(ctx, commerceDBURL)
+		})
+		if csErr != nil {
+			slog.Error("commerce ledger store init failed; /api/v1/commerce* routes will return 503", "error", csErr)
+		} else {
+			commerceStore = cs
+			defer cs.Close()
+		}
+	}
+
 	// Human-input delivery ledger (mctl-api#261). Optional — enabled when
 	// HUMAN_INPUT_DB_URL or AUDIT_DB_URL is set. Without it the response
 	// endpoint is 503: an answer that could be neither deduplicated nor
@@ -882,6 +910,7 @@ func main() {
 		Roadmap:                        roadmapReader,
 		RoadmapWaveMaxAge:              roadmapWaveMaxAge,
 		Usage:                          usageStore,
+		Commerce:                       commerceStore,
 		Evidence:                       evidenceStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,

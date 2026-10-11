@@ -1,0 +1,557 @@
+// Copyright 2025 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package api
+
+import (
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/mctlhq/mctl-api/internal/audit"
+	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/commerce"
+	"github.com/mctlhq/mctl-api/internal/operations"
+)
+
+// Commerce ledger endpoints (mctl-api#547), implementing ADR 020 secs. 4-6,
+// 11-13: terms, quotes, invocations and their history.
+//
+// Identity binding (ADR 020 sec. 3): tenant_id comes from the path,
+// principal_id from the canonical principal the auth middleware resolved,
+// payer_account_id is derived from the tenant. None of them is read from a
+// request body. A caller whose principal is unresolved is refused with
+// identity-unresolved: a quote with no canonical principal cannot be
+// idempotent, cannot be approved and cannot be charged, so it is never
+// minted.
+//
+// Authorization (ADR 020 sec. 12): every tenant-scoped read and write needs
+// tenant authority at commerceTenantRole; the milestone rule is tenant
+// admin, and mctl-api#489 decides the final roles. Terms publication and
+// phase transitions are platform operations: the first sets prices, the
+// second moves money state and belongs to mctl-api's own components (C3,
+// the reconciler) and the gateway, never to a tenant human.
+
+const commerceMaxBodyBytes = 64 << 10 // identifiers and digests, never a payload
+
+// commerceTenantRole is the milestone rule of ADR 020 sec. 12.
+const commerceTenantRole = operations.RoleOwner
+
+// payerAccountFor is the one payer account a tenant has in the simulated
+// milestone. C3 may introduce a real account model; the derivation stays
+// server-side either way.
+func payerAccountFor(tenant string) string { return "acct_tenant_" + tenant }
+
+func (h *Handlers) requireCommerce(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
+	if h.opts.Commerce == nil {
+		// 503, never 404: "the ledger is off" and "this tenant has no
+		// invocations" must not be the same answer.
+		writeError(w, http.StatusServiceUnavailable, "commerce ledger not configured")
+		return nil, false
+	}
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return nil, false
+	}
+	return user, true
+}
+
+func (h *Handlers) requireCommerceAdmin(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
+	user, ok := h.requireCommerce(w, r)
+	if !ok {
+		return nil, false
+	}
+	if !user.IsAdmin() {
+		writeError(w, http.StatusForbidden, "commerce administration is admin-only")
+		return nil, false
+	}
+	return user, true
+}
+
+// requireCommerceTenant admits a caller with tenant authority on the path
+// tenant and a resolved canonical principal.
+func (h *Handlers) requireCommerceTenant(w http.ResponseWriter, r *http.Request, operation string) (*auth.User, string, bool) {
+	user, ok := h.requireCommerce(w, r)
+	if !ok {
+		return nil, "", false
+	}
+	tenant := chi.URLParam(r, "tenant")
+	if tenant == "" {
+		writeError(w, http.StatusBadRequest, "tenant is required")
+		return nil, "", false
+	}
+	if !user.HasTenantAccess(tenant) {
+		// The same answer as a tenant that does not exist (ADR 020 sec. 12).
+		writeError(w, http.StatusNotFound, "not found")
+		return nil, "", false
+	}
+	if !h.requireTenantRole(w, r, user, tenant, commerceTenantRole, operation, operations.RiskMedium) {
+		return nil, "", false
+	}
+	if user.PrincipalID() == "" {
+		h.logAudit(r, audit.Entry{
+			UserID: user.ID, Operation: operation, Parameters: map[string]string{"tenant": tenant},
+			Status: "denied", RiskLevel: string(operations.RiskMedium),
+			Message: "caller has no canonical principal; commerce refuses an unresolved identity",
+		})
+		writeErrorCode(w, http.StatusForbidden, commerce.ReasonIdentityUnresolved,
+			"commerce requires a resolved canonical principal", nil)
+		return nil, "", false
+	}
+	return user, tenant, true
+}
+
+func decodeCommerceBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, commerceMaxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "body exceeds "+strconv.Itoa(commerceMaxBodyBytes)+" bytes")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return false
+	}
+	return true
+}
+
+// writeCommerceError maps store errors to the reason codes of ADR 020
+// sec. 13. Every refusal is a code the gateway can carry verbatim.
+func writeCommerceError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, commerce.ErrInvalid):
+		writeErrorCode(w, http.StatusBadRequest, "invalid-request", err.Error(), nil)
+	case errors.Is(err, commerce.ErrTermsNotFound):
+		writeErrorCode(w, http.StatusUnprocessableEntity, commerce.ReasonTermsUnknown, "no commerce terms resolve for this capability", nil)
+	case errors.Is(err, commerce.ErrQuoteNotFound), errors.Is(err, commerce.ErrInvocationNotFound):
+		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, commerce.ErrIdempotencyConflict):
+		writeErrorCode(w, http.StatusConflict, commerce.ReasonIdempotencyConflict, "idempotency key reused with a different quote", nil)
+	case errors.Is(err, commerce.ErrQuoteExpired):
+		writeErrorCode(w, http.StatusConflict, commerce.ReasonQuoteExpired, "quote has expired", nil)
+	case errors.Is(err, commerce.ErrQuoteStale):
+		writeErrorCode(w, http.StatusConflict, commerce.ReasonQuoteStale, "quote no longer matches the terms in force", nil)
+	case errors.Is(err, commerce.ErrQuoteMismatch):
+		writeErrorCode(w, http.StatusConflict, commerce.ReasonQuoteMismatch, err.Error(), nil)
+	case errors.Is(err, commerce.ErrFundsModeUnavailable):
+		writeErrorCode(w, http.StatusUnprocessableEntity, commerce.ReasonFundsModeUnavailable, err.Error(), nil)
+	case errors.Is(err, commerce.ErrTerminal), errors.Is(err, commerce.ErrPhaseConflict):
+		writeErrorCode(w, http.StatusConflict, "phase-conflict", err.Error(), nil)
+	default:
+		slog.Error("commerce ledger request failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "commerce ledger request failed")
+	}
+}
+
+// ---- terms --------------------------------------------------------------
+
+type publishTermsRequest struct {
+	TermsID         string         `json:"terms_id,omitempty"`
+	CapabilityID    string         `json:"capability_id"`
+	InputSchemaHash string         `json:"input_schema_hash"`
+	ProviderID      string         `json:"provider_id"`
+	PriceMode       string         `json:"price_mode"`
+	Price           commerce.Money `json:"price"`
+	FundsMode       string         `json:"funds_mode"`
+	QuoteTTLSeconds int            `json:"quote_ttl_seconds"`
+	EffectiveFrom   *time.Time     `json:"effective_from,omitempty"`
+}
+
+// PublishCommerceTerms publishes the next version of a capability's terms
+// (ADR 020 sec. 4). Admin-only: it sets a price.
+func (h *Handlers) PublishCommerceTerms(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireCommerceAdmin(w, r)
+	if !ok {
+		return
+	}
+	var req publishTermsRequest
+	if !decodeCommerceBody(w, r, &req) {
+		return
+	}
+	effective := time.Now().UTC()
+	if req.EffectiveFrom != nil {
+		effective = req.EffectiveFrom.UTC()
+	}
+	publisher := user.PrincipalID()
+	if publisher == "" {
+		publisher = principalOf(user)
+	}
+	terms, err := h.opts.Commerce.PublishTerms(r.Context(), commerce.PublishTermsInput{
+		TermsID: req.TermsID, CapabilityID: req.CapabilityID, InputSchemaHash: req.InputSchemaHash,
+		ProviderID: req.ProviderID, PriceMode: req.PriceMode, Price: req.Price, FundsMode: req.FundsMode,
+		QuoteTTLSeconds: req.QuoteTTLSeconds, EffectiveFrom: effective, PublishedBy: publisher,
+	})
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	h.logAudit(r, audit.Entry{
+		UserID: user.ID, Operation: "commerce-terms-publish", Status: "succeeded", RiskLevel: string(operations.RiskHigh),
+		Parameters: map[string]string{
+			"terms_id": terms.TermsID, "terms_version": strconv.FormatInt(terms.TermsVersion, 10),
+			"capability_id": terms.CapabilityID, "price_mode": terms.PriceMode,
+			"amount_minor": strconv.FormatInt(terms.Price.AmountMinor, 10), "currency": terms.Price.Currency,
+		},
+	})
+	writeJSON(w, http.StatusCreated, terms)
+}
+
+// RetireCommerceTerms retires one version. Quotes minted against it become
+// stale; invocations already accepted keep their price.
+func (h *Handlers) RetireCommerceTerms(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireCommerceAdmin(w, r)
+	if !ok {
+		return
+	}
+	version, err := strconv.ParseInt(chi.URLParam(r, "version"), 10, 64)
+	if err != nil || version < 1 {
+		writeError(w, http.StatusBadRequest, "version must be a positive integer")
+		return
+	}
+	terms, err := h.opts.Commerce.RetireTerms(r.Context(), chi.URLParam(r, "terms_id"), version)
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	h.logAudit(r, audit.Entry{
+		UserID: user.ID, Operation: "commerce-terms-retire", Status: "succeeded", RiskLevel: string(operations.RiskHigh),
+		Parameters: map[string]string{"terms_id": terms.TermsID, "terms_version": strconv.FormatInt(terms.TermsVersion, 10)},
+	})
+	writeJSON(w, http.StatusOK, terms)
+}
+
+// ListCommerceTerms lists every version for a capability, or resolves the
+// version in force with current=true.
+func (h *Handlers) ListCommerceTerms(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireCommerce(w, r); !ok {
+		return
+	}
+	q := r.URL.Query()
+	capID := q.Get("capability_id")
+	if capID == "" {
+		writeError(w, http.StatusBadRequest, "capability_id is required")
+		return
+	}
+	if q.Get("current") == "true" {
+		terms, err := h.opts.Commerce.CurrentTerms(r.Context(), capID, q.Get("input_schema_hash"))
+		if err != nil {
+			writeCommerceError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, terms)
+		return
+	}
+	terms, err := h.opts.Commerce.ListTerms(r.Context(), capID)
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"terms": terms})
+}
+
+// GetCommerceTerms returns one exact version.
+func (h *Handlers) GetCommerceTerms(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireCommerce(w, r); !ok {
+		return
+	}
+	version, err := strconv.ParseInt(chi.URLParam(r, "version"), 10, 64)
+	if err != nil || version < 1 {
+		writeError(w, http.StatusBadRequest, "version must be a positive integer")
+		return
+	}
+	terms, err := h.opts.Commerce.GetTerms(r.Context(), chi.URLParam(r, "terms_id"), version)
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, terms)
+}
+
+// ---- quotes -------------------------------------------------------------
+
+// commerceIdentityRequest is the part of a body a caller may say about who
+// the call is for. Everything else about identity is resolved server-side.
+type commerceIdentityRequest struct {
+	ExecutionID        string `json:"execution_id"`
+	SubjectPrincipalID string `json:"subject_principal_id,omitempty"`
+	DelegationGrantID  string `json:"delegation_grant_id,omitempty"`
+}
+
+func resolveIdentities(user *auth.User, tenant string, req commerceIdentityRequest) commerce.Identities {
+	subject := req.SubjectPrincipalID
+	if subject == "" {
+		subject = user.PrincipalID()
+	}
+	return commerce.Identities{
+		TenantID:           tenant,
+		PrincipalID:        user.PrincipalID(),
+		SubjectPrincipalID: subject,
+		DelegationGrantID:  req.DelegationGrantID,
+		PayerAccountID:     payerAccountFor(tenant),
+		ExecutionID:        req.ExecutionID,
+	}
+}
+
+type mintQuoteRequest struct {
+	commerceIdentityRequest
+	CapabilityID    string `json:"capability_id"`
+	InputSchemaHash string `json:"input_schema_hash"`
+	ArgsDigest      string `json:"args_digest"`
+}
+
+// MintCommerceQuote is step 5 of ADR 020 sec. 7.
+func (h *Handlers) MintCommerceQuote(w http.ResponseWriter, r *http.Request) {
+	user, tenant, ok := h.requireCommerceTenant(w, r, "commerce-quote-mint")
+	if !ok {
+		return
+	}
+	var req mintQuoteRequest
+	if !decodeCommerceBody(w, r, &req) {
+		return
+	}
+	quote, err := h.opts.Commerce.MintQuote(r.Context(), commerce.MintQuoteInput{
+		CapabilityID: req.CapabilityID, InputSchemaHash: req.InputSchemaHash,
+		Identities: resolveIdentities(user, tenant, req.commerceIdentityRequest), ArgsDigest: req.ArgsDigest,
+	})
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	h.logAudit(r, audit.Entry{
+		UserID: user.ID, Operation: "commerce-quote-mint", Status: "succeeded", RiskLevel: string(operations.RiskMedium),
+		Parameters: map[string]string{
+			"tenant": tenant, "quote_id": quote.QuoteID, "capability_id": quote.CapabilityID,
+			"terms_version": strconv.FormatInt(quote.TermsVersion, 10), "execution_id": quote.ExecutionID,
+		},
+	})
+	writeJSON(w, http.StatusCreated, quote)
+}
+
+// GetCommerceQuote returns a quote of the path tenant.
+func (h *Handlers) GetCommerceQuote(w http.ResponseWriter, r *http.Request) {
+	_, tenant, ok := h.requireCommerceTenant(w, r, "commerce-quote-read")
+	if !ok {
+		return
+	}
+	quote, err := h.opts.Commerce.GetQuote(r.Context(), tenant, chi.URLParam(r, "quote_id"))
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, quote)
+}
+
+// ---- invocations --------------------------------------------------------
+
+type acceptInvocationRequest struct {
+	commerceIdentityRequest
+	QuoteID        string `json:"quote_id"`
+	QuoteDigest    string `json:"quote_digest"`
+	IdempotencyKey string `json:"idempotency_key"`
+	ArgsDigest     string `json:"args_digest"`
+	ApprovalID     string `json:"approval_id,omitempty"`
+	TermsBinding   string `json:"terms_binding,omitempty"`
+}
+
+type acceptInvocationResponse struct {
+	*commerce.Invocation
+	Replayed bool `json:"replayed"`
+}
+
+// AcceptCommerceInvocation is step 6 of ADR 020 sec. 7. 201 is a new row,
+// 200 the existing row for the same idempotency key and quote digest.
+func (h *Handlers) AcceptCommerceInvocation(w http.ResponseWriter, r *http.Request) {
+	user, tenant, ok := h.requireCommerceTenant(w, r, "commerce-invocation-accept")
+	if !ok {
+		return
+	}
+	var req acceptInvocationRequest
+	if !decodeCommerceBody(w, r, &req) {
+		return
+	}
+	res, err := h.opts.Commerce.AcceptInvocation(r.Context(), commerce.AcceptInvocationInput{
+		QuoteID: req.QuoteID, QuoteDigest: req.QuoteDigest, IdempotencyKey: req.IdempotencyKey,
+		Identities: resolveIdentities(user, tenant, req.commerceIdentityRequest), ArgsDigest: req.ArgsDigest,
+		ApprovalID: req.ApprovalID, TermsBinding: req.TermsBinding,
+	})
+	if err != nil {
+		h.logAudit(r, audit.Entry{
+			UserID: user.ID, Operation: "commerce-invocation-accept", Status: "failed", RiskLevel: string(operations.RiskMedium),
+			Parameters: map[string]string{"tenant": tenant, "quote_id": req.QuoteID, "execution_id": req.ExecutionID},
+			Message:    err.Error(),
+		})
+		writeCommerceError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if res.Replayed {
+		status = http.StatusOK
+	} else {
+		h.logAudit(r, audit.Entry{
+			UserID: user.ID, Operation: "commerce-invocation-accept", Status: "succeeded", RiskLevel: string(operations.RiskMedium),
+			Parameters: map[string]string{
+				"tenant": tenant, "invocation_id": res.Invocation.InvocationID, "quote_id": res.Invocation.QuoteID,
+				"execution_id": res.Invocation.ExecutionID, "approval_id": res.Invocation.ApprovalID,
+				"amount_minor": strconv.FormatInt(res.Invocation.Price.AmountMinor, 10), "currency": res.Invocation.Price.Currency,
+			},
+		})
+	}
+	writeJSON(w, status, acceptInvocationResponse{Invocation: res.Invocation, Replayed: res.Replayed})
+}
+
+// GetCommerceInvocation returns one receipt of the path tenant.
+func (h *Handlers) GetCommerceInvocation(w http.ResponseWriter, r *http.Request) {
+	_, tenant, ok := h.requireCommerceTenant(w, r, "commerce-invocation-read")
+	if !ok {
+		return
+	}
+	inv, err := h.opts.Commerce.GetInvocation(r.Context(), tenant, chi.URLParam(r, "invocation_id"))
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inv)
+}
+
+// ListCommerceInvocations lists the path tenant's receipts, filtered by
+// capability, phase or period.
+func (h *Handlers) ListCommerceInvocations(w http.ResponseWriter, r *http.Request) {
+	_, tenant, ok := h.requireCommerceTenant(w, r, "commerce-invocation-read")
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	f := commerce.ListFilter{TenantID: tenant, CapabilityID: q.Get("capability_id"), Phase: q.Get("phase")}
+	for _, p := range []struct {
+		name string
+		dst  *time.Time
+	}{{"since", &f.Since}, {"until", &f.Until}} {
+		if v := q.Get(p.name); v != "" {
+			t, err := time.Parse(time.RFC3339, v)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, p.name+" must be RFC 3339")
+				return
+			}
+			*p.dst = t
+		}
+	}
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			writeError(w, http.StatusBadRequest, "limit must be 1..500")
+			return
+		}
+		f.Limit = n
+	}
+	list, err := h.opts.Commerce.ListInvocations(r.Context(), f)
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"invocations": list})
+}
+
+// ListCommerceInvocationTransitions returns the append-only history.
+func (h *Handlers) ListCommerceInvocationTransitions(w http.ResponseWriter, r *http.Request) {
+	_, tenant, ok := h.requireCommerceTenant(w, r, "commerce-invocation-read")
+	if !ok {
+		return
+	}
+	list, err := h.opts.Commerce.ListTransitions(r.Context(), tenant, chi.URLParam(r, "invocation_id"))
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"transitions": list})
+}
+
+type transitionRequest struct {
+	ExpectedPhase       string     `json:"expected_phase"`
+	ToPhase             string     `json:"to_phase"`
+	ReasonCode          string     `json:"reason_code,omitempty"`
+	Note                string     `json:"note,omitempty"`
+	ExecutionOutcome    string     `json:"execution_outcome,omitempty"`
+	UsageQuantity       *int64     `json:"usage_quantity,omitempty"`
+	ChargeStatus        string     `json:"charge_status,omitempty"`
+	PaymentStatus       string     `json:"payment_status,omitempty"`
+	SettlementStatus    string     `json:"settlement_status,omitempty"`
+	ReservationDeadline *time.Time `json:"reservation_deadline,omitempty"`
+}
+
+// TransitionCommerceInvocation applies one phase change (ADR 020 sec. 11).
+// Platform-only: a tenant must not finalize or release its own charge.
+func (h *Handlers) TransitionCommerceInvocation(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireCommerceAdmin(w, r)
+	if !ok {
+		return
+	}
+	tenant := chi.URLParam(r, "tenant")
+	id := chi.URLParam(r, "invocation_id")
+	var req transitionRequest
+	if !decodeCommerceBody(w, r, &req) {
+		return
+	}
+	actor := user.PrincipalID()
+	if actor == "" {
+		actor = principalOf(user)
+	}
+	inv, err := h.opts.Commerce.Transition(r.Context(), tenant, commerce.TransitionInput{
+		InvocationID: id, ExpectedPhase: req.ExpectedPhase, ToPhase: req.ToPhase, ReasonCode: req.ReasonCode,
+		Actor: actor, Note: req.Note, ExecutionOutcome: req.ExecutionOutcome, UsageQuantity: req.UsageQuantity,
+		ChargeStatus: req.ChargeStatus, PaymentStatus: req.PaymentStatus, SettlementStatus: req.SettlementStatus,
+		ReservationDeadline: req.ReservationDeadline,
+	})
+	params := map[string]string{"tenant": tenant, "invocation_id": id, "expected_phase": req.ExpectedPhase,
+		"to_phase": req.ToPhase, "reason_code": req.ReasonCode, "actor": actor}
+	if err != nil {
+		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: "commerce-invocation-transition", Status: "failed",
+			RiskLevel: string(operations.RiskHigh), Parameters: params, Message: err.Error()})
+		writeCommerceError(w, err)
+		return
+	}
+	h.logAudit(r, audit.Entry{UserID: user.ID, Operation: "commerce-invocation-transition", Status: "succeeded",
+		RiskLevel: string(operations.RiskHigh), Parameters: params})
+	writeJSON(w, http.StatusOK, inv)
+}
+
+// ListOverdueCommerceInvocations lists non-terminal invocations past their
+// reconciliation deadline, for the operator alert of ADR 020 sec. 11.
+func (h *Handlers) ListOverdueCommerceInvocations(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireCommerceAdmin(w, r); !ok {
+		return
+	}
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			writeError(w, http.StatusBadRequest, "limit must be 1..500")
+			return
+		}
+		limit = n
+	}
+	list, err := h.opts.Commerce.ListOverdue(r.Context(), limit)
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"invocations": list})
+}

@@ -1025,6 +1025,117 @@ components:
         detail: {type: object}
         created_at: {type: string, format: date-time}
 
+    CommerceMoney:
+      type: object
+      description: Integer minor-unit money (ADR 020 sec. 2). Never a float.
+      properties:
+        currency: {type: string, description: ISO 4217 code, from a checked-in table}
+        amount_minor: {type: integer, format: int64, minimum: 0}
+      required: [currency, amount_minor]
+    CommerceTerms:
+      type: object
+      description: One immutable, versioned price declaration (ADR 020 sec. 4).
+      properties:
+        schema_version: {type: integer, enum: [1]}
+        terms_id: {type: string, description: 'ctm_<ulid>'}
+        terms_version: {type: integer, format: int64}
+        capability_id: {type: string}
+        input_schema_hash: {type: string}
+        provider_id: {type: string}
+        price_mode: {type: string, enum: [free, per_call, per_successful_call]}
+        meter: {type: string, enum: [invocation]}
+        price: {$ref: '#/components/schemas/CommerceMoney'}
+        funds_mode: {type: string, enum: [simulated, live]}
+        quote_ttl_seconds: {type: integer, minimum: 30, maximum: 900}
+        effective_from: {type: string, format: date-time}
+        retired_at: {type: string, format: date-time}
+        published_by: {type: string}
+        created_at: {type: string, format: date-time}
+    CommerceIdentities:
+      type: object
+      description: Server-resolved parties of a quote or invocation (ADR 020 sec. 3). None is read from a body.
+      properties:
+        tenant_id: {type: string}
+        principal_id: {type: string, description: 'prn_<ulid> of the authenticated caller'}
+        subject_principal_id: {type: string}
+        delegation_grant_id: {type: string}
+        payer_account_id: {type: string}
+        execution_id: {type: string}
+    CommerceQuote:
+      allOf:
+        - $ref: '#/components/schemas/CommerceIdentities'
+        - type: object
+          properties:
+            schema_version: {type: integer, enum: [1]}
+            quote_id: {type: string, description: 'cq_<ulid>'}
+            terms_id: {type: string}
+            terms_version: {type: integer, format: int64}
+            capability_id: {type: string}
+            input_schema_hash: {type: string}
+            args_digest: {type: string}
+            price_mode: {type: string, enum: [free, per_call, per_successful_call]}
+            price: {$ref: '#/components/schemas/CommerceMoney'}
+            funds_mode: {type: string, enum: [simulated, live]}
+            expires_at: {type: string, format: date-time}
+            quote_digest: {type: string, description: 'sha256 over the mctl-commerce-quote/v1 length-prefixed encoding (ADR 020 sec. 5)'}
+            created_at: {type: string, format: date-time}
+    CommerceInvocation:
+      allOf:
+        - $ref: '#/components/schemas/CommerceIdentities'
+        - type: object
+          description: The receipt. The five facts of ADR 020 sec. 1 are separate fields beside phase.
+          properties:
+            schema_version: {type: integer, enum: [1]}
+            invocation_id: {type: string, description: 'inv_<ulid>'}
+            quote_id: {type: string}
+            quote_digest: {type: string}
+            quote_expires_at: {type: string, format: date-time}
+            terms_id: {type: string}
+            terms_version: {type: integer, format: int64}
+            capability_id: {type: string}
+            provider_id: {type: string}
+            idempotency_key: {type: string}
+            args_digest: {type: string}
+            price_mode: {type: string, enum: [free, per_call, per_successful_call]}
+            price: {$ref: '#/components/schemas/CommerceMoney'}
+            funds_mode: {type: string, enum: [simulated, live]}
+            phase: {type: string, enum: [accepted, refused, reserved, dispatching, dispatched, outcome_unknown, released, finalized]}
+            execution_outcome: {type: string, enum: [not_dispatched, succeeded, failed, unknown]}
+            usage_quantity: {type: integer, format: int64}
+            charge_status: {type: string, enum: [none, reserved, captured, released]}
+            payment_status: {type: string, enum: [none, not_required, authorized, denied, captured, voided, unknown]}
+            settlement_status: {type: string, enum: [not_applicable, pending, settled, failed]}
+            reason_code: {type: string}
+            approval_id: {type: string}
+            provider_operation_key: {type: string, description: 'mctl-op/v1:<invocation_id> (ADR 020 sec. 6)'}
+            reservation_deadline: {type: string, format: date-time}
+            reconciliation_deadline: {type: string, format: date-time}
+            created_at: {type: string, format: date-time}
+            updated_at: {type: string, format: date-time}
+            finalized_at: {type: string, format: date-time}
+            version: {type: integer, format: int64}
+    CommerceTransition:
+      type: object
+      description: One append-only history row (ADR 020 sec. 11).
+      properties:
+        seq: {type: integer, format: int64}
+        invocation_id: {type: string}
+        from_phase: {type: string}
+        to_phase: {type: string}
+        reason_code: {type: string}
+        actor: {type: string}
+        note: {type: string}
+        recorded_at: {type: string, format: date-time}
+    CommerceError:
+      type: object
+      description: Error carrying a reason code of ADR 020 sec. 13 where one applies.
+      properties:
+        error: {type: string}
+        code:
+          type: string
+          enum: [invalid-request, identity-unresolved, commerce-terms-unknown, quote-expired, quote-stale,
+                 quote-mismatch, idempotency-conflict, funds-mode-unavailable, phase-conflict]
+
 paths:
   /healthz:
     get:
@@ -4296,6 +4407,313 @@ paths:
                   events: {type: array, items: {$ref: '#/components/schemas/WorkItemEvent'}}
         '404': {description: No such work item, or not visible, content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemError'}}}}
 
+  /api/v1/commerce/terms:
+    get:
+      summary: List commerce terms for a capability, or resolve the version in force
+      description: |
+        ADR 020 sec. 4 (mctl-api#547). With `current=true` and `input_schema_hash`
+        returns the single version in force; a capability with no such version is
+        422 `commerce-terms-unknown`, which is not free.
+      tags: [Commerce]
+      parameters:
+        - {name: capability_id, in: query, required: true, schema: {type: string}}
+        - {name: current, in: query, schema: {type: boolean}}
+        - {name: input_schema_hash, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: Every version newest first (`terms`), or the current one with `current=true`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      terms: {type: array, items: {$ref: '#/components/schemas/CommerceTerms'}}
+                  - $ref: '#/components/schemas/CommerceTerms'
+        '401': {description: Authentication required}
+        '422': {description: No terms resolve, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+    post:
+      summary: Publish the next version of a capability's commerce terms
+      description: |
+        Admin-only; it sets a price. Earlier versions stay in place and keep
+        resolving for quotes already minted against them. `funds_mode: live` is
+        refused with 422 `funds-mode-unavailable` (ADR 020 sec. 2).
+      tags: [Commerce]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                terms_id: {type: string, description: Required after the first publication for the capability}
+                capability_id: {type: string}
+                input_schema_hash: {type: string}
+                provider_id: {type: string}
+                price_mode: {type: string, enum: [free, per_call, per_successful_call]}
+                price: {$ref: '#/components/schemas/CommerceMoney'}
+                funds_mode: {type: string, enum: [simulated]}
+                quote_ttl_seconds: {type: integer, minimum: 30, maximum: 900}
+                effective_from: {type: string, format: date-time}
+              required: [capability_id, input_schema_hash, provider_id, price_mode, price, funds_mode, quote_ttl_seconds]
+      responses:
+        '201': {description: Published, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceTerms'}}}}
+        '400': {description: Invalid body, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '422': {description: Live funds are not enabled, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/terms/{terms_id}/versions/{version}:
+    get:
+      summary: Read one exact terms version
+      tags: [Commerce]
+      parameters:
+        - {name: terms_id, in: path, required: true, schema: {type: string}}
+        - {name: version, in: path, required: true, schema: {type: integer, format: int64}}
+      responses:
+        '200': {description: The version, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceTerms'}}}}
+        '401': {description: Authentication required}
+        '422': {description: No such version, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/terms/{terms_id}/versions/{version}/retire:
+    post:
+      summary: Retire one terms version
+      description: Admin-only. Quotes minted against it become stale; accepted invocations keep their price.
+      tags: [Commerce]
+      parameters:
+        - {name: terms_id, in: path, required: true, schema: {type: string}}
+        - {name: version, in: path, required: true, schema: {type: integer, format: int64}}
+      responses:
+        '200': {description: Retired, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceTerms'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '422': {description: No such active version, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/invocations/overdue:
+    get:
+      summary: List non-terminal invocations past their reconciliation deadline
+      description: Admin-only operator view (ADR 020 sec. 11). Crossing the deadline changes nothing in the row.
+      tags: [Commerce]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500}}
+      responses:
+        '200':
+          description: Oldest deadline first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invocations: {type: array, items: {$ref: '#/components/schemas/CommerceInvocation'}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/tenants/{tenant}/quotes:
+    post:
+      summary: Mint a quote at the terms in force
+      description: |
+        Step 5 of ADR 020 sec. 7. `tenant_id`, `principal_id` and
+        `payer_account_id` are resolved server-side and refused as body fields.
+        Requires tenant authority (milestone rule: tenant owner, or a platform
+        admin) and a resolved canonical principal; without one the call is 403
+        `identity-unresolved`. Another tenant is 404.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                capability_id: {type: string}
+                input_schema_hash: {type: string}
+                args_digest: {type: string, description: 'sha256 of canonical_json(arguments)'}
+                execution_id: {type: string}
+                subject_principal_id: {type: string, description: Only with delegation_grant_id}
+                delegation_grant_id: {type: string}
+              required: [capability_id, input_schema_hash, args_digest, execution_id]
+      responses:
+        '201': {description: Minted, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceQuote'}}}}
+        '400': {description: Invalid body or an identity field in it, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Below the tenant role, or no canonical principal, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '404': {description: No access to the tenant}
+        '422': {description: No terms resolve, or live funds, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/tenants/{tenant}/quotes/{quote_id}:
+    get:
+      summary: Read a quote of the tenant
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: quote_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: The quote, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceQuote'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Below the tenant role, or no canonical principal}
+        '404': {description: No such quote in this tenant}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/tenants/{tenant}/invocations:
+    get:
+      summary: List the tenant's invocation receipts
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: capability_id, in: query, schema: {type: string}}
+        - {name: phase, in: query, schema: {type: string}}
+        - {name: since, in: query, schema: {type: string, format: date-time}}
+        - {name: until, in: query, schema: {type: string, format: date-time}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500}}
+      responses:
+        '200':
+          description: Newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invocations: {type: array, items: {$ref: '#/components/schemas/CommerceInvocation'}}
+        '401': {description: Authentication required}
+        '403': {description: Below the tenant role, or no canonical principal}
+        '404': {description: No access to the tenant}
+        '503': {description: Commerce ledger not configured}
+    post:
+      summary: Accept a quoted invocation
+      description: |
+        Step 6 of ADR 020 sec. 7. Idempotent under (tenant, principal,
+        idempotency_key): the same quote digest returns the existing row with
+        200, a different one is 409 `idempotency-conflict`. The quote must be
+        the caller's, unexpired, at the terms still in force, and reproduce
+        its stored digest; `terms_binding`, when sent, must equal the binding
+        of the quote's terms for this payer (ADR 020 sec. 8). Nothing is
+        reserved here.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                quote_id: {type: string}
+                quote_digest: {type: string}
+                idempotency_key: {type: string, pattern: '^[A-Za-z0-9._:-]{1,128}$'}
+                args_digest: {type: string}
+                execution_id: {type: string}
+                subject_principal_id: {type: string}
+                delegation_grant_id: {type: string}
+                approval_id: {type: string}
+                terms_binding: {type: string}
+              required: [quote_id, quote_digest, idempotency_key, args_digest, execution_id]
+      responses:
+        '201':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/CommerceInvocation'
+                  - type: object
+                    properties:
+                      replayed: {type: boolean}
+        '200': {description: 'Replay; the existing invocation with replayed=true', content: {application/json: {schema: {$ref: '#/components/schemas/CommerceInvocation'}}}}
+        '400': {description: Invalid body, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Below the tenant role, or no canonical principal, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '404': {description: No such quote in this tenant}
+        '409': {description: 'quote-expired, quote-stale, quote-mismatch or idempotency-conflict', content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '422': {description: Live funds, or the terms are gone, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}:
+    get:
+      summary: Read one invocation receipt
+      description: Ids, terms version, quote digest, the five facts, phase, reason code and timestamps. Never arguments, results or payment proofs.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: invocation_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: The receipt, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceInvocation'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Below the tenant role, or no canonical principal}
+        '404': {description: No such invocation in this tenant}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/transitions:
+    get:
+      summary: Read the append-only history of an invocation
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: invocation_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: In order of seq
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transitions: {type: array, items: {$ref: '#/components/schemas/CommerceTransition'}}
+        '401': {description: Authentication required}
+        '403': {description: Below the tenant role, or no canonical principal}
+        '404': {description: No such invocation in this tenant}
+        '503': {description: Commerce ledger not configured}
+    post:
+      summary: Apply one phase transition
+      description: |
+        ADR 020 sec. 11. Platform-only: a tenant must not finalize or release
+        its own charge. The row is locked, its phase compared with
+        `expected_phase`, and a mismatch is 409 `phase-conflict`, never a
+        blind write; a terminal row never moves. Each call appends one history
+        row naming the actor.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: invocation_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                expected_phase: {type: string}
+                to_phase: {type: string}
+                reason_code: {type: string, description: Required for refused and released}
+                note: {type: string, maxLength: 1024}
+                execution_outcome: {type: string, enum: [not_dispatched, succeeded, failed, unknown]}
+                usage_quantity: {type: integer, format: int64, minimum: 0}
+                charge_status: {type: string, enum: [none, reserved, captured, released]}
+                payment_status: {type: string, enum: [none, not_required, authorized, denied, captured, voided, unknown]}
+                settlement_status: {type: string, enum: [not_applicable, pending, settled, failed]}
+                reservation_deadline: {type: string, format: date-time, description: Required when to_phase is reserved}
+              required: [expected_phase, to_phase]
+      responses:
+        '200': {description: Applied, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceInvocation'}}}}
+        '400': {description: Invalid body or an undefined transition, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '404': {description: No such invocation in this tenant}
+        '409': {description: Phase does not match expected_phase, or the row is terminal, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+
 tags:
   - name: Health
     description: Health and readiness probes
@@ -4351,3 +4769,5 @@ tags:
     description: workitem/v1 durable work across surfaces (docs/work-context-contract.md)
   - name: Action Approvals
     description: actionapproval/v1 durable single-use approvals of runtime agent side effects (mctl-api#366)
+  - name: Commerce
+    description: ADR 020 commerce ledger — terms, quotes, invocation receipts and history (mctl-api#547)

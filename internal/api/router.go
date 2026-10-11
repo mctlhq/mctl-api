@@ -28,6 +28,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/agentregistry"
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/commerce"
 	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/evidence"
@@ -153,6 +154,11 @@ type Options struct {
 	// must read as "the ledger is unavailable" and never as "nothing was
 	// spent".
 	Usage *usage.Store
+	// Commerce is the durable commerce ledger of ADR 020 (mctl-api#547):
+	// terms, quotes, invocations and their history. Optional — nil makes the
+	// commerce endpoints 503, which is "the ledger is unavailable", never
+	// "this tenant was not charged".
+	Commerce *commerce.Store
 	// TemporalClient starts/signals DevLoopWorkflow runs on the dev-workflow
 	// control plane's Temporal deployment (optional — nil disables
 	// mctl_trigger_issue's use_temporal path; callers fall back to the
@@ -719,6 +725,29 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/usage/records", h.IngestUsageRecords)
 			r.Get("/usage/records", h.ListUsageRecords)
 			r.Get("/usage/summary", h.GetUsageSummary)
+
+			// Commerce ledger (mctl-api#547, ADR 020). Like usage, the writes
+			// are single short Postgres transactions, one per quote or
+			// accepted invocation, and they stay off the 20/min group for
+			// the same reason. Terms and transitions are platform
+			// operations; quotes, invocations and receipts are tenant-scoped
+			// under /commerce/tenants/{tenant}.
+			r.Route("/commerce", func(r chi.Router) {
+				r.Post("/terms", h.PublishCommerceTerms)
+				r.Get("/terms", h.ListCommerceTerms)
+				r.Get("/terms/{terms_id}/versions/{version}", h.GetCommerceTerms)
+				r.Post("/terms/{terms_id}/versions/{version}/retire", h.RetireCommerceTerms)
+				r.Get("/invocations/overdue", h.ListOverdueCommerceInvocations)
+				r.Route("/tenants/{tenant}", func(r chi.Router) {
+					r.Post("/quotes", h.MintCommerceQuote)
+					r.Get("/quotes/{quote_id}", h.GetCommerceQuote)
+					r.Post("/invocations", h.AcceptCommerceInvocation)
+					r.Get("/invocations", h.ListCommerceInvocations)
+					r.Get("/invocations/{invocation_id}", h.GetCommerceInvocation)
+					r.Get("/invocations/{invocation_id}/transitions", h.ListCommerceInvocationTransitions)
+					r.Post("/invocations/{invocation_id}/transitions", h.TransitionCommerceInvocation)
+				})
+			})
 
 			// Human-operator lifecycle RECOVERY -- fence a dead claim,
 			// escalate a stuck owner into a handoff, retry a stalled

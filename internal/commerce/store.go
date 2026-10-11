@@ -1,0 +1,821 @@
+// Copyright 2025 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package commerce
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// Deadlines (ADR 020 sec. 11).
+const (
+	DefaultReconciliationWindow = 24 * time.Hour
+)
+
+// commerceSchema is applied on every start, like usageSchema. Everything is
+// additive and sits beside the usage ledger, never inside it (ADR 020
+// sec. 14). No table stores arguments, results or payment proofs.
+const commerceSchema = `
+CREATE TABLE IF NOT EXISTS commerce_terms (
+    terms_id          TEXT        NOT NULL,
+    terms_version     BIGINT      NOT NULL,
+    capability_id     TEXT        NOT NULL,
+    input_schema_hash TEXT        NOT NULL,
+    provider_id       TEXT        NOT NULL,
+    price_mode        TEXT        NOT NULL,
+    meter             TEXT        NOT NULL,
+    currency          TEXT        NOT NULL,
+    amount_minor      BIGINT      NOT NULL CHECK (amount_minor >= 0),
+    funds_mode        TEXT        NOT NULL,
+    quote_ttl_seconds INTEGER     NOT NULL,
+    effective_from    TIMESTAMPTZ NOT NULL,
+    retired_at        TIMESTAMPTZ,
+    published_by      TEXT        NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (terms_id, terms_version)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS commerce_terms_capability_version
+    ON commerce_terms (capability_id, terms_version);
+
+CREATE TABLE IF NOT EXISTS commerce_quotes (
+    quote_id             TEXT        PRIMARY KEY,
+    terms_id             TEXT        NOT NULL,
+    terms_version        BIGINT      NOT NULL,
+    capability_id        TEXT        NOT NULL,
+    input_schema_hash    TEXT        NOT NULL,
+    tenant_id            TEXT        NOT NULL,
+    principal_id         TEXT        NOT NULL,
+    subject_principal_id TEXT        NOT NULL,
+    delegation_grant_id  TEXT        NOT NULL DEFAULT '',
+    payer_account_id     TEXT        NOT NULL,
+    execution_id         TEXT        NOT NULL,
+    args_digest          TEXT        NOT NULL,
+    price_mode           TEXT        NOT NULL,
+    currency             TEXT        NOT NULL,
+    amount_minor         BIGINT      NOT NULL CHECK (amount_minor >= 0),
+    funds_mode           TEXT        NOT NULL,
+    expires_at           TIMESTAMPTZ NOT NULL,
+    quote_digest         TEXT        NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (terms_id, terms_version) REFERENCES commerce_terms (terms_id, terms_version)
+);
+CREATE INDEX IF NOT EXISTS commerce_quotes_tenant_created
+    ON commerce_quotes (tenant_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS commerce_invocations (
+    invocation_id           TEXT        PRIMARY KEY,
+    quote_id                TEXT        NOT NULL UNIQUE REFERENCES commerce_quotes (quote_id),
+    quote_digest            TEXT        NOT NULL,
+    quote_expires_at        TIMESTAMPTZ NOT NULL,
+    terms_id                TEXT        NOT NULL,
+    terms_version           BIGINT      NOT NULL,
+    capability_id           TEXT        NOT NULL,
+    provider_id             TEXT        NOT NULL,
+    tenant_id               TEXT        NOT NULL,
+    principal_id            TEXT        NOT NULL,
+    subject_principal_id    TEXT        NOT NULL,
+    delegation_grant_id     TEXT        NOT NULL DEFAULT '',
+    payer_account_id        TEXT        NOT NULL,
+    execution_id            TEXT        NOT NULL,
+    idempotency_key         TEXT        NOT NULL,
+    args_digest             TEXT        NOT NULL,
+    price_mode              TEXT        NOT NULL,
+    currency                TEXT        NOT NULL,
+    amount_minor            BIGINT      NOT NULL CHECK (amount_minor >= 0),
+    funds_mode              TEXT        NOT NULL,
+    phase                   TEXT        NOT NULL,
+    execution_outcome       TEXT        NOT NULL,
+    usage_quantity          BIGINT,
+    charge_status           TEXT        NOT NULL,
+    payment_status          TEXT        NOT NULL,
+    settlement_status       TEXT        NOT NULL,
+    reason_code             TEXT        NOT NULL DEFAULT '',
+    approval_id             TEXT        NOT NULL DEFAULT '',
+    reservation_deadline    TIMESTAMPTZ,
+    reconciliation_deadline TIMESTAMPTZ NOT NULL,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finalized_at            TIMESTAMPTZ,
+    version                 BIGINT      NOT NULL DEFAULT 1,
+    UNIQUE (tenant_id, principal_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS commerce_invocations_tenant_created
+    ON commerce_invocations (tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS commerce_invocations_open
+    ON commerce_invocations (reconciliation_deadline)
+    WHERE phase NOT IN ('refused', 'released', 'finalized');
+
+CREATE TABLE IF NOT EXISTS commerce_invocation_transitions (
+    seq           BIGSERIAL   PRIMARY KEY,
+    invocation_id TEXT        NOT NULL REFERENCES commerce_invocations (invocation_id),
+    from_phase    TEXT        NOT NULL,
+    to_phase      TEXT        NOT NULL,
+    reason_code   TEXT        NOT NULL DEFAULT '',
+    actor         TEXT        NOT NULL,
+    note          TEXT        NOT NULL DEFAULT '',
+    recorded_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS commerce_invocation_transitions_invocation
+    ON commerce_invocation_transitions (invocation_id, seq);
+`
+
+// Store is the Postgres-backed commerce ledger.
+type Store struct {
+	pool *pgxpool.Pool
+	now  func() time.Time
+}
+
+// NewStore connects, applies the schema and returns the store.
+func NewStore(ctx context.Context, connStr string) (*Store, error) {
+	pool, err := pgxpool.New(ctx, connStr)
+	if err != nil {
+		return nil, fmt.Errorf("commerce: connect: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("commerce: ping: %w", err)
+	}
+	if _, err := pool.Exec(ctx, commerceSchema); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("commerce: schema: %w", err)
+	}
+	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+// Close releases the pool.
+func (s *Store) Close() {
+	if s != nil && s.pool != nil {
+		s.pool.Close()
+	}
+}
+
+func (s *Store) withTx(ctx context.Context, lockKey string, fn func(pgx.Tx) error) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("commerce: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit has succeeded
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+		return fmt.Errorf("commerce: acquire lock: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commerce: commit: %w", err)
+	}
+	return nil
+}
+
+// newULID is Crockford base32 of 48 bits of milliseconds and 80 random
+// bits, the same shape internal/principals mints. It is copied rather than
+// imported so this package does not depend on the principals store.
+func newULID(t time.Time) string {
+	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	var raw [16]byte
+	// 48 bits of milliseconds, big-endian, in raw[0:6]; the shift leaves
+	// raw[6:8] zero for the random tail to overwrite.
+	binary.BigEndian.PutUint64(raw[0:8], uint64(t.UnixMilli())<<16) //nolint:gosec // UnixMilli is positive for every date this runs on
+	if _, err := rand.Read(raw[6:]); err != nil {
+		panic("commerce: crypto/rand: " + err.Error())
+	}
+	var out [26]byte
+	// Encode 128 bits as 26 base32 characters, most significant first,
+	// with the leading two bits of the first character zero.
+	var acc uint64
+	bits := 0
+	pos := 25
+	for i := 15; i >= 0; i-- {
+		acc |= uint64(raw[i]) << bits
+		bits += 8
+		for bits >= 5 && pos >= 0 {
+			out[pos] = alphabet[acc&31]
+			acc >>= 5
+			bits -= 5
+			pos--
+		}
+	}
+	for pos >= 0 {
+		out[pos] = alphabet[acc&31]
+		acc >>= 5
+		pos--
+	}
+	return string(out[:])
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// ---- terms --------------------------------------------------------------
+
+const termsColumns = `terms_id, terms_version, capability_id, input_schema_hash, provider_id,
+	price_mode, meter, currency, amount_minor, funds_mode, quote_ttl_seconds,
+	effective_from, retired_at, published_by, created_at`
+
+func scanTerms(row pgx.Row) (*Terms, error) {
+	var t Terms
+	if err := row.Scan(&t.TermsID, &t.TermsVersion, &t.CapabilityID, &t.InputSchemaHash, &t.ProviderID,
+		&t.PriceMode, &t.Meter, &t.Price.Currency, &t.Price.AmountMinor, &t.FundsMode, &t.QuoteTTLSeconds,
+		&t.EffectiveFrom, &t.RetiredAt, &t.PublishedBy, &t.CreatedAt); err != nil {
+		return nil, err
+	}
+	t.SchemaVersion = SchemaVersion
+	return &t, nil
+}
+
+// PublishTerms stores the next immutable version of a capability's terms
+// (ADR 020 sec. 4). The first publication for a capability mints the
+// terms_id; later ones must name it. Earlier versions are left in place and
+// keep resolving for quotes already minted against them.
+func (s *Store) PublishTerms(ctx context.Context, in PublishTermsInput) (*Terms, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	var out *Terms
+	err := s.withTx(ctx, "commerce:terms:"+in.CapabilityID, func(tx pgx.Tx) error {
+		var existingID string
+		var maxVersion int64
+		err := tx.QueryRow(ctx, `SELECT terms_id, max(terms_version) FROM commerce_terms
+			WHERE capability_id = $1 GROUP BY terms_id`, in.CapabilityID).Scan(&existingID, &maxVersion)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			if in.TermsID == "" {
+				in.TermsID = TermsIDPrefix + newULID(s.now())
+			} else {
+				var n int
+				if err := tx.QueryRow(ctx, `SELECT count(*) FROM commerce_terms WHERE terms_id = $1`, in.TermsID).Scan(&n); err != nil {
+					return fmt.Errorf("commerce: check terms id: %w", err)
+				}
+				if n > 0 {
+					return invalid("terms_id %s belongs to another capability", in.TermsID)
+				}
+			}
+		case err != nil:
+			return fmt.Errorf("commerce: current terms: %w", err)
+		default:
+			if in.TermsID == "" {
+				in.TermsID = existingID
+			} else if in.TermsID != existingID {
+				return invalid("capability %s already has terms %s", in.CapabilityID, existingID)
+			}
+		}
+		row := tx.QueryRow(ctx, `INSERT INTO commerce_terms (`+termsColumns+`)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, $13, $14)
+			RETURNING `+termsColumns,
+			in.TermsID, maxVersion+1, in.CapabilityID, in.InputSchemaHash, in.ProviderID,
+			in.PriceMode, MeterInvocation, in.Price.Currency, in.Price.AmountMinor, in.FundsMode,
+			in.QuoteTTLSeconds, in.EffectiveFrom.UTC(), in.PublishedBy, s.now())
+		t, err := scanTerms(row)
+		if err != nil {
+			return fmt.Errorf("commerce: insert terms: %w", err)
+		}
+		out = t
+		return nil
+	})
+	return out, err
+}
+
+// RetireTerms marks one version retired. A retired version no longer
+// mints quotes and makes quotes minted against it stale.
+func (s *Store) RetireTerms(ctx context.Context, termsID string, version int64) (*Terms, error) {
+	row := s.pool.QueryRow(ctx, `UPDATE commerce_terms SET retired_at = $3
+		WHERE terms_id = $1 AND terms_version = $2 AND retired_at IS NULL
+		RETURNING `+termsColumns, termsID, version, s.now())
+	t, err := scanTerms(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTermsNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("commerce: retire terms: %w", err)
+	}
+	return t, nil
+}
+
+// GetTerms returns one exact version.
+func (s *Store) GetTerms(ctx context.Context, termsID string, version int64) (*Terms, error) {
+	return s.getTerms(ctx, s.pool, termsID, version)
+}
+
+type querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func (s *Store) getTerms(ctx context.Context, q querier, termsID string, version int64) (*Terms, error) {
+	t, err := scanTerms(q.QueryRow(ctx, `SELECT `+termsColumns+` FROM commerce_terms
+		WHERE terms_id = $1 AND terms_version = $2`, termsID, version))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTermsNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("commerce: get terms: %w", err)
+	}
+	return t, nil
+}
+
+// CurrentTerms resolves the version in force for a capability and schema
+// hash: the highest non-retired version whose effective_from has passed.
+// A capability with no such version is unknown, which is not free (ADR 020
+// sec. 12).
+func (s *Store) CurrentTerms(ctx context.Context, capabilityID, inputSchemaHash string) (*Terms, error) {
+	return s.currentTerms(ctx, s.pool, capabilityID, inputSchemaHash, s.now())
+}
+
+func (s *Store) currentTerms(ctx context.Context, q querier, capabilityID, inputSchemaHash string, now time.Time) (*Terms, error) {
+	t, err := scanTerms(q.QueryRow(ctx, `SELECT `+termsColumns+` FROM commerce_terms
+		WHERE capability_id = $1 AND input_schema_hash = $2 AND retired_at IS NULL AND effective_from <= $3
+		ORDER BY terms_version DESC LIMIT 1`, capabilityID, inputSchemaHash, now))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTermsNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("commerce: current terms: %w", err)
+	}
+	return t, nil
+}
+
+// ListTerms returns every version for a capability, newest first.
+func (s *Store) ListTerms(ctx context.Context, capabilityID string) ([]Terms, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+termsColumns+` FROM commerce_terms
+		WHERE capability_id = $1 ORDER BY terms_version DESC`, capabilityID)
+	if err != nil {
+		return nil, fmt.Errorf("commerce: list terms: %w", err)
+	}
+	defer rows.Close()
+	out := []Terms{}
+	for rows.Next() {
+		t, err := scanTerms(rows)
+		if err != nil {
+			return nil, fmt.Errorf("commerce: scan terms: %w", err)
+		}
+		out = append(out, *t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("commerce: list terms: %w", err)
+	}
+	return out, nil
+}
+
+// ---- quotes -------------------------------------------------------------
+
+const quoteColumns = `quote_id, terms_id, terms_version, capability_id, input_schema_hash,
+	tenant_id, principal_id, subject_principal_id, delegation_grant_id, payer_account_id, execution_id,
+	args_digest, price_mode, currency, amount_minor, funds_mode, expires_at, quote_digest, created_at`
+
+func scanQuote(row pgx.Row) (*Quote, error) {
+	var q Quote
+	if err := row.Scan(&q.QuoteID, &q.TermsID, &q.TermsVersion, &q.CapabilityID, &q.InputSchemaHash,
+		&q.TenantID, &q.PrincipalID, &q.SubjectPrincipalID, &q.DelegationGrantID, &q.PayerAccountID, &q.ExecutionID,
+		&q.ArgsDigest, &q.PriceMode, &q.Price.Currency, &q.Price.AmountMinor, &q.FundsMode, &q.ExpiresAt,
+		&q.QuoteDigest, &q.CreatedAt); err != nil {
+		return nil, err
+	}
+	q.SchemaVersion = SchemaVersion
+	return &q, nil
+}
+
+// MintQuote prices one call at the current terms for the resolved
+// identities (ADR 020 sec. 5). The quote is immutable; a changed argument
+// digest or payer is a new quote.
+func (s *Store) MintQuote(ctx context.Context, in MintQuoteInput) (*Quote, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	now := s.now()
+	t, err := s.currentTerms(ctx, s.pool, in.CapabilityID, in.InputSchemaHash, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkFundsMode(t.FundsMode); err != nil {
+		return nil, err
+	}
+	q := Quote{
+		SchemaVersion:   SchemaVersion,
+		QuoteID:         QuoteIDPrefix + newULID(now),
+		TermsID:         t.TermsID,
+		TermsVersion:    t.TermsVersion,
+		CapabilityID:    t.CapabilityID,
+		InputSchemaHash: t.InputSchemaHash,
+		Identities:      in.Identities,
+		ArgsDigest:      in.ArgsDigest,
+		PriceMode:       t.PriceMode,
+		Price:           t.Price,
+		FundsMode:       t.FundsMode,
+		ExpiresAt:       now.Add(time.Duration(t.QuoteTTLSeconds) * time.Second).Truncate(time.Second),
+		CreatedAt:       now,
+	}
+	q.QuoteDigest = QuoteDigest(q)
+	row := s.pool.QueryRow(ctx, `INSERT INTO commerce_quotes (`+quoteColumns+`)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+		RETURNING `+quoteColumns,
+		q.QuoteID, q.TermsID, q.TermsVersion, q.CapabilityID, q.InputSchemaHash,
+		q.TenantID, q.PrincipalID, q.SubjectPrincipalID, q.DelegationGrantID, q.PayerAccountID, q.ExecutionID,
+		q.ArgsDigest, q.PriceMode, q.Price.Currency, q.Price.AmountMinor, q.FundsMode, q.ExpiresAt,
+		q.QuoteDigest, q.CreatedAt)
+	stored, err := scanQuote(row)
+	if err != nil {
+		return nil, fmt.Errorf("commerce: insert quote: %w", err)
+	}
+	return stored, nil
+}
+
+// GetQuote returns a quote visible to one tenant. Another tenant's quote
+// is not found (ADR 020 sec. 12).
+func (s *Store) GetQuote(ctx context.Context, tenantID, quoteID string) (*Quote, error) {
+	q, err := scanQuote(s.pool.QueryRow(ctx, `SELECT `+quoteColumns+` FROM commerce_quotes
+		WHERE quote_id = $1 AND tenant_id = $2`, quoteID, tenantID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrQuoteNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("commerce: get quote: %w", err)
+	}
+	return q, nil
+}
+
+// ---- invocations --------------------------------------------------------
+
+const invocationColumns = `invocation_id, quote_id, quote_digest, quote_expires_at, terms_id, terms_version,
+	capability_id, provider_id, tenant_id, principal_id, subject_principal_id, delegation_grant_id,
+	payer_account_id, execution_id, idempotency_key, args_digest, price_mode, currency, amount_minor,
+	funds_mode, phase, execution_outcome, usage_quantity, charge_status, payment_status, settlement_status,
+	reason_code, approval_id, reservation_deadline, reconciliation_deadline, created_at, updated_at,
+	finalized_at, version`
+
+func scanInvocation(row pgx.Row) (*Invocation, error) {
+	var v Invocation
+	if err := row.Scan(&v.InvocationID, &v.QuoteID, &v.QuoteDigest, &v.QuoteExpiresAt, &v.TermsID, &v.TermsVersion,
+		&v.CapabilityID, &v.ProviderID, &v.TenantID, &v.PrincipalID, &v.SubjectPrincipalID, &v.DelegationGrantID,
+		&v.PayerAccountID, &v.ExecutionID, &v.IdempotencyKey, &v.ArgsDigest, &v.PriceMode, &v.Price.Currency,
+		&v.Price.AmountMinor, &v.FundsMode, &v.Phase, &v.ExecutionOutcome, &v.UsageQuantity, &v.ChargeStatus,
+		&v.PaymentStatus, &v.SettlementStatus, &v.ReasonCode, &v.ApprovalID, &v.ReservationDeadline,
+		&v.ReconciliationDeadline, &v.CreatedAt, &v.UpdatedAt, &v.FinalizedAt, &v.Version); err != nil {
+		return nil, err
+	}
+	v.SchemaVersion = SchemaVersion
+	v.ProviderOpKey = ProviderOperationKey(v.InvocationID)
+	return &v, nil
+}
+
+// AcceptResult is what AcceptInvocation returns: the row, and whether it
+// already existed for the same idempotency key and quote digest.
+type AcceptResult struct {
+	Invocation *Invocation
+	Replayed   bool
+}
+
+// AcceptInvocation is step 6 of ADR 020 sec. 7. Under the idempotency scope
+// (tenant, principal, key) it returns the existing invocation when the
+// quote digest matches, refuses with ErrIdempotencyConflict when it does
+// not, and otherwise verifies the quote against the server-resolved
+// identities and the terms in force and stores the row in phase accepted.
+// Nothing is reserved here; that is C3.
+func (s *Store) AcceptInvocation(ctx context.Context, in AcceptInvocationInput) (*AcceptResult, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	id := in.Identities
+	// The lock key is length-prefixed so (a, bc, d) and (ab, c, d) cannot
+	// share a lock; hashtext() takes text, so no NUL separator.
+	lockKey := lengthPrefixed("commerce-idem/v1", [][2]string{
+		{"tenant_id", id.TenantID}, {"principal_id", id.PrincipalID}, {"idempotency_key", in.IdempotencyKey}})
+	var res AcceptResult
+	err := s.withTx(ctx, lockKey, func(tx pgx.Tx) error {
+		existing, err := scanInvocation(tx.QueryRow(ctx, `SELECT `+invocationColumns+` FROM commerce_invocations
+			WHERE tenant_id = $1 AND principal_id = $2 AND idempotency_key = $3`,
+			id.TenantID, id.PrincipalID, in.IdempotencyKey))
+		switch {
+		case err == nil:
+			if existing.QuoteDigest != in.QuoteDigest {
+				return ErrIdempotencyConflict
+			}
+			res = AcceptResult{Invocation: existing, Replayed: true}
+			return nil
+		case !errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("commerce: idempotency lookup: %w", err)
+		}
+
+		q, err := scanQuote(tx.QueryRow(ctx, `SELECT `+quoteColumns+` FROM commerce_quotes
+			WHERE quote_id = $1 AND tenant_id = $2`, in.QuoteID, id.TenantID))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrQuoteNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("commerce: load quote: %w", err)
+		}
+		// The stored digest is recomputed, so a row edited behind the API
+		// cannot be accepted, and the client's copy must match it.
+		if QuoteDigest(*q) != q.QuoteDigest || q.QuoteDigest != in.QuoteDigest {
+			return fmt.Errorf("%w: quote_digest", ErrQuoteMismatch)
+		}
+		if q.Identities != id {
+			return fmt.Errorf("%w: identities", ErrQuoteMismatch)
+		}
+		if q.ArgsDigest != in.ArgsDigest {
+			return fmt.Errorf("%w: args_digest", ErrQuoteMismatch)
+		}
+		now := s.now()
+		if !now.Before(q.ExpiresAt) {
+			return ErrQuoteExpired
+		}
+		if err := checkFundsMode(q.FundsMode); err != nil {
+			return err
+		}
+		t, err := s.getTerms(ctx, tx, q.TermsID, q.TermsVersion)
+		if err != nil {
+			return err
+		}
+		if t.RetiredAt != nil {
+			return ErrQuoteStale
+		}
+		current, err := s.currentTerms(ctx, tx, q.CapabilityID, q.InputSchemaHash, now)
+		if err != nil {
+			return err
+		}
+		if current.TermsVersion != q.TermsVersion {
+			return ErrQuoteStale
+		}
+		if in.TermsBinding != "" && in.TermsBinding != TermsBinding(*t, id.TenantID, id.PayerAccountID) {
+			return fmt.Errorf("%w: terms_binding", ErrQuoteMismatch)
+		}
+
+		paymentStatus := PaymentNone
+		if q.PriceMode == PriceModeFree {
+			paymentStatus = PaymentNotRequired
+		}
+		v := Invocation{
+			InvocationID:           InvocationIDPrefix + newULID(now),
+			QuoteID:                q.QuoteID,
+			QuoteDigest:            q.QuoteDigest,
+			QuoteExpiresAt:         q.ExpiresAt,
+			TermsID:                q.TermsID,
+			TermsVersion:           q.TermsVersion,
+			CapabilityID:           q.CapabilityID,
+			ProviderID:             t.ProviderID,
+			Identities:             id,
+			IdempotencyKey:         in.IdempotencyKey,
+			ArgsDigest:             q.ArgsDigest,
+			PriceMode:              q.PriceMode,
+			Price:                  q.Price,
+			FundsMode:              q.FundsMode,
+			Phase:                  PhaseAccepted,
+			ExecutionOutcome:       OutcomeNotDispatched,
+			ChargeStatus:           ChargeNone,
+			PaymentStatus:          paymentStatus,
+			SettlementStatus:       SettlementNotApplicable,
+			ApprovalID:             in.ApprovalID,
+			ReconciliationDeadline: now.Add(DefaultReconciliationWindow),
+		}
+		row := tx.QueryRow(ctx, `INSERT INTO commerce_invocations (`+invocationColumns+`)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+			        $21,$22,NULL,$23,$24,$25,'',$26,NULL,$27,$28,$28,NULL,1)
+			RETURNING `+invocationColumns,
+			v.InvocationID, v.QuoteID, v.QuoteDigest, v.QuoteExpiresAt, v.TermsID, v.TermsVersion,
+			v.CapabilityID, v.ProviderID, v.TenantID, v.PrincipalID, v.SubjectPrincipalID, v.DelegationGrantID,
+			v.PayerAccountID, v.ExecutionID, v.IdempotencyKey, v.ArgsDigest, v.PriceMode, v.Price.Currency,
+			v.Price.AmountMinor, v.FundsMode, v.Phase, v.ExecutionOutcome, v.ChargeStatus, v.PaymentStatus,
+			v.SettlementStatus, v.ApprovalID, v.ReconciliationDeadline, now)
+		stored, err := scanInvocation(row)
+		if isUniqueViolation(err) {
+			// The quote is consumed by another idempotency key: a quote
+			// binds one invocation (ADR 020 sec. 5).
+			return fmt.Errorf("%w: quote already consumed", ErrQuoteMismatch)
+		}
+		if err != nil {
+			return fmt.Errorf("commerce: insert invocation: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO commerce_invocation_transitions
+			(invocation_id, from_phase, to_phase, reason_code, actor, note, recorded_at)
+			VALUES ($1, '', $2, '', $3, '', $4)`, stored.InvocationID, PhaseAccepted, id.PrincipalID, now); err != nil {
+			return fmt.Errorf("commerce: insert transition: %w", err)
+		}
+		res = AcceptResult{Invocation: stored}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// Transition applies one phase change transactionally with its history
+// row (ADR 020 sec. 11). The row is locked, its phase compared with the
+// expected one, and a mismatch is ErrPhaseConflict (ErrTerminal when the
+// row is already terminal). Fields beside the phase are overwritten only
+// when the input sets them.
+func (s *Store) Transition(ctx context.Context, tenantID string, in TransitionInput) (*Invocation, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	if err := checkText("tenant_id", tenantID, MaxIDBytes, true); err != nil {
+		return nil, err
+	}
+	var out *Invocation
+	err := s.withTx(ctx, "commerce:inv:"+in.InvocationID, func(tx pgx.Tx) error {
+		cur, err := scanInvocation(tx.QueryRow(ctx, `SELECT `+invocationColumns+` FROM commerce_invocations
+			WHERE invocation_id = $1 AND tenant_id = $2 FOR UPDATE`, in.InvocationID, tenantID))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrInvocationNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("commerce: lock invocation: %w", err)
+		}
+		if IsTerminal(cur.Phase) {
+			return fmt.Errorf("%w: %s", ErrTerminal, cur.Phase)
+		}
+		if cur.Phase != in.ExpectedPhase {
+			return fmt.Errorf("%w: phase is %s, expected %s", ErrPhaseConflict, cur.Phase, in.ExpectedPhase)
+		}
+		now := s.now()
+		outcome := firstNonEmpty(in.ExecutionOutcome, cur.ExecutionOutcome)
+		charge := firstNonEmpty(in.ChargeStatus, cur.ChargeStatus)
+		payment := firstNonEmpty(in.PaymentStatus, cur.PaymentStatus)
+		settlement := firstNonEmpty(in.SettlementStatus, cur.SettlementStatus)
+		usage := cur.UsageQuantity
+		if in.UsageQuantity != nil {
+			usage = in.UsageQuantity
+		}
+		reservation := cur.ReservationDeadline
+		if in.ReservationDeadline != nil {
+			d := in.ReservationDeadline.UTC()
+			reservation = &d
+		}
+		var finalized *time.Time
+		if IsTerminal(in.ToPhase) {
+			finalized = &now
+		}
+		if in.ToPhase == PhaseReleased && charge == ChargeReserved {
+			charge = ChargeReleased
+		}
+		if in.ToPhase == PhaseOutcomeUnknown {
+			outcome = OutcomeUnknown
+		}
+		row := tx.QueryRow(ctx, `UPDATE commerce_invocations SET
+			phase = $3, execution_outcome = $4, usage_quantity = $5, charge_status = $6,
+			payment_status = $7, settlement_status = $8, reason_code = $9,
+			reservation_deadline = $10, updated_at = $11, finalized_at = $12, version = version + 1
+			WHERE invocation_id = $1 AND tenant_id = $2
+			RETURNING `+invocationColumns,
+			in.InvocationID, tenantID, in.ToPhase, outcome, usage, charge, payment, settlement,
+			firstNonEmpty(in.ReasonCode, cur.ReasonCode), reservation, now, finalized)
+		next, err := scanInvocation(row)
+		if err != nil {
+			return fmt.Errorf("commerce: update invocation: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO commerce_invocation_transitions
+			(invocation_id, from_phase, to_phase, reason_code, actor, note, recorded_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			in.InvocationID, cur.Phase, in.ToPhase, in.ReasonCode, in.Actor, in.Note, now); err != nil {
+			return fmt.Errorf("commerce: insert transition: %w", err)
+		}
+		out = next
+		return nil
+	})
+	return out, err
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// GetInvocation returns one receipt visible to the tenant.
+func (s *Store) GetInvocation(ctx context.Context, tenantID, invocationID string) (*Invocation, error) {
+	v, err := scanInvocation(s.pool.QueryRow(ctx, `SELECT `+invocationColumns+` FROM commerce_invocations
+		WHERE invocation_id = $1 AND tenant_id = $2`, invocationID, tenantID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrInvocationNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("commerce: get invocation: %w", err)
+	}
+	return v, nil
+}
+
+// ListInvocations lists one tenant's receipts, newest first.
+func (s *Store) ListInvocations(ctx context.Context, f ListFilter) ([]Invocation, error) {
+	if err := checkText("tenant_id", f.TenantID, MaxIDBytes, true); err != nil {
+		return nil, err
+	}
+	limit := f.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	var sb strings.Builder
+	sb.WriteString(`SELECT ` + invocationColumns + ` FROM commerce_invocations WHERE tenant_id = $1`)
+	args := []any{f.TenantID}
+	add := func(clause string, v any) {
+		args = append(args, v)
+		fmt.Fprintf(&sb, " AND %s $%d", clause, len(args))
+	}
+	if f.CapabilityID != "" {
+		add("capability_id =", f.CapabilityID)
+	}
+	if f.Phase != "" {
+		add("phase =", f.Phase)
+	}
+	if !f.Since.IsZero() {
+		add("created_at >=", f.Since.UTC())
+	}
+	if !f.Until.IsZero() {
+		add("created_at <", f.Until.UTC())
+	}
+	args = append(args, limit)
+	fmt.Fprintf(&sb, " ORDER BY created_at DESC, invocation_id DESC LIMIT $%d", len(args))
+	rows, err := s.pool.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("commerce: list invocations: %w", err)
+	}
+	defer rows.Close()
+	out := []Invocation{}
+	for rows.Next() {
+		v, err := scanInvocation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("commerce: scan invocation: %w", err)
+		}
+		out = append(out, *v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("commerce: list invocations: %w", err)
+	}
+	return out, nil
+}
+
+// ListTransitions returns the append-only history of one invocation.
+func (s *Store) ListTransitions(ctx context.Context, tenantID, invocationID string) ([]Transition, error) {
+	if _, err := s.GetInvocation(ctx, tenantID, invocationID); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `SELECT seq, invocation_id, from_phase, to_phase, reason_code, actor, note, recorded_at
+		FROM commerce_invocation_transitions WHERE invocation_id = $1 ORDER BY seq`, invocationID)
+	if err != nil {
+		return nil, fmt.Errorf("commerce: list transitions: %w", err)
+	}
+	defer rows.Close()
+	out := []Transition{}
+	for rows.Next() {
+		var t Transition
+		if err := rows.Scan(&t.Seq, &t.InvocationID, &t.FromPhase, &t.ToPhase, &t.ReasonCode, &t.Actor, &t.Note, &t.RecordedAt); err != nil {
+			return nil, fmt.Errorf("commerce: scan transition: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("commerce: list transitions: %w", err)
+	}
+	return out, nil
+}
+
+// ListOverdue returns non-terminal invocations past their reconciliation
+// deadline, for the operator alert of ADR 020 sec. 11. Crossing the
+// deadline changes nothing in the row.
+func (s *Store) ListOverdue(ctx context.Context, limit int) ([]Invocation, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+invocationColumns+` FROM commerce_invocations
+		WHERE phase NOT IN ('refused', 'released', 'finalized') AND reconciliation_deadline < $1
+		ORDER BY reconciliation_deadline LIMIT $2`, s.now(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("commerce: list overdue: %w", err)
+	}
+	defer rows.Close()
+	out := []Invocation{}
+	for rows.Next() {
+		v, err := scanInvocation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("commerce: scan invocation: %w", err)
+		}
+		out = append(out, *v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("commerce: list overdue: %w", err)
+	}
+	return out, nil
+}
