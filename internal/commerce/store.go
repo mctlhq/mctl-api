@@ -132,12 +132,20 @@ CREATE INDEX IF NOT EXISTS commerce_invocations_open
 -- every signed invocation authorization for the row carries exactly it, so a
 -- second dispatcher can only ever present the same authorization and never
 -- a later deadline. An approval is consumed by one invocation (ADR 020
--- sec. 8): the partial unique index makes a second row naming the same
--- approval impossible, which is what lets the gateway read "consumed, and
--- this invocation carries it" as "consumed for this invocation".
+-- sec. 8): the partial unique index makes a second row in the tenant naming
+-- the same approval impossible, which is what lets the gateway read
+-- "consumed, and this invocation carries it" as "consumed for this
+-- invocation". It is scoped by tenant because approvals are tenant
+-- resources and approval_id is caller input: a global index would let one
+-- tenant squat another tenant's approval id and learn whether it exists.
+-- A database that already holds a duplicate fails this statement and with it
+-- the store, so every commerce route answers 503: deliberate, because
+-- accepting paid calls without the binding is the worse failure.
 ALTER TABLE commerce_invocations ADD COLUMN IF NOT EXISTS dispatch_deadline TIMESTAMPTZ;
-CREATE UNIQUE INDEX IF NOT EXISTS commerce_invocations_approval
-    ON commerce_invocations (approval_id) WHERE approval_id <> '';
+-- An earlier draft of this change created a global index under this name.
+DROP INDEX IF EXISTS commerce_invocations_approval;
+CREATE UNIQUE INDEX IF NOT EXISTS commerce_invocations_tenant_approval
+    ON commerce_invocations (tenant_id, approval_id) WHERE approval_id <> '';
 
 -- The vocabulary CHECKs are added by name outside CREATE TABLE so that a
 -- table created by an earlier build of this package gets them too:
@@ -757,7 +765,7 @@ func (s *Store) AcceptInvocation(ctx context.Context, in AcceptInvocationInput) 
 			v.Price.AmountMinor, v.FundsMode, v.Phase, v.ExecutionOutcome, v.ChargeStatus, v.PaymentStatus,
 			v.SettlementStatus, v.ApprovalID, v.ReconciliationDeadline, now)
 		stored, err := scanInvocation(row)
-		if uniqueViolationOn(err, "commerce_invocations_approval") {
+		if uniqueViolationOn(err, "commerce_invocations_tenant_approval") {
 			// The approval already belongs to another invocation: it is
 			// consumed by one invocation and never authorizes a second
 			// (ADR 020 sec. 8).
@@ -941,13 +949,16 @@ func (s *Store) ListInvocations(ctx context.Context, f ListFilter) ([]Invocation
 		args = append(args, v)
 		fmt.Fprintf(&sb, " AND %s $%d", clause, len(args))
 	}
-	if f.IdempotencyKey != "" {
-		// The idempotency scope is (tenant, principal, key): a key alone
-		// names nothing, so the lookup always carries the principal.
-		if f.PrincipalID == "" {
-			return nil, invalid("idempotency_key filter requires the caller's principal")
-		}
+	// The idempotency scope is (tenant, principal, key): a key alone names
+	// nothing, so the lookup always carries the principal. A principal on
+	// its own scopes the listing the same way.
+	if f.IdempotencyKey != "" && f.PrincipalID == "" {
+		return nil, invalid("idempotency_key filter requires the caller's principal")
+	}
+	if f.PrincipalID != "" {
 		add("principal_id =", f.PrincipalID)
+	}
+	if f.IdempotencyKey != "" {
 		add("idempotency_key =", f.IdempotencyKey)
 	}
 	if f.CapabilityID != "" {

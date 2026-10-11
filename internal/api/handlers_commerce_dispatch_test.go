@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/commerce"
 )
 
@@ -69,6 +70,8 @@ func TestCommerceDispatch_SignedFencedAndOwnedByItsEndpoint(t *testing.T) {
 
 	signer := testDispatchSigner(t)
 	f.store.UseDispatchSigner(signer)
+	auditLog := audit.NewLogger()
+	f.h.opts.AuditLog = auditLog
 
 	// The generic transition does not own the dispatching edge.
 	if rec := f.transition(t, "acme", id, commerce.PhaseReserved, commerce.PhaseDispatching); rec.Code != http.StatusBadRequest ||
@@ -112,6 +115,17 @@ func TestCommerceDispatch_SignedFencedAndOwnedByItsEndpoint(t *testing.T) {
 	var res2 commerce.DispatchResult
 	if err := json.Unmarshal(again.Body.Bytes(), &res2); err != nil || !res2.Replayed || res2.Authorization != res.Authorization {
 		t.Fatalf("replay = %d %s", again.Code, again.Body.String())
+	}
+	// Every hand-out of the signed authorization is audited: one first
+	// dispatch, then one row per replay.
+	statuses := map[string]int{}
+	for _, e := range auditLog.List(100) {
+		if e.Operation == "commerce-dispatch" && e.Status != "failed" {
+			statuses[e.Status]++
+		}
+	}
+	if statuses["succeeded"] != 1 || statuses["replayed"] != 1 || len(statuses) != 2 {
+		t.Fatalf("dispatch audit = %v", statuses)
 	}
 
 	keys := f.call(t, owner, "GET", "/api/v1/commerce/dispatch-keys", nil, nil, f.h.ListCommerceDispatchKeys)

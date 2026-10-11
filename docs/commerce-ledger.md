@@ -140,8 +140,8 @@ Reason codes on refusals are those of ADR 020 sec. 13 (`identity-unresolved`,
 `currency-mismatch`, `payment-denied`), plus `phase-conflict`, `terms-retired`,
 `payment-unknown`, `dispatch-unavailable` and `invalid-request` for this
 API's own shapes. Accepting with an `approval_id` that another invocation
-already carries is 409 `policy-denied`: one approval authorizes one
-invocation. Every
+of the same tenant already carries is 409 `policy-denied`: one approval
+authorizes one invocation. Every
 denial `…/reserve` commits is 422 with the row's reason, `quote-expired`
 included: unlike the 409 of accept, there is no new quote to retry with.
 `reservation-expired` is a reason code the reconciler stamps on a released
@@ -272,8 +272,12 @@ The gateway resumes after a restart with
 `GET …/invocations?idempotency_key=…`, which always applies the caller's
 principal: the idempotency scope is (tenant, principal, key), and another
 principal's row under the same key is never returned. A unique index on
-`approval_id` lets the gateway read "the approval is consumed and this
-invocation carries it" as "consumed for this invocation".
+`(tenant_id, approval_id)` lets the gateway read "the approval is consumed
+and this invocation carries it" as "consumed for this invocation". It is
+scoped by tenant because `approval_id` is caller input: a global index would
+let one tenant block another tenant's approval id and learn that it exists.
+Every hand-out of a signed authorization is audited as `commerce-dispatch`,
+with status `succeeded` for the fence and `replayed` for each replay.
 
 ## Tests
 
@@ -289,6 +293,7 @@ per-request maximum and a reconciler that also touches `dispatching` rows
 were each put back once and each made its test fail. The dispatch tests were
 verified the same way: the replay branch, the `dispatch_deadline IS NULL`
 guard on the fence write, the refusal of an unfenced `dispatching` row, the
-`approval_id` unique index and its error mapping, the principal on the
-idempotency-key filter, the `dispatching` entry among the owned edges and
+tenant-scoped `approval_id` unique index and its error mapping, the
+principal on the idempotency-key and principal-only filters, the replay
+audit, the `dispatching` entry among the owned edges and
 the signature check were each removed once and each made a test fail.

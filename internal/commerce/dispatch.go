@@ -44,7 +44,10 @@ const (
 	// the dispatch edge (ADR 020 sec. 9 requirement 4).
 	DefaultDispatchWindow = 60 * time.Second
 	// MaxClockSkew is the margin after the deadline before a provider's
-	// not_found is definitive (ADR 020 sec. 9 requirement 4).
+	// not_found is definitive (ADR 020 sec. 9 requirement 4). mctl-api never
+	// reads it: the gateway applies it before releasing on not_found
+	// (mctl-agents orchestrator/commerce.py MAX_CLOCK_SKEW_S, which must
+	// stay equal). It is published here so the two sides share one number.
 	MaxClockSkew = 60 * time.Second
 
 	// DispatchAuthorizationVersion names the signed encoding.

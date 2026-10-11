@@ -348,10 +348,15 @@ func (h *Handlers) DispatchCommerceInvocation(w http.ResponseWriter, r *http.Req
 	params["provider_id"] = res.Authorization.ProviderID
 	params["dispatch_deadline"] = res.Authorization.DispatchDeadline
 	params["key_id"] = res.Authorization.KeyID
-	if !res.Replayed {
-		h.logAudit(r, audit.Entry{UserID: userID, Operation: "commerce-dispatch", Status: "succeeded",
-			RiskLevel: string(operations.RiskHigh), Parameters: params})
+	// A replay hands out the same signed authorization again, so it is
+	// audited too, under its own status: the log shows one "succeeded" and
+	// N "replayed" per invocation, never a second fence.
+	status := "succeeded"
+	if res.Replayed {
+		status = "replayed"
 	}
+	h.logAudit(r, audit.Entry{UserID: userID, Operation: "commerce-dispatch", Status: status,
+		RiskLevel: string(operations.RiskHigh), Parameters: params})
 	writeJSON(w, http.StatusOK, res)
 }
 

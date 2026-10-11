@@ -1245,7 +1245,7 @@ components:
         in that order. Deterministic: a replay returns the identical object.
         Carries no arguments, results, prices or payment proofs.
       properties:
-        schema_version: {type: string, enum: [mctl-commerce-dispatch/v1]}
+        schema_version: {type: integer, enum: [1]}
         key_id: {type: string}
         invocation_id: {type: string}
         provider_operation_key: {type: string, description: 'mctl-op/v1:<invocation_id>; the provider dedupes on it'}

@@ -134,8 +134,8 @@ func TestDispatchSignsAFencedAuthorizationAndReplaysIt(t *testing.T) {
 
 func countTo(hist []Transition, phase string) int {
 	n := 0
-	for _, h := range hist {
-		if h.ToPhase == phase {
+	for i := range hist {
+		if hist[i].ToPhase == phase {
 			n++
 		}
 	}
@@ -346,6 +346,15 @@ func TestApprovalBindsOneInvocation(t *testing.T) {
 	// Invocations without an approval never collide with each other.
 	acceptOne(t, s, cap, tenant, "k3")
 	acceptOne(t, s, cap, tenant, "k4")
+
+	// The binding is per tenant: approval_id is caller input, so another
+	// tenant naming the same id neither collides with it nor learns it exists.
+	other := testTenant(t)
+	q3 := mint(t, s, cap, ids(other))
+	if _, err := s.AcceptInvocation(ctx, AcceptInvocationInput{QuoteID: q3.QuoteID, QuoteDigest: q3.QuoteDigest,
+		IdempotencyKey: "k1", Identities: q3.Identities, ArgsDigest: q3.ArgsDigest, ApprovalID: approval}); err != nil {
+		t.Fatalf("another tenant naming the same approval id: %v", err)
+	}
 }
 
 func TestListFindsAnInvocationByItsIdempotencyScope(t *testing.T) {
@@ -367,6 +376,13 @@ func TestListFindsAnInvocationByItsIdempotencyScope(t *testing.T) {
 	}
 	if got, err := s.ListInvocations(ctx, ListFilter{TenantID: testTenant(t), PrincipalID: principal, IdempotencyKey: "gw:key-1"}); err != nil || len(got) != 0 {
 		t.Fatalf("another tenant must find nothing: %+v, %v", got, err)
+	}
+	// A principal without a key scopes the listing too.
+	if got, err := s.ListInvocations(ctx, ListFilter{TenantID: tenant, PrincipalID: principal}); err != nil || len(got) != 2 {
+		t.Fatalf("principal-only listing = %d rows, %v", len(got), err)
+	}
+	if got, err := s.ListInvocations(ctx, ListFilter{TenantID: tenant, PrincipalID: "prn_someone_else"}); err != nil || len(got) != 0 {
+		t.Fatalf("principal-only listing for another principal = %+v, %v", got, err)
 	}
 	if _, err := s.ListInvocations(ctx, ListFilter{TenantID: tenant, IdempotencyKey: "gw:key-1"}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("key without principal: %v", err)
