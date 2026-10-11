@@ -365,8 +365,12 @@ const (
 	GitTagPattern = `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
 	// githubRepoPattern: tpl-git-commit and preview-deploy repo check.
 	githubRepoPattern = `^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`
-	// repoPathPattern: preview-deploy dockerfile_path check.
-	repoPathPattern = `^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$`
+	// repoPathPattern: deploy-service and preview-deploy dockerfile_path
+	// check. Every segment starts with a letter, digit or underscore, so
+	// "." and ".." segments, empty segments, absolute paths and a leading
+	// "-" are all refused, matching ciRelativePath in the CI deploy path.
+	// Length is bounded by the parameters' MaxLength.
+	repoPathPattern = `^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$`
 	// hostnameCore: add-custom-domain and tpl-git-commit host check.
 	hostnameCore    = `[a-z0-9]([a-z0-9.-]*[a-z0-9])?(\.[a-z]{2,})+`
 	hostnamePattern = `^` + hostnameCore + `$`
@@ -437,7 +441,7 @@ var builtinOperations = []Operation{
 			{Name: "provision_database", Type: "string", Default: "false", Description: "Also provision a PostgreSQL database", Enum: []string{"true", "false"}},
 			{Name: "skip_health_check", Type: "string", Default: "false", Description: "Skip post-deploy health check", Enum: []string{"true", "false"}},
 			{Name: "health_check_path", Type: "string", Default: "", Description: "Override the liveness/readiness probe HTTP path (default: chart default /healthz + /readyz). Empty = unchanged.", Pattern: `^/[A-Za-z0-9._~/-]{0,255}$`},
-			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Description: "Path to Dockerfile in the repo", Pattern: repoPathPattern},
+			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Description: "Path to Dockerfile in the repo", Pattern: repoPathPattern, MaxLength: 256},
 			{Name: "image_tag", Type: "string", Description: "Explicit image tag override (default: derived from git_tag)", Pattern: ociTagPattern},
 			{Name: "autoscaling_enabled", Type: "string", Default: "false", Description: "Enable HPA autoscaling", Enum: []string{"true", "false"}},
 			{Name: "min_replicas", Type: "string", Default: "1", Description: "Minimum replica count (autoscaling)", Pattern: `^[0-9]{1,3}$`},
@@ -566,7 +570,7 @@ var builtinOperations = []Operation{
 			{Name: "ttl_hours", Type: "string", Default: "24", Description: "Preview lifetime in hours (default: 24)", Pattern: `^[0-9]{1,4}$`},
 			{Name: "git_ref", Type: "string", Default: "", Pattern: `^[A-Za-z0-9._/-]{1,255}$`, Description: "Branch, SHA, or tag to build from. Leave empty to deploy an existing image_tag."},
 			{Name: "dockerfile_repo", Type: "string", Default: "", Pattern: githubRepoPattern, Description: "Source repo in org/repo format. Required when git_ref is set."},
-			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Pattern: repoPathPattern, Description: "Path to Dockerfile inside dockerfile_repo (default: Dockerfile)"},
+			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Pattern: repoPathPattern, Description: "Path to Dockerfile inside dockerfile_repo (default: Dockerfile)", MaxLength: 256},
 		},
 	},
 	{

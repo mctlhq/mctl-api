@@ -150,6 +150,8 @@ func TestOperationParametersAcceptCurrentRealValues(t *testing.T) {
 		{"deploy-service", map[string]string{"action": "deploy", "team_name": "a", "component_name": "b", "host": "none", "env_vars": "__CLEAR__", "image_tag": "auto", "git_tag": "1.73.0", "dockerfile_repo": "mctlhq/mctl-api"}},
 		{"deploy-service", map[string]string{"action": "deploy", "team_name": "a", "component_name": "b", "host": "app.example.com", "image_tag": "main-9c35416", "health_check_path": "/readyz", "service_template": "spring-worker", "env_vars": "A=b c \"$x\"\n\nB=1"}},
 		{"deploy-service", map[string]string{"action": "deploy", "team_name": "a", "component_name": "b", "image_tag": "98c8352c1636"}},
+		{"deploy-service", map[string]string{"action": "deploy", "team_name": "a", "component_name": "b", "dockerfile_path": "docker/api/Dockerfile.prod"}},
+		{"preview-deploy", map[string]string{"team_name": "a", "component_name": "b", "image_tag": GeneratePreviewTag("main"), "dockerfile_path": "services/web_app/Dockerfile"}},
 		{"create-tenant", map[string]string{"tenant_name": "abc", "quota_cpu_req": "500m", "quota_cpu_lim": "2", "quota_memory_req": "1500Mi", "quota_memory_lim": "5Gi", "quota_pods": "30", "creator_user_id": "octocat"}},
 		{"preview-deploy", map[string]string{"team_name": "a", "component_name": "b", "image_tag": GeneratePreviewTag("feat/my-feature")}},
 		{"mctl-agents-implement", map[string]string{"slug": "go-chi-v5.3.2-router-upgrade"}},
@@ -182,6 +184,13 @@ func TestOperationParametersRejectInjectionShapes(t *testing.T) {
 		{"preview-deploy", "ttl_hours", "x"},
 		{"deploy-service", "min_replicas", "x"},
 		{"platform-skill-publish", "content_b64", "not base64!"},
+		{"deploy-service", "dockerfile_path", "a/../../../etc/passwd"},
+		{"deploy-service", "dockerfile_path", "a/./Dockerfile"},
+		{"deploy-service", "dockerfile_path", "a//Dockerfile"},
+		{"deploy-service", "dockerfile_path", "/etc/passwd"},
+		{"deploy-service", "dockerfile_path", "-f"},
+		{"deploy-service", "dockerfile_path", strings.Repeat("a", 257)},
+		{"preview-deploy", "dockerfile_path", "x/.."},
 	}
 	for _, c := range cases {
 		op := opByName(t, c.op)
