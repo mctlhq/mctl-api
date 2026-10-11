@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
@@ -47,5 +48,24 @@ func TestCheckBuildRepos_RefusesMalformedNameBeforeAnyLookup(t *testing.T) {
 				t.Error("a malformed repository must be refused before any lookup")
 			}
 		})
+	}
+}
+
+// nilPolicyReader answers ImageNamePolicy with neither a policy nor an
+// error; nothing else is called on it.
+type nilPolicyReader struct{ GitReader }
+
+func (nilPolicyReader) ImageNamePolicy() (*gitops.ImageNamePolicy, error) { return nil, nil }
+
+func TestCheckImageName_NilPolicyIsUnavailableNotAPanic(t *testing.T) {
+	op, ok := operations.NewRegistry().Get("deploy-service")
+	if !ok {
+		t.Fatal("deploy-service operation not registered")
+	}
+	h := &Handlers{opts: Options{GitReader: nilPolicyReader{}}}
+	user := auth.NewGitHubUser("test-owner", []string{"tests"})
+	err := h.checkImageName(op, map[string]string{"action": "onboard", "component_name": "my-app", "dockerfile_repo": "myorg/my-app"}, user, "tests")
+	if !errors.Is(err, errBuildCheckUnavailable) {
+		t.Fatalf("expected an unavailable check, got %v", err)
 	}
 }

@@ -33,8 +33,21 @@ const defaultGitHubAPIBaseURL = "https://api.github.com"
 
 var buildRepoClient = &http.Client{Timeout: 10 * time.Second}
 
-// errBuildRepoRefused is wrapped by every refusal, with the reason.
+// errBuildRepoRefused is wrapped by every build-repository refusal, with the
+// reason; image-name refusals wrap gitops.ErrImageNameRefused. Both are
+// answers about the caller's own input, so they are shown to the caller (403).
 var errBuildRepoRefused = errors.New("build repository refused")
+
+// errBuildCheckUnavailable is wrapped when a check could not be made: the
+// portal or GitHub did not answer, or the gitops checkout is unreadable or
+// stale. That is not a verdict on the input, and the detail can carry
+// internal URLs and checkout paths, so the caller gets a generic 503 and the
+// detail goes to the log only. It still refuses: nothing is submitted.
+var errBuildCheckUnavailable = errors.New("cannot check the build inputs right now; try again later")
+
+func buildCheckUnavailable(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errBuildCheckUnavailable, fmt.Sprintf(format, args...))
+}
 
 // checkBuildRepos refuses an operation whose build repository the caller's
 // team may not use. Admins (which include the platform service principal)
@@ -62,13 +75,18 @@ func (h *Handlers) checkBuildRepos(ctx context.Context, op operations.Operation,
 		}
 		bound, err := h.repoBoundToTeam(ctx, team, repo)
 		if err != nil {
-			return fmt.Errorf("%w: could not confirm that %q is connected to team %q: %v", errBuildRepoRefused, repo, team, err)
+			// Could not check is not "not connected": it never falls
+			// through to the public check.
+			return buildCheckUnavailable("binding lookup for %q in team %q: %v", repo, team, err)
 		}
 		if bound {
 			continue
 		}
 		public, err := h.repoIsPublic(ctx, repo)
-		if err != nil || !public {
+		if err != nil {
+			return buildCheckUnavailable("public check for %q: %v", repo, err)
+		}
+		if !public {
 			return fmt.Errorf("%w: repository %q is not connected to team %q and is not public; connect it in the portal first", errBuildRepoRefused, repo, team)
 		}
 	}
@@ -76,10 +94,18 @@ func (h *Handlers) checkBuildRepos(ctx context.Context, op operations.Operation,
 }
 
 // checkBuildInputs applies every build-input check: the build repository
-// (checkBuildRepos) and the image name (checkImageName).
-func (h *Handlers) checkBuildInputs(ctx context.Context, op operations.Operation, input map[string]string, user *auth.User, team string) error {
+// (checkBuildRepos) and the image name (checkImageName). A CI principal's
+// dockerfile_repo is already pinned by authorizeCIDeploy to both its token's
+// repository and the source repository registered for team/component in
+// gitops, which the caller cannot choose; the portal binding adds nothing to
+// that and would only refuse a private component repository that was never
+// connected in the portal, so for CI only the image name is checked.
+func (h *Handlers) checkBuildInputs(ctx context.Context, op operations.Operation, input map[string]string, user *auth.User, team string, ciAuthorized bool) error {
 	if err := h.checkImageName(op, input, user, team); err != nil {
 		return err
+	}
+	if ciAuthorized {
+		return nil
 	}
 	return h.checkBuildRepos(ctx, op, input, user, team)
 }
@@ -109,20 +135,22 @@ func (h *Handlers) checkImageName(op operations.Operation, input map[string]stri
 		return nil
 	}
 	if h.opts.GitReader == nil {
-		return fmt.Errorf("%w: image name policy unavailable", errBuildRepoRefused)
+		return buildCheckUnavailable("image name policy: no gitops reader configured")
 	}
 	policy, err := h.opts.GitReader.ImageNamePolicy()
 	if err != nil {
-		return fmt.Errorf("%w: could not read the image name policy: %v", errBuildRepoRefused, err)
+		return buildCheckUnavailable("image name policy: %v", err)
+	}
+	if policy == nil {
+		return buildCheckUnavailable("image name policy: reader returned no policy")
 	}
 	name := input["component_name"]
 	if name != strings.TrimSpace(name) {
-		return fmt.Errorf("%w: component_name %q has surrounding whitespace", errBuildRepoRefused, name)
+		return fmt.Errorf("%w: component_name %q has surrounding whitespace", gitops.ErrImageNameRefused, name)
 	}
-	if err := policy.Allowed(team, name, buildsImage(op, input, policy, team, name)); err != nil {
-		return fmt.Errorf("%w: %v", errBuildRepoRefused, err)
-	}
-	return nil
+	// Allowed only refuses (wrapping gitops.ErrImageNameRefused); every read
+	// happened in ImageNamePolicy above.
+	return policy.Allowed(team, name, buildsImage(op, input, policy, team, name))
 }
 
 // buildsImage reports whether the operation will push to
@@ -176,8 +204,10 @@ func (h *Handlers) repoBoundToTeam(ctx context.Context, team, repo string) (bool
 }
 
 // repoIsPublic asks GitHub without credentials. Only 200 with
-// `private: false` is public; anything else (404, rate limit, error,
-// malformed body) is reported as an error or false.
+// `private: false` is public. 404 is GitHub's documented answer for a
+// private or missing repository and means "not public"; any other status
+// (a rate limit included), a transport error or a malformed body is an
+// error, never "public".
 func (h *Handlers) repoIsPublic(ctx context.Context, repo string) (bool, error) {
 	base := h.opts.GitHubAPIBaseURL
 	if base == "" {
@@ -193,6 +223,9 @@ func (h *Handlers) repoIsPublic(ctx context.Context, repo string) (bool, error) 
 		return false, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
 	if resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("github answered %d", resp.StatusCode)
 	}

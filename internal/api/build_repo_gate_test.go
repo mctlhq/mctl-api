@@ -138,20 +138,25 @@ func TestBuildRepoGate_UnboundPublicRepoDeploysWithoutCredentials(t *testing.T) 
 }
 
 func TestBuildRepoGate_RefusesUnboundNonPublic(t *testing.T) {
-	cases := map[string]func(w http.ResponseWriter, r *http.Request){
-		"404":                            githubAnswer(404, `{"message":"Not Found"}`),
-		"private":                        githubAnswer(200, `{"private":true}`),
-		"no private flag":                githubAnswer(200, `{}`),
-		"malformed":                      githubAnswer(200, `not json`),
-		"rate limited, body says public": githubAnswer(403, `{"private":false}`),
-		"error":                          githubAnswer(502, ``),
+	// 404 and private:true are GitHub's answer "not public" (403). Anything
+	// else is a check that could not be made (503). Both refuse.
+	cases := map[string]struct {
+		answer func(w http.ResponseWriter, r *http.Request)
+		status int
+	}{
+		"404":                            {githubAnswer(404, `{"message":"Not Found"}`), http.StatusForbidden},
+		"private":                        {githubAnswer(200, `{"private":true}`), http.StatusForbidden},
+		"no private flag":                {githubAnswer(200, `{}`), http.StatusServiceUnavailable},
+		"malformed":                      {githubAnswer(200, `not json`), http.StatusServiceUnavailable},
+		"rate limited, body says public": {githubAnswer(403, `{"private":false}`), http.StatusServiceUnavailable},
+		"error":                          {githubAnswer(502, ``), http.StatusServiceUnavailable},
 	}
-	for name, answer := range cases {
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			router, exec, f := newGateRouter(t, "gac-token")
-			f.github = answer
+			f.github = c.answer
 			w := postAs(t, router, deployPath, onboard("victim-org/secret"), ownerUser)
-			assertStatus(t, w, http.StatusForbidden)
+			assertStatus(t, w, c.status)
 			if len(exec.submittedParams) != 0 {
 				t.Errorf("refused build reached the executor: %v", exec.submittedParams)
 			}
@@ -185,7 +190,7 @@ func TestBuildRepoGate_BindingLookupFailureRefusesWithoutPublicFallback(t *testi
 			// Public on GitHub: a lookup failure must still refuse, not fall through to this.
 			f.github = githubAnswer(200, `{"private":false}`)
 			w := postAs(t, router, deployPath, onboard("openclaw/openclaw"), ownerUser)
-			assertStatus(t, w, http.StatusForbidden)
+			assertUnavailableWithoutDetail(t, w)
 			if len(exec.submittedParams) != 0 {
 				t.Error("refused build reached the executor")
 			}
@@ -200,9 +205,19 @@ func TestBuildRepoGate_UnconfiguredTokenRefuses(t *testing.T) {
 	router, exec, f := newGateRouter(t, "")
 	f.github = githubAnswer(200, `{"private":false}`)
 	w := postAs(t, router, deployPath, onboard("openclaw/openclaw"), ownerUser)
-	assertStatus(t, w, http.StatusForbidden)
+	assertUnavailableWithoutDetail(t, w)
 	if len(exec.submittedParams) != 0 || len(f.bindingCalls()) != 0 {
 		t.Error("an unconfigured binding check must refuse without calling anything")
+	}
+}
+
+// A check that could not be made answers a generic 503: the detail (the
+// portal's internal URL, a checkout path) is for the log, not the caller.
+func assertUnavailableWithoutDetail(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	assertStatus(t, w, http.StatusServiceUnavailable)
+	if got := w.Body.String(); got != `{"error":"cannot check the build inputs right now; try again later"}`+"\n" {
+		t.Errorf("a failed check must answer only the generic message, got %q", got)
 	}
 }
 

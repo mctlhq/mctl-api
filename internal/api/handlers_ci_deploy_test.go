@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/audit"
@@ -326,25 +327,34 @@ func TestCIDeploy_IdentityIsLowercase(t *testing.T) {
 
 func ptr(s string) *string { return &s }
 
-// A CI principal is not an admin: its repository goes through the same
-// build-repository gate as a human's. A registered source repository that is
-// private and not connected to the team is refused, and a failed binding
-// lookup does not fall through to the public check.
-func TestCIDeploy_BuildRepositoryGateApplies(t *testing.T) {
+// A CI principal's dockerfile_repo is pinned by authorizeCIDeploy to its
+// token's repository and to the source repository registered in gitops, so
+// the portal binding is not consulted: a private registered repository that
+// was never connected in the portal still deploys, and neither the portal nor
+// GitHub is asked. The image name is still checked: without the grant,
+// mctl-telegram is under the reserved mctl- prefix and is refused.
+func TestCIDeploy_RegisteredRepoSkipsTheBindingGate(t *testing.T) {
 	t.Setenv("AUTH_REQUIRED", "false")
 	for name, c := range map[string]struct {
-		binding http.HandlerFunc
-		github  string
+		imageNames string
+		status     int
 	}{
-		"private and unbound": {bindingAnswer(false), `{"private":true}`},
-		"binding unreadable":  {func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadGateway) }, `{"private":false}`},
+		"granted image name":     {"registry ghcr.io/mctlhq\nreserved-prefix mctl-\ngrant labs mctl-telegram\n", http.StatusAccepted},
+		"not granted image name": {"registry ghcr.io/mctlhq\nreserved-prefix mctl-\n", http.StatusForbidden},
 	} {
 		t.Run(name, func(t *testing.T) {
-			portal := httptest.NewServer(c.binding)
+			var portalHits, githubHits atomic.Int32
+			portal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				portalHits.Add(1)
+				w.WriteHeader(http.StatusBadGateway)
+			}))
 			t.Cleanup(portal.Close)
-			github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(c.github)) }))
+			github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				githubHits.Add(1)
+				_, _ = w.Write([]byte(`{"private":true}`))
+			}))
 			t.Cleanup(github.Close)
-			policy, err := gitops.ParseImageNames([]byte("registry ghcr.io/mctlhq\nreserved-prefix mctl-\ngrant labs mctl-telegram\n"))
+			policy, err := gitops.ParseImageNames([]byte(c.imageNames))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -365,11 +375,14 @@ func TestCIDeploy_BuildRepositoryGateApplies(t *testing.T) {
 				BackstageGithubAppConnectToken: "gac-token",
 			})
 			w := postAs(t, router, "/api/v1/operations/deploy-service/execute", ciBody(), ciUser())
-			if w.Code != http.StatusForbidden {
-				t.Fatalf("status %d, want 403; body: %s", w.Code, w.Body.String())
+			if w.Code != c.status {
+				t.Fatalf("status %d, want %d; body: %s", w.Code, c.status, w.Body.String())
 			}
-			if len(exec.submitted) != 0 {
-				t.Fatalf("a workflow was submitted: %v", exec.submitted)
+			if (c.status == http.StatusAccepted) != (len(exec.submitted) == 1) {
+				t.Errorf("submitted %d workflows for status %d", len(exec.submitted), c.status)
+			}
+			if portalHits.Load() != 0 || githubHits.Load() != 0 {
+				t.Errorf("a CI deploy must not consult the binding or GitHub: portal %d, github %d", portalHits.Load(), githubHits.Load())
 			}
 		})
 	}

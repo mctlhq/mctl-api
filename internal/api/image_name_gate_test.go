@@ -106,10 +106,8 @@ func TestImageNameGate_UnreadablePolicyRefuses(t *testing.T) {
 	git := &fakeGitReader{imagePolicyErr: errors.New("reading image-names.txt: no such file")}
 	router, exec, _ := imageGateRouter(t, git)
 	w := postAs(t, router, deployPath, onboardAs("my-app"), ownerUser)
-	assertStatus(t, w, http.StatusForbidden)
-	if !strings.Contains(w.Body.String(), "image name policy") {
-		t.Errorf("unexpected body: %s", w.Body.String())
-	}
+	// The read error carries checkout paths: it goes to the log only.
+	assertUnavailableWithoutDetail(t, w)
 	if len(exec.submittedParams) != 0 {
 		t.Fatal("must not submit without a readable policy")
 	}
