@@ -328,6 +328,14 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			// Dispatch stays live under the accept-only switch (mctl-api#570),
+			// so its key is still validated.
+			name:    "an unusable commerce dispatch key is still refused while COMMERCE_ACCEPT_DISABLED is on",
+			cfg:     config{CommerceDispatchKeyID: "kid-1", CommerceAcceptDisabled: true},
+			wantErr: true,
+			wantVar: "COMMERCE_DISPATCH_SIGNING_KEY",
+		},
+		{
 			name:    "a well-formed commerce dispatch key is accepted",
 			cfg:     config{CommerceDispatchKeyID: "kid-1", CommerceDispatchSigningKey: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="},
 			wantErr: false,

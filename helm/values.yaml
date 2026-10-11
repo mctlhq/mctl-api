@@ -71,6 +71,9 @@ env:
   # authentication chain.
   MCTL_OIDC_PROVIDERS: ""
   MCTL_FEDERATION_DISABLED: ""
+  # Commerce accept-only kill switch (mctl-api#570, docs/commerce-ledger.md
+  # "Pausing acceptance"): refuses new quotes and accepts, keeps the drain live.
+  COMMERCE_ACCEPT_DISABLED: ""
 
 # Optional CNPG CA for sslmode=verify-full. When set, ca.crt is mounted at
 # /etc/cnpg/ca.crt and the process upgrades AUDIT_DB_URL to verify-full.

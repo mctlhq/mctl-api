@@ -24,6 +24,7 @@ authorizations, captures and voids in the same database.
 |---|---|
 | `COMMERCE_DB_URL` | Postgres for the ledger. Falls back to `AUDIT_DB_URL`. |
 | `COMMERCE_DISABLED` | Kill switch, same values as the other kill switches. Routes answer 503. |
+| `COMMERCE_ACCEPT_DISABLED` | Accept-only kill switch, same values. New quotes and accepts answer 422 `unsupported-execution`; every other route stays live. See [Pausing acceptance](#pausing-acceptance). |
 | `COMMERCE_DISPATCH_KEY_ID` | Identifier of the dispatch signing key, carried in every authorization so a provider knows which pinned key verifies it. |
 | `COMMERCE_DISPATCH_SIGNING_KEY` | Ed25519 seed, 32 bytes, base64 (standard or URL alphabet, padded or not). Set both or neither: one without the other, or a seed that is not 32 bytes of base64, refuses the boot (unless `COMMERCE_DISABLED` is on). Without them `…/dispatch` and `/dispatch-keys` answer 503 `dispatch-unavailable`. |
 
@@ -34,6 +35,50 @@ Deploying this ledger enables no payment behaviour. No terms exist until a
 platform admin publishes them, and nothing mints a quote until C4
 (`mctl-agents#619`) wires the gateway. ADR 020 sec. 14: merging enables
 nothing.
+
+## Pausing acceptance
+
+`COMMERCE_ACCEPT_DISABLED` (mctl-api#570) stops new paid acceptances without
+taking the ledger off. While it is on:
+
+- `POST /api/v1/commerce/tenants/{tenant}/quotes` and
+  `POST …/tenants/{tenant}/invocations` answer **422** with code
+  `unsupported-execution` (ADR 020 sec. 13) and write nothing but a `denied`
+  audit entry (`commerce-quote-mint`, `commerce-invocation-accept`). An accept
+  that would only have replayed an existing row is refused too; a gateway
+  resuming after a restart finds its row with
+  `GET …/invocations?idempotency_key=…`. The status is 422, not 503: the
+  mctl-agents client reads every 5xx as "ledger unknown", and this is a final
+  refusal with nothing held.
+- The authentication, tenant-access (404) and `identity-unresolved` checks
+  still answer first, so the refusal says nothing about a tenant the caller
+  cannot see.
+- Every other route is served as usual: terms, quote, invocation, receipt and
+  transition reads, budgets, `…/reserve`, `…/dispatch`, `…/finalize`,
+  `…/release`, `…/transitions`, `/invocations/overdue`, `/reconcile/expired`
+  and `/dispatch-keys`. Rows accepted before the switch can still complete or
+  be released, and the dispatch signing key is still validated at boot.
+- `COMMERCE_DISABLED` takes precedence: with both on, every route answers 503.
+
+The switch is an env var, so it takes full effect only once every replica has
+rolled (two in production).
+
+**Disable order.** Turning `COMMERCE_DISABLED` on while liability is open
+freezes it: nothing can reconcile until the ledger is back. So:
+
+1. Set `COMMERCE_ACCEPT_DISABLED=true` and roll out every replica.
+2. Drain. Run `POST /reconcile/expired` until it reports nothing left: it
+   refuses `accepted` rows whose quote expired and releases `reserved` rows
+   past their deadline. Time never moves `dispatching`, `dispatched` or
+   `outcome_unknown` rows; the gateway or an operator resolves them through
+   `…/finalize` or `…/release`.
+3. Confirm that `GET /invocations/overdue` is empty and no non-terminal row
+   remains.
+4. Only then, if the ledger must go fully dark, set `COMMERCE_DISABLED=true`.
+
+**Enable order** is the reverse: unset `COMMERCE_DISABLED` first with
+`COMMERCE_ACCEPT_DISABLED` still on, check that reads, `/dispatch-keys` and
+`/reconcile/expired` answer, then unset `COMMERCE_ACCEPT_DISABLED`.
 
 ## Tables
 
