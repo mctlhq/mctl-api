@@ -95,6 +95,8 @@ var reservedCases = []struct {
 	{"temporal-web", true, "platform app temporal-web"},
 	{"tenant", true, "tenants ApplicationSet"},
 	{"tenant-x", true, "prefix tenant-"},
+	{"sync", true, "argocd Role argo-workflow-argocd-sync"},
+	{"SYNC", true, "case-insensitive"},
 
 	// The existing tenants stay valid: none of them is a hyphen-prefix of a
 	// platform Application in platformApplicationNames.
@@ -131,6 +133,8 @@ var reservedCases = []struct {
 	{"sharedteam", false, "shared-pg needs shared followed by a hyphen"},
 	{"team-root", false, "platform-app rule is a prefix rule only"},
 	{"tenants", false, "tenant- needs the hyphen"},
+	{"syncer", false, "sync is an exact match only"},
+	{"data-sync", false, "sync is an exact match only"},
 }
 
 func TestIsReservedTenantName(t *testing.T) {

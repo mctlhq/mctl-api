@@ -157,9 +157,13 @@ var tenantScopedPlatformApplications = []string{
 
 // reservedTenantExact are names reserved outright beyond the platform list:
 // "tenant" would make the tenants ApplicationSet's tenant-<x> Applications
-// reachable as <tenant>-<service>.
+// reachable as <tenant>-<service>. "sync" would give the tenant the name of
+// the platform tier's own argocd Role and RoleBinding,
+// argo-workflow-argocd-sync, since the tenant chart names its pair
+// argo-workflow-argocd-<tenant> (mctl-gitops#1805).
 var reservedTenantExact = map[string]struct{}{
 	"tenant": {},
+	"sync":   {},
 }
 
 // collidesWithPlatformApplication reports whether n equals a platform
