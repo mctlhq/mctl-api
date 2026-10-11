@@ -17,6 +17,7 @@ package mcp
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -85,7 +86,9 @@ func TestCommerceToolsRefuseBadArgumentsWithoutCalling(t *testing.T) {
 		"no tenant":         {"invocation_id": "inv_1"},
 		"slash tenant":      {"tenant": "a/b", "invocation_id": "inv_1"},
 		"dotdot tenant":     {"tenant": "..", "invocation_id": "inv_1"},
-		"upper tenant":      {"tenant": "Acme", "invocation_id": "inv_1"},
+		"backslash tenant":  {"tenant": `a\b`, "invocation_id": "inv_1"},
+		"dot tenant":        {"tenant": " . ", "invocation_id": "inv_1"},
+		"control tenant":    {"tenant": "a\nb", "invocation_id": "inv_1"},
 		"numeric tenant":    {"tenant": float64(1), "invocation_id": "inv_1"},
 		"no invocation":     {"tenant": "acme"},
 		"dotdot invocation": {"tenant": "acme", "invocation_id": ".."},
@@ -96,10 +99,15 @@ func TestCommerceToolsRefuseBadArgumentsWithoutCalling(t *testing.T) {
 		}
 	}
 	for name, args := range map[string]map[string]any{
-		"no tenant":      {},
-		"bad limit":      {"tenant": "acme", "limit": float64(0)},
-		"fraction limit": {"tenant": "acme", "limit": 1.5},
-		"string limit":   {"tenant": "acme", "limit": "5"},
+		"no tenant":          {},
+		"bad limit":          {"tenant": "acme", "limit": float64(0)},
+		"fraction limit":     {"tenant": "acme", "limit": 1.5},
+		"string limit":       {"tenant": "acme", "limit": "5"},
+		"limit over 500":     {"tenant": "acme", "limit": float64(501)},
+		"numeric phase":      {"tenant": "acme", "phase": float64(42)},
+		"bool since":         {"tenant": "acme", "since": true},
+		"numeric capability": {"tenant": "acme", "capability_id": float64(1)},
+		"list until":         {"tenant": "acme", "until": []any{"x"}},
 	} {
 		if r := callRoadmapTool(t, (*Server).toolListCommerceInvocations, ts.URL, args); !r.IsError {
 			t.Errorf("list %s: accepted", name)
@@ -110,6 +118,35 @@ func TestCommerceToolsRefuseBadArgumentsWithoutCalling(t *testing.T) {
 	}
 	if len(*calls) != 0 {
 		t.Fatalf("refused calls reached the API: %v", *calls)
+	}
+}
+
+// Review of #573: tenants are IdP group names, so the tool applies the
+// API's normalization instead of a DNS-label pattern the route never had.
+func TestCommerceToolsNormalizeTenantsLikeTheAPI(t *testing.T) {
+	ts, calls := workItemBackend(t, http.StatusOK, `{}`)
+	for tenant, want := range map[string]string{
+		" Acme ":                "GET /api/v1/commerce/tenants/acme/budget",
+		"team_one":              "GET /api/v1/commerce/tenants/team_one/budget",
+		"a.b":                   "GET /api/v1/commerce/tenants/a.b/budget",
+		strings.Repeat("x", 70): "GET /api/v1/commerce/tenants/" + strings.Repeat("x", 70) + "/budget",
+	} {
+		if r := callRoadmapTool(t, (*Server).toolGetCommerceBudget, ts.URL, map[string]any{"tenant": tenant}); r.IsError {
+			t.Fatalf("%q refused: %s", tenant, resultText(t, r))
+		}
+		if got := (*calls)[len(*calls)-1].line; got != want {
+			t.Errorf("%q: called %q, want %q", tenant, got, want)
+		}
+	}
+}
+
+func TestListCommerceInvocationsAcceptsTheAPILimitBound(t *testing.T) {
+	var raw string
+	ts := queryBackend(t, &raw)
+	if r := callRoadmapTool(t, (*Server).toolListCommerceInvocations, ts, map[string]any{
+		"tenant": "acme", "limit": float64(500),
+	}); r.IsError || raw != "limit=500" {
+		t.Fatalf("limit 500: error=%v query=%q", r.IsError, raw)
 	}
 }
 

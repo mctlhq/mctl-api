@@ -527,7 +527,8 @@ func (h *Handlers) checkApprovalOwner(r *http.Request, user *auth.User, approval
 	return nil
 }
 
-// GetCommerceInvocation returns one receipt of the path tenant.
+// GetCommerceInvocation returns one invocation record of the path tenant,
+// ledger fields included; the redacted receipt is GetCommerceReceipt.
 func (h *Handlers) GetCommerceInvocation(w http.ResponseWriter, r *http.Request) {
 	_, tenant, ok := h.requireCommerceTenant(w, r, "commerce-invocation-read")
 	if !ok {
@@ -580,8 +581,8 @@ func (h *Handlers) GetCommerceReceipt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, commerce.ReceiptOf(*inv, h.policyDecisionOf(r.Context(), inv.ApprovalID)))
 }
 
-// ListCommerceInvocations lists the path tenant's receipts, filtered by
-// capability, phase or period.
+// ListCommerceInvocations lists the path tenant's invocation records,
+// filtered by capability, phase or period.
 func (h *Handlers) ListCommerceInvocations(w http.ResponseWriter, r *http.Request) {
 	user, tenant, ok := h.requireCommerceTenant(w, r, "commerce-invocation-read")
 	if !ok {
