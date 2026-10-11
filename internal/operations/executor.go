@@ -138,6 +138,12 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 		slog.Warn("refusing to submit service operation", "operation", op.Name, "user", userID, "error", err)
 		return nil, err
 	}
+	// Secret values never enter the Workflow spec (secret_handoff.go).
+	submitParams, secretValues, err := splitSecretParams(op, params)
+	if err != nil {
+		slog.Warn("refusing to submit operation with secret parameters", "operation", op.Name, "user", userID, "error", err)
+		return nil, err
+	}
 	namespace := WorkflowNamespace(op.WorkflowTemplate, team)
 	requestID := uuid.New().String()[:8]
 	workflowName := fmt.Sprintf("%s-%s", op.WorkflowTemplate, requestID)
@@ -187,19 +193,42 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 			"mctl.ai/trace-id":    telemetry.TraceIDFrom(ctx),
 		})
 	}
-	wf.Object["spec"] = map[string]interface{}{
+	spec := map[string]interface{}{
 		"workflowTemplateRef": map[string]interface{}{
 			"name":         op.WorkflowTemplate,
 			"clusterScope": true,
 		},
-		"arguments": map[string]interface{}{
-			"parameters": buildArgoParams(params),
-		},
 	}
+	handoff := len(secretValues) > 0
+	secretName := handoffSecretName(workflowName)
+	if handoff {
+		if err := e.checkSecretHandoffSupport(ctx, op.WorkflowTemplate); err != nil {
+			slog.Warn("refusing to submit workflow", "operation", op.Name, "workflow", workflowName, "error", err)
+			return nil, err
+		}
+		submitParams[SecretHandoffParam] = secretName
+		// Nothing runs until the Secret exists: resumed below.
+		spec["suspend"] = true
+	}
+	spec["arguments"] = map[string]interface{}{
+		"parameters": buildArgoParams(submitParams),
+	}
+	wf.Object["spec"] = spec
 
-	_, err := e.dynamicClient.Resource(workflowGVR).Namespace(namespace).Create(ctx, wf, metav1.CreateOptions{})
+	created, err := e.dynamicClient.Resource(workflowGVR).Namespace(namespace).Create(ctx, wf, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("create workflow %s: %w", workflowName, err)
+	}
+
+	if handoff {
+		if err := e.createHandoffSecret(ctx, created, secretName, secretValues, labels); err != nil {
+			e.abortWorkflow(ctx, namespace, workflowName)
+			return nil, fmt.Errorf("hand off secret parameters for workflow %s: %w", workflowName, err)
+		}
+		if err := e.resumeWorkflow(ctx, namespace, workflowName); err != nil {
+			e.abortWorkflow(ctx, namespace, workflowName)
+			return nil, fmt.Errorf("hand off secret parameters for workflow %s: %w", workflowName, err)
+		}
 	}
 
 	slog.Info("workflow created", "workflow", workflowName, "namespace", namespace)
