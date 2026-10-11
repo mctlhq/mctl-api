@@ -134,8 +134,11 @@ Reason codes on refusals are those of ADR 020 sec. 13 (`identity-unresolved`,
 `commerce-terms-unknown`, `quote-expired`, `quote-stale`, `quote-mismatch`,
 `idempotency-conflict`, `funds-mode-unavailable`, `budget-exhausted`,
 `currency-mismatch`, `payment-denied`), plus `phase-conflict`, `terms-retired`,
-`payment-unknown`, `reservation-expired` and `invalid-request` for this API's
-own shapes. A `phase` filter outside the
+`payment-unknown` and `invalid-request` for this API's own shapes. Every
+denial `…/reserve` commits is 422 with the row's reason, `quote-expired`
+included: unlike the 409 of accept, there is no new quote to retry with.
+`reservation-expired` is a reason code the reconciler stamps on a released
+invocation, never an error code. A `phase` filter outside the
 vocabulary is `invalid-request` too, never an empty listing. A missing
 terms version is a plain 404; only an unresolvable capability is
 `commerce-terms-unknown`. `funds_mode: live` is refused
@@ -197,10 +200,16 @@ runs in one transaction under an advisory lock on the tenant budget and
 
 An adapter answer the ledger cannot classify, or no answer at all, leaves
 the hold in place with `payment_status: unknown` and is reported as 409
-`payment-unknown`; nothing is refused and nothing is spendable again.
-Before a capture or a void, the ledger asks the adapter for the status of
-the authorization key and proceeds only on a definite answer; a hold whose
-authorization turned out denied is released without a void.
+`payment-unknown`; nothing is refused and nothing is spendable again. Such
+a row cannot be dispatched: `reserved → dispatching` is refused with
+`payment-unknown` until a retry of `…/reserve` resolves it, by asking the
+adapter for the status of the same authorization key (never a fresh
+authorization): authorized is recorded and the hold replays, denied
+releases the hold with nothing to void, anything else is unknown again.
+Before a capture or a void, the ledger does the same lookup and proceeds
+only on a definite answer; a hold whose authorization turned out denied
+after dispatch is released and the row finalized with `payment_status:
+denied`, so no hold is ever stuck behind an adapter's late denial.
 
 `POST /api/v1/commerce/reconcile/expired` is the reconciler for the two
 states time alone may move (ADR 020 sec. 11): an `accepted` row past its

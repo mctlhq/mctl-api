@@ -740,3 +740,154 @@ func TestPaymentKeyWithDifferentParametersConflicts(t *testing.T) {
 		t.Fatalf("status of nothing = %+v, %v", st, err)
 	}
 }
+
+func TestReserveNeverReplaysASettledHold(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t)
+	setBudget(t, s, tenant, 100, 50)
+	cap := testCapability(t)
+	publish(t, s, cap, PriceModePerCall, 10)
+
+	// A live hold replays through dispatch, a settled one answers conflict.
+	done := acceptOne(t, s, cap, tenant, "k-finalized")
+	reserve(t, s, tenant, done.InvocationID)
+	dispatch(t, s, tenant, done.InvocationID)
+	if again := reserve(t, s, tenant, done.InvocationID); !again.Replayed || again.Reservation.Status != ReservationHeld {
+		t.Fatalf("dispatched row must replay its live hold: %+v", again)
+	}
+	if _, err := s.Finalize(ctx, FinalizeInput{TenantID: tenant, InvocationID: done.InvocationID, Actor: "prn_gateway", ExecutionOutcome: OutcomeSucceeded}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Reserve(ctx, ReserveInput{TenantID: tenant, InvocationID: done.InvocationID, Actor: "prn_gateway"})
+	if !errors.Is(err, ErrPhaseConflict) || res != nil {
+		t.Fatalf("reserve on a finalized row: res = %+v, err = %v, want phase-conflict", res, err)
+	}
+
+	gone := acceptOne(t, s, cap, tenant, "k-released")
+	reserve(t, s, tenant, gone.InvocationID)
+	if _, err := s.Release(ctx, ReleaseInput{TenantID: tenant, InvocationID: gone.InvocationID, Actor: "prn_gateway", ReasonCode: "cancelled"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Reserve(ctx, ReserveInput{TenantID: tenant, InvocationID: gone.InvocationID, Actor: "prn_gateway"}); !errors.Is(err, ErrPhaseConflict) {
+		t.Fatalf("reserve on a released row: err = %v, want phase-conflict", err)
+	}
+
+	// A refused row answers its refusal again, with the row.
+	setBudget(t, s, tenant, 5, 50)
+	no := acceptOne(t, s, cap, tenant, "k-refused")
+	if _, err := s.Reserve(ctx, ReserveInput{TenantID: tenant, InvocationID: no.InvocationID, Actor: "prn_gateway"}); !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("first: %v", err)
+	}
+	res, err = s.Reserve(ctx, ReserveInput{TenantID: tenant, InvocationID: no.InvocationID, Actor: "prn_gateway"})
+	if !errors.Is(err, ErrBudgetExhausted) || res == nil || res.Invocation == nil || res.Invocation.Phase != PhaseRefused {
+		t.Fatalf("retry on a refused row: res = %+v, err = %v", res, err)
+	}
+}
+
+// statusAdapter answers unknown to every authorize and lets the test decide
+// what a later status lookup of the authorize key says, like a rail whose
+// response was lost and is settled out of band.
+type statusAdapter struct {
+	SimulatedAuthorizer
+	mu     sync.Mutex
+	status map[string]PaymentResult
+}
+
+func (a *statusAdapter) Authorize(context.Context, querier, PaymentRequest) (PaymentResult, error) {
+	return PaymentResult{Operation: PaymentOpAuthorize, Result: PaymentResultUnknown}, nil
+}
+
+func (a *statusAdapter) Status(ctx context.Context, q querier, key string) (PaymentResult, error) {
+	a.mu.Lock()
+	st, ok := a.status[key]
+	a.mu.Unlock()
+	if ok {
+		return st, nil
+	}
+	if strings.HasSuffix(key, ":"+PaymentOpAuthorize) {
+		return PaymentResult{Operation: PaymentOpAuthorize, Result: PaymentResultUnknown}, nil
+	}
+	return a.SimulatedAuthorizer.Status(ctx, q, key)
+}
+
+func (a *statusAdapter) resolve(id, result, authID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.status[PaymentOperationKey(id, PaymentOpAuthorize)] = PaymentResult{Operation: PaymentOpAuthorize, Result: result, ID: authID}
+}
+
+func TestUnknownHoldCannotDispatchUntilResolved(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	adapter := &statusAdapter{status: map[string]PaymentResult{}}
+	if err := s.UseAuthorizer(adapter); err != nil {
+		t.Fatal(err)
+	}
+	tenant := testTenant(t)
+	setBudget(t, s, tenant, 100, 50)
+	cap := testCapability(t)
+	publish(t, s, cap, PriceModePerCall, 10)
+	toDispatching := func(id string) error {
+		_, err := s.Transition(ctx, tenant, TransitionInput{InvocationID: id, ExpectedPhase: PhaseReserved, ToPhase: PhaseDispatching, Actor: "prn_gateway"})
+		return err
+	}
+
+	// 1. Unknown: held, counted, not dispatchable, and a retry says unknown.
+	a := acceptOne(t, s, cap, tenant, "k-authorized")
+	if res := reserve(t, s, tenant, a.InvocationID); res.Invocation.PaymentStatus != PaymentUnknown {
+		t.Fatalf("reserve = %+v", res.Invocation)
+	}
+	if err := toDispatching(a.InvocationID); !errors.Is(err, ErrPaymentUnknown) {
+		t.Fatalf("dispatching an unknown hold: err = %v, want payment-unknown", err)
+	}
+	if _, err := s.Reserve(ctx, ReserveInput{TenantID: tenant, InvocationID: a.InvocationID, Actor: "prn_gateway"}); !errors.Is(err, ErrPaymentUnknown) {
+		t.Fatalf("retry while unknown: err = %v", err)
+	}
+	if bal := balance(t, s, tenant); bal.ReservedMinor != 10 {
+		t.Fatalf("hold must stay counted: %+v", bal)
+	}
+
+	// 2. The rail settles it as authorized: the retry records it and the
+	// row may now be dispatched.
+	adapter.resolve(a.InvocationID, PaymentResultAuthorized, "rail_auth_1")
+	res := reserve(t, s, tenant, a.InvocationID)
+	if !res.Replayed || res.Invocation.PaymentStatus != PaymentAuthorized || res.Reservation.AuthorizationID != "rail_auth_1" || res.Reservation.Status != ReservationHeld {
+		t.Fatalf("resolved authorized = %+v / %+v", res.Invocation, res.Reservation)
+	}
+	if err := toDispatching(a.InvocationID); err != nil {
+		t.Fatalf("dispatch after resolution: %v", err)
+	}
+
+	// 3. The rail settles another as denied: the retry releases the hold
+	// with nothing to void and reports the denial.
+	d := acceptOne(t, s, cap, tenant, "k-denied")
+	reserve(t, s, tenant, d.InvocationID)
+	adapter.resolve(d.InvocationID, PaymentResultDenied, "")
+	res, err := s.Reserve(ctx, ReserveInput{TenantID: tenant, InvocationID: d.InvocationID, Actor: "prn_gateway"})
+	if !errors.Is(err, ErrPaymentDenied) || res == nil || res.Invocation.Phase != PhaseReleased ||
+		res.Invocation.ChargeStatus != ChargeReleased || res.Invocation.PaymentStatus != PaymentDenied || res.Reservation.Status != ReservationReleased {
+		t.Fatalf("resolved denied: res = %+v, err = %v", res, err)
+	}
+	if bal := balance(t, s, tenant); bal.ReservedMinor != 10 || bal.AvailableMinor != 90 {
+		t.Fatalf("denied hold must be freed: %+v", bal)
+	}
+
+	// 4. A late denial after dispatch (only reachable if the guard above is
+	// bypassed; forced here) finalizes the row with the hold released
+	// instead of erroring forever.
+	l := acceptOne(t, s, cap, tenant, "k-late")
+	reserve(t, s, tenant, l.InvocationID)
+	if _, err := s.pool.Exec(ctx, `UPDATE commerce_invocations SET phase = $2 WHERE invocation_id = $1`, l.InvocationID, PhaseDispatched); err != nil {
+		t.Fatal(err)
+	}
+	adapter.resolve(l.InvocationID, PaymentResultDenied, "")
+	fin, err := s.Finalize(ctx, FinalizeInput{TenantID: tenant, InvocationID: l.InvocationID, Actor: "prn_gateway", ExecutionOutcome: OutcomeSucceeded})
+	if err != nil || fin.Invocation.Phase != PhaseFinalized || fin.Invocation.ChargeStatus != ChargeReleased ||
+		fin.Invocation.PaymentStatus != PaymentDenied || fin.Reservation.Status != ReservationReleased {
+		t.Fatalf("finalize after late denial: res = %+v, err = %v", fin, err)
+	}
+	if bal := balance(t, s, tenant); bal.ReservedMinor != 10 || bal.CommittedMinor != 0 {
+		t.Fatalf("late-denied hold must not stay held: %+v", bal)
+	}
+}

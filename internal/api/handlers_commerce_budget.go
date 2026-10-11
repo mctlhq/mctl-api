@@ -15,6 +15,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -176,6 +177,15 @@ func (h *Handlers) ReserveCommerceInvocation(w http.ResponseWriter, r *http.Requ
 		}
 		h.logAudit(r, audit.Entry{UserID: userID, Operation: "commerce-reserve", Status: "denied",
 			RiskLevel: string(operations.RiskHigh), Parameters: params, Message: err.Error()})
+		if res != nil && res.Invocation != nil && res.Invocation.Phase == commerce.PhaseRefused {
+			// Every denial reserve commits is final: the row is refused
+			// with its reason, and a retry answers the same. 422 for all
+			// of them, including quote-expired, which elsewhere (accept)
+			// is the 409 "mint a new quote" answer; here there is nothing
+			// left to retry against.
+			writeErrorCode(w, http.StatusUnprocessableEntity, res.Invocation.ReasonCode, err.Error(), nil)
+			return
+		}
 		writeCommerceError(w, err)
 		return
 	}
@@ -292,6 +302,12 @@ func (h *Handlers) ReconcileCommerceExpired(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: "commerce-reconcile-expired", Status: "failed",
 			RiskLevel: string(operations.RiskHigh), Parameters: params, Message: err.Error()})
+		if res != nil {
+			// The rows already moved stay moved; the caller must know how
+			// far the pass got before the failure, so a retry is informed.
+			err = fmt.Errorf("%w (before the failure: refused %d, released %d, unresolved %d)",
+				err, len(res.Refused), len(res.Released), len(res.Unresolved))
+		}
 		writeCommerceError(w, err)
 		return
 	}

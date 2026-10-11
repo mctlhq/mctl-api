@@ -620,11 +620,26 @@ func (s *Store) balanceOf(ctx context.Context, q querier, b *Budget, now time.Ti
 
 // GetBalance is the tenant budget read of ADR 020 sec. 12.
 func (s *Store) GetBalance(ctx context.Context, tenantID, payerAccountID string) (*Balance, error) {
-	b, err := s.getBudget(ctx, s.pool, tenantID, payerAccountID, false)
+	// One snapshot for the limits and the sums, so a concurrent SetBudget or
+	// Reserve cannot be observed half-applied: available_minor is always
+	// consistent with the numbers printed beside it.
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, fmt.Errorf("commerce: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	b, err := s.getBudget(ctx, tx, tenantID, payerAccountID, false)
 	if err != nil {
 		return nil, err
 	}
-	return s.balanceOf(ctx, s.pool, b, s.now())
+	bal, err := s.balanceOf(ctx, tx, b, s.now())
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commerce: commit: %w", err)
+	}
+	return bal, nil
 }
 
 // admits is the budget decision shared by Precheck and Reserve: a currency
@@ -724,8 +739,8 @@ type ReserveInput struct {
 
 // ReserveResult is the reserved invocation and its hold. Replayed reports
 // that the hold already existed. When the adapter answered unknown, the
-// invocation is reserved with payment_status unknown and must not be
-// dispatched until status resolves it.
+// invocation is reserved with payment_status unknown; applyTransition
+// refuses to dispatch it until a retry of Reserve resolves it by status.
 type ReserveResult struct {
 	Invocation  *Invocation  `json:"invocation"`
 	Reservation *Reservation `json:"reservation,omitempty"`
@@ -773,18 +788,28 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 			return err
 		}
 		if cur.Phase != PhaseAccepted {
-			rsv, err := s.reservationOf(ctx, tx, cur.InvocationID, false)
+			if cur.Phase == PhaseRefused {
+				// The row is handed back with the error so the caller can
+				// see the refusal is final, like the first answer was.
+				res = ReserveResult{Invocation: cur}
+				refusal = refusedError(cur.ReasonCode)
+				return nil
+			}
+			rsv, err := s.reservationOf(ctx, tx, cur.InvocationID, true)
 			if err != nil {
 				return err
 			}
-			if rsv != nil {
-				res = ReserveResult{Invocation: cur, Reservation: rsv, Replayed: true}
-				return nil
+			// Only a live hold replays. A captured or released row still has
+			// its reservation, and answering it as a reservation would tell
+			// a retrying gateway it holds budget for a settled invocation.
+			if rsv == nil || rsv.Status != ReservationHeld {
+				return fmt.Errorf("%w: phase is %s, expected %s", ErrPhaseConflict, cur.Phase, PhaseAccepted)
 			}
-			if cur.Phase == PhaseRefused {
-				return refusedError(cur.ReasonCode)
+			if cur.Phase == PhaseReserved && cur.PaymentStatus == PaymentUnknown {
+				return s.resolveUnknownHold(ctx, tx, in, cur, rsv, &res, &refusal)
 			}
-			return fmt.Errorf("%w: phase is %s, expected %s", ErrPhaseConflict, cur.Phase, PhaseAccepted)
+			res = ReserveResult{Invocation: cur, Reservation: rsv, Replayed: true}
+			return nil
 		}
 		now := s.now()
 		refuse := func(reason, note string, cause error) error {
@@ -883,6 +908,53 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 	return &res, nil
 }
 
+// resolveUnknownHold is the retry path of a hold whose authorize answered
+// unknown: the adapter is asked for the status of the same key (ADR 020
+// sec. 10), never for a fresh authorization. Authorized is recorded on the
+// row and the hold replays; denied releases the hold with nothing to void
+// and reports the denial; still unknown leaves everything as it was. Until
+// this resolves, applyTransition refuses to dispatch the row.
+func (s *Store) resolveUnknownHold(ctx context.Context, tx pgx.Tx, in ReserveInput, cur *Invocation, rsv *Reservation, res *ReserveResult, refusal *error) error {
+	authID, denied, err := s.resolveAuthorization(ctx, tx, cur, rsv)
+	if err != nil {
+		return err
+	}
+	now := s.now()
+	if denied {
+		updated, err := s.setReservationStatus(ctx, tx, rsv.ReservationID, ReservationReleased, "", now)
+		if err != nil {
+			return err
+		}
+		inv, err := s.applyTransition(ctx, tx, in.TenantID, TransitionInput{
+			InvocationID: cur.InvocationID, ExpectedPhase: PhaseReserved, ToPhase: PhaseReleased,
+			ReasonCode: ReasonPaymentDenied, Actor: in.Actor, Note: "authorization resolved denied before dispatch",
+			ExecutionOutcome: OutcomeNotDispatched, ChargeStatus: ChargeReleased, PaymentStatus: PaymentDenied,
+		})
+		if err != nil {
+			return err
+		}
+		*res = ReserveResult{Invocation: inv, Reservation: updated}
+		*refusal = fmt.Errorf("%w: authorization was denied", ErrPaymentDenied)
+		return nil
+	}
+	row := tx.QueryRow(ctx, `UPDATE commerce_invocations SET payment_status = $3, updated_at = $4, version = version + 1
+		WHERE invocation_id = $1 AND tenant_id = $2 RETURNING `+invocationColumns,
+		cur.InvocationID, in.TenantID, PaymentAuthorized, now)
+	inv, err := scanInvocation(row)
+	if err != nil {
+		return fmt.Errorf("commerce: record authorization: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO commerce_invocation_transitions
+		(invocation_id, from_phase, to_phase, reason_code, actor, note, recorded_at)
+		VALUES ($1, $2, $2, '', $3, $4, $5)`,
+		cur.InvocationID, PhaseReserved, in.Actor, "authorization resolved by status lookup", now); err != nil {
+		return fmt.Errorf("commerce: insert transition: %w", err)
+	}
+	rsv.AuthorizationID = authID
+	*res = ReserveResult{Invocation: inv, Reservation: rsv, Replayed: true}
+	return nil
+}
+
 // FinalizeInput records a confirmed outcome and settles the charge (ADR 020
 // sec. 7 steps 10-11).
 type FinalizeInput struct {
@@ -960,11 +1032,23 @@ func (s *Store) Finalize(ctx context.Context, in FinalizeInput) (*FinalizeResult
 			Actor: in.Actor, Note: in.Note, ExecutionOutcome: in.ExecutionOutcome, UsageQuantity: usage}
 		captureID := ""
 		status := ReservationReleased
+		denied := false
+		if cur.PriceMode != PriceModeFree {
+			if _, denied, err = s.resolveAuthorization(ctx, tx, cur, rsv); err != nil {
+				return err
+			}
+		}
 		switch {
 		case cur.PriceMode == PriceModeFree:
 			// Nothing to capture: a free hold of zero is recorded captured
 			// so the receipt reads "charged 0", not "released".
 			tr.ChargeStatus, status = ChargeCaptured, ReservationCaptured
+		case denied:
+			// The rail denied what the ledger had held as unknown. There is
+			// nothing to capture or void: the hold is released and the
+			// receipt says the payment was denied, so the row can finalize
+			// instead of erroring on every retry with its hold stuck.
+			tr.ChargeStatus, tr.PaymentStatus, tr.SettlementStatus = ChargeReleased, PaymentDenied, SettlementNotApplicable
 		case capture:
 			pr, err := s.settlePayment(ctx, tx, PaymentOpCapture, cur, rsv)
 			if err != nil {
@@ -1174,8 +1258,8 @@ func (s *Store) ExpireStale(ctx context.Context, actor string, limit int) (*Expi
 	now := s.now()
 	out := &ExpireResult{Refused: []string{}, Released: []string{}, Unresolved: []string{}}
 	type ref struct{ tenant, id string }
-	list := func(query string) ([]ref, error) {
-		rows, err := s.pool.Query(ctx, query, now, limit)
+	list := func(query, phase string) ([]ref, error) {
+		rows, err := s.pool.Query(ctx, query, now, limit, phase)
 		if err != nil {
 			return nil, fmt.Errorf("commerce: list stale: %w", err)
 		}
@@ -1191,7 +1275,7 @@ func (s *Store) ExpireStale(ctx context.Context, actor string, limit int) (*Expi
 		return refs, rows.Err()
 	}
 	accepted, err := list(`SELECT tenant_id, invocation_id FROM commerce_invocations
-		WHERE phase = 'accepted' AND quote_expires_at < $1 ORDER BY quote_expires_at LIMIT $2`)
+		WHERE phase = $3 AND quote_expires_at < $1 ORDER BY quote_expires_at LIMIT $2`, PhaseAccepted)
 	if err != nil {
 		return nil, err
 	}
@@ -1207,7 +1291,7 @@ func (s *Store) ExpireStale(ctx context.Context, actor string, limit int) (*Expi
 		out.Refused = append(out.Refused, r.id)
 	}
 	reserved, err := list(`SELECT tenant_id, invocation_id FROM commerce_invocations
-		WHERE phase = 'reserved' AND reservation_deadline < $1 ORDER BY reservation_deadline LIMIT $2`)
+		WHERE phase = $3 AND reservation_deadline < $1 ORDER BY reservation_deadline LIMIT $2`, PhaseReserved)
 	if err != nil {
 		return out, err
 	}

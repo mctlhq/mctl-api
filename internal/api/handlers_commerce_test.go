@@ -69,6 +69,7 @@ func (r *commerceGitReader) MemberRoles(namespace, login string) ([][]string, er
 type commerceFixture struct {
 	h     *Handlers
 	store *commerce.Store
+	pool  *pgxpool.Pool
 	cap   string
 }
 
@@ -108,7 +109,7 @@ func newCommerceFixture(t *testing.T) *commerceFixture {
 		{Name: "beta", Members: []gitops.TenantMember{{UserID: "beta-owner", Role: "owner"}}},
 	}}
 	h := &Handlers{opts: Options{Commerce: store, GitReader: git}}
-	return &commerceFixture{h: h, store: store, cap: capID}
+	return &commerceFixture{h: h, store: store, pool: pool, cap: capID}
 }
 
 // tenantUser is a GitHub-proven member of tenant with a resolved principal.

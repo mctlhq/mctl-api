@@ -15,6 +15,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -200,6 +201,26 @@ func TestCommerceBudget_MoneyEdgesOverHTTP(t *testing.T) {
 	}
 	if rec = f.money(t, "release", "acme", first, map[string]any{"reason_code": "x"}); rec.Code != http.StatusConflict {
 		t.Fatalf("release finalized: want 409, got %d %s", rec.Code, rec.Body.String())
+	}
+	// A settled hold never replays as a reservation.
+	if rec = f.money(t, "reserve", "acme", first, nil); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "phase-conflict") {
+		t.Fatalf("reserve finalized: want 409 phase-conflict, got %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = f.money(t, "reserve", "acme", second, nil); rec.Code != http.StatusConflict {
+		t.Fatalf("reserve released: want 409, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Every denial reserve commits is 422 with its reason, quote expiry too.
+	expired := newInvocation("k-expired")
+	if _, err := f.pool.Exec(context.Background(), `UPDATE commerce_invocations SET quote_expires_at = now() - interval '1 minute' WHERE invocation_id = $1`, expired); err != nil {
+		t.Fatal(err)
+	}
+	rec = f.money(t, "reserve", "acme", expired, nil)
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), `"code":"quote-expired"`) {
+		t.Fatalf("expired reserve: want 422 quote-expired, got %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = f.money(t, "reserve", "acme", expired, nil); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expired reserve retry: want 422 again, got %d %s", rec.Code, rec.Body.String())
 	}
 
 	// Exhaustion is a durable refusal with its reason.

@@ -1135,7 +1135,7 @@ components:
           type: string
           enum: [invalid-request, identity-unresolved, commerce-terms-unknown, quote-expired, quote-stale,
                  quote-mismatch, idempotency-conflict, funds-mode-unavailable, phase-conflict, terms-retired,
-                 budget-exhausted, currency-mismatch, payment-denied, payment-unknown, reservation-expired]
+                 budget-exhausted, currency-mismatch, payment-denied, payment-unknown]
     CommerceBudget:
       type: object
       description: |
@@ -4783,7 +4783,8 @@ paths:
         `released` or `finalized` is refused with 400 naming the owning
         endpoint (`…/reserve`, `…/release`, `…/finalize`), because those
         edges must move the hold and the authorization in the same
-        transaction (mctl-api#548).
+        transaction (mctl-api#548). `to_phase: dispatching` is refused with
+        409 `payment-unknown` while the row's authorization is unknown.
       tags: [Commerce]
       parameters:
         - {name: tenant, in: path, required: true, schema: {type: string}}
@@ -4942,7 +4943,10 @@ paths:
         repeat on a reserved row returns the existing hold with `replayed:
         true`. An authorization the adapter cannot confirm is never treated as
         denied: the hold stays, `payment_status` is `unknown` and the answer is
-        409 `payment-unknown`. Platform-only.
+        409 `payment-unknown`. Such a row cannot be dispatched; a retry of this
+        call asks the adapter for the status of the same authorization key and
+        either records it (replay), releases the hold on a denial (422), or
+        answers 409 `payment-unknown` again. Platform-only.
       tags: [Commerce]
       parameters:
         - {name: tenant, in: path, required: true, schema: {type: string}}
@@ -4952,8 +4956,8 @@ paths:
         '401': {description: Authentication required}
         '403': {description: Not a platform admin}
         '404': {description: No such invocation in this tenant, or no budget granted}
-        '409': {description: Row not in accepted or reserved (phase-conflict), payment state unknown (payment-unknown), or an idempotency conflict at the adapter, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
-        '422': {description: Denied — budget-exhausted, currency-mismatch, quote-expired or payment-denied; the invocation is now refused, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '409': {description: Row settled or not reservable (phase-conflict), payment state still unknown (payment-unknown), or an idempotency conflict at the adapter, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '422': {description: Denied and final — budget-exhausted, currency-mismatch, quote-expired, funds-mode-unavailable or payment-denied; the invocation is refused (or, for a denial resolved after an unknown authorization, released) and a retry answers the same, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
         '503': {description: Commerce ledger not configured}
   /api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/finalize:
     post:
@@ -4964,7 +4968,9 @@ paths:
         captures on `succeeded` and voids on `failed`; `free` finalizes a zero
         hold. A capture is attributed to the period the hold was taken in. A
         hold whose authorization is still unknown is confirmed with the adapter
-        first and the call is 409 `payment-unknown` if it still cannot be.
+        first: the call is 409 `payment-unknown` if it still cannot be, and a
+        hold whose authorization resolved to denied is released and the row
+        finalized with `payment_status: denied`.
         A repeat returns the finalized row with `replayed: true`. Platform-only.
       tags: [Commerce]
       parameters:

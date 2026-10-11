@@ -839,6 +839,12 @@ func (s *Store) applyTransition(ctx context.Context, tx pgx.Tx, tenantID string,
 		if err := checkFactCombination(in.ToPhase, charge, payment); err != nil {
 			return err
 		}
+		if in.ToPhase == PhaseDispatching && payment == PaymentUnknown {
+			// A hold whose authorization is unknown must not be dispatched
+			// (ADR 020 sec. 10): a retry of reserve resolves it by status
+			// lookup, and only then may the provider be called.
+			return fmt.Errorf("%w: authorization of %s is unknown; retry reserve to resolve it before dispatch", ErrPaymentUnknown, in.InvocationID)
+		}
 		row := tx.QueryRow(ctx, `UPDATE commerce_invocations SET
 			phase = $3, execution_outcome = $4, usage_quantity = $5, charge_status = $6,
 			payment_status = $7, settlement_status = $8, reason_code = $9,
