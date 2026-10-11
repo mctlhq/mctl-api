@@ -171,6 +171,9 @@ func TestBuildRepoGate_BindingLookupFailureRefusesWithoutPublicFallback(t *testi
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"team":"tests","repo":"openclaw/openclaw","bound":true}`))
 		},
+		"other repo echoed": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"team":"tests","repo":"myorg/connected-one","bound":true}`))
+		},
 		"other team echoed": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"team":"admins","repo":"openclaw/openclaw","bound":true}`))
 		},
@@ -204,7 +207,9 @@ func TestBuildRepoGate_UnconfiguredTokenRefuses(t *testing.T) {
 }
 
 func TestBuildRepoGate_RefusesMalformedRepo(t *testing.T) {
-	for _, repo := range []string{"../etc", "owner", "a/b/c", "owner/..", "../.."} {
+	// Padded values are refused as received, not trimmed: the repository
+	// checked must be the one the workflow builds.
+	for _, repo := range []string{"../etc", "owner", "a/b/c", "owner/..", "../..", " myorg/my-app", "myorg/my-app ", "myorg/my-app\n"} {
 		t.Run(repo, func(t *testing.T) {
 			router, exec, f := newGateRouter(t, "gac-token")
 			f.binding = bindingAnswer(true)

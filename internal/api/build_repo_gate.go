@@ -49,8 +49,11 @@ func (h *Handlers) checkBuildRepos(ctx context.Context, op operations.Operation,
 		if !buildRepoParameters[p.Name] {
 			continue
 		}
-		repo := strings.TrimSpace(input[p.Name])
-		if repo == "" {
+		// The value is checked exactly as the workflow will receive it: a
+		// padded value is refused rather than trimmed, so the repository
+		// checked is the repository built.
+		repo := input[p.Name]
+		if strings.TrimSpace(repo) == "" {
 			continue
 		}
 		owner, name, _ := strings.Cut(repo, "/")
@@ -112,7 +115,10 @@ func (h *Handlers) checkImageName(op operations.Operation, input map[string]stri
 	if err != nil {
 		return fmt.Errorf("%w: could not read the image name policy: %v", errBuildRepoRefused, err)
 	}
-	name := strings.TrimSpace(input["component_name"])
+	name := input["component_name"]
+	if name != strings.TrimSpace(name) {
+		return fmt.Errorf("%w: component_name %q has surrounding whitespace", errBuildRepoRefused, name)
+	}
 	if err := policy.Allowed(team, name, buildsImage(op, input, policy, team, name)); err != nil {
 		return fmt.Errorf("%w: %v", errBuildRepoRefused, err)
 	}
