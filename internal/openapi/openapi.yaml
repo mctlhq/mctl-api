@@ -4844,8 +4844,9 @@ paths:
       description: |
         Platform-only and audited at high risk: a limit is granted, never
         self-granted (mctl-api#548). The call upserts the budget and appends a
-        budget-change row naming the actor and the reason. The currency cannot
-        change while the tenant has any reservation. This is a limit, not a
+        budget-change row naming the actor and the reason. The currency is fixed
+        once the account has ever reserved, settled or not (422
+        `currency-mismatch`); another currency means another payer account. This is a limit, not a
         deposit: there is no top-up, nothing is redeemable, and `funds_mode`
         is always `simulated`.
       tags: [Commerce]
@@ -4869,7 +4870,7 @@ paths:
         '400': {description: Invalid body, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
         '401': {description: Authentication required}
         '403': {description: Not a platform admin}
-        '422': {description: Currency change while reservations exist (currency-mismatch), content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '422': {description: Currency change on an account that has ever reserved (currency-mismatch), content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
         '503': {description: Commerce ledger not configured}
     get:
       summary: Read the tenant budget and its current-period balance

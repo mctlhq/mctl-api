@@ -152,8 +152,11 @@ balance: there is no deposit, no top-up endpoint, nothing is redeemable, and
 `funds_mode` is `simulated` by a CHECK constraint. Setting it is a platform
 operation audited at high risk, and every change appends a
 `commerce_budget_changes` row naming the actor and the reason (ADR 020
-sec. 12: no self-granted limits). The currency cannot change while the tenant
-has any reservation.
+sec. 12: no self-granted limits). The currency is fixed once the account has
+ever reserved, settled or not: a capture of this period in the old currency
+beside a limit in the new one would make `committed_minor` meaningless, and
+history is never rewritten. A tenant that needs another currency gets
+another payer account.
 
 The balance read (`GET …/budget`) is computed, never stored, for the current
 UTC month:

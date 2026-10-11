@@ -488,8 +488,11 @@ func scanBudget(row pgx.Row) (*Budget, error) {
 func budgetLockKey(tenantID string) string { return "commerce:budget:" + tenantID }
 
 // SetBudget creates or changes a payer account's limits and appends the
-// change to the account's history. The currency cannot change once the
-// account holds any reservation: the sums would mix currencies.
+// change to the account's history. The currency is fixed once the account
+// has ever reserved, settled or not: a capture of this period in the old
+// currency beside a limit in the new one would make committed meaningless,
+// and history is never rewritten. A tenant that needs another currency
+// gets another payer account.
 func (s *Store) SetBudget(ctx context.Context, in SetBudgetInput) (*Budget, error) {
 	if err := in.validate(); err != nil {
 		return nil, err
@@ -512,7 +515,7 @@ func (s *Store) SetBudget(ctx context.Context, in SetBudgetInput) (*Budget, erro
 				return fmt.Errorf("commerce: count reservations: %w", err)
 			}
 			if n > 0 {
-				return fmt.Errorf("%w: currency cannot change while the account has reservations", ErrCurrencyMismatch)
+				return fmt.Errorf("%w: currency is fixed once the account has ever reserved", ErrCurrencyMismatch)
 			}
 		}
 		row := tx.QueryRow(ctx, `INSERT INTO commerce_budgets (`+budgetColumns+`)
@@ -950,7 +953,7 @@ func (s *Store) resolveUnknownHold(ctx context.Context, tx pgx.Tx, in ReserveInp
 		cur.InvocationID, PhaseReserved, in.Actor, "authorization resolved by status lookup", now); err != nil {
 		return fmt.Errorf("commerce: insert transition: %w", err)
 	}
-	rsv.AuthorizationID = authID
+	_ = authID // already written onto rsv by resolveAuthorization
 	*res = ReserveResult{Invocation: inv, Reservation: rsv, Replayed: true}
 	return nil
 }
@@ -1101,6 +1104,7 @@ func (s *Store) resolveAuthorization(ctx context.Context, tx pgx.Tx, cur *Invoca
 		if _, err := tx.Exec(ctx, `UPDATE commerce_reservations SET authorization_id = $2 WHERE reservation_id = $1`, rsv.ReservationID, st.ID); err != nil {
 			return "", false, fmt.Errorf("commerce: record authorization: %w", err)
 		}
+		rsv.AuthorizationID = st.ID // the next caller in this transaction reads the field
 		return st.ID, false, nil
 	case PaymentResultDenied:
 		return "", true, nil

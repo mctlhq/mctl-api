@@ -839,10 +839,12 @@ func (s *Store) applyTransition(ctx context.Context, tx pgx.Tx, tenantID string,
 		if err := checkFactCombination(in.ToPhase, charge, payment); err != nil {
 			return err
 		}
-		if in.ToPhase == PhaseDispatching && payment == PaymentUnknown {
+		if in.ToPhase == PhaseDispatching && cur.PaymentStatus == PaymentUnknown {
 			// A hold whose authorization is unknown must not be dispatched
-			// (ADR 020 sec. 10): a retry of reserve resolves it by status
-			// lookup, and only then may the provider be called.
+			// (ADR 020 sec. 10). The check reads the fact in the ledger, not
+			// the merged one: a caller naming payment_status in the body
+			// cannot talk the row past it. Only a retry of reserve, which
+			// asks the adapter for the status of the same key, resolves it.
 			return fmt.Errorf("%w: authorization of %s is unknown; retry reserve to resolve it before dispatch", ErrPaymentUnknown, in.InvocationID)
 		}
 		row := tx.QueryRow(ctx, `UPDATE commerce_invocations SET

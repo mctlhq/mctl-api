@@ -210,6 +210,30 @@ func TestCommerceBudget_MoneyEdgesOverHTTP(t *testing.T) {
 		t.Fatalf("reserve released: want 409, got %d %s", rec.Code, rec.Body.String())
 	}
 
+	// An unknown authorization blocks dispatch on the fact in the ledger; a
+	// body naming payment_status does not talk the row past it.
+	unknown := newInvocation("k-unknown")
+	if rec = f.money(t, "reserve", "acme", unknown, nil); rec.Code != http.StatusOK {
+		t.Fatalf("reserve: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := f.pool.Exec(context.Background(), `UPDATE commerce_invocations SET payment_status = 'unknown' WHERE invocation_id = $1`, unknown); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.pool.Exec(context.Background(), `UPDATE commerce_reservations SET authorization_id = '' WHERE invocation_id = $1`, unknown); err != nil {
+		t.Fatal(err)
+	}
+	rec = f.call(t, commerceAdmin(t), "POST", "/api/v1/commerce/tenants/acme/invocations/"+unknown+"/transitions",
+		map[string]any{"expected_phase": "reserved", "to_phase": "dispatching", "payment_status": "authorized"},
+		map[string]string{"tenant": "acme", "invocation_id": unknown}, f.h.TransitionCommerceInvocation)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "payment-unknown") {
+		t.Fatalf("dispatch with a claimed payment_status: want 409 payment-unknown, got %d %s", rec.Code, rec.Body.String())
+	}
+	rec = f.call(t, owner, "GET", "/api/v1/commerce/tenants/acme/invocations/"+unknown, nil,
+		map[string]string{"tenant": "acme", "invocation_id": unknown}, f.h.GetCommerceInvocation)
+	if !strings.Contains(rec.Body.String(), `"phase":"reserved"`) || !strings.Contains(rec.Body.String(), `"payment_status":"unknown"`) {
+		t.Fatalf("row must be untouched: %s", rec.Body.String())
+	}
+
 	// Every denial reserve commits is 422 with its reason, quote expiry too.
 	expired := newInvocation("k-expired")
 	if _, err := f.pool.Exec(context.Background(), `UPDATE commerce_invocations SET quote_expires_at = now() - interval '1 minute' WHERE invocation_id = $1`, expired); err != nil {
@@ -221,6 +245,19 @@ func TestCommerceBudget_MoneyEdgesOverHTTP(t *testing.T) {
 	}
 	if rec = f.money(t, "reserve", "acme", expired, nil); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expired reserve retry: want 422 again, got %d %s", rec.Code, rec.Body.String())
+	}
+	// A row refused through the generic route under a free-text reason is
+	// not a reserve denial: the error envelope stays inside its vocabulary.
+	odd := newInvocation("k-odd")
+	rec = f.call(t, commerceAdmin(t), "POST", "/api/v1/commerce/tenants/acme/invocations/"+odd+"/transitions",
+		map[string]any{"expected_phase": "accepted", "to_phase": "refused", "reason_code": "oops"},
+		map[string]string{"tenant": "acme", "invocation_id": odd}, f.h.TransitionCommerceInvocation)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refuse via transitions: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = f.money(t, "reserve", "acme", odd, nil)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"code":"phase-conflict"`) || strings.Contains(rec.Body.String(), `"code":"oops"`) {
+		t.Fatalf("reserve on an oddly refused row: want 409 phase-conflict, got %d %s", rec.Code, rec.Body.String())
 	}
 
 	// Exhaustion is a durable refusal with its reason.
