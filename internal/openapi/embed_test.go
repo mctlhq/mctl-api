@@ -45,6 +45,7 @@ func TestSpecParses(t *testing.T) {
 		"/api/v1/commerce/tenants/{tenant}/quotes/{quote_id}":                       {"get"},
 		"/api/v1/commerce/tenants/{tenant}/invocations":                             {"get", "post"},
 		"/api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}":             {"get"},
+		"/api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/receipt":     {"get"},
 		"/api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/transitions": {"get", "post"},
 	} {
 		for _, m := range methods {
