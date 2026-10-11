@@ -738,7 +738,16 @@ func NewRouter(opts Options) http.Handler {
 				r.Get("/terms/{terms_id}/versions/{version}", h.GetCommerceTerms)
 				r.Post("/terms/{terms_id}/versions/{version}/retire", h.RetireCommerceTerms)
 				r.Get("/invocations/overdue", h.ListOverdueCommerceInvocations)
+				// Budgets and the money edges (mctl-api#548). Setting a
+				// budget, reserve, finalize, release and the reconciler
+				// are platform operations; the balance, its history and
+				// the non-binding precheck are tenant reads.
+				r.Post("/reconcile/expired", h.ReconcileCommerceExpired)
 				r.Route("/tenants/{tenant}", func(r chi.Router) {
+					r.Put("/budget", h.SetCommerceBudget)
+					r.Get("/budget", h.GetCommerceBudget)
+					r.Get("/budget/changes", h.ListCommerceBudgetChanges)
+					r.Post("/budget/precheck", h.PrecheckCommerceBudget)
 					r.Post("/quotes", h.MintCommerceQuote)
 					r.Get("/quotes/{quote_id}", h.GetCommerceQuote)
 					r.Post("/invocations", h.AcceptCommerceInvocation)
@@ -746,6 +755,9 @@ func NewRouter(opts Options) http.Handler {
 					r.Get("/invocations/{invocation_id}", h.GetCommerceInvocation)
 					r.Get("/invocations/{invocation_id}/transitions", h.ListCommerceInvocationTransitions)
 					r.Post("/invocations/{invocation_id}/transitions", h.TransitionCommerceInvocation)
+					r.Post("/invocations/{invocation_id}/reserve", h.ReserveCommerceInvocation)
+					r.Post("/invocations/{invocation_id}/finalize", h.FinalizeCommerceInvocation)
+					r.Post("/invocations/{invocation_id}/release", h.ReleaseCommerceInvocation)
 				})
 			})
 

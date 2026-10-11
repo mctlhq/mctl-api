@@ -683,9 +683,11 @@ func (in TransitionInput) validate() error {
 // checkFactCombination closes the combinations the phase implies, on the
 // values that are about to be stored rather than on the request alone: a
 // fact the caller omitted is inherited from the row, and an inherited value
-// must satisfy the same rule as a supplied one. A refused invocation never
-// held a charge, a released one does not keep a captured charge, and a
-// captured charge cannot sit beside a denied or voided payment.
+// must satisfy the same rule as a supplied one. Five rules: a refused
+// invocation never held a charge and never carries a captured payment; a
+// released one neither keeps a captured charge nor a captured payment; a
+// finalized one cannot pair a captured charge with a denied or voided
+// payment, nor a released charge with a captured payment.
 func checkFactCombination(phase, charge, payment string) error {
 	switch phase {
 	case PhaseRefused:

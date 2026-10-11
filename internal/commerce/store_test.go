@@ -39,6 +39,12 @@ func newTestStore(t *testing.T) *Store {
 	t.Cleanup(func() {
 		// Rows are keyed by the test's own capability prefix; the FK order is
 		// transitions, invocations, quotes, terms.
+		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_payment_operations WHERE invocation_id IN
+			(SELECT invocation_id FROM commerce_invocations WHERE capability_id LIKE 'mctl://test-commerce/%')`)
+		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_reservations WHERE invocation_id IN
+			(SELECT invocation_id FROM commerce_invocations WHERE capability_id LIKE 'mctl://test-commerce/%')`)
+		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_budget_changes WHERE tenant_id LIKE 'tc-%'`)
+		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_budgets WHERE tenant_id LIKE 'tc-%'`)
 		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_invocation_transitions WHERE invocation_id IN
 			(SELECT invocation_id FROM commerce_invocations WHERE capability_id LIKE 'mctl://test-commerce/%')`)
 		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_invocations WHERE capability_id LIKE 'mctl://test-commerce/%'`)

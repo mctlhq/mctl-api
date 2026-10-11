@@ -167,6 +167,27 @@ func writeCommerceError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusUnprocessableEntity, commerce.ReasonFundsModeUnavailable, err.Error(), nil)
 	case errors.Is(err, commerce.ErrTerminal), errors.Is(err, commerce.ErrPhaseConflict):
 		writeErrorCode(w, http.StatusConflict, "phase-conflict", err.Error(), nil)
+	case errors.Is(err, commerce.ErrBudgetNotFound):
+		// The same answer as a tenant that does not exist: a budget's
+		// absence is not shown across tenants either (ADR 020 sec. 12).
+		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, commerce.ErrBudgetExhausted):
+		writeErrorCode(w, http.StatusUnprocessableEntity, commerce.ReasonBudgetExhausted, "budget exhausted; the invocation is refused", nil)
+	case errors.Is(err, commerce.ErrCurrencyMismatch):
+		writeErrorCode(w, http.StatusUnprocessableEntity, commerce.ReasonCurrencyMismatch, err.Error(), nil)
+	case errors.Is(err, commerce.ErrPaymentDenied):
+		writeErrorCode(w, http.StatusUnprocessableEntity, commerce.ReasonPaymentDenied, err.Error(), nil)
+	case errors.Is(err, commerce.ErrPaymentUnknown):
+		// Unknown is never denied: nothing changed, the hold stays, and
+		// only status on the same key resolves it.
+		writeErrorCode(w, http.StatusConflict, "payment-unknown", err.Error(), nil)
+	case errors.Is(err, commerce.ErrPaymentConflict):
+		writeErrorCode(w, http.StatusConflict, commerce.ReasonIdempotencyConflict, err.Error(), nil)
+	case errors.Is(err, commerce.ErrReservationMissing):
+		// A reserved row with no hold is an invariant broken behind the
+		// API, never a caller's mistake.
+		slog.Error("commerce ledger invariant broken", "error", err)
+		writeError(w, http.StatusInternalServerError, "commerce ledger invariant broken")
 	default:
 		slog.Error("commerce ledger request failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "commerce ledger request failed")
@@ -503,8 +524,19 @@ type transitionRequest struct {
 	ReservationDeadline *time.Time `json:"reservation_deadline,omitempty"`
 }
 
+// moneyEdges are the phases only the budget endpoints may enter: reserved
+// holds budget, released and finalized settle it. Entering one through the
+// generic transition would bypass the atomic check or leave a hold behind,
+// so the generic route refuses them and names the endpoint that owns each.
+var moneyEdges = map[string]string{
+	commerce.PhaseReserved:  "reserve",
+	commerce.PhaseReleased:  "release",
+	commerce.PhaseFinalized: "finalize",
+}
+
 // TransitionCommerceInvocation applies one phase change (ADR 020 sec. 11).
-// Platform-only: a tenant must not finalize or release its own charge.
+// Platform-only: a tenant must not finalize or release its own charge. The
+// edges that move budget are not accepted here (see moneyEdges).
 func (h *Handlers) TransitionCommerceInvocation(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.requireCommerceAdmin(w, r)
 	if !ok {
@@ -514,6 +546,11 @@ func (h *Handlers) TransitionCommerceInvocation(w http.ResponseWriter, r *http.R
 	id := chi.URLParam(r, "invocation_id")
 	var req transitionRequest
 	if !decodeCommerceBody(w, r, &req) {
+		return
+	}
+	if owner, money := moneyEdges[req.ToPhase]; money {
+		writeErrorCode(w, http.StatusBadRequest, "invalid-request",
+			"to_phase "+req.ToPhase+" moves budget and is owned by POST .../invocations/{invocation_id}/"+owner, nil)
 		return
 	}
 	actor := user.PrincipalID()
