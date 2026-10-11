@@ -132,12 +132,11 @@ func TestCommerceToolsNormalizeTenantsLikeTheAPI(t *testing.T) {
 		{"a.b", "GET /api/v1/commerce/tenants/a.b/budget"},
 		{strings.Repeat("x", 70), "GET /api/v1/commerce/tenants/" + strings.Repeat("x", 70) + "/budget"},
 	} {
-		tenant, want := c.tenant, c.want
-		if r := callRoadmapTool(t, (*Server).toolGetCommerceBudget, ts.URL, map[string]any{"tenant": tenant}); r.IsError {
-			t.Fatalf("%q refused: %s", tenant, resultText(t, r))
+		if r := callRoadmapTool(t, (*Server).toolGetCommerceBudget, ts.URL, map[string]any{"tenant": c.tenant}); r.IsError {
+			t.Fatalf("%q refused: %s", c.tenant, resultText(t, r))
 		}
-		if got := (*calls)[len(*calls)-1].line; got != want {
-			t.Errorf("%q: called %q, want %q", tenant, got, want)
+		if got := (*calls)[len(*calls)-1].line; got != c.want {
+			t.Errorf("%q: called %q, want %q", c.tenant, got, c.want)
 		}
 	}
 }
