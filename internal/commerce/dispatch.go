@@ -93,8 +93,9 @@ func (s *DispatchSigner) PublicKey() ed25519.PublicKey {
 }
 
 // UseDispatchSigner installs the signer. Without one, Dispatch answers
-// ErrDispatchUnavailable.
-func (s *Store) UseDispatchSigner(signer *DispatchSigner) { s.signer = signer }
+// ErrDispatchUnavailable. Safe to call while requests are served: each
+// request reads the signer once and signs with that one.
+func (s *Store) UseDispatchSigner(signer *DispatchSigner) { s.signer.Store(signer) }
 
 // DispatchKey is the public half of the signing key.
 type DispatchKey struct {
@@ -106,12 +107,13 @@ type DispatchKey struct {
 
 // DispatchKeys lists the public keys a provider may verify against.
 func (s *Store) DispatchKeys() ([]DispatchKey, error) {
-	if s.signer == nil {
+	signer := s.signer.Load()
+	if signer == nil {
 		return nil, ErrDispatchUnavailable
 	}
 	return []DispatchKey{{
-		KeyID: s.signer.keyID, Algorithm: DispatchSignatureAlgorithm,
-		PublicKey: base64.RawURLEncoding.EncodeToString(s.signer.PublicKey()),
+		KeyID: signer.keyID, Algorithm: DispatchSignatureAlgorithm,
+		PublicKey: base64.RawURLEncoding.EncodeToString(signer.PublicKey()),
 	}}, nil
 }
 
@@ -207,7 +209,8 @@ type DispatchResult struct {
 // dispatching the only safe next step is the provider's outcome lookup,
 // never a second dispatch.
 func (s *Store) Dispatch(ctx context.Context, in DispatchInput) (*DispatchResult, error) {
-	if s.signer == nil {
+	signer := s.signer.Load()
+	if signer == nil {
 		return nil, ErrDispatchUnavailable
 	}
 	for _, f := range [][2]string{{"tenant_id", in.TenantID}, {"invocation_id", in.InvocationID}, {"actor", in.Actor}} {
@@ -237,7 +240,7 @@ func (s *Store) Dispatch(ctx context.Context, in DispatchInput) (*DispatchResult
 				// API and must not be handed an authorization.
 				return fmt.Errorf("%w: %s is dispatching without a dispatch fence", ErrPhaseConflict, cur.InvocationID)
 			}
-			res = DispatchResult{Invocation: cur, Authorization: s.authorizationFor(cur, schemaHash), Replayed: true}
+			res = DispatchResult{Invocation: cur, Authorization: authorizationFor(signer, cur, schemaHash), Replayed: true}
 			return nil
 		case PhaseReserved:
 		default:
@@ -270,7 +273,7 @@ func (s *Store) Dispatch(ctx context.Context, in DispatchInput) (*DispatchResult
 		if err != nil {
 			return fmt.Errorf("commerce: write dispatch fence: %w", err)
 		}
-		res = DispatchResult{Invocation: stored, Authorization: s.authorizationFor(stored, schemaHash)}
+		res = DispatchResult{Invocation: stored, Authorization: authorizationFor(signer, stored, schemaHash)}
 		return nil
 	})
 	if err != nil {
@@ -279,8 +282,8 @@ func (s *Store) Dispatch(ctx context.Context, in DispatchInput) (*DispatchResult
 	return &res, nil
 }
 
-func (s *Store) authorizationFor(v *Invocation, inputSchemaHash string) DispatchAuthorization {
-	return s.signer.sign(DispatchAuthorization{
+func authorizationFor(signer *DispatchSigner, v *Invocation, inputSchemaHash string) DispatchAuthorization {
+	return signer.sign(DispatchAuthorization{
 		InvocationID:         v.InvocationID,
 		ProviderOperationKey: ProviderOperationKey(v.InvocationID),
 		ProviderID:           v.ProviderID,

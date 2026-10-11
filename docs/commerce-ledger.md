@@ -25,7 +25,7 @@ authorizations, captures and voids in the same database.
 | `COMMERCE_DB_URL` | Postgres for the ledger. Falls back to `AUDIT_DB_URL`. |
 | `COMMERCE_DISABLED` | Kill switch, same values as the other kill switches. Routes answer 503. |
 | `COMMERCE_DISPATCH_KEY_ID` | Identifier of the dispatch signing key, carried in every authorization so a provider knows which pinned key verifies it. |
-| `COMMERCE_DISPATCH_SIGNING_KEY` | Ed25519 seed, 32 bytes, base64 (standard or URL alphabet, padded or not). Set both or neither: one without the other is logged and dispatch stays off. Without them `…/dispatch` and `/dispatch-keys` answer 503 `dispatch-unavailable`. |
+| `COMMERCE_DISPATCH_SIGNING_KEY` | Ed25519 seed, 32 bytes, base64 (standard or URL alphabet, padded or not). Set both or neither: one without the other, or a seed that is not 32 bytes of base64, refuses the boot (unless `COMMERCE_DISABLED` is on). Without them `…/dispatch` and `/dispatch-keys` answer 503 `dispatch-unavailable`. |
 
 Without a database every `/api/v1/commerce*` route answers 503: "the ledger
 is off" and "this tenant was not charged" must never be the same answer.

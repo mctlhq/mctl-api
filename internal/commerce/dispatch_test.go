@@ -388,3 +388,33 @@ func TestListFindsAnInvocationByItsIdempotencyScope(t *testing.T) {
 		t.Fatalf("key without principal: %v", err)
 	}
 }
+
+// mctlhq/mctl-agents#626 item 7: installing the signer while requests read
+// it is not a data race (run with -race; CI's validate does not, so this
+// is the guard for anyone who does).
+func TestUseDispatchSignerIsSafeWhileServing(t *testing.T) {
+	s := &Store{}
+	sig := testSigner(t)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			s.UseDispatchSigner(sig)
+			s.UseDispatchSigner(nil)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			if keys, err := s.DispatchKeys(); err == nil && keys[0].KeyID != "kid-test-1" {
+				t.Errorf("key id %q", keys[0].KeyID)
+			}
+		}
+	}()
+	wg.Wait()
+	s.UseDispatchSigner(sig)
+	if keys, err := s.DispatchKeys(); err != nil || len(keys) != 1 {
+		t.Fatalf("installed signer not served: %v %v", keys, err)
+	}
+}

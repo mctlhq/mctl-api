@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.78.0](https://github.com/mctlhq/mctl-api/compare/4.77.0...4.78.0) (2026-10-11)
+
+
+### Features
+
+* **commerce:** sign dispatch authorizations behind a fence ([edb6faf](https://github.com/mctlhq/mctl-api/commit/edb6faf78bfaf820982067433dfaf7c7fc6841f3))
+* **commerce:** sign dispatch authorizations behind a fence ([22f3b09](https://github.com/mctlhq/mctl-api/commit/22f3b09c98c15e8a8525a2c0c60cc93f4494e83b))
+
+
+### Bug Fixes
+
+* **commerce:** bind an accepted approval to the call that requested it ([312a44a](https://github.com/mctlhq/mctl-api/commit/312a44a77f9937e59c89ba0a76ad5a632210f8ae))
+* **commerce:** bind an accepted approval to the call that requested it ([e3545b7](https://github.com/mctlhq/mctl-api/commit/e3545b7c9fb3dda986aab636f9336c0e9cb90bee))
+* **commerce:** refuse boot on a bad dispatch key, install it atomically ([fbdd438](https://github.com/mctlhq/mctl-api/commit/fbdd4385a1eb922bf894d81fc3cd7cec0fff240f))
+* **commerce:** refuse boot on a bad dispatch key, install it atomically ([512224e](https://github.com/mctlhq/mctl-api/commit/512224e0405acbb60a9bfaca23ea9b58d738042d))
+* **commerce:** scope approval binding by tenant, audit replays ([88cc461](https://github.com/mctlhq/mctl-api/commit/88cc4614389b54ee3025b62b5df6f64f4d4bedaa))
+
 ## [4.77.0](https://github.com/mctlhq/mctl-api/compare/4.76.1...4.77.0) (2026-10-11)
 
 
