@@ -57,7 +57,7 @@ func githubAnswer(status int, body string) func(w http.ResponseWriter, r *http.R
 func newGateRouter(t *testing.T, token string) (http.Handler, *fakeExecutor, *gateFixture) {
 	t.Helper()
 	return newGateRouterWith(t, token, &fakeGitReader{tenants: []gitops.Tenant{
-		{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10"}},
+		{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10"}, Members: []gitops.TenantMember{{UserID: "test-owner", Role: "owner"}}},
 	}})
 }
 

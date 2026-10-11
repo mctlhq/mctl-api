@@ -262,6 +262,21 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A repository to build must belong to the caller's team, and so must the
+	// image name it is built into and run from (build_repo_gate.go).
+	if err := h.checkBuildInputs(r.Context(), op, input, user, tenantParam); err != nil {
+		h.logAudit(r, audit.Entry{
+			UserID:     user.ID,
+			Operation:  opName,
+			Parameters: auditParams,
+			Status:     "denied",
+			RiskLevel:  string(op.RiskLevel),
+			Message:    err.Error(),
+		})
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	// A new tenant name must not share an Application name space with an
 	// existing tenant: "labs-x" next to "labs" (or the reverse) would let one
 	// tenant's <tenant>-<service> spell the other's Application. This applies
@@ -300,21 +315,6 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, msg)
 			return
 		}
-	}
-
-	// A repository to build must belong to the caller's team, and so must the
-	// image name it is built into and run from (build_repo_gate.go).
-	if err := h.checkBuildInputs(r.Context(), op, input, user, tenantParam); err != nil {
-		h.logAudit(r, audit.Entry{
-			UserID:     user.ID,
-			Operation:  opName,
-			Parameters: auditParams,
-			Status:     "denied",
-			RiskLevel:  string(op.RiskLevel),
-			Message:    err.Error(),
-		})
-		writeError(w, http.StatusForbidden, err.Error())
-		return
 	}
 
 	// For create-tenant: also notify Backstage for immediate catalog sync.

@@ -39,7 +39,7 @@ shared openclaw
 
 func imageGateRouter(t *testing.T, git *fakeGitReader) (http.Handler, *fakeExecutor, *gateFixture) {
 	t.Helper()
-	git.tenants = []gitops.Tenant{{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10"}}}
+	git.tenants = []gitops.Tenant{{Name: "tests", DisplayName: "Tests", Quotas: map[string]string{"pods": "10"}, Members: []gitops.TenantMember{{UserID: "test-owner", Role: "owner"}}}}
 	router, exec, f := newGateRouterWith(t, "gac-token", git)
 	f.binding = bindingAnswer(true)
 	return router, exec, f
@@ -133,7 +133,7 @@ func TestImageNameGate_SharedNameRunsButDoesNotBuild(t *testing.T) {
 	// tests/openclaw runs mctl-openclaw, so deploy-service does not build it
 	// even when service_template is left at its default.
 	policy.AddRunsOther("tests", "openclaw")
-	git := &fakeGitReader{imagePolicy: policy}
+	git := &fakeGitReader{imagePolicy: policy, services: []gitops.Service{{Team: "tests", Name: "openclaw"}}}
 	const previewPath = "/api/v1/operations/preview-deploy/execute"
 	runOpenclawTemplate := onboardAs("openclaw")
 	runOpenclawTemplate["service_template"] = "openclaw"
