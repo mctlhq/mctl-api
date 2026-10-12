@@ -110,3 +110,18 @@ func TestWhoamiRequiresAuthentication(t *testing.T) {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }
+
+// In principal mode admin is ADMIN_PRINCIPALS, not a group, and Apply
+// keeps "admins" out of the groups; whoami still lists the namespace an
+// admin can submit to.
+func TestWhoamiPrincipalModeAdminListsAdminsNamespace(t *testing.T) {
+	u := withPrincipal(t, auth.NewGitHubUser("mashkovd", []string{"admins"}), shadowPRN)
+	p := &auth.PrincipalAuthz{Members: tenantsByPrincipal{shadowPRN: {"admins", "ovk"}}, Admins: map[string]bool{shadowPRN: true}}
+	if err := p.Apply(u); err != nil {
+		t.Fatal(err)
+	}
+	got := callWhoami(t, u)
+	if !got.IsAdmin || !contains(got.Namespaces, "admins") || !contains(got.Namespaces, "ovk") || contains(got.Groups, "admins") {
+		t.Fatalf("isAdmin=%v groups=%v namespaces=%v; want admin, groups without \"admins\", namespaces with it", got.IsAdmin, got.Groups, got.Namespaces)
+	}
+}

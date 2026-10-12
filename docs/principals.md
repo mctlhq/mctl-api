@@ -304,7 +304,11 @@ delegated; service, surface, agent, CI and dev callers are not compared):
   diff. It needs no membership read, so it is still made when the tenant
   comparison is unresolved (a broken tenant file must not hide every
   `admin_mismatch`). Set `ADMIN_PRINCIPALS` in shadow before the switch so
-  the window measures it.
+  the window measures it, and make it list the principal of **every**
+  `ADMIN_USERS` entry: until the two sets agree each such admin counts
+  `admin_mismatch` on every request (and `role_mismatch` on writes), which
+  is a configuration gap to reconcile before starting the clock, not a
+  shadow finding.
 
 ### `ADMIN_PRINCIPALS`
 
