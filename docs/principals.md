@@ -348,6 +348,13 @@ caller's authorization; it never merges with the legacy one:
 - `checkTenantRole` reads the role GitOps writes for the principal
   (`MemberRolesForPrincipal`); a non-human caller holds no tenant role, and
   an unresolved principal is 503.
+- a human a surface relays for, or an agent run delegates to, gets the
+  tenants of its own principal through the same decision as a direct
+  caller, never those of its login, and is never a platform admin. One
+  whose principal or membership cannot be read is refused with 503
+  (`surface_identity_unavailable` / `delegation_unavailable`)
+  rather than carried with no tenants: a relay no longer proceeds without
+  a principal id in this mode.
 - a platform-skill role binding on `admins` means platform admin, never a
   tenant named `admins`.
 - `/whoami` reports `admins` in `namespaces` for a platform admin, but
