@@ -3,10 +3,13 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -33,6 +36,7 @@ func TestParseTenantAuthzMode(t *testing.T) {
 // stubPrincipalMembership answers principal-keyed membership from fixed
 // data, or with the configured failure.
 type stubPrincipalMembership struct {
+	reads      atomic.Int64
 	namespaces []string
 	unreadable []string
 	busy       bool
@@ -42,6 +46,7 @@ type stubPrincipalMembership struct {
 }
 
 func (s *stubPrincipalMembership) TryNamespacesForPrincipal(string) (gitops.PrincipalMembership, bool, error) {
+	s.reads.Add(1)
 	if s.busy {
 		return gitops.PrincipalMembership{}, false, nil
 	}
@@ -248,4 +253,96 @@ func TestTenantAuthzShadow_MountedInRouter(t *testing.T) {
 		t.Fatalf("whoami = %d: %s", rec.Code, rec.Body)
 	}
 	assertDelta(t, before.delta(), "result:match")
+}
+
+func TestPrincipalSetCache(t *testing.T) {
+	now := time.Unix(1000, 0)
+	pm := &stubPrincipalMembership{namespaces: []string{"labs"}}
+	h := &Handlers{opts: Options{PrincipalMembership: pm}, principalSets: newPrincipalSetCache(10 * time.Second)}
+	h.principalSets.now = func() time.Time { return now }
+
+	for range 3 {
+		if m, ok, err := h.principalSet(shadowPRN); !ok || err != nil || m.Namespaces[0] != "labs" {
+			t.Fatalf("principalSet = %+v, %v, %v", m, ok, err)
+		}
+	}
+	if n := pm.reads.Load(); n != 1 {
+		t.Fatalf("%d checkout reads for three comparisons in one window, want 1", n)
+	}
+	now = now.Add(10 * time.Second)
+	h.principalSet(shadowPRN)
+	if n := pm.reads.Load(); n != 2 {
+		t.Fatalf("%d reads after the window, want 2: a stale set must be re-read", n)
+	}
+
+	// Only a complete read is kept: a busy or failed one is retried.
+	busy := &stubPrincipalMembership{busy: true}
+	h = &Handlers{opts: Options{PrincipalMembership: busy}, principalSets: newPrincipalSetCache(time.Minute)}
+	h.principalSet(shadowPRN)
+	h.principalSet(shadowPRN)
+	failing := &stubPrincipalMembership{err: errors.New("stale")}
+	h2 := &Handlers{opts: Options{PrincipalMembership: failing}, principalSets: newPrincipalSetCache(time.Minute)}
+	h2.principalSet(shadowPRN)
+	h2.principalSet(shadowPRN)
+	if busy.reads.Load() != 2 || failing.reads.Load() != 2 {
+		t.Fatalf("busy %d, failing %d reads; want 2 each (never cached)", busy.reads.Load(), failing.reads.Load())
+	}
+
+	c := newPrincipalSetCache(time.Minute)
+	for i := range principalSetCacheMax + 1 {
+		c.put(fmt.Sprintf("prn_%d", i), gitops.PrincipalMembership{})
+	}
+	if len(c.m) > principalSetCacheMax {
+		t.Fatalf("cache grew to %d, cap %d", len(c.m), principalSetCacheMax)
+	}
+}
+
+// The global limiter runs first: a request it refuses is never compared,
+// so it costs no checkout read (claude P2 on #590).
+func TestTenantAuthzShadow_BelowRateLimiter(t *testing.T) {
+	user := withPrincipal(t, auth.NewGitHubUser("dev", []string{"labs"}), shadowPRN)
+	router := NewRouter(Options{
+		AuthMiddleware:      injectUser(user),
+		TenantAuthzMode:     TenantAuthzShadow,
+		PrincipalMembership: &stubPrincipalMembership{namespaces: []string{"labs"}},
+	})
+	before := snapshotShadow()
+	served, limited := 0, 0
+	for range 320 {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+		req.RemoteAddr = "203.0.113.7:1234" // not loopback, so the limiter applies
+		router.ServeHTTP(rec, req)
+		if rec.Code == http.StatusTooManyRequests {
+			limited++
+		} else {
+			served++
+		}
+	}
+	if limited == 0 {
+		t.Fatal("the limiter never refused; the test proves nothing")
+	}
+	if got := before.delta()["result:match"]; got != float64(served) {
+		t.Fatalf("%v comparisons for %d served and %d refused requests; refused ones must not be compared", got, served, limited)
+	}
+}
+
+func TestShadowDiffLogIsDeduplicated(t *testing.T) {
+	now := time.Unix(1000, 0)
+	c := newPrincipalSetCache(time.Minute)
+	c.now = func() time.Time { return now }
+	if !c.shouldLog("a") || c.shouldLog("a") {
+		t.Fatal("one diff logged twice within the interval")
+	}
+	if !c.shouldLog("b") {
+		t.Fatal("a different diff was suppressed")
+	}
+	now = now.Add(diffLogInterval)
+	if !c.shouldLog("a") {
+		t.Fatal("a diff was never logged again")
+	}
+	var nilCache *principalSetCache
+	if !nilCache.shouldLog("a") || !nilCache.shouldLog("a") {
+		t.Fatal("no cache must log every diff")
+	}
 }

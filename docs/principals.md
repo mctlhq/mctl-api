@@ -330,7 +330,8 @@ resolved through the numeric id GitHub reports for it now, then the live
 Each entry gets a `status`: `keyed` and `propose` are fine; `unresolved`
 (with a `reason`: `github_lookup_failed`, `no_linked_identity`,
 `identity_revoked`, `principal_disabled`, `principal_not_found`,
-`store_error`), `mismatch` (the key and the login name different principals)
-and `invalid` block. An unreadable tenant or a tenant key error also blocks.
+`store_error`), `mismatch` (the key and the login name different principals),
+`unverified` (a key whose `userId` could not be resolved, so the two were
+never compared; retry) and `invalid` block. An unreadable tenant or a tenant key error also blocks.
 `complete` is true only with zero blockers; the output then becomes a
 human-reviewed mctl-gitops PR adding the keys.

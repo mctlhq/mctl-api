@@ -255,11 +255,17 @@ type Handlers struct {
 	opts         Options
 	identityLink *identityLinker
 	oauthZitadel *oauthZitadel
+	// principalSets memoizes shadow mode's principal-keyed tenant sets;
+	// nil reads the checkout on every comparison.
+	principalSets *principalSetCache
 }
 
 // NewRouter creates the HTTP router with all API routes.
 func NewRouter(opts Options) http.Handler {
 	h := &Handlers{opts: opts}
+	if opts.TenantAuthzMode == TenantAuthzShadow {
+		h.principalSets = newPrincipalSetCache(principalSetCacheTTL)
+	}
 	if opts.IdentityLink != nil {
 		h.identityLink = newIdentityLinker(opts.IdentityLink)
 	}
@@ -405,11 +411,6 @@ func NewRouter(opts Options) http.Handler {
 		// A GitHub Actions principal reaches the deploy route and nothing
 		// else (mctl-api#530).
 		r.Use(ciPrincipalGate)
-		// Shadow comparison of tenant authorization (mctl-api#377). After
-		// every gate that substitutes a relayed or delegated human, so the
-		// caller compared is the one the handlers authorize; a no-op unless
-		// TENANT_AUTHZ_MODE=shadow.
-		r.Use(h.tenantAuthzShadow)
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
 		// Loopback is skipped so MCP's in-process REST to localhost:8080 does
@@ -423,6 +424,12 @@ func NewRouter(opts Options) http.Handler {
 			}
 			return keyByTrustedIP(r)
 		}))))
+		// Shadow comparison of tenant authorization (mctl-api#377). After
+		// every gate that substitutes a relayed or delegated human, so the
+		// caller compared is the one the handlers authorize, and after the
+		// global limiter, so a request it refuses costs no checkout read. A
+		// no-op unless TENANT_AUTHZ_MODE=shadow.
+		r.Use(h.tenantAuthzShadow)
 
 		r.Route("/api/v1", func(r chi.Router) {
 			// Auth endpoints.

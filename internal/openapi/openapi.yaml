@@ -78,13 +78,20 @@ components:
 
     TenantMember:
       type: object
+      description: >-
+        A member entry carries userId (a GitHub login), principalId (the
+        canonical principal, mctl-api#377), or both. Either may be absent.
       properties:
         userId:
           type: string
           example: alice
+        principalId:
+          type: string
+          pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$'
+          example: prn_01J0000000000000000000000
         role:
           type: string
-          example: admin
+          example: developer
 
     Service:
       type: object

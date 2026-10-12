@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
@@ -62,6 +63,11 @@ const (
 	planUnresolved = "unresolved" // no principal can be named for it; Reason says why
 	planMismatch   = "mismatch"   // principalId and userId name different principals
 	planInvalid    = "invalid"    // principalId is malformed
+	// planUnverified: principalId names an active principal, but userId
+	// beside it could not be resolved, so the two were never checked
+	// against each other. A transient GitHub failure costs a retry, never a
+	// silent pass for a key that may belong to someone else.
+	planUnverified = "unverified"
 )
 
 type memberKeyPlanEntry struct {
@@ -124,24 +130,37 @@ func buildMemberKeyPlan(ctx context.Context, o *MemberKeyPlanOptions, all gitops
 	if plan.KeyErrors == nil {
 		plan.KeyErrors = map[string]string{}
 	}
+	// GitHub logins are case-insensitive: one lookup per login, however
+	// it is spelled.
 	logins := map[string]loginResolution{}
 	resolve := func(login string) loginResolution {
-		if res, ok := logins[login]; ok {
+		key := strings.ToLower(login)
+		if res, ok := logins[key]; ok {
 			return res
 		}
 		res := resolveLoginPrincipal(ctx, o, login)
-		logins[login] = res
+		logins[key] = res
 		return res
 	}
+	entryBlocked := map[string]bool{} // tenant -> some entry of it blocks
 	for _, e := range all.Entries {
 		pe := planMemberEntry(ctx, o, e, resolve)
 		plan.Counts[pe.Status]++
 		if pe.Status != planKeyed && pe.Status != planPropose {
 			plan.Blockers++
+			entryBlocked[e.Tenant] = true
 		}
 		plan.Entries = append(plan.Entries, pe)
 	}
-	plan.Blockers += len(plan.UnreadableTenants) + len(plan.KeyErrors)
+	// A key error is one more thing to fix only when no entry of that tenant
+	// already counts for it (an entry naming nobody, a malformed key); a
+	// duplicate key shows nowhere else.
+	plan.Blockers += len(plan.UnreadableTenants)
+	for tenant := range plan.KeyErrors {
+		if !entryBlocked[tenant] {
+			plan.Blockers++
+		}
+	}
 	plan.Complete = plan.Blockers == 0
 	return plan
 }
@@ -189,12 +208,11 @@ func planMemberEntry(ctx context.Context, o *MemberKeyPlanOptions, e gitops.Memb
 		pe.Status, pe.Reason = planMismatch, "login_names_another_principal"
 		return pe
 	}
-	pe.Status = planKeyed
 	if e.UserID != "" && login.principalID == "" {
-		// The key stands on its own; userId is display data from here on.
-		// Say that the login could not be checked against it.
-		pe.Reason, pe.Detail = "login_unverified", login.reason
+		pe.Status, pe.Reason, pe.Detail = planUnverified, "login_unverified", login.reason
+		return pe
 	}
+	pe.Status = planKeyed
 	return pe
 }
 

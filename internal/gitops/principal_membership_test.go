@@ -260,3 +260,20 @@ func TestAllMemberEntries(t *testing.T) {
 		t.Error("a missing tenants directory read as no entries")
 	}
 }
+
+// Entries and key errors name the tenant directory, as Unreadable does,
+// even when tenant.name says otherwise.
+func TestAllMemberEntries_KeyedOnDirectory(t *testing.T) {
+	dir, r := syncedRepo(t)
+	writeTenantYAML(t, dir, "folder", "tenant:\n  name: declared\n  members:\n    - userId: x\n      principalId: prn_bad\n")
+	got, err := r.AllMemberEntries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Entries) != 1 || got.Entries[0].Tenant != "folder" {
+		t.Fatalf("entries = %+v, want tenant \"folder\"", got.Entries)
+	}
+	if _, ok := got.KeyErrors["folder"]; !ok {
+		t.Fatalf("key errors = %v, want them under \"folder\"", got.KeyErrors)
+	}
+}

@@ -115,7 +115,7 @@ func TestMemberKeyPlan(t *testing.T) {
 		{planMismatch, "", "login_names_another_principal"},
 		{planUnresolved, "", "principal_not_found"},
 		{planInvalid, "", "malformed_principal_id"},
-		{planKeyed, "", "login_unverified"},
+		{planUnverified, "", "login_unverified"},
 	}
 	for i, w := range want {
 		got := plan.Entries[i]
@@ -124,8 +124,8 @@ func TestMemberKeyPlan(t *testing.T) {
 				got.Status, got.ProposedPrincipalID, got.Reason, w.status, w.proposed, w.reason)
 		}
 	}
-	if plan.Complete || plan.Blockers != 7 {
-		t.Errorf("complete=%v blockers=%d, want incomplete with 7", plan.Complete, plan.Blockers)
+	if plan.Complete || plan.Blockers != 8 {
+		t.Errorf("complete=%v blockers=%d, want incomplete with 8", plan.Complete, plan.Blockers)
 	}
 	if calls["boss"] != 1 {
 		t.Errorf("boss looked up %d times, want once per plan", calls["boss"])
@@ -200,5 +200,28 @@ func TestTenantMemberPrincipalPlanEndpoint(t *testing.T) {
 				t.Fatalf("plan = %+v", plan)
 			}
 		})
+	}
+}
+
+// Review P3s on #590: one fix is one blocker, and a login is looked up
+// once however it is spelled.
+func TestMemberKeyPlan_CountsEachProblemOnce(t *testing.T) {
+	store := &planStore{byGitHubID: map[string]string{"1": planPrnBoss}, status: map[string]string{planPrnBoss: principals.StatusActive}}
+	calls := map[string]int{}
+	o := &MemberKeyPlanOptions{Store: store, GitHubID: planGitHub(map[string]int64{"boss": 1, "Boss": 1, "BOSS": 1}, calls)}
+	all := gitops.MemberEntries{
+		Entries: []gitops.MemberEntry{
+			{Tenant: "acme", UserID: "boss"}, {Tenant: "acme", UserID: "Boss"}, {Tenant: "acme", UserID: "BOSS"},
+			{Tenant: "nobody", Index: 0}, // names nobody: one entry blocker, and its tenant's key error
+			{Tenant: "dup", UserID: "boss", PrincipalID: planPrnBoss},
+		},
+		KeyErrors: map[string]string{"nobody": "member 0 names neither", "dup": "lists a principalId twice"},
+	}
+	plan := buildMemberKeyPlan(context.Background(), o, all)
+	if plan.Blockers != 2 { // nobody's entry, dup's key error
+		t.Errorf("blockers = %d, want 2", plan.Blockers)
+	}
+	if n := calls["boss"] + calls["Boss"] + calls["BOSS"]; n != 1 {
+		t.Errorf("%d GitHub lookups for one login in three spellings, want 1", n)
 	}
 }

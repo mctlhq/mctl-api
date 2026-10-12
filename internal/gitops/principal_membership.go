@@ -257,7 +257,7 @@ func (r *Reader) recordPrincipalKeyMetrics() {
 
 // MemberEntry is one member entry as written in a tenant's values.yaml.
 type MemberEntry struct {
-	Tenant      string `json:"tenant"`
+	Tenant      string `json:"tenant"`         // the tenant's directory under platform-gitops/tenants
 	Team        string `json:"team,omitempty"` // empty for a tenant-level entry
 	Index       int    `json:"index"`          // position in its members list
 	UserID      string `json:"userId,omitempty"`
@@ -305,13 +305,15 @@ func (r *Reader) AllMemberEntries() (MemberEntries, error) {
 			out.Unreadable = append(out.Unreadable, dir.Name())
 			continue
 		}
+		// Keyed on the directory, as Unreadable is: that is the file a
+		// backfill PR edits, and tenant.name may differ from it.
 		if t.principalErr != nil {
-			out.KeyErrors[t.Name] = t.principalErr.Error()
+			out.KeyErrors[dir.Name()] = t.principalErr.Error()
 		}
 		add := func(team string, members []TenantMember) {
 			for i, m := range members {
 				out.Entries = append(out.Entries, MemberEntry{
-					Tenant: t.Name, Team: team, Index: i,
+					Tenant: dir.Name(), Team: team, Index: i,
 					UserID: m.UserID, PrincipalID: m.PrincipalID, Role: m.Role,
 				})
 			}

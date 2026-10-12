@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -158,7 +160,7 @@ func (h *Handlers) shadowTenantSet(r *http.Request, user *auth.User) {
 		recordShadowUnresolved(unresolvedMembershipUnavailable)
 		return
 	}
-	got, ok, err := h.opts.PrincipalMembership.TryNamespacesForPrincipal(prn)
+	got, ok, err := h.principalSet(prn)
 	switch {
 	case !ok:
 		recordShadowUnresolved(unresolvedMembershipBusy)
@@ -183,6 +185,9 @@ func (h *Handlers) shadowTenantSet(r *http.Request, user *auth.User) {
 	}
 	if len(onlyPrincipal) > 0 {
 		tenantAuthzShadowDiffTotal.WithLabelValues("tenant_only_principal").Inc()
+	}
+	if !h.principalSets.shouldLog(prn + "|tenants|" + strings.Join(onlyLegacy, ",") + "|" + strings.Join(onlyPrincipal, ",")) {
+		return
 	}
 	slog.Warn("tenant authz shadow diff",
 		"kind", "tenants", "path", r.URL.Path, "principal", prn, "login", user.ID,
@@ -222,6 +227,9 @@ func (h *Handlers) shadowTenantRole(user *auth.User, tenant string, min operatio
 	}
 	tenantAuthzShadowTotal.WithLabelValues(shadowDiff).Inc()
 	tenantAuthzShadowDiffTotal.WithLabelValues("role_mismatch").Inc()
+	if !h.principalSets.shouldLog(prn + "|role|" + tenant + "|" + string(min)) {
+		return
+	}
 	slog.Warn("tenant authz shadow diff",
 		"kind", "role", "tenant", tenant, "min", string(min), "principal", prn, "login", user.ID,
 		"legacy_allows", legacyAllows, "legacy_detail", legacy.detail,
@@ -249,4 +257,94 @@ func setMinus(a, b []string) []string {
 		}
 	}
 	return out
+}
+
+// principalSet is TryNamespacesForPrincipal through the cache. Only a
+// complete read is cached; busy and failed reads are retried next time.
+func (h *Handlers) principalSet(prn string) (gitops.PrincipalMembership, bool, error) {
+	if m, hit := h.principalSets.get(prn); hit {
+		return m, true, nil
+	}
+	m, ok, err := h.opts.PrincipalMembership.TryNamespacesForPrincipal(prn)
+	if ok && err == nil {
+		h.principalSets.put(prn, m)
+	}
+	return m, ok, err
+}
+
+// principalSetCacheTTL bounds how stale a cached principal set may be. The
+// legacy side it is compared with comes from a groups cache of 30s, so a
+// shorter window adds no disagreement of its own, and it caps the checkout
+// reads shadow mode costs at one per principal per window.
+const principalSetCacheTTL = 10 * time.Second
+
+// principalSetCacheMax bounds the cache; past it the cache is cleared
+// rather than grown.
+const principalSetCacheMax = 4096
+
+type principalSetCache struct {
+	mu  sync.Mutex
+	ttl time.Duration
+	now func() time.Time
+	m   map[string]cachedPrincipalSet
+	// logged is when each distinct diff was last logged. The counters carry
+	// every diff; the log needs one line per distinct diff per interval,
+	// not one per request for a multi-day window.
+	logged map[string]time.Time
+}
+
+// diffLogInterval is how often one distinct diff is logged again.
+const diffLogInterval = 10 * time.Minute
+
+type cachedPrincipalSet struct {
+	at  time.Time
+	set gitops.PrincipalMembership
+}
+
+func newPrincipalSetCache(ttl time.Duration) *principalSetCache {
+	return &principalSetCache{ttl: ttl, now: time.Now, m: map[string]cachedPrincipalSet{}, logged: map[string]time.Time{}}
+}
+
+// shouldLog reports whether the diff named key is due to be logged, and
+// records it as logged. A nil cache logs everything.
+func (c *principalSetCache) shouldLog(key string) bool {
+	if c == nil {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	if at, ok := c.logged[key]; ok && now.Sub(at) < diffLogInterval {
+		return false
+	}
+	if len(c.logged) >= principalSetCacheMax {
+		clear(c.logged)
+	}
+	c.logged[key] = now
+	return true
+}
+
+func (c *principalSetCache) get(prn string) (gitops.PrincipalMembership, bool) {
+	if c == nil {
+		return gitops.PrincipalMembership{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.m[prn]
+	if !ok || c.now().Sub(e.at) >= c.ttl {
+		return gitops.PrincipalMembership{}, false
+	}
+	return e.set, true
+}
+
+func (c *principalSetCache) put(prn string, m gitops.PrincipalMembership) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.m) >= principalSetCacheMax {
+		clear(c.m)
+	}
+	c.m[prn] = cachedPrincipalSet{at: c.now(), set: m}
 }
