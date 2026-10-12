@@ -10,6 +10,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -135,4 +136,26 @@ func TraceparentFrom(ctx context.Context) string {
 	carrier := propagation.MapCarrier{}
 	propagation.TraceContext{}.Inject(ctx, carrier)
 	return carrier.Get("traceparent")
+}
+
+var (
+	traceIDRe     = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	traceparentRe = regexp.MustCompile(`^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$`)
+)
+
+// ValidTraceID reports whether s is exactly 32 lowercase hex characters and
+// not all zeros.
+func ValidTraceID(s string) bool {
+	return traceIDRe.MatchString(s) && strings.Trim(s, "0") != ""
+}
+
+// TraceIDFromTraceparent extracts the trace id from a W3C version-00
+// traceparent. It returns false when the value is malformed or the trace id
+// is all zeros.
+func TraceIDFromTraceparent(tp string) (string, bool) {
+	m := traceparentRe.FindStringSubmatch(tp)
+	if len(m) != 2 || !ValidTraceID(m[1]) {
+		return "", false
+	}
+	return m[1], true
 }

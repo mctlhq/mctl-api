@@ -2116,7 +2116,14 @@ func (s *Server) toolGetIncident() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithDescription(`Get full details of an incident including evidence, analysis, and PR information.
 
 Accepts a full incident ID or an 8-character prefix (as shown in Telegram notifications).
-Returns the incident with all collected evidence (logs, alerts, workflow data).`),
+Returns the incident with all collected evidence (logs, alerts, workflow data).
+
+Also returns trace_id (the 32-hex trace to open in Tempo, then pivot to Loki) with
+trace_source "reported" (sent by the producer) or "workflow_audit" (derived from the
+failed workflow's submit audit record). When no trace id could be obtained,
+trace_unavailable gives the reason. A missing trace_id means "not known", never
+"no trace exists". List results carry trace_unavailable "not_derived_on_list"
+instead of a derived trace; call this tool to resolve it.`),
 		mcplib.WithString("id",
 			mcplib.Required(),
 			mcplib.Description("Incident ID (full UUID or 8-char prefix)"),

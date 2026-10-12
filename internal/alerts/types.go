@@ -75,6 +75,15 @@ type Alert struct {
 	OccurrenceCount int        `json:"occurrence_count,omitempty"`
 	LastSeenAt      *time.Time `json:"last_seen_at,omitempty"`
 	Evidence        []Evidence `json:"evidence,omitempty"`
+	// TraceID is the 32-hex W3C trace id reported for the run that handled
+	// this incident. WorkflowName is the Argo workflow it came from. Both are
+	// stored; empty means not reported.
+	TraceID      string `json:"trace_id,omitempty"`
+	WorkflowName string `json:"workflow_name,omitempty"`
+	// TraceSource ("reported" | "workflow_audit") and TraceUnavailable are
+	// response-only and never persisted.
+	TraceSource      string `json:"trace_source,omitempty"`
+	TraceUnavailable string `json:"trace_unavailable,omitempty"`
 }
 
 // Evidence attached to an alert.

@@ -15,6 +15,7 @@
 package audit
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -57,6 +58,9 @@ type Log interface {
 	Log(entry Entry)
 	List(limit int) []Entry
 	GetByWorkflow(name string) *Entry
+	// LookupByWorkflow is GetByWorkflow that can tell "no such record"
+	// ((nil, nil)) from "could not look" ((nil, err)).
+	LookupByWorkflow(ctx context.Context, name string) (*Entry, error)
 	// UpdateStatus moves an entry out of a non-terminal status. It is a no-op
 	// (returning false) when no row matches or the row is already terminal,
 	// which is what makes a redelivered webhook safe.
@@ -155,6 +159,12 @@ func (l *Logger) GetByWorkflow(workflowName string) *Entry {
 		}
 	}
 	return nil
+}
+
+// LookupByWorkflow returns the entry for workflowName, or (nil, nil) if none.
+// The in-memory store cannot fail.
+func (l *Logger) LookupByWorkflow(_ context.Context, workflowName string) (*Entry, error) {
+	return l.GetByWorkflow(workflowName), nil
 }
 
 // UpdateStatus closes out the newest non-terminal entry for workflowName.
