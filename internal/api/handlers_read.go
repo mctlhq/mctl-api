@@ -361,7 +361,8 @@ func (h *Handlers) ListWorkflows(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		team := auditEntryTenant(e)
-		if !user.IsAdmin() && team != "" && !user.HasTenantAccess(team) {
+		if !user.IsAdmin() && (e.ParametersUnreadable || (team != "" && !user.HasTenantAccess(team))) {
+			// An unreadable row's empty team is "unknown", not "platform".
 			continue
 		}
 		if teamFilter != "" && team != teamFilter {
@@ -401,7 +402,22 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check audit log for a record of this workflow to determine the namespace and team.
-	entry := h.opts.AuditLog.GetByWorkflow(name)
+	entry, err := h.opts.AuditLog.LookupByWorkflow(r.Context(), name)
+	if err != nil {
+		// "Could not look" is not "no record": answering with the 404 or the
+		// cron fallback below would tell an operator that a submitted
+		// workflow does not exist or is a cron run (mctl-api#586).
+		slog.Error("audit read failed for workflow lookup", "workflow", name, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "audit log unavailable, workflow may exist")
+		return
+	}
+	if entry != nil && entry.ParametersUnreadable {
+		// The owning team, and so both the access check and the namespace,
+		// cannot be derived. An empty team would let a non-admin through.
+		slog.Error("audit record has unreadable parameters", "workflow", name, "id", entry.ID)
+		writeError(w, http.StatusServiceUnavailable, "audit record for workflow is unreadable (parameters could not be decoded); owning team cannot be determined")
+		return
+	}
 	if entry == nil {
 		// The audit log only records operator-initiated submissions
 		// (mctl-api REST POST -> AuditLog.Append); every cron-driven run
@@ -524,7 +540,16 @@ func (h *Handlers) GetWorkflowLogs(w http.ResponseWriter, r *http.Request) {
 	// This is deliberately stricter than GetWorkflow, which tolerates an
 	// empty team: a step log exposes far more than a status phase does.
 	if !user.IsAdmin() {
-		team := auditEntryTenant(h.opts.AuditLog.GetByWorkflow(name))
+		entry, err := h.opts.AuditLog.LookupByWorkflow(r.Context(), name)
+		if err != nil || (entry != nil && entry.ParametersUnreadable) {
+			// A failed read or an unreadable record is not "no owning team":
+			// answer retryably instead of with the admin-only 403.
+			slog.Error("audit read failed for workflow logs", "workflow", name, "error", err,
+				"parameters_unreadable", entry != nil && entry.ParametersUnreadable)
+			writeError(w, http.StatusServiceUnavailable, "audit log unavailable, workflow may exist")
+			return
+		}
+		team := auditEntryTenant(entry)
 		if team == "" {
 			writeError(w, http.StatusForbidden, "admin group membership required: workflow has no owning team")
 			return
@@ -808,7 +833,8 @@ func (h *Handlers) ListAudit(w http.ResponseWriter, r *http.Request) {
 	var items []interface{}
 	for i := range entries {
 		team := auditEntryTenant(&entries[i])
-		if !user.IsAdmin() && team != "" && !user.HasTenantAccess(team) {
+		if !user.IsAdmin() && (entries[i].ParametersUnreadable || (team != "" && !user.HasTenantAccess(team))) {
+			// An unreadable row's empty team is "unknown", not "platform".
 			continue
 		}
 		// Redact at read-time so historical entries persisted before the

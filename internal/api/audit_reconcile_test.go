@@ -74,7 +74,7 @@ func TestReconcileClosesTerminalPhases(t *testing.T) {
 
 			newTestReconciler(log, getter).reconcileOnce(context.Background())
 
-			if got := log.GetByWorkflow("wf-1"); got.Status != tc.want {
+			if got := mustLookup(t, log, "wf-1"); got.Status != tc.want {
 				t.Errorf("status = %q, want %q", got.Status, tc.want)
 			}
 			if !getter.deadlineSeen {
@@ -105,7 +105,7 @@ func TestReconcileLeavesRunningAlone(t *testing.T) {
 
 	newTestReconciler(log, getter).reconcileOnce(context.Background())
 
-	if got := log.GetByWorkflow("wf-running"); got.Status != "submitted" {
+	if got := mustLookup(t, log, "wf-running"); got.Status != "submitted" {
 		t.Errorf("status = %q, want it left at \"submitted\"", got.Status)
 	}
 }
@@ -119,7 +119,7 @@ func TestReconcileNotFoundWithinGraceIsLeftAlone(t *testing.T) {
 
 	newTestReconciler(log, getter).reconcileOnce(context.Background())
 
-	if got := log.GetByWorkflow("wf-young"); got.Status != "submitted" {
+	if got := mustLookup(t, log, "wf-young"); got.Status != "submitted" {
 		t.Errorf("status = %q, want it left at \"submitted\"", got.Status)
 	}
 }
@@ -131,7 +131,7 @@ func TestReconcileNotFoundPastGraceExpires(t *testing.T) {
 
 	newTestReconciler(log, getter).reconcileOnce(context.Background())
 
-	got := log.GetByWorkflow("wf-old")
+	got := mustLookup(t, log, "wf-old")
 	if got.Status != "expired" {
 		t.Errorf("status = %q, want %q", got.Status, "expired")
 	}
@@ -149,7 +149,7 @@ func TestReconcileTransportErrorLeavesRowOpen(t *testing.T) {
 
 	newTestReconciler(log, getter).reconcileOnce(context.Background())
 
-	if got := log.GetByWorkflow("wf-err"); got.Status != "submitted" {
+	if got := mustLookup(t, log, "wf-err"); got.Status != "submitted" {
 		t.Errorf("status = %q, want it left at \"submitted\"", got.Status)
 	}
 }
@@ -171,7 +171,7 @@ func TestReconcileSkipsUnknownOperation(t *testing.T) {
 	if len(getter.calls) != 0 {
 		t.Errorf("looked up %v for an unknown operation", getter.calls)
 	}
-	if got := log.GetByWorkflow("wf-gone-op"); got.Status != "submitted" {
+	if got := mustLookup(t, log, "wf-gone-op"); got.Status != "submitted" {
 		t.Errorf("status = %q, want it untouched", got.Status)
 	}
 }
@@ -251,7 +251,7 @@ func TestReconcileIgnoresAlreadyTerminalRows(t *testing.T) {
 	if len(getter.calls) != 0 {
 		t.Errorf("looked up %v for an already-terminal row", getter.calls)
 	}
-	if got := log.GetByWorkflow("wf-done"); got.Status != "succeeded" {
+	if got := mustLookup(t, log, "wf-done"); got.Status != "succeeded" {
 		t.Errorf("status = %q, want it to stay %q", got.Status, "succeeded")
 	}
 }
@@ -277,12 +277,12 @@ func TestReconcilePagesPastUnresolvableRows(t *testing.T) {
 
 	r.reconcileOnce(context.Background())
 
-	if got := log.GetByWorkflow("wf-finished"); got.Status != "succeeded" {
+	if got := mustLookup(t, log, "wf-finished"); got.Status != "succeeded" {
 		t.Errorf("newer finished row = %q, want %q — the pass never got past the stuck rows",
 			got.Status, "succeeded")
 	}
 	for _, w := range []string{"wf-stuck-1", "wf-stuck-2"} {
-		if got := log.GetByWorkflow(w); got.Status != "submitted" {
+		if got := mustLookup(t, log, w); got.Status != "submitted" {
 			t.Errorf("%s = %q, want it left at \"submitted\"", w, got.Status)
 		}
 	}
@@ -307,5 +307,69 @@ func TestReconcileRespectsMaxPerPass(t *testing.T) {
 
 	if len(getter.calls) != 4 {
 		t.Errorf("examined %d rows, want maxPerPass=4", len(getter.calls))
+	}
+}
+
+// mustLookup is LookupByWorkflow for tests over the in-memory store, which
+// cannot fail; a missing entry is a test failure, not a nil dereference.
+func mustLookup(t *testing.T, l *audit.Logger, name string) *audit.Entry {
+	t.Helper()
+	e, err := l.LookupByWorkflow(context.Background(), name)
+	if err != nil || e == nil {
+		t.Fatalf("LookupByWorkflow(%q) = %v, %v", name, e, err)
+	}
+	return e
+}
+
+// failingQueueLog fails every queue read.
+type failingQueueLog struct {
+	*audit.Logger
+	reads int
+}
+
+func (f *failingQueueLog) ListByStatus(string, time.Duration, int, time.Time) ([]audit.Entry, error) {
+	f.reads++
+	return nil, errors.New("pool closed")
+}
+
+// mctl-api#586 T7: a failed queue read ends the pass after one attempt and
+// touches nothing, rather than being read as an empty queue.
+func TestReconcileQueueReadFailureEndsPass(t *testing.T) {
+	log := &failingQueueLog{Logger: audit.NewLogger()}
+	getter := &fakeStatusGetter{}
+
+	newTestReconciler(log, getter).reconcileOnce(context.Background())
+
+	if log.reads != 1 || len(getter.calls) != 0 {
+		t.Fatalf("queue reads=%d, live lookups=%v; want 1 read and no lookups", log.reads, getter.calls)
+	}
+}
+
+// mctl-api#586 T7: a row that could not be fully read is never looked up, so
+// a NotFound cannot expire it. A tenant op is covered by the empty-namespace
+// guard as well; a platform op (namespace independent of the tenant) only by
+// the explicit skip.
+func TestReconcileSkipsUnreadableParameters(t *testing.T) {
+	for _, op := range []string{"deploy-service", "create-tenant"} {
+		t.Run(op, func(t *testing.T) {
+			log := audit.NewLogger()
+			log.Log(audit.Entry{
+				Operation:            op,
+				WorkflowName:         "wf-unreadable",
+				ParametersUnreadable: true,
+				Status:               "submitted",
+				Timestamp:            time.Now().UTC().Add(-48 * time.Hour),
+			})
+			getter := &fakeStatusGetter{} // every lookup would be NotFound
+
+			newTestReconciler(log, getter).reconcileOnce(context.Background())
+
+			if len(getter.calls) != 0 {
+				t.Errorf("live lookups %v for an unreadable row", getter.calls)
+			}
+			if got := mustLookup(t, log, "wf-unreadable"); got.Status != "submitted" {
+				t.Errorf("status = %q, want submitted (not expired)", got.Status)
+			}
+		})
 	}
 }

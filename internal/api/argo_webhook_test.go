@@ -105,7 +105,7 @@ func TestArgoComplete_ClosesAuditStatus(t *testing.T) {
 				t.Fatalf("status = %d, want 200 body=%s", rec.Code, rec.Body.String())
 			}
 
-			got := log.GetByWorkflow("wf-1")
+			got := mustLookup(t, log, "wf-1")
 			if got == nil {
 				t.Fatal("audit entry disappeared")
 			}
@@ -130,7 +130,7 @@ func TestArgoComplete_RunningPhaseLeavesStatusAlone(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if got := log.GetByWorkflow("wf-2"); got.Status != "submitted" {
+	if got := mustLookup(t, log, "wf-2"); got.Status != "submitted" {
 		t.Errorf("audit status = %q, want it left at \"submitted\"", got.Status)
 	}
 }
@@ -152,7 +152,7 @@ func TestArgoComplete_RedeliveryIsANoOp(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (redelivery must still be acknowledged)", rec.Code)
 	}
-	if got := log.GetByWorkflow("wf-3"); got.Status != "succeeded" {
+	if got := mustLookup(t, log, "wf-3"); got.Status != "succeeded" {
 		t.Errorf("audit status = %q, want it to stay %q", got.Status, "succeeded")
 	}
 }
