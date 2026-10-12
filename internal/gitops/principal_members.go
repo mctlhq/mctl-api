@@ -116,13 +116,13 @@ func (t *Tenant) principalMemberRoles(namespace, prn string) (scopes [][]string,
 
 // readTenantsStrictLocked reads every tenant, failing on any that cannot be
 // read. Callers hold r.mu and have checked freshness.
-func (r *Reader) readTenantsStrictLocked() ([]Tenant, error) {
+// dirs[i] is the directory name tenants[i] was read from.
+func (r *Reader) readTenantsStrictLocked() (tenants []Tenant, dirs []string, err error) {
 	tenantsDir := filepath.Join(r.localPath, "platform-gitops", "tenants")
 	entries, err := os.ReadDir(tenantsDir)
 	if err != nil {
-		return nil, fmt.Errorf("reading tenants dir: %w", err)
+		return nil, nil, fmt.Errorf("reading tenants dir: %w", err)
 	}
-	var tenants []Tenant
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -132,11 +132,12 @@ func (r *Reader) readTenantsStrictLocked() ([]Tenant, error) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("reading tenant %q: %w", entry.Name(), err)
+			return nil, nil, fmt.Errorf("reading tenant %q: %w", entry.Name(), err)
 		}
 		tenants = append(tenants, *t)
+		dirs = append(dirs, entry.Name())
 	}
-	return tenants, nil
+	return tenants, dirs, nil
 }
 
 func principalNamespaces(tenants []Tenant, prn string) ([]string, error) {
@@ -154,15 +155,15 @@ func principalNamespaces(tenants []Tenant, prn string) ([]string, error) {
 // or unreadable checkout, or any tenant whose members cannot be read by
 // principal, is an error: it never comes back as "no namespaces".
 func (r *Reader) NamespacesForPrincipal(prn string) ([]string, error) {
-	if prn == "" {
-		return nil, errors.New("namespaces for principal: principal is required")
+	if !ValidPrincipalID(prn) {
+		return nil, fmt.Errorf("namespaces for principal: malformed principal %q", prn)
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if err := r.checkFreshLocked(); err != nil {
 		return nil, err
 	}
-	tenants, err := r.readTenantsStrictLocked()
+	tenants, _, err := r.readTenantsStrictLocked()
 	if err != nil {
 		return nil, err
 	}
@@ -172,8 +173,8 @@ func (r *Reader) NamespacesForPrincipal(prn string) ([]string, error) {
 // TryNamespacesForPrincipal is NamespacesForPrincipal without waiting: ok is
 // false at once when a refresh holds the write lock.
 func (r *Reader) TryNamespacesForPrincipal(prn string) (namespaces []string, ok bool, err error) {
-	if prn == "" {
-		return nil, true, errors.New("namespaces for principal: principal is required")
+	if !ValidPrincipalID(prn) {
+		return nil, true, fmt.Errorf("namespaces for principal: malformed principal %q", prn)
 	}
 	if !r.mu.TryRLock() {
 		return nil, false, nil
@@ -182,7 +183,7 @@ func (r *Reader) TryNamespacesForPrincipal(prn string) (namespaces []string, ok 
 	if err := r.checkFreshLocked(); err != nil {
 		return nil, true, err
 	}
-	tenants, err := r.readTenantsStrictLocked()
+	tenants, _, err := r.readTenantsStrictLocked()
 	if err != nil {
 		return nil, true, err
 	}
@@ -193,20 +194,24 @@ func (r *Reader) TryNamespacesForPrincipal(prn string) (namespaces []string, ok 
 // MemberRolesForPrincipal mirrors MemberRoles, keyed by principal id. Only the
 // tenant that owns namespace has to be readable by principal.
 func (r *Reader) MemberRolesForPrincipal(namespace, prn string) ([][]string, error) {
-	if namespace == "" || prn == "" {
-		return nil, errors.New("member roles: namespace and principal are required")
+	if namespace == "" {
+		return nil, errors.New("member roles: namespace is required")
+	}
+	if !ValidPrincipalID(prn) {
+		return nil, fmt.Errorf("member roles: malformed principal %q", prn)
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if err := r.checkFreshLocked(); err != nil {
 		return nil, err
 	}
-	tenants, err := r.readTenantsStrictLocked()
+	tenants, dirs, err := r.readTenantsStrictLocked()
 	if err != nil {
 		return nil, err
 	}
 	var roles [][]string
 	owner := ""
+	ownerDir := ""
 	for i := range tenants {
 		t := &tenants[i]
 		// Ownership does not depend on members, so an unreadable member
@@ -215,9 +220,10 @@ func (r *Reader) MemberRolesForPrincipal(namespace, prn string) ([][]string, err
 			continue
 		}
 		if owner != "" {
-			return nil, fmt.Errorf("namespace %q is claimed by tenants %q and %q", namespace, owner, t.Name)
+			return nil, fmt.Errorf("namespace %q is claimed by tenant directories %q and %q", namespace, ownerDir, dirs[i])
 		}
 		owner = t.Name
+		ownerDir = dirs[i]
 		if err := t.ValidatePrincipalMembers(); err != nil {
 			return nil, fmt.Errorf("tenant %q is unreadable by principal: %w", t.Name, err)
 		}

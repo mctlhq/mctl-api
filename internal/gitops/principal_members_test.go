@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -46,9 +47,15 @@ func TestPrincipalReading(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, []string{"mctl"}) {
 		t.Errorf("NamespacesForPrincipal(B) = %v, %v", got, err)
 	}
-	// A login is never a principal key.
-	if got, err = r.NamespacesForPrincipal("alice"); err != nil || len(got) != 0 {
-		t.Errorf("login as principal = %v, %v", got, err)
+	// A login is never a principal key: it is an error, not "no namespaces".
+	if _, err = r.NamespacesForPrincipal("alice"); err == nil {
+		t.Error("login as principal must be an error")
+	}
+	if _, ok, err := r.TryNamespacesForPrincipal("alice"); !ok || err == nil {
+		t.Errorf("Try with login: ok=%v err=%v", ok, err)
+	}
+	if _, err = r.MemberRolesForPrincipal("mctl", strings.ToLower(prnA)); err == nil {
+		t.Error("lowercased principal must be an error")
 	}
 	if got, ok, err := r.TryNamespacesForPrincipal(prnB); !ok || err != nil || len(got) != 1 {
 		t.Errorf("TryNamespacesForPrincipal = %v %v %v", got, ok, err)
@@ -118,4 +125,71 @@ func sortedEqual(a, b []string) bool {
 		}
 	}
 	return len(a) == len(b)
+}
+
+func TestTryNamespacesForPrincipal_WriteLockHeld(t *testing.T) {
+	dir, r := syncedRepo(t)
+	writeTenantYAML(t, dir, "mctl", "tenant:\n  name: mctl\n  members:\n    - principalId: "+prnA+"\n      role: owner\n")
+	r.mu.Lock()
+	done := make(chan bool, 1)
+	go func() {
+		_, ok, _ := r.TryNamespacesForPrincipal(prnA)
+		done <- ok
+	}()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Error("expected ok=false while the write lock is held")
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("TryNamespacesForPrincipal blocked on the refresh write lock")
+	}
+	r.mu.Unlock()
+}
+
+func TestPrincipalReading_UnreadableIsNeverAnAnswer(t *testing.T) {
+	owner := "tenant:\n  name: erpact\n  members:\n    - principalId: " + prnA + "\n      role: owner\n"
+	both := func(t *testing.T, r *Reader) {
+		t.Helper()
+		if got, err := r.NamespacesForPrincipal(prnA); err == nil {
+			t.Errorf("NamespacesForPrincipal answered %v", got)
+		}
+		if got, err := r.MemberRolesForPrincipal("erpact", prnA); err == nil {
+			t.Errorf("MemberRolesForPrincipal answered %v", got)
+		}
+	}
+	t.Run("stale checkout", func(t *testing.T) {
+		dir, r := setupTempRepo(t)
+		writeTenantYAML(t, dir, "erpact", owner)
+		r.lastSync.Store(time.Now().Add(-CheckoutMaxAge - time.Minute).UnixNano())
+		both(t, r)
+	})
+	t.Run("another tenant unparseable", func(t *testing.T) {
+		dir, r := syncedRepo(t)
+		writeTenantYAML(t, dir, "erpact", owner)
+		writeTenantYAML(t, dir, "broken", "tenant: [not, a, mapping\n")
+		both(t, r)
+	})
+	t.Run("malformed team member", func(t *testing.T) {
+		dir, r := syncedRepo(t)
+		writeTenantYAML(t, dir, "erpact", "tenant:\n  name: erpact\n  teams:\n    - name: web\n      members:\n        - principalId: prn_nope\n          role: viewer\n")
+		if _, err := r.NamespacesForPrincipal(prnA); err == nil {
+			t.Error("NamespacesForPrincipal must error")
+		}
+		if _, err := r.MemberRolesForPrincipal("erpact-web", prnA); err == nil {
+			t.Error("MemberRolesForPrincipal must error")
+		}
+	})
+	t.Run("namespace claimed twice", func(t *testing.T) {
+		dir, r := syncedRepo(t)
+		writeTenantYAML(t, dir, "erpact", owner)
+		writeTenantYAML(t, dir, "impostor", "tenant:\n  name: erpact\n  members:\n    - principalId: "+prnB+"\n      role: owner\n")
+		got, err := r.MemberRolesForPrincipal("erpact", prnB)
+		if err == nil {
+			t.Fatalf("an ambiguous namespace answered %v", got)
+		}
+		if !strings.Contains(err.Error(), "erpact") || !strings.Contains(err.Error(), "impostor") {
+			t.Errorf("error does not tell the tenants apart: %v", err)
+		}
+	})
 }
