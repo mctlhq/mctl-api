@@ -1122,6 +1122,12 @@ func writeForbidden(w http.ResponseWriter, msg string) {
 }
 
 // resolveGroups builds the list of groups (tenant names) for a GitHub user.
+//
+// "admins" comes from ADMIN_USERS and nowhere else. A tenant can be named
+// "admins" (one is), and its name used to reach Groups verbatim here, so
+// every member of that tenant was a platform admin on the GitHub-token path
+// while the OAuth path (withAdmins) stripped it. The tenant list goes
+// through tenantsOnly for the same reason (mctl-api#377, PR-0).
 func resolveGroups(login string, validator *GitHubValidator, resolver TenantResolver) []string {
 	var groups []string
 
@@ -1134,7 +1140,7 @@ func resolveGroups(login string, validator *GitHubValidator, resolver TenantReso
 		if err != nil {
 			slog.Warn("failed to resolve tenant memberships", "user", login, "error", err)
 		} else {
-			groups = append(groups, tenants...)
+			groups = append(groups, tenantsOnly(tenants)...)
 		}
 	}
 
