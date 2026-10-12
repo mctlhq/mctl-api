@@ -192,8 +192,8 @@ func (t *Tenant) namespacesFor(match memberMatcher) []string {
 	return ns
 }
 
-// memberRoles returns the roles under which login is a member of namespace,
-// one list per members list that names the login, and whether this tenant
+// memberRolesFor returns the roles under which the member match names holds
+// namespace, one list per members list that names it, and whether this tenant
 // owns that namespace at all. The lists are the ones UserNamespaces grants
 // access on: for a legacy tenant the tenant's members, for a multi-team
 // tenant its tenant-level members and the members of the team the namespace
@@ -205,10 +205,6 @@ func (t *Tenant) namespacesFor(match memberMatcher) []string {
 // so a tenant-wide owner who is also a viewer of one team is still an owner
 // there. A list that does not name the login is left out. A role is
 // returned exactly as written, empty included.
-func (t *Tenant) memberRoles(namespace, login string) (scopes [][]string, owns bool) {
-	return t.memberRolesFor(namespace, matchLogin(login))
-}
-
 func (t *Tenant) memberRolesFor(namespace string, match memberMatcher) (scopes [][]string, owns bool) {
 	collect := func(members []TenantMember) {
 		var roles []string
