@@ -228,6 +228,12 @@ The identity itself is unaffected: the caller is still authenticated, keyed
 on `(provider, issuer, sub)` in `external_identities`, and resolved to a
 principal. It simply holds no tenant and no admin access through this path.
 
+Principal mode (mctl-api#377, `TENANT_AUTHZ_MODE`, see
+[principals.md](principals.md#tenant-membership-by-principal-377)) removes
+provider groups from authorization altogether: membership is read from
+GitOps by the caller's principal id. Until it is switched on, this table
+holds.
+
 ## ZITADEL (mctl-api#434)
 
 ZITADEL is the MCTL human identity provider (mctlhq/.github#157). It enters

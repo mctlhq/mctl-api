@@ -66,6 +66,16 @@ func (d roleRefusal) refused() bool { return d.status != 0 }
 // role could not be read are 503 rather than 403: "we could not check" is
 // kept apart from "you are not allowed", and neither is a pass.
 func (h *Handlers) checkTenantRole(user *auth.User, tenant string, min operations.Role, what string) roleRefusal {
+	d := h.checkTenantRoleByLogin(user, tenant, min, what)
+	if h.opts.TenantAuthzMode == TenantAuthzShadow {
+		h.shadowTenantRole(user, tenant, min, d)
+	}
+	return d
+}
+
+// checkTenantRoleByLogin is the login-keyed decision, the only one that
+// authorizes until principal mode (mctl-api#377).
+func (h *Handlers) checkTenantRoleByLogin(user *auth.User, tenant string, min operations.Role, what string) roleRefusal {
 	if user.IsAdmin() {
 		return roleRefusal{}
 	}

@@ -535,3 +535,31 @@ func TestProvisionAgentIdentityIsIdempotent(t *testing.T) {
 		t.Fatal("two different agent names must not share one principal")
 	}
 }
+
+// LookupIdentity answers who an identity belongs to and never provisions:
+// the backfill plan (mctl-api#377) must not create what it reports on.
+func TestLookupIdentityIsReadOnly(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	p, err := s.Provision(ctx, github(77, "octo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, revoked, err := s.LookupIdentity(ctx, auth.ProviderGitHub, "", "77")
+	if err != nil || got.ID != p.ID || revoked {
+		t.Fatalf("LookupIdentity = %+v, %v, %v; want %s live", got, revoked, err, p.ID)
+	}
+	if _, _, err := s.LookupIdentity(ctx, auth.ProviderGitHub, "", "78"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown identity: %v, want ErrNotFound", err)
+	}
+	var n int
+	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM principals").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("%d principals after a lookup miss (%v), want 1", n, err)
+	}
+	if _, err := s.pool.Exec(ctx, "UPDATE external_identities SET revoked_at=now() WHERE subject='77'"); err != nil {
+		t.Fatal(err)
+	}
+	if got, revoked, err := s.LookupIdentity(ctx, auth.ProviderGitHub, "", "77"); err != nil || !revoked || got.ID != p.ID {
+		t.Fatalf("revoked identity: %+v, %v, %v; want %s revoked", got, revoked, err, p.ID)
+	}
+}

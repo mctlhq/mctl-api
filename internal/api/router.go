@@ -138,6 +138,16 @@ type Options struct {
 	// (mctl-api#373 phase 1), as authentication does for a direct caller.
 	// Nil relays without a principal id.
 	Principals auth.PrincipalResolver
+	// TenantAuthzMode is TENANT_AUTHZ_MODE (mctl-api#377). The zero value
+	// behaves as legacy; shadow also compares the principal-keyed decision
+	// (tenantAuthzShadow) without acting on it.
+	TenantAuthzMode TenantAuthzMode
+	// PrincipalMembership is the principal-keyed membership shadow mode
+	// reads. Nil makes every shadow comparison unresolved.
+	PrincipalMembership PrincipalMembershipReader
+	// MemberKeyPlan backs the read-only principal-key plan for GitOps
+	// member entries (mctl-api#377 A5). Nil makes it 503.
+	MemberKeyPlan *MemberKeyPlanOptions
 	// Delegation resolves an X-MCTL-On-Behalf-Of grant ref to the stored
 	// subject it names (mctl-api#376 slice B). Optional: nil makes every
 	// delegated request 503, never an undelegated one.
@@ -245,11 +255,17 @@ type Handlers struct {
 	opts         Options
 	identityLink *identityLinker
 	oauthZitadel *oauthZitadel
+	// principalSets memoizes shadow mode's principal-keyed tenant sets;
+	// nil reads the checkout on every comparison.
+	principalSets *principalSetCache
 }
 
 // NewRouter creates the HTTP router with all API routes.
 func NewRouter(opts Options) http.Handler {
 	h := &Handlers{opts: opts}
+	if opts.TenantAuthzMode == TenantAuthzShadow {
+		h.principalSets = newPrincipalSetCache(principalSetCacheTTL)
+	}
 	if opts.IdentityLink != nil {
 		h.identityLink = newIdentityLinker(opts.IdentityLink)
 	}
@@ -408,6 +424,12 @@ func NewRouter(opts Options) http.Handler {
 			}
 			return keyByTrustedIP(r)
 		}))))
+		// Shadow comparison of tenant authorization (mctl-api#377). After
+		// every gate that substitutes a relayed or delegated human, so the
+		// caller compared is the one the handlers authorize, and after the
+		// global limiter, so a request it refuses costs no checkout read. A
+		// no-op unless TENANT_AUTHZ_MODE=shadow.
+		r.Use(h.tenantAuthzShadow)
 
 		r.Route("/api/v1", func(r chi.Router) {
 			// Auth endpoints.
@@ -416,6 +438,8 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/identity/links", h.ListIdentityLinks)
 			r.Delete("/identity/links/{id}", h.UnlinkIdentity)
 			r.Post("/admin/principals/{from}/merge-into/{into}", h.MergePrincipals)
+			// Read-only: proposes a principalId per GitOps member entry.
+			r.Get("/admin/tenant-members/principal-plan", h.TenantMemberPrincipalPlan)
 			r.Post("/auth/logout", h.Logout)
 
 			// Read endpoints (safe, no side effects).
