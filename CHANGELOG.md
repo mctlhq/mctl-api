@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.81.0](https://github.com/mctlhq/mctl-api/compare/4.80.1...4.81.0) (2026-10-12)
+
+
+### Features
+
+* **commerce:** accept-only kill switch that keeps reconciliation running ([fefeef1](https://github.com/mctlhq/mctl-api/commit/fefeef11288adeef9decdf75d3e0dae38c9c59f9))
+* **commerce:** accept-only kill switch that keeps reconciliation running ([e1bcd89](https://github.com/mctlhq/mctl-api/commit/e1bcd89c2573033b9eb7263d5d83794c91662a2f)), closes [#570](https://github.com/mctlhq/mctl-api/issues/570)
+
+
+### Bug Fixes
+
+* **mcp:** commerce read tools match the routes they call ([6784a52](https://github.com/mctlhq/mctl-api/commit/6784a52729326bebbcaaa33bde7eae0b23217fd2))
+
 ## [4.80.1](https://github.com/mctlhq/mctl-api/compare/4.80.0...4.80.1) (2026-10-11)
 
 
