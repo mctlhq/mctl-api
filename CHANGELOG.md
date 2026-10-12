@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.82.2](https://github.com/mctlhq/mctl-api/compare/4.82.1...4.82.2) (2026-10-12)
+
+
+### Bug Fixes
+
+* **audit:** address the [#593](https://github.com/mctlhq/mctl-api/issues/593) review follow-ups ([9ed223e](https://github.com/mctlhq/mctl-api/commit/9ed223ed654d02c841a34da6b024d4effe4ab4f1))
+* **audit:** address the [#593](https://github.com/mctlhq/mctl-api/issues/593) review follow-ups ([3a568b9](https://github.com/mctlhq/mctl-api/commit/3a568b960fa1bcddc87e43316052ce7f9f7df038)), closes [#586](https://github.com/mctlhq/mctl-api/issues/586)
+
 ## [4.82.1](https://github.com/mctlhq/mctl-api/compare/4.82.0...4.82.1) (2026-10-12)
 
 
