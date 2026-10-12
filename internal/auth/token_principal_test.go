@@ -215,18 +215,25 @@ func TestRegistryRefusesThePrincipalNamespace(t *testing.T) {
 // Only the local-OAuth provider may return the principal namespace; any
 // other provider doing so could name any principal it liked.
 func TestOtherProviderCannotReturnThePrincipalNamespace(t *testing.T) {
-	bad := &fakeProvider{
-		name: "acme", issuer: "https://issuer", claims: matchIssuer("https://issuer"),
-		verify: func(context.Context, string) (*Verified, error) {
-			return &Verified{Identity: Identity{Provider: ProviderPrincipal, Subject: "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ", Kind: KindHuman}}, nil
-		},
-	}
-	r, err := NewRegistry(nil, []Provider{bad}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Verify(context.Background(), fakeJWT("https://issuer")); !errors.Is(err, ErrProviderContractViolation) {
-		t.Fatalf("expected ErrProviderContractViolation, got %v", err)
+	for name, v := range map[string]*Verified{
+		"principal namespace": {Identity: Identity{Provider: ProviderPrincipal, Subject: "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ", Kind: KindHuman}},
+		// Nor may it carry the token-principal claim in its own namespace.
+		"token principal claim": {Identity: Identity{Provider: "acme", Subject: "s-1", Kind: KindHuman},
+			Claims: Claims{TokenPrincipal: "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := &fakeProvider{
+				name: "acme", issuer: "https://issuer", claims: matchIssuer("https://issuer"),
+				verify: func(context.Context, string) (*Verified, error) { return v, nil },
+			}
+			r, err := NewRegistry(nil, []Provider{bad}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Verify(context.Background(), fakeJWT("https://issuer")); !errors.Is(err, ErrProviderContractViolation) {
+				t.Fatalf("expected ErrProviderContractViolation, got %v", err)
+			}
+		})
 	}
 }
 

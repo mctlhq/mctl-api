@@ -409,6 +409,8 @@ the switch.
 | `tenant_member_entry_unkeyed{tenant}` | member entries with no `principalId` |
 | `tenant_principal_keys_invalid{tenant}` | 1 when a tenant's keys are invalid or the tenant cannot be read |
 | `tenant_principal_keys_scan_ok` | 1 when the last scan could list the tenants; the two gauges above are cleared when it is 0 |
+| `oauth_token_principal_mismatch_total` | local tokens whose `pid` names a different principal than the one resolved from the login (outside `principal` mode, where it is still resolved) |
+| `oauth_upstream_signins_total{result}` | also `principal_refused` (disabled or refused principal, 403) and `principal_unavailable` (could not be resolved, 503 in `principal` mode), for both upstreams |
 
 An `unresolved` comparison is never counted as a `match` or a `diff`: a
 decision that could not be computed is not evidence either way. The one
@@ -430,6 +432,14 @@ increasing for human callers; `sum(tenant_member_entry_unkeyed) == 0`,
 == 1` throughout; and traffic seen through each sign-in path (GitHub PAT,
 ZITADEL MCP OAuth, ZITADEL bearer). A window in which a path saw no traffic
 does not count for that path.
+
+Over the same window, `oauth_token_principal_mismatch_total` must stay at
+zero. Before the flip, check pid coverage too: a live session minted
+before the release that records `pid` is refused at the switch and its
+holder must sign in again. A refresh carries an empty `principal_id`
+forward, so such sessions end only by expiry or a new sign-in; count the
+live refresh rows with an empty `principal_id` and decide whether that
+many re-sign-ins are acceptable on switch day.
 
 ### Backfill plan
 

@@ -37,7 +37,10 @@ import (
 // the original upstream. ZITADEL signs the person in as the GitHub login of
 // the principal their ZITADEL identity is linked to (#435), so the code,
 // the tokens and the groups behind them are exactly what a GitHub sign-in of
-// the same person yields. Nothing is linked or provisioned here.
+// the same person yields. Nothing is linked here, and outside principal
+// mode nothing is provisioned either. In principal mode (mctl-api#377) an
+// identity with no single GitHub login signs in as its own principal,
+// which the resolver provisions on first sight.
 
 // OAuthUpstreamMode is OAUTH_UPSTREAM.
 type OAuthUpstreamMode string

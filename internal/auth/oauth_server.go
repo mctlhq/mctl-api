@@ -1529,6 +1529,9 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 			slog.Error("oauth: refresh store unexpected error", "error", err)
 			return "", "", fmt.Errorf("oauth: %w", ErrServerError)
 		}
+		if err := s.refreshablePrincipal(sess.PrincipalID); err != nil {
+			return "", "", err
+		}
 		// The row rotate() just wrote still carries storedGroups verbatim --
 		// refreshstore.Store.Rotate has no parameter for new groups, and
 		// adding one would change the interface, the PostgresStore schema and
@@ -1536,9 +1539,6 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 		// That snapshot's staleness is no longer load-bearing because
 		// groupsForSession re-resolves it here, bounded by the degraded-grace
 		// fallback when resolution fails.
-		if err := s.refreshablePrincipal(sess.PrincipalID); err != nil {
-			return "", "", err
-		}
 		var groups []string
 		if !s.PrincipalMode {
 			groups = s.groupsForSession(sess.Login, sess.Groups)

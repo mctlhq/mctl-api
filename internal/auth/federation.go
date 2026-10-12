@@ -364,6 +364,11 @@ func checkProviderContract(p Provider, v *Verified) error {
 	if v.Identity.Provider != p.Name() && !principalTokenOf(p, v) {
 		return fmt.Errorf("%w: provider %q returned identity in namespace %q", ErrProviderContractViolation, p.Name(), v.Identity.Provider)
 	}
+	// The token-principal claim is trusted as checked-at-mint, so only the
+	// provider that mints it may carry it, as with the namespace above.
+	if _, local := p.(*localOAuthProvider); v.Claims.TokenPrincipal != "" && !local {
+		return fmt.Errorf("%w: provider %q returned a token principal", ErrProviderContractViolation, p.Name())
+	}
 	if v.Identity.Subject == "" && !v.Identity.GitHubLoginOnly() {
 		return fmt.Errorf("%w: provider %q returned an empty subject", ErrProviderContractViolation, p.Name())
 	}
