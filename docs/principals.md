@@ -378,9 +378,21 @@ rotation carries it forward.
   principal-only token is refused.
 
 At the switch, sessions minted before this release carry no `pid`, so
-their holders sign in again. Unlinking or merging does not revoke live
-sessions until their next refresh; a disabled or merged-away principal is
-refused on every request in the meantime.
+their holders sign in again. With the persistent refresh store the refresh
+token is rotated before its missing `pid` is refused, so a client that
+retries it gets `invalid_grant` and, once the rotation grace window has
+passed, trips reuse detection: the family is revoked and `oauth refresh
+token reuse detected; family revoked` is logged as a warning. On switch day
+those warnings are pre-#377 sessions, not stolen tokens.
+
+A disabled principal, merged-away ones included (a merge disables `from`),
+is refused on every request. An **unlink is not**: the principal stays
+active, and a session signed in through the unlinked identity keeps acting
+as that principal through every refresh until its refresh family expires
+(`OAUTH_REFRESH_TOKEN_TTL`, 30 days by default) or is revoked. Nothing
+re-checks the identity at refresh. Revoking refresh families by
+`principal_id` on unlink (the column is indexed for it) must land before
+the switch.
 
 ### Metrics
 

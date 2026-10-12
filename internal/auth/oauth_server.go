@@ -1339,8 +1339,13 @@ type pendingRecord struct {
 // IssueCode generates a random authorization code for a GitHub login and
 // the principal it signed in as ("" when it could not be resolved, which
 // principal mode refuses before getting here). The code is stored alongside
-// the PKCE challenge for later verification.
+// the PKCE challenge for later verification. A malformed principal id is
+// refused here, at sign-in, rather than by IssueJWT once the code has been
+// spent at the token endpoint.
 func (s *OAuthServer) IssueCode(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string) (string, error) {
+	if principalID != "" && !ValidPrincipalID(principalID) {
+		return "", fmt.Errorf("malformed principal id %q", principalID)
+	}
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate code: %w", err)

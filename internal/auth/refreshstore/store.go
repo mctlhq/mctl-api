@@ -22,7 +22,6 @@ import (
 	"time"
 )
 
-// ErrInvalidToken is returned when a refresh token is not found, expired, or revoked.
 // Session is what a refresh token stands for: the GitHub login it was
 // signed in as (empty for a principal with no GitHub login), the canonical
 // principal (empty for tokens minted before mctl-api#377 recorded it), and
@@ -33,6 +32,7 @@ type Session struct {
 	Groups      []string
 }
 
+// ErrInvalidToken is returned when a refresh token is not found, expired, or revoked.
 var ErrInvalidToken = errors.New("invalid or expired refresh token")
 
 // ErrClientMismatch is returned when the client_id in a rotation request does not match

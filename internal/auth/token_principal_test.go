@@ -82,6 +82,10 @@ func TestIssueJWT_PrincipalClaim(t *testing.T) {
 	if _, err := o.IssueJWT("", "", nil); err == nil {
 		t.Fatal("a token with neither login nor principal was minted")
 	}
+	// A malformed pid is refused at sign-in, before the code is spent.
+	if _, err := o.IssueCode(context.Background(), "alice", "prn_bad", "client", "https://client/cb", "challenge", nil); err == nil {
+		t.Fatal("a code was issued for a malformed pid")
+	}
 	payload, err := verifyJWT(mustToken(t, o, "", pzZitadel), o.JWTSecret, o.BaseURL)
 	if err != nil || payload.Subject != pzZitadel || payload.PID != pzZitadel {
 		t.Fatalf("principal-only token: %+v, %v", payload, err)

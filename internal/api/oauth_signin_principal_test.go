@@ -18,9 +18,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
@@ -71,6 +76,86 @@ func TestSigninPrincipal(t *testing.T) {
 			}
 			if tt.wantStatus != 0 && rec.Code != tt.wantStatus {
 				t.Fatalf("status %d, want %d", rec.Code, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// fakeGitHub answers the two GitHub calls the OAuth callback makes: the
+// code exchange and GET /user.
+type fakeGitHub struct {
+	login string
+	id    int64
+}
+
+func (f fakeGitHub) RoundTrip(r *http.Request) (*http.Response, error) {
+	var body string
+	switch r.URL.Host + r.URL.Path {
+	case "github.com/login/oauth/access_token":
+		body = `{"access_token":"gh-token","token_type":"bearer"}`
+	case "api.github.com/user":
+		body = fmt.Sprintf(`{"login":%q,"id":%d}`, f.login, f.id)
+	default:
+		return nil, fmt.Errorf("unexpected request to %s", r.URL)
+	}
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+}
+
+// The GitHub callback mints for the principal it resolved, counts a
+// sign-in the principal stops, and mints no groups in principal mode.
+func TestGitHubSigninCarriesThePrincipal(t *testing.T) {
+	orig := http.DefaultTransport
+	http.DefaultTransport = fakeGitHub{login: "mashkovd", id: 42}
+	t.Cleanup(func() { http.DefaultTransport = orig })
+	const prn = "prn_01JBBBBBBBBBBBBBBBBBBBBBBB"
+	tests := []struct {
+		name          string
+		resolver      auth.PrincipalResolver
+		principalMode bool
+		wantStatus    int // 0: a code is issued
+		result        string
+		pid           any // the issued token's pid claim; nil when absent
+		groups        bool
+	}{
+		{"resolved", signinResolver{prn: prn}, false, 0, "issued", prn, true},
+		{"principal mode: groups decided per request", signinResolver{prn: prn}, true, 0, "issued", prn, false},
+		{"unresolved outside principal mode", signinResolver{err: errors.New("store down")}, false, 0, "issued", nil, true},
+		{"unresolved in principal mode", signinResolver{err: errors.New("store down")}, true, http.StatusServiceUnavailable, "principal_unavailable", nil, false},
+		{"principal disabled", signinResolver{err: auth.ErrPrincipalDisabled}, false, http.StatusForbidden, "principal_refused", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newUpstreamHarness(t, OAuthUpstreamGitHub, nil)
+			h.oauth.PrincipalMode = tt.principalMode
+			mode := TenantAuthzLegacy
+			if tt.principalMode {
+				mode = TenantAuthzPrincipal
+			}
+			h.router = NewRouter(Options{OAuthServer: h.oauth, OAuthUpstream: OAuthUpstreamGitHub, TenantAuthzMode: mode, Principals: tt.resolver})
+			counter := oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, tt.result)
+			before := testutil.ToFloat64(counter)
+
+			gh, _ := url.Parse(h.get(authorizeQuery("")).Header().Get("Location"))
+			rec := h.get(githubCallbackPath + "?code=gh-code&state=" + url.QueryEscape(gh.Query().Get("state")))
+			if n := testutil.ToFloat64(counter) - before; n != 1 {
+				t.Errorf("%s +%v, want +1", tt.result, n)
+			}
+			if tt.wantStatus != 0 {
+				if rec.Code != tt.wantStatus || rec.Header().Get("Location") != "" {
+					t.Fatalf("callback = %d Location=%q, want %d and no code", rec.Code, rec.Header().Get("Location"), tt.wantStatus)
+				}
+				return
+			}
+			loc, _ := url.Parse(rec.Header().Get("Location"))
+			access, _, err := h.oauth.ExchangeCode(context.Background(), loc.Query().Get("code"), testVerifier, "client", testClientRedirect)
+			if err != nil {
+				t.Fatalf("callback = %d %s: %v", rec.Code, rec.Body.String(), err)
+			}
+			claims := jwtClaims(t, access)
+			g, _ := claims["groups"].([]any)
+			if claims["sub"] != "mashkovd" || claims["pid"] != tt.pid || (len(g) > 0) != tt.groups {
+				t.Fatalf("sub=%v pid=%v groups=%v, want mashkovd / %v / groups %v", claims["sub"], claims["pid"], g, tt.pid, tt.groups)
 			}
 		})
 	}
