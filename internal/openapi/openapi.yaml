@@ -88,7 +88,7 @@ components:
         principalId:
           type: string
           pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$'
-          example: prn_01J0000000000000000000000
+          example: prn_01J00000000000000000000000
         role:
           type: string
           example: developer

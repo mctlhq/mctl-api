@@ -270,7 +270,7 @@ func TestPrincipalSetCache(t *testing.T) {
 		t.Fatalf("%d checkout reads for three comparisons in one window, want 1", n)
 	}
 	now = now.Add(10 * time.Second)
-	h.principalSet(shadowPRN)
+	_, _, _ = h.principalSet(shadowPRN)
 	if n := pm.reads.Load(); n != 2 {
 		t.Fatalf("%d reads after the window, want 2: a stale set must be re-read", n)
 	}
@@ -278,12 +278,12 @@ func TestPrincipalSetCache(t *testing.T) {
 	// Only a complete read is kept: a busy or failed one is retried.
 	busy := &stubPrincipalMembership{busy: true}
 	h = &Handlers{opts: Options{PrincipalMembership: busy}, principalSets: newPrincipalSetCache(time.Minute)}
-	h.principalSet(shadowPRN)
-	h.principalSet(shadowPRN)
+	_, _, _ = h.principalSet(shadowPRN)
+	_, _, _ = h.principalSet(shadowPRN)
 	failing := &stubPrincipalMembership{err: errors.New("stale")}
 	h2 := &Handlers{opts: Options{PrincipalMembership: failing}, principalSets: newPrincipalSetCache(time.Minute)}
-	h2.principalSet(shadowPRN)
-	h2.principalSet(shadowPRN)
+	_, _, _ = h2.principalSet(shadowPRN)
+	_, _, _ = h2.principalSet(shadowPRN)
 	if busy.reads.Load() != 2 || failing.reads.Load() != 2 {
 		t.Fatalf("busy %d, failing %d reads; want 2 each (never cached)", busy.reads.Load(), failing.reads.Load())
 	}
@@ -342,7 +342,9 @@ func TestShadowDiffLogIsDeduplicated(t *testing.T) {
 		t.Fatal("a diff was never logged again")
 	}
 	var nilCache *principalSetCache
-	if !nilCache.shouldLog("a") || !nilCache.shouldLog("a") {
-		t.Fatal("no cache must log every diff")
+	for range 2 {
+		if !nilCache.shouldLog("a") {
+			t.Fatal("no cache must log every diff")
+		}
 	}
 }

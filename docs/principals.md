@@ -254,12 +254,12 @@ tenant:
   name: acme
   members:
     - userId: boss                              # optional, display only
-      principalId: prn_01J0000000000000000000000
+      principalId: prn_01J00000000000000000000000
       role: owner
   teams:
     - name: web
       members:
-        - principalId: prn_01J1111111111111111111111   # e.g. a ZITADEL-only user
+        - principalId: prn_01J11111111111111111111111  # e.g. a ZITADEL-only user
           role: developer
 ```
 
@@ -305,9 +305,11 @@ Platform admin is not compared yet: it moves to `ADMIN_PRINCIPALS` in PR-B.
 | `tenant_principal_keys_scan_ok` | 1 when the last scan could list the tenants; the two gauges above are cleared when it is 0 |
 
 An `unresolved` comparison is never counted as a `match` or a `diff`: a
-decision that could not be computed is not evidence either way. Every diff
-is logged (`tenant authz shadow diff`) with the path or tenant, the
-principal, the login and both decisions.
+decision that could not be computed is not evidence either way. The
+counters carry every diff; the log (`tenant authz shadow diff`, with the
+path or tenant, the principal, the login and both decisions) carries one
+line per distinct diff per 10 minutes, so it names the affected callers but
+does not count them. The switch criterion reads the counters, never the log.
 
 ### Switch criterion
 

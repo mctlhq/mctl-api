@@ -214,12 +214,13 @@ func TestMemberKeyPlan_CountsEachProblemOnce(t *testing.T) {
 			{Tenant: "acme", UserID: "boss"}, {Tenant: "acme", UserID: "Boss"}, {Tenant: "acme", UserID: "BOSS"},
 			{Tenant: "nobody", Index: 0}, // names nobody: one entry blocker, and its tenant's key error
 			{Tenant: "dup", UserID: "boss", PrincipalID: planPrnBoss},
+			{Tenant: "dup", UserID: "ghost", PrincipalID: planPrnBoss}, // unverified: a separate fix
 		},
 		KeyErrors: map[string]string{"nobody": "member 0 names neither", "dup": "lists a principalId twice"},
 	}
 	plan := buildMemberKeyPlan(context.Background(), o, all)
-	if plan.Blockers != 2 { // nobody's entry, dup's key error
-		t.Errorf("blockers = %d, want 2", plan.Blockers)
+	if plan.Blockers != 3 { // nobody's entry, dup's unverified entry, dup's key error
+		t.Errorf("blockers = %d, want 3", plan.Blockers)
 	}
 	if n := calls["boss"] + calls["Boss"] + calls["BOSS"]; n != 1 {
 		t.Errorf("%d GitHub lookups for one login in three spellings, want 1", n)

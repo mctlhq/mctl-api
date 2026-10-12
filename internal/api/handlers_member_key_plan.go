@@ -142,22 +142,25 @@ func buildMemberKeyPlan(ctx context.Context, o *MemberKeyPlanOptions, all gitops
 		logins[key] = res
 		return res
 	}
-	entryBlocked := map[string]bool{} // tenant -> some entry of it blocks
+	keyErrorShown := map[string]bool{} // tenant -> an entry already is its key error
 	for _, e := range all.Entries {
 		pe := planMemberEntry(ctx, o, e, resolve)
 		plan.Counts[pe.Status]++
 		if pe.Status != planKeyed && pe.Status != planPropose {
 			plan.Blockers++
-			entryBlocked[e.Tenant] = true
+			if pe.Status == planInvalid {
+				keyErrorShown[e.Tenant] = true
+			}
 		}
 		plan.Entries = append(plan.Entries, pe)
 	}
-	// A key error is one more thing to fix only when no entry of that tenant
-	// already counts for it (an entry naming nobody, a malformed key); a
-	// duplicate key shows nowhere else.
+	// A key error is one more thing to fix unless an entry already is that
+	// error (an entry naming nobody, a malformed key). A duplicate key shows
+	// on no entry, and an unrelated blocker in the same tenant does not
+	// stand in for it.
 	plan.Blockers += len(plan.UnreadableTenants)
 	for tenant := range plan.KeyErrors {
-		if !entryBlocked[tenant] {
+		if !keyErrorShown[tenant] {
 			plan.Blockers++
 		}
 	}
