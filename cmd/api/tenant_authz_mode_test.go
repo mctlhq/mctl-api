@@ -66,3 +66,36 @@ func TestTenantMemberLogins_SkipsPrincipalOnlyEntries(t *testing.T) {
 		t.Fatalf("logins = %q, want [boss dev]", got)
 	}
 }
+
+// ADMIN_PRINCIPALS is validated in every mode, and principal mode refuses
+// a configuration that would leave no admin or no principal to decide on.
+// The boot refusal of principal itself is lifted in the last PR-B slice;
+// until then validatePrincipalMode is exercised directly.
+func TestConfigValidate_AdminPrincipals(t *testing.T) {
+	const admin = "prn_01JAAAAAAAAAAAAAAAAAAAAAAA"
+	for _, raw := range []string{"mashkovd", admin + ",prn_bad"} {
+		cfg := config{TenantAuthzModeRaw: "shadow", AdminPrincipalsRaw: raw, CommerceDisabled: true}
+		if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "ADMIN_PRINCIPALS") {
+			t.Errorf("ADMIN_PRINCIPALS=%q in shadow: validate() = %v, want a refusal", raw, err)
+		}
+	}
+	ok := config{AdminPrincipalsRaw: admin, PrincipalDBConfigured: true}
+	if err := ok.validatePrincipalMode(mctlapi.TenantAuthzPrincipal); err != nil {
+		t.Fatalf("complete principal config refused: %v", err)
+	}
+	for name, cfg := range map[string]config{
+		"no admins":           {PrincipalDBConfigured: true},
+		"principals disabled": {AdminPrincipalsRaw: admin, PrincipalDBConfigured: true, PrincipalsDisabled: true},
+		"no principal store":  {AdminPrincipalsRaw: admin},
+	} {
+		if err := cfg.validatePrincipalMode(mctlapi.TenantAuthzPrincipal); err == nil {
+			t.Errorf("%s: principal mode accepted", name)
+		}
+		if err := cfg.validatePrincipalMode(mctlapi.TenantAuthzShadow); err != nil {
+			t.Errorf("%s: shadow refused: %v", name, err)
+		}
+	}
+	if got := (config{AdminPrincipalsRaw: admin}).principalAuthz(nil); got != nil {
+		t.Fatal("principal authz wired outside principal mode")
+	}
+}
