@@ -138,6 +138,13 @@ type Options struct {
 	// (mctl-api#373 phase 1), as authentication does for a direct caller.
 	// Nil relays without a principal id.
 	Principals auth.PrincipalResolver
+	// TenantAuthzMode is TENANT_AUTHZ_MODE (mctl-api#377). The zero value
+	// behaves as legacy; shadow also compares the principal-keyed decision
+	// (tenantAuthzShadow) without acting on it.
+	TenantAuthzMode TenantAuthzMode
+	// PrincipalMembership is the principal-keyed membership shadow mode
+	// reads. Nil makes every shadow comparison unresolved.
+	PrincipalMembership PrincipalMembershipReader
 	// Delegation resolves an X-MCTL-On-Behalf-Of grant ref to the stored
 	// subject it names (mctl-api#376 slice B). Optional: nil makes every
 	// delegated request 503, never an undelegated one.
@@ -395,6 +402,11 @@ func NewRouter(opts Options) http.Handler {
 		// A GitHub Actions principal reaches the deploy route and nothing
 		// else (mctl-api#530).
 		r.Use(ciPrincipalGate)
+		// Shadow comparison of tenant authorization (mctl-api#377). After
+		// every gate that substitutes a relayed or delegated human, so the
+		// caller compared is the one the handlers authorize; a no-op unless
+		// TENANT_AUTHZ_MODE=shadow.
+		r.Use(h.tenantAuthzShadow)
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
 		// Loopback is skipped so MCP's in-process REST to localhost:8080 does

@@ -130,6 +130,26 @@ func (r *Reader) NamespacesForPrincipal(principalID string) (PrincipalMembership
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.namespacesForPrincipalLocked(principalID)
+}
+
+// TryNamespacesForPrincipal is NamespacesForPrincipal without waiting: ok is
+// false, with nothing read, when a refresh holds the checkout. It is for
+// callers on a request path that must never queue behind a git pull, as
+// TryGetTenantsForUser is; ok false is "not observed", never "no tenants".
+func (r *Reader) TryNamespacesForPrincipal(principalID string) (m PrincipalMembership, ok bool, err error) {
+	if !ValidPrincipalID(principalID) {
+		return PrincipalMembership{}, true, fmt.Errorf("invalid principal id %q", principalID)
+	}
+	if !r.mu.TryRLock() {
+		return PrincipalMembership{}, false, nil
+	}
+	defer r.mu.RUnlock()
+	m, err = r.namespacesForPrincipalLocked(principalID)
+	return m, true, err
+}
+
+func (r *Reader) namespacesForPrincipalLocked(principalID string) (PrincipalMembership, error) {
 	if err := r.checkFreshLocked(); err != nil {
 		return PrincipalMembership{}, err
 	}

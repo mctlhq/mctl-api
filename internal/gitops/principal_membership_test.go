@@ -212,3 +212,18 @@ func sortStrings(s []string) {
 		}
 	}
 }
+
+func TestTryNamespacesForPrincipal(t *testing.T) {
+	dir, r := syncedRepo(t)
+	writeTenantYAML(t, dir, "acme", keyedAcmeYAML)
+	got, ok, err := r.TryNamespacesForPrincipal(prnBob)
+	if err != nil || !ok || !reflect.DeepEqual(got.Namespaces, []string{"acme-web"}) {
+		t.Fatalf("got %+v, %v, %v; want [acme-web]", got, ok, err)
+	}
+	r.mu.Lock() // a refresh in progress
+	got, ok, err = r.TryNamespacesForPrincipal(prnBob)
+	r.mu.Unlock()
+	if ok || err != nil || got.Namespaces != nil {
+		t.Fatalf("a held checkout answered %+v, %v, %v", got, ok, err)
+	}
+}

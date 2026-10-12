@@ -937,6 +937,8 @@ func main() {
 		SurfaceIdentities:              surfaceIDs,
 		TenantResolver:                 gitReader,
 		Principals:                     principalResolver,
+		TenantAuthzMode:                cfg.tenantAuthzMode(),
+		PrincipalMembership:            gitReader,
 		Delegation:                     delegationResolver,
 		WorkflowDispatcher:             workflowDispatcher,
 		GitopsReady:                    gitopsReady,
@@ -1224,6 +1226,10 @@ type config struct {
 	// refuses new quotes and accepts only, so outstanding liability can still
 	// drain. It does not skip the dispatch-key check — dispatch stays live.
 	CommerceAcceptDisabled bool
+	// TenantAuthzModeRaw is TENANT_AUTHZ_MODE (mctl-api#377), validated at
+	// boot: an unknown value, or principal before this build implements it,
+	// refuses to start.
+	TenantAuthzModeRaw string
 }
 
 func loadConfig() config {
@@ -1330,6 +1336,7 @@ func loadConfig() config {
 		CommerceDispatchSigningKey:     os.Getenv("COMMERCE_DISPATCH_SIGNING_KEY"),
 		CommerceDisabled:               killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
 		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
+		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
 	}
 }
 
@@ -1550,6 +1557,11 @@ const maxOAuthTokenTTL = 24 * time.Hour
 // server. Called from main immediately after loadConfig; loadConfig itself
 // stays total so it remains usable from tests.
 func (c config) validate() error {
+	// TENANT_AUTHZ_MODE first: it does not depend on any kill switch below,
+	// so none of them can skip it.
+	if _, err := mctlapi.ParseTenantAuthzMode(c.TenantAuthzModeRaw); err != nil {
+		return err
+	}
 	// Only enforced when the OAuth server is actually constructed — the same
 	// gate main uses at the NewOAuthServer call. OAUTH_TOKEN_TTL governs
 	// nothing on a deployment that never issues tokens, and refusing to start
@@ -1617,6 +1629,17 @@ func (c config) validate() error {
 		return err
 	}
 	return nil
+}
+
+// tenantAuthzMode is the parsed TENANT_AUTHZ_MODE. validate has already
+// refused a value that does not parse, so the fallback is never taken in
+// main.
+func (c config) tenantAuthzMode() mctlapi.TenantAuthzMode {
+	m, err := mctlapi.ParseTenantAuthzMode(c.TenantAuthzModeRaw)
+	if err != nil {
+		return mctlapi.TenantAuthzLegacy
+	}
+	return m
 }
 
 // oauthUpstreamMode is the parsed OAUTH_UPSTREAM. validate has already
@@ -1871,22 +1894,25 @@ func backfillPrincipals(ctx context.Context, store *principals.Store, reader *gi
 }
 
 // tenantMemberLogins lists every GitHub login gitops names as a tenant or
-// team member.
+// team member. An entry keyed only by principalId (mctl-api#377) names no
+// login and is left out.
 func tenantMemberLogins(reader *gitops.Reader) ([]string, error) {
 	tenants, err := reader.ListTenants()
 	if err != nil {
 		return nil, err
 	}
 	var logins []string
-	for i := range tenants {
-		t := &tenants[i]
-		for _, m := range t.Members {
-			logins = append(logins, m.UserID)
-		}
-		for _, team := range t.Teams {
-			for _, m := range team.Members {
+	add := func(members []gitops.TenantMember) {
+		for _, m := range members {
+			if m.UserID != "" {
 				logins = append(logins, m.UserID)
 			}
+		}
+	}
+	for i := range tenants {
+		add(tenants[i].Members)
+		for _, team := range tenants[i].Teams {
+			add(team.Members)
 		}
 	}
 	return logins, nil
