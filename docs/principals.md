@@ -242,4 +242,95 @@ them for a decision.
 
 Authorization and tenant membership still use `User.ID` and `User.Groups`,
 and idempotency keys stay scoped to the actor strings. Switching them to
-principal ids is phase 2 (#377).
+principal ids is phase 2 (#377), described next.
+
+## Tenant membership by principal (#377)
+
+GitOps member entries gain a `principalId`, which becomes the authorization
+key; `userId` (a GitHub login) stays as optional display data:
+
+```yaml
+tenant:
+  name: acme
+  members:
+    - userId: boss                              # optional, display only
+      principalId: prn_01J0000000000000000000000
+      role: owner
+  teams:
+    - name: web
+      members:
+        - principalId: prn_01J1111111111111111111111   # e.g. a ZITADEL-only user
+          role: developer
+```
+
+Parser rules: `principalId` must match `^prn_[0-9A-HJKMNP-TV-Z]{26}$`; a
+malformed value, the same `principalId` twice in one members list, or an
+entry with neither key makes **that tenant** unreadable for principal-keyed
+reads (an error, never "not a member"). The login-keyed path ignores
+`principalId` entirely, so a bad key cannot change today's decisions. Team
+and tenant-level semantics are the login ones; only the key differs.
+
+### `TENANT_AUTHZ_MODE`
+
+| Value | Decides | Also |
+|---|---|---|
+| `legacy` (default, or unset) | the login, as before | nothing |
+| `shadow` | the login, as before | computes the principal decision for the same request and compares |
+| `principal` | the principal | **not in this build**: refused at boot until PR-B |
+
+Any other value refuses boot. Rollback is setting the value back; no data
+moves in either direction.
+
+In `shadow`, for each request of a human caller (direct, relayed or
+delegated; service, surface, agent, CI and dev callers are not compared):
+
+- the request's tenant set (`User.Groups` without `admins`, which every
+  `HasTenantAccess` call reads) is compared with
+  `TryNamespacesForPrincipal(prn)`;
+- every `checkTenantRole` write compares the login decision (allow/deny)
+  with the one `MemberRolesForPrincipal` would give. A legacy decision that
+  itself failed (503) and platform admins are not compared.
+
+Platform admin is not compared yet: it moves to `ADMIN_PRINCIPALS` in PR-B.
+
+### Metrics
+
+| Metric | Meaning |
+|---|---|
+| `tenant_authz_shadow_total{result}` | `match`, `diff` or `unresolved` per comparison |
+| `tenant_authz_shadow_diff_total{kind}` | `tenant_only_legacy`, `tenant_only_principal`, `role_mismatch` |
+| `tenant_authz_principal_unresolved_total{reason}` | `no_pid` (no principal at authentication), `membership_busy` (checkout held by a refresh), `membership_unreadable` (stale checkout, or any tenant unreadable), `membership_unavailable` (reader not wired) |
+| `tenant_member_entry_unkeyed{tenant}` | member entries with no `principalId` |
+| `tenant_principal_keys_invalid{tenant}` | 1 when a tenant's keys are invalid or the tenant cannot be read |
+| `tenant_principal_keys_scan_ok` | 1 when the last scan could list the tenants; the two gauges above are cleared when it is 0 |
+
+An `unresolved` comparison is never counted as a `match` or a `diff`: a
+decision that could not be computed is not evidence either way. Every diff
+is logged (`tenant authz shadow diff`) with the path or tenant, the
+principal, the login and both decisions.
+
+### Switch criterion
+
+At least 7 consecutive days in `shadow` with: `tenant_authz_shadow_diff_total`
+not increasing; `tenant_authz_shadow_total{result="unresolved"}` not
+increasing for human callers; `sum(tenant_member_entry_unkeyed) == 0`,
+`sum(tenant_principal_keys_invalid) == 0` and `tenant_principal_keys_scan_ok
+== 1` throughout; and traffic seen through each sign-in path (GitHub PAT,
+ZITADEL MCP OAuth, ZITADEL bearer). A window in which a path saw no traffic
+does not count for that path.
+
+### Backfill plan
+
+`GET /api/v1/admin/tenant-members/principal-plan` (platform admin acting
+directly) proposes a `principalId` for every member entry and changes
+nothing: no principal is provisioned and no file is written. A login is
+resolved through the numeric id GitHub reports for it now, then the live
+`external_identities` row; never through the login string alone.
+
+Each entry gets a `status`: `keyed` and `propose` are fine; `unresolved`
+(with a `reason`: `github_lookup_failed`, `no_linked_identity`,
+`identity_revoked`, `principal_disabled`, `principal_not_found`,
+`store_error`), `mismatch` (the key and the login name different principals)
+and `invalid` block. An unreadable tenant or a tenant key error also blocks.
+`complete` is true only with zero blockers; the output then becomes a
+human-reviewed mctl-gitops PR adding the keys.
