@@ -1184,7 +1184,10 @@ type config struct {
 	// upstream has its own confidential client, not the link client, and
 	// takes its issuer from the MCTL_OIDC_PROVIDERS entry OAuthZitadelProvider
 	// names, the one the link flow writes identities for.
-	OAuthUpstreamRaw         string
+	OAuthUpstreamRaw string
+	// TenantAuthzModeRaw is TENANT_AUTHZ_MODE as read (legacy, shadow;
+	// principal arrives with mctl-api#377 PR-B). Unset means legacy.
+	TenantAuthzModeRaw       string
 	OAuthZitadelClientID     string
 	OAuthZitadelClientSecret string
 	OAuthZitadelProvider     string
@@ -1304,6 +1307,7 @@ func loadConfig() config {
 		OAuthGitHubClientID:            os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
 		OAuthGitHubClientSecret:        os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
 		OAuthUpstreamRaw:               os.Getenv("OAUTH_UPSTREAM"),
+		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
 		OAuthZitadelClientID:           os.Getenv("OAUTH_ZITADEL_CLIENT_ID"),
 		OAuthZitadelClientSecret:       os.Getenv("OAUTH_ZITADEL_CLIENT_SECRET"),
 		OAuthZitadelProvider:           envOr("OAUTH_ZITADEL_PROVIDER", "zitadel"),
@@ -1576,6 +1580,9 @@ func (c config) validate() error {
 		}
 	}
 	if err := c.validateOAuthUpstream(); err != nil {
+		return err
+	}
+	if err := validateTenantAuthzMode(c.TenantAuthzModeRaw); err != nil {
 		return err
 	}
 	oauthEnabled := c.oauthEnabled()
@@ -2119,4 +2126,18 @@ func commerceDispatchSigner(keyID, seedB64 string) (*commerce.DispatchSigner, er
 		return nil, fmt.Errorf("COMMERCE_DISPATCH_KEY_ID/COMMERCE_DISPATCH_SIGNING_KEY: %w", err)
 	}
 	return signer, nil
+}
+
+// validateTenantAuthzMode refuses boot on an unknown TENANT_AUTHZ_MODE.
+// "principal" is refused until the principal-mode decision path exists
+// (mctl-api#377 PR-B): accepting it now would silently run legacy.
+func validateTenantAuthzMode(raw string) error {
+	switch strings.TrimSpace(raw) {
+	case "", "legacy", "shadow":
+		return nil
+	case "principal":
+		return fmt.Errorf("TENANT_AUTHZ_MODE=principal is not available yet")
+	default:
+		return fmt.Errorf("TENANT_AUTHZ_MODE %q is not one of legacy, shadow", raw)
+	}
 }

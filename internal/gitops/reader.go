@@ -97,8 +97,12 @@ type Team struct {
 
 // TenantMember represents a member of a tenant.
 type TenantMember struct {
-	UserID string `json:"userId"`
-	Role   string `json:"role,omitempty"`
+	// PrincipalID is the canonical principal (prn_...) and the
+	// authorization key in principal mode. UserID is legacy/display
+	// metadata there and may be empty.
+	PrincipalID string `json:"principalId,omitempty"`
+	UserID      string `json:"userId"`
+	Role        string `json:"role,omitempty"`
 }
 
 // IsMultiTeam returns true if the tenant has explicit teams defined.
@@ -853,15 +857,17 @@ func (r *Reader) readTenant(name string) (*Tenant, error) {
 			Description  string `yaml:"description"`
 			ContactEmail string `yaml:"contactEmail"`
 			Members      []struct {
-				UserID string `yaml:"userId"`
-				Role   string `yaml:"role"`
+				PrincipalID string `yaml:"principalId"`
+				UserID      string `yaml:"userId"`
+				Role        string `yaml:"role"`
 			} `yaml:"members"`
 			Teams []struct {
 				Name        string `yaml:"name"`
 				DisplayName string `yaml:"displayName"`
 				Members     []struct {
-					UserID string `yaml:"userId"`
-					Role   string `yaml:"role"`
+					PrincipalID string `yaml:"principalId"`
+					UserID      string `yaml:"userId"`
+					Role        string `yaml:"role"`
 				} `yaml:"members"`
 			} `yaml:"teams"`
 			Quotas     map[string]string `yaml:"quotas"`
@@ -892,12 +898,12 @@ func (r *Reader) readTenant(name string) (*Tenant, error) {
 		t.Name = name
 	}
 	for _, m := range raw.Tenant.Members {
-		t.Members = append(t.Members, TenantMember{UserID: m.UserID, Role: m.Role})
+		t.Members = append(t.Members, TenantMember{PrincipalID: m.PrincipalID, UserID: m.UserID, Role: m.Role})
 	}
 	for _, team := range raw.Tenant.Teams {
 		tm := Team{Name: team.Name, DisplayName: team.DisplayName}
 		for _, m := range team.Members {
-			tm.Members = append(tm.Members, TenantMember{UserID: m.UserID, Role: m.Role})
+			tm.Members = append(tm.Members, TenantMember{PrincipalID: m.PrincipalID, UserID: m.UserID, Role: m.Role})
 		}
 		t.Teams = append(t.Teams, tm)
 	}
