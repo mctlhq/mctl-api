@@ -254,3 +254,72 @@ func (r *Reader) recordPrincipalKeyMetrics() {
 		tenantMemberEntryUnkeyed.WithLabelValues(entry.Name()).Set(float64(t.UnkeyedMembers()))
 	}
 }
+
+// MemberEntry is one member entry as written in a tenant's values.yaml.
+type MemberEntry struct {
+	Tenant      string `json:"tenant"`
+	Team        string `json:"team,omitempty"` // empty for a tenant-level entry
+	Index       int    `json:"index"`          // position in its members list
+	UserID      string `json:"userId,omitempty"`
+	PrincipalID string `json:"principalId,omitempty"`
+	Role        string `json:"role,omitempty"`
+}
+
+// MemberEntries is every member entry the checkout holds, for the
+// principal backfill plan (mctl-api#377 A5).
+type MemberEntries struct {
+	Entries []MemberEntry
+	// Unreadable names each tenant whose values.yaml could not be read or
+	// parsed; its entries are not in Entries, so a plan is incomplete
+	// while this is non-empty.
+	Unreadable []string
+	// KeyErrors is tenant -> why its principal keys are invalid. Those
+	// tenants' entries are in Entries, so the bad key can be seen and fixed.
+	KeyErrors map[string]string
+}
+
+// AllMemberEntries lists every tenant and team member entry. Unlike
+// ListTenants, which skips a tenant it cannot parse, it reports that tenant
+// in Unreadable; a stale or never-synced checkout, or a tenants directory
+// that cannot be listed, is an error.
+func (r *Reader) AllMemberEntries() (MemberEntries, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.checkFreshLocked(); err != nil {
+		return MemberEntries{}, err
+	}
+	dirs, err := os.ReadDir(filepath.Join(r.localPath, "platform-gitops", "tenants"))
+	if err != nil {
+		return MemberEntries{}, fmt.Errorf("reading tenants dir: %w", err)
+	}
+	out := MemberEntries{KeyErrors: map[string]string{}}
+	for _, dir := range dirs {
+		if !dir.IsDir() {
+			continue
+		}
+		t, err := r.readTenant(dir.Name())
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			out.Unreadable = append(out.Unreadable, dir.Name())
+			continue
+		}
+		if t.principalErr != nil {
+			out.KeyErrors[t.Name] = t.principalErr.Error()
+		}
+		add := func(team string, members []TenantMember) {
+			for i, m := range members {
+				out.Entries = append(out.Entries, MemberEntry{
+					Tenant: t.Name, Team: team, Index: i,
+					UserID: m.UserID, PrincipalID: m.PrincipalID, Role: m.Role,
+				})
+			}
+		}
+		add("", t.Members)
+		for _, team := range t.Teams {
+			add(team.Name, team.Members)
+		}
+	}
+	return out, nil
+}

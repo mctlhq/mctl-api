@@ -282,6 +282,28 @@ func (s *Store) ResolveGitHubLogin(ctx context.Context, login string) (*Principa
 		ORDER BY x.verified_at DESC LIMIT 1`, login))
 }
 
+// LookupIdentity returns the principal an external identity belongs to,
+// and whether that identity row is revoked, without provisioning anything:
+// ErrNotFound when no row names the identity. It is for read-only callers
+// such as the tenant member backfill plan (mctl-api#377), which must never
+// create the principal it is asked about.
+func (s *Store) LookupIdentity(ctx context.Context, provider, issuer, subject string) (*Principal, bool, error) {
+	var p Principal
+	var revoked *time.Time
+	err := s.pool.QueryRow(ctx, `SELECT `+principalColumns+`, x.revoked_at
+		FROM external_identities x JOIN principals p ON p.id = x.principal_id
+		WHERE x.provider=$1 AND x.issuer=$2 AND x.subject=$3`, provider, issuer, subject).
+		Scan(&p.ID, &p.Kind, &p.DisplayName, &p.Status, &p.CreatedAt, &revoked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, ErrNotFound
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	p.CreatedAt = p.CreatedAt.UTC()
+	return &p, revoked != nil, nil
+}
+
 // Get returns one principal.
 func (s *Store) Get(ctx context.Context, id string) (*Principal, error) {
 	return scanPrincipal(s.pool.QueryRow(ctx, `SELECT `+principalColumns+` FROM principals p WHERE p.id=$1`, id))

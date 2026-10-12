@@ -939,6 +939,7 @@ func main() {
 		Principals:                     principalResolver,
 		TenantAuthzMode:                cfg.tenantAuthzMode(),
 		PrincipalMembership:            gitReader,
+		MemberKeyPlan:                  memberKeyPlanOptions(principalStore, gitReader),
 		Delegation:                     delegationResolver,
 		WorkflowDispatcher:             workflowDispatcher,
 		GitopsReady:                    gitopsReady,
@@ -1891,6 +1892,15 @@ func backfillPrincipals(ctx context.Context, store *principals.Store, reader *gi
 	}
 	slog.Info("principal backfill done", "logins", res.Logins, "known", res.Known,
 		"provisioned", res.Provisioned, "failed", res.Failed, "links_mirrored", res.LinksMirrored, "links_failed", res.LinksFailed)
+}
+
+// memberKeyPlanOptions wires the member principal-key plan (mctl-api#377
+// A5), or nil without a principal store, which makes the endpoint 503.
+func memberKeyPlanOptions(store *principals.Store, reader *gitops.Reader) *mctlapi.MemberKeyPlanOptions {
+	if store == nil {
+		return nil
+	}
+	return &mctlapi.MemberKeyPlanOptions{Entries: reader, Store: store, GitHubID: githubIDLookup()}
 }
 
 // tenantMemberLogins lists every GitHub login gitops names as a tenant or

@@ -145,6 +145,9 @@ type Options struct {
 	// PrincipalMembership is the principal-keyed membership shadow mode
 	// reads. Nil makes every shadow comparison unresolved.
 	PrincipalMembership PrincipalMembershipReader
+	// MemberKeyPlan backs the read-only principal-key plan for GitOps
+	// member entries (mctl-api#377 A5). Nil makes it 503.
+	MemberKeyPlan *MemberKeyPlanOptions
 	// Delegation resolves an X-MCTL-On-Behalf-Of grant ref to the stored
 	// subject it names (mctl-api#376 slice B). Optional: nil makes every
 	// delegated request 503, never an undelegated one.
@@ -428,6 +431,8 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/identity/links", h.ListIdentityLinks)
 			r.Delete("/identity/links/{id}", h.UnlinkIdentity)
 			r.Post("/admin/principals/{from}/merge-into/{into}", h.MergePrincipals)
+			// Read-only: proposes a principalId per GitOps member entry.
+			r.Get("/admin/tenant-members/principal-plan", h.TenantMemberPrincipalPlan)
 			r.Post("/auth/logout", h.Logout)
 
 			// Read endpoints (safe, no side effects).

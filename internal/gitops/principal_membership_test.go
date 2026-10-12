@@ -227,3 +227,36 @@ func TestTryNamespacesForPrincipal(t *testing.T) {
 		t.Fatalf("a held checkout answered %+v, %v, %v", got, ok, err)
 	}
 }
+
+func TestAllMemberEntries(t *testing.T) {
+	dir, r := syncedRepo(t)
+	writeTenantYAML(t, dir, "acme", keyedAcmeYAML)
+	writeTenantYAML(t, dir, "bad", "tenant:\n  name: bad\n  members:\n    - userId: x\n      principalId: prn_bad\n")
+	writeTenantYAML(t, dir, "broken", "tenant: [unclosed\n")
+	got, err := r.AllMemberEntries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Entries) != 5 { // acme: boss, dev, zed, analyst; bad: x
+		t.Fatalf("entries = %+v, want 5", got.Entries)
+	}
+	if e := got.Entries[2]; e.Tenant != "acme" || e.Team != "web" || e.Index != 1 || e.UserID != "" || e.PrincipalID != prnZed {
+		t.Errorf("third entry = %+v, want acme/web #1, principal-only", e)
+	}
+	if !reflect.DeepEqual(got.Unreadable, []string{"broken"}) {
+		t.Errorf("unreadable = %v, want [broken]", got.Unreadable)
+	}
+	if _, ok := got.KeyErrors["bad"]; !ok || len(got.KeyErrors) != 1 {
+		t.Errorf("key errors = %v, want bad only", got.KeyErrors)
+	}
+
+	staleDir, stale := setupTempRepo(t)
+	writeTenantYAML(t, staleDir, "acme", keyedAcmeYAML)
+	if _, err := stale.AllMemberEntries(); err == nil {
+		t.Error("a never-synced checkout answered")
+	}
+	_, empty := syncedRepo(t)
+	if _, err := empty.AllMemberEntries(); err == nil {
+		t.Error("a missing tenants directory read as no entries")
+	}
+}
