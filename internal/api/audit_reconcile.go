@@ -104,8 +104,10 @@ func (r *auditReconciler) reconcileOnce(ctx context.Context) {
 	for examined < r.maxPerPass {
 		pending, err := r.log.ListByStatus("submitted", r.lookback, r.batch, cursor)
 		if err != nil {
-			// Not an empty queue: end this pass, the next tick retries.
-			slog.Warn("audit reconcile: queue read failed", "error", err)
+			// Not an empty queue: end this pass, the next tick retries. Error,
+			// not Warn: nothing else surfaces an outage that silently stops
+			// the reconciler.
+			slog.Error("audit reconcile: queue read failed", "error", err)
 			break
 		}
 		if len(pending) == 0 {

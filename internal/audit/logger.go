@@ -83,8 +83,11 @@ type Log interface {
 	// oldest forever, so without paging past them they would fill every batch
 	// and no newer row would ever be examined.
 	//
-	// A failed read returns an error, never a shorter or empty page: an empty
-	// page is what ends a reconcile pass.
+	// A failed query or iteration returns an error, never a shorter or empty
+	// page: a short page is what ends a reconcile pass. A single row that
+	// fails to scan is still skipped and logged, so it can shorten a page;
+	// with params decode failures now marked (ParametersUnreadable) instead
+	// of failing the scan, nothing known reaches that path.
 	ListByStatus(status string, maxAge time.Duration, limit int, after time.Time) ([]Entry, error)
 }
 

@@ -218,9 +218,13 @@ func scanAuditEntry(scan func(dest ...any) error) (Entry, error) {
 		if err := json.Unmarshal(params, &e.Parameters); err != nil {
 			// Not "submitted without parameters": mark it so callers that
 			// authorize or route on Parameters refuse instead of guessing.
+			// Warn, not Error: a corrupt row is permanent and the reconciler
+			// re-reads it every pass, so this line repeats for as long as the
+			// row stays submitted. The callers that refuse it log at Error,
+			// with request context.
 			e.Parameters = nil
 			e.ParametersUnreadable = true
-			slog.Error("audit postgres: params decode failed", "id", e.ID, "error", err)
+			slog.Warn("audit postgres: params decode failed", "id", e.ID, "error", err)
 		}
 	}
 	return e, nil
