@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -12,7 +13,7 @@ func TestLoggerUpdateStatus(t *testing.T) {
 	if !l.UpdateStatus("wf-1", "succeeded", "") {
 		t.Fatal("UpdateStatus returned false for a matching non-terminal row")
 	}
-	if got := l.GetByWorkflow("wf-1"); got.Status != "succeeded" {
+	if got := mustLookup(t, l, "wf-1"); got.Status != "succeeded" {
 		t.Errorf("status = %q, want %q", got.Status, "succeeded")
 	}
 }
@@ -27,7 +28,7 @@ func TestLoggerUpdateStatusIgnoresTerminalRows(t *testing.T) {
 	if l.UpdateStatus("wf-2", "failed", "late delivery") {
 		t.Error("UpdateStatus overwrote a terminal status")
 	}
-	if got := l.GetByWorkflow("wf-2"); got.Status != "succeeded" {
+	if got := mustLookup(t, l, "wf-2"); got.Status != "succeeded" {
 		t.Errorf("status = %q, want it to stay %q", got.Status, "succeeded")
 	}
 }
@@ -49,14 +50,14 @@ func TestLoggerUpdateStatusKeepsMessageWhenEmpty(t *testing.T) {
 	l.Log(Entry{WorkflowName: "wf-3", Status: "submitted", Message: "submitted by hand"})
 
 	l.UpdateStatus("wf-3", "succeeded", "")
-	if got := l.GetByWorkflow("wf-3"); got.Message != "submitted by hand" {
+	if got := mustLookup(t, l, "wf-3"); got.Message != "submitted by hand" {
 		t.Errorf("message = %q, want it preserved", got.Message)
 	}
 
 	l2 := NewLogger()
 	l2.Log(Entry{WorkflowName: "wf-4", Status: "submitted", Message: "original"})
 	l2.UpdateStatus("wf-4", "failed", "argo workflow phase Failed")
-	if got := l2.GetByWorkflow("wf-4"); got.Message != "argo workflow phase Failed" {
+	if got := mustLookup(t, l2, "wf-4"); got.Message != "argo workflow phase Failed" {
 		t.Errorf("message = %q, want it replaced", got.Message)
 	}
 }
@@ -66,15 +67,15 @@ func TestLoggerListByStatus(t *testing.T) {
 	l.Log(Entry{WorkflowName: "wf-open", Status: "submitted"})
 	l.Log(Entry{WorkflowName: "wf-done", Status: "succeeded"})
 
-	got := l.ListByStatus("submitted", time.Hour, 10, time.Time{})
+	got := mustList(t, l, "submitted", time.Hour, 10, time.Time{})
 	if len(got) != 1 || got[0].WorkflowName != "wf-open" {
 		t.Fatalf("ListByStatus = %+v, want just wf-open", got)
 	}
 
-	if n := len(l.ListByStatus("submitted", time.Nanosecond, 10, time.Time{})); n != 0 {
+	if n := len(mustList(t, l, "submitted", time.Nanosecond, 10, time.Time{})); n != 0 {
 		t.Errorf("maxAge ignored: got %d entries, want 0", n)
 	}
-	if n := len(l.ListByStatus("submitted", time.Hour, 0, time.Time{})); n != 0 {
+	if n := len(mustList(t, l, "submitted", time.Hour, 0, time.Time{})); n != 0 {
 		t.Errorf("limit ignored: got %d entries, want 0", n)
 	}
 }
@@ -100,18 +101,39 @@ func TestLoggerListByStatusCursor(t *testing.T) {
 		l.Log(Entry{WorkflowName: name, Status: "submitted", Timestamp: base.Add(time.Duration(i) * time.Minute)})
 	}
 
-	first := l.ListByStatus("submitted", 2*time.Hour, 1, time.Time{})
+	first := mustList(t, l, "submitted", 2*time.Hour, 1, time.Time{})
 	if len(first) != 1 || first[0].WorkflowName != "wf-a" {
 		t.Fatalf("first page = %+v, want wf-a", first)
 	}
 
-	second := l.ListByStatus("submitted", 2*time.Hour, 1, first[0].Timestamp)
+	second := mustList(t, l, "submitted", 2*time.Hour, 1, first[0].Timestamp)
 	if len(second) != 1 || second[0].WorkflowName != "wf-b" {
 		t.Fatalf("second page = %+v, want wf-b — the cursor did not advance", second)
 	}
 
-	last := l.ListByStatus("submitted", 2*time.Hour, 10, second[0].Timestamp)
+	last := mustList(t, l, "submitted", 2*time.Hour, 10, second[0].Timestamp)
 	if len(last) != 1 || last[0].WorkflowName != "wf-c" {
 		t.Fatalf("third page = %+v, want just wf-c", last)
 	}
+}
+
+// mustLookup is LookupByWorkflow for tests over the in-memory store, which
+// cannot fail; a missing entry is a test failure, not a nil dereference.
+func mustLookup(t *testing.T, l *Logger, name string) *Entry {
+	t.Helper()
+	e, err := l.LookupByWorkflow(context.Background(), name)
+	if err != nil || e == nil {
+		t.Fatalf("LookupByWorkflow(%q) = %v, %v", name, e, err)
+	}
+	return e
+}
+
+// mustList is ListByStatus for tests over the in-memory store.
+func mustList(t *testing.T, l *Logger, status string, maxAge time.Duration, limit int, after time.Time) []Entry {
+	t.Helper()
+	out, err := l.ListByStatus(status, maxAge, limit, after)
+	if err != nil {
+		t.Fatalf("ListByStatus: %v", err)
+	}
+	return out
 }

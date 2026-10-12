@@ -176,6 +176,13 @@ func deriveIncidentTrace(ctx context.Context, a *alerts.Alert, lookup workflowAu
 		a.TraceUnavailable = traceAuditNotFound
 		return
 	}
+	if entry.ParametersUnreadable {
+		// Neither the owning team nor the traceparent can be read, so this is
+		// an unreadable record, not a forbidden one or one without a trace.
+		slog.Warn("incident: audit record for trace has unreadable parameters", "workflow", name, "id", entry.ID)
+		a.TraceUnavailable = traceAuditUnavailable
+		return
+	}
 	if canRead != nil && !canRead(entry) {
 		a.TraceUnavailable = traceAuditForbidden
 		return

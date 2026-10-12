@@ -51,15 +51,22 @@ type Entry struct {
 	// bound to (mctl-api#376), recorded next to ViaPrincipalID on a request
 	// an agent principal made. "" for every non-agent request.
 	ViaExecutionID string `json:"-"`
+	// ParametersUnreadable is set when the stored params could not be
+	// decoded; Parameters is then nil. It is a marker rather than a read
+	// error so the otherwise-good row stays visible to List and ListByStatus.
+	// Every caller that authorizes or routes on Parameters (the tenant, the
+	// namespace, a traceparent) must refuse explicitly instead of reading nil
+	// as "submitted without parameters" (mctl-api#586).
+	ParametersUnreadable bool `json:"-"`
 }
 
 // Log is the interface for recording and querying audit events.
 type Log interface {
 	Log(entry Entry)
 	List(limit int) []Entry
-	GetByWorkflow(name string) *Entry
-	// LookupByWorkflow is GetByWorkflow that can tell "no such record"
-	// ((nil, nil)) from "could not look" ((nil, err)).
+	// LookupByWorkflow returns the newest entry for the workflow. It tells
+	// "no such record" ((nil, nil)) from "could not look" ((nil, err)); a
+	// caller must never treat the second as the first (mctl-api#586).
 	LookupByWorkflow(ctx context.Context, name string) (*Entry, error)
 	// UpdateStatus moves an entry out of a non-terminal status. It is a no-op
 	// (returning false) when no row matches or the row is already terminal,
@@ -75,7 +82,10 @@ type Log interface {
 	// from creating the opposite problem — rows that cannot yet be resolved stay
 	// oldest forever, so without paging past them they would fill every batch
 	// and no newer row would ever be examined.
-	ListByStatus(status string, maxAge time.Duration, limit int, after time.Time) []Entry
+	//
+	// A failed read returns an error, never a shorter or empty page: an empty
+	// page is what ends a reconcile pass.
+	ListByStatus(status string, maxAge time.Duration, limit int, after time.Time) ([]Entry, error)
 }
 
 // TerminalStatuses are the audit statuses that will never change again.
@@ -147,24 +157,19 @@ func (l *Logger) List(limit int) []Entry {
 	return result
 }
 
-// GetByWorkflow returns the audit entry for a specific workflow.
-func (l *Logger) GetByWorkflow(workflowName string) *Entry {
+// LookupByWorkflow returns the newest entry for workflowName, or (nil, nil)
+// if none. The in-memory store cannot fail.
+func (l *Logger) LookupByWorkflow(_ context.Context, workflowName string) (*Entry, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
 	for i := len(l.entries) - 1; i >= 0; i-- {
 		if l.entries[i].WorkflowName == workflowName {
 			e := l.entries[i]
-			return &e
+			return &e, nil
 		}
 	}
-	return nil
-}
-
-// LookupByWorkflow returns the entry for workflowName, or (nil, nil) if none.
-// The in-memory store cannot fail.
-func (l *Logger) LookupByWorkflow(_ context.Context, workflowName string) (*Entry, error) {
-	return l.GetByWorkflow(workflowName), nil
+	return nil, nil
 }
 
 // UpdateStatus closes out the newest non-terminal entry for workflowName.
@@ -189,7 +194,7 @@ func (l *Logger) UpdateStatus(workflowName, status, message string) bool {
 }
 
 // ListByStatus returns entries in the given status, oldest first.
-func (l *Logger) ListByStatus(status string, maxAge time.Duration, limit int, after time.Time) []Entry {
+func (l *Logger) ListByStatus(status string, maxAge time.Duration, limit int, after time.Time) ([]Entry, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	cutoff := time.Now().UTC().Add(-maxAge)
@@ -212,5 +217,5 @@ func (l *Logger) ListByStatus(status string, maxAge time.Duration, limit int, af
 		}
 		out = append(out, e)
 	}
-	return out
+	return out, nil
 }

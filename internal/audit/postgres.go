@@ -74,7 +74,7 @@ func NewPostgresLogger(ctx context.Context, connStr string) (*PostgresLogger, er
 	// Separate Exec, and deliberately not part of `schema`: CONCURRENTLY cannot
 	// run inside a transaction, and pgx wraps a multi-statement Exec in an
 	// implicit one. Partial because most denied/failed rows have no workflow.
-	// A failure here costs an index, not a startup — GetByWorkflow, UpdateStatus
+	// A failure here costs an index, not a startup — LookupByWorkflow, UpdateStatus
 	// and the reconciler all still work, just with a sequential scan.
 	for _, idx := range []struct{ name, stmt string }{
 		{"audit_events_workflow",
@@ -167,25 +167,13 @@ func (p *PostgresLogger) List(limit int) []Entry {
 	return entries
 }
 
-// GetByWorkflow returns the audit entry for a specific workflow.
-func (p *PostgresLogger) GetByWorkflow(workflowName string) *Entry {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// LookupByWorkflow returns the newest entry for workflowName. Only
+// pgx.ErrNoRows means "no record" ((nil, nil)); every other failure, including
+// the caller's context ending and the 5 s bound below, is an error.
+func (p *PostgresLogger) LookupByWorkflow(ctx context.Context, workflowName string) (*Entry, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	row := p.pool.QueryRow(ctx,
-		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id
-		 FROM audit_events WHERE workflow = $1 ORDER BY timestamp DESC LIMIT 1`, workflowName)
-
-	e, err := scanAuditEntry(row.Scan)
-	if err != nil {
-		return nil
-	}
-	return &e
-}
-
-// LookupByWorkflow is GetByWorkflow with the caller's context, mapping
-// pgx.ErrNoRows to (nil, nil) and any other failure to an error.
-func (p *PostgresLogger) LookupByWorkflow(ctx context.Context, workflowName string) (*Entry, error) {
 	row := p.pool.QueryRow(ctx,
 		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id
 		 FROM audit_events WHERE workflow = $1 ORDER BY timestamp DESC LIMIT 1`, workflowName)
@@ -195,7 +183,7 @@ func (p *PostgresLogger) LookupByWorkflow(ctx context.Context, workflowName stri
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("audit postgres: lookup by workflow: %w", err)
+		return nil, fmt.Errorf("audit postgres: lookup by workflow %q: %w", workflowName, err)
 	}
 	return &e, nil
 }
@@ -227,7 +215,13 @@ func scanAuditEntry(scan func(dest ...any) error) (Entry, error) {
 		e.RequestID = *requestID
 	}
 	if len(params) > 0 {
-		_ = json.Unmarshal(params, &e.Parameters)
+		if err := json.Unmarshal(params, &e.Parameters); err != nil {
+			// Not "submitted without parameters": mark it so callers that
+			// authorize or route on Parameters refuse instead of guessing.
+			e.Parameters = nil
+			e.ParametersUnreadable = true
+			slog.Error("audit postgres: params decode failed", "id", e.ID, "error", err)
+		}
 	}
 	return e, nil
 }
@@ -235,7 +229,7 @@ func scanAuditEntry(scan func(dest ...any) error) (Entry, error) {
 // UpdateStatus closes out a non-terminal audit row for workflowName.
 //
 // This is an UPDATE in place rather than a second "completion" row on purpose:
-// GetByWorkflow reads ORDER BY timestamp DESC LIMIT 1, so a completion row —
+// LookupByWorkflow reads ORDER BY timestamp DESC LIMIT 1, so a completion row —
 // which carries no params — would become the newest match and break the tenant
 // lookup that authorizes GET /workflows/{name}/logs for non-admins. Updating
 // in place also keeps the original submission timestamp, so ordering in
@@ -291,7 +285,7 @@ func (p *PostgresLogger) UpdateStatus(workflowName, status, message string) bool
 
 // ListByStatus returns audit entries in the given status, oldest first — see
 // the interface doc for why the reconciler must drain from the old end.
-func (p *PostgresLogger) ListByStatus(status string, maxAge time.Duration, limit int, after time.Time) []Entry {
+func (p *PostgresLogger) ListByStatus(status string, maxAge time.Duration, limit int, after time.Time) ([]Entry, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -303,8 +297,7 @@ func (p *PostgresLogger) ListByStatus(status string, maxAge time.Duration, limit
 		  LIMIT $3`,
 		status, time.Now().UTC().Add(-maxAge), limit, after)
 	if err != nil {
-		slog.Error("audit postgres: list by status failed", "status", status, "error", err)
-		return nil
+		return nil, fmt.Errorf("audit postgres: list by status %q: %w", status, err)
 	}
 	defer rows.Close()
 
@@ -312,10 +305,15 @@ func (p *PostgresLogger) ListByStatus(status string, maxAge time.Duration, limit
 	for rows.Next() {
 		e, err := scanAuditEntry(rows.Scan)
 		if err != nil {
+			// One bad row must not starve the queue: skip it, keep going.
 			slog.Error("audit postgres: scan failed", "error", err)
 			continue
 		}
 		entries = append(entries, e)
 	}
-	return entries
+	// An iteration failure is a failed read, not a shorter queue.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("audit postgres: list by status %q: iterate: %w", status, err)
+	}
+	return entries, nil
 }

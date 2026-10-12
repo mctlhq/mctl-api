@@ -97,3 +97,14 @@ func TestAlertJSONTraceKey(t *testing.T) {
 		t.Fatalf("trace_id missing: %s", b)
 	}
 }
+
+// mctl-api#586: an audit row whose params could not be decoded is an
+// unreadable record, not a forbidden one or one without a traceparent.
+func TestDeriveIncidentTrace_UnreadableParametersIsAuditUnavailable(t *testing.T) {
+	a := argoAlert("Failed — " + dae)
+	lookup := &fakeLookup{entry: &audit.Entry{WorkflowName: "mctl-agents-implement-dae24112", ParametersUnreadable: true}}
+	deriveIncidentTrace(context.Background(), a, lookup, func(*audit.Entry) bool { return true })
+	if a.TraceID != "" || a.TraceUnavailable != traceAuditUnavailable {
+		t.Fatalf("trace_id=%q trace_unavailable=%q, want \"\" / %q", a.TraceID, a.TraceUnavailable, traceAuditUnavailable)
+	}
+}

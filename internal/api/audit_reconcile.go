@@ -102,7 +102,12 @@ func (r *auditReconciler) reconcileOnce(ctx context.Context) {
 	// stays among the oldest. Re-reading the same first page every pass would
 	// let a few hundred such rows block every newer one indefinitely.
 	for examined < r.maxPerPass {
-		pending := r.log.ListByStatus("submitted", r.lookback, r.batch, cursor)
+		pending, err := r.log.ListByStatus("submitted", r.lookback, r.batch, cursor)
+		if err != nil {
+			// Not an empty queue: end this pass, the next tick retries.
+			slog.Warn("audit reconcile: queue read failed", "error", err)
+			break
+		}
 		if len(pending) == 0 {
 			break
 		}
@@ -129,6 +134,16 @@ func (r *auditReconciler) reconcileBatch(ctx context.Context, pending []audit.En
 		case <-ctx.Done():
 			return
 		default:
+		}
+
+		if e.ParametersUnreadable {
+			// Never act on a row that could not be fully read. For a tenant
+			// op the empty tenant already yields ns == "" below; a platform
+			// op would be looked up and could be expired on what is still an
+			// unreadable record. Leave it for an operator (mctl-api#586).
+			slog.Warn("audit reconcile: skipping row with unreadable parameters",
+				"id", e.ID, "workflow", e.WorkflowName)
+			continue
 		}
 
 		op, ok := r.registry.Get(e.Operation)
