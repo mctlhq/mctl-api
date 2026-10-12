@@ -34,6 +34,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/principals"
 )
 
@@ -579,5 +580,149 @@ func TestFlowStoreFailureIsAServerErrorNotABadState(t *testing.T) {
 		if got := testutil.ToFloat64(counter) - before; got != 1 {
 			t.Errorf("mode %s: flow_store_unavailable += %v, want 1", tc.mode, got)
 		}
+	}
+}
+
+// ─── principal mode (mctl-api#377, Q5) ──────────────────────────────────
+
+// newPrincipalModeHarness is newUpstreamHarness in principal mode, with
+// pr resolving (and provisioning) the ZITADEL identity's principal.
+func newPrincipalModeHarness(t *testing.T, store *fakeLinkedStore, pr auth.PrincipalResolver) *upstreamHarness {
+	t.Helper()
+	h := newUpstreamHarness(t, OAuthUpstreamZitadel, store)
+	h.oauth.PrincipalMode = true
+	zopts := &OAuthZitadelOptions{ProviderName: "zitadel", Issuer: h.idp.srv.URL, ClientID: testOAuthZClientID, ClientSecret: testOAuthZClientSecret, Store: store}
+	h.router = NewRouter(Options{OAuthServer: h.oauth, OAuthUpstream: OAuthUpstreamZitadel, OAuthZitadel: zopts,
+		TenantAuthzMode: TenantAuthzPrincipal, Principals: pr})
+	return h
+}
+
+// A ZITADEL identity with no single GitHub login signs in as its own
+// principal in principal mode: the token's sub and pid are the principal
+// id, and no groups are minted (they are decided per request).
+func TestZitadelSigninPrincipalMode(t *testing.T) {
+	const (
+		linked = "prn_01JTESTAAAAAAAAAAAAAAAAAAA"
+		own    = "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ"
+		other  = "prn_01JBBBBBBBBBBBBBBBBBBBBBBB"
+	)
+	ownP := &principals.Principal{ID: own, Kind: auth.KindHuman, Status: principals.StatusActive}
+	cases := map[string]struct {
+		store    *fakeLinkedStore
+		resolver auth.PrincipalResolver
+		code     int    // 0: a code is issued
+		sub, pid string // the issued token's claims
+		result   string // oauth_upstream_signins_total result
+	}{
+		"linked to a GitHub login": {linkedTo("mashkovd"), signinResolver{prn: linked}, 0, "mashkovd", linked, "issued"},
+		"never seen: provisioned":  {&fakeLinkedStore{err: principals.ErrNotFound}, signinResolver{prn: own}, 0, own, own, "issued"},
+		"own principal, no GitHub": {&fakeLinkedStore{p: ownP, err: principals.ErrNoGitHubIdentity}, signinResolver{prn: own}, 0, own, own, "issued"},
+		"GitHub login unknown":     {&fakeLinkedStore{p: ownP, err: principals.ErrGitHubLoginUnknown}, signinResolver{prn: own}, 0, own, own, "issued"},
+		"two GitHub identities":    {&fakeLinkedStore{p: ownP, err: principals.ErrAmbiguousGitHubIdentity}, signinResolver{prn: own}, 0, own, own, "issued"},
+		"resolver disagrees":       {&fakeLinkedStore{p: ownP, err: principals.ErrNoGitHubIdentity}, signinResolver{prn: other}, http.StatusServiceUnavailable, "", "", "store_unavailable"},
+		"no resolver":              {&fakeLinkedStore{err: principals.ErrNotFound}, nil, http.StatusServiceUnavailable, "", "", "principal_unavailable"},
+		"resolver down":            {&fakeLinkedStore{err: principals.ErrNotFound}, signinResolver{err: errors.New("store down")}, http.StatusServiceUnavailable, "", "", "principal_unavailable"},
+		"principal disabled":       {&fakeLinkedStore{err: principals.ErrNotFound}, signinResolver{err: auth.ErrPrincipalDisabled}, http.StatusForbidden, "", "", "principal_refused"},
+		"identity revoked":         {&fakeLinkedStore{err: auth.ErrIdentityRefused}, signinResolver{prn: own}, http.StatusForbidden, "", "", "refused"},
+		"store down":               {&fakeLinkedStore{err: errors.New("db down")}, signinResolver{prn: own}, http.StatusServiceUnavailable, "", "", "store_unavailable"},
+		// A refusal that must name a principal and does not is a failed read.
+		"refusal without a principal": {&fakeLinkedStore{err: principals.ErrNoGitHubIdentity}, signinResolver{prn: own}, http.StatusServiceUnavailable, "", "", "store_unavailable"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			before := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, tc.result))
+			h := newPrincipalModeHarness(t, tc.store, tc.resolver)
+			rec := h.callback(h.toZitadel(h.get(authorizeQuery(""))))
+			if n := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, tc.result)) - before; n != 1 {
+				t.Errorf("%s +%v, want +1", tc.result, n)
+			}
+			if tc.code != 0 {
+				if rec.Code != tc.code || rec.Header().Get("Location") != "" {
+					t.Fatalf("callback = %d Location=%q, want %d and no code", rec.Code, rec.Header().Get("Location"), tc.code)
+				}
+				return
+			}
+			loc, _ := url.Parse(rec.Header().Get("Location"))
+			if rec.Code != http.StatusFound || loc.Query().Get("code") == "" {
+				t.Fatalf("callback = %d %q, want a code: %s", rec.Code, loc, rec.Body.String())
+			}
+			access, _, err := h.oauth.ExchangeCode(context.Background(), loc.Query().Get("code"), testVerifier, "client", testClientRedirect)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims := jwtClaims(t, access)
+			if claims["sub"] != tc.sub || claims["pid"] != tc.pid {
+				t.Fatalf("sub=%v pid=%v, want %s / %s", claims["sub"], claims["pid"], tc.sub, tc.pid)
+			}
+			if g, _ := claims["groups"].([]any); len(g) != 0 {
+				t.Fatalf("groups %v minted in principal mode", g)
+			}
+		})
+	}
+}
+
+// activePrincipals resolves nothing and reports every principal active: the
+// middleware's per-request check of a token's principal.
+type activePrincipals struct{}
+
+func (activePrincipals) ResolvePrincipal(context.Context, auth.Identity) (string, error) {
+	return "", errors.New("not a resolver")
+}
+
+func (activePrincipals) CheckPrincipal(context.Context, string) error { return nil }
+
+// B6 end to end: a ZITADEL-only human signs in, and the token it gets is a
+// developer of the tenant whose GitOps entry names its principal and no
+// login. Removing the entry removes the access on the same token; an
+// unlinked identity with the same email is another principal and gets
+// nothing.
+func TestZitadelOnlyPrincipal_SigninToTenantRole(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	const unlinked = "prn_01JQQQQQQQQQQQQQQQQQQQQQQQ"
+	signIn := func(prn string) (*upstreamHarness, string) {
+		h := newPrincipalModeHarness(t, &fakeLinkedStore{err: principals.ErrNotFound}, signinResolver{prn: prn})
+		loc, _ := url.Parse(h.callback(h.toZitadel(h.get(authorizeQuery("")))).Header().Get("Location"))
+		access, _, err := h.oauth.ExchangeCode(context.Background(), loc.Query().Get("code"), testVerifier, "client", testClientRedirect)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h, access
+	}
+	listed := tenantsByPrincipal{zitadelOnlyPRN: {"commerce-proof"}}
+	roles := &principalRoles{byPRN: map[string]map[string][][]string{zitadelOnlyPRN: {"commerce-proof": {{"developer"}}}}}
+	handlers := &Handlers{opts: Options{TenantAuthzMode: TenantAuthzPrincipal, PrincipalMembership: roles}}
+	// developer reports whether token is a developer of commerce-proof, as
+	// the middleware and the role check decide it in principal mode.
+	developer := func(h *upstreamHarness, token string) bool {
+		t.Helper()
+		var user *auth.User
+		mw := auth.Middleware(nil, nil, nil, h.oauth, auth.WithPrincipalResolver(activePrincipals{}),
+			auth.WithPrincipalAuthz(&auth.PrincipalAuthz{Members: listed, Admins: map[string]bool{}}))
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { user = auth.UserFromContext(r.Context()) })).ServeHTTP(rec, req)
+		if user == nil {
+			t.Fatalf("token refused: %d %s", rec.Code, rec.Body.String())
+		}
+		access := user.HasTenantAccess("commerce-proof")
+		role := !handlers.checkTenantRole(user, "commerce-proof", operations.RoleDeveloper, "test").refused()
+		if access != role {
+			t.Fatalf("tenant access %v but developer role %v", access, role)
+		}
+		return access
+	}
+
+	h, member := signIn(zitadelOnlyPRN)
+	if !developer(h, member) {
+		t.Fatal("ZITADEL-only member was refused")
+	}
+	if hu, other := signIn(unlinked); developer(hu, other) {
+		t.Fatal("unlinked same-email identity was let in")
+	}
+	delete(listed, zitadelOnlyPRN)
+	delete(roles.byPRN, zitadelOnlyPRN)
+	if developer(h, member) {
+		t.Fatal("access survived removal of the GitOps entry")
 	}
 }
