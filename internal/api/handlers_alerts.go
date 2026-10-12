@@ -63,6 +63,12 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 	a := body.Alert
 	a.TraceID = validIncidentTraceID(body.TraceID)
 	a.WorkflowName = validIncidentWorkflowName(body.WorkflowName)
+	// Argo producers send no workflow_name, only a summary link. Store the
+	// name from it so a dedup hit, which keeps the first occurrence's
+	// summary, still records the newest run and derivation follows it.
+	if a.WorkflowName == "" && a.Source == incidentSourceArgo {
+		a.WorkflowName = workflowNameFromSummary(a.Summary)
+	}
 
 	if a.ID == "" || a.Source == "" || a.Type == "" || a.Tenant == "" || a.Summary == "" || a.Severity == "" {
 		writeError(w, http.StatusBadRequest, "missing required fields: id, source, type, tenant, summary, severity")

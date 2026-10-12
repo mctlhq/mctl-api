@@ -77,7 +77,10 @@ type Alert struct {
 	Evidence        []Evidence `json:"evidence,omitempty"`
 	// TraceID is the 32-hex W3C trace id reported for the run that handled
 	// this incident. WorkflowName is the Argo workflow it came from. Both are
-	// stored; empty means not reported.
+	// stored; empty means not reported. They describe the newest occurrence
+	// and move together on dedup. There is no way to clear a stored trace id
+	// through the API (absent and invalid values both leave it unchanged), and
+	// WorkflowName is set only on create or by a dedup hit, never by PATCH.
 	TraceID      string `json:"trace_id,omitempty"`
 	WorkflowName string `json:"workflow_name,omitempty"`
 	// TraceSource ("reported" | "workflow_audit") and TraceUnavailable are

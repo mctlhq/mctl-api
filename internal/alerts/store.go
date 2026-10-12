@@ -143,6 +143,9 @@ func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 		               last_seen_at = EXCLUDED.updated_at,
 		               updated_at = EXCLUDED.updated_at,
 		               trace_id = CASE WHEN EXCLUDED.trace_id <> '' THEN EXCLUDED.trace_id ELSE alerts.trace_id END,
+		               -- trace_id and workflow_name describe one run and move
+		               -- together: a trace reported without a name clears the
+		               -- stale name rather than pairing it with the new trace.
 		               workflow_name = CASE
 		                   WHEN EXCLUDED.trace_id <> '' THEN EXCLUDED.workflow_name
 		                   WHEN alerts.trace_id = '' AND EXCLUDED.workflow_name <> '' THEN EXCLUDED.workflow_name
@@ -206,7 +209,7 @@ func (s *Store) Update(ctx context.Context, a *Alert) error {
 	_, err := s.pool.Exec(ctx,
 		`UPDATE alerts SET status=$2, analysis=$3, proposed_fix=$4, pr_url=$5, pr_number=$6,
 		 confidence=$7, updated_at=$8, resolved_at=$9, acknowledged_by=$10, acknowledged_at=$11,
-		 trace_id=CASE WHEN $12 <> '' THEN $12 ELSE trace_id END
+		 trace_id=CASE WHEN $12::text <> '' THEN $12::text ELSE trace_id END
 		 WHERE id=$1`,
 		a.ID, a.Status, a.Analysis, a.ProposedFix, a.PRURL, a.PRNumber,
 		a.Confidence, a.UpdatedAt, a.ResolvedAt, a.AcknowledgedBy, a.AcknowledgedAt,

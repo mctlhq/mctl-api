@@ -152,6 +152,7 @@ func TestTraceID_Dedup(t *testing.T) {
 	occur("argo-dedup-1", fp, traceA, "wf-first", 1)
 	assertTrace(t, "new trace replaces the pair", occur("argo-dedup-2", fp, traceB, "wf-second", 2), traceB, "wf-second")
 	assertTrace(t, "no trace keeps the pair", occur("argo-dedup-3", fp, "", "wf-third", 3), traceB, "wf-second")
+	assertTrace(t, "a trace without a name clears the stale name", occur("argo-dedup-4", fp, traceA, "", 4), traceA, "")
 
 	const fpNoTrace = "workflow_failed:trace:dedup-untraced"
 	occur("argo-untraced-1", fpNoTrace, "", "wf-a", 1)

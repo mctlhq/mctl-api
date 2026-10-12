@@ -2122,8 +2122,13 @@ Also returns trace_id (the 32-hex trace to open in Tempo, then pivot to Loki) wi
 trace_source "reported" (sent by the producer) or "workflow_audit" (derived from the
 failed workflow's submit audit record). When no trace id could be obtained,
 trace_unavailable gives the reason. A missing trace_id means "not known", never
-"no trace exists". List results carry trace_unavailable "not_derived_on_list"
-instead of a derived trace; call this tool to resolve it.`),
+"no trace exists". trace_unavailable is "not_reported" when no trace can exist for
+the incident's source; "not_derived_on_list" for an argo incident on a list
+response (call this tool to resolve it); "not_derived" on a create, patch,
+acknowledge or resolve response; or, when this tool ran the derivation and could
+not produce a trace, one of "workflow_name_unknown", "audit_unavailable",
+"audit_record_not_found", "audit_record_forbidden" or
+"no_traceparent_in_audit_record".`),
 		mcplib.WithString("id",
 			mcplib.Required(),
 			mcplib.Description("Incident ID (full UUID or 8-char prefix)"),

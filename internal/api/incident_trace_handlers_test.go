@@ -357,3 +357,42 @@ func TestIncidentTrace_WriteResponsesAreLabelled(t *testing.T) {
 		t.Fatalf("patch response: %v / %v / %v", got["trace_id"], got["trace_source"], got["trace_unavailable"])
 	}
 }
+
+// A recurring argo failure dedups into one open incident whose summary keeps
+// the first run's link. GET must derive the newest run's trace, not the
+// first one's: the producer sends no workflow_name, so create records it
+// from each occurrence's summary and the dedup hit moves it forward.
+func TestIncidentTrace_DedupedArgoIncidentFollowsNewestRun(t *testing.T) {
+	store := newTestAlertStore(t)
+	log := audit.NewLogger()
+	h := &Handlers{opts: Options{AlertStore: store, AuditLog: log}}
+	admin := adminUser()
+
+	runs := []struct{ wf, traceparent string }{
+		{"mctl-agents-implement-run1", "00-" + otherTraceID + "-7a16c732dc164e9e-01"},
+		{"mctl-agents-implement-run2", daeTraceparent},
+	}
+	for i, run := range runs {
+		log.Log(audit.Entry{ID: uuid.NewString(), UserID: "mctl-agent", Operation: "mctl-agents-implement",
+			WorkflowName: run.wf, Status: "failed", Parameters: map[string]string{"traceparent": run.traceparent}})
+		body := `{"id":"argo-` + run.wf + `","source":"argo-workflows","type":"workflow_failed","tenant":"admins",` +
+			`"service":"mctl-agents","severity":"warning","fingerprint":"workflow_failed:implement:recurring",` +
+			`"summary":"implement Failed — https://workflows.mctl.ai/workflows/argo-workflows/` + run.wf + `"}`
+		rec := httptest.NewRecorder()
+		h.CreateIncident(rec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/incidents", strings.NewReader(body)), admin))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("occurrence %d: status %d: %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	const id = "argo-mctl-agents-implement-run1"
+	rec := httptest.NewRecorder()
+	h.GetIncident(rec, withURLParam(withUser(httptest.NewRequest(http.MethodGet, "/api/v1/incidents/"+id, nil), admin), "id", id))
+	got := decodeIncident(t, rec)
+	if got["occurrence_count"] != float64(2) {
+		t.Fatalf("occurrences did not dedup: %v", got["occurrence_count"])
+	}
+	if got["trace_id"] != daeTraceID || got["workflow_name"] != "mctl-agents-implement-run2" {
+		t.Fatalf("derived trace_id=%v workflow_name=%v, want the newest run (%s, run2)", got["trace_id"], got["workflow_name"], daeTraceID)
+	}
+}

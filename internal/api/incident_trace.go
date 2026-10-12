@@ -60,6 +60,15 @@ const (
 // not captured, and the URL may follow whitespace or an opening parenthesis.
 var workflowURLRe = regexp.MustCompile(`(?:^|[\s(])https://workflows\.mctl\.ai/workflows/[a-z0-9-]+/([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)`)
 
+// workflowNameFromSummary returns the workflow named by the Argo UI link in
+// summary, or "" if there is none.
+func workflowNameFromSummary(summary string) string {
+	if m := workflowURLRe.FindStringSubmatch(summary); len(m) == 2 && len(validation.IsDNS1123Subdomain(m[1])) == 0 {
+		return m[1]
+	}
+	return ""
+}
+
 // labelStoredTrace sets the response-only trace fields from the stored row
 // alone, for responses that do not run deriveIncidentTrace. underived is the
 // reason given to an argo incident whose trace could still be derived by
@@ -144,9 +153,7 @@ func deriveIncidentTrace(ctx context.Context, a *alerts.Alert, lookup workflowAu
 
 	name := a.WorkflowName
 	if name == "" {
-		if m := workflowURLRe.FindStringSubmatch(a.Summary); len(m) == 2 && len(validation.IsDNS1123Subdomain(m[1])) == 0 {
-			name = m[1]
-		}
+		name = workflowNameFromSummary(a.Summary)
 	}
 	if name == "" {
 		a.TraceUnavailable = traceWorkflowUnknown
