@@ -65,6 +65,7 @@ var ErrUnresolved = errors.New("principal could not be resolved")
 type backend interface {
 	Provision(ctx context.Context, id auth.Identity) (*Principal, error)
 	ResolveGitHubLogin(ctx context.Context, login string) (*Principal, error)
+	Get(ctx context.Context, id string) (*Principal, error)
 }
 
 // Resolver implements auth.PrincipalResolver over a Store, with a cache.
@@ -131,7 +132,43 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 	if id.Provider == auth.ProviderDev && !r.allowDev {
 		return "", fmt.Errorf("%w: the dev identity is only accepted when authentication is not required", auth.ErrIdentityRefused)
 	}
-	key := cacheKey(id)
+	c, err := r.cachedLookup(ctx, cacheKey(id), func(ctx context.Context) (*Principal, error) {
+		return r.resolve(ctx, id)
+	}, "provider", id.Provider)
+	if err != nil {
+		return "", err
+	}
+	return answer(c)
+}
+
+// CheckPrincipal implements auth.PrincipalChecker: whether the principal a
+// local token was minted for may still act (mctl-api#377 principal mode).
+// A disabled principal (merged-away ones included) is auth.ErrPrincipalDisabled,
+// one that does not exist auth.ErrIdentityRefused, a failed read
+// ErrUnresolved. Answers are cached like ResolvePrincipal's, under their own
+// key, so Forget drops them with the rest.
+func (r *Resolver) CheckPrincipal(ctx context.Context, principalID string) error {
+	c, err := r.cachedLookup(ctx, "principal|"+principalID, func(ctx context.Context) (*Principal, error) {
+		p, err := r.store.Get(ctx, principalID)
+		if errors.Is(err, ErrNotFound) {
+			return nil, fmt.Errorf("%w: principal %q does not exist", auth.ErrIdentityRefused, principalID)
+		}
+		return p, err
+	}, "principal", principalID)
+	if err != nil {
+		return err
+	}
+	_, err = answer(c)
+	return err
+}
+
+// cachedLookup answers key from the cache, or from fetch, whose answer it
+// then caches. A refusal (auth.ErrIdentityRefused) is returned as it is and
+// never cached; any other failure is cached for failureTTL and returned as
+// ErrUnresolved. An answer is stored only if no Forget ran while fetch was
+// reading (gen), so a merge or unlink is never undone by a read that began
+// before it.
+func (r *Resolver) cachedLookup(ctx context.Context, key string, fetch func(context.Context) (*Principal, error), logAttrs ...any) (cached, error) {
 	now := r.now()
 	r.mu.Lock()
 	c, ok := r.cache[key]
@@ -140,23 +177,23 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 	switch {
 	case ok && c.failed && now.Sub(c.at) < r.failureTTL:
 		resolutionFailed.Inc()
-		return "", fmt.Errorf("%w: resolution failed %s ago", ErrUnresolved, now.Sub(c.at).Round(time.Millisecond))
+		return cached{}, fmt.Errorf("%w: resolution failed %s ago", ErrUnresolved, now.Sub(c.at).Round(time.Millisecond))
 	case ok && !c.failed && now.Sub(c.at) < r.ttl:
-		return answer(c)
+		return c, nil
 	}
 	rctx, cancel := context.WithTimeout(ctx, r.timeout)
-	p, err := r.resolve(rctx, id)
+	p, err := fetch(rctx)
 	cancel()
 	if err != nil {
 		if errors.Is(err, auth.ErrIdentityRefused) {
-			return "", err
+			return cached{}, err
 		}
 		resolutionFailed.Inc()
-		slog.Warn("principal resolution failed", "provider", id.Provider, "error", err)
+		slog.Warn("principal resolution failed", append(logAttrs, "error", err)...)
 		r.mu.Lock()
 		r.cache[key] = cached{failed: true, at: now}
 		r.mu.Unlock()
-		return "", fmt.Errorf("%w: %v", ErrUnresolved, err)
+		return cached{}, fmt.Errorf("%w: %v", ErrUnresolved, err)
 	}
 	c = cached{principal: p.ID, disabled: p.Status == StatusDisabled, at: now}
 	r.mu.Lock()
@@ -165,7 +202,7 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 	}
 	r.sweepLocked(now)
 	r.mu.Unlock()
-	return answer(c)
+	return c, nil
 }
 
 // sweepLocked drops expired entries, at most once per TTL, so the cache

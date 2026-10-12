@@ -60,8 +60,18 @@ func (p *localOAuthProvider) Verify(_ context.Context, raw string) (*Verified, e
 	if err != nil {
 		return nil, err
 	}
+	claims := Claims{Groups: u.Groups, TokenPID: u.tokenPID}
+	if u.tokenPrincipal {
+		claims.TokenPrincipal = u.principalID
+	}
+	if _, linked := u.GitHubLogin(); !linked {
+		return &Verified{
+			Identity: Identity{Provider: ProviderPrincipal, Subject: u.principalID, Display: u.ID, Kind: KindHuman},
+			Claims:   claims,
+		}, nil
+	}
 	return &Verified{
 		Identity: Identity{Provider: ProviderGitHub, Display: u.ID, Kind: KindHuman},
-		Claims:   Claims{Groups: u.Groups},
+		Claims:   claims,
 	}, nil
 }

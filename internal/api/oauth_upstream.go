@@ -326,9 +326,13 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 
 	// From here on this is the GitHub callback's tail, for the linked
 	// principal's GitHub login: same groups, same admin decision, same code.
+	// The principal is the one the store just found the link on.
 	login := gh.Display
-	groups := o.ResolveGroups(login)
-	mctlCode, err := o.IssueCode(r.Context(), login, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
+	var groups []string
+	if h.opts.TenantAuthzMode != TenantAuthzPrincipal {
+		groups = o.ResolveGroups(login)
+	}
+	mctlCode, err := o.IssueCode(r.Context(), login, p.ID, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
 	if err != nil {
 		slog.Error("failed to issue auth code", "error", err)
 		result = "internal_error"

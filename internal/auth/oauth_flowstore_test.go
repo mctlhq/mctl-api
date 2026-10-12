@@ -91,7 +91,7 @@ func TestFlowStorePendingAuthCrossesReplicas(t *testing.T) {
 
 func TestFlowStoreCodeCrossesReplicas(t *testing.T) {
 	a, b, _ := twoReplicas(t)
-	code, err := a.IssueCode(context.Background(), "dmitrii", "client-1", "https://client.example/callback",
+	code, err := a.IssueCode(context.Background(), "dmitrii", "", "client-1", "https://client.example/callback",
 		testPKCEChallenge(t, "verifier-1"), []string{"my-team"})
 	if err != nil {
 		t.Fatalf("IssueCode: %v", err)
@@ -120,7 +120,7 @@ func TestFlowStoreFailuresAreServerErrors(t *testing.T) {
 	if err := a.StorePendingAuth(ctx, "s", "c", "https://client.example/callback", "ch"); !errors.Is(err, ErrServerError) {
 		t.Fatalf("StorePendingAuth on put failure = %v; want ErrServerError", err)
 	}
-	if _, err := a.IssueCode(context.Background(), "u", "c", "https://client.example/callback", "ch", nil); !errors.Is(err, ErrServerError) {
+	if _, err := a.IssueCode(context.Background(), "u", "", "c", "https://client.example/callback", "ch", nil); !errors.Is(err, ErrServerError) {
 		t.Fatalf("IssueCode on put failure = %v; want ErrServerError", err)
 	}
 
@@ -145,7 +145,7 @@ func TestFlowStoreUndecodablePayloadIsServerError(t *testing.T) {
 func TestFlowStoreKeepsCodeAndStateApart(t *testing.T) {
 	a, _, _ := twoReplicas(t)
 	ctx := context.Background()
-	code, err := a.IssueCode(context.Background(), "u", "c", "https://client.example/callback", "ch", nil)
+	code, err := a.IssueCode(context.Background(), "u", "", "c", "https://client.example/callback", "ch", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestFlowStoreCallsAreBounded(t *testing.T) {
 	ctx := context.Background()
 	_ = s.StorePendingAuth(ctx, "s", "client-1", "https://client.example/callback", "ch")
 	_, _, _ = s.LoadPendingAuth(ctx, "s")
-	code, _ := s.IssueCode(ctx, "u", "client-1", "https://client.example/callback", testPKCEChallenge(t, "v"), nil)
+	code, _ := s.IssueCode(ctx, "u", "", "client-1", "https://client.example/callback", testPKCEChallenge(t, "v"), nil)
 	if _, _, err := s.ExchangeCode(ctx, code, "v", "client-1", "https://client.example/callback"); err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}

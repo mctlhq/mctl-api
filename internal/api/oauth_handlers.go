@@ -280,18 +280,27 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Validate the GitHub token and get the login.
-	login, err := o.GitHubValidator.Validate(r.Context(), ghToken)
+	login, githubID, err := o.GitHubValidator.ValidateIdentity(r.Context(), ghToken)
 	if err != nil {
 		slog.Error("failed to validate GitHub token", "error", err)
 		http.Error(w, "GitHub token validation failed", http.StatusBadGateway)
 		return
 	}
+	principalID, stopped := h.signinPrincipal(w, r, githubSigninIdentity(login, githubID))
+	if stopped != "" {
+		oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, stopped).Inc()
+		return
+	}
 
-	// Resolve tenant groups (same as regular GitHub auth path).
-	groups := o.ResolveGroups(login)
+	// Resolve tenant groups (same as regular GitHub auth path). In
+	// principal mode they are decided per request by principal instead.
+	var groups []string
+	if h.opts.TenantAuthzMode != TenantAuthzPrincipal {
+		groups = o.ResolveGroups(login)
+	}
 
 	// Issue a mctl authorization code.
-	mctlCode, err := o.IssueCode(r.Context(), login, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
+	mctlCode, err := o.IssueCode(r.Context(), login, principalID, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
 	if err != nil {
 		slog.Error("failed to issue auth code", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

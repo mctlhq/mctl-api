@@ -61,11 +61,12 @@ func TestInsertAndRotate(t *testing.T) {
 	groups := []string{"admins"}
 	exp := time.Now().Add(30 * 24 * time.Hour)
 
-	if err := s.Insert(raw1, login, clientID, groups, exp); err != nil {
+	if err := s.Insert(raw1, clientID, Session{Login: login, Groups: groups}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 
-	gotLogin, gotGroups, err := s.Rotate(raw1, raw2, clientID, exp)
+	got, err := s.Rotate(raw1, raw2, clientID, exp)
+	gotLogin, gotGroups := got.Login, got.Groups
 	if err != nil {
 		t.Fatalf("Rotate: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestInsertAndRotate(t *testing.T) {
 
 func TestRotateRejectsUnknownToken(t *testing.T) {
 	s := newTestStore(t)
-	_, _, err := s.Rotate(uniqueTok(t, "missing"), uniqueTok(t, "new"), "c1", time.Now().Add(time.Hour))
+	_, err := s.Rotate(uniqueTok(t, "missing"), uniqueTok(t, "new"), "c1", time.Now().Add(time.Hour))
 	if !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("expected ErrInvalidToken, got %v", err)
 	}
@@ -90,10 +91,10 @@ func TestRotateRejectsClientMismatch(t *testing.T) {
 
 	exp := time.Now().Add(time.Hour)
 	tok := uniqueTok(t, "tok")
-	if err := s.Insert(tok, "carol", "right-client", []string{}, exp); err != nil {
+	if err := s.Insert(tok, "right-client", Session{Login: "carol", Groups: []string{}}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	_, _, err := s.Rotate(tok, uniqueTok(t, "new"), "wrong-client", exp)
+	_, err := s.Rotate(tok, uniqueTok(t, "new"), "wrong-client", exp)
 	if !errors.Is(err, ErrClientMismatch) {
 		t.Errorf("expected ErrClientMismatch, got %v", err)
 	}
@@ -127,17 +128,18 @@ func TestRotateGraceWindowReplay_Succeeds(t *testing.T) {
 	tok1 := uniqueTok(t, "1")
 	tok2 := uniqueTok(t, "2")
 
-	if err := s.Insert(tok1, "dave", "c2", []string{}, exp); err != nil {
+	if err := s.Insert(tok1, "c2", Session{Login: "dave", Groups: []string{}}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if _, _, err := s.Rotate(tok1, tok2, "c2", exp); err != nil {
+	if _, err := s.Rotate(tok1, tok2, "c2", exp); err != nil {
 		t.Fatalf("first Rotate: %v", err)
 	}
 
 	// A deterministic-derivation caller recomputes the exact same successor
 	// (tok2) when retrying with predecessor tok1 — replaying that pair within
 	// the grace window must succeed and hand back the same session.
-	login, groups, err := s.Rotate(tok1, tok2, "c2", exp)
+	got, err := s.Rotate(tok1, tok2, "c2", exp)
+	login, groups := got.Login, got.Groups
 	if err != nil {
 		t.Fatalf("grace-window replay: %v", err)
 	}
@@ -151,7 +153,7 @@ func TestRotateGraceWindowReplay_Succeeds(t *testing.T) {
 	// The re-issued successor (tok2) must still be usable for a further,
 	// genuine rotation afterwards.
 	tok3 := uniqueTok(t, "3")
-	if _, _, err := s.Rotate(tok2, tok3, "c2", exp); err != nil {
+	if _, err := s.Rotate(tok2, tok3, "c2", exp); err != nil {
 		t.Errorf("Rotate on grace-replayed successor: %v", err)
 	}
 }
@@ -167,20 +169,20 @@ func TestRotateGraceWindow_WrongClientRejected(t *testing.T) {
 	tok1 := uniqueTok(t, "1")
 	tok2 := uniqueTok(t, "2")
 
-	if err := s.Insert(tok1, "dave", "c2", []string{}, exp); err != nil {
+	if err := s.Insert(tok1, "c2", Session{Login: "dave", Groups: []string{}}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if _, _, err := s.Rotate(tok1, tok2, "c2", exp); err != nil {
+	if _, err := s.Rotate(tok1, tok2, "c2", exp); err != nil {
 		t.Fatalf("first Rotate: %v", err)
 	}
 
-	if _, _, err := s.Rotate(tok1, tok2, "wrong-client", exp); !errors.Is(err, ErrInvalidToken) {
+	if _, err := s.Rotate(tok1, tok2, "wrong-client", exp); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("expected ErrInvalidToken for cross-client grace replay, got %v", err)
 	}
 
 	// The legitimate successor must remain untouched by the failed attempt.
 	tok3 := uniqueTok(t, "3")
-	if _, _, err := s.Rotate(tok2, tok3, "c2", exp); err != nil {
+	if _, err := s.Rotate(tok2, tok3, "c2", exp); err != nil {
 		t.Errorf("legitimate successor should still work after rejected cross-client replay: %v", err)
 	}
 }
@@ -200,14 +202,14 @@ func TestRotateGraceWindow_ExpiredSuccessorRejected(t *testing.T) {
 	tok1 := uniqueTok(t, "1")
 	tok2 := uniqueTok(t, "2")
 
-	if err := s.Insert(tok1, "dave", "c2", []string{}, longExp); err != nil {
+	if err := s.Insert(tok1, "c2", Session{Login: "dave", Groups: []string{}}, longExp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if _, _, err := s.Rotate(tok1, tok2, "c2", alreadyExpired); err != nil {
+	if _, err := s.Rotate(tok1, tok2, "c2", alreadyExpired); err != nil {
 		t.Fatalf("first Rotate: %v", err)
 	}
 
-	if _, _, err := s.Rotate(tok1, tok2, "c2", longExp); !errors.Is(err, ErrInvalidToken) {
+	if _, err := s.Rotate(tok1, tok2, "c2", longExp); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("expected ErrInvalidToken for expired successor grace replay, got %v", err)
 	}
 }
@@ -224,25 +226,25 @@ func TestRotateGraceWindow_TwoHopsBackRejected(t *testing.T) {
 	tokB := uniqueTok(t, "b")
 	tokC := uniqueTok(t, "c")
 
-	if err := s.Insert(tokA, "dave", "c2", []string{}, exp); err != nil {
+	if err := s.Insert(tokA, "c2", Session{Login: "dave", Groups: []string{}}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if _, _, err := s.Rotate(tokA, tokB, "c2", exp); err != nil {
+	if _, err := s.Rotate(tokA, tokB, "c2", exp); err != nil {
 		t.Fatalf("rotate A->B: %v", err)
 	}
-	if _, _, err := s.Rotate(tokB, tokC, "c2", exp); err != nil {
+	if _, err := s.Rotate(tokB, tokC, "c2", exp); err != nil {
 		t.Fatalf("rotate B->C: %v", err)
 	}
 
 	// Replaying A (still within its own grace window) must not reissue B,
 	// since B is no longer the live tip of the family.
-	if _, _, err := s.Rotate(tokA, tokB, "c2", exp); !errors.Is(err, ErrInvalidToken) {
+	if _, err := s.Rotate(tokA, tokB, "c2", exp); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("expected ErrInvalidToken for two-hops-back replay, got %v", err)
 	}
 
 	// C must remain valid.
 	tokD := uniqueTok(t, "d")
-	if _, _, err := s.Rotate(tokC, tokD, "c2", exp); err != nil {
+	if _, err := s.Rotate(tokC, tokD, "c2", exp); err != nil {
 		t.Errorf("current successor C should still work: %v", err)
 	}
 }
@@ -258,7 +260,7 @@ func TestRotateGraceWindow_ConcurrentReplaySameSuccessor(t *testing.T) {
 	exp := time.Now().Add(time.Hour)
 	tok1 := uniqueTok(t, "1")
 	tok2 := uniqueTok(t, "2")
-	if err := s.Insert(tok1, "dave", "c2", []string{}, exp); err != nil {
+	if err := s.Insert(tok1, "c2", Session{Login: "dave", Groups: []string{}}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 
@@ -270,7 +272,8 @@ func TestRotateGraceWindow_ConcurrentReplaySameSuccessor(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			login, _, err := s.Rotate(tok1, tok2, "c2", exp)
+			got, err := s.Rotate(tok1, tok2, "c2", exp)
+			login := got.Login
 			logins[i] = login
 			errs[i] = err
 		}(i)
@@ -307,10 +310,10 @@ func TestPostgresStore_NeverPersistsRawToken(t *testing.T) {
 	exp := time.Now().Add(time.Hour)
 	tok1 := uniqueTok(t, "1")
 	tok2 := uniqueTok(t, "2")
-	if err := s.Insert(tok1, "dave", "c2", []string{}, exp); err != nil {
+	if err := s.Insert(tok1, "c2", Session{Login: "dave", Groups: []string{}}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if _, _, err := s.Rotate(tok1, tok2, "c2", exp); err != nil {
+	if _, err := s.Rotate(tok1, tok2, "c2", exp); err != nil {
 		t.Fatalf("Rotate: %v", err)
 	}
 
@@ -356,11 +359,11 @@ func TestRotateReuseAfterGraceWindow_RevokesFamily(t *testing.T) {
 	tok3 := uniqueTok(t, "3")
 	tok4 := uniqueTok(t, "4")
 
-	if err := s.Insert(tok1, "dave", "c2", []string{}, exp); err != nil {
+	if err := s.Insert(tok1, "c2", Session{Login: "dave", Groups: []string{}}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	// First rotation succeeds.
-	if _, _, err := s.Rotate(tok1, tok2, "c2", exp); err != nil {
+	if _, err := s.Rotate(tok1, tok2, "c2", exp); err != nil {
 		t.Fatalf("first Rotate: %v", err)
 	}
 
@@ -368,12 +371,12 @@ func TestRotateReuseAfterGraceWindow_RevokesFamily(t *testing.T) {
 
 	// Replaying the already-rotated original token past the grace window =
 	// genuine reuse detection.
-	_, _, err := s.Rotate(tok1, tok3, "c2", exp)
+	_, err := s.Rotate(tok1, tok3, "c2", exp)
 	if !errors.Is(err, ErrReuseDetected) {
 		t.Errorf("expected ErrReuseDetected, got %v", err)
 	}
 	// The current token in the family (tok2) should also be revoked now.
-	_, _, err = s.Rotate(tok2, tok4, "c2", exp)
+	_, err = s.Rotate(tok2, tok4, "c2", exp)
 	if err == nil {
 		t.Error("expected error when using token from revoked family, got nil")
 	}
@@ -384,7 +387,7 @@ func TestConcurrentRotationRace(t *testing.T) {
 
 	exp := time.Now().Add(time.Hour)
 	base := uniqueTok(t, "base")
-	if err := s.Insert(base, "eve", "c3", []string{}, exp); err != nil {
+	if err := s.Insert(base, "c3", Session{Login: "eve", Groups: []string{}}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 
@@ -395,7 +398,7 @@ func TestConcurrentRotationRace(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, _, err := s.Rotate(base, fmt.Sprintf("%s-r%d", base, i), "c3", exp)
+			_, err := s.Rotate(base, fmt.Sprintf("%s-r%d", base, i), "c3", exp)
 			results[i] = err
 		}(i)
 	}
@@ -420,16 +423,16 @@ func TestRevokeFamily(t *testing.T) {
 	tok2 := uniqueTok(t, "2")
 	tok3 := uniqueTok(t, "3")
 
-	if err := s.Insert(tok1, "frank", "c4", []string{}, exp); err != nil {
+	if err := s.Insert(tok1, "c4", Session{Login: "frank", Groups: []string{}}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if _, _, err := s.Rotate(tok1, tok2, "c4", exp); err != nil {
+	if _, err := s.Rotate(tok1, tok2, "c4", exp); err != nil {
 		t.Fatalf("Rotate: %v", err)
 	}
 	if err := s.RevokeFamily(tok1, "c4", "test_revoke"); err != nil {
 		t.Fatalf("RevokeFamily: %v", err)
 	}
-	_, _, err := s.Rotate(tok2, tok3, "c4", exp)
+	_, err := s.Rotate(tok2, tok3, "c4", exp)
 	if err == nil {
 		t.Error("expected error after family revocation, got nil")
 	}
@@ -440,7 +443,7 @@ func TestGCRemovesOldRevokedRows(t *testing.T) {
 
 	exp := time.Now().Add(-8 * 24 * time.Hour) // expired 8 days ago
 	tok := uniqueTok(t, "gc")
-	if err := s.Insert(tok, "grace", "c5", []string{}, exp); err != nil {
+	if err := s.Insert(tok, "c5", Session{Login: "grace", Groups: []string{}}, exp); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	if err := s.RevokeFamily(tok, "c5", "gc_test"); err != nil {
@@ -450,7 +453,7 @@ func TestGCRemovesOldRevokedRows(t *testing.T) {
 		t.Fatalf("GC: %v", err)
 	}
 	// After GC the row is gone; any lookup should return not-found.
-	_, _, err := s.Rotate(tok, uniqueTok(t, "gc-new"), "c5", time.Now().Add(time.Hour))
+	_, err := s.Rotate(tok, uniqueTok(t, "gc-new"), "c5", time.Now().Add(time.Hour))
 	if !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("expected ErrInvalidToken after GC, got %v", err)
 	}
@@ -474,5 +477,40 @@ func TestGCRemovesOldRevokedRows(t *testing.T) {
 func TestDefaultRotationGraceWindow_CoversAClientRetryCycle(t *testing.T) {
 	if defaultRotationGraceWindow < time.Minute {
 		t.Errorf("defaultRotationGraceWindow = %s, want at least 1m: see the comment on rotationGraceWindow", defaultRotationGraceWindow)
+	}
+}
+
+// The principal a session was minted for survives every rotation path, the
+// grace-window replay included (mctl-api#377): a refresh that dropped it
+// would mint a pid-less token, which principal mode refuses.
+func TestRotateCarriesThePrincipal(t *testing.T) {
+	s := newTestStore(t)
+	withShortGraceWindow(t, time.Hour)
+	const prn = "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ"
+	exp := time.Now().Add(time.Hour)
+	tok1, tok2 := uniqueTok(t, "1"), uniqueTok(t, "2")
+	if err := s.Insert(tok1, "c", Session{Login: "erin", PrincipalID: prn, Groups: []string{}}, exp); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	got, err := s.Rotate(tok1, tok2, "c", exp)
+	if err != nil || got.PrincipalID != prn || got.Login != "erin" {
+		t.Fatalf("Rotate = %+v, %v; want erin / %s", got, err, prn)
+	}
+	got, err = s.Rotate(tok1, tok2, "c", exp)
+	if err != nil || got.PrincipalID != prn {
+		t.Fatalf("grace replay = %+v, %v; want %s", got, err, prn)
+	}
+	got, err = s.Rotate(tok2, uniqueTok(t, "3"), "c", exp)
+	if err != nil || got.PrincipalID != prn {
+		t.Fatalf("second Rotate = %+v, %v; want %s", got, err, prn)
+	}
+
+	// A principal-only session has no login at all.
+	tok4 := uniqueTok(t, "4")
+	if err := s.Insert(tok4, "c", Session{PrincipalID: prn}, exp); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if got, err := s.Rotate(tok4, uniqueTok(t, "5"), "c", exp); err != nil || got.PrincipalID != prn || got.Login != "" {
+		t.Fatalf("principal-only Rotate = %+v, %v", got, err)
 	}
 }

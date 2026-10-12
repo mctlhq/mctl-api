@@ -22,7 +22,7 @@ everything in this document stay exactly as they are.
 | Caller | provider | issuer | subject | kind |
 |---|---|---|---|---|
 | GitHub token | `github` | — | numeric GitHub user id | human |
-| local OAuth JWT (GitHub callback) | `github` | — | resolved from the login, see below | human |
+| local OAuth JWT (GitHub callback) | `github` | — | its `pid` claim when it has one, else resolved from the login (see below) | human |
 | Dex JWT | `dex` | token `iss` | token `sub` | human |
 | `MCTL_AGENT_SERVICE_TOKEN` | `service` | — | `mctl-agent` | service |
 | surface token | `service` | — | `surface:<name>` | service |
@@ -181,7 +181,7 @@ read-only (`Store.LinkedGitHub`):
 
 | Lookup | Answer |
 |---|---|
-| linked to P, P has one live GitHub identity with a login | code for that login: `IssueCode(login, ResolveGroups(login))`, the same code, groups and admin decision (`ADMIN_USERS`) a GitHub sign-in of P yields |
+| linked to P, P has one live GitHub identity with a login | code for that login and P (`pid`): the same code, groups and admin decision (`ADMIN_USERS`) a GitHub sign-in of P yields; in `principal` mode no groups are minted |
 | no row, or a principal of its own with no GitHub identity | 403 page linking to `/identity/link/zitadel`; nothing issued or provisioned |
 | identity revoked, or P disabled | 403 |
 | P's GitHub login unknown (taken by another account) or two live GitHub identities | 409, nothing guessed |
@@ -348,6 +348,51 @@ caller's authorization; it never merges with the legacy one:
   an unresolved principal is 503.
 - a platform-skill role binding on `admins` means platform admin, never a
   tenant named `admins`.
+
+### Local tokens carry the principal (`pid`)
+
+Every local OAuth JWT and refresh token now records the principal it was
+signed in for, in every mode: a GitHub sign-in resolves it from the
+numeric GitHub id, a ZITADEL sign-in from the linked identity. The access
+token carries it as the `pid` claim; the refresh token row as
+`principal_id` (`oauth_refresh_tokens`, added in place), and every
+rotation carries it forward.
+
+- A sign-in whose principal is disabled or refused gets a 403 page in every
+  mode. Any other resolution failure mints without a principal outside
+  `principal` mode, and answers 503 in it. A GitHub sign-in stopped either
+  way is counted as `oauth_upstream_signins_total{upstream="github"}` with
+  `result` `principal_refused` or `principal_unavailable`.
+- In `principal` mode the `pid` is **checked** on each request (exists,
+  not disabled), never re-derived from the login. Outside it the principal
+  is still resolved from the login as before, and a `pid` that names a
+  different one is counted in `oauth_token_principal_mismatch_total`,
+  which must stay at zero before the switch.
+- A principal with no GitHub login gets a token whose `sub` is its
+  principal id. GitHub logins cannot contain `_`, so such a `sub` never
+  reads as a login. The identity namespace `principal` is reserved: only
+  the local OAuth provider may return it.
+- In `principal` mode a token without a `pid` is refused (401), a
+  principal-only token must have `sub == pid`, and a refresh of a session
+  with no recorded principal answers `invalid_grant`. Outside it, a
+  principal-only token is refused.
+
+At the switch, sessions minted before this release carry no `pid`, so
+their holders sign in again. With the persistent refresh store the refresh
+token is rotated before its missing `pid` is refused, so a client that
+retries it gets `invalid_grant` and, once the rotation grace window has
+passed, trips reuse detection: the family is revoked and `oauth refresh
+token reuse detected; family revoked` is logged as a warning. On switch day
+those warnings are pre-#377 sessions, not stolen tokens.
+
+A disabled principal, merged-away ones included (a merge disables `from`),
+is refused on every request. An **unlink is not**: the principal stays
+active, and a session signed in through the unlinked identity keeps acting
+as that principal through every refresh until its refresh family expires
+(`OAUTH_REFRESH_TOKEN_TTL`, 30 days by default) or is revoked. Nothing
+re-checks the identity at refresh. Revoking refresh families by
+`principal_id` on unlink (the column is indexed for it) must land before
+the switch.
 
 ### Metrics
 

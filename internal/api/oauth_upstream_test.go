@@ -65,8 +65,8 @@ func (f *fakeLinkedStore) LinkedGitHub(_ context.Context, id auth.Identity) (*pr
 
 func linkedTo(login string) *fakeLinkedStore {
 	return &fakeLinkedStore{
-		p:  &principals.Principal{ID: "prn_1", Kind: auth.KindHuman, Status: principals.StatusActive},
-		gh: &principals.ExternalIdentity{ID: "xid_gh", PrincipalID: "prn_1", Provider: auth.ProviderGitHub, Subject: "42", Display: login},
+		p:  &principals.Principal{ID: "prn_01JTESTAAAAAAAAAAAAAAAAAAA", Kind: auth.KindHuman, Status: principals.StatusActive},
+		gh: &principals.ExternalIdentity{ID: "xid_gh", PrincipalID: "prn_01JTESTAAAAAAAAAAAAAAAAAAA", Provider: auth.ProviderGitHub, Subject: "42", Display: login},
 	}
 }
 
@@ -224,7 +224,7 @@ func TestZitadelSigninIssuesTheLinkedGitHubLoginsCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := h.oauth.IssueJWT("mashkovd", h.oauth.ResolveGroups("mashkovd"))
+	ref, err := h.oauth.IssueJWT("mashkovd", "prn_01JTESTAAAAAAAAAAAAAAAAAAA", h.oauth.ResolveGroups("mashkovd"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestZitadelSigninMetricSeparatesFailures(t *testing.T) {
 }
 
 func TestZitadelSigninRefusals(t *testing.T) {
-	p := &principals.Principal{ID: "prn_1", Status: principals.StatusActive}
+	p := &principals.Principal{ID: "prn_01JTESTAAAAAAAAAAAAAAAAAAA", Status: principals.StatusActive}
 	// The principal is returned as principals.Store.LinkedGitHub does:
 	// not with a revoked identity or a disabled principal.
 	cases := map[string]struct {

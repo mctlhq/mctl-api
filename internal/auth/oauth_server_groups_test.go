@@ -104,6 +104,7 @@ func (r *syncingTenantResolver) setLastSync(t time.Time) {
 // fakeRefreshToken is one row of fakeRefreshStore.
 type fakeRefreshToken struct {
 	login     string
+	pid       string
 	clientID  string
 	groups    []string
 	familyID  string
@@ -126,12 +127,14 @@ func newFakeRefreshStore() *fakeRefreshStore {
 	return &fakeRefreshStore{tokens: make(map[string]*fakeRefreshToken)}
 }
 
-func (f *fakeRefreshStore) Insert(rawToken, login, clientID string, groups []string, _ time.Time) error {
+func (f *fakeRefreshStore) Insert(rawToken, clientID string, sess refreshstore.Session, _ time.Time) error {
+	login, groups := sess.Login, sess.Groups
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.seq++
 	f.tokens[rawToken] = &fakeRefreshToken{
 		login:    login,
+		pid:      sess.PrincipalID,
 		clientID: clientID,
 		groups:   append([]string(nil), groups...),
 		familyID: fmt.Sprintf("%s-family-%d", login, f.seq),
@@ -139,15 +142,15 @@ func (f *fakeRefreshStore) Insert(rawToken, login, clientID string, groups []str
 	return nil
 }
 
-func (f *fakeRefreshStore) Rotate(oldRawToken, newRawToken, clientID string, _ time.Time) (string, []string, error) {
+func (f *fakeRefreshStore) Rotate(oldRawToken, newRawToken, clientID string, _ time.Time) (refreshstore.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	entry, ok := f.tokens[oldRawToken]
 	if !ok {
-		return "", nil, refreshstore.ErrInvalidToken
+		return refreshstore.Session{}, refreshstore.ErrInvalidToken
 	}
 	if entry.revoked {
-		return "", nil, refreshstore.ErrInvalidToken
+		return refreshstore.Session{}, refreshstore.ErrInvalidToken
 	}
 	if entry.rotatedTo != "" {
 		// Reuse of an already-rotated token: revoke the whole family, same
@@ -157,19 +160,20 @@ func (f *fakeRefreshStore) Rotate(oldRawToken, newRawToken, clientID string, _ t
 				e.revoked = true
 			}
 		}
-		return "", nil, refreshstore.ErrReuseDetected
+		return refreshstore.Session{}, refreshstore.ErrReuseDetected
 	}
 	if entry.clientID != clientID {
-		return "", nil, refreshstore.ErrClientMismatch
+		return refreshstore.Session{}, refreshstore.ErrClientMismatch
 	}
 	entry.rotatedTo = newRawToken
 	f.tokens[newRawToken] = &fakeRefreshToken{
 		login:    entry.login,
+		pid:      entry.pid,
 		clientID: entry.clientID,
 		groups:   append([]string(nil), entry.groups...),
 		familyID: entry.familyID,
 	}
-	return entry.login, append([]string(nil), entry.groups...), nil
+	return refreshstore.Session{Login: entry.login, PrincipalID: entry.pid, Groups: append([]string(nil), entry.groups...)}, nil
 }
 
 func (f *fakeRefreshStore) RevokeFamily(rawToken, clientID, _ string) error {
@@ -240,7 +244,7 @@ func TestGroupsRefreshStoreGrant(t *testing.T) {
 	resolver.setTenants("dmitrii", []string{"acme", "karabu"})
 	server.TenantResolver = resolver
 
-	if err := store.Insert("refresh-t1", "dmitrii", "client-1", []string{"acme"}, time.Now().Add(time.Hour)); err != nil {
+	if err := store.Insert("refresh-t1", "client-1", refreshstore.Session{Login: "dmitrii", Groups: []string{"acme"}}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
@@ -262,7 +266,7 @@ func TestGroupsRefreshStoreRevoke(t *testing.T) {
 	resolver.setTenants("dmitrii", []string{"acme"})
 	server.TenantResolver = resolver
 
-	if err := store.Insert("refresh-t2", "dmitrii", "client-1", []string{"acme", "karabu"}, time.Now().Add(time.Hour)); err != nil {
+	if err := store.Insert("refresh-t2", "client-1", refreshstore.Session{Login: "dmitrii", Groups: []string{"acme", "karabu"}}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
@@ -284,7 +288,7 @@ func TestGroupsInMemoryGrant(t *testing.T) {
 	resolver.setTenants("dmitrii", []string{"acme", "karabu"})
 	server.TenantResolver = resolver
 
-	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme"}, "client-1")
+	raw, err := server.IssueRefreshToken("dmitrii", "", []string{"acme"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}
@@ -304,7 +308,7 @@ func TestGroupsInMemoryRevoke(t *testing.T) {
 	resolver.setTenants("dmitrii", []string{"acme"})
 	server.TenantResolver = resolver
 
-	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme", "karabu"}, "client-1")
+	raw, err := server.IssueRefreshToken("dmitrii", "", []string{"acme", "karabu"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}
@@ -337,7 +341,7 @@ func TestGroupsAdminsGained(t *testing.T) {
 	resolver.setTenants("dmitrii", nil)
 	server.TenantResolver = resolver
 
-	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme"}, "client-1")
+	raw, err := server.IssueRefreshToken("dmitrii", "", []string{"acme"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}
@@ -358,7 +362,7 @@ func TestGroupsAdminsLost(t *testing.T) {
 	resolver.setTenants("dmitrii", []string{"acme"})
 	server.TenantResolver = resolver
 
-	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme", "admins"}, "client-1")
+	raw, err := server.IssueRefreshToken("dmitrii", "", []string{"acme", "admins"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}
@@ -381,7 +385,7 @@ func TestGroupsDegradedWithinGrace(t *testing.T) {
 	server.TenantResolver = resolver
 	server.GroupsDegradedGrace = time.Hour
 
-	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme"}, "client-1")
+	raw, err := server.IssueRefreshToken("dmitrii", "", []string{"acme"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}
@@ -408,7 +412,7 @@ func TestGroupsFailClosedBeyondGrace(t *testing.T) {
 	// Push the last successful resolution back beyond the grace window.
 	server.lastResolveOK.Store(time.Now().Add(-time.Hour).UnixNano())
 
-	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme"}, "client-1")
+	raw, err := server.IssueRefreshToken("dmitrii", "", []string{"acme"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}
@@ -433,7 +437,7 @@ func TestGroupsNeverSyncedIsNotNoTenants(t *testing.T) {
 	server.TenantResolver = resolver
 	server.GroupsDegradedGrace = time.Hour
 
-	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme"}, "client-1")
+	raw, err := server.IssueRefreshToken("dmitrii", "", []string{"acme"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}
@@ -457,7 +461,7 @@ func TestGroupsStaleButPresentStillAnswers(t *testing.T) {
 	resolver.setTenants("dmitrii", []string{"acme", "karabu"})
 	server.TenantResolver = resolver
 
-	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme"}, "client-1")
+	raw, err := server.IssueRefreshToken("dmitrii", "", []string{"acme"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}
@@ -488,7 +492,7 @@ func TestGroupsStrictMode(t *testing.T) {
 	server.GroupsMaxStaleness = 15 * time.Minute
 	server.GroupsDegradedGrace = time.Hour
 
-	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme"}, "client-1")
+	raw, err := server.IssueRefreshToken("dmitrii", "", []string{"acme"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}
@@ -514,7 +518,7 @@ func TestGroupsStrictMode(t *testing.T) {
 	server2.GroupsMaxStaleness = 5 * time.Minute
 	server2.GroupsDegradedGrace = time.Hour
 
-	raw2, err := server2.IssueRefreshToken("dmitrii", []string{"acme"}, "client-1")
+	raw2, err := server2.IssueRefreshToken("dmitrii", "", []string{"acme"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}
@@ -577,7 +581,7 @@ func TestGroupsNoResolverBackCompat(t *testing.T) {
 	server := newTestOAuthServer(t)
 	// TenantResolver left nil.
 
-	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme"}, "client-1")
+	raw, err := server.IssueRefreshToken("dmitrii", "", []string{"acme"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}
@@ -606,7 +610,7 @@ func TestValidateJWTReResolves(t *testing.T) {
 	resolver.setTenants("dmitrii", []string{"acme"})
 	server.TenantResolver = resolver
 
-	token, err := server.IssueJWT("dmitrii", []string{"acme"})
+	token, err := server.IssueJWT("dmitrii", "", []string{"acme"})
 	if err != nil {
 		t.Fatalf("IssueJWT: %v", err)
 	}
@@ -648,7 +652,7 @@ func TestGroupsMemoBoundsResolverCalls(t *testing.T) {
 	resolver.setTenants("other", []string{"beta"})
 	server.TenantResolver = resolver
 
-	token, err := server.IssueJWT("dmitrii", nil)
+	token, err := server.IssueJWT("dmitrii", "", nil)
 	if err != nil {
 		t.Fatalf("IssueJWT: %v", err)
 	}
@@ -661,7 +665,7 @@ func TestGroupsMemoBoundsResolverCalls(t *testing.T) {
 		t.Fatalf("expected exactly one GetTenantsForUser call for one login within the memo TTL, got %d", got)
 	}
 
-	token2, err := server.IssueJWT("other", nil)
+	token2, err := server.IssueJWT("other", "", nil)
 	if err != nil {
 		t.Fatalf("IssueJWT: %v", err)
 	}
@@ -679,7 +683,7 @@ func TestGroupsRotationRegressionFakeStore(t *testing.T) {
 	server := newTestOAuthServer(t)
 	store := newFakeRefreshStore()
 	server.RefreshStore = store
-	if err := store.Insert("refresh-t13", "dmitrii", "client-1", []string{"acme"}, time.Now().Add(time.Hour)); err != nil {
+	if err := store.Insert("refresh-t13", "client-1", refreshstore.Session{Login: "dmitrii", Groups: []string{"acme"}}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
@@ -959,7 +963,7 @@ func TestInMemoryRefreshKeepsSnapshotOnFailClosed(t *testing.T) {
 	server.TenantResolver = resolver
 	server.lastResolveOK.Store(time.Now().Add(-time.Hour).UnixNano())
 
-	raw, err := server.IssueRefreshToken("dmitrii", []string{"acme"}, "client-1")
+	raw, err := server.IssueRefreshToken("dmitrii", "", []string{"acme"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken: %v", err)
 	}

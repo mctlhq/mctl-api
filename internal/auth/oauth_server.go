@@ -145,6 +145,11 @@ type OAuthServer struct {
 	GitHubClientSecret string
 	// JWTSecret is the HMAC-SHA256 signing key for issued access tokens.
 	JWTSecret []byte
+	// PrincipalMode is TENANT_AUTHZ_MODE=principal (mctl-api#377): an
+	// access token is then accepted only with a pid claim, which names the
+	// caller's principal; groups are not resolved from the login, and a
+	// session with no recorded principal cannot be refreshed.
+	PrincipalMode bool
 	// AllowedRedirectURIs is the whitelist of permitted redirect_uri values.
 	AllowedRedirectURIs []string
 	// AccessTokenTTL is the lifetime of issued access tokens (default: 1h).
@@ -1331,9 +1336,16 @@ type pendingRecord struct {
 	ClientState []byte
 }
 
-// IssueCode generates a random authorization code for a GitHub login.
-// The code is stored alongside the PKCE challenge for later verification.
-func (s *OAuthServer) IssueCode(ctx context.Context, login, clientID, redirectURI, codeChallenge string, groups []string) (string, error) {
+// IssueCode generates a random authorization code for a GitHub login and
+// the principal it signed in as ("" when it could not be resolved, which
+// principal mode refuses before getting here). The code is stored alongside
+// the PKCE challenge for later verification. A malformed principal id is
+// refused here, at sign-in, rather than by IssueJWT once the code has been
+// spent at the token endpoint.
+func (s *OAuthServer) IssueCode(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string) (string, error) {
+	if principalID != "" && !ValidPrincipalID(principalID) {
+		return "", fmt.Errorf("malformed principal id %q", principalID)
+	}
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate code: %w", err)
@@ -1341,6 +1353,7 @@ func (s *OAuthServer) IssueCode(ctx context.Context, login, clientID, redirectUR
 	code := base64.RawURLEncoding.EncodeToString(b)
 	entry := authCodeEntry{
 		Login:         login,
+		PrincipalID:   principalID,
 		Groups:        groups,
 		ClientID:      clientID,
 		RedirectURI:   redirectURI,
@@ -1423,11 +1436,11 @@ func (s *OAuthServer) ExchangeCode(ctx context.Context, code, codeVerifier, clie
 	if !verifyPKCE(codeVerifier, entry.CodeChallenge) {
 		return "", "", errors.New("PKCE verification failed")
 	}
-	accessToken, err := s.IssueJWT(entry.Login, entry.Groups)
+	accessToken, err := s.IssueJWT(entry.Login, entry.PrincipalID, entry.Groups)
 	if err != nil {
 		return "", "", err
 	}
-	refreshToken, err := s.IssueRefreshToken(entry.Login, entry.Groups, clientID)
+	refreshToken, err := s.IssueRefreshToken(entry.Login, entry.PrincipalID, entry.Groups, clientID)
 	if err != nil {
 		return "", "", err
 	}
@@ -1435,8 +1448,20 @@ func (s *OAuthServer) ExchangeCode(ctx context.Context, code, codeVerifier, clie
 	return accessToken, refreshToken, nil
 }
 
-// IssueJWT creates a signed JWT access token for the given user.
-func (s *OAuthServer) IssueJWT(login string, groups []string) (string, error) {
+// IssueJWT creates a signed JWT access token for the given user. principalID
+// becomes the pid claim; with no login, the token is for a principal with
+// no GitHub login and its subject is the principal id.
+func (s *OAuthServer) IssueJWT(login, principalID string, groups []string) (string, error) {
+	if principalID != "" && !ValidPrincipalID(principalID) {
+		return "", fmt.Errorf("issue token: %q is not a principal id", principalID)
+	}
+	subject := login
+	if subject == "" {
+		if principalID == "" {
+			return "", errors.New("issue token: neither a login nor a principal")
+		}
+		subject = principalID
+	}
 	ttl := s.AccessTokenTTL
 	if ttl == 0 {
 		ttl = time.Hour
@@ -1444,7 +1469,8 @@ func (s *OAuthServer) IssueJWT(login string, groups []string) (string, error) {
 	now := time.Now()
 	payload := jwtPayload{
 		Issuer:    s.BaseURL,
-		Subject:   login,
+		Subject:   subject,
+		PID:       principalID,
 		Groups:    groups,
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(ttl).Unix(),
@@ -1453,7 +1479,7 @@ func (s *OAuthServer) IssueJWT(login string, groups []string) (string, error) {
 }
 
 // IssueRefreshToken creates and stores a refresh token for the given user and client.
-func (s *OAuthServer) IssueRefreshToken(login string, groups []string, clientID string) (string, error) {
+func (s *OAuthServer) IssueRefreshToken(login, principalID string, groups []string, clientID string) (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate refresh token: %w", err)
@@ -1465,18 +1491,19 @@ func (s *OAuthServer) IssueRefreshToken(login string, groups []string, clientID 
 	}
 	expiresAt := time.Now().Add(ttl)
 	if s.RefreshStore != nil {
-		if err := s.RefreshStore.Insert(token, login, clientID, groups, expiresAt); err != nil {
+		if err := s.RefreshStore.Insert(token, clientID, refreshstore.Session{Login: login, PrincipalID: principalID, Groups: groups}, expiresAt); err != nil {
 			slog.Error("oauth: refresh store insert failed", "error", err)
 			return "", fmt.Errorf("store refresh token: %w", ErrServerError)
 		}
 		return token, nil
 	}
 	s.refreshTokens.store(token, refreshTokenEntry{
-		Login:     login,
-		Groups:    groups,
-		ClientID:  clientID,
-		CreatedAt: time.Now(),
-		ExpiresAt: expiresAt,
+		Login:       login,
+		PrincipalID: principalID,
+		Groups:      groups,
+		ClientID:    clientID,
+		CreatedAt:   time.Now(),
+		ExpiresAt:   expiresAt,
 	})
 	return token, nil
 }
@@ -1489,7 +1516,7 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 		if ttl == 0 {
 			ttl = 30 * 24 * time.Hour
 		}
-		login, storedGroups, err := s.RefreshStore.Rotate(refreshToken, newToken, clientID, time.Now().Add(ttl))
+		sess, err := s.RefreshStore.Rotate(refreshToken, newToken, clientID, time.Now().Add(ttl))
 		if err != nil {
 			// Map store errors to the same string used by the in-memory path so
 			// oauth_handlers.go doesn't need to import the refreshstore package.
@@ -1509,8 +1536,14 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 		// That snapshot's staleness is no longer load-bearing because
 		// groupsForSession re-resolves it here, bounded by the degraded-grace
 		// fallback when resolution fails.
-		groups := s.groupsForSession(login, storedGroups)
-		accessToken, err := s.IssueJWT(login, groups)
+		if err := s.refreshablePrincipal(sess.PrincipalID); err != nil {
+			return "", "", err
+		}
+		var groups []string
+		if !s.PrincipalMode {
+			groups = s.groupsForSession(sess.Login, sess.Groups)
+		}
+		accessToken, err := s.IssueJWT(sess.Login, sess.PrincipalID, groups)
 		if err != nil {
 			return "", "", err
 		}
@@ -1529,8 +1562,15 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 	// resolution. A degraded or fail-closed fallback must not overwrite the
 	// snapshot: that would leave the next outage nothing to fall back on
 	// (the store path never overwrites it, since Rotate carries it forward).
-	groups, fresh := s.sessionGroups(entry.Login, entry.Groups)
-	accessToken, err := s.IssueJWT(entry.Login, groups)
+	if err := s.refreshablePrincipal(entry.PrincipalID); err != nil {
+		return "", "", err
+	}
+	var groups []string
+	fresh := false
+	if !s.PrincipalMode {
+		groups, fresh = s.sessionGroups(entry.Login, entry.Groups)
+	}
+	accessToken, err := s.IssueJWT(entry.Login, entry.PrincipalID, groups)
 	if err != nil {
 		return "", "", err
 	}
@@ -1538,12 +1578,24 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 	if fresh {
 		snapshot = groups
 	}
-	newRefreshToken, err := s.IssueRefreshToken(entry.Login, snapshot, clientID)
+	newRefreshToken, err := s.IssueRefreshToken(entry.Login, entry.PrincipalID, snapshot, clientID)
 	if err != nil {
 		return "", "", err
 	}
 	s.touchClient(clientID)
 	return accessToken, newRefreshToken, nil
+}
+
+// refreshablePrincipal refuses, in principal mode, to refresh a session
+// with no recorded principal (minted before mctl-api#377 recorded one): its
+// access tokens would be refused anyway, and re-deriving the principal from
+// the login is what principal mode removes. The holder signs in again. The
+// error reads as an invalid grant, which is what tells a client to do that.
+func (s *OAuthServer) refreshablePrincipal(principalID string) error {
+	if s.PrincipalMode && principalID == "" {
+		return errors.New("invalid or expired refresh token")
+	}
+	return nil
 }
 
 // RevokeRefreshToken revokes a stored refresh token (and its whole family when
@@ -1569,6 +1621,30 @@ func (s *OAuthServer) ValidateJWT(token string) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A subject that is a principal id is a principal with no GitHub
+	// login. A GitHub login can never take that shape (logins hold no
+	// underscore), so no such token can pass for a login, in any mode or
+	// in an older build.
+	principalOnly := ValidPrincipalID(payload.Subject)
+	if s.PrincipalMode {
+		if !ValidPrincipalID(payload.PID) {
+			return nil, ErrTokenWithoutPrincipal
+		}
+		if principalOnly {
+			if payload.Subject != payload.PID {
+				return nil, errors.New("malformed token: subject and pid name different principals")
+			}
+			return &User{ID: payload.PID, principalID: payload.PID, tokenPrincipal: true}, nil
+		}
+		// Groups are decided by principal (PrincipalAuthz.Apply), never
+		// resolved from the login here.
+		u := NewGitHubUser(payload.Subject, nil)
+		u.principalID, u.tokenPrincipal = payload.PID, true
+		return u, nil
+	}
+	if principalOnly {
+		return nil, errors.New("this token is for a principal without a GitHub login, which is accepted only when tenant authorization is by principal")
+	}
 	// The subject is the GitHub login the OAuth callback validated before
 	// IssueCode; this server mints for no other identity provider. The
 	// groups claim is retained on the token for compatibility and as the
@@ -1576,8 +1652,17 @@ func (s *OAuthServer) ValidateJWT(token string) (*User, error) {
 	// re-resolved here on every validation, which is what lets a same-session
 	// tenant grant or removal reach a live session without waiting for the
 	// access token to expire (requirements.md, the reported "karabu" case).
-	return NewGitHubUser(payload.Subject, s.groupsForSession(payload.Subject, payload.Groups)), nil
+	u := NewGitHubUser(payload.Subject, s.groupsForSession(payload.Subject, payload.Groups))
+	if ValidPrincipalID(payload.PID) {
+		u.tokenPID = payload.PID
+	}
+	return u, nil
 }
+
+// ErrTokenWithoutPrincipal: in principal mode, a local access token that
+// names no principal (minted before mctl-api#377 recorded one). Refused, so
+// the holder signs in again, rather than resolved from its login.
+var ErrTokenWithoutPrincipal = errors.New("this token predates principal sign-in; sign in again")
 
 // ─── PKCE ─────────────────────────────────────────────────────────────────────
 
@@ -1597,8 +1682,12 @@ func verifyPKCE(verifier, challenge string) bool {
 var jwtHeader = base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 
 type jwtPayload struct {
-	Issuer    string   `json:"iss"`
-	Subject   string   `json:"sub"`
+	Issuer  string `json:"iss"`
+	Subject string `json:"sub"`
+	// PID is the canonical principal the token was minted for
+	// (mctl-api#377). Subject is the GitHub login, or the principal id
+	// itself for a principal with no GitHub login.
+	PID       string   `json:"pid,omitempty"`
 	Groups    []string `json:"groups"`
 	IssuedAt  int64    `json:"iat"`
 	ExpiresAt int64    `json:"exp"`
@@ -1653,6 +1742,7 @@ const pendingAuthTTL = 5 * time.Minute
 
 type authCodeEntry struct {
 	Login         string
+	PrincipalID   string
 	Groups        []string
 	ClientID      string
 	RedirectURI   string
@@ -1675,11 +1765,12 @@ type pendingAuth struct {
 }
 
 type refreshTokenEntry struct {
-	Login     string
-	Groups    []string
-	ClientID  string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	Login       string
+	PrincipalID string
+	Groups      []string
+	ClientID    string
+	CreatedAt   time.Time
+	ExpiresAt   time.Time
 }
 
 type authCodeStore struct {

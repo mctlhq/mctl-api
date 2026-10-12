@@ -72,6 +72,12 @@ type Claims struct {
 	// minted for (githubActionsProvider only). Authorization compares it to
 	// the deploy request and the component's registered source repository.
 	CIRepository string
+	// TokenPrincipal is the principal a local OAuth token was minted for,
+	// accepted as the caller's principal (principal mode), and TokenPID the
+	// same claim outside principal mode, recorded only for comparison.
+	// localOAuthProvider alone sets either.
+	TokenPrincipal string
+	TokenPID       string
 }
 
 // tokenShape is computed once per request from the existing isJWT/jwtIssuer
@@ -157,6 +163,9 @@ var reservedProviderNames = map[string]bool{
 	// Only githubActionsProvider may declare it (NewRegistry exempts that
 	// type), so no MCTL_OIDC_PROVIDERS entry can mint a CI principal.
 	ProviderGitHubActions: true,
+	// The local-OAuth provider alone yields it, for a token minted for a
+	// principal; any other provider declaring it could name any principal.
+	ProviderPrincipal: true,
 }
 
 // reservedNameExempt reports whether p is one of the built-in JWT providers
@@ -352,7 +361,7 @@ func checkProviderContract(p Provider, v *Verified) error {
 	if v == nil {
 		return fmt.Errorf("%w: provider %q returned no result", ErrProviderContractViolation, p.Name())
 	}
-	if v.Identity.Provider != p.Name() {
+	if v.Identity.Provider != p.Name() && !principalTokenOf(p, v) {
 		return fmt.Errorf("%w: provider %q returned identity in namespace %q", ErrProviderContractViolation, p.Name(), v.Identity.Provider)
 	}
 	if v.Identity.Subject == "" && !v.Identity.GitHubLoginOnly() {
@@ -364,6 +373,14 @@ func checkProviderContract(p Provider, v *Verified) error {
 		return fmt.Errorf("%w: provider %q returned kind %q", ErrProviderContractViolation, p.Name(), v.Identity.Kind)
 	}
 	return nil
+}
+
+// principalTokenOf reports whether v is a local-OAuth token minted for a
+// principal with no GitHub login (mctl-api#377): the one identity a
+// provider may return outside its own namespace, and only that provider.
+func principalTokenOf(p Provider, v *Verified) bool {
+	_, local := p.(*localOAuthProvider)
+	return local && v.Identity.Provider == ProviderPrincipal
 }
 
 // Federation metrics (design.md "Observability"), registered once following

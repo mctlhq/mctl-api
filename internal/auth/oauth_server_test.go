@@ -21,8 +21,7 @@ func TestOAuthServerExchangeCodeReturnsRefreshToken(t *testing.T) {
 	server.RefreshTokenTTL = 24 * time.Hour
 
 	code, err := server.IssueCode(context.Background(),
-		"dmitrii",
-		"client-1",
+		"dmitrii", "", "client-1",
 		"https://client.example/callback",
 		testPKCEChallenge(t, "verifier-1"),
 		[]string{"my-team"},
@@ -71,7 +70,7 @@ func TestOAuthServerRefreshRotatesToken(t *testing.T) {
 		NewGitHubValidator(nil),
 	)
 
-	refreshToken, err := server.IssueRefreshToken("dmitrii", []string{"my-team"}, "client-1")
+	refreshToken, err := server.IssueRefreshToken("dmitrii", "", []string{"my-team"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken failed: %v", err)
 	}
@@ -105,7 +104,7 @@ func TestOAuthServerRevokeRefreshToken(t *testing.T) {
 		NewGitHubValidator(nil),
 	)
 
-	refreshToken, err := server.IssueRefreshToken("dmitrii", []string{"my-team"}, "client-1")
+	refreshToken, err := server.IssueRefreshToken("dmitrii", "", []string{"my-team"}, "client-1")
 	if err != nil {
 		t.Fatalf("IssueRefreshToken failed: %v", err)
 	}
