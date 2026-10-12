@@ -96,6 +96,7 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	labelStoredTrace(stored, traceNotDerived)
 	writeJSON(w, http.StatusCreated, stored)
 }
 
@@ -201,9 +202,7 @@ func (h *Handlers) ListIncidents(w http.ResponseWriter, r *http.Request) {
 	// The list does not run the audit derivation; mark the absence so it is
 	// never read as "this incident has no trace".
 	for i := range items {
-		if items[i].TraceID == "" {
-			items[i].TraceUnavailable = traceNotDerivedOnList
-		}
+		labelStoredTrace(&items[i], traceNotDerivedOnList)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -242,8 +241,7 @@ func (h *Handlers) GetIncident(w http.ResponseWriter, r *http.Request) {
 		lookup = h.opts.AuditLog
 	}
 	deriveIncidentTrace(r.Context(), a, lookup, func(e *audit.Entry) bool {
-		team := auditEntryTenant(e)
-		return user.IsAdmin() || team == "" || user.HasTenantAccess(team)
+		return canReadAuditEntry(user, e)
 	})
 
 	writeJSON(w, http.StatusOK, a)
@@ -312,7 +310,6 @@ func (h *Handlers) UpdateIncident(w http.ResponseWriter, r *http.Request) {
 
 	if id := validIncidentTraceID(patch.TraceID); id != "" {
 		existing.TraceID = id
-		existing.TraceSource = "reported"
 	}
 
 	if err := h.opts.AlertStore.Update(r.Context(), existing); err != nil {
@@ -320,6 +317,7 @@ func (h *Handlers) UpdateIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	labelStoredTrace(existing, traceNotDerived)
 	writeJSON(w, http.StatusOK, existing)
 }
 
@@ -363,6 +361,7 @@ func (h *Handlers) AcknowledgeIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	labelStoredTrace(existing, traceNotDerived)
 	writeJSON(w, http.StatusOK, existing)
 }
 
@@ -411,6 +410,7 @@ func (h *Handlers) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	labelStoredTrace(existing, traceNotDerived)
 	writeJSON(w, http.StatusOK, existing)
 }
 

@@ -23,26 +23,71 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/audit"
+	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // trace_unavailable reasons. Exactly one is set when no trace id is returned.
 const (
-	traceNotReported       = "not_reported"
-	traceNotDerivedOnList  = "not_derived_on_list"
-	traceWorkflowUnknown   = "workflow_name_unknown"
-	traceAuditUnavailable  = "audit_unavailable"
-	traceAuditNotFound     = "audit_record_not_found"
-	traceNoTraceparent     = "no_traceparent_in_audit_record"
-	traceAuditForbidden    = "audit_record_forbidden"
-	incidentSourceArgo     = "argo-workflows"
-	incidentAuditTimeout   = 2 * time.Second
+	traceNotReported      = "not_reported"
+	traceNotDerivedOnList = "not_derived_on_list"
+	// traceNotDerived marks write responses (create, patch, ack, resolve),
+	// which return the stored row without running the audit derivation.
+	traceNotDerived       = "not_derived"
+	traceWorkflowUnknown  = "workflow_name_unknown"
+	traceAuditUnavailable = "audit_unavailable"
+	traceAuditNotFound    = "audit_record_not_found"
+	traceNoTraceparent    = "no_traceparent_in_audit_record"
+	traceAuditForbidden   = "audit_record_forbidden"
+)
+
+// trace_source values.
+const (
 	traceSourceReported    = "reported"
 	traceSourceAuditDerive = "workflow_audit"
 )
 
-var workflowURLRe = regexp.MustCompile(`(?:^|\s)https://workflows\.mctl\.ai/workflows/[a-z0-9-]+/([a-z0-9][a-z0-9.-]*)`)
+const (
+	incidentSourceArgo   = "argo-workflows"
+	incidentAuditTimeout = 2 * time.Second
+)
+
+// workflowURLRe finds the Argo UI link the onExit incident legs put in the
+// summary. It is the fallback for rows posted without workflow_name (every
+// argo incident today); producers that send workflow_name never reach it.
+// The name must end alphanumeric so sentence punctuation after the URL is
+// not captured, and the URL may follow whitespace or an opening parenthesis.
+var workflowURLRe = regexp.MustCompile(`(?:^|[\s(])https://workflows\.mctl\.ai/workflows/[a-z0-9-]+/([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)`)
+
+// labelStoredTrace sets the response-only trace fields from the stored row
+// alone, for responses that do not run deriveIncidentTrace. underived is the
+// reason given to an argo incident whose trace could still be derived by
+// GET /incidents/{id}; any other source without a trace is not_reported.
+func labelStoredTrace(a *alerts.Alert, underived string) {
+	a.TraceSource, a.TraceUnavailable = "", ""
+	switch {
+	case a.TraceID != "":
+		a.TraceSource = traceSourceReported
+	case a.Source == incidentSourceArgo:
+		a.TraceUnavailable = underived
+	default:
+		a.TraceUnavailable = traceNotReported
+	}
+}
+
+// canReadAuditEntry is the gate for deriving a trace from a workflow's audit
+// record. The workflow name is caller-controlled (summary, workflow_name), so
+// a non-admin may only read entries of a team they belong to. An entry with
+// no team is an AdminOnly platform operation and is admin-only here, as in
+// GetWorkflowLogs.
+func canReadAuditEntry(user *auth.User, e *audit.Entry) bool {
+	if user.IsAdmin() {
+		return true
+	}
+	team := auditEntryTenant(e)
+	return team != "" && user.HasTenantAccess(team)
+}
 
 // workflowAuditLookup finds the audit record of a workflow. (nil, nil) means
 // there is no such record.

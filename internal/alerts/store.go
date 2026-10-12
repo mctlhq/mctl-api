@@ -94,10 +94,6 @@ func scanAlert(row pgx.Row, a *Alert) error {
 	); err != nil {
 		return err
 	}
-	a.TraceSource = ""
-	if a.TraceID != "" {
-		a.TraceSource = "reported"
-	}
 	return nil
 }
 
@@ -146,7 +142,11 @@ func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 		 DO UPDATE SET occurrence_count = alerts.occurrence_count + 1,
 		               last_seen_at = EXCLUDED.updated_at,
 		               updated_at = EXCLUDED.updated_at,
-		               trace_id = CASE WHEN EXCLUDED.trace_id <> '' THEN EXCLUDED.trace_id ELSE alerts.trace_id END
+		               trace_id = CASE WHEN EXCLUDED.trace_id <> '' THEN EXCLUDED.trace_id ELSE alerts.trace_id END,
+		               workflow_name = CASE
+		                   WHEN EXCLUDED.trace_id <> '' THEN EXCLUDED.workflow_name
+		                   WHEN alerts.trace_id = '' AND EXCLUDED.workflow_name <> '' THEN EXCLUDED.workflow_name
+		                   ELSE alerts.workflow_name END
 		 RETURNING `+alertColumns,
 		a.ID, a.Source, a.Type, a.Tenant, a.Service, a.Summary, a.Severity, a.Status,
 		a.Analysis, a.ProposedFix, a.PRURL, a.PRNumber, a.Confidence,
@@ -206,7 +206,7 @@ func (s *Store) Update(ctx context.Context, a *Alert) error {
 	_, err := s.pool.Exec(ctx,
 		`UPDATE alerts SET status=$2, analysis=$3, proposed_fix=$4, pr_url=$5, pr_number=$6,
 		 confidence=$7, updated_at=$8, resolved_at=$9, acknowledged_by=$10, acknowledged_at=$11,
-		 trace_id=$12
+		 trace_id=CASE WHEN $12 <> '' THEN $12 ELSE trace_id END
 		 WHERE id=$1`,
 		a.ID, a.Status, a.Analysis, a.ProposedFix, a.PRURL, a.PRNumber,
 		a.Confidence, a.UpdatedAt, a.ResolvedAt, a.AcknowledgedBy, a.AcknowledgedAt,

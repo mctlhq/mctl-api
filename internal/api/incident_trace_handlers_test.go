@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/audit"
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 const (
@@ -82,6 +83,9 @@ func TestIncidentTrace_InvalidInputIgnoredNotRejected(t *testing.T) {
 			h.CreateIncident(rec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/incidents", strings.NewReader(body)), admin))
 			if rec.Code != http.StatusCreated {
 				t.Fatalf("status %d, want 201: %s", rec.Code, rec.Body.String())
+			}
+			if resp := decodeIncident(t, rec); name != "bad workflow" && resp["trace_unavailable"] != "not_reported" {
+				t.Fatalf("create response for a manual incident without a trace: %v", resp["trace_unavailable"])
 			}
 			stored, err := store.Get(context.Background(), id)
 			if err != nil {
@@ -150,6 +154,12 @@ func TestIncidentTrace_ListMarksAbsenceWithoutAuditLookup(t *testing.T) {
 		t.Fatalf("seed argo: %v", err)
 	}
 
+	if _, err := store.Create(ctx, &alerts.Alert{ID: "manual-untraced", Source: "manual", Type: "workflow_failed",
+		Tenant: "admins", Summary: "s", Severity: "warning", Status: alerts.StatusOpen,
+		Fingerprint: "fp-manual-untraced"}); err != nil {
+		t.Fatalf("seed manual: %v", err)
+	}
+
 	rec := httptest.NewRecorder()
 	h.ListIncidents(rec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil), adminUser()))
 	if rec.Code != http.StatusOK {
@@ -176,6 +186,11 @@ func TestIncidentTrace_ListMarksAbsenceWithoutAuditLookup(t *testing.T) {
 	}
 	if argo["trace_unavailable"] != "not_derived_on_list" {
 		t.Fatalf("argo item without a stored trace is unmarked: %v", argo)
+	}
+	// Derivation could never produce a trace for a non-argo incident, so the
+	// list gives the terminal reason rather than sending callers to GET it.
+	if manual := byID["manual-untraced"]; manual["trace_unavailable"] != "not_reported" {
+		t.Fatalf("non-argo item without a trace: %v", manual)
 	}
 	if log.lookups != 0 {
 		t.Fatalf("list consulted the audit log %d times, want 0", log.lookups)
@@ -214,4 +229,61 @@ func TestIncidentTrace_GetDerivesDae24112FromAudit(t *testing.T) {
 	if stored, _ := store.Get(context.Background(), daeIncidentID); stored.TraceID != "" {
 		t.Fatalf("GET wrote the derived trace back: %q", stored.TraceID)
 	}
+}
+
+// The trace derivation must not hand a non-admin the audit record of a
+// workflow outside their teams. The workflow name is caller-controlled, and
+// an entry without a team is an AdminOnly platform operation.
+func TestCanReadAuditEntry(t *testing.T) {
+	platform := &audit.Entry{Parameters: map[string]string{"traceparent": daeTraceparent}}
+	acme := &audit.Entry{Parameters: map[string]string{"tenant_name": "acme", "traceparent": daeTraceparent}}
+	member := &auth.User{ID: "dev", Groups: []string{"acme"}}
+	outsider := &auth.User{ID: "dev2", Groups: []string{"other"}}
+
+	for name, tc := range map[string]struct {
+		user  *auth.User
+		entry *audit.Entry
+		want  bool
+	}{
+		"admin, platform entry":      {adminUser(), platform, true},
+		"admin, tenant entry":        {adminUser(), acme, true},
+		"member, own tenant":         {member, acme, true},
+		"outsider, other tenant":     {outsider, acme, false},
+		"non-admin, platform entry":  {member, platform, false},
+		"non-admin, entry no params": {member, &audit.Entry{}, false},
+	} {
+		if got := canReadAuditEntry(tc.user, tc.entry); got != tc.want {
+			t.Errorf("%s: canReadAuditEntry = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// The summary fallback must find the workflow name wherever the URL sits in
+// ordinary prose: at the end of a sentence, inside parentheses.
+func TestDeriveIncidentTrace_SummaryURLInProse(t *testing.T) {
+	entry := &audit.Entry{Parameters: map[string]string{"traceparent": daeTraceparent}}
+	for _, summary := range []string{
+		daeSummary,
+		"Workflow failed: https://workflows.mctl.ai/workflows/argo-workflows/" + daeWorkflow + ".",
+		"Workflow failed (https://workflows.mctl.ai/workflows/argo-workflows/" + daeWorkflow + ")",
+		"Workflow failed (https://workflows.mctl.ai/workflows/argo-workflows/" + daeWorkflow + ").",
+		"see https://workflows.mctl.ai/workflows/argo-workflows/" + daeWorkflow + "-",
+	} {
+		var asked string
+		lookup := lookupFunc(func(_ context.Context, name string) (*audit.Entry, error) {
+			asked = name
+			return entry, nil
+		})
+		a := &alerts.Alert{Source: "argo-workflows", Summary: summary}
+		deriveIncidentTrace(context.Background(), a, lookup, func(*audit.Entry) bool { return true })
+		if asked != daeWorkflow || a.TraceID != daeTraceID {
+			t.Errorf("summary %q: looked up %q, trace %q (unavailable=%q)", summary, asked, a.TraceID, a.TraceUnavailable)
+		}
+	}
+}
+
+type lookupFunc func(context.Context, string) (*audit.Entry, error)
+
+func (f lookupFunc) LookupByWorkflow(ctx context.Context, name string) (*audit.Entry, error) {
+	return f(ctx, name)
 }

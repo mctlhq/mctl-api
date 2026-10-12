@@ -24,17 +24,14 @@ const (
 	traceB = "008ad8979d34c0509e74d8062b7f92ca"
 )
 
-// assertTrace fails unless a carries the stored trace id and workflow name,
-// labelled "reported" exactly when a trace id is present.
+// assertTrace fails unless a carries the stored trace id and workflow name.
+// trace_source is response-only and set by the handlers, so the store leaves
+// it empty.
 func assertTrace(t *testing.T, path string, a *Alert, wantTrace, wantWorkflow string) {
 	t.Helper()
-	wantSource := ""
-	if wantTrace != "" {
-		wantSource = "reported"
-	}
-	if a.TraceID != wantTrace || a.WorkflowName != wantWorkflow || a.TraceSource != wantSource {
-		t.Fatalf("%s: trace_id=%q workflow_name=%q trace_source=%q, want %q / %q / %q",
-			path, a.TraceID, a.WorkflowName, a.TraceSource, wantTrace, wantWorkflow, wantSource)
+	if a.TraceID != wantTrace || a.WorkflowName != wantWorkflow || a.TraceSource != "" {
+		t.Fatalf("%s: trace_id=%q workflow_name=%q trace_source=%q, want %q / %q / \"\"",
+			path, a.TraceID, a.WorkflowName, a.TraceSource, wantTrace, wantWorkflow)
 	}
 }
 
@@ -99,6 +96,17 @@ func TestTraceID_RoundTripsThroughEveryReadPath(t *testing.T) {
 		t.Fatalf("get after trace update: %v", err)
 	}
 	assertTrace(t, "Get after trace Update", replaced, traceB, in.WorkflowName)
+
+	// A partial update that does not carry the trace must not blank it.
+	replaced.TraceID = ""
+	if err := s.Update(ctx, replaced); err != nil {
+		t.Fatalf("partial update: %v", err)
+	}
+	kept, err := s.Get(ctx, in.ID)
+	if err != nil {
+		t.Fatalf("get after partial update: %v", err)
+	}
+	assertTrace(t, "Get after Update without trace", kept, traceB, in.WorkflowName)
 }
 
 // An incident created without a trace reads back with no trace and no
@@ -117,39 +125,35 @@ func TestTraceID_AbsentStaysAbsent(t *testing.T) {
 	assertTrace(t, "Get", got, "", "")
 }
 
-// mctl-api#585 T2: a dedup hit with a new valid trace replaces the stored one,
-// a dedup hit without a trace keeps it, and workflow_name stays the original.
+// mctl-api#585 T2: trace_id and workflow_name describe the same run, so a
+// dedup hit moves them together. A new valid trace replaces both; a hit
+// without a trace keeps both; and while no trace is stored a newer
+// workflow_name replaces the older one, so derivation uses the latest run.
 func TestTraceID_Dedup(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
+
+	occur := func(id, fp, trace, workflow string, wantCount int) *Alert {
+		t.Helper()
+		a := newAlert(id, fp)
+		a.TraceID, a.WorkflowName = trace, workflow
+		got, err := s.Create(ctx, a)
+		if err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+		if got.OccurrenceCount != wantCount {
+			t.Fatalf("create %s: occurrence_count=%d, want %d", id, got.OccurrenceCount, wantCount)
+		}
+		return got
+	}
+
 	const fp = "workflow_failed:trace:dedup"
+	occur("argo-dedup-1", fp, traceA, "wf-first", 1)
+	assertTrace(t, "new trace replaces the pair", occur("argo-dedup-2", fp, traceB, "wf-second", 2), traceB, "wf-second")
+	assertTrace(t, "no trace keeps the pair", occur("argo-dedup-3", fp, "", "wf-third", 3), traceB, "wf-second")
 
-	first := newAlert("argo-dedup-1", fp)
-	first.TraceID = traceA
-	first.WorkflowName = "wf-first"
-	if _, err := s.Create(ctx, first); err != nil {
-		t.Fatalf("first create: %v", err)
-	}
-
-	second := newAlert("argo-dedup-2", fp)
-	second.TraceID = traceB
-	second.WorkflowName = "wf-second"
-	got, err := s.Create(ctx, second)
-	if err != nil {
-		t.Fatalf("second create: %v", err)
-	}
-	if got.ID != first.ID || got.OccurrenceCount != 2 {
-		t.Fatalf("second create did not dedup: id=%q count=%d", got.ID, got.OccurrenceCount)
-	}
-	assertTrace(t, "dedup with new trace", got, traceB, "wf-first")
-
-	third := newAlert("argo-dedup-3", fp)
-	got, err = s.Create(ctx, third)
-	if err != nil {
-		t.Fatalf("third create: %v", err)
-	}
-	if got.OccurrenceCount != 3 {
-		t.Fatalf("third create did not dedup: count=%d", got.OccurrenceCount)
-	}
-	assertTrace(t, "dedup without trace", got, traceB, "wf-first")
+	const fpNoTrace = "workflow_failed:trace:dedup-untraced"
+	occur("argo-untraced-1", fpNoTrace, "", "wf-a", 1)
+	assertTrace(t, "untraced row takes the newer workflow", occur("argo-untraced-2", fpNoTrace, "", "wf-b", 2), "", "wf-b")
+	assertTrace(t, "empty workflow keeps the stored one", occur("argo-untraced-3", fpNoTrace, "", "", 3), "", "wf-b")
 }
