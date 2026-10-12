@@ -131,7 +131,12 @@ func (p *PrincipalAuthz) Apply(u *User) error {
 	case len(unreadable) > 0:
 		return fmt.Errorf("%w: tenants %v could not be read", ErrPrincipalAuthzUnavailable, unreadable)
 	}
-	u.Groups = namespaces
+	// A tenant named "admins" grants nothing by membership: legacy and
+	// shadow filter it the same way (tenantsOnly), and a platform admin
+	// reaches it as admin. Granting it here would be a privilege change at
+	// the switch that the shadow comparison, which drops "admins" from both
+	// sides, could not report.
+	u.Groups = tenantsOnly(namespaces)
 	return nil
 }
 

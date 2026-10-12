@@ -84,11 +84,11 @@ func TestPrincipalAuthz_NoGroupMakesAnAdmin(t *testing.T) {
 	if member.IsAdmin() {
 		t.Fatal("a member of the tenant \"admins\" is a platform admin in principal mode")
 	}
-	if !slices.Equal(member.Groups, []string{"admins", "labs"}) {
-		t.Fatalf("groups = %v, want GitOps membership only (legacy \"mctl\" dropped)", member.Groups)
+	if !slices.Equal(member.Groups, []string{"labs"}) {
+		t.Fatalf("groups = %v, want GitOps membership only (legacy \"mctl\" and the tenant \"admins\" dropped)", member.Groups)
 	}
-	if !member.HasTenantAccess("admins") || member.HasTenantAccess("mctl") {
-		t.Fatal("tenant access must follow principal membership")
+	if member.HasTenantAccess("admins") || member.HasTenantAccess("mctl") || !member.HasTenantAccess("labs") {
+		t.Fatal("tenant access must follow principal membership, never reaching the tenant \"admins\"")
 	}
 	if member.HasRole("admins") {
 		t.Fatal("the admins role binding matched a tenant named admins")

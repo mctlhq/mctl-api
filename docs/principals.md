@@ -294,7 +294,9 @@ delegated; service, surface, agent, CI and dev callers are not compared):
   `TryNamespacesForPrincipal(prn)`;
 - every `checkTenantRole` write compares the login decision (allow/deny)
   with the one `MemberRolesForPrincipal` would give. A legacy decision that
-  itself failed (503) and platform admins are not compared.
+  itself failed (503) is not compared, nor is a caller that is a platform
+  admin on both sides. One that is admin on only one side is compared,
+  since that is where the switch changes the answer.
 
 - platform admin is compared once `ADMIN_PRINCIPALS` is set: the legacy
   decision (the `admins` group) against membership of `ADMIN_PRINCIPALS`.
@@ -324,7 +326,8 @@ caller's authorization; it never merges with the legacy one:
   principal (`members[].principalId`), and it is a platform admin only if
   its principal is in `ADMIN_PRINCIPALS` and it acts directly: a relayed
   or delegated caller is never an admin, whoever it acts for. No login is
-  read.
+  read. Membership of a tenant named `admins` grants nothing, exactly as
+  in `legacy`: a platform admin reaches it as admin.
 - a human whose principal did not resolve gets **503** with `Retry-After`,
   platform admins included: without a principal there is nothing to look
   up in `ADMIN_PRINCIPALS` either.
@@ -354,7 +357,11 @@ caller's authorization; it never merges with the legacy one:
 | `tenant_principal_keys_scan_ok` | 1 when the last scan could list the tenants; the two gauges above are cleared when it is 0 |
 
 An `unresolved` comparison is never counted as a `match` or a `diff`: a
-decision that could not be computed is not evidence either way. The
+decision that could not be computed is not evidence either way. The one
+exception is `admin_mismatch`, which needs no membership read and is
+counted even when the tenant comparison was unresolved, so a broken tenant
+file cannot hide it. `sum(tenant_authz_shadow_diff_total)` can therefore
+exceed `tenant_authz_shadow_total{result="diff"}`. The
 counters carry every diff; the log (`tenant authz shadow diff`, with the
 path or tenant, the principal, the login and both decisions) carries one
 line per distinct diff per 10 minutes, so it names the affected callers but

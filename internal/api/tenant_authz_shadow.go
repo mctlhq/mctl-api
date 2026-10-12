@@ -105,7 +105,7 @@ var (
 	}, []string{"result"})
 	tenantAuthzShadowDiffTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "tenant_authz_shadow_diff_total",
-		Help: "Shadow comparisons that differed, by kind (tenant_only_legacy, tenant_only_principal, role_mismatch, admin_mismatch).",
+		Help: "Shadow comparisons that differed, by kind (tenant_only_legacy, tenant_only_principal, role_mismatch, admin_mismatch). admin_mismatch is also counted when the tenant comparison was unresolved.",
 	}, []string{"kind"})
 	tenantAuthzPrincipalUnresolvedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "tenant_authz_principal_unresolved_total",
@@ -163,11 +163,7 @@ func (h *Handlers) shadowTenantSet(r *http.Request, user *auth.User) {
 	// while the rollout gate read 0. Principal mode never makes a relayed
 	// or delegated caller an admin (PrincipalAuthz.Apply), and neither
 	// does this comparison.
-	legacyAdmin := user.IsAdmin()
-	principalAdmin := legacyAdmin
-	if len(h.opts.AdminPrincipals) > 0 {
-		principalAdmin = h.opts.AdminPrincipals[prn] && user.ActingPrincipal() == ""
-	}
+	legacyAdmin, principalAdmin := h.shadowAdmin(user, prn)
 	tenantsUnresolved := func(reason string) {
 		recordShadowUnresolved(reason)
 		if legacyAdmin != principalAdmin {
@@ -222,13 +218,29 @@ func (h *Handlers) shadowTenantSet(r *http.Request, user *auth.User) {
 		"legacy_admin", legacyAdmin, "principal_admin", principalAdmin)
 }
 
+// shadowAdmin is the platform-admin decision on each side: legacy's
+// "admins" group, and membership of ADMIN_PRINCIPALS for a caller acting
+// directly. Without ADMIN_PRINCIPALS the principal side is not measured
+// and mirrors legacy, since every admin would otherwise read as a diff.
+func (h *Handlers) shadowAdmin(user *auth.User, prn string) (legacy, principal bool) {
+	legacy = user.IsAdmin()
+	if len(h.opts.AdminPrincipals) == 0 {
+		return legacy, legacy
+	}
+	return legacy, h.opts.AdminPrincipals[prn] && user.ActingPrincipal() == ""
+}
+
 // shadowTenantRole compares checkTenantRole's login-keyed decision with the
 // one principal mode would make for the same write. Only an allow or a deny
 // is compared: a legacy decision that itself could not be made (503/500)
-// has nothing to compare against, and an admin passes on both sides before
-// a role is read.
+// has nothing to compare against. A caller that is admin on both sides
+// passes on both before a role is read; one that is admin on one side
+// only is compared, since that is where the switch changes the answer.
 func (h *Handlers) shadowTenantRole(user *auth.User, tenant string, min operations.Role, legacy roleRefusal) {
-	if !shadowEligible(user) || user.IsAdmin() || !min.IsTenantRole() || legacy.auditStatus == "error" {
+	if !shadowEligible(user) || !min.IsTenantRole() || legacy.auditStatus == "error" {
+		return
+	}
+	if user.IsAdmin() && len(h.opts.AdminPrincipals) == 0 {
 		return
 	}
 	prn := user.PrincipalID()
@@ -236,17 +248,26 @@ func (h *Handlers) shadowTenantRole(user *auth.User, tenant string, min operatio
 		recordShadowUnresolved(unresolvedNoPID)
 		return
 	}
-	if h.opts.PrincipalMembership == nil {
-		recordShadowUnresolved(unresolvedMembershipUnavailable)
+	legacyAdmin, principalAdmin := h.shadowAdmin(user, prn)
+	if legacyAdmin && principalAdmin {
 		return
 	}
-	written, err := h.opts.PrincipalMembership.MemberRolesForPrincipal(tenant, prn)
-	if err != nil {
-		recordShadowUnresolved(unresolvedMembershipUnreadable)
-		return
+	var written [][]string
+	principalAllows := principalAdmin
+	if !principalAdmin {
+		if h.opts.PrincipalMembership == nil {
+			recordShadowUnresolved(unresolvedMembershipUnavailable)
+			return
+		}
+		var err error
+		written, err = h.opts.PrincipalMembership.MemberRolesForPrincipal(tenant, prn)
+		if err != nil {
+			recordShadowUnresolved(unresolvedMembershipUnreadable)
+			return
+		}
+		role, known := operations.EffectiveTenantRole(written)
+		principalAllows = len(written) > 0 && known && role.Satisfies(min)
 	}
-	role, known := operations.EffectiveTenantRole(written)
-	principalAllows := len(written) > 0 && known && role.Satisfies(min)
 	legacyAllows := !legacy.refused()
 	if principalAllows == legacyAllows {
 		tenantAuthzShadowTotal.WithLabelValues(shadowMatch).Inc()

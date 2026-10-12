@@ -177,6 +177,8 @@ func TestTenantAuthzShadow_TenantSet(t *testing.T) {
 // principal mode would have decided.
 func TestCheckTenantRole_Shadow(t *testing.T) {
 	dev := func() *auth.User { return withPrincipal(t, erpactMember("dan-dev"), shadowPRN) }
+	root := func() *auth.User { return withPrincipal(t, auth.NewGitHubUser("root", []string{"admins"}), shadowPRN) }
+	const otherPRN = "prn_01JAAAAAAAAAAAAAAAAAAAAAAA"
 	legacyRoles := rolesOf("erpact/dan-dev=developer")
 	tests := []struct {
 		name       string
@@ -186,30 +188,41 @@ func TestCheckTenantRole_Shadow(t *testing.T) {
 		pm         *stubPrincipalMembership
 		wantStatus int
 		want       []string
+		admins     map[string]bool
 	}{
 		{"both allow", dev(), operations.RoleDeveloper, legacyRoles,
-			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"developer"}}}}, 0, []string{"result:match"}},
+			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"developer"}}}}, 0, []string{"result:match"}, nil},
 		{"both deny", dev(), operations.RoleOwner, legacyRoles,
-			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"developer"}}}}, http.StatusForbidden, []string{"result:match"}},
+			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"developer"}}}}, http.StatusForbidden, []string{"result:match"}, nil},
 		{"principal would deny: legacy still allows", dev(), operations.RoleDeveloper, legacyRoles,
-			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"viewer"}}}}, 0, []string{"result:diff", "kind:role_mismatch"}},
+			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"viewer"}}}}, 0, []string{"result:diff", "kind:role_mismatch"}, nil},
 		{"principal would allow: legacy still denies", dev(), operations.RoleOwner, legacyRoles,
-			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"owner"}}}}, http.StatusForbidden, []string{"result:diff", "kind:role_mismatch"}},
+			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"owner"}}}}, http.StatusForbidden, []string{"result:diff", "kind:role_mismatch"}, nil},
 		{"not a member by principal", dev(), operations.RoleViewer, legacyRoles,
-			&stubPrincipalMembership{}, 0, []string{"result:diff", "kind:role_mismatch"}},
+			&stubPrincipalMembership{}, 0, []string{"result:diff", "kind:role_mismatch"}, nil},
 		{"principal roles unreadable", dev(), operations.RoleDeveloper, legacyRoles,
-			&stubPrincipalMembership{rolesErr: errors.New("tenant \"erpact\": malformed principalId")}, 0, []string{"result:unresolved", "reason:membership_unreadable"}},
+			&stubPrincipalMembership{rolesErr: errors.New("tenant \"erpact\": malformed principalId")}, 0, []string{"result:unresolved", "reason:membership_unreadable"}, nil},
 		{"no principal id", erpactMember("dan-dev"), operations.RoleDeveloper, legacyRoles,
-			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"viewer"}}}}, 0, []string{"result:unresolved", "reason:no_pid"}},
+			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"viewer"}}}}, 0, []string{"result:unresolved", "reason:no_pid"}, nil},
 		// A legacy decision that could not be made has nothing to compare.
 		{"legacy unreadable", dev(), operations.RoleDeveloper, &stubRoles{err: errors.New("stale")},
-			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"developer"}}}}, http.StatusServiceUnavailable, nil},
-		{"admin passes before any role", withPrincipal(t, auth.NewGitHubUser("root", []string{"admins"}), shadowPRN), operations.RoleOwner, legacyRoles,
-			&stubPrincipalMembership{}, 0, nil},
+			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"developer"}}}}, http.StatusServiceUnavailable, nil, nil},
+		{"admin passes before any role", root(), operations.RoleOwner, legacyRoles,
+			&stubPrincipalMembership{}, 0, nil, nil},
+		{"admin on both sides", root(), operations.RoleOwner, legacyRoles,
+			&stubPrincipalMembership{}, 0, nil, map[string]bool{shadowPRN: true}},
+		// Admin on one side only: the switch changes the answer here, so the
+		// role is compared.
+		{"admin by login only, no written role", root(), operations.RoleOwner, legacyRoles,
+			&stubPrincipalMembership{}, 0, []string{"result:diff", "kind:role_mismatch"}, map[string]bool{otherPRN: true}},
+		{"admin by login only, written owner", root(), operations.RoleOwner, legacyRoles,
+			&stubPrincipalMembership{roles: map[string][][]string{"erpact": {{"owner"}}}}, 0, []string{"result:match"}, map[string]bool{otherPRN: true}},
+		{"admin by principal only", dev(), operations.RoleOwner, legacyRoles,
+			&stubPrincipalMembership{rolesErr: errors.New("must not be read")}, http.StatusForbidden, []string{"result:diff", "kind:role_mismatch"}, map[string]bool{shadowPRN: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := &Handlers{opts: Options{GitReader: tt.git, TenantAuthzMode: TenantAuthzShadow, PrincipalMembership: tt.pm}}
+			h := &Handlers{opts: Options{GitReader: tt.git, TenantAuthzMode: TenantAuthzShadow, PrincipalMembership: tt.pm, AdminPrincipals: tt.admins}}
 			before := snapshotShadow()
 			d := h.checkTenantRole(tt.user, "erpact", tt.min, "test")
 			if d.status != tt.wantStatus {
