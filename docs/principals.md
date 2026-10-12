@@ -276,7 +276,7 @@ and tenant-level semantics are the login ones; only the key differs.
 |---|---|---|
 | `legacy` (default, or unset) | the login, as before | nothing |
 | `shadow` | the login, as before | computes the principal decision for the same request and compares |
-| `principal` | the principal | **not in this build**: refused at boot until PR-B |
+| `principal` | the principal | **not yet accepted**: refused at boot until the last PR-B slice (local JWT `pid`, relayed and delegated callers) lands |
 
 Any other value refuses boot. Rollback is setting the value back; no data
 moves in either direction.
@@ -291,14 +291,50 @@ delegated; service, surface, agent, CI and dev callers are not compared):
   with the one `MemberRolesForPrincipal` would give. A legacy decision that
   itself failed (503) and platform admins are not compared.
 
-Platform admin is not compared yet: it moves to `ADMIN_PRINCIPALS` in PR-B.
+- platform admin is compared once `ADMIN_PRINCIPALS` is set: the legacy
+  decision (the `admins` group) against membership of `ADMIN_PRINCIPALS`.
+  Without it the comparison is skipped, since every admin would read as a
+  diff. Set `ADMIN_PRINCIPALS` in shadow before the switch so the window
+  measures it.
+
+### `ADMIN_PRINCIPALS`
+
+Comma-separated principal ids. A malformed entry refuses boot in every mode
+(a typo must not silently drop or add an admin). In `principal` mode it is
+the **only** source of platform admin: `ADMIN_USERS`, the `admins` group, a
+provider's group claim and a tenant named `admins` all stop counting
+(`ADMIN_USERS` set alongside is only warned about, so rolling back to
+`shadow` stays a one-value change). `principal` mode refuses to boot
+without at least one admin, with `PRINCIPALS_DISABLED` on, or without the
+principal store (`SURFACE_IDENTITY_DB_URL` or `AUDIT_DB_URL`).
+
+### `principal` mode
+
+After authentication and principal resolution the middleware replaces the
+caller's authorization; it never merges with the legacy one:
+
+- a human caller's tenants are exactly the GitOps tenants that list its
+  principal (`members[].principalId`), and it is a platform admin only if
+  its principal is in `ADMIN_PRINCIPALS`. No login is read.
+- a human whose principal did not resolve, or whose membership could not be
+  read (stale checkout, any tenant unreadable), gets **503** with
+  `Retry-After`, never an empty tenant set. A platform admin is still
+  served, without tenant groups, since admin does not depend on membership.
+- the static service principal and the dev caller (`AUTH_REQUIRED=false`)
+  stay platform admins; every other non-human caller (surface, agent, CI,
+  federated machine identity) holds no groups.
+- `checkTenantRole` reads the role GitOps writes for the principal
+  (`MemberRolesForPrincipal`); a non-human caller holds no tenant role, and
+  an unresolved principal is 503.
+- a platform-skill role binding on `admins` means platform admin, never a
+  tenant named `admins`.
 
 ### Metrics
 
 | Metric | Meaning |
 |---|---|
 | `tenant_authz_shadow_total{result}` | `match`, `diff` or `unresolved` per comparison |
-| `tenant_authz_shadow_diff_total{kind}` | `tenant_only_legacy`, `tenant_only_principal`, `role_mismatch` |
+| `tenant_authz_shadow_diff_total{kind}` | `tenant_only_legacy`, `tenant_only_principal`, `role_mismatch`, `admin_mismatch` (only with `ADMIN_PRINCIPALS` set) |
 | `tenant_authz_principal_unresolved_total{reason}` | `no_pid` (no principal at authentication), `membership_busy` (checkout held by a refresh), `membership_unreadable` (stale checkout, or any tenant unreadable), `membership_unavailable` (reader not wired) |
 | `tenant_member_entry_unkeyed{tenant}` | member entries with no `principalId` |
 | `tenant_principal_keys_invalid{tenant}` | 1 when a tenant's keys are invalid or the tenant cannot be read |
