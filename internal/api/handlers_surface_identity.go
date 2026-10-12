@@ -223,7 +223,9 @@ func (h *Handlers) relaySubject(w http.ResponseWriter, r *http.Request, acting *
 		return refuse(sidCodeNotFound, "the link does not name a GitHub principal")
 	}
 	var groups []string
-	if h.opts.TenantResolver != nil {
+	// In principal mode the subject's tenants come from its principal
+	// (authorizeSubject below), never from its login.
+	if h.opts.TenantResolver != nil && !h.principalMode() {
 		// Same as authentication: a failed lookup grants no tenant, even
 		// if the resolver returned a partial list alongside the error.
 		if g, err := h.opts.TenantResolver.GetTenantsForUser(login); err != nil {
@@ -247,6 +249,13 @@ func (h *Handlers) relaySubject(w http.ResponseWriter, r *http.Request, acting *
 			return refuse(sidCodeIdentityRefused, "the identity linked to this "+surface+" identity is refused")
 		}
 		slog.Warn("surface relay: principal not resolved; relaying without a principal id", "subject", link.Principal, "error", err)
+	}
+	// In principal mode a subject without a principal is refused here, as
+	// delegation refuses it (design.md B5): its tenants cannot be decided.
+	if err := h.authorizeSubject(subject); err != nil {
+		slog.Warn("surface relay: tenant access undecided", "subject", link.Principal, "principal", subject.PrincipalID(), "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "cannot determine the relayed subject's tenant access right now", nil)
+		return nil, false
 	}
 	return subject, true
 }
