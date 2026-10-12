@@ -281,6 +281,11 @@ and tenant-level semantics are the login ones; only the key differs.
 Any other value refuses boot. Rollback is setting the value back; no data
 moves in either direction.
 
+Break-glass: if `principal` mode locks people out (a GitOps checkout that
+stops refreshing, a broken tenant file), set `TENANT_AUTHZ_MODE=shadow` and
+restart. Authorization goes back to the login immediately, and shadow keeps
+reporting what principal mode would have decided.
+
 In `shadow`, for each request of a human caller (direct, relayed or
 delegated; service, surface, agent, CI and dev callers are not compared):
 
@@ -316,10 +321,14 @@ caller's authorization; it never merges with the legacy one:
 - a human caller's tenants are exactly the GitOps tenants that list its
   principal (`members[].principalId`), and it is a platform admin only if
   its principal is in `ADMIN_PRINCIPALS`. No login is read.
-- a human whose principal did not resolve, or whose membership could not be
-  read (stale checkout, any tenant unreadable), gets **503** with
-  `Retry-After`, never an empty tenant set. A platform admin is still
-  served, without tenant groups, since admin does not depend on membership.
+- a human whose principal did not resolve gets **503** with `Retry-After`,
+  platform admins included: without a principal there is nothing to look
+  up in `ADMIN_PRINCIPALS` either.
+- a human whose membership could not be read (stale checkout, any tenant
+  unreadable) gets **503** with `Retry-After`, never an empty or partial
+  tenant set. A platform admin is the exception: it is served without
+  tenant groups, since admin does not depend on membership.
+- a caller whose identity cannot be recorded at all gets **503** too.
 - the static service principal and the dev caller (`AUTH_REQUIRED=false`)
   stay platform admins; every other non-human caller (surface, agent, CI,
   federated machine identity) holds no groups.
