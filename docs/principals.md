@@ -182,10 +182,11 @@ read-only (`Store.LinkedGitHub`):
 | Lookup | Answer |
 |---|---|
 | linked to P, P has one live GitHub identity with a login | code for that login and P (`pid`): the same code, groups and admin decision (`ADMIN_USERS`) a GitHub sign-in of P yields; in `principal` mode no groups are minted |
-| no row, or a principal of its own with no GitHub identity | 403 page linking to `/identity/link/zitadel`; nothing issued or provisioned |
+| no row, or a principal of its own with no GitHub identity | 403 page linking to `/identity/link/zitadel`; nothing issued or provisioned. In `principal` mode: a code for the identity's own principal (provisioned on first sign-in), `sub` = `pid` = its principal id, with no groups; it reaches a tenant only once a GitOps member entry names that `principalId` |
 | identity revoked, or P disabled | 403 |
-| P's GitHub login unknown (taken by another account) or two live GitHub identities | 409, nothing guessed |
+| P's GitHub login unknown (taken by another account) or two live GitHub identities | 409, nothing guessed. In `principal` mode: a code for P with no login, as in the row above |
 | store error, or no principal store | 503, never "not linked" |
+| (`principal` mode) the principal resolver answers a different principal than the link store | 503 `store_unavailable`; nothing issued |
 
 A pending authorization records its upstream: a GitHub callback cannot
 complete a ZITADEL authorization or the reverse, and an authorization whose
@@ -193,6 +194,7 @@ upstream the current mode does not allow (one pending across a rollback)
 gets a 400. Sign-ins are counted in
 `oauth_upstream_signins_total{upstream,result}`. For `upstream="zitadel"`,
 `result` is `issued`, `unlinked`, `refused`, `store_unavailable`,
+`principal_refused`, `principal_unavailable` (`principal` mode, as for GitHub),
 `invalid_token`, `upstream_error` (ZITADEL redirected back with an error),
 `upstream_unreachable` (discovery failed), `exchange_failed`,
 `bad_request` or `internal_error`, so "ZITADEL is down" and "mctl is
@@ -348,6 +350,9 @@ caller's authorization; it never merges with the legacy one:
   an unresolved principal is 503.
 - a platform-skill role binding on `admins` means platform admin, never a
   tenant named `admins`.
+- `/whoami` reports `admins` in `namespaces` for a platform admin, but
+  never in `groups`: admin is decided by principal, not carried as a
+  group. Clients must read `isAdmin`, not `groups.includes("admins")`.
 
 ### Local tokens carry the principal (`pid`)
 
