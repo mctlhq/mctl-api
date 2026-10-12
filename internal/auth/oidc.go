@@ -124,6 +124,15 @@ type User struct {
 	principalID    string
 	viaPrincipalID string
 
+	// principalAuthz records that this caller's tenants and admin were
+	// decided by principal (TENANT_AUTHZ_MODE=principal, mctl-api#377):
+	// Groups then holds tenants only, and IsAdmin reads platformAdmin and
+	// nothing else. platformAdmin is set by NewServiceUser, the dev caller
+	// and ADMIN_PRINCIPALS (PrincipalAuthz.Apply). Both unexported for the
+	// same reason as service.
+	principalAuthz bool
+	platformAdmin  bool
+
 	// agent records that this principal authenticated with an agent run
 	// token (mctl-api#376): its value is the bare agent name (never
 	// "agent:"-prefixed). Deliberately UNEXPORTED, for the same reason as
@@ -161,11 +170,22 @@ func (u *User) GitHubLogin() (string, bool) {
 // tests can construct the same principal the middleware does, rather than
 // approximating it with a matching ID.
 func NewServiceUser() *User {
-	return &User{ID: ServiceUserID, Groups: []string{"admins"}, service: true}
+	return &User{ID: ServiceUserID, Groups: []string{"admins"}, service: true, platformAdmin: true}
 }
 
-// IsAdmin checks if the user is a platform admin.
+// IsAdmin checks if the user is a platform admin. In principal mode only
+// platformAdmin counts; no group string, tenant name or provider claim can
+// make an admin. Otherwise (legacy, shadow) it is the "admins" group.
 func (u *User) IsAdmin() bool {
+	if u == nil {
+		return false
+	}
+	if u.platformAdmin {
+		return true
+	}
+	if u.principalAuthz {
+		return false
+	}
 	for _, g := range u.Groups {
 		if g == "admins" {
 			return true
@@ -819,6 +839,9 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 				if !attachPrincipal(w, r, cfg.principals, dev, writeErr) {
 					return
 				}
+				if !applyPrincipalAuthz(w, r, cfg.principalAuthz, dev) {
+					return
+				}
 				ctx := context.WithValue(r.Context(), userContextKey, dev)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -921,6 +944,9 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 			if !attachPrincipal(w, r, cfg.principals, user, writeErr) {
 				return
 			}
+			if !applyPrincipalAuthz(w, r, cfg.principalAuthz, user) {
+				return
+			}
 
 			// Store user and raw token in context for downstream handlers.
 			ctx := context.WithValue(r.Context(), userContextKey, user)
@@ -935,6 +961,7 @@ type MiddlewareOption func(*middlewareConfig)
 
 type middlewareConfig struct {
 	principals         PrincipalResolver
+	principalAuthz     *PrincipalAuthz
 	federationRegistry *Registry
 	agentRuns          AgentRunResolver
 }
@@ -943,6 +970,12 @@ type middlewareConfig struct {
 // canonical principal. A nil resolver is the same as not passing it.
 func WithPrincipalResolver(pr PrincipalResolver) MiddlewareOption {
 	return func(c *middlewareConfig) { c.principals = pr }
+}
+
+// WithPrincipalAuthz decides every caller's tenants and platform admin by
+// principal (TENANT_AUTHZ_MODE=principal). Nil keeps the legacy decision.
+func WithPrincipalAuthz(p *PrincipalAuthz) MiddlewareOption {
+	return func(c *middlewareConfig) { c.principalAuthz = p }
 }
 
 // WithAgentRunResolver authenticates bearer tokens minted by
@@ -1113,6 +1146,23 @@ func attachPrincipal(w http.ResponseWriter, r *http.Request, pr PrincipalResolve
 		slog.Warn("principal not resolved; continuing without a principal id", "user", u.ID, "path", r.URL.Path, "error", err)
 		return true
 	}
+}
+
+// applyPrincipalAuthz runs principal mode on u, when it is on. It answers
+// false after writing a 503 when the caller's tenants could not be decided.
+func applyPrincipalAuthz(w http.ResponseWriter, r *http.Request, p *PrincipalAuthz, u *User) bool {
+	if p == nil {
+		return true
+	}
+	if err := p.Apply(u); err != nil {
+		slog.Warn("principal authorization unavailable", "user", u.ID, "principal", u.principalID, "path", r.URL.Path, "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "cannot determine your tenant access right now; try again later"})
+		return false
+	}
+	return true
 }
 
 func writeForbidden(w http.ResponseWriter, msg string) {
