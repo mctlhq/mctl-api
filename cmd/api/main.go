@@ -349,7 +349,7 @@ func main() {
 
 	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer,
 		auth.WithPrincipalResolver(principalResolver), auth.WithFederationRegistry(federationRegistry),
-		auth.WithAgentRunResolver(agentRunResolver))
+		auth.WithAgentRunResolver(agentRunResolver), auth.WithPrincipalAuthz(cfg.principalAuthz(gitReader)))
 
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
 
@@ -939,6 +939,7 @@ func main() {
 		Principals:                     principalResolver,
 		TenantAuthzMode:                cfg.tenantAuthzMode(),
 		PrincipalMembership:            gitReader,
+		AdminPrincipals:                cfg.adminPrincipals(),
 		MemberKeyPlan:                  memberKeyPlanOptions(principalStore, gitReader),
 		Delegation:                     delegationResolver,
 		WorkflowDispatcher:             workflowDispatcher,
@@ -1231,6 +1232,14 @@ type config struct {
 	// boot: an unknown value, or principal before this build implements it,
 	// refuses to start.
 	TenantAuthzModeRaw string
+	// AdminPrincipalsRaw is ADMIN_PRINCIPALS (mctl-api#377): the platform
+	// admins of principal mode, as principal ids. A malformed entry refuses
+	// boot in every mode.
+	AdminPrincipalsRaw string
+	// PrincipalsDisabled and PrincipalDBConfigured say whether callers can
+	// carry a principal id at all; principal mode refuses to boot without.
+	PrincipalsDisabled    bool
+	PrincipalDBConfigured bool
 }
 
 func loadConfig() config {
@@ -1338,6 +1347,9 @@ func loadConfig() config {
 		CommerceDisabled:               killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
 		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
 		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
+		AdminPrincipalsRaw:             os.Getenv("ADMIN_PRINCIPALS"),
+		PrincipalsDisabled:             killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
+		PrincipalDBConfigured:          postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
 	}
 }
 
@@ -1560,7 +1572,11 @@ const maxOAuthTokenTTL = 24 * time.Hour
 func (c config) validate() error {
 	// TENANT_AUTHZ_MODE first: it does not depend on any kill switch below,
 	// so none of them can skip it.
-	if _, err := mctlapi.ParseTenantAuthzMode(c.TenantAuthzModeRaw); err != nil {
+	mode, err := mctlapi.ParseTenantAuthzMode(c.TenantAuthzModeRaw)
+	if err != nil {
+		return err
+	}
+	if err := c.validatePrincipalMode(mode); err != nil {
 		return err
 	}
 	// Only enforced when the OAuth server is actually constructed — the same
@@ -1630,6 +1646,68 @@ func (c config) validate() error {
 		return err
 	}
 	return nil
+}
+
+// validatePrincipalMode refuses a principal-mode configuration that would
+// lock everyone out or keep a login in charge: ADMIN_PRINCIPALS must parse
+// (in any mode) and, in principal mode, name at least one admin, and
+// callers must be able to carry a principal id at all. ADMIN_USERS is
+// ignored in principal mode, which is only warned about: it is deleted in
+// PR-C, and refusing it would make the rollback to shadow a two-line change.
+func (c config) validatePrincipalMode(mode mctlapi.TenantAuthzMode) error {
+	admins, err := auth.ParseAdminPrincipals(c.AdminPrincipalsRaw)
+	if err != nil {
+		return err
+	}
+	if mode != mctlapi.TenantAuthzPrincipal {
+		return nil
+	}
+	switch {
+	case len(admins) == 0:
+		return errors.New("TENANT_AUTHZ_MODE=principal needs ADMIN_PRINCIPALS: without it no human is a platform admin")
+	case c.PrincipalsDisabled:
+		return errors.New("TENANT_AUTHZ_MODE=principal cannot run with PRINCIPALS_DISABLED: no caller would carry a principal")
+	case !c.PrincipalDBConfigured:
+		return errors.New("TENANT_AUTHZ_MODE=principal needs the principal store (SURFACE_IDENTITY_DB_URL or AUDIT_DB_URL)")
+	}
+	if len(c.AdminUsers) > 0 {
+		slog.Warn("ADMIN_USERS is set but ignored in principal mode; platform admins are ADMIN_PRINCIPALS")
+	}
+	return nil
+}
+
+// adminPrincipals is the parsed ADMIN_PRINCIPALS; validate has already
+// refused a malformed value.
+func (c config) adminPrincipals() map[string]bool {
+	m, err := auth.ParseAdminPrincipals(c.AdminPrincipalsRaw)
+	if err != nil {
+		return nil
+	}
+	return m
+}
+
+// principalAuthz is the middleware's principal-mode decision, or nil
+// outside principal mode.
+func (c config) principalAuthz(reader *gitops.Reader) *auth.PrincipalAuthz {
+	if c.tenantAuthzMode() != mctlapi.TenantAuthzPrincipal {
+		return nil
+	}
+	p := &auth.PrincipalAuthz{Admins: c.adminPrincipals()}
+	if reader != nil {
+		p.Members = principalTenants{reader}
+	}
+	return p
+}
+
+// principalTenants adapts gitops.Reader to auth.PrincipalMembershipSource.
+type principalTenants struct{ r *gitops.Reader }
+
+func (p principalTenants) PrincipalTenants(principalID string) ([]string, []string, error) {
+	m, err := p.r.NamespacesForPrincipal(principalID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return m.Namespaces, m.Unreadable, nil
 }
 
 // tenantAuthzMode is the parsed TENANT_AUTHZ_MODE. validate has already

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,7 +56,14 @@ func (h *Handlers) Whoami(w http.ResponseWriter, r *http.Request) {
 	// checks read user.Groups directly (auth.User.IsAdmin, HasTenantAccess),
 	// and the "one team per user" rule for create-tenant is enforced
 	// separately by filterNonAdmin in handlers_write.go.
+	//
+	// In principal mode a platform admin's groups no longer carry "admins"
+	// (admin is ADMIN_PRINCIPALS, not a group), so the namespace is added
+	// back here for an admin: it still reaches it, as admin.
 	namespaces := groups
+	if user.IsAdmin() && !slices.Contains(namespaces, "admins") {
+		namespaces = append(slices.Clone(namespaces), "admins")
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"id":         user.ID,

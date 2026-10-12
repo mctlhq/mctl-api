@@ -276,10 +276,15 @@ and tenant-level semantics are the login ones; only the key differs.
 |---|---|---|
 | `legacy` (default, or unset) | the login, as before | nothing |
 | `shadow` | the login, as before | computes the principal decision for the same request and compares |
-| `principal` | the principal | **not in this build**: refused at boot until PR-B |
+| `principal` | the principal | **not yet accepted**: refused at boot until the last PR-B slice (local JWT `pid`, relayed and delegated callers) lands |
 
 Any other value refuses boot. Rollback is setting the value back; no data
 moves in either direction.
+
+Break-glass: if `principal` mode locks people out (a GitOps checkout that
+stops refreshing, a broken tenant file), set `TENANT_AUTHZ_MODE=shadow` and
+restart. Authorization goes back to the login immediately, and shadow keeps
+reporting what principal mode would have decided.
 
 In `shadow`, for each request of a human caller (direct, relayed or
 delegated; service, surface, agent, CI and dev callers are not compared):
@@ -289,23 +294,78 @@ delegated; service, surface, agent, CI and dev callers are not compared):
   `TryNamespacesForPrincipal(prn)`;
 - every `checkTenantRole` write compares the login decision (allow/deny)
   with the one `MemberRolesForPrincipal` would give. A legacy decision that
-  itself failed (503) and platform admins are not compared.
+  itself failed (503) is not compared, nor is a caller that is a platform
+  admin on both sides. One that is admin on only one side is compared,
+  since that is where the switch changes the answer.
 
-Platform admin is not compared yet: it moves to `ADMIN_PRINCIPALS` in PR-B.
+- platform admin is compared once `ADMIN_PRINCIPALS` is set: the legacy
+  decision (the `admins` group) against membership of `ADMIN_PRINCIPALS`.
+  Without it the comparison is skipped, since every admin would read as a
+  diff. It needs no membership read, so it is still made when the tenant
+  comparison is unresolved (a broken tenant file must not hide every
+  `admin_mismatch`). Set `ADMIN_PRINCIPALS` in shadow before the switch so
+  the window measures it, and make it list the principal of **every**
+  `ADMIN_USERS` entry: until the two sets agree each such admin counts
+  `admin_mismatch` on every request (and `role_mismatch` on writes), which
+  is a configuration gap to reconcile before starting the clock, not a
+  shadow finding.
+
+### `ADMIN_PRINCIPALS`
+
+Comma-separated principal ids. A malformed entry refuses boot in every mode
+(a typo must not silently drop or add an admin). In `principal` mode it is
+the **only** source of platform admin: `ADMIN_USERS`, the `admins` group, a
+provider's group claim and a tenant named `admins` all stop counting
+(`ADMIN_USERS` set alongside is only warned about, so rolling back to
+`shadow` stays a one-value change). `principal` mode refuses to boot
+without at least one admin, with `PRINCIPALS_DISABLED` on, or without the
+principal store (`SURFACE_IDENTITY_DB_URL` or `AUDIT_DB_URL`).
+
+### `principal` mode
+
+After authentication and principal resolution the middleware replaces the
+caller's authorization; it never merges with the legacy one:
+
+- a human caller's tenants are exactly the GitOps tenants that list its
+  principal (`members[].principalId`), and it is a platform admin only if
+  its principal is in `ADMIN_PRINCIPALS` and it acts directly: a relayed
+  or delegated caller is never an admin, whoever it acts for. No login is
+  read. Membership of a tenant named `admins` grants nothing, exactly as
+  in `legacy`: a platform admin reaches it as admin.
+- a human whose principal did not resolve gets **503** with `Retry-After`,
+  platform admins included: without a principal there is nothing to look
+  up in `ADMIN_PRINCIPALS` either.
+- a human whose membership could not be read (stale checkout, any tenant
+  unreadable) gets **503** with `Retry-After`, never an empty or partial
+  tenant set. A platform admin is the exception: it is served without
+  tenant groups, since admin does not depend on membership.
+- a caller whose identity cannot be recorded at all gets **503** too.
+- the static service principal and the dev caller (`AUTH_REQUIRED=false`)
+  stay platform admins; every other non-human caller (surface, agent, CI,
+  federated machine identity) holds no groups.
+- `checkTenantRole` reads the role GitOps writes for the principal
+  (`MemberRolesForPrincipal`); a non-human caller holds no tenant role, and
+  an unresolved principal is 503.
+- a platform-skill role binding on `admins` means platform admin, never a
+  tenant named `admins`.
 
 ### Metrics
 
 | Metric | Meaning |
 |---|---|
 | `tenant_authz_shadow_total{result}` | `match`, `diff` or `unresolved` per comparison |
-| `tenant_authz_shadow_diff_total{kind}` | `tenant_only_legacy`, `tenant_only_principal`, `role_mismatch` |
+| `tenant_authz_shadow_diff_total{kind}` | `tenant_only_legacy`, `tenant_only_principal`, `role_mismatch`, `admin_mismatch` (only with `ADMIN_PRINCIPALS` set) |
 | `tenant_authz_principal_unresolved_total{reason}` | `no_pid` (no principal at authentication), `membership_busy` (checkout held by a refresh), `membership_unreadable` (stale checkout, or any tenant unreadable), `membership_unavailable` (reader not wired) |
 | `tenant_member_entry_unkeyed{tenant}` | member entries with no `principalId` |
 | `tenant_principal_keys_invalid{tenant}` | 1 when a tenant's keys are invalid or the tenant cannot be read |
 | `tenant_principal_keys_scan_ok` | 1 when the last scan could list the tenants; the two gauges above are cleared when it is 0 |
 
 An `unresolved` comparison is never counted as a `match` or a `diff`: a
-decision that could not be computed is not evidence either way. The
+decision that could not be computed is not evidence either way. The one
+exception is `admin_mismatch`, which needs no membership read and is
+counted even when the tenant comparison was unresolved, so a broken tenant
+file cannot hide it. `sum(tenant_authz_shadow_diff_total)` can therefore
+exceed `tenant_authz_shadow_total{result="diff"}`. The
 counters carry every diff; the log (`tenant authz shadow diff`, with the
 path or tenant, the principal, the login and both decisions) carries one
 line per distinct diff per 10 minutes, so it names the affected callers but
