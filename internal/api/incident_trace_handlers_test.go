@@ -287,3 +287,73 @@ type lookupFunc func(context.Context, string) (*audit.Entry, error)
 func (f lookupFunc) LookupByWorkflow(ctx context.Context, name string) (*audit.Entry, error) {
 	return f(ctx, name)
 }
+
+// The gate as GetIncident applies it, with real non-admin users: a member of
+// the incident's tenant gets the trace only from an audit entry of a team
+// they belong to.
+func TestIncidentTrace_GetAsNonAdmin(t *testing.T) {
+	store := newTestAlertStore(t)
+	log := audit.NewLogger()
+	h := &Handlers{opts: Options{AlertStore: store, AuditLog: log}}
+	member := &auth.User{ID: "dev", Groups: []string{"acme"}}
+
+	for name, tc := range map[string]struct {
+		params     map[string]string
+		wantTrace  string
+		wantReason string
+	}{
+		"own team":    {map[string]string{"tenant_name": "acme", "traceparent": daeTraceparent}, daeTraceID, ""},
+		"other team":  {map[string]string{"tenant_name": "other", "traceparent": daeTraceparent}, "", "audit_record_forbidden"},
+		"platform op": {map[string]string{"traceparent": daeTraceparent}, "", "audit_record_forbidden"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			wf := "wf-" + uuid.NewString()[:8]
+			log.Log(audit.Entry{ID: uuid.NewString(), UserID: "x", Operation: "op", WorkflowName: wf, Status: "failed", Parameters: tc.params})
+			id := "argo-" + wf
+			if _, err := store.Create(context.Background(), &alerts.Alert{ID: id, Source: "argo-workflows",
+				Type: "workflow_failed", Tenant: "acme", Summary: "failed https://workflows.mctl.ai/workflows/acme/" + wf,
+				Severity: "warning", Status: alerts.StatusOpen, Fingerprint: "fp-" + wf}); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			rec := httptest.NewRecorder()
+			h.GetIncident(rec, withURLParam(withUser(httptest.NewRequest(http.MethodGet, "/api/v1/incidents/"+id, nil), member), "id", id))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			got := decodeIncident(t, rec)
+			trace, _ := got["trace_id"].(string)
+			reason, _ := got["trace_unavailable"].(string)
+			if trace != tc.wantTrace || reason != tc.wantReason {
+				t.Fatalf("trace_id=%q trace_unavailable=%q, want %q / %q", trace, reason, tc.wantTrace, tc.wantReason)
+			}
+		})
+	}
+}
+
+// Write responses return the stored row without deriving, and say so: an
+// argo incident without a trace is not_derived, never silently traceless.
+func TestIncidentTrace_WriteResponsesAreLabelled(t *testing.T) {
+	store := newTestAlertStore(t)
+	h := &Handlers{opts: Options{AlertStore: store, AuditLog: audit.NewLogger()}}
+	admin := adminUser()
+
+	rec := httptest.NewRecorder()
+	h.CreateIncident(rec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/incidents", strings.NewReader(
+		`{"id":"argo-label-1","source":"argo-workflows","type":"workflow_failed","tenant":"admins","summary":"s","severity":"warning","fingerprint":"fp-label-1"}`)), admin))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := decodeIncident(t, rec); got["trace_unavailable"] != "not_derived" || got["trace_id"] != nil {
+		t.Fatalf("create response: trace_id=%v trace_unavailable=%v", got["trace_id"], got["trace_unavailable"])
+	}
+
+	rec = httptest.NewRecorder()
+	h.UpdateIncident(rec, withURLParam(withUser(httptest.NewRequest(http.MethodPatch, "/api/v1/incidents/argo-label-1",
+		strings.NewReader(`{"trace_id":"`+daeTraceID+`"}`)), admin), "id", "argo-label-1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := decodeIncident(t, rec); got["trace_id"] != daeTraceID || got["trace_source"] != "reported" || got["trace_unavailable"] != nil {
+		t.Fatalf("patch response: %v / %v / %v", got["trace_id"], got["trace_source"], got["trace_unavailable"])
+	}
+}

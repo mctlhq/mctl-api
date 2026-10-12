@@ -80,7 +80,9 @@ func labelStoredTrace(a *alerts.Alert, underived string) {
 // record. The workflow name is caller-controlled (summary, workflow_name), so
 // a non-admin may only read entries of a team they belong to. An entry with
 // no team is an AdminOnly platform operation and is admin-only here, as in
-// GetWorkflowLogs.
+// GetWorkflowLogs. This is deliberately stricter than GetWorkflow, which
+// tolerates an empty team: the incident path has no reason to widen access,
+// and argo incidents are posted to the admins tenant anyway.
 func canReadAuditEntry(user *auth.User, e *audit.Entry) bool {
 	if user.IsAdmin() {
 		return true

@@ -85,7 +85,8 @@ func TestTraceID_RoundTripsThroughEveryReadPath(t *testing.T) {
 	}
 	assertTrace(t, "Get after ack-style Update", after, traceA, in.WorkflowName)
 
-	// A PATCH carrying a new trace replaces it; workflow_name is immutable.
+	// A PATCH carrying a new trace replaces it. Update does not persist
+	// workflow_name, so the changed value below is dropped, not rejected.
 	after.TraceID = traceB
 	after.WorkflowName = "something-else"
 	if err := s.Update(ctx, after); err != nil {
