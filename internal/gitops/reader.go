@@ -85,6 +85,13 @@ type Tenant struct {
 	Networking   map[string]bool   `json:"networking,omitempty"`
 	Members      []TenantMember    `json:"members,omitempty"`
 	Teams        []Team            `json:"teams,omitempty"` // optional: multi-team support
+
+	// principalErr is why this tenant's principal-keyed membership cannot
+	// be read (mctl-api#377): a malformed or duplicate principalId, or a
+	// member entry that names nobody. It is kept off the login-keyed path
+	// on purpose, so a bad principalId never changes legacy authorization;
+	// every principal-keyed read of this tenant reports it as an error.
+	principalErr error
 }
 
 // Team represents a team within a multi-team tenant.
@@ -96,9 +103,14 @@ type Team struct {
 }
 
 // TenantMember represents a member of a tenant.
+//
+// PrincipalID is the canonical principal (prn_<ulid>) the entry grants to,
+// and becomes the authorization key in principal mode (mctl-api#377).
+// UserID is a GitHub login: the key in legacy mode, display data after.
 type TenantMember struct {
-	UserID string `json:"userId"`
-	Role   string `json:"role,omitempty"`
+	UserID      string `json:"userId,omitempty"`
+	PrincipalID string `json:"principalId,omitempty"`
+	Role        string `json:"role,omitempty"`
 }
 
 // IsMultiTeam returns true if the tenant has explicit teams defined.
@@ -124,9 +136,31 @@ func (t *Tenant) Namespaces() []string {
 // For legacy tenants: returns [tenantName] if user is a member.
 // For multi-team: returns compound namespaces for teams the user belongs to.
 func (t *Tenant) UserNamespaces(login string) []string {
+	return t.namespacesFor(matchLogin(login))
+}
+
+// memberMatcher reports whether a member entry names the caller. The login
+// and principal lookups share every rule below and differ only here, so the
+// two keys cannot drift apart on team or tenant-level semantics.
+type memberMatcher func(TenantMember) bool
+
+// matchLogin is the legacy key: a case-insensitive GitHub login. An empty
+// login matches nothing: an entry keyed only by principalId has no userId,
+// and "" must not equal "" on an authorization path.
+func matchLogin(login string) memberMatcher {
+	return func(m TenantMember) bool { return login != "" && strings.EqualFold(m.UserID, login) }
+}
+
+// matchPrincipal is the canonical key: an exact principal id. An empty id
+// matches nothing, so an entry without principalId never grants by it.
+func matchPrincipal(principalID string) memberMatcher {
+	return func(m TenantMember) bool { return principalID != "" && m.PrincipalID == principalID }
+}
+
+func (t *Tenant) namespacesFor(match memberMatcher) []string {
 	if !t.IsMultiTeam() {
 		for _, m := range t.Members {
-			if strings.EqualFold(m.UserID, login) {
+			if match(m) {
 				return []string{t.Name}
 			}
 		}
@@ -136,7 +170,7 @@ func (t *Tenant) UserNamespaces(login string) []string {
 	var ns []string
 	isTenantMember := false
 	for _, m := range t.Members {
-		if strings.EqualFold(m.UserID, login) {
+		if match(m) {
 			isTenantMember = true
 			break
 		}
@@ -149,7 +183,7 @@ func (t *Tenant) UserNamespaces(login string) []string {
 			continue
 		}
 		for _, m := range team.Members {
-			if strings.EqualFold(m.UserID, login) {
+			if match(m) {
 				ns = append(ns, compound)
 				break
 			}
@@ -172,10 +206,14 @@ func (t *Tenant) UserNamespaces(login string) []string {
 // there. A list that does not name the login is left out. A role is
 // returned exactly as written, empty included.
 func (t *Tenant) memberRoles(namespace, login string) (scopes [][]string, owns bool) {
+	return t.memberRolesFor(namespace, matchLogin(login))
+}
+
+func (t *Tenant) memberRolesFor(namespace string, match memberMatcher) (scopes [][]string, owns bool) {
 	collect := func(members []TenantMember) {
 		var roles []string
 		for _, m := range members {
-			if strings.EqualFold(m.UserID, login) {
+			if match(m) {
 				roles = append(roles, m.Role)
 			}
 		}
@@ -274,6 +312,8 @@ func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
 	// Initial sync.
 	if err := r.refresh(); err != nil {
 		slog.Error("initial gitops sync failed", "error", err)
+	} else {
+		r.recordPrincipalKeyMetrics()
 	}
 
 	ticker := time.NewTicker(interval)
@@ -286,6 +326,8 @@ func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
 		case <-ticker.C:
 			if err := r.refresh(); err != nil {
 				slog.Error("gitops refresh failed", "error", err)
+			} else {
+				r.recordPrincipalKeyMetrics()
 			}
 		}
 	}
@@ -800,6 +842,13 @@ func (r *Reader) MemberRoles(namespace, login string) ([][]string, error) {
 	if namespace == "" || login == "" {
 		return nil, errors.New("member roles: namespace and login are required")
 	}
+	return r.memberRolesMatching(namespace, matchLogin(login), false)
+}
+
+// memberRolesMatching is MemberRoles for any member key. With byPrincipal,
+// the tenant owning namespace must also have readable principal keys; the
+// login key never looks at them (see Tenant.principalErr).
+func (r *Reader) memberRolesMatching(namespace string, match memberMatcher, byPrincipal bool) ([][]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -826,12 +875,15 @@ func (r *Reader) MemberRoles(namespace, login string) ([][]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading tenant %q: %w", entry.Name(), err)
 		}
-		found, owns := t.memberRoles(namespace, login)
+		found, owns := t.memberRolesFor(namespace, match)
 		if !owns {
 			continue
 		}
 		if owner != "" {
 			return nil, fmt.Errorf("namespace %q is claimed by tenants %q and %q", namespace, owner, entry.Name())
+		}
+		if byPrincipal && t.principalErr != nil {
+			return nil, fmt.Errorf("tenant %q: %w", entry.Name(), t.principalErr)
 		}
 		owner = entry.Name()
 		roles = found
@@ -853,15 +905,17 @@ func (r *Reader) readTenant(name string) (*Tenant, error) {
 			Description  string `yaml:"description"`
 			ContactEmail string `yaml:"contactEmail"`
 			Members      []struct {
-				UserID string `yaml:"userId"`
-				Role   string `yaml:"role"`
+				UserID      string `yaml:"userId"`
+				PrincipalID string `yaml:"principalId"`
+				Role        string `yaml:"role"`
 			} `yaml:"members"`
 			Teams []struct {
 				Name        string `yaml:"name"`
 				DisplayName string `yaml:"displayName"`
 				Members     []struct {
-					UserID string `yaml:"userId"`
-					Role   string `yaml:"role"`
+					UserID      string `yaml:"userId"`
+					PrincipalID string `yaml:"principalId"`
+					Role        string `yaml:"role"`
 				} `yaml:"members"`
 			} `yaml:"teams"`
 			Quotas     map[string]string `yaml:"quotas"`
@@ -892,15 +946,16 @@ func (r *Reader) readTenant(name string) (*Tenant, error) {
 		t.Name = name
 	}
 	for _, m := range raw.Tenant.Members {
-		t.Members = append(t.Members, TenantMember{UserID: m.UserID, Role: m.Role})
+		t.Members = append(t.Members, TenantMember{UserID: m.UserID, PrincipalID: m.PrincipalID, Role: m.Role})
 	}
 	for _, team := range raw.Tenant.Teams {
 		tm := Team{Name: team.Name, DisplayName: team.DisplayName}
 		for _, m := range team.Members {
-			tm.Members = append(tm.Members, TenantMember{UserID: m.UserID, Role: m.Role})
+			tm.Members = append(tm.Members, TenantMember{UserID: m.UserID, PrincipalID: m.PrincipalID, Role: m.Role})
 		}
 		t.Teams = append(t.Teams, tm)
 	}
+	t.principalErr = t.validatePrincipalKeys()
 	return t, nil
 }
 
