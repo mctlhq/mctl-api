@@ -22,7 +22,6 @@ import (
 	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"log/slog"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
@@ -424,11 +423,6 @@ func trimWorkflowStatus(obj map[string]interface{}) map[string]interface{} {
 	return result
 }
 
-var (
-	w3cTraceparent = regexp.MustCompile(`^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$`)
-	w3cTraceID     = regexp.MustCompile(`^[0-9a-f]{32}$`)
-)
-
 // workflowTraceID names the trace a workflow belongs to, so a caller holding
 // only a workflow name (an ArgoWorkflowFailed alert, a ticket) can open the
 // trace in Tempo and from there the logs (mctlhq/mctl-agent#97).
@@ -450,8 +444,8 @@ func workflowTraceID(obj map[string]interface{}) (string, string) {
 					continue
 				}
 				value, _ := param["value"].(string)
-				if m := w3cTraceparent.FindStringSubmatch(value); len(m) == 2 && !allZero(m[1]) {
-					return m[1], "traceparent-argument"
+				if id, ok := telemetry.TraceIDFromTraceparent(value); ok {
+					return id, "traceparent-argument"
 				}
 			}
 		}
@@ -459,16 +453,12 @@ func workflowTraceID(obj map[string]interface{}) (string, string) {
 	if meta, ok := obj["metadata"].(map[string]interface{}); ok {
 		if ann, ok := meta["annotations"].(map[string]interface{}); ok {
 			value, _ := ann["mctl.ai/trace-id"].(string)
-			if w3cTraceID.MatchString(value) && !allZero(value) {
+			if telemetry.ValidTraceID(value) {
 				return value, "submit-annotation"
 			}
 		}
 	}
 	return "", ""
-}
-
-func allZero(s string) bool {
-	return strings.Trim(s, "0") == ""
 }
 
 // labelValue makes s usable as a Kubernetes label value. A value that is

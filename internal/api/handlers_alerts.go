@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/alerts"
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
@@ -46,10 +47,27 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var a alerts.Alert
-	if err := json.NewDecoder(r.Body).Decode(&a); err != nil {
+	// The trace fields shadow Alert's so a wrong JSON type for them is
+	// ignored instead of failing the whole request.
+	var body struct {
+		alerts.Alert
+		TraceID          json.RawMessage `json:"trace_id"`
+		WorkflowName     json.RawMessage `json:"workflow_name"`
+		TraceSource      json.RawMessage `json:"trace_source"`
+		TraceUnavailable json.RawMessage `json:"trace_unavailable"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
+	}
+	a := body.Alert
+	a.TraceID = validIncidentTraceID(body.TraceID)
+	a.WorkflowName = validIncidentWorkflowName(body.WorkflowName)
+	// Argo producers send no workflow_name, only a summary link. Store the
+	// name from it so a dedup hit, which keeps the first occurrence's
+	// summary, still records the newest run and derivation follows it.
+	if a.WorkflowName == "" && a.Source == incidentSourceArgo {
+		a.WorkflowName = workflowNameFromSummary(a.Summary)
 	}
 
 	if a.ID == "" || a.Source == "" || a.Type == "" || a.Tenant == "" || a.Summary == "" || a.Severity == "" {
@@ -84,6 +102,7 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	labelStoredTrace(stored, traceNotDerived)
 	writeJSON(w, http.StatusCreated, stored)
 }
 
@@ -186,6 +205,11 @@ func (h *Handlers) ListIncidents(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []alerts.Alert{}
 	}
+	// The list does not run the audit derivation; mark the absence so it is
+	// never read as "this incident has no trace".
+	for i := range items {
+		labelStoredTrace(&items[i], traceNotDerivedOnList)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"items": items,
@@ -217,6 +241,14 @@ func (h *Handlers) GetIncident(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
+
+	var lookup workflowAuditLookup
+	if h.opts.AuditLog != nil {
+		lookup = h.opts.AuditLog
+	}
+	deriveIncidentTrace(r.Context(), a, lookup, func(e *audit.Entry) bool {
+		return canReadAuditEntry(user, e)
+	})
 
 	writeJSON(w, http.StatusOK, a)
 }
@@ -250,12 +282,13 @@ func (h *Handlers) UpdateIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var patch struct {
-		Status      *string `json:"status"`
-		Analysis    *string `json:"analysis"`
-		ProposedFix *string `json:"proposed_fix"`
-		PRURL       *string `json:"pr_url"`
-		PRNumber    *int    `json:"pr_number"`
-		Confidence  *string `json:"confidence"`
+		Status      *string         `json:"status"`
+		Analysis    *string         `json:"analysis"`
+		ProposedFix *string         `json:"proposed_fix"`
+		PRURL       *string         `json:"pr_url"`
+		PRNumber    *int            `json:"pr_number"`
+		Confidence  *string         `json:"confidence"`
+		TraceID     json.RawMessage `json:"trace_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -281,11 +314,16 @@ func (h *Handlers) UpdateIncident(w http.ResponseWriter, r *http.Request) {
 		existing.Confidence = *patch.Confidence
 	}
 
+	if id := validIncidentTraceID(patch.TraceID); id != "" {
+		existing.TraceID = id
+	}
+
 	if err := h.opts.AlertStore.Update(r.Context(), existing); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update incident: "+err.Error())
 		return
 	}
 
+	labelStoredTrace(existing, traceNotDerived)
 	writeJSON(w, http.StatusOK, existing)
 }
 
@@ -329,6 +367,7 @@ func (h *Handlers) AcknowledgeIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	labelStoredTrace(existing, traceNotDerived)
 	writeJSON(w, http.StatusOK, existing)
 }
 
@@ -377,6 +416,7 @@ func (h *Handlers) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	labelStoredTrace(existing, traceNotDerived)
 	writeJSON(w, http.StatusOK, existing)
 }
 

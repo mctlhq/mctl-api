@@ -17,11 +17,13 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -179,6 +181,23 @@ func (p *PostgresLogger) GetByWorkflow(workflowName string) *Entry {
 		return nil
 	}
 	return &e
+}
+
+// LookupByWorkflow is GetByWorkflow with the caller's context, mapping
+// pgx.ErrNoRows to (nil, nil) and any other failure to an error.
+func (p *PostgresLogger) LookupByWorkflow(ctx context.Context, workflowName string) (*Entry, error) {
+	row := p.pool.QueryRow(ctx,
+		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id
+		 FROM audit_events WHERE workflow = $1 ORDER BY timestamp DESC LIMIT 1`, workflowName)
+
+	e, err := scanAuditEntry(row.Scan)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("audit postgres: lookup by workflow: %w", err)
+	}
+	return &e, nil
 }
 
 func scanAuditEntry(scan func(dest ...any) error) (Entry, error) {

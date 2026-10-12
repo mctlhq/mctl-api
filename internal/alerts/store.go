@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -59,6 +60,8 @@ CREATE INDEX IF NOT EXISTS alerts_created_at ON alerts (created_at DESC);
 ALTER TABLE alerts ADD COLUMN IF NOT EXISTS fingerprint      TEXT NOT NULL DEFAULT '';
 ALTER TABLE alerts ADD COLUMN IF NOT EXISTS occurrence_count INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE alerts ADD COLUMN IF NOT EXISTS last_seen_at     TIMESTAMPTZ;
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS trace_id         TEXT NOT NULL DEFAULT '';
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS workflow_name    TEXT NOT NULL DEFAULT '';
 
 DROP INDEX IF EXISTS alerts_fingerprint_open;
 CREATE UNIQUE INDEX IF NOT EXISTS alerts_tenant_fingerprint_open
@@ -74,6 +77,25 @@ CREATE TABLE IF NOT EXISTS alert_evidence (
 );
 CREATE INDEX IF NOT EXISTS alert_evidence_alert_id ON alert_evidence (alert_id);
 `
+
+// alertColumns is the single SELECT/RETURNING column list; scanAlert is its
+// matching Scan target list. Keep them in lockstep.
+const alertColumns = `id, source, type, tenant, service, summary, severity, status,
+		 analysis, proposed_fix, pr_url, pr_number, confidence,
+		 created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at,
+		 fingerprint, occurrence_count, last_seen_at, trace_id, workflow_name`
+
+func scanAlert(row pgx.Row, a *Alert) error {
+	if err := row.Scan(
+		&a.ID, &a.Source, &a.Type, &a.Tenant, &a.Service, &a.Summary, &a.Severity, &a.Status,
+		&a.Analysis, &a.ProposedFix, &a.PRURL, &a.PRNumber, &a.Confidence,
+		&a.CreatedAt, &a.UpdatedAt, &a.ResolvedAt, &a.AcknowledgedBy, &a.AcknowledgedAt,
+		&a.Fingerprint, &a.OccurrenceCount, &a.LastSeenAt, &a.TraceID, &a.WorkflowName,
+	); err != nil {
+		return err
+	}
+	return nil
+}
 
 // Store is a PostgreSQL-backed alert store.
 type Store struct {
@@ -110,30 +132,31 @@ func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 	}
 
 	stored := &Alert{}
-	err := s.pool.QueryRow(ctx,
+	row := s.pool.QueryRow(ctx,
 		`INSERT INTO alerts (id, source, type, tenant, service, summary, severity, status,
 		 analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at,
-		 acknowledged_by, acknowledged_at, fingerprint, occurrence_count, last_seen_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+		 acknowledged_by, acknowledged_at, fingerprint, occurrence_count, last_seen_at,
+		 trace_id, workflow_name)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 		 ON CONFLICT (tenant, fingerprint) WHERE fingerprint <> '' AND status NOT IN ('resolved','suppressed')
 		 DO UPDATE SET occurrence_count = alerts.occurrence_count + 1,
 		               last_seen_at = EXCLUDED.updated_at,
-		               updated_at = EXCLUDED.updated_at
-		 RETURNING id, source, type, tenant, service, summary, severity, status,
-		           analysis, proposed_fix, pr_url, pr_number, confidence,
-		           created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at,
-		           fingerprint, occurrence_count, last_seen_at`,
+		               updated_at = EXCLUDED.updated_at,
+		               trace_id = CASE WHEN EXCLUDED.trace_id <> '' THEN EXCLUDED.trace_id ELSE alerts.trace_id END,
+		               -- trace_id and workflow_name describe one run and move
+		               -- together: a trace reported without a name clears the
+		               -- stale name rather than pairing it with the new trace.
+		               workflow_name = CASE
+		                   WHEN EXCLUDED.trace_id <> '' THEN EXCLUDED.workflow_name
+		                   WHEN alerts.trace_id = '' AND EXCLUDED.workflow_name <> '' THEN EXCLUDED.workflow_name
+		                   ELSE alerts.workflow_name END
+		 RETURNING `+alertColumns,
 		a.ID, a.Source, a.Type, a.Tenant, a.Service, a.Summary, a.Severity, a.Status,
 		a.Analysis, a.ProposedFix, a.PRURL, a.PRNumber, a.Confidence,
 		a.CreatedAt, a.UpdatedAt, a.ResolvedAt, a.AcknowledgedBy, a.AcknowledgedAt,
-		a.Fingerprint, a.OccurrenceCount, a.LastSeenAt,
-	).Scan(
-		&stored.ID, &stored.Source, &stored.Type, &stored.Tenant, &stored.Service, &stored.Summary,
-		&stored.Severity, &stored.Status, &stored.Analysis, &stored.ProposedFix, &stored.PRURL,
-		&stored.PRNumber, &stored.Confidence, &stored.CreatedAt, &stored.UpdatedAt, &stored.ResolvedAt,
-		&stored.AcknowledgedBy, &stored.AcknowledgedAt, &stored.Fingerprint, &stored.OccurrenceCount,
-		&stored.LastSeenAt,
+		a.Fingerprint, a.OccurrenceCount, a.LastSeenAt, a.TraceID, a.WorkflowName,
 	)
+	err := scanAlert(row, stored)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "alerts_pkey" {
@@ -185,10 +208,12 @@ func (s *Store) Update(ctx context.Context, a *Alert) error {
 
 	_, err := s.pool.Exec(ctx,
 		`UPDATE alerts SET status=$2, analysis=$3, proposed_fix=$4, pr_url=$5, pr_number=$6,
-		 confidence=$7, updated_at=$8, resolved_at=$9, acknowledged_by=$10, acknowledged_at=$11
+		 confidence=$7, updated_at=$8, resolved_at=$9, acknowledged_by=$10, acknowledged_at=$11,
+		 trace_id=CASE WHEN $12::text <> '' THEN $12::text ELSE trace_id END
 		 WHERE id=$1`,
 		a.ID, a.Status, a.Analysis, a.ProposedFix, a.PRURL, a.PRNumber,
 		a.Confidence, a.UpdatedAt, a.ResolvedAt, a.AcknowledgedBy, a.AcknowledgedAt,
+		a.TraceID,
 	)
 	if err != nil {
 		return fmt.Errorf("alerts store: update: %w", err)
@@ -211,17 +236,8 @@ func (s *Store) Update(ctx context.Context, a *Alert) error {
 // Get returns a single alert with evidence.
 func (s *Store) Get(ctx context.Context, id string) (*Alert, error) {
 	a := &Alert{}
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, source, type, tenant, service, summary, severity, status,
-		 analysis, proposed_fix, pr_url, pr_number, confidence,
-		 created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at,
-		 fingerprint, occurrence_count, last_seen_at
-		 FROM alerts WHERE id=$1`, id).Scan(
-		&a.ID, &a.Source, &a.Type, &a.Tenant, &a.Service, &a.Summary, &a.Severity, &a.Status,
-		&a.Analysis, &a.ProposedFix, &a.PRURL, &a.PRNumber, &a.Confidence,
-		&a.CreatedAt, &a.UpdatedAt, &a.ResolvedAt, &a.AcknowledgedBy, &a.AcknowledgedAt,
-		&a.Fingerprint, &a.OccurrenceCount, &a.LastSeenAt,
-	)
+	err := scanAlert(s.pool.QueryRow(ctx,
+		`SELECT `+alertColumns+` FROM alerts WHERE id=$1`, id), a)
 	if err != nil {
 		return nil, fmt.Errorf("alerts store: get: %w", err)
 	}
@@ -237,17 +253,8 @@ func (s *Store) GetByPrefix(ctx context.Context, prefix string) (*Alert, error) 
 	}
 
 	a := &Alert{}
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, source, type, tenant, service, summary, severity, status,
-		 analysis, proposed_fix, pr_url, pr_number, confidence,
-		 created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at,
-		 fingerprint, occurrence_count, last_seen_at
-		 FROM alerts WHERE id LIKE $1 ORDER BY created_at DESC LIMIT 1`, prefix+"%").Scan(
-		&a.ID, &a.Source, &a.Type, &a.Tenant, &a.Service, &a.Summary, &a.Severity, &a.Status,
-		&a.Analysis, &a.ProposedFix, &a.PRURL, &a.PRNumber, &a.Confidence,
-		&a.CreatedAt, &a.UpdatedAt, &a.ResolvedAt, &a.AcknowledgedBy, &a.AcknowledgedAt,
-		&a.Fingerprint, &a.OccurrenceCount, &a.LastSeenAt,
-	)
+	err := scanAlert(s.pool.QueryRow(ctx,
+		`SELECT `+alertColumns+` FROM alerts WHERE id LIKE $1 ORDER BY created_at DESC LIMIT 1`, prefix+"%"), a)
 	if err != nil {
 		return nil, fmt.Errorf("alerts store: get by prefix: %w", err)
 	}
@@ -334,11 +341,7 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]Alert, error) {
 		argIdx++
 	}
 
-	query := `SELECT id, source, type, tenant, service, summary, severity, status,
-		analysis, proposed_fix, pr_url, pr_number, confidence,
-		created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at,
-		fingerprint, occurrence_count, last_seen_at
-		FROM alerts`
+	query := `SELECT ` + alertColumns + ` FROM alerts`
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
@@ -360,12 +363,7 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]Alert, error) {
 	var alerts []Alert
 	for rows.Next() {
 		var a Alert
-		if err := rows.Scan(
-			&a.ID, &a.Source, &a.Type, &a.Tenant, &a.Service, &a.Summary, &a.Severity, &a.Status,
-			&a.Analysis, &a.ProposedFix, &a.PRURL, &a.PRNumber, &a.Confidence,
-			&a.CreatedAt, &a.UpdatedAt, &a.ResolvedAt, &a.AcknowledgedBy, &a.AcknowledgedAt,
-			&a.Fingerprint, &a.OccurrenceCount, &a.LastSeenAt,
-		); err != nil {
+		if err := scanAlert(rows, &a); err != nil {
 			slog.Error("alerts store: scan failed", "error", err)
 			continue
 		}
