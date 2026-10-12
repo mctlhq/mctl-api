@@ -128,6 +128,26 @@ func (h *Handlers) requireCommerceTenant(w http.ResponseWriter, r *http.Request,
 	return user, tenant, true
 }
 
+// refuseIfAcceptDisabled implements COMMERCE_ACCEPT_DISABLED (mctl-api#570):
+// it stops new paid acceptances only. It runs after requireCommerceTenant, so
+// a caller without access still gets 404 and an unresolved one still gets
+// identity-unresolved, and before the body is decoded, so nothing is written.
+func (h *Handlers) refuseIfAcceptDisabled(w http.ResponseWriter, r *http.Request, user *auth.User, tenant, operation string) bool {
+	if !h.opts.CommerceAcceptDisabled {
+		return false
+	}
+	h.logAudit(r, audit.Entry{
+		UserID: user.ID, Operation: operation, Parameters: map[string]string{"tenant": tenant},
+		Status: "denied", RiskLevel: string(operations.RiskMedium),
+		Message: "COMMERCE_ACCEPT_DISABLED is on; new paid acceptances are refused",
+	})
+	// 422, not 503: mctl-agents reads every 5xx as "ledger unknown", and this
+	// is a final refusal with nothing held.
+	writeErrorCode(w, http.StatusUnprocessableEntity, commerce.ReasonUnsupportedExecution,
+		"commerce is not accepting new paid invocations", nil)
+	return true
+}
+
 func decodeCommerceBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, commerceMaxBodyBytes)
 	dec := json.NewDecoder(r.Body)
@@ -385,7 +405,7 @@ type mintQuoteRequest struct {
 // MintCommerceQuote is step 5 of ADR 020 sec. 7.
 func (h *Handlers) MintCommerceQuote(w http.ResponseWriter, r *http.Request) {
 	user, tenant, ok := h.requireCommerceTenant(w, r, "commerce-quote-mint")
-	if !ok {
+	if !ok || h.refuseIfAcceptDisabled(w, r, user, tenant, "commerce-quote-mint") {
 		return
 	}
 	var req mintQuoteRequest
@@ -445,7 +465,7 @@ type acceptInvocationResponse struct {
 // 200 the existing row for the same idempotency key and quote digest.
 func (h *Handlers) AcceptCommerceInvocation(w http.ResponseWriter, r *http.Request) {
 	user, tenant, ok := h.requireCommerceTenant(w, r, "commerce-invocation-accept")
-	if !ok {
+	if !ok || h.refuseIfAcceptDisabled(w, r, user, tenant, "commerce-invocation-accept") {
 		return
 	}
 	var req acceptInvocationRequest

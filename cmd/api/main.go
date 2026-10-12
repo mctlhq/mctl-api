@@ -500,6 +500,9 @@ func main() {
 		} else {
 			commerceStore = cs
 			defer cs.Close()
+			if cfg.CommerceAcceptDisabled {
+				slog.Warn("COMMERCE_ACCEPT_DISABLED is set; commerce quotes and invocation accepts are refused with unsupported-execution; reads, reconcile, release and finalize stay live")
+			}
 			// The dispatch signing key (C4, mctl-agents#619). Without it
 			// nothing can be dispatched to a paid provider: dispatch
 			// answers 503 and reserved rows are released by the reconciler.
@@ -922,6 +925,7 @@ func main() {
 		RoadmapWaveMaxAge:              roadmapWaveMaxAge,
 		Usage:                          usageStore,
 		Commerce:                       commerceStore,
+		CommerceAcceptDisabled:         cfg.CommerceAcceptDisabled,
 		Evidence:                       evidenceStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
@@ -1216,6 +1220,10 @@ type config struct {
 	CommerceDispatchKeyID      string
 	CommerceDispatchSigningKey string
 	CommerceDisabled           bool
+	// CommerceAcceptDisabled is COMMERCE_ACCEPT_DISABLED (mctl-api#570): it
+	// refuses new quotes and accepts only, so outstanding liability can still
+	// drain. It does not skip the dispatch-key check — dispatch stays live.
+	CommerceAcceptDisabled bool
 }
 
 func loadConfig() config {
@@ -1321,6 +1329,7 @@ func loadConfig() config {
 		CommerceDispatchKeyID:          os.Getenv("COMMERCE_DISPATCH_KEY_ID"),
 		CommerceDispatchSigningKey:     os.Getenv("COMMERCE_DISPATCH_SIGNING_KEY"),
 		CommerceDisabled:               killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
+		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
 	}
 }
 
@@ -1581,7 +1590,8 @@ func (c config) validate() error {
 	// would only show as dispatch answering 503 while every reservation
 	// expired. Both unset is "not configured", which stays allowed. Skipped
 	// while COMMERCE_DISABLED is on, so the kill switch can roll back a bad
-	// key without a crash loop.
+	// key without a crash loop. COMMERCE_ACCEPT_DISABLED does not skip it:
+	// dispatch stays live for rows accepted before that switch (mctl-api#570).
 	if !c.CommerceDisabled {
 		if _, err := commerceDispatchSigner(c.CommerceDispatchKeyID, c.CommerceDispatchSigningKey); err != nil {
 			return err

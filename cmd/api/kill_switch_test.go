@@ -14,7 +14,11 @@
 
 package main
 
-import "testing"
+import (
+	"os"
+	"regexp"
+	"testing"
+)
 
 func TestKillSwitchErrsTowardOff(t *testing.T) {
 	cases := []struct {
@@ -29,5 +33,26 @@ func TestKillSwitchErrsTowardOff(t *testing.T) {
 		if got := killSwitchOn(c.value); got != c.want {
 			t.Errorf("killSwitchOn(%q) = %v, want %v", c.value, got, c.want)
 		}
+	}
+}
+
+func TestLoadConfigReadsCommerceAcceptDisabled(t *testing.T) {
+	for value, want := range map[string]bool{"": false, "off": false, "false": false, "true": true, "1": true} {
+		t.Setenv("COMMERCE_ACCEPT_DISABLED", value)
+		if got := loadConfig().CommerceAcceptDisabled; got != want {
+			t.Errorf("COMMERCE_ACCEPT_DISABLED=%q: CommerceAcceptDisabled = %v, want %v", value, got, want)
+		}
+	}
+}
+
+// main() is not unit-testable, so pin in the source that the switch reaches
+// the router: read but never passed, it would silently mean nothing.
+func TestMainPassesCommerceAcceptDisabledToTheRouter(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`CommerceAcceptDisabled:\s+cfg\.CommerceAcceptDisabled,`).Match(src) {
+		t.Error("main.go does not pass cfg.CommerceAcceptDisabled into mctlapi.Options")
 	}
 }

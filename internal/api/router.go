@@ -162,6 +162,12 @@ type Options struct {
 	// commerce endpoints 503, which is "the ledger is unavailable", never
 	// "this tenant was not charged".
 	Commerce *commerce.Store
+	// CommerceAcceptDisabled is COMMERCE_ACCEPT_DISABLED (mctl-api#570). It
+	// refuses only MintCommerceQuote and AcceptCommerceInvocation, with 422
+	// unsupported-execution; every other commerce route stays live so
+	// outstanding liability can drain. Commerce == nil takes precedence: the
+	// routes are 503 whatever this says.
+	CommerceAcceptDisabled bool
 	// TemporalClient starts/signals DevLoopWorkflow runs on the dev-workflow
 	// control plane's Temporal deployment (optional — nil disables
 	// mctl_trigger_issue's use_temporal path; callers fall back to the
