@@ -414,8 +414,16 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 	if entry != nil && entry.ParametersUnreadable {
 		// The owning team, and so both the access check and the namespace,
 		// cannot be derived. An empty team would let a non-admin through.
+		//
+		// Admins are dead-ended here on purpose, although the no-record
+		// branch below gives them a live lookup. For a platform op the
+		// namespace would not depend on the tenant, but routing on part of a
+		// record we know is damaged is the guess this fix exists to remove;
+		// the reconciler refuses the same rows for the same reason. The
+		// operator repairs the row (it is flagged in GET /audit) instead.
+		// The cause stays in the log, off the wire (mctl-api#586).
 		slog.Error("audit record has unreadable parameters", "workflow", name, "id", entry.ID)
-		writeError(w, http.StatusServiceUnavailable, "audit record for workflow is unreadable (parameters could not be decoded); owning team cannot be determined")
+		writeError(w, http.StatusServiceUnavailable, "audit record for workflow is unreadable, workflow may exist")
 		return
 	}
 	if entry == nil {
@@ -541,12 +549,16 @@ func (h *Handlers) GetWorkflowLogs(w http.ResponseWriter, r *http.Request) {
 	// empty team: a step log exposes far more than a status phase does.
 	if !user.IsAdmin() {
 		entry, err := h.opts.AuditLog.LookupByWorkflow(r.Context(), name)
-		if err != nil || (entry != nil && entry.ParametersUnreadable) {
-			// A failed read or an unreadable record is not "no owning team":
-			// answer retryably instead of with the admin-only 403.
-			slog.Error("audit read failed for workflow logs", "workflow", name, "error", err,
-				"parameters_unreadable", entry != nil && entry.ParametersUnreadable)
+		// A failed read or an unreadable record is not "no owning team":
+		// answer retryably instead of with the admin-only 403.
+		if err != nil {
+			slog.Error("audit read failed for workflow logs", "workflow", name, "error", err)
 			writeError(w, http.StatusServiceUnavailable, "audit log unavailable, workflow may exist")
+			return
+		}
+		if entry != nil && entry.ParametersUnreadable {
+			slog.Error("audit record has unreadable parameters", "workflow", name, "id", entry.ID)
+			writeError(w, http.StatusServiceUnavailable, "audit record for workflow is unreadable, workflow may exist")
 			return
 		}
 		team := auditEntryTenant(entry)
@@ -822,6 +834,15 @@ func (h *Handlers) GetServiceLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// auditListItem is an audit entry as GET /audit serves it. The unreadable
+// flag is surfaced here rather than on audit.Entry so the write path stays
+// untouched; it is what lets an operator find a row whose parameters could not
+// be decoded without grepping server logs. Only admins ever see such a row.
+type auditListItem struct {
+	audit.Entry
+	ParametersUnreadable bool `json:"parametersUnreadable,omitempty"`
+}
+
 func (h *Handlers) ListAudit(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
@@ -840,7 +861,10 @@ func (h *Handlers) ListAudit(w http.ResponseWriter, r *http.Request) {
 		// Redact at read-time so historical entries persisted before the
 		// audit/redact module landed are also protected. See
 		// internal/audit/redact.go for the heuristic.
-		items = append(items, audit.RedactEntry(entries[i]))
+		items = append(items, auditListItem{
+			Entry:                audit.RedactEntry(entries[i]),
+			ParametersUnreadable: entries[i].ParametersUnreadable,
+		})
 	}
 	if items == nil {
 		items = []interface{}{}

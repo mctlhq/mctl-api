@@ -151,10 +151,48 @@ func TestAuditUnreadableParameters_Refused(t *testing.T) {
 		if len(exec.namespaces) != 0 {
 			t.Errorf("%s: live lookup ran in %v for an unreadable row", u.ID, exec.namespaces)
 		}
+		wantUnreadableBody(t, "GetWorkflow as "+u.ID, w.Body.String())
 	}
 	router, _ := auditRouter(unreadableAuditLog{audit.NewLogger()})
 	w := getAs(t, router, "/api/v1/workflows/wf-x/logs", acmeMember)
 	wantStatus(t, "GetWorkflowLogs", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	wantUnreadableBody(t, "GetWorkflowLogs", w.Body.String())
+}
+
+// Both handlers tell an unreadable record from an outage, and keep the cause
+// (the decode failure) off the wire.
+func wantUnreadableBody(t *testing.T, label, body string) {
+	t.Helper()
+	if !strings.Contains(body, "audit record for workflow is unreadable, workflow may exist") {
+		t.Errorf("%s: body %s, want the unreadable-record message", label, body)
+	}
+	if strings.Contains(body, "decode") {
+		t.Errorf("%s: body leaks the cause: %s", label, body)
+	}
+}
+
+// An admin can find an unreadable row from GET /audit; a readable row carries
+// no flag at all.
+func TestListAudit_FlagsUnreadableRowForAdmin(t *testing.T) {
+	router, _ := auditRouter(unreadableAuditLog{audit.NewLogger()})
+	w := getAs(t, router, "/api/v1/audit", adminUser)
+	wantStatus(t, "ListAudit", w.Code, http.StatusOK, w.Body.String())
+	items, _ := decodeJSON(t, w)["items"].([]interface{})
+	if len(items) != 1 {
+		t.Fatalf("items %v, want the one unreadable row", items)
+	}
+	if item, _ := items[0].(map[string]interface{}); item["parametersUnreadable"] != true || item["workflowName"] != "wf-x" {
+		t.Errorf("item %v, want parametersUnreadable=true on wf-x", item)
+	}
+
+	log := audit.NewLogger()
+	log.Log(audit.Entry{WorkflowName: "wf-ok", Operation: "deploy-service", Status: "submitted",
+		Parameters: map[string]string{"tenant_name": "acme"}})
+	router, _ = auditRouter(log)
+	w = getAs(t, router, "/api/v1/audit", adminUser)
+	if strings.Contains(w.Body.String(), "parametersUnreadable") {
+		t.Errorf("a readable row carries the flag: %s", w.Body.String())
+	}
 }
 
 // Sweep: the list endpoints treat an empty team as "platform" and show it to
