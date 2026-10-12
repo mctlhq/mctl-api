@@ -180,6 +180,9 @@ func main() {
 		oauthServer.TenantResolver = gitReader
 		oauthServer.AccessTokenTTL = cfg.OAuthTokenTTL
 		oauthServer.RefreshTokenTTL = cfg.OAuthRefreshTokenTTL
+		// Principal mode (mctl-api#377): tokens are accepted by their pid
+		// claim only, and a session with none is not refreshed.
+		oauthServer.PrincipalMode = cfg.tenantAuthzMode() == mctlapi.TenantAuthzPrincipal
 		// Unset/0 = strict mode off: a stale checkout is used and alerted on
 		// via the gauge above, not failed (mctl-api#411, README.md
 		// "Authorization group freshness"). GroupsDegradedGrace is

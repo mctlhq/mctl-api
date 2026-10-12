@@ -680,7 +680,10 @@ func usersEqual(a, b *User) bool {
 		a.githubID == b.githubID &&
 		a.dexIssuer == b.dexIssuer &&
 		a.dexSubject == b.dexSubject &&
-		a.dev == b.dev
+		a.dev == b.dev &&
+		a.principalID == b.principalID &&
+		a.tokenPrincipal == b.tokenPrincipal &&
+		a.tokenPID == b.tokenPID
 }
 
 func TestCharacterization_ServiceSurfaceUsageWriterGitHubDev(t *testing.T) {
@@ -738,7 +741,7 @@ func TestCharacterization_DevMode(t *testing.T) {
 func TestCharacterization_LocalOAuthJWT(t *testing.T) {
 	t.Setenv("AUTH_REQUIRED", "true")
 	oauth := &OAuthServer{BaseURL: "https://api.mctl.ai", JWTSecret: []byte("test-secret-key-material")}
-	tok, err := oauth.IssueJWT("alice", []string{"team-a"})
+	tok, err := oauth.IssueJWT("alice", "", []string{"team-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,7 +796,7 @@ func TestLocalOAuthJWTsAreCountedApartFromGitHubTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := oauth.IssueJWT("mashkovd", nil)
+	token, err := oauth.IssueJWT("mashkovd", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

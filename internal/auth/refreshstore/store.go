@@ -23,6 +23,16 @@ import (
 )
 
 // ErrInvalidToken is returned when a refresh token is not found, expired, or revoked.
+// Session is what a refresh token stands for: the GitHub login it was
+// signed in as (empty for a principal with no GitHub login), the canonical
+// principal (empty for tokens minted before mctl-api#377 recorded it), and
+// the groups snapshot used as the degraded fallback.
+type Session struct {
+	Login       string
+	PrincipalID string
+	Groups      []string
+}
+
 var ErrInvalidToken = errors.New("invalid or expired refresh token")
 
 // ErrClientMismatch is returned when the client_id in a rotation request does not match
@@ -44,17 +54,17 @@ type Store interface {
 	// Insert stores a brand-new refresh token (first issuance, not a rotation).
 	// rawToken is the opaque string returned to the client; the store hashes it
 	// with SHA-256 before writing so the raw value never rests in the database.
-	Insert(rawToken, login, clientID string, groups []string, expiresAt time.Time) error
+	Insert(rawToken, clientID string, sess Session, expiresAt time.Time) error
 
 	// Rotate atomically invalidates oldRawToken and stores newRawToken with the same
-	// family_id. Returns the login and groups from the original token so the caller
+	// family_id. Returns the original token's Session so the caller
 	// can issue a new access token.
 	//
 	// Errors:
 	//   ErrInvalidToken   — token not found, expired, or already revoked
 	//   ErrClientMismatch — client_id does not match the stored value
 	//   ErrReuseDetected  — token was already rotated (reuse attack); whole family revoked
-	Rotate(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time) (login string, groups []string, err error)
+	Rotate(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time) (Session, error)
 
 	// RevokeFamily revokes all tokens that share a family_id with rawToken.
 	// If clientID is non-empty, only tokens matching that client_id are revoked.

@@ -59,6 +59,23 @@ func (f *fakeBackend) Provision(_ context.Context, id auth.Identity) (*Principal
 	return p, nil
 }
 
+func (f *fakeBackend) Get(_ context.Context, id string) (*Principal, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	for _, p := range f.byIdentity {
+		if p.ID == id {
+			return p, nil
+		}
+	}
+	for _, p := range f.byLogin {
+		if p.ID == id {
+			return p, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
 func (f *fakeBackend) ResolveGitHubLogin(_ context.Context, login string) (*Principal, error) {
 	f.logins = append(f.logins, login)
 	if f.err != nil {
@@ -333,5 +350,46 @@ func TestResolverForgetBeatsAnInFlightResolution(t *testing.T) {
 	}
 	if _, err := r.ResolvePrincipal(context.Background(), githubAlice); err != nil || len(b.provisions) != 2 {
 		t.Fatalf("store reads = %d (%v), want the clean read cached", len(b.provisions), err)
+	}
+}
+
+// CheckPrincipal answers for a principal a token names (mctl-api#377): a
+// disabled or unknown one is refused, a store failure is unresolved and
+// remembered for FailureTTL, and an answer is cached until Forget.
+func TestResolverCheckPrincipal(t *testing.T) {
+	p := &Principal{ID: "prn_A", Status: StatusActive}
+	b := &fakeBackend{byIdentity: map[string]*Principal{"github||4242": p}}
+	r := newResolver(b, nil, false)
+	ctx := context.Background()
+
+	if err := r.CheckPrincipal(ctx, "prn_A"); err != nil {
+		t.Fatalf("active: %v", err)
+	}
+	if err := r.CheckPrincipal(ctx, "prn_GONE"); !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("unknown: %v, want ErrIdentityRefused", err)
+	}
+
+	p.Status = StatusDisabled
+	if err := r.CheckPrincipal(ctx, "prn_A"); err != nil {
+		t.Fatalf("cached answer: %v", err)
+	}
+	r.Forget("prn_A")
+	if err := r.CheckPrincipal(ctx, "prn_A"); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("after Forget: %v, want ErrPrincipalDisabled", err)
+	}
+
+	b.err = errors.New("db down")
+	if err := r.CheckPrincipal(ctx, "prn_B"); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("store error: %v, want ErrUnresolved", err)
+	}
+	b.err = nil
+	b.byIdentity["github||7"] = &Principal{ID: "prn_B", Status: StatusActive}
+	if err := r.CheckPrincipal(ctx, "prn_B"); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("within FailureTTL: %v, want the remembered failure", err)
+	}
+	now := time.Now().Add(FailureTTL + time.Second)
+	r.now = func() time.Time { return now }
+	if err := r.CheckPrincipal(ctx, "prn_B"); err != nil {
+		t.Fatalf("after FailureTTL: %v", err)
 	}
 }

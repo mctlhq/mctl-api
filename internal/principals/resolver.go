@@ -65,6 +65,7 @@ var ErrUnresolved = errors.New("principal could not be resolved")
 type backend interface {
 	Provision(ctx context.Context, id auth.Identity) (*Principal, error)
 	ResolveGitHubLogin(ctx context.Context, login string) (*Principal, error)
+	Get(ctx context.Context, id string) (*Principal, error)
 }
 
 // Resolver implements auth.PrincipalResolver over a Store, with a cache.
@@ -171,6 +172,52 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 // sweepLocked drops expired entries, at most once per TTL, so the cache
 // holds only the identities seen within the last TTL or two instead of every
 // identity ever seen.
+// CheckPrincipal implements auth.PrincipalChecker: whether the principal a
+// local token was minted for may still act (mctl-api#377 principal mode).
+// A disabled principal (merged-away ones included) is auth.ErrPrincipalDisabled,
+// one that does not exist auth.ErrIdentityRefused, a failed read
+// ErrUnresolved. Answers are cached like ResolvePrincipal's, under their own
+// key, so Forget drops them with the rest.
+func (r *Resolver) CheckPrincipal(ctx context.Context, principalID string) error {
+	key := "principal|" + principalID
+	now := r.now()
+	r.mu.Lock()
+	c, ok := r.cache[key]
+	gen := r.gen
+	r.mu.Unlock()
+	switch {
+	case ok && c.failed && now.Sub(c.at) < r.failureTTL:
+		resolutionFailed.Inc()
+		return fmt.Errorf("%w: check failed %s ago", ErrUnresolved, now.Sub(c.at).Round(time.Millisecond))
+	case ok && !c.failed && now.Sub(c.at) < r.ttl:
+		_, err := answer(c)
+		return err
+	}
+	rctx, cancel := context.WithTimeout(ctx, r.timeout)
+	p, err := r.store.Get(rctx, principalID)
+	cancel()
+	if errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("%w: principal %q does not exist", auth.ErrIdentityRefused, principalID)
+	}
+	if err != nil {
+		resolutionFailed.Inc()
+		slog.Warn("principal check failed", "principal", principalID, "error", err)
+		r.mu.Lock()
+		r.cache[key] = cached{failed: true, at: now}
+		r.mu.Unlock()
+		return fmt.Errorf("%w: %v", ErrUnresolved, err)
+	}
+	c = cached{principal: p.ID, disabled: p.Status == StatusDisabled, at: now}
+	r.mu.Lock()
+	if r.gen == gen {
+		r.cache[key] = c
+	}
+	r.sweepLocked(now)
+	r.mu.Unlock()
+	_, err = answer(c)
+	return err
+}
+
 func (r *Resolver) sweepLocked(now time.Time) {
 	if now.Sub(r.lastSweep) < r.ttl {
 		return

@@ -124,6 +124,16 @@ type User struct {
 	principalID    string
 	viaPrincipalID string
 
+	// tokenPrincipal records that principalID came from a local OAuth
+	// token's pid claim in principal mode (mctl-api#377), not from
+	// resolving an identity: AttachPrincipal then checks that principal is
+	// still active instead of re-deriving one from the login. tokenPID is
+	// the same claim outside principal mode, kept only to compare with the
+	// principal the identity resolves to. Set only by ValidateJWT and
+	// userFromVerified.
+	tokenPrincipal bool
+	tokenPID       string
+
 	// principalAuthz records that this caller's tenants and admin were
 	// decided by principal (TENANT_AUTHZ_MODE=principal, mctl-api#377):
 	// Groups then holds tenants only, and IsAdmin reads platformAdmin and
@@ -1105,7 +1115,15 @@ func userFromVerified(v *Verified) *User {
 				u.githubID = id
 			}
 		}
+		if v.Claims.TokenPrincipal != "" {
+			u.principalID, u.tokenPrincipal = v.Claims.TokenPrincipal, true
+		}
+		u.tokenPID = v.Claims.TokenPID
 		return u
+	case v.Identity.Provider == ProviderPrincipal:
+		// Reserved: only the local-OAuth provider yields it, for a token
+		// minted for this principal. No groups: principal mode decides them.
+		return &User{ID: v.Identity.Display, principalID: v.Identity.Subject, tokenPrincipal: true}
 	case v.Identity.Provider == ProviderGitHubActions:
 		// No groups, whatever the token held: a CI job is not a tenant
 		// member. Marked ci even if a claim were somehow empty, so the

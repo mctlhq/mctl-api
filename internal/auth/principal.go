@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"strconv"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Canonical principals, phase 1 (mctl-api#373).
@@ -52,6 +54,11 @@ const (
 	// (mctl-api#530). Reserved like ProviderAgent: only the dedicated
 	// provider in provider_github_actions.go may mint into it.
 	ProviderGitHubActions = "github-actions"
+	// ProviderPrincipal: subject is a canonical principal id that a local
+	// OAuth token was minted for, a principal with no GitHub login
+	// (mctl-api#377, principal mode). Reserved: no provider may mint into
+	// it, since userFromVerified takes its subject as the principal itself.
+	ProviderPrincipal = "principal"
 )
 
 // Principal kinds.
@@ -151,6 +158,10 @@ func (u *User) Identity() (Identity, bool) {
 		return Identity{Provider: ProviderGitHub, Subject: strconv.FormatInt(u.githubID, 10), Display: u.ID, Kind: KindHuman}, true
 	case u.githubLogin:
 		return Identity{Provider: ProviderGitHub, Display: u.ID, Kind: KindHuman}, true
+	case u.tokenPrincipal:
+		// A principal with no GitHub login, proven by a local token minted
+		// for it (principal mode only).
+		return Identity{Provider: ProviderPrincipal, Subject: u.principalID, Display: u.ID, Kind: KindHuman}, true
 	}
 	return Identity{}, false
 }
@@ -164,7 +175,13 @@ func (u *User) Identity() (Identity, bool) {
 // the caller proceeds without a principal id, because in phase 1 nothing
 // authorizes on it.
 func AttachPrincipal(ctx context.Context, pr PrincipalResolver, u *User) error {
-	if pr == nil || u == nil {
+	if u == nil {
+		return nil
+	}
+	if u.tokenPrincipal {
+		return checkTokenPrincipal(ctx, pr, u)
+	}
+	if pr == nil {
 		return nil
 	}
 	id, ok := u.Identity()
@@ -176,5 +193,44 @@ func AttachPrincipal(ctx context.Context, pr PrincipalResolver, u *User) error {
 		return err
 	}
 	u.principalID = principal
+	if u.tokenPID != "" && u.tokenPID != principal {
+		tokenPrincipalMismatch.Inc()
+	}
 	return nil
 }
+
+// PrincipalChecker reports whether a principal a token names may still act:
+// nil when it is active, ErrPrincipalDisabled when disabled (a merged-away
+// principal is disabled), ErrIdentityRefused when no such principal exists,
+// any other error when it could not be read.
+type PrincipalChecker interface {
+	CheckPrincipal(ctx context.Context, principalID string) error
+}
+
+// checkTokenPrincipal keeps the principal a local token was minted for only
+// if it is still active. On any failure the principal is cleared, so the
+// caller carries none and principal mode refuses it: a token's claim is
+// never trusted unchecked.
+func checkTokenPrincipal(ctx context.Context, pr PrincipalResolver, u *User) error {
+	checker, ok := pr.(PrincipalChecker)
+	if !ok {
+		u.principalID = ""
+		return errors.New("no principal store to check the token's principal against")
+	}
+	if err := checker.CheckPrincipal(ctx, u.principalID); err != nil {
+		u.principalID = ""
+		return err
+	}
+	return nil
+}
+
+// tokenPrincipalMismatch counts local tokens whose pid claim names another
+// principal than the one their identity resolves to. Outside principal mode
+// only, where the claim is not used: it must stay at zero before the
+// switch makes the claim the authority.
+var tokenPrincipalMismatch = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "oauth_token_principal_mismatch_total",
+	Help: "Local OAuth tokens whose pid claim differs from the principal their identity resolves to (outside principal mode).",
+})
+
+func init() { prometheus.MustRegister(tokenPrincipalMismatch) }

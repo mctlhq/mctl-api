@@ -194,7 +194,7 @@ func TestPersistedRegistration_TokenUseTouchesClient(t *testing.T) {
 	verifier := "verifier-verifier-verifier-verifier-verifier"
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	code, err := s.IssueCode(context.Background(), "alice", c.ClientID, portalCallback, challenge, nil)
+	code, err := s.IssueCode(context.Background(), "alice", "", c.ClientID, portalCallback, challenge, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
