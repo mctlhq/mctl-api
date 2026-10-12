@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.82.1](https://github.com/mctlhq/mctl-api/compare/4.82.0...4.82.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* **audit:** report a failed audit read as an error, not "no record" ([38c3bff](https://github.com/mctlhq/mctl-api/commit/38c3bffac03be3394da4eb3f55c4968abb80204a))
+* **audit:** report a failed audit read as an error, not "no record" ([2b76bbb](https://github.com/mctlhq/mctl-api/commit/2b76bbb30c7d39e554e0fb3db5bae13c1720b839)), closes [#586](https://github.com/mctlhq/mctl-api/issues/586)
+
 ## [4.82.0](https://github.com/mctlhq/mctl-api/compare/4.81.1...4.82.0) (2026-10-12)
 
 
