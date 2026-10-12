@@ -447,7 +447,7 @@ func (a platformSkillAccess) enabledForUserTenant(skillName string) bool {
 		}
 	}
 	for _, binding := range a.roleBindings {
-		if !containsString(a.user.Groups, binding.Role) {
+		if !a.user.HasRole(binding.Role) {
 			continue
 		}
 		if containsString(binding.EnabledSkills, skillName) {

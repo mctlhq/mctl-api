@@ -145,6 +145,10 @@ type Options struct {
 	// PrincipalMembership is the principal-keyed membership shadow mode
 	// reads. Nil makes every shadow comparison unresolved.
 	PrincipalMembership PrincipalMembershipReader
+	// AdminPrincipals is ADMIN_PRINCIPALS. In principal mode it is the only
+	// source of platform admin (auth.PrincipalAuthz); in shadow mode, when
+	// set, each request's legacy admin decision is compared with it.
+	AdminPrincipals map[string]bool
 	// MemberKeyPlan backs the read-only principal-key plan for GitOps
 	// member entries (mctl-api#377 A5). Nil makes it 503.
 	MemberKeyPlan *MemberKeyPlanOptions

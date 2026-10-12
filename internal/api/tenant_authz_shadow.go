@@ -105,7 +105,7 @@ var (
 	}, []string{"result"})
 	tenantAuthzShadowDiffTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "tenant_authz_shadow_diff_total",
-		Help: "Shadow comparisons that differed, by kind (tenant_only_legacy, tenant_only_principal, role_mismatch).",
+		Help: "Shadow comparisons that differed, by kind (tenant_only_legacy, tenant_only_principal, role_mismatch, admin_mismatch).",
 	}, []string{"kind"})
 	tenantAuthzPrincipalUnresolvedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "tenant_authz_principal_unresolved_total",
@@ -136,8 +136,9 @@ func shadowEligible(user *auth.User) bool {
 // HasTenantAccess decision reads) with the set principal mode would give
 // it. One comparison of the whole set covers every HasTenantAccess call the
 // request goes on to make, without touching the handlers that make them.
-// Platform admin is left out on both sides: it is compared in PR-B, once
-// ADMIN_PRINCIPALS exists.
+// Platform admin is compared too once ADMIN_PRINCIPALS is set (without it
+// every admin would read as a diff): the legacy "admins" decision against
+// membership of ADMIN_PRINCIPALS.
 func (h *Handlers) tenantAuthzShadow(next http.Handler) http.Handler {
 	if h.opts.TenantAuthzMode != TenantAuthzShadow {
 		return next
@@ -175,7 +176,12 @@ func (h *Handlers) shadowTenantSet(r *http.Request, user *auth.User) {
 	principal := tenantSet(got.Namespaces)
 	onlyLegacy := setMinus(legacy, principal)
 	onlyPrincipal := setMinus(principal, legacy)
-	if len(onlyLegacy) == 0 && len(onlyPrincipal) == 0 {
+	legacyAdmin := user.IsAdmin()
+	principalAdmin := legacyAdmin
+	if len(h.opts.AdminPrincipals) > 0 {
+		principalAdmin = h.opts.AdminPrincipals[prn]
+	}
+	if len(onlyLegacy) == 0 && len(onlyPrincipal) == 0 && legacyAdmin == principalAdmin {
 		tenantAuthzShadowTotal.WithLabelValues(shadowMatch).Inc()
 		return
 	}
@@ -186,13 +192,17 @@ func (h *Handlers) shadowTenantSet(r *http.Request, user *auth.User) {
 	if len(onlyPrincipal) > 0 {
 		tenantAuthzShadowDiffTotal.WithLabelValues("tenant_only_principal").Inc()
 	}
-	if !h.principalSets.shouldLog(prn + "|tenants|" + strings.Join(onlyLegacy, ",") + "|" + strings.Join(onlyPrincipal, ",")) {
+	if legacyAdmin != principalAdmin {
+		tenantAuthzShadowDiffTotal.WithLabelValues("admin_mismatch").Inc()
+	}
+	if !h.principalSets.shouldLog(fmt.Sprintf("%s|tenants|%s|%s|%t", prn, strings.Join(onlyLegacy, ","), strings.Join(onlyPrincipal, ","), principalAdmin)) {
 		return
 	}
 	slog.Warn("tenant authz shadow diff",
 		"kind", "tenants", "path", r.URL.Path, "principal", prn, "login", user.ID,
 		"legacy", legacy, "principal_tenants", principal,
-		"only_legacy", onlyLegacy, "only_principal", onlyPrincipal)
+		"only_legacy", onlyLegacy, "only_principal", onlyPrincipal,
+		"legacy_admin", legacyAdmin, "principal_admin", principalAdmin)
 }
 
 // shadowTenantRole compares checkTenantRole's login-keyed decision with the

@@ -77,7 +77,7 @@ func snapshotShadow() shadowCounts {
 	for _, r := range []string{shadowMatch, shadowDiff, shadowUnresolved} {
 		c["result:"+r] = testutil.ToFloat64(tenantAuthzShadowTotal.WithLabelValues(r))
 	}
-	for _, k := range []string{"tenant_only_legacy", "tenant_only_principal", "role_mismatch"} {
+	for _, k := range []string{"tenant_only_legacy", "tenant_only_principal", "role_mismatch", "admin_mismatch"} {
 		c["kind:"+k] = testutil.ToFloat64(tenantAuthzShadowDiffTotal.WithLabelValues(k))
 	}
 	for _, r := range []string{unresolvedNoPID, unresolvedMembershipUnavailable, unresolvedMembershipBusy, unresolvedMembershipUnreadable} {

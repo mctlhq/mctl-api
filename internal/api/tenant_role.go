@@ -66,6 +66,9 @@ func (d roleRefusal) refused() bool { return d.status != 0 }
 // role could not be read are 503 rather than 403: "we could not check" is
 // kept apart from "you are not allowed", and neither is a pass.
 func (h *Handlers) checkTenantRole(user *auth.User, tenant string, min operations.Role, what string) roleRefusal {
+	if h.opts.TenantAuthzMode == TenantAuthzPrincipal {
+		return h.checkTenantRoleByPrincipal(user, tenant, min, what)
+	}
 	d := h.checkTenantRoleByLogin(user, tenant, min, what)
 	if h.opts.TenantAuthzMode == TenantAuthzShadow {
 		h.shadowTenantRole(user, tenant, min, d)
@@ -73,29 +76,11 @@ func (h *Handlers) checkTenantRole(user *auth.User, tenant string, min operation
 	return d
 }
 
-// checkTenantRoleByLogin is the login-keyed decision, the only one that
-// authorizes until principal mode (mctl-api#377).
+// checkTenantRoleByLogin is the login-keyed decision, the one that
+// authorizes in legacy and shadow mode (mctl-api#377).
 func (h *Handlers) checkTenantRoleByLogin(user *auth.User, tenant string, min operations.Role, what string) roleRefusal {
-	if user.IsAdmin() {
-		return roleRefusal{}
-	}
-	if min == operations.RoleAdmin {
-		return roleRefusal{
-			status:      http.StatusForbidden,
-			message:     what + " requires a platform admin",
-			auditStatus: "denied",
-			detail:      fmt.Sprintf("user %q is not a platform admin; %s is admin-only", user.ID, what),
-		}
-	}
-	if !min.IsTenantRole() {
-		// A tenant write with no tenant minimum is a registry or handler
-		// bug. Refusing it is the only safe reading of "nobody decided".
-		return roleRefusal{
-			status:      http.StatusInternalServerError,
-			message:     what + " has no minimum role configured; refusing to run it",
-			auditStatus: "error",
-			detail:      fmt.Sprintf("minimum role %q of %s is not a tenant role", min, what),
-		}
+	if d, decided := roleGate(user, min, what); decided {
+		return d
 	}
 	login, proven := user.GitHubLogin()
 	if !proven {
@@ -107,16 +92,88 @@ func (h *Handlers) checkTenantRoleByLogin(user *auth.User, tenant string, min op
 			detail:      fmt.Sprintf("user %q has no GitHub-proven login, so no tenant role on %q; %q required", user.ID, tenant, min),
 		}
 	}
+	var read func() ([][]string, error)
+	if h.opts.GitReader != nil {
+		read = func() ([][]string, error) { return h.opts.GitReader.MemberRoles(tenant, login) }
+	}
+	return decideWrittenRole(login, tenant, min, what, read)
+}
+
+// checkTenantRoleByPrincipal is the principal-keyed decision of principal
+// mode: the role GitOps writes for the caller's principal, read with no
+// login at all. A human without a resolved principal is 503 (the
+// middleware already refuses one; this is the second line), a non-human
+// caller holds no tenant role.
+func (h *Handlers) checkTenantRoleByPrincipal(user *auth.User, tenant string, min operations.Role, what string) roleRefusal {
+	if d, decided := roleGate(user, min, what); decided {
+		return d
+	}
+	id, ok := user.Identity()
+	if !ok || id.Kind != auth.KindHuman {
+		return roleRefusal{
+			status:      http.StatusForbidden,
+			message:     fmt.Sprintf("%s requires role %q on tenant %q; your sign-in does not carry a tenant role", what, min, tenant),
+			auditStatus: "denied",
+			detail:      fmt.Sprintf("caller %q is not a human principal, so no tenant role on %q; %q required", user.ID, tenant, min),
+		}
+	}
+	prn := user.PrincipalID()
+	if prn == "" {
+		return roleRefusal{
+			status:      http.StatusServiceUnavailable,
+			message:     fmt.Sprintf("cannot verify your role on tenant %q right now; try again later", tenant),
+			auditStatus: "error",
+			detail:      fmt.Sprintf("role of %q on %q not read: principal not resolved", user.ID, tenant),
+		}
+	}
+	var read func() ([][]string, error)
+	if h.opts.PrincipalMembership != nil {
+		read = func() ([][]string, error) { return h.opts.PrincipalMembership.MemberRolesForPrincipal(tenant, prn) }
+	}
+	return decideWrittenRole(prn, tenant, min, what, read)
+}
+
+// roleGate is what every tenant-role decision settles before reading a
+// role: an admin passes, an admin-only action refuses anyone else, and a
+// minimum that is no tenant role refuses everyone.
+func roleGate(user *auth.User, min operations.Role, what string) (roleRefusal, bool) {
+	if user.IsAdmin() {
+		return roleRefusal{}, true
+	}
+	if min == operations.RoleAdmin {
+		return roleRefusal{
+			status:      http.StatusForbidden,
+			message:     what + " requires a platform admin",
+			auditStatus: "denied",
+			detail:      fmt.Sprintf("user %q is not a platform admin; %s is admin-only", user.ID, what),
+		}, true
+	}
+	if !min.IsTenantRole() {
+		// A tenant write with no tenant minimum is a registry or handler
+		// bug. Refusing it is the only safe reading of "nobody decided".
+		return roleRefusal{
+			status:      http.StatusInternalServerError,
+			message:     what + " has no minimum role configured; refusing to run it",
+			auditStatus: "error",
+			detail:      fmt.Sprintf("minimum role %q of %s is not a tenant role", min, what),
+		}, true
+	}
+	return roleRefusal{}, false
+}
+
+// decideWrittenRole decides min on tenant from the roles read for who (a
+// login or a principal id). A nil read means no reader is configured.
+func decideWrittenRole(login, tenant string, min operations.Role, what string, read func() ([][]string, error)) roleRefusal {
 	unavailable := roleRefusal{
 		status:      http.StatusServiceUnavailable,
 		message:     fmt.Sprintf("cannot verify your role on tenant %q right now; try again later", tenant),
 		auditStatus: "error",
 	}
-	if h.opts.GitReader == nil {
+	if read == nil {
 		unavailable.detail = fmt.Sprintf("role of %q on %q not read: gitops reader not configured", login, tenant)
 		return unavailable
 	}
-	written, err := h.opts.GitReader.MemberRoles(tenant, login)
+	written, err := read()
 	if err != nil {
 		// The error can carry checkout paths; it goes to the log and the
 		// audit entry, not to the caller.
