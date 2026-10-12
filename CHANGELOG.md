@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.81.1](https://github.com/mctlhq/mctl-api/compare/4.81.0...4.81.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* **auth:** a tenant named admins no longer confers platform admin ([12de31c](https://github.com/mctlhq/mctl-api/commit/12de31ca274b2452bef03603dfa42f09a54f6387))
+* **auth:** a tenant named admins no longer confers platform admin ([0989555](https://github.com/mctlhq/mctl-api/commit/0989555b657577083c6b1edd4931a082621d10bd))
+
 ## [4.81.0](https://github.com/mctlhq/mctl-api/compare/4.80.1...4.81.0) (2026-10-12)
 
 
