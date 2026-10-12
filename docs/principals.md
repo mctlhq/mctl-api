@@ -353,6 +353,10 @@ caller's authorization; it never merges with the legacy one:
 - `/whoami` reports `admins` in `namespaces` for a platform admin, but
   never in `groups`: admin is decided by principal, not carried as a
   group. Clients must read `isAdmin`, not `groups.includes("admins")`.
+- `/whoami` `id` is the GitHub login for a GitHub-linked caller, but the
+  principal id (`prn_…`) for a ZITADEL-only principal, which has no login.
+  Clients must not treat `id` as a GitHub login (link to a profile, look it
+  up in a repo's collaborators).
 
 ### Local tokens carry the principal (`pid`)
 

@@ -219,7 +219,7 @@ func TestOtherProviderCannotReturnThePrincipalNamespace(t *testing.T) {
 		"principal namespace": {Identity: Identity{Provider: ProviderPrincipal, Subject: "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ", Kind: KindHuman}},
 		// Nor may it carry the token-principal claim in its own namespace.
 		"token principal claim": {Identity: Identity{Provider: "acme", Subject: "s-1", Kind: KindHuman},
-			Claims: Claims{TokenPrincipal: "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ"}},
+			Claims: Claims{TokenPrincipal: "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ"}}, //nolint:gosec // G101: a principal id, not a credential
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := &fakeProvider{
@@ -252,6 +252,15 @@ func TestRefresh_CarriesThePrincipal(t *testing.T) {
 					rt, err := o.IssueRefreshToken(tc.login, tc.pid, []string{"acme"}, "c")
 					if err != nil {
 						t.Fatal(err)
+					}
+					if tc.login == "" && !principalMode {
+						// Outside principal mode its access tokens would be
+						// refused, so the session is not refreshed either: the
+						// client signs in again rather than looping on 401s.
+						if _, _, err := o.RefreshAccessToken(rt, "c"); err == nil {
+							t.Fatal("login-less session refreshed outside principal mode")
+						}
+						continue
 					}
 					// Twice: the successor must carry the principal too.
 					for hop := range 2 {
