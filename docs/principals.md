@@ -384,7 +384,8 @@ rotation carries it forward.
 - In `principal` mode a token without a `pid` is refused (401), a
   principal-only token must have `sub == pid`, and a refresh of a session
   with no recorded principal answers `invalid_grant`. Outside it, a
-  principal-only token is refused.
+  principal-only token is refused (401), and a refresh of a session with
+  no login (a ZITADEL-only principal) answers `invalid_grant`.
 
 At the switch, sessions minted before this release carry no `pid`, so
 their holders sign in again. With the persistent refresh store the refresh
@@ -392,7 +393,10 @@ token is rotated before its missing `pid` is refused, so a client that
 retries it gets `invalid_grant` and, once the rotation grace window has
 passed, trips reuse detection: the family is revoked and `oauth refresh
 token reuse detected; family revoked` is logged as a warning. On switch day
-those warnings are pre-#377 sessions, not stolen tokens.
+those warnings are pre-#377 sessions, not stolen tokens. A rollback out
+of `principal` mode does the same to ZITADEL-only principals: their
+sessions have no login, so their refresh is refused, and the same
+reuse-detection warnings follow.
 
 A disabled principal, merged-away ones included (a merge disables `from`),
 is refused on every request. An **unlink is not**: the principal stays
@@ -439,7 +443,7 @@ does not count for that path.
 
 Over the same window, `oauth_token_principal_mismatch_total` must stay at
 zero. Before the flip, check pid coverage too: a live session minted
-before the release that records `pid` is refused at the switch and its
+before the release that records no `pid` is refused at the switch and its
 holder must sign in again. A refresh carries an empty `principal_id`
 forward, so such sessions end only by expiry or a new sign-in; count the
 live refresh rows with an empty `principal_id` and decide whether that
