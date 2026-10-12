@@ -96,7 +96,7 @@ func (h *Handlers) checkTenantRoleByLogin(user *auth.User, tenant string, min op
 	if h.opts.GitReader != nil {
 		read = func() ([][]string, error) { return h.opts.GitReader.MemberRoles(tenant, login) }
 	}
-	return decideWrittenRole(login, tenant, min, what, read)
+	return decideWrittenRole(login, "gitops reader", tenant, min, what, read)
 }
 
 // checkTenantRoleByPrincipal is the principal-keyed decision of principal
@@ -130,7 +130,7 @@ func (h *Handlers) checkTenantRoleByPrincipal(user *auth.User, tenant string, mi
 	if h.opts.PrincipalMembership != nil {
 		read = func() ([][]string, error) { return h.opts.PrincipalMembership.MemberRolesForPrincipal(tenant, prn) }
 	}
-	return decideWrittenRole(prn, tenant, min, what, read)
+	return decideWrittenRole(prn, "principal membership reader", tenant, min, what, read)
 }
 
 // roleGate is what every tenant-role decision settles before reading a
@@ -162,22 +162,23 @@ func roleGate(user *auth.User, min operations.Role, what string) (roleRefusal, b
 }
 
 // decideWrittenRole decides min on tenant from the roles read for who (a
-// login or a principal id). A nil read means no reader is configured.
-func decideWrittenRole(login, tenant string, min operations.Role, what string, read func() ([][]string, error)) roleRefusal {
+// login or a principal id). A nil read means reader, the option that would
+// have answered, is not configured.
+func decideWrittenRole(who, reader, tenant string, min operations.Role, what string, read func() ([][]string, error)) roleRefusal {
 	unavailable := roleRefusal{
 		status:      http.StatusServiceUnavailable,
 		message:     fmt.Sprintf("cannot verify your role on tenant %q right now; try again later", tenant),
 		auditStatus: "error",
 	}
 	if read == nil {
-		unavailable.detail = fmt.Sprintf("role of %q on %q not read: gitops reader not configured", login, tenant)
+		unavailable.detail = fmt.Sprintf("role of %q on %q not read: %s not configured", who, tenant, reader)
 		return unavailable
 	}
 	written, err := read()
 	if err != nil {
 		// The error can carry checkout paths; it goes to the log and the
 		// audit entry, not to the caller.
-		unavailable.detail = fmt.Sprintf("role of %q on %q not read: %v", login, tenant, err)
+		unavailable.detail = fmt.Sprintf("role of %q on %q not read: %v", who, tenant, err)
 		return unavailable
 	}
 	if len(written) == 0 {
@@ -187,7 +188,7 @@ func decideWrittenRole(login, tenant string, min operations.Role, what string, r
 			status:      http.StatusForbidden,
 			message:     fmt.Sprintf("%s requires role %q on tenant %q; you are not listed as a member of it", what, min, tenant),
 			auditStatus: "denied",
-			detail:      fmt.Sprintf("user %q is not in the members of tenant %q; %q required", login, tenant, min),
+			detail:      fmt.Sprintf("user %q is not in the members of tenant %q; %q required", who, tenant, min),
 		}
 	}
 	role, known := operations.EffectiveTenantRole(written)
@@ -196,7 +197,7 @@ func decideWrittenRole(login, tenant string, min operations.Role, what string, r
 			status:      http.StatusForbidden,
 			message:     fmt.Sprintf("%s requires role %q on tenant %q; your role there is missing or not recognized", what, min, tenant),
 			auditStatus: "denied",
-			detail:      fmt.Sprintf("user %q has unrecognized role(s) %q on tenant %q; %q required", login, written, tenant, min),
+			detail:      fmt.Sprintf("user %q has unrecognized role(s) %q on tenant %q; %q required", who, written, tenant, min),
 		}
 	}
 	if !role.Satisfies(min) {
@@ -204,7 +205,7 @@ func decideWrittenRole(login, tenant string, min operations.Role, what string, r
 			status:      http.StatusForbidden,
 			message:     fmt.Sprintf("%s requires role %q on tenant %q; your role is %q", what, min, tenant, role),
 			auditStatus: "denied",
-			detail:      fmt.Sprintf("user %q has role %q on tenant %q; %q required", login, role, tenant, min),
+			detail:      fmt.Sprintf("user %q has role %q on tenant %q; %q required", who, role, tenant, min),
 		}
 	}
 	return roleRefusal{}

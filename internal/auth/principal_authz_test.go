@@ -120,7 +120,7 @@ func TestPrincipalAuthz_UnreadableMembership(t *testing.T) {
 	admins := map[string]bool{pzAdmin: true}
 	for name, m := range map[string]PrincipalMembershipSource{
 		"stale checkout": pzMembers{err: errors.New("checkout is stale")},
-		"broken tenant":  pzMembers{tenants: map[string][]string{pzMember: {"labs"}}, unreadable: []string{"erpact"}},
+		"broken tenant":  pzMembers{tenants: map[string][]string{pzMember: {"labs"}, pzAdmin: {"labs"}}, unreadable: []string{"erpact"}},
 		"no source":      nil,
 	} {
 		p := &PrincipalAuthz{Members: m, Admins: admins}
@@ -138,6 +138,15 @@ func TestPrincipalAuthz_UnreadableMembership(t *testing.T) {
 	p := &PrincipalAuthz{Members: pzMembers{}, Admins: admins}
 	if err := p.Apply(pzHuman("", "labs")); !errors.Is(err, ErrPrincipalAuthzUnavailable) {
 		t.Fatalf("unresolved principal: %v", err)
+	}
+}
+
+// A caller that matches no identity shape is not a proven non-human: it is
+// refused like an unresolved human, never served with no tenants.
+func TestPrincipalAuthz_UnrecognisedIdentity(t *testing.T) {
+	p := &PrincipalAuthz{Members: pzMembers{}, Admins: map[string]bool{}}
+	if err := p.Apply(&User{ID: "dex-without-sub", Groups: []string{"labs"}}); !errors.Is(err, ErrPrincipalAuthzUnavailable) {
+		t.Fatalf("got %v, want ErrPrincipalAuthzUnavailable", err)
 	}
 }
 

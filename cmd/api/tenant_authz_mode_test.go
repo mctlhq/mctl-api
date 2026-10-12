@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/gitops"
@@ -97,5 +100,54 @@ func TestConfigValidate_AdminPrincipals(t *testing.T) {
 	}
 	if got := (config{AdminPrincipalsRaw: admin}).principalAuthz(nil); got != nil {
 		t.Fatal("principal authz wired outside principal mode")
+	}
+}
+
+// principalTenants is the only wiring between the GitOps reader and the
+// principal-mode decision: readable tenants are the membership, unreadable
+// ones are reported as such and never granted. Swapping the two would hand
+// out the tenants that could not be read.
+func TestPrincipalTenantsAdapter(t *testing.T) {
+	// The membership read refuses a checkout that never synced, so the
+	// reader clones a local repository once, as RefreshLoop does at boot.
+	src := t.TempDir()
+	write := func(name, values string) {
+		tenant := filepath.Join(src, "platform-gitops", "tenants", name)
+		if err := os.MkdirAll(tenant, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tenant, "values.yaml"), []byte(values), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const member = "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ"
+	write("acme", "tenant:\n  name: acme\n  members:\n    - principalId: "+member+"\n      role: owner\n")
+	write("broken", "tenant:\n  name: broken\n  members:\n    - principalId: prn_bad\n      role: owner\n")
+	write("other", "tenant:\n  name: other\n  members:\n    - principalId: prn_01JBBBBBBBBBBBBBBBBBBBBBBB\n      role: owner\n")
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main"},
+		{"-c", "user.name=t", "-c", "user.email=t@example.com", "add", "."},
+		{"-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "tenants"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = src
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	reader := gitops.NewReader(src, "main", filepath.Join(t.TempDir(), "checkout"), nil, "", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reader.RefreshLoop(ctx, time.Hour)
+	if reader.LastSync().IsZero() {
+		t.Fatal("the local clone did not sync")
+	}
+
+	namespaces, unreadable, err := principalTenants{reader}.PrincipalTenants(member)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(namespaces, []string{"acme"}) || !reflect.DeepEqual(unreadable, []string{"broken"}) {
+		t.Fatalf("namespaces = %q, unreadable = %q; want [acme] and [broken]", namespaces, unreadable)
 	}
 }

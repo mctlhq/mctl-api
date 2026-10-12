@@ -18,6 +18,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -81,6 +82,17 @@ func TestCheckTenantRole_PrincipalMode(t *testing.T) {
 				t.Fatalf("status = %d (%s), want %d", d.status, d.detail, tt.want)
 			}
 		})
+	}
+}
+
+// The nil-reader refusal names the reader principal mode actually needed,
+// not the login-keyed one.
+func TestCheckTenantRole_PrincipalModeNamesItsReader(t *testing.T) {
+	user := principalUser(t, erpactMember("dan-dev"), shadowPRN, map[string][]string{shadowPRN: {"erpact"}})
+	h := &Handlers{opts: Options{TenantAuthzMode: TenantAuthzPrincipal}}
+	d := h.checkTenantRole(user, "erpact", operations.RoleDeveloper, "test")
+	if d.status != http.StatusServiceUnavailable || !strings.Contains(d.detail, "principal membership reader not configured") {
+		t.Fatalf("got %d %q", d.status, d.detail)
 	}
 }
 

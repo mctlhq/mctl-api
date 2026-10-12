@@ -81,7 +81,8 @@ type PrincipalAuthz struct {
 //     (NewServiceUser, AUTH_REQUIRED=false).
 //   - Any other non-human caller (surface, agent, CI, writers, a federated
 //     machine identity) keeps no groups: principal mode reads no provider
-//     group for anyone.
+//     group for anyone. A caller with no recognisable identity at all is
+//     refused, not served as one.
 //   - A human gets ADMIN_PRINCIPALS for admin and its GitOps membership for
 //     tenants. A platform admin whose membership cannot be read is still
 //     served, since admin does not depend on it; anyone else is refused
@@ -95,12 +96,16 @@ func (p *PrincipalAuthz) Apply(u *User) error {
 		u.platformAdmin = true
 		return nil
 	}
+	u.Groups = nil
 	id, ok := u.Identity()
-	if !ok || id.Kind != KindHuman {
-		u.Groups = nil
+	if !ok {
+		// Not a proven non-human: a caller whose identity has no
+		// recognised shape (a Dex token with no sub) cannot be decided.
+		return fmt.Errorf("%w: %q has no recordable identity", ErrPrincipalAuthzUnavailable, u.ID)
+	}
+	if id.Kind != KindHuman {
 		return nil
 	}
-	u.Groups = nil
 	prn := u.principalID
 	if prn == "" {
 		return fmt.Errorf("%w: principal of %q was not resolved", ErrPrincipalAuthzUnavailable, u.ID)
@@ -114,11 +119,13 @@ func (p *PrincipalAuthz) Apply(u *User) error {
 	}
 	namespaces, unreadable, err := p.Members.PrincipalTenants(prn)
 	switch {
-	case err != nil && u.platformAdmin:
+	case (err != nil || len(unreadable) > 0) && u.platformAdmin:
+		// Served without tenant groups: a partial list would not be the
+		// membership, and admin does not need it.
 		return nil
 	case err != nil:
 		return fmt.Errorf("%w: %v", ErrPrincipalAuthzUnavailable, err)
-	case len(unreadable) > 0 && !u.platformAdmin:
+	case len(unreadable) > 0:
 		return fmt.Errorf("%w: tenants %v could not be read", ErrPrincipalAuthzUnavailable, unreadable)
 	}
 	u.Groups = namespaces
@@ -131,10 +138,6 @@ func (p *PrincipalAuthz) Apply(u *User) error {
 func NewFederatedUser(provider, issuer, subject, display, kind string) *User {
 	return &User{ID: display, oidcProviderName: provider, oidcIssuer: issuer, oidcSubject: subject, oidcKind: kind}
 }
-
-// PrincipalAuthzActive reports whether u's authorization was decided by
-// principal (Apply ran on it).
-func (u *User) PrincipalAuthzActive() bool { return u != nil && u.principalAuthz }
 
 // HasRole reports whether u holds a platform role binding's role. "admins"
 // is platform admin, decided by IsAdmin; any other role is a group name.
