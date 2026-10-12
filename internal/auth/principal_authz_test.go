@@ -240,3 +240,24 @@ func TestMiddleware_PrincipalMode(t *testing.T) {
 		t.Fatalf("unreadable membership: %d", code)
 	}
 }
+
+// A relayed or delegated caller acting for an admin principal is not an
+// admin: relaying never confers admin, and a delegated run must not
+// approve its own actions.
+func TestPrincipalAuthz_RelayedAndDelegatedAreNeverAdmin(t *testing.T) {
+	agent := NewAgentUser("implementer", AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1", RunID: "art_1"})
+	agent.principalID = "prn_AGENT"
+	for name, u := range map[string]*User{
+		"relayed":   NewRelayedUser("root", []string{"admins", "labs"}, NewSurfaceUser("telegram")),
+		"delegated": NewDelegatedUser("root", []string{"admins", "labs"}, agent),
+	} {
+		u.principalID = pzAdmin
+		p := &PrincipalAuthz{Members: pzMembers{tenants: map[string][]string{pzAdmin: {"labs"}}}, Admins: map[string]bool{pzAdmin: true}}
+		if err := p.Apply(u); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if u.IsAdmin() || !slices.Equal(u.Groups, []string{"labs"}) {
+			t.Fatalf("%s: admin=%v groups=%q; want a non-admin member of labs", name, u.IsAdmin(), u.Groups)
+		}
+	}
+}

@@ -110,7 +110,10 @@ func (p *PrincipalAuthz) Apply(u *User) error {
 	if prn == "" {
 		return fmt.Errorf("%w: principal of %q was not resolved", ErrPrincipalAuthzUnavailable, u.ID)
 	}
-	u.platformAdmin = p.Admins[prn]
+	// A relayed or delegated caller is never an admin, whoever it acts
+	// for: NewRelayedUser and NewDelegatedUser strip "admins" for the same
+	// reason, and a delegated run must not approve its own actions.
+	u.platformAdmin = p.Admins[prn] && u.actingPrincipal == ""
 	if p.Members == nil {
 		if u.platformAdmin {
 			return nil

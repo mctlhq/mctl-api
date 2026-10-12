@@ -142,21 +142,41 @@ func TestTenantAuthzShadow_AdminMismatch(t *testing.T) {
 		return withPrincipal(t, auth.NewGitHubUser("root", []string{"admins", "labs"}), shadowPRN)
 	}
 	member := func() *auth.User { return withPrincipal(t, auth.NewGitHubUser("dev", []string{"labs"}), shadowPRN) }
+	relayed := func() *auth.User {
+		return withPrincipal(t, auth.NewRelayedUser("root", []string{"admins", "labs"}, auth.NewSurfaceUser("telegram")), shadowPRN)
+	}
 	pm := &stubPrincipalMembership{namespaces: []string{"labs"}}
+	unreadable := &stubPrincipalMembership{namespaces: []string{"labs"}, unreadable: []string{"erpact"}}
 	tests := []struct {
 		name   string
 		user   *auth.User
 		admins map[string]bool
 		want   []string
+		pm     *stubPrincipalMembership
 	}{
-		{"not configured: admin is not compared", admin(), nil, []string{"result:match"}},
-		{"both admin", admin(), map[string]bool{shadowPRN: true}, []string{"result:match"}},
-		{"admin only by login", admin(), map[string]bool{"prn_01JAAAAAAAAAAAAAAAAAAAAAAA": true}, []string{"result:diff", "kind:admin_mismatch"}},
-		{"admin only by principal", member(), map[string]bool{shadowPRN: true}, []string{"result:diff", "kind:admin_mismatch"}},
-		{"neither", member(), map[string]bool{"prn_01JAAAAAAAAAAAAAAAAAAAAAAA": true}, []string{"result:match"}},
+		{"not configured: admin is not compared", admin(), nil, []string{"result:match"}, nil},
+		{"both admin", admin(), map[string]bool{shadowPRN: true}, []string{"result:match"}, nil},
+		{"admin only by login", admin(), map[string]bool{"prn_01JAAAAAAAAAAAAAAAAAAAAAAA": true}, []string{"result:diff", "kind:admin_mismatch"}, nil},
+		{"admin only by principal", member(), map[string]bool{shadowPRN: true}, []string{"result:diff", "kind:admin_mismatch"}, nil},
+		{"neither", member(), map[string]bool{"prn_01JAAAAAAAAAAAAAAAAAAAAAAA": true}, []string{"result:match"}, nil},
+		// The admin comparison needs no membership, so a failed read does
+		// not hide it.
+		{"tenant unreadable, admin only by login", admin(), map[string]bool{"prn_01JAAAAAAAAAAAAAAAAAAAAAAA": true},
+			[]string{"result:unresolved", "reason:membership_unreadable", "kind:admin_mismatch"}, unreadable},
+		{"checkout busy, admin only by principal", member(), map[string]bool{shadowPRN: true},
+			[]string{"result:unresolved", "reason:membership_busy", "kind:admin_mismatch"}, &stubPrincipalMembership{busy: true}},
+		{"tenant unreadable, both admin", admin(), map[string]bool{shadowPRN: true},
+			[]string{"result:unresolved", "reason:membership_unreadable"}, unreadable},
+		// Principal mode never makes a relayed caller an admin; neither does
+		// the comparison.
+		{"relayed admin principal", relayed(), map[string]bool{shadowPRN: true}, []string{"result:match"}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			pm := pm
+			if tt.pm != nil {
+				pm = tt.pm
+			}
 			h := &Handlers{opts: Options{TenantAuthzMode: TenantAuthzShadow, PrincipalMembership: pm, AdminPrincipals: tt.admins}}
 			before := snapshotShadow()
 			h.shadowTenantSet(httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil), tt.user)

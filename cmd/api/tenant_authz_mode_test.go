@@ -129,7 +129,7 @@ func TestPrincipalTenantsAdapter(t *testing.T) {
 		{"-c", "user.name=t", "-c", "user.email=t@example.com", "add", "."},
 		{"-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "tenants"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := exec.Command("git", args...) //nolint:gosec // fixed arguments from this test
 		cmd.Dir = src
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)

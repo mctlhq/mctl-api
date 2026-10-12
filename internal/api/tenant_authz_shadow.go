@@ -157,18 +157,40 @@ func (h *Handlers) shadowTenantSet(r *http.Request, user *auth.User) {
 		recordShadowUnresolved(unresolvedNoPID)
 		return
 	}
+	// The admin comparison reads neither the checkout nor the membership,
+	// so a membership read that fails must not suppress it: one broken
+	// tenant file would otherwise hide every admin_mismatch platform-wide
+	// while the rollout gate read 0. Principal mode never makes a relayed
+	// or delegated caller an admin (PrincipalAuthz.Apply), and neither
+	// does this comparison.
+	legacyAdmin := user.IsAdmin()
+	principalAdmin := legacyAdmin
+	if len(h.opts.AdminPrincipals) > 0 {
+		principalAdmin = h.opts.AdminPrincipals[prn] && user.ActingPrincipal() == ""
+	}
+	tenantsUnresolved := func(reason string) {
+		recordShadowUnresolved(reason)
+		if legacyAdmin != principalAdmin {
+			tenantAuthzShadowDiffTotal.WithLabelValues("admin_mismatch").Inc()
+			if h.principalSets.shouldLog(fmt.Sprintf("%s|admin|%t", prn, principalAdmin)) {
+				slog.Warn("tenant authz shadow diff",
+					"kind", "admin", "path", r.URL.Path, "principal", prn, "login", user.ID,
+					"legacy_admin", legacyAdmin, "principal_admin", principalAdmin)
+			}
+		}
+	}
 	if h.opts.PrincipalMembership == nil {
-		recordShadowUnresolved(unresolvedMembershipUnavailable)
+		tenantsUnresolved(unresolvedMembershipUnavailable)
 		return
 	}
 	got, ok, err := h.principalSet(prn)
 	switch {
 	case !ok:
-		recordShadowUnresolved(unresolvedMembershipBusy)
+		tenantsUnresolved(unresolvedMembershipBusy)
 		return
 	case err != nil || len(got.Unreadable) > 0:
 		// A tenant that could not be read may hold either answer.
-		recordShadowUnresolved(unresolvedMembershipUnreadable)
+		tenantsUnresolved(unresolvedMembershipUnreadable)
 		return
 	}
 
@@ -176,11 +198,6 @@ func (h *Handlers) shadowTenantSet(r *http.Request, user *auth.User) {
 	principal := tenantSet(got.Namespaces)
 	onlyLegacy := setMinus(legacy, principal)
 	onlyPrincipal := setMinus(principal, legacy)
-	legacyAdmin := user.IsAdmin()
-	principalAdmin := legacyAdmin
-	if len(h.opts.AdminPrincipals) > 0 {
-		principalAdmin = h.opts.AdminPrincipals[prn]
-	}
 	if len(onlyLegacy) == 0 && len(onlyPrincipal) == 0 && legacyAdmin == principalAdmin {
 		tenantAuthzShadowTotal.WithLabelValues(shadowMatch).Inc()
 		return

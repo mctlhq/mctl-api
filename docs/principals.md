@@ -299,8 +299,10 @@ delegated; service, surface, agent, CI and dev callers are not compared):
 - platform admin is compared once `ADMIN_PRINCIPALS` is set: the legacy
   decision (the `admins` group) against membership of `ADMIN_PRINCIPALS`.
   Without it the comparison is skipped, since every admin would read as a
-  diff. Set `ADMIN_PRINCIPALS` in shadow before the switch so the window
-  measures it.
+  diff. It needs no membership read, so it is still made when the tenant
+  comparison is unresolved (a broken tenant file must not hide every
+  `admin_mismatch`). Set `ADMIN_PRINCIPALS` in shadow before the switch so
+  the window measures it.
 
 ### `ADMIN_PRINCIPALS`
 
@@ -320,7 +322,9 @@ caller's authorization; it never merges with the legacy one:
 
 - a human caller's tenants are exactly the GitOps tenants that list its
   principal (`members[].principalId`), and it is a platform admin only if
-  its principal is in `ADMIN_PRINCIPALS`. No login is read.
+  its principal is in `ADMIN_PRINCIPALS` and it acts directly: a relayed
+  or delegated caller is never an admin, whoever it acts for. No login is
+  read.
 - a human whose principal did not resolve gets **503** with `Retry-After`,
   platform admins included: without a principal there is nothing to look
   up in `ADMIN_PRINCIPALS` either.
