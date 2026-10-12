@@ -1,5 +1,24 @@
 # Changelog
 
+## [4.82.0](https://github.com/mctlhq/mctl-api/compare/4.81.1...4.82.0) (2026-10-12)
+
+
+### Features
+
+* **agents:** issue-585-feat-incidents-store-and-return-trace-id ([7d08afc](https://github.com/mctlhq/mctl-api/commit/7d08afc243acf694907345865b6e8eba48fda265))
+* **api:** read-only principal-key plan for tenant members ([400ad7f](https://github.com/mctlhq/mctl-api/commit/400ad7fc3b7e64c3df56653941595b8140176d33)), closes [#377](https://github.com/mctlhq/mctl-api/issues/377)
+* **api:** TENANT_AUTHZ_MODE with a shadow comparison ([e3f44e8](https://github.com/mctlhq/mctl-api/commit/e3f44e853f07582fb46d85af75847aabc5859957)), closes [#377](https://github.com/mctlhq/mctl-api/issues/377)
+* **gitops:** read tenant membership by principalId ([d92e7b1](https://github.com/mctlhq/mctl-api/commit/d92e7b18b910bdf180e74c3aa8f8f35b273a2179)), closes [#377](https://github.com/mctlhq/mctl-api/issues/377)
+* principal-keyed tenant membership with shadow mode ([#377](https://github.com/mctlhq/mctl-api/issues/377) PR-A) ([1aaeef7](https://github.com/mctlhq/mctl-api/commit/1aaeef7fc993fa602fc709f78ef39bde8f24a329))
+
+
+### Bug Fixes
+
+* **api:** lint on shadow tests; count key errors per cause ([57f32c7](https://github.com/mctlhq/mctl-api/commit/57f32c7736f4a7bd87bb47ce87ee8df47b83aa1f))
+* **api:** shadow below the rate limiter; unverified keys block the plan ([3d49bac](https://github.com/mctlhq/mctl-api/commit/3d49bacf817cc5267fc52e4dea10c6e336d6f841))
+* **incidents:** address review of trace derivation and dedup ([869866c](https://github.com/mctlhq/mctl-api/commit/869866c99bf93c8499392ff0120f2128603d5b95))
+* **incidents:** derive the newest run for deduped argo incidents ([f2472b6](https://github.com/mctlhq/mctl-api/commit/f2472b64f7d326f61fce7ae5162f384f33f9e4dc))
+
 ## [4.81.1](https://github.com/mctlhq/mctl-api/compare/4.81.0...4.81.1) (2026-10-12)
 
 
