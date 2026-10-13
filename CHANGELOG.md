@@ -1,5 +1,26 @@
 # Changelog
 
+## [4.84.0](https://github.com/mctlhq/mctl-api/compare/4.83.0...4.84.0) (2026-10-13)
+
+
+### Features
+
+* **api:** accept TENANT_AUTHZ_MODE=principal ([8869ac7](https://github.com/mctlhq/mctl-api/commit/8869ac7e48d775a0e5b683e2528e995d17849b9f))
+* **api:** accept TENANT_AUTHZ_MODE=principal ([3d78b4e](https://github.com/mctlhq/mctl-api/commit/3d78b4e1496388cb16d9e17817362947e44edf64)), closes [#377](https://github.com/mctlhq/mctl-api/issues/377)
+* **auth:** revoke a principal's sessions on identity unlink ([d0d3562](https://github.com/mctlhq/mctl-api/commit/d0d35620b8869dd7570d0e44b8a6dbb55fca90c5))
+* **auth:** revoke a principal's sessions on identity unlink ([831d5a3](https://github.com/mctlhq/mctl-api/commit/831d5a3941d80106521771dbc1dd3acc1d25a332)), closes [#377](https://github.com/mctlhq/mctl-api/issues/377)
+* **gitops:** read principal membership from a sync snapshot ([#377](https://github.com/mctlhq/mctl-api/issues/377) PR-B 2d) ([c029da4](https://github.com/mctlhq/mctl-api/commit/c029da4d6d7779fda03b5ad3d6b0b8657fc0cbfd))
+* **gitops:** read principal membership from a sync snapshot ([#377](https://github.com/mctlhq/mctl-api/issues/377) PR-B 2d) ([b60fb3d](https://github.com/mctlhq/mctl-api/commit/b60fb3d96abde5971c57e605dd3a2759578d80ab))
+
+
+### Bug Fixes
+
+* **api:** mark a repeated unlink in the audit ([f688edd](https://github.com/mctlhq/mctl-api/commit/f688edd43e719d2fe61a506f94e0c58e9597cbc1))
+* **api:** mark a repeated unlink in the audit ([ea5fa85](https://github.com/mctlhq/mctl-api/commit/ea5fa850335ca4aaf25478fb88bdf7453bafbe20)), closes [#377](https://github.com/mctlhq/mctl-api/issues/377)
+* **api:** refuse a doomed unlink before revoking sessions ([0200669](https://github.com/mctlhq/mctl-api/commit/0200669b11d9042e647a98113957f44cd63fe686)), closes [#377](https://github.com/mctlhq/mctl-api/issues/377)
+* **gitops:** build the principal snapshot inside refresh ([36d1d73](https://github.com/mctlhq/mctl-api/commit/36d1d73990a151592aba698eba3a55d80935fefd))
+* **gitops:** build the principal snapshot inside refresh ([60fa189](https://github.com/mctlhq/mctl-api/commit/60fa18908da201ef96bca4cbaf37c704fb7e5b2e)), closes [#377](https://github.com/mctlhq/mctl-api/issues/377)
+
 ## [4.83.0](https://github.com/mctlhq/mctl-api/compare/4.82.2...4.83.0) (2026-10-13)
 
 
