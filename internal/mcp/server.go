@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -168,6 +169,24 @@ func (s *Server) NewStreamableHTTPHandler() http.Handler {
 }
 
 // NewMCPServer creates the mcp-go Server with all tool definitions.
+// recoverToolPanic is a backstop: a panicking handler becomes a JSON-RPC error
+// instead of aborting the HTTP request with a bare 500 (mctl-api#608). It logs
+// the panic with its stack, because the returned error is the only other
+// trace of it and carries none. Handlers must still validate their own
+// arguments (req.RequireString): a recovered panic does not tell the caller
+// which argument was wrong.
+func recoverToolPanic(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (res *mcplib.CallToolResult, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("mcp tool handler panic", "tool", req.Params.Name, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+				res, err = nil, fmt.Errorf("panic recovered in %s tool handler: %v", req.Params.Name, r)
+			}
+		}()
+		return next(ctx, req)
+	}
+}
+
 func (s *Server) NewMCPServer() *server.MCPServer {
 	srv := server.NewMCPServer(
 		"mctl",
@@ -183,13 +202,14 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		server.WithToolFilter(s.ownerOnlyToolFilter),
 		// Reports a failed role lookup on tools/call explicitly.
 		server.WithToolHandlerMiddleware(s.ownerOnlyCallMiddleware),
-		// Outermost-last: spans every tool call, continuing _meta/HTTP trace context.
+		// mcp-go wraps middlewares in registration order: the first one
+		// registered is the outermost. The tracing span therefore covers
+		// every call that passes the owner-only check, continuing the
+		// _meta/HTTP trace context.
 		server.WithToolHandlerMiddleware(s.tracingMiddleware),
-		// Backstop only: a panicking handler becomes a JSON-RPC error instead
-		// of aborting the HTTP request with a bare 500. Handlers must still
-		// validate their own arguments (RequireString), because a recovered
-		// panic does not tell the caller which argument was wrong (mctl-api#608).
-		server.WithRecovery(),
+		// Innermost, so a recovered panic flows back out through the tracing
+		// middleware as an error and the span is marked failed.
+		server.WithToolHandlerMiddleware(recoverToolPanic),
 	)
 	s.mcpServer = srv
 

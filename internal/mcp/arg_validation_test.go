@@ -15,19 +15,28 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
+	"github.com/mctlhq/mctl-api/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // mctl-api#608: a missing, misnamed or mistyped required argument must be a
@@ -53,8 +62,9 @@ var requiredStringArgs = map[string][]string{
 	"mctl_resolve_incident":     {"id"},
 }
 
-// callToolJSON drives the real tools/call path and returns the raw response.
-func callToolJSON(t *testing.T, s *Server, name string, args map[string]any) string {
+// callTool drives the real tools/call path. It returns the tool result, or
+// the JSON-RPC error message when the call failed at the protocol level.
+func callTool(t *testing.T, srv *server.MCPServer, name string, args map[string]any) (*mcplib.CallToolResult, string) {
 	t.Helper()
 	req, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -63,8 +73,27 @@ func callToolJSON(t *testing.T, s *Server, name string, args map[string]any) str
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := json.Marshal(s.NewMCPServer().HandleMessage(context.Background(), req))
-	return string(b)
+	b, err := json.Marshal(srv.HandleMessage(context.Background(), req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(b, &resp); err != nil {
+		t.Fatalf("decode response %s: %v", b, err)
+	}
+	if resp.Error != nil {
+		return nil, resp.Error.Message
+	}
+	res, err := mcplib.ParseCallToolResult(&resp.Result)
+	if err != nil {
+		t.Fatalf("decode result %s: %v", resp.Result, err)
+	}
+	return res, ""
 }
 
 func TestRequiredStringArgs_AreToolErrorsNotPanics(t *testing.T) {
@@ -74,37 +103,30 @@ func TestRequiredStringArgs_AreToolErrorsNotPanics(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer api.Close()
-	s := NewServer(api.URL, "")
+	srv := NewServer(api.URL, "").NewMCPServer()
 
 	for tool, keys := range requiredStringArgs {
 		for _, key := range keys {
-			valid := map[string]any{}
-			for _, k := range keys {
-				valid[k] = "x"
-			}
-
 			missing := map[string]any{}
-			for k, v := range valid {
+			wrongType := map[string]any{}
+			for _, k := range keys {
 				if k != key {
-					missing[k] = v
+					missing[k] = "x"
 				}
+				wrongType[k] = "x"
 			}
 			// The misnamed case from the incident: the right value under a
 			// wrong key is the same as the key being absent.
 			missing[key+"_typo"] = "x"
-			wrongType := map[string]any{}
-			for k, v := range valid {
-				wrongType[k] = v
-			}
 			wrongType[key] = 123
 
-			for label, args := range map[string]map[string]any{
+			for want, args := range map[string]map[string]any{
 				fmt.Sprintf("required argument %q not found", key): missing,
 				fmt.Sprintf("argument %q is not a string", key):    wrongType,
 			} {
-				got := callToolJSON(t, s, tool, args)
-				if !strings.Contains(got, `"isError":true`) || !strings.Contains(got, strings.ReplaceAll(label, `"`, `\"`)) {
-					t.Errorf("%s %v: want a tool error %q, got %.400s", tool, args, label, got)
+				res, rpcErr := callTool(t, srv, tool, args)
+				if res == nil || !res.IsError || resultText(t, res) != want {
+					t.Errorf("%s %v: want tool error %q, got result %+v, rpc error %q", tool, args, want, res, rpcErr)
 				}
 			}
 		}
@@ -114,45 +136,104 @@ func TestRequiredStringArgs_AreToolErrorsNotPanics(t *testing.T) {
 	}
 }
 
-// The backstop: a handler that still panics yields a JSON-RPC error, it does
-// not unwind through HandleMessage.
-func TestToolHandlerPanicIsRecovered(t *testing.T) {
-	s := NewServer("http://localhost:8080", "")
-	srv := s.NewMCPServer()
+// The backstop: a handler that still panics yields a JSON-RPC error, logs the
+// panic with its stack, and marks the tool span failed.
+func TestToolHandlerPanicIsRecoveredLoggedAndTraced(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	oldTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp)))
+	defer otel.SetTracerProvider(oldTP)
+	var logs bytes.Buffer
+	oldLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(oldLog)
+
+	srv := NewServer("http://localhost:8080", "").NewMCPServer()
 	srv.AddTool(mcplib.NewTool("mctl_test_panics"), func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		panic("boom")
 	})
-	resp := srv.HandleMessage(context.Background(),
-		json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mctl_test_panics","arguments":{}}}`))
-	b, _ := json.Marshal(resp)
-	if !strings.Contains(string(b), `"error"`) || !strings.Contains(string(b), "panic recovered") {
-		t.Fatalf("want a recovered-panic error, got %.400s", b)
+	_, rpcErr := callTool(t, srv, "mctl_test_panics", map[string]any{})
+	if !strings.Contains(rpcErr, "panic recovered in mctl_test_panics tool handler: boom") {
+		t.Errorf("rpc error %q, want the recovered panic", rpcErr)
+	}
+
+	var entry struct {
+		Msg   string `json:"msg"`
+		Tool  string `json:"tool"`
+		Panic string `json:"panic"`
+		Stack string `json:"stack"`
+	}
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatalf("want one JSON log line, got %q: %v", logs.String(), err)
+	}
+	if entry.Msg != "mcp tool handler panic" || entry.Tool != "mctl_test_panics" || entry.Panic != "boom" ||
+		!strings.Contains(entry.Stack, "arg_validation_test.go") {
+		t.Errorf("log entry %+v, want the panic with a stack through the handler", entry)
+	}
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 || spans[0].Status.Code != codes.Error {
+		t.Fatalf("spans %+v, want one span with status Error", spans)
+	}
+	status := ""
+	for _, a := range spans[0].Attributes {
+		if a.Key == telemetry.KeyToolStatus {
+			status = a.Value.AsString()
+		}
+	}
+	if status != "error" {
+		t.Errorf("tool status %q, want error", status)
 	}
 }
 
-// Keeps the class from coming back: no handler in this package may read a
-// tool argument with a single-value type assertion. A type switch is safe and
-// is allowed.
+// Keeps the class from coming back: no single-value type assertion on an
+// indexed value anywhere in the package's non-test code. A two-value
+// assertion and a type switch are both safe and allowed.
 func TestNoUncheckedArgumentAssertions(t *testing.T) {
-	unchecked := regexp.MustCompile(`(args|GetArguments\(\))\["[A-Za-z_]+"\]\.\([^)]+\)`)
-	checked := regexp.MustCompile(`,\s*(ok|_)\s*:?=`)
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	fset := token.NewFileSet()
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
-		src, err := os.ReadFile(f)
+		file, err := parser.ParseFile(fset, f, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for i, line := range strings.Split(string(src), "\n") {
-			if unchecked.MatchString(line) && !checked.MatchString(line) && !strings.Contains(line, ".(type)") {
-				t.Errorf("%s:%d: unchecked argument assertion, use req.RequireString or the two-value form: %s",
-					f, i+1, strings.TrimSpace(line))
+		checked := map[*ast.TypeAssertExpr]bool{}
+		ast.Inspect(file, func(n ast.Node) bool {
+			var rhs []ast.Expr
+			switch n := n.(type) {
+			case *ast.AssignStmt:
+				if len(n.Lhs) == 2 {
+					rhs = n.Rhs
+				}
+			case *ast.ValueSpec:
+				if len(n.Names) == 2 {
+					rhs = n.Values
+				}
 			}
-		}
+			if len(rhs) == 1 {
+				if ta, ok := rhs[0].(*ast.TypeAssertExpr); ok {
+					checked[ta] = true
+				}
+			}
+			return true
+		})
+		ast.Inspect(file, func(n ast.Node) bool {
+			ta, ok := n.(*ast.TypeAssertExpr)
+			// Type == nil is the x.(type) of a type switch.
+			if !ok || ta.Type == nil || checked[ta] {
+				return true
+			}
+			if _, indexed := ta.X.(*ast.IndexExpr); indexed {
+				t.Errorf("%s: single-value type assertion on an indexed value; use req.RequireString or the two-value form",
+					fset.Position(ta.Pos()))
+			}
+			return true
+		})
 	}
 }
