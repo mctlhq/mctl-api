@@ -89,9 +89,9 @@ type delegationRoute struct {
 // ones where there is no prior grant to bind to. POST /work-items is
 // deliberately excluded: creation NAMES an owner, so there is no prior
 // grant to bind it to. POST /agent-run-tokens, POST /agents/dev-loop/*,
-// POST /operations/{name}/execute and every /surface-identities/* route are
-// excluded as privileged or identity-establishing (requirements.md "Open
-// questions").
+// every POST /operations/{name}/execute except mctl-agents-approve, and
+// every /surface-identities/* route are excluded as privileged or
+// identity-establishing (requirements.md "Open questions").
 var delegationRoutes = []delegationRoute{
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/intents$`)},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/surface-refs$`)},
@@ -103,6 +103,11 @@ var delegationRoutes = []delegationRoute{
 	// Read-only, and the one place a delegated run can see the subject and
 	// grant it is acting under (mctl-api#376 D3).
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/identity/self$`)},
+	// A DevLoop exercising its human's approval (mctl-api#571 R5). The one
+	// operation route: ExecuteOperation authorizes it from an
+	// action_approval grant alone, and refuses every other grant kind
+	// through its unchanged admin gate.
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/operations/mctl-agents-approve/execute$`)},
 }
 
 // delegationAllowlisted reports whether method+path may carry

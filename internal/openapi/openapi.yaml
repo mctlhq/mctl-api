@@ -2068,6 +2068,26 @@ paths:
         | `preview-deploy` | Deploy ephemeral preview environment | low |
         | `preview-delete` | Remove preview environment | low |
 
+        **Grant-authorized approval (mctl-api#571).** `mctl-agents-approve`
+        is the one operation an agent run may call with
+        `X-MCTL-On-Behalf-Of: aar_…`. The action approval must be bound to
+        the run's `we_` (else 403 `grant_not_bound`), decided (a pending one
+        is 403 `grant_subject_unresolved`; denied, expired or consumed is
+        403 `grant_not_bound`), and approved for this exact intent: action
+        kind `mctl-agents-approve`, target `<service>/<slug>`, policy
+        `dev-loop.human-approval`/`v1` (else 409 `approval_intent_mismatch`).
+        The target must also belong to the run's own DevLoop: its
+        `<service>/<slug>` maps to the workflow id the `we_`'s `engine_ref`
+        names (else 409 `approval_intent_mismatch`). That mapping keeps only
+        the slug's `issue-<n>-` prefix, so it binds the service and issue;
+        the exact slug is the one the approval was created for (the intent
+        hash) and is recorded in the decision and consume audit. It is consumed once,
+        before submit, and the recorded approver is its decider's name
+        without its `github:`/`oidc:` prefix, validated like any approver;
+        a body `approver` is refused (400 `actor_not_accepted`).
+        The grant replaces the admin check for this call only; every other
+        caller and grant kind is authorized as before.
+
         **Rate limit:** 20 requests/minute per user.
       tags: [Operations]
       parameters:
@@ -3038,9 +3058,10 @@ paths:
         `we_` execution (`engine=temporal`, `engine_ref` the workflow id or,
         for a run dispatched from an execution request,
         `<workflow_id>#<request_id>`), and that
-        execution's newest pending `mctl-agents-approve` action approval is
-        decided as the caller and signalled as `{approval_ref}`; an already
-        approved, unconsumed one is re-signalled as is. With no such
+        execution's newest `mctl-agents-approve` action approval, in any
+        state, decides: a pending one is approved as the caller and
+        signalled as `{approval_ref}`; an approved, unconsumed one is
+        re-signalled as is. With no such
         execution or approval the legacy `{approver}` payload is signalled
         while `MCTL_AGENTS_APPROVE_LEGACY_APPROVER` is on, and 409
         `approval_grant_missing` is returned once it is off. An execution

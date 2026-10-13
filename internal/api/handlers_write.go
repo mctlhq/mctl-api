@@ -30,6 +30,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/prometheus/client_golang/prometheus"
@@ -117,13 +118,31 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			"operation", opName, "parameters", strings.Join(dropped, ", "))
 	}
 
+	// An agent run exercising a human's action-approval grant (mctl-api#571
+	// R6): the grant, not the caller's admin status, authorizes
+	// mctl-agents-approve. Checked here, before the admin and tenant gates
+	// it replaces; spent right before submit. A delegated subject on any
+	// other grant kind falls through to the gates below and is refused there
+	// exactly as before (R7): delegation never confers admin.
+	var grantSpend *approvalSpend
+	if opName == devLoopApprovalKind {
+		if g := delegationGrantFrom(r.Context()); g != nil && g.Kind == delegation.KindActionApproval {
+			s, ok := h.prepareApprovalGrant(w, r, user, input, g.Ref)
+			if !ok {
+				return
+			}
+			grantSpend = s
+		}
+	}
+	grantAuthorized := grantSpend != nil
+
 	// AdminOnly platform-scoped ops (e.g. mctl-agents triggers) skip the
 	// tenant-access check — they have no team_name parameter and are
 	// gated only by admin group membership. The Executor labels them with
 	// the sentinel team "platform" for audit/UI grouping.
 	tenantParam := extractTenantParam(op, input)
 	if op.AdminOnly {
-		if !user.IsAdmin() {
+		if !grantAuthorized && !user.IsAdmin() {
 			h.logAudit(r, audit.Entry{
 				UserID:    user.ID,
 				Operation: opName,
@@ -188,7 +207,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		input["creator_principal_id"] = pid
-	} else if !ciAuthorized && !user.HasTenantAccess(tenantParam) {
+	} else if !ciAuthorized && !grantAuthorized && !user.HasTenantAccess(tenantParam) {
 		h.logAudit(r, audit.Entry{
 			UserID:    user.ID,
 			Operation: opName,
@@ -206,7 +225,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// developer, or a read-only viewer, could delete the tenant they belong
 	// to. create-tenant is the one operation with no tenant to hold a role
 	// in; its own rules are the branch above.
-	if opName != "create-tenant" && !ciAuthorized && !h.requireTenantRole(w, r, user, tenantParam, op.MinRole, opName, op.RiskLevel) {
+	if opName != "create-tenant" && !ciAuthorized && !grantAuthorized && !h.requireTenantRole(w, r, user, tenantParam, op.MinRole, opName, op.RiskLevel) {
 		return
 	}
 
@@ -240,7 +259,10 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// string. Until mctl-agents has moved over, every relay is audited as
 	// approver.legacy_relay, so "is anything still using it?" is a query;
 	// MCTL_AGENTS_APPROVE_LEGACY_APPROVER=false then refuses it.
-	if opName == "mctl-agents-approve" {
+	//
+	// A grant-authorized call is not handled here: its approver is the
+	// grant's decider, set by prepareApprovalGrant (R8).
+	if opName == "mctl-agents-approve" && !grantAuthorized {
 		if user.IsService() {
 			relayed := input["approver"]
 			switch {
@@ -306,6 +328,10 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			"error":            "validation failed: " + strings.Join(errs, "; "),
 			"validationErrors": errs,
 		})
+		return
+	}
+
+	if grantAuthorized && !h.bindApprovalGrant(w, r, user, grantSpend, input) {
 		return
 	}
 
@@ -394,6 +420,18 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, msg)
 			return
 		}
+	}
+
+	// Spend the grant last, after every check that could still refuse, so
+	// a refused request leaves the approval usable.
+	if grantAuthorized {
+		consumed, ok := h.spendApprovalGrant(w, r, user, grantSpend)
+		if !ok {
+			return
+		}
+		// R8: input["approver"] is the grant's decider, set and validated
+		// with the rest of the input (prepareApprovalGrant).
+		approvalGrantAuditParams(auditParams, user, consumed)
 	}
 
 	// Submit the Argo Workflow in the team's namespace (team-{name}).

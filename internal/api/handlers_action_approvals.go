@@ -143,6 +143,7 @@ func (h *Handlers) auditActionApproval(r *http.Request, user *auth.User, op stri
 		"approval_id":    a.ID,
 		"execution_id":   a.ExecutionID,
 		"action_kind":    a.ActionKind,
+		"target":         a.Target,
 		"policy_rule_id": a.PolicyRuleID,
 		"intent_hash":    a.IntentHash,
 		"state":          a.State,
