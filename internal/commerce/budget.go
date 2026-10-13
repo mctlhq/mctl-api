@@ -759,6 +759,8 @@ var reserveRefusals = map[string]error{
 	ReasonQuoteExpired:         ErrQuoteExpired,
 	ReasonCurrencyMismatch:     ErrCurrencyMismatch,
 	ReasonFundsModeUnavailable: ErrFundsModeUnavailable,
+	ReasonEntitlementExhausted: ErrEntitlementExhausted,
+	ReasonEntitlementExpired:   ErrEntitlementExpired,
 }
 
 // IsReserveRefusal reports whether reason is one Reserve refuses with, as
@@ -860,6 +862,15 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 		if note != "" {
 			return refuse(ReasonBudgetExhausted, note, ErrBudgetExhausted)
 		}
+		if err := s.holdEntitlementUnit(ctx, tx, cur.TenantID, cur.CapabilityID, cur.InvocationID, now); err != nil {
+			if errors.Is(err, ErrEntitlementExhausted) {
+				return refuse(ReasonEntitlementExhausted, "prepaid entitlement units exhausted", ErrEntitlementExhausted)
+			}
+			if errors.Is(err, ErrEntitlementExpired) {
+				return refuse(ReasonEntitlementExpired, "prepaid entitlement package expired", ErrEntitlementExpired)
+			}
+			return err
+		}
 		payment := PaymentNotRequired
 		authorizationID := ""
 		if cur.PriceMode != PriceModeFree {
@@ -875,6 +886,7 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 			case PaymentResultAuthorized:
 				payment, authorizationID = PaymentAuthorized, pr.ID
 			case PaymentResultDenied:
+				_ = s.releaseEntitlementUnit(ctx, tx, cur.InvocationID, now)
 				// Nothing was inserted yet: the denial commits no reservation
 				// (ADR 020 sec. 11).
 				return refuse(ReasonPaymentDenied, pr.Reason, ErrPaymentDenied)
@@ -903,15 +915,6 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 			ChargeStatus: ChargeReserved, PaymentStatus: payment, ReservationDeadline: &deadline,
 		})
 		if err != nil {
-			return err
-		}
-		if err := s.holdEntitlementUnit(ctx, tx, cur.TenantID, cur.CapabilityID, cur.InvocationID, now); err != nil {
-			if errors.Is(err, ErrEntitlementExhausted) {
-				return refuse(ReasonEntitlementExhausted, "prepaid entitlement units exhausted", ErrEntitlementExhausted)
-			}
-			if errors.Is(err, ErrEntitlementExpired) {
-				return refuse(ReasonEntitlementExpired, "prepaid entitlement package expired", ErrEntitlementExpired)
-			}
 			return err
 		}
 		res = ReserveResult{Invocation: inv, Reservation: rsv}
@@ -1377,7 +1380,7 @@ func (s *Store) holdEntitlementUnit(ctx context.Context, tx pgx.Tx, tenantID, ca
 		}
 		alcULID, err := newULID(now)
 		if err != nil {
-			return err
+			return fmt.Errorf("commerce: generate allocation ulid: %w", err)
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO commerce_entitlement_allocations
 			(allocation_id, entitlement_id, invocation_id, units, state, recorded_at)
@@ -1393,21 +1396,24 @@ func (s *Store) holdEntitlementUnit(ctx context.Context, tx pgx.Tx, tenantID, ca
 	}
 
 	// No active units found. Check whether this tenant has entitlements for this capability.
-	var count, remaining int64
-	err = tx.QueryRow(ctx, `SELECT count(*), COALESCE(sum(remaining_units), 0)
+	// 1. Never configured: totalPackages == 0 -> return nil (fall back to currency budget)
+	// 2. Active package exists (expires_at > now) but all units consumed -> ErrEntitlementExhausted
+	// 3. All packages are expired (expires_at <= now) -> ErrEntitlementExpired
+	var totalPackages, activePackages int64
+	err = tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE expires_at > $3)
 		FROM commerce_entitlements
-		WHERE tenant_id = $1 AND capability_id = $2`, tenantID, capabilityID).Scan(&count, &remaining)
+		WHERE tenant_id = $1 AND capability_id = $2`, tenantID, capabilityID, now).Scan(&totalPackages, &activePackages)
 	if err != nil {
 		return fmt.Errorf("commerce: check entitlement count: %w", err)
 	}
-	if count == 0 {
+	if totalPackages == 0 {
 		// Not an entitlement-backed capability for this tenant.
 		return nil
 	}
-	if remaining > 0 {
-		return ErrEntitlementExpired
+	if activePackages > 0 {
+		return ErrEntitlementExhausted
 	}
-	return ErrEntitlementExhausted
+	return ErrEntitlementExpired
 }
 
 func (s *Store) captureEntitlementUnit(ctx context.Context, tx pgx.Tx, invocationID string, now time.Time) error {

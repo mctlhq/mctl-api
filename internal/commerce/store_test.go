@@ -41,6 +41,9 @@ func newTestStore(t *testing.T) *Store {
 		// transitions, invocations, quotes, terms.
 		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_payment_operations WHERE invocation_id IN
 			(SELECT invocation_id FROM commerce_invocations WHERE capability_id LIKE 'mctl://test-commerce/%')`)
+		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_entitlement_allocations WHERE invocation_id IN
+			(SELECT invocation_id FROM commerce_invocations WHERE capability_id LIKE 'mctl://test-commerce/%')`)
+		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_entitlements WHERE tenant_id LIKE 'tc-%'`)
 		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_reservations WHERE invocation_id IN
 			(SELECT invocation_id FROM commerce_invocations WHERE capability_id LIKE 'mctl://test-commerce/%')`)
 		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_budget_changes WHERE tenant_id LIKE 'tc-%'`)
@@ -569,7 +572,7 @@ func TestSchemaAddsVocabularyChecksToExistingTable(t *testing.T) {
 	}
 	cap := testCapability(t)
 	publish(t, again, cap, PriceModePerCall, 5)
-	inv := accept(t, again, mint(t, again, cap, ids("acme")), "k").Invocation
+	inv := accept(t, again, mint(t, again, cap, ids("acme")), "k-vocab").Invocation
 	_, err = again.pool.Exec(ctx, `UPDATE commerce_invocations SET payment_status = 'capturd' WHERE invocation_id = $1`, inv.InvocationID)
 	if err == nil || !strings.Contains(err.Error(), "23514") {
 		t.Fatalf("CHECK did not fire on the re-created constraint: %v", err)

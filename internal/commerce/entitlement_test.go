@@ -49,7 +49,7 @@ func TestEntitlementGrantAndList(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	tenant := testTenant(t)
-	capID := "mctl://projects/projects_search"
+	capID := testCapability(t) + "/grant"
 	expires := time.Now().Add(30 * 24 * time.Hour).UTC().Truncate(time.Second)
 
 	// Valid grant
@@ -113,7 +113,7 @@ func TestEntitlementLifecycleWithInvocation(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	tenant := testTenant(t)
-	capID := "mctl://projects/projects_search"
+	capID := testCapability(t) + "/alpha"
 	expires := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
 
 	// Publish terms and set budget
@@ -149,7 +149,7 @@ func TestEntitlementLifecycleWithInvocation(t *testing.T) {
 
 	// Assert independent budget ledger: price mode was PriceModePerSuccessfulCall (10 minor)
 	bal := balance(t, s, tenant)
-	if bal.ReservedMinor != 10 || bal.CommittedMinor != 50 || bal.AvailableMinor != 40 {
+	if bal.ReservedMinor != 10 || bal.CommittedMinor != 0 || bal.AvailableMinor != 90 {
 		t.Fatalf("balance after reserve 1: %+v", bal)
 	}
 
@@ -177,7 +177,7 @@ func TestEntitlementLifecycleWithInvocation(t *testing.T) {
 
 	// Assert budget balance after finalize: captured 10 minor
 	bal = balance(t, s, tenant)
-	if bal.ReservedMinor != 0 || bal.CommittedMinor != 60 || bal.AvailableMinor != 40 {
+	if bal.ReservedMinor != 0 || bal.CommittedMinor != 10 || bal.AvailableMinor != 90 {
 		t.Fatalf("balance after finalize 1: %+v", bal)
 	}
 
@@ -195,7 +195,7 @@ func TestEntitlementLifecycleWithInvocation(t *testing.T) {
 
 	// Budget holds 10 minor again
 	bal = balance(t, s, tenant)
-	if bal.ReservedMinor != 10 || bal.AvailableMinor != 30 {
+	if bal.ReservedMinor != 10 || bal.CommittedMinor != 10 || bal.AvailableMinor != 80 {
 		t.Fatalf("balance after reserve 2: %+v", bal)
 	}
 
@@ -221,7 +221,7 @@ func TestEntitlementLifecycleWithInvocation(t *testing.T) {
 
 	// Budget reservation is restored
 	bal = balance(t, s, tenant)
-	if bal.ReservedMinor != 0 || bal.CommittedMinor != 60 || bal.AvailableMinor != 40 {
+	if bal.ReservedMinor != 0 || bal.CommittedMinor != 10 || bal.AvailableMinor != 90 {
 		t.Fatalf("balance after release 2: %+v", bal)
 	}
 }
@@ -270,7 +270,7 @@ func TestEntitlementGatingExhaustedAndExpired(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Restore 1 unit so remaining_units > 0 but expired
-	_, err = s.pool.Exec(ctx, `UPDATE commerce_entitlements SET remaining_units = 1 WHERE tenant_id = $2 AND capability_id = $3`,
+	_, err = s.pool.Exec(ctx, `UPDATE commerce_entitlements SET remaining_units = 1 WHERE tenant_id = $1 AND capability_id = $2`,
 		tenant, capID)
 	if err != nil {
 		t.Fatal(err)
@@ -283,6 +283,23 @@ func TestEntitlementGatingExhaustedAndExpired(t *testing.T) {
 	}
 	if res.Invocation.ReasonCode != ReasonEntitlementExpired {
 		t.Fatalf("reason code: want %s, got %s", ReasonEntitlementExpired, res.Invocation.ReasonCode)
+	}
+
+	// 3. Retry on refused invocations preserves the refusal error (ADR 020 replay invariant)
+	retryExhausted, err := s.Reserve(ctx, ReserveInput{TenantID: tenant, InvocationID: inv2.InvocationID, Actor: "prn_gateway"})
+	if !errors.Is(err, ErrEntitlementExhausted) {
+		t.Fatalf("retry on exhausted: want ErrEntitlementExhausted, got %v", err)
+	}
+	if retryExhausted.Invocation.ReasonCode != ReasonEntitlementExhausted {
+		t.Fatalf("retry reason code: want %s, got %s", ReasonEntitlementExhausted, retryExhausted.Invocation.ReasonCode)
+	}
+
+	retryExpired, err := s.Reserve(ctx, ReserveInput{TenantID: tenant, InvocationID: inv3.InvocationID, Actor: "prn_gateway"})
+	if !errors.Is(err, ErrEntitlementExpired) {
+		t.Fatalf("retry on expired: want ErrEntitlementExpired, got %v", err)
+	}
+	if retryExpired.Invocation.ReasonCode != ReasonEntitlementExpired {
+		t.Fatalf("retry reason code: want %s, got %s", ReasonEntitlementExpired, retryExpired.Invocation.ReasonCode)
 	}
 }
 

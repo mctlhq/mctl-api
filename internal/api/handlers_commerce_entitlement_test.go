@@ -90,6 +90,20 @@ func TestCommerceEntitlement_AdminGrantedAndTenantRead(t *testing.T) {
 		t.Fatalf("get by owner: want 200, got %d", rec.Code)
 	}
 
+	// 4b. Get non-existent entitlement returns 404
+	rec = f.call(t, owner, "GET", "/api/v1/commerce/tenants/acme/entitlements/ent_nonexistent", nil,
+		map[string]string{"tenant": tenant, "entitlement_id": "ent_nonexistent"}, f.h.GetCommerceEntitlement)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("get nonexistent: want 404, got %d", rec.Code)
+	}
+
+	// 4c. Cross-tenant get entitlement returns 404
+	rec = f.call(t, beta, "GET", "/api/v1/commerce/tenants/acme/entitlements/"+created.EntitlementID, nil,
+		map[string]string{"tenant": tenant, "entitlement_id": created.EntitlementID}, f.h.GetCommerceEntitlement)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant get: want 404, got %d", rec.Code)
+	}
+
 	// 5. Developer without permission cannot read
 	rec = f.call(t, dev, "GET", "/api/v1/commerce/tenants/acme/entitlements", nil,
 		map[string]string{"tenant": tenant}, f.h.ListCommerceEntitlements)

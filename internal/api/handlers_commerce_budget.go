@@ -399,7 +399,7 @@ func (h *Handlers) GrantCommerceEntitlement(w http.ResponseWriter, r *http.Reque
 	if !decodeCommerceBody(w, r, &req) {
 		return
 	}
-	expires, err := time.Parse(time.RFC3339, req.ExpiresAt)
+	expires, err := time.Parse(time.RFC3339Nano, req.ExpiresAt)
 	if err != nil {
 		writeErrorCode(w, http.StatusBadRequest, "invalid-request", "expires_at must be RFC3339 timestamp", nil)
 		return

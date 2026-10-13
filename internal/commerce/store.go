@@ -284,6 +284,8 @@ CREATE INDEX IF NOT EXISTS commerce_entitlements_tenant_cap
     ON commerce_entitlements (tenant_id, capability_id);
 CREATE UNIQUE INDEX IF NOT EXISTS commerce_entitlements_invoice
     ON commerce_entitlements (tenant_id, invoice_ref);
+ALTER TABLE commerce_entitlements ADD COLUMN IF NOT EXISTS granted_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE commerce_entitlements ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS commerce_entitlement_allocations (
     allocation_id   TEXT        PRIMARY KEY,
@@ -1097,7 +1099,7 @@ func (s *Store) GrantEntitlement(ctx context.Context, in GrantEntitlementInput) 
 	}
 	id, err := newULID(now)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("commerce: generate entitlement ulid: %w", err)
 	}
 	entID := EntitlementIDPrefix + id
 	row := s.pool.QueryRow(ctx, `INSERT INTO commerce_entitlements (`+entitlementColumns+`)
