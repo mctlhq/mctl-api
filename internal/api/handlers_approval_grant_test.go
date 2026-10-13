@@ -331,6 +331,15 @@ func TestApprovalGrant_WrongTargetOrKindIsRefused(t *testing.T) {
 	if res.code != http.StatusConflict || res.body["code"] != aarCodeIntentMismatch {
 		t.Errorf("other kind = %d %s, want 409 %s", res.code, res.raw, aarCodeIntentMismatch)
 	}
+	// Refused before the input is validated: an invalid body still gets
+	// the kind refusal, not a validation error.
+	res = g.execute(run.agent, merge, map[string]string{"service": "mctl-api"})
+	if res.code != http.StatusConflict || res.body["code"] != aarCodeIntentMismatch {
+		t.Errorf("other kind, invalid body = %d %s, want 409 %s", res.code, res.raw, aarCodeIntentMismatch)
+	}
+	if st := g.approvalState(merge)["state"]; st != "approved" {
+		t.Errorf("other-kind approval state = %v, want approved (unspent)", st)
+	}
 	if g.submitted() != 0 {
 		t.Fatalf("submitted %d workflows", g.submitted())
 	}

@@ -78,6 +78,13 @@ func (h *Handlers) prepareApprovalGrant(w http.ResponseWriter, r *http.Request, 
 		writeActionApprovalError(w, err)
 		return nil, false
 	}
+	// A grant for another action is refused here, before the input is
+	// validated or anything else is read, not only by the intent CAS at
+	// spend time: it never authorized this operation.
+	if a.ActionKind != devLoopApprovalKind {
+		return refuse(http.StatusConflict, aarCodeIntentMismatch,
+			"approval "+ref+" was not granted for "+devLoopApprovalKind)
+	}
 	approver, ok := approverName(a.DecidedBy)
 	if !ok {
 		// The gate already refuses an undecided aar_ (no subject), and a
