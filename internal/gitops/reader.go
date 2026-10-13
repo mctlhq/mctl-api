@@ -63,6 +63,9 @@ type Reader struct {
 	// the sync age (auth's freshness gate, the sync-age metric scrape) must
 	// never queue behind a slow or hung fetch (mctl-api#411).
 	lastSync atomic.Int64
+	// principals is the principal-keyed membership snapshot of the last
+	// sync (principal_snapshot.go), read without taking mu.
+	principals atomic.Pointer[principalSnapshot]
 	// head is the commit the checkout is on, recorded at the end of every
 	// refresh under the write lock, so readers never fork git to learn it.
 	head string
@@ -309,6 +312,7 @@ func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
 	if err := r.refresh(); err != nil {
 		slog.Error("initial gitops sync failed", "error", err)
 	} else {
+		r.snapshotPrincipals()
 		r.recordPrincipalKeyMetrics()
 	}
 
@@ -323,6 +327,7 @@ func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
 			if err := r.refresh(); err != nil {
 				slog.Error("gitops refresh failed", "error", err)
 			} else {
+				r.snapshotPrincipals()
 				r.recordPrincipalKeyMetrics()
 			}
 		}
@@ -838,13 +843,13 @@ func (r *Reader) MemberRoles(namespace, login string) ([][]string, error) {
 	if namespace == "" || login == "" {
 		return nil, errors.New("member roles: namespace and login are required")
 	}
-	return r.memberRolesMatching(namespace, matchLogin(login), false)
+	return r.memberRolesMatching(namespace, matchLogin(login))
 }
 
-// memberRolesMatching is MemberRoles for any member key. With byPrincipal,
-// the tenant owning namespace must also have readable principal keys; the
-// login key never looks at them (see Tenant.principalErr).
-func (r *Reader) memberRolesMatching(namespace string, match memberMatcher, byPrincipal bool) ([][]string, error) {
+// memberRolesMatching is MemberRoles for any member key read from disk. It
+// never looks at the principal keys (see Tenant.principalErr); the
+// principal-keyed read is principalSnapshot.memberRolesForPrincipal.
+func (r *Reader) memberRolesMatching(namespace string, match memberMatcher) ([][]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -877,9 +882,6 @@ func (r *Reader) memberRolesMatching(namespace string, match memberMatcher, byPr
 		}
 		if owner != "" {
 			return nil, fmt.Errorf("namespace %q is claimed by tenants %q and %q", namespace, owner, entry.Name())
-		}
-		if byPrincipal && t.principalErr != nil {
-			return nil, fmt.Errorf("tenant %q: %w", entry.Name(), t.principalErr)
 		}
 		owner = entry.Name()
 		roles = found

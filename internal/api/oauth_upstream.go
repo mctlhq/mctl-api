@@ -324,6 +324,12 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	p, gh, err := z.opts.Store.LinkedGitHub(r.Context(), id)
 	var login, principalID string
 	switch {
+	case err == nil && (p == nil || !auth.ValidPrincipalID(p.ID) || gh == nil || gh.Display == ""):
+		// A link reported without the principal or its GitHub login is a
+		// failed read: minting would issue a token for nobody, or one
+		// principal mode refuses on every request.
+		result = zitadelStoreUnavailable(w, errors.New("the link store answered without a principal or GitHub login"))
+		return
 	case err == nil:
 		// The GitHub callback's tail, for the linked principal's GitHub
 		// login: same groups, same admin decision, same code. The principal

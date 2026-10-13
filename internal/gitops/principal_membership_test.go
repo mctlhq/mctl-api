@@ -220,12 +220,8 @@ func TestTryNamespacesForPrincipal(t *testing.T) {
 	if err != nil || !ok || !reflect.DeepEqual(got.Namespaces, []string{"acme-web"}) {
 		t.Fatalf("got %+v, %v, %v; want [acme-web]", got, ok, err)
 	}
-	r.mu.Lock() // a refresh in progress
-	got, ok, err = r.TryNamespacesForPrincipal(prnBob)
-	r.mu.Unlock()
-	if ok || err != nil || got.Namespaces != nil {
-		t.Fatalf("a held checkout answered %+v, %v, %v", got, ok, err)
-	}
+	// A held checkout is covered in principal_snapshot_test.go: it answers
+	// from the snapshot, or is not observed when there is none.
 }
 
 func TestAllMemberEntries(t *testing.T) {
