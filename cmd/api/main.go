@@ -2014,11 +2014,6 @@ func tenantMemberLogins(reader *gitops.Reader) ([]string, error) {
 	return logins, nil
 }
 
-// killSwitchOn reads a kill-switch value (WORK_ITEMS_DISABLED,
-// ROADMAP_STATE_DISABLED, PRINCIPALS_DISABLED). It errs toward off: any value except an explicit
-// "false"/"f"/"0"/"no"/"off" (or empty) turns the feature off, so a template
-// that renders the flag as "false" keeps it on while "yes" or "disabled" never
-// silently fails open.
 // parseLegacyApprover reads MCTL_AGENTS_APPROVE_LEGACY_APPROVER. Empty is on:
 // the relay stays until mctl-agents stops needing it (mctl-api#571). An
 // unrecognised value is an error rather than either answer, because both
@@ -2026,9 +2021,9 @@ func tenantMemberLogins(reader *gitops.Reader) ([]string, error) {
 // guessing "on" keeps a path the operator meant to close.
 func parseLegacyApprover(v string) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "", "true", "1", "yes", "on":
+	case "", "true":
 		return true, nil
-	case "false", "0", "no", "off":
+	case "false":
 		return false, nil
 	}
 	return false, fmt.Errorf("MCTL_AGENTS_APPROVE_LEGACY_APPROVER=%q: want true or false", v)
@@ -2041,6 +2036,11 @@ func (c config) legacyApproverDisabled() bool {
 	return err == nil && !on
 }
 
+// killSwitchOn reads a kill-switch value (WORK_ITEMS_DISABLED,
+// ROADMAP_STATE_DISABLED, PRINCIPALS_DISABLED). It errs toward off: any value except an explicit
+// "false"/"f"/"0"/"no"/"off" (or empty) turns the feature off, so a template
+// that renders the flag as "false" keeps it on while "yes" or "disabled" never
+// silently fails open.
 func killSwitchOn(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", "false", "f", "0", "no", "off":

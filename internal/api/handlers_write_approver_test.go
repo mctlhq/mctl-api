@@ -12,6 +12,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // mctl-agents-approve writes approved_by into .status.yaml and into the gitops
@@ -200,16 +201,20 @@ func entriesFor(logger *audit.Logger, operation string) []audit.Entry {
 // proposal. That entry is the evidence the flag can be turned off.
 func TestApprove_LegacyRelayIsAuditedOncePerUse(t *testing.T) {
 	router, exec, logger := newApproveRouter(t, false)
+	relayed := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed"))
 	code, params := approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-8", "approver": "mashkovd",
 	}, auth.NewServiceUser())
+	if d := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed")) - relayed; d != 1 {
+		t.Errorf("relayed counter moved by %v, want 1", d)
+	}
 
 	if *code != http.StatusAccepted || params["approver"] != "mashkovd" {
 		t.Fatalf("status = %d, approver = %q; the relay must keep working while the flag is on", *code, params["approver"])
 	}
 	got := entriesFor(logger, "approver.legacy_relay")
-	if len(got) != 1 {
-		t.Fatalf("approver.legacy_relay entries = %d, want exactly 1", len(got))
+	if len(got) != 1 || got[0].Status != "succeeded" {
+		t.Fatalf("approver.legacy_relay entries = %+v, want exactly 1, succeeded", got)
 	}
 	want := map[string]string{
 		"approver": "mashkovd", "calling_principal": auth.ServiceUserID,
@@ -228,6 +233,7 @@ func TestApprove_LegacyRelayIsAuditedOncePerUse(t *testing.T) {
 func TestApprove_ServiceNamingNobodyIsNotALegacyRelay(t *testing.T) {
 	for _, approver := range []string{"", auth.ServiceUserID} {
 		router, exec, logger := newApproveRouter(t, true)
+		before := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed")) + testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("refused"))
 		code, params := approveParams(t, router, exec, map[string]string{
 			"service": "mctl-web", "slug": "issue-9", "approver": approver,
 		}, auth.NewServiceUser())
@@ -237,6 +243,9 @@ func TestApprove_ServiceNamingNobodyIsNotALegacyRelay(t *testing.T) {
 		if n := len(entriesFor(logger, "approver.legacy_relay")); n != 0 {
 			t.Errorf("approver %q: %d legacy_relay entries, want 0", approver, n)
 		}
+		if after := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed")) + testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("refused")); after != before {
+			t.Errorf("approver %q: relay counter moved by %v, want 0", approver, after-before)
+		}
 	}
 }
 
@@ -245,6 +254,7 @@ func TestApprove_ServiceNamingNobodyIsNotALegacyRelay(t *testing.T) {
 func TestApprove_LegacyRelayRefusedWhenDisabled(t *testing.T) {
 	router, exec, logger := newApproveRouter(t, true)
 	before := len(exec.submittedParams)
+	refused := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("refused"))
 	w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
 		"service": "mctl-web", "slug": "issue-10", "approver": "mashkovd",
 	}, auth.NewServiceUser())
@@ -257,6 +267,9 @@ func TestApprove_LegacyRelayRefusedWhenDisabled(t *testing.T) {
 	}
 	if len(exec.submittedParams) != before {
 		t.Error("a workflow was submitted although the relay is disabled")
+	}
+	if d := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("refused")) - refused; d != 1 {
+		t.Errorf("refused counter moved by %v, want 1", d)
 	}
 	if n := len(entriesFor(logger, "approver.legacy_relay")); n != 0 {
 		t.Errorf("%d legacy_relay entries for a refused relay, want 0", n)

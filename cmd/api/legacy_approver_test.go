@@ -12,8 +12,8 @@ func TestConfigValidate_LegacyApprover(t *testing.T) {
 		raw          string
 		wantDisabled bool
 	}{
-		{"", false}, {"true", false}, {"on", false}, {" 1 ", false},
-		{"false", true}, {"OFF", true}, {"0", true}, {"no", true},
+		{"", false}, {"true", false}, {" TRUE ", false},
+		{"false", true}, {"False", true},
 	} {
 		raw, wantDisabled := c.raw, c.wantDisabled
 		cfg := config{LegacyApproverRaw: raw, CommerceDisabled: true}
@@ -24,7 +24,7 @@ func TestConfigValidate_LegacyApprover(t *testing.T) {
 			t.Errorf("%q: disabled = %v, want %v", raw, got, wantDisabled)
 		}
 	}
-	for _, raw := range []string{"flase", "disabled", "2"} {
+	for _, raw := range []string{"flase", "disabled", "2", "1", "0", "yes", "no", "on", "off"} {
 		cfg := config{LegacyApproverRaw: raw, CommerceDisabled: true}
 		err := cfg.validate()
 		if err == nil || !strings.Contains(err.Error(), "MCTL_AGENTS_APPROVE_LEGACY_APPROVER") {
