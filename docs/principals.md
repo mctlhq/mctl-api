@@ -348,6 +348,14 @@ caller's authorization; it never merges with the legacy one:
 - `checkTenantRole` reads the role GitOps writes for the principal
   (`MemberRolesForPrincipal`); a non-human caller holds no tenant role, and
   an unresolved principal is 503.
+- membership and roles are read from a snapshot of the tenants, taken
+  after each successful GitOps sync, never from the checkout on the
+  request: a refresh holds the checkout across `git fetch`, and no request
+  waits for it. The snapshot's age is that of its own sync, so a
+  snapshot older than `CheckoutMaxAge` answers 503 even when a later sync
+  has landed but not yet been read. `membership_busy` (shadow) means a
+  refresh held the checkout before any snapshot existed, i.e. only at
+  startup.
 - a human a surface relays for, or an agent run delegates to, gets the
   tenants of its own principal through the same decision as a direct
   caller, never those of its login, and is never a platform admin. One
@@ -420,7 +428,7 @@ the switch.
 |---|---|
 | `tenant_authz_shadow_total{result}` | `match`, `diff` or `unresolved` per comparison |
 | `tenant_authz_shadow_diff_total{kind}` | `tenant_only_legacy`, `tenant_only_principal`, `role_mismatch`, `admin_mismatch` (only with `ADMIN_PRINCIPALS` set) |
-| `tenant_authz_principal_unresolved_total{reason}` | `no_pid` (no principal at authentication), `membership_busy` (checkout held by a refresh), `membership_unreadable` (stale checkout, or any tenant unreadable), `membership_unavailable` (reader not wired) |
+| `tenant_authz_principal_unresolved_total{reason}` | `no_pid` (no principal at authentication), `membership_busy` (no membership snapshot yet and a refresh holds the checkout: startup only), `membership_unreadable` (stale checkout, or any tenant unreadable), `membership_unavailable` (reader not wired) |
 | `tenant_member_entry_unkeyed{tenant}` | member entries with no `principalId` |
 | `tenant_principal_keys_invalid{tenant}` | 1 when a tenant's keys are invalid or the tenant cannot be read |
 | `tenant_principal_keys_scan_ok` | 1 when the last scan could list the tenants; the two gauges above are cleared when it is 0 |
@@ -449,9 +457,9 @@ ZITADEL MCP OAuth, ZITADEL bearer). A window in which a path saw no traffic
 does not count for that path.
 
 Over the same window, `oauth_token_principal_mismatch_total` must stay at
-zero. Before the flip, check pid coverage too: a live session minted
-before the release that records no `pid` is refused at the switch and its
-holder must sign in again. A refresh carries an empty `principal_id`
+zero. Before the flip, check pid coverage too: a live session with no
+recorded `pid` (one minted before the release that started recording it)
+is refused at the switch, and its holder must sign in again. A refresh carries an empty `principal_id`
 forward, so such sessions end only by expiry or a new sign-in; count the
 live refresh rows with an empty `principal_id` and decide whether that
 many re-sign-ins are acceptable on switch day.

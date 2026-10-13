@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -106,6 +107,35 @@ func TestFlowStoreCodeCrossesReplicas(t *testing.T) {
 	if _, _, err := a.ExchangeCode(context.Background(), code, "verifier-1", "client-1", "https://client.example/callback"); err == nil ||
 		!strings.Contains(err.Error(), "invalid or expired") {
 		t.Fatalf("replayed code = %v; want invalid or expired", err)
+	}
+}
+
+// The principal an authorization code was issued for must survive the trip
+// through the shared flow store: a code redeemed on another replica that
+// lost it would mint a token principal mode refuses on every request.
+func TestFlowStoreCodeCarriesThePrincipalAcrossReplicas(t *testing.T) {
+	const prn = "prn_01JTESTAAAAAAAAAAAAAAAAAAA"
+	for _, login := range []string{"dmitrii", ""} { // GitHub-linked, then ZITADEL-only
+		t.Run(fmt.Sprintf("login=%q", login), func(t *testing.T) {
+			a, b, _ := twoReplicas(t)
+			a.PrincipalMode, b.PrincipalMode = true, true
+			code, err := a.IssueCode(context.Background(), login, prn, "client-1", "https://client.example/callback",
+				testPKCEChallenge(t, "verifier-1"), nil)
+			if err != nil {
+				t.Fatalf("IssueCode: %v", err)
+			}
+			access, refresh, err := b.ExchangeCode(context.Background(), code, "verifier-1", "client-1", "https://client.example/callback")
+			if err != nil {
+				t.Fatalf("ExchangeCode on the other replica: %v", err)
+			}
+			payload, err := verifyJWT(access, b.JWTSecret, b.BaseURL)
+			if err != nil || payload.PID != prn {
+				t.Fatalf("pid = %q, %v; want %s", payload.PID, err, prn)
+			}
+			if _, _, err := b.RefreshAccessToken(refresh, "client-1"); err != nil {
+				t.Fatalf("the refresh token lost the principal: %v", err)
+			}
+		})
 	}
 }
 
