@@ -155,8 +155,8 @@ func TestDevLoopApprove_ServicePrincipalCannotApprove(t *testing.T) {
 	run := e.startDevLoopRun("svc")
 	id := e.requestDevLoopGrant(run.execID, "gate-1")
 
-	if res := e.approveDevLoop(auth.NewServiceUser(), run.workflowID, ""); res.code != http.StatusForbidden {
-		t.Fatalf("service approve = %d %s, want 403", res.code, res.raw)
+	if res := e.approveDevLoop(auth.NewServiceUser(), run.workflowID, ""); res.code != http.StatusForbidden || code(res) != aarCodeDeciderForbidden {
+		t.Fatalf("service approve = %d %s, want 403 %s", res.code, res.raw, aarCodeDeciderForbidden)
 	}
 	if fake.lastApprovePayload != nil {
 		t.Fatalf("a refused approval signalled %v", fake.lastApprovePayload)
@@ -198,6 +198,56 @@ func TestDevLoopApprove_NoGrantFollowsTheLegacyFlag(t *testing.T) {
 		}
 		if fake.lastApprovePayload != nil {
 			t.Fatalf("%s, flag off: signalled %v", name, fake.lastApprovePayload)
+		}
+	}
+}
+
+// A grant that was denied, spent or let expire is a recorded outcome, not
+// an absent gate: approving over it is refused with its state's code even
+// while the legacy flag is on, and nothing is signalled.
+func TestDevLoopApprove_ClosedGrantIsNeverLegacy(t *testing.T) {
+	e, fake := newDevLoopGrantEnv(t)
+	e.h.opts.LegacyApproverDisabled = false
+	decide := func(id, decision string) {
+		t.Helper()
+		if res := e.do(rootAdmin, "POST", "/api/v1/action-approvals/"+id+"/decision", map[string]any{"decision": decision}); res.code != http.StatusOK {
+			t.Fatalf("decide %s = %d %s", decision, res.code, res.raw)
+		}
+	}
+	for _, tc := range []struct {
+		name, code string
+		close      func(id string)
+	}{
+		{"denied", aarCodeDenied, func(id string) { decide(id, workitems.DecisionDeny) }},
+		{"consumed", aarCodeConsumed, func(id string) {
+			decide(id, workitems.DecisionApprove)
+			hash := e.approvalState(id)["intent_hash"]
+			if res := e.do(auth.NewServiceUser(), "POST", "/api/v1/action-approvals/"+id+"/consume", map[string]any{"intent_hash": hash}); res.code != http.StatusOK {
+				t.Fatalf("consume = %d %s", res.code, res.raw)
+			}
+		}},
+		{"expired", aarCodeExpired, func(id string) {
+			pool, err := pgxpool.New(context.Background(), e.connStr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pool.Close()
+			if _, err := pool.Exec(context.Background(),
+				`UPDATE action_approval_requests SET expires_at = now() - interval '1 minute' WHERE id=$1`, id); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		run := e.startDevLoopRun("closed-" + tc.name)
+		id := e.requestDevLoopGrant(run.execID, "gate-"+tc.name)
+		tc.close(id)
+		fake.lastApprovePayload = nil
+		res := e.approveDevLoop(rootAdmin, run.workflowID, "")
+		if res.code != http.StatusConflict || code(res) != tc.code {
+			t.Errorf("%s grant: approve = %d %s, want 409 %s", tc.name, res.code, res.raw, tc.code)
+		}
+		if fake.lastApprovePayload != nil {
+			t.Errorf("%s grant: signalled %v", tc.name, fake.lastApprovePayload)
 		}
 	}
 }
