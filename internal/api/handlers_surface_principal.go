@@ -15,7 +15,9 @@
 package api
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -40,8 +42,11 @@ import (
 const sidCodePortalOnly = "portal_surface_required"
 
 // githubLoginRE is GitHub's own login grammar: alphanumerics and single
-// inner hyphens, at most 39 characters (the repetition bound caps it).
-var githubLoginRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9]){0,38}$`)
+// inner hyphens. It does not bound the length (a repetition may be two
+// characters); maxGitHubLogin does.
+var githubLoginRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9])*$`)
+
+const maxGitHubLogin = 39
 
 // ResolveGitHubPrincipal handles POST /api/v1/surface-principals/github.
 func (h *Handlers) ResolveGitHubPrincipal(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +67,15 @@ func (h *Handlers) ResolveGitHubPrincipal(w http.ResponseWriter, r *http.Request
 	// The login is the actor the portal acts for, named by the actor header
 	// the surface gate already requires and rate-limits on; the body names
 	// nobody (decodeSurfaceBody refuses identity fields) and may only be {}.
-	if r.ContentLength != 0 {
+	// Read first: a chunked request has no length, and an empty one is no
+	// body all the same.
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, sidMaxBodyBytes))
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid, "could not read the body", nil)
+		return
+	}
+	if len(bytes.TrimSpace(data)) > 0 {
+		r.Body = io.NopCloser(bytes.NewReader(data))
 		var none struct{}
 		if !decodeSurfaceBody(w, r, &none) {
 			return
@@ -70,7 +83,7 @@ func (h *Handlers) ResolveGitHubPrincipal(w http.ResponseWriter, r *http.Request
 	}
 	actor := r.Header.Get(SurfaceActorHeader)
 	login, ok := strings.CutPrefix(actor, "github:")
-	if !ok || !githubLoginRE.MatchString(login) {
+	if !ok || len(login) > maxGitHubLogin || !githubLoginRE.MatchString(login) {
 		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid,
 			SurfaceActorHeader+" must be github:<login> with a GitHub login", nil)
 		return
@@ -92,6 +105,9 @@ func (h *Handlers) ResolveGitHubPrincipal(w http.ResponseWriter, r *http.Request
 		writeErrorCode(w, http.StatusForbidden, sidCodeIdentityRefused, "this GitHub identity is refused", nil)
 		return
 	case err != nil:
+		// Includes a login GitHub does not know: the resolver cannot tell a
+		// 404 from an outage, so both fail closed as unavailable. Logged,
+		// not audited: nothing was resolved or refused.
 		slog.Warn("resolving a GitHub login for the portal failed", "login", login, "error", err)
 		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not resolve the GitHub login right now", nil)
 		return
@@ -103,6 +119,6 @@ func (h *Handlers) ResolveGitHubPrincipal(w http.ResponseWriter, r *http.Request
 		return
 	}
 	params["principal_id"] = pid
-	h.auditSurfaceIdentity(r, user, "principal.resolve_github", "success", params)
+	h.auditSurfaceIdentity(r, user, "principal.resolve_github", "succeeded", params)
 	writeJSON(w, http.StatusOK, map[string]string{"principalId": pid})
 }

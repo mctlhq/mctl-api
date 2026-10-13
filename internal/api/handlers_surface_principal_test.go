@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -64,7 +66,8 @@ func TestResolveGitHubPrincipal_PortalGetsTheLoginsPrincipal(t *testing.T) {
 	found := false
 	for _, entry := range e.audit.List(100) {
 		if entry.Operation == "principal.resolve_github" && entry.Parameters["principal_id"] == pid &&
-			entry.Parameters["github_login"] == "Octo-Cat" && entry.UserID == "surface:portal" {
+			entry.Parameters["github_login"] == "Octo-Cat" && entry.UserID == "surface:portal" &&
+			entry.Status == "succeeded" {
 			found = true
 		}
 	}
@@ -98,6 +101,8 @@ func TestResolveGitHubPrincipal_RefusesBadInput(t *testing.T) {
 	for _, actor := range []string{
 		"", "octocat", "telegram:4242", "github:", "github:-octo", "github:octo-", "github:oc--to",
 		"github:octo_cat", "github:octo.cat", "github:a123456789012345678901234567890123456789",
+		// 41 characters, every repetition two of them.
+		"github:a-b-c-d-e-f-g-h-i-j-k-l-m-n-o-p-q-r-s-t-u",
 	} {
 		if code, body := e.resolveGitHub("portal", actor); code != http.StatusBadRequest {
 			t.Errorf("actor %q = %d %v", actor, code, body)
@@ -118,6 +123,19 @@ func TestResolveGitHubPrincipal_RefusesBadInput(t *testing.T) {
 	}
 	if code, res := e.resolveGitHub("portal", "github:a12345678901234567890123456789012345678"); code != http.StatusOK {
 		t.Errorf("39-character login = %d %v", code, res)
+	}
+	if code, res := e.resolveGitHub("portal", "github:a-b-c-d-e-f-g-h-i-j-k-l-m-n-o-p-q-r-s-t"); code != http.StatusOK {
+		t.Errorf("39-character hyphenated login = %d %v", code, res)
+	}
+	// A chunked empty body has no length and is still no body.
+	req := httptest.NewRequest("POST", surfacePrincipalPath, strings.NewReader(""))
+	req.ContentLength = -1
+	req.Header.Set("X-Test-User", "portal")
+	req.Header.Set(SurfaceActorHeader, "github:octocat")
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("chunked empty body = %d %s", rec.Code, rec.Body.String())
 	}
 }
 
