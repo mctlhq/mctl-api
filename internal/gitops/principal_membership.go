@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -123,64 +122,38 @@ type PrincipalMembership struct {
 // never synced or is stale, or a tenants directory that cannot be listed,
 // is an error; a single unreadable tenant is reported in Unreadable instead,
 // so a caller can still rely on what was read and knows exactly what was
-// not.
+// not. It answers from the snapshot of the last sync and never waits for a
+// refresh (principal_snapshot.go); with no snapshot to answer from, it is
+// an error.
 func (r *Reader) NamespacesForPrincipal(principalID string) (PrincipalMembership, error) {
-	if !ValidPrincipalID(principalID) {
-		return PrincipalMembership{}, fmt.Errorf("invalid principal id %q", principalID)
+	m, ok, err := r.TryNamespacesForPrincipal(principalID)
+	if err == nil && !ok {
+		err = errMembershipNotObserved
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.namespacesForPrincipalLocked(principalID)
+	return m, err
 }
 
-// TryNamespacesForPrincipal is NamespacesForPrincipal without waiting: ok is
-// false, with nothing read, when a refresh holds the checkout. It is for
-// callers on a request path that must never queue behind a git pull, as
-// TryGetTenantsForUser is; ok false is "not observed", never "no tenants".
+// TryNamespacesForPrincipal is NamespacesForPrincipal reporting "not
+// observed" as ok false rather than as an error: ok is false, with nothing
+// read, only when no snapshot exists and a refresh holds the checkout.
+// ok false is never "no tenants".
 func (r *Reader) TryNamespacesForPrincipal(principalID string) (m PrincipalMembership, ok bool, err error) {
 	if !ValidPrincipalID(principalID) {
 		return PrincipalMembership{}, true, fmt.Errorf("invalid principal id %q", principalID)
 	}
-	if !r.mu.TryRLock() {
+	s, ok := r.principalView()
+	if !ok {
 		return PrincipalMembership{}, false, nil
 	}
-	defer r.mu.RUnlock()
-	m, err = r.namespacesForPrincipalLocked(principalID)
+	m, err = s.namespacesForPrincipal(principalID)
 	return m, true, err
-}
-
-func (r *Reader) namespacesForPrincipalLocked(principalID string) (PrincipalMembership, error) {
-	if err := r.checkFreshLocked(); err != nil {
-		return PrincipalMembership{}, err
-	}
-	entries, err := os.ReadDir(filepath.Join(r.localPath, "platform-gitops", "tenants"))
-	if err != nil {
-		return PrincipalMembership{}, fmt.Errorf("reading tenants dir: %w", err)
-	}
-	var out PrincipalMembership
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		t, err := r.readTenant(entry.Name())
-		if errors.Is(err, fs.ErrNotExist) {
-			// No values.yaml: not a tenant, exactly as MemberRoles reads it.
-			continue
-		}
-		if err != nil || t.principalErr != nil {
-			out.Unreadable = append(out.Unreadable, entry.Name())
-			continue
-		}
-		out.Namespaces = append(out.Namespaces, t.PrincipalNamespaces(principalID)...)
-	}
-	sort.Strings(out.Namespaces)
-	return out, nil
 }
 
 // MemberRolesForPrincipal is MemberRoles keyed by canonical principal id,
 // with the same contract: an empty result with a nil error means "read, and
 // not a member", and anything that could not be read, including the owning
-// tenant's principal keys, is an error.
+// tenant's principal keys, is an error. Like NamespacesForPrincipal it
+// answers from the snapshot and never waits.
 func (r *Reader) MemberRolesForPrincipal(namespace, principalID string) ([][]string, error) {
 	if namespace == "" {
 		return nil, errors.New("member roles: namespace is required")
@@ -188,7 +161,11 @@ func (r *Reader) MemberRolesForPrincipal(namespace, principalID string) ([][]str
 	if !ValidPrincipalID(principalID) {
 		return nil, fmt.Errorf("member roles: invalid principal id %q", principalID)
 	}
-	return r.memberRolesMatching(namespace, matchPrincipal(principalID), true)
+	s, ok := r.principalView()
+	if !ok {
+		return nil, errMembershipNotObserved
+	}
+	return s.memberRolesForPrincipal(namespace, principalID)
 }
 
 // tenantMemberEntryUnkeyed is the number of member entries per tenant with

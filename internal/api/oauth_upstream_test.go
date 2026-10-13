@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"net/http"
 	"net/http/httptest"
@@ -318,6 +319,38 @@ func TestZitadelSigninRefusalWithoutAPrincipalIsAFailedRead(t *testing.T) {
 				t.Fatalf("callback = %d, want 503 without the link page", rec.Code)
 			}
 		})
+	}
+}
+
+// A link the store reports without a usable principal or GitHub login is a
+// failed read in every mode: minting from it would issue a token for
+// nobody, or one principal mode refuses on every request.
+func TestZitadelSigninLinkWithoutPrincipalIsAFailedRead(t *testing.T) {
+	const linked = "prn_01JTESTAAAAAAAAAAAAAAAAAAA"
+	broken := map[string]func(*fakeLinkedStore){
+		"no principal":        func(f *fakeLinkedStore) { f.p = nil },
+		"empty principal id":  func(f *fakeLinkedStore) { f.p.ID = "" },
+		"malformed principal": func(f *fakeLinkedStore) { f.p.ID = "alice" },
+		"no GitHub identity":  func(f *fakeLinkedStore) { f.gh = nil },
+		"no GitHub login":     func(f *fakeLinkedStore) { f.gh.Display = "" },
+	}
+	for name, breakIt := range broken {
+		for _, principalMode := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/principalMode=%v", name, principalMode), func(t *testing.T) {
+				store := linkedTo("mashkovd")
+				breakIt(store)
+				var h *upstreamHarness
+				if principalMode {
+					h = newPrincipalModeHarness(t, store, signinResolver{prn: linked})
+				} else {
+					h = newUpstreamHarness(t, OAuthUpstreamZitadel, store)
+				}
+				rec := h.callback(h.toZitadel(h.get(authorizeQuery(""))))
+				if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+					t.Fatalf("callback = %d Location=%q, want 503 and no code", rec.Code, rec.Header().Get("Location"))
+				}
+			})
+		}
 	}
 }
 
