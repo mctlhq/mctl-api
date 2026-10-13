@@ -24,6 +24,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func newTestStore(t *testing.T) *PostgresStore {
@@ -512,5 +514,150 @@ func TestRotateCarriesThePrincipal(t *testing.T) {
 	}
 	if got, err := s.Rotate(tok4, uniqueTok(t, "5"), "c", exp); err != nil || got.PrincipalID != prn || got.Login != "" {
 		t.Fatalf("principal-only Rotate = %+v, %v", got, err)
+	}
+}
+
+func TestRevokePrincipal(t *testing.T) {
+	s := newTestStore(t)
+	const (
+		prn   = "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ" //nolint:gosec // G101: a principal id, not a credential
+		other = "prn_01JYYYYYYYYYYYYYYYYYYYYYYY" //nolint:gosec // G101: a principal id, not a credential
+	)
+	exp := time.Now().Add(time.Hour)
+	tok := func(n string) string { return uniqueTok(t, n) }
+
+	// Two families under two clients, one of them rotated, plus another
+	// principal's session and a login-only one.
+	for _, ins := range []struct {
+		tok, client string
+		sess        Session
+	}{
+		{tok("a1"), "c1", Session{Login: "alice", PrincipalID: prn, Groups: []string{}}},
+		{tok("b1"), "c2", Session{PrincipalID: prn}},
+		{tok("o1"), "c1", Session{Login: "bob", PrincipalID: other, Groups: []string{}}},
+		{tok("l1"), "c1", Session{Login: "alice", Groups: []string{}}},
+	} {
+		if err := s.Insert(ins.tok, ins.client, ins.sess, exp); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+	if _, err := s.Rotate(tok("a1"), tok("a2"), "c1", exp); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+
+	n, err := s.RevokePrincipal(prn, "identity_unlinked")
+	if err != nil {
+		t.Fatalf("RevokePrincipal: %v", err)
+	}
+	// Two sessions: a1 (rotated, still unrevoked) and a2 are one family.
+	if n != 2 {
+		t.Errorf("RevokePrincipal reported %d sessions, want 2", n)
+	}
+	if _, err := s.Rotate(tok("a2"), tok("a3"), "c1", exp); err == nil {
+		t.Error("the revoked principal's successor still rotates")
+	}
+	if _, err := s.Rotate(tok("b1"), tok("b2"), "c2", exp); err == nil {
+		t.Error("the revoked principal's other family still rotates")
+	}
+	if _, err := s.Rotate(tok("o1"), tok("o2"), "c1", exp); err != nil {
+		t.Errorf("another principal's session was revoked: %v", err)
+	}
+	if _, err := s.Rotate(tok("l1"), tok("l2"), "c1", exp); err != nil {
+		t.Errorf("a session with no principal was revoked: %v", err)
+	}
+
+	if n, err := s.RevokePrincipal(prn, "identity_unlinked"); err != nil || n != 0 {
+		t.Errorf("second RevokePrincipal = %d, %v; want 0, nil", n, err)
+	}
+	if _, err := s.RevokePrincipal("", "identity_unlinked"); err == nil {
+		t.Error("RevokePrincipal accepted an empty principal id")
+	}
+}
+
+// TestRevokePrincipalCatchesAConcurrentRotation holds a rotation open at the
+// point where its successor is written but not committed, starts
+// RevokePrincipal, and commits the rotation only once the revocation is
+// waiting on its lock. The successor must end up revoked: a revocation that
+// misses it leaves the unlinked identity a live session.
+func TestRevokePrincipalCatchesAConcurrentRotation(t *testing.T) {
+	s := newTestStore(t)
+	const prn = "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ" //nolint:gosec // G101: a principal id, not a credential
+	exp := time.Now().Add(time.Hour)
+	tok1, tok2 := uniqueTok(t, "1"), uniqueTok(t, "2")
+	if err := s.Insert(tok1, "c", Session{Login: "erin", PrincipalID: prn, Groups: []string{}}, exp); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	ctx := context.Background()
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// What rotateTx writes: lock the predecessor, mark it rotated, insert
+	// the successor in its family.
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM oauth_refresh_tokens WHERE token_hash = $1 FOR UPDATE`, tokenHash(tok1)); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE oauth_refresh_tokens SET rotated_at = NOW() WHERE token_hash = $1`, tokenHash(tok1)); err != nil {
+		t.Fatalf("mark rotated: %v", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO oauth_refresh_tokens
+		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at)
+		 SELECT $1, client_id, login, principal_id, groups, family_id, token_hash, NOW(), expires_at
+		 FROM oauth_refresh_tokens WHERE token_hash = $2`,
+		tokenHash(tok2), tokenHash(tok1)); err != nil {
+		t.Fatalf("insert successor: %v", err)
+	}
+
+	type result struct {
+		n   int64
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := s.RevokePrincipal(prn, "identity_unlinked")
+		done <- result{n, err}
+	}()
+
+	// Commit only once the revocation is blocked on the predecessor's row.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting int
+		if err := s.pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_locks WHERE NOT granted AND locktype = 'transactionid'`,
+		).Scan(&waiting); err != nil {
+			t.Fatalf("pg_locks: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("RevokePrincipal never waited on the rotation's lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit rotation: %v", err)
+	}
+
+	res := <-done
+	if res.err != nil {
+		t.Fatalf("RevokePrincipal: %v", res.err)
+	}
+	var revoked bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT revoked_at IS NOT NULL FROM oauth_refresh_tokens WHERE token_hash = $1`, tokenHash(tok2),
+	).Scan(&revoked); err != nil {
+		t.Fatalf("read successor: %v", err)
+	}
+	if !revoked {
+		t.Fatal("the successor committed during the revocation is still live")
+	}
+	if res.n != 1 {
+		t.Errorf("RevokePrincipal reported %d sessions, want the one", res.n)
 	}
 }

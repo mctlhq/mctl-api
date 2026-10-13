@@ -191,6 +191,22 @@ func (f *fakeRefreshStore) RevokeFamily(rawToken, clientID, _ string) error {
 	return nil
 }
 
+func (f *fakeRefreshStore) RevokePrincipal(principalID, _ string) (int64, error) {
+	if principalID == "" {
+		return 0, errors.New("empty principal id")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	families := map[string]bool{}
+	for _, e := range f.tokens {
+		if e.pid == principalID && !e.revoked {
+			e.revoked = true
+			families[e.familyID] = true
+		}
+	}
+	return int64(len(families)), nil
+}
+
 func (f *fakeRefreshStore) GC() error { return nil }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

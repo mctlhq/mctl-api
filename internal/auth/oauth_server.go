@@ -1551,6 +1551,8 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 		return accessToken, newToken, nil
 	}
 
+	s.refreshTokens.rotation.RLock()
+	defer s.refreshTokens.rotation.RUnlock()
 	entry, ok := s.refreshTokens.loadAndDelete(refreshToken)
 	if !ok {
 		return "", "", errors.New("invalid or expired refresh token")
@@ -1616,6 +1618,27 @@ func (s *OAuthServer) RevokeRefreshToken(refreshToken, clientID string) {
 		return
 	}
 	s.refreshTokens.delete(refreshToken)
+}
+
+// RevokePrincipalSessions revokes every refresh token recorded for
+// principalID, in every family and for every client, and reports how many.
+// Access tokens already issued stay valid until they expire
+// (OAUTH_TOKEN_TTL); what ends is the session's ability to renew them.
+// It is how an unlink ends the sessions signed in through the identity
+// that was removed: a refresh does not record which identity signed in, so
+// all of the principal's sessions end, and its holder signs in again.
+func (s *OAuthServer) RevokePrincipalSessions(principalID, reason string) (int64, error) {
+	if !ValidPrincipalID(principalID) {
+		return 0, fmt.Errorf("revoke sessions: %q is not a principal id", principalID)
+	}
+	if s.RefreshStore != nil {
+		n, err := s.RefreshStore.RevokePrincipal(principalID, reason)
+		if err != nil {
+			return 0, fmt.Errorf("revoke sessions: %w", err)
+		}
+		return n, nil
+	}
+	return s.refreshTokens.revokePrincipal(principalID), nil
 }
 
 // ValidateJWT validates a JWT issued by this server and returns the User.
@@ -1783,6 +1806,11 @@ type authCodeStore struct {
 
 type refreshTokenStore struct {
 	tokens sync.Map // token → refreshTokenEntry
+	// rotation is held for reading by every in-memory rotation, from
+	// taking the old token to storing its successor, and for writing by
+	// revokePrincipal: a successor stored mid-scan would otherwise escape
+	// the revocation.
+	rotation sync.RWMutex
 }
 
 func (s *authCodeStore) init() {
@@ -1862,6 +1890,22 @@ func (s *refreshTokenStore) loadAndDelete(token string) (refreshTokenEntry, bool
 
 func (s *refreshTokenStore) delete(token string) {
 	s.tokens.Delete(token)
+}
+
+// revokePrincipal deletes every refresh token of principalID, waiting for
+// in-flight rotations so none of their successors is missed.
+func (s *refreshTokenStore) revokePrincipal(principalID string) int64 {
+	s.rotation.Lock()
+	defer s.rotation.Unlock()
+	var n int64
+	s.tokens.Range(func(k, v any) bool {
+		if v.(refreshTokenEntry).PrincipalID == principalID {
+			s.tokens.Delete(k)
+			n++
+		}
+		return true
+	})
+	return n
 }
 
 func (s *refreshTokenStore) gcLoop() {
