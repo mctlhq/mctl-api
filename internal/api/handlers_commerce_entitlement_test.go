@@ -17,6 +17,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,6 +52,48 @@ func TestCommerceEntitlement_AdminGrantedAndTenantRead(t *testing.T) {
 		map[string]string{"tenant": tenant}, f.h.GrantCommerceEntitlement)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("grant unknown cap: want 422, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// 0a. Malformed expires_at returns 400 invalid-request
+	badDateBody := map[string]any{
+		"capability_id": f.cap,
+		"units":         100,
+		"invoice_ref":   "INV-BADDATE",
+		"expires_at":    "not-a-date",
+	}
+	rec = f.call(t, commerceAdmin(t), "POST", "/api/v1/commerce/tenants/acme/entitlements", badDateBody,
+		map[string]string{"tenant": tenant}, f.h.GrantCommerceEntitlement)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid-request") {
+		t.Fatalf("grant bad date: want 400 invalid-request, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// 0b. Retired terms capability returns 422 terms-unknown
+	retiredCap := f.cap + "/retired"
+	rec = f.call(t, commerceAdmin(t), "POST", "/api/v1/commerce/terms", map[string]any{
+		"capability_id": retiredCap, "input_schema_hash": commerceTestSchemaHash, "provider_id": "p",
+		"price_mode": "per_call", "price": map[string]any{"currency": "EUR", "amount_minor": 10},
+		"funds_mode": "simulated", "quote_ttl_seconds": 60,
+	}, nil, f.h.PublishCommerceTerms)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("publish terms: %d", rec.Code)
+	}
+	var pubTerms commerce.Terms
+	_ = json.Unmarshal(rec.Body.Bytes(), &pubTerms)
+	rec = f.call(t, commerceAdmin(t), "POST", "/api/v1/commerce/terms/"+pubTerms.TermsID+"/versions/1/retire", nil,
+		map[string]string{"terms_id": pubTerms.TermsID, "version": "1"}, f.h.RetireCommerceTerms)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retire terms: %d", rec.Code)
+	}
+	retiredGrantBody := map[string]any{
+		"capability_id": retiredCap,
+		"units":         10,
+		"invoice_ref":   "INV-RETIRED-CAP",
+		"expires_at":    expiry,
+	}
+	rec = f.call(t, commerceAdmin(t), "POST", "/api/v1/commerce/tenants/acme/entitlements", retiredGrantBody,
+		map[string]string{"tenant": tenant}, f.h.GrantCommerceEntitlement)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("grant on retired terms cap: want 422, got %d (%s)", rec.Code, rec.Body.String())
 	}
 
 	// 1. Non-admin cannot grant entitlement

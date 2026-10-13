@@ -33,6 +33,7 @@ func TestEntitlementInputValidation(t *testing.T) {
 		"missing actor":        {TenantID: "t1", CapabilityID: "cap", Units: 10, InvoiceRef: "INV-001", ExpiresAt: expires, Actor: ""},
 		"zero expiry":          {TenantID: "t1", CapabilityID: "cap", Units: 10, InvoiceRef: "INV-001", ExpiresAt: time.Time{}, Actor: "prn_admin"},
 		"past expiry":          {TenantID: "t1", CapabilityID: "cap", Units: 10, InvoiceRef: "INV-001", ExpiresAt: now.Add(-1 * time.Hour), Actor: "prn_admin"},
+		"exact now expiry":     {TenantID: "t1", CapabilityID: "cap", Units: 10, InvoiceRef: "INV-001", ExpiresAt: now, Actor: "prn_admin"},
 		"expiry over 10 years": {TenantID: "t1", CapabilityID: "cap", Units: 10, InvoiceRef: "INV-001", ExpiresAt: now.AddDate(11, 0, 0), Actor: "prn_admin"},
 	} {
 		if err := in.validate(now); !errors.Is(err, ErrInvalid) {
@@ -63,6 +64,24 @@ func TestEntitlementGrantAndList(t *testing.T) {
 	})
 	if !errors.Is(err, ErrTermsNotFound) {
 		t.Fatalf("grant without terms: want ErrTermsNotFound, got %v", err)
+	}
+
+	// Capability with only retired terms also fails with ErrTermsNotFound
+	retiredCap := testCapability(t) + "/retired-terms"
+	retTerms := publish(t, s, retiredCap, PriceModePerCall, 10)
+	if _, err := s.RetireTerms(ctx, retTerms.TermsID, retTerms.TermsVersion); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.GrantEntitlement(ctx, GrantEntitlementInput{
+		TenantID:     tenant,
+		CapabilityID: retiredCap,
+		Units:        50,
+		InvoiceRef:   "INV-RETIRED-TEST",
+		ExpiresAt:    expires,
+		Actor:        "prn_admin",
+	})
+	if !errors.Is(err, ErrTermsNotFound) {
+		t.Fatalf("grant on retired terms: want ErrTermsNotFound, got %v", err)
 	}
 
 	publish(t, s, capID, PriceModePerCall, 10)

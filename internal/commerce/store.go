@@ -288,6 +288,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS commerce_entitlements_invoice
 ALTER TABLE commerce_entitlements ADD COLUMN IF NOT EXISTS granted_by TEXT NOT NULL DEFAULT '';
 ALTER TABLE commerce_entitlements ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT '';
 ALTER TABLE commerce_entitlements ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'commerce_entitlements_status_check') THEN
+        BEGIN
+            ALTER TABLE commerce_entitlements ADD CONSTRAINT commerce_entitlements_status_check CHECK (status IN ('active', 'retired'));
+        EXCEPTION WHEN duplicate_object THEN
+            NULL;
+        END;
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS commerce_entitlement_allocations (
     allocation_id   TEXT        PRIMARY KEY,
@@ -1100,12 +1110,12 @@ func (s *Store) GrantEntitlement(ctx context.Context, in GrantEntitlementInput) 
 		return nil, err
 	}
 	var exists bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM commerce_terms WHERE capability_id = $1)`, in.CapabilityID).Scan(&exists)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM commerce_terms WHERE capability_id = $1 AND retired_at IS NULL)`, in.CapabilityID).Scan(&exists)
 	if err != nil {
 		return nil, fmt.Errorf("commerce: check capability terms: %w", err)
 	}
 	if !exists {
-		return nil, fmt.Errorf("%w: capability %s has no commerce terms", ErrTermsNotFound, in.CapabilityID)
+		return nil, fmt.Errorf("%w: capability %s has no active commerce terms", ErrTermsNotFound, in.CapabilityID)
 	}
 	id, err := newULID(now)
 	if err != nil {
@@ -1142,12 +1152,6 @@ func (s *Store) RetireEntitlement(ctx context.Context, tenantID, entitlementID s
 		tenantID, entitlementID, now)
 	e, err := scanEntitlement(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		var exists bool
-		_ = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM commerce_entitlements WHERE tenant_id = $1 AND entitlement_id = $2)`,
-			tenantID, entitlementID).Scan(&exists)
-		if !exists {
-			return nil, fmt.Errorf("%w: entitlement %s", ErrEntitlementNotFound, entitlementID)
-		}
 		return s.GetEntitlement(ctx, tenantID, entitlementID)
 	}
 	if err != nil {

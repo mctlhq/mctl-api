@@ -812,7 +812,7 @@ func (in GrantEntitlementInput) validate(now time.Time) error {
 	if in.ExpiresAt.IsZero() {
 		return invalid("expires_at is required")
 	}
-	if in.ExpiresAt.Before(now) {
+	if !in.ExpiresAt.After(now) {
 		return invalid("expires_at must be in the future")
 	}
 	if in.ExpiresAt.After(now.AddDate(10, 0, 0)) {

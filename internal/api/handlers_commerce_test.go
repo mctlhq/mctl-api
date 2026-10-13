@@ -100,6 +100,9 @@ func newCommerceFixture(t *testing.T) *commerceFixture {
 			(SELECT invocation_id FROM commerce_invocations WHERE capability_id = $1)`, capID)
 		_, _ = pool.Exec(ctx, `DELETE FROM commerce_invocations WHERE capability_id = $1`, capID)
 		_, _ = pool.Exec(ctx, `DELETE FROM commerce_quotes WHERE capability_id = $1`, capID)
+		_, _ = pool.Exec(ctx, `DELETE FROM commerce_entitlement_allocations WHERE entitlement_id IN
+			(SELECT entitlement_id FROM commerce_entitlements WHERE tenant_id IN ('acme', 'beta'))`)
+		_, _ = pool.Exec(ctx, `DELETE FROM commerce_entitlements WHERE tenant_id IN ('acme', 'beta')`)
 		_, _ = pool.Exec(ctx, `DELETE FROM commerce_terms WHERE capability_id = $1`, capID)
 		pool.Close()
 		store.Close()

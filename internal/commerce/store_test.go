@@ -41,6 +41,8 @@ func newTestStore(t *testing.T) *Store {
 		// transitions, invocations, quotes, terms.
 		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_payment_operations WHERE invocation_id IN
 			(SELECT invocation_id FROM commerce_invocations WHERE capability_id LIKE 'mctl://test-commerce/%')`)
+		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_entitlement_allocations WHERE entitlement_id IN
+			(SELECT entitlement_id FROM commerce_entitlements WHERE tenant_id LIKE 'tc-%')`)
 		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_entitlement_allocations WHERE invocation_id IN
 			(SELECT invocation_id FROM commerce_invocations WHERE capability_id LIKE 'mctl://test-commerce/%')`)
 		_, _ = s.pool.Exec(ctx, `DELETE FROM commerce_entitlements WHERE tenant_id LIKE 'tc-%'`)
