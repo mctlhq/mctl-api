@@ -274,12 +274,16 @@ CREATE TABLE IF NOT EXISTS commerce_entitlements (
     reserved_units   BIGINT      NOT NULL DEFAULT 0 CHECK (reserved_units >= 0),
     invoice_ref      TEXT        NOT NULL,
     payment_status   TEXT        NOT NULL,
+    granted_by       TEXT        NOT NULL,
+    reason           TEXT        NOT NULL DEFAULT '',
     expires_at       TIMESTAMPTZ NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS commerce_entitlements_tenant_cap
     ON commerce_entitlements (tenant_id, capability_id);
+CREATE UNIQUE INDEX IF NOT EXISTS commerce_entitlements_invoice
+    ON commerce_entitlements (tenant_id, invoice_ref);
 
 CREATE TABLE IF NOT EXISTS commerce_entitlement_allocations (
     allocation_id   TEXT        PRIMARY KEY,
@@ -1073,12 +1077,12 @@ func (s *Store) ListOverdue(ctx context.Context, limit int) ([]Invocation, error
 	return out, nil
 }
 
-const entitlementColumns = `entitlement_id, tenant_id, capability_id, total_units, remaining_units, reserved_units, invoice_ref, payment_status, expires_at, created_at, updated_at`
+const entitlementColumns = `entitlement_id, tenant_id, capability_id, total_units, remaining_units, reserved_units, invoice_ref, payment_status, granted_by, reason, expires_at, created_at, updated_at`
 
 func scanEntitlement(row pgx.Row) (*Entitlement, error) {
 	var e Entitlement
 	err := row.Scan(&e.EntitlementID, &e.TenantID, &e.CapabilityID, &e.TotalUnits, &e.RemainingUnits, &e.ReservedUnits,
-		&e.InvoiceRef, &e.PaymentStatus, &e.ExpiresAt, &e.CreatedAt, &e.UpdatedAt)
+		&e.InvoiceRef, &e.PaymentStatus, &e.GrantedBy, &e.Reason, &e.ExpiresAt, &e.CreatedAt, &e.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1087,20 +1091,27 @@ func scanEntitlement(row pgx.Row) (*Entitlement, error) {
 
 // GrantEntitlement issues a finite entitlement package of units for a capability.
 func (s *Store) GrantEntitlement(ctx context.Context, in GrantEntitlementInput) (*Entitlement, error) {
-	if err := in.validate(); err != nil {
+	now := s.now()
+	if err := in.validate(now); err != nil {
 		return nil, err
 	}
-	now := s.now()
 	id, err := newULID(now)
 	if err != nil {
 		return nil, err
 	}
 	entID := EntitlementIDPrefix + id
 	row := s.pool.QueryRow(ctx, `INSERT INTO commerce_entitlements (`+entitlementColumns+`)
-		VALUES ($1, $2, $3, $4, $4, 0, $5, 'paid', $6, $7, $7)
+		VALUES ($1, $2, $3, $4, $4, 0, $5, 'paid', $6, $7, $8, $9, $9)
 		RETURNING `+entitlementColumns,
-		entID, in.TenantID, in.CapabilityID, in.Units, in.InvoiceRef, in.ExpiresAt, now)
-	return scanEntitlement(row)
+		entID, in.TenantID, in.CapabilityID, in.Units, in.InvoiceRef, in.Actor, in.Reason, in.ExpiresAt, now)
+	ent, err := scanEntitlement(row)
+	if err != nil {
+		if uniqueViolationOn(err, "commerce_entitlements_invoice") {
+			return nil, fmt.Errorf("%w: invoice %s already granted", ErrEntitlementConflict, in.InvoiceRef)
+		}
+		return nil, fmt.Errorf("commerce: grant entitlement: %w", err)
+	}
+	return ent, nil
 }
 
 // ListEntitlements returns all entitlements of one tenant.
@@ -1150,4 +1161,3 @@ func (s *Store) GetEntitlement(ctx context.Context, tenantID, entitlementID stri
 	}
 	return e, nil
 }
-

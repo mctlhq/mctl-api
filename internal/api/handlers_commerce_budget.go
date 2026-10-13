@@ -446,7 +446,7 @@ func (h *Handlers) ListCommerceEntitlements(w http.ResponseWriter, r *http.Reque
 		writeCommerceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	writeJSON(w, http.StatusOK, map[string]any{"entitlements": list})
 }
 
 // GetCommerceEntitlement returns one entitlement by ID.
@@ -463,4 +463,3 @@ func (h *Handlers) GetCommerceEntitlement(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, http.StatusOK, ent)
 }
-

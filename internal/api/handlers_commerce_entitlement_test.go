@@ -66,12 +66,21 @@ func TestCommerceEntitlement_AdminGrantedAndTenantRead(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list by owner: want 200, got %d", rec.Code)
 	}
-	var list []commerce.Entitlement
-	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+	var resp struct {
+		Entitlements []commerce.Entitlement `json:"entitlements"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if len(list) != 1 || list[0].EntitlementID != created.EntitlementID {
-		t.Fatalf("list = %+v", list)
+	if len(resp.Entitlements) != 1 || resp.Entitlements[0].EntitlementID != created.EntitlementID {
+		t.Fatalf("list = %+v", resp.Entitlements)
+	}
+
+	// 3b. Duplicate invoice returns 409 Conflict
+	rec = f.call(t, commerceAdmin(t), "POST", "/api/v1/commerce/tenants/acme/entitlements", grantBody,
+		map[string]string{"tenant": tenant}, f.h.GrantCommerceEntitlement)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate grant: want 409, got %d (%s)", rec.Code, rec.Body.String())
 	}
 
 	// 4. Tenant owner can get entitlement by ID

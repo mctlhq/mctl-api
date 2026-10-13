@@ -127,6 +127,8 @@ const (
 	ReasonUnsupportedExecution = "unsupported-execution"
 	ReasonOutcomeUnknown       = "outcome-unknown"
 	ReasonTooLateToCancel      = "too-late-to-cancel"
+	ReasonEntitlementExhausted = "entitlement-exhausted"
+	ReasonEntitlementExpired   = "entitlement-expired"
 )
 
 // Encoding version prefixes of the two digests (ADR 020 secs. 5 and 8).
@@ -160,8 +162,11 @@ var (
 	ErrPhaseConflict        = errors.New("commerce: phase conflict")
 	ErrTerminal             = errors.New("commerce: invocation is terminal")
 	// ErrApprovalBound: the approval already belongs to another invocation.
-	ErrApprovalBound       = errors.New("commerce: approval is bound to another invocation")
-	ErrEntitlementNotFound = errors.New("commerce: entitlement not found")
+	ErrApprovalBound        = errors.New("commerce: approval is bound to another invocation")
+	ErrEntitlementNotFound  = errors.New("commerce: entitlement not found")
+	ErrEntitlementConflict  = errors.New("commerce: entitlement invoice already granted")
+	ErrEntitlementExhausted = errors.New("commerce: entitlement exhausted")
+	ErrEntitlementExpired   = errors.New("commerce: entitlement expired")
 )
 
 func invalid(format string, args ...any) error {
@@ -742,13 +747,6 @@ const EntitlementIDPrefix = "ent_"
 // AllocationIDPrefix prefixes entitlement allocation IDs.
 const AllocationIDPrefix = "alc_"
 
-// Entitlement statuses.
-const (
-	EntitlementStatusActive    = "active"
-	EntitlementStatusExhausted = "exhausted"
-	EntitlementStatusExpired   = "expired"
-)
-
 // Allocation states.
 const (
 	AllocationStateHeld     = "held"
@@ -767,6 +765,8 @@ type Entitlement struct {
 	ReservedUnits  int64     `json:"reserved_units"`
 	InvoiceRef     string    `json:"invoice_ref"`
 	PaymentStatus  string    `json:"payment_status"`
+	GrantedBy      string    `json:"granted_by"`
+	Reason         string    `json:"reason,omitempty"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
@@ -783,7 +783,7 @@ type GrantEntitlementInput struct {
 	Reason       string    `json:"reason"`
 }
 
-func (in GrantEntitlementInput) validate() error {
+func (in GrantEntitlementInput) validate(now time.Time) error {
 	if err := checkText("tenant_id", in.TenantID, MaxIDBytes, true); err != nil {
 		return err
 	}
@@ -805,6 +805,12 @@ func (in GrantEntitlementInput) validate() error {
 	if in.ExpiresAt.IsZero() {
 		return invalid("expires_at is required")
 	}
+	if in.ExpiresAt.Before(now) {
+		return invalid("expires_at must be in the future")
+	}
+	if in.ExpiresAt.After(now.AddDate(10, 0, 0)) {
+		return invalid("expires_at cannot be more than 10 years in the future")
+	}
 	return nil
 }
 
@@ -817,4 +823,3 @@ type EntitlementAllocation struct {
 	State         string    `json:"state"`
 	RecordedAt    time.Time `json:"recorded_at"`
 }
-
