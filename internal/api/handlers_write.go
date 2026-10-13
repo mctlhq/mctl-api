@@ -159,7 +159,10 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		// the tenant they just made. Taken from the session like the login;
 		// a caller-supplied value is never forwarded. An unresolved principal
 		// sends none, and the workflow writes a login-only entry, which
-		// gitops CI flags (validate-tenant-member-keys.py).
+		// gitops CI flags (validate-tenant-member-keys.py). In principal mode
+		// a human caller without a principal never gets here (the auth
+		// middleware answers 503), so this only degrades in legacy/shadow
+		// mode, for the dev caller, or for a machine identity.
 		delete(input, "creator_principal_id")
 		if pid := user.PrincipalID(); auth.ValidPrincipalID(pid) {
 			input["creator_principal_id"] = pid

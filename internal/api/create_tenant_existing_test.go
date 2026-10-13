@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -121,5 +122,35 @@ func TestCreateTenant_CreatorPrincipalComesFromTheSession(t *testing.T) {
 				t.Errorf("creator_principal_id = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// The registry's creator_principal_id pattern is a copy of the auth
+// package's; the two must agree, or the handler would stamp an id that
+// ValidateInput then rejects on a parameter no caller can see.
+func TestCreateTenant_CreatorPrincipalPatternMatchesAuth(t *testing.T) {
+	op, ok := operations.NewRegistry().Get("create-tenant")
+	if !ok {
+		t.Fatal("create-tenant not registered")
+	}
+	var pattern string
+	for _, p := range op.Parameters {
+		if p.Name == "creator_principal_id" {
+			pattern = p.Pattern
+		}
+	}
+	re := regexp.MustCompile(pattern)
+	for _, id := range []string{
+		"prn_01M39HRB7JRXZ2PHW5VVB695YZ",
+		"prn_01M39HRB7JRXZ2PHW5VVB695YI", // excluded letter
+		"prn_01m39hrb7jrxz2phw5vvb695yz",
+		"prn_01M39HRB7JRXZ2PHW5VVB695Y",
+		"prn_01M39HRB7JRXZ2PHW5VVB695YZZ",
+		"01M39HRB7JRXZ2PHW5VVB695YZ",
+		"",
+	} {
+		if got, want := re.MatchString(id), auth.ValidPrincipalID(id); got != want {
+			t.Errorf("%q: registry pattern says %v, auth.ValidPrincipalID says %v", id, got, want)
+		}
 	}
 }

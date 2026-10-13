@@ -342,6 +342,13 @@ func TestToolCreateTenant_ExposesEveryOperationParameter(t *testing.T) {
 			t.Errorf("operation parameter %q is not exposed on the mctl_create_tenant MCP tool schema", p.Name)
 		}
 	}
+	// The server-stamped ones must stay off the schema: the handler drops a
+	// body value, but a client-settable field would invite one.
+	for _, name := range []string{"creator_user_id", "creator_principal_id"} {
+		if _, exposed := tool.InputSchema.Properties[name]; exposed {
+			t.Errorf("server-stamped parameter %q is exposed on the mctl_create_tenant MCP tool schema", name)
+		}
+	}
 }
 
 // callToolApproveDevLoop builds a CallToolRequest for toolApproveDevLoop with
