@@ -40,11 +40,11 @@ const (
 const consentTTL = 5 * time.Minute
 
 // CIMDEnabled reports whether Client ID Metadata Documents are resolved.
-func (s *OAuthServer) CIMDEnabled() bool { return s.CIMD != nil }
+func (s *OAuthServer) CIMDEnabled() bool { return s != nil && s.CIMD != nil }
 
 // IsCIMDClient reports whether clientID is handled as a CIMD client.
 func (s *OAuthServer) IsCIMDClient(clientID string) bool {
-	return s.CIMD != nil && cimd.IsCIMDURL(clientID) && !s.isStatic(clientID)
+	return s != nil && s.CIMD != nil && cimd.IsCIMDURL(clientID) && !s.isStatic(clientID)
 }
 
 // ResolveCIMDClient returns the client a CIMD client_id names, from its

@@ -167,8 +167,15 @@ func requestConsent(t *testing.T, h *Handlers) (token string, cookie *http.Cooki
 	body = rec.Body.String()
 	marker := `name="token" value="`
 	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatal("consent token marker missing")
+	}
 	token = body[i+len(marker):]
-	token = token[:strings.Index(token, `"`)]
+	j := strings.Index(token, `"`)
+	if j < 0 {
+		t.Fatal("consent token not terminated")
+	}
+	token = token[:j]
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == consentCookie {
 			cookie = c

@@ -69,7 +69,11 @@ func (s *stubResolver) LookupNetIP(context.Context, string, string) ([]netip.Add
 func get(t *testing.T, c *http.Client, url string) (*http.Response, error) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
-	return c.Do(req)
+	resp, err := c.Do(req)
+	if resp != nil {
+		t.Cleanup(func() { _ = resp.Body.Close() })
+	}
+	return resp, err
 }
 
 func TestResolvedNonPublicRefused(t *testing.T) {
@@ -146,7 +150,7 @@ func TestRedirectIsFailure(t *testing.T) {
 	resp, err := get(t, c, srv.URL)
 	if err == nil || !errors.Is(err, ErrRedirect) {
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		t.Fatalf("redirect must fail: %v", err)
 	}
@@ -187,7 +191,7 @@ func TestTimeoutFailsClosed(t *testing.T) {
 	pool.AddCert(srv.Certificate())
 	c.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
 	if resp, err := get(t, c, srv.URL); err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatal("slow response must fail")
 	}
 }

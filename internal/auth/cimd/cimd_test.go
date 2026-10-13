@@ -166,7 +166,7 @@ func doc(id string, extra string) string {
 func serve(body string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	}
 }
 
@@ -206,11 +206,11 @@ func TestFetchFailuresFailClosed(t *testing.T) {
 		},
 		"media type": func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/html")
-			fmt.Fprint(w, "{}")
+			_, _ = fmt.Fprint(w, "{}")
 		},
 		"oversize": func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"x":"`+strings.Repeat("a", 70<<10)+`"}`)
+			_, _ = fmt.Fprint(w, `{"x":"`+strings.Repeat("a", 70<<10)+`"}`)
 		},
 		"slow": func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(600 * time.Millisecond)
@@ -254,7 +254,7 @@ func TestCaching(t *testing.T) {
 	f.h = func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "max-age=1")
-		fmt.Fprint(w, doc(f.url, ""))
+		_, _ = fmt.Fprint(w, doc(f.url, ""))
 	}
 	r := f.resolver()
 	for i := 0; i < 3; i++ {

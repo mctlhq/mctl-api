@@ -206,6 +206,9 @@ func NewResolver(o Options) *Resolver {
 	}
 }
 
+// maxRateHosts bounds the per-host rate map before stale hosts are swept.
+const maxRateHosts = 1024
+
 func (r *Resolver) hostAllowed(host string) bool {
 	host = strings.ToLower(host)
 	for _, a := range r.allowed {
@@ -292,6 +295,13 @@ func (r *Resolver) allowHost(host string) bool {
 	defer r.mu.Unlock()
 	now := r.now()
 	cut := now.Add(-time.Minute)
+	if len(r.rate) > maxRateHosts {
+		for h, ts := range r.rate {
+			if len(ts) == 0 || !ts[len(ts)-1].After(cut) {
+				delete(r.rate, h)
+			}
+		}
+	}
 	kept := r.rate[host][:0]
 	for _, t := range r.rate[host] {
 		if t.After(cut) {
@@ -307,13 +317,13 @@ func (r *Resolver) allowHost(host string) bool {
 }
 
 func (r *Resolver) fetch(ctx context.Context, u *url.URL, clientID string) (Document, time.Duration, error) {
-	if !r.allowHost(strings.ToLower(u.Hostname())) {
-		return Document{}, 0, ErrRateLimited
-	}
 	select {
 	case r.sem <- struct{}{}:
 		defer func() { <-r.sem }()
 	default:
+		return Document{}, 0, ErrRateLimited
+	}
+	if !r.allowHost(strings.ToLower(u.Hostname())) {
 		return Document{}, 0, ErrRateLimited
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, clientID, nil)
@@ -325,7 +335,7 @@ func (r *Resolver) fetch(ctx context.Context, u *url.URL, clientID string) (Docu
 	if err != nil {
 		return Document{}, 0, fmt.Errorf("%w: %v", ErrFetch, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return Document{}, 0, fmt.Errorf("%w: status %d", ErrFetch, resp.StatusCode)
 	}
