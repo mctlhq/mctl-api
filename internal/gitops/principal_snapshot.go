@@ -82,6 +82,10 @@ func (r *Reader) snapshotPrincipalsLocked() *principalSnapshot {
 // must not be: a kept snapshot answers every read until the next sync, so a
 // one-off EIO or EMFILE would fail them all. Left unstored, the next read
 // builds again. A parse error is a property of the commit and is kept.
+// A persistent I/O fault therefore rebuilds on every read while it lasts:
+// the per-request directory read every principal read did before the
+// snapshot existed, no worse, and only for as long as the checkout is
+// broken.
 func (s *principalSnapshot) cacheable() bool {
 	if s.listErr != nil {
 		return false

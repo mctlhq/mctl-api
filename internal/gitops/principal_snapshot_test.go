@@ -229,3 +229,49 @@ func TestOfferSnapshotKeepsANewerOne(t *testing.T) {
 		t.Fatalf("the snapshot it started from was not replaced: %+v", got)
 	}
 }
+
+// A sync whose snapshot hit an I/O error does not store it: the snapshot
+// of the previous sync stays, and the next read builds again.
+func TestRefreshDoesNotKeepAnIOError(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	work := filepath.Join(root, "work")
+	runGit(t, root, "init", "--bare", remote)
+	runGit(t, root, "clone", remote, work)
+	runGit(t, work, "checkout", "-b", "main")
+	runGit(t, work, "config", "user.email", "test@example.com")
+	runGit(t, work, "config", "user.name", "Test User")
+	writeTenantYAML(t, work, "acme", keyedAcmeYAML)
+	commitAll(t, work, "acme")
+	runGit(t, work, "push", "origin", "main")
+
+	r := &Reader{repoURL: remote, branch: "main", localPath: filepath.Join(root, "cache")}
+	if err := r.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	good := r.principals.Load()
+	if good == nil {
+		t.Fatal("no snapshot for a healthy sync")
+	}
+
+	// values.yaml as a directory: reading it fails with an *fs.PathError
+	// (EISDIR), the I/O class, on every platform and as root too.
+	broken := filepath.Join(work, "platform-gitops", "tenants", "broken", "values.yaml")
+	if err := os.MkdirAll(broken, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(broken, "keep"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, work, "broken")
+	runGit(t, work, "push", "origin", "main")
+	if err := r.refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if got := r.principals.Load(); got != good {
+		t.Fatalf("a snapshot with an I/O error was stored: %+v", got)
+	}
+	if _, err := r.MemberRolesForPrincipal("acme-web", prnBob); err == nil {
+		t.Fatal("an unreadable tenant did not fail the role read")
+	}
+}
