@@ -1,5 +1,25 @@
 # Changelog
 
+## [4.86.0](https://github.com/mctlhq/mctl-api/compare/4.85.1...4.86.0) (2026-10-13)
+
+
+### Features
+
+* **api:** resolve a GitHub login to a principal for the portal ([b9a3b1d](https://github.com/mctlhq/mctl-api/commit/b9a3b1d2073b4ac4ce7f6417661d00c4c0d25f8e))
+* **api:** resolve a GitHub login to a principal for the portal ([ba42f20](https://github.com/mctlhq/mctl-api/commit/ba42f20f757937e6d24bb9fa431bea9964f2f02d))
+* **commerce:** add finite service entitlements and unit allocation ([8725689](https://github.com/mctlhq/mctl-api/commit/87256896af007b1701ca5e188252a3397c16db17))
+* **commerce:** add finite service entitlements and unit allocation ([4fbee56](https://github.com/mctlhq/mctl-api/commit/4fbee56e4e4b4f520851ecd87c1e5de741d6480e))
+
+
+### Bug Fixes
+
+* **api:** answer 413 for an oversized principal-resolve body ([3f3374c](https://github.com/mctlhq/mctl-api/commit/3f3374ce7631ec51f3c4fc10af087d42433ba68e))
+* **api:** bound GitHub logins by length, audit as succeeded ([4067438](https://github.com/mctlhq/mctl-api/commit/4067438079abe9c2d6ce7dd5817b4536f0cb98ea))
+* **commerce:** add entitlement retire path and terms validation ([847b5cc](https://github.com/mctlhq/mctl-api/commit/847b5ccf9c9f47e4ccaec7c230cc9da978a8bf4e))
+* **commerce:** move entitlement gating before reservation and fix replay ([44a1961](https://github.com/mctlhq/mctl-api/commit/44a19611d54ea59c4da92a4035e5a1cc245e1adb))
+* **commerce:** release holds on denied auth and gate on exhaustion ([197575d](https://github.com/mctlhq/mctl-api/commit/197575d545a2cea27996164f0731b521a150cc22))
+* **commerce:** strengthen entitlement validations and clean up fixture ([d47147d](https://github.com/mctlhq/mctl-api/commit/d47147d585bb2f081330bcad78db5d8d48c36946))
+
 ## [4.85.1](https://github.com/mctlhq/mctl-api/compare/4.85.0...4.85.1) (2026-10-13)
 
 
