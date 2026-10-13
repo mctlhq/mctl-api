@@ -166,13 +166,15 @@ func TestProxyEnvIgnored(t *testing.T) {
 }
 
 func TestReadLimited(t *testing.T) {
-	mk := func(n int) *http.Response {
-		return &http.Response{Body: nopCloser{strings.NewReader(strings.Repeat("a", n))}}
+	read := func(n int) ([]byte, error) {
+		resp := &http.Response{Body: nopCloser{strings.NewReader(strings.Repeat("a", n))}}
+		defer func() { _ = resp.Body.Close() }()
+		return ReadLimited(resp, 10)
 	}
-	if b, err := ReadLimited(mk(10), 10); err != nil || len(b) != 10 {
+	if b, err := read(10); err != nil || len(b) != 10 {
 		t.Fatalf("exact: %v %d", err, len(b))
 	}
-	if _, err := ReadLimited(mk(11), 10); !errors.Is(err, ErrTooLarge) {
+	if _, err := read(11); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("over: %v", err)
 	}
 }
