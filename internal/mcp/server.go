@@ -179,7 +179,10 @@ func recoverToolPanic(next server.ToolHandlerFunc) server.ToolHandlerFunc {
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("mcp tool handler panic", "tool", req.Params.Name, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
-				res, err = nil, fmt.Errorf("panic recovered in %s tool handler: %v", req.Params.Name, r)
+				// The value stays in the log: a panic message can interpolate
+				// anything (a URL with a token, a struct dump), so the caller
+				// gets only the tool name.
+				res, err = nil, fmt.Errorf("panic recovered in %s tool handler", req.Params.Name)
 			}
 		}()
 		return next(ctx, req)

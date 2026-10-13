@@ -153,8 +153,8 @@ func TestToolHandlerPanicIsRecoveredLoggedAndTraced(t *testing.T) {
 		panic("boom")
 	})
 	_, rpcErr := callTool(t, srv, "mctl_test_panics", map[string]any{})
-	if !strings.Contains(rpcErr, "panic recovered in mctl_test_panics tool handler: boom") {
-		t.Errorf("rpc error %q, want the recovered panic", rpcErr)
+	if !strings.Contains(rpcErr, "panic recovered in mctl_test_panics tool handler") || strings.Contains(rpcErr, "boom") {
+		t.Errorf("rpc error %q, want the recovered panic without its value", rpcErr)
 	}
 
 	var entry struct {
@@ -193,9 +193,12 @@ func TestToolHandlerPanicIsRecoveredLoggedAndTraced(t *testing.T) {
 	}
 }
 
-// Keeps the class from coming back: no single-value type assertion on an
-// indexed value anywhere in the package's non-test code. A two-value
-// assertion and a type switch are both safe and allowed.
+// Keeps the class from coming back: no single-value type assertion whose
+// operand is syntactically an index expression, in the package's non-test
+// code. A two-value assertion and a type switch are both allowed. This is a
+// syntactic guard, not a dataflow one: `v := args["id"]; v.(string)` is not
+// caught, and a two-value assertion returned directly (`return m[k].(T)`)
+// would be a false positive. Neither occurs in the package today.
 func TestNoUncheckedArgumentAssertions(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
