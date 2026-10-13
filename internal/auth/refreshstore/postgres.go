@@ -372,7 +372,8 @@ func (s *PostgresStore) RevokeFamily(rawToken, clientID, reason string) error {
 	return nil
 }
 
-// RevokePrincipal revokes every live token of principalID. It runs under
+// RevokePrincipal revokes every unrevoked token of principalID and counts
+// the families (sessions) it touched. It runs under
 // REPEATABLE READ, as rotateTx does: a rotation that commits a successor
 // while this runs has also updated a row this statement updates (the
 // predecessor's rotated_at), so one of the two fails with a serialization
@@ -405,19 +406,23 @@ func (s *PostgresStore) revokePrincipalTx(principalID, reason string) (int64, er
 		return 0, fmt.Errorf("oauth refresh store: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	tag, err := tx.Exec(ctx,
-		`UPDATE oauth_refresh_tokens
-		 SET revoked_at = $1, revoked_reason = $2
-		 WHERE principal_id = $3 AND revoked_at IS NULL`,
+	var sessions int64
+	err = tx.QueryRow(ctx,
+		`WITH revoked AS (
+		   UPDATE oauth_refresh_tokens
+		   SET revoked_at = $1, revoked_reason = $2
+		   WHERE principal_id = $3 AND revoked_at IS NULL
+		   RETURNING family_id)
+		 SELECT count(DISTINCT family_id) FROM revoked`,
 		time.Now().UTC(), reason, principalID,
-	)
+	).Scan(&sessions)
 	if err != nil {
 		return 0, fmt.Errorf("oauth refresh store: revoke principal: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("oauth refresh store: revoke principal commit: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	return sessions, nil
 }
 
 // GC hard-deletes rows that expired more than 7 days ago (regardless of revocation

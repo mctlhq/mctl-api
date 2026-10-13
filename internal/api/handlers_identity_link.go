@@ -786,6 +786,17 @@ func (h *Handlers) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	xid := chi.URLParam(r, "id")
+	// The sessions are revoked only for an unlink that is going to happen:
+	// an id that is not the caller's, or their last live identity, is
+	// refused here first, so a typo signs nobody out.
+	ids, err := h.identityLink.opts.Store.Identities(r.Context(), pid)
+	if err != nil {
+		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "principal store unavailable", nil)
+		return
+	}
+	if !unlinkMayProceed(w, ids, xid) {
+		return
+	}
 	// A refresh session does not record which identity signed it in, so
 	// the ones the removed identity started can only be ended by ending all
 	// of the principal's. Before the unlink, so a failure leaves nothing
@@ -797,7 +808,26 @@ func (h *Handlers) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "sessions could not be revoked; nothing was unlinked, try again", nil)
 		return
 	}
+	params := map[string]string{"principal_id": pid, "identity_id": xid}
 	x, err := h.identityLink.opts.Store.UnlinkIdentity(r.Context(), pid, xid)
+	if err != nil {
+		// The identities changed since the check above (a concurrent
+		// unlink or merge), or the store failed: nothing was unlinked, but
+		// the sessions were revoked, which the audit records.
+		params["sessions_revoked"] = strconv.FormatInt(revoked, 10)
+		switch {
+		case errors.Is(err, principals.ErrNotFound):
+			params["refused"] = "not_found"
+		case errors.Is(err, principals.ErrLastIdentity):
+			params["refused"] = "last_identity"
+		default:
+			params["refused"] = "store_unavailable"
+		}
+		h.logAudit(r, audit.Entry{
+			UserID: user.ID, Operation: "identity.unlink", Status: "failed", RiskLevel: string(operations.RiskMedium),
+			Parameters: params,
+		})
+	}
 	switch {
 	case errors.Is(err, principals.ErrNotFound):
 		writeError(w, http.StatusNotFound, "no such identity on your principal")
@@ -812,7 +842,7 @@ func (h *Handlers) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 	// The revoked identity must stop resolving now, not when the resolver's
 	// cached answer for it expires.
 	h.identityLink.opts.forget(pid)
-	params := map[string]string{"principal_id": pid, "identity_id": x.ID, "provider": x.Provider, "issuer": x.Issuer, "subject": x.Subject}
+	params["provider"], params["issuer"], params["subject"] = x.Provider, x.Issuer, x.Subject
 	if again, err := h.identityLink.opts.revokeSessions(pid); err != nil {
 		// Only a session that rotated or signed in between the two
 		// revocations can have survived; say so rather than claim none did.
@@ -828,6 +858,33 @@ func (h *Handlers) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 		Parameters: params,
 	})
 	writeJSON(w, http.StatusOK, x)
+}
+
+// unlinkMayProceed answers the refusals Store.UnlinkIdentity would
+// give, from the caller's identities as listed: xid is not one of them
+// (404), or it is the last live one (409). It reports whether the unlink
+// may go ahead. An identity already unlinked goes ahead, as the store's
+// unlink of it does: a retry completes the revocation.
+func unlinkMayProceed(w http.ResponseWriter, ids []principals.ExternalIdentity, xid string) bool {
+	var target *principals.ExternalIdentity
+	live := 0
+	for i := range ids {
+		if ids[i].RevokedAt == nil {
+			live++
+		}
+		if ids[i].ID == xid {
+			target = &ids[i]
+		}
+	}
+	switch {
+	case target == nil:
+		writeError(w, http.StatusNotFound, "no such identity on your principal")
+		return false
+	case target.RevokedAt == nil && live < 2:
+		writeErrorCode(w, http.StatusConflict, linkCodeLastIdentity, "cannot unlink your last live identity", nil)
+		return false
+	}
+	return true
 }
 
 // MergePrincipals: POST /api/v1/admin/principals/{from}/merge-into/{into}.

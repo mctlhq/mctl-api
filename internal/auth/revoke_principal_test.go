@@ -47,15 +47,11 @@ func TestRevokePrincipalSessions(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// The store also counts the rotated predecessor, which it keeps
-			// (unrevoked) for reuse detection; memory drops it on rotation.
-			want := int64(2)
-			if store {
-				want = 3
-			}
+			// Two sessions, though the store keeps a third row: the rotated
+			// predecessor, for reuse detection.
 			n, err := o.RevokePrincipalSessions(pzMember, "identity_unlinked")
-			if err != nil || n != want {
-				t.Fatalf("RevokePrincipalSessions = %d, %v; want %d, nil", n, err, want)
+			if err != nil || n != 2 {
+				t.Fatalf("RevokePrincipalSessions = %d, %v; want 2 sessions, nil", n, err)
 			}
 			if _, _, err := o.RefreshAccessToken(a, "c1"); err == nil {
 				t.Error("revoked session still refreshes")

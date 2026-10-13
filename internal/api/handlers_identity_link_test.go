@@ -39,6 +39,7 @@ type fakeLinkStore struct {
 	merged   [][2]string
 	mergeErr error
 	listErr  error
+	ids      []principals.ExternalIdentity // Identities' answer; nil: one live GitHub identity
 	provErr  error
 	disabled bool
 }
@@ -85,6 +86,9 @@ func (f *fakeLinkStore) MergePrincipals(_ context.Context, from, into string) (p
 func (f *fakeLinkStore) Identities(_ context.Context, pid string) ([]principals.ExternalIdentity, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
+	}
+	if f.ids != nil {
+		return f.ids, nil
 	}
 	return []principals.ExternalIdentity{{ID: "xid_1", PrincipalID: pid, Provider: "github", Subject: "42"}}, nil
 }
@@ -864,8 +868,10 @@ type forgetRecorder struct{ calls [][]string }
 
 func (f *forgetRecorder) forget(ids ...string) { f.calls = append(f.calls, ids) }
 
+// The store's own refusals (the identities changed after the pre-check)
+// are mapped too, and audited as failed with the sessions already revoked.
 func TestUnlinkIdentityMapsTheStoreOutcomes(t *testing.T) {
-	store := &fakeLinkStore{}
+	store := &fakeLinkStore{ids: []principals.ExternalIdentity{{ID: "xid_1"}, {ID: "xid_2"}, {ID: "xid_x"}}}
 	fr := &forgetRecorder{}
 	h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store, ForgetPrincipals: fr.forget}), opts: Options{AuditLog: audit.NewLogger()}}
 	u := userWithPrincipal(t, "mashkovd", nil, "prn_me")
@@ -895,6 +901,62 @@ func TestUnlinkIdentityMapsTheStoreOutcomes(t *testing.T) {
 	}
 	if len(fr.calls) != 1 || len(fr.calls[0]) != 1 || fr.calls[0][0] != "prn_me" {
 		t.Fatalf("forgot %v after an unlink, want [[prn_me]]", fr.calls)
+	}
+	var refused []string
+	for _, e := range h.opts.AuditLog.List(10) {
+		if e.Operation == "identity.unlink" && e.Status == "failed" {
+			refused = append(refused, e.Parameters["refused"])
+		}
+	}
+	slices.Sort(refused)
+	if !slices.Equal(refused, []string{"last_identity", "not_found"}) {
+		t.Fatalf("store refusals audited as %v, want last_identity and not_found", refused)
+	}
+}
+
+// What the pre-check refuses, it refuses before any session is revoked
+// and before the store is asked to unlink: a typo signs nobody out.
+func TestUnlinkIdentityRefusesBeforeRevoking(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name string
+		ids  []principals.ExternalIdentity
+		xid  string
+		want int
+	}{
+		{"not the caller's", []principals.ExternalIdentity{{ID: "xid_1"}, {ID: "xid_2"}}, "xid_9", http.StatusNotFound},
+		{"last live identity", []principals.ExternalIdentity{{ID: "xid_1"}, {ID: "xid_2", RevokedAt: &now}}, "xid_1", http.StatusConflict},
+		{"only identity", []principals.ExternalIdentity{{ID: "xid_1"}}, "xid_1", http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			rr := &revokeRecorder{events: &events}
+			store := &fakeLinkStore{ids: tc.ids, unlinkFn: func(_, xid string) (*principals.ExternalIdentity, error) {
+				events = append(events, "unlink:"+xid)
+				return &principals.ExternalIdentity{ID: xid}, nil
+			}}
+			h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store, RevokeSessions: rr.revoke}), opts: Options{AuditLog: audit.NewLogger()}}
+			rec := callAs(h, userWithPrincipal(t, "mashkovd", nil, "prn_me"), http.MethodDelete, "/", map[string]string{"id": tc.xid}, h.UnlinkIdentity)
+			if rec.Code != tc.want || len(events) != 0 {
+				t.Fatalf("unlink = %d, events %v; want %d and nothing done", rec.Code, events, tc.want)
+			}
+		})
+	}
+	// An identity already unlinked goes ahead, so a retry completes the
+	// revocation, as the store's unlink of it succeeds.
+	var events []string
+	store := &fakeLinkStore{ids: []principals.ExternalIdentity{{ID: "xid_1"}, {ID: "xid_2", RevokedAt: &now}}, unlinkFn: func(_, xid string) (*principals.ExternalIdentity, error) {
+		events = append(events, "unlink:"+xid)
+		return &principals.ExternalIdentity{ID: xid, RevokedAt: &now}, nil
+	}}
+	h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store, RevokeSessions: (&revokeRecorder{events: &events}).revoke}), opts: Options{AuditLog: audit.NewLogger()}}
+	if rec := callAs(h, userWithPrincipal(t, "mashkovd", nil, "prn_me"), http.MethodDelete, "/", map[string]string{"id": "xid_2"}, h.UnlinkIdentity); rec.Code != http.StatusOK || len(events) != 3 {
+		t.Fatalf("retried unlink = %d, events %v", rec.Code, events)
+	}
+	store.listErr = errors.New("db down")
+	events = nil
+	if rec := callAs(h, userWithPrincipal(t, "mashkovd", nil, "prn_me"), http.MethodDelete, "/", map[string]string{"id": "xid_2"}, h.UnlinkIdentity); rec.Code != http.StatusServiceUnavailable || len(events) != 0 {
+		t.Fatalf("unlink with an unreadable list = %d, events %v; want 503 and nothing done", rec.Code, events)
 	}
 }
 
@@ -946,16 +1008,16 @@ func TestUnlinkIdentityRevokesThePrincipalsSessions(t *testing.T) {
 			wantAudit:  map[string]string{"sessions_revoked": "2", "sessions_revocation": "incomplete"},
 		},
 		{
-			// A refused unlink has already ended the sessions; harmless,
-			// and the price of never unlinking with sessions left live.
-			name: "unlink refused", unlinkErr: principals.ErrLastIdentity, wantCode: http.StatusConflict,
+			// The store refuses after the pre-check passed (a concurrent
+			// unlink): the sessions are already ended, and audited.
+			name: "unlink refused by the store", unlinkErr: principals.ErrLastIdentity, wantCode: http.StatusConflict,
 			wantEvents: []string{"revoke:prn_me:identity_unlinked", "unlink:xid_2"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var events []string
 			rr := &revokeRecorder{events: &events, errs: tc.errs, n: 2}
-			store := &fakeLinkStore{unlinkFn: func(_, xid string) (*principals.ExternalIdentity, error) {
+			store := &fakeLinkStore{ids: []principals.ExternalIdentity{{ID: "xid_1"}, {ID: "xid_2"}}, unlinkFn: func(_, xid string) (*principals.ExternalIdentity, error) {
 				events = append(events, "unlink:"+xid)
 				if tc.unlinkErr != nil {
 					return nil, tc.unlinkErr
@@ -1004,7 +1066,7 @@ func TestUnlinkIdentityRevokesThePrincipalsSessions(t *testing.T) {
 // goes ahead.
 func TestUnlinkIdentityWithoutSessionsToRevoke(t *testing.T) {
 	now := time.Now()
-	store := &fakeLinkStore{unlinkFn: func(_, xid string) (*principals.ExternalIdentity, error) {
+	store := &fakeLinkStore{ids: []principals.ExternalIdentity{{ID: "xid_1"}, {ID: "xid_2"}}, unlinkFn: func(_, xid string) (*principals.ExternalIdentity, error) {
 		return &principals.ExternalIdentity{ID: xid, Provider: "zitadel", RevokedAt: &now}, nil
 	}}
 	h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store}), opts: Options{AuditLog: audit.NewLogger()}}

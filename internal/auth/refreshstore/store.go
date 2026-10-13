@@ -71,9 +71,11 @@ type Store interface {
 	// Idempotent: no error if the token does not exist.
 	RevokeFamily(rawToken, clientID, reason string) error
 
-	// RevokePrincipal revokes every live refresh token recorded for
-	// principalID, whatever its family or client, and reports how many it
-	// revoked. A rotation racing with it either sees the revocation or
+	// RevokePrincipal revokes every unrevoked refresh token recorded for
+	// principalID, whatever its family or client, and reports how many
+	// sessions (families) that touched: a session's rows include the
+	// rotated predecessors kept for reuse detection, so rows would
+	// overstate it. A rotation racing with it either sees the revocation or
 	// makes it retry, so no successor minted concurrently survives.
 	// An empty principalID is refused: it would name every session that
 	// predates the principal_id column.

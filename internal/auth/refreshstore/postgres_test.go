@@ -549,9 +549,9 @@ func TestRevokePrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RevokePrincipal: %v", err)
 	}
-	// a1 (rotated, still unrevoked), a2 and b1.
-	if n != 3 {
-		t.Errorf("RevokePrincipal revoked %d rows, want 3", n)
+	// Two sessions: a1 (rotated, still unrevoked) and a2 are one family.
+	if n != 2 {
+		t.Errorf("RevokePrincipal reported %d sessions, want 2", n)
 	}
 	if _, err := s.Rotate(tok("a2"), tok("a3"), "c1", exp); err == nil {
 		t.Error("the revoked principal's successor still rotates")
@@ -657,7 +657,7 @@ func TestRevokePrincipalCatchesAConcurrentRotation(t *testing.T) {
 	if !revoked {
 		t.Fatal("the successor committed during the revocation is still live")
 	}
-	if res.n != 2 {
-		t.Errorf("RevokePrincipal revoked %d rows, want 2", res.n)
+	if res.n != 1 {
+		t.Errorf("RevokePrincipal reported %d sessions, want the one", res.n)
 	}
 }
