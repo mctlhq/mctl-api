@@ -153,6 +153,20 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 		// Force creator_user_id from the authenticated session (prevent spoofing).
 		input["creator_user_id"] = user.ID
+		// The owner entry is keyed by the creator's canonical principal too:
+		// principal-mode authorization grants by members[].principalId alone
+		// (mctl-api#377), so without it the creator would be locked out of
+		// the tenant they just made. Taken from the session like the login;
+		// a caller-supplied value is never forwarded. An unresolved principal
+		// sends none, and the workflow writes a login-only entry, which
+		// gitops CI flags (validate-tenant-member-keys.py).
+		delete(input, "creator_principal_id")
+		if pid := user.PrincipalID(); auth.ValidPrincipalID(pid) {
+			input["creator_principal_id"] = pid
+		} else {
+			slog.Warn("create-tenant without a resolved creator principal; the owner entry will carry no principalId",
+				"user", user.ID)
+		}
 	} else if !ciAuthorized && !user.HasTenantAccess(tenantParam) {
 		h.logAudit(r, audit.Entry{
 			UserID:    user.ID,

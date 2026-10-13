@@ -272,6 +272,14 @@ reads (an error, never "not a member"). The login-keyed path ignores
 `principalId` entirely, so a bad key cannot change today's decisions. Team
 and tenant-level semantics are the login ones; only the key differs.
 
+New tenants are keyed from the start. `create-tenant` stamps
+`creator_principal_id` from the session, like `creator_user_id`, and never
+forwards a value from the request body. The workflow writes it as the owner
+entry's `principalId`. When the caller's principal is unresolved, no id is
+sent and the owner entry gets a login only. mctl-gitops CI
+(`scripts/validate-tenant-member-keys.py`) then fails on that entry, as it
+does on any member without a well-formed `principalId`.
+
 ### `TENANT_AUTHZ_MODE`
 
 | Value | Decides | Also |

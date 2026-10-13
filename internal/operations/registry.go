@@ -492,6 +492,7 @@ var builtinOperations = []Operation{
 			{Name: "allow_internet_egress", Type: "string", Default: "false", Description: "Allow outbound internet egress from tenant pods (default: false)", Enum: []string{"true", "false"}},
 			{Name: "contact_email", Type: "string", Description: "Team contact email", Pattern: emailPattern, MaxLength: 254},
 			{Name: "creator_user_id", Type: "string", Description: "GitHub user ID of the workspace creator", Pattern: `^[A-Za-z0-9._@-]{1,256}$`},
+			{Name: "creator_principal_id", Type: "string", Description: "Canonical principal of the workspace creator; set by the server from the session", Pattern: `^prn_[0-9A-HJKMNP-TV-Z]{26}$`},
 		},
 	},
 	{

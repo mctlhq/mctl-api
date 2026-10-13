@@ -324,12 +324,14 @@ func TestToolCreateTenant_ExposesEveryOperationParameter(t *testing.T) {
 	}
 
 	// Parameters the handler or caller supplies out of band rather than the
-	// MCP client. creator_user_id is stamped from the authenticated identity;
-	// the *_lim quotas are derived platform-side from the *_req values.
+	// MCP client. creator_user_id and creator_principal_id are stamped from
+	// the authenticated identity; the *_lim quotas are derived platform-side
+	// from the *_req values.
 	internal := map[string]bool{
-		"creator_user_id":  true,
-		"quota_cpu_lim":    true,
-		"quota_memory_lim": true,
+		"creator_user_id":      true,
+		"creator_principal_id": true,
+		"quota_cpu_lim":        true,
+		"quota_memory_lim":     true,
 	}
 
 	for _, p := range op.Parameters {
