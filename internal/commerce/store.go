@@ -264,6 +264,33 @@ CREATE TABLE IF NOT EXISTS commerce_payment_operations (
 );
 CREATE INDEX IF NOT EXISTS commerce_payment_operations_authorization
     ON commerce_payment_operations (result_id) WHERE operation = 'authorize';
+
+CREATE TABLE IF NOT EXISTS commerce_entitlements (
+    entitlement_id   TEXT        PRIMARY KEY,
+    tenant_id        TEXT        NOT NULL,
+    capability_id    TEXT        NOT NULL,
+    total_units      BIGINT      NOT NULL CHECK (total_units > 0),
+    remaining_units  BIGINT      NOT NULL CHECK (remaining_units >= 0),
+    reserved_units   BIGINT      NOT NULL DEFAULT 0 CHECK (reserved_units >= 0),
+    invoice_ref      TEXT        NOT NULL,
+    payment_status   TEXT        NOT NULL,
+    expires_at       TIMESTAMPTZ NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS commerce_entitlements_tenant_cap
+    ON commerce_entitlements (tenant_id, capability_id);
+
+CREATE TABLE IF NOT EXISTS commerce_entitlement_allocations (
+    allocation_id   TEXT        PRIMARY KEY,
+    entitlement_id  TEXT        NOT NULL REFERENCES commerce_entitlements (entitlement_id),
+    invocation_id   TEXT        NOT NULL REFERENCES commerce_invocations (invocation_id),
+    units           BIGINT      NOT NULL CHECK (units > 0),
+    state           TEXT        NOT NULL CHECK (state IN ('held', 'captured', 'released')),
+    recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS commerce_entitlement_allocations_inv
+    ON commerce_entitlement_allocations (invocation_id);
 `
 
 // Store is the Postgres-backed commerce ledger.
@@ -1045,3 +1072,82 @@ func (s *Store) ListOverdue(ctx context.Context, limit int) ([]Invocation, error
 	}
 	return out, nil
 }
+
+const entitlementColumns = `entitlement_id, tenant_id, capability_id, total_units, remaining_units, reserved_units, invoice_ref, payment_status, expires_at, created_at, updated_at`
+
+func scanEntitlement(row pgx.Row) (*Entitlement, error) {
+	var e Entitlement
+	err := row.Scan(&e.EntitlementID, &e.TenantID, &e.CapabilityID, &e.TotalUnits, &e.RemainingUnits, &e.ReservedUnits,
+		&e.InvoiceRef, &e.PaymentStatus, &e.ExpiresAt, &e.CreatedAt, &e.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+// GrantEntitlement issues a finite entitlement package of units for a capability.
+func (s *Store) GrantEntitlement(ctx context.Context, in GrantEntitlementInput) (*Entitlement, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	now := s.now()
+	id, err := newULID(now)
+	if err != nil {
+		return nil, err
+	}
+	entID := EntitlementIDPrefix + id
+	row := s.pool.QueryRow(ctx, `INSERT INTO commerce_entitlements (`+entitlementColumns+`)
+		VALUES ($1, $2, $3, $4, $4, 0, $5, 'paid', $6, $7, $7)
+		RETURNING `+entitlementColumns,
+		entID, in.TenantID, in.CapabilityID, in.Units, in.InvoiceRef, in.ExpiresAt, now)
+	return scanEntitlement(row)
+}
+
+// ListEntitlements returns all entitlements of one tenant.
+func (s *Store) ListEntitlements(ctx context.Context, tenantID string) ([]Entitlement, error) {
+	if err := checkText("tenant_id", tenantID, MaxIDBytes, true); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+entitlementColumns+` FROM commerce_entitlements
+		WHERE tenant_id = $1 ORDER BY created_at DESC`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("commerce: list entitlements: %w", err)
+	}
+	defer rows.Close()
+	var out []Entitlement
+	for rows.Next() {
+		e, err := scanEntitlement(rows)
+		if err != nil {
+			return nil, fmt.Errorf("commerce: scan entitlement: %w", err)
+		}
+		out = append(out, *e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("commerce: list entitlements: %w", err)
+	}
+	if out == nil {
+		out = []Entitlement{}
+	}
+	return out, nil
+}
+
+// GetEntitlement returns one entitlement by tenant and entitlement ID.
+func (s *Store) GetEntitlement(ctx context.Context, tenantID, entitlementID string) (*Entitlement, error) {
+	if err := checkText("tenant_id", tenantID, MaxIDBytes, true); err != nil {
+		return nil, err
+	}
+	if err := checkText("entitlement_id", entitlementID, MaxIDBytes, true); err != nil {
+		return nil, err
+	}
+	row := s.pool.QueryRow(ctx, `SELECT `+entitlementColumns+` FROM commerce_entitlements
+		WHERE tenant_id = $1 AND entitlement_id = $2`, tenantID, entitlementID)
+	e, err := scanEntitlement(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: entitlement %s", ErrEntitlementNotFound, entitlementID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("commerce: get entitlement: %w", err)
+	}
+	return e, nil
+}
+

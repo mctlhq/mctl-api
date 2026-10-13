@@ -905,6 +905,9 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 		if err != nil {
 			return err
 		}
+		if err := s.holdEntitlementUnit(ctx, tx, cur.TenantID, cur.CapabilityID, cur.InvocationID, now); err != nil {
+			return err
+		}
 		res = ReserveResult{Invocation: inv, Reservation: rsv}
 		return nil
 	})
@@ -1077,6 +1080,15 @@ func (s *Store) Finalize(ctx context.Context, in FinalizeInput) (*FinalizeResult
 		if err != nil {
 			return err
 		}
+		if status == ReservationCaptured {
+			if err := s.captureEntitlementUnit(ctx, tx, cur.InvocationID, now); err != nil {
+				return err
+			}
+		} else {
+			if err := s.releaseEntitlementUnit(ctx, tx, cur.InvocationID, now); err != nil {
+				return err
+			}
+		}
 		inv, err := s.applyTransition(ctx, tx, in.TenantID, tr)
 		if err != nil {
 			return err
@@ -1230,6 +1242,9 @@ func (s *Store) Release(ctx context.Context, in ReleaseInput) (*FinalizeResult, 
 		if err != nil {
 			return err
 		}
+		if err := s.releaseEntitlementUnit(ctx, tx, cur.InvocationID, s.now()); err != nil {
+			return err
+		}
 		inv, err := s.applyTransition(ctx, tx, in.TenantID, tr)
 		if err != nil {
 			return err
@@ -1323,3 +1338,89 @@ func (s *Store) ExpireStale(ctx context.Context, actor string, limit int) (*Expi
 	}
 	return out, nil
 }
+
+func (s *Store) holdEntitlementUnit(ctx context.Context, tx pgx.Tx, tenantID, capabilityID, invocationID string, now time.Time) error {
+	var entID string
+	err := tx.QueryRow(ctx, `SELECT entitlement_id
+		FROM commerce_entitlements
+		WHERE tenant_id = $1 AND capability_id = $2 AND remaining_units > 0 AND expires_at > $3
+		ORDER BY expires_at ASC LIMIT 1 FOR UPDATE`,
+		tenantID, capabilityID, now).Scan(&entID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("commerce: check entitlement: %w", err)
+	}
+	_, err = tx.Exec(ctx, `UPDATE commerce_entitlements
+		SET remaining_units = remaining_units - 1, reserved_units = reserved_units + 1, updated_at = $2
+		WHERE entitlement_id = $1`, entID, now)
+	if err != nil {
+		return fmt.Errorf("commerce: reserve entitlement unit: %w", err)
+	}
+	alcULID, err := newULID(now)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO commerce_entitlement_allocations
+		(allocation_id, entitlement_id, invocation_id, units, state, recorded_at)
+		VALUES ($1, $2, $3, 1, $4, $5)`,
+		AllocationIDPrefix+alcULID, entID, invocationID, AllocationStateHeld, now)
+	if err != nil {
+		return fmt.Errorf("commerce: record entitlement allocation: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) captureEntitlementUnit(ctx context.Context, tx pgx.Tx, invocationID string, now time.Time) error {
+	var alcID, entID string
+	var units int64
+	err := tx.QueryRow(ctx, `SELECT allocation_id, entitlement_id, units
+		FROM commerce_entitlement_allocations WHERE invocation_id = $1 AND state = $2
+		FOR UPDATE`, invocationID, AllocationStateHeld).Scan(&alcID, &entID, &units)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("commerce: find held allocation: %w", err)
+	}
+	_, err = tx.Exec(ctx, `UPDATE commerce_entitlement_allocations SET state = $2 WHERE allocation_id = $1`,
+		alcID, AllocationStateCaptured)
+	if err != nil {
+		return fmt.Errorf("commerce: capture allocation: %w", err)
+	}
+	_, err = tx.Exec(ctx, `UPDATE commerce_entitlements
+		SET reserved_units = GREATEST(0, reserved_units - $2), updated_at = $3
+		WHERE entitlement_id = $1`, entID, units, now)
+	if err != nil {
+		return fmt.Errorf("commerce: commit entitlement unit: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) releaseEntitlementUnit(ctx context.Context, tx pgx.Tx, invocationID string, now time.Time) error {
+	var alcID, entID string
+	var units int64
+	err := tx.QueryRow(ctx, `SELECT allocation_id, entitlement_id, units
+		FROM commerce_entitlement_allocations WHERE invocation_id = $1 AND state = $2
+		FOR UPDATE`, invocationID, AllocationStateHeld).Scan(&alcID, &entID, &units)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("commerce: find held allocation: %w", err)
+	}
+	_, err = tx.Exec(ctx, `UPDATE commerce_entitlement_allocations SET state = $2 WHERE allocation_id = $1`,
+		alcID, AllocationStateReleased)
+	if err != nil {
+		return fmt.Errorf("commerce: release allocation: %w", err)
+	}
+	_, err = tx.Exec(ctx, `UPDATE commerce_entitlements
+		SET remaining_units = remaining_units + $2, reserved_units = GREATEST(0, reserved_units - $2), updated_at = $3
+		WHERE entitlement_id = $1`, entID, units, now)
+	if err != nil {
+		return fmt.Errorf("commerce: restore entitlement unit: %w", err)
+	}
+	return nil
+}
+

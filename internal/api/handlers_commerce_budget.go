@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -374,3 +375,92 @@ func (h *Handlers) ListCommerceDispatchKeys(w http.ResponseWriter, r *http.Reque
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
 }
+
+type grantEntitlementRequest struct {
+	CapabilityID string `json:"capability_id"`
+	Units        int64  `json:"units"`
+	InvoiceRef   string `json:"invoice_ref"`
+	ExpiresAt    string `json:"expires_at"`
+	Reason       string `json:"reason"`
+}
+
+// GrantCommerceEntitlement creates a finite paid service package. Admin-only.
+func (h *Handlers) GrantCommerceEntitlement(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireCommerceAdmin(w, r)
+	if !ok {
+		return
+	}
+	tenant := normalizeIdentifier(chi.URLParam(r, "tenant"))
+	if tenant == "" {
+		writeError(w, http.StatusBadRequest, "tenant is required")
+		return
+	}
+	var req grantEntitlementRequest
+	if !decodeCommerceBody(w, r, &req) {
+		return
+	}
+	expires, err := time.Parse(time.RFC3339, req.ExpiresAt)
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, "invalid-request", "expires_at must be RFC3339 timestamp", nil)
+		return
+	}
+	actor := user.PrincipalID()
+	if actor == "" {
+		actor = principalOf(user)
+	}
+	params := map[string]string{
+		"tenant":        tenant,
+		"capability_id": req.CapabilityID,
+		"units":         strconv.FormatInt(req.Units, 10),
+		"invoice_ref":   req.InvoiceRef,
+		"reason":        req.Reason,
+	}
+	ent, err := h.opts.Commerce.GrantEntitlement(r.Context(), commerce.GrantEntitlementInput{
+		TenantID:     tenant,
+		CapabilityID: req.CapabilityID,
+		Units:        req.Units,
+		InvoiceRef:   req.InvoiceRef,
+		ExpiresAt:    expires,
+		Actor:        actor,
+		Reason:       req.Reason,
+	})
+	if err != nil {
+		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: "commerce-entitlement-grant", Status: "failed",
+			RiskLevel: string(operations.RiskHigh), Parameters: params, Message: err.Error()})
+		writeCommerceError(w, err)
+		return
+	}
+	h.logAudit(r, audit.Entry{UserID: user.ID, Operation: "commerce-entitlement-grant", Status: "succeeded",
+		RiskLevel: string(operations.RiskHigh), Parameters: params})
+	writeJSON(w, http.StatusCreated, ent)
+}
+
+// ListCommerceEntitlements returns all entitlements of a tenant.
+func (h *Handlers) ListCommerceEntitlements(w http.ResponseWriter, r *http.Request) {
+	_, tenant, ok := h.requireCommerceTenant(w, r, "commerce-entitlement-read")
+	if !ok {
+		return
+	}
+	list, err := h.opts.Commerce.ListEntitlements(r.Context(), tenant)
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// GetCommerceEntitlement returns one entitlement by ID.
+func (h *Handlers) GetCommerceEntitlement(w http.ResponseWriter, r *http.Request) {
+	_, tenant, ok := h.requireCommerceTenant(w, r, "commerce-entitlement-read")
+	if !ok {
+		return
+	}
+	entID := chi.URLParam(r, "entitlement_id")
+	ent, err := h.opts.Commerce.GetEntitlement(r.Context(), tenant, entID)
+	if err != nil {
+		writeCommerceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ent)
+}
+
