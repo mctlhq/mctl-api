@@ -129,6 +129,11 @@ type Options struct {
 	// (mctl-api#373 phase 1), as authentication does for a direct caller.
 	// Nil relays without a principal id.
 	Principals auth.PrincipalResolver
+	// LegacyApproverDisabled is MCTL_AGENTS_APPROVE_LEGACY_APPROVER=false
+	// (mctl-api#571). The zero value keeps the service principal's
+	// free-text approver relay on mctl-agents-approve, audited per use as
+	// approver.legacy_relay; true refuses it.
+	LegacyApproverDisabled bool
 	// TenantAuthzMode is TENANT_AUTHZ_MODE (mctl-api#377). The zero value
 	// behaves as legacy; shadow also compares the principal-keyed decision
 	// (tenantAuthzShadow) without acting on it.

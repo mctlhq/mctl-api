@@ -32,7 +32,19 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+// legacyRelayTotal counts the free-text approver relay on
+// mctl-agents-approve by outcome (relayed, refused), next to its audit entry:
+// the audit write is best-effort, and retiring the relay (mctl-api#571)
+// needs a "zero uses" that a lost row cannot fake.
+var legacyRelayTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "mctl_agents_approve_legacy_relay_total",
+	Help: "Free-text approver relays on mctl-agents-approve by a service principal, by outcome (relayed, refused).",
+}, []string{"outcome"})
+
+func init() { prometheus.MustRegister(legacyRelayTotal) }
 
 // ExecuteOperation validates input, enforces RBAC, and submits an Argo Workflow.
 func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
@@ -222,10 +234,44 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	//
 	// The audit log below records user.ID either way, so the relayed value
 	// never displaces the record of who actually made the request.
+	//
+	// The relay is being retired (mctl-api#571): an approval will be
+	// exercised through a server-held action-approval grant instead of a
+	// string. Until mctl-agents has moved over, every relay is audited as
+	// approver.legacy_relay, so "is anything still using it?" is a query;
+	// MCTL_AGENTS_APPROVE_LEGACY_APPROVER=false then refuses it.
 	if opName == "mctl-agents-approve" {
 		if user.IsService() {
-			if input["approver"] == "" {
+			relayed := input["approver"]
+			switch {
+			case relayed == "" || relayed == user.ID:
 				input["approver"] = user.ID
+			case h.opts.LegacyApproverDisabled:
+				h.logAudit(r, audit.Entry{
+					UserID:     user.ID,
+					Operation:  opName,
+					Status:     "denied",
+					RiskLevel:  string(op.RiskLevel),
+					Message:    "free-text approver relay refused: MCTL_AGENTS_APPROVE_LEGACY_APPROVER is off",
+					Parameters: legacyRelayParams(user, opName, input),
+				})
+				legacyRelayTotal.WithLabelValues("refused").Inc()
+				writeErrorCode(w, http.StatusBadRequest, "legacy_approver_disabled",
+					"the free-text approver relay is disabled; approve through an action-approval grant", nil)
+				return
+			default:
+				// Counted as well as audited: an audit write that fails is
+				// only logged, and "zero relays" must not be read off a
+				// missing row (mctl-api#571 A7).
+				legacyRelayTotal.WithLabelValues("relayed").Inc()
+				h.logAudit(r, audit.Entry{
+					UserID:     user.ID,
+					Operation:  "approver.legacy_relay",
+					Status:     "succeeded",
+					RiskLevel:  string(op.RiskLevel),
+					Message:    fmt.Sprintf("%s relayed approver %q on %s", user.ID, relayed, opName),
+					Parameters: legacyRelayParams(user, opName, input),
+				})
 			}
 		} else {
 			if input["approver"] != "" && input["approver"] != user.ID {
@@ -600,4 +646,17 @@ func (h *Handlers) checkTenantNameCollision(tenant string) (status int, msg stri
 		return http.StatusBadRequest, "tenant_name: \"" + tenant + "\" overlaps the name of existing workspace \"" + other + "\"; choose a name that neither extends nor is extended by another workspace name"
 	}
 	return 0, ""
+}
+
+// legacyRelayParams is the evidence one approver relay leaves: who was
+// named, who named them, and for which proposal. Only the input the caller
+// sent; nothing here is resolved or trusted.
+func legacyRelayParams(user *auth.User, opName string, input map[string]string) map[string]string {
+	return map[string]string{
+		"approver":          input["approver"],
+		"calling_principal": user.ID,
+		"operation":         opName,
+		"service":           input["service"],
+		"slug":              input["slug"],
+	}
 }

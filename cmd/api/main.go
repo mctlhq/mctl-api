@@ -942,6 +942,7 @@ func main() {
 		TenantResolver:                 gitReader,
 		Principals:                     principalResolver,
 		TenantAuthzMode:                cfg.tenantAuthzMode(),
+		LegacyApproverDisabled:         cfg.legacyApproverDisabled(),
 		PrincipalMembership:            gitReader,
 		AdminPrincipals:                cfg.adminPrincipals(),
 		PrincipalAuthz:                 principalAuthz,
@@ -1229,6 +1230,10 @@ type config struct {
 	// refuses new quotes and accepts only, so outstanding liability can still
 	// drain. It does not skip the dispatch-key check — dispatch stays live.
 	CommerceAcceptDisabled bool
+	// LegacyApproverRaw is MCTL_AGENTS_APPROVE_LEGACY_APPROVER (mctl-api#571):
+	// whether the service principal may still relay a free-text approver on
+	// mctl-agents-approve. Empty means on; validated at startup.
+	LegacyApproverRaw string
 	// TenantAuthzModeRaw is TENANT_AUTHZ_MODE (mctl-api#377), validated at
 	// boot: an unknown value, or principal before this build implements it,
 	// refuses to start.
@@ -1346,6 +1351,7 @@ func loadConfig() config {
 		CommerceDisabled:               killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
 		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
 		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
+		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
 		AdminPrincipalsRaw:             os.Getenv("ADMIN_PRINCIPALS"),
 		PrincipalsDisabled:             killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
 		PrincipalDBConfigured:          postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
@@ -1576,6 +1582,9 @@ func (c config) validate() error {
 		return err
 	}
 	if err := c.validatePrincipalMode(mode); err != nil {
+		return err
+	}
+	if _, err := parseLegacyApprover(c.LegacyApproverRaw); err != nil {
 		return err
 	}
 	// Only enforced when the OAuth server is actually constructed — the same
@@ -2003,6 +2012,28 @@ func tenantMemberLogins(reader *gitops.Reader) ([]string, error) {
 		}
 	}
 	return logins, nil
+}
+
+// parseLegacyApprover reads MCTL_AGENTS_APPROVE_LEGACY_APPROVER. Empty is on:
+// the relay stays until mctl-agents stops needing it (mctl-api#571). An
+// unrecognised value is an error rather than either answer, because both
+// answers are consequential: guessing "off" breaks every DevLoop approval,
+// guessing "on" keeps a path the operator meant to close.
+func parseLegacyApprover(v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf("MCTL_AGENTS_APPROVE_LEGACY_APPROVER=%q: want true or false", v)
+}
+
+// legacyApproverDisabled is the parsed flag, inverted for Options' zero
+// value. validate has already refused an unparsable value.
+func (c config) legacyApproverDisabled() bool {
+	on, err := parseLegacyApprover(c.LegacyApproverRaw)
+	return err == nil && !on
 }
 
 // killSwitchOn reads a kill-switch value (WORK_ITEMS_DISABLED,
