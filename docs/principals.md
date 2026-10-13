@@ -237,10 +237,11 @@ before this change; nothing is backfilled into them.
 | `human_input_deliveries` | `respondent` | `respondent_principal_id`, `via_principal_id` |
 | `lifecycle_events` | (`actor_type`/`actor_id` name the owner, not the caller) | `caller_principal_id`, `via_principal_id` |
 
-Nothing reads the ids for a decision. Two responses serve them
+Nothing reads the ids for a decision. Two payloads serve them
 (mctl-api#376 slice D), and no other one does:
 
-- `GET /api/v1/action-approvals/{id}` (and the listing) returns the four
+- The action approval, in every response that carries one (create, get,
+  list, decision and consume under `/api/v1/action-approvals`), returns the four
   principal ids above, plus the requester as actor and subject:
   `actor_kind`, `actor_name`, `subject_principal_id`, `subject_kind` and
   `agent_run_id`. They are taken from authentication at create and stored

@@ -28,6 +28,7 @@ func TestSpecParses(t *testing.T) {
 		"/api/v1/work-items/{id}/events":                                            {"get"},
 		"/api/v1/action-approvals":                                                  {"get", "post"},
 		"/api/v1/action-approvals/{id}":                                             {"get"},
+		"/api/v1/identity/self":                                                     {"get"},
 		"/api/v1/action-approvals/{id}/decision":                                    {"post"},
 		"/api/v1/action-approvals/{id}/consume":                                     {"post"},
 		"/api/v1/work-items/{id}/execution-requests":                                {"get", "post"},

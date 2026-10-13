@@ -4319,6 +4319,7 @@ paths:
         '401': {description: Authentication required}
         '403': {description: 'grant_not_bound or grant_subject_unresolved'}
         '503': {description: delegation_unavailable}
+
   /api/v1/action-approvals/{id}:
     get:
       summary: One action approval request
