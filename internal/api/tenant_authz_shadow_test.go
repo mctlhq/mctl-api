@@ -21,12 +21,12 @@ import (
 const shadowPRN = "prn_01JBBBBBBBBBBBBBBBBBBBBBBB"
 
 func TestParseTenantAuthzMode(t *testing.T) {
-	for raw, want := range map[string]TenantAuthzMode{"": TenantAuthzLegacy, "legacy": TenantAuthzLegacy, "shadow": TenantAuthzShadow, "\tshadow\n": TenantAuthzShadow} {
+	for raw, want := range map[string]TenantAuthzMode{"": TenantAuthzLegacy, "legacy": TenantAuthzLegacy, "shadow": TenantAuthzShadow, "\tshadow\n": TenantAuthzShadow, "principal": TenantAuthzPrincipal} {
 		if got, err := ParseTenantAuthzMode(raw); err != nil || got != want {
 			t.Errorf("ParseTenantAuthzMode(%q) = %q, %v; want %q", raw, got, err, want)
 		}
 	}
-	for _, raw := range []string{"principal", "Shadow", "off", "legacy,shadow"} {
+	for _, raw := range []string{"Principal", "Shadow", "off", "legacy,shadow", "shadow,principal"} {
 		if got, err := ParseTenantAuthzMode(raw); err == nil {
 			t.Errorf("ParseTenantAuthzMode(%q) = %q, want a refusal", raw, got)
 		}

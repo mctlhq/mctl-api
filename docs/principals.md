@@ -278,7 +278,7 @@ and tenant-level semantics are the login ones; only the key differs.
 |---|---|---|
 | `legacy` (default, or unset) | the login, as before | nothing |
 | `shadow` | the login, as before | computes the principal decision for the same request and compares |
-| `principal` | the principal | **not yet accepted**: refused at boot until the last PR-B slice (local JWT `pid`, relayed and delegated callers) lands |
+| `principal` | the principal | the login, `ADMIN_USERS` and provider groups stop counting; see [`principal` mode](#principal-mode) |
 
 Any other value refuses boot. Rollback is setting the value back; no data
 moves in either direction.
