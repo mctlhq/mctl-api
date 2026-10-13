@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS work_item_executions (
 CREATE UNIQUE INDEX IF NOT EXISTS work_item_executions_one_open
     ON work_item_executions (work_item_id)
     WHERE phase IN ('Pending', 'Running');
+-- Engine-run lookup across work items (OpenExecutionsOfEngineRun,
+-- mctl-api#571).
+CREATE INDEX IF NOT EXISTS work_item_executions_engine_ref
+    ON work_item_executions (engine, engine_ref);
 
 CREATE TABLE IF NOT EXISTS work_item_surface_refs (
     work_item_id      TEXT NOT NULL REFERENCES work_items (id) ON DELETE CASCADE,
@@ -685,6 +689,50 @@ func (s *Store) ResolveExecution(ctx context.Context, executionID string) (*Exec
 		return nil, fmt.Errorf("workitems: resolve execution %s: %w", executionID, err)
 	}
 	return &c, nil
+}
+
+// ExecutionByID loads one execution by its globally-unique id, or
+// ErrNotFound. No authorization: the caller checks who may use it.
+func (s *Store) ExecutionByID(ctx context.Context, executionID string) (*Execution, error) {
+	e, err := scanExecution(s.pool.QueryRow(ctx, `SELECT `+executionColumns+` FROM work_item_executions
+		WHERE id=$1`, executionID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("workitems: execution %s: %w", executionID, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("workitems: get execution: %w", err)
+	}
+	return e, nil
+}
+
+// OpenExecutionsOfEngineRun lists the non-terminal executions of one engine
+// run, across work items, oldest first: those whose engine_ref is run, or
+// starts with run+"#" (the form mctl-agents gives a run dispatched from an
+// execution request, "<workflow_id>#<request_id>"). The pair is unique only
+// per work item, so a caller that needs exactly one must treat more than one
+// as ambiguous rather than pick. An empty list is the store's "none open";
+// any failed read is an error.
+func (s *Store) OpenExecutionsOfEngineRun(ctx context.Context, engine, run string) ([]Execution, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+executionColumns+` FROM work_item_executions
+		WHERE engine=$1 AND (engine_ref=$2 OR left(engine_ref, length($2) + 1) = $2 || '#')
+		  AND phase IN ('Pending', 'Running')
+		ORDER BY started_at, id`, engine, run)
+	if err != nil {
+		return nil, fmt.Errorf("workitems: open executions of engine run: %w", err)
+	}
+	defer rows.Close()
+	out := []Execution{}
+	for rows.Next() {
+		e, err := scanExecution(rows)
+		if err != nil {
+			return nil, fmt.Errorf("workitems: open executions of engine run: %w", err)
+		}
+		out = append(out, *e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("workitems: open executions of engine run: %w", err)
+	}
+	return out, nil
 }
 
 // AttachExecution correlates an engine run with a non-terminal work item,
