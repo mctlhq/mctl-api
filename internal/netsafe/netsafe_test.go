@@ -79,7 +79,7 @@ func get(t *testing.T, c *http.Client, url string) (*http.Response, error) {
 func TestResolvedNonPublicRefused(t *testing.T) {
 	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "::1", "169.254.169.254", "::ffff:127.0.0.1"} {
 		c := Client(Options{Resolver: &stubResolver{seq: [][]netip.Addr{{netip.MustParseAddr(ip)}}}})
-		if _, err := get(t, c, "https://example.test/x"); err == nil || !errors.Is(err, ErrNonPublic) {
+		if _, err := get(t, c, "https://example.test/x"); err == nil || !errors.Is(err, ErrNonPublic) { //nolint:bodyclose // closed via t.Cleanup in get
 			t.Errorf("%s: want ErrNonPublic, got %v", ip, err)
 		}
 	}
@@ -87,10 +87,10 @@ func TestResolvedNonPublicRefused(t *testing.T) {
 
 func TestDirectIPAndPortRefused(t *testing.T) {
 	c := Client(Options{})
-	if _, err := get(t, c, "https://127.0.0.1/x"); !errors.Is(err, ErrNonPublic) {
+	if _, err := get(t, c, "https://127.0.0.1/x"); !errors.Is(err, ErrNonPublic) { //nolint:bodyclose // closed via t.Cleanup in get
 		t.Fatalf("direct loopback: %v", err)
 	}
-	if _, err := get(t, c, "https://[::1]/x"); !errors.Is(err, ErrNonPublic) {
+	if _, err := get(t, c, "https://[::1]/x"); !errors.Is(err, ErrNonPublic) { //nolint:bodyclose // closed via t.Cleanup in get
 		t.Fatalf("direct v6 loopback: %v", err)
 	}
 	c = Client(Options{Resolver: &stubResolver{seq: [][]netip.Addr{{netip.MustParseAddr("8.8.8.8")}}}})

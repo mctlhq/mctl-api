@@ -242,9 +242,16 @@ func (r *Resolver) Resolve(ctx context.Context, clientID string) (Document, erro
 		if doc, err, hit := r.cached(clientID); hit {
 			return doc, err
 		}
-		doc, ttl, err := r.fetch(ctx, u, clientID)
+		// Detach from the first caller's lifetime: the shared fetch must not be
+		// aborted (or cached as a failure) because one browser went away. The
+		// netsafe client's own timeout bounds it.
+		doc, ttl, err := r.fetch(context.WithoutCancel(ctx), u, clientID)
 		if errors.Is(err, ErrRateLimited) {
 			// Not the document's fault: refuse, but do not cache it.
+			return Document{}, err
+		}
+		if err != nil && ctx.Err() != nil {
+			// The caller went away: that says nothing about the document.
 			return Document{}, err
 		}
 		r.store(clientID, doc, err, ttl)
@@ -416,6 +423,13 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 		u, err := url.Parse(s)
 		if err != nil || !u.IsAbs() || u.Scheme == "" {
 			return bad("redirect_uri %q is not an absolute URI", s)
+		}
+		if u.Fragment != "" || u.User != nil {
+			return bad("redirect_uri %q must not contain a fragment or userinfo", s)
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "javascript", "data", "vbscript", "file", "blob":
+			return bad("redirect_uri %q has a disallowed scheme", s)
 		}
 	}
 	name, _ := str("client_name")

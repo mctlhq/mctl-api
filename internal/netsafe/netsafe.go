@@ -168,7 +168,7 @@ func Client(opts Options) *http.Client {
 					return nil, err
 				}
 			}
-			var lastErr error = ErrNonPublic
+			lastErr := ErrNonPublic
 			for _, a := range addrs {
 				if !PublicAddr(a) {
 					continue
