@@ -76,8 +76,9 @@ env:
   COMMERCE_ACCEPT_DISABLED: ""
   # Tenant authorization key (mctl-api#377, docs/principals.md): empty or
   # "legacy" decides on the GitHub login; "shadow" also compares the
-  # principal-keyed decision into metrics without acting on it. Any other
-  # value refuses boot ("principal" until it is implemented).
+  # principal-keyed decision into metrics without acting on it; "principal"
+  # decides on the principal (needs ADMIN_PRINCIPALS). Any other value
+  # refuses boot.
   TENANT_AUTHZ_MODE: ""
   # Platform admins by principal id (prn_...), comma-separated. The only
   # source of platform admin in principal mode (ADMIN_USERS is then

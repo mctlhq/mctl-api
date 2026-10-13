@@ -15,7 +15,6 @@
 package api
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -42,8 +41,8 @@ import (
 //     decision is computed beside it for the same request and the two are
 //     compared into metrics and logs. Nothing the principal path computes
 //     is used to authorize.
-//   - principal: the principal decides. Not in this build; refused at boot
-//     until it exists (PR-B).
+//   - principal: the principal decides (tenant_authz_principal.go,
+//     auth.PrincipalAuthz). The login and provider groups no longer count.
 
 // TenantAuthzMode is the parsed TENANT_AUTHZ_MODE.
 type TenantAuthzMode string
@@ -54,10 +53,10 @@ const (
 	TenantAuthzPrincipal TenantAuthzMode = "principal"
 )
 
-// ParseTenantAuthzMode reads TENANT_AUTHZ_MODE. Empty is legacy. principal
-// is refused until this build can honour it, and any other value is
-// refused: a mistyped mode must stop the boot, not fall back to one the
-// operator did not ask for.
+// ParseTenantAuthzMode reads TENANT_AUTHZ_MODE. Empty is legacy. Any other
+// value is refused: a mistyped mode must stop the boot, not fall back to
+// one the operator did not ask for. Whether principal mode has what it
+// needs is checked separately (validatePrincipalMode in cmd/api).
 func ParseTenantAuthzMode(raw string) (TenantAuthzMode, error) {
 	switch m := TenantAuthzMode(strings.TrimSpace(raw)); m {
 	case "", TenantAuthzLegacy:
@@ -65,9 +64,9 @@ func ParseTenantAuthzMode(raw string) (TenantAuthzMode, error) {
 	case TenantAuthzShadow:
 		return TenantAuthzShadow, nil
 	case TenantAuthzPrincipal:
-		return "", errors.New("TENANT_AUTHZ_MODE=principal is not implemented in this build (mctl-api#377 PR-B); use legacy or shadow")
+		return TenantAuthzPrincipal, nil
 	default:
-		return "", fmt.Errorf("TENANT_AUTHZ_MODE %q is not one of legacy, shadow", raw)
+		return "", fmt.Errorf("TENANT_AUTHZ_MODE %q is not one of legacy, shadow, principal", raw)
 	}
 }
 

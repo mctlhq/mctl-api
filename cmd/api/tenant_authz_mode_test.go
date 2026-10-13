@@ -14,8 +14,9 @@ import (
 	"github.com/mctlhq/mctl-api/internal/gitops"
 )
 
-// TENANT_AUTHZ_MODE refuses the boot on a value it cannot honour, and no
-// kill switch skips that check.
+// TENANT_AUTHZ_MODE refuses the boot on a value it cannot honour, principal
+// included when its configuration is incomplete, and no kill switch skips
+// that check.
 func TestConfigValidate_TenantAuthzMode(t *testing.T) {
 	for _, raw := range []string{"principal", "shadwo", "Legacy"} {
 		for _, killed := range []bool{false, true} {
@@ -26,8 +27,9 @@ func TestConfigValidate_TenantAuthzMode(t *testing.T) {
 			}
 		}
 	}
-	for raw, want := range map[string]mctlapi.TenantAuthzMode{"": mctlapi.TenantAuthzLegacy, "legacy": mctlapi.TenantAuthzLegacy, "shadow": mctlapi.TenantAuthzShadow} {
-		cfg := config{TenantAuthzModeRaw: raw, CommerceDisabled: true}
+	for raw, want := range map[string]mctlapi.TenantAuthzMode{"": mctlapi.TenantAuthzLegacy, "legacy": mctlapi.TenantAuthzLegacy, "shadow": mctlapi.TenantAuthzShadow, "principal": mctlapi.TenantAuthzPrincipal} {
+		cfg := config{TenantAuthzModeRaw: raw, CommerceDisabled: true,
+			AdminPrincipalsRaw: "prn_01JAAAAAAAAAAAAAAAAAAAAAAA", PrincipalDBConfigured: true}
 		if err := cfg.validate(); err != nil {
 			t.Errorf("TENANT_AUTHZ_MODE=%q: validate() = %v", raw, err)
 		}
@@ -72,8 +74,6 @@ func TestTenantMemberLogins_SkipsPrincipalOnlyEntries(t *testing.T) {
 
 // ADMIN_PRINCIPALS is validated in every mode, and principal mode refuses
 // a configuration that would leave no admin or no principal to decide on.
-// The boot refusal of principal itself is lifted in the last PR-B slice;
-// until then validatePrincipalMode is exercised directly.
 func TestConfigValidate_AdminPrincipals(t *testing.T) {
 	const admin = "prn_01JAAAAAAAAAAAAAAAAAAAAAAA"
 	for _, raw := range []string{"mashkovd", admin + ",prn_bad"} {
