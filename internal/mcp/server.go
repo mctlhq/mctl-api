@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -167,6 +168,27 @@ func (s *Server) NewStreamableHTTPHandler() http.Handler {
 	)
 }
 
+// recoverToolPanic is a backstop: a panicking handler becomes a JSON-RPC error
+// instead of aborting the HTTP request with a bare 500 (mctl-api#608). It logs
+// the panic with its stack, because the returned error is the only other
+// trace of it and carries none. Handlers must still validate their own
+// arguments (req.RequireString): a recovered panic does not tell the caller
+// which argument was wrong.
+func recoverToolPanic(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (res *mcplib.CallToolResult, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("mcp tool handler panic", "tool", req.Params.Name, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+				// The value stays in the log: a panic message can interpolate
+				// anything (a URL with a token, a struct dump), so the caller
+				// gets only the tool name.
+				res, err = nil, fmt.Errorf("panic recovered in %s tool handler", req.Params.Name)
+			}
+		}()
+		return next(ctx, req)
+	}
+}
+
 // NewMCPServer creates the mcp-go Server with all tool definitions.
 func (s *Server) NewMCPServer() *server.MCPServer {
 	srv := server.NewMCPServer(
@@ -183,8 +205,14 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		server.WithToolFilter(s.ownerOnlyToolFilter),
 		// Reports a failed role lookup on tools/call explicitly.
 		server.WithToolHandlerMiddleware(s.ownerOnlyCallMiddleware),
-		// Outermost-last: spans every tool call, continuing _meta/HTTP trace context.
+		// mcp-go wraps middlewares in registration order: the first one
+		// registered is the outermost. The tracing span therefore covers
+		// every call that passes the owner-only check, continuing the
+		// _meta/HTTP trace context.
 		server.WithToolHandlerMiddleware(s.tracingMiddleware),
+		// Innermost, so a recovered panic flows back out through the tracing
+		// middleware as an error and the span is marked failed.
+		server.WithToolHandlerMiddleware(recoverToolPanic),
 	)
 	s.mcpServer = srv
 
@@ -431,9 +459,14 @@ func (s *Server) toolGetServiceStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		args := req.GetArguments()
-		team := args["team"].(string)
-		service := args["service"].(string)
+		team, err := req.RequireString("team")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		service, err := req.RequireString("service")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/status/%s/%s", url.PathEscape(team), url.PathEscape(service)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get status for %s/%s: %v", team, service, err)), nil
@@ -457,8 +490,10 @@ func (s *Server) toolGetWorkflowStatus() (mcplib.Tool, server.ToolHandlerFunc) {
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		args := req.GetArguments()
-		name := args["workflow_name"].(string)
+		name, err := req.RequireString("workflow_name")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/workflows/%s", url.PathEscape(name)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get workflow %s: %v", name, err)), nil
@@ -482,8 +517,10 @@ func (s *Server) toolGetResourceUsage() (mcplib.Tool, server.ToolHandlerFunc) {
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		args := req.GetArguments()
-		team := args["team"].(string)
+		team, err := req.RequireString("team")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/resources/%s", url.PathEscape(team)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get resource usage for %s: %v", team, err)), nil
@@ -937,8 +974,10 @@ func (s *Server) toolGetTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		args := req.GetArguments()
-		name := args["name"].(string)
+		name, err := req.RequireString("name")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/tenants/%s", url.PathEscape(name)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get tenant %s: %v", name, err)), nil
@@ -966,9 +1005,14 @@ func (s *Server) toolGetServiceConfig() (mcplib.Tool, server.ToolHandlerFunc) {
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		args := req.GetArguments()
-		team := args["team"].(string)
-		service := args["service"].(string)
+		team, err := req.RequireString("team")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		service, err := req.RequireString("service")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/services/%s/%s", url.PathEscape(team), url.PathEscape(service)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get config for %s/%s: %v", team, service, err)), nil
@@ -1101,8 +1145,10 @@ For repos outside GitHub App scope, store a PAT in Vault (see mctl_deploy_servic
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		args := req.GetArguments()
-		team := args["team"].(string)
+		team, err := req.RequireString("team")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/repos?team=%s", url.QueryEscape(team)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list repos for team %s: %v", team, err)), nil
@@ -1146,8 +1192,14 @@ copy-paste templates and onboard checklist at https://docs.mctl.ai/guides/scaffo
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		args := req.GetArguments()
-		team := args["team"].(string)
-		repo := args["repo"].(string)
+		team, err := req.RequireString("team")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		repo, err := req.RequireString("repo")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		service := ""
 		if s, ok := args["service"].(string); ok {
 			service = s
@@ -1209,8 +1261,11 @@ If the GitHub App is not installed on your account, visit: https://github.com/ap
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		args := req.GetArguments()
-		params := make(map[string]string)
-		params["team"] = args["team"].(string)
+		team, err := req.RequireString("team")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		params := map[string]string{"team": team}
 		if user, ok := args["user"].(string); ok && user != "" {
 			params["user"] = user
 		}
@@ -1306,11 +1361,13 @@ Use mctl_verify_domain next.`),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		args := req.GetArguments()
-		params := map[string]string{
-			"team":    args["team"].(string),
-			"service": args["service"].(string),
-			"domain":  args["domain"].(string),
+		params := make(map[string]string, 3)
+		for _, k := range []string{"team", "service", "domain"} {
+			v, err := req.RequireString(k)
+			if err != nil {
+				return mcplib.NewToolResultError(err.Error()), nil
+			}
+			params[k] = v
 		}
 		// Register domain in mctl-api's own domain registry. The
 		// add-custom-domain workflow is deliberately NOT triggered here —
@@ -1943,8 +2000,10 @@ func (s *Server) toolGetOperation() (mcplib.Tool, server.ToolHandlerFunc) {
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		args := req.GetArguments()
-		name := args["name"].(string)
+		name, err := req.RequireString("name")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/operations/%s", url.PathEscape(name)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get operation %s: %v", name, err)), nil
@@ -2026,7 +2085,10 @@ Use this to check which previews are running before creating new ones or cleanin
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		args := req.GetArguments()
-		team := args["team"].(string)
+		team, err := req.RequireString("team")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		path := "/api/v1/previews?team=" + url.QueryEscape(team)
 		if svc, ok := args["service"].(string); ok && svc != "" {
 			path += "&service=" + url.QueryEscape(svc)
@@ -2136,7 +2198,10 @@ not produce a trace, one of "workflow_name_unknown", "audit_unavailable",
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		id := req.GetArguments()["id"].(string)
+		id, err := req.RequireString("id")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		body, err := s.apiGet(ctx, "/api/v1/incidents/"+url.PathEscape(id))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get incident %s: %v", id, err)), nil
@@ -2185,7 +2250,10 @@ and want to signal that someone is aware of it.`),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		id := req.GetArguments()["id"].(string)
+		id, err := req.RequireString("id")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		body, err := s.apiPost(ctx, "/api/v1/incidents/"+url.PathEscape(id)+"/ack", nil)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to acknowledge incident %s: %v", id, err)), nil
@@ -2217,7 +2285,10 @@ the resolution timestamp.`),
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		args := req.GetArguments()
-		id := args["id"].(string)
+		id, err := req.RequireString("id")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		params := make(map[string]string)
 		if v, ok := args["reason"].(string); ok && v != "" {
 			params["reason"] = v
