@@ -37,7 +37,10 @@ import (
 // the original upstream. ZITADEL signs the person in as the GitHub login of
 // the principal their ZITADEL identity is linked to (#435), so the code,
 // the tokens and the groups behind them are exactly what a GitHub sign-in of
-// the same person yields. Nothing is linked or provisioned here.
+// the same person yields. Nothing is linked here, and outside principal
+// mode nothing is provisioned either. In principal mode (mctl-api#377) an
+// identity with no single GitHub login signs in as its own principal,
+// which the resolver provisions on first sight.
 
 // OAuthUpstreamMode is OAUTH_UPSTREAM.
 type OAuthUpstreamMode string
@@ -319,20 +322,39 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	}
 	id := auth.Identity{Provider: z.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display, Kind: auth.KindHuman}
 	p, gh, err := z.opts.Store.LinkedGitHub(r.Context(), id)
-	if err != nil {
+	var login, principalID string
+	switch {
+	case err == nil:
+		// The GitHub callback's tail, for the linked principal's GitHub
+		// login: same groups, same admin decision, same code. The principal
+		// is the one the store just found the link on.
+		login, principalID = gh.Display, p.ID
+	case h.opts.TenantAuthzMode == TenantAuthzPrincipal && zitadelOnly(p, err):
+		// Principal mode needs no GitHub login (mctl-api#377, Q5): the
+		// identity signs in as its principal, provisioned on first sight,
+		// and gets exactly the GitOps membership keyed by that principal.
+		var stopped string
+		if principalID, stopped = h.signinPrincipal(w, r, id); stopped != "" {
+			result = stopped
+			return
+		}
+		if p != nil && principalID != p.ID {
+			// The resolver and the store disagree on whose identity this
+			// is; minting for either would be a guess.
+			slog.Error("oauth: ZITADEL identity resolved to another principal", "store", p.ID, "resolver", principalID)
+			result = zitadelStoreUnavailable(w, errors.New("principal resolution disagrees with the link store"))
+			return
+		}
+	default:
 		result = h.refuseZitadelSignin(w, display, p, err)
 		return
 	}
 
-	// From here on this is the GitHub callback's tail, for the linked
-	// principal's GitHub login: same groups, same admin decision, same code.
-	// The principal is the one the store just found the link on.
-	login := gh.Display
 	var groups []string
 	if h.opts.TenantAuthzMode != TenantAuthzPrincipal {
 		groups = o.ResolveGroups(login)
 	}
-	mctlCode, err := o.IssueCode(r.Context(), login, p.ID, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
+	mctlCode, err := o.IssueCode(r.Context(), login, principalID, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
 	if err != nil {
 		slog.Error("failed to issue auth code", "error", err)
 		result = "internal_error"
@@ -352,8 +374,23 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	}
 	target.RawQuery = cq.Encode()
 	result = "issued"
-	slog.Info("oauth: ZITADEL sign-in", "principal_id", p.ID, "login", login, "zitadel_subject", idt.Subject)
+	slog.Info("oauth: ZITADEL sign-in", "principal_id", principalID, "login", login, "zitadel_subject", idt.Subject)
 	http.Redirect(w, r, target.String(), http.StatusFound)
+}
+
+// zitadelOnly reports whether a LinkedGitHub refusal only says the
+// identity has no single GitHub login to sign in as: not linked to any
+// principal yet, or a principal without exactly one live GitHub login.
+// Principal mode signs those in as the principal. A refusal that names no
+// principal where it must is a failed read, never this.
+func zitadelOnly(p *principals.Principal, err error) bool {
+	switch {
+	case errors.Is(err, principals.ErrNotFound):
+		return true
+	case errors.Is(err, principals.ErrNoGitHubIdentity), errors.Is(err, principals.ErrGitHubLoginUnknown), errors.Is(err, principals.ErrAmbiguousGitHubIdentity):
+		return p != nil
+	}
+	return false
 }
 
 // refuseZitadelSignin answers a ZITADEL identity that cannot sign in and
