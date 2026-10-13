@@ -16,6 +16,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -55,6 +56,11 @@ func (h *Handlers) signinPrincipal(w http.ResponseWriter, r *http.Request, id au
 		return "", ""
 	}
 	prn, err := h.opts.Principals.ResolvePrincipal(r.Context(), id)
+	if err == nil && !auth.ValidPrincipalID(prn) {
+		// A resolver answering with no usable principal and no error has
+		// not resolved one: treat it like any other failed lookup.
+		err = fmt.Errorf("resolver returned %q, not a principal id", prn)
+	}
 	switch {
 	case err == nil:
 		return prn, ""

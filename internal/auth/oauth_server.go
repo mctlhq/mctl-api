@@ -1529,6 +1529,9 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 			slog.Error("oauth: refresh store unexpected error", "error", err)
 			return "", "", fmt.Errorf("oauth: %w", ErrServerError)
 		}
+		if err := s.refreshablePrincipal(sess.Login, sess.PrincipalID); err != nil {
+			return "", "", err
+		}
 		// The row rotate() just wrote still carries storedGroups verbatim --
 		// refreshstore.Store.Rotate has no parameter for new groups, and
 		// adding one would change the interface, the PostgresStore schema and
@@ -1536,9 +1539,6 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 		// That snapshot's staleness is no longer load-bearing because
 		// groupsForSession re-resolves it here, bounded by the degraded-grace
 		// fallback when resolution fails.
-		if err := s.refreshablePrincipal(sess.PrincipalID); err != nil {
-			return "", "", err
-		}
 		var groups []string
 		if !s.PrincipalMode {
 			groups = s.groupsForSession(sess.Login, sess.Groups)
@@ -1562,7 +1562,7 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 	// resolution. A degraded or fail-closed fallback must not overwrite the
 	// snapshot: that would leave the next outage nothing to fall back on
 	// (the store path never overwrites it, since Rotate carries it forward).
-	if err := s.refreshablePrincipal(entry.PrincipalID); err != nil {
+	if err := s.refreshablePrincipal(entry.Login, entry.PrincipalID); err != nil {
 		return "", "", err
 	}
 	var groups []string
@@ -1586,13 +1586,16 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 	return accessToken, newRefreshToken, nil
 }
 
-// refreshablePrincipal refuses, in principal mode, to refresh a session
-// with no recorded principal (minted before mctl-api#377 recorded one): its
-// access tokens would be refused anyway, and re-deriving the principal from
-// the login is what principal mode removes. The holder signs in again. The
-// error reads as an invalid grant, which is what tells a client to do that.
-func (s *OAuthServer) refreshablePrincipal(principalID string) error {
-	if s.PrincipalMode && principalID == "" {
+// refreshablePrincipal refuses to refresh a session whose access tokens
+// ValidateJWT would refuse anyway: in principal mode, one with no recorded
+// principal (minted before mctl-api#377 recorded one), since re-deriving the
+// principal from the login is what principal mode removes; outside it, one
+// with no login (a ZITADEL-only principal, after a rollback from principal
+// mode). Refreshing either would only mint tokens that answer 401, which a
+// client retries in a loop. The error reads as an invalid grant, which is
+// what tells a client to sign in again.
+func (s *OAuthServer) refreshablePrincipal(login, principalID string) error {
+	if (s.PrincipalMode && principalID == "") || (!s.PrincipalMode && login == "") {
 		return errors.New("invalid or expired refresh token")
 	}
 	return nil

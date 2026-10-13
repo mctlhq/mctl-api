@@ -58,6 +58,9 @@ func TestSigninPrincipal(t *testing.T) {
 		{"refused, principal mode", signinResolver{err: fmt.Errorf("x: %w", auth.ErrIdentityRefused)}, true, "", http.StatusForbidden},
 		{"unresolved", signinResolver{err: unresolved}, false, "", 0},
 		{"unresolved, principal mode", signinResolver{err: unresolved}, true, "", http.StatusServiceUnavailable},
+		{"empty answer", signinResolver{}, false, "", 0},
+		{"empty answer, principal mode", signinResolver{}, true, "", http.StatusServiceUnavailable},
+		{"malformed answer, principal mode", signinResolver{prn: "alice"}, true, "", http.StatusServiceUnavailable},
 		{"no resolver", nil, false, "", 0},
 		{"no resolver, principal mode", nil, true, "", http.StatusServiceUnavailable},
 	}

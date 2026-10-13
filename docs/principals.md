@@ -360,6 +360,10 @@ caller's authorization; it never merges with the legacy one:
 - `/whoami` reports `admins` in `namespaces` for a platform admin, but
   never in `groups`: admin is decided by principal, not carried as a
   group. Clients must read `isAdmin`, not `groups.includes("admins")`.
+- `/whoami` `id` is the GitHub login for a GitHub-linked caller, but the
+  principal id (`prn_…`) for a ZITADEL-only principal, which has no login.
+  Clients must not treat `id` as a GitHub login (link to a profile, look it
+  up in a repo's collaborators).
 
 ### Local tokens carry the principal (`pid`)
 
@@ -387,7 +391,8 @@ rotation carries it forward.
 - In `principal` mode a token without a `pid` is refused (401), a
   principal-only token must have `sub == pid`, and a refresh of a session
   with no recorded principal answers `invalid_grant`. Outside it, a
-  principal-only token is refused.
+  principal-only token is refused (401), and a refresh of a session with
+  no login (a ZITADEL-only principal) answers `invalid_grant`.
 
 At the switch, sessions minted before this release carry no `pid`, so
 their holders sign in again. With the persistent refresh store the refresh
@@ -395,7 +400,10 @@ token is rotated before its missing `pid` is refused, so a client that
 retries it gets `invalid_grant` and, once the rotation grace window has
 passed, trips reuse detection: the family is revoked and `oauth refresh
 token reuse detected; family revoked` is logged as a warning. On switch day
-those warnings are pre-#377 sessions, not stolen tokens.
+those warnings are pre-#377 sessions, not stolen tokens. A rollback out
+of `principal` mode does the same to ZITADEL-only principals: their
+sessions have no login, so their refresh is refused, and the same
+reuse-detection warnings follow.
 
 A disabled principal, merged-away ones included (a merge disables `from`),
 is refused on every request. An **unlink is not**: the principal stays
@@ -416,6 +424,8 @@ the switch.
 | `tenant_member_entry_unkeyed{tenant}` | member entries with no `principalId` |
 | `tenant_principal_keys_invalid{tenant}` | 1 when a tenant's keys are invalid or the tenant cannot be read |
 | `tenant_principal_keys_scan_ok` | 1 when the last scan could list the tenants; the two gauges above are cleared when it is 0 |
+| `oauth_token_principal_mismatch_total` | local tokens whose `pid` names a different principal than the one resolved from the login (outside `principal` mode, where it is still resolved) |
+| `oauth_upstream_signins_total{result}` | also `principal_refused` (disabled or refused principal, 403) and `principal_unavailable` (could not be resolved, 503 in `principal` mode), for both upstreams |
 
 An `unresolved` comparison is never counted as a `match` or a `diff`: a
 decision that could not be computed is not evidence either way. The one
@@ -437,6 +447,14 @@ increasing for human callers; `sum(tenant_member_entry_unkeyed) == 0`,
 == 1` throughout; and traffic seen through each sign-in path (GitHub PAT,
 ZITADEL MCP OAuth, ZITADEL bearer). A window in which a path saw no traffic
 does not count for that path.
+
+Over the same window, `oauth_token_principal_mismatch_total` must stay at
+zero. Before the flip, check pid coverage too: a live session minted
+before the release that records no `pid` is refused at the switch and its
+holder must sign in again. A refresh carries an empty `principal_id`
+forward, so such sessions end only by expiry or a new sign-in; count the
+live refresh rows with an empty `principal_id` and decide whether that
+many re-sign-ins are acceptable on switch day.
 
 ### Backfill plan
 
