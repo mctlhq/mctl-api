@@ -186,9 +186,10 @@ func newApproveRouter(t *testing.T, legacyOff bool) (http.Handler, *fakeExecutor
 
 func entriesFor(logger *audit.Logger, operation string) []audit.Entry {
 	var out []audit.Entry
-	for _, e := range logger.List(1000) {
-		if e.Operation == operation {
-			out = append(out, e)
+	entries := logger.List(1000)
+	for i := range entries {
+		if entries[i].Operation == operation {
+			out = append(out, entries[i])
 		}
 	}
 	return out

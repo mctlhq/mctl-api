@@ -8,10 +8,14 @@ import (
 // MCTL_AGENTS_APPROVE_LEGACY_APPROVER (mctl-api#571) is on unless it says
 // off, and an unrecognised value refuses the boot rather than picking a side.
 func TestConfigValidate_LegacyApprover(t *testing.T) {
-	for raw, wantDisabled := range map[string]bool{
-		"": false, "true": false, "on": false, " 1 ": false,
-		"false": true, "OFF": true, "0": true, "no": true,
+	for _, c := range []struct {
+		raw          string
+		wantDisabled bool
+	}{
+		{"", false}, {"true", false}, {"on", false}, {" 1 ", false},
+		{"false", true}, {"OFF", true}, {"0", true}, {"no", true},
 	} {
+		raw, wantDisabled := c.raw, c.wantDisabled
 		cfg := config{LegacyApproverRaw: raw, CommerceDisabled: true}
 		if err := cfg.validate(); err != nil {
 			t.Errorf("%q: validate() = %v", raw, err)
