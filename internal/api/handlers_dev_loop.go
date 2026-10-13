@@ -316,7 +316,8 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 	// admits the service principal, which carries the admins group and
 	// legitimately reads and starts DevLoops; it must never approve one.
 	if !isHumanAdmin(user) {
-		writeError(w, http.StatusForbidden, "approving a DevLoop is admin-only and must be done by a human acting directly")
+		writeErrorCode(w, http.StatusForbidden, aarCodeDeciderForbidden,
+			"approving a DevLoop is admin-only and must be done by a human acting directly", nil)
 		return
 	}
 
@@ -464,7 +465,7 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 		return "", true
 	}
 	ctx := r.Context()
-	execs, err := h.opts.WorkItems.OpenExecutionsOfEngineRun(ctx, "temporal", workflowID)
+	execs, err := h.opts.WorkItems.OpenExecutionsOfEngineRun(ctx, workitems.EngineTemporal, workflowID)
 	switch {
 	case err != nil:
 		return unavailable(err)
@@ -503,7 +504,35 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 		h.auditActionApproval(r, user, "action_approval.decision", decided, operations.RiskMedium)
 		return decided.ID, true
 	}
+	// No live grant. One that was denied, spent or let expire is a recorded
+	// outcome, not an absent gate: answering it with the legacy payload
+	// would approve past an explicit human "no". Only an execution that
+	// never had a grant falls back.
+	closed, err := h.opts.WorkItems.ActionApprovals(ctx, workitems.ActionApprovalFilter{
+		ExecutionID: exec.ID, ActionKind: devLoopApprovalKind, Limit: 1,
+	})
+	if err != nil {
+		return unavailable(err)
+	}
+	if len(closed) > 0 {
+		code, ok := closedApprovalCodes[closed[0].State]
+		if !ok {
+			// Pending or approved here means it changed since the probes
+			// above; refuse rather than guess, the caller retries.
+			code = aarCodeNotApproved
+		}
+		return refuse(http.StatusConflict, code,
+			"the DevLoop's approval "+closed[0].ID+" is "+closed[0].State+"; it cannot be approved again")
+	}
 	return noGrant("no pending " + devLoopApprovalKind + " approval for execution " + exec.ID)
+}
+
+// closedApprovalCodes are the typed refusals of an approve call whose
+// DevLoop grant is no longer live.
+var closedApprovalCodes = map[string]string{
+	workitems.ApprovalDenied:   aarCodeDenied,
+	workitems.ApprovalConsumed: aarCodeConsumed,
+	workitems.ApprovalExpired:  aarCodeExpired,
 }
 
 type abandonDevLoopRequest struct {
