@@ -312,7 +312,6 @@ func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
 	if err := r.refresh(); err != nil {
 		slog.Error("initial gitops sync failed", "error", err)
 	} else {
-		r.snapshotPrincipals()
 		r.recordPrincipalKeyMetrics()
 	}
 
@@ -327,7 +326,6 @@ func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
 			if err := r.refresh(); err != nil {
 				slog.Error("gitops refresh failed", "error", err)
 			} else {
-				r.snapshotPrincipals()
 				r.recordPrincipalKeyMetrics()
 			}
 		}
@@ -463,6 +461,12 @@ func (r *Reader) refresh() error {
 
 	synced := time.Now()
 	r.lastSync.Store(synced.UnixNano())
+	// The principal snapshot of this sync becomes visible with it, while
+	// the write lock is still held: no request sees the new lastSync
+	// without it and has to build one itself.
+	if s := r.snapshotPrincipalsLocked(); s.cacheable() {
+		r.principals.Store(s)
+	}
 	if head, err := r.gitOutput(sshEnv, "rev-parse", "--short", "HEAD"); err == nil {
 		slog.Info("gitops refreshed",
 			"branch", r.branch,

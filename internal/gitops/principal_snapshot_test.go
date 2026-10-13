@@ -15,8 +15,9 @@
 package gitops
 
 import (
-	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -25,15 +26,24 @@ import (
 
 // withinDeadline runs read and fails the test if it does not return
 // promptly: a principal-keyed read that waited for the checkout would hang
-// here rather than answer.
-func withinDeadline(t *testing.T, what string, read func()) {
+// here rather than answer. read reports through errorf, never t: a read
+// still blocked when the test returns must not log afterwards, which the
+// testing package turns into a panic that hides this failure.
+func withinDeadline(t *testing.T, what string, read func(errorf func(string, ...any))) {
 	t.Helper()
+	var errs []string
 	done := make(chan struct{})
-	go func() { defer close(done); read() }()
+	go func() {
+		defer close(done)
+		read(func(format string, args ...any) { errs = append(errs, fmt.Sprintf(format, args...)) })
+	}()
 	select {
 	case <-done:
+		for _, e := range errs {
+			t.Error(e)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatalf("%s waited for the checkout", what)
+		t.Errorf("%s waited for the checkout", what)
 	}
 }
 
@@ -42,26 +52,26 @@ func withinDeadline(t *testing.T, what string, read func()) {
 func TestPrincipalReadsNeverWaitForARefresh(t *testing.T) {
 	dir, r := syncedRepo(t)
 	writeTenantYAML(t, dir, "acme", keyedAcmeYAML)
-	r.snapshotPrincipals()
+	r.principalView() // the snapshot of this sync
 
 	r.mu.Lock() // a refresh in progress
 	defer r.mu.Unlock()
-	withinDeadline(t, "NamespacesForPrincipal", func() {
+	withinDeadline(t, "NamespacesForPrincipal", func(errorf func(string, ...any)) {
 		m, err := r.NamespacesForPrincipal(prnBob)
 		if err != nil || !reflect.DeepEqual(m.Namespaces, []string{"acme-web"}) {
-			t.Errorf("NamespacesForPrincipal = %+v, %v; want [acme-web]", m, err)
+			errorf("NamespacesForPrincipal = %+v, %v; want [acme-web]", m, err)
 		}
 	})
-	withinDeadline(t, "TryNamespacesForPrincipal", func() {
+	withinDeadline(t, "TryNamespacesForPrincipal", func(errorf func(string, ...any)) {
 		m, ok, err := r.TryNamespacesForPrincipal(prnBob)
 		if !ok || err != nil || !reflect.DeepEqual(m.Namespaces, []string{"acme-web"}) {
-			t.Errorf("TryNamespacesForPrincipal = %+v, %v, %v; want [acme-web]", m, ok, err)
+			errorf("TryNamespacesForPrincipal = %+v, %v, %v; want [acme-web]", m, ok, err)
 		}
 	})
-	withinDeadline(t, "MemberRolesForPrincipal", func() {
+	withinDeadline(t, "MemberRolesForPrincipal", func(errorf func(string, ...any)) {
 		roles, err := r.MemberRolesForPrincipal("acme-web", prnBob)
 		if err != nil || !reflect.DeepEqual(roles, [][]string{{"developer"}}) {
-			t.Errorf("MemberRolesForPrincipal = %q, %v; want [[developer]]", roles, err)
+			errorf("MemberRolesForPrincipal = %q, %v; want [[developer]]", roles, err)
 		}
 	})
 }
@@ -74,15 +84,15 @@ func TestPrincipalReadsWithoutASnapshotAreNotObserved(t *testing.T) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	withinDeadline(t, "reads", func() {
+	withinDeadline(t, "reads", func(errorf func(string, ...any)) {
 		if _, ok, err := r.TryNamespacesForPrincipal(prnBob); ok || err != nil {
-			t.Errorf("TryNamespacesForPrincipal answered: %v, %v", ok, err)
+			errorf("TryNamespacesForPrincipal answered: %v, %v", ok, err)
 		}
 		if _, err := r.NamespacesForPrincipal(prnBob); !errors.Is(err, errMembershipNotObserved) {
-			t.Errorf("NamespacesForPrincipal: %v, want not observed", err)
+			errorf("NamespacesForPrincipal: %v, want not observed", err)
 		}
 		if _, err := r.MemberRolesForPrincipal("acme-web", prnBob); !errors.Is(err, errMembershipNotObserved) {
-			t.Errorf("MemberRolesForPrincipal: %v, want not observed", err)
+			errorf("MemberRolesForPrincipal: %v, want not observed", err)
 		}
 	})
 }
@@ -111,19 +121,20 @@ func TestPrincipalSnapshotFollowsTheSync(t *testing.T) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lastSync.Store(time.Now().UnixNano())
-	withinDeadline(t, "reads", func() {
+	withinDeadline(t, "reads", func(errorf func(string, ...any)) {
 		if _, err := r.NamespacesForPrincipal(prnNone); err == nil {
-			t.Error("a stale snapshot answered for a later sync")
+			errorf("a stale snapshot answered for a later sync")
 		}
 		if _, err := r.MemberRolesForPrincipal("beta", prnNone); err == nil {
-			t.Error("a stale snapshot answered roles for a later sync")
+			errorf("a stale snapshot answered roles for a later sync")
 		}
 	})
 }
 
-// RefreshLoop builds the snapshot right after a successful sync, so a
-// request arriving during the next refresh still has one to answer from.
-func TestRefreshLoopBuildsThePrincipalSnapshot(t *testing.T) {
+// refresh builds the snapshot of its sync before releasing the checkout,
+// so a request arriving during the next refresh still has one to answer
+// from, and none has to build one for the new sync.
+func TestRefreshBuildsThePrincipalSnapshot(t *testing.T) {
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")
 	work := filepath.Join(root, "work")
@@ -137,9 +148,9 @@ func TestRefreshLoopBuildsThePrincipalSnapshot(t *testing.T) {
 	runGit(t, work, "push", "origin", "main")
 
 	r := &Reader{repoURL: remote, branch: "main", localPath: filepath.Join(root, "cache")}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // the initial sync only
-	r.RefreshLoop(ctx, time.Hour)
+	if err := r.refresh(); err != nil {
+		t.Fatal(err)
+	}
 
 	s := r.principals.Load()
 	if s == nil || s.syncedAt != r.lastSync.Load() || s.syncedAt == 0 {
@@ -147,9 +158,74 @@ func TestRefreshLoopBuildsThePrincipalSnapshot(t *testing.T) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	withinDeadline(t, "NamespacesForPrincipal", func() {
+	withinDeadline(t, "NamespacesForPrincipal", func(errorf func(string, ...any)) {
 		if m, err := r.NamespacesForPrincipal(prnBob); err != nil || !reflect.DeepEqual(m.Namespaces, []string{"acme-web"}) {
-			t.Errorf("got %+v, %v; want [acme-web]", m, err)
+			errorf("got %+v, %v; want [acme-web]", m, err)
 		}
 	})
+}
+
+// A read error that may be transient is not kept until the next sync: the
+// next read builds again and answers.
+func TestPrincipalSnapshotDoesNotKeepAnIOError(t *testing.T) {
+	t.Run("listing", func(t *testing.T) {
+		dir, r := syncedRepo(t)
+		tenants := filepath.Join(dir, "platform-gitops", "tenants")
+		if err := os.RemoveAll(tenants); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.NamespacesForPrincipal(prnBob); err == nil {
+			t.Fatal("an unlistable tenants dir answered")
+		}
+		writeTenantYAML(t, dir, "acme", keyedAcmeYAML) // same sync
+		if m, err := r.NamespacesForPrincipal(prnBob); err != nil || !reflect.DeepEqual(m.Namespaces, []string{"acme-web"}) {
+			t.Fatalf("listing error kept: %+v, %v", m, err)
+		}
+	})
+	t.Run("tenant file", func(t *testing.T) {
+		dir, r := syncedRepo(t)
+		writeTenantYAML(t, dir, "acme", keyedAcmeYAML)
+		values := filepath.Join(dir, "platform-gitops", "tenants", "acme", "values.yaml")
+		if err := os.Chmod(values, 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.MemberRolesForPrincipal("acme-web", prnBob); err == nil {
+			t.Skip("values.yaml readable at mode 0 (running as root)")
+		}
+		if err := os.Chmod(values, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if roles, err := r.MemberRolesForPrincipal("acme-web", prnBob); err != nil || !reflect.DeepEqual(roles, [][]string{{"developer"}}) {
+			t.Fatalf("read error kept: %q, %v", roles, err)
+		}
+	})
+	t.Run("parse error is kept", func(t *testing.T) {
+		dir, r := syncedRepo(t)
+		writeTenantYAML(t, dir, "acme", "tenant: [")
+		if _, err := r.MemberRolesForPrincipal("acme-web", prnBob); err == nil {
+			t.Fatal("an unparsable tenant answered")
+		}
+		if s := r.principals.Load(); s == nil || s.syncedAt != r.lastSync.Load() {
+			t.Fatal("a snapshot with only a parse error was not kept")
+		}
+	})
+}
+
+// A request-path build never replaces a snapshot stored after the one it
+// started from: that one is from a newer sync.
+func TestOfferSnapshotKeepsANewerOne(t *testing.T) {
+	_, r := syncedRepo(t)
+	seen := &principalSnapshot{syncedAt: 1}
+	newer := &principalSnapshot{syncedAt: 3}
+	r.principals.Store(newer)
+	r.offerSnapshot(seen, &principalSnapshot{syncedAt: 2})
+	if got := r.principals.Load(); got != newer {
+		t.Fatalf("an older snapshot replaced a newer one: %+v", got)
+	}
+	r.principals.Store(seen)
+	fresh := &principalSnapshot{syncedAt: 2}
+	r.offerSnapshot(seen, fresh)
+	if got := r.principals.Load(); got != fresh {
+		t.Fatalf("the snapshot it started from was not replaced: %+v", got)
+	}
 }
