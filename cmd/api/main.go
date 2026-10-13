@@ -915,8 +915,6 @@ func main() {
 		QuotaReader:                    quotaReader,
 		LogQuerier:                     logQuerier,
 		WorkflowLogArchive:             workflowLogArchive,
-		BackstageURL:                   cfg.BackstageURL,
-		BackstageToken:                 cfg.BackstageToken,
 		BackstageInternalURL:           cfg.BackstageInternalURL,
 		BackstageGithubAppConnectToken: cfg.BackstageGithubAppConnectToken,
 		AllowedOrigins:                 cfg.AllowedOrigins,
@@ -1145,14 +1143,9 @@ type config struct {
 	ErpactDeployerURL    string
 	GitHubOrg            string
 	AdminUsers           []string
-	BackstageURL         string
-	BackstageToken       string
 	BackstageInternalURL string
 	// BackstageGithubAppConnectToken authorizes calls to Backstage's
-	// github-app-connect plugin (repos list/sync/install-url), scoped
-	// separately from BackstageToken (which now only authorizes
-	// notifyBackstage's tenant catalog sync) so the two credentials can be
-	// rotated and leaked independently of each other.
+	// github-app-connect plugin (repos list/sync/install-url).
 	BackstageGithubAppConnectToken string
 	// PlatformDomain is the platform's own domain (e.g. "mctl.ai"). Custom
 	// domain registration rejects any hostname equal to or ending in
@@ -1311,8 +1304,6 @@ func loadConfig() config {
 		ArgoCDToken:                    os.Getenv("ARGOCD_TOKEN"),
 		GitHubOrg:                      envOr("GITHUB_ORG", "mctlhq"),
 		AdminUsers:                     adminList,
-		BackstageURL:                   os.Getenv("BACKSTAGE_URL"),
-		BackstageToken:                 os.Getenv("BACKSTAGE_TOKEN"),
 		BackstageInternalURL:           envOr("BACKSTAGE_INTERNAL_URL", "http://backstage.backstage.svc.cluster.local:7007"),
 		PlatformDomain:                 envOr("PLATFORM_DOMAIN", "mctl.ai"),
 		DNSResolverAddr:                envOr("DNS_RESOLVER_ADDR", "1.1.1.1:53"),

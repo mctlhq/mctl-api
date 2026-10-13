@@ -280,6 +280,20 @@ sent and the owner entry gets a login only. mctl-gitops CI
 (`scripts/validate-tenant-member-keys.py`) then fails on that entry, as it
 does on any member without a well-formed `principalId`.
 
+The portal creates tenants without going through mctl-api: its `POST
+/tenants` (the mctl.me signup form, the portal's own page, the Backstage
+scaffolder) submits `create-tenant` itself and knows the creator only by
+GitHub login. Before it does, it asks for the principal with `POST
+/api/v1/surface-principals/github`, sending its surface token and
+`X-MCTL-Surface-Actor: github:<login>` with no body. The route answers
+`{"principalId": "prn_..."}`. It resolves the login the way a first sign-in
+would: through the live GitHub identity that holds it, else GitHub's numeric
+id, provisioning a principal if there is none. Only the portal surface may
+call it (`403 portal_surface_required`). A disabled or refused identity is
+`403`, and any other failure is `503`, never an empty answer. Each
+resolution is audited as `principal.resolve_github`. This confers nothing
+new: the portal could already make any login the owner of a new tenant.
+
 ### `TENANT_AUTHZ_MODE`
 
 | Value | Decides | Also |

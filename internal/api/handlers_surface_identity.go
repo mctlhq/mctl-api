@@ -80,6 +80,9 @@ type surfaceRoute struct {
 // relay capability, not an API key. Relay is opt-in per route, here.
 var surfaceRoutes = []surfaceRoute{
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-identities/redeem$`), false},
+	// The portal surface resolves a tenant creator's GitHub login to a
+	// principal (mctl-api#377); the handler refuses every other surface.
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-principals/github$`), false},
 	// Human input (mctl-api#261): see and answer what the linked human may.
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/human-input$`), true},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/human-input/[^/]+$`), true},

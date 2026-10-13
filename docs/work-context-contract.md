@@ -482,6 +482,7 @@ is no generic on-behalf-of: relay is opt-in per route.
 |---|---|---|
 | `POST /api/v1/surface-identities/challenges` | the human (GitHub login) | one-time code, 10 min, bound to the human and the surface; stored hashed |
 | `POST /api/v1/surface-identities/redeem` | that surface's principal | `{"code"}` + `X-MCTL-Surface-Actor: <external id>` → link |
+| `POST /api/v1/surface-principals/github` | `surface:portal` only | no body + `X-MCTL-Surface-Actor: github:<login>` → `{"principalId"}` |
 | `GET /api/v1/surface-identities`, `POST .../{id}/revoke` | the human, or a human admin | |
 
 On a relay route the surface principal names the end user in

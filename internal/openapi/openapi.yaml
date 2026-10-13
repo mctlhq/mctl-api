@@ -3184,6 +3184,35 @@ paths:
         '400': {description: Invalid body or X-MCTL-Surface-Actor}
         '403': {description: Not a surface principal, or challenge unknown, used, expired or for another surface}
         '409': {description: The identity is linked to another principal}
+  /api/v1/surface-principals/github:
+    post:
+      summary: Resolve a GitHub login to its canonical principal
+      description: |
+        Only `surface:portal`. The portal calls it before it submits
+        create-tenant itself, to key the new tenant's owner entry
+        (mctl-api#377). Resolves the login named in `X-MCTL-Surface-Actor`
+        the way a first sign-in would, provisioning a principal if there is
+        none. The body names nobody: send none, or `{}`.
+      tags: [Surface Identity]
+      parameters:
+        - name: X-MCTL-Surface-Actor
+          in: header
+          required: true
+          schema: {type: string, pattern: '^github:[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9]){0,38}$'}
+          description: '`github:<login>` of the tenant creator'
+      responses:
+        '200':
+          description: The principal
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [principalId]
+                properties:
+                  principalId: {type: string, pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$'}
+        '400': {description: Missing or malformed X-MCTL-Surface-Actor, or a body with fields}
+        '403': {description: Not the portal surface (portal_surface_required), or the identity is disabled or refused}
+        '503': {description: The principal could not be resolved right now}
   /api/v1/surface-identities:
     get:
       summary: List the caller's surface identity links
