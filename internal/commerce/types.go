@@ -754,6 +754,12 @@ const (
 	AllocationStateReleased = "released"
 )
 
+// Entitlement statuses.
+const (
+	EntitlementStatusActive  = "active"
+	EntitlementStatusRetired = "retired"
+)
+
 // Entitlement represents a purchased finite service package of capability executions
 // backed by an external verified invoice payment.
 type Entitlement struct {
@@ -767,6 +773,7 @@ type Entitlement struct {
 	PaymentStatus  string    `json:"payment_status"`
 	GrantedBy      string    `json:"granted_by"`
 	Reason         string    `json:"reason,omitempty"`
+	Status         string    `json:"status"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`

@@ -52,6 +52,21 @@ func TestEntitlementGrantAndList(t *testing.T) {
 	capID := testCapability(t) + "/grant"
 	expires := time.Now().Add(30 * 24 * time.Hour).UTC().Truncate(time.Second)
 
+	// Unknown capability fails with ErrTermsNotFound
+	_, err := s.GrantEntitlement(ctx, GrantEntitlementInput{
+		TenantID:     tenant,
+		CapabilityID: capID,
+		Units:        50,
+		InvoiceRef:   "INV-2026-TEST",
+		ExpiresAt:    expires,
+		Actor:        "prn_admin",
+	})
+	if !errors.Is(err, ErrTermsNotFound) {
+		t.Fatalf("grant without terms: want ErrTermsNotFound, got %v", err)
+	}
+
+	publish(t, s, capID, PriceModePerCall, 10)
+
 	// Valid grant
 	ent, err := s.GrantEntitlement(ctx, GrantEntitlementInput{
 		TenantID:     tenant,
@@ -65,8 +80,8 @@ func TestEntitlementGrantAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GrantEntitlement: %v", err)
 	}
-	if ent.TotalUnits != 50 || ent.RemainingUnits != 50 || ent.ReservedUnits != 0 {
-		t.Fatalf("units mismatch: %+v", ent)
+	if ent.TotalUnits != 50 || ent.RemainingUnits != 50 || ent.ReservedUnits != 0 || ent.Status != EntitlementStatusActive {
+		t.Fatalf("units/status mismatch: %+v", ent)
 	}
 	if ent.PaymentStatus != "paid" || ent.InvoiceRef != "INV-2026-TEST" || ent.GrantedBy != "prn_admin" || ent.Reason != "Paid Capability Alpha pilot" {
 		t.Fatalf("metadata mismatch: %+v", ent)
@@ -353,5 +368,178 @@ func TestEntitlementUnknownHoldDeniedRelease(t *testing.T) {
 	curEnt, err = s.GetEntitlement(ctx, tenant, ent.EntitlementID)
 	if err != nil || curEnt.RemainingUnits != 1 || curEnt.ReservedUnits != 0 {
 		t.Fatalf("after denied resolution: remaining=%d, reserved=%d (want 1, 0)", curEnt.RemainingUnits, curEnt.ReservedUnits)
+	}
+}
+
+func TestEntitlementRetire(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t)
+	otherTenant := testTenant(t) + "-other"
+	capID := testCapability(t) + "/retire"
+	expires := time.Now().Add(30 * 24 * time.Hour).UTC().Truncate(time.Second)
+
+	publish(t, s, capID, PriceModePerCall, 10)
+
+	ent, err := s.GrantEntitlement(ctx, GrantEntitlementInput{
+		TenantID:     tenant,
+		CapabilityID: capID,
+		Units:        10,
+		InvoiceRef:   "INV-RETIRE-01",
+		ExpiresAt:    expires,
+		Actor:        "prn_admin",
+	})
+	if err != nil {
+		t.Fatalf("GrantEntitlement: %v", err)
+	}
+	if ent.Status != EntitlementStatusActive {
+		t.Fatalf("status: want active, got %s", ent.Status)
+	}
+
+	// Retire entitlement
+	retired, err := s.RetireEntitlement(ctx, tenant, ent.EntitlementID)
+	if err != nil {
+		t.Fatalf("RetireEntitlement: %v", err)
+	}
+	if retired.Status != EntitlementStatusRetired {
+		t.Fatalf("retired status: want retired, got %s", retired.Status)
+	}
+
+	// Idempotent retire
+	retiredAgain, err := s.RetireEntitlement(ctx, tenant, ent.EntitlementID)
+	if err != nil {
+		t.Fatalf("RetireEntitlement retry: %v", err)
+	}
+	if retiredAgain.Status != EntitlementStatusRetired {
+		t.Fatalf("retired retry status: want retired, got %s", retiredAgain.Status)
+	}
+
+	// Cross-tenant retire returns not found
+	_, err = s.RetireEntitlement(ctx, otherTenant, ent.EntitlementID)
+	if !errors.Is(err, ErrEntitlementNotFound) {
+		t.Fatalf("cross-tenant retire: want ErrEntitlementNotFound, got %v", err)
+	}
+
+	// Unknown entitlement returns not found
+	_, err = s.RetireEntitlement(ctx, tenant, "ent_00000000000000000000000000")
+	if !errors.Is(err, ErrEntitlementNotFound) {
+		t.Fatalf("unknown retire: want ErrEntitlementNotFound, got %v", err)
+	}
+}
+
+func TestEntitlementMultiPackageFIFODepletion(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t)
+	capID := testCapability(t) + "/multi-pkg"
+	publish(t, s, capID, PriceModePerCall, 10)
+	setBudget(t, s, tenant, 100, 50)
+
+	finalize := func(invID string) {
+		dispatch(t, s, tenant, invID)
+		_, err := s.Finalize(ctx, FinalizeInput{
+			TenantID:         tenant,
+			InvocationID:     invID,
+			ExecutionOutcome: OutcomeSucceeded,
+			Actor:            "prn_gateway",
+		})
+		if err != nil {
+			t.Fatalf("finalize %s: %v", invID, err)
+		}
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	// Package 1: 2 units, earlier expiry (+10h)
+	pkg1, err := s.GrantEntitlement(ctx, GrantEntitlementInput{
+		TenantID:     tenant,
+		CapabilityID: capID,
+		Units:        2,
+		InvoiceRef:   "INV-PKG-1",
+		ExpiresAt:    now.Add(10 * time.Hour),
+		Actor:        "prn_admin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Package 2: 3 units, later expiry (+20h)
+	pkg2, err := s.GrantEntitlement(ctx, GrantEntitlementInput{
+		TenantID:     tenant,
+		CapabilityID: capID,
+		Units:        3,
+		InvoiceRef:   "INV-PKG-2",
+		ExpiresAt:    now.Add(20 * time.Hour),
+		Actor:        "prn_admin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Consume 2 units: should both come from Package 1 (FIFO by expires_at)
+	inv1 := acceptOne(t, s, capID, tenant, "k1")
+	reserve(t, s, tenant, inv1.InvocationID)
+	inv2 := acceptOne(t, s, capID, tenant, "k2")
+	reserve(t, s, tenant, inv2.InvocationID)
+
+	p1, _ := s.GetEntitlement(ctx, tenant, pkg1.EntitlementID)
+	p2, _ := s.GetEntitlement(ctx, tenant, pkg2.EntitlementID)
+	if p1.RemainingUnits != 0 || p1.ReservedUnits != 2 {
+		t.Fatalf("pkg1 after 2 reserves: %+v", p1)
+	}
+	if p2.RemainingUnits != 3 || p2.ReservedUnits != 0 {
+		t.Fatalf("pkg2 untouched: %+v", p2)
+	}
+
+	// Finalize both to free reservations
+	finalize(inv1.InvocationID)
+	finalize(inv2.InvocationID)
+
+	// 2. Consume 3rd unit: Package 1 is exhausted, should roll over to Package 2 seamlessly
+	inv3 := acceptOne(t, s, capID, tenant, "k3")
+	reserve(t, s, tenant, inv3.InvocationID)
+
+	p1, _ = s.GetEntitlement(ctx, tenant, pkg1.EntitlementID)
+	p2, _ = s.GetEntitlement(ctx, tenant, pkg2.EntitlementID)
+	if p1.RemainingUnits != 0 || p1.ReservedUnits != 0 {
+		t.Fatalf("pkg1 after rollover: %+v", p1)
+	}
+	if p2.RemainingUnits != 2 || p2.ReservedUnits != 1 {
+		t.Fatalf("pkg2 drawn: %+v", p2)
+	}
+	finalize(inv3.InvocationID)
+
+	// 3. Consume remaining 2 units of Package 2
+	inv4 := acceptOne(t, s, capID, tenant, "k4")
+	reserve(t, s, tenant, inv4.InvocationID)
+	inv5 := acceptOne(t, s, capID, tenant, "k5")
+	reserve(t, s, tenant, inv5.InvocationID)
+	finalize(inv4.InvocationID)
+	finalize(inv5.InvocationID)
+
+	// 4. Both packages exhausted: next reservation refused
+	inv6 := acceptOne(t, s, capID, tenant, "k6")
+	res6, err := s.Reserve(ctx, ReserveInput{TenantID: tenant, InvocationID: inv6.InvocationID, Actor: "prn_gateway"})
+	if !errors.Is(err, ErrEntitlementExhausted) {
+		t.Fatalf("want ErrEntitlementExhausted, got %v", err)
+	}
+	if res6.Invocation.ReasonCode != ReasonEntitlementExhausted {
+		t.Fatalf("reason code: want %s, got %s", ReasonEntitlementExhausted, res6.Invocation.ReasonCode)
+	}
+
+	// 5. Admin retires both exhausted packages: tenant seamlessly falls back to standard currency budget
+	_, err = s.RetireEntitlement(ctx, tenant, pkg1.EntitlementID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.RetireEntitlement(ctx, tenant, pkg2.EntitlementID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Next reservation succeeds under standard budget
+	inv7 := acceptOne(t, s, capID, tenant, "k7")
+	res7 := reserve(t, s, tenant, inv7.InvocationID)
+	if res7.Reservation == nil || res7.Reservation.AmountMinor != 10 {
+		t.Fatalf("fallback reservation under budget: %+v", res7)
 	}
 }

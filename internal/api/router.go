@@ -795,6 +795,8 @@ func NewRouter(opts Options) http.Handler {
 					r.Post("/entitlements", h.GrantCommerceEntitlement)
 					r.Get("/entitlements", h.ListCommerceEntitlements)
 					r.Get("/entitlements/{entitlement_id}", h.GetCommerceEntitlement)
+					r.Post("/entitlements/{entitlement_id}/retire", h.RetireCommerceEntitlement)
+					r.Delete("/entitlements/{entitlement_id}", h.RetireCommerceEntitlement)
 					r.Post("/quotes", h.MintCommerceQuote)
 					r.Get("/quotes/{quote_id}", h.GetCommerceQuote)
 					r.Post("/invocations", h.AcceptCommerceInvocation)

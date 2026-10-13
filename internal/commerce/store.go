@@ -276,6 +276,7 @@ CREATE TABLE IF NOT EXISTS commerce_entitlements (
     payment_status   TEXT        NOT NULL,
     granted_by       TEXT        NOT NULL,
     reason           TEXT        NOT NULL DEFAULT '',
+    status           TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'retired')),
     expires_at       TIMESTAMPTZ NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -286,6 +287,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS commerce_entitlements_invoice
     ON commerce_entitlements (tenant_id, invoice_ref);
 ALTER TABLE commerce_entitlements ADD COLUMN IF NOT EXISTS granted_by TEXT NOT NULL DEFAULT '';
 ALTER TABLE commerce_entitlements ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE commerce_entitlements ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
 
 CREATE TABLE IF NOT EXISTS commerce_entitlement_allocations (
     allocation_id   TEXT        PRIMARY KEY,
@@ -1079,12 +1081,12 @@ func (s *Store) ListOverdue(ctx context.Context, limit int) ([]Invocation, error
 	return out, nil
 }
 
-const entitlementColumns = `entitlement_id, tenant_id, capability_id, total_units, remaining_units, reserved_units, invoice_ref, payment_status, granted_by, reason, expires_at, created_at, updated_at`
+const entitlementColumns = `entitlement_id, tenant_id, capability_id, total_units, remaining_units, reserved_units, invoice_ref, payment_status, granted_by, reason, status, expires_at, created_at, updated_at`
 
 func scanEntitlement(row pgx.Row) (*Entitlement, error) {
 	var e Entitlement
 	err := row.Scan(&e.EntitlementID, &e.TenantID, &e.CapabilityID, &e.TotalUnits, &e.RemainingUnits, &e.ReservedUnits,
-		&e.InvoiceRef, &e.PaymentStatus, &e.GrantedBy, &e.Reason, &e.ExpiresAt, &e.CreatedAt, &e.UpdatedAt)
+		&e.InvoiceRef, &e.PaymentStatus, &e.GrantedBy, &e.Reason, &e.Status, &e.ExpiresAt, &e.CreatedAt, &e.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1097,13 +1099,21 @@ func (s *Store) GrantEntitlement(ctx context.Context, in GrantEntitlementInput) 
 	if err := in.validate(now); err != nil {
 		return nil, err
 	}
+	var exists bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM commerce_terms WHERE capability_id = $1)`, in.CapabilityID).Scan(&exists)
+	if err != nil {
+		return nil, fmt.Errorf("commerce: check capability terms: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: capability %s has no commerce terms", ErrTermsNotFound, in.CapabilityID)
+	}
 	id, err := newULID(now)
 	if err != nil {
 		return nil, fmt.Errorf("commerce: generate entitlement ulid: %w", err)
 	}
 	entID := EntitlementIDPrefix + id
 	row := s.pool.QueryRow(ctx, `INSERT INTO commerce_entitlements (`+entitlementColumns+`)
-		VALUES ($1, $2, $3, $4, $4, 0, $5, 'paid', $6, $7, $8, $9, $9)
+		VALUES ($1, $2, $3, $4, $4, 0, $5, 'paid', $6, $7, 'active', $8, $9, $9)
 		RETURNING `+entitlementColumns,
 		entID, in.TenantID, in.CapabilityID, in.Units, in.InvoiceRef, in.Actor, in.Reason, in.ExpiresAt, now)
 	ent, err := scanEntitlement(row)
@@ -1114,6 +1124,36 @@ func (s *Store) GrantEntitlement(ctx context.Context, in GrantEntitlementInput) 
 		return nil, fmt.Errorf("commerce: grant entitlement: %w", err)
 	}
 	return ent, nil
+}
+
+// RetireEntitlement marks an active entitlement retired.
+func (s *Store) RetireEntitlement(ctx context.Context, tenantID, entitlementID string) (*Entitlement, error) {
+	if err := checkText("tenant_id", tenantID, MaxIDBytes, true); err != nil {
+		return nil, err
+	}
+	if err := checkText("entitlement_id", entitlementID, MaxIDBytes, true); err != nil {
+		return nil, err
+	}
+	now := s.now()
+	row := s.pool.QueryRow(ctx, `UPDATE commerce_entitlements
+		SET status = 'retired', updated_at = $3
+		WHERE tenant_id = $1 AND entitlement_id = $2 AND status = 'active'
+		RETURNING `+entitlementColumns,
+		tenantID, entitlementID, now)
+	e, err := scanEntitlement(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var exists bool
+		_ = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM commerce_entitlements WHERE tenant_id = $1 AND entitlement_id = $2)`,
+			tenantID, entitlementID).Scan(&exists)
+		if !exists {
+			return nil, fmt.Errorf("%w: entitlement %s", ErrEntitlementNotFound, entitlementID)
+		}
+		return s.GetEntitlement(ctx, tenantID, entitlementID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("commerce: retire entitlement: %w", err)
+	}
+	return e, nil
 }
 
 // ListEntitlements returns all entitlements of one tenant.

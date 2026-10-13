@@ -1189,7 +1189,7 @@ components:
           enum: [invalid-request, identity-unresolved, commerce-terms-unknown, quote-expired, quote-stale,
                  quote-mismatch, idempotency-conflict, funds-mode-unavailable, phase-conflict, terms-retired,
                  budget-exhausted, currency-mismatch, payment-denied, payment-unknown, policy-denied,
-                 dispatch-unavailable]
+                 dispatch-unavailable, entitlement-exhausted, entitlement-expired, entitlement-conflict]
     CommerceBudget:
       type: object
       description: |
@@ -1261,6 +1261,25 @@ components:
         authorization_id: {type: string}
         capture_id: {type: string}
         deadline: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CommerceEntitlement:
+      type: object
+      description: |
+        A tenant's prepaid service package of capability execution units (mctl-api#614).
+      properties:
+        entitlement_id: {type: string}
+        tenant_id: {type: string}
+        capability_id: {type: string}
+        total_units: {type: integer, format: int64}
+        remaining_units: {type: integer, format: int64}
+        reserved_units: {type: integer, format: int64}
+        invoice_ref: {type: string}
+        payment_status: {type: string, enum: [paid]}
+        granted_by: {type: string}
+        reason: {type: string}
+        status: {type: string, enum: [active, retired]}
+        expires_at: {type: string, format: date-time}
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
     CommerceMoneyResult:
@@ -4692,6 +4711,98 @@ paths:
                   invocations: {type: array, items: {$ref: '#/components/schemas/CommerceInvocation'}}
         '401': {description: Authentication required}
         '403': {description: Not a platform admin}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/tenants/{tenant}/entitlements:
+    post:
+      summary: Grant a finite prepaid service entitlement package
+      description: |
+        Platform admin only. Grants a prepaid package of execution units for a capability,
+        backed by a verified external invoice.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                capability_id: {type: string}
+                units: {type: integer, format: int64, minimum: 1}
+                invoice_ref: {type: string}
+                expires_at: {type: string, format: date-time}
+                reason: {type: string}
+              required: [capability_id, units, invoice_ref, expires_at]
+      responses:
+        '201': {description: Entitlement granted, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceEntitlement'}}}}
+        '400': {description: Invalid body or timestamp, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '409': {description: Invoice reference already granted to this tenant, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '422': {description: Capability has no commerce terms, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
+        '503': {description: Commerce ledger not configured}
+    get:
+      summary: List entitlements of a tenant
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: List of entitlements
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entitlements: {type: array, items: {$ref: '#/components/schemas/CommerceEntitlement'}}
+        '401': {description: Authentication required}
+        '403': {description: Below tenant role or no canonical principal}
+        '404': {description: No access to tenant}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/tenants/{tenant}/entitlements/{entitlement_id}:
+    get:
+      summary: Get one entitlement by ID
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: entitlement_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: The entitlement, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceEntitlement'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Below tenant role or no canonical principal}
+        '404': {description: Entitlement not found in tenant}
+        '503': {description: Commerce ledger not configured}
+    delete:
+      summary: Retire an entitlement package
+      description: Platform admin only. Marks the entitlement status as retired.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: entitlement_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Entitlement retired, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceEntitlement'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '404': {description: Entitlement not found in tenant}
+        '503': {description: Commerce ledger not configured}
+
+  /api/v1/commerce/tenants/{tenant}/entitlements/{entitlement_id}/retire:
+    post:
+      summary: Retire an entitlement package
+      description: Platform admin only. Marks the entitlement status as retired.
+      tags: [Commerce]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: entitlement_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Entitlement retired, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceEntitlement'}}}}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin}
+        '404': {description: Entitlement not found in tenant}
         '503': {description: Commerce ledger not configured}
 
   /api/v1/commerce/tenants/{tenant}/quotes:

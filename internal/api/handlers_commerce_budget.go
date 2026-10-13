@@ -463,3 +463,31 @@ func (h *Handlers) GetCommerceEntitlement(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, http.StatusOK, ent)
 }
+
+// RetireCommerceEntitlement marks an active entitlement retired. Admin-only.
+func (h *Handlers) RetireCommerceEntitlement(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireCommerceAdmin(w, r)
+	if !ok {
+		return
+	}
+	tenant := normalizeIdentifier(chi.URLParam(r, "tenant"))
+	if tenant == "" {
+		writeError(w, http.StatusBadRequest, "tenant is required")
+		return
+	}
+	entID := chi.URLParam(r, "entitlement_id")
+	params := map[string]string{
+		"tenant":         tenant,
+		"entitlement_id": entID,
+	}
+	ent, err := h.opts.Commerce.RetireEntitlement(r.Context(), tenant, entID)
+	if err != nil {
+		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: "commerce-entitlement-retire", Status: "failed",
+			RiskLevel: string(operations.RiskHigh), Parameters: params, Message: err.Error()})
+		writeCommerceError(w, err)
+		return
+	}
+	h.logAudit(r, audit.Entry{UserID: user.ID, Operation: "commerce-entitlement-retire", Status: "succeeded",
+		RiskLevel: string(operations.RiskHigh), Parameters: params})
+	writeJSON(w, http.StatusOK, ent)
+}

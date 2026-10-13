@@ -886,7 +886,9 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 			case PaymentResultAuthorized:
 				payment, authorizationID = PaymentAuthorized, pr.ID
 			case PaymentResultDenied:
-				_ = s.releaseEntitlementUnit(ctx, tx, cur.InvocationID, now)
+				if err := s.releaseEntitlementUnit(ctx, tx, cur.InvocationID, now); err != nil {
+					return err
+				}
 				// Nothing was inserted yet: the denial commits no reservation
 				// (ADR 020 sec. 11).
 				return refuse(ReasonPaymentDenied, pr.Reason, ErrPaymentDenied)
@@ -1368,7 +1370,7 @@ func (s *Store) holdEntitlementUnit(ctx context.Context, tx pgx.Tx, tenantID, ca
 	var entID string
 	err := tx.QueryRow(ctx, `SELECT entitlement_id
 		FROM commerce_entitlements
-		WHERE tenant_id = $1 AND capability_id = $2 AND remaining_units > 0 AND expires_at > $3
+		WHERE tenant_id = $1 AND capability_id = $2 AND status = 'active' AND remaining_units > 0 AND expires_at > $3
 		ORDER BY expires_at ASC LIMIT 1 FOR UPDATE`,
 		tenantID, capabilityID, now).Scan(&entID)
 	if err == nil {
@@ -1395,22 +1397,22 @@ func (s *Store) holdEntitlementUnit(ctx context.Context, tx pgx.Tx, tenantID, ca
 		return fmt.Errorf("commerce: check entitlement: %w", err)
 	}
 
-	// No active units found. Check whether this tenant has entitlements for this capability.
-	// 1. Never configured: totalPackages == 0 -> return nil (fall back to currency budget)
+	// No active units found. Check whether this tenant has active entitlements for this capability.
+	// 1. Never configured or all retired: activePackages == 0 -> return nil (fall back to currency budget)
 	// 2. Active package exists (expires_at > now) but all units consumed -> ErrEntitlementExhausted
-	// 3. All packages are expired (expires_at <= now) -> ErrEntitlementExpired
-	var totalPackages, activePackages int64
+	// 3. Active package exists but all active packages have expired (expires_at <= now) -> ErrEntitlementExpired
+	var activePackages, unexpiredPackages int64
 	err = tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE expires_at > $3)
 		FROM commerce_entitlements
-		WHERE tenant_id = $1 AND capability_id = $2`, tenantID, capabilityID, now).Scan(&totalPackages, &activePackages)
+		WHERE tenant_id = $1 AND capability_id = $2 AND status = 'active'`, tenantID, capabilityID, now).Scan(&activePackages, &unexpiredPackages)
 	if err != nil {
 		return fmt.Errorf("commerce: check entitlement count: %w", err)
 	}
-	if totalPackages == 0 {
-		// Not an entitlement-backed capability for this tenant.
+	if activePackages == 0 {
+		// Not an entitlement-backed capability for this tenant (or all packages retired).
 		return nil
 	}
-	if activePackages > 0 {
+	if unexpiredPackages > 0 {
 		return ErrEntitlementExhausted
 	}
 	return ErrEntitlementExpired
