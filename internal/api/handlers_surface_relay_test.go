@@ -582,3 +582,31 @@ func TestSurfaceRelay_WorkItemHistoryIsTheHumansReadOnlyView(t *testing.T) {
 		t.Errorf("relayed execution snapshot = %d %v", code, body)
 	}
 }
+
+// GET /identity/self through the router's surface gate (mctl-api#376 D3):
+// a relayed call answers with the surface as actor and the linked human as
+// subject, not a 403 surface_route_not_allowed.
+func TestSurfaceRelay_IdentitySelfNamesSurfaceAndHuman(t *testing.T) {
+	pr := &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE", "surface:telegram": "prn_SURFACE"}}
+	e := newSIDEnvWith(t, pr)
+	e.link("alice", "telegram", "4242")
+	// As auth.Middleware does for the surface's own token.
+	if err := auth.AttachPrincipal(context.Background(), pr, e.users["telegram"]); err != nil {
+		t.Fatal(err)
+	}
+	code, body := e.do("telegram", "GET", "/api/v1/identity/self", nil, SurfaceActorHeader, "4242")
+	if code != http.StatusOK {
+		t.Fatalf("relayed identity/self = %d %v", code, body)
+	}
+	actor, _ := body["actor"].(map[string]any)
+	subject, _ := body["subject"].(map[string]any)
+	if actor["kind"] != auth.KindService || actor["name"] != "surface:telegram" || actor["principal_id"] != "prn_SURFACE" {
+		t.Errorf("actor = %v, want the telegram surface", actor)
+	}
+	if subject["kind"] != auth.KindHuman || subject["name"] != "alice" || subject["principal_id"] != "prn_ALICE" {
+		t.Errorf("subject = %v, want alice", subject)
+	}
+	if body["grant"] != nil {
+		t.Errorf("grant = %v; a relay runs under no delegation grant", body["grant"])
+	}
+}

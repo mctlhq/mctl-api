@@ -68,6 +68,10 @@ var forbiddenIdentityFields = []string{
 	"actor", "actor_principal", "owner", "owner_principal", "created_by",
 	"on_behalf_of", "subject", "delegated_actor", "acting_principal", "user", "user_id",
 	"requested_by", "decided_by",
+	// The served actor/subject record (mctl-api#376 D1, D2): always derived
+	// from authentication, so a body naming one is refused, not ignored.
+	"actor_kind", "actor_name", "subject_principal_id", "subject_kind", "agent_run_id",
+	"requested_by_principal_id", "via_principal_id", "decided_by_principal_id", "decided_via_principal_id",
 }
 
 // refuseIdentityFields answers 400 when the raw body names any

@@ -922,7 +922,54 @@ components:
         reason: {type: string}
         consumed_at: {type: string, format: date-time}
         schema_version: {type: string, enum: [actionapproval/v1]}
+        requested_by_principal_id: {type: string, description: 'Canonical principal (prn_) of the requester, when it resolved (mctl-api#373, served since #376 D1). Absent on rows written before it was recorded.'}
+        via_principal_id: {type: string, description: Principal of the agent or surface that carried a delegated or relayed request}
+        decided_by_principal_id: {type: string, description: Canonical principal of the decider}
+        decided_via_principal_id: {type: string, description: Principal of the surface that relayed the decision}
+        actor_kind: {type: string, enum: [human, agent, service], description: 'Kind of the principal that authenticated the request (mctl-api#376 D2)'}
+        actor_name: {type: string, description: 'Agent name, service id or login of the actor', example: mctl-agent}
+        subject_principal_id: {type: string, description: 'Principal the request was made for when it was delegated or relayed; absent when the actor acted for itself'}
+        subject_kind: {type: string, enum: [human], description: Kind of the subject; absent when the actor acted for itself}
+        agent_run_id: {type: string, description: 'The agent run token (art_) the request was made with, if any', example: art_01M4QF0AJ9Y3C5V2KX7WQ4N8RT}
       required: [id, execution_id, action_kind, target, args_digest, policy_rule_id, policy_version, idempotency_key, requested_by, intent_hash, state, expires_at, created_at, schema_version]
+
+    IdentityParty:
+      type: object
+      description: One side of a request, resolved from authentication.
+      properties:
+        principal_id: {type: string, description: 'Canonical principal (prn_); empty when it could not be resolved'}
+        kind: {type: string, enum: [human, agent, service, '']}
+        name: {type: string, description: 'Agent name, service id, surface id or login'}
+      required: [principal_id, kind, name]
+
+    IdentitySelf:
+      type: object
+      description: |
+        Who the API resolved the caller to (mctl-api#376 D3). Every field is
+        derived from authentication and, for a delegated agent run, from the
+        grant the delegation gate resolved; nothing is read from the request.
+      properties:
+        schema_version: {type: string, enum: [identity/v1]}
+        actor: {$ref: '#/components/schemas/IdentityParty'}
+        subject:
+          description: |
+            The human the actor acts for on a delegated (X-MCTL-On-Behalf-Of)
+            or relayed request, and null otherwise -- never a copy of the
+            actor, so "acting for itself" is distinguishable.
+          nullable: true
+          allOf: [{$ref: '#/components/schemas/IdentityParty'}]
+        execution_id: {type: string, description: 'The execution an agent run token is bound to; empty for every other caller'}
+        work_item_id: {type: string, description: 'The work item an agent run token is bound to; empty for every other caller'}
+        agent_run_id: {type: string, description: 'The agent run token (art_) in use; empty for every other caller'}
+        grant:
+          type: object
+          nullable: true
+          description: The delegation grant the request runs under; null unless delegated
+          properties:
+            kind: {type: string, enum: [execution_request, action_approval, work_item, surface_link]}
+            ref: {type: string}
+          required: [kind, ref]
+      required: [schema_version, actor, subject, execution_id, work_item_id, agent_run_id, grant]
 
     ActionApprovalResponse:
       type: object
@@ -4257,6 +4304,22 @@ paths:
         '403': {description: approval_reader_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
 
+  /api/v1/identity/self:
+    get:
+      summary: The caller's resolved actor, subject and grant
+      description: |
+        Read-only (identity/v1). An agent run token may send
+        X-MCTL-On-Behalf-Of here like on any delegation route; the answer
+        then carries the delegated subject and the grant. Without a
+        delegation, `subject` and `grant` are null.
+      tags: [Identity]
+      responses:
+        '200': {description: The resolved identity, content: {application/json: {schema: {$ref: '#/components/schemas/IdentitySelf'}}}}
+        '400': {description: 'delegation_not_accepted (the header from a non-agent caller)'}
+        '401': {description: Authentication required}
+        '403': {description: 'grant_not_bound or grant_subject_unresolved'}
+        '503': {description: delegation_unavailable}
+
   /api/v1/action-approvals/{id}:
     get:
       summary: One action approval request
@@ -5374,11 +5437,17 @@ tags:
       GET /api/v1/work-items/{id}/snapshots,
       GET /api/v1/work-items/{id}/snapshots/{snapshot_id} (metadata only,
       no `canonical_b64`), GET /api/v1/work-items/{id}/events,
-      GET /api/v1/work-items/{id}/evidence. No relay
+      GET /api/v1/work-items/{id}/evidence, and GET /api/v1/identity/self
+      (the surface as actor, the linked human as subject). No relay
       route takes an engine, engine run or execution id: POST
       /api/v1/work-items/{id}/resume is not one (mctl-api#368).
       Unknown, revoked or expired links, another surface's link, or a missing
       header answer 403; the header from any other caller answers 400.
+  - name: Identity
+    description: |
+      The caller's resolved identity (mctl-api#376): the actor that
+      authenticated, the subject it acts for on a delegated or relayed
+      request, and the grant and agent run binding it.
   - name: Roadmap
     description: Read-only roadmap publication (epic status and ready work items)
   - name: Agent Registry

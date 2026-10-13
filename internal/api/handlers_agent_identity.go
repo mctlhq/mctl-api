@@ -100,6 +100,9 @@ var delegationRoutes = []delegationRoute{
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+$`)},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/human-input$`)},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/human-input/[^/]+$`)},
+	// Read-only, and the one place a delegated run can see the subject and
+	// grant it is acting under (mctl-api#376 D3).
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/identity/self$`)},
 }
 
 // delegationAllowlisted reports whether method+path may carry
@@ -253,6 +256,7 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 			writeErrorCode(w, http.StatusServiceUnavailable, delegationCodeUnavailable, "cannot determine the delegated subject's tenant access right now", nil)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), subject)))
+		ctx := withDelegationGrant(auth.WithUser(r.Context(), subject), identityGrant{Kind: grant.Kind, Ref: grant.Ref})
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

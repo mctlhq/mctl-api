@@ -446,3 +446,53 @@ func TestActionApprovalRoutesAreRegistered(t *testing.T) {
 		}
 	}
 }
+
+// The requester's actor fields and every principal id are served on the
+// approval (mctl-api#376 D1, D2), from authentication: a body naming one is
+// refused, and the decider's principal is readable next to the execution.
+func TestActionApprovals_ServeActorAndPrincipalFields(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	pr := &relayPrincipals{byLogin: map[string]string{auth.ServiceUserID: "prn_SERVICE", "root": "prn_ROOT"}}
+	svc := auth.NewServiceUser()
+	admin := auth.NewGitHubUser("root", []string{"admins"})
+	for _, u := range []*auth.User{svc, admin} {
+		if err := auth.AttachPrincipal(context.Background(), pr, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	spoof := e.approvalBody("k-spoof")
+	spoof["actor_kind"] = "human"
+	if res := e.do(svc, "POST", "/api/v1/action-approvals", spoof); res.code != http.StatusBadRequest || code(res) != wiCodeActorNotAccepted {
+		t.Fatalf("a body naming actor_kind = %d %s", res.code, res.raw)
+	}
+
+	res := e.do(svc, "POST", "/api/v1/action-approvals", e.approvalBody("k-actor"))
+	if res.code != http.StatusCreated {
+		t.Fatalf("create = %d %s", res.code, res.raw)
+	}
+	id := res.body["approval"].(map[string]any)["id"].(string)
+	if d := e.decide(admin, id, "approve"); d.code != http.StatusOK {
+		t.Fatalf("decide = %d %s", d.code, d.raw)
+	}
+	got := e.do(admin, "GET", "/api/v1/action-approvals/"+id, nil)
+	if got.code != http.StatusOK {
+		t.Fatalf("get = %d %s", got.code, got.raw)
+	}
+	a := got.body["approval"].(map[string]any)
+	for field, want := range map[string]any{
+		"requested_by_principal_id": "prn_SERVICE",
+		"decided_by_principal_id":   "prn_ROOT",
+		"actor_kind":                auth.KindService,
+		"actor_name":                auth.ServiceUserID,
+		"execution_id":              e.tenant + "-exec",
+		// The service acted for itself: no subject, no run token.
+		"subject_principal_id": nil,
+		"subject_kind":         nil,
+		"agent_run_id":         nil,
+	} {
+		if a[field] != want {
+			t.Errorf("%s = %v, want %v", field, a[field], want)
+		}
+	}
+}

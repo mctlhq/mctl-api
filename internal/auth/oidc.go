@@ -97,6 +97,10 @@ type User struct {
 	// the surface that carried it is kept, never collapsed into it.
 	actingPrincipal string
 	relaySurface    string
+	// delegatingAgent is the agent a delegated subject acts through
+	// (NewDelegatedUser), kept as a name so readers never have to parse it
+	// back out of actingPrincipal.
+	delegatingAgent string
 
 	// How the caller authenticated, for the principal model (mctl-api#373).
 	// Unexported for the same reason as service: set only by the code that
@@ -427,6 +431,7 @@ func NewDelegatedUser(login string, groups []string, acting *User) *User {
 	return &User{
 		ID: login, Groups: kept, githubLogin: true,
 		actingPrincipal: AgentPrincipalPrefix + name,
+		delegatingAgent: name,
 		viaPrincipalID:  acting.principalID,
 		execID:          acting.execID,
 		workItemID:      acting.workItemID,
@@ -441,6 +446,15 @@ func (u *User) ActingPrincipal() string {
 		return ""
 	}
 	return u.actingPrincipal
+}
+
+// DelegatingAgent is the agent a delegated subject acts through
+// (mctl-api#376), and false for every request that is not delegated.
+func (u *User) DelegatingAgent() (string, bool) {
+	if u == nil || u.delegatingAgent == "" {
+		return "", false
+	}
+	return u.delegatingAgent, true
 }
 
 // RelaySurface is the surface a relayed request came through.

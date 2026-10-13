@@ -4,10 +4,10 @@ package workitems
 //
 // Each of these is a narrow, purpose-built SELECT returning only
 // delegation.Record's four fields -- deliberately distinct from
-// executionRequestColumns / actionApprovalColumns / itemColumns, which stay
-// unwidened (D1's job, not this slice's): those back the public read
-// payloads of ExecutionRequest, ActionApproval and Get, and widening them
-// would change what those endpoints return.
+// executionRequestColumns / actionApprovalColumns / itemColumns: those back
+// the public read payloads of ExecutionRequest, ActionApproval and Get, and
+// what those endpoints return is decided there (actionApprovalColumns was
+// widened by #376 D1), not by what delegation needs.
 //
 // A not-found row here is delegation.ErrNotBound, never
 // ErrExecutionRequestNotFound / ErrApprovalNotFound / ErrNotFound:

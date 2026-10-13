@@ -130,11 +130,20 @@ ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS requested_by_princ
 ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS decided_by_principal_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS decided_via_principal_id TEXT NOT NULL DEFAULT '';
+-- The requester as actor and subject (mctl-api#376 D2): who authenticated,
+-- and on whose behalf when the request was delegated.
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS actor_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS actor_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS subject_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS subject_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS agent_run_id TEXT NOT NULL DEFAULT '';
 `
 
 const actionApprovalColumns = `id, execution_id, action_kind, target, args_digest, policy_rule_id,
 	policy_version, artifact_hash, work_item_id, idempotency_key, requested_by, intent_hash, state,
-	expires_at, created_at, decided_by, decided_at, reason, consumed_at, schema_version`
+	expires_at, created_at, decided_by, decided_at, reason, consumed_at, schema_version,
+	requested_by_principal_id, via_principal_id, decided_by_principal_id, decided_via_principal_id,
+	actor_kind, actor_name, subject_principal_id, subject_kind, agent_run_id`
 
 // ActionApprovalRequest is one durable approval of one hashed side effect.
 // State is the effective state: `expired` for a pending or approved request
@@ -160,6 +169,26 @@ type ActionApprovalRequest struct {
 	Reason         string     `json:"reason,omitempty"`
 	ConsumedAt     *time.Time `json:"consumed_at,omitempty"`
 	SchemaVersion  string     `json:"schema_version"`
+
+	// Canonical principal ids, dual-written since mctl-api#373 and served
+	// since #376 D1. Empty for a row written before they existed, or for a
+	// caller whose principal could not be resolved.
+	RequestedByPrincipalID string `json:"requested_by_principal_id,omitempty"`
+	ViaPrincipalID         string `json:"via_principal_id,omitempty"`
+	DecidedByPrincipalID   string `json:"decided_by_principal_id,omitempty"`
+	DecidedViaPrincipalID  string `json:"decided_via_principal_id,omitempty"`
+
+	// The requester as actor and subject (#376 D2), taken from the
+	// authenticated caller at create, never from a body. The actor is who
+	// authenticated (an agent run, a service, a human); the subject is the
+	// human a delegated request acts for, and empty when the actor acted
+	// for itself. The decider is recorded by DecidedBy and its principal
+	// ids above.
+	ActorKind          string `json:"actor_kind,omitempty"`
+	ActorName          string `json:"actor_name,omitempty"`
+	SubjectPrincipalID string `json:"subject_principal_id,omitempty"`
+	SubjectKind        string `json:"subject_kind,omitempty"`
+	AgentRunID         string `json:"agent_run_id,omitempty"`
 }
 
 // ActionIntent is what an approval binds: the fields intent_hash covers.
@@ -218,8 +247,16 @@ type ActionApprovalInput struct {
 	// (mctl-api#373 phase 1); see Mutation.
 	RequestedByPrincipalID string
 	ViaPrincipalID         string
-	IdempotencyKey         string
-	ExpiresAt              time.Time
+	// Actor and subject of the requester (#376 D2); see
+	// ActionApprovalRequest. Set by the HTTP layer from the authenticated
+	// caller only.
+	ActorKind          string
+	ActorName          string
+	SubjectPrincipalID string
+	SubjectKind        string
+	AgentRunID         string
+	IdempotencyKey     string
+	ExpiresAt          time.Time
 	// IntentHash, when set, must equal IntentHash(ActionIntent).
 	IntentHash string
 }
@@ -275,7 +312,9 @@ func scanActionApproval(row pgx.Row, now time.Time) (*ActionApprovalRequest, err
 	if err := row.Scan(&a.ID, &a.ExecutionID, &a.ActionKind, &a.Target, &a.ArgsDigest, &a.PolicyRuleID,
 		&a.PolicyVersion, &a.ArtifactHash, &a.WorkItemID, &a.IdempotencyKey, &a.RequestedBy, &a.IntentHash,
 		&a.State, &a.ExpiresAt, &a.CreatedAt, &a.DecidedBy, &a.DecidedAt, &a.Reason, &a.ConsumedAt,
-		&a.SchemaVersion); err != nil {
+		&a.SchemaVersion, &a.RequestedByPrincipalID, &a.ViaPrincipalID, &a.DecidedByPrincipalID,
+		&a.DecidedViaPrincipalID, &a.ActorKind, &a.ActorName, &a.SubjectPrincipalID, &a.SubjectKind,
+		&a.AgentRunID); err != nil {
 		return nil, err
 	}
 	a.ExpiresAt = a.ExpiresAt.UTC()
@@ -350,12 +389,15 @@ func (s *Store) CreateActionApproval(ctx context.Context, in ActionApprovalInput
 		out, err = scanActionApproval(tx.QueryRow(ctx, `INSERT INTO action_approval_requests (
 				id, execution_id, action_kind, target, args_digest, policy_rule_id, policy_version,
 				artifact_hash, work_item_id, idempotency_key, requested_by, intent_hash, state,
-				expires_at, created_at, schema_version, requested_by_principal_id, via_principal_id)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING `+actionApprovalColumns,
+				expires_at, created_at, schema_version, requested_by_principal_id, via_principal_id,
+				actor_kind, actor_name, subject_principal_id, subject_kind, agent_run_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+			RETURNING `+actionApprovalColumns,
 			ActionApprovalIDPrefix+strings.ReplaceAll(uuid.NewString(), "-", ""), in.ExecutionID, in.ActionKind,
 			in.Target, in.ArgsDigest, in.PolicyRuleID, in.PolicyVersion, in.ArtifactHash, in.WorkItemID,
 			in.IdempotencyKey, in.RequestedBy, hash, ApprovalPending, in.ExpiresAt.UTC(), now,
-			ActionApprovalSchemaVersion, in.RequestedByPrincipalID, in.ViaPrincipalID), now)
+			ActionApprovalSchemaVersion, in.RequestedByPrincipalID, in.ViaPrincipalID,
+			in.ActorKind, in.ActorName, in.SubjectPrincipalID, in.SubjectKind, in.AgentRunID), now)
 		if err != nil {
 			return fmt.Errorf("workitems: insert action approval: %w", err)
 		}
