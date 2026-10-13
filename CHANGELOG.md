@@ -1,5 +1,29 @@
 # Changelog
 
+## [4.83.0](https://github.com/mctlhq/mctl-api/compare/4.82.2...4.83.0) (2026-10-13)
+
+
+### Features
+
+* **api:** principal mode core for tenant authz ([#377](https://github.com/mctlhq/mctl-api/issues/377) PR-B slice 1) ([0098678](https://github.com/mctlhq/mctl-api/commit/00986785e4e4a99fe800aeb94b388ba3c3889707))
+* **api:** relay and delegate by principal ([#377](https://github.com/mctlhq/mctl-api/issues/377) PR-B 2c) ([0e0b8f7](https://github.com/mctlhq/mctl-api/commit/0e0b8f79d35059c5965f8d097f4cc5e2fb2be267))
+* **api:** relay and delegate by principal ([#377](https://github.com/mctlhq/mctl-api/issues/377) PR-B 2c) ([b820604](https://github.com/mctlhq/mctl-api/commit/b8206043caf46874dcfdf663772c41944256681c))
+* **api:** sign in a ZITADEL-only principal ([#377](https://github.com/mctlhq/mctl-api/issues/377) PR-B 2b) ([9d2f1dc](https://github.com/mctlhq/mctl-api/commit/9d2f1dc441db5b924c98ac98c274cb33a715cade))
+* **api:** sign in a ZITADEL-only principal ([#377](https://github.com/mctlhq/mctl-api/issues/377) PR-B 2b) ([edfe66d](https://github.com/mctlhq/mctl-api/commit/edfe66dad2795fb15f3439bdacf54e06d3f01861))
+* **auth:** record the principal in local OAuth tokens ([#377](https://github.com/mctlhq/mctl-api/issues/377) PR-B 2a) ([efb2a10](https://github.com/mctlhq/mctl-api/commit/efb2a1091a4741a114d40eb2d666a59edc6a32ce))
+* **auth:** record the principal in local OAuth tokens ([#377](https://github.com/mctlhq/mctl-api/issues/377) PR-B 2a) ([36f1a21](https://github.com/mctlhq/mctl-api/commit/36f1a21868d32298211b0e09cd22db8062fba66b))
+
+
+### Bug Fixes
+
+* **api:** grant no access via the tenant named admins ([8eeb166](https://github.com/mctlhq/mctl-api/commit/8eeb166571a6b630a3e6209d3a377c770ae04c5c))
+* **api:** keep admin shadow alive, never admin a relayed caller ([8944431](https://github.com/mctlhq/mctl-api/commit/89444312b356e7124f12aa6647e6a24a5efa6309))
+* **api:** list admins in whoami for a principal-mode admin ([3adb362](https://github.com/mctlhq/mctl-api/commit/3adb3629a4803dc6a18a961e21d389b7a47fddee))
+* **api:** serve an admin without groups on unreadable membership ([a81b40e](https://github.com/mctlhq/mctl-api/commit/a81b40e85308b9d1068711ca16cfb3f3ee09f745))
+* **auth:** confine the token-principal claim, finish switch docs ([c90fe4f](https://github.com/mctlhq/mctl-api/commit/c90fe4f1f7aa09dd33d256bab10f05724d722e47))
+* **auth:** refuse login-less refresh outside principal mode ([d58da55](https://github.com/mctlhq/mctl-api/commit/d58da5531899cb42dc036688cd65b804d785d597))
+* **auth:** validate the pid at sign-in, test the GitHub callback ([cdee2bf](https://github.com/mctlhq/mctl-api/commit/cdee2bfb666b026227119fa6d02c3bc4c1a438d0))
+
 ## [4.82.2](https://github.com/mctlhq/mctl-api/compare/4.82.1...4.82.2) (2026-10-12)
 
 
