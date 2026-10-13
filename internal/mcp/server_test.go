@@ -324,12 +324,14 @@ func TestToolCreateTenant_ExposesEveryOperationParameter(t *testing.T) {
 	}
 
 	// Parameters the handler or caller supplies out of band rather than the
-	// MCP client. creator_user_id is stamped from the authenticated identity;
-	// the *_lim quotas are derived platform-side from the *_req values.
+	// MCP client. creator_user_id and creator_principal_id are stamped from
+	// the authenticated identity; the *_lim quotas are derived platform-side
+	// from the *_req values.
 	internal := map[string]bool{
-		"creator_user_id":  true,
-		"quota_cpu_lim":    true,
-		"quota_memory_lim": true,
+		"creator_user_id":      true,
+		"creator_principal_id": true,
+		"quota_cpu_lim":        true,
+		"quota_memory_lim":     true,
 	}
 
 	for _, p := range op.Parameters {
@@ -338,6 +340,13 @@ func TestToolCreateTenant_ExposesEveryOperationParameter(t *testing.T) {
 		}
 		if _, exposed := tool.InputSchema.Properties[p.Name]; !exposed {
 			t.Errorf("operation parameter %q is not exposed on the mctl_create_tenant MCP tool schema", p.Name)
+		}
+	}
+	// The server-stamped ones must stay off the schema: the handler drops a
+	// body value, but a client-settable field would invite one.
+	for _, name := range []string{"creator_user_id", "creator_principal_id"} {
+		if _, exposed := tool.InputSchema.Properties[name]; exposed {
+			t.Errorf("server-stamped parameter %q is exposed on the mctl_create_tenant MCP tool schema", name)
 		}
 	}
 }
