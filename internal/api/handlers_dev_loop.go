@@ -430,11 +430,11 @@ const (
 // decideDevLoopApproval resolves workflowID to the run's one open we_
 // execution (engine temporal, engine_ref the workflow id or, for a run
 // dispatched from an execution request, "<workflow_id>#<request_id>"),
-// decides that execution's newest pending
-// mctl-agents-approve grant as the caller, and returns the grant id to
-// signal (mctl-api#571 R3). An already approved, unconsumed grant is
-// returned as is, so a retry after a lost signal re-sends it instead of
-// falling back to the legacy payload.
+// and lets that execution's newest mctl-agents-approve grant, in any
+// state, decide (mctl-api#571 R3): a pending one is approved as the caller
+// and its id returned to signal; an approved, unconsumed one is returned as
+// is, so a retry after a lost signal re-sends it instead of falling back to
+// the legacy payload; a denied, consumed or expired one is refused.
 //
 // It returns "" with ok=true when there is no grant to decide and the
 // legacy payload is still allowed; with the legacy payload disabled that is
