@@ -235,7 +235,11 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		// Recorded only (mctl-api#373 phase 1).
 		RequestedByPrincipalID: user.PrincipalID(),
 		ViaPrincipalID:         user.ViaPrincipalID(),
-		// The requester as actor and subject (mctl-api#376 D2).
+		// The requester as actor and subject (mctl-api#376 D2). Only a
+		// direct service may create today (isDirectService above), so the
+		// subject and agent_run_id stay empty until an agent run token may
+		// request an approval (#376 slice C): an empty subject here means
+		// "no caller can produce one yet", not "checked and not delegated".
 		ActorKind:      actor.Kind,
 		ActorName:      actor.Name,
 		AgentRunID:     user.AgentRunID(),

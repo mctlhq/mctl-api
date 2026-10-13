@@ -5436,7 +5436,8 @@ tags:
       GET /api/v1/work-items/{id}/snapshots,
       GET /api/v1/work-items/{id}/snapshots/{snapshot_id} (metadata only,
       no `canonical_b64`), GET /api/v1/work-items/{id}/events,
-      GET /api/v1/work-items/{id}/evidence. No relay
+      GET /api/v1/work-items/{id}/evidence, and GET /api/v1/identity/self
+      (the surface as actor, the linked human as subject). No relay
       route takes an engine, engine run or execution id: POST
       /api/v1/work-items/{id}/resume is not one (mctl-api#368).
       Unknown, revoked or expired links, another surface's link, or a missing
