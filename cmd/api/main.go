@@ -976,6 +976,7 @@ func main() {
 	// on the same signal that starts the drain, rather than running through it.
 	ctx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
+	gitReader.EnablePrincipalKeyMetrics()
 	go gitReader.RefreshLoop(ctx, 60*time.Second)
 	if principalStore != nil {
 		go backfillPrincipals(ctx, principalStore, gitReader)
