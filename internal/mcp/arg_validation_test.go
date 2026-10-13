@@ -163,10 +163,17 @@ func TestToolHandlerPanicIsRecoveredLoggedAndTraced(t *testing.T) {
 		Panic string `json:"panic"`
 		Stack string `json:"stack"`
 	}
-	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
-		t.Fatalf("want one JSON log line, got %q: %v", logs.String(), err)
+	// Scan rather than expect a single line: other middleware may log too.
+	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		if err := json.Unmarshal(line, &entry); err == nil && entry.Msg == "mcp tool handler panic" {
+			break
+		}
+		entry.Msg = ""
 	}
-	if entry.Msg != "mcp tool handler panic" || entry.Tool != "mctl_test_panics" || entry.Panic != "boom" ||
+	if entry.Msg == "" {
+		t.Fatalf("no panic log line in %q", logs.String())
+	}
+	if entry.Tool != "mctl_test_panics" || entry.Panic != "boom" ||
 		!strings.Contains(entry.Stack, "arg_validation_test.go") {
 		t.Errorf("log entry %+v, want the panic with a stack through the handler", entry)
 	}
@@ -229,7 +236,7 @@ func TestNoUncheckedArgumentAssertions(t *testing.T) {
 			if !ok || ta.Type == nil || checked[ta] {
 				return true
 			}
-			if _, indexed := ta.X.(*ast.IndexExpr); indexed {
+			if _, indexed := ast.Unparen(ta.X).(*ast.IndexExpr); indexed {
 				t.Errorf("%s: single-value type assertion on an indexed value; use req.RequireString or the two-value form",
 					fset.Position(ta.Pos()))
 			}

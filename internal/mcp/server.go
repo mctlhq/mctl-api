@@ -168,7 +168,6 @@ func (s *Server) NewStreamableHTTPHandler() http.Handler {
 	)
 }
 
-// NewMCPServer creates the mcp-go Server with all tool definitions.
 // recoverToolPanic is a backstop: a panicking handler becomes a JSON-RPC error
 // instead of aborting the HTTP request with a bare 500 (mctl-api#608). It logs
 // the panic with its stack, because the returned error is the only other
@@ -187,6 +186,7 @@ func recoverToolPanic(next server.ToolHandlerFunc) server.ToolHandlerFunc {
 	}
 }
 
+// NewMCPServer creates the mcp-go Server with all tool definitions.
 func (s *Server) NewMCPServer() *server.MCPServer {
 	srv := server.NewMCPServer(
 		"mctl",
