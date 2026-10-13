@@ -139,10 +139,17 @@ func TestCreateTenant_CreatorPrincipalPatternMatchesAuth(t *testing.T) {
 			pattern = p.Pattern
 		}
 	}
+	if pattern == "" {
+		t.Fatal("create-tenant has no creator_principal_id parameter, or it has no pattern")
+	}
 	re := regexp.MustCompile(pattern)
 	for _, id := range []string{
 		"prn_01M39HRB7JRXZ2PHW5VVB695YZ",
-		"prn_01M39HRB7JRXZ2PHW5VVB695YI", // excluded letter
+		// Crockford base32 excludes I, L, O and U.
+		"prn_01M39HRB7JRXZ2PHW5VVB695YI",
+		"prn_01M39HRB7JRXZ2PHW5VVB695YL",
+		"prn_01M39HRB7JRXZ2PHW5VVB695YO",
+		"prn_01M39HRB7JRXZ2PHW5VVB695YU",
 		"prn_01m39hrb7jrxz2phw5vvb695yz",
 		"prn_01M39HRB7JRXZ2PHW5VVB695Y",
 		"prn_01M39HRB7JRXZ2PHW5VVB695YZZ",
