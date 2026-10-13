@@ -36,7 +36,23 @@ func createTenantRouter(t *testing.T, git *fakeGitReader) (http.Handler, *fakeEx
 	return router, exec
 }
 
-var newcomer = &auth.User{ID: "newcomer", Groups: []string{}}
+var newcomer = resolvedUser(auth.NewGitHubUser("newcomer", []string{}))
+
+// testCreatorPID is the principal create-tenant fixtures resolve to:
+// create-tenant refuses a creator without one (mctl-api#377).
+const testCreatorPID = "prn_01M39HRB7JRXZ2PHW5VVB695YZ"
+
+// resolvedAdmin is adminUser with a resolved principal.
+var resolvedAdmin = resolvedUser(auth.NewGitHubUser("test-admin", []string{"admins"}))
+
+// resolvedUser attaches testCreatorPID to u, as the auth middleware does
+// for a caller whose principal resolved.
+func resolvedUser(u *auth.User) *auth.User {
+	if err := auth.AttachPrincipal(context.Background(), creatorPrincipal(testCreatorPID), u); err != nil {
+		panic(err)
+	}
+	return u
+}
 
 func TestCreateTenant_ExistingTenantConflicts(t *testing.T) {
 	router, exec := createTenantRouter(t, &fakeGitReader{})
@@ -75,7 +91,7 @@ func TestCreateTenant_UncheckableRefuses(t *testing.T) {
 // its provisioning; they are not checked.
 func TestCreateTenant_AdminMayRerun(t *testing.T) {
 	router, exec := createTenantRouter(t, &fakeGitReader{tenantExistsErr: errors.New("would refuse")})
-	w := postAs(t, router, createTenantPath, map[string]string{"tenant_name": "taken"}, adminUser)
+	w := postAs(t, router, createTenantPath, map[string]string{"tenant_name": "taken"}, resolvedAdmin)
 	assertStatus(t, w, http.StatusAccepted)
 	if len(exec.submitted) != 1 {
 		t.Fatalf("expected a submission, got %v", exec.submitted)
@@ -89,37 +105,44 @@ func (p creatorPrincipal) ResolvePrincipal(context.Context, auth.Identity) (stri
 }
 
 // The creator's owner entry is keyed by the principal the session resolved
-// to (mctl-api#377), never by one the caller names; an unresolved principal
-// sends none rather than whatever the body carried.
+// to (mctl-api#377), never by one the caller names.
 func TestCreateTenant_CreatorPrincipalComesFromTheSession(t *testing.T) {
-	const pid = "prn_01M39HRB7JRXZ2PHW5VVB695YZ"
 	const spoofed = "prn_01M45DR1GWC87109EH88VBJX25"
-	resolved := auth.NewGitHubUser("newcomer", []string{})
-	if err := auth.AttachPrincipal(context.Background(), creatorPrincipal(pid), resolved); err != nil {
-		t.Fatal(err)
+	router, exec := createTenantRouter(t, &fakeGitReader{})
+	w := postAs(t, router, createTenantPath, map[string]string{
+		"tenant_name":          "fresh",
+		"creator_principal_id": spoofed,
+	}, resolvedUser(auth.NewGitHubUser("newcomer", []string{})))
+	assertStatus(t, w, http.StatusAccepted)
+	if len(exec.submittedParams) != 1 {
+		t.Fatalf("expected one submission, got %v", exec.submittedParams)
 	}
-	for _, tc := range []struct {
-		name string
-		user *auth.User
-		want string
-	}{
-		{"resolved", resolved, pid},
-		{"unresolved", auth.NewGitHubUser("newcomer", []string{}), ""},
+	if got := exec.submittedParams[0]["creator_principal_id"]; got != testCreatorPID {
+		t.Errorf("creator_principal_id = %q, want %q", got, testCreatorPID)
+	}
+}
+
+// A creator whose principal could not be established is refused in every
+// mode, admins included: the workflow would otherwise push a login-only
+// owner entry straight to gitops main, and a login is not an authorization
+// key. Nothing is submitted, and a body-supplied principal changes nothing.
+func TestCreateTenant_UnresolvedCreatorIsRefused(t *testing.T) {
+	for _, u := range []*auth.User{
+		auth.NewGitHubUser("newcomer", []string{}),
+		{ID: "root-admin", Groups: []string{"admins"}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(u.ID, func(t *testing.T) {
 			router, exec := createTenantRouter(t, &fakeGitReader{})
 			w := postAs(t, router, createTenantPath, map[string]string{
 				"tenant_name":          "fresh",
-				"creator_principal_id": spoofed,
-			}, tc.user)
-			assertStatus(t, w, http.StatusAccepted)
-			if len(exec.submittedParams) != 1 {
-				t.Fatalf("expected one submission, got %v", exec.submittedParams)
+				"creator_principal_id": "prn_01M45DR1GWC87109EH88VBJX25",
+			}, u)
+			assertStatus(t, w, http.StatusServiceUnavailable)
+			if !strings.Contains(w.Body.String(), "creator_principal_unavailable") {
+				t.Errorf("want code creator_principal_unavailable, got %s", w.Body.String())
 			}
-			// ApplyDefaults sends an absent parameter as "", which the
-			// workflow reads as "no principal".
-			if got := exec.submittedParams[0]["creator_principal_id"]; got != tc.want {
-				t.Errorf("creator_principal_id = %q, want %q", got, tc.want)
+			if len(exec.submitted) != 0 {
+				t.Fatalf("submitted without a creator principal: %v", exec.submitted)
 			}
 		})
 	}

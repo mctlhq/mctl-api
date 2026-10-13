@@ -688,7 +688,7 @@ func TestSmoke_CreateTenantRBAC(t *testing.T) {
 	router, exec := newTestRouter(t)
 
 	t.Run("new user with no groups can create-tenant", func(t *testing.T) {
-		newUser := &auth.User{ID: "fresh-user", Groups: []string{}}
+		newUser := resolvedUser(auth.NewGitHubUser("fresh-user", []string{}))
 		w := postAs(t, router, "/api/v1/operations/create-tenant/execute", map[string]string{
 			"tenant_name": "fresh-team",
 		}, newUser)
@@ -714,12 +714,12 @@ func TestSmoke_CreateTenantRBAC(t *testing.T) {
 	t.Run("admin can create-tenant even with existing groups", func(t *testing.T) {
 		w := postAs(t, router, "/api/v1/operations/create-tenant/execute", map[string]string{
 			"tenant_name": "admin-team",
-		}, adminUser)
+		}, resolvedAdmin)
 		assertStatus(t, w, http.StatusAccepted)
 	})
 
 	t.Run("creator_user_id is forced from JWT", func(t *testing.T) {
-		newUser := &auth.User{ID: "real-user", Groups: []string{}}
+		newUser := resolvedUser(auth.NewGitHubUser("real-user", []string{}))
 		w := postAs(t, router, "/api/v1/operations/create-tenant/execute", map[string]string{
 			"tenant_name":     "my-workspace",
 			"creator_user_id": "spoofed-user",
