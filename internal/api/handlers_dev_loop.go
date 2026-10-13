@@ -316,6 +316,14 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 	// admits the service principal, which carries the admins group and
 	// legitimately reads and starts DevLoops; it must never approve one.
 	if !isHumanAdmin(user) {
+		h.logAudit(r, audit.Entry{
+			UserID:       user.ID,
+			Operation:    "dev-loop-approve",
+			WorkflowName: chi.URLParam(r, "workflow_id"),
+			Status:       "denied",
+			RiskLevel:    string(operations.RiskMedium),
+			Message:      aarCodeDeciderForbidden + ": not a human admin acting directly",
+		})
 		writeErrorCode(w, http.StatusForbidden, aarCodeDeciderForbidden,
 			"approving a DevLoop is admin-only and must be done by a human acting directly", nil)
 		return
@@ -477,26 +485,29 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 	}
 	exec := execs[0]
 	auditParams["execution_id"] = exec.ID
-	for _, state := range []string{workitems.ApprovalPending, workitems.ApprovalApproved} {
-		list, err := h.opts.WorkItems.ActionApprovals(ctx, workitems.ActionApprovalFilter{
-			State: state, ExecutionID: exec.ID, ActionKind: devLoopApprovalKind, Limit: 1,
-		})
-		if err != nil {
-			return unavailable(err)
-		}
-		if len(list) == 0 {
-			continue
-		}
-		if state == workitems.ApprovalApproved {
-			return list[0].ID, true
-		}
+	// The newest grant of this execution decides, whatever its state: an
+	// older live grant must not outrank a newer recorded denial.
+	list, err := h.opts.WorkItems.ActionApprovals(ctx, workitems.ActionApprovalFilter{
+		ExecutionID: exec.ID, ActionKind: devLoopApprovalKind, Limit: 1,
+	})
+	if err != nil {
+		return unavailable(err)
+	}
+	if len(list) == 0 {
+		return noGrant("no " + devLoopApprovalKind + " approval for execution " + exec.ID)
+	}
+	newest := list[0]
+	switch newest.State {
+	case workitems.ApprovalApproved:
+		return newest.ID, true
+	case workitems.ApprovalPending:
 		decided, err := h.opts.WorkItems.DecideActionApproval(ctx, workitems.ActionDecisionInput{
-			ID: list[0].ID, DecidedBy: principalOf(user), Decision: workitems.DecisionApprove, Reason: reason,
+			ID: newest.ID, DecidedBy: principalOf(user), Decision: workitems.DecisionApprove, Reason: reason,
 			DecidedByPrincipalID: user.PrincipalID(), DecidedViaPrincipalID: user.ViaPrincipalID(),
 		})
 		if err != nil {
 			if code := actionApprovalRefusalCode(err); code != "" {
-				h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", list[0].ID, code)
+				h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", newest.ID, code)
 			}
 			writeActionApprovalError(w, err)
 			return "", false
@@ -504,27 +515,15 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 		h.auditActionApproval(r, user, "action_approval.decision", decided, operations.RiskMedium)
 		return decided.ID, true
 	}
-	// No live grant. One that was denied, spent or let expire is a recorded
-	// outcome, not an absent gate: answering it with the legacy payload
-	// would approve past an explicit human "no". Only an execution that
-	// never had a grant falls back.
-	closed, err := h.opts.WorkItems.ActionApprovals(ctx, workitems.ActionApprovalFilter{
-		ExecutionID: exec.ID, ActionKind: devLoopApprovalKind, Limit: 1,
-	})
-	if err != nil {
-		return unavailable(err)
+	// Denied, spent or let expire: a recorded outcome, not an absent gate.
+	// Answering it with the legacy payload would approve past an explicit
+	// human "no", so only an execution that never had a grant falls back.
+	code, ok := closedApprovalCodes[newest.State]
+	if !ok {
+		code = aarCodeNotApproved
 	}
-	if len(closed) > 0 {
-		code, ok := closedApprovalCodes[closed[0].State]
-		if !ok {
-			// Pending or approved here means it changed since the probes
-			// above; refuse rather than guess, the caller retries.
-			code = aarCodeNotApproved
-		}
-		return refuse(http.StatusConflict, code,
-			"the DevLoop's approval "+closed[0].ID+" is "+closed[0].State+"; it cannot be approved again")
-	}
-	return noGrant("no pending " + devLoopApprovalKind + " approval for execution " + exec.ID)
+	return refuse(http.StatusConflict, code,
+		"the DevLoop's approval "+newest.ID+" is "+newest.State+"; it cannot be approved again")
 }
 
 // closedApprovalCodes are the typed refusals of an approve call whose

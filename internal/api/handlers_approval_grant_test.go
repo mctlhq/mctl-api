@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -48,22 +52,55 @@ func newGrantEnv(t *testing.T) *grantEnv {
 	return &grantEnv{workItemsEnv: e, exec: exec, router: r, decider: decider}
 }
 
-// grantedRun is a DevLoop run with a pending approval grant for
-// mctl-api/issue-571-x, and the agent run bound to it.
+// grantedRun is a DevLoop run for a proposal of mctl-api, attached under the
+// workflow id the real DevLoop has for it, with a pending approval grant
+// for that proposal and the agent run bound to it.
 type grantedRun struct {
 	devLoopRun
+	slug     string
 	approval string
 	agent    *auth.User
 }
 
+// grantIssues numbers the proposals of these tests: workflow ids are global,
+// so each run gets an issue no other run (or earlier test process) uses.
+var grantIssues atomic.Int64
+
+func init() { grantIssues.Store(time.Now().UnixNano() % 1_000_000_000) }
+
 func (g *grantEnv) grantedRun(suffix string) grantedRun {
 	g.t.Helper()
-	run := g.startDevLoopRun(suffix)
-	return grantedRun{
-		devLoopRun: run,
-		approval:   g.requestDevLoopGrant(run.execID, "k-"+suffix),
-		agent:      g.runAgent(run.execID),
+	return g.grantedRunTargeting(suffix, "")
+}
+
+// grantedRunTargeting is grantedRun with the grant created for target
+// instead of the run's own proposal ("" keeps it).
+func (g *grantEnv) grantedRunTargeting(suffix, target string) grantedRun {
+	g.t.Helper()
+	n := grantIssues.Add(1)
+	run := grantedRun{slug: fmt.Sprintf("issue-%d-x", n)}
+	svc := auth.NewServiceUser()
+	item := g.open(svc, nil)
+	run.devLoopRun = devLoopRun{workflowID: fmt.Sprintf("dev-loop-mctlhq-mctl-api-%d", n), itemID: item["id"].(string)}
+	run.execID = g.attachExecution(svc, run.itemID, run.workflowID, "Running")
+	g.forgetApprovalsOf(run.execID)
+	if target == "" {
+		target = "mctl-api/" + run.slug
 	}
+	run.approval = g.createGrant(run.execID, "k-"+suffix, target, devLoopApprovalKind)
+	run.agent = g.runAgent(run.execID)
+	return run
+}
+
+func (g *grantEnv) createGrant(execID, key, target, kind string) string {
+	g.t.Helper()
+	body := g.devLoopGrantBody(execID, key)
+	body["target"], body["action_kind"] = target, kind
+	res := g.do(auth.NewServiceUser(), "POST", "/api/v1/action-approvals", body)
+	if res.code != http.StatusCreated {
+		g.t.Fatalf("create grant = %d %s", res.code, res.raw)
+	}
+	return res.body["approval"].(map[string]any)["id"].(string)
 }
 
 // runAgent mints a real run token for execID through the mint route and
@@ -136,7 +173,7 @@ func TestApprovalGrant_BoundGrantApprovesOnceAsTheDecider(t *testing.T) {
 	run := g.grantedRun("a1")
 	g.decide(run.approval, "approve")
 
-	res := g.execute(run.agent, run.approval, approveInput("issue-571-x"))
+	res := g.execute(run.agent, run.approval, approveInput(run.slug))
 	if res.code != http.StatusAccepted {
 		t.Fatalf("grant-authorized approve = %d %s", res.code, res.raw)
 	}
@@ -144,8 +181,8 @@ func TestApprovalGrant_BoundGrantApprovesOnceAsTheDecider(t *testing.T) {
 		t.Fatalf("submitted %d workflows, want 1", g.submitted())
 	}
 	params := g.exec.submitted[0]
-	if params["approver"] != "github:root" || params["service"] != "mctl-api" || params["slug"] != "issue-571-x" {
-		t.Errorf("submitted params = %v, want approver github:root for mctl-api/issue-571-x", params)
+	if params["approver"] != "root" || params["service"] != "mctl-api" || params["slug"] != run.slug {
+		t.Errorf("submitted params = %v, want approver root for mctl-api/%s", params, run.slug)
 	}
 	if st := g.approvalState(run.approval)["state"]; st != "consumed" {
 		t.Errorf("approval state = %v, want consumed", st)
@@ -171,8 +208,16 @@ func TestApprovalGrant_BoundGrantApprovesOnceAsTheDecider(t *testing.T) {
 	if n := g.auditOps("action_approval.consume", run.approval); n != 1 {
 		t.Errorf("consume audited %d times, want 1", n)
 	}
+	// What the human authorized is answerable from the audit alone.
+	for _, op := range []string{"action_approval.decision", "action_approval.consume"} {
+		for _, entry := range g.audit.List(1000) {
+			if entry.Operation == op && entry.Parameters["approval_id"] == run.approval && entry.Parameters["target"] != "mctl-api/"+run.slug {
+				t.Errorf("%s audit target = %q, want mctl-api/%s", op, entry.Parameters["target"], run.slug)
+			}
+		}
+	}
 
-	again := g.execute(run.agent, run.approval, approveInput("issue-571-x"))
+	again := g.execute(run.agent, run.approval, approveInput(run.slug))
 	if again.code < 400 || g.submitted() != 1 {
 		t.Errorf("second use = %d %s, submitted %d; want a refusal and nothing more submitted", again.code, again.raw, g.submitted())
 	}
@@ -196,15 +241,15 @@ func TestApprovalGrant_NonGitHubDeciderApprovesEndToEnd(t *testing.T) {
 	run := g.grantedRun("a6")
 	g.decide(run.approval, "approve")
 
-	res := g.execute(run.agent, run.approval, approveInput("issue-571-x"))
+	res := g.execute(run.agent, run.approval, approveInput(run.slug))
 	if res.code != http.StatusAccepted {
 		t.Fatalf("grant-authorized approve by a ZITADEL decider = %d %s", res.code, res.raw)
 	}
 	if g.submitted() != 1 {
 		t.Fatalf("submitted %d workflows, want 1", g.submitted())
 	}
-	if got := g.exec.submitted[0]["approver"]; got != "oidc:zed@example.com" {
-		t.Errorf("approver = %q, want oidc:zed@example.com", got)
+	if got := g.exec.submitted[0]["approver"]; got != "zed@example.com" {
+		t.Errorf("approver = %q, want zed@example.com", got)
 	}
 	var found bool
 	for _, entry := range g.audit.List(200) {
@@ -222,6 +267,33 @@ func TestApprovalGrant_NonGitHubDeciderApprovesEndToEnd(t *testing.T) {
 	}
 }
 
+// R8: the decider recorded as approver is validated like every other
+// approver before anything is spent. A decider name the operation's
+// identity pattern refuses (an IdP display name with a newline, which
+// would land in .status.yaml and a commit message) is a 400 and leaves the
+// approval unspent.
+func TestApprovalGrant_DeciderIsValidatedAsTheApprover(t *testing.T) {
+	g := newGrantEnv(t)
+	odd := auth.NewFederatedUser("zitadel", "https://id.example.com", "z-odd", "zed\napproved_by: someone-else", string(auth.KindHuman))
+	odd.Groups = []string{"admins"}
+	if err := auth.AttachPrincipal(context.Background(), loginPrincipals{}, odd); err != nil {
+		t.Fatal(err)
+	}
+	g.decider = odd
+	run := g.grantedRun("ctl")
+	g.decide(run.approval, "approve")
+	res := g.execute(run.agent, run.approval, approveInput(run.slug))
+	if res.code != http.StatusBadRequest || !strings.Contains(res.raw, "validation failed") || !strings.Contains(res.raw, "approver") {
+		t.Errorf("control character in the decider = %d %s, want 400 validation failed on approver", res.code, res.raw)
+	}
+	if g.submitted() != 0 {
+		t.Fatalf("submitted %d workflows", g.submitted())
+	}
+	if st := g.approvalState(run.approval)["state"]; st != "approved" {
+		t.Errorf("approval state = %v, want approved (unspent)", st)
+	}
+}
+
 // A2: the same grant presented by another execution's run is not bound to
 // it. A run token's work item is its execution's (the mint derives it), and
 // a work item has one open execution at a time, so another execution is
@@ -232,7 +304,7 @@ func TestApprovalGrant_OtherExecutionIsNotBound(t *testing.T) {
 	other := g.startDevLoopRun("a2-other")
 	g.decide(run.approval, "approve")
 
-	res := g.execute(g.runAgent(other.execID), run.approval, approveInput("issue-571-x"))
+	res := g.execute(g.runAgent(other.execID), run.approval, approveInput(run.slug))
 	if res.code != http.StatusForbidden || res.body["code"] != delegationCodeNotBound {
 		t.Errorf("other execution = %d %s, want 403 %s", res.code, res.raw, delegationCodeNotBound)
 	}
@@ -251,7 +323,7 @@ func TestApprovalGrant_ArbitraryRefsAreRefused(t *testing.T) {
 	run := g.grantedRun("a3")
 	g.decide(run.approval, "approve")
 	for _, ref := range []string{run.workflowID, run.execID, "aar_00000000000000000000000000", "42"} {
-		res := g.execute(run.agent, ref, approveInput("issue-571-x"))
+		res := g.execute(run.agent, ref, approveInput(run.slug))
 		if res.code != http.StatusForbidden {
 			t.Errorf("ref %q = %d %s, want 403", ref, res.code, res.raw)
 		}
@@ -267,14 +339,21 @@ func TestApprovalGrant_WrongTargetOrKindIsRefused(t *testing.T) {
 	g := newGrantEnv(t)
 	run := g.grantedRun("tgt")
 	g.decide(run.approval, "approve")
+	n := strings.TrimSuffix(strings.TrimPrefix(run.slug, "issue-"), "-x")
 
-	res := g.execute(run.agent, run.approval, approveInput("issue-999-other"))
-	if res.code != http.StatusConflict || res.body["code"] != aarCodeIntentMismatch {
-		t.Errorf("wrong slug = %d %s, want 409 %s", res.code, res.raw, aarCodeIntentMismatch)
-	}
-	res = g.execute(run.agent, run.approval, map[string]string{"service": "mctl-web", "slug": "issue-571-x"})
-	if res.code != http.StatusConflict || res.body["code"] != aarCodeIntentMismatch {
-		t.Errorf("wrong service = %d %s, want 409 %s", res.code, res.raw, aarCodeIntentMismatch)
+	for name, in := range map[string]map[string]string{
+		// Another DevLoop's proposal: refused by the binding.
+		"other issue":   approveInput("issue-1-x"),
+		"other service": {"service": "mctl-web", "slug": run.slug},
+		"no devloop":    approveInput("not-an-issue-slug"),
+		// This DevLoop, another proposal than the one approved: the
+		// binding passes and the intent CAS refuses it.
+		"other slug": approveInput("issue-" + n + "-y"),
+	} {
+		res := g.execute(run.agent, run.approval, in)
+		if res.code != http.StatusConflict || res.body["code"] != aarCodeIntentMismatch {
+			t.Errorf("%s = %d %s, want 409 %s", name, res.code, res.raw, aarCodeIntentMismatch)
+		}
 	}
 	if st := g.approvalState(run.approval)["state"]; st != "approved" {
 		t.Errorf("approval state = %v, want approved (unspent)", st)
@@ -282,15 +361,9 @@ func TestApprovalGrant_WrongTargetOrKindIsRefused(t *testing.T) {
 
 	// Same run, same target, another action kind: decided by the same
 	// human, still not an approval of mctl-agents-approve.
-	body := g.devLoopGrantBody(run.execID, "k-tgt-merge")
-	body["action_kind"] = "merge"
-	created := g.do(auth.NewServiceUser(), "POST", "/api/v1/action-approvals", body)
-	if created.code != http.StatusCreated {
-		t.Fatalf("create merge approval = %d %s", created.code, created.raw)
-	}
-	merge := created.body["approval"].(map[string]any)["id"].(string)
+	merge := g.createGrant(run.execID, "k-tgt-merge", "mctl-api/"+run.slug, "merge")
 	g.decide(merge, "approve")
-	res = g.execute(run.agent, merge, approveInput("issue-571-x"))
+	res := g.execute(run.agent, merge, approveInput(run.slug))
 	if res.code != http.StatusConflict || res.body["code"] != aarCodeIntentMismatch {
 		t.Errorf("other kind = %d %s, want 409 %s", res.code, res.raw, aarCodeIntentMismatch)
 	}
@@ -299,19 +372,61 @@ func TestApprovalGrant_WrongTargetOrKindIsRefused(t *testing.T) {
 	}
 }
 
+// The requester names the target when it creates the grant, but the human
+// approves a DevLoop, not a target. A grant created for another DevLoop's
+// proposal and approved through this execution is refused at use, whoever
+// decided it, and stays unspent: the target is bound to the execution's
+// engine_ref server-side.
+func TestApprovalGrant_TargetIsBoundToTheExecutionsDevLoop(t *testing.T) {
+	g := newGrantEnv(t)
+	run := g.grantedRunTargeting("bind", "mctl-web/issue-1-x")
+	g.decide(run.approval, "approve")
+
+	res := g.execute(run.agent, run.approval, approveInput("issue-1-x"))
+	res2 := g.execute(run.agent, run.approval, map[string]string{"service": "mctl-web", "slug": "issue-1-x"})
+	for _, r := range []wiResponse{res, res2} {
+		if r.code != http.StatusConflict || r.body["code"] != aarCodeIntentMismatch {
+			t.Errorf("foreign target = %d %s, want 409 %s", r.code, r.raw, aarCodeIntentMismatch)
+		}
+	}
+	if g.submitted() != 0 {
+		t.Fatalf("submitted %d workflows", g.submitted())
+	}
+	if st := g.approvalState(run.approval)["state"]; st != "approved" {
+		t.Errorf("approval state = %v, want approved (unspent)", st)
+	}
+}
+
+// A run dispatched from an execution request carries
+// <workflow_id>#<request_id> as its engine_ref (D3); its own proposal binds.
+func TestApprovalGrant_DispatchedRunBindsItsProposal(t *testing.T) {
+	g := newGrantEnv(t)
+	n := grantIssues.Add(1)
+	slug := fmt.Sprintf("issue-%d-x", n)
+	svc := auth.NewServiceUser()
+	item := g.open(svc, nil)
+	execID := g.attachExecution(svc, item["id"].(string), fmt.Sprintf("dev-loop-mctlhq-mctl-api-%d#xr_01TEST", n), "Running")
+	g.forgetApprovalsOf(execID)
+	approval := g.createGrant(execID, "k-disp", "mctl-api/"+slug, devLoopApprovalKind)
+	g.decide(approval, "approve")
+	if res := g.execute(g.runAgent(execID), approval, approveInput(slug)); res.code != http.StatusAccepted {
+		t.Fatalf("dispatched run = %d %s, want 202", res.code, res.raw)
+	}
+}
+
 // A4: pending, denied and expired grants fail closed and submit nothing.
 func TestApprovalGrant_UndecidedDeniedExpiredFailClosed(t *testing.T) {
 	g := newGrantEnv(t)
 
 	pending := g.grantedRun("pend")
-	if res := g.execute(pending.agent, pending.approval, approveInput("issue-571-x")); res.code != http.StatusForbidden ||
+	if res := g.execute(pending.agent, pending.approval, approveInput(pending.slug)); res.code != http.StatusForbidden ||
 		res.body["code"] != delegationCodeUnresolved {
 		t.Errorf("pending = %d %s, want 403 %s", res.code, res.raw, delegationCodeUnresolved)
 	}
 
 	denied := g.grantedRun("deny")
 	g.decide(denied.approval, "deny")
-	if res := g.execute(denied.agent, denied.approval, approveInput("issue-571-x")); res.code != http.StatusForbidden ||
+	if res := g.execute(denied.agent, denied.approval, approveInput(denied.slug)); res.code != http.StatusForbidden ||
 		res.body["code"] != delegationCodeNotBound {
 		t.Errorf("denied = %d %s, want 403 %s", res.code, res.raw, delegationCodeNotBound)
 	}
@@ -319,7 +434,7 @@ func TestApprovalGrant_UndecidedDeniedExpiredFailClosed(t *testing.T) {
 	expired := g.grantedRun("exp")
 	g.decide(expired.approval, "approve")
 	g.expire(expired.approval)
-	if res := g.execute(expired.agent, expired.approval, approveInput("issue-571-x")); res.code != http.StatusForbidden ||
+	if res := g.execute(expired.agent, expired.approval, approveInput(expired.slug)); res.code != http.StatusForbidden ||
 		res.body["code"] != delegationCodeNotBound {
 		t.Errorf("expired = %d %s, want 403 %s", res.code, res.raw, delegationCodeNotBound)
 	}
@@ -335,8 +450,8 @@ func TestApprovalGrant_BodyApproverIsRefused(t *testing.T) {
 	g := newGrantEnv(t)
 	run := g.grantedRun("r8")
 	g.decide(run.approval, "approve")
-	for _, approver := range []string{"github:root", "someone-else", ""} {
-		in := approveInput("issue-571-x")
+	for _, approver := range []string{"root", "github:root", "someone-else", ""} {
+		in := approveInput(run.slug)
 		in["approver"] = approver
 		res := g.execute(run.agent, run.approval, in)
 		if res.code != http.StatusBadRequest || res.body["code"] != wiCodeActorNotAccepted {
@@ -359,19 +474,19 @@ func TestApprovalGrant_EveryoneElseIsRefusedAsBefore(t *testing.T) {
 	run := g.grantedRun("r7")
 	g.decide(run.approval, "approve")
 
-	if res := g.execute(run.agent, "", approveInput("issue-571-x")); res.code != http.StatusForbidden {
+	if res := g.execute(run.agent, "", approveInput(run.slug)); res.code != http.StatusForbidden {
 		t.Errorf("agent without a grant = %d %s, want 403", res.code, res.raw)
 	}
-	if res := g.execute(g.user("dev"), "", approveInput("issue-571-x")); res.code != http.StatusForbidden {
+	if res := g.execute(g.user("dev"), "", approveInput(run.slug)); res.code != http.StatusForbidden {
 		t.Errorf("non-admin human = %d %s, want 403", res.code, res.raw)
 	}
 
-	// The gate only builds github: subjects today, so another grant kind
-	// is put on the context directly: what ExecuteOperation must do with a
-	// delegated subject whose grant is not an action approval.
+	// Another grant kind is put on the context directly: what
+	// ExecuteOperation must do with a delegated subject whose grant is not
+	// an action approval, whichever route delivered it.
 	subject := auth.NewDelegatedUser("root", []string{"admins"}, run.agent)
 	for _, kind := range []string{delegation.KindWorkItem, delegation.KindExecutionRequest, delegation.KindSurfaceLink} {
-		raw, _ := json.Marshal(approveInput("issue-571-x"))
+		raw, _ := json.Marshal(approveInput(run.slug))
 		req := httptest.NewRequest("POST", grantApprovePath, bytes.NewReader(raw))
 		req = withChiParam(req, "name", devLoopApprovalKind)
 		ctx := withDelegationGrant(auth.WithUser(req.Context(), subject), identityGrant{Kind: kind, Ref: run.approval})
@@ -389,7 +504,7 @@ func TestApprovalGrant_EveryoneElseIsRefusedAsBefore(t *testing.T) {
 	}
 
 	// And a human admin acting directly still approves as before.
-	if res := g.execute(g.decider, "", approveInput("issue-571-x")); res.code != http.StatusAccepted {
+	if res := g.execute(g.decider, "", approveInput(run.slug)); res.code != http.StatusAccepted {
 		t.Errorf("human admin = %d %s, want 202", res.code, res.raw)
 	}
 }

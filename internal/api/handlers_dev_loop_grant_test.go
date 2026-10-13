@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -164,6 +165,16 @@ func TestDevLoopApprove_ServicePrincipalCannotApprove(t *testing.T) {
 	if a := e.approvalState(id); a["state"] != workitems.ApprovalPending {
 		t.Fatalf("a refused approval moved the grant to %v", a["state"])
 	}
+	denied := 0
+	for _, entry := range e.audit.List(1000) {
+		if entry.Operation == "dev-loop-approve" && entry.Status == "denied" && entry.WorkflowName == run.workflowID &&
+			strings.HasPrefix(entry.Message, aarCodeDeciderForbidden) {
+			denied++
+		}
+	}
+	if denied != 1 {
+		t.Fatalf("the refusal was audited %d times, want 1", denied)
+	}
 	// Nor through the legacy payload, where no grant's self-decision rule
 	// would catch it.
 	if res := e.approveDevLoop(auth.NewServiceUser(), e.tenant+"-unattached", ""); res.code != http.StatusForbidden {
@@ -207,7 +218,6 @@ func TestDevLoopApprove_NoGrantFollowsTheLegacyFlag(t *testing.T) {
 // while the legacy flag is on, and nothing is signalled.
 func TestDevLoopApprove_ClosedGrantIsNeverLegacy(t *testing.T) {
 	e, fake := newDevLoopGrantEnv(t)
-	e.h.opts.LegacyApproverDisabled = false
 	decide := func(id, decision string) {
 		t.Helper()
 		if res := e.do(rootAdmin, "POST", "/api/v1/action-approvals/"+id+"/decision", map[string]any{"decision": decision}); res.code != http.StatusOK {
@@ -238,16 +248,51 @@ func TestDevLoopApprove_ClosedGrantIsNeverLegacy(t *testing.T) {
 			}
 		}},
 	} {
-		run := e.startDevLoopRun("closed-" + tc.name)
-		id := e.requestDevLoopGrant(run.execID, "gate-"+tc.name)
-		tc.close(id)
+		for _, off := range []bool{false, true} {
+			e.h.opts.LegacyApproverDisabled = off
+			name := fmt.Sprintf("%s-flag-off-%v", tc.name, off)
+			run := e.startDevLoopRun("closed-" + name)
+			id := e.requestDevLoopGrant(run.execID, "gate-"+name)
+			tc.close(id)
+			fake.lastApprovePayload = nil
+			res := e.approveDevLoop(rootAdmin, run.workflowID, "")
+			if res.code != http.StatusConflict || code(res) != tc.code {
+				t.Errorf("%s grant: approve = %d %s, want 409 %s", name, res.code, res.raw, tc.code)
+			}
+			if fake.lastApprovePayload != nil {
+				t.Errorf("%s grant: signalled %v", name, fake.lastApprovePayload)
+			}
+		}
+	}
+}
+
+// The newest grant decides: an older grant that is still live does not
+// outrank a newer recorded denial.
+func TestDevLoopApprove_NewestGrantDecides(t *testing.T) {
+	e, fake := newDevLoopGrantEnv(t)
+	e.h.opts.LegacyApproverDisabled = false
+	for _, older := range []string{workitems.ApprovalApproved, workitems.ApprovalPending} {
+		run := e.startDevLoopRun("newest-" + older)
+		first := e.requestDevLoopGrant(run.execID, "gate-old-"+older)
+		if older == workitems.ApprovalApproved {
+			if res := e.do(rootAdmin, "POST", "/api/v1/action-approvals/"+first+"/decision", map[string]any{"decision": workitems.DecisionApprove}); res.code != http.StatusOK {
+				t.Fatalf("approve older = %d %s", res.code, res.raw)
+			}
+		}
+		second := e.requestDevLoopGrant(run.execID, "gate-new-"+older)
+		if res := e.do(rootAdmin, "POST", "/api/v1/action-approvals/"+second+"/decision", map[string]any{"decision": workitems.DecisionDeny}); res.code != http.StatusOK {
+			t.Fatalf("deny newer = %d %s", res.code, res.raw)
+		}
 		fake.lastApprovePayload = nil
 		res := e.approveDevLoop(rootAdmin, run.workflowID, "")
-		if res.code != http.StatusConflict || code(res) != tc.code {
-			t.Errorf("%s grant: approve = %d %s, want 409 %s", tc.name, res.code, res.raw, tc.code)
+		if res.code != http.StatusConflict || code(res) != aarCodeDenied {
+			t.Errorf("older %s under a newer denial: approve = %d %s, want 409 %s", older, res.code, res.raw, aarCodeDenied)
 		}
 		if fake.lastApprovePayload != nil {
-			t.Errorf("%s grant: signalled %v", tc.name, fake.lastApprovePayload)
+			t.Errorf("older %s under a newer denial: signalled %v", older, fake.lastApprovePayload)
+		}
+		if st := e.approvalState(first)["state"]; st != older {
+			t.Errorf("the older grant moved to %v", st)
 		}
 	}
 }
