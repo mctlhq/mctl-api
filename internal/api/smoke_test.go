@@ -321,12 +321,11 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 	exec := &fakeExecutor{}
 
 	router := mctlapi.NewRouter(mctlapi.Options{
-		Registry:     operations.NewRegistry(),
-		GitReader:    gitReader,
-		ArgoCD:       argoClient,
-		AuditLog:     audit.NewLogger(),
-		Executor:     exec,
-		BackstageURL: "https://app.mctl.ai",
+		Registry:  operations.NewRegistry(),
+		GitReader: gitReader,
+		ArgoCD:    argoClient,
+		AuditLog:  audit.NewLogger(),
+		Executor:  exec,
 	})
 	return router, exec
 }

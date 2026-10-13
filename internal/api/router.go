@@ -66,13 +66,6 @@ type Options struct {
 	// WorkflowLogArchive reads archived Argo step logs from object storage
 	// (optional — nil when the archive env vars are unset).
 	WorkflowLogArchive WorkflowLogArchive
-	// Optional Backstage integration for immediate catalog sync.
-	BackstageURL string
-	// BackstageToken authorizes notifyBackstage's tenant catalog sync POST
-	// only (handlers_write.go). Custom domains no longer use it — mctl-api
-	// is the system of record for those (internal/domains), not a Backstage
-	// proxy.
-	BackstageToken string
 	// BackstageInternalURL is the cluster-internal URL for Backstage (e.g. http://backstage.backstage.svc:7007).
 	// Used for proxying repo operations to the github-app-connect plugin.
 	BackstageInternalURL string
@@ -80,11 +73,9 @@ type Options struct {
 	// repository gate's public-repository check (tests only).
 	GitHubAPIBaseURL string
 	// BackstageGithubAppConnectToken authorizes calls to Backstage's
-	// github-app-connect plugin (repos list/sync/install-url). Deliberately
-	// distinct from BackstageToken so the two credentials have independent
-	// blast radii and rotation schedules. When empty, proxied requests carry
-	// no Authorization header (matches authorizeGithubAppConnect's
-	// no-op-when-unset behavior).
+	// github-app-connect plugin (repos list/sync/install-url). When empty,
+	// proxied requests carry no Authorization header (matches
+	// authorizeGithubAppConnect's no-op-when-unset behavior).
 	BackstageGithubAppConnectToken string
 	// AllowedOrigins is the list of origins permitted by CORS.
 	// If empty, no Access-Control-Allow-Origin header is set (deny all cross-origin).
@@ -582,6 +573,9 @@ func NewRouter(opts Options) http.Handler {
 				// Surface identity links (mctl-api#350).
 				r.Post("/surface-identities/challenges", h.CreateSurfaceChallenge)
 				r.Post("/surface-identities/redeem", h.RedeemSurfaceChallenge)
+				// The portal resolves a tenant creator's GitHub login to a
+				// principal before it submits create-tenant (mctl-api#377).
+				r.Post("/surface-principals/github", h.ResolveGitHubPrincipal)
 				r.Post("/surface-identities/{id}/revoke", h.RevokeSurfaceIdentity)
 				r.Patch("/work-items/{id}", h.TransitionWorkItem)
 				r.Post("/work-items/{id}/intents", h.AppendWorkItemIntent)

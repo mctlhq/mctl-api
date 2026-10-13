@@ -166,8 +166,6 @@ docker run -p 8080:8080 mctl-api
 | `ROADMAP_WAVE_MAX_AGE` | Maximum age of the latest publication's observation when `POST /api/v1/roadmap/waves/execute` starts a wave (Go duration). An invalid value turns wave execution off. | `30m` | No |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated Traefik CIDRs/IPs trusted for `X-Forwarded-For` on audit events | — | No |
 | `ALLOW_INSECURE_DB` | Permit `sslmode=disable` (tests/local only) | — | No |
-| `BACKSTAGE_URL` | Backstage catalog URL | — | No |
-| `BACKSTAGE_TOKEN` | Backstage service token, used only for tenant catalog sync (`notifyBackstage`) — no longer used by `/api/v1/domains*`, which is mctl-api's own registry | — | No |
 | `BACKSTAGE_GITHUB_APP_CONNECT_TOKEN` | Backstage service token, scoped to the `github-app-connect` plugin (repos list/sync/install-url) | — | No |
 | `DOMAINS_DB_URL` | PostgreSQL connection string for the custom domains registry (falls back to `AUDIT_DB_URL`). Without either, `/api/v1/domains*` returns 503. | — | No |
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for `POST /api/v1/webhooks/github` (`X-Hub-Signature-256`). Unset: the webhook answers 401. Pull request events are queued as reference-only envelopes for Claude Remote (mctlhq/.github#87). | — | No |
