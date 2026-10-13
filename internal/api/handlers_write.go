@@ -261,7 +261,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// MCTL_AGENTS_APPROVE_LEGACY_APPROVER=false then refuses it.
 	//
 	// A grant-authorized call is not handled here: its approver is the
-	// grant's decider, set from the consumed row right before submit (R8).
+	// grant's decider, set by prepareApprovalGrant (R8).
 	if opName == "mctl-agents-approve" && !grantAuthorized {
 		if user.IsService() {
 			relayed := input["approver"]
@@ -328,6 +328,10 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			"error":            "validation failed: " + strings.Join(errs, "; "),
 			"validationErrors": errs,
 		})
+		return
+	}
+
+	if grantAuthorized && !h.bindApprovalGrant(w, r, user, grantSpend, input) {
 		return
 	}
 
@@ -425,10 +429,8 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		// R8: the decider of the grant, never the body (refused in
-		// prepareApprovalGrant).
-		input["approver"] = consumed.DecidedBy
-		auditParams = redactSecrets(op, input)
+		// R8: input["approver"] is the grant's decider, set and validated
+		// with the rest of the input (prepareApprovalGrant).
 		approvalGrantAuditParams(auditParams, user, consumed)
 	}
 
