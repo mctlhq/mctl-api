@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.87.0](https://github.com/mctlhq/mctl-api/compare/4.86.0...4.87.0) (2026-10-13)
+
+
+### Features
+
+* **identity:** serve actor and subject on approvals and identity/self ([55c2d0e](https://github.com/mctlhq/mctl-api/commit/55c2d0ee9d33274334807bf2cb019fe6586b1834))
+* **identity:** serve actor and subject on approvals and identity/self ([7f1ce90](https://github.com/mctlhq/mctl-api/commit/7f1ce9051beb6d1603a38ceb09b60aebb8a3cde0))
+
+
+### Bug Fixes
+
+* **api:** refuse create-tenant when the creator has no principal ([9eeff3a](https://github.com/mctlhq/mctl-api/commit/9eeff3ab30b9ad7ff0fc495be24cde867b8598ed))
+* **api:** refuse create-tenant when the creator has no principal ([401e7b0](https://github.com/mctlhq/mctl-api/commit/401e7b0d7ac2fbe16f43bdab734d5023b07269e2)), closes [#377](https://github.com/mctlhq/mctl-api/issues/377)
+* **gitops:** publish principal-key gauges from the tenants reader only ([78cb99d](https://github.com/mctlhq/mctl-api/commit/78cb99d04a402d85bcaa8ed23217e3d37079e08c))
+* **gitops:** publish principal-key gauges from the tenants reader only ([bd03287](https://github.com/mctlhq/mctl-api/commit/bd032877db4445a84c9b274eeec2441d15670f50)), closes [#377](https://github.com/mctlhq/mctl-api/issues/377)
+* **identity:** relay identity/self through the surface gate ([d59743e](https://github.com/mctlhq/mctl-api/commit/d59743e30c440aaaf7258cdacdd9c95fe6bb0e58))
+
 ## [4.86.0](https://github.com/mctlhq/mctl-api/compare/4.85.1...4.86.0) (2026-10-13)
 
 
