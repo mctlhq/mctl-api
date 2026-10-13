@@ -439,6 +439,31 @@ func NewDelegatedUser(login string, groups []string, acting *User) *User {
 	}
 }
 
+// NewDelegatedPrincipalUser builds the delegated subject from the canonical
+// principal a grant stored (mctl-api#571 R9), for a human signed in through
+// any IdP. id is the grant subject's name without its namespace, so the
+// subject's principalOf string matches what the grant recorded; githubLogin
+// says whether that name is a GitHub login. It returns nil when
+// NewDelegatedUser would, or when principalID is empty: a subject is never
+// taken from its name alone.
+//
+// The principal is NOT resolved from the name. It is marked as a token
+// principal, so AttachPrincipal checks that the stored principal is still
+// active (PrincipalChecker) and clears it otherwise -- the same check a
+// local token's pid claim gets.
+func NewDelegatedPrincipalUser(id, principalID string, githubLogin bool, groups []string, acting *User) *User {
+	if principalID == "" {
+		return nil
+	}
+	u := NewDelegatedUser(id, groups, acting)
+	if u == nil {
+		return nil
+	}
+	u.githubLogin = githubLogin
+	u.principalID, u.tokenPrincipal = principalID, true
+	return u
+}
+
 // ActingPrincipal is the surface principal that carried a relayed request,
 // or "" when the caller acted directly.
 func (u *User) ActingPrincipal() string {

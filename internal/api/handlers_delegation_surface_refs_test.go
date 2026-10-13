@@ -193,6 +193,15 @@ func (loginPrincipals) ResolvePrincipal(_ context.Context, id auth.Identity) (st
 	return "prn_" + id.Display, nil
 }
 
+// CheckPrincipal treats every principal this resolver could have produced
+// as active.
+func (loginPrincipals) CheckPrincipal(_ context.Context, principalID string) error {
+	if !strings.HasPrefix(principalID, "prn_") {
+		return auth.ErrIdentityRefused
+	}
+	return nil
+}
+
 // Through the real router: an agent rotating grant refs across many human
 // subjects still hits ONE aggregate ceiling. Each subject stays far below the
 // global per-subject limit, so a 429 can only come from agentAggregateLimit

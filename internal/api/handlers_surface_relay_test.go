@@ -397,6 +397,7 @@ type relayPrincipals struct {
 	byLogin map[string]string
 	err     error
 	seen    []auth.Identity
+	checked []string
 }
 
 func (p *relayPrincipals) ResolvePrincipal(_ context.Context, id auth.Identity) (string, error) {
@@ -405,6 +406,22 @@ func (p *relayPrincipals) ResolvePrincipal(_ context.Context, id auth.Identity) 
 		return "", p.err
 	}
 	return p.byLogin[id.Display], nil
+}
+
+// CheckPrincipal answers a stored principal (a delegation grant's,
+// mctl-api#571 R9) from the same table: the fixed error if set, active if
+// some login maps to it, otherwise no such principal.
+func (p *relayPrincipals) CheckPrincipal(_ context.Context, principalID string) error {
+	p.checked = append(p.checked, principalID)
+	if p.err != nil {
+		return p.err
+	}
+	for _, prn := range p.byLogin {
+		if prn == principalID {
+			return nil
+		}
+	}
+	return auth.ErrIdentityRefused
 }
 
 // The relay resolves the human's principal the way authentication does, and

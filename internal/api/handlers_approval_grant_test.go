@@ -223,6 +223,50 @@ func TestApprovalGrant_BoundGrantApprovesOnceAsTheDecider(t *testing.T) {
 	}
 }
 
+// A6 (R9): a human admin with no GitHub identity -- a ZITADEL sign-in --
+// decides the approval and the agent run exercises it end to end. The
+// delegated subject is the decider's stored principal; nothing about it is
+// read from a GitHub login.
+func TestApprovalGrant_NonGitHubDeciderApprovesEndToEnd(t *testing.T) {
+	g := newGrantEnv(t)
+	zed := auth.NewFederatedUser("zitadel", "https://id.example.com", "z-sub", "zed@example.com", string(auth.KindHuman))
+	zed.Groups = []string{"admins"}
+	if err := auth.AttachPrincipal(context.Background(), loginPrincipals{}, zed); err != nil {
+		t.Fatal(err)
+	}
+	if _, gh := zed.GitHubLogin(); gh {
+		t.Fatal("the decider must have no GitHub login")
+	}
+	g.decider = zed
+	run := g.grantedRun("a6")
+	g.decide(run.approval, "approve")
+
+	res := g.execute(run.agent, run.approval, approveInput(run.slug))
+	if res.code != http.StatusAccepted {
+		t.Fatalf("grant-authorized approve by a ZITADEL decider = %d %s", res.code, res.raw)
+	}
+	if g.submitted() != 1 {
+		t.Fatalf("submitted %d workflows, want 1", g.submitted())
+	}
+	if got := g.exec.submitted[0]["approver"]; got != "zed@example.com" {
+		t.Errorf("approver = %q, want zed@example.com", got)
+	}
+	var found bool
+	for _, entry := range g.audit.List(200) {
+		if entry.Operation != devLoopApprovalKind || entry.Status != "submitted" {
+			continue
+		}
+		found = true
+		if entry.UserID != "zed@example.com" || entry.PrincipalID != "prn_zed@example.com" ||
+			entry.Parameters["subject_principal_id"] != "prn_zed@example.com" || entry.Parameters["actor_name"] != "implementer" {
+			t.Errorf("submit audit = user %q principal %q params %v", entry.UserID, entry.PrincipalID, entry.Parameters)
+		}
+	}
+	if !found {
+		t.Error("no submitted audit entry")
+	}
+}
+
 // R8: the decider recorded as approver is validated like every other
 // approver before anything is spent. A decider name the operation's
 // identity pattern refuses (an IdP display name with a newline, which
@@ -238,17 +282,9 @@ func TestApprovalGrant_DeciderIsValidatedAsTheApprover(t *testing.T) {
 	g.decider = odd
 	run := g.grantedRun("ctl")
 	g.decide(run.approval, "approve")
-	// The delegated subject is built here, not by the gate: this branch's
-	// gate only delegates to github: subjects.
-	subject := auth.NewDelegatedUser("x", nil, run.agent)
-	raw, _ := json.Marshal(approveInput(run.slug))
-	req := httptest.NewRequest("POST", grantApprovePath, bytes.NewReader(raw))
-	req = withChiParam(req, "name", devLoopApprovalKind)
-	ctx := withDelegationGrant(auth.WithUser(req.Context(), subject), identityGrant{Kind: delegation.KindActionApproval, Ref: run.approval})
-	rec := httptest.NewRecorder()
-	g.h.ExecuteOperation(rec, req.WithContext(ctx))
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "validation failed") || !strings.Contains(rec.Body.String(), "approver") {
-		t.Errorf("control character in the decider = %d %s, want 400 validation failed on approver", rec.Code, rec.Body.String())
+	res := g.execute(run.agent, run.approval, approveInput(run.slug))
+	if res.code != http.StatusBadRequest || !strings.Contains(res.raw, "validation failed") || !strings.Contains(res.raw, "approver") {
+		t.Errorf("control character in the decider = %d %s, want 400 validation failed on approver", res.code, res.raw)
 	}
 	if g.submitted() != 0 {
 		t.Fatalf("submitted %d workflows", g.submitted())
@@ -454,9 +490,9 @@ func TestApprovalGrant_EveryoneElseIsRefusedAsBefore(t *testing.T) {
 		t.Errorf("non-admin human = %d %s, want 403", res.code, res.raw)
 	}
 
-	// The gate only builds github: subjects today, so another grant kind
-	// is put on the context directly: what ExecuteOperation must do with a
-	// delegated subject whose grant is not an action approval.
+	// Another grant kind is put on the context directly: what
+	// ExecuteOperation must do with a delegated subject whose grant is not
+	// an action approval, whichever route delivered it.
 	subject := auth.NewDelegatedUser("root", []string{"admins"}, run.agent)
 	for _, kind := range []string{delegation.KindWorkItem, delegation.KindExecutionRequest, delegation.KindSurfaceLink} {
 		raw, _ := json.Marshal(approveInput(run.slug))

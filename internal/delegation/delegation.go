@@ -114,9 +114,9 @@ var (
 	// for a record id it does not own.
 	ErrNotBound = errors.New("delegation: grant is not bound to this run")
 	// ErrSubjectUnresolved is returned when a resolved grant's subject
-	// principal id is empty, or (for a github-namespaced check performed by
-	// the caller) not resolvable to a GitHub principal. There is
-	// deliberately no fallback to the adjacent principal string.
+	// principal id is empty. There is deliberately no fallback to the
+	// adjacent principal string: the caller takes the subject from the
+	// stored principal id (mctl-api#571 R9), whatever IdP it signed in with.
 	ErrSubjectUnresolved = errors.New("delegation: grant subject has no principal")
 	// ErrUnavailable is returned when a grant source is unconfigured or
 	// answers with anything other than "not found": a nil source, or a
