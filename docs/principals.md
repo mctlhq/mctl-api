@@ -237,8 +237,46 @@ before this change; nothing is backfilled into them.
 | `human_input_deliveries` | `respondent` | `respondent_principal_id`, `via_principal_id` |
 | `lifecycle_events` | (`actor_type`/`actor_id` name the owner, not the caller) | `caller_principal_id`, `via_principal_id` |
 
-The ids are written only: no API response serves them yet and nothing reads
-them for a decision.
+Nothing reads the ids for a decision. Two responses serve them
+(mctl-api#376 slice D), and no other one does:
+
+- `GET /api/v1/action-approvals/{id}` (and the listing) returns the four
+  principal ids above, plus the requester as actor and subject:
+  `actor_kind`, `actor_name`, `subject_principal_id`, `subject_kind` and
+  `agent_run_id`. They are taken from authentication at create and stored
+  in columns of the same names; a request body naming any of them is
+  refused with `actor_not_accepted`. The decider is `decided_by` and its
+  two principal ids.
+- `GET /api/v1/identity/self` (below).
+
+## Actor and subject: `GET /api/v1/identity/self`
+
+Returns, in the `identity/v1` shape the policy checkpoint and the evidence
+envelope read:
+
+```json
+{"schema_version": "identity/v1",
+ "actor":   {"principal_id": "prn_…", "kind": "agent", "name": "implementer"},
+ "subject": {"principal_id": "prn_…", "kind": "human", "name": "alice"},
+ "execution_id": "we_…", "work_item_id": "wi_…", "agent_run_id": "art_…",
+ "grant":   {"kind": "execution_request", "ref": "xr_…"}}
+```
+
+- The **actor** is the principal that authenticated: the agent run, the
+  service, the surface or the human.
+- The **subject** is the human the actor acts for, and is set only on a
+  delegated request (an agent run token sending `X-MCTL-On-Behalf-Of`, which
+  this route accepts) or a relayed one (a surface). Otherwise it is `null`,
+  never a copy of the actor: `null` is the statement "acting for itself".
+- `grant` is the delegation grant the gate resolved, and `null` unless the
+  request is delegated. A relay is authorized by its surface link instead.
+- On a delegated or relayed request the record columns keep their existing
+  meaning: `actor_principal_id` (or `requested_by_principal_id`) holds the
+  subject, and `via_principal_id` the agent or surface that carried it.
+
+Every field comes from authentication and the delegation gate. Nothing is
+parsed out of a principal string or a login, and the same human resolves to
+the same `principal_id` whichever provider they signed in with.
 
 ## Not in phase 1
 

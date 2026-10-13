@@ -683,6 +683,11 @@ func NewRouter(opts Options) http.Handler {
 			// /operations/{name}/execute and starve real writes.
 			r.Get("/agents/dev-loop/{workflow_id}", h.GetDevLoopWorkflow)
 
+			// Who the API resolved the caller to (mctl-api#376 D3):
+			// side-effect-free, outside the write group like the dev-loop
+			// liveness read.
+			r.Get("/identity/self", h.GetIdentitySelf)
+
 			// Human-input read model (mctl-api#261): side-effect-free reads,
 			// outside the write group like the dev-loop liveness read.
 			r.Get("/human-input", h.ListHumanInputs)

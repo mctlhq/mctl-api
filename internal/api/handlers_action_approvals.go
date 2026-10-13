@@ -219,7 +219,8 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "Idempotency-Key header and idempotency_key differ", nil)
 		return
 	}
-	a, created, err := h.opts.WorkItems.CreateActionApproval(r.Context(), workitems.ActionApprovalInput{
+	actor, subject := actorAndSubject(user)
+	in := workitems.ActionApprovalInput{
 		ActionIntent: workitems.ActionIntent{
 			ExecutionID:   body.ExecutionID,
 			ActionKind:    body.ActionKind,
@@ -234,10 +235,19 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		// Recorded only (mctl-api#373 phase 1).
 		RequestedByPrincipalID: user.PrincipalID(),
 		ViaPrincipalID:         user.ViaPrincipalID(),
-		IdempotencyKey:         body.IdempotencyKey,
-		ExpiresAt:              body.ExpiresAt,
-		IntentHash:             body.IntentHash,
-	})
+		// The requester as actor and subject (mctl-api#376 D2).
+		ActorKind:      actor.Kind,
+		ActorName:      actor.Name,
+		AgentRunID:     user.AgentRunID(),
+		IdempotencyKey: body.IdempotencyKey,
+		ExpiresAt:      body.ExpiresAt,
+		IntentHash:     body.IntentHash,
+	}
+	if subject != nil {
+		in.SubjectPrincipalID = subject.PrincipalID
+		in.SubjectKind = subject.Kind
+	}
+	a, created, err := h.opts.WorkItems.CreateActionApproval(r.Context(), in)
 	if err != nil {
 		writeActionApprovalError(w, err)
 		return

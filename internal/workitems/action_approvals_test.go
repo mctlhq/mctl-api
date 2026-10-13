@@ -330,3 +330,55 @@ func TestConsumeActionApprovalIsSingleUseUnderConcurrency(t *testing.T) {
 		}
 	}
 }
+
+// The principal ids and the requester's actor/subject are served on every
+// read (mctl-api#376 D1, D2), not only written: a reader that drops a column
+// would answer with "" and look like a row that never had one.
+func TestActionApprovalServesPrincipalAndActorFields(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	in := approvalInput(s, "k-actor")
+	in.RequestedByPrincipalID = "prn_01M39HRB7JRXZ2PHW5VVB695YZ"
+	in.ViaPrincipalID = "prn_01M45DR1GWC87109EH88VBJX25"
+	in.ActorKind = "agent"
+	in.ActorName = "implementer"
+	in.SubjectPrincipalID = "prn_01M4QEZ1N0V8QX5JZ3N1KWD7KQ"
+	in.SubjectKind = "human"
+	in.AgentRunID = "art_01M4QF0AJ9Y3C5V2KX7WQ4N8RT"
+	a := createApproval(t, s, in)
+	d, err := s.DecideActionApproval(ctx, ActionDecisionInput{
+		ID: a.ID, DecidedBy: "github:root", Decision: DecisionApprove,
+		DecidedByPrincipalID: "prn_01M4QF2T6BWS0J7H0E3F9Y1CGD", DecidedViaPrincipalID: "prn_01M4QF3K8D2RNWX5MZB0T7P6QA",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ActionApproval(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.ActionApprovals(ctx, ActionApprovalFilter{ExecutionID: storeTestExecution})
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list = %v %v", list, err)
+	}
+	for name, r := range map[string]*ActionApprovalRequest{"create": a, "decide": d, "get": got, "list": &list[0]} {
+		want := map[string][2]string{
+			"requested_by_principal_id": {r.RequestedByPrincipalID, in.RequestedByPrincipalID},
+			"via_principal_id":          {r.ViaPrincipalID, in.ViaPrincipalID},
+			"actor_kind":                {r.ActorKind, in.ActorKind},
+			"actor_name":                {r.ActorName, in.ActorName},
+			"subject_principal_id":      {r.SubjectPrincipalID, in.SubjectPrincipalID},
+			"subject_kind":              {r.SubjectKind, in.SubjectKind},
+			"agent_run_id":              {r.AgentRunID, in.AgentRunID},
+		}
+		if name != "create" {
+			want["decided_by_principal_id"] = [2]string{r.DecidedByPrincipalID, "prn_01M4QF2T6BWS0J7H0E3F9Y1CGD"}
+			want["decided_via_principal_id"] = [2]string{r.DecidedViaPrincipalID, "prn_01M4QF3K8D2RNWX5MZB0T7P6QA"}
+		}
+		for field, v := range want {
+			if v[0] != v[1] {
+				t.Errorf("%s: %s = %q, want %q", name, field, v[0], v[1])
+			}
+		}
+	}
+}
