@@ -92,6 +92,8 @@ proofs or `external_ref` contents.
 | `commerce_quotes` | one row per quote, with its stored `quote_digest` |
 | `commerce_invocations` | one row per accepted invocation; `UNIQUE (tenant_id, principal_id, idempotency_key)` is the idempotency scope of ADR 020 sec. 6, `UNIQUE (quote_id)` binds a quote to one invocation |
 | `commerce_invocation_transitions` | append-only history, one row per phase change |
+| `commerce_entitlements` | finite prepaid capability service packages granted to tenants against verified invoices |
+| `commerce_entitlement_allocations` | unit hold/capture/release records bound to specific invocations |
 
 ## Identity binding
 
@@ -343,6 +345,34 @@ scoped by tenant because `approval_id` is caller input: a global index would
 let one tenant block another tenant's approval id and learn that it exists.
 Every hand-out of a signed authorization is audited as `commerce-dispatch`,
 with status `succeeded` for the fence and `replayed` for each replay.
+
+## Entitlements
+
+Implements finite prepaid capability service packages (`mctl-api#614`).
+Entitlements allow granting a finite number of capability invocation units to a tenant,
+backed by an invoice reference (`invoice_ref`) and verified external payment.
+
+- **Granting**: `POST /api/v1/commerce/tenants/{tenant}/entitlements` (admin-only). Validates
+  that the requested `capability_id` has published terms in `commerce_terms` (`terms-unknown`
+  422 if not), that `units >= 1`, and that `expires_at` is a valid future timestamp. A duplicate
+  `invoice_ref` for the same tenant is refused with 409 `entitlement-conflict`. Newly granted
+  packages are stored with `status = 'active'`.
+- **Hold on Reserve**: During `…/reserve`, `holdEntitlementUnit` checks for active packages
+  (`status = 'active' AND expires_at > now AND remaining_units > 0`). If found, it decrements
+  `remaining_units`, increments `reserved_units`, and records an allocation in
+  `commerce_entitlement_allocations` with `state: held`. If multiple active packages exist,
+  units are consumed FIFO by earliest expiration (`ORDER BY expires_at ASC`).
+- **Capture and Release**: On `…/finalize`, successful outcomes transition the allocation to
+  `captured` and decrement `reserved_units`. On release or payment denial, the allocation is
+  transitioned to `released`, restoring `remaining_units` and decrementing `reserved_units`.
+- **Gating Refusal**: If a tenant has active entitlement packages for a capability:
+  - If all units are consumed before expiry: `Reserve` refuses with 422 `entitlement-exhausted`.
+  - If active packages have expired: `Reserve` refuses with 422 `entitlement-expired`.
+  - Refused invocations are persisted in `refused` phase, replaying the refusal reason on retries.
+- **Retirement and Fallback**: Admins can retire an entitlement package via
+  `DELETE /api/v1/commerce/tenants/{tenant}/entitlements/{entitlement_id}` or `POST …/retire`,
+  setting `status = 'retired'`. If a tenant has no active entitlement packages for a capability
+  (or all have been retired), invocations seamlessly fall back to standard currency budget limits.
 
 ## Tests
 

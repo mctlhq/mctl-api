@@ -127,6 +127,8 @@ const (
 	ReasonUnsupportedExecution = "unsupported-execution"
 	ReasonOutcomeUnknown       = "outcome-unknown"
 	ReasonTooLateToCancel      = "too-late-to-cancel"
+	ReasonEntitlementExhausted = "entitlement-exhausted"
+	ReasonEntitlementExpired   = "entitlement-expired"
 )
 
 // Encoding version prefixes of the two digests (ADR 020 secs. 5 and 8).
@@ -160,7 +162,11 @@ var (
 	ErrPhaseConflict        = errors.New("commerce: phase conflict")
 	ErrTerminal             = errors.New("commerce: invocation is terminal")
 	// ErrApprovalBound: the approval already belongs to another invocation.
-	ErrApprovalBound = errors.New("commerce: approval is bound to another invocation")
+	ErrApprovalBound        = errors.New("commerce: approval is bound to another invocation")
+	ErrEntitlementNotFound  = errors.New("commerce: entitlement not found")
+	ErrEntitlementConflict  = errors.New("commerce: entitlement invoice already granted")
+	ErrEntitlementExhausted = errors.New("commerce: entitlement exhausted")
+	ErrEntitlementExpired   = errors.New("commerce: entitlement expired")
 )
 
 func invalid(format string, args ...any) error {
@@ -733,4 +739,94 @@ type ListFilter struct {
 	Since          time.Time
 	Until          time.Time
 	Limit          int
+}
+
+// EntitlementIDPrefix prefixes entitlement IDs.
+const EntitlementIDPrefix = "ent_"
+
+// AllocationIDPrefix prefixes entitlement allocation IDs.
+const AllocationIDPrefix = "alc_"
+
+// Allocation states.
+const (
+	AllocationStateHeld     = "held"
+	AllocationStateCaptured = "captured"
+	AllocationStateReleased = "released"
+)
+
+// Entitlement statuses.
+const (
+	EntitlementStatusActive  = "active"
+	EntitlementStatusRetired = "retired"
+)
+
+// Entitlement represents a purchased finite service package of capability executions
+// backed by an external verified invoice payment.
+type Entitlement struct {
+	EntitlementID  string    `json:"entitlement_id"`
+	TenantID       string    `json:"tenant_id"`
+	CapabilityID   string    `json:"capability_id"`
+	TotalUnits     int64     `json:"total_units"`
+	RemainingUnits int64     `json:"remaining_units"`
+	ReservedUnits  int64     `json:"reserved_units"`
+	InvoiceRef     string    `json:"invoice_ref"`
+	PaymentStatus  string    `json:"payment_status"`
+	GrantedBy      string    `json:"granted_by"`
+	Reason         string    `json:"reason,omitempty"`
+	Status         string    `json:"status"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// GrantEntitlementInput grants a new finite entitlement bucket to a tenant.
+type GrantEntitlementInput struct {
+	TenantID     string    `json:"tenant_id"`
+	CapabilityID string    `json:"capability_id"`
+	Units        int64     `json:"units"`
+	InvoiceRef   string    `json:"invoice_ref"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	Actor        string    `json:"actor"`
+	Reason       string    `json:"reason"`
+}
+
+func (in GrantEntitlementInput) validate(now time.Time) error {
+	if err := checkText("tenant_id", in.TenantID, MaxIDBytes, true); err != nil {
+		return err
+	}
+	if err := checkText("capability_id", in.CapabilityID, MaxIDBytes, true); err != nil {
+		return err
+	}
+	if in.Units <= 0 {
+		return invalid("units must be > 0")
+	}
+	if err := checkText("invoice_ref", in.InvoiceRef, MaxIDBytes, true); err != nil {
+		return err
+	}
+	if err := checkText("actor", in.Actor, MaxIDBytes, true); err != nil {
+		return err
+	}
+	if err := checkText("reason", in.Reason, MaxReasonBytes, false); err != nil {
+		return err
+	}
+	if in.ExpiresAt.IsZero() {
+		return invalid("expires_at is required")
+	}
+	if !in.ExpiresAt.After(now) {
+		return invalid("expires_at must be in the future")
+	}
+	if in.ExpiresAt.After(now.AddDate(10, 0, 0)) {
+		return invalid("expires_at cannot be more than 10 years in the future")
+	}
+	return nil
+}
+
+// EntitlementAllocation records the deduction of an entitlement unit by an invocation.
+type EntitlementAllocation struct {
+	AllocationID  string    `json:"allocation_id"`
+	EntitlementID string    `json:"entitlement_id"`
+	InvocationID  string    `json:"invocation_id"`
+	Units         int64     `json:"units"`
+	State         string    `json:"state"`
+	RecordedAt    time.Time `json:"recorded_at"`
 }

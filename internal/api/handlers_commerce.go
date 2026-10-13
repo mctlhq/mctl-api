@@ -195,8 +195,14 @@ func writeCommerceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, commerce.ErrTermsRetired):
 		writeErrorCode(w, http.StatusConflict, "terms-retired", "this terms version is already retired", nil)
-	case errors.Is(err, commerce.ErrQuoteNotFound), errors.Is(err, commerce.ErrInvocationNotFound):
+	case errors.Is(err, commerce.ErrQuoteNotFound), errors.Is(err, commerce.ErrInvocationNotFound), errors.Is(err, commerce.ErrEntitlementNotFound):
 		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, commerce.ErrEntitlementConflict):
+		writeErrorCode(w, http.StatusConflict, "entitlement-conflict", err.Error(), nil)
+	case errors.Is(err, commerce.ErrEntitlementExhausted):
+		writeErrorCode(w, http.StatusUnprocessableEntity, commerce.ReasonEntitlementExhausted, "entitlement units exhausted; the invocation is refused", nil)
+	case errors.Is(err, commerce.ErrEntitlementExpired):
+		writeErrorCode(w, http.StatusUnprocessableEntity, commerce.ReasonEntitlementExpired, "entitlement package expired; the invocation is refused", nil)
 	case errors.Is(err, commerce.ErrIdempotencyConflict):
 		writeErrorCode(w, http.StatusConflict, commerce.ReasonIdempotencyConflict, "idempotency key reused with a different quote", nil)
 	case errors.Is(err, commerce.ErrQuoteExpired):

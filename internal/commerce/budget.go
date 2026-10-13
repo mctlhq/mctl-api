@@ -759,6 +759,8 @@ var reserveRefusals = map[string]error{
 	ReasonQuoteExpired:         ErrQuoteExpired,
 	ReasonCurrencyMismatch:     ErrCurrencyMismatch,
 	ReasonFundsModeUnavailable: ErrFundsModeUnavailable,
+	ReasonEntitlementExhausted: ErrEntitlementExhausted,
+	ReasonEntitlementExpired:   ErrEntitlementExpired,
 }
 
 // IsReserveRefusal reports whether reason is one Reserve refuses with, as
@@ -860,6 +862,15 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 		if note != "" {
 			return refuse(ReasonBudgetExhausted, note, ErrBudgetExhausted)
 		}
+		if err := s.holdEntitlementUnit(ctx, tx, cur.TenantID, cur.CapabilityID, cur.InvocationID, now); err != nil {
+			if errors.Is(err, ErrEntitlementExhausted) {
+				return refuse(ReasonEntitlementExhausted, "prepaid entitlement units exhausted", ErrEntitlementExhausted)
+			}
+			if errors.Is(err, ErrEntitlementExpired) {
+				return refuse(ReasonEntitlementExpired, "prepaid entitlement package expired", ErrEntitlementExpired)
+			}
+			return err
+		}
 		payment := PaymentNotRequired
 		authorizationID := ""
 		if cur.PriceMode != PriceModeFree {
@@ -875,6 +886,9 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (*ReserveResult, e
 			case PaymentResultAuthorized:
 				payment, authorizationID = PaymentAuthorized, pr.ID
 			case PaymentResultDenied:
+				if err := s.releaseEntitlementUnit(ctx, tx, cur.InvocationID, now); err != nil {
+					return err
+				}
 				// Nothing was inserted yet: the denial commits no reservation
 				// (ADR 020 sec. 11).
 				return refuse(ReasonPaymentDenied, pr.Reason, ErrPaymentDenied)
@@ -940,6 +954,9 @@ func (s *Store) resolveUnknownHold(ctx context.Context, tx pgx.Tx, in ReserveInp
 			ExecutionOutcome: OutcomeNotDispatched, ChargeStatus: ChargeReleased, PaymentStatus: PaymentDenied,
 		})
 		if err != nil {
+			return err
+		}
+		if err := s.releaseEntitlementUnit(ctx, tx, cur.InvocationID, now); err != nil {
 			return err
 		}
 		*res = ReserveResult{Invocation: inv, Reservation: updated}
@@ -1076,6 +1093,15 @@ func (s *Store) Finalize(ctx context.Context, in FinalizeInput) (*FinalizeResult
 		updated, err := s.setReservationStatus(ctx, tx, rsv.ReservationID, status, captureID, now)
 		if err != nil {
 			return err
+		}
+		if status == ReservationCaptured {
+			if err := s.captureEntitlementUnit(ctx, tx, cur.InvocationID, now); err != nil {
+				return err
+			}
+		} else {
+			if err := s.releaseEntitlementUnit(ctx, tx, cur.InvocationID, now); err != nil {
+				return err
+			}
 		}
 		inv, err := s.applyTransition(ctx, tx, in.TenantID, tr)
 		if err != nil {
@@ -1230,6 +1256,9 @@ func (s *Store) Release(ctx context.Context, in ReleaseInput) (*FinalizeResult, 
 		if err != nil {
 			return err
 		}
+		if err := s.releaseEntitlementUnit(ctx, tx, cur.InvocationID, s.now()); err != nil {
+			return err
+		}
 		inv, err := s.applyTransition(ctx, tx, in.TenantID, tr)
 		if err != nil {
 			return err
@@ -1322,4 +1351,121 @@ func (s *Store) ExpireStale(ctx context.Context, actor string, limit int) (*Expi
 		out.Released = append(out.Released, r.id)
 	}
 	return out, nil
+}
+
+// holdEntitlementUnit locks and decrements a unit from the earliest-expiring active
+// entitlement for (tenantID, capabilityID).
+//
+// The entitlement ledger (prepaid capability units) and the budget ledger (currency
+// limits and rail authorization) operate independently in this phase. A held entitlement
+// unit tracks service entitlement consumption, while the invocation's price mode governs
+// rail authorization and spend limits. When an entitlement is held alongside a priced
+// capability, both ledgers record the execution.
+//
+// If the tenant has an entitlement registered for this capability but all units are
+// consumed or expired, holdEntitlementUnit returns ErrEntitlementExhausted or
+// ErrEntitlementExpired to refuse the reservation. If the tenant has no entitlements
+// configured for this capability, it returns nil so execution proceeds under standard budget.
+func (s *Store) holdEntitlementUnit(ctx context.Context, tx pgx.Tx, tenantID, capabilityID, invocationID string, now time.Time) error {
+	var entID string
+	err := tx.QueryRow(ctx, `SELECT entitlement_id
+		FROM commerce_entitlements
+		WHERE tenant_id = $1 AND capability_id = $2 AND status = 'active' AND remaining_units > 0 AND expires_at > $3
+		ORDER BY expires_at ASC LIMIT 1 FOR UPDATE`,
+		tenantID, capabilityID, now).Scan(&entID)
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE commerce_entitlements
+			SET remaining_units = remaining_units - 1, reserved_units = reserved_units + 1, updated_at = $2
+			WHERE entitlement_id = $1`, entID, now)
+		if err != nil {
+			return fmt.Errorf("commerce: reserve entitlement unit: %w", err)
+		}
+		alcULID, err := newULID(now)
+		if err != nil {
+			return fmt.Errorf("commerce: generate allocation ulid: %w", err)
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO commerce_entitlement_allocations
+			(allocation_id, entitlement_id, invocation_id, units, state, recorded_at)
+			VALUES ($1, $2, $3, 1, $4, $5)`,
+			AllocationIDPrefix+alcULID, entID, invocationID, AllocationStateHeld, now)
+		if err != nil {
+			return fmt.Errorf("commerce: record entitlement allocation: %w", err)
+		}
+		return nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("commerce: check entitlement: %w", err)
+	}
+
+	// No active units found. Check whether this tenant has active entitlements for this capability.
+	// 1. Never configured or all retired: activePackages == 0 -> return nil (fall back to currency budget)
+	// 2. Active package exists (expires_at > now) but all units consumed -> ErrEntitlementExhausted
+	// 3. Active package exists but all active packages have expired (expires_at <= now) -> ErrEntitlementExpired
+	var activePackages, unexpiredPackages int64
+	err = tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE expires_at > $3)
+		FROM commerce_entitlements
+		WHERE tenant_id = $1 AND capability_id = $2 AND status = 'active'`, tenantID, capabilityID, now).Scan(&activePackages, &unexpiredPackages)
+	if err != nil {
+		return fmt.Errorf("commerce: check entitlement count: %w", err)
+	}
+	if activePackages == 0 {
+		// Not an entitlement-backed capability for this tenant (or all packages retired).
+		return nil
+	}
+	if unexpiredPackages > 0 {
+		return ErrEntitlementExhausted
+	}
+	return ErrEntitlementExpired
+}
+
+func (s *Store) captureEntitlementUnit(ctx context.Context, tx pgx.Tx, invocationID string, now time.Time) error {
+	var alcID, entID string
+	var units int64
+	err := tx.QueryRow(ctx, `SELECT allocation_id, entitlement_id, units
+		FROM commerce_entitlement_allocations WHERE invocation_id = $1 AND state = $2
+		FOR UPDATE`, invocationID, AllocationStateHeld).Scan(&alcID, &entID, &units)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("commerce: find held allocation: %w", err)
+	}
+	_, err = tx.Exec(ctx, `UPDATE commerce_entitlement_allocations SET state = $2 WHERE allocation_id = $1`,
+		alcID, AllocationStateCaptured)
+	if err != nil {
+		return fmt.Errorf("commerce: capture allocation: %w", err)
+	}
+	_, err = tx.Exec(ctx, `UPDATE commerce_entitlements
+		SET reserved_units = reserved_units - $2, updated_at = $3
+		WHERE entitlement_id = $1`, entID, units, now)
+	if err != nil {
+		return fmt.Errorf("commerce: commit entitlement unit: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) releaseEntitlementUnit(ctx context.Context, tx pgx.Tx, invocationID string, now time.Time) error {
+	var alcID, entID string
+	var units int64
+	err := tx.QueryRow(ctx, `SELECT allocation_id, entitlement_id, units
+		FROM commerce_entitlement_allocations WHERE invocation_id = $1 AND state = $2
+		FOR UPDATE`, invocationID, AllocationStateHeld).Scan(&alcID, &entID, &units)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("commerce: find held allocation: %w", err)
+	}
+	_, err = tx.Exec(ctx, `UPDATE commerce_entitlement_allocations SET state = $2 WHERE allocation_id = $1`,
+		alcID, AllocationStateReleased)
+	if err != nil {
+		return fmt.Errorf("commerce: release allocation: %w", err)
+	}
+	_, err = tx.Exec(ctx, `UPDATE commerce_entitlements
+		SET remaining_units = remaining_units + $2, reserved_units = reserved_units - $2, updated_at = $3
+		WHERE entitlement_id = $1`, entID, units, now)
+	if err != nil {
+		return fmt.Errorf("commerce: restore entitlement unit: %w", err)
+	}
+	return nil
 }
