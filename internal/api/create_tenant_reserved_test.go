@@ -23,7 +23,7 @@ func TestCreateTenant_ReservedNameRejectedBeforeSubmit(t *testing.T) {
 	users := []struct {
 		label string
 		user  *auth.User
-	}{{"user", newcomer}, {"admin", adminUser}}
+	}{{"user", newcomer}, {"admin", resolvedAdmin}}
 	for _, name := range []string{"kube-system", "argocd", "vault", "kube-system-team", "my-system", "mctl-labs", "platform-x"} {
 		for _, u := range users {
 			t.Run(u.label+"/"+name, func(t *testing.T) {

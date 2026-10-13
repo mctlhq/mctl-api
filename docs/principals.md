@@ -275,10 +275,11 @@ and tenant-level semantics are the login ones; only the key differs.
 New tenants are keyed from the start. `create-tenant` stamps
 `creator_principal_id` from the session, like `creator_user_id`, and never
 forwards a value from the request body. The workflow writes it as the owner
-entry's `principalId`. When the caller's principal is unresolved, no id is
-sent and the owner entry gets a login only. mctl-gitops CI
-(`scripts/validate-tenant-member-keys.py`) then fails on that entry, as it
-does on any member without a well-formed `principalId`.
+entry's `principalId`. A caller whose principal is unresolved is refused
+with `503 creator_principal_unavailable` in every mode, admins included,
+and nothing is submitted: the workflow pushes straight to gitops main, so a
+login-only owner entry would land before CI
+(`scripts/validate-tenant-member-keys.py`) could flag it.
 
 The portal creates tenants without going through mctl-api: its `POST
 /tenants` (the mctl.me signup form, the portal's own page, the Backstage

@@ -157,7 +157,7 @@ func newCreateTenantFixture(t *testing.T) *roleFixture {
 }
 
 func TestCreateTenant_RefusesPlatformApplicationNames(t *testing.T) {
-	users := map[string]*auth.User{"tok-new": auth.NewGitHubUser("newcomer", nil)}
+	users := map[string]*auth.User{"tok-new": resolvedUser(auth.NewGitHubUser("newcomer", nil))}
 	for _, name := range []string{"root", "shared", "tenant", "loki", "otel", "external", "cloudnative", "grafana", "reflector", "valkey"} {
 		t.Run(name, func(t *testing.T) {
 			f := newCreateTenantFixture(t)
@@ -182,7 +182,7 @@ func TestCreateTenant_RefusesPlatformApplicationNames(t *testing.T) {
 }
 
 func TestCreateTenant_RefusesNamesOverlappingAnExistingTenant(t *testing.T) {
-	users := map[string]*auth.User{"tok-new": auth.NewGitHubUser("newcomer", nil)}
+	users := map[string]*auth.User{"tok-new": resolvedUser(auth.NewGitHubUser("newcomer", nil))}
 	for _, name := range []string{"labs-mctl", "admins-mctl", "erpact-oidc", "ovk-x"} {
 		t.Run(name, func(t *testing.T) {
 			f := newCreateTenantFixture(t)
@@ -209,7 +209,7 @@ func TestCreateTenant_RefusesNamesOverlappingAnExistingTenant(t *testing.T) {
 func TestCreateTenant_TenantListReadFailureRefuses(t *testing.T) {
 	f := newCreateTenantFixture(t)
 	f.git.tenantNamesErr = errors.New("checkout stale")
-	w := postAs(t, f.router, "/api/v1/operations/create-tenant/execute", map[string]string{"tenant_name": "acme"}, auth.NewGitHubUser("newcomer", nil))
+	w := postAs(t, f.router, "/api/v1/operations/create-tenant/execute", map[string]string{"tenant_name": "acme"}, resolvedUser(auth.NewGitHubUser("newcomer", nil)))
 	if w.Code != http.StatusServiceUnavailable || len(f.exec.submitted) != 0 {
 		t.Fatalf("status %d, submitted %v; want 503 and nothing submitted", w.Code, f.exec.submitted)
 	}
@@ -217,7 +217,7 @@ func TestCreateTenant_TenantListReadFailureRefuses(t *testing.T) {
 
 func TestCreateTenant_OrdinaryNameStillAccepted(t *testing.T) {
 	f := newCreateTenantFixture(t)
-	w := postAs(t, f.router, "/api/v1/operations/create-tenant/execute", map[string]string{"tenant_name": "acme"}, auth.NewGitHubUser("newcomer", nil))
+	w := postAs(t, f.router, "/api/v1/operations/create-tenant/execute", map[string]string{"tenant_name": "acme"}, resolvedUser(auth.NewGitHubUser("newcomer", nil)))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status %d; body %s", w.Code, w.Body.String())
 	}
@@ -226,7 +226,7 @@ func TestCreateTenant_OrdinaryNameStillAccepted(t *testing.T) {
 // An admin re-running create-tenant for an existing tenant is neither
 // reserved nor a collision with itself.
 func TestCreateTenant_ExistingTenantNamesStayValidForAdmins(t *testing.T) {
-	admin := &auth.User{ID: "root-admin", Groups: []string{"admins"}}
+	admin := resolvedUser(auth.NewGitHubUser("root-admin", []string{"admins"}))
 	for _, name := range []string{"admins", "erpact", "karabu", "labs", "mctl", "ovk"} {
 		t.Run(name, func(t *testing.T) {
 			f := newCreateTenantFixture(t)

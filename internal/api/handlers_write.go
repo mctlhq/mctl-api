@@ -155,19 +155,27 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		// principal-mode authorization grants by members[].principalId alone
 		// (mctl-api#377), so without it the creator would be locked out of
 		// the tenant they just made. Taken from the session like the login;
-		// a caller-supplied value is never forwarded. An unresolved principal
-		// sends none, and the workflow writes a login-only entry, which
-		// gitops CI flags (validate-tenant-member-keys.py). In principal mode
-		// a human caller without a principal never gets here (the auth
-		// middleware answers 503), so this only degrades in legacy/shadow
-		// mode, for the dev caller, or for a machine identity.
+		// a caller-supplied value is never forwarded. A creator whose
+		// principal could not be established is refused in every mode:
+		// sending none would land a login-only owner on gitops main (the
+		// workflow pushes directly), and the login is not an authorization
+		// key. 503, not 403: the identity is unknown, not denied.
 		delete(input, "creator_principal_id")
-		if pid := user.PrincipalID(); auth.ValidPrincipalID(pid) {
-			input["creator_principal_id"] = pid
-		} else {
-			slog.Warn("create-tenant without a resolved creator principal; the owner entry will carry no principalId",
-				"user", user.ID)
+		pid := user.PrincipalID()
+		if !auth.ValidPrincipalID(pid) {
+			h.logAudit(r, audit.Entry{
+				UserID:    user.ID,
+				Operation: opName,
+				Status:    "failed",
+				RiskLevel: string(op.RiskLevel),
+				Message:   "create-tenant refused: the creator has no resolved principal",
+			})
+			slog.Warn("create-tenant refused: no resolved creator principal", "user", user.ID)
+			writeErrorCode(w, http.StatusServiceUnavailable, "creator_principal_unavailable",
+				"your account's platform identity could not be established; try again later", nil)
+			return
 		}
+		input["creator_principal_id"] = pid
 	} else if !ciAuthorized && !user.HasTenantAccess(tenantParam) {
 		h.logAudit(r, audit.Entry{
 			UserID:    user.ID,
