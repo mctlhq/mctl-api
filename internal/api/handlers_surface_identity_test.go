@@ -71,6 +71,12 @@ func newSIDEnv(t *testing.T) *sidEnv {
 // newSIDEnvWith is newSIDEnv with a principal resolver for relayed humans.
 func newSIDEnvWith(t *testing.T, principals auth.PrincipalResolver) *sidEnv {
 	t.Helper()
+	return newSIDEnvOpts(t, principals, nil)
+}
+
+// newSIDEnvOpts is newSIDEnvWith with a last say over the router options.
+func newSIDEnvOpts(t *testing.T, principals auth.PrincipalResolver, mutate func(*Options)) *sidEnv {
+	t.Helper()
 	connStr := os.Getenv("TEST_DATABASE_URL")
 	if connStr == "" {
 		t.Skip("TEST_DATABASE_URL not set; skipping Postgres-backed surface identity handler test")
@@ -126,12 +132,16 @@ func newSIDEnvWith(t *testing.T, principals auth.PrincipalResolver) *sidEnv {
 			next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), u)))
 		})
 	}
-	e.router = NewRouter(Options{
+	opts := Options{
 		AuthMiddleware: fakeAuth, SurfaceIdentities: store, WorkItems: items, Evidence: ev, AuditLog: e.audit,
 		// alice is an admin in her own right; relaying must not carry it.
 		TenantResolver: sidTenants{"alice": {tenant, "admins"}, "bob": {"acme"}, "carol": {tenant}},
 		Principals:     principals,
-	})
+	}
+	if mutate != nil {
+		mutate(&opts)
+	}
+	e.router = NewRouter(opts)
 	return e
 }
 

@@ -350,9 +350,12 @@ func main() {
 	// where a request could observe the holder before its store is set.
 	agentRunResolver := &agentRunResolverHolder{}
 
+	// One decision for a direct caller (the middleware) and for a relayed
+	// or delegated subject (the handlers), so the two cannot drift.
+	principalAuthz := cfg.principalAuthz(gitReader)
 	authMiddleware := auth.Middleware(ghValidator, gitReader, dexVerifier, oauthServer,
 		auth.WithPrincipalResolver(principalResolver), auth.WithFederationRegistry(federationRegistry),
-		auth.WithAgentRunResolver(agentRunResolver), auth.WithPrincipalAuthz(cfg.principalAuthz(gitReader)))
+		auth.WithAgentRunResolver(agentRunResolver), auth.WithPrincipalAuthz(principalAuthz))
 
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
 
@@ -943,6 +946,7 @@ func main() {
 		TenantAuthzMode:                cfg.tenantAuthzMode(),
 		PrincipalMembership:            gitReader,
 		AdminPrincipals:                cfg.adminPrincipals(),
+		PrincipalAuthz:                 principalAuthz,
 		MemberKeyPlan:                  memberKeyPlanOptions(principalStore, gitReader),
 		Delegation:                     delegationResolver,
 		WorkflowDispatcher:             workflowDispatcher,

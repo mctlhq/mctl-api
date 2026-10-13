@@ -149,6 +149,11 @@ type Options struct {
 	// source of platform admin (auth.PrincipalAuthz); in shadow mode, when
 	// set, each request's legacy admin decision is compared with it.
 	AdminPrincipals map[string]bool
+	// PrincipalAuthz decides, in principal mode, a relayed or delegated
+	// subject's tenants by its principal, exactly as the middleware decides
+	// a direct caller's (mctl-api#377 B5). Nil in principal mode makes every
+	// relay and delegation 503, never a login-keyed fallback.
+	PrincipalAuthz *auth.PrincipalAuthz
 	// MemberKeyPlan backs the read-only principal-key plan for GitOps
 	// member entries (mctl-api#377 A5). Nil makes it 503.
 	MemberKeyPlan *MemberKeyPlanOptions

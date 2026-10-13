@@ -191,7 +191,9 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 			return
 		}
 		var groups []string
-		if h.opts.TenantResolver != nil {
+		// In principal mode the subject's tenants come from its principal
+		// (authorizeSubject below), never from its login.
+		if h.opts.TenantResolver != nil && !h.principalMode() {
 			// Same as authentication and as the surface relay: a failed
 			// lookup grants no tenant, even if the resolver returned a
 			// partial list alongside the error.
@@ -244,6 +246,11 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 		} else if subject.PrincipalID() != grant.SubjectPrincipalID {
 			h.refuseDelegation(w, r, user, agentName, ref, delegationCodeUnresolved, http.StatusForbidden,
 				"the grant's stored principal does not match its resolved identity")
+			return
+		}
+		if err := h.authorizeSubject(subject); err != nil {
+			slog.Warn("delegation: tenant access undecided", "subject", grant.Subject, "principal", subject.PrincipalID(), "error", err)
+			writeErrorCode(w, http.StatusServiceUnavailable, delegationCodeUnavailable, "cannot determine the delegated subject's tenant access right now", nil)
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), subject)))
