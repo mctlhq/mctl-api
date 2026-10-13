@@ -193,16 +193,22 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 			return
 		}
 		// The subject is the grant's stored principal (mctl-api#571 R9), for
-		// a human from any IdP. Its name is only carried for display and for
-		// principalOf, which must reproduce grant.Subject. A sil_ grant stores
-		// no principal: it is resolved from its mirrored GitHub identity
-		// below, so it still needs a GitHub subject.
+		// a human from any IdP: it decides tenants and what is recorded. Its
+		// name is still the grant's subject string, not re-derived from the
+		// principal, so whatever keys on principalOf(subject) -- private
+		// work-item visibility (canSeeWorkItem) -- follows that string. If the
+		// name was later re-linked to another principal, those checks see the
+		// name's current holder; a merged-away principal is refused below
+		// (ErrPrincipalDisabled). A sil_ grant stores no principal: it is
+		// resolved from its mirrored GitHub identity below, so it still needs
+		// a GitHub subject.
 		name, isGitHub := strings.CutPrefix(grant.Subject, "github:")
+		isOIDC := false
 		if !isGitHub {
-			name, _ = strings.CutPrefix(grant.Subject, "oidc:")
+			name, isOIDC = strings.CutPrefix(grant.Subject, "oidc:")
 		}
 		switch {
-		case name == "" || name == grant.Subject:
+		case (!isGitHub && !isOIDC) || name == "":
 			h.refuseDelegation(w, r, user, agentName, ref, delegationCodeUnresolved, http.StatusForbidden,
 				"the grant does not name a human principal")
 			return
@@ -239,8 +245,8 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 		if subject == nil {
 			// Unreachable in practice: user.AgentName() already proved
 			// isAgent, and name and the principal are non-empty by the
-			// checks above. Refused
-			// defensively rather than passing a nil user downstream.
+			// checks above. Refused defensively rather than passing a nil
+			// user downstream.
 			h.refuseDelegation(w, r, user, agentName, ref, delegationCodeUnresolved, http.StatusForbidden,
 				"the grant could not be resolved to a delegated subject")
 			return
@@ -265,9 +271,11 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 			return
 		}
 		// Every other grant kind's subject IS its stored principal, which
-		// AttachPrincipal has just checked is still active; the comparison
-		// below only keeps that a checked property rather than an assumption
-		// about the constructor. For KindSurfaceLink, grant carries no
+		// AttachPrincipal has just checked is still active. The comparison
+		// below cannot fail today (NewDelegatedPrincipalUser sets the id, and
+		// checkTokenPrincipal only clears it while returning an error, which
+		// was refused above); it is kept so a constructor change cannot
+		// silently swap the recorded subject. For KindSurfaceLink, grant carries no
 		// SubjectPrincipalID of its own (a link stores none): this check is
 		// how it gets one, from whatever AttachPrincipal just resolved via
 		// the surface-link mirror.
