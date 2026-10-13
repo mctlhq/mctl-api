@@ -239,6 +239,10 @@ func TestDocumentValidation(t *testing.T) {
 		"missing method":    fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a/cb"]}`, id),
 		"client_secret":     doc(id, `,"client_secret":"s"`),
 		"secret expiry":     doc(id, `,"client_secret_expires_at":0`),
+		"fragment uri":      fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://app.example.com/cb#f"],"token_endpoint_auth_method":"none"}`, id),
+		"userinfo uri":      fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://u:p@app.example.com/cb"],"token_endpoint_auth_method":"none"}`, id),
+		"javascript uri":    fmt.Sprintf(`{"client_id":%q,"redirect_uris":["javascript:alert(1)"],"token_endpoint_auth_method":"none"}`, id),
+		"data uri":          fmt.Sprintf(`{"client_id":%q,"redirect_uris":["data:text/html,x"],"token_endpoint_auth_method":"none"}`, id),
 	}
 	for name, body := range cases {
 		f := newFixture(t, serve(body))
@@ -246,6 +250,18 @@ func TestDocumentValidation(t *testing.T) {
 		if _, err := f.resolver().Resolve(context.Background(), id); !errors.Is(err, ErrInvalidDocument) {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+func TestCancelledCallerIsNotNegativeCached(t *testing.T) {
+	f := newFixture(t, nil)
+	f.h = serve(doc(f.url, ""))
+	r := f.resolver()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = r.Resolve(ctx, f.url) // may succeed or fail; must not poison the cache
+	if _, err := r.Resolve(context.Background(), f.url); err != nil {
+		t.Fatalf("a cancelled caller must not poison the cache: %v", err)
 	}
 }
 

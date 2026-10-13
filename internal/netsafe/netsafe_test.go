@@ -94,7 +94,7 @@ func TestDirectIPAndPortRefused(t *testing.T) {
 		t.Fatalf("direct v6 loopback: %v", err)
 	}
 	c = Client(Options{Resolver: &stubResolver{seq: [][]netip.Addr{{netip.MustParseAddr("8.8.8.8")}}}})
-	if _, err := get(t, c, "https://example.test:8443/x"); err == nil || !strings.Contains(err.Error(), "port 8443") {
+	if _, err := get(t, c, "https://example.test:8443/x"); err == nil || !strings.Contains(err.Error(), "port 8443") { //nolint:bodyclose // closed via t.Cleanup in get
 		t.Fatalf("port: %v", err)
 	}
 }
@@ -122,7 +122,7 @@ func TestRedirectRefusedAndLoopbackServerUnreachable(t *testing.T) {
 	defer srv.Close()
 	// The loopback server is not reachable through the safe client at all.
 	c := Client(Options{AllowedPorts: []int{portOf(srv.URL)}})
-	if _, err := get(t, c, srv.URL); !errors.Is(err, ErrNonPublic) {
+	if _, err := get(t, c, srv.URL); !errors.Is(err, ErrNonPublic) { //nolint:bodyclose // closed via t.Cleanup in get
 		t.Fatalf("loopback server: %v", err)
 	}
 }
