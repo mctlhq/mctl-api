@@ -496,6 +496,13 @@ increasing for human callers; `sum(tenant_member_entry_unkeyed) == 0`,
 ZITADEL MCP OAuth, ZITADEL bearer). A window in which a path saw no traffic
 does not count for that path.
 
+Up to and including 4.86.0, the roadmap-state Reader also published the three key gauges
+from a checkout with no tenants directory, so `tenant_principal_keys_scan_ok`
+dropped to 0 for a few seconds after each of its refreshes and the
+per-tenant series were briefly cleared. Zero samples from that cause are an
+artefact, not a failed scan: count the `scan_ok` part of the window from the
+release that fixed it.
+
 Over the same window, `oauth_token_principal_mismatch_total` must stay at
 zero. Before the flip, check pid coverage too: a live session with no
 recorded `pid` (one minted before the release that started recording it)

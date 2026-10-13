@@ -205,6 +205,29 @@ func TestPrincipalKeyMetrics(t *testing.T) {
 	}
 }
 
+// Only the tenants Reader publishes the gauges. The roadmap-state Reader
+// refreshes a checkout with no tenants directory every few minutes; when it
+// published too, it zeroed scan_ok and wiped the per-tenant series until the
+// next tenants refresh, so the switch criterion could never hold.
+func TestPrincipalKeyMetricsOnlyFromTheTenantsReader(t *testing.T) {
+	dir, tenants := syncedRepo(t)
+	writeTenantYAML(t, dir, "acme", keyedAcmeYAML)
+	tenants.EnablePrincipalKeyMetrics()
+	tenants.afterRefresh()
+	if got := testutil.ToFloat64(tenantPrincipalKeysScanOK); got != 1 {
+		t.Fatalf("scan ok = %v, want 1", got)
+	}
+
+	_, roadmap := syncedRepo(t)
+	roadmap.afterRefresh()
+	if got := testutil.ToFloat64(tenantPrincipalKeysScanOK); got != 1 {
+		t.Errorf("another checkout's refresh set scan ok to %v", got)
+	}
+	if got := testutil.ToFloat64(tenantMemberEntryUnkeyed.WithLabelValues("acme")); got != 1 {
+		t.Errorf("another checkout's refresh cleared the acme series (unkeyed = %v)", got)
+	}
+}
+
 func sortStrings(s []string) {
 	for i := 1; i < len(s); i++ {
 		for j := i; j > 0 && s[j] < s[j-1]; j-- {

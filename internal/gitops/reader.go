@@ -63,6 +63,11 @@ type Reader struct {
 	// the sync age (auth's freshness gate, the sync-age metric scrape) must
 	// never queue behind a slow or hung fetch (mctl-api#411).
 	lastSync atomic.Int64
+	// principalKeyMetrics makes each successful refresh publish the tenant
+	// principal-key gauges. Only the Reader on the tenants checkout sets it:
+	// any other checkout (the roadmap-state branch) has no tenants directory,
+	// and publishing from it would zero the shared gauges (mctl-api#377).
+	principalKeyMetrics bool
 	// principals is the principal-keyed membership snapshot of the last
 	// sync (principal_snapshot.go), read without taking mu.
 	principals atomic.Pointer[principalSnapshot]
@@ -312,7 +317,7 @@ func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
 	if err := r.refresh(); err != nil {
 		slog.Error("initial gitops sync failed", "error", err)
 	} else {
-		r.recordPrincipalKeyMetrics()
+		r.afterRefresh()
 	}
 
 	ticker := time.NewTicker(interval)
@@ -326,9 +331,23 @@ func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
 			if err := r.refresh(); err != nil {
 				slog.Error("gitops refresh failed", "error", err)
 			} else {
-				r.recordPrincipalKeyMetrics()
+				r.afterRefresh()
 			}
 		}
+	}
+}
+
+// EnablePrincipalKeyMetrics marks this Reader as the one whose checkout
+// holds platform-gitops/tenants, so its refreshes publish the tenant
+// principal-key gauges. Call it before RefreshLoop, on one Reader only.
+func (r *Reader) EnablePrincipalKeyMetrics() {
+	r.principalKeyMetrics = true
+}
+
+// afterRefresh runs after every successful refresh.
+func (r *Reader) afterRefresh() {
+	if r.principalKeyMetrics {
+		r.recordPrincipalKeyMetrics()
 	}
 }
 
