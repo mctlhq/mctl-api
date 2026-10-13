@@ -16,6 +16,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -94,5 +95,68 @@ func TestNewDelegatedUser_ResolvesPrincipalThroughGitHubLogin(t *testing.T) {
 	}
 	if u.PrincipalID() != "prn_ALICE" {
 		t.Fatalf("PrincipalID() = %q, want prn_ALICE", u.PrincipalID())
+	}
+}
+
+// checkOnly is a PrincipalChecker that records what it checked and answers
+// err; it resolves nothing.
+type checkOnly struct {
+	err     error
+	checked []string
+}
+
+func (c *checkOnly) ResolvePrincipal(context.Context, Identity) (string, error) {
+	return "", errors.New("a stored principal must not be resolved from a name")
+}
+
+func (c *checkOnly) CheckPrincipal(_ context.Context, principalID string) error {
+	c.checked = append(c.checked, principalID)
+	return c.err
+}
+
+// mctl-api#571 R9: the delegated subject is the grant's stored principal,
+// checked, never resolved from its name; a disabled one is cleared and
+// refused; an empty one is never built.
+func TestNewDelegatedPrincipalUser(t *testing.T) {
+	agent := NewAgentUser("implementer", AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1", RunID: "art_1"})
+	if u := NewDelegatedPrincipalUser("zed", "", false, nil, agent); u != nil {
+		t.Fatalf("empty principal: %+v, want nil", u)
+	}
+	if u := NewDelegatedPrincipalUser("zed", "prn_ZED", false, nil, NewGitHubUser("bob", nil)); u != nil {
+		t.Fatalf("non-agent acting user: %+v, want nil", u)
+	}
+
+	u := NewDelegatedPrincipalUser("zed", "prn_ZED", false, []string{"acme", "admins"}, agent)
+	c := &checkOnly{}
+	if err := AttachPrincipal(context.Background(), c, u); err != nil {
+		t.Fatal(err)
+	}
+	if u.PrincipalID() != "prn_ZED" || len(c.checked) != 1 || c.checked[0] != "prn_ZED" {
+		t.Fatalf("principal %q, checked %v", u.PrincipalID(), c.checked)
+	}
+	if _, gh := u.GitHubLogin(); gh {
+		t.Error("a non-GitHub subject must carry no GitHub login")
+	}
+	if u.IsAdmin() || u.IsAgent() {
+		t.Errorf("admin=%v agent=%v, want neither", u.IsAdmin(), u.IsAgent())
+	}
+	if id, _ := u.Identity(); id.Kind != KindHuman || id.Subject != "prn_ZED" {
+		t.Errorf("Identity() = %+v, want the principal as a human", id)
+	}
+	if a, ok := u.DelegatingAgent(); !ok || a != "implementer" || u.ExecutionID() != "we_1" || u.AgentRunID() != "art_1" {
+		t.Errorf("delegation fields lost: agent %q exec %q run %q", a, u.ExecutionID(), u.AgentRunID())
+	}
+
+	gh := NewDelegatedPrincipalUser("alice", "prn_ALICE", true, nil, agent)
+	if login, ok := gh.GitHubLogin(); !ok || login != "alice" {
+		t.Errorf("GitHub subject login = %q %v", login, ok)
+	}
+	if err := AttachPrincipal(context.Background(), &checkOnly{}, gh); err != nil || gh.PrincipalID() != "prn_ALICE" {
+		t.Errorf("GitHub subject: principal %q err %v, want the stored one checked", gh.PrincipalID(), err)
+	}
+
+	off := NewDelegatedPrincipalUser("zed", "prn_ZED", false, nil, agent)
+	if err := AttachPrincipal(context.Background(), &checkOnly{err: ErrPrincipalDisabled}, off); !errors.Is(err, ErrPrincipalDisabled) || off.PrincipalID() != "" {
+		t.Errorf("disabled: err %v principal %q, want ErrPrincipalDisabled and cleared", err, off.PrincipalID())
 	}
 }

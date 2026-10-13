@@ -178,6 +178,50 @@ func TestApprovalGrant_BoundGrantApprovesOnceAsTheDecider(t *testing.T) {
 	}
 }
 
+// A6 (R9): a human admin with no GitHub identity -- a ZITADEL sign-in --
+// decides the approval and the agent run exercises it end to end. The
+// delegated subject is the decider's stored principal; nothing about it is
+// read from a GitHub login.
+func TestApprovalGrant_NonGitHubDeciderApprovesEndToEnd(t *testing.T) {
+	g := newGrantEnv(t)
+	zed := auth.NewFederatedUser("zitadel", "https://id.example.com", "z-sub", "zed@example.com", string(auth.KindHuman))
+	zed.Groups = []string{"admins"}
+	if err := auth.AttachPrincipal(context.Background(), loginPrincipals{}, zed); err != nil {
+		t.Fatal(err)
+	}
+	if _, gh := zed.GitHubLogin(); gh {
+		t.Fatal("the decider must have no GitHub login")
+	}
+	g.decider = zed
+	run := g.grantedRun("a6")
+	g.decide(run.approval, "approve")
+
+	res := g.execute(run.agent, run.approval, approveInput("issue-571-x"))
+	if res.code != http.StatusAccepted {
+		t.Fatalf("grant-authorized approve by a ZITADEL decider = %d %s", res.code, res.raw)
+	}
+	if g.submitted() != 1 {
+		t.Fatalf("submitted %d workflows, want 1", g.submitted())
+	}
+	if got := g.exec.submitted[0]["approver"]; got != "oidc:zed@example.com" {
+		t.Errorf("approver = %q, want oidc:zed@example.com", got)
+	}
+	var found bool
+	for _, entry := range g.audit.List(200) {
+		if entry.Operation != devLoopApprovalKind || entry.Status != "submitted" {
+			continue
+		}
+		found = true
+		if entry.UserID != "zed@example.com" || entry.PrincipalID != "prn_zed@example.com" ||
+			entry.Parameters["subject_principal_id"] != "prn_zed@example.com" || entry.Parameters["actor_name"] != "implementer" {
+			t.Errorf("submit audit = user %q principal %q params %v", entry.UserID, entry.PrincipalID, entry.Parameters)
+		}
+	}
+	if !found {
+		t.Error("no submitted audit entry")
+	}
+}
+
 // A2: the same grant presented by another execution's run is not bound to
 // it. A run token's work item is its execution's (the mint derives it), and
 // a work item has one open execution at a time, so another execution is
