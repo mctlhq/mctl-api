@@ -953,6 +953,9 @@ func TestUnlinkIdentityRefusesBeforeRevoking(t *testing.T) {
 	if rec := callAs(h, userWithPrincipal(t, "mashkovd", nil, "prn_me"), http.MethodDelete, "/", map[string]string{"id": "xid_2"}, h.UnlinkIdentity); rec.Code != http.StatusOK || len(events) != 3 {
 		t.Fatalf("retried unlink = %d, events %v", rec.Code, events)
 	}
+	if e := h.opts.AuditLog.List(1); len(e) != 1 || e[0].Status != "succeeded" || e[0].Parameters["already_unlinked"] != "true" {
+		t.Fatalf("retried unlink audited as %+v, want already_unlinked=true", e)
+	}
 	store.listErr = errors.New("db down")
 	events = nil
 	if rec := callAs(h, userWithPrincipal(t, "mashkovd", nil, "prn_me"), http.MethodDelete, "/", map[string]string{"id": "xid_2"}, h.UnlinkIdentity); rec.Code != http.StatusServiceUnavailable || len(events) != 0 {
@@ -996,7 +999,7 @@ func TestUnlinkIdentityRevokesThePrincipalsSessions(t *testing.T) {
 		{
 			name: "both passes", wantCode: http.StatusOK,
 			wantEvents: []string{"revoke:prn_me:identity_unlinked", "unlink:xid_2", "forget", "revoke:prn_me:identity_unlinked"},
-			wantAudit:  map[string]string{"sessions_revoked": "4", "sessions_revocation": "complete"},
+			wantAudit:  map[string]string{"sessions_revoked": "4", "sessions_revocation": "complete", "already_unlinked": "false"},
 		},
 		{
 			name: "first pass fails", errs: []error{errors.New("db down")}, wantCode: http.StatusServiceUnavailable,

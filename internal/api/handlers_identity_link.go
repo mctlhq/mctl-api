@@ -794,7 +794,8 @@ func (h *Handlers) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "principal store unavailable", nil)
 		return
 	}
-	if !unlinkMayProceed(w, ids, xid) {
+	proceed, alreadyUnlinked := unlinkMayProceed(w, ids, xid)
+	if !proceed {
 		return
 	}
 	// A refresh session does not record which identity signed it in, so
@@ -808,7 +809,7 @@ func (h *Handlers) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "sessions could not be revoked; nothing was unlinked, try again", nil)
 		return
 	}
-	params := map[string]string{"principal_id": pid, "identity_id": xid}
+	params := map[string]string{"principal_id": pid, "identity_id": xid, "already_unlinked": strconv.FormatBool(alreadyUnlinked)}
 	x, err := h.identityLink.opts.Store.UnlinkIdentity(r.Context(), pid, xid)
 	if err != nil {
 		// The identities changed since the check above (a concurrent
@@ -863,9 +864,11 @@ func (h *Handlers) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 // unlinkMayProceed answers the refusals Store.UnlinkIdentity would
 // give, from the caller's identities as listed: xid is not one of them
 // (404), or it is the last live one (409). It reports whether the unlink
-// may go ahead. An identity already unlinked goes ahead, as the store's
-// unlink of it does: a retry completes the revocation.
-func unlinkMayProceed(w http.ResponseWriter, ids []principals.ExternalIdentity, xid string) bool {
+// may go ahead, and whether xid was already unlinked. An identity already
+// unlinked goes ahead, as the store's unlink of it does: a retry completes
+// the revocation. The audit says so, since such a request ends every
+// session without unlinking anything.
+func unlinkMayProceed(w http.ResponseWriter, ids []principals.ExternalIdentity, xid string) (proceed, alreadyUnlinked bool) {
 	var target *principals.ExternalIdentity
 	live := 0
 	for i := range ids {
@@ -879,12 +882,12 @@ func unlinkMayProceed(w http.ResponseWriter, ids []principals.ExternalIdentity, 
 	switch {
 	case target == nil:
 		writeError(w, http.StatusNotFound, "no such identity on your principal")
-		return false
+		return false, false
 	case target.RevokedAt == nil && live < 2:
 		writeErrorCode(w, http.StatusConflict, linkCodeLastIdentity, "cannot unlink your last live identity", nil)
-		return false
+		return false, false
 	}
-	return true
+	return true, target.RevokedAt != nil
 }
 
 // MergePrincipals: POST /api/v1/admin/principals/{from}/merge-into/{into}.

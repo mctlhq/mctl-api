@@ -427,9 +427,11 @@ identity: 409) is refused before anything is revoked. Otherwise the
 revocation runs before the unlink, so a failure answers 503 with nothing
 unlinked and the request can be retried, and again after it, for a
 session that rotated in between. The `identity.unlink` audit entry
-carries `sessions_revoked` (sessions, i.e. refresh families, not rows)
-and `sessions_revocation` (`complete`, or `incomplete` when the second
-pass failed); if the store still refuses after the check (a concurrent
+carries `sessions_revoked` (sessions, i.e. refresh families, not rows),
+`sessions_revocation` (`complete`, or `incomplete` when the second pass
+failed) and `already_unlinked` (`true` for a repeated unlink, which
+unlinks nothing but still ends the sessions, so a retry completes an
+`incomplete` one); if the store still refuses after the check (a concurrent
 change), a `failed` entry records the sessions already revoked and
 `refused`. Access tokens already issued stay valid
 until they expire (`OAUTH_TOKEN_TTL`); nothing re-checks the identity at
