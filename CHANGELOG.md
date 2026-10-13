@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.85.0](https://github.com/mctlhq/mctl-api/compare/4.84.0...4.85.0) (2026-10-13)
+
+
+### Features
+
+* **api:** stamp the creator's principal on create-tenant ([f01a873](https://github.com/mctlhq/mctl-api/commit/f01a87376afc369fc42502921a401d84bfa5161f))
+* **api:** stamp the creator's principal on create-tenant ([5432d18](https://github.com/mctlhq/mctl-api/commit/5432d1877749128626072d174dabd2515c02c52a)), closes [#377](https://github.com/mctlhq/mctl-api/issues/377)
+
 ## [4.84.0](https://github.com/mctlhq/mctl-api/compare/4.83.0...4.84.0) (2026-10-13)
 
 
