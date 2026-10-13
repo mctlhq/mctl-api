@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.85.1](https://github.com/mctlhq/mctl-api/compare/4.85.0...4.85.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* **mcp:** keep a recovered panic's value out of the tool error ([b6b9a24](https://github.com/mctlhq/mctl-api/commit/b6b9a24f08cc25e13804968ff41cb05dd8ffcce2)), closes [#608](https://github.com/mctlhq/mctl-api/issues/608)
+* **mcp:** return a tool error for a bad required argument, not a panic ([1c3ee6e](https://github.com/mctlhq/mctl-api/commit/1c3ee6e8e0da3c740bf679d41a029e2ab57f29eb))
+
 ## [4.85.0](https://github.com/mctlhq/mctl-api/compare/4.84.0...4.85.0) (2026-10-13)
 
 
