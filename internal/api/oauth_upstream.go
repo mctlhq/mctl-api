@@ -22,7 +22,6 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"sync"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -360,28 +359,13 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	if h.opts.TenantAuthzMode != TenantAuthzPrincipal {
 		groups = o.ResolveGroups(login)
 	}
-	mctlCode, err := o.IssueCode(r.Context(), login, principalID, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
-	if err != nil {
-		slog.Error("failed to issue auth code", "error", err)
-		result = "internal_error"
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	target, err := url.Parse(pending.RedirectURI)
-	if err != nil {
-		result = "internal_error"
-		http.Error(w, "invalid redirect_uri", http.StatusInternalServerError)
-		return
-	}
-	cq := target.Query()
-	cq.Set("code", mctlCode)
-	if pending.ClientState != "" {
-		cq.Set("state", pending.ClientState)
-	}
-	target.RawQuery = cq.Encode()
-	result = "issued"
-	slog.Info("oauth: ZITADEL sign-in", "principal_id", principalID, "login", login, "zitadel_subject", idt.Subject)
-	http.Redirect(w, r, target.String(), http.StatusFound)
+	result = h.finishAuthorization(w, r, authzCompletion{
+		Login: login, PrincipalID: principalID, Groups: groups,
+		ClientID: pending.ClientID, RedirectURI: pending.RedirectURI,
+		CodeChallenge: pending.CodeChallenge, ClientState: pending.ClientState,
+		Upstream: auth.UpstreamZitadel,
+	})
+	slog.Info("oauth: ZITADEL sign-in", "principal_id", principalID, "login", login, "zitadel_subject", idt.Subject, "result", result)
 }
 
 // zitadelOnly reports whether a LinkedGitHub refusal only says the
