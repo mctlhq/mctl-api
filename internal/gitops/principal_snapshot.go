@@ -77,19 +77,45 @@ func (r *Reader) snapshotPrincipalsLocked() *principalSnapshot {
 	return s
 }
 
-// snapshotPrincipals rebuilds the snapshot after a successful sync
-// (RefreshLoop), so the request path normally never builds one.
-func (r *Reader) snapshotPrincipals() {
-	r.mu.RLock()
-	s := r.snapshotPrincipalsLocked()
-	r.mu.RUnlock()
-	r.principals.Store(s)
+// cacheable reports whether s may be kept until the next sync. A read
+// error that may be transient (listing the directory, or reading a file)
+// must not be: a kept snapshot answers every read until the next sync, so a
+// one-off EIO or EMFILE would fail them all. Left unstored, the next read
+// builds again. A parse error is a property of the commit and is kept.
+// A persistent I/O fault therefore rebuilds on every read while it lasts:
+// the per-request directory read every principal read did before the
+// snapshot existed, no worse, and only for as long as the checkout is
+// broken.
+func (s *principalSnapshot) cacheable() bool {
+	if s.listErr != nil {
+		return false
+	}
+	for _, st := range s.tenants {
+		var pe *fs.PathError
+		if st.err != nil && errors.As(st.err, &pe) {
+			return false
+		}
+	}
+	return true
 }
 
-// principalView is the snapshot for the current sync, built here if the
-// last sync has none yet, but only when the checkout is free. While a
-// refresh holds it, the previous snapshot answers; with none at all, ok is
-// false. It never waits.
+// offerSnapshot stores fresh in place of seen, the snapshot its builder
+// started from, unless another one was stored meanwhile: that one is from
+// a sync at least as new (refresh stores under the write lock, which a
+// build under the read lock precedes), and replacing it would bring an
+// older snapshot back.
+func (r *Reader) offerSnapshot(seen, fresh *principalSnapshot) {
+	if fresh.cacheable() {
+		r.principals.CompareAndSwap(seen, fresh)
+	}
+}
+
+// principalView is the snapshot for the current sync. refresh() builds it
+// under the write lock together with lastSync, so a request normally finds
+// it; it is built here only when there is none for the last sync (startup,
+// or the last build was not cacheable), and only when the checkout is free.
+// While a refresh holds it, the previous snapshot answers; with none at
+// all, ok is false. It never waits.
 func (r *Reader) principalView() (s *principalSnapshot, ok bool) {
 	s = r.principals.Load()
 	if s != nil && s.syncedAt == r.lastSync.Load() {
@@ -100,7 +126,7 @@ func (r *Reader) principalView() (s *principalSnapshot, ok bool) {
 	}
 	fresh := r.snapshotPrincipalsLocked()
 	r.mu.RUnlock()
-	r.principals.Store(fresh)
+	r.offerSnapshot(s, fresh)
 	return fresh, true
 }
 
