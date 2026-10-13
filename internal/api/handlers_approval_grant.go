@@ -25,10 +25,14 @@ import (
 //
 // The target is not the requester's to choose: the agent run names it when
 // it creates the aar_, but the human approves a DevLoop by its workflow id,
-// so the target must be that DevLoop's own proposal. bindApprovalGrant
-// checks it against the execution's engine_ref through the same
-// <service>/<slug> -> workflow id mapping the shepherd uses
-// (temporalclient.WorkflowIDForProposalRef).
+// so the target must belong to that DevLoop. bindApprovalGrant checks it
+// against the execution's engine_ref through the same <service>/<slug> ->
+// workflow id mapping the shepherd uses
+// (temporalclient.WorkflowIDForProposalRef). That mapping keeps only the
+// slug's issue-<n>- prefix, so this binds the service and the issue, not
+// the slug: the exact slug is pinned by the intent hash, which the server
+// computed from the row when the run created the aar_, and it is recorded
+// in the decision and consume audit (target).
 
 // devLoopApprovalPolicyRule and devLoopApprovalPolicyVersion are what a
 // DevLoop approval grant is created under (R1).
@@ -98,7 +102,7 @@ func approverName(decidedBy string) (string, bool) {
 }
 
 // bindApprovalGrant runs on the defaulted, validated input. It refuses a
-// target that is not the proposal of the approval's own DevLoop, then
+// target whose service and issue are not the approval's own DevLoop's, then
 // computes the intent the request asks for, which ConsumeActionApproval
 // compares with the one the human approved.
 //
@@ -135,7 +139,7 @@ func (h *Handlers) bindApprovalGrant(w http.ResponseWriter, r *http.Request, use
 	// run dispatched from an execution request (D3).
 	run, _, _ := strings.Cut(exec.EngineRef, "#")
 	if exec.Engine != workitems.EngineTemporal || run != workflowID {
-		return refuse("target " + target + " is not the proposal of the DevLoop this approval was decided for")
+		return refuse("target " + target + " does not belong to the DevLoop this approval was decided for")
 	}
 	s.intentHash = workitems.IntentHash(workitems.ActionIntent{
 		ExecutionID:   a.ExecutionID,
