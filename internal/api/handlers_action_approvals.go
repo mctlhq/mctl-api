@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -46,7 +47,13 @@ const (
 	aarCodeRequesterForbidden  = "approval_requester_forbidden"
 	aarCodeDeciderForbidden    = "approval_decider_forbidden"
 	aarCodeReaderForbidden     = "approval_reader_forbidden"
+	aarCodeExecutionInvalid    = "approval_execution_invalid"
+	aarCodeExecutionNotOpen    = "approval_execution_not_open"
 )
+
+// devLoopApprovalKind is the action kind of a DevLoop's human approval gate
+// (mctl-api#571): the grant later exercised on mctl-agents-approve.
+const devLoopApprovalKind = "mctl-agents-approve"
 
 // isDirectService is the service principal acting for itself.
 func isDirectService(u *auth.User) bool {
@@ -219,6 +226,9 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "Idempotency-Key header and idempotency_key differ", nil)
 		return
 	}
+	if body.ActionKind == devLoopApprovalKind && !h.requireOpenExecution(w, r, user, body.ExecutionID) {
+		return
+	}
 	actor, subject := actorAndSubject(user)
 	in := workitems.ActionApprovalInput{
 		ActionIntent: workitems.ActionIntent{
@@ -260,6 +270,32 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		h.auditActionApproval(r, user, "action_approval.create", a, operations.RiskLow)
 	}
 	writeActionApproval(w, createdStatus(created), a)
+}
+
+// requireOpenExecution admits a DevLoop approval only for an existing,
+// non-terminal we_ execution (mctl-api#571 R2): the grant is bound to that
+// execution later, so a free-form workflow id or a finished run would make
+// a grant nothing can legitimately exercise. A failed read is a 503, never
+// "no such execution".
+func (h *Handlers) requireOpenExecution(w http.ResponseWriter, r *http.Request, user *auth.User, executionID string) bool {
+	refuse := func(status int, code, msg string) bool {
+		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", code)
+		writeErrorCode(w, status, code, msg, nil)
+		return false
+	}
+	exec, err := h.opts.WorkItems.ExecutionByID(r.Context(), executionID)
+	switch {
+	case errors.Is(err, workitems.ErrNotFound):
+		return refuse(http.StatusBadRequest, aarCodeExecutionInvalid,
+			"a "+devLoopApprovalKind+" approval must name an existing "+workitems.ExecutionIDPrefix+" execution")
+	case err != nil:
+		slog.Error("action approval: execution lookup failed", "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, wiCodeUnavailable, "execution lookup failed", nil)
+		return false
+	case workitems.IsTerminalPhase(exec.Phase):
+		return refuse(http.StatusConflict, aarCodeExecutionNotOpen, "execution "+exec.ID+" has finished ("+exec.Phase+")")
+	}
+	return true
 }
 
 // GetActionApproval handles GET /api/v1/action-approvals/{id}. The state is

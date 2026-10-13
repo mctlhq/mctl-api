@@ -989,7 +989,8 @@ components:
                  approval_not_found, approval_idempotency_conflict, approval_already_decided,
                  approval_self_decision, approval_not_approved, approval_denied, approval_expired,
                  approval_intent_mismatch, approval_consumed, approval_requester_forbidden,
-                 approval_decider_forbidden, approval_reader_forbidden]
+                 approval_decider_forbidden, approval_reader_forbidden, approval_execution_invalid,
+                 approval_execution_not_open]
 
     ExecutionRequest:
       type: object
@@ -3029,9 +3030,25 @@ paths:
         The durable "human flips it to accepted" step, expressed as a
         Temporal signal instead of a gitops .status.yaml edit. Unblocks the
         workflow's wait_condition so it proceeds to the implement step.
-        The optional body carries approval provenance; `approver` defaults
-        to the authenticated caller and is recorded in the proposal's
-        gitops approval block. **Admin access required.**
+        **A human admin acting directly only** (the service principal is
+        refused 403). The approver is the authenticated caller; a body
+        `approver` naming anyone else is refused 400.
+
+        mctl-api#571: the workflow id is resolved to the run's one open
+        `we_` execution (`engine=temporal`, `engine_ref` the workflow id or,
+        for a run dispatched from an execution request,
+        `<workflow_id>#<request_id>`), and that
+        execution's newest pending `mctl-agents-approve` action approval is
+        decided as the caller and signalled as `{approval_ref}`; an already
+        approved, unconsumed one is re-signalled as is. With no such
+        execution or approval the legacy `{approver}` payload is signalled
+        while `MCTL_AGENTS_APPROVE_LEGACY_APPROVER` is on, and 409
+        `approval_grant_missing` is returned once it is off. An execution
+        whose newest approval was denied, consumed or let expire is 409
+        (`approval_denied`, `approval_consumed`, `approval_expired`), never
+        the legacy payload: a recorded "no" is not an absent gate. Two open
+        executions for the same run are 409 `execution_ambiguous`; a store
+        that cannot be read is 503, never the legacy payload.
       tags: [Agent Registry]
       parameters:
         - name: workflow_id
@@ -3049,7 +3066,7 @@ paths:
               properties:
                 approver:
                   type: string
-                  description: Identity recorded as approved_by. Defaults to the authenticated caller.
+                  description: Accepted only when it equals the authenticated caller; anything else is 400.
                   example: mashkovd
                 reason:
                   type: string
@@ -3074,13 +3091,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Admin access required
+          description: Not a human admin acting directly (approval_decider_forbidden), or the action approval refused the decision (approval_self_decision)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: approval_grant_missing, execution_ambiguous, the run's grant is no longer live (approval_denied, approval_consumed, approval_expired; never answered with the legacy payload), or an action approval refusal (approval_already_decided)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Temporal client not configured
+          description: Temporal client not configured, or the DevLoop's approval grant could not be read (work_items_unavailable)
           content:
             application/json:
               schema:
@@ -4246,6 +4269,10 @@ paths:
         Every field is checked by the secret scanner (400
         `secret_in_text`). A new request needs `expires_at` in
         the future and at most 7 days ahead. A named `work_item_id` must exist.
+        A DevLoop gate (`action_kind` `mctl-agents-approve`, mctl-api#571)
+        must name an existing `we_` execution (400
+        `approval_execution_invalid`) that has not finished (409
+        `approval_execution_not_open`).
       tags: [Action Approvals]
       parameters:
         - {name: Idempotency-Key, in: header, required: false, schema: {type: string, maxLength: 512}}
@@ -4272,9 +4299,9 @@ paths:
       responses:
         '201': {description: Created in state pending, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
         '200': {description: This key already names this intent; the stored request, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
-        '400': {description: 'invalid_request (missing or oversized field, expiry outside the window, unknown work item), secret_in_text, intent_hash_mismatch, or actor_not_accepted (a body naming requested_by or another actor)', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '400': {description: 'invalid_request (missing or oversized field, expiry outside the window, unknown work item), secret_in_text, intent_hash_mismatch, actor_not_accepted (a body naming requested_by or another actor), or approval_execution_invalid', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '403': {description: approval_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
-        '409': {description: approval_idempotency_conflict, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '409': {description: 'approval_idempotency_conflict, or approval_execution_not_open', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
     get:
       summary: List action approval requests

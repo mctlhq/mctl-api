@@ -30,6 +30,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 // shepherdQueryTimeout bounds the best-effort shepherd_in_loop query so a
@@ -311,6 +312,22 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	// Approving is the human act (mctl-api#571 R4). requireTemporalAdmin
+	// admits the service principal, which carries the admins group and
+	// legitimately reads and starts DevLoops; it must never approve one.
+	if !isHumanAdmin(user) {
+		h.logAudit(r, audit.Entry{
+			UserID:       user.ID,
+			Operation:    "dev-loop-approve",
+			WorkflowName: chi.URLParam(r, "workflow_id"),
+			Status:       "denied",
+			RiskLevel:    string(operations.RiskMedium),
+			Message:      aarCodeDeciderForbidden + ": not a human admin acting directly",
+		})
+		writeErrorCode(w, http.StatusForbidden, aarCodeDeciderForbidden,
+			"approving a DevLoop is admin-only and must be done by a human acting directly", nil)
+		return
+	}
 
 	workflowID := chi.URLParam(r, "workflow_id")
 	if workflowID == "" {
@@ -343,13 +360,23 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 	// control.requires_human_approval — is where that carrier belongs, added
 	// together with the code that reads it.
 	approver := user.ID
-	payload := map[string]string{"approver": approver}
+	auditParams := map[string]string{"approver": approver}
+	ref, ok := h.decideDevLoopApproval(w, r, user, workflowID, body.Reason, auditParams)
+	if !ok {
+		return
+	}
+	// A decided grant travels as its id alone: the worker exercises it and
+	// the recorded approver comes from the grant (mctl-api#571 R8). Without
+	// one the legacy payload names the authenticated caller, as before.
+	payload := map[string]string{}
+	if ref != "" {
+		payload["approval_ref"] = ref
+		auditParams["approval_ref"] = ref
+	} else {
+		payload["approver"] = approver
+	}
 	if body.Reason != "" {
 		payload["reason"] = body.Reason
-	}
-
-	auditParams := map[string]string{"approver": approver}
-	if body.Reason != "" {
 		auditParams["reason"] = body.Reason
 	}
 
@@ -392,6 +419,119 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 		"workflow_id": workflowID,
 		"signalled":   "approve",
 	})
+}
+
+// Typed refusals of the grant path of ApproveDevLoopWorkflow (mctl-api#571).
+const (
+	devLoopCodeGrantMissing       = "approval_grant_missing"
+	devLoopCodeExecutionAmbiguous = "execution_ambiguous"
+)
+
+// decideDevLoopApproval resolves workflowID to the run's one open we_
+// execution (engine temporal, engine_ref the workflow id or, for a run
+// dispatched from an execution request, "<workflow_id>#<request_id>"),
+// decides that execution's newest pending
+// mctl-agents-approve grant as the caller, and returns the grant id to
+// signal (mctl-api#571 R3). An already approved, unconsumed grant is
+// returned as is, so a retry after a lost signal re-sends it instead of
+// falling back to the legacy payload.
+//
+// It returns "" with ok=true when there is no grant to decide and the
+// legacy payload is still allowed; with the legacy payload disabled that is
+// a 409. A store that cannot be read is a 503 and never "no grant": a read
+// that failed is not evidence that nothing is pending.
+func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request, user *auth.User, workflowID, reason string, auditParams map[string]string) (string, bool) {
+	refuse := func(status int, code, msg string) (string, bool) {
+		h.logAudit(r, audit.Entry{
+			UserID:       user.ID,
+			Operation:    "dev-loop-approve",
+			Parameters:   auditParams,
+			WorkflowName: workflowID,
+			Status:       "failed",
+			RiskLevel:    string(operations.RiskMedium),
+			Message:      code + ": " + msg,
+		})
+		writeErrorCode(w, status, code, msg, nil)
+		return "", false
+	}
+	noGrant := func(why string) (string, bool) {
+		if h.opts.LegacyApproverDisabled {
+			return refuse(http.StatusConflict, devLoopCodeGrantMissing,
+				why+"; the legacy approver payload is disabled (MCTL_AGENTS_APPROVE_LEGACY_APPROVER=false)")
+		}
+		return "", true
+	}
+	unavailable := func(err error) (string, bool) {
+		slog.Error("dev-loop approve: grant lookup failed", "workflow_id", workflowID, "error", err)
+		return refuse(http.StatusServiceUnavailable, wiCodeUnavailable, "could not read the DevLoop's approval grant")
+	}
+	if h.opts.WorkItems == nil {
+		if h.opts.LegacyApproverDisabled {
+			return refuse(http.StatusServiceUnavailable, wiCodeUnavailable,
+				"the work-item store is not configured, so the DevLoop's approval grant cannot be read")
+		}
+		return "", true
+	}
+	ctx := r.Context()
+	execs, err := h.opts.WorkItems.OpenExecutionsOfEngineRun(ctx, workitems.EngineTemporal, workflowID)
+	switch {
+	case err != nil:
+		return unavailable(err)
+	case len(execs) == 0:
+		return noGrant("no open work-item execution is attached for this workflow")
+	case len(execs) > 1:
+		return refuse(http.StatusConflict, devLoopCodeExecutionAmbiguous,
+			fmt.Sprintf("%d open work-item executions are attached for this workflow; resolve them before approving", len(execs)))
+	}
+	exec := execs[0]
+	auditParams["execution_id"] = exec.ID
+	// The newest grant of this execution decides, whatever its state: an
+	// older live grant must not outrank a newer recorded denial.
+	list, err := h.opts.WorkItems.ActionApprovals(ctx, workitems.ActionApprovalFilter{
+		ExecutionID: exec.ID, ActionKind: devLoopApprovalKind, Limit: 1,
+	})
+	if err != nil {
+		return unavailable(err)
+	}
+	if len(list) == 0 {
+		return noGrant("no " + devLoopApprovalKind + " approval for execution " + exec.ID)
+	}
+	newest := list[0]
+	switch newest.State {
+	case workitems.ApprovalApproved:
+		return newest.ID, true
+	case workitems.ApprovalPending:
+		decided, err := h.opts.WorkItems.DecideActionApproval(ctx, workitems.ActionDecisionInput{
+			ID: newest.ID, DecidedBy: principalOf(user), Decision: workitems.DecisionApprove, Reason: reason,
+			DecidedByPrincipalID: user.PrincipalID(), DecidedViaPrincipalID: user.ViaPrincipalID(),
+		})
+		if err != nil {
+			if code := actionApprovalRefusalCode(err); code != "" {
+				h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", newest.ID, code)
+			}
+			writeActionApprovalError(w, err)
+			return "", false
+		}
+		h.auditActionApproval(r, user, "action_approval.decision", decided, operations.RiskMedium)
+		return decided.ID, true
+	}
+	// Denied, spent or let expire: a recorded outcome, not an absent gate.
+	// Answering it with the legacy payload would approve past an explicit
+	// human "no", so only an execution that never had a grant falls back.
+	code, ok := closedApprovalCodes[newest.State]
+	if !ok {
+		code = aarCodeNotApproved
+	}
+	return refuse(http.StatusConflict, code,
+		"the DevLoop's approval "+newest.ID+" is "+newest.State+"; it cannot be approved again")
+}
+
+// closedApprovalCodes are the typed refusals of an approve call whose
+// DevLoop grant is no longer live.
+var closedApprovalCodes = map[string]string{
+	workitems.ApprovalDenied:   aarCodeDenied,
+	workitems.ApprovalConsumed: aarCodeConsumed,
+	workitems.ApprovalExpired:  aarCodeExpired,
 }
 
 type abandonDevLoopRequest struct {

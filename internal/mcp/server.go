@@ -2891,7 +2891,7 @@ This calls the same handler/path as the REST endpoint (POST /api/v1/agents/dev-l
 
 This is distinct from the standalone mctl-agents-approve REST operation, which directly mutates a proposal's .status.yaml outside DevLoop's ownership (the gitops-file path used when a proposal was not started via use_temporal on mctl_trigger_issue). Use this tool only for workflow_ids returned by mctl_trigger_issue with use_temporal=true or by mctl_get_workflow_status for a dev-loop-* workflow.
 
-Admin-only. Requires the server's Temporal client to be configured — returns 503 otherwise.`),
+Human admins only, acting directly: a service or agent credential is refused 403 (mctl-api#571). Requires the server's Temporal client to be configured — returns 503 otherwise.`),
 		mcplib.WithString("workflow_id",
 			mcplib.Required(),
 			mcplib.Description("The DevLoopWorkflow's Temporal workflow ID, e.g. dev-loop-mctlhq-mctl-telegram-296."),
