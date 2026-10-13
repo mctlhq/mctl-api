@@ -2144,6 +2144,9 @@ func identityLinkOptions(cfg config, store *principals.Store, cache *principals.
 	if cache != nil {
 		opts.ForgetPrincipals = cache.Forget
 	}
+	if oauth != nil {
+		opts.RevokeSessions = oauth.RevokePrincipalSessions
+	}
 	if cfg.ZitadelLinkClientID == "" && cfg.ZitadelLinkClientSecret == "" {
 		return opts
 	}

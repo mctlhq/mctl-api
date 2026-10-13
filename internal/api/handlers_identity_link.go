@@ -74,9 +74,21 @@ type IdentityLinkOptions struct {
 	// takes effect on the next request instead of after the cache TTL. Nil
 	// when there is no resolver cache.
 	ForgetPrincipals func(principalIDs ...string)
+	// RevokeSessions revokes every local OAuth refresh session of a
+	// principal (auth.OAuthServer.RevokePrincipalSessions). Nil when this
+	// instance issues no local OAuth tokens, so there is nothing to revoke.
+	RevokeSessions func(principalID, reason string) (int64, error)
 
 	// clock replaces time.Now in tests.
 	clock func() time.Time
+}
+
+// revokeSessions is RevokeSessions, or nothing to revoke without it.
+func (o *IdentityLinkOptions) revokeSessions(principalID string) (int64, error) {
+	if o.RevokeSessions == nil {
+		return 0, nil
+	}
+	return o.RevokeSessions(principalID, "identity_unlinked")
 }
 
 func (o *IdentityLinkOptions) forget(principalIDs ...string) {
@@ -774,6 +786,17 @@ func (h *Handlers) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	xid := chi.URLParam(r, "id")
+	// A refresh session does not record which identity signed it in, so
+	// the ones the removed identity started can only be ended by ending all
+	// of the principal's. Before the unlink, so a failure leaves nothing
+	// half done and the request can simply be retried; and again after it,
+	// for a session that rotated or signed in between the two.
+	revoked, err := h.identityLink.opts.revokeSessions(pid)
+	if err != nil {
+		slog.Error("identity unlink: revoking the principal's sessions failed; nothing unlinked", "principal_id", pid, "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "sessions could not be revoked; nothing was unlinked, try again", nil)
+		return
+	}
 	x, err := h.identityLink.opts.Store.UnlinkIdentity(r.Context(), pid, xid)
 	switch {
 	case errors.Is(err, principals.ErrNotFound):
@@ -789,9 +812,20 @@ func (h *Handlers) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 	// The revoked identity must stop resolving now, not when the resolver's
 	// cached answer for it expires.
 	h.identityLink.opts.forget(pid)
+	params := map[string]string{"principal_id": pid, "identity_id": x.ID, "provider": x.Provider, "issuer": x.Issuer, "subject": x.Subject}
+	if again, err := h.identityLink.opts.revokeSessions(pid); err != nil {
+		// Only a session that rotated or signed in between the two
+		// revocations can have survived; say so rather than claim none did.
+		slog.Error("identity unlink: revoking the principal's sessions after the unlink failed", "principal_id", pid, "error", err)
+		params["sessions_revoked"] = strconv.FormatInt(revoked, 10)
+		params["sessions_revocation"] = "incomplete"
+	} else {
+		params["sessions_revoked"] = strconv.FormatInt(revoked+again, 10)
+		params["sessions_revocation"] = "complete"
+	}
 	h.logAudit(r, audit.Entry{
 		UserID: user.ID, Operation: "identity.unlink", Status: "succeeded", RiskLevel: string(operations.RiskMedium),
-		Parameters: map[string]string{"principal_id": pid, "identity_id": x.ID, "provider": x.Provider, "issuer": x.Issuer, "subject": x.Subject},
+		Parameters: params,
 	})
 	writeJSON(w, http.StatusOK, x)
 }

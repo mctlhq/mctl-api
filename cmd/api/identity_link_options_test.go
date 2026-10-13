@@ -45,6 +45,9 @@ func TestIdentityLinkOptionsGating(t *testing.T) {
 	if o.ForgetPrincipals != nil {
 		t.Error("ForgetPrincipals set without a resolver")
 	}
+	if o.RevokeSessions == nil {
+		t.Error("RevokeSessions not wired to the OAuth server")
+	}
 	if o := identityLinkOptions(full(), store, principals.NewResolver(store, nil, false), oauth, gh); o.ForgetPrincipals == nil {
 		t.Error("ForgetPrincipals not wired to the resolver")
 	}

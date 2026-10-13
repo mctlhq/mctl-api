@@ -372,6 +372,54 @@ func (s *PostgresStore) RevokeFamily(rawToken, clientID, reason string) error {
 	return nil
 }
 
+// RevokePrincipal revokes every live token of principalID. It runs under
+// REPEATABLE READ, as rotateTx does: a rotation that commits a successor
+// while this runs has also updated a row this statement updates (the
+// predecessor's rotated_at), so one of the two fails with a serialization
+// error and retries, and the retry sees the other's write. Under READ
+// COMMITTED the successor would be invisible here and survive.
+func (s *PostgresStore) RevokePrincipal(principalID, reason string) (int64, error) {
+	if principalID == "" {
+		return 0, errors.New("oauth refresh store: revoke principal: empty principal id")
+	}
+	backoff := []time.Duration{5 * time.Millisecond, 15 * time.Millisecond}
+	for attempt := range 3 {
+		n, err := s.revokePrincipalTx(principalID, reason)
+		if err == nil || !isSerializationFailure(err) {
+			return n, err
+		}
+		slog.Warn("oauth refresh store: serialization failure revoking a principal, retrying",
+			"attempt", attempt+1, "error", err)
+		if attempt < len(backoff) {
+			time.Sleep(backoff[attempt])
+		}
+	}
+	return 0, ErrServerError
+}
+
+func (s *PostgresStore) revokePrincipalTx(principalID, reason string) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return 0, fmt.Errorf("oauth refresh store: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	tag, err := tx.Exec(ctx,
+		`UPDATE oauth_refresh_tokens
+		 SET revoked_at = $1, revoked_reason = $2
+		 WHERE principal_id = $3 AND revoked_at IS NULL`,
+		time.Now().UTC(), reason, principalID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("oauth refresh store: revoke principal: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("oauth refresh store: revoke principal commit: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // GC hard-deletes rows that expired more than 7 days ago (regardless of revocation
 // state). The 7-day grace window ensures any in-flight refresh that completed just
 // before the token expired is not caught by a race with the GC ticker.

@@ -407,12 +407,18 @@ reuse-detection warnings follow.
 
 A disabled principal, merged-away ones included (a merge disables `from`),
 is refused on every request. An **unlink is not**: the principal stays
-active, and a session signed in through the unlinked identity keeps acting
-as that principal through every refresh until its refresh family expires
-(`OAUTH_REFRESH_TOKEN_TTL`, 30 days by default) or is revoked. Nothing
-re-checks the identity at refresh. Revoking refresh families by
-`principal_id` on unlink (the column is indexed for it) must land before
-the switch.
+active. What ends a session signed in through the unlinked identity is
+that the unlink revokes **every** refresh session of the principal, in
+every client, by `principal_id`. A refresh session does not record which
+identity signed it in, so the unlinking user is signed out everywhere and
+signs in again through an identity that is still linked. The revocation
+runs before the unlink, so a failure answers 503 with nothing unlinked
+and the request can be retried, and again after it, for a session that
+rotated in between; the `identity.unlink` audit entry carries
+`sessions_revoked` and `sessions_revocation` (`complete`, or `incomplete`
+when the second pass failed). Access tokens already issued stay valid
+until they expire (`OAUTH_TOKEN_TTL`); nothing re-checks the identity at
+refresh, so the revocation is what stops the renewal.
 
 ### Metrics
 

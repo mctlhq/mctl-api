@@ -71,6 +71,14 @@ type Store interface {
 	// Idempotent: no error if the token does not exist.
 	RevokeFamily(rawToken, clientID, reason string) error
 
+	// RevokePrincipal revokes every live refresh token recorded for
+	// principalID, whatever its family or client, and reports how many it
+	// revoked. A rotation racing with it either sees the revocation or
+	// makes it retry, so no successor minted concurrently survives.
+	// An empty principalID is refused: it would name every session that
+	// predates the principal_id column.
+	RevokePrincipal(principalID, reason string) (int64, error)
+
 	// GC hard-deletes rows where expires_at < now()-7d AND revoked_at IS NOT NULL.
 	// Safe to call on a schedule; never deletes live tokens.
 	GC() error

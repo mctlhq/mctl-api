@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -894,6 +895,121 @@ func TestUnlinkIdentityMapsTheStoreOutcomes(t *testing.T) {
 	}
 	if len(fr.calls) != 1 || len(fr.calls[0]) != 1 || fr.calls[0][0] != "prn_me" {
 		t.Fatalf("forgot %v after an unlink, want [[prn_me]]", fr.calls)
+	}
+}
+
+// revokeRecorder stands in for auth.OAuthServer.RevokePrincipalSessions:
+// it answers each call from errs in turn and records the order of events.
+type revokeRecorder struct {
+	events *[]string
+	errs   []error
+	n      int64
+}
+
+func (r *revokeRecorder) revoke(pid, reason string) (int64, error) {
+	*r.events = append(*r.events, "revoke:"+pid+":"+reason)
+	var err error
+	if len(r.errs) > 0 {
+		err, r.errs = r.errs[0], r.errs[1:]
+	}
+	if err != nil {
+		return 0, err
+	}
+	return r.n, nil
+}
+
+// An unlink ends the principal's sessions before the unlink, so a failure
+// leaves nothing half done, and again after it, for a session that rotated
+// in between; the audit says how many and whether the second pass ran.
+func TestUnlinkIdentityRevokesThePrincipalsSessions(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name       string
+		errs       []error
+		unlinkErr  error
+		wantCode   int
+		wantEvents []string
+		wantAudit  map[string]string // nil: no succeeded audit entry
+	}{
+		{
+			name: "both passes", wantCode: http.StatusOK,
+			wantEvents: []string{"revoke:prn_me:identity_unlinked", "unlink:xid_2", "forget", "revoke:prn_me:identity_unlinked"},
+			wantAudit:  map[string]string{"sessions_revoked": "4", "sessions_revocation": "complete"},
+		},
+		{
+			name: "first pass fails", errs: []error{errors.New("db down")}, wantCode: http.StatusServiceUnavailable,
+			wantEvents: []string{"revoke:prn_me:identity_unlinked"},
+		},
+		{
+			name: "second pass fails", errs: []error{nil, errors.New("db down")}, wantCode: http.StatusOK,
+			wantEvents: []string{"revoke:prn_me:identity_unlinked", "unlink:xid_2", "forget", "revoke:prn_me:identity_unlinked"},
+			wantAudit:  map[string]string{"sessions_revoked": "2", "sessions_revocation": "incomplete"},
+		},
+		{
+			// A refused unlink has already ended the sessions; harmless,
+			// and the price of never unlinking with sessions left live.
+			name: "unlink refused", unlinkErr: principals.ErrLastIdentity, wantCode: http.StatusConflict,
+			wantEvents: []string{"revoke:prn_me:identity_unlinked", "unlink:xid_2"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			rr := &revokeRecorder{events: &events, errs: tc.errs, n: 2}
+			store := &fakeLinkStore{unlinkFn: func(_, xid string) (*principals.ExternalIdentity, error) {
+				events = append(events, "unlink:"+xid)
+				if tc.unlinkErr != nil {
+					return nil, tc.unlinkErr
+				}
+				return &principals.ExternalIdentity{ID: xid, Provider: "zitadel", RevokedAt: &now}, nil
+			}}
+			h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{
+				Store:            store,
+				ForgetPrincipals: func(...string) { events = append(events, "forget") },
+				RevokeSessions:   rr.revoke,
+			}), opts: Options{AuditLog: audit.NewLogger()}}
+			u := userWithPrincipal(t, "mashkovd", nil, "prn_me")
+
+			rec := callAs(h, u, http.MethodDelete, "/", map[string]string{"id": "xid_2"}, h.UnlinkIdentity)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("unlink = %d %s, want %d", rec.Code, rec.Body.String(), tc.wantCode)
+			}
+			if !slices.Equal(events, tc.wantEvents) {
+				t.Fatalf("events %v, want %v", events, tc.wantEvents)
+			}
+			if tc.wantCode == http.StatusServiceUnavailable && strings.Contains(rec.Body.String(), "db down") {
+				t.Errorf("503 leaks the store error: %s", rec.Body.String())
+			}
+			var got map[string]string
+			for _, e := range h.opts.AuditLog.List(10) {
+				if e.Operation == "identity.unlink" && e.Status == "succeeded" {
+					got = e.Parameters
+				}
+			}
+			if tc.wantAudit == nil {
+				if got != nil {
+					t.Fatalf("audited a succeeded unlink: %v", got)
+				}
+				return
+			}
+			for k, v := range tc.wantAudit {
+				if got[k] != v {
+					t.Errorf("audit %s = %q, want %q (%v)", k, got[k], v, got)
+				}
+			}
+		})
+	}
+}
+
+// Without a local OAuth server there is nothing to revoke, and the unlink
+// goes ahead.
+func TestUnlinkIdentityWithoutSessionsToRevoke(t *testing.T) {
+	now := time.Now()
+	store := &fakeLinkStore{unlinkFn: func(_, xid string) (*principals.ExternalIdentity, error) {
+		return &principals.ExternalIdentity{ID: xid, Provider: "zitadel", RevokedAt: &now}, nil
+	}}
+	h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store}), opts: Options{AuditLog: audit.NewLogger()}}
+	if rec := callAs(h, userWithPrincipal(t, "mashkovd", nil, "prn_me"), http.MethodDelete, "/", map[string]string{"id": "xid_2"}, h.UnlinkIdentity); rec.Code != http.StatusOK {
+		t.Fatalf("unlink = %d, want 200", rec.Code)
 	}
 }
 
