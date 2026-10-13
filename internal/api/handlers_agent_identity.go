@@ -275,10 +275,11 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 		// below cannot fail today (NewDelegatedPrincipalUser sets the id, and
 		// checkTokenPrincipal only clears it while returning an error, which
 		// was refused above); it is kept so a constructor change cannot
-		// silently swap the recorded subject. For KindSurfaceLink, grant carries no
-		// SubjectPrincipalID of its own (a link stores none): this check is
-		// how it gets one, from whatever AttachPrincipal just resolved via
-		// the surface-link mirror.
+		// silently swap the recorded subject.
+		//
+		// For KindSurfaceLink, grant carries no SubjectPrincipalID of its own
+		// (a link stores none): this check is how it gets one, from whatever
+		// AttachPrincipal just resolved via the surface-link mirror.
 		if grant.Kind == delegation.KindSurfaceLink {
 			if subject.PrincipalID() == "" {
 				h.refuseDelegation(w, r, user, agentName, ref, delegationCodeUnresolved, http.StatusForbidden,
