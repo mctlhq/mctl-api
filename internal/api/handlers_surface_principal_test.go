@@ -127,6 +127,11 @@ func TestResolveGitHubPrincipal_RefusesBadInput(t *testing.T) {
 	if code, res := e.resolveGitHub("portal", "github:a-b-c-d-e-f-g-h-i-j-k-l-m-n-o-p-q-r-s-t"); code != http.StatusOK {
 		t.Errorf("39-character hyphenated login = %d %v", code, res)
 	}
+	// An oversized body is 413, as on every surface route.
+	if code, res := e.do("portal", "POST", surfacePrincipalPath, strings.Repeat(" ", sidMaxBodyBytes+1),
+		SurfaceActorHeader, "github:octocat"); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized body = %d %v", code, res)
+	}
 	// A chunked empty body has no length and is still no body.
 	req := httptest.NewRequest("POST", surfacePrincipalPath, strings.NewReader(""))
 	req.ContentLength = -1

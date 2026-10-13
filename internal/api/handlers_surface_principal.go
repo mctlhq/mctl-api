@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -71,6 +72,11 @@ func (h *Handlers) ResolveGitHubPrincipal(w http.ResponseWriter, r *http.Request
 	// body all the same.
 	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, sidMaxBodyBytes))
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeErrorCode(w, http.StatusRequestEntityTooLarge, sidCodeInvalid, "request body exceeds "+strconv.Itoa(sidMaxBodyBytes)+" bytes", nil)
+			return
+		}
 		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid, "could not read the body", nil)
 		return
 	}

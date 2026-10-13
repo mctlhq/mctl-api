@@ -289,12 +289,13 @@ GitHub login. Before it does, it asks for the principal with `POST
 `{"principalId": "prn_..."}`. It resolves the login the way a first sign-in
 would: through the live GitHub identity that holds it, else GitHub's numeric
 id, provisioning a principal if there is none. Only the portal surface may
-call it (`403 portal_surface_required`). A disabled or refused identity is
-`403`, and any other failure is `503`, never an empty answer; a login
-GitHub does not know is a `503` too, since the resolver cannot tell it from
-an outage. A resolution is audited as `principal.resolve_github`, a
-resolver refusal as `principal.resolve_github_refused`; a `503` is logged. This confers nothing
-new: the portal could already make any login the owner of a new tenant.
+call it (`403 portal_surface_required`). A disabled or refused identity
+is `403`, and any other failure is `503`, never an empty answer; a login
+GitHub does not know is a `503` too, since the resolver cannot tell it
+from an outage. A resolution is audited as `principal.resolve_github`, a
+resolver refusal as `principal.resolve_github_refused`; a `503` is
+logged. This confers nothing new: the portal could already make any login
+the owner of a new tenant.
 
 ### `TENANT_AUTHZ_MODE`
 
