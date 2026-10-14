@@ -817,3 +817,103 @@ func TestIsTenantOwner(t *testing.T) {
 		t.Errorf("unreadable role: got (%v, %v), want (false, error)", got, err)
 	}
 }
+
+// --- Two domains (erpact/mctl-apps#16): new sites are <label>.erpact.online,
+// older ones keep erpact-<label>.mctl.ai. Both map to the short name
+// erpact-<label> that callers use.
+
+func TestErpactShortName(t *testing.T) {
+	cases := map[string]string{
+		"acme.erpact.online":           "erpact-acme",
+		"erpact-acme.mctl.ai":          "erpact-acme",
+		"erpact-shared-stteam.mctl.ai": "erpact-shared-stteam",
+		// A host under neither domain stays visible as itself instead of
+		// being mangled into some other site's name.
+		"acme.example.com": "acme.example.com",
+		// The suffix must be a whole domain, not a substring of one.
+		"acmeerpact.online": "acmeerpact.online",
+	}
+	for host, want := range cases {
+		if got := erpactShortName(host); got != want {
+			t.Errorf("erpactShortName(%q) = %q, want %q", host, got, want)
+		}
+	}
+}
+
+func TestListErpactSites_MapsBothDomains(t *testing.T) {
+	dep := &fakeErpactDeployer{sites: []erpactsites.Site{
+		erpactBaseHostSite,
+		{Name: "erpact-bar2.mctl.ai", Enabled: true, Status: "ACTIVE"},
+		{Name: "acme.erpact.online", Enabled: true, Status: "CREATING"},
+	}}
+	h := erpactTestHandlers(dep, erpactRoles())
+
+	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites", nil), erpactOwner())
+	w := httptest.NewRecorder()
+	h.ListErpactSites(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Sites []erpactSiteResponse `json:"sites"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := []erpactSiteResponse{
+		{Name: "erpact-bar2", Host: "erpact-bar2.mctl.ai", Status: "ACTIVE"},
+		{Name: "erpact-acme", Host: "acme.erpact.online", Status: "CREATING"},
+	}
+	if len(resp.Sites) != len(want) {
+		t.Fatalf("got %+v, want %+v", resp.Sites, want)
+	}
+	for i := range want {
+		if resp.Sites[i] != want[i] {
+			t.Fatalf("entry %d: got %+v, want %+v", i, resp.Sites[i], want[i])
+		}
+	}
+}
+
+func TestGetErpactSiteStatus_FindsNewDomainSiteByShortName(t *testing.T) {
+	dep := &fakeErpactDeployer{sites: []erpactsites.Site{
+		erpactBaseHostSite,
+		{Name: "acme.erpact.online", Status: "CREATING"},
+	}}
+	h := erpactTestHandlers(dep, erpactRoles())
+
+	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites/erpact-acme/status", nil), erpactOwner())
+	req = withURLParam(req, "name", "erpact-acme")
+	w := httptest.NewRecorder()
+	h.GetErpactSiteStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var resp erpactSiteResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Name != "erpact-acme" || resp.Host != "acme.erpact.online" || resp.Status != "CREATING" {
+		t.Fatalf("unexpected status entry: %+v", resp)
+	}
+}
+
+func TestCreateErpactSite_NewDomainSiteBlocksSameName(t *testing.T) {
+	dep := &fakeErpactDeployer{sites: []erpactsites.Site{
+		erpactBaseHostSite,
+		{Name: "acme.erpact.online", Status: "ACTIVE"},
+	}}
+	h := &Handlers{opts: Options{ErpactDeployer: dep, GitReader: erpactRoles(), AuditLog: audit.NewLogger()}}
+
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/tenants/erpact/sites", strings.NewReader(`{"name":"erpact-acme"}`)), erpactOwner())
+	w := httptest.NewRecorder()
+	h.CreateErpactSite(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("got %d, want 409: %s", w.Code, w.Body.String())
+	}
+	if len(dep.createdNames) != 0 {
+		t.Fatalf("deployer must not be called, got %v", dep.createdNames)
+	}
+}
