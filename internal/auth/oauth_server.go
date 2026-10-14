@@ -32,6 +32,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/auth/cimd"
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
@@ -266,6 +267,12 @@ type OAuthServer struct {
 	// client's URIs remain acceptable on their own merits. What it loses is
 	// the per-client scoping, and re-registering restores that.
 	ClientRegistrationTTL time.Duration
+
+	// CIMD resolves Client ID Metadata Documents (OAUTH_CIMD_ENABLED). Nil
+	// disables CIMD: an https client_id then resolves exactly as before.
+	CIMD *cimd.Resolver
+
+	consents sync.Map // token → consentMem, used when FlowStore is nil
 
 	codes         authCodeStore
 	refreshTokens refreshTokenStore
@@ -1144,6 +1151,12 @@ func (s *OAuthServer) awaitBusyResolver(login string) ([]string, error) {
 // there — whoever starts the flow chooses the challenge. Registrations are now
 // only honoured for the client that made them.
 func (s *OAuthServer) IsRedirectURIAllowed(clientID, uri string) bool {
+	return s.IsRedirectURIAllowedCtx(context.Background(), clientID, uri)
+}
+
+// IsRedirectURIAllowedCtx is IsRedirectURIAllowed with the caller's context,
+// which a CIMD client_id needs for its metadata fetch.
+func (s *OAuthServer) IsRedirectURIAllowedCtx(ctx context.Context, clientID, uri string) bool {
 	// A pre-registered client trusts the callbacks it lists and nothing else:
 	// not the global allowlist, not the loopback rule. That is the property
 	// static registration exists to give -- onboarding one counterpart must
@@ -1151,6 +1164,17 @@ func (s *OAuthServer) IsRedirectURIAllowed(clientID, uri string) bool {
 	// decided here, before either general rule can answer for it.
 	if uris, ok := s.staticRedirectURIs(clientID); ok {
 		return slices.Contains(uris, uri)
+	}
+	// A CIMD client is decided by its own metadata document alone, ahead of
+	// the global allowlist and the loopback rule, with no fallback: an
+	// unresolvable document refuses.
+	if s.CIMD != nil && cimd.IsCIMDURL(clientID) {
+		doc, err := s.CIMD.Resolve(ctx, clientID)
+		if err != nil {
+			slog.Warn("oauth: client metadata document refused", "client_id", clientID, "error", err)
+			return false
+		}
+		return cimd.RedirectAllowed(doc.RedirectURIs, uri)
 	}
 	for _, allowed := range s.AllowedRedirectURIs {
 		if strings.HasSuffix(allowed, "/*") {

@@ -344,6 +344,7 @@ func NewRouter(opts Options) http.Handler {
 		r.Get("/oauth/authorize", h.handleOAuthAuthorize)
 		r.Get("/oauth/github/callback", h.handleOAuthGitHubCallback)
 		r.Get(oauthZitadelCallbackPath, h.handleOAuthZitadelCallback)
+		r.Post("/oauth/consent", h.handleOAuthConsent)
 		r.Post("/oauth/token", h.handleOAuthToken)
 		r.Post("/oauth/revoke", h.handleOAuthRevoke)
 		// Explicit identity linking, browser side (mctl-api#435). Public:

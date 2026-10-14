@@ -32,6 +32,8 @@ import (
 const (
 	KindPending = "pending"
 	KindCode    = "code"
+	// KindConsent is a CIMD consent decision waiting for the signed-in human.
+	KindConsent = "consent"
 )
 
 // Store keeps one-time entries until they are taken or expire.

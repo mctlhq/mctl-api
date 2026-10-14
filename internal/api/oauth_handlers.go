@@ -43,6 +43,8 @@ type OAuthMeta struct {
 	GrantTypesSupported               []string `json:"grant_types_supported"`
 	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
+	// ClientIDMetadataDocumentSupported is advertised only while CIMD is on.
+	ClientIDMetadataDocumentSupported bool `json:"client_id_metadata_document_supported,omitempty"`
 }
 
 // oauthScope is the only OAuth scope this server issues or advertises.
@@ -71,6 +73,7 @@ func (h *Handlers) handleOAuthMeta(w http.ResponseWriter, r *http.Request) {
 		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
 		CodeChallengeMethodsSupported:     []string{"S256"},
 		TokenEndpointAuthMethodsSupported: []string{"none"},
+		ClientIDMetadataDocumentSupported: h.opts.OAuthServer.CIMDEnabled(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(meta)
@@ -150,7 +153,7 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "client_id is required", http.StatusBadRequest)
 		return
 	}
-	if redirectURI == "" || !o.IsRedirectURIAllowed(clientID, redirectURI) {
+	if redirectURI == "" || !o.IsRedirectURIAllowedCtx(r.Context(), clientID, redirectURI) {
 		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
 		return
 	}
@@ -299,29 +302,15 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 		groups = o.ResolveGroups(login)
 	}
 
-	// Issue a mctl authorization code.
-	mctlCode, err := o.IssueCode(r.Context(), login, principalID, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
-	if err != nil {
-		slog.Error("failed to issue auth code", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, "issued").Inc()
-
-	// Redirect back to client with code + state.
-	target, err := url.Parse(pending.RedirectURI)
-	if err != nil {
-		http.Error(w, "invalid redirect_uri", http.StatusInternalServerError)
-		return
-	}
-	cq := target.Query()
-	cq.Set("code", mctlCode)
-	if clientState != "" {
-		cq.Set("state", clientState)
-	}
-	target.RawQuery = cq.Encode()
-
-	http.Redirect(w, r, target.String(), http.StatusFound)
+	// Issue a mctl authorization code (or, for a CIMD client, ask the human
+	// first).
+	res := h.finishAuthorization(w, r, authzCompletion{
+		Login: login, PrincipalID: principalID, Groups: groups,
+		ClientID: pending.ClientID, RedirectURI: pending.RedirectURI,
+		CodeChallenge: pending.CodeChallenge, ClientState: clientState,
+		Upstream: auth.UpstreamGitHub,
+	})
+	oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, res).Inc()
 }
 
 // handleOAuthToken exchanges an authorization code or refresh token for an access token.

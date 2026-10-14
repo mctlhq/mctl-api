@@ -423,6 +423,29 @@ deploy:
 No repository secret is needed. The body must stay flat (no nested
 `parameters` object) and must not carry any field outside the allowlist.
 
+## Client identity versus principal identity (CIMD, mctl-api#375)
+
+A grant has two identities that are never merged:
+
+- the **client identity**: which MCP/OAuth client asks for authorization
+  (pre-registered, `dcr_...`, a Client ID Metadata Document URL, or an
+  allowlisted/loopback client);
+- the **principal identity**: the human or service the upstream IdP
+  (ZITADEL or GitHub) authenticated, resolved to the canonical `prn_...`.
+
+With `OAUTH_CIMD_ENABLED=true` an `https://` `client_id` is resolved from the
+document at that URL, fetched only from hosts in `OAUTH_CIMD_ALLOWED_HOSTS`
+through an SSRF-safe client (`internal/netsafe`: public addresses only,
+checked on the connected socket, no proxy, no redirect, 5 s, 64 KiB). The
+document decides `redirect_uri` alone; it can never name a principal, tenant
+or group, which come from the upstream sign-in only. A CIMD client is shown a
+consent page after sign-in on every authorization (single-use token, 5
+minutes, bound to the signing-in browser by the `__Host-mctl_consent`
+cookie; `POST /oauth/consent`). Every issued code writes one
+`oauth.grant_issued` audit entry: principal in the principal column, client
+in parameters (`client_id`, `client_kind`, `client_name`, `redirect_host`,
+`upstream`).
+
 ## `MCTL_FEDERATION_DISABLED`: the kill switch
 
 Same shape as `PRINCIPALS_DISABLED`: any value except an explicit
