@@ -2078,7 +2078,10 @@ paths:
         `dev-loop.human-approval`/`v1` (else 409 `approval_intent_mismatch`).
         The target must also belong to the run's own DevLoop: its
         `<service>/<slug>` maps to the workflow id the `we_`'s `engine_ref`
-        names (else 409 `approval_intent_mismatch`). That mapping keeps only
+        names (else 409 `approval_intent_mismatch`; a target that maps to no
+        workflow id, or an approval whose `we_` no longer exists, is refused
+        with the same code: in each case the grant does not authorize this
+        request). That mapping keeps only
         the slug's `issue-<n>-` prefix, so it binds the service and issue;
         the exact slug is the one the approval was created for (the intent
         hash) and is recorded in the decision and consume audit. It is consumed once,

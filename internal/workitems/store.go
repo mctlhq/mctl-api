@@ -13,6 +13,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// openPhasesSQL is the SQL list of the non-terminal execution phases: the
+// complement of IsTerminalPhase among the valid phases, which
+// TestOpenPhasesSQLMatchesIsTerminalPhase holds it to. The one-open-per-item
+// index and OpenExecutionsOfEngineRun both use it, so "open" means the same
+// thing in SQL as in Go.
+const openPhasesSQL = `('Pending', 'Running')`
+
 const schema = `
 CREATE TABLE IF NOT EXISTS work_items (
     id                     TEXT PRIMARY KEY,
@@ -83,7 +90,7 @@ CREATE TABLE IF NOT EXISTS work_item_executions (
 -- At most one non-terminal execution per work item.
 CREATE UNIQUE INDEX IF NOT EXISTS work_item_executions_one_open
     ON work_item_executions (work_item_id)
-    WHERE phase IN ('Pending', 'Running');
+    WHERE phase IN ` + openPhasesSQL + `;
 -- Engine-run lookup across work items (OpenExecutionsOfEngineRun,
 -- mctl-api#571).
 CREATE INDEX IF NOT EXISTS work_item_executions_engine_ref
@@ -715,7 +722,7 @@ func (s *Store) ExecutionByID(ctx context.Context, executionID string) (*Executi
 func (s *Store) OpenExecutionsOfEngineRun(ctx context.Context, engine, run string) ([]Execution, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+executionColumns+` FROM work_item_executions
 		WHERE engine=$1 AND (engine_ref=$2 OR left(engine_ref, length($2) + 1) = $2 || '#')
-		  AND phase IN ('Pending', 'Running')
+		  AND phase IN `+openPhasesSQL+`
 		ORDER BY started_at, id`, engine, run)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: open executions of engine run: %w", err)

@@ -279,6 +279,83 @@ Every field comes from authentication and the delegation gate. Nothing is
 parsed out of a principal string or a login, and the same human resolves to
 the same `principal_id` whichever provider they signed in with.
 
+## DevLoop approval by grant (#571)
+
+A DevLoop's human approval is exercised by the agent run that waits for
+it, as that human, through an action approval (`aar_`). Four parties stay
+distinct: the **human** who decides (subject, a `prn_`), the **agent run**
+that submits (actor, `agent:<name>` with its `art_` token), the run's
+**execution** (`we_`, canonical; the Temporal workflow id is its
+`engine_ref`), and the **grant** that links them (`aar_`).
+
+1. The worker attaches its DevLoop to the issue's work item as a `we_`
+   (`engine=temporal`, `engine_ref=<workflow_id>`, or
+   `<workflow_id>#<request_id>` for a run dispatched from an execution
+   request) and, at the approval gate, creates an `aar_` for that `we_`:
+   action kind `mctl-agents-approve`, target `<service>/<slug>`, policy
+   `dev-loop.human-approval`/`v1`. Creating it still takes the
+   `mctl-agent` service token.
+2. A human admin approves with
+   `POST /api/v1/agents/dev-loop/{workflow_id}/approve`. The workflow id is
+   resolved to its one open `we_` (more than one is 409
+   `execution_ambiguous`), and the newest `aar_` of that kind for it, in
+   any state, decides the answer: a pending one is decided and its
+   `approval_ref` signalled, an approved and unspent one is signalled
+   again, and a denied, consumed or expired one is refused with that
+   state's 409 whatever the legacy flag says. No `aar_` (or no `we_`) is
+   the legacy relay while `MCTL_AGENTS_APPROVE_LEGACY_APPROVER` is on and
+   409 `approval_grant_missing` once it is off. A store error is 503
+   `work_items_unavailable`, never "none".
+3. The run calls `POST /api/v1/operations/mctl-agents-approve/execute`
+   with its run token and `X-MCTL-On-Behalf-Of: aar_…`. The delegation
+   gate binds the grant to the run's `we_` and takes the subject from the
+   grant's `decided_by_principal_id`; the operation then checks the grant
+   instead of the admin role, and spends it once
+   (`ConsumeActionApproval`, an intent-hash compare-and-set) before
+   anything is submitted. The recorded approver is the decider's name;
+   the body may not name one.
+
+The operation record carries `actor_kind=agent`, `actor_name`,
+`agent_run_id`, `execution_id`, `subject_principal_id` and `grant_ref`, and
+the audit trail has `action_approval.create`, `.decision` and `.consume`
+(each with a `_refused` counterpart).
+
+**Subject from the principal, for every IdP.** For an `xr_`, `aar_` or
+`wi_` grant the subject is the principal the grant stored, checked active
+on every request: a ZITADEL-only human approves the same way as a GitHub
+one. A grant with no stored principal (an undecided `aar_`), or whose
+principal is disabled, is 403 `grant_subject_unresolved`; it never falls
+back to the login string. A surface link (`sil_`) stores no principal and
+still resolves through its mirrored GitHub identity, so it requires a
+`github:` subject; it cannot authorize this operation.
+
+| Code | Status | Where | Meaning |
+|---|---|---|---|
+| `grant_not_bound` | 403 | gate | the `aar_` is for another `we_` or work item, or is denied, expired or consumed |
+| `grant_subject_unresolved` | 403 | gate | no stored principal (undecided), disabled, or (`sil_`) not a GitHub subject |
+| `actor_not_accepted` | 400 | operation | the body names an `approver` |
+| `approval_intent_mismatch` | 409 | operation | another action kind, target or policy; a target that maps to no workflow id or not to the run's own DevLoop; or the approval's `we_` no longer exists |
+| `approval_consumed` / `approval_expired` | 409 | operation, approve route | spent or past its expiry |
+| `approval_denied` | 409 | approve route | the newest grant was denied |
+| `approval_grant_missing` | 409 | approve route | no grant and the legacy flag is off |
+| `execution_ambiguous` | 409 | approve route | more than one open `we_` for the workflow id |
+| `legacy_approver_disabled` | 400 | operation | free-text `approver` from a service principal with the flag off |
+| `delegation_unavailable` | 503 | gate | the grant could not be resolved (store outage) or delegation is not configured |
+| `work_items_unavailable` | 503 | operation, approve route | a work-item store read failed, or (approve route, flag off) the store is not configured |
+
+The target binding maps `<service>/<slug>` to a workflow id the way the
+shepherd does (`temporalclient.WorkflowIDForProposalRef`), which keeps only
+the slug's `issue-<n>-` prefix: it pins the service and the issue, and the
+intent hash pins the exact slug.
+
+**Retiring the legacy relay.** While the flag is on, the `mctl-agent`
+service may still relay a free-text `approver`; every use writes one
+`approver.legacy_relay` audit entry and increments
+`mctl_agents_approve_legacy_relay_total{outcome="relayed"}`. The flag goes
+off only after a full natural DevLoop cycle (the Saturday cron and one
+issue-triggered loop) with mctl-agents#636 deployed records actor and
+subject separately and zero legacy relays.
+
 ## Not in phase 1
 
 Authorization and tenant membership still use `User.ID` and `User.Groups`,
