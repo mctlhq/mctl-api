@@ -55,27 +55,43 @@ const erpactSiteCap = 10
 // rare, owner-only operation.
 var erpactCreateMu sync.Mutex
 
-// erpactMainDomain mirrors the deployer's own MAIN_DOMAIN env var. The
-// deployer's listing reports each site by its full host (name+"."+MAIN_DOMAIN);
-// this API accepts and reports the short name a caller used at creation, so
-// it needs the suffix to translate between the two.
-const erpactMainDomain = "mctl.ai"
+// erpactMainDomain and erpactLegacyMainDomain mirror the deployer's
+// MAIN_DOMAIN and LEGACY_MAIN_DOMAIN env vars (erpact/mctl-apps
+// helm-deployer/values.yaml). The deployer's listing reports each site by its
+// full host; this API accepts and reports the short name a caller used at
+// creation, "erpact-<label>", so it translates between the two:
+//
+//	<label>.erpact.online      sites created since erpact/mctl-apps#16
+//	erpact-<label>.mctl.ai     sites created before it, which keep their host
+//
+// Both map to the same short name, so a new site cannot reuse a legacy
+// site's name, which is also what the deployer itself enforces.
+const (
+	erpactMainDomain       = "erpact.online"
+	erpactLegacyMainDomain = "mctl.ai"
+)
 
-// erpactShortName strips the deployer's MAIN_DOMAIN suffix from a listed
-// site's host, back to the short name CreateErpactSite accepted. A host
-// that, unexpectedly, does not carry the suffix is returned unchanged
-// rather than mangled — this only ever happens if MAIN_DOMAIN itself
-// changes on the deployer side without this constant following it.
+// erpactShortName maps a listed site's host back to the short name
+// CreateErpactSite accepted. A host under neither domain is returned
+// unchanged rather than mangled: that only happens if the deployer's domains
+// change without these constants following them, and an unmapped name then
+// shows up in the listing instead of silently matching the wrong site.
 func erpactShortName(host string) string {
-	return strings.TrimSuffix(host, "."+erpactMainDomain)
+	if label, ok := strings.CutSuffix(host, "."+erpactMainDomain); ok {
+		return erpactSiteHostPrefix + label
+	}
+	if short, ok := strings.CutSuffix(host, "."+erpactLegacyMainDomain); ok {
+		return short
+	}
+	return host
 }
 
-// erpactSiteHostPrefix mirrors the deployer's SITE_HOST_PREFIX env var. The
-// running deployer (its argocd_controller.py comes from a ConfigMap override
-// in erpact/mctl-apps, not from site-deployer main) builds a host as
-// SITE_HOST_PREFIX + name + "." + MAIN_DOMAIN, so it is sent the label
-// without this prefix. Sending the full name created
-// "erpact-erpact-<label>" in prod on 2026-10-09.
+// erpactSiteHostPrefix is the prefix every short name carries. The deployer
+// (its argocd_controller.py comes from a ConfigMap override in
+// erpact/mctl-apps, not from site-deployer main) is sent the label without
+// it: new hosts are <label>.erpact.online, legacy ones
+// LEGACY_SITE_HOST_PREFIX ("erpact-") + label + ".mctl.ai". Sending the full
+// name created "erpact-erpact-<label>" in prod on 2026-10-09.
 const erpactSiteHostPrefix = "erpact-"
 
 // erpactSiteNamePattern mirrors the deployer's own validate_site_name
@@ -109,7 +125,7 @@ func validateErpactSiteName(name string) (string, error) {
 	if !erpactSiteNamePattern.MatchString(name) {
 		return "", fmt.Errorf("site name %q must start with \"erpact-\", contain only lowercase letters, digits and hyphens, and be at most 47 characters", name)
 	}
-	if strings.EqualFold(name+"."+erpactMainDomain, erpactBaseHostName) {
+	if strings.EqualFold(name+"."+erpactLegacyMainDomain, erpactBaseHostName) {
 		return "", fmt.Errorf("site name %q is reserved", name)
 	}
 	if erpactSystemNames[strings.TrimPrefix(name, "erpact-")] {
@@ -125,7 +141,8 @@ func validateErpactSiteName(name string) (string, error) {
 // would otherwise be hidden from the listing, excluded from erpactSiteCap's
 // count, and 404 from a status lookup during exactly the create-then-poll
 // window a caller needs it most (review finding on mctl-api#497).
-const erpactBaseHostName = "erpact-shared-stteam." + erpactMainDomain
+// It stays on the legacy domain: the deployer pins it (sharedNamespaceHost).
+const erpactBaseHostName = "erpact-shared-stteam." + erpactLegacyMainDomain
 
 func erpactIsBaseHost(s erpactsites.Site) bool {
 	return strings.EqualFold(s.Name, erpactBaseHostName)
