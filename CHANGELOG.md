@@ -1,5 +1,28 @@
 # Changelog
 
+## [4.88.0](https://github.com/mctlhq/mctl-api/compare/4.87.0...4.88.0) (2026-10-13)
+
+
+### Features
+
+* **api:** audit and gate the legacy approver relay ([#571](https://github.com/mctlhq/mctl-api/issues/571)) ([48140e1](https://github.com/mctlhq/mctl-api/commit/48140e1d8ab027b82f7596a73d6ee20a2ec68598))
+* **api:** audit and gate the legacy approver relay ([#571](https://github.com/mctlhq/mctl-api/issues/571)) ([4df8488](https://github.com/mctlhq/mctl-api/commit/4df84888728baca44d12dff6dd70b680c756b8f9))
+* **api:** let a DevLoop run approve through its human's aar_ grant ([2f9dc6e](https://github.com/mctlhq/mctl-api/commit/2f9dc6e6f6cb4d6ff7023368c77aefd60764482a))
+* **api:** let a DevLoop run approve through its human's aar_ grant ([55f168c](https://github.com/mctlhq/mctl-api/commit/55f168ca8609edc2cd8df5c671fab576b5b47f6e)), closes [#571](https://github.com/mctlhq/mctl-api/issues/571)
+* **api:** take the delegated subject from the grant's principal ([901d0e6](https://github.com/mctlhq/mctl-api/commit/901d0e64f474d2e751f2644592596cd3cf19fc77))
+* **api:** take the delegated subject from the grant's principal ([6efc0fa](https://github.com/mctlhq/mctl-api/commit/6efc0fafc032323e560d04176e64ba272b99f216))
+* **dev-loop:** approve a DevLoop through its we_-bound grant ([b8eb1a1](https://github.com/mctlhq/mctl-api/commit/b8eb1a1f68fdf451989e16283bedb391bfdccb80))
+* **dev-loop:** approve a DevLoop through its we_-bound grant ([d2f2c71](https://github.com/mctlhq/mctl-api/commit/d2f2c712e48a27f4557ed6023ac80a8bc2f0e3d1)), closes [#571](https://github.com/mctlhq/mctl-api/issues/571)
+
+
+### Bug Fixes
+
+* **api:** bind a DevLoop grant's target to its execution ([4e1fd5f](https://github.com/mctlhq/mctl-api/commit/4e1fd5fd6150012c2ec23edeba743f6381609389))
+* **api:** refuse an approval grant of another kind before validation ([74f397a](https://github.com/mctlhq/mctl-api/commit/74f397a83464fa51e3e10f8406351acd6eaf9d81))
+* count legacy approver relays and parse the flag strictly ([3d6d72a](https://github.com/mctlhq/mctl-api/commit/3d6d72aaf61703423b092214cc812336f8bf6b4e))
+* **dev-loop:** let the newest grant decide a DevLoop approval ([6311b05](https://github.com/mctlhq/mctl-api/commit/6311b05a3c35b24f5dfacbb6228c0761b7ea961e))
+* **dev-loop:** refuse approval over a denied, spent or expired grant ([dab23f3](https://github.com/mctlhq/mctl-api/commit/dab23f31a059814fb3ef680298c62d0594bbfc30))
+
 ## [4.87.0](https://github.com/mctlhq/mctl-api/compare/4.86.0...4.87.0) (2026-10-13)
 
 
