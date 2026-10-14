@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.88.1](https://github.com/mctlhq/mctl-api/compare/4.88.0...4.88.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **erpact:** map sites on erpact.online back to their short names ([b3c7b15](https://github.com/mctlhq/mctl-api/commit/b3c7b154500fb52af99e16a6d3403396e51caac3))
+* **erpact:** map sites on erpact.online back to their short names ([c78dc85](https://github.com/mctlhq/mctl-api/commit/c78dc85b1074c109198f9890887cdd2e9829985d))
+
 ## [4.88.0](https://github.com/mctlhq/mctl-api/compare/4.87.0...4.88.0) (2026-10-13)
 
 
