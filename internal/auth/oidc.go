@@ -122,19 +122,22 @@ type User struct {
 	oidcSubject      string
 	oidcKind         string
 
-	// principalID is the canonical principal (prn_...) resolved from that
-	// identity, and viaPrincipalID the relaying surface's principal. Set
-	// only by AttachPrincipal and NewRelayedUser.
+	// principalID is the canonical principal (prn_...): resolved from that
+	// identity by AttachPrincipal, or taken from a token or grant when
+	// tokenPrincipal is set. viaPrincipalID is the principal that carried
+	// the request for someone else: the relaying surface (NewRelayedUser)
+	// or the delegating agent run (NewDelegatedUser).
 	principalID    string
 	viaPrincipalID string
 
-	// tokenPrincipal records that principalID came from a local OAuth
-	// token's pid claim in principal mode (mctl-api#377), not from
-	// resolving an identity: AttachPrincipal then checks that principal is
-	// still active instead of re-deriving one from the login. tokenPID is
-	// the same claim outside principal mode, kept only to compare with the
-	// principal the identity resolves to. Set only by ValidateJWT and
-	// userFromVerified.
+	// tokenPrincipal records that principalID was not resolved from an
+	// identity but carried in: a local OAuth token's pid claim in principal
+	// mode (mctl-api#377; ValidateJWT, userFromVerified), or the principal a
+	// delegation grant stored for its subject (mctl-api#571;
+	// NewDelegatedPrincipalUser). AttachPrincipal then checks that principal
+	// is still active instead of re-deriving one from the login. tokenPID is
+	// the pid claim outside principal mode, kept only to compare with the
+	// principal the identity resolves to.
 	tokenPrincipal bool
 	tokenPID       string
 
