@@ -12,11 +12,7 @@ func TestOpenPhasesSQLMatchesIsTerminalPhase(t *testing.T) {
 	for _, m := range regexp.MustCompile(`'([^']*)'`).FindAllStringSubmatch(openPhasesSQL, -1) {
 		open[m[1]] = true
 	}
-	all := []string{PhasePending, PhaseRunning, PhaseSucceeded, PhaseFailed, PhaseError}
-	for _, p := range all {
-		if !validPhase(p) {
-			t.Fatalf("%q is not a valid phase", p)
-		}
+	for _, p := range allPhases {
 		if open[p] == IsTerminalPhase(p) {
 			t.Errorf("phase %q: in openPhasesSQL=%v, IsTerminalPhase=%v", p, open[p], IsTerminalPhase(p))
 		}

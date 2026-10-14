@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"time"
 )
 
@@ -140,8 +141,13 @@ func IsTerminalPhase(phase string) bool {
 	return phase == PhaseSucceeded || phase == PhaseFailed || phase == PhaseError
 }
 
+// allPhases is every valid execution phase; validPhase accepts exactly
+// these, and TestOpenPhasesSQLMatchesIsTerminalPhase checks each against
+// openPhasesSQL.
+var allPhases = []string{PhasePending, PhaseRunning, PhaseSucceeded, PhaseFailed, PhaseError}
+
 func validPhase(phase string) bool {
-	return phase == PhasePending || phase == PhaseRunning || IsTerminalPhase(phase)
+	return slices.Contains(allPhases, phase)
 }
 
 func validState(state string) bool {

@@ -340,7 +340,8 @@ still resolves through its mirrored GitHub identity, so it requires a
 | `approval_grant_missing` | 409 | approve route | no grant and the legacy flag is off |
 | `execution_ambiguous` | 409 | approve route | more than one open `we_` for the workflow id |
 | `legacy_approver_disabled` | 400 | operation | free-text `approver` from a service principal with the flag off |
-| `work_items_unavailable` | 503 | both | a store read failed |
+| `delegation_unavailable` | 503 | gate | the grant could not be resolved (store outage) or delegation is not configured |
+| `work_items_unavailable` | 503 | operation, approve route | a work-item store read failed, or (approve route, flag off) the store is not configured |
 
 The target binding maps `<service>/<slug>` to a workflow id the way the
 shepherd does (`temporalclient.WorkflowIDForProposalRef`), which keeps only
