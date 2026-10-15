@@ -36,6 +36,15 @@ failure would block admin tokens too and burn refresh tokens. A failing token
 hook therefore yields tokens without `mctl:*` claims, and relying parties
 treat a missing `mctl:github_id` as a refusal.
 
+**Hard constraint: the GitHub IdP is an org IdP of customers**
+(`zitadel_org_idp_github` on the customers org), never instance-level and
+never added to another org's login policy. The update path writes a verified
+email onto the `userId` ZITADEL resolved for the GitHub link without checking
+its org; that is safe only because every user linked to this IdP was created
+in customers through the create gate (the link methods are gated as well, see
+below). Changing the IdP's scope breaks that invariant and must not be done
+without an `UpdateUser` gate.
+
 ZITADEL's default `HTTPClient.DenyList` blocks private ranges, so the targets
 point at the public hostname (`https://api.mctl.ai/...`), not the in-cluster
 Service.
