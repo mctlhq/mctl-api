@@ -131,13 +131,15 @@ type oauthZitadel struct {
 type lazyOIDCProvider struct {
 	issuer string
 
-	mu       sync.Mutex
+	// discoMu is named apart from its holders' own mutexes: it guards the
+	// discovery call, a network round trip, and nothing else.
+	discoMu  sync.Mutex
 	provider *oidc.Provider
 }
 
 func (l *lazyOIDCProvider) oidcProvider(ctx context.Context) (*oidc.Provider, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.discoMu.Lock()
+	defer l.discoMu.Unlock()
 	if l.provider != nil {
 		return l.provider, nil
 	}
