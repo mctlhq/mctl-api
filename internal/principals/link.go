@@ -297,9 +297,15 @@ var ErrCustomerConflict = errors.New("customer identity conflicts with the princ
 // Nothing is keyed on a login, and the ZITADEL subject never gets a
 // principal of its own.
 //
-// Refusals: a revoked GitHub identity or a link conflict is
-// auth.ErrIdentityRefused, a disabled principal auth.ErrPrincipalDisabled.
-// Any other error is a failed read or write.
+// A disabled principal is returned as it is, unlinked, like Provision
+// returns one: the resolver's answer maps it to auth.ErrPrincipalDisabled
+// and caches that. A revoked GitHub identity or a link conflict is
+// auth.ErrIdentityRefused. Any other error is a failed read or write.
+//
+// The GitHub identity is provisioned before the link is tried, so a
+// refused conflict still leaves the principal of that GitHub id behind.
+// That is deliberate and idempotent: it is the principal the id gets on any
+// sign-in, and the admin who resolves the conflict merges into it.
 func (s *Store) ResolveCustomer(ctx context.Context, id auth.Identity) (*Principal, error) {
 	if id.Customer == nil {
 		return nil, fmt.Errorf("%w: not a customer identity", ErrInvalid)
@@ -312,7 +318,7 @@ func (s *Store) ResolveCustomer(ctx context.Context, id auth.Identity) (*Princip
 		return nil, err
 	}
 	if p.Status != StatusActive {
-		return nil, auth.ErrPrincipalDisabled
+		return p, nil
 	}
 	link := id
 	link.Customer = nil

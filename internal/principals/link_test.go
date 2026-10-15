@@ -414,6 +414,15 @@ func TestResolveCustomerRefusesASubjectOwnedElsewhere(t *testing.T) {
 	if len(ids) != 1 {
 		t.Fatalf("the subject moved: %+v", ids)
 	}
+	// Deliberate: the GitHub id's own principal exists after the refusal,
+	// with only its GitHub identity, for an admin to merge into.
+	gh, err := s.Provision(ctx, customer("z1", 7, "bob").Customer.GitHubIdentity())
+	if err != nil || gh.ID == own.ID {
+		t.Fatalf("GitHub principal = %+v, %v", gh, err)
+	}
+	if ids, _ := s.Identities(ctx, gh.ID); len(ids) != 1 || ids[0].Provider != auth.ProviderGitHub {
+		t.Fatalf("GitHub principal identities = %+v, want only the GitHub one", ids)
+	}
 }
 
 // A second ZITADEL account for the same GitHub id (a deleted and recreated
@@ -455,8 +464,27 @@ func TestResolveCustomerRefusesADisabledPrincipal(t *testing.T) {
 	if _, err := s.pool.Exec(ctx, `UPDATE principals SET status='disabled' WHERE id=$1`, p.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob")); !errors.Is(err, auth.ErrPrincipalDisabled) {
-		t.Fatalf("err = %v, want disabled", err)
+	if got, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob")); err != nil || got.ID != p.ID || got.Status != StatusDisabled {
+		t.Fatalf("ResolveCustomer = %+v, %v; want the disabled principal", got, err)
+	}
+	// Through the resolver, as every caller sees it: refused as disabled,
+	// not a failed read that bearer requests would degrade past.
+	r := NewResolver(s, nil, false)
+	if _, err := r.ResolvePrincipal(ctx, customer("z1", 7, "bob")); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("ResolvePrincipal err = %v, want ErrPrincipalDisabled", err)
+	}
+	// A disabled principal gets no new identity linked.
+	if _, err := r.ResolvePrincipal(ctx, customer("z2", 8, "carol")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE principals SET status='disabled' WHERE id=(SELECT principal_id FROM external_identities WHERE provider='github' AND subject='8')`); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ResolveCustomer(ctx, customer("z3", 8, "carol")); err != nil || got.Status != StatusDisabled {
+		t.Fatalf("ResolveCustomer = %+v, %v", got, err)
+	}
+	if _, _, err := s.LinkedGitHub(ctx, zitadel("z3", "carol")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("z3 was linked to a disabled principal: %v", err)
 	}
 }
 

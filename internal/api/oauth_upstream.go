@@ -121,36 +121,48 @@ func init() { prometheus.MustRegister(oauthUpstreamSignins) }
 
 type oauthZitadel struct {
 	opts *OAuthZitadelOptions
+	lazyOIDCProvider
+}
+
+// lazyOIDCProvider runs OIDC discovery for issuer once it first succeeds; a
+// failure is retried on the next call, so the identity provider being down
+// never delays mctl-api's start. The ZITADEL sign-in, the identity link and
+// the portal's customer resolution each hold one.
+type lazyOIDCProvider struct {
+	issuer string
 
 	mu       sync.Mutex
 	provider *oidc.Provider
 }
 
-// oidcProvider runs discovery once it first succeeds; a failure is retried
-// on the next sign-in, so ZITADEL being down never delays mctl-api's start.
-func (z *oauthZitadel) oidcProvider(ctx context.Context) (*oidc.Provider, error) {
-	z.mu.Lock()
-	defer z.mu.Unlock()
-	if z.provider != nil {
-		return z.provider, nil
+func (l *lazyOIDCProvider) oidcProvider(ctx context.Context) (*oidc.Provider, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.provider != nil {
+		return l.provider, nil
 	}
-	p, err := oidc.NewProvider(ctx, z.opts.Issuer)
+	p, err := oidc.NewProvider(ctx, l.issuer)
 	if err != nil {
 		return nil, err
 	}
-	z.provider = p
+	l.provider = p
 	return p, nil
 }
 
 func (z *oauthZitadel) oauthConfig(p *oidc.Provider, baseURL string) *oauth2.Config {
+	scopes := []string{oidc.ScopeOpenID, "profile"}
+	if z.opts.CustomersOrgID != "" {
+		// The ID token must name the user's organization, or a customer
+		// could not be told from anyone else. Asked only when customers
+		// are configured, so the sign-in is unchanged until then.
+		scopes = append(scopes, auth.ScopeResourceOwner)
+	}
 	return &oauth2.Config{
 		ClientID:     z.opts.ClientID,
 		ClientSecret: z.opts.ClientSecret,
 		Endpoint:     p.Endpoint(),
 		RedirectURL:  baseURL + oauthZitadelCallbackPath,
-		// ScopeResourceOwner: the ID token must name the user's
-		// organization, or a customer could not be told from anyone else.
-		Scopes: []string{oidc.ScopeOpenID, "profile", auth.ScopeResourceOwner},
+		Scopes:       scopes,
 	}
 }
 

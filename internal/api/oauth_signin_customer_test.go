@@ -75,13 +75,19 @@ func newCustomerHarness(t *testing.T, principalMode bool, claims map[string]any,
 	return h
 }
 
-// The sign-in asks ZITADEL to name the user's organization: without it a
-// customer cannot be told from anyone else.
+// With customers configured the sign-in asks ZITADEL to name the user's
+// organization: without it a customer cannot be told from anyone else.
 func TestZitadelSigninAsksForTheResourceOwner(t *testing.T) {
 	h := newCustomerHarness(t, true, nil, nil)
 	loc, _ := url.Parse(h.get(authorizeQuery("")).Header().Get("Location"))
 	if scopes := strings.Fields(loc.Query().Get("scope")); !contains(scopes, auth.ScopeResourceOwner) {
 		t.Fatalf("scope = %v, want %s", scopes, auth.ScopeResourceOwner)
+	}
+	// Without a customers organization the sign-in is unchanged.
+	plain := newUpstreamHarness(t, OAuthUpstreamZitadel, &fakeLinkedStore{err: principals.ErrNotFound})
+	loc, _ = url.Parse(plain.get(authorizeQuery("")).Header().Get("Location"))
+	if scopes := strings.Fields(loc.Query().Get("scope")); contains(scopes, auth.ScopeResourceOwner) || !contains(scopes, "openid") {
+		t.Fatalf("scope without customers = %v, want openid and no %s", scopes, auth.ScopeResourceOwner)
 	}
 }
 

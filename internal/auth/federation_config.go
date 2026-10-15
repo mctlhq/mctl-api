@@ -70,6 +70,9 @@ func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
 	}
 }
 
+// zitadelOrgIDRE is the shape of a ZITADEL resource id.
+var zitadelOrgIDRE = regexp.MustCompile(`^[0-9]{1,32}$`)
+
 // ParseOIDCProviders decodes and validates the MCTL_OIDC_PROVIDERS value.
 // Unset or blank means no explicitly configured providers -- only the legacy
 // Dex shim applies. A malformed value, an entry with no name/issuer/
@@ -78,9 +81,6 @@ func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
 // normalized issuer all refuse with an error naming the offending entry
 // (requirements.md "Issuer and audience validation", "Registry and
 // routing").
-// zitadelOrgIDRE is the shape of a ZITADEL resource id.
-var zitadelOrgIDRE = regexp.MustCompile(`^[0-9]{1,32}$`)
-
 func ParseOIDCProviders(raw string) ([]OIDCProviderConfigEntry, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

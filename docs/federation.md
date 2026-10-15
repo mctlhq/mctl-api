@@ -299,7 +299,7 @@ the ZITADEL entry:
   `urn:zitadel:iam:user:resourceowner:id` is refused (401): an organization
   that could not be read is never taken to be "not customers". Clients must
   request the scope `urn:zitadel:iam:user:resourceowner`; mctl-api's own
-  OAuth sign-in does.
+  OAuth sign-in does whenever `customers_org_id` is set.
 - **A customer is keyed on GitHub, never on a login.** The principal is the
   one holding the GitHub identity `('github', '', <github_id>)`, provisioned
   on first sight; the ZITADEL identity is then linked to it. A reused GitHub

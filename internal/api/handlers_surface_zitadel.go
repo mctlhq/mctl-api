@@ -15,11 +15,9 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 	"net/http"
-	"sync"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 
@@ -66,25 +64,7 @@ type SurfaceZitadelOptions struct {
 
 type surfaceZitadel struct {
 	opts *SurfaceZitadelOptions
-
-	mu       sync.Mutex
-	provider *oidc.Provider
-}
-
-// oidcProvider runs discovery once it first succeeds; a failure is retried
-// on the next call.
-func (z *surfaceZitadel) oidcProvider(ctx context.Context) (*oidc.Provider, error) {
-	z.mu.Lock()
-	defer z.mu.Unlock()
-	if z.provider != nil {
-		return z.provider, nil
-	}
-	p, err := oidc.NewProvider(ctx, z.opts.Issuer)
-	if err != nil {
-		return nil, err
-	}
-	z.provider = p
-	return p, nil
+	lazyOIDCProvider
 }
 
 func (z *surfaceZitadel) clientFor(purpose string) (string, bool) {

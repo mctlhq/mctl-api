@@ -284,10 +284,10 @@ func NewRouter(opts Options) http.Handler {
 		h.identityLink = newIdentityLinker(opts.IdentityLink)
 	}
 	if opts.OAuthZitadel != nil {
-		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel}
+		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel, lazyOIDCProvider: lazyOIDCProvider{issuer: opts.OAuthZitadel.Issuer}}
 	}
 	if opts.SurfaceZitadel != nil {
-		h.surfaceZitadel = &surfaceZitadel{opts: opts.SurfaceZitadel}
+		h.surfaceZitadel = &surfaceZitadel{opts: opts.SurfaceZitadel, lazyOIDCProvider: lazyOIDCProvider{issuer: opts.SurfaceZitadel.Issuer}}
 	}
 
 	if opts.BackstageGithubAppConnectToken == "" {
