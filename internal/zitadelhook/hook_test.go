@@ -253,6 +253,55 @@ func TestIntentIDMismatchRefused(t *testing.T) {
 	refusedWith(t, h.Intent(context.Background(), intentBody(idpGitHub, "4242", "bob", "", raw)), http.StatusForbidden)
 }
 
+func TestIntentRawInformationRequired(t *testing.T) {
+	for name, raw := range map[string]map[string]any{
+		"no type":        {"id": 4242, "login": "bob"},
+		"no id":          {"login": "bob", "type": "User"},
+		"no login":       {"id": 4242, "type": "User"},
+		"login mismatch": {"id": 4242, "login": "mallory", "type": "User"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHook(t, nil, verified, 0)
+			refusedWith(t, h.Intent(context.Background(), intentBody(idpGitHub, "4242", "bob", "", raw)), http.StatusForbidden)
+		})
+	}
+	// GitHub logins are case-insensitive; a case difference is not a mismatch.
+	h := newHook(t, nil, verified, 0)
+	raw := map[string]any{"id": 4242, "login": "Bob", "type": "User"}
+	if r := h.Intent(context.Background(), intentBody(idpGitHub, "4242", "bob", "", raw)); r.Reason != "intent_create" {
+		t.Fatalf("reason %s", r.Reason)
+	}
+}
+
+func TestIntentUnparsableUserIDFailsClosed(t *testing.T) {
+	h := newHook(t, nil, verified, 0)
+	var m map[string]any
+	_ = json.Unmarshal(intentBody(idpGitHub, "4242", "bob", "", nil), &m)
+	m["response"].(map[string]any)["userId"] = map[string]any{"x": 1}
+	b, _ := json.Marshal(m)
+	if r := h.Intent(context.Background(), b); r.Status != http.StatusServiceUnavailable {
+		t.Fatalf("status %d (%s), want 503", r.Status, r.Reason)
+	}
+}
+
+func TestIntentExistingUserSurvivesGitHubOutage(t *testing.T) {
+	h := newHook(t, nil, nil, http.StatusBadGateway)
+	r := h.Intent(context.Background(), intentBody(idpGitHub, "4242", "bob", "u-1", nil))
+	if r.Reason != "intent_update" {
+		t.Fatalf("status %d reason %s, want intent_update", r.Status, r.Reason)
+	}
+	out := decodeResponse(t, r)
+	if _, ok := out["updateUser"].(map[string]any)["human"].(map[string]any)["email"]; ok {
+		t.Fatal("no email may be set when GitHub could not be read")
+	}
+}
+
+func TestIntentReservedCheckedBeforeGitHub(t *testing.T) {
+	// A reserved login is a 403 even while GitHub is down.
+	h := newHook(t, nil, nil, http.StatusBadGateway)
+	refusedWith(t, h.Intent(context.Background(), intentBody(idpGitHub, "4242", "adminone", "", nil)), http.StatusForbidden)
+}
+
 func TestIntentExistingUserUpdatesLoginNotID(t *testing.T) {
 	// A reserved tenant member login must not lock an existing customer
 	// out: reservation applies at creation only.
@@ -412,6 +461,12 @@ func TestGateOtherMethods(t *testing.T) {
 		"mgmt ImportHumanUser idp link": {"fullMethod": MethodMgmtImportHumanUser, "orgID": orgAdmins, "request": map[string]any{"idps": []any{map[string]any{"configId": idpGitHub}}}},
 		"admin ImportData":              {"fullMethod": MethodAdminImportData, "orgID": orgAdmins, "request": map[string]any{"dataOrgs": map[string]any{"orgs": []any{map[string]any{"orgId": orgCustomers}}}}},
 		"v3alpha CreateUser":            {"fullMethod": MethodV3AlphaCreateUser, "orgID": orgAdmins, "request": map[string]any{"organization": map[string]any{"orgId": orgCustomers}}},
+		"v2 AddHumanUser other domain":  {"fullMethod": MethodV2AddHumanUser, "orgID": orgAdmins, "request": map[string]any{"organization": map[string]any{"orgDomain": "customers.auth.example"}}},
+		"v2 AddHumanUser snake domain":  {"fullMethod": MethodV2AddHumanUser, "orgID": orgAdmins, "request": map[string]any{"organization": map[string]any{"org_domain": "x"}}},
+		"v2 AddIDPLink github":          {"fullMethod": MethodV2AddIDPLink, "orgID": orgAdmins, "request": map[string]any{"userId": "u-9", "idpLink": map[string]any{"idpId": idpGitHub}}},
+		"v2beta AddIDPLink github":      {"fullMethod": MethodV2BetaAddIDPLink, "orgID": orgAdmins, "request": map[string]any{"userId": "u-9", "idpLink": map[string]any{"idpId": idpGitHub}}},
+		"v3alpha AddIDPAuthenticator":   {"fullMethod": MethodV3AlphaAddIDPAuthenticator, "orgID": orgAdmins, "request": map[string]any{"id": "u-9", "authenticator": map[string]any{"idpId": idpGitHub}}},
+		"v2 AddIDPLink in customers":    {"fullMethod": MethodV2AddIDPLink, "orgID": orgCustomers, "request": map[string]any{"userId": "u-9", "idpLink": map[string]any{"idpId": "777"}}},
 		"unknown method":                {"fullMethod": "/zitadel.user.v9.UserService/MakeUser", "orgID": orgAdmins, "request": map[string]any{}},
 	}
 	for name, p := range refuse {
@@ -424,6 +479,9 @@ func TestGateOtherMethods(t *testing.T) {
 		"v2 AddHumanUser admin org":   {"fullMethod": MethodV2AddHumanUser, "orgID": orgAdmins, "request": map[string]any{"username": "ops"}},
 		"mgmt AddMachineUser admin":   {"fullMethod": MethodMgmtAddMachineUser, "orgID": orgAdmins, "request": map[string]any{"userName": "svc"}},
 		"mgmt ImportHumanUser tenant": {"fullMethod": MethodMgmtImportHumanUser, "orgID": "300000000000000099", "request": map[string]any{"userName": "x"}},
+		"v2 AddIDPLink other idp":     {"fullMethod": MethodV2AddIDPLink, "orgID": orgAdmins, "request": map[string]any{"userId": "u-9", "idpLink": map[string]any{"idpId": "777"}}},
+		"v2beta AddIDPLink other idp": {"fullMethod": MethodV2BetaAddIDPLink, "orgID": orgAdmins, "request": map[string]any{"userId": "u-9", "idpLink": map[string]any{"idpId": "777"}}},
+		"v3alpha AddIDPAuth other":    {"fullMethod": MethodV3AlphaAddIDPAuthenticator, "orgID": orgAdmins, "request": map[string]any{"id": "u-9", "authenticator": map[string]any{"idpId": "777"}}},
 	}
 	for name, p := range pass {
 		t.Run(name, func(t *testing.T) {
@@ -431,6 +489,23 @@ func TestGateOtherMethods(t *testing.T) {
 			if r := h.CreateGate(context.Background(), b); r.Status != http.StatusOK || len(r.Body) != 0 {
 				t.Fatalf("got %d %s (%s), want pass-through", r.Status, r.Body, r.Reason)
 			}
+		})
+	}
+}
+
+func TestGateCreateUserUnrecognisedShapeRefused(t *testing.T) {
+	h := newHook(t, nil, nil, 0)
+	for name, req := range map[string]map[string]any{
+		"empty request": {},
+		// snake_case names customers but parses as neither human nor machine.
+		"snake case org": {"organization_id": orgCustomers, "user_name": "x"},
+		// A field rename leaves organizationId empty; the raw org id still counts.
+		"renamed org field": {"orgId": orgCustomers, "username": "x", "human": map[string]any{}},
+		"renamed idp field": {"organizationId": orgAdmins, "human": map[string]any{"links": []any{map[string]any{"provider": idpGitHub}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, _ := json.Marshal(map[string]any{"fullMethod": MethodV2CreateUser, "orgID": orgAdmins, "userID": "iac-user", "request": req})
+			refusedWith(t, h.CreateGate(context.Background(), b), http.StatusForbidden)
 		})
 	}
 }

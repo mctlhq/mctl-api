@@ -3,7 +3,13 @@
 mctl-api serves three ZITADEL Actions v2 `restCall` targets that make the
 `customers` organization a GitHub-only, self-service sign-up org (mctl-web
 onboarding plan, B1). Payload shapes and failure semantics were checked
-against the ZITADEL **v4.19.2** source.
+against the ZITADEL **v4.19.2** source. The proto fields the hook writes:
+`RetrieveIdentityProviderIntentResponse` oneof `user_action` with
+`create_user` (6) and `update_user` (7), the deprecated `add_human_user` (4)
+and `update_human_user` (5) being cleared; `CreateUserRequest` top-level
+`metadata` (6; the deprecated `human.metadata` is not set, setting both fails
+validation); `UpdateUserRequest` top-level `metadata` (5). Login V2
+(`idp-intent.ts`) prefers `create_user`/`update_user` when present.
 
 The hook is **inert until configured**: with `ZITADEL_HOOK_CUSTOMERS_ORG_ID`
 unset, or any required key missing, the three routes answer `503` and nothing
@@ -51,20 +57,27 @@ reads to decide whether to create or update the user.
 
 - Any IdP other than `ZITADEL_HOOK_GITHUB_IDP_ID` passes through untouched.
 - The GitHub id must be numeric and the login a valid GitHub login.
-  `rawInformation.type` must be `User`, so organizations and bots are refused,
-  and `rawInformation.id` must equal the intent's user id.
+  `rawInformation` (GitHub's `/user` body) must carry `type` = `User`, so
+  organizations and bots are refused, an `id` equal to the intent's user id,
+  and a `login` equal to the intent's user name (case-insensitive). A missing
+  field is a refusal, not a pass.
+- An unparsable `userId` is `503`.
+- **New user, reserved login** → refused with `403` before GitHub is called.
+  Tenant data that cannot be read → `503`.
 - `GET https://api.github.com/user/emails` with the intent's access token
   (the OAuth App needs the `user:email` scope). Only the **primary and
-  verified** address is used; the public profile email is ignored.
+  verified** address is used; the public profile email is ignored. A failed
+  read is `503` for a new user; an existing user signs in without an email
+  change, so a GitHub outage does not lock customers out.
 - Any user action ZITADEL proposed (`addHumanUser`, `updateHumanUser`,
   `createUser`, `updateUser`) is removed. The hook alone sets one.
 - **Existing user** (`userId` set): sets `updateUser` with the profile (name,
   falling back to the login), the verified email if there is one (otherwise
-  the stored address is kept), and `github_login` metadata. It never changes
+  the stored address is kept, also when GitHub could not be read), and
+  `github_login` metadata. It never changes
   the username or `github_id`.
 - **New user**:
   - No primary verified email → refused with `412`.
-  - Reserved login → refused with `403`. Tenant data that cannot be read → `503`.
   - Otherwise sets `createUser`:
     - `organizationId` = customers, set explicitly;
     - `username` = `<lowercase login>@mctl.ai`;
@@ -103,6 +116,9 @@ tenant member under their own login must not lock themselves out.
 | `/zitadel.management.v1.ManagementService/ImportHumanUser` | refused if it touches customers |
 | `/zitadel.management.v1.ManagementService/AddMachineUser` | refused if it touches customers |
 | `/zitadel.admin.v1.AdminService/ImportData` | refused if it touches customers |
+| `/zitadel.user.v2.UserService/AddIDPLink` | refused if it touches customers |
+| `/zitadel.user.v2beta.UserService/AddIDPLink` | refused if it touches customers |
+| `/zitadel.resources.user.v3alpha.ZITADELUsers/AddIDPAuthenticator` | refused if it touches customers |
 | any other method routed to this target | refused (`gate_unknown_method`) |
 
 Not gated, because they only create users in a **new** organization:
@@ -111,23 +127,33 @@ Not gated, because they only create users in a **new** organization:
 - `AdminService/SetUpOrg`
 - `org.v2` and `org.v2beta` `OrganizationService/AddOrganization`
 
+The link methods do not create users, but a GitHub link added to an existing
+user lets that GitHub account sign in as the user. With them gated, the
+invariant is: every user linked to the customers GitHub IdP was created in
+customers through this gate. Management v1 has no add-link RPC in v4.19.2.
+
 SCIM (`/scim/v2/...`) is plain HTTP, not gRPC, so executions do not cover it.
-It must stay unused for customers. See the open questions below.
+It is the one exception to the invariant and must stay unused for customers.
 
 "Touches customers" is deliberately coarse. A request touches customers if
 any of these hold:
 
 - the call's context org is customers;
 - the customers org ID or the GitHub IdP ID appears anywhere in the request;
-- an `orgDomain` equals `mctl.ai`;
+- it carries any `orgDomain`/`org_domain` field, whatever the value
+  (customers also has its generated `<org>.<instance domain>` domain, and the
+  hook cannot resolve a domain to an organization);
 - the request does not parse.
 
 A false positive refuses an admin call; it can never let a user in.
 
 ### `CreateUser` rules
 
-A request is in scope when its `organizationId` is customers (or is empty and
-the context org is customers), or when it carries any GitHub IdP link.
+A request that parses as neither `human` nor `machine` (an empty request, a
+renamed field, another spelling) is refused: passing requires positive
+evidence. A request is in scope when its `organizationId` is customers (or is
+empty and the context org is customers), when it carries any GitHub IdP
+link, or when the customers org ID or GitHub IdP ID appears anywhere in it.
 Everything else passes through. In scope, all of these must hold:
 
 1. `organizationId` is explicitly customers. A GitHub link into any other org

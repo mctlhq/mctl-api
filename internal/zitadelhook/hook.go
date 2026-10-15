@@ -76,21 +76,28 @@ const (
 // The list is the inventory the CreateGate execution must be bound to; it is
 // re-checked on every ZITADEL upgrade (docs/zitadel-identity-hook.md).
 const (
-	MethodV2CreateUser              = "/zitadel.user.v2.UserService/CreateUser"
-	MethodV2AddHumanUser            = "/zitadel.user.v2.UserService/AddHumanUser"
-	MethodV2BetaAddHumanUser        = "/zitadel.user.v2beta.UserService/AddHumanUser"
-	MethodV3AlphaCreateUser         = "/zitadel.resources.user.v3alpha.ZITADELUsers/CreateUser"
-	MethodMgmtAddHumanUser          = "/zitadel.management.v1.ManagementService/AddHumanUser"
-	MethodMgmtImportHumanUser       = "/zitadel.management.v1.ManagementService/ImportHumanUser"
-	MethodMgmtAddMachineUser        = "/zitadel.management.v1.ManagementService/AddMachineUser"
-	MethodAdminImportData           = "/zitadel.admin.v1.AdminService/ImportData"
-	MethodIntentRetrieve            = "/zitadel.user.v2.UserService/RetrieveIdentityProviderIntent"
-	functionPreUserinfo             = "preuserinfo"
-	functionPreAccessToken          = "preaccesstoken"
-	defaultGitHubAPIURL             = "https://api.github.com"
-	defaultUsernameDomain           = "mctl.ai"
-	githubRequestTimeout            = 5 * time.Second
-	maxGitHubResponseBytes    int64 = 1 << 20
+	MethodV2CreateUser        = "/zitadel.user.v2.UserService/CreateUser"
+	MethodV2AddHumanUser      = "/zitadel.user.v2.UserService/AddHumanUser"
+	MethodV2BetaAddHumanUser  = "/zitadel.user.v2beta.UserService/AddHumanUser"
+	MethodV3AlphaCreateUser   = "/zitadel.resources.user.v3alpha.ZITADELUsers/CreateUser"
+	MethodMgmtAddHumanUser    = "/zitadel.management.v1.ManagementService/AddHumanUser"
+	MethodMgmtImportHumanUser = "/zitadel.management.v1.ManagementService/ImportHumanUser"
+	MethodMgmtAddMachineUser  = "/zitadel.management.v1.ManagementService/AddMachineUser"
+	MethodAdminImportData     = "/zitadel.admin.v1.AdminService/ImportData"
+	// Linking an IdP to an existing user does not create one, but a GitHub
+	// link added to an arbitrary user would let a GitHub account sign in as
+	// that user, so these are gated as well. Management v1 has no
+	// add-link RPC in v4.19.2.
+	MethodV2AddIDPLink                     = "/zitadel.user.v2.UserService/AddIDPLink"
+	MethodV2BetaAddIDPLink                 = "/zitadel.user.v2beta.UserService/AddIDPLink"
+	MethodV3AlphaAddIDPAuthenticator       = "/zitadel.resources.user.v3alpha.ZITADELUsers/AddIDPAuthenticator"
+	MethodIntentRetrieve                   = "/zitadel.user.v2.UserService/RetrieveIdentityProviderIntent"
+	functionPreUserinfo                    = "preuserinfo"
+	functionPreAccessToken                 = "preaccesstoken"
+	defaultGitHubAPIURL                    = "https://api.github.com"
+	defaultUsernameDomain                  = "mctl.ai"
+	githubRequestTimeout                   = 5 * time.Second
+	maxGitHubResponseBytes           int64 = 1 << 20
 )
 
 // GatedMethods is the method inventory the CreateGate execution is bound to.
@@ -105,6 +112,9 @@ var GatedMethods = []string{
 	MethodMgmtImportHumanUser,
 	MethodMgmtAddMachineUser,
 	MethodAdminImportData,
+	MethodV2AddIDPLink,
+	MethodV2BetaAddIDPLink,
+	MethodV3AlphaAddIDPAuthenticator,
 }
 
 // githubLoginRE is GitHub's login syntax: alphanumerics and single inner
@@ -279,11 +289,17 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 	if !digitsRE.MatchString(info.UserID) || !githubLoginRE.MatchString(info.UserName) {
 		return refuse(http.StatusForbidden, "intent_bad_github_identity", msgNotAllowed)
 	}
-	if t, _ := info.RawInformation["type"].(string); t != "" && t != "User" {
+	// GitHub's /user body always carries type, id and login. Each must be
+	// present and agree with what ZITADEL projected; an absent field is not
+	// a pass.
+	if t, _ := info.RawInformation["type"].(string); t != "User" {
 		return refuse(http.StatusForbidden, "intent_not_a_user", msgNotAllowed)
 	}
-	if rawID, ok := info.RawInformation["id"]; ok && jsonNumberString(rawID) != info.UserID {
+	if rawID, ok := info.RawInformation["id"]; !ok || jsonNumberString(rawID) != info.UserID {
 		return refuse(http.StatusForbidden, "intent_id_mismatch", msgNotAllowed)
+	}
+	if rawLogin, _ := info.RawInformation["login"].(string); !strings.EqualFold(rawLogin, info.UserName) {
+		return refuse(http.StatusForbidden, "intent_login_mismatch", msgNotAllowed)
 	}
 	if info.OAuth == nil || info.OAuth.AccessToken == "" {
 		return failure("intent_no_access_token")
@@ -298,12 +314,30 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 
 	var existingUserID string
 	if raw, ok := p.Response["userId"]; ok {
-		_ = json.Unmarshal(raw, &existingUserID)
+		if err := json.Unmarshal(raw, &existingUserID); err != nil {
+			return failure("intent_unparsable_user_id")
+		}
+	}
+
+	// At creation the login is checked before GitHub is asked anything, so
+	// a reserved login is always a 403, never a 503 from a GitHub outage.
+	if existingUserID == "" {
+		reserved, rErr := h.loginReservedAtCreation(login)
+		if rErr != nil {
+			return failure("intent_reserved_unreadable")
+		}
+		if reserved {
+			return refuse(http.StatusForbidden, "intent_login_reserved", msgNotAllowed)
+		}
 	}
 
 	email, err := h.primaryVerifiedEmail(ctx, info.OAuth.AccessToken)
 	if err != nil && !errors.Is(err, errNoVerifiedEmail) {
-		return failure("intent_github_emails_unavailable")
+		if existingUserID == "" {
+			return failure("intent_github_emails_unavailable")
+		}
+		// An existing account does not need the address to sign in; a
+		// GitHub outage keeps the stored one instead of locking everyone out.
 	}
 
 	resp := make(map[string]json.RawMessage, len(p.Response))
@@ -338,15 +372,8 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 		return replace("intent_update", resp)
 	}
 
-	if errors.Is(err, errNoVerifiedEmail) {
+	if err != nil {
 		return refuse(http.StatusPreconditionFailed, "intent_no_verified_email", msgNoVerifiedEmail)
-	}
-	reserved, rErr := h.loginReservedAtCreation(login)
-	if rErr != nil {
-		return failure("intent_reserved_unreadable")
-	}
-	if reserved {
-		return refuse(http.StatusForbidden, "intent_login_reserved", msgNotAllowed)
 	}
 
 	create := map[string]any{
@@ -417,7 +444,7 @@ func (h *Hook) primaryVerifiedEmail(ctx context.Context, token string) (string, 
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("github /user/emails: status %d", resp.StatusCode)
 	}
@@ -456,7 +483,8 @@ func (h *Hook) loginReservedAtCreation(login string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for _, t := range tenants {
+	for i := range tenants {
+		t := &tenants[i]
 		if strings.EqualFold(t.Name, login) {
 			// Not a member, but a login equal to a workspace name is kept
 			// out to avoid confusing the two in support.
@@ -525,7 +553,8 @@ func (h *Hook) CreateGate(_ context.Context, body []byte) Result {
 		return h.gateCreateUser(p)
 	case MethodV2AddHumanUser, MethodV2BetaAddHumanUser, MethodV3AlphaCreateUser,
 		MethodMgmtAddHumanUser, MethodMgmtImportHumanUser, MethodMgmtAddMachineUser,
-		MethodAdminImportData:
+		MethodAdminImportData,
+		MethodV2AddIDPLink, MethodV2BetaAddIDPLink, MethodV3AlphaAddIDPAuthenticator:
 		if h.touchesCustomers(p) {
 			return refuse(http.StatusForbidden, "gate_path_closed", "Customer accounts are created only through GitHub sign-in.")
 		}
@@ -553,25 +582,28 @@ func (h *Hook) touchesCustomers(p requestPayload) bool {
 	if err := json.Unmarshal(p.Request, &anyReq); err != nil {
 		return true
 	}
-	return containsOrgDomain(anyReq, h.cfg.UsernameDomain)
+	return containsOrgDomain(anyReq)
 }
 
-// containsOrgDomain walks a decoded request for an orgDomain field equal to
-// domain (v2 AddHumanUser's organization.orgDomain and similar).
-func containsOrgDomain(v any, domain string) bool {
+// containsOrgDomain reports whether a decoded request names its organization
+// by domain (v2 AddHumanUser's organization.orgDomain and similar). Any such
+// field counts, whatever its value: customers has more than one domain (its
+// generated <org>.<instance> one besides mctl.ai), and the hook cannot
+// resolve a domain to an organization, so it refuses rather than guess.
+func containsOrgDomain(v any) bool {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, val := range t {
-			if (k == "orgDomain" || k == "org_domain") && strings.EqualFold(fmt.Sprint(val), domain) {
+			if k == "orgDomain" || k == "org_domain" {
 				return true
 			}
-			if containsOrgDomain(val, domain) {
+			if containsOrgDomain(val) {
 				return true
 			}
 		}
 	case []any:
 		for _, val := range t {
-			if containsOrgDomain(val, domain) {
+			if containsOrgDomain(val) {
 				return true
 			}
 		}
@@ -592,9 +624,18 @@ func (h *Hook) gateCreateUser(p requestPayload) Result {
 			}
 		}
 	}
+	// Passing requires positive evidence: a request whose fields this code
+	// does not recognise (a renamed field after an upgrade, another
+	// spelling) is refused, never read as "not about customers". The raw
+	// check catches the customers org or IdP named in any field.
+	if req.Human == nil && len(req.Machine) == 0 {
+		return refuse(http.StatusForbidden, "gate_unrecognised_request", "User creation request not understood by the identity hook.")
+	}
+	raw := string(p.Request)
 	intoCustomers := req.OrganizationID == h.cfg.CustomersOrgID ||
-		(req.OrganizationID == "" && p.OrgID == h.cfg.CustomersOrgID)
-	if !intoCustomers && !linksGitHub {
+		(req.OrganizationID == "" && p.OrgID == h.cfg.CustomersOrgID) ||
+		strings.Contains(raw, h.cfg.CustomersOrgID)
+	if !intoCustomers && !linksGitHub && !strings.Contains(raw, h.cfg.GitHubIdPID) {
 		return pass("gate_other_org")
 	}
 	no := func(reason string) Result {

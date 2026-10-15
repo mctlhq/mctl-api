@@ -28,7 +28,7 @@ import (
 const (
 	zitadelHookIntentPath = "/api/v1/webhooks/zitadel/intent"
 	zitadelHookCreatePath = "/api/v1/webhooks/zitadel/create-user"
-	zitadelHookTokenPath  = "/api/v1/webhooks/zitadel/token-claims"
+	zitadelHookTokenPath  = "/api/v1/webhooks/zitadel/token-claims" //nolint:gosec // G101 matches "token" in a route path, not a credential
 )
 
 const maxZitadelHookBytes = 1 << 20 // 1 MiB
