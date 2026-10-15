@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -235,5 +236,44 @@ func TestResolveZitadelPrincipal_NotConfigured(t *testing.T) {
 		SurfaceActorHeader, "zitadel:z-sub")
 	if code != http.StatusServiceUnavailable || body["code"] != sidCodeUnavailable {
 		t.Fatalf("resolve = %d %v", code, body)
+	}
+}
+
+// A whole ID token fits: one padded well past what ZITADEL issues today is
+// accepted, and only a body past the route's own limit is refused.
+func TestResolveZitadelPrincipal_BodyLimitFitsAnIDToken(t *testing.T) {
+	e := newSurfaceZitadelEnv(t, signinResolver{prn: testCustomerPID}, nil)
+	big := e.idp.idToken(t, testWebClient, map[string]any{"padding": strings.Repeat("x", 8<<10)})
+	if code, body := e.resolve(big, "create"); code != http.StatusOK {
+		t.Fatalf("%d-byte token = %d %v, want 200", len(big), code, body)
+	}
+	huge := e.idp.idToken(t, testWebClient, map[string]any{"padding": strings.Repeat("x", 16<<10)})
+	if code, body := e.resolve(huge, "create"); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("%d-byte token = %d %v, want 413", len(huge), code, body)
+	}
+}
+
+// Every refusal after the token verified leaves an audit entry naming its
+// reason, the misconfigurations included.
+func TestResolveZitadelPrincipal_RefusalsAreAudited(t *testing.T) {
+	for reason, over := range map[string]map[string]any{
+		sidCodeTokenInvalid:     {auth.ClaimResourceOwnerID: nil},
+		sidCodeNotCustomer:      {auth.ClaimResourceOwnerID: "393497610436019469"},
+		sidCodeCustomerUnproven: {auth.ClaimCustomerGitHubID: nil},
+	} {
+		e := newSurfaceZitadelEnv(t, signinResolver{prn: testCustomerPID}, nil)
+		if code, _ := e.resolve(e.idp.idToken(t, testWebClient, over), "create"); code == http.StatusOK {
+			t.Fatalf("%s: resolved", reason)
+		}
+		found := false
+		for _, entry := range e.audit.List(100) {
+			if entry.Operation == "principal.resolve_zitadel_refused" && entry.Parameters["reason"] == reason &&
+				entry.Parameters["zitadel_subject"] == "z-sub" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: no audit entry", reason)
+		}
 	}
 }

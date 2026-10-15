@@ -494,3 +494,21 @@ func TestResolveCustomerRefusesANonCustomerIdentity(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInvalid", err)
 	}
 }
+
+// Disabled between the provision and the link (two transactions): still
+// refused as disabled through the resolver, not degraded as a failed read.
+func TestResolveCustomerDisabledBetweenProvisionAndLink(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	s.beforeCustomerLink = func() {
+		if _, err := s.pool.Exec(ctx, `UPDATE principals SET status='disabled' WHERE id=(SELECT principal_id FROM external_identities WHERE provider='github' AND subject='7')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := NewResolver(s, nil, false).ResolvePrincipal(ctx, customer("z1", 7, "bob")); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("err = %v, want ErrPrincipalDisabled", err)
+	}
+	if _, _, err := s.LinkedGitHub(ctx, zitadel("z1", "bob")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("z1 was linked to a disabled principal: %v", err)
+	}
+}

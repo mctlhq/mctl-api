@@ -45,6 +45,12 @@ const (
 	sidCodeNotCustomer      = "not_a_customer"
 	sidCodeCustomerUnproven = "customer_unproven"
 	sidCodeCustomerConflict = "customer_conflict"
+
+	// surfaceZitadelMaxBodyBytes bounds a body that carries a whole ID
+	// token, the largest thing a surface posts: ZITADEL's run to about
+	// 2.5 KiB with the customer claims, so 16 KiB leaves room for claims
+	// ZITADEL may add without a release here.
+	surfaceZitadelMaxBodyBytes = 16 << 10
 )
 
 // SurfaceZitadelOptions configures the route. Nil leaves it answering 503.
@@ -98,7 +104,7 @@ func (h *Handlers) ResolveZitadelPrincipal(w http.ResponseWriter, r *http.Reques
 		IDToken string `json:"idToken"`
 		Purpose string `json:"purpose"`
 	}
-	if !decodeSurfaceBody(w, r, &body) {
+	if !decodeSurfaceBodyLimit(w, r, &body, surfaceZitadelMaxBodyBytes) {
 		return
 	}
 	clientID, known := z.clientFor(body.Purpose)
@@ -143,19 +149,26 @@ func (h *Handlers) ResolveZitadelPrincipal(w http.ResponseWriter, r *http.Reques
 	}
 
 	params := map[string]string{"purpose": body.Purpose, "zitadel_subject": idt.Subject}
+	refuse := func(status int, code, msg string) {
+		params["reason"] = code
+		h.auditSurfaceIdentity(r, user, "principal.resolve_zitadel_refused", "failed", params)
+		writeErrorCode(w, status, code, msg, nil)
+	}
 	customer, err := auth.ReadCustomerProof(claims, z.opts.CustomersOrgID)
 	switch {
 	case errors.Is(err, auth.ErrCustomerUnproven):
-		params["reason"] = sidCodeCustomerUnproven
-		h.auditSurfaceIdentity(r, user, "principal.resolve_zitadel_refused", "failed", params)
-		writeErrorCode(w, http.StatusForbidden, sidCodeCustomerUnproven, "the customer token carries no proven GitHub identity", nil)
+		slog.Warn("surface-principals/zitadel: customer without a proven GitHub identity", "zitadel_subject", idt.Subject, "error", err)
+		refuse(http.StatusForbidden, sidCodeCustomerUnproven, "the customer token carries no proven GitHub identity")
 		return
 	case err != nil:
 		// The organization could not be observed: never "not a customer".
-		writeErrorCode(w, http.StatusUnauthorized, sidCodeTokenInvalid, "the ID token does not name its user's organization", nil)
+		// The client that issued the token lost the resource-owner scope.
+		slog.Error("surface-principals/zitadel: ID token does not name its organization", "purpose", body.Purpose, "zitadel_subject", idt.Subject, "error", err)
+		refuse(http.StatusUnauthorized, sidCodeTokenInvalid, "the ID token does not name its user's organization")
 		return
 	case customer == nil:
-		writeErrorCode(w, http.StatusBadRequest, sidCodeNotCustomer, "the ID token is not a self-service customer's", nil)
+		slog.Warn("surface-principals/zitadel: ID token of another organization", "purpose", body.Purpose, "zitadel_subject", idt.Subject)
+		refuse(http.StatusBadRequest, sidCodeNotCustomer, "the ID token is not a self-service customer's")
 		return
 	}
 	params["github_id"], params["github_login"] = customer.GitHubID, customer.GitHubLogin
@@ -167,11 +180,6 @@ func (h *Handlers) ResolveZitadelPrincipal(w http.ResponseWriter, r *http.Reques
 		Provider: z.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display,
 		Kind: auth.KindHuman, Customer: customer,
 	})
-	refuse := func(status int, code, msg string) {
-		params["reason"] = code
-		h.auditSurfaceIdentity(r, user, "principal.resolve_zitadel_refused", "failed", params)
-		writeErrorCode(w, status, code, msg, nil)
-	}
 	switch {
 	case errors.Is(err, principals.ErrCustomerConflict):
 		refuse(http.StatusConflict, sidCodeCustomerConflict, "this ZITADEL identity belongs to another principal than its GitHub id; a platform admin must resolve it")

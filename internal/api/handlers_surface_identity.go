@@ -308,11 +308,16 @@ var forbiddenLinkFields = []string{
 // decodeSurfaceBody decodes a small JSON body, refusing identity fields and
 // unknown keys.
 func decodeSurfaceBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, sidMaxBodyBytes))
+	return decodeSurfaceBodyLimit(w, r, v, sidMaxBodyBytes)
+}
+
+// decodeSurfaceBodyLimit is decodeSurfaceBody with its own size limit.
+func decodeSurfaceBodyLimit(w http.ResponseWriter, r *http.Request, v any, limit int) bool {
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, int64(limit)))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeErrorCode(w, http.StatusRequestEntityTooLarge, sidCodeInvalid, "request body exceeds "+strconv.Itoa(sidMaxBodyBytes)+" bytes", nil)
+			writeErrorCode(w, http.StatusRequestEntityTooLarge, sidCodeInvalid, "request body exceeds "+strconv.Itoa(limit)+" bytes", nil)
 			return false
 		}
 		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid, "could not read the body", nil)

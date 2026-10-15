@@ -320,6 +320,9 @@ func (s *Store) ResolveCustomer(ctx context.Context, id auth.Identity) (*Princip
 	if p.Status != StatusActive {
 		return p, nil
 	}
+	if s.beforeCustomerLink != nil {
+		s.beforeCustomerLink()
+	}
 	link := id
 	link.Customer = nil
 	switch _, err := s.LinkIdentity(ctx, p.ID, link); {
@@ -327,6 +330,11 @@ func (s *Store) ResolveCustomer(ctx context.Context, id auth.Identity) (*Princip
 		return p, nil
 	case errors.Is(err, ErrIdentityOwnedElsewhere), errors.Is(err, ErrIdentityRevoked), errors.Is(err, ErrPrincipalAlreadyLinked):
 		return nil, fmt.Errorf("%w: %w: %w", auth.ErrIdentityRefused, ErrCustomerConflict, err)
+	case errors.Is(err, auth.ErrPrincipalDisabled):
+		// Disabled between Provision and the link: answer as above, with
+		// the principal, so the resolver refuses it as disabled.
+		p.Status = StatusDisabled
+		return p, nil
 	default:
 		return nil, err
 	}
