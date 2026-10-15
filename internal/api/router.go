@@ -247,6 +247,11 @@ type Options struct {
 	GitHubEventOutbox GitHubEventOutbox
 	// GitHubEventNotify wakes the outbox relay after an insert (optional).
 	GitHubEventNotify func()
+	// ZitadelHook wires the ZITADEL Actions v2 identity hook for the
+	// customers org (handlers_zitadel_hook.go). Nil answers 503 on its
+	// three routes; each route also rejects calls without a valid
+	// ZITADEL-Signature under that target's own key.
+	ZitadelHook *ZitadelHookOptions
 	// OAuthRegistrationToken, when non-empty, requires Authorization: Bearer
 	// <token> on POST /oauth/register (RFC 7591 initial access token).
 	OAuthRegistrationToken string
@@ -370,6 +375,9 @@ func NewRouter(opts Options) http.Handler {
 	// Webhook callbacks (unauthenticated/token-validated)
 	r.Post("/api/v1/workflows/events/argo-complete", h.HandleArgoWorkflowComplete)
 	r.Post("/api/v1/webhooks/github", h.HandleGitHubWebhook)
+	r.Post(zitadelHookIntentPath, h.HandleZitadelIntent)
+	r.Post(zitadelHookCreatePath, h.HandleZitadelCreateUser)
+	r.Post(zitadelHookTokenPath, h.HandleZitadelTokenClaims)
 
 	// Authenticated API routes.
 	r.Group(func(r chi.Router) {

@@ -1740,3 +1740,34 @@ func TestTenantNames(t *testing.T) {
 		}
 	}
 }
+
+func TestListTenantsStrict(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	if _, err := r.ListTenantsStrict(); err == nil {
+		t.Fatal("a checkout that never synced must not answer")
+	}
+	r.lastSync.Store(time.Now().UnixNano())
+	if _, err := r.ListTenantsStrict(); err == nil {
+		t.Fatal("a missing tenants directory must be an error, not an empty list")
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "platform-gitops", "tenants"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ListTenantsStrict(); err == nil {
+		t.Fatal("an empty tenants directory must be an error")
+	}
+	writeTenantYAML(t, dir, "labs", "tenant:\n  name: labs\n  members:\n    - userId: alice\n")
+	got, err := r.ListTenantsStrict()
+	if err != nil || len(got) != 1 || got[0].Members[0].UserID != "alice" {
+		t.Fatalf("ListTenantsStrict = %v, %v", got, err)
+	}
+	// ListTenants skips a tenant it cannot parse; the strict variant must not.
+	writeTenantYAML(t, dir, "broken", ":\n  - [\n")
+	if _, err := r.ListTenantsStrict(); err == nil {
+		t.Fatal("an unparsable tenant must be an error, not a shorter list")
+	}
+	r.lastSync.Store(time.Now().Add(-CheckoutMaxAge - time.Minute).UnixNano())
+	if _, err := r.ListTenantsStrict(); err == nil {
+		t.Fatal("a stale checkout must not answer")
+	}
+}
