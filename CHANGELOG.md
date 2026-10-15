@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.89.0](https://github.com/mctlhq/mctl-api/compare/4.88.1...4.89.0) (2026-10-15)
+
+
+### Features
+
+* **zitadel:** identity hook for the customers org ([ae4ed96](https://github.com/mctlhq/mctl-api/commit/ae4ed9631dc0f12b6fdd71344b2e5a7d88c40f80))
+* **zitadel:** identity hook for the customers org ([6df13cc](https://github.com/mctlhq/mctl-api/commit/6df13cc97be82638342eca1f635fd27d79128c61))
+
+
+### Bug Fixes
+
+* **zitadel:** close review gaps in the identity hook ([b7998e3](https://github.com/mctlhq/mctl-api/commit/b7998e37327352e4e9dbd6ddaff42ac662e93e8e))
+* **zitadel:** fail closed on members without a userId ([c155008](https://github.com/mctlhq/mctl-api/commit/c15500886ce63d09146f16d8bad4d0a6dd863ba9))
+* **zitadel:** pin github_id and github_login after creation ([495ac19](https://github.com/mctlhq/mctl-api/commit/495ac19f7470e33a91a2e1fec056f811182a9073))
+
 ## [4.88.1](https://github.com/mctlhq/mctl-api/compare/4.88.0...4.88.1) (2026-10-14)
 
 
