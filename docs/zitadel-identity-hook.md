@@ -104,7 +104,10 @@ A login is reserved **at creation** when it matches, case-insensitively:
 3. a tenant name in the gitops checkout;
 4. any tenant or team member `userId` in the gitops checkout.
 
-Tenant data is read with `gitops.Reader.ListTenantsStrict`. A checkout that
+Tenant data is read with `gitops.Reader.ListTenantsStrict`. A member recorded
+with only a `principalId` (no `userId`) makes the reservation undecidable, so
+it is `503` as well; every member in gitops carries a `userId` today, and the
+api#377 migration must keep it until this check resolves principals. A checkout that
 never synced, is older than 10 minutes, is missing, empty, or holds a tenant
 that does not parse is an error (`503`), never an empty list.
 
@@ -209,7 +212,7 @@ Relying parties (mctl-web, and later C0) must refuse any token that carries
 | `ZITADEL_HOOK_GITHUB_IDP_ID` | yes | customers GitHub IdP ID |
 | `ZITADEL_HOOK_LOGIN_CLIENT_USER_ID` | yes | Login V2 service user ID (the only allowed `CreateUser` caller in customers) |
 | `ZITADEL_HOOK_CLAIM_CLIENT_IDS` | yes | CSV of OIDC client IDs that get `mctl:*` claims (`mctl-web`, `mctl-web-dev`) |
-| `ZITADEL_HOOK_USERNAME_DOMAIN` | no, default `mctl.ai` | username suffix and customers org domain |
+| `ZITADEL_HOOK_USERNAME_DOMAIN` | no, default `mctl.ai` | username suffix (`<login>@<domain>`) only; org domains are not compared |
 | `ZITADEL_HOOK_RESERVED_LOGINS` | no | CSV of extra reserved logins; `ADMIN_USERS` is always added |
 | `ZITADEL_HOOK_INTENT_SIGNING_KEYS` | yes, in practice | CSV; signing key(s) of the intent target |
 | `ZITADEL_HOOK_CREATE_SIGNING_KEYS` | yes, in practice | CSV; signing key(s) of the create-user target |

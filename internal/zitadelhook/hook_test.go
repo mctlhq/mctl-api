@@ -241,6 +241,42 @@ func TestIntentReservedUnreadableFailsClosed(t *testing.T) {
 	}
 }
 
+func TestReservedPrincipalOnlyMemberFailsClosed(t *testing.T) {
+	for name, tenants := range map[string]fakeTenants{
+		"member": {tenants: []gitops.Tenant{{Name: "acme", Members: []gitops.TenantMember{{PrincipalID: "prn_x"}}}}},
+		"team member": {tenants: []gitops.Tenant{{Name: "multi", Teams: []gitops.Team{{Name: "x",
+			Members: []gitops.TenantMember{{PrincipalID: "prn_x"}}}}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHook(t, tenants, verified, 0)
+			if r := h.Intent(context.Background(), intentBody(idpGitHub, "4242", "bob", "", nil)); r.Status != http.StatusServiceUnavailable {
+				t.Fatalf("intent: status %d (%s), want 503", r.Status, r.Reason)
+			}
+			if r := h.CreateGate(context.Background(), createBodyFrom(t, goodCreate(), loginClient)); r.Status != http.StatusServiceUnavailable {
+				t.Fatalf("gate: status %d (%s), want 503", r.Status, r.Reason)
+			}
+		})
+	}
+}
+
+func TestGateReservedUnreadableFailsClosed(t *testing.T) {
+	h := newHook(t, fakeTenants{err: errors.New("checkout not synced")}, nil, 0)
+	if r := h.CreateGate(context.Background(), createBodyFrom(t, goodCreate(), loginClient)); r.Status != http.StatusServiceUnavailable {
+		t.Fatalf("status %d (%s), want 503", r.Status, r.Reason)
+	}
+}
+
+func TestIntentExistingUserSnakeCaseUserID(t *testing.T) {
+	h := newHook(t, nil, verified, 0)
+	var m map[string]any
+	_ = json.Unmarshal(intentBody(idpGitHub, "4242", "bob", "", nil), &m)
+	m["response"].(map[string]any)["user_id"] = "u-1"
+	b, _ := json.Marshal(m)
+	if r := h.Intent(context.Background(), b); r.Reason != "intent_update" {
+		t.Fatalf("reason %s, want intent_update", r.Reason)
+	}
+}
+
 func TestIntentNonUserAccountRefused(t *testing.T) {
 	h := newHook(t, nil, verified, 0)
 	raw := map[string]any{"id": 4242, "login": "some-bot", "type": "Bot"}
@@ -502,6 +538,7 @@ func TestGateCreateUserUnrecognisedShapeRefused(t *testing.T) {
 		// A field rename leaves organizationId empty; the raw org id still counts.
 		"renamed org field": {"orgId": orgCustomers, "username": "x", "human": map[string]any{}},
 		"renamed idp field": {"organizationId": orgAdmins, "human": map[string]any{"links": []any{map[string]any{"provider": idpGitHub}}}},
+		"org by domain":     {"organization": map[string]any{"orgDomain": "x.example"}, "username": "x", "human": map[string]any{}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			b, _ := json.Marshal(map[string]any{"fullMethod": MethodV2CreateUser, "orgID": orgAdmins, "userID": "iac-user", "request": req})

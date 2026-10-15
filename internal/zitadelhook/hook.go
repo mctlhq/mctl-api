@@ -313,7 +313,12 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 	}
 
 	var existingUserID string
-	if raw, ok := p.Response["userId"]; ok {
+	rawUserID, ok := p.Response["userId"]
+	if !ok {
+		rawUserID, ok = p.Response["user_id"]
+	}
+	if ok {
+		raw := rawUserID
 		if err := json.Unmarshal(raw, &existingUserID); err != nil {
 			return failure("intent_unparsable_user_id")
 		}
@@ -475,6 +480,16 @@ func validEmail(s string) bool {
 // tenant in the gitops checkout. It is checked only when an account is
 // created, never on later sign-ins or at token time, because a customer
 // becomes a tenant member under their own login once their workspace exists.
+// memberHasLogin reports whether a tenant member is login. A member recorded
+// with only a principalId has a login the checkout does not state, so the
+// reservation cannot be decided: that is an error, not "not reserved".
+func memberHasLogin(tenant string, m gitops.TenantMember, login string) (bool, error) {
+	if m.UserID == "" {
+		return false, fmt.Errorf("tenant %q: member without userId", tenant)
+	}
+	return strings.EqualFold(m.UserID, login), nil
+}
+
 func (h *Hook) loginReservedAtCreation(login string) (bool, error) {
 	if h.reserved[strings.ToLower(login)] {
 		return true, nil
@@ -491,14 +506,14 @@ func (h *Hook) loginReservedAtCreation(login string) (bool, error) {
 			return true, nil
 		}
 		for _, m := range t.Members {
-			if strings.EqualFold(m.UserID, login) {
-				return true, nil
+			if reserved, err := memberHasLogin(t.Name, m, login); reserved || err != nil {
+				return reserved, err
 			}
 		}
 		for _, team := range t.Teams {
 			for _, m := range team.Members {
-				if strings.EqualFold(m.UserID, login) {
-					return true, nil
+				if reserved, err := memberHasLogin(t.Name, m, login); reserved || err != nil {
+					return reserved, err
 				}
 			}
 		}
@@ -632,9 +647,12 @@ func (h *Hook) gateCreateUser(p requestPayload) Result {
 		return refuse(http.StatusForbidden, "gate_unrecognised_request", "User creation request not understood by the identity hook.")
 	}
 	raw := string(p.Request)
+	var anyReq any
+	_ = json.Unmarshal(p.Request, &anyReq) // already parsed above
 	intoCustomers := req.OrganizationID == h.cfg.CustomersOrgID ||
 		(req.OrganizationID == "" && p.OrgID == h.cfg.CustomersOrgID) ||
-		strings.Contains(raw, h.cfg.CustomersOrgID)
+		strings.Contains(raw, h.cfg.CustomersOrgID) ||
+		containsOrgDomain(anyReq)
 	if !intoCustomers && !linksGitHub && !strings.Contains(raw, h.cfg.GitHubIdPID) {
 		return pass("gate_other_org")
 	}
