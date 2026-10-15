@@ -959,6 +959,7 @@ func main() {
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
 		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,
 		GitHubWebhookOwners:            cfg.GitHubWebhookOwners,
+		ZitadelHook:                    zitadelHookOptions(cfg, gitReader),
 		GitHubEventOutbox:              githubEventOutboxOption(githubEventOutbox),
 		GitHubEventNotify:              githubEventNotify(githubEventRelay),
 		OAuthRegistrationToken:         cfg.OAuthRegistrationToken,
@@ -1216,6 +1217,7 @@ type config struct {
 	ArgoWebhookSecret            string
 	GitHubWebhookSecret          string
 	GitHubWebhookOwners          []string
+	ZitadelHook                  zitadelHookConfig
 	EventsValkeyURL              string
 	EventsValkeyPassword         string
 	OAuthRegistrationToken       string
@@ -1342,6 +1344,7 @@ func loadConfig() config {
 		ArgoWebhookSecret:              os.Getenv("ARGO_WEBHOOK_SECRET"),
 		GitHubWebhookSecret:            os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		GitHubWebhookOwners:            splitCSV(envOr("GITHUB_WEBHOOK_OWNERS", "mctlhq")),
+		ZitadelHook:                    loadZitadelHookConfig(),
 		EventsValkeyURL:                os.Getenv("EVENTS_VALKEY_URL"),
 		EventsValkeyPassword:           os.Getenv("EVENTS_VALKEY_PASSWORD"),
 		OAuthRegistrationToken:         os.Getenv("OAUTH_REGISTRATION_TOKEN"),

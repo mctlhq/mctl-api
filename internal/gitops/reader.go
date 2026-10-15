@@ -788,6 +788,38 @@ func (r *Reader) TenantNames() ([]string, error) {
 	return names, nil
 }
 
+// ListTenantsStrict is ListTenants for a security decision: a checkout that
+// never synced or is stale, a missing or unlistable tenants directory, a
+// tenant whose values.yaml cannot be read or parsed, and an empty result are
+// all errors, never a shorter list. The identity hook uses it to keep tenant
+// member logins out of self-service sign-up.
+func (r *Reader) ListTenantsStrict() ([]Tenant, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.checkFreshLocked(); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(r.localPath, "platform-gitops", "tenants"))
+	if err != nil {
+		return nil, fmt.Errorf("listing tenants: %w", err)
+	}
+	var tenants []Tenant
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		t, err := r.readTenant(e.Name())
+		if err != nil {
+			return nil, fmt.Errorf("reading tenant %q: %w", e.Name(), err)
+		}
+		tenants = append(tenants, *t)
+	}
+	if len(tenants) == 0 {
+		return nil, errors.New("no tenants in the checkout")
+	}
+	return tenants, nil
+}
+
 // ServiceExists reports whether team has a service named component: a plain
 // directory platform-gitops/services/<team>/<component> holding a regular
 // values.yaml. That directory is what the apps ApplicationSet turns into the
