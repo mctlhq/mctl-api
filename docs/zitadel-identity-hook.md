@@ -21,10 +21,18 @@ another target's key is `401`. Bodies over 1 MiB are `413`.
 |---|---|---|
 | `POST /api/v1/webhooks/zitadel/intent` | response, method `/zitadel.user.v2.UserService/RetrieveIdentityProviderIntent` | `restCall`, `interruptOnError: true` |
 | `POST /api/v1/webhooks/zitadel/create-user` | request, every method in the inventory below | `restCall`, `interruptOnError: true` |
-| `POST /api/v1/webhooks/zitadel/token-claims` | functions `preuserinfo` and `preaccesstoken` | `restCall`, `interruptOnError: true` |
+| `POST /api/v1/webhooks/zitadel/token-claims` | functions `preuserinfo` and `preaccesstoken` | `restCall`, `interruptOnError: false` |
 
-`interruptOnError` must be `true` on all three: with `false` ZITADEL ignores
-the hook's errors and refusals, and the gate is open.
+The intent and create-user targets must interrupt: with `false` ZITADEL
+ignores their refusals and the gate is open. The token target must **not**
+interrupt (B0 item 5): functions are instance-wide, so an interrupting
+failure would block admin tokens too and burn refresh tokens. A failing token
+hook therefore yields tokens without `mctl:*` claims, and relying parties
+treat a missing `mctl:github_id` as a refusal.
+
+ZITADEL's default `HTTPClient.DenyList` blocks private ranges, so the targets
+point at the public hostname (`https://api.mctl.ai/...`), not the in-cluster
+Service.
 
 ### Answers
 
@@ -125,7 +133,9 @@ Everything else passes through. In scope, all of these must hold:
 1. `organizationId` is explicitly customers. A GitHub link into any other org
    is refused, as is an org taken only from the context.
 2. The caller (`userID`) is `ZITADEL_HOOK_LOGIN_CLIENT_USER_ID`, the Login V2
-   service user.
+   service user. When Login V2 authenticates as a System API user, its id is
+   the System API user's name (`login-client` in mctl's deployment). A
+   refusal logs the caller it saw (`gate_caller_not_login_client:<id>`).
 3. The user is human, not a machine.
 4. There is no password, hashed password or TOTP secret.
 5. There is exactly one IdP link, and it is to the GitHub IdP, with a numeric
@@ -152,7 +162,7 @@ It appends `mctl:refused` instead in two cases:
 - the login is in the static reserved list (for example, a customer renamed
   their GitHub account to an admin login) → `mctl:refused=login_reserved`.
 
-Relying parties (mctl-web) must refuse any token that carries
+Relying parties (mctl-web, and later C0) must refuse any token that carries
 `mctl:refused`, or that lacks `mctl:github_id`. Other orgs and clients get
 `{}`, with no claims.
 

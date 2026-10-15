@@ -605,7 +605,9 @@ func (h *Hook) gateCreateUser(p requestPayload) Result {
 		return no("gate_github_link_outside_customers")
 	}
 	if p.UserID != h.cfg.LoginClientUserID {
-		return no("gate_caller_not_login_client")
+		// The caller id is logged so the configured value can be checked
+		// against what ZITADEL sends (a System API user's id is its name).
+		return no("gate_caller_not_login_client:" + p.UserID)
 	}
 	if req.Human == nil || len(req.Machine) > 0 {
 		return no("gate_not_human")
