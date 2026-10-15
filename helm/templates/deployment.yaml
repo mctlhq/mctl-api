@@ -40,6 +40,11 @@ spec:
             - secretRef:
                 name: {{ .Values.envFromExtraSecret }}
             {{- end }}
+            {{- range .Values.envFromOptionalSecrets }}
+            - secretRef:
+                name: {{ . }}
+                optional: true
+            {{- end }}
           env:
             {{- if and .Values.oidcProvidersSecret .Values.env.MCTL_OIDC_PROVIDERS }}
             {{- fail "set MCTL_OIDC_PROVIDERS either in env or through oidcProvidersSecret, not both" }}

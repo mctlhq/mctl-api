@@ -107,6 +107,14 @@ envFromSecret: ""
 gitopsSSHSecret: ""
 envFromExtraSecret: ""
 
+# Optional: more Secrets mounted as envFrom with `optional: true`, so the pod
+# still starts while one of them does not exist yet. For a Secret another
+# controller fills in later, e.g. mctl-api-zitadel-hook, which ZITADEL's
+# zitadel-iac writes after it creates the hook targets
+# (docs/zitadel-identity-hook.md). envFrom is read at container start: after
+# the Secret appears or changes, the pod needs a restart to see it.
+envFromOptionalSecrets: []
+
 # Optional: mount a GitHub App installation token as a file.
 #
 # If set, mounts the Secret at /var/run/secrets/github/token and sets
