@@ -27,6 +27,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
@@ -49,6 +50,9 @@ type OIDCProviderConfigEntry struct {
 	// slot, where it would not apply, rather than silently ignore an
 	// explicit "grant_groups": false there.
 	GrantGroups *bool `json:"grant_groups,omitempty"`
+	// CustomersOrgID names the ZITADEL organization of self-service
+	// customers (OIDCProviderSpec.CustomersOrgID).
+	CustomersOrgID string `json:"customers_org_id,omitempty"`
 }
 
 func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
@@ -62,6 +66,7 @@ func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
 		GroupsClaim:         e.GroupsClaim,
 		Kind:                e.Kind,
 		GrantGroups:         e.GrantGroups != nil && *e.GrantGroups,
+		CustomersOrgID:      e.CustomersOrgID,
 	}
 }
 
@@ -73,6 +78,9 @@ func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
 // normalized issuer all refuse with an error naming the offending entry
 // (requirements.md "Issuer and audience validation", "Registry and
 // routing").
+// zitadelOrgIDRE is the shape of a ZITADEL resource id.
+var zitadelOrgIDRE = regexp.MustCompile(`^[0-9]{1,32}$`)
+
 func ParseOIDCProviders(raw string) ([]OIDCProviderConfigEntry, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -116,6 +124,9 @@ func ParseOIDCProviders(raw string) ([]OIDCProviderConfigEntry, error) {
 		case "", KindHuman, KindAgent, KindService:
 		default:
 			return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has invalid kind %q (must be %q, %q, or %q)", e.Name, e.Kind, KindHuman, KindAgent, KindService)
+		}
+		if e.CustomersOrgID != "" && (!zitadelOrgIDRE.MatchString(e.CustomersOrgID) || (e.Kind != "" && e.Kind != KindHuman)) {
+			return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has customers_org_id %q: it must be a ZITADEL organization id on a human entry", e.Name, e.CustomersOrgID)
 		}
 		if reservedProviderNames[e.Name] {
 			return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q uses reserved provider name %q", e.Name, e.Name)

@@ -83,6 +83,9 @@ var surfaceRoutes = []surfaceRoute{
 	// The portal surface resolves a tenant creator's GitHub login to a
 	// principal (mctl-api#377); the handler refuses every other surface.
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-principals/github$`), false},
+	// The portal surface resolves a self-service customer by the ZITADEL
+	// ID token the customer signed in with (mctl-web site onboarding, C0).
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-principals/zitadel$`), false},
 	// Who the API resolved the relayed call to (mctl-api#376 D3): the
 	// surface as actor, the linked human as subject.
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/identity/self$`), true},

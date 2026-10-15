@@ -99,6 +99,12 @@ type OIDCProviderSpec struct {
 	// keeps its groups unfiltered). Even when set, "admins" is still
 	// stripped.
 	GrantGroups bool
+	// CustomersOrgID, when set, is the ZITADEL organization of self-service
+	// customers. Every token of this entry must then name its user's
+	// organization (ScopeResourceOwner), and a customers token must carry a
+	// proven GitHub identity, which becomes Identity.Customer (customer.go).
+	// A token that fails either check is refused.
+	CustomersOrgID string
 }
 
 func (s OIDCProviderSpec) withDefaults() OIDCProviderSpec {
@@ -271,8 +277,24 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 		}
 	}
 
+	var customer *CustomerProof
+	if p.spec.CustomersOrgID != "" {
+		customer, err = ReadCustomerProof(tok.Claims, p.spec.CustomersOrgID)
+		if err != nil {
+			return nil, fmt.Errorf("%s token refused: %w", p.spec.Name, err)
+		}
+		if customer != nil && p.spec.Kind != KindHuman {
+			return nil, fmt.Errorf("%s token refused: a customer is a person, but the entry's kind is %q", p.spec.Name, p.spec.Kind)
+		}
+		if customer != nil {
+			// A customer's groups claim is the customer's own business in
+			// ZITADEL; access comes from the principal alone.
+			groups = nil
+		}
+	}
+
 	return &Verified{
-		Identity: Identity{Provider: p.spec.Name, Issuer: tok.Issuer, Subject: subject, Display: display, Kind: p.spec.Kind},
+		Identity: Identity{Provider: p.spec.Name, Issuer: tok.Issuer, Subject: subject, Display: display, Kind: p.spec.Kind, Customer: customer},
 		Claims:   Claims{Groups: groups},
 	}, nil
 }

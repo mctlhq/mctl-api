@@ -91,6 +91,9 @@ type Options struct {
 	OAuthUpstream OAuthUpstreamMode
 	// OAuthZitadel configures the ZITADEL upstream; nil keeps it off.
 	OAuthZitadel *OAuthZitadelOptions
+	// SurfaceZitadel configures POST /api/v1/surface-principals/zitadel;
+	// nil leaves it answering 503.
+	SurfaceZitadel *SurfaceZitadelOptions
 	// AlertStore persists incident alerts to PostgreSQL (optional — nil disables incident endpoints).
 	AlertStore *alerts.Store
 	// DomainStore persists custom domain registrations to PostgreSQL
@@ -262,9 +265,10 @@ type Options struct {
 
 // Handlers holds all API handler dependencies.
 type Handlers struct {
-	opts         Options
-	identityLink *identityLinker
-	oauthZitadel *oauthZitadel
+	opts           Options
+	identityLink   *identityLinker
+	oauthZitadel   *oauthZitadel
+	surfaceZitadel *surfaceZitadel
 	// principalSets memoizes shadow mode's principal-keyed tenant sets;
 	// nil reads the checkout on every comparison.
 	principalSets *principalSetCache
@@ -281,6 +285,9 @@ func NewRouter(opts Options) http.Handler {
 	}
 	if opts.OAuthZitadel != nil {
 		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel}
+	}
+	if opts.SurfaceZitadel != nil {
+		h.surfaceZitadel = &surfaceZitadel{opts: opts.SurfaceZitadel}
 	}
 
 	if opts.BackstageGithubAppConnectToken == "" {
@@ -589,6 +596,8 @@ func NewRouter(opts Options) http.Handler {
 				// The portal resolves a tenant creator's GitHub login to a
 				// principal before it submits create-tenant (mctl-api#377).
 				r.Post("/surface-principals/github", h.ResolveGitHubPrincipal)
+				// ... and a self-service customer by its ZITADEL ID token.
+				r.Post("/surface-principals/zitadel", h.ResolveZitadelPrincipal)
 				r.Post("/surface-identities/{id}/revoke", h.RevokeSurfaceIdentity)
 				r.Patch("/work-items/{id}", h.TransitionWorkItem)
 				r.Post("/work-items/{id}/intents", h.AppendWorkItemIntent)

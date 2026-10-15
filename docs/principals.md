@@ -414,6 +414,24 @@ resolver refusal as `principal.resolve_github_refused`; a `503` is
 logged. This confers nothing new: the portal could already make any login
 the owner of a new tenant.
 
+A self-service customer (`docs/federation.md`, "Self-service customers") is
+resolved by its ZITADEL ID token instead, with `POST
+/api/v1/surface-principals/zitadel`, body `{"idToken": "...", "purpose":
+"create" | "signin"}` and `X-MCTL-Surface-Actor: zitadel:<sub of the token>`.
+mctl-api verifies the token itself: signature against the issuer's keys,
+issuer, expiry, and that it was issued to the client the purpose names, both
+as an audience and as `azp`: the mctl-web site's client
+(`MCTL_WEB_CLIENT_ID`) for `create`, the portal's (`ZITADEL_PORTAL_CLIENT_ID`)
+for `signin`. Any other client, the dev client included, is `401
+id_token_invalid`; a purpose whose client is not configured is `503`. The
+route answers `{"principalId", "githubId", "githubLogin"}`, keyed on the
+GitHub id the token proved. A token of another organization is `400
+not_a_customer`, an unproven customer `403 customer_unproven`, a conflict
+`409 customer_conflict`, a disabled principal or refused identity `403`, a
+failed read `503`. Only the portal surface may call it. Resolutions are
+audited as `principal.resolve_zitadel` and refusals as
+`principal.resolve_zitadel_refused`.
+
 ### `TENANT_AUTHZ_MODE`
 
 | Value | Decides | Also |

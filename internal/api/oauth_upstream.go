@@ -99,6 +99,12 @@ type OAuthZitadelOptions struct {
 	// mctl-api has no principal store: every ZITADEL sign-in then answers
 	// 503, because who is linked cannot be observed.
 	Store LinkedPrincipalStore
+	// CustomersOrgID is the ZITADEL organization of self-service customer
+	// accounts (the provider entry's customers_org_id). When set, a
+	// customer signs in as the principal of the GitHub id the identity hook
+	// proved, never through the link store; empty keeps the link store as
+	// the only path.
+	CustomersOrgID string
 }
 
 const (
@@ -142,7 +148,9 @@ func (z *oauthZitadel) oauthConfig(p *oidc.Provider, baseURL string) *oauth2.Con
 		ClientSecret: z.opts.ClientSecret,
 		Endpoint:     p.Endpoint(),
 		RedirectURL:  baseURL + oauthZitadelCallbackPath,
-		Scopes:       []string{oidc.ScopeOpenID, "profile"},
+		// ScopeResourceOwner: the ID token must name the user's
+		// organization, or a customer could not be told from anyone else.
+		Scopes: []string{oidc.ScopeOpenID, "profile", auth.ScopeResourceOwner},
 	}
 }
 
@@ -312,6 +320,57 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	if display == "" {
 		display = idt.Subject
 	}
+	id := auth.Identity{Provider: z.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display, Kind: auth.KindHuman}
+
+	// issue ends the sign-in: it mints the mctl authorization code for
+	// login and principalID and redirects to the client. Groups come from
+	// the login outside principal mode only; a customer has no login and
+	// so no groups.
+	issue := func(login, principalID string) {
+		var groups []string
+		if h.opts.TenantAuthzMode != TenantAuthzPrincipal && login != "" {
+			groups = o.ResolveGroups(login)
+		}
+		mctlCode, err := o.IssueCode(r.Context(), login, principalID, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
+		if err != nil {
+			slog.Error("failed to issue auth code", "error", err)
+			result = "internal_error"
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		target, err := url.Parse(pending.RedirectURI)
+		if err != nil {
+			result = "internal_error"
+			http.Error(w, "invalid redirect_uri", http.StatusInternalServerError)
+			return
+		}
+		cq := target.Query()
+		cq.Set("code", mctlCode)
+		if pending.ClientState != "" {
+			cq.Set("state", pending.ClientState)
+		}
+		target.RawQuery = cq.Encode()
+		result = "issued"
+		slog.Info("oauth: ZITADEL sign-in", "principal_id", principalID, "login", login, "zitadel_subject", idt.Subject)
+		http.Redirect(w, r, target.String(), http.StatusFound)
+	}
+
+	if z.opts.CustomersOrgID != "" {
+		customer, stopped := readSigninCustomer(w, idt, z.opts.CustomersOrgID)
+		if stopped != "" {
+			result = stopped
+			return
+		}
+		if customer != nil {
+			id.Customer = customer
+			var principalID string
+			if principalID, result = h.customerSigninPrincipal(w, r, id); result != "" {
+				return
+			}
+			issue("", principalID)
+			return
+		}
+	}
 
 	if z.opts.Store == nil {
 		result = "store_unavailable"
@@ -320,7 +379,6 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 		}})
 		return
 	}
-	id := auth.Identity{Provider: z.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display, Kind: auth.KindHuman}
 	p, gh, err := z.opts.Store.LinkedGitHub(r.Context(), id)
 	var login, principalID string
 	switch {
@@ -356,32 +414,7 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	var groups []string
-	if h.opts.TenantAuthzMode != TenantAuthzPrincipal {
-		groups = o.ResolveGroups(login)
-	}
-	mctlCode, err := o.IssueCode(r.Context(), login, principalID, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
-	if err != nil {
-		slog.Error("failed to issue auth code", "error", err)
-		result = "internal_error"
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	target, err := url.Parse(pending.RedirectURI)
-	if err != nil {
-		result = "internal_error"
-		http.Error(w, "invalid redirect_uri", http.StatusInternalServerError)
-		return
-	}
-	cq := target.Query()
-	cq.Set("code", mctlCode)
-	if pending.ClientState != "" {
-		cq.Set("state", pending.ClientState)
-	}
-	target.RawQuery = cq.Encode()
-	result = "issued"
-	slog.Info("oauth: ZITADEL sign-in", "principal_id", principalID, "login", login, "zitadel_subject", idt.Subject)
-	http.Redirect(w, r, target.String(), http.StatusFound)
+	issue(login, principalID)
 }
 
 // zitadelOnly reports whether a LinkedGitHub refusal only says the

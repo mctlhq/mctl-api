@@ -79,6 +79,11 @@ type Identity struct {
 	// GitHub login-only case below.
 	Display string
 	Kind    string
+	// Customer is set only on a ZITADEL identity of the customers
+	// organization (customer.go). The resolver then keys the principal on
+	// the GitHub id it carries and links this identity to it, instead of
+	// provisioning a principal for the ZITADEL subject.
+	Customer *CustomerProof
 }
 
 // GitHubLoginOnly reports an identity whose GitHub login was proven earlier
@@ -153,7 +158,7 @@ func (u *User) Identity() (Identity, bool) {
 	case u.dexSubject != "":
 		return Identity{Provider: ProviderDex, Issuer: u.dexIssuer, Subject: u.dexSubject, Display: u.ID, Kind: KindHuman}, true
 	case u.oidcSubject != "":
-		return Identity{Provider: u.oidcProviderName, Issuer: u.oidcIssuer, Subject: u.oidcSubject, Display: u.ID, Kind: u.oidcKind}, true
+		return Identity{Provider: u.oidcProviderName, Issuer: u.oidcIssuer, Subject: u.oidcSubject, Display: u.ID, Kind: u.oidcKind, Customer: u.oidcCustomer}, true
 	case u.githubLogin && u.githubID > 0:
 		return Identity{Provider: ProviderGitHub, Subject: strconv.FormatInt(u.githubID, 10), Display: u.ID, Kind: KindHuman}, true
 	case u.githubLogin:
