@@ -131,6 +131,10 @@ tenant member under their own login must not lock themselves out.
 | `/zitadel.user.v2.UserService/AddIDPLink` | refused if it touches customers |
 | `/zitadel.user.v2beta.UserService/AddIDPLink` | refused if it touches customers |
 | `/zitadel.resources.user.v3alpha.ZITADELUsers/AddIDPAuthenticator` | refused if it touches customers |
+| `/zitadel.management.v1.ManagementService/SetUserMetadata` | identity metadata rules (below) |
+| `/zitadel.management.v1.ManagementService/BulkSetUserMetadata` | identity metadata rules (below) |
+| `/zitadel.user.v2.UserService/SetUserMetadata` | identity metadata rules (below) |
+| `/zitadel.user.v2.UserService/UpdateUser` | identity metadata rules (below) |
 | any other method routed to this target | refused (`gate_unknown_method`) |
 
 Not gated, because they only create users in a **new** organization:
@@ -143,6 +147,25 @@ The link methods do not create users, but a GitHub link added to an existing
 user lets that GitHub account sign in as the user. With them gated, the
 invariant is: every user linked to the customers GitHub IdP was created in
 customers through this gate. Management v1 has no add-link RPC in v4.19.2.
+
+### Identity metadata after creation
+
+`github_id` and `github_login` are what the token claims carry, so writes of
+them after creation are gated too (v2beta and v3alpha have no user metadata
+RPC in v4.19.2). Keys are matched as raw text in the request:
+
+- `github_id` is refused in every org. Only the create path writes it, and
+  the hook cannot tell from a user id which org the user is in.
+- `github_login` is refused when the request touches customers, unless the
+  caller is the Login V2 service user, which syncs the login the hook set on
+  `/intent`. It is allowed elsewhere because `zitadel-iac` writes it for
+  admin and tenant users (`github-login.tf`).
+- Any other key passes.
+
+A request that names neither the customers org nor a customers context can
+still rewrite a customer's `github_login` by user id alone. Relying parties
+therefore authorize on `mctl:github_id` only; `mctl:github_login` is a
+display value.
 
 SCIM (`/scim/v2/...`) is plain HTTP, not gRPC, so executions do not cover it.
 It is the one exception to the invariant and must stay unused for customers.
@@ -201,7 +224,8 @@ It appends `mctl:refused` instead in two cases:
   their GitHub account to an admin login) → `mctl:refused=login_reserved`.
 
 Relying parties (mctl-web, and later C0) must refuse any token that carries
-`mctl:refused`, or that lacks `mctl:github_id`. Other orgs and clients get
+`mctl:refused`, or that lacks `mctl:github_id`, and must key identity on
+`mctl:github_id`, never on `mctl:github_login`. Other orgs and clients get
 `{}`, with no claims.
 
 ## Configuration
@@ -223,6 +247,9 @@ two keys allows rotation without downtime.
 
 ## Operational notes
 
+- Routing the metadata methods to the gate means an mctl-api outage also
+  blocks `zitadel-iac`'s `github_login` metadata writes and every
+  `UpdateUser`, including profile edits, in every org.
 - An mctl-api outage, or a stale gitops checkout, blocks every **v2
   `CreateUser`** routed to the gate: Login V2 sign-ups in every org, and
   `zitadel-iac` user resources; the other gated methods fail the same way.

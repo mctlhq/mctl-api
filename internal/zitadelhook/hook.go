@@ -88,16 +88,23 @@ const (
 	// link added to an arbitrary user would let a GitHub account sign in as
 	// that user, so these are gated as well. Management v1 has no
 	// add-link RPC in v4.19.2.
-	MethodV2AddIDPLink                     = "/zitadel.user.v2.UserService/AddIDPLink"
-	MethodV2BetaAddIDPLink                 = "/zitadel.user.v2beta.UserService/AddIDPLink"
-	MethodV3AlphaAddIDPAuthenticator       = "/zitadel.resources.user.v3alpha.ZITADELUsers/AddIDPAuthenticator"
-	MethodIntentRetrieve                   = "/zitadel.user.v2.UserService/RetrieveIdentityProviderIntent"
-	functionPreUserinfo                    = "preuserinfo"
-	functionPreAccessToken                 = "preaccesstoken"
-	defaultGitHubAPIURL                    = "https://api.github.com"
-	defaultUsernameDomain                  = "mctl.ai"
-	githubRequestTimeout                   = 5 * time.Second
-	maxGitHubResponseBytes           int64 = 1 << 20
+	MethodV2AddIDPLink               = "/zitadel.user.v2.UserService/AddIDPLink"
+	MethodV2BetaAddIDPLink           = "/zitadel.user.v2beta.UserService/AddIDPLink"
+	MethodV3AlphaAddIDPAuthenticator = "/zitadel.resources.user.v3alpha.ZITADELUsers/AddIDPAuthenticator"
+	// Metadata writes: github_id and github_login are the identity the
+	// token claims carry, so they are pinned after creation as well.
+	// v2beta and v3alpha have no user metadata RPC in v4.19.2.
+	MethodMgmtSetUserMetadata           = "/zitadel.management.v1.ManagementService/SetUserMetadata"
+	MethodMgmtBulkSetUserMetadata       = "/zitadel.management.v1.ManagementService/BulkSetUserMetadata"
+	MethodV2SetUserMetadata             = "/zitadel.user.v2.UserService/SetUserMetadata"
+	MethodV2UpdateUser                  = "/zitadel.user.v2.UserService/UpdateUser"
+	MethodIntentRetrieve                = "/zitadel.user.v2.UserService/RetrieveIdentityProviderIntent"
+	functionPreUserinfo                 = "preuserinfo"
+	functionPreAccessToken              = "preaccesstoken"
+	defaultGitHubAPIURL                 = "https://api.github.com"
+	defaultUsernameDomain               = "mctl.ai"
+	githubRequestTimeout                = 5 * time.Second
+	maxGitHubResponseBytes        int64 = 1 << 20
 )
 
 // GatedMethods is the method inventory the CreateGate execution is bound to.
@@ -115,6 +122,10 @@ var GatedMethods = []string{
 	MethodV2AddIDPLink,
 	MethodV2BetaAddIDPLink,
 	MethodV3AlphaAddIDPAuthenticator,
+	MethodMgmtSetUserMetadata,
+	MethodMgmtBulkSetUserMetadata,
+	MethodV2SetUserMetadata,
+	MethodV2UpdateUser,
 }
 
 // githubLoginRE is GitHub's login syntax: alphanumerics and single inner
@@ -313,12 +324,7 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 	}
 
 	var existingUserID string
-	rawUserID, ok := p.Response["userId"]
-	if !ok {
-		rawUserID, ok = p.Response["user_id"]
-	}
-	if ok {
-		raw := rawUserID
+	if raw, ok := p.Response["userId"]; ok {
 		if err := json.Unmarshal(raw, &existingUserID); err != nil {
 			return failure("intent_unparsable_user_id")
 		}
@@ -475,14 +481,10 @@ func validEmail(s string) bool {
 	return at > 0 && at < len(s)-1 && !strings.ContainsAny(s, " \t\r\n")
 }
 
-// loginReservedAtCreation reports whether a new customers account may not
-// take login: an admin or service login, or the login of any member of any
-// tenant in the gitops checkout. It is checked only when an account is
-// created, never on later sign-ins or at token time, because a customer
-// becomes a tenant member under their own login once their workspace exists.
-// memberHasLogin reports whether a tenant member is login. A member recorded
-// with only a principalId has a login the checkout does not state, so the
-// reservation cannot be decided: that is an error, not "not reserved".
+// memberHasLogin reports whether a tenant member's login equals login. A
+// member recorded with only a principalId has a login the checkout does not
+// state, so the reservation cannot be decided: that is an error, not "not
+// reserved".
 func memberHasLogin(tenant string, m gitops.TenantMember, login string) (bool, error) {
 	if m.UserID == "" {
 		return false, fmt.Errorf("tenant %q: member without userId", tenant)
@@ -490,6 +492,11 @@ func memberHasLogin(tenant string, m gitops.TenantMember, login string) (bool, e
 	return strings.EqualFold(m.UserID, login), nil
 }
 
+// loginReservedAtCreation reports whether a new customers account may not
+// take login: an admin or service login, or the login of any member of any
+// tenant in the gitops checkout. It is checked only when an account is
+// created, never on later sign-ins or at token time, because a customer
+// becomes a tenant member under their own login once their workspace exists.
 func (h *Hook) loginReservedAtCreation(login string) (bool, error) {
 	if h.reserved[strings.ToLower(login)] {
 		return true, nil
@@ -570,13 +577,51 @@ func (h *Hook) CreateGate(_ context.Context, body []byte) Result {
 		MethodMgmtAddHumanUser, MethodMgmtImportHumanUser, MethodMgmtAddMachineUser,
 		MethodAdminImportData,
 		MethodV2AddIDPLink, MethodV2BetaAddIDPLink, MethodV3AlphaAddIDPAuthenticator:
-		if h.touchesCustomers(p) {
+		scoped, err := h.touchesCustomers(p)
+		if err != nil {
+			return failure("gate_unparsable_request")
+		}
+		if scoped {
 			return refuse(http.StatusForbidden, "gate_path_closed", "Customer accounts are created only through GitHub sign-in.")
 		}
 		return pass("gate_other_org")
+	case MethodMgmtSetUserMetadata, MethodMgmtBulkSetUserMetadata, MethodV2SetUserMetadata, MethodV2UpdateUser:
+		return h.gateIdentityMetadata(p)
 	default:
 		return refuse(http.StatusForbidden, "gate_unknown_method", "User creation method not covered by the identity hook.")
 	}
+}
+
+// gateIdentityMetadata pins github_id and github_login after creation. A
+// request is matched on the raw key names, so any spelling or nesting counts.
+//
+//   - github_id is written only by the create path, so a later write of it is
+//     refused in every org: the hook cannot tell from a user id which org the
+//     user is in, and no other writer of the key exists.
+//   - github_login is also written by zitadel-iac for admin and tenant users,
+//     so it is refused only when the request touches customers, except from
+//     Login V2 (the same caller the create path trusts), which syncs after
+//     /intent the login the hook itself set. Relying parties authorize on
+//     mctl:github_id, never on mctl:github_login.
+func (h *Hook) gateIdentityMetadata(p requestPayload) Result {
+	raw := string(p.Request)
+	if strings.Contains(raw, MetaGitHubID) {
+		return refuse(http.StatusForbidden, "gate_github_id_immutable", "The GitHub identity of an account cannot be changed.")
+	}
+	if !strings.Contains(raw, MetaGitHubLogin) {
+		return pass("gate_metadata_other_key")
+	}
+	if p.UserID == h.cfg.LoginClientUserID {
+		return pass("gate_metadata_login_client")
+	}
+	scoped, err := h.touchesCustomers(p)
+	if err != nil {
+		return failure("gate_unparsable_request")
+	}
+	if scoped {
+		return refuse(http.StatusForbidden, "gate_github_login_customers", "The GitHub identity of an account cannot be changed.")
+	}
+	return pass("gate_other_org")
 }
 
 // touchesCustomers reports whether a non-CreateUser creation request could
@@ -585,19 +630,19 @@ func (h *Hook) CreateGate(_ context.Context, body []byte) Result {
 // customers org ID, the GitHub IdP ID or the customers domain anywhere in
 // the request. A false positive refuses an admin call; it never lets a user
 // in.
-func (h *Hook) touchesCustomers(p requestPayload) bool {
+func (h *Hook) touchesCustomers(p requestPayload) (bool, error) {
 	if p.OrgID == h.cfg.CustomersOrgID {
-		return true
+		return true, nil
 	}
 	raw := string(p.Request)
 	if strings.Contains(raw, h.cfg.CustomersOrgID) || strings.Contains(raw, h.cfg.GitHubIdPID) {
-		return true
+		return true, nil
 	}
 	var anyReq any
 	if err := json.Unmarshal(p.Request, &anyReq); err != nil {
-		return true
+		return false, fmt.Errorf("decode request: %w", err)
 	}
-	return containsOrgDomain(anyReq)
+	return containsOrgDomain(anyReq), nil
 }
 
 // containsOrgDomain reports whether a decoded request names its organization
@@ -648,11 +693,16 @@ func (h *Hook) gateCreateUser(p requestPayload) Result {
 	}
 	raw := string(p.Request)
 	var anyReq any
-	_ = json.Unmarshal(p.Request, &anyReq) // already parsed above
+	if err := json.Unmarshal(p.Request, &anyReq); err != nil {
+		return failure("gate_unparsable_request")
+	}
+	if containsOrgDomain(anyReq) {
+		// The hook cannot resolve a domain to an org; see touchesCustomers.
+		return refuse(http.StatusForbidden, "gate_org_by_domain", "Organizations must be named by ID for the identity hook.")
+	}
 	intoCustomers := req.OrganizationID == h.cfg.CustomersOrgID ||
 		(req.OrganizationID == "" && p.OrgID == h.cfg.CustomersOrgID) ||
-		strings.Contains(raw, h.cfg.CustomersOrgID) ||
-		containsOrgDomain(anyReq)
+		strings.Contains(raw, h.cfg.CustomersOrgID)
 	if !intoCustomers && !linksGitHub && !strings.Contains(raw, h.cfg.GitHubIdPID) {
 		return pass("gate_other_org")
 	}

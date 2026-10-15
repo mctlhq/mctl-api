@@ -266,17 +266,6 @@ func TestGateReservedUnreadableFailsClosed(t *testing.T) {
 	}
 }
 
-func TestIntentExistingUserSnakeCaseUserID(t *testing.T) {
-	h := newHook(t, nil, verified, 0)
-	var m map[string]any
-	_ = json.Unmarshal(intentBody(idpGitHub, "4242", "bob", "", nil), &m)
-	m["response"].(map[string]any)["user_id"] = "u-1"
-	b, _ := json.Marshal(m)
-	if r := h.Intent(context.Background(), b); r.Reason != "intent_update" {
-		t.Fatalf("reason %s, want intent_update", r.Reason)
-	}
-}
-
 func TestIntentNonUserAccountRefused(t *testing.T) {
 	h := newHook(t, nil, verified, 0)
 	raw := map[string]any{"id": 4242, "login": "some-bot", "type": "Bot"}
@@ -543,6 +532,50 @@ func TestGateCreateUserUnrecognisedShapeRefused(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			b, _ := json.Marshal(map[string]any{"fullMethod": MethodV2CreateUser, "orgID": orgAdmins, "userID": "iac-user", "request": req})
 			refusedWith(t, h.CreateGate(context.Background(), b), http.StatusForbidden)
+		})
+	}
+}
+
+func TestGateCreateUserOrgByDomainReason(t *testing.T) {
+	h := newHook(t, nil, nil, 0)
+	req := map[string]any{"organization": map[string]any{"orgDomain": "x.example"}, "username": "x", "human": map[string]any{}}
+	b, _ := json.Marshal(map[string]any{"fullMethod": MethodV2CreateUser, "orgID": orgAdmins, "userID": "iac-user", "request": req})
+	if r := h.CreateGate(context.Background(), b); r.Reason != "gate_org_by_domain" {
+		t.Fatalf("reason %s", r.Reason)
+	}
+}
+
+func TestGateIdentityMetadata(t *testing.T) {
+	h := newHook(t, nil, nil, 0)
+	idMeta := []any{map[string]any{"key": MetaGitHubID, "value": b64("1")}}
+	loginMeta := []any{map[string]any{"key": MetaGitHubLogin, "value": b64("adminone")}}
+	refuse := map[string]map[string]any{
+		"mgmt SetUserMetadata github_id other org":  {"fullMethod": MethodMgmtSetUserMetadata, "orgID": orgAdmins, "userID": "iac-user", "request": map[string]any{"id": "u-1", "key": MetaGitHubID, "value": b64("1")}},
+		"mgmt Bulk github_id":                       {"fullMethod": MethodMgmtBulkSetUserMetadata, "orgID": orgAdmins, "request": map[string]any{"id": "u-1", "metadata": idMeta}},
+		"v2 SetUserMetadata github_id":              {"fullMethod": MethodV2SetUserMetadata, "orgID": orgAdmins, "request": map[string]any{"userId": "u-1", "metadata": idMeta}},
+		"v2 UpdateUser github_id by login client":   {"fullMethod": MethodV2UpdateUser, "orgID": orgCustomers, "userID": loginClient, "request": map[string]any{"userId": "u-1", "metadata": idMeta}},
+		"v2 SetUserMetadata github_login customers": {"fullMethod": MethodV2SetUserMetadata, "orgID": orgCustomers, "userID": "admin", "request": map[string]any{"userId": "u-1", "metadata": loginMeta}},
+		"v2 UpdateUser github_login customers":      {"fullMethod": MethodV2UpdateUser, "orgID": orgCustomers, "userID": "admin", "request": map[string]any{"userId": "u-1", "metadata": loginMeta}},
+		"mgmt SetUserMetadata github_login named":   {"fullMethod": MethodMgmtSetUserMetadata, "orgID": orgAdmins, "userID": "admin", "request": map[string]any{"id": "u-1", "key": MetaGitHubLogin, "value": b64("x"), "org": orgCustomers}},
+	}
+	for name, p := range refuse {
+		t.Run(name, func(t *testing.T) {
+			b, _ := json.Marshal(p)
+			refusedWith(t, h.CreateGate(context.Background(), b), http.StatusForbidden)
+		})
+	}
+	pass := map[string]map[string]any{
+		"iac github_login in admins":      {"fullMethod": MethodMgmtSetUserMetadata, "orgID": orgAdmins, "userID": "iac-user", "request": map[string]any{"id": "u-1", "key": MetaGitHubLogin, "value": b64("bob")}},
+		"login client syncs github_login": {"fullMethod": MethodV2UpdateUser, "orgID": orgCustomers, "userID": loginClient, "request": map[string]any{"userId": "u-1", "metadata": loginMeta}},
+		"other key in customers":          {"fullMethod": MethodV2SetUserMetadata, "orgID": orgCustomers, "userID": "admin", "request": map[string]any{"userId": "u-1", "metadata": []any{map[string]any{"key": "plan", "value": b64("x")}}}},
+		"profile update in customers":     {"fullMethod": MethodV2UpdateUser, "orgID": orgCustomers, "userID": "admin", "request": map[string]any{"userId": "u-1", "human": map[string]any{}}},
+	}
+	for name, p := range pass {
+		t.Run(name, func(t *testing.T) {
+			b, _ := json.Marshal(p)
+			if r := h.CreateGate(context.Background(), b); r.Status != http.StatusOK || len(r.Body) != 0 {
+				t.Fatalf("got %d %s (%s), want pass-through", r.Status, r.Body, r.Reason)
+			}
 		})
 	}
 }
