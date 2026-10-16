@@ -440,7 +440,7 @@ func main() {
 	roadmapWaveDisabledReason := ""
 	roadmapWaveMaxAge, err := parseWaveMaxAge(os.Getenv("ROADMAP_WAVE_MAX_AGE"))
 	if err != nil {
-		roadmapWaveDisabledReason = "ROADMAP_WAVE_MAX_AGE is invalid"
+		roadmapWaveDisabledReason = "ROADMAP_WAVE_MAX_AGE is invalid" //nolint:gosec // env var name, not a credential
 		slog.Error("invalid ROADMAP_WAVE_MAX_AGE; roadmap wave execution is off", "error", err)
 		roadmapWaveMaxAge = -1
 	}
@@ -450,7 +450,7 @@ func main() {
 		slog.Error("invalid ROADMAP_WAVE_CALL_TIMEOUT; roadmap wave execution is off", "error", err)
 		roadmapWaveMaxAge = -1
 		if roadmapWaveDisabledReason == "" {
-			roadmapWaveDisabledReason = "ROADMAP_WAVE_CALL_TIMEOUT is invalid"
+			roadmapWaveDisabledReason = "ROADMAP_WAVE_CALL_TIMEOUT is invalid" //nolint:gosec // env var name, not a credential
 		}
 	} else {
 		mctlapi.SetRoadmapWaveCallTimeout(ct)
