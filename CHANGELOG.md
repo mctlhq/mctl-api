@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.90.0](https://github.com/mctlhq/mctl-api/compare/4.89.0...4.90.0) (2026-10-16)
+
+
+### Features
+
+* **auth:** resolve ZITADEL customers by their proven GitHub id ([5fd878a](https://github.com/mctlhq/mctl-api/commit/5fd878ac0be41e27a2e48c9be9ff658b5ac64576))
+* **auth:** resolve ZITADEL customers by their proven GitHub id ([f266b3d](https://github.com/mctlhq/mctl-api/commit/f266b3d04373aadcb57f9bc2de868be0c8135443))
+* **helm:** optional envFrom Secrets beyond the two fixed slots ([72cc1e8](https://github.com/mctlhq/mctl-api/commit/72cc1e81de896ca09942a04c8d9d091c8a5f4277))
+* **helm:** optional envFrom Secrets beyond the two fixed slots ([cdb82fd](https://github.com/mctlhq/mctl-api/commit/cdb82fd250c46f380d953ac7eb1f08e5b78a9a32))
+
+
+### Bug Fixes
+
+* **auth:** close the last review nits on customer resolution ([c1e3eca](https://github.com/mctlhq/mctl-api/commit/c1e3ecaac0dbee7873da1521a7591ebd62a5ffe3))
+* **auth:** refuse a disabled customer principal on every path ([3ab6c1e](https://github.com/mctlhq/mctl-api/commit/3ab6c1e3a88701cdbd6a586bbd648188e3212ecb))
+
 ## [4.89.0](https://github.com/mctlhq/mctl-api/compare/4.88.1...4.89.0) (2026-10-15)
 
 
