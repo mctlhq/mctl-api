@@ -108,6 +108,9 @@ CREATE INDEX IF NOT EXISTS external_identities_github_display
 type Store struct {
 	pool *pgxpool.Pool
 	now  func() time.Time
+	// beforeCustomerLink, in tests, runs in ResolveCustomer between its
+	// provision and its link, the window two transactions leave open.
+	beforeCustomerLink func()
 }
 
 // NewStore connects and creates the schema. It must share a database with

@@ -333,3 +333,182 @@ func TestMergePrincipalsIsSafeToRetryAndRefusesADisabledSource(t *testing.T) {
 		t.Fatalf("a refused merge moved identities: %+v", ids)
 	}
 }
+
+func customer(sub string, githubID int64, login string) auth.Identity {
+	id := zitadel(sub, login+"@mctl.ai")
+	id.Customer = &auth.CustomerProof{GitHubID: strconv.FormatInt(githubID, 10), GitHubLogin: login}
+	return id
+}
+
+// Stage C0: a customer lands on the principal of the GitHub id the hook
+// proved, the ZITADEL subject is linked to it, and a second sign-in finds
+// the same principal.
+func TestResolveCustomerKeysOnTheGitHubID(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	p, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh, err := s.Provision(ctx, github(7, "bob"))
+	if err != nil || gh.ID != p.ID {
+		t.Fatalf("GitHub id 7 resolves to %v (%v), want the customer's %s", gh, err, p.ID)
+	}
+	again, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if err != nil || again.ID != p.ID {
+		t.Fatalf("second sign-in = %v (%v), want %s", again, err, p.ID)
+	}
+	ids, _ := s.Identities(ctx, p.ID)
+	if len(ids) != 2 {
+		t.Fatalf("identities = %+v, want the GitHub id and the ZITADEL subject", ids)
+	}
+}
+
+// A GitHub id that already has a principal (a legacy sign-up resolved it
+// through surface-principals/github) is reused, not duplicated.
+func TestResolveCustomerJoinsTheExistingPrincipalOfTheGitHubID(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	existing, err := s.Provision(ctx, github(7, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if err != nil || p.ID != existing.ID {
+		t.Fatalf("customer = %v (%v), want the existing %s", p, err, existing.ID)
+	}
+}
+
+// The Alice/Bob case: a login freed by one GitHub account and taken by
+// another resolves by id, so Bob never lands on Alice's principal.
+func TestResolveCustomerNeverMatchesAReusedLogin(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	alice, err := s.Provision(ctx, github(1, "shared"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := s.ResolveCustomer(ctx, customer("z2", 2, "shared"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bob.ID == alice.ID {
+		t.Fatalf("Bob resolved to Alice's principal %s through the reused login", alice.ID)
+	}
+}
+
+// A ZITADEL subject that already has a principal of its own is a conflict
+// for an admin, refused as such, and nothing moves.
+func TestResolveCustomerRefusesASubjectOwnedElsewhere(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	own, err := s.Provision(ctx, zitadel("z1", "bob@mctl.ai"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if !errors.Is(err, auth.ErrIdentityRefused) || !errors.Is(err, ErrCustomerConflict) || !errors.Is(err, ErrIdentityOwnedElsewhere) {
+		t.Fatalf("err = %v, want a refused customer conflict", err)
+	}
+	ids, _ := s.Identities(ctx, own.ID)
+	if len(ids) != 1 {
+		t.Fatalf("the subject moved: %+v", ids)
+	}
+	// Deliberate: the GitHub id's own principal exists after the refusal,
+	// with only its GitHub identity, for an admin to merge into.
+	gh, err := s.Provision(ctx, customer("z1", 7, "bob").Customer.GitHubIdentity())
+	if err != nil || gh.ID == own.ID {
+		t.Fatalf("GitHub principal = %+v, %v", gh, err)
+	}
+	if ids, _ := s.Identities(ctx, gh.ID); len(ids) != 1 || ids[0].Provider != auth.ProviderGitHub {
+		t.Fatalf("GitHub principal identities = %+v, want only the GitHub one", ids)
+	}
+}
+
+// A second ZITADEL account for the same GitHub id (a deleted and recreated
+// customer) is refused until an admin unlinks the first.
+func TestResolveCustomerRefusesASecondSubjectForTheSameGitHubID(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	if _, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.ResolveCustomer(ctx, customer("z9", 7, "bob"))
+	if !errors.Is(err, auth.ErrIdentityRefused) || !errors.Is(err, ErrPrincipalAlreadyLinked) {
+		t.Fatalf("err = %v, want refused: principal already linked", err)
+	}
+}
+
+func TestResolveCustomerRefusesARevokedGitHubIdentity(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	p, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE external_identities SET revoked_at=now() WHERE principal_id=$1 AND provider='github'`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob")); !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("err = %v, want refused", err)
+	}
+}
+
+func TestResolveCustomerRefusesADisabledPrincipal(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	p, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE principals SET status='disabled' WHERE id=$1`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob")); err != nil || got.ID != p.ID || got.Status != StatusDisabled {
+		t.Fatalf("ResolveCustomer = %+v, %v; want the disabled principal", got, err)
+	}
+	// Through the resolver, as every caller sees it: refused as disabled,
+	// not a failed read that bearer requests would degrade past.
+	r := NewResolver(s, nil, false)
+	if _, err := r.ResolvePrincipal(ctx, customer("z1", 7, "bob")); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("ResolvePrincipal err = %v, want ErrPrincipalDisabled", err)
+	}
+	// A disabled principal gets no new identity linked.
+	if _, err := r.ResolvePrincipal(ctx, customer("z2", 8, "carol")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE principals SET status='disabled' WHERE id=(SELECT principal_id FROM external_identities WHERE provider='github' AND subject='8')`); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ResolveCustomer(ctx, customer("z3", 8, "carol")); err != nil || got.Status != StatusDisabled {
+		t.Fatalf("ResolveCustomer = %+v, %v", got, err)
+	}
+	if _, _, err := s.LinkedGitHub(ctx, zitadel("z3", "carol")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("z3 was linked to a disabled principal: %v", err)
+	}
+}
+
+func TestResolveCustomerRefusesANonCustomerIdentity(t *testing.T) {
+	s := newStoreForTest(t)
+	if _, err := s.ResolveCustomer(context.Background(), zitadel("z1", "bob")); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+}
+
+// Disabled between the provision and the link (two transactions): still
+// refused as disabled through the resolver, not degraded as a failed read.
+func TestResolveCustomerDisabledBetweenProvisionAndLink(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	s.beforeCustomerLink = func() {
+		if _, err := s.pool.Exec(ctx, `UPDATE principals SET status='disabled' WHERE id=(SELECT principal_id FROM external_identities WHERE provider='github' AND subject='7')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := NewResolver(s, nil, false).ResolvePrincipal(ctx, customer("z1", 7, "bob")); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("err = %v, want ErrPrincipalDisabled", err)
+	}
+	if _, _, err := s.LinkedGitHub(ctx, zitadel("z1", "bob")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("z1 was linked to a disabled principal: %v", err)
+	}
+}

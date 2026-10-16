@@ -35,6 +35,7 @@ type fakeBackend struct {
 	err        error
 	provisions []auth.Identity
 	logins     []string
+	customers  []auth.Identity
 	// during runs inside Provision, while the resolver holds no lock.
 	during func()
 }
@@ -57,6 +58,13 @@ func (f *fakeBackend) Provision(_ context.Context, id auth.Identity) (*Principal
 	}
 	f.byIdentity[key] = p
 	return p, nil
+}
+
+// ResolveCustomer records the call and answers the principal of the
+// customer's GitHub id, as the store does once the link is in place.
+func (f *fakeBackend) ResolveCustomer(ctx context.Context, id auth.Identity) (*Principal, error) {
+	f.customers = append(f.customers, id)
+	return f.Provision(ctx, id.Customer.GitHubIdentity())
 }
 
 func (f *fakeBackend) Get(_ context.Context, id string) (*Principal, error) {
@@ -391,5 +399,31 @@ func TestResolverCheckPrincipal(t *testing.T) {
 	r.now = func() time.Time { return now }
 	if err := r.CheckPrincipal(ctx, "prn_B"); err != nil {
 		t.Fatalf("after FailureTTL: %v", err)
+	}
+}
+
+// A customers-organization identity resolves through ResolveCustomer to the
+// principal of its GitHub id, never by provisioning the ZITADEL subject.
+func TestResolverRoutesCustomerIdentityByGitHubID(t *testing.T) {
+	b := &fakeBackend{}
+	r := newResolver(b, nil, false)
+	id := auth.Identity{
+		Provider: "zitadel", Issuer: "https://auth.example", Subject: "zsub-1", Display: "alice@mctl.ai", Kind: auth.KindHuman,
+		Customer: &auth.CustomerProof{GitHubID: "4242", GitHubLogin: "alice"},
+	}
+	got, err := r.ResolvePrincipal(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ResolvePrincipal: %v", err)
+	}
+	if want := "prn_github||4242"; got != want {
+		t.Fatalf("principal = %q, want the GitHub id's %q", got, want)
+	}
+	if len(b.customers) != 1 {
+		t.Fatalf("ResolveCustomer calls = %d, want 1", len(b.customers))
+	}
+	for _, p := range b.provisions {
+		if p.Provider == "zitadel" {
+			t.Fatalf("the ZITADEL subject was provisioned on its own: %+v", p)
+		}
 	}
 }

@@ -922,6 +922,7 @@ func main() {
 		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
+		SurfaceZitadel:                 surfaceZitadelOptions(cfg),
 		AlertStore:                     alertStore,
 		AgentRegistry:                  agentRegistryStore,
 		Lifecycle:                      lifecycleStore,
@@ -1199,9 +1200,15 @@ type config struct {
 	// confidential web app; both empty keeps the browser flow off.
 	// ZitadelLinkProvider names the MCTL_OIDC_PROVIDERS entry whose issuer
 	// the linked identity must carry.
-	ZitadelLinkClientID      string
-	ZitadelLinkClientSecret  string
-	ZitadelLinkProvider      string
+	ZitadelLinkClientID     string
+	ZitadelLinkClientSecret string
+	ZitadelLinkProvider     string
+	// The ZITADEL clients whose ID tokens the portal may present to
+	// surface-principals/zitadel: the mctl-web site's (MCTL_WEB_CLIENT_ID,
+	// creating a workspace) and the portal's (ZITADEL_PORTAL_CLIENT_ID,
+	// signing in).
+	MctlWebClientID          string
+	ZitadelPortalClientID    string
 	OAuthJWTSecret           string
 	OAuthAllowedRedirectURIs []string
 	// OAuthPreregisteredClientsRaw is the OAUTH_PREREGISTERED_CLIENTS value as
@@ -1345,6 +1352,8 @@ func loadConfig() config {
 		GitHubWebhookSecret:            os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		GitHubWebhookOwners:            splitCSV(envOr("GITHUB_WEBHOOK_OWNERS", "mctlhq")),
 		ZitadelHook:                    loadZitadelHookConfig(),
+		MctlWebClientID:                os.Getenv("MCTL_WEB_CLIENT_ID"),
+		ZitadelPortalClientID:          os.Getenv("ZITADEL_PORTAL_CLIENT_ID"),
 		EventsValkeyURL:                os.Getenv("EVENTS_VALKEY_URL"),
 		EventsValkeyPassword:           os.Getenv("EVENTS_VALKEY_PASSWORD"),
 		OAuthRegistrationToken:         os.Getenv("OAUTH_REGISTRATION_TOKEN"),
@@ -1653,6 +1662,11 @@ func (c config) validate() error {
 	if _, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw); err != nil {
 		return err
 	}
+	// customers_org_id on two entries, or one that disagrees with the
+	// identity hook, would resolve a customer differently per path.
+	if _, err := c.customersProvider(); err != nil {
+		return err
+	}
 	if _, err := auth.ParseGitHubActionsOIDC(c.GitHubActionsOIDCRaw); err != nil {
 		return err
 	}
@@ -1830,6 +1844,7 @@ func oauthZitadelOptions(cfg config, store *principals.Store, oauth *auth.OAuthS
 	opts := &mctlapi.OAuthZitadelOptions{
 		ProviderName: entry.Name, Issuer: entry.Issuer,
 		ClientID: cfg.OAuthZitadelClientID, ClientSecret: cfg.OAuthZitadelClientSecret,
+		CustomersOrgID: entry.CustomersOrgID,
 	}
 	// Assigned only when non-nil: a nil *Store in the interface would not
 	// compare equal to nil and would be called.

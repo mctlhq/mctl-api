@@ -64,6 +64,7 @@ var ErrUnresolved = errors.New("principal could not be resolved")
 // backend is the part of Store the resolver uses.
 type backend interface {
 	Provision(ctx context.Context, id auth.Identity) (*Principal, error)
+	ResolveCustomer(ctx context.Context, id auth.Identity) (*Principal, error)
 	ResolveGitHubLogin(ctx context.Context, login string) (*Principal, error)
 	Get(ctx context.Context, id string) (*Principal, error)
 }
@@ -252,6 +253,9 @@ func answer(c cached) (string, error) {
 }
 
 func (r *Resolver) resolve(ctx context.Context, id auth.Identity) (*Principal, error) {
+	if id.Customer != nil {
+		return r.store.ResolveCustomer(ctx, id)
+	}
 	if !id.GitHubLoginOnly() {
 		return r.store.Provision(ctx, id)
 	}

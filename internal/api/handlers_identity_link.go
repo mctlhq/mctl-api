@@ -186,9 +186,8 @@ type identityLinker struct {
 	byGitHub map[string]*linkChallenge
 	byZState map[string]*linkChallenge
 
-	oidcMu   sync.Mutex
-	provider *oidc.Provider
-	now      func() time.Time
+	lazyOIDCProvider
+	now func() time.Time
 }
 
 func newIdentityLinker(opts *IdentityLinkOptions) *identityLinker {
@@ -197,11 +196,12 @@ func newIdentityLinker(opts *IdentityLinkOptions) *identityLinker {
 		now = opts.clock
 	}
 	return &identityLinker{
-		opts:     opts,
-		byID:     map[string]*linkChallenge{},
-		byGitHub: map[string]*linkChallenge{},
-		byZState: map[string]*linkChallenge{},
-		now:      now,
+		opts:             opts,
+		lazyOIDCProvider: lazyOIDCProvider{issuer: opts.Issuer},
+		byID:             map[string]*linkChallenge{},
+		byGitHub:         map[string]*linkChallenge{},
+		byZState:         map[string]*linkChallenge{},
+		now:              now,
 	}
 }
 
@@ -284,23 +284,6 @@ func (l *identityLinker) dropLocked(id string, c *linkChallenge) {
 	delete(l.byID, id)
 	delete(l.byGitHub, c.githubState)
 	delete(l.byZState, c.zitadelState)
-}
-
-// oidcProvider runs discovery once it first succeeds; a failure is retried
-// on the next link rather than at boot, so ZITADEL being down never delays
-// mctl-api's start.
-func (l *identityLinker) oidcProvider(ctx context.Context) (*oidc.Provider, error) {
-	l.oidcMu.Lock()
-	defer l.oidcMu.Unlock()
-	if l.provider != nil {
-		return l.provider, nil
-	}
-	p, err := oidc.NewProvider(ctx, l.opts.Issuer)
-	if err != nil {
-		return nil, err
-	}
-	l.provider = p
-	return p, nil
 }
 
 func (l *identityLinker) oauthConfig(p *oidc.Provider) *oauth2.Config {

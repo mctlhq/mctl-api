@@ -99,6 +99,12 @@ type OAuthZitadelOptions struct {
 	// mctl-api has no principal store: every ZITADEL sign-in then answers
 	// 503, because who is linked cannot be observed.
 	Store LinkedPrincipalStore
+	// CustomersOrgID is the ZITADEL organization of self-service customer
+	// accounts (the provider entry's customers_org_id). When set, a
+	// customer signs in as the principal of the GitHub id the identity hook
+	// proved, never through the link store; empty keeps the link store as
+	// the only path.
+	CustomersOrgID string
 }
 
 const (
@@ -115,34 +121,50 @@ func init() { prometheus.MustRegister(oauthUpstreamSignins) }
 
 type oauthZitadel struct {
 	opts *OAuthZitadelOptions
+	lazyOIDCProvider
+}
 
-	mu       sync.Mutex
+// lazyOIDCProvider runs OIDC discovery for issuer once it first succeeds; a
+// failure is retried on the next call, so the identity provider being down
+// never delays mctl-api's start. The ZITADEL sign-in, the identity link and
+// the portal's customer resolution each hold one.
+type lazyOIDCProvider struct {
+	issuer string
+
+	// discoMu is named apart from its holders' own mutexes: it guards the
+	// discovery call, a network round trip, and nothing else.
+	discoMu  sync.Mutex
 	provider *oidc.Provider
 }
 
-// oidcProvider runs discovery once it first succeeds; a failure is retried
-// on the next sign-in, so ZITADEL being down never delays mctl-api's start.
-func (z *oauthZitadel) oidcProvider(ctx context.Context) (*oidc.Provider, error) {
-	z.mu.Lock()
-	defer z.mu.Unlock()
-	if z.provider != nil {
-		return z.provider, nil
+func (l *lazyOIDCProvider) oidcProvider(ctx context.Context) (*oidc.Provider, error) {
+	l.discoMu.Lock()
+	defer l.discoMu.Unlock()
+	if l.provider != nil {
+		return l.provider, nil
 	}
-	p, err := oidc.NewProvider(ctx, z.opts.Issuer)
+	p, err := oidc.NewProvider(ctx, l.issuer)
 	if err != nil {
 		return nil, err
 	}
-	z.provider = p
+	l.provider = p
 	return p, nil
 }
 
 func (z *oauthZitadel) oauthConfig(p *oidc.Provider, baseURL string) *oauth2.Config {
+	scopes := []string{oidc.ScopeOpenID, "profile"}
+	if z.opts.CustomersOrgID != "" {
+		// The ID token must name the user's organization, or a customer
+		// could not be told from anyone else. Asked only when customers
+		// are configured, so the sign-in is unchanged until then.
+		scopes = append(scopes, auth.ScopeResourceOwner)
+	}
 	return &oauth2.Config{
 		ClientID:     z.opts.ClientID,
 		ClientSecret: z.opts.ClientSecret,
 		Endpoint:     p.Endpoint(),
 		RedirectURL:  baseURL + oauthZitadelCallbackPath,
-		Scopes:       []string{oidc.ScopeOpenID, "profile"},
+		Scopes:       scopes,
 	}
 }
 
@@ -312,6 +334,57 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	if display == "" {
 		display = idt.Subject
 	}
+	id := auth.Identity{Provider: z.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display, Kind: auth.KindHuman}
+
+	// issue ends the sign-in: it mints the mctl authorization code for
+	// login and principalID and redirects to the client. Groups come from
+	// the login outside principal mode only; a customer has no login and
+	// so no groups.
+	issue := func(login, principalID string) {
+		var groups []string
+		if h.opts.TenantAuthzMode != TenantAuthzPrincipal && login != "" {
+			groups = o.ResolveGroups(login)
+		}
+		mctlCode, err := o.IssueCode(r.Context(), login, principalID, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
+		if err != nil {
+			slog.Error("failed to issue auth code", "error", err)
+			result = "internal_error"
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		target, err := url.Parse(pending.RedirectURI)
+		if err != nil {
+			result = "internal_error"
+			http.Error(w, "invalid redirect_uri", http.StatusInternalServerError)
+			return
+		}
+		cq := target.Query()
+		cq.Set("code", mctlCode)
+		if pending.ClientState != "" {
+			cq.Set("state", pending.ClientState)
+		}
+		target.RawQuery = cq.Encode()
+		result = "issued"
+		slog.Info("oauth: ZITADEL sign-in", "principal_id", principalID, "login", login, "zitadel_subject", idt.Subject)
+		http.Redirect(w, r, target.String(), http.StatusFound)
+	}
+
+	if z.opts.CustomersOrgID != "" {
+		customer, stopped := readSigninCustomer(w, idt, z.opts.CustomersOrgID)
+		if stopped != "" {
+			result = stopped
+			return
+		}
+		if customer != nil {
+			id.Customer = customer
+			var principalID string
+			if principalID, result = h.customerSigninPrincipal(w, r, id); result != "" {
+				return
+			}
+			issue("", principalID)
+			return
+		}
+	}
 
 	if z.opts.Store == nil {
 		result = "store_unavailable"
@@ -320,7 +393,6 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 		}})
 		return
 	}
-	id := auth.Identity{Provider: z.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display, Kind: auth.KindHuman}
 	p, gh, err := z.opts.Store.LinkedGitHub(r.Context(), id)
 	var login, principalID string
 	switch {
@@ -356,32 +428,7 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	var groups []string
-	if h.opts.TenantAuthzMode != TenantAuthzPrincipal {
-		groups = o.ResolveGroups(login)
-	}
-	mctlCode, err := o.IssueCode(r.Context(), login, principalID, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
-	if err != nil {
-		slog.Error("failed to issue auth code", "error", err)
-		result = "internal_error"
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	target, err := url.Parse(pending.RedirectURI)
-	if err != nil {
-		result = "internal_error"
-		http.Error(w, "invalid redirect_uri", http.StatusInternalServerError)
-		return
-	}
-	cq := target.Query()
-	cq.Set("code", mctlCode)
-	if pending.ClientState != "" {
-		cq.Set("state", pending.ClientState)
-	}
-	target.RawQuery = cq.Encode()
-	result = "issued"
-	slog.Info("oauth: ZITADEL sign-in", "principal_id", principalID, "login", login, "zitadel_subject", idt.Subject)
-	http.Redirect(w, r, target.String(), http.StatusFound)
+	issue(login, principalID)
 }
 
 // zitadelOnly reports whether a LinkedGitHub refusal only says the

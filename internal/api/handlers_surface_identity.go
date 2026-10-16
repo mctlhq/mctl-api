@@ -83,6 +83,9 @@ var surfaceRoutes = []surfaceRoute{
 	// The portal surface resolves a tenant creator's GitHub login to a
 	// principal (mctl-api#377); the handler refuses every other surface.
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-principals/github$`), false},
+	// The portal surface resolves a self-service customer by the ZITADEL
+	// ID token the customer signed in with (mctl-web site onboarding, C0).
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-principals/zitadel$`), false},
 	// Who the API resolved the relayed call to (mctl-api#376 D3): the
 	// surface as actor, the linked human as subject.
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/identity/self$`), true},
@@ -305,11 +308,16 @@ var forbiddenLinkFields = []string{
 // decodeSurfaceBody decodes a small JSON body, refusing identity fields and
 // unknown keys.
 func decodeSurfaceBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, sidMaxBodyBytes))
+	return decodeSurfaceBodyLimit(w, r, v, sidMaxBodyBytes)
+}
+
+// decodeSurfaceBodyLimit is decodeSurfaceBody with its own size limit.
+func decodeSurfaceBodyLimit(w http.ResponseWriter, r *http.Request, v any, limit int) bool {
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, int64(limit)))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeErrorCode(w, http.StatusRequestEntityTooLarge, sidCodeInvalid, "request body exceeds "+strconv.Itoa(sidMaxBodyBytes)+" bytes", nil)
+			writeErrorCode(w, http.StatusRequestEntityTooLarge, sidCodeInvalid, "request body exceeds "+strconv.Itoa(limit)+" bytes", nil)
 			return false
 		}
 		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid, "could not read the body", nil)

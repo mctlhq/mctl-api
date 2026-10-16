@@ -121,6 +121,9 @@ type User struct {
 	oidcIssuer       string
 	oidcSubject      string
 	oidcKind         string
+	// oidcCustomer is the GitHub identity a customers-organization token
+	// proved (customer.go); nil for every other caller.
+	oidcCustomer *CustomerProof
 
 	// principalID is the canonical principal (prn_...): resolved from that
 	// identity by AttachPrincipal, or taken from a token or grant when
@@ -1181,6 +1184,7 @@ func userFromVerified(v *Verified) *User {
 			ID: v.Identity.Display, Groups: v.Claims.Groups,
 			oidcProviderName: v.Identity.Provider, oidcIssuer: v.Identity.Issuer,
 			oidcSubject: v.Identity.Subject, oidcKind: v.Identity.Kind,
+			oidcCustomer: v.Identity.Customer,
 		}
 	}
 }
