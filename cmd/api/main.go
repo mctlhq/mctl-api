@@ -437,8 +437,10 @@ func main() {
 	// ROADMAP_WAVE_MAX_AGE (mctl-api#334): how old the latest publication may
 	// be when a wave executes. Invalid turns wave execution off rather than
 	// running it against a bound nobody meant.
+	roadmapWaveDisabledReason := ""
 	roadmapWaveMaxAge, err := parseWaveMaxAge(os.Getenv("ROADMAP_WAVE_MAX_AGE"))
 	if err != nil {
+		roadmapWaveDisabledReason = "ROADMAP_WAVE_MAX_AGE is invalid"
 		slog.Error("invalid ROADMAP_WAVE_MAX_AGE; roadmap wave execution is off", "error", err)
 		roadmapWaveMaxAge = -1
 	}
@@ -447,6 +449,9 @@ func main() {
 	if ct, err := parseWaveCallTimeout(os.Getenv("ROADMAP_WAVE_CALL_TIMEOUT")); err != nil {
 		slog.Error("invalid ROADMAP_WAVE_CALL_TIMEOUT; roadmap wave execution is off", "error", err)
 		roadmapWaveMaxAge = -1
+		if roadmapWaveDisabledReason == "" {
+			roadmapWaveDisabledReason = "ROADMAP_WAVE_CALL_TIMEOUT is invalid"
+		}
 	} else {
 		mctlapi.SetRoadmapWaveCallTimeout(ct)
 	}
@@ -935,6 +940,7 @@ func main() {
 		Lifecycle:                      lifecycleStore,
 		Roadmap:                        roadmapReader,
 		RoadmapWaveMaxAge:              roadmapWaveMaxAge,
+		RoadmapWaveDisabledReason:      roadmapWaveDisabledReason,
 		Usage:                          usageStore,
 		Commerce:                       commerceStore,
 		CommerceAcceptDisabled:         cfg.CommerceAcceptDisabled,

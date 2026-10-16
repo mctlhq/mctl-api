@@ -125,6 +125,14 @@ func (h *Handlers) waveMaxAge() time.Duration {
 	return h.opts.RoadmapWaveMaxAge
 }
 
+// waveDisabledReason says which setting turned wave execution off.
+func (h *Handlers) waveDisabledReason() string {
+	if h.opts.RoadmapWaveDisabledReason != "" {
+		return h.opts.RoadmapWaveDisabledReason
+	}
+	return "ROADMAP_WAVE_MAX_AGE is invalid"
+}
+
 type wavePlanRequest struct {
 	Epic         string   `json:"epic"`
 	RequiredOnly *bool    `json:"required_only"`
@@ -167,7 +175,7 @@ func waveFreshness(prov roadmap.Provenance, maxAge time.Duration) (fresh bool, r
 		return false, "the publication carries no observation time"
 	}
 	if maxAge <= 0 {
-		return false, "ROADMAP_WAVE_MAX_AGE is invalid"
+		return false, "wave execution is disabled by server configuration"
 	}
 	if *prov.AgeSeconds < 0 {
 		// Captured "in the future": the clocks disagree, so the age is
@@ -262,7 +270,7 @@ func (h *Handlers) PlanRoadmapWave(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case maxAge < 0:
 		// The same terminal answer execute gives: no publication fixes it.
-		resp["not_executable_reason"] = roadmapCodeWaveDisabled + ": ROADMAP_WAVE_MAX_AGE is invalid"
+		resp["not_executable_reason"] = roadmapCodeWaveDisabled + ": " + h.waveDisabledReason()
 	case !fresh:
 		resp["not_executable_reason"] = roadmapCodeTooOld + ": " + why
 	case len(plan.Selected) == 0:
@@ -336,7 +344,7 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.waveMaxAge() < 0 {
-		refuse(http.StatusServiceUnavailable, roadmapCodeWaveDisabled, "ROADMAP_WAVE_MAX_AGE is invalid; wave execution is off", nil)
+		refuse(http.StatusServiceUnavailable, roadmapCodeWaveDisabled, h.waveDisabledReason()+"; wave execution is off", nil)
 		return
 	}
 

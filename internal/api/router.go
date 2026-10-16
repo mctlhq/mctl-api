@@ -166,6 +166,10 @@ type Options struct {
 	// DefaultRoadmapWaveMaxAge; negative means the configuration was
 	// invalid, and execution is refused.
 	RoadmapWaveMaxAge time.Duration
+	// RoadmapWaveDisabledReason names the setting that disabled wave
+	// execution; reported in responses. Empty falls back to
+	// ROADMAP_WAVE_MAX_AGE.
+	RoadmapWaveDisabledReason string
 
 	// Usage is the durable model-usage and cost ledger (mctl-api#266,
 	// ADR-012). Optional — nil makes the usage endpoints 503, which a caller
