@@ -1,0 +1,19 @@
+name: x402 MCP Check pilot
+on:
+  pull_request:
+    paths:
+      - 'experiments/x402-mcp-check/**'
+      - '.github/workflows/x402-mcp-check.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - run: node --test
+        working-directory: experiments/x402-mcp-check
