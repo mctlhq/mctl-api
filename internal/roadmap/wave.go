@@ -161,7 +161,8 @@ type waveItemWire struct {
 // false), and it is bound to an exact issue that DevLoop can start.
 //
 // With no explicit items, ready items that are unbound or not startable are
-// listed as refused, never dropped silently. With explicit items, any item
+// listed as refused, never dropped silently. The WorkflowIDFunc is consulted
+// once per item. With explicit items, any item
 // that is not eligible fails the whole plan with a *SelectionError.
 func (p *Publication) PlanWave(req WaveRequest, workflowID WorkflowIDFunc, now time.Time) (*WavePlan, error) {
 	e, err := p.find(req.Epic)
@@ -227,6 +228,7 @@ func (p *Publication) PlanWave(req WaveRequest, workflowID WorkflowIDFunc, now t
 		}
 	} else {
 		requested := map[string]bool{}
+		built := make(map[string]WaveItem, len(req.Items))
 		var refused []WaveRefusal
 		for _, id := range req.Items {
 			if requested[id] {
@@ -234,18 +236,20 @@ func (p *Publication) PlanWave(req WaveRequest, workflowID WorkflowIDFunc, now t
 				continue
 			}
 			requested[id] = true
-			if _, refusal := eligible(id); refusal != nil {
+			item, refusal := eligible(id)
+			if refusal != nil {
 				refused = append(refused, *refusal)
+				continue
 			}
+			built[id] = *item
 		}
 		if len(refused) > 0 {
 			return nil, &SelectionError{Refused: refused}
 		}
 		// Published order, not request order: the same set is the same plan.
 		for _, id := range order {
-			if requested[id] {
-				item, _ := eligible(id)
-				plan.Selected = append(plan.Selected, *item)
+			if item, ok := built[id]; ok {
+				plan.Selected = append(plan.Selected, item)
 			}
 		}
 	}

@@ -970,7 +970,7 @@ func main() {
 		Addr:         ":" + cfg.Port,
 		Handler:      router,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: mctlapi.ServerWriteTimeout,
 		IdleTimeout:  60 * time.Second,
 	}
 

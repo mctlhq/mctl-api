@@ -620,3 +620,19 @@ func TestRoadmapWave_InactiveEpicsAreRefusedWithTypedReasons(t *testing.T) {
 		t.Errorf("audited refusals = %v", reasons)
 	}
 }
+
+func TestRoadmapWaveBudgetFitsTheWriteTimeout(t *testing.T) {
+	if roadmapWaveBudget >= ServerWriteTimeout {
+		t.Fatal("budget must be below the write timeout")
+	}
+	if roadmapWaveMaxItems() < 1 {
+		t.Fatal("cap must admit at least one item")
+	}
+	if time.Duration(roadmapWaveMaxItems())*2*roadmapWaveCallTimeout > roadmapWaveBudget {
+		t.Fatal("cap does not fit the budget")
+	}
+	// Pins the number printed in the MCP tool description.
+	if roadmapWaveMaxItems() != 4 {
+		t.Fatalf("cap = %d, MCP description says 4", roadmapWaveMaxItems())
+	}
+}

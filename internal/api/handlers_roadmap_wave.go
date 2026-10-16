@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -53,19 +54,33 @@ const (
 	roadmapCodeInvalidSelection = "invalid_selection"
 	roadmapCodeWaveDisabled     = "wave_execution_disabled"
 
+	roadmapCodeWaveTooLarge        = "wave_too_large"
+	roadmapCodeWaveBudgetExhausted = "wave_budget_exhausted"
+
 	roadmapWaveMaxBody = 64 << 10
 )
 
-// Once a wave has begun, each Temporal call (one item's Describe, then its
-// Start) gets its own bound, so neither a slow item nor a slow Describe eats
-// another call's budget; the whole wave is still bounded. The call bound
-// stays well under the server's 30s WriteTimeout (cmd/api/main.go), so one
-// slow call still leaves time to deliver the per-item outcomes. Vars for
-// tests.
+// Wave execution is synchronous and must answer before the server's
+// ServerWriteTimeout: a response written later is dropped while the DevLoops
+// it started keep running. So:
+//
+//	budget = ServerWriteTimeout - roadmapWaveResponseMargin
+//	cap    = budget / (2 * roadmapWaveCallTimeout)   (Describe + Start per item)
+//
+// and a plan with more items than the cap is refused (wave_too_large) rather
+// than started in part. Each Temporal call gets its own bound so one slow
+// item cannot eat another's. Vars for tests.
+const roadmapWaveResponseMargin = 5 * time.Second
+
 var (
-	roadmapWaveCallTimeout = 10 * time.Second
-	roadmapWaveTimeout     = 5 * time.Minute
+	roadmapWaveCallTimeout = 3 * time.Second
+	roadmapWaveBudget      = ServerWriteTimeout - roadmapWaveResponseMargin
 )
+
+// roadmapWaveMaxItems is the most items one execute may start.
+func roadmapWaveMaxItems() int {
+	return int(roadmapWaveBudget / (2 * roadmapWaveCallTimeout))
+}
 
 // Per-item execution outcomes — aliases of the shared devLoopOutcome*
 // vocabulary (handlers_dev_loop.go) so this route and
@@ -218,7 +233,9 @@ func (h *Handlers) PlanRoadmapWave(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"plan":            plan,
 		"max_age_seconds": max(int64(maxAge/time.Second), 0),
-		"executable":      fresh && len(plan.Selected) > 0,
+		"executable":      fresh && len(plan.Selected) > 0 && len(plan.Selected) <= roadmapWaveMaxItems(),
+
+		"max_items_per_execute": roadmapWaveMaxItems(),
 	}
 	switch {
 	case maxAge < 0:
@@ -228,6 +245,9 @@ func (h *Handlers) PlanRoadmapWave(w http.ResponseWriter, r *http.Request) {
 		resp["not_executable_reason"] = roadmapCodeTooOld + ": " + why
 	case len(plan.Selected) == 0:
 		resp["not_executable_reason"] = roadmapCodeInvalidSelection + ": nothing to start"
+	case len(plan.Selected) > roadmapWaveMaxItems():
+		resp["not_executable_reason"] = fmt.Sprintf("%s: %d items selected; at most %d per execute: plan again with explicit items",
+			roadmapCodeWaveTooLarge, len(plan.Selected), roadmapWaveMaxItems())
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -261,6 +281,7 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	deadline := time.Now().Add(roadmapWaveBudget)
 	var body waveExecuteRequest
 	// Every refusal from here on is audited, including a malformed body.
 	auditRefusal := func(code, msg string) {
@@ -332,6 +353,18 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if n, maxItems := len(plan.Selected), roadmapWaveMaxItems(); n > maxItems {
+		refuse(http.StatusUnprocessableEntity, roadmapCodeWaveTooLarge,
+			fmt.Sprintf("the plan selects %d items; at most %d per execute: plan again with explicit items", n, maxItems),
+			map[string]any{"selected": n, "max_items": maxItems})
+		return
+	}
+	if time.Until(deadline) < time.Duration(len(plan.Selected))*2*roadmapWaveCallTimeout {
+		refuse(http.StatusServiceUnavailable, roadmapCodeWaveBudgetExhausted,
+			"not enough time left to start the whole plan; nothing was started, retry the same plan", nil)
+		return
+	}
+
 	// 5. Start each item through the idempotent DevLoop start.
 	type outcome struct {
 		roadmap.WaveItem
@@ -342,7 +375,7 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 	}
 	// A client that disconnects mid-wave must not abort it part-way: the
 	// loop finishes what it began, each item bounded by its own timeout.
-	wave, waveCancel := context.WithTimeout(context.WithoutCancel(r.Context()), roadmapWaveTimeout)
+	wave, waveCancel := context.WithDeadline(context.WithoutCancel(r.Context()), deadline)
 	defer waveCancel()
 	call := func(fn func(ctx context.Context)) {
 		ctx, cancel := context.WithTimeout(wave, roadmapWaveCallTimeout)
@@ -423,3 +456,7 @@ func (h *Handlers) ExecuteRoadmapWave(w http.ResponseWriter, r *http.Request) {
 		"message":      "Starting a wave never approves a proposal: each DevLoop still waits for its human approval.",
 	})
 }
+
+// ServerWriteTimeout is the http.Server WriteTimeout cmd/api/main.go uses.
+// Handlers doing bounded synchronous work derive their budget from it.
+const ServerWriteTimeout = 30 * time.Second
