@@ -636,3 +636,65 @@ func TestRoadmapWaveBudgetFitsTheWriteTimeout(t *testing.T) {
 		t.Fatalf("cap = %d, MCP description says 4", roadmapWaveMaxItems())
 	}
 }
+
+func waveAuditReasons(e *waveEnv) map[string]bool {
+	reasons := map[string]bool{}
+	for _, a := range e.audit.List(100) {
+		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" {
+			reasons[a.Parameters["reason"]] = true
+		}
+	}
+	return reasons
+}
+
+// A plan larger than the cap is reported non-executable by plan and refused
+// by execute, audited, with nothing started.
+func TestRoadmapWave_TooLargeIsRefusedAndPlanSaysSo(t *testing.T) {
+	e := newWaveEnv(t)
+	resp, exec := e.plan("enterprise-mcp")
+	n := len(exec["items"].([]string))
+	if n < 2 {
+		t.Skipf("fixture selects %d items", n)
+	}
+	prev := roadmapWaveCallTimeout
+	roadmapWaveCallTimeout = 10 * time.Second // cap floors to 1
+	t.Cleanup(func() { roadmapWaveCallTimeout = prev })
+
+	_, planOut := e.post(waveUser, "/api/v1/roadmap/waves/plan", map[string]any{"epic": "enterprise-mcp"})
+	_ = resp
+	if planOut["executable"] != false || planOut["max_items_per_execute"] != float64(roadmapWaveMaxItems()) {
+		t.Fatalf("plan = %v", planOut)
+	}
+	if r, _ := planOut["not_executable_reason"].(string); !strings.HasPrefix(r, "wave_too_large: ") {
+		t.Fatalf("reason = %q", r)
+	}
+	code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", exec)
+	details, _ := out["details"].(map[string]any)
+	if code != http.StatusUnprocessableEntity || out["code"] != "wave_too_large" ||
+		details["selected"] != float64(n) || details["max_items"] != float64(roadmapWaveMaxItems()) {
+		t.Fatalf("execute = %d %v", code, out)
+	}
+	if len(e.tc.started) != 0 || !waveAuditReasons(e)["wave_too_large"] {
+		t.Fatalf("started %v, audit %v", e.tc.started, waveAuditReasons(e))
+	}
+}
+
+// With no preamble reserve and a budget that exactly fits the plan, the time
+// spent before the loop makes execute refuse, audited, starting nothing.
+func TestRoadmapWave_BudgetExhaustedIsRefused(t *testing.T) {
+	e := newWaveEnv(t)
+	_, exec := e.plan("enterprise-mcp")
+	n := len(exec["items"].([]string))
+	pb, pr := roadmapWaveBudget, roadmapWavePreambleReserve
+	roadmapWavePreambleReserve = 0
+	roadmapWaveBudget = time.Duration(n) * 2 * roadmapWaveCallTimeout
+	t.Cleanup(func() { roadmapWaveBudget, roadmapWavePreambleReserve = pb, pr })
+
+	code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", exec)
+	if code != http.StatusServiceUnavailable || out["code"] != "wave_budget_exhausted" {
+		t.Fatalf("execute = %d %v", code, out)
+	}
+	if len(e.tc.started) != 0 || !waveAuditReasons(e)["wave_budget_exhausted"] {
+		t.Fatalf("started %v, audit %v", e.tc.started, waveAuditReasons(e))
+	}
+}

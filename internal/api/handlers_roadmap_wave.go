@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -65,21 +66,39 @@ const (
 // it started keep running. So:
 //
 //	budget = ServerWriteTimeout - roadmapWaveResponseMargin
-//	cap    = budget / (2 * roadmapWaveCallTimeout)   (Describe + Start per item)
+//	cap    = (budget - roadmapWavePreambleReserve) / (2 * roadmapWaveCallTimeout)
+//
+// (Describe + Start per item). The reserve covers the work before the loop
+// (body read, publication load, planning), which also counts against the
+// budget, so a plan the plan endpoint calls executable always fits.
+// ROADMAP_WAVE_CALL_TIMEOUT (a Go duration, 500ms..10s) trades the cap
+// against tolerance for a slow Temporal frontend.
 //
 // and a plan with more items than the cap is refused (wave_too_large) rather
 // than started in part. Each Temporal call gets its own bound so one slow
 // item cannot eat another's. Vars for tests.
-const roadmapWaveResponseMargin = 5 * time.Second
+const roadmapWaveResponseMargin = 3 * time.Second
 
 var (
-	roadmapWaveCallTimeout = 3 * time.Second
+	roadmapWaveCallTimeout = waveCallTimeoutFromEnv()
 	roadmapWaveBudget      = ServerWriteTimeout - roadmapWaveResponseMargin
+
+	roadmapWavePreambleReserve = 3 * time.Second
 )
+
+func waveCallTimeoutFromEnv() time.Duration {
+	d := 3 * time.Second
+	if v := os.Getenv("ROADMAP_WAVE_CALL_TIMEOUT"); v != "" {
+		if p, err := time.ParseDuration(v); err == nil && p >= 500*time.Millisecond && p <= 10*time.Second {
+			d = p
+		}
+	}
+	return d
+}
 
 // roadmapWaveMaxItems is the most items one execute may start.
 func roadmapWaveMaxItems() int {
-	return int(roadmapWaveBudget / (2 * roadmapWaveCallTimeout))
+	return int((roadmapWaveBudget - roadmapWavePreambleReserve) / (2 * roadmapWaveCallTimeout))
 }
 
 // Per-item execution outcomes — aliases of the shared devLoopOutcome*
