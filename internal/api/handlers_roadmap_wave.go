@@ -23,7 +23,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -80,21 +79,25 @@ const (
 const roadmapWaveResponseMargin = 3 * time.Second
 
 var (
-	roadmapWaveCallTimeout = waveCallTimeoutFromEnv()
+	roadmapWaveCallTimeout = DefaultRoadmapWaveCallTimeout
 	roadmapWaveBudget      = ServerWriteTimeout - roadmapWaveResponseMargin
 
 	roadmapWavePreambleReserve = 3 * time.Second
 )
 
-func waveCallTimeoutFromEnv() time.Duration {
-	d := 3 * time.Second
-	if v := os.Getenv("ROADMAP_WAVE_CALL_TIMEOUT"); v != "" {
-		if p, err := time.ParseDuration(v); err == nil && p >= 500*time.Millisecond && p <= 10*time.Second {
-			d = p
-		}
-	}
-	return d
-}
+// DefaultRoadmapWaveCallTimeout is the per-Temporal-call bound when
+// ROADMAP_WAVE_CALL_TIMEOUT is unset.
+const DefaultRoadmapWaveCallTimeout = 3 * time.Second
+
+// Bounds accepted for ROADMAP_WAVE_CALL_TIMEOUT.
+const (
+	MinRoadmapWaveCallTimeout = 500 * time.Millisecond
+	MaxRoadmapWaveCallTimeout = 10 * time.Second
+)
+
+// SetRoadmapWaveCallTimeout sets the per-call bound at startup. The caller
+// (cmd/api) validates the range.
+func SetRoadmapWaveCallTimeout(d time.Duration) { roadmapWaveCallTimeout = d }
 
 // roadmapWaveMaxItems is the most items one execute may start.
 func roadmapWaveMaxItems() int {

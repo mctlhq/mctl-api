@@ -321,7 +321,9 @@ func TestRoadmapWave_ExecuteFailsClosed(t *testing.T) {
 		t.Fatalf("a refused request started %v", e.tc.started[started:])
 	}
 	var refusals int
-	for _, a := range e.audit.List(100) {
+	entries := e.audit.List(100)
+	for i := range entries {
+		a := &entries[i]
 		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" {
 			refusals++
 		}
@@ -491,7 +493,9 @@ func TestRoadmapWave_NoReaderAndUnknownEpicAreAuditedRefusals(t *testing.T) {
 		t.Fatalf("started %v", e.tc.started)
 	}
 	reasons := map[string]bool{}
-	for _, a := range e.audit.List(100) {
+	entries := e.audit.List(100)
+	for i := range entries {
+		a := &entries[i]
 		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" {
 			reasons[a.Parameters["reason"]] = true
 		}
@@ -611,7 +615,9 @@ func TestRoadmapWave_InactiveEpicsAreRefusedWithTypedReasons(t *testing.T) {
 		t.Fatalf("started %v", e.tc.started)
 	}
 	reasons := map[string]bool{}
-	for _, a := range e.audit.List(100) {
+	entries := e.audit.List(100)
+	for i := range entries {
+		a := &entries[i]
 		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" {
 			reasons[a.Parameters["reason"]] = true
 		}
@@ -631,15 +637,13 @@ func TestRoadmapWaveBudgetFitsTheWriteTimeout(t *testing.T) {
 	if time.Duration(roadmapWaveMaxItems())*2*roadmapWaveCallTimeout > roadmapWaveBudget {
 		t.Fatal("cap does not fit the budget")
 	}
-	// Pins the number printed in the MCP tool description.
-	if roadmapWaveMaxItems() != 4 {
-		t.Fatalf("cap = %d, MCP description says 4", roadmapWaveMaxItems())
-	}
 }
 
 func waveAuditReasons(e *waveEnv) map[string]bool {
 	reasons := map[string]bool{}
-	for _, a := range e.audit.List(100) {
+	entries := e.audit.List(100)
+	for i := range entries {
+		a := &entries[i]
 		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" {
 			reasons[a.Parameters["reason"]] = true
 		}

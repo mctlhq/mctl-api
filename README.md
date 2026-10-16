@@ -165,6 +165,7 @@ docker run -p 8080:8080 mctl-api
 | `ROADMAP_STATE_TOKEN` | Credential for a private publication repository; the default repository is public. | — | No |
 | `ROADMAP_STATE_DISABLED` | Kill switch: any value except `false`/`f`/`0`/`no`/`off` leaves the roadmap reader off (routes answer 503). | unset | No |
 | `ROADMAP_WAVE_MAX_AGE` | Maximum age of the latest publication's observation when `POST /api/v1/roadmap/waves/execute` starts a wave (Go duration). An invalid value turns wave execution off. | `30m` | No |
+| `ROADMAP_WAVE_CALL_TIMEOUT` | Per-Temporal-call bound during wave execution (Go duration, `500ms` to `10s`); it sets `max_items_per_execute`. An invalid value turns wave execution off. | `3s` | No |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated Traefik CIDRs/IPs trusted for `X-Forwarded-For` on audit events | — | No |
 | `ALLOW_INSECURE_DB` | Permit `sslmode=disable` (tests/local only) | — | No |
 | `BACKSTAGE_GITHUB_APP_CONNECT_TOKEN` | Backstage service token, scoped to the `github-app-connect` plugin (repos list/sync/install-url) | — | No |
