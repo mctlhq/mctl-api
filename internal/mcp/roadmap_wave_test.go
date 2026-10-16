@@ -96,6 +96,8 @@ func TestStartEpicWaveExplainsTypedRefusals(t *testing.T) {
 		"wave_execution_disabled": "do not retry",
 		"epic_completed":          "not active",
 		"epic_paused":             "not active",
+		"wave_too_large":          "max_items_per_execute",
+		"wave_budget_exhausted":   "Retry the same plan",
 	} {
 		ts, _, _ := waveBackend(t, http.StatusConflict, `{"code":"`+code+`","error":"x"}`)
 		r := callRoadmapTool(t, (*Server).toolStartEpicWave, ts.URL, map[string]any{

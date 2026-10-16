@@ -39,9 +39,9 @@ import (
 const shepherdQueryTimeout = 3 * time.Second
 
 // devLoopDescribeTimeout bounds each pre-start describe call startDevLoop
-// makes, mirroring roadmapWaveCallTimeout (handlers_roadmap_wave.go) so a
-// hung Temporal frontend fails fast instead of eating the request's full
-// API-wide timeout.
+// makes, so a hung Temporal frontend fails fast instead of eating the
+// request's full API-wide timeout. It is independent of the (shorter)
+// roadmapWaveCallTimeout, which is derived from ServerWriteTimeout.
 const devLoopDescribeTimeout = 10 * time.Second
 
 // devLoopOutcome* is the shared vocabulary both the single-issue start route

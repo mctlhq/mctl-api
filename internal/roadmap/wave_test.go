@@ -235,3 +235,35 @@ func TestWavePlanRefusesAnEpicThatIsNotActive(t *testing.T) {
 		t.Fatalf("unknown lifecycle reason = %q", r)
 	}
 }
+
+func TestWavePlanExplicitItemsConsultWorkflowIDOnce(t *testing.T) {
+	pub := livePublication(t)
+	base, err := pub.PlanWave(WaveRequest{Epic: "enterprise-mcp", RequiredOnly: true}, testWorkflowID, liveNow)
+	if err != nil || len(base.Selected) == 0 {
+		t.Fatalf("base plan: %v %v", base, err)
+	}
+	ids := make([]string, 0, len(base.Selected))
+	for _, it := range base.Selected {
+		ids = append(ids, it.ID)
+	}
+	calls := map[string]int{}
+	wf := func(url string) (string, error) {
+		calls[url]++
+		if calls[url] > 1 {
+			return "", fmt.Errorf("second lookup of %s", url)
+		}
+		return testWorkflowID(url)
+	}
+	plan, err := pub.PlanWave(WaveRequest{Epic: "enterprise-mcp", RequiredOnly: true, Items: ids}, wf, liveNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for url, n := range calls {
+		if n != 1 {
+			t.Fatalf("%s looked up %d times", url, n)
+		}
+	}
+	if plan.PlanHash != base.PlanHash || len(plan.Selected) != len(base.Selected) {
+		t.Fatalf("plan differs: %s vs %s", plan.PlanHash, base.PlanHash)
+	}
+}

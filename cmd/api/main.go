@@ -437,10 +437,23 @@ func main() {
 	// ROADMAP_WAVE_MAX_AGE (mctl-api#334): how old the latest publication may
 	// be when a wave executes. Invalid turns wave execution off rather than
 	// running it against a bound nobody meant.
+	roadmapWaveDisabledReason := ""
 	roadmapWaveMaxAge, err := parseWaveMaxAge(os.Getenv("ROADMAP_WAVE_MAX_AGE"))
 	if err != nil {
+		roadmapWaveDisabledReason = "ROADMAP_WAVE_MAX_AGE is invalid" //nolint:gosec // env var name, not a credential
 		slog.Error("invalid ROADMAP_WAVE_MAX_AGE; roadmap wave execution is off", "error", err)
 		roadmapWaveMaxAge = -1
+	}
+	// ROADMAP_WAVE_CALL_TIMEOUT: per-Temporal-call bound, which sets the
+	// wave size cap. Invalid turns wave execution off.
+	if ct, err := parseWaveCallTimeout(os.Getenv("ROADMAP_WAVE_CALL_TIMEOUT")); err != nil {
+		slog.Error("invalid ROADMAP_WAVE_CALL_TIMEOUT; roadmap wave execution is off", "error", err)
+		roadmapWaveMaxAge = -1
+		if roadmapWaveDisabledReason == "" {
+			roadmapWaveDisabledReason = "ROADMAP_WAVE_CALL_TIMEOUT is invalid" //nolint:gosec // env var name, not a credential
+		}
+	} else {
+		mctlapi.SetRoadmapWaveCallTimeout(ct)
 	}
 
 	// Model usage / cost ledger (mctl-api#266, ADR-012). Optional — enabled
@@ -928,6 +941,7 @@ func main() {
 		Lifecycle:                      lifecycleStore,
 		Roadmap:                        roadmapReader,
 		RoadmapWaveMaxAge:              roadmapWaveMaxAge,
+		RoadmapWaveDisabledReason:      roadmapWaveDisabledReason,
 		Usage:                          usageStore,
 		Commerce:                       commerceStore,
 		CommerceAcceptDisabled:         cfg.CommerceAcceptDisabled,
@@ -971,7 +985,7 @@ func main() {
 		Addr:         ":" + cfg.Port,
 		Handler:      router,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: mctlapi.ServerWriteTimeout,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -2081,6 +2095,24 @@ func parseLinkTTL(v string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("SURFACE_LINK_TTL must be positive, got %s", v)
+	}
+	return d, nil
+}
+
+// parseWaveCallTimeout reads ROADMAP_WAVE_CALL_TIMEOUT: empty means the
+// default, any other value must be a Go duration within the allowed range.
+func parseWaveCallTimeout(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return mctlapi.DefaultRoadmapWaveCallTimeout, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, err
+	}
+	if d < mctlapi.MinRoadmapWaveCallTimeout || d > mctlapi.MaxRoadmapWaveCallTimeout {
+		return 0, fmt.Errorf("ROADMAP_WAVE_CALL_TIMEOUT must be between %s and %s, got %s",
+			mctlapi.MinRoadmapWaveCallTimeout, mctlapi.MaxRoadmapWaveCallTimeout, v)
 	}
 	return d, nil
 }
