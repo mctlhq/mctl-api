@@ -45,6 +45,14 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if err := refresh.Insert("deletion-test-token", "test-client", refreshstore.Session{PrincipalID: p.ID}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	for _, holder := range []string{p.ID, "github:delete-customer", "github:other-customer"} {
+		if _, err := s.pool.Exec(ctx, `INSERT INTO surface_identity_challenges(id,code_hash,principal,surface,created_at,expires_at) VALUES($1,$1,$1,'telegram',now(),now()+interval '1 hour')`, holder); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.pool.Exec(ctx, `INSERT INTO surface_identity_links(id,surface,external_id,principal,challenge_id,created_at) VALUES($1,'telegram',$1,$1,$1,now())`, holder); err != nil {
+			t.Fatal(err)
+		}
+	}
 	d, err := s.PrepareCustomerDeletion(ctx, "delete-test", p.ID, old.Issuer, "admin-approval")
 	if err != nil {
 		t.Fatal(err)
@@ -102,6 +110,12 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	var remaining int
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM oauth_refresh_tokens WHERE principal_id=$1`, p.ID).Scan(&remaining); err != nil || remaining != 0 {
 		t.Fatalf("old refresh sessions: %d %v", remaining, err)
+	}
+	for _, table := range []string{"surface_identity_challenges", "surface_identity_links"} {
+		var total, unrelated int
+		if err := s.pool.QueryRow(ctx, "SELECT count(*),count(*) FILTER (WHERE principal='github:other-customer') FROM "+table).Scan(&total, &unrelated); err != nil || total != 1 || unrelated != 1 {
+			t.Fatalf("%s cleanup isolation: total=%d unrelated=%d err=%v", table, total, unrelated, err)
+		}
 	}
 	ids, err := s.Identities(ctx, p.ID)
 	if err != nil || len(ids) != 0 {

@@ -210,8 +210,8 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 		if err := lockPrincipalTx(ctx, tx, pid); err != nil {
 			return err
 		}
-		var status string
-		if err := tx.QueryRow(ctx, `SELECT status FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2 FOR UPDATE`, tenant, pid).Scan(&status); err != nil {
+		var status, login string
+		if err := tx.QueryRow(ctx, `SELECT status,login FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2 FOR UPDATE`, tenant, pid).Scan(&status, &login); err != nil {
 			return err
 		}
 		if status == "complete" {
@@ -220,10 +220,15 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 		if status != "deleting" {
 			return ErrInvalid
 		}
+		// Older surface links were keyed by the verified GitHub login rather
+		// than the immutable principal. Remove both forms before name reuse.
+		for _, table := range []string{"surface_identity_links", "surface_identity_challenges"} {
+			if _, err := tx.Exec(ctx, "DELETE FROM "+table+" WHERE principal=$1 OR lower(principal)=$2", pid, "github:"+strings.ToLower(login)); err != nil {
+				return err
+			}
+		}
 		for _, query := range []string{
 			`DELETE FROM oauth_refresh_tokens WHERE principal_id=$1`,
-			`DELETE FROM surface_identity_links WHERE principal=$1`,
-			`DELETE FROM surface_identity_challenges WHERE principal=$1`,
 			`DELETE FROM external_identities WHERE principal_id=$1`,
 			`DELETE FROM principals WHERE id=$1 AND status='disabled' AND kind='human'`,
 		} {
