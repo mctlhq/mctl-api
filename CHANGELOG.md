@@ -1,5 +1,31 @@
 # Changelog
 
+## [4.92.0](https://github.com/mctlhq/mctl-api/compare/4.91.0...4.92.0) (2026-10-17)
+
+
+### Features
+
+* **api:** admin endpoint to disable a human principal ([a977684](https://github.com/mctlhq/mctl-api/commit/a977684bc918436f0ed8faadf66f9959ca46d7b1))
+* **api:** admin endpoint to disable a human principal ([cadec85](https://github.com/mctlhq/mctl-api/commit/cadec85d19ad5af3dc7cbb8252805dc6d585bc8f))
+* **oauth:** offer customers a GitHub sign-in entry ([3676c09](https://github.com/mctlhq/mctl-api/commit/3676c091ff6af5d70217aec4ac3ed078ff795642))
+* **oauth:** offer customers a GitHub sign-in entry ([6a533d3](https://github.com/mctlhq/mctl-api/commit/6a533d372831b405177c744f62594a5022677ec3))
+* **unified-identity:** resolve surface actors and respondents by prn ([c9ed04c](https://github.com/mctlhq/mctl-api/commit/c9ed04c8dfabe69dface6bda1e5a3337d35074ab))
+* **unified-identity:** resolve surface actors and respondents by prn ([c72c452](https://github.com/mctlhq/mctl-api/commit/c72c45208a936f785141b546b364984b33cdcc36))
+* **zitadelhook:** allowlist new customers accounts by GitHub id ([df80207](https://github.com/mctlhq/mctl-api/commit/df802072de872218b9c49bdc3fd70ec28fc8db11))
+* **zitadelhook:** allowlist new customers accounts by GitHub id ([02deaf6](https://github.com/mctlhq/mctl-api/commit/02deaf6ac9852bc7a9efe4dd73bca105002ec8ed))
+
+
+### Bug Fixes
+
+* **api:** address [#649](https://github.com/mctlhq/mctl-api/issues/649) review on admin principal disable ([9e16900](https://github.com/mctlhq/mctl-api/commit/9e16900cd5714ef66e0a2bf761fb9b5775c5a2d6))
+* **oauth:** chooser hint covers returning customers ([ae4424b](https://github.com/mctlhq/mctl-api/commit/ae4424bd80711b2039744f06fbf51cd6a2958b17))
+* **oauth:** count customer sign-ins, scope the IdP id boot check ([d9d0f53](https://github.com/mctlhq/mctl-api/commit/d9d0f53305816501620019ace65208b54fb7ab06))
+* **oauth:** label customer sign-ins from the token's organization ([16267f3](https://github.com/mctlhq/mctl-api/commit/16267f3132971d411f6246be527af4dfc4d2b406))
+* **oauth:** label the account entry "Sign in with MCTL account" ([6fd69e1](https://github.com/mctlhq/mctl-api/commit/6fd69e14a21948bd638ea58a3c0c0f0ece4c9ad9))
+* **oauth:** match staff hint wording to the portal chooser ([b33f24d](https://github.com/mctlhq/mctl-api/commit/b33f24d3b1b4a5b4ec2d9d9567b281e3baeae8e2))
+* **oauth:** point staff and partners to the account button ([2e66225](https://github.com/mctlhq/mctl-api/commit/2e662250dc00ddcfa7539b3572979eaaf9b7c436))
+* **unified-identity:** document 503 for an unresolvable link owner ([cb4f80a](https://github.com/mctlhq/mctl-api/commit/cb4f80a64a6be5a38f463dd953d21629dd5885c0))
+
 ## [4.91.0](https://github.com/mctlhq/mctl-api/compare/4.90.0...4.91.0) (2026-10-17)
 
 
