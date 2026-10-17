@@ -89,3 +89,43 @@ func TestCustomersOrgConfigRefusals(t *testing.T) {
 		t.Fatalf("matching hook organization: validate() = %v", err)
 	}
 }
+
+// The OAuth customer GitHub entry (mctl-web#158) takes the identity hook's
+// IdP id only alongside a confirmed customers organization; anything less
+// offers no customer entry.
+func TestCustomersGitHubIdPWiring(t *testing.T) {
+	oauth := auth.NewOAuthServer("https://api.example", "", "", []byte("k"), nil, nil)
+	withHook := func(org, idp string) config {
+		cfg := zitadelUpstreamConfig("zitadel")
+		cfg.OIDCProvidersRaw = testCustomersProviders
+		cfg.ZitadelHook.CustomersOrgID, cfg.ZitadelHook.GitHubIdPID = org, idp
+		return cfg
+	}
+	cfg := withHook("395272528420931285", "395272528420931999")
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate() = %v", err)
+	}
+	if o := oauthZitadelOptions(cfg, &principals.Store{}, oauth); o == nil || o.CustomersGitHubIdPID != "395272528420931999" {
+		t.Fatalf("OAuth upstream options = %+v, want the GitHub IdP", o)
+	}
+	noEntry := zitadelUpstreamConfig("zitadel")
+	noEntry.ZitadelHook.GitHubIdPID = "395272528420931999"
+	for name, c := range map[string]config{
+		"no IdP id":          withHook("395272528420931285", ""),
+		"hook org unset":     withHook("", "395272528420931999"),
+		"no customers entry": noEntry,
+	} {
+		if o := oauthZitadelOptions(c, &principals.Store{}, oauth); o == nil || o.CustomersGitHubIdPID != "" {
+			t.Errorf("%s: OAuth upstream options = %+v, want no GitHub IdP", name, o)
+		}
+	}
+	// A malformed id would reach a scope string: it refuses the boot, and
+	// is not offered should validation ever be skipped.
+	bad := withHook("395272528420931285", "1 urn:zitadel:iam:org:project:roles")
+	if err := bad.validate(); err == nil || !strings.Contains(err.Error(), "ZITADEL_HOOK_GITHUB_IDP_ID") {
+		t.Fatalf("malformed IdP id: validate() = %v, want a refusal naming ZITADEL_HOOK_GITHUB_IDP_ID", err)
+	}
+	if o := oauthZitadelOptions(bad, &principals.Store{}, oauth); o == nil || o.CustomersGitHubIdPID != "" {
+		t.Fatalf("malformed IdP id: OAuth upstream options = %+v, want no GitHub IdP", o)
+	}
+}

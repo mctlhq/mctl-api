@@ -73,6 +73,11 @@ func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
 // zitadelOrgIDRE is the shape of a ZITADEL resource id.
 var zitadelOrgIDRE = regexp.MustCompile(`^[0-9]{1,32}$`)
 
+// ValidZitadelID reports whether s has the shape of a ZITADEL resource id
+// (an organization, an IdP). Anything else must never reach a scope
+// string, where a space would add a scope of its own.
+func ValidZitadelID(s string) bool { return zitadelOrgIDRE.MatchString(s) }
+
 // ParseOIDCProviders decodes and validates the MCTL_OIDC_PROVIDERS value.
 // Unset or blank means no explicitly configured providers -- only the legacy
 // Dex shim applies. A malformed value, an entry with no name/issuer/

@@ -1681,6 +1681,12 @@ func (c config) validate() error {
 	if _, err := c.customersProvider(); err != nil {
 		return err
 	}
+	// The customer sign-in entry puts the GitHub IdP id into a ZITADEL
+	// scope (mctl-web#158); a malformed one refuses boot like a malformed
+	// customers_org_id does.
+	if id := c.ZitadelHook.GitHubIdPID; id != "" && !auth.ValidZitadelID(id) {
+		return fmt.Errorf("ZITADEL_HOOK_GITHUB_IDP_ID %q is not a ZITADEL resource id", id)
+	}
 	if _, err := auth.ParseGitHubActionsOIDC(c.GitHubActionsOIDCRaw); err != nil {
 		return err
 	}
@@ -1858,7 +1864,7 @@ func oauthZitadelOptions(cfg config, store *principals.Store, oauth *auth.OAuthS
 	opts := &mctlapi.OAuthZitadelOptions{
 		ProviderName: entry.Name, Issuer: entry.Issuer,
 		ClientID: cfg.OAuthZitadelClientID, ClientSecret: cfg.OAuthZitadelClientSecret,
-		CustomersOrgID: entry.CustomersOrgID,
+		CustomersOrgID: entry.CustomersOrgID, CustomersGitHubIdPID: cfg.customersGitHubIdPID(entry),
 	}
 	// Assigned only when non-nil: a nil *Store in the interface would not
 	// compare equal to nil and would be called.
@@ -1867,7 +1873,8 @@ func oauthZitadelOptions(cfg config, store *principals.Store, oauth *auth.OAuthS
 	} else {
 		slog.Error("OAuth ZITADEL upstream has no principal store; ZITADEL sign-ins will answer 503")
 	}
-	slog.Info("OAuth ZITADEL upstream enabled", "provider", entry.Name, "issuer", entry.Issuer)
+	slog.Info("OAuth ZITADEL upstream enabled", "provider", entry.Name, "issuer", entry.Issuer,
+		"customer_github_signin", opts.CustomersGitHubIdPID != "")
 	return opts
 }
 

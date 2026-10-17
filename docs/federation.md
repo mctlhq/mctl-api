@@ -313,6 +313,10 @@ the ZITADEL entry:
   route). It never falls back to the ZITADEL-only principal.
 - **No groups.** A customer's groups claim is dropped even with
   `grant_groups`; access comes from GitOps entries naming the principal.
+- **An explicit entry.** mctl-api's OAuth chooser offers customers
+  "Sign in with GitHub" once `ZITADEL_HOOK_GITHUB_IDP_ID` is also set; it
+  sends ZITADEL the customers organization and GitHub IdP scopes
+  (`docs/principals.md`, "Customer entry").
 - **Principal mode only.** The OAuth sign-in refuses a customer (403) unless
   `TENANT_AUTHZ_MODE=principal`: outside it a token is authorized by a GitHub
   login and its groups, which a customer has none of.

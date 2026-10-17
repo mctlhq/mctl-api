@@ -168,7 +168,40 @@ GitHub or not at all.
 `OAUTH_UPSTREAM` decides where `GET /oauth/authorize` (every MCP connector)
 signs people in: `github` (the default, unchanged), `zitadel`, or `both`
 (a page offering ZITADEL first and GitHub as legacy; the choice comes back
-as the same authorization plus `upstream=`, a parameter only `both` reads).
+as the same authorization plus `upstream=`).
+
+### Customer entry: "Sign in with GitHub" (mctl-web#158)
+
+A customer (ZITADEL organization `customers`, GitHub its only IdP) finds no
+GitHub button on the instance login page. So when the ZITADEL entry has
+`customers_org_id` and `ZITADEL_HOOK_GITHUB_IDP_ID` names that
+organization's GitHub IdP (the identity hook's Secret carries both, and
+`ZITADEL_HOOK_CUSTOMERS_ORG_ID` must equal `customers_org_id`), the chooser
+gets a customer entry, `upstream=customer`, labelled "Sign in with GitHub":
+
+| `OAUTH_UPSTREAM` | Chooser |
+|---|---|
+| `zitadel` | Sign in with GitHub (customers), Sign in with MCTL (staff, ZITADEL) |
+| `both` | the same two, then GitHub as legacy |
+| `github` | no chooser, no customer entry |
+
+The customer entry starts the same ZITADEL authorization with two more
+scopes, `urn:zitadel:iam:org:id:<customers_org_id>` and
+`urn:zitadel:iam:org:idp:id:<github idp id>`, exactly as mctl.ai does
+(mctl-web `cloudflare-worker/zitadel.js`): ZITADEL signs the person in to
+`customers` and goes straight to GitHub. The staff entry and the code
+exchange are unchanged. The choice is not stored with the pending
+authorization: whether the person signs in as a customer is decided in the
+callback from the verified ID token's organization (see "Self-service
+customers" in `docs/federation.md`), so choosing the entry grants nothing.
+
+It fails closed. Without both ids, or with the hook's organization unset or
+different, no customer entry is offered and `zitadel` goes straight to
+ZITADEL as before. An `upstream=customer` that is not offered answers 400
+rather than becoming a staff sign-in. A `ZITADEL_HOOK_GITHUB_IDP_ID` that is
+not a ZITADEL resource id (digits) refuses the boot, since it is written
+into a scope string. The startup log line `OAuth ZITADEL upstream enabled`
+says `customer_github_signin=true` when the entry is offered.
 
 The ZITADEL leg uses its own confidential client
 (`OAUTH_ZITADEL_CLIENT_ID` / `OAUTH_ZITADEL_CLIENT_SECRET`, not the link
