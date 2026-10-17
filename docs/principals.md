@@ -534,7 +534,13 @@ principal, and each session holds the other's links (#646, #663):
 Either session lists both holders' links and may revoke them. Who the
 session holds links as is never guessed: if the principal store cannot
 answer (or, for a GitHub session, authentication could not resolve the
-principal), list and revoke are 503, not a shorter list or a 404. The list
+principal), the list is 503, not a shorter list, and a revoke of a link
+none of the known holders holds is 503, not 404. A link the session's own
+holder form holds stays revocable meanwhile, and an admin listing a named
+holder, or revoking, needs no holder set at all. The derived
+`github:<login>` matches a link's holder exactly (the store compares logins
+case-insensitively); both are GitHub's spelling of the login, so they can
+differ only across a case-only rename no sign-in has recorded yet. The list
 response's `principal` is the holder form asked for, the session's own one
 by default, `holders` every holder whose links are listed, and each link
 names its own holder in `principal`. A new link for an identity already
@@ -545,7 +551,9 @@ The audit keys naming the holder mean the same in every
 `surface_identity.*` event: `principal` is the holder (`github:<login>` or
 `prn_…`) and `holder_subject` the recorded `oidc:` name of a `prn_` holder.
 `linked` and `revoked` also keep `subject`, which has always meant the holder
-there.
+there. `challenge_created` carried the name as `subject` only in 4.95.0
+(#660); it is `holder_subject` from the release after it, with no
+transition period: the key shipped one day before the change.
 
 - The mirror writes a `prn_` link's telegram identity for that principal
   outright. A `prn_` that does not exist or is not human fails the redeem,

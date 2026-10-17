@@ -3384,7 +3384,7 @@ paths:
                     description: Newest first. Each link names its own holder in `principal`.
                     items: {type: object}
         '403': {description: 'Not a human acting directly, or not an admin for another principal'}
-        '503': {description: 'Which holders are the caller''s could not be read: the principal store did not answer or is not configured, or the caller''s principal could not be resolved (surface_identity_unavailable)'}
+        '503': {description: 'Which holders are the caller''s could not be read (not asked for an admin naming a holder): the principal store did not answer or is not configured, or the caller''s principal could not be resolved (surface_identity_unavailable)'}
   /api/v1/surface-identities/{id}/revoke:
     post:
       summary: Revoke a surface identity link
@@ -3396,7 +3396,7 @@ paths:
         '200': {description: Revoked (or already revoked)}
         '403': {description: Not a human acting directly}
         '404': {description: No such link visible to the caller}
-        '503': {description: 'Which holders are the caller''s could not be read (surface_identity_unavailable)'}
+        '503': {description: 'The link is not held by any holder the caller is known to be, and the rest of its holders could not be read (surface_identity_unavailable)'}
   /api/v1/roadmap/epics:
     get:
       summary: List the epics in the roadmap publication

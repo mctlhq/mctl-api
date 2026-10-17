@@ -518,6 +518,10 @@ func TestSurfaceIdentity_ZitadelSessionReachesTheHumansGitHubLinks(t *testing.T)
 	if code, body := e.do("hank-zitadel", "POST", "/api/v1/surface-identities/"+ghLink+"/revoke", nil); code != http.StatusServiceUnavailable || body["code"] != sidCodeUnavailable {
 		t.Errorf("revoke with the store down = %d %v, want 503 %s", code, body, sidCodeUnavailable)
 	}
+	// A link the session's own prn_ holds stays revocable meanwhile.
+	if code, body := e.do("hank-zitadel", "POST", "/api/v1/surface-identities/"+prnLink+"/revoke", nil); code != http.StatusOK {
+		t.Errorf("revoking the prn_ link with the store down = %d %v, want 200", code, body)
+	}
 	ids.err = nil
 
 	code, body := e.do("hank-zitadel", "POST", "/api/v1/surface-identities/"+ghLink+"/revoke", nil)
@@ -550,10 +554,13 @@ func TestSurfaceIdentity_ZitadelSessionWithoutIdentityStore(t *testing.T) {
 // revoke: the prn_ links it may hold are unknown, not absent.
 func TestSurfaceIdentity_UnresolvedPrincipalIs503(t *testing.T) {
 	e, pr := newZedEnv(t)
+	aliceLink := e.link("alice", "telegram", "4242")
+	bobLink := e.link("bob", "telegram", "5555")
 	pr.err = errors.New("dial tcp: connection refused")
 	for name, u := range map[string]*auth.User{
 		"zed-down":   auth.NewFederatedUser("zitadel", "https://auth.mctl.ai", "330001", "zed@example.com", auth.KindHuman),
 		"alice-down": auth.NewGitHubUser("alice", nil),
+		"root-down":  auth.NewGitHubUser("root", []string{"admins"}),
 	} {
 		if err := auth.AttachPrincipal(context.Background(), pr, u); err == nil || !u.PrincipalUnresolved() {
 			t.Fatalf("%s: err=%v unresolved=%v, want a degraded resolution", name, err, u.PrincipalUnresolved())
@@ -567,6 +574,8 @@ func TestSurfaceIdentity_UnresolvedPrincipalIs503(t *testing.T) {
 		{"zed-down", "POST", "/api/v1/surface-identities/sid_x/revoke"},
 		{"alice-down", "GET", "/api/v1/surface-identities"},
 		{"alice-down", "POST", "/api/v1/surface-identities/sid_x/revoke"},
+		{"alice-down", "POST", "/api/v1/surface-identities/" + bobLink + "/revoke"},
+		{"root-down", "GET", "/api/v1/surface-identities"},
 	} {
 		var body any
 		if strings.HasSuffix(tc.path, "/challenges") {
@@ -577,6 +586,20 @@ func TestSurfaceIdentity_UnresolvedPrincipalIs503(t *testing.T) {
 		}
 	}
 	e.challenge("alice-down", "telegram")
+	// A link held by the holder the session is known to be stays revocable.
+	if code, body := e.do("alice-down", "POST", "/api/v1/surface-identities/"+aliceLink+"/revoke", nil); code != http.StatusOK {
+		t.Errorf("alice-down revoking her github: link = %d %v, want 200", code, body)
+	}
+	// An admin naming a holder, or revoking, needs no holder set of its own.
+	if !e.users["root-down"].IsAdmin() {
+		t.Fatal("root-down is not an admin")
+	}
+	if code, body := e.do("root-down", "GET", "/api/v1/surface-identities?principal=github:bob", nil); code != http.StatusOK || len(body["links"].([]any)) != 1 {
+		t.Errorf("admin listing github:bob = %d %v, want bob's link", code, body)
+	}
+	if code, body := e.do("root-down", "POST", "/api/v1/surface-identities/"+bobLink+"/revoke", nil); code != http.StatusOK {
+		t.Errorf("admin revoking bob's link = %d %v, want 200", code, body)
+	}
 }
 
 // The one refusal of a well-formed human at challenge time, a name the link

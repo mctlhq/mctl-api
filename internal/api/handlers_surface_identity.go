@@ -324,7 +324,10 @@ func (h *Handlers) relayPrincipalSubject(w http.ResponseWriter, r *http.Request,
 	// The subject is built as a human. Upstream, humanPrincipal links only a
 	// human and the redeem's mirrorLink refuses a non-human prn_, and a
 	// principal's kind never changes; checked here as well because this is
-	// where the link turns into a human subject.
+	// where the link turns into a human subject. A github: link needs no
+	// such check: its principal is resolved from a GitHub identity, which
+	// the resolver only ever provisions as a human. The check shares
+	// CheckPrincipal's cache entry, so it is normally no second read.
 	if code, err := checkHumanPrincipal(r.Context(), h.opts.Principals, link.Principal); err != nil {
 		if code != "" {
 			return refuse(code, "the principal linked to this "+surface+" identity is not an active human")
@@ -423,6 +426,16 @@ func refuseNonHuman(w http.ResponseWriter, err error, msg string) {
 //     or impossible read is an error, never "no github: links". A GitHub
 //     identity whose login the store no longer knows (display "": the
 //     login moved to another GitHub account) holds nothing under it.
+//
+// On error the holders returned are the ones known (primary, at least), and
+// the set is incomplete: a caller may act on a link one of them holds, but
+// must never read "not among them" as "not the caller's".
+//
+// The derived github:<display> holder matches a link's holder exactly, while
+// the principal store compares logins case-insensitively. Both come from
+// GitHub's own spelling of the login (the session's on the link, the last
+// provisioning's in display), so they differ only across a case-only rename
+// that no sign-in has yet recorded.
 func (h *Handlers) ownHolders(ctx context.Context, u *auth.User, primary string) ([]string, error) {
 	owners := []string{primary}
 	if strings.HasPrefix(primary, "github:") {
@@ -431,18 +444,19 @@ func (h *Handlers) ownHolders(ctx context.Context, u *auth.User, primary string)
 		case auth.ValidPrincipalID(pid):
 			owners = append(owners, pid)
 		case u.PrincipalUnresolved():
-			return nil, errHolderUnresolved
+			return owners, errHolderUnresolved
 		}
 		return owners, nil
 	}
 	if h.identityLink == nil || h.identityLink.opts.Store == nil {
-		return nil, errors.New("principal store not configured; cannot read the principal's GitHub identities")
+		return owners, errors.New("principal store not configured; cannot read the principal's GitHub identities")
 	}
 	ids, err := h.identityLink.opts.Store.Identities(ctx, primary)
 	if err != nil {
-		return nil, err
+		return owners, err
 	}
-	for _, x := range ids {
+	for i := range ids {
+		x := &ids[i]
 		if x.Provider != auth.ProviderGitHub || x.RevokedAt != nil || x.Display == "" {
 			continue
 		}
@@ -672,20 +686,27 @@ func (h *Handlers) ListSurfaceIdentities(w http.ResponseWriter, r *http.Request)
 		refuseNonHuman(w, err, "only a human acting directly has links")
 		return
 	}
-	owners, err := h.ownHolders(r.Context(), user, own)
-	if err != nil {
-		slog.Error("surface identity list: the caller's holders could not be read", "principal", own, "error", err)
-		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not determine which links are the caller's", nil)
-		return
-	}
 	principal := r.URL.Query().Get("principal")
 	holders := []string{principal}
-	switch {
-	case principal == "":
-		principal, holders = own, owners
-	case !slices.Contains(owners, principal) && !user.IsAdmin():
-		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only an admin may list another principal's links", nil)
-		return
+	// An admin naming a holder may list anyone's: the caller's own holder
+	// set is not needed, so a principal store that cannot answer does not
+	// stand in the way.
+	if principal == "" || !user.IsAdmin() {
+		owners, err := h.ownHolders(r.Context(), user, own)
+		if err != nil {
+			// An incomplete set is never listed as if it were whole, nor
+			// read as "not the caller's" for a named holder.
+			slog.Error("surface identity list: the caller's holders could not be read", "principal", own, "error", err)
+			writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not determine which links are the caller's", nil)
+			return
+		}
+		switch {
+		case principal == "":
+			principal, holders = own, owners
+		case !slices.Contains(owners, principal):
+			writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only an admin may list another principal's links", nil)
+			return
+		}
 	}
 	links := []surfaceid.Link{}
 	for _, holder := range holders {
@@ -720,14 +741,21 @@ func (h *Handlers) RevokeSurfaceIdentity(w http.ResponseWriter, r *http.Request)
 		refuseNonHuman(w, err, "only the linked human or a human admin can revoke a link")
 		return
 	}
-	holders, err := h.ownHolders(r.Context(), user, by)
-	if err != nil {
-		slog.Error("surface identity revoke: the caller's holders could not be read", "principal", by, "error", err)
-		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not determine which links are the caller's", nil)
-		return
+	// An admin may revoke any link, so it needs no holder set. Anyone else
+	// may revoke a link held by a holder it is known to be even while the
+	// rest of its holders cannot be read: revoke is what a human reaches for
+	// when a surface account is compromised. Only "not among the known
+	// holders" is then unknown rather than 404.
+	holders, incomplete := []string{by}, error(nil)
+	if !user.IsAdmin() {
+		holders, incomplete = h.ownHolders(r.Context(), user, by)
 	}
 	link, err := h.opts.SurfaceIdentities.RevokeAs(r.Context(), chi.URLParam(r, "id"), by, holders, user.IsAdmin())
 	switch {
+	case errors.Is(err, surfaceid.ErrLinkNotFound) && incomplete != nil:
+		slog.Error("surface identity revoke: the caller's holders could not be read", "principal", by, "error", incomplete)
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not determine which links are the caller's", nil)
+		return
 	case errors.Is(err, surfaceid.ErrLinkNotFound):
 		writeErrorCode(w, http.StatusNotFound, sidCodeNotFound, "link not found", nil)
 		return
