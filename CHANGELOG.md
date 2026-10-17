@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.97.0](https://github.com/mctlhq/mctl-api/compare/4.96.1...4.97.0) (2026-10-17)
+
+
+### Features
+
+* **approval:** pass the grant's content digest to the approve workflow ([a9cf6b1](https://github.com/mctlhq/mctl-api/commit/a9cf6b16c789a276dbe7bda008a6c2d2cf7d430c))
+
 ## [4.96.1](https://github.com/mctlhq/mctl-api/compare/4.96.0...4.96.1) (2026-10-17)
 
 
