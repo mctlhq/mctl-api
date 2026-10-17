@@ -31,17 +31,18 @@ import (
 // ─── fakes ────────────────────────────────────────────────────────────────
 
 type fakeLinkStore struct {
-	mu       sync.Mutex
-	linkErr  error
-	linked   []auth.Identity
-	linkedTo []string
-	unlinkFn func(pid, xid string) (*principals.ExternalIdentity, error)
-	merged   [][2]string
-	mergeErr error
-	listErr  error
-	ids      []principals.ExternalIdentity // Identities' answer; nil: one live GitHub identity
-	provErr  error
-	disabled bool
+	mu          sync.Mutex
+	linkErr     error
+	linked      []auth.Identity
+	linkedTo    []string
+	unlinkFn    func(pid, xid string) (*principals.ExternalIdentity, error)
+	merged      [][2]string
+	mergeErr    error
+	mergeAdmins []string // the admins list of the last MergePrincipals call
+	listErr     error
+	ids         []principals.ExternalIdentity // Identities' answer; nil: one live GitHub identity
+	provErr     error
+	disabled    bool
 
 	disableErr     error
 	disabledIDs    []string // DisablePrincipal's targets, in order
@@ -75,7 +76,8 @@ func (f *fakeLinkStore) UnlinkIdentity(_ context.Context, pid, xid string) (*pri
 	return f.unlinkFn(pid, xid)
 }
 
-func (f *fakeLinkStore) MergePrincipals(_ context.Context, from, into string) (principals.MergeResult, error) {
+func (f *fakeLinkStore) MergePrincipals(_ context.Context, from, into string, admins []string) (principals.MergeResult, error) {
+	f.mergeAdmins = admins
 	if f.mergeErr != nil {
 		return principals.MergeResult{}, f.mergeErr
 	}
@@ -1102,7 +1104,10 @@ func TestUnlinkIdentityWithoutSessionsToRevoke(t *testing.T) {
 func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	store := &fakeLinkStore{}
 	fr := &forgetRecorder{}
-	h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store, ForgetPrincipals: fr.forget}), opts: Options{AuditLog: audit.NewLogger()}}
+	h := &Handlers{
+		identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store, ForgetPrincipals: fr.forget}),
+		opts:         Options{AuditLog: audit.NewLogger(), AdminPrincipals: map[string]bool{"prn_boss": true, "prn_off": false}},
+	}
 	params := map[string]string{"from": "prn_q", "into": "prn_p"}
 
 	if rec := callAs(h, auth.NewGitHubUser("someone", []string{"team"}), http.MethodPost, "/", params, h.MergePrincipals); rec.Code != http.StatusForbidden {
@@ -1127,6 +1132,10 @@ func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	if e := h.opts.AuditLog.List(10); len(e) != 1 || !auditNames(e[0]) || e[0].Status != "succeeded" || e[0].Parameters["moved"] != "1" {
 		t.Fatalf("audit = %+v", e)
 	}
+	// The store gets ADMIN_PRINCIPALS for its last-admin check (#650).
+	if strings.Join(store.mergeAdmins, ",") != "prn_boss" {
+		t.Fatalf("admins passed to the store = %v, want [prn_boss]", store.mergeAdmins)
+	}
 	// A retry answers 200 again and says so.
 	rec = callAs(h, admin, http.MethodPost, "/", params, h.MergePrincipals)
 	var retry struct {
@@ -1150,6 +1159,15 @@ func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	}
 	if e := h.opts.AuditLog.List(1); !auditNames(e[0]) || e[0].Status != "failed" || e[0].Parameters["reason"] != "merge_conflict" {
 		t.Fatalf("409 audit = %+v", e)
+	}
+	// Merging the last admin away is refused like a disable of it.
+	store.mergeErr = principals.ErrLastAdmin
+	rec = callAs(h, admin, http.MethodPost, "/", params, h.MergePrincipals)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), disableCodeLastAdmin) {
+		t.Fatalf("last-admin merge = %d %s, want 409 %s", rec.Code, rec.Body.String(), disableCodeLastAdmin)
+	}
+	if e := h.opts.AuditLog.List(1); !auditNames(e[0]) || e[0].Status != "failed" || e[0].Parameters["reason"] != disableCodeLastAdmin {
+		t.Fatalf("last-admin audit = %+v", e)
 	}
 	// The audit row carries a classified reason, never the store's text.
 	store.mergeErr = errors.New("dial tcp 10.0.0.7:5432: connection refused")

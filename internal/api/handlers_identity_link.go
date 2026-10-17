@@ -48,7 +48,7 @@ type IdentityLinkStore interface {
 	Provision(ctx context.Context, id auth.Identity) (*principals.Principal, error)
 	LinkIdentity(ctx context.Context, principalID string, id auth.Identity) (string, error)
 	UnlinkIdentity(ctx context.Context, principalID, identityID string) (*principals.ExternalIdentity, error)
-	MergePrincipals(ctx context.Context, from, into string) (principals.MergeResult, error)
+	MergePrincipals(ctx context.Context, from, into string, admins []string) (principals.MergeResult, error)
 	DisablePrincipal(ctx context.Context, id string, admins []string) (principals.DisableResult, error)
 	Identities(ctx context.Context, principalID string) ([]principals.ExternalIdentity, error)
 }
@@ -887,7 +887,7 @@ func (h *Handlers) MergePrincipals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	from, into := chi.URLParam(r, "from"), chi.URLParam(r, "into")
-	res, err := h.identityLink.opts.Store.MergePrincipals(r.Context(), from, into)
+	res, err := h.identityLink.opts.Store.MergePrincipals(r.Context(), from, into, h.adminPrincipalList())
 	if err == nil {
 		// Cached answers still name from as an active principal; without
 		// this the moved identities keep acting as it for the cache TTL.
@@ -924,11 +924,25 @@ func (h *Handlers) MergePrincipals(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "principal not found")
 	case errors.Is(err, principals.ErrMergeConflict):
 		writeErrorCode(w, http.StatusConflict, linkCodeMergeConflict, err.Error(), nil)
+	case errors.Is(err, principals.ErrLastAdmin):
+		writeErrorCode(w, http.StatusConflict, disableCodeLastAdmin, "from is the last active admin principal; merging would disable it", nil)
 	case errors.Is(err, principals.ErrInvalid), errors.Is(err, auth.ErrPrincipalDisabled):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "principal store unavailable", nil)
 	}
+}
+
+// adminPrincipalList is ADMIN_PRINCIPALS as the store's last-admin check
+// takes it.
+func (h *Handlers) adminPrincipalList() []string {
+	admins := make([]string, 0, len(h.opts.AdminPrincipals))
+	for prn, ok := range h.opts.AdminPrincipals {
+		if ok {
+			admins = append(admins, prn)
+		}
+	}
+	return admins
 }
 
 func mergeFailureReason(err error) string {
@@ -937,6 +951,8 @@ func mergeFailureReason(err error) string {
 		return "not_found"
 	case errors.Is(err, principals.ErrMergeConflict):
 		return linkCodeMergeConflict
+	case errors.Is(err, principals.ErrLastAdmin):
+		return disableCodeLastAdmin
 	case errors.Is(err, principals.ErrInvalid):
 		return "invalid"
 	case errors.Is(err, auth.ErrPrincipalDisabled):
@@ -1019,13 +1035,7 @@ func (h *Handlers) DisablePrincipal(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "principal store not configured", nil)
 		return
 	}
-	admins := make([]string, 0, len(h.opts.AdminPrincipals))
-	for prn, ok := range h.opts.AdminPrincipals {
-		if ok {
-			admins = append(admins, prn)
-		}
-	}
-	res, err := h.identityLink.opts.Store.DisablePrincipal(r.Context(), target, admins)
+	res, err := h.identityLink.opts.Store.DisablePrincipal(r.Context(), target, h.adminPrincipalList())
 	if err != nil {
 		refusal := "store_error"
 		switch {
