@@ -722,6 +722,7 @@ components:
         id: {type: string, example: wi_5c8e0f3a-1b2c-4d5e-8f90-123456789abc}
         tenant: {type: string}
         owner_principal: {type: string, description: 'Derived from authentication, e.g. github:alice or service:mctl-agent.'}
+        owner_principal_id: {type: string, pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$', description: "The owner's canonical principal, recorded at creation. Absent for an item whose owner had none recorded. Informational: access is decided by owner_principal."}
         visibility: {type: string, enum: [tenant, private]}
         origin_surface: {type: string}
         title: {type: string, maxLength: 256}
@@ -3262,7 +3263,11 @@ paths:
     post:
       summary: Request a one-time link challenge for a surface
       description: |
-        mctl-api#350. Only a human authenticated by GitHub. Returns a one-time
+        mctl-api#350. Only a human acting directly: a GitHub-authenticated
+        human is linked as `github:<login>`, any other human with a resolved
+        principal as its `prn_` id, the link recording the name it acted
+        under as `subject` (`oidc:<name>`, mctl-api#646; that form needs
+        `TENANT_AUTHZ_MODE=principal`, else 403 `principal_mode_required`). Returns a one-time
         code, valid for 10 minutes, bound to the caller and the surface. The
         human sends it through that surface (e.g. to the Telegram bot), whose
         own principal redeems it. The body never names who is linked.
@@ -3280,7 +3285,7 @@ paths:
       responses:
         '201': {description: 'Challenge created; the code is shown once'}
         '400': {description: Invalid body or an identity field in it}
-        '403': {description: Not a GitHub-authenticated human}
+        '403': {description: 'Not a human acting directly with a GitHub login or a resolved principal (human_principal_required), or a prn_ link outside principal mode (principal_mode_required)'}
         '429': {description: Too many open challenges}
         '503': {description: Surface identity store not configured}
   /api/v1/surface-identities/redeem:
@@ -3348,13 +3353,13 @@ paths:
   /api/v1/surface-identities:
     get:
       summary: List the caller's surface identity links
-      description: A human admin may pass `principal=github:<login>`.
+      description: A human admin may pass `principal=github:<login>` or `principal=prn_…`.
       tags: [Surface Identity]
       parameters:
         - {name: principal, in: query, required: false, schema: {type: string}}
       responses:
         '200': {description: Links, live and revoked}
-        '403': {description: Not a GitHub-authenticated human, or not an admin for another principal}
+        '403': {description: 'Not a human acting directly, or not an admin for another principal'}
   /api/v1/surface-identities/{id}/revoke:
     post:
       summary: Revoke a surface identity link
@@ -3364,7 +3369,7 @@ paths:
         - {name: id, in: path, required: true, schema: {type: string}}
       responses:
         '200': {description: Revoked (or already revoked)}
-        '403': {description: Not a GitHub-authenticated human}
+        '403': {description: Not a human acting directly}
         '404': {description: No such link visible to the caller}
   /api/v1/roadmap/epics:
     get:

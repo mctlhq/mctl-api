@@ -488,6 +488,14 @@ func TestSurfaceRelay_RecordsHumanAndSurfacePrincipals(t *testing.T) {
 	if owner != "prn_ALICE" || actor != "prn_ALICE" || via != "prn_TELEGRAM" {
 		t.Fatalf("owner=%q actor=%q via=%q; want the human, and the surface as via", owner, actor, via)
 	}
+	// The read payload carries the owner's principal (mctl-agents#668).
+	if got := body["work_item"].(map[string]any)["owner_principal_id"]; got != "prn_ALICE" {
+		t.Errorf("created owner_principal_id = %v, want prn_ALICE", got)
+	}
+	if code, read := e.do("telegram", "GET", "/api/v1/work-items/"+id, nil, SurfaceActorHeader, "4242"); code != http.StatusOK ||
+		read["work_item"].(map[string]any)["owner_principal_id"] != "prn_ALICE" {
+		t.Errorf("read = %d %v, want owner_principal_id prn_ALICE", code, read)
+	}
 	var audited bool
 	for _, a := range e.audit.List(100) {
 		if a.Parameters["work_item_id"] == id {

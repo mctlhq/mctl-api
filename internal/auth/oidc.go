@@ -410,6 +410,28 @@ func NewRelayedUser(login string, groups []string, acting *User) *User {
 	}
 }
 
+// NewRelayedPrincipalUser builds the relayed subject from a link that names
+// a canonical principal (mctl-api#646), for a human with no GitHub
+// identity. id is the link's recorded request name without its "oidc:"
+// namespace, so the subject's principalOf string matches that human's own
+// requests. It carries no tenant groups: tenants come from the principal.
+// As in NewDelegatedPrincipalUser the principal is not resolved from the
+// name; it is marked as a token principal, so AttachPrincipal only checks
+// it is still active. Returns nil unless acting is a surface principal and
+// id and principalID are non-empty.
+func NewRelayedPrincipalUser(id, principalID string, acting *User) *User {
+	if principalID == "" {
+		return nil
+	}
+	u := NewRelayedUser(id, nil, acting)
+	if u == nil {
+		return nil
+	}
+	u.githubLogin = false
+	u.principalID, u.tokenPrincipal = principalID, true
+	return u
+}
+
 // NewDelegatedUser builds the subject an agent run token delegates to, from
 // a grant already bound to that run (mctl-api#376 slice B). Sibling of
 // NewRelayedUser, not a variant of it: it returns nil unless acting

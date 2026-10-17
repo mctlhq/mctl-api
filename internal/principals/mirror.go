@@ -36,9 +36,11 @@ import (
 // two stores share one database.
 
 // MirrorLink records a live surface link for the human principal it names
-// (principal is the link's "github:<login>"). A link whose human has no
-// GitHub identity yet is skipped, not failed: the startup backfill mirrors
-// it once the human is known.
+// (principal is the link's "github:<login>" or "prn_<ULID>"). A github:
+// link whose human has no GitHub identity yet is skipped, not failed: the
+// startup backfill mirrors it once the human is known. A prn_ link names
+// its principal outright, so a principal that does not exist, or is not
+// human, is an error and the link is not created (mctl-api#646).
 func (s *Store) MirrorLink(ctx context.Context, tx pgx.Tx, surface, externalID, principal string) error {
 	_, err := s.mirrorLink(ctx, tx, surface, externalID, principal, false)
 	return err
@@ -46,8 +48,12 @@ func (s *Store) MirrorLink(ctx context.Context, tx pgx.Tx, surface, externalID, 
 
 // mirrorLink writes the mirror row and reports whether it wrote one.
 func (s *Store) mirrorLink(ctx context.Context, tx pgx.Tx, surface, externalID, principal string, onlyIfAbsent bool) (bool, error) {
-	login, ok := strings.CutPrefix(principal, "github:")
-	if !ok || login == "" || surface == "" || externalID == "" {
+	if surface == "" || externalID == "" {
+		return false, nil
+	}
+	login, isGitHub := strings.CutPrefix(principal, "github:")
+	isPRN := auth.ValidPrincipalID(principal)
+	if (!isGitHub || login == "") && !isPRN {
 		return false, nil
 	}
 	// A mirror row is (provider=<surface>, "", <surface-native id>). A
@@ -57,15 +63,30 @@ func (s *Store) mirrorLink(ctx context.Context, tx pgx.Tx, surface, externalID, 
 		return false, fmt.Errorf("principals: surface %q uses a reserved provider name", surface)
 	}
 	var principalID string
-	err := tx.QueryRow(ctx, `SELECT principal_id FROM external_identities
-		WHERE provider='github' AND display <> '' AND lower(display)=lower($1) AND revoked_at IS NULL
-		ORDER BY verified_at DESC LIMIT 1`, login).Scan(&principalID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		slog.Info("surface link not mirrored yet: its human has no principal", "surface", surface, "principal", principal)
-		return false, nil
-	}
-	if err != nil {
-		return false, err
+	if isPRN {
+		var kind string
+		err := tx.QueryRow(ctx, `SELECT kind FROM principals WHERE id=$1`, principal).Scan(&kind)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, fmt.Errorf("principals: surface link names unknown principal %s", principal)
+		}
+		if err != nil {
+			return false, err
+		}
+		if kind != auth.KindHuman {
+			return false, fmt.Errorf("principals: surface link names a %s principal, not a human", kind)
+		}
+		principalID = principal
+	} else {
+		err := tx.QueryRow(ctx, `SELECT principal_id FROM external_identities
+			WHERE provider='github' AND display <> '' AND lower(display)=lower($1) AND revoked_at IS NULL
+			ORDER BY verified_at DESC LIMIT 1`, login).Scan(&principalID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			slog.Info("surface link not mirrored yet: its human has no principal", "surface", surface, "principal", principal)
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
 	}
 	now := s.now()
 	xid, err := newPrefixedID(externalIdentityIDPrefix, now)

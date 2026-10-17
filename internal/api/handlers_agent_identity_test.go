@@ -328,8 +328,9 @@ func TestAgentPrincipalGate_EmptyStoredPrincipalIsUnresolved(t *testing.T) {
 	}
 }
 
-// A sil_ grant stores no principal and is resolved from its mirrored GitHub
-// identity, so a non-GitHub surface-link subject is refused.
+// A sil_ grant of a github: link stores no principal and is resolved from
+// its mirrored GitHub identity, so a non-GitHub subject without a stored
+// principal is refused (a prn_ link's grant carries one, mctl-api#646).
 func TestAgentPrincipalGate_SurfaceLinkNeedsGitHubSubject(t *testing.T) {
 	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1"})
 	pr := &relayPrincipals{byLogin: map[string]string{"dave": "prn_DAVE"}}

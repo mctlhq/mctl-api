@@ -186,22 +186,27 @@ func (e *ConflictError) Unwrap() error { return e.Err }
 
 // WorkItem is one piece of work a human asked for.
 type WorkItem struct {
-	ID             string     `json:"id"`
-	Tenant         string     `json:"tenant"`
-	OwnerPrincipal string     `json:"owner_principal"`
-	Visibility     string     `json:"visibility"`
-	OriginSurface  string     `json:"origin_surface"`
-	Title          string     `json:"title"`
-	ExternalKey    string     `json:"external_key,omitempty"`
-	State          string     `json:"state"`
-	WaitingReason  string     `json:"waiting_reason,omitempty"`
-	SupersededBy   string     `json:"superseded_by,omitempty"`
-	StateVersion   int64      `json:"state_version"`
-	CreatedBy      string     `json:"created_by"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	CompletedAt    *time.Time `json:"completed_at,omitempty"`
-	SchemaVersion  string     `json:"schema_version"`
+	ID             string `json:"id"`
+	Tenant         string `json:"tenant"`
+	OwnerPrincipal string `json:"owner_principal"`
+	// OwnerPrincipalID is the owner's canonical principal (prn_...), recorded
+	// at creation; "" for an item created before principals were recorded
+	// or by a caller with none (mctl-agents#668: names the owner as a
+	// human-input respondent). Authorization still reads OwnerPrincipal.
+	OwnerPrincipalID string     `json:"owner_principal_id,omitempty"`
+	Visibility       string     `json:"visibility"`
+	OriginSurface    string     `json:"origin_surface"`
+	Title            string     `json:"title"`
+	ExternalKey      string     `json:"external_key,omitempty"`
+	State            string     `json:"state"`
+	WaitingReason    string     `json:"waiting_reason,omitempty"`
+	SupersededBy     string     `json:"superseded_by,omitempty"`
+	StateVersion     int64      `json:"state_version"`
+	CreatedBy        string     `json:"created_by"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	CompletedAt      *time.Time `json:"completed_at,omitempty"`
+	SchemaVersion    string     `json:"schema_version"`
 }
 
 // Event is one append-only lifecycle record.
