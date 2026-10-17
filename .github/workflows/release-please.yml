@@ -31,9 +31,9 @@ jobs:
       # release PR gets normal CI instead of the default token's silent one.
       - name: Generate release token
         id: release-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.AGENTS_APP_ID }}
+          client-id: ${{ vars.AGENTS_APP_CLIENT_ID }}
           private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
           owner: mctlhq
           repositories: mctl-api
@@ -58,9 +58,9 @@ jobs:
       - name: Generate Platform App token
         if: ${{ steps.release.outputs.release_created == 'true' }}
         id: app
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.AGENTS_APP_ID }}
+          client-id: ${{ vars.AGENTS_APP_CLIENT_ID }}
           private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
           owner: mctlhq
           repositories: mctl-gitops
