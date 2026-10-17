@@ -276,7 +276,7 @@ func (h *Handlers) pickOAuthUpstream(w http.ResponseWriter, r *http.Request) (up
 	if customers {
 		d.Lines = []string{
 			"Customers: sign in with your GitHub account.",
-			"Staff and partner organizations: use Sign in with MCTL account.",
+			"MCTL staff and partner accounts: use Sign in with MCTL account.",
 		}
 		d.Primary = &oauthPageLink{Href: choose(oauthUpstreamCustomer), Text: "Sign in with GitHub"}
 		// Not "staff": partner organizations sign in here too, and the

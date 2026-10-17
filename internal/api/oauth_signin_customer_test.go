@@ -255,7 +255,7 @@ func TestCustomerGitHubEntry(t *testing.T) {
 		}
 		// Partner organizations use the other entry too, so it must not
 		// read as staff-only.
-		if !strings.Contains(rec.Body.String(), "Sign in with MCTL account</a>") || strings.Contains(rec.Body.String(), "staff,") || !strings.Contains(rec.Body.String(), "Customers: sign in with your GitHub account.") || !strings.Contains(rec.Body.String(), "Staff and partner organizations: use Sign in with MCTL account.") || strings.Contains(rec.Body.String(), "at auth.mctl.ai") {
+		if !strings.Contains(rec.Body.String(), "Sign in with MCTL account</a>") || strings.Contains(rec.Body.String(), "staff,") || !strings.Contains(rec.Body.String(), "Customers: sign in with your GitHub account.") || !strings.Contains(rec.Body.String(), "MCTL staff and partner accounts: use Sign in with MCTL account.") || strings.Contains(rec.Body.String(), "at auth.mctl.ai") {
 			t.Errorf("mode %s: the account entry is not labelled Sign in with MCTL account", mode)
 		}
 		scopes := authorizeScopes(t, h.get(authorizeQuery("&upstream=customer")))
