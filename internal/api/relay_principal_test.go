@@ -65,7 +65,7 @@ func TestSurfaceRelay_PrincipalMode(t *testing.T) {
 			pr := &relayPrincipals{byLogin: map[string]string{"alice": prn}}
 			var tenant string
 			e := newSIDEnvOpts(t, pr, func(o *Options) {
-				o.TenantAuthzMode = TenantAuthzPrincipal
+				developerByPrincipal()(o)
 				tenant = o.TenantResolver.(sidTenants)["carol"][0]
 				o.PrincipalAuthz = tc.authz(tenant)
 			})

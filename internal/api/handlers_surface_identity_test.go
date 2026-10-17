@@ -134,7 +134,7 @@ func newSIDEnvOpts(t *testing.T, principals auth.PrincipalResolver, mutate func(
 		})
 	}
 	opts := Options{
-		AuthMiddleware: fakeAuth, SurfaceIdentities: store, WorkItems: items, Evidence: ev, AuditLog: e.audit,
+		AuthMiddleware: fakeAuth, GitReader: ownerEverywhere{}, SurfaceIdentities: store, WorkItems: items, Evidence: ev, AuditLog: e.audit,
 		// alice is an admin in her own right; relaying must not carry it.
 		TenantResolver: sidTenants{"alice": {tenant, "admins"}, "bob": {"acme"}, "carol": {tenant}},
 		Principals:     principals,

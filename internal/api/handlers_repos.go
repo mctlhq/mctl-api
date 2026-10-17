@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
 // backstageReposProxy is a shared HTTP client for proxying repo requests to Backstage.
@@ -166,6 +167,9 @@ func (h *Handlers) SyncRepos(w http.ResponseWriter, r *http.Request) {
 	}
 	if !user.HasTenantAccess(req.Team) {
 		http.Error(w, `{"error":"access denied to team"}`, http.StatusForbidden)
+		return
+	}
+	if !h.requireTenantRole(w, r, user, req.Team, reposSyncRole, "repos-sync", operations.RiskLow) {
 		return
 	}
 
