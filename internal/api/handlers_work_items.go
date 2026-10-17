@@ -819,9 +819,11 @@ func (h *Handlers) delegatedActorIsSubject(w http.ResponseWriter, r *http.Reques
 }
 
 // errLinkOwnerUnresolved: a surface link's owner is no active principal. It
-// is a definite answer from the principal store (a disabled or refused
-// identity) or a link naming no human the store can key on, never a failed
-// read.
+// is only a definite answer: the principal store said disabled or refused,
+// or the link names no github:<login> at all. A login the store could not
+// resolve (principals.ErrUnresolved: no known GitHub identity, GitHub did
+// not answer, a failed read) is NOT this. It may be transient, so it stays
+// a 503 rather than reading "could not observe" as "no such owner".
 var errLinkOwnerUnresolved = errors.New("the surface link's owner resolves to no active principal")
 
 // surfaceLinkPrincipal resolves a live surface link's owner ("github:<login>",
@@ -829,8 +831,11 @@ var errLinkOwnerUnresolved = errors.New("the surface link's owner resolves to no
 // on the same login-only GitHub identity agentPrincipalGate builds for a
 // sil_ grant's subject (auth.NewDelegatedUser, then AttachPrincipal), so the
 // principal a surface actor is bound for is the principal its sil_ grant
-// later acts as. A store that could not answer is returned as its error,
-// for the caller to refuse with 503.
+// later acts as. The login comes from the stored link, never from the
+// caller or the body. Like that gate, the lookup can ask GitHub for the
+// login's id and provision a principal for it, here on the surface-ref
+// write path. A store that could not answer is returned as its error, for
+// the caller to refuse with 503.
 func (h *Handlers) surfaceLinkPrincipal(ctx context.Context, linkPrincipal string) (string, error) {
 	login, ok := strings.CutPrefix(linkPrincipal, "github:")
 	if !ok || login == "" {

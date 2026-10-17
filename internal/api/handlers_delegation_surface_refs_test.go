@@ -30,6 +30,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/delegation"
+	"github.com/mctlhq/mctl-api/internal/principals"
 )
 
 // surfaceRefRows counts the work_item_surface_refs rows on id naming actor.
@@ -393,6 +394,9 @@ func TestDelegatedSurfaceRef_OwnerLookupFailsClosed(t *testing.T) {
 		"refused owner":          {answer: ownerAnswer{err: auth.ErrIdentityRefused}, wantCode: http.StatusForbidden, wantErr: delegationCodeNotBound},
 		"no principal, no error": {wantCode: http.StatusForbidden, wantErr: delegationCodeNotBound},
 		"store outage":           {answer: ownerAnswer{err: errors.New("principal store down")}, wantCode: http.StatusServiceUnavailable, wantErr: delegationCodeUnavailable},
+		// No known GitHub identity for the login, or GitHub did not answer:
+		// possibly transient, so never read as "no such owner".
+		"owner login unresolved": {answer: ownerAnswer{err: fmt.Errorf("%w: no GitHub identity", principals.ErrUnresolved)}, wantCode: http.StatusServiceUnavailable, wantErr: delegationCodeUnavailable},
 		"store not configured":   {noStore: true, wantCode: http.StatusServiceUnavailable, wantErr: delegationCodeUnavailable},
 	} {
 		t.Run(name, func(t *testing.T) {

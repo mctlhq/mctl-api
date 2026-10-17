@@ -141,21 +141,23 @@ func callerActorRefs(u *auth.User) []string {
 }
 
 // respondentRef is the first of the caller's references that the request's
-// actor_refs names, and false when none is. The order is fixed, so the same
-// caller always answers as the same reference.
-func respondentRef(u *auth.User, req *humaninput.Request) (string, bool) {
-	for _, ref := range callerActorRefs(u) {
+// actor_refs names, and false when none is, together with every reference
+// the caller has (callerActorRefs). The order is fixed, so the same caller
+// always answers as the same reference.
+func respondentRef(u *auth.User, req *humaninput.Request) (ref string, eligible bool, candidates []string) {
+	candidates = callerActorRefs(u)
+	for _, ref := range candidates {
 		if req.CanRespond(ref) {
-			return ref, true
+			return ref, true, candidates
 		}
 	}
-	return "", false
+	return "", false, candidates
 }
 
 // callerCanRespond: one of the caller's verified references is in
 // actor_refs.
 func callerCanRespond(u *auth.User, req *humaninput.Request) bool {
-	_, ok := respondentRef(u, req)
+	_, ok, _ := respondentRef(u, req)
 	return ok
 }
 

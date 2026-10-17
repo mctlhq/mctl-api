@@ -374,14 +374,17 @@ for an `xr_`, `aar_` or `wi_` grant the stored `prn_`, whatever IdP the
 human signed in with. The link's owner (`github:<login>`, the only form a
 link names today) is resolved through the principal store exactly as the
 gate resolves a `sil_` subject, so the principal a surface actor is bound
-for is the principal its `sil_` grant later acts as. A subject that shares
-the owner's login string but is another principal is refused.
+for is the principal its `sil_` grant later acts as. The login is read
+from the stored link, never from the caller. Like the gate, that lookup
+may ask GitHub for the login's id and provision a principal for it, on
+this write path. A subject that shares the owner's login string but is
+another principal is refused.
 
 | Outcome | Status | Code |
 |---|---|---|
 | the subject has no resolved principal | 403 | `grant_subject_unresolved` |
-| another principal's identity; unknown, revoked or expired link; owner disabled, refused or unresolvable | 403 | `grant_not_bound` (one answer, no existence oracle) |
-| the link or principal store could not be read, or is not configured | 503 | `delegation_unavailable` |
+| another principal's identity; unknown, revoked or expired link; owner disabled or refused | 403 | `grant_not_bound` (one answer, no existence oracle) |
+| the link store could not be read; the owner's login could not be resolved (unknown GitHub identity, GitHub or principal store unavailable); the principal store is not configured | 503 | `delegation_unavailable` |
 
 A ZITADEL-only human still cannot *create* a surface link: a link challenge
 requires a GitHub-verified caller (`humanPrincipal`), and links name only

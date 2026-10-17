@@ -153,8 +153,7 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 	// Only a reference proven by authentication can answer: a verified
 	// GitHub login or the resolved principal (callerActorRefs). The
 	// respondent is the first of those actor_refs names, never a body field.
-	ref, eligible := respondentRef(user, req)
-	candidates := callerActorRefs(user)
+	ref, eligible, candidates := respondentRef(user, req)
 	if !eligible && len(candidates) > 0 {
 		// Audited and echoed on refusal so the caller sees who it was taken
 		// for; it is never delivered.
