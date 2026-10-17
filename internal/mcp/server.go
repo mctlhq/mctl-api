@@ -2921,9 +2921,11 @@ Human admins only, acting directly: a service or agent credential is refused 403
 func (s *Server) toolAbandonDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_abandon_dev_loop",
 		mcplib.WithTitleAnnotation("Abandon a DevLoopWorkflow"),
-		// Destructive: it ends a running loop for good, and nothing restarts
-		// a closed DevLoop under the same workflow id. Idempotent: a repeat
-		// against a finished execution only reports its final status.
+		// Destructive: it ends a running loop, and the run it ends is never
+		// resumed: mctl_trigger_issue(use_temporal=true) can only start a NEW
+		// run on the same workflow id, and only for a loop abandoned before
+		// the implement step (mctl-api#640). Idempotent: a repeat against a
+		// finished execution only reports its final status.
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithIdempotentHintAnnotation(true),

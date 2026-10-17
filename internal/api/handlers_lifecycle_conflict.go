@@ -203,6 +203,11 @@ const devLoopStatusUnknown = "Unknown"
 // devLoopStatusRunning is DescribeDevLoop's answer for a live execution.
 const devLoopStatusRunning = "Running"
 
+// devLoopStatusCompleted is the only closed status an abandoned DevLoop
+// ends in: the abandon signal makes the workflow return a result, it does
+// not fail, cancel or terminate it (mctl-api#640).
+const devLoopStatusCompleted = "Completed"
+
 func (h *Handlers) lifecycleDescribeLegacy(ctx context.Context, workflowID string) legacyAnswer {
 	status, err := h.opts.TemporalClient.DescribeDevLoop(ctx, workflowID)
 	if err != nil {

@@ -1045,23 +1045,56 @@ func assertNotRestarted(t *testing.T, fake *fakeDevLoopClient, rec *httptest.Res
 // A restart that Temporal refuses, or that comes back under another id or as
 // the abandoned run itself, is failed, never reported as a restart.
 func TestStartDevLoopWorkflow_RestartFailuresAreFailed(t *testing.T) {
-	cases := map[string]*fakeDevLoopClient{
-		"start error":     {restartErr: serviceerror.NewUnavailable("down")},
-		"other workflow":  {restartedAsWF: "dev-loop-mctlhq-mctl-telegram-2", restartRunID: "run-new"},
-		"same run echoed": {restartRunID: "run-old"},
+	cases := map[string]struct {
+		fake    *fakeDevLoopClient
+		message string // what the 502 must name, so the cases stay distinct
+	}{
+		"start error":     {fake: &fakeDevLoopClient{restartErr: serviceerror.NewUnavailable("down")}, message: "restart after abandoned run run-old"},
+		"other workflow":  {fake: &fakeDevLoopClient{restartedAsWF: "dev-loop-mctlhq-mctl-telegram-2", restartRunID: "run-new"}, message: "restarted workflow dev-loop-mctlhq-mctl-telegram-2"},
+		"same run echoed": {fake: &fakeDevLoopClient{restartRunID: "run-old"}, message: "restart returned the abandoned run run-old itself"},
 	}
-	for name, fake := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			fake := tc.fake
 			fake.describeExec = &temporalclient.DevLoopExecution{Status: "Completed", RunID: "run-old"}
 			fake.workflowID = "dev-loop-mctlhq-mctl-telegram-1"
 			fake.ended = temporalclient.AbandonedEndedPrefix + "x"
-			h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: audit.NewLogger()}}
+			logger := audit.NewLogger()
+			h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
 			req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
 			rec := httptest.NewRecorder()
 			h.StartDevLoopWorkflow(rec, adminCtx(req))
 			if rec.Code != http.StatusBadGateway {
 				t.Fatalf("expected 502, got %d %s", rec.Code, rec.Body.String())
 			}
+			if body := rec.Body.String(); !strings.Contains(body, tc.message) || strings.Contains(body, `"started"`) || strings.Contains(body, `"run_id"`) {
+				t.Fatalf("the 502 must name %q and claim no run, got %s", tc.message, body)
+			}
+			entries := logger.List(10)
+			if len(entries) != 1 || entries[0].Status != "failed" || entries[0].Parameters["outcome"] != devLoopOutcomeFailed ||
+				entries[0].Parameters["previous_run_id"] != "run-old" {
+				t.Fatalf("expected one failed audit entry naming the abandoned run, got %+v", entries)
+			}
 		})
+	}
+}
+
+// A running loop is already_running: its result is never read, even when it
+// would say abandoned, and nothing restarts.
+func TestStartDevLoopWorkflow_RunningLoopNeverReadsTheMarker(t *testing.T) {
+	fake := &fakeDevLoopClient{
+		describeExec: &temporalclient.DevLoopExecution{Status: "Running", RunID: "run-live"},
+		workflowID:   "dev-loop-mctlhq-mctl-telegram-1",
+		ended:        temporalclient.AbandonedEndedPrefix + "x",
+	}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: audit.NewLogger()}}
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+	rec := httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, adminCtx(req))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), devLoopOutcomeAlreadyRunning) {
+		t.Fatalf("expected 200 %s, got %d %s", devLoopOutcomeAlreadyRunning, rec.Code, rec.Body.String())
+	}
+	if len(fake.endedReadRuns) != 0 || fake.restartCalls != 0 || fake.startCalls != 0 {
+		t.Fatalf("a running loop: reads %v, restarts %d, starts %d", fake.endedReadRuns, fake.restartCalls, fake.startCalls)
 	}
 }

@@ -60,11 +60,6 @@ const (
 	devLoopOutcomeRestartedAfterAbandon = "restarted_after_abandon"
 )
 
-// devLoopStatusCompleted is the only closed status an abandoned DevLoop
-// ends in: the abandon signal makes the workflow return a result, it does
-// not fail, cancel or terminate it.
-const devLoopStatusCompleted = "Completed"
-
 // devLoopStartResult is startDevLoop's answer: what happened, and everything
 // a caller needs to report it (the pre-existing execution's status/run id, or
 // the new run's id, or why nothing could be decided/started).
@@ -90,8 +85,14 @@ type devLoopStartResult struct {
 // classifyDevLoop and startDevLoopAfterNotFound: ExecuteRoadmapWave bounds
 // each one with its own fresh per-item Temporal-call timeout (so one item's
 // slow describe cannot eat its own start's budget, or another item's), while
-// this function bounds the describe half with devLoopDescribeTimeout and
+// this function bounds the reads with one devLoopDescribeTimeout deadline and
 // otherwise lets the caller's context govern the start.
+//
+// This route alone adds a third path: an already_exists classification goes
+// through restartIfAbandoned (mctl-api#640), which the wave route deliberately
+// does not call. The describe and that path's result read share the one
+// deadline, so the reads together never take more than devLoopDescribeTimeout
+// of the request's budget and the start keeps the rest.
 //
 // TOCTOU: two callers racing can both observe NotFound between the describe
 // and the start; the second start is then absorbed by StartDevLoopWorkflow's
@@ -99,15 +100,15 @@ type devLoopStartResult struct {
 // nothing new actually began. This is strictly narrower than the bug this
 // function fixes (which reported every no-op as a start regardless of
 // timing) and is not closable without dropping USE_EXISTING, which would be a
-// cross-repo behaviour change to orchestrator/temporal/cli.py's start policy
-// — out of scope here (see mctl-api#404).
+// cross-repo behaviour change to orchestrator/temporal/start.py's start
+// policy — out of scope here (see mctl-api#404).
 func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID string) devLoopStartResult {
 	dctx, cancel := context.WithTimeout(ctx, devLoopDescribeTimeout)
 	result := classifyDevLoop(dctx, c, workflowID)
-	cancel()
 	if result.Outcome == devLoopOutcomeAlreadyExists {
-		return restartIfAbandoned(ctx, c, issueURL, workflowID, result)
+		result = restartIfAbandoned(dctx, ctx, c, issueURL, workflowID, result)
 	}
+	cancel()
 	if result.Outcome != "" {
 		return result
 	}
@@ -147,18 +148,30 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 // abandoned item as already_exists: a batch start must not silently undo an
 // operator's abandon.
 //
+// The new run gets its own canonical execution: mctl-agents derives the
+// engine ref per run (`<workflow id>#run_<run id>`), and DevLoopWorkflow.run
+// ends its own `we_` on every exit, an abandon included. So the abandoned
+// run leaves no open execution behind for decideDevLoopApproval's
+// OpenExecutionsOfEngineRun to find beside the new one (execution_ambiguous);
+// runs from before mctl-agents 1.76.0 never opened one at all.
+//
+// readCtx bounds the result read (startDevLoop shares it with the describe);
+// ctx governs the restart itself.
+//
 // TOCTOU: the restart cannot be conditioned on which run closed (Temporal's
 // reuse policy is per call, not per run), so a run that started and
 // completed between the result read and the restart would be followed by
-// another. Both steps are admin calls on one issue a few milliseconds
-// apart; a second racing restart is absorbed by USE_EXISTING into the first.
-func restartIfAbandoned(ctx context.Context, c DevLoopClient, issueURL, workflowID string, existing devLoopStartResult) devLoopStartResult {
+// another. And a run another caller started in that window would absorb this
+// restart through USE_EXISTING: its id differs from the abandoned one, so
+// this call reports restarted_after_abandon for a run it did not start — the
+// same class as startDevLoop's TOCTOU, not closable without dropping
+// USE_EXISTING. Both windows are a few milliseconds between admin calls on
+// one issue.
+func restartIfAbandoned(readCtx, ctx context.Context, c DevLoopClient, issueURL, workflowID string, existing devLoopStartResult) devLoopStartResult {
 	if existing.Status != devLoopStatusCompleted {
 		return existing
 	}
-	rctx, cancel := context.WithTimeout(ctx, devLoopDescribeTimeout)
-	end, err := c.DevLoopEnded(rctx, workflowID, existing.RunID)
-	cancel()
+	end, err := c.DevLoopEnded(readCtx, workflowID, existing.RunID)
 	if err != nil {
 		return devLoopStartResult{Outcome: devLoopOutcomeFailed, Status: existing.Status, RunID: existing.RunID,
 			Err: fmt.Errorf("could not read how the existing DevLoop run %s ended: %w", existing.RunID, err)}
@@ -374,6 +387,10 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 			"message":     "A DevLoopWorkflow already ran for this issue and is not restarted; nothing new was started. Only a run abandoned before it reached the implement step is restarted.",
 		})
 	default: // devLoopOutcomeFailed
+		if result.PreviousRunID != "" {
+			// A failed restart: record which abandoned run it was replacing.
+			auditParams["previous_run_id"] = result.PreviousRunID
+		}
 		h.logAudit(r, audit.Entry{
 			UserID:     user.ID,
 			Operation:  "dev-loop-start",
