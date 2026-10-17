@@ -49,6 +49,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -223,8 +225,24 @@ var githubPrincipalPattern = regexp.MustCompile(`^github:[A-Za-z0-9](?:[A-Za-z0-
 // it. Repeated here: internal/auth imports this package.
 var prnPattern = regexp.MustCompile(`^prn_[0-9A-HJKMNP-TV-Z]{26}$`)
 
-// oidcSubjectPattern bounds the request name a prn_ link carries.
-var oidcSubjectPattern = regexp.MustCompile(`^oidc:[!-~]{1,256}$`)
+// maxSubjectNameBytes bounds the request name a prn_ link carries.
+const maxSubjectNameBytes = 256
+
+// validOIDCSubject reports whether subject is "oidc:<name>" with a
+// non-empty name of printable UTF-8 (an IdP's preferred_username or email,
+// which need not be ASCII), at most maxSubjectNameBytes long.
+func validOIDCSubject(subject string) bool {
+	name, ok := strings.CutPrefix(subject, "oidc:")
+	if !ok || name == "" || len(name) > maxSubjectNameBytes || !utf8.ValidString(name) {
+		return false
+	}
+	for _, r := range name {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
 
 // IsPrincipalID reports whether principal is a canonical principal id, the
 // form a link takes for a human with no GitHub identity.
@@ -236,7 +254,7 @@ func validHolder(principal, subject string) bool {
 	if githubPrincipalPattern.MatchString(principal) {
 		return subject == ""
 	}
-	return prnPattern.MatchString(principal) && oidcSubjectPattern.MatchString(subject)
+	return prnPattern.MatchString(principal) && validOIDCSubject(subject)
 }
 
 // externalIDPattern bounds a surface-native id per surface. A Telegram user

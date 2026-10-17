@@ -299,11 +299,13 @@ func TestPrincipalLinksKeepTheirSubject(t *testing.T) {
 	ctx := context.Background()
 	const prn = "prn_01JZED00000000000000000000"
 	for _, h := range []struct{ principal, subject string }{
-		{prn, ""},                     // a principal needs its name
-		{prn, "zed@example.com"},      // only an oidc: name
-		{prn, "github:zed"},           // never a GitHub one
-		{prn, "oidc:"},                // nor an empty one
-		{prn, "oidc:zed example.com"}, // nor one with a space
+		{prn, ""},                      // a principal needs its name
+		{prn, "zed@example.com"},       // only an oidc: name
+		{prn, "github:zed"},            // never a GitHub one
+		{prn, "oidc:"},                 // nor an empty one
+		{prn, "oidc:zed\nexample.com"}, // nor one with a control character
+		{prn, "oidc:" + strings.Repeat("z", 257)},
+		{prn, "oidc:z\xffed"}, // nor invalid UTF-8
 		{"github:alice", "oidc:alice"},
 		{"prn_01jzed00000000000000000000", "oidc:zed@example.com"}, // not canonical
 		{"prn_", "oidc:zed@example.com"},
@@ -313,6 +315,13 @@ func TestPrincipalLinksKeepTheirSubject(t *testing.T) {
 		}
 	}
 
+	// A name need not be ASCII.
+	if _, err := s.CreateChallenge(ctx, prn, "oidc:Зед Иванов", SurfaceTelegram); err != nil {
+		t.Errorf("non-ASCII name: %v", err)
+	}
+	if _, err := s.CreateChallenge(ctx, prn, "oidc:"+strings.Repeat("z", 256), SurfaceTelegram); err != nil {
+		t.Errorf("name at the bound: %v", err)
+	}
 	c, err := s.CreateChallenge(ctx, prn, "oidc:zed@example.com", SurfaceTelegram)
 	if err != nil {
 		t.Fatal(err)
