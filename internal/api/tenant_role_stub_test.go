@@ -53,3 +53,11 @@ func rolesOf(entries ...string) *stubRoles {
 	}
 	return s
 }
+
+// ownerEverywhere is a GitReader that lists every login as an owner of every
+// tenant, for harnesses whose subject is not the tenant-role decision.
+type ownerEverywhere struct{ GitReader }
+
+func (ownerEverywhere) MemberRoles(_, _ string) ([][]string, error) {
+	return [][]string{{"owner"}}, nil
+}
