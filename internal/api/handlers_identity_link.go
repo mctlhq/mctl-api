@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -329,18 +328,11 @@ func setLinkCookie(w http.ResponseWriter, value string, maxAge int) {
 	})
 }
 
-var linkPage = template.Must(template.New("link").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}} · mctl</title>
-<style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
-code{background:#f2f2f2;padding:0 .25rem}button{font-size:1rem;padding:.5rem 1rem}</style></head>
-<body><h1>{{.Title}}</h1>{{range .Lines}}<p>{{.}}</p>{{end}}
-{{if .Continue}}<p><a href="{{.Continue}}">Continue to ZITADEL sign-in</a></p>{{end}}
-{{if .Confirm}}<form method="post" action="{{.Confirm.Action}}">
+var linkPage = shellPage("link", `{{if .Continue}}<div class="actions"><a href="{{.Continue}}">Continue to ZITADEL sign-in</a></div>{{end}}
+{{if .Confirm}}<form class="actions" method="post" action="{{.Confirm.Action}}">
 <input type="hidden" name="challenge" value="{{.Confirm.Challenge}}">
 <input type="hidden" name="csrf" value="{{.Confirm.CSRF}}">
-<button type="submit">Link these identities</button></form>{{end}}
-</body></html>`))
+<button type="submit">Link these identities</button></form>{{end}}`)
 
 type linkPageData struct {
 	Title string
@@ -353,12 +345,8 @@ type linkPageData struct {
 }
 
 func renderLinkPage(w http.ResponseWriter, status int, d linkPageData) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
-	w.WriteHeader(status)
-	_ = linkPage.Execute(w, d)
+	renderShellPage(w, status, "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", linkPage,
+		shellData{Title: d.Title, Lines: d.Lines, Page: d})
 }
 
 func linkFailed(w http.ResponseWriter, status int, msg string) {
@@ -466,7 +454,7 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 		// text (hosts, connection detail) stays in the log.
 		switch {
 		case errors.Is(err, auth.ErrIdentityRefused):
-			linkFailed(w, http.StatusForbidden, "Your GitHub identity is refused by mctl and cannot be used for linking.")
+			linkFailed(w, http.StatusForbidden, "Your GitHub identity is refused by MCTL and cannot be used for linking.")
 		default:
 			linkFailed(w, http.StatusServiceUnavailable, "The principal store is unavailable; nothing was changed. Try again later.")
 		}
@@ -475,7 +463,7 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 	// Provision returns a disabled principal as a value, not an error. The
 	// confirm step would refuse it too; stop before the ZITADEL sign-in.
 	if p.Status != principals.StatusActive {
-		linkFailed(w, http.StatusForbidden, "Your mctl principal is disabled.")
+		linkFailed(w, http.StatusForbidden, "Your MCTL principal is disabled.")
 		return
 	}
 
@@ -634,7 +622,7 @@ func (h *Handlers) handleIdentityLinkCallback(w http.ResponseWriter, r *http.Req
 		Lines: []string{
 			"GitHub: " + c.githubLogin,
 			"ZITADEL: " + display,
-			"Linking lets you sign in to mctl with ZITADEL as the same principal you use with GitHub (" + c.principalID + ").",
+			"Linking lets you sign in to MCTL with ZITADEL as the same principal you use with GitHub (" + c.principalID + ").",
 		},
 		Confirm: &struct{ Action, Challenge, CSRF string }{Action: linkConfirmPath, Challenge: c.id, CSRF: csrf},
 	})
@@ -706,12 +694,12 @@ func (h *Handlers) handleIdentityLinkConfirm(w http.ResponseWriter, r *http.Requ
 	switch {
 	case err == nil:
 		renderLinkPage(w, status, linkPageData{Title: "Identities linked", Lines: []string{
-			"ZITADEL user " + c.identity.Display + " now signs in as your mctl principal " + c.principalID + ".",
+			"ZITADEL user " + c.identity.Display + " now signs in as your MCTL principal " + c.principalID + ".",
 			"You can review or remove linked identities with GET /api/v1/identity/links.",
 		}})
 	case code == linkCodeOwnedElsewhere:
 		renderLinkPage(w, status, linkPageData{Title: "Not linked: this ZITADEL identity already has its own principal", Lines: []string{
-			"ZITADEL user " + c.identity.Display + " has already signed in to mctl on its own, which created a separate principal (" + owned.PrincipalID + ").",
+			"ZITADEL user " + c.identity.Display + " has already signed in to MCTL on its own, which created a separate principal (" + owned.PrincipalID + ").",
 			"Self-service never moves an identity between principals. A platform admin can merge " + owned.PrincipalID + " into " + c.principalID + " (an audited admin operation); ask one, quoting both ids.",
 		}})
 	case code == linkCodeAlreadyLinked:
