@@ -15,14 +15,20 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/delegation"
+	"github.com/mctlhq/mctl-api/internal/principals"
 )
 
 // zedPRN is a ZITADEL-only human's canonical principal: no GitHub identity.
@@ -44,10 +50,35 @@ func (r resolveOnly) ResolvePrincipal(ctx context.Context, id auth.Identity) (st
 	return r.pr.ResolvePrincipal(ctx, id)
 }
 
+// principalIdentities is the principal store's identity listing, keyed by
+// principal, or a fixed error: where a prn_ session reads the GitHub logins
+// it also holds links under (mctl-api#663).
+type principalIdentities struct {
+	fakeLinkStore
+	byPrincipal map[string][]principals.ExternalIdentity
+	err         error
+}
+
+func (p *principalIdentities) Identities(_ context.Context, pid string) ([]principals.ExternalIdentity, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	return p.byPrincipal[pid], nil
+}
+
 // newZedEnvWith is newZedEnv whose router, if noChecker, gets a principal
 // store with no CheckPrincipal.
 func newZedEnvWith(t *testing.T, noChecker bool) (*sidEnv, *relayPrincipals) {
 	t.Helper()
+	e, pr, _ := newZedEnvIDs(t, noChecker)
+	return e, pr
+}
+
+// newZedEnvIDs is newZedEnvWith that also hands back the principal store's
+// identity listing, empty to begin with.
+func newZedEnvIDs(t *testing.T, noChecker bool) (*sidEnv, *relayPrincipals, *principalIdentities) {
+	t.Helper()
+	ids := &principalIdentities{byPrincipal: map[string][]principals.ExternalIdentity{}}
 	pr := &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE", "zed@example.com": zedPRN}}
 	var store auth.PrincipalResolver = pr
 	if noChecker {
@@ -57,6 +88,7 @@ func newZedEnvWith(t *testing.T, noChecker bool) (*sidEnv, *relayPrincipals) {
 	e := newSIDEnvOpts(t, store, func(o *Options) {
 		developerByPrincipal(zedPRN, "prn_ALICE")(o)
 		authz = o.PrincipalAuthz
+		o.IdentityLink = &IdentityLinkOptions{Store: ids}
 	})
 	zed := auth.NewFederatedUser("zitadel", "https://auth.mctl.ai", "330001", "zed@example.com", auth.KindHuman)
 	// As auth.Middleware does.
@@ -70,7 +102,7 @@ func newZedEnvWith(t *testing.T, noChecker bool) (*sidEnv, *relayPrincipals) {
 		t.Fatal(err)
 	}
 	e.users["zed"] = zed
-	return e, pr
+	return e, pr, ids
 }
 
 // mctl-api#646: a human with no GitHub identity links a surface identity
@@ -377,5 +409,270 @@ func TestSurfaceIdentity_PrincipalLinkStaysTheHumansAcrossSessions(t *testing.T)
 	code, body = e.do("hank-github", "POST", "/api/v1/surface-identities/"+id+"/revoke", nil)
 	if code != http.StatusOK || body["link"].(map[string]any)["revoked_by"] != "github:hank" {
 		t.Fatalf("hank's GitHub session revoking the prn_ link = %d %v", code, body)
+	}
+}
+
+// A prn_ link relays only in principal mode, even once it exists
+// (mctl-api#663): a link outlives a TENANT_AUTHZ_MODE rollback, and a
+// challenge minted before the flip can be redeemed after it. Either way the
+// relay answers the typed code, never a generic tenant 403.
+func TestSurfaceRelay_PrincipalLinkNeedsPrincipalMode(t *testing.T) {
+	pr := &relayPrincipals{byLogin: map[string]string{"zed@example.com": zedPRN}}
+	e := newSIDEnvOpts(t, pr, nil)
+	// Minted while principal mode was on (the handler would refuse it now).
+	c, err := e.store.CreateChallenge(context.Background(), zedPRN, "oidc:zed@example.com", "telegram")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := e.redeem("telegram", c.Code, "7070"); code != http.StatusCreated {
+		t.Fatalf("redeem after the flip = %d %v", code, body)
+	}
+	for _, path := range []string{"/api/v1/identity/self", "/api/v1/human-input"} {
+		code, body := e.do("telegram", "GET", path, nil, SurfaceActorHeader, "7070")
+		if code != http.StatusForbidden || body["code"] != sidCodePrincipalModeRequired {
+			t.Errorf("relayed %s = %d %v, want 403 %s", path, code, body, sidCodePrincipalModeRequired)
+		}
+	}
+	if len(pr.checked) != 0 || len(pr.seen) != 0 {
+		t.Errorf("the principal store was asked (checked=%v seen=%v) before the mode gate", pr.checked, pr.seen)
+	}
+	// A GitHub-held link still relays in legacy mode.
+	e.link("alice", "telegram", "4242")
+	if code, body := e.do("telegram", "GET", "/api/v1/identity/self", nil, SurfaceActorHeader, "4242"); code != http.StatusOK {
+		t.Errorf("legacy-mode github: relay = %d %v", code, body)
+	}
+}
+
+// The reverse of TestSurfaceIdentity_PrincipalLinkStaysTheHumansAcrossSessions
+// (mctl-api#663): a ZITADEL session lists and revokes a link the same human
+// holds as github:<login>, because the principal store says that login is
+// one of its principal's live GitHub identities. A revoked identity, or one
+// whose login moved away, holds nothing; another human sees nothing.
+func TestSurfaceIdentity_ZitadelSessionReachesTheHumansGitHubLinks(t *testing.T) {
+	e, pr, ids := newZedEnvIDs(t, false)
+	pr.byLogin["hank"] = hankPRN
+	pr.byLogin["hank@example.com"] = hankPRN
+	for name, u := range map[string]*auth.User{
+		"hank-zitadel": auth.NewFederatedUser("zitadel", "https://auth.mctl.ai", "330009", "hank@example.com", auth.KindHuman),
+		"hank-github":  auth.NewGitHubUser("hank", nil),
+		"hank-old":     auth.NewGitHubUser("hank-old", nil),
+		"hank-gone":    auth.NewGitHubUser("hank-gone", nil),
+	} {
+		if err := auth.AttachPrincipal(context.Background(), pr, u); err != nil {
+			t.Fatal(err)
+		}
+		e.users[name] = u
+	}
+	revoked := time.Now()
+	ids.byPrincipal[hankPRN] = []principals.ExternalIdentity{
+		{PrincipalID: hankPRN, Provider: "zitadel", Issuer: "https://auth.mctl.ai", Subject: "330009", Display: "hank@example.com"},
+		{PrincipalID: hankPRN, Provider: auth.ProviderGitHub, Subject: "77", Display: "hank"},
+		{PrincipalID: hankPRN, Provider: auth.ProviderGitHub, Subject: "78", Display: "hank-old", RevokedAt: &revoked},
+		{PrincipalID: hankPRN, Provider: auth.ProviderGitHub, Subject: "79", Display: ""},
+		// A surface mirror row is not a GitHub identity, whatever its display.
+		{PrincipalID: hankPRN, Provider: "telegram", Subject: "1", Display: "hank-gone"},
+	}
+	ghLink := e.link("hank-github", "telegram", "8080")
+	e.link("hank-old", "telegram", "8181")
+	e.link("hank-gone", "telegram", "8282")
+	prnLink := e.link("hank-zitadel", "portal", "hank-portal")
+
+	code, list := e.do("hank-zitadel", "GET", "/api/v1/surface-identities", nil)
+	links, _ := list["links"].([]any)
+	if code != http.StatusOK || len(links) != 2 {
+		t.Fatalf("hank's ZITADEL session lists %d %v, want the prn_ and the github:hank link", code, list)
+	}
+	var got []string
+	for _, l := range links {
+		got = append(got, l.(map[string]any)["id"].(string))
+	}
+	if !slices.Contains(got, ghLink) || !slices.Contains(got, prnLink) {
+		t.Fatalf("listed %v, want %s and %s", got, ghLink, prnLink)
+	}
+	if list["principal"] != hankPRN {
+		t.Errorf("principal = %v, want the session's own holder %s", list["principal"], hankPRN)
+	}
+	if holders, _ := list["holders"].([]any); len(holders) != 2 || holders[0] != hankPRN || holders[1] != "github:hank" {
+		t.Errorf("holders = %v, want [%s github:hank]", list["holders"], hankPRN)
+	}
+	if code, list := e.do("hank-zitadel", "GET", "/api/v1/surface-identities?principal=github:hank", nil); code != http.StatusOK || len(list["links"].([]any)) != 1 {
+		t.Errorf("hank's ZITADEL session listing github:hank = %d %v", code, list)
+	}
+	if code, _ := e.do("hank-zitadel", "GET", "/api/v1/surface-identities?principal=github:hank-old", nil); code != http.StatusForbidden {
+		t.Errorf("listing a revoked identity's login = %d, want 403", code)
+	}
+	if code, list := e.do("zed", "GET", "/api/v1/surface-identities", nil); code != http.StatusOK || len(list["links"].([]any)) != 0 {
+		t.Errorf("zed lists %d %v, want none of hank's", code, list)
+	}
+	if code, _ := e.do("zed", "POST", "/api/v1/surface-identities/"+ghLink+"/revoke", nil); code != http.StatusNotFound {
+		t.Errorf("zed revoking hank's github: link = %d, want 404", code)
+	}
+
+	// The store cannot answer: a 503, never "hank holds only the prn_ link".
+	ids.err = errors.New("principal store down")
+	if code, body := e.do("hank-zitadel", "GET", "/api/v1/surface-identities", nil); code != http.StatusServiceUnavailable || body["code"] != sidCodeUnavailable {
+		t.Errorf("list with the store down = %d %v, want 503 %s", code, body, sidCodeUnavailable)
+	}
+	if code, body := e.do("hank-zitadel", "POST", "/api/v1/surface-identities/"+ghLink+"/revoke", nil); code != http.StatusServiceUnavailable || body["code"] != sidCodeUnavailable {
+		t.Errorf("revoke with the store down = %d %v, want 503 %s", code, body, sidCodeUnavailable)
+	}
+	// A link the session's own prn_ holds stays revocable meanwhile.
+	if code, body := e.do("hank-zitadel", "POST", "/api/v1/surface-identities/"+prnLink+"/revoke", nil); code != http.StatusOK {
+		t.Errorf("revoking the prn_ link with the store down = %d %v, want 200", code, body)
+	}
+	ids.err = nil
+
+	code, body := e.do("hank-zitadel", "POST", "/api/v1/surface-identities/"+ghLink+"/revoke", nil)
+	if code != http.StatusOK || body["link"].(map[string]any)["revoked_by"] != hankPRN {
+		t.Fatalf("hank's ZITADEL session revoking the github: link = %d %v", code, body)
+	}
+}
+
+// A prn_ session with no principal store to read its GitHub identities from
+// cannot say which links are its own: 503, not just its prn_ links.
+func TestSurfaceIdentity_ZitadelSessionWithoutIdentityStore(t *testing.T) {
+	pr := &relayPrincipals{byLogin: map[string]string{"zed@example.com": zedPRN}}
+	e := newSIDEnvOpts(t, pr, func(o *Options) { o.TenantAuthzMode = TenantAuthzPrincipal })
+	zed := auth.NewFederatedUser("zitadel", "https://auth.mctl.ai", "330001", "zed@example.com", auth.KindHuman)
+	if err := auth.AttachPrincipal(context.Background(), pr, zed); err != nil {
+		t.Fatal(err)
+	}
+	e.users["zed"] = zed
+	if code, body := e.do("zed", "GET", "/api/v1/surface-identities", nil); code != http.StatusServiceUnavailable || body["code"] != sidCodeUnavailable {
+		t.Errorf("list = %d %v, want 503 %s", code, body, sidCodeUnavailable)
+	}
+	if code, body := e.do("zed", "POST", "/api/v1/surface-identities/sid_x/revoke", nil); code != http.StatusServiceUnavailable || body["code"] != sidCodeUnavailable {
+		t.Errorf("revoke = %d %v, want 503 %s", code, body, sidCodeUnavailable)
+	}
+}
+
+// A human whose principal authentication could not resolve (the store did
+// not answer) is told 503, not 403 "not a human" (mctl-api#663). A GitHub
+// session in that state still links as github:<login>, but cannot list or
+// revoke: the prn_ links it may hold are unknown, not absent.
+func TestSurfaceIdentity_UnresolvedPrincipalIs503(t *testing.T) {
+	e, pr := newZedEnv(t)
+	aliceLink := e.link("alice", "telegram", "4242")
+	bobLink := e.link("bob", "telegram", "5555")
+	pr.err = errors.New("dial tcp: connection refused")
+	for name, u := range map[string]*auth.User{
+		"zed-down":   auth.NewFederatedUser("zitadel", "https://auth.mctl.ai", "330001", "zed@example.com", auth.KindHuman),
+		"alice-down": auth.NewGitHubUser("alice", nil),
+		"root-down":  auth.NewGitHubUser("root", []string{"admins"}),
+	} {
+		if err := auth.AttachPrincipal(context.Background(), pr, u); err == nil || !u.PrincipalUnresolved() {
+			t.Fatalf("%s: err=%v unresolved=%v, want a degraded resolution", name, err, u.PrincipalUnresolved())
+		}
+		e.users[name] = u
+	}
+	pr.err = nil
+	for _, tc := range []struct{ who, method, path string }{
+		{"zed-down", "POST", "/api/v1/surface-identities/challenges"},
+		{"zed-down", "GET", "/api/v1/surface-identities"},
+		{"zed-down", "POST", "/api/v1/surface-identities/sid_x/revoke"},
+		{"alice-down", "GET", "/api/v1/surface-identities"},
+		{"alice-down", "POST", "/api/v1/surface-identities/sid_x/revoke"},
+		{"alice-down", "POST", "/api/v1/surface-identities/" + bobLink + "/revoke"},
+		{"root-down", "GET", "/api/v1/surface-identities"},
+	} {
+		var body any
+		if strings.HasSuffix(tc.path, "/challenges") {
+			body = map[string]any{"surface": "telegram"}
+		}
+		if code, got := e.do(tc.who, tc.method, tc.path, body); code != http.StatusServiceUnavailable || got["code"] != sidCodeUnavailable {
+			t.Errorf("%s %s %s = %d %v, want 503 %s", tc.who, tc.method, tc.path, code, got, sidCodeUnavailable)
+		}
+	}
+	e.challenge("alice-down", "telegram")
+	// A link held by the holder the session is known to be stays revocable.
+	if code, body := e.do("alice-down", "POST", "/api/v1/surface-identities/"+aliceLink+"/revoke", nil); code != http.StatusOK {
+		t.Errorf("alice-down revoking her github: link = %d %v, want 200", code, body)
+	}
+	// An admin naming a holder, or revoking, needs no holder set of its own.
+	if !e.users["root-down"].IsAdmin() {
+		t.Fatal("root-down is not an admin")
+	}
+	if code, body := e.do("root-down", "GET", "/api/v1/surface-identities?principal=github:bob", nil); code != http.StatusOK || len(body["links"].([]any)) != 1 {
+		t.Errorf("admin listing github:bob = %d %v, want bob's link", code, body)
+	}
+	if code, body := e.do("root-down", "POST", "/api/v1/surface-identities/"+bobLink+"/revoke", nil); code != http.StatusOK {
+		t.Errorf("admin revoking bob's link = %d %v, want 200", code, body)
+	}
+}
+
+// The one refusal of a well-formed human at challenge time, a name the link
+// cannot record, is logged with who was refused (mctl-api#663).
+func TestSurfaceIdentity_UnrecordableNameIsLogged(t *testing.T) {
+	e, pr := newZedEnv(t)
+	pr.byLogin["zed\nsmith"] = zedPRN
+	u := auth.NewFederatedUser("zitadel", "https://auth.mctl.ai", "330001", "zed\nsmith", auth.KindHuman)
+	if err := auth.AttachPrincipal(context.Background(), pr, u); err != nil {
+		t.Fatal(err)
+	}
+	e.users["zed-newline"] = u
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	code, body := e.do("zed-newline", "POST", "/api/v1/surface-identities/challenges", map[string]any{"surface": "telegram"})
+	if code != http.StatusForbidden || body["code"] != sidCodeHumanOnly {
+		t.Fatalf("challenge = %d %v, want 403 %s", code, body, sidCodeHumanOnly)
+	}
+	if out := logs.String(); !strings.Contains(out, "cannot be recorded") || !strings.Contains(out, zedPRN) {
+		t.Errorf("log = %q, want a warning naming %s", out, zedPRN)
+	}
+}
+
+// The holder audit keys mean the same in every surface_identity.* event
+// (mctl-api#663): principal is the holder, holder_subject the oidc: name of
+// a prn_ holder; linked and revoked keep subject as the holder.
+func TestSurfaceIdentity_AuditHolderKeysAreConsistent(t *testing.T) {
+	e, _ := newZedEnv(t)
+	id := e.link("zed", "telegram", "7070")
+	if code, body := e.do("zed", "POST", "/api/v1/surface-identities/"+id+"/revoke", nil); code != http.StatusOK {
+		t.Fatalf("revoke = %d %v", code, body)
+	}
+	seen := map[string]bool{}
+	for _, entry := range e.audit.List(100) {
+		switch entry.Operation {
+		case "surface_identity.challenge_created", "surface_identity.linked", "surface_identity.revoked":
+		default:
+			continue
+		}
+		seen[entry.Operation] = true
+		p := entry.Parameters
+		if p["principal"] != zedPRN || p["holder_subject"] != "oidc:zed@example.com" {
+			t.Errorf("%s: principal=%q holder_subject=%q, want %s and oidc:zed@example.com", entry.Operation, p["principal"], p["holder_subject"], zedPRN)
+		}
+		if s, ok := p["subject"]; ok && s != zedPRN {
+			t.Errorf("%s: subject=%q, want the holder %s or no subject", entry.Operation, s, zedPRN)
+		}
+	}
+	if len(seen) != 3 {
+		t.Fatalf("audit events seen = %v, want all three", seen)
+	}
+}
+
+// A prn_ link whose principal is not a human is no subject to relay or to
+// bind (mctl-api#663). Upstream guards keep such a link from being made; the
+// read paths check the kind themselves.
+func TestSurfaceIdentity_NonHumanPrincipalLinkIsRefused(t *testing.T) {
+	e, pr := newZedEnv(t)
+	e.link("zed", "telegram", "7070")
+	e.link("alice", "telegram", "4242")
+	_, created := e.relayCreate("telegram", "4242", nil)
+	id := created["work_item"].(map[string]any)["id"].(string)
+	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: id})
+	e.users["as-zed"] = auth.NewDelegatedPrincipalUser("zed@example.com", zedPRN, false, []string{e.tenant}, agent)
+
+	pr.kinds = map[string]string{zedPRN: auth.KindService}
+	if code, body := e.do("telegram", "GET", "/api/v1/identity/self", nil, SurfaceActorHeader, "7070"); code != http.StatusForbidden || body["code"] != sidCodeIdentityRefused {
+		t.Errorf("relay of a service principal's link = %d %v, want 403 %s", code, body, sidCodeIdentityRefused)
+	}
+	code, body := e.do("as-zed", "POST", "/api/v1/work-items/"+id+"/surface-refs", map[string]any{
+		"surface": "telegram", "external_id": "chat-1", "actor_external_id": "7070",
+	})
+	if code != http.StatusForbidden || body["code"] != delegationCodeNotBound {
+		t.Errorf("binding a service principal's link = %d %v, want 403 %s", code, body, delegationCodeNotBound)
 	}
 }

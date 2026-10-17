@@ -849,8 +849,10 @@ var errLinkOwnerUnresolved = errors.New("the surface link's owner resolves to no
 
 // surfaceLinkPrincipal resolves a live surface link's owner to its canonical
 // principal. A prn_ owner (mctl-api#646) is that principal once the store
-// confirms it is active, the same check agentPrincipalGate's token
-// principal gets. A "github:<login>" owner is resolved as follows. It keys
+// confirms it is an active human: the check agentPrincipalGate's token
+// principal gets, plus its kind, which humanPrincipal and the redeem's
+// mirrorLink already guarantee (mctl-api#663) but which is what binding a
+// surface actor rests on. A "github:<login>" owner is resolved as follows. It keys
 // on the same login-only GitHub identity agentPrincipalGate builds for a
 // sil_ grant's subject (auth.NewDelegatedUser, then AttachPrincipal), so the
 // principal a surface actor is bound for is the principal its sil_ grant
@@ -861,12 +863,8 @@ var errLinkOwnerUnresolved = errors.New("the surface link's owner resolves to no
 // the caller to refuse with 503.
 func (h *Handlers) surfaceLinkPrincipal(ctx context.Context, linkPrincipal string) (string, error) {
 	if surfaceid.IsPrincipalID(linkPrincipal) {
-		checker, ok := h.opts.Principals.(auth.PrincipalChecker)
-		if !ok {
-			return "", errors.New("principal store cannot check principals")
-		}
-		switch err := checker.CheckPrincipal(ctx, linkPrincipal); {
-		case errors.Is(err, auth.ErrPrincipalDisabled), errors.Is(err, auth.ErrIdentityRefused):
+		switch code, err := checkHumanPrincipal(ctx, h.opts.Principals, linkPrincipal); {
+		case code != "":
 			return "", errLinkOwnerUnresolved
 		case err != nil:
 			return "", err
