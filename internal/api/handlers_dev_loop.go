@@ -53,7 +53,17 @@ const (
 	devLoopOutcomeAlreadyRunning = "already_running"
 	devLoopOutcomeAlreadyExists  = "already_exists"
 	devLoopOutcomeFailed         = "failed"
+	// devLoopOutcomeRestartedAfterAbandon is the single-issue route's only:
+	// the latest run was abandoned by an operator, so a new run started on
+	// the same workflow id (mctl-api#640). The roadmap wave route never
+	// produces it; see restartIfAbandoned.
+	devLoopOutcomeRestartedAfterAbandon = "restarted_after_abandon"
 )
+
+// devLoopStatusCompleted is the only closed status an abandoned DevLoop
+// ends in: the abandon signal makes the workflow return a result, it does
+// not fail, cancel or terminate it.
+const devLoopStatusCompleted = "Completed"
 
 // devLoopStartResult is startDevLoop's answer: what happened, and everything
 // a caller needs to report it (the pre-existing execution's status/run id, or
@@ -62,7 +72,10 @@ type devLoopStartResult struct {
 	Outcome string
 	Status  string // Temporal status of the pre-existing execution, when one exists
 	RunID   string
-	Err     error
+	// PreviousRunID is the abandoned run a restarted_after_abandon start
+	// replaced; empty for every other outcome.
+	PreviousRunID string
+	Err           error
 }
 
 // startDevLoop implements the describe -> classify -> start decision shared
@@ -92,11 +105,80 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 	dctx, cancel := context.WithTimeout(ctx, devLoopDescribeTimeout)
 	result := classifyDevLoop(dctx, c, workflowID)
 	cancel()
+	if result.Outcome == devLoopOutcomeAlreadyExists {
+		return restartIfAbandoned(ctx, c, issueURL, workflowID, result)
+	}
 	if result.Outcome != "" {
 		return result
 	}
 	// Empty Outcome is classifyDevLoop's signal for "not found; start it".
 	return startDevLoopAfterNotFound(ctx, c, issueURL, workflowID)
+}
+
+// restartIfAbandoned decides what an already_exists classification means
+// for the single-issue route (mctl-api#640). An operator's abandon is not a
+// verdict on the issue: since the legacy approver relay was turned off
+// (mctl-gitops#1913), a running DevLoop is the only way to implement a
+// proposal, so a loop abandoned at its approval park would otherwise close
+// the issue to DevLoop for good.
+//
+//   - status Completed and the run's result says "abandoned: ..." -> start a
+//     new run on the same id and report restarted_after_abandon with the
+//     abandoned run as PreviousRunID.
+//   - status Completed with any other or no `ended` -> already_exists, as
+//     before: the loop finished, or ended for a reason that is not an
+//     operator's withdrawal (approval wait expired, issue closed, ...).
+//   - status Completed but the result cannot be read -> failed, no start:
+//     an unreadable result is not an abandoned one.
+//   - any other closed status (Failed, Terminated, TimedOut, Canceled, ...)
+//     -> already_exists without reading anything; abandon never ends a run
+//     that way.
+//
+// The marker is the run's own result, not a memo or search attribute: the
+// runs this exists for were abandoned before any such marker could have
+// been written, and DevLoopResult.ended has carried "abandoned: <reason>"
+// on every abandon path since mctl-agents#420.
+//
+// Only this route restarts. ExecuteRoadmapWave composes classifyDevLoop
+// and startDevLoopAfterNotFound directly, so a wave keeps reporting an
+// abandoned item as already_exists: a batch start must not silently undo an
+// operator's abandon.
+//
+// TOCTOU: the restart cannot be conditioned on which run closed (Temporal's
+// reuse policy is per call, not per run), so a run that started and
+// completed between the result read and the restart would be followed by
+// another. Both steps are admin calls on one issue a few milliseconds
+// apart; a second racing restart is absorbed by USE_EXISTING into the first.
+func restartIfAbandoned(ctx context.Context, c DevLoopClient, issueURL, workflowID string, existing devLoopStartResult) devLoopStartResult {
+	if existing.Status != devLoopStatusCompleted {
+		return existing
+	}
+	rctx, cancel := context.WithTimeout(ctx, devLoopDescribeTimeout)
+	ended, err := c.DevLoopEnded(rctx, workflowID, existing.RunID)
+	cancel()
+	if err != nil {
+		return devLoopStartResult{Outcome: devLoopOutcomeFailed, Status: existing.Status, RunID: existing.RunID,
+			Err: fmt.Errorf("could not read how the existing DevLoop run %s ended: %w", existing.RunID, err)}
+	}
+	if !strings.HasPrefix(ended, temporalclient.AbandonedEndedPrefix) {
+		return existing
+	}
+	wf, runID, err := c.RestartAbandonedDevLoopWorkflow(ctx, issueURL)
+	switch {
+	case err != nil:
+		return devLoopStartResult{Outcome: devLoopOutcomeFailed, PreviousRunID: existing.RunID,
+			Err: fmt.Errorf("restart after abandoned run %s: %w", existing.RunID, err)}
+	case wf != workflowID:
+		return devLoopStartResult{Outcome: devLoopOutcomeFailed, PreviousRunID: existing.RunID,
+			Err: fmt.Errorf("restarted workflow %s, planned %s", wf, workflowID)}
+	case runID == existing.RunID:
+		// The start was absorbed into the very run we read as closed, which
+		// would mean the describe lied; never report that as a restart.
+		return devLoopStartResult{Outcome: devLoopOutcomeFailed, PreviousRunID: existing.RunID,
+			Err: fmt.Errorf("restart returned the abandoned run %s itself", runID)}
+	default:
+		return devLoopStartResult{Outcome: devLoopOutcomeRestartedAfterAbandon, RunID: runID, PreviousRunID: existing.RunID}
+	}
 }
 
 // classifyDevLoop describes workflowID and decides whether a start should
@@ -233,6 +315,25 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 			"outcome":     result.Outcome,
 			"message":     "DevLoopWorkflow started. Approve the implement step with POST /api/v1/agents/dev-loop/{workflow_id}/approve once the proposal is reviewed.",
 		})
+	case devLoopOutcomeRestartedAfterAbandon:
+		auditParams["previous_run_id"] = result.PreviousRunID
+		h.logAudit(r, audit.Entry{
+			UserID:       user.ID,
+			Operation:    "dev-loop-start",
+			Parameters:   auditParams,
+			WorkflowName: workflowID,
+			Status:       "succeeded",
+			RiskLevel:    string(operations.RiskMedium),
+			Message:      "restarted after abandoned run " + result.PreviousRunID + " (new run " + result.RunID + ")",
+		})
+		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+			"workflow_id":     workflowID,
+			"run_id":          result.RunID,
+			"previous_run_id": result.PreviousRunID,
+			"started":         true,
+			"outcome":         result.Outcome,
+			"message":         "The previous DevLoopWorkflow run for this issue was abandoned, so a new run started on the same workflow id. It re-investigates the issue; approve the implement step with POST /api/v1/agents/dev-loop/{workflow_id}/approve once the proposal is reviewed.",
+		})
 	case devLoopOutcomeAlreadyRunning:
 		h.logAudit(r, audit.Entry{
 			UserID:       user.ID,
@@ -267,7 +368,7 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 			"started":     false,
 			"outcome":     result.Outcome,
 			"status":      result.Status,
-			"message":     "A DevLoopWorkflow already ran for this issue and is not restarted; nothing new was started.",
+			"message":     "A DevLoopWorkflow already ran for this issue and is not restarted; nothing new was started. Only a run that was abandoned is restarted.",
 		})
 	default: // devLoopOutcomeFailed
 		h.logAudit(r, audit.Entry{

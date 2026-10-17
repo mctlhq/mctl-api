@@ -16,6 +16,7 @@ package temporalclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -58,6 +59,74 @@ func TestStartDevLoopWorkflow_UsesComputedIDAndTaskQueue(t *testing.T) {
 		t.Fatalf("got workflowID=%q runID=%q", workflowID, runID)
 	}
 	mockClient.AssertExpectations(t)
+}
+
+// resultWorkflowRun answers Get by JSON-decoding a recorded result, the way
+// the SDK's default data converter decodes a JSON payload, or with err.
+type resultWorkflowRun struct {
+	fakeWorkflowRun
+	result string
+	err    error
+}
+
+func (r *resultWorkflowRun) Get(_ context.Context, valuePtr interface{}) error {
+	if r.err != nil {
+		return r.err
+	}
+	return json.Unmarshal([]byte(r.result), valuePtr)
+}
+
+func TestRestartAbandonedDevLoopWorkflow_AllowsDuplicateAndKeepsUseExisting(t *testing.T) {
+	mockClient := new(mocks.Client)
+	mockClient.On("ExecuteWorkflow", mock.Anything, mock.MatchedBy(func(opts client.StartWorkflowOptions) bool {
+		return opts.ID == "dev-loop-mctlhq-mctl-telegram-296" && opts.TaskQueue == TaskQueue &&
+			opts.WorkflowIDReusePolicy == enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE &&
+			opts.WorkflowIDConflictPolicy == enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING
+	}), DevLoopWorkflowType, mock.Anything).
+		Return(&fakeWorkflowRun{id: "dev-loop-mctlhq-mctl-telegram-296", runID: "run-2"}, nil)
+
+	c := &Client{temporal: mockClient}
+	wf, runID, err := c.RestartAbandonedDevLoopWorkflow(context.Background(), "https://github.com/mctlhq/mctl-telegram/issues/296")
+	if err != nil || wf != "dev-loop-mctlhq-mctl-telegram-296" || runID != "run-2" {
+		t.Fatalf("got %q %q %v", wf, runID, err)
+	}
+	mockClient.AssertExpectations(t)
+}
+
+func TestDevLoopEnded_ReadsThePinnedRunsResult(t *testing.T) {
+	cases := []struct {
+		name    string
+		run     *resultWorkflowRun
+		want    string
+		wantErr bool
+	}{
+		{name: "abandoned", run: &resultWorkflowRun{result: `{"investigate":{},"implement":null,"ended":"abandoned: superseded"}`}, want: "abandoned: superseded"},
+		{name: "full pipeline", run: &resultWorkflowRun{result: `{"investigate":{},"ended":""}`}, want: ""},
+		{name: "predates the field", run: &resultWorkflowRun{result: `{"investigate":{}}`}, want: ""},
+		{name: "read fails", run: &resultWorkflowRun{err: serviceerror.NewUnavailable("down")}, wantErr: true},
+		{name: "undecodable", run: &resultWorkflowRun{result: `{"ended":42}`}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockClient := new(mocks.Client)
+			mockClient.On("GetWorkflow", mock.Anything, "dev-loop-mctlhq-mctl-telegram-296", "run-1").Return(tc.run)
+			c := &Client{temporal: mockClient}
+			got, err := c.DevLoopEnded(context.Background(), "dev-loop-mctlhq-mctl-telegram-296", "run-1")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got %q", got)
+				}
+				if got != "" {
+					t.Fatalf("a failed read must not return an answer, got %q", got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("got %q %v, want %q", got, err, tc.want)
+			}
+			mockClient.AssertExpectations(t)
+		})
+	}
 }
 
 func TestStartDevLoopWorkflow_RejectsMalformedIssueURLWithoutCallingTemporal(t *testing.T) {

@@ -67,6 +67,35 @@ type fakeDevLoopClient struct {
 	humanInputSignalTo []string
 	signalErr          error
 	onSignal           func(f *fakeDevLoopClient, workflowID string, doc map[string]any)
+	// Restart-after-abandon (mctl-api#640): what DevLoopEnded answers for a
+	// run, or the error it fails with, and every restart.
+	ended         string
+	endedErr      error
+	endedReadRuns []string
+	restartCalls  int
+	restartRunID  string
+	restartErr    error
+	restartedAsWF string
+}
+
+func (f *fakeDevLoopClient) DevLoopEnded(ctx context.Context, workflowID, runID string) (string, error) {
+	f.endedReadRuns = append(f.endedReadRuns, runID)
+	if f.endedErr != nil {
+		return "", f.endedErr
+	}
+	return f.ended, nil
+}
+
+func (f *fakeDevLoopClient) RestartAbandonedDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
+	f.restartCalls++
+	if f.restartErr != nil {
+		return "", "", f.restartErr
+	}
+	wf := f.restartedAsWF
+	if wf == "" {
+		wf = f.workflowID
+	}
+	return wf, f.restartRunID, nil
 }
 
 func (f *fakeDevLoopClient) SignalHumanInputResponse(ctx context.Context, workflowID, runID string, response map[string]any) error {
@@ -911,6 +940,124 @@ func TestGetDevLoopWorkflow_KnownSeparatesAnAnswerFromAFallback(t *testing.T) {
 			if body["shepherd_in_loop_known"] != tc.wantKnown {
 				t.Errorf("shepherd_in_loop_known: got %v, want %v",
 					body["shepherd_in_loop_known"], tc.wantKnown)
+			}
+		})
+	}
+}
+
+// TestStartDevLoopWorkflow_RestartOnlyAfterAbandon is mctl-api#640's table:
+// every closed status crossed with what the run's result says about how it
+// ended. Only a Completed run whose result says "abandoned: ..." is
+// restarted; an unreadable result is failed without a start.
+func TestStartDevLoopWorkflow_RestartOnlyAfterAbandon(t *testing.T) {
+	const wf = "dev-loop-mctlhq-mctl-telegram-1"
+	type marker struct {
+		name  string
+		ended string
+		err   error
+	}
+	markers := []marker{
+		{name: "abandoned", ended: temporalclient.AbandonedEndedPrefix + "superseded by #663"},
+		{name: "other", ended: "approval wait expired"},
+		{name: "absent", ended: ""},
+		{name: "unreadable", err: serviceerror.NewUnavailable("temporal frontend unreachable")},
+	}
+	statuses := []string{"Completed", "Failed", "Terminated", "TimedOut", "Canceled", "ContinuedAsNew", "Unknown"}
+
+	for _, status := range statuses {
+		for _, m := range markers {
+			t.Run(status+"/"+m.name, func(t *testing.T) {
+				fake := &fakeDevLoopClient{
+					describeExec: &temporalclient.DevLoopExecution{Status: status, RunID: "run-old"},
+					workflowID:   wf, runID: "run-start", restartRunID: "run-new",
+					ended: m.ended, endedErr: m.err,
+				}
+				logger := audit.NewLogger()
+				h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+				req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+				rec := httptest.NewRecorder()
+				h.StartDevLoopWorkflow(rec, adminCtx(req))
+
+				if fake.startCalls != 0 {
+					t.Fatalf("a closed DevLoop must never go through the no-restart start, got %d calls", fake.startCalls)
+				}
+				var body map[string]interface{}
+				_ = json.Unmarshal(rec.Body.Bytes(), &body)
+
+				switch {
+				case status != "Completed":
+					// Abandon only ever ends a run as Completed: the marker is
+					// not even read.
+					if len(fake.endedReadRuns) != 0 {
+						t.Fatalf("read the result of a %s run", status)
+					}
+					assertNotRestarted(t, fake, rec, body)
+				case m.name == "abandoned":
+					if rec.Code != http.StatusAccepted || body["outcome"] != devLoopOutcomeRestartedAfterAbandon {
+						t.Fatalf("expected 202 %s, got %d %v", devLoopOutcomeRestartedAfterAbandon, rec.Code, body)
+					}
+					if body["started"] != true || body["run_id"] != "run-new" || body["previous_run_id"] != "run-old" {
+						t.Fatalf("restart must report the new run and the abandoned one, got %v", body)
+					}
+					if fake.restartCalls != 1 || len(fake.endedReadRuns) != 1 || fake.endedReadRuns[0] != "run-old" {
+						t.Fatalf("expected one restart after reading run-old, got %d restarts, reads %v", fake.restartCalls, fake.endedReadRuns)
+					}
+					entries := logger.List(10)
+					if len(entries) != 1 || entries[0].Parameters["outcome"] != devLoopOutcomeRestartedAfterAbandon ||
+						entries[0].Parameters["previous_run_id"] != "run-old" || entries[0].UserID == "" {
+						t.Fatalf("expected one audit entry naming the actor and the abandoned run, got %+v", entries)
+					}
+				case m.name == "unreadable":
+					if rec.Code != http.StatusBadGateway {
+						t.Fatalf("an unreadable result must fail, got %d %s", rec.Code, rec.Body.String())
+					}
+					if fake.restartCalls != 0 {
+						t.Fatal("restarted a run whose result could not be read")
+					}
+					entries := logger.List(10)
+					if len(entries) != 1 || entries[0].Status != "failed" || entries[0].Parameters["outcome"] != devLoopOutcomeFailed {
+						t.Fatalf("expected one failed audit entry, got %+v", entries)
+					}
+				default:
+					assertNotRestarted(t, fake, rec, body)
+				}
+			})
+		}
+	}
+}
+
+func assertNotRestarted(t *testing.T, fake *fakeDevLoopClient, rec *httptest.ResponseRecorder, body map[string]interface{}) {
+	t.Helper()
+	if rec.Code != http.StatusOK || body["outcome"] != devLoopOutcomeAlreadyExists || body["started"] != false {
+		t.Fatalf("expected 200 %s started=false, got %d %v", devLoopOutcomeAlreadyExists, rec.Code, body)
+	}
+	if body["run_id"] != "run-old" {
+		t.Errorf("expected the existing run id, got %v", body["run_id"])
+	}
+	if fake.restartCalls != 0 {
+		t.Fatalf("restarted a DevLoop that was not abandoned (%d calls)", fake.restartCalls)
+	}
+}
+
+// A restart that Temporal refuses, or that comes back under another id or as
+// the abandoned run itself, is failed, never reported as a restart.
+func TestStartDevLoopWorkflow_RestartFailuresAreFailed(t *testing.T) {
+	cases := map[string]*fakeDevLoopClient{
+		"start error":     {restartErr: serviceerror.NewUnavailable("down")},
+		"other workflow":  {restartedAsWF: "dev-loop-mctlhq-mctl-telegram-2", restartRunID: "run-new"},
+		"same run echoed": {restartRunID: "run-old"},
+	}
+	for name, fake := range cases {
+		t.Run(name, func(t *testing.T) {
+			fake.describeExec = &temporalclient.DevLoopExecution{Status: "Completed", RunID: "run-old"}
+			fake.workflowID = "dev-loop-mctlhq-mctl-telegram-1"
+			fake.ended = temporalclient.AbandonedEndedPrefix + "x"
+			h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: audit.NewLogger()}}
+			req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+			rec := httptest.NewRecorder()
+			h.StartDevLoopWorkflow(rec, adminCtx(req))
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("expected 502, got %d %s", rec.Code, rec.Body.String())
 			}
 		})
 	}
