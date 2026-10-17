@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.91.0](https://github.com/mctlhq/mctl-api/compare/4.90.0...4.91.0) (2026-10-17)
+
+
+### Features
+
+* **agents:** issue-363-fix-roadmap-guard-eligible-dereference-a ([7b67d82](https://github.com/mctlhq/mctl-api/commit/7b67d82a344e6ef3993bd067e78f2480e6380045))
+* observe verified workspace access for the portal ([0744132](https://github.com/mctlhq/mctl-api/commit/0744132c997725c5367057526d19c9b463d871c3))
+* observe workspace readiness for the portal ([142c625](https://github.com/mctlhq/mctl-api/commit/142c625c4ce1f0157e993af67cde9a9f97ecd0df))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-363-fix-roadmap-guard-eligible-dereference-a ([8a23965](https://github.com/mctlhq/mctl-api/commit/8a239650cc7fac96a405364b16201be1f6a84e4d))
+* **agents:** address P1/P2 codex findings on issue-363-fix-roadmap-guard-eligible-dereference-a ([64f244b](https://github.com/mctlhq/mctl-api/commit/64f244b2168cbbca183080fd8fc4ae47a86717f5))
+* **agents:** address P1/P2 codex findings on issue-363-fix-roadmap-guard-eligible-dereference-a ([27fff9b](https://github.com/mctlhq/mctl-api/commit/27fff9be4802e8d6f56f251ebe5b10889329f93b))
+* **agents:** address P1/P2 codex findings on issue-363-fix-roadmap-guard-eligible-dereference-a ([7c6520d](https://github.com/mctlhq/mctl-api/commit/7c6520da08bdc689d1d34f419e49456d62aa7b12))
+
 ## [4.90.0](https://github.com/mctlhq/mctl-api/compare/4.89.0...4.90.0) (2026-10-16)
 
 
