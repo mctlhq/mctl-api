@@ -439,16 +439,17 @@ the audit trail has `action_approval.create`, `.decision` and `.consume`
 on every request: a ZITADEL-only human approves the same way as a GitHub
 one. A grant with no stored principal (an undecided `aar_`), or whose
 principal is disabled, is 403 `grant_subject_unresolved`; it never falls
-back to the login string. A surface link (`sil_`) stores no principal and
-still resolves through its mirrored GitHub identity, so it requires a
-`github:` subject; it cannot authorize this operation. Binding a surface
-actor to a delegated subject, by contrast, compares principals (#629, next
-section).
+back to the login string. A `sil_` grant of a `github:<login>` link stores
+no principal and still resolves through its mirrored GitHub identity, so it
+requires a `github:` subject; it cannot authorize this operation. A `sil_`
+grant of a `prn_` link (#646) carries the link's principal and is checked
+like the other kinds. Binding a surface actor to a delegated subject
+compares principals (#629, next section).
 
 | Code | Status | Where | Meaning |
 |---|---|---|---|
 | `grant_not_bound` | 403 | gate | the `aar_` is for another `we_` or work item, or is denied, expired or consumed |
-| `grant_subject_unresolved` | 403 | gate | no stored principal (undecided), disabled, or (`sil_`) not a GitHub subject |
+| `grant_subject_unresolved` | 403 | gate | no stored principal (undecided), disabled, or (`sil_`) a `github:` link without a GitHub subject or a `prn_` link without its recorded `oidc:` name |
 | `actor_not_accepted` | 400 | operation | the body names an `approver` |
 | `approval_intent_mismatch` | 409 | operation | another action kind, target or policy; a target that maps to no workflow id or not to the run's own DevLoop; or the approval's `we_` no longer exists |
 | `approval_consumed` / `approval_expired` | 409 | operation, approve route | spent or past its expiry |
@@ -485,26 +486,58 @@ to the work item (and with it the identity's `sil_` grant). The binding is
 allowed only when the identity's live link resolves to the delegated
 subject's principal. The subject's principal is the one the gate resolved:
 for an `xr_`, `aar_` or `wi_` grant the stored `prn_`, whatever IdP the
-human signed in with. The link's owner (`github:<login>`, the only form a
-link names today) is resolved through the principal store exactly as the
-gate resolves a `sil_` subject, so the principal a surface actor is bound
-for is the principal its `sil_` grant later acts as. The login is read
-from the stored link, never from the caller. Like the gate, that lookup
-may ask GitHub for the login's id and provision a principal for it, on
-this write path. A subject that shares the owner's login string but is
-another principal is refused.
+human signed in with. The link's owner is read from the stored link, never
+from the caller. A `github:<login>` owner is resolved through the principal
+store exactly as the gate resolves a `sil_` subject, so the principal a
+surface actor is bound for is the principal its `sil_` grant later acts as.
+Like the gate, that lookup may ask GitHub for the login's id and provision
+a principal for it, on this write path. A `prn_` owner (#646) is that
+principal once the store confirms it is active. A subject that shares the
+owner's login string but is another principal is refused.
 
 | Outcome | Status | Code |
 |---|---|---|
 | the subject has no resolved principal | 403 | `grant_subject_unresolved` |
 | another principal's identity; unknown, revoked or expired link; owner disabled or refused | 403 | `grant_not_bound` (one answer, no existence oracle) |
-| the link store could not be read; the owner's login could not be resolved (unknown GitHub identity, GitHub or principal store unavailable); the principal store is not configured | 503 | `delegation_unavailable` |
+| the link store could not be read; the owner's login could not be resolved (unknown GitHub identity, GitHub or principal store unavailable); the principal store is not configured or cannot check a `prn_` owner | 503 | `delegation_unavailable` |
 
-A ZITADEL-only human still cannot *create* a surface link: a link challenge
-requires a GitHub-verified caller (`humanPrincipal`), and links name only
-`github:<login>`. The binding therefore helps a ZITADEL sign-in whose
-principal also owns a GitHub-named link (an ambiguous or unknown GitHub
-identity), and every principal once links can name a `prn_`.
+**Surface links for any human (#646).** A link names its holder in one of
+two forms. A caller whose GitHub login authentication proved is linked as
+`github:<login>`, as before. Any other human acting directly (a ZITADEL
+sign-in, say) whose principal authentication resolved is linked as that
+`prn_`, and the link records the name the human acted under, `oidc:<name>`
+(`principalOf`), as its `subject`. A service, surface or agent, a relayed
+or delegated subject, and a human without a resolved principal get 403
+`human_principal_required`.
+A `prn_` link needs `TENANT_AUTHZ_MODE=principal`: its relayed subject's
+tenants come from the principal, and only principal mode resolves them, so
+outside it the challenge is 403 `principal_mode_required` rather than a link
+every tenant-scoped relay would refuse.
+
+One human can sign in through GitHub and through ZITADEL onto the same
+principal. The GitHub session also holds the links of its resolved `prn_`:
+it lists them alongside its `github:` links and may revoke them. A new link
+for an identity already held under the other form is still `link_conflict`;
+revoke the old one first.
+
+- The mirror writes a `prn_` link's telegram identity for that principal
+  outright. A `prn_` that does not exist or is not human fails the redeem,
+  which is rolled back with the mirror.
+- The relay runs as the link's principal, checked active on every request
+  (`CheckPrincipal`): disabled is 403 `principal_disabled`, unknown or
+  refused 403 `identity_refused`, and a store that cannot answer is 503,
+  never a relay without a principal. A `prn_` link without a well-formed
+  `oidc:` subject is 403 `link_not_found`. The relayed subject acts under the
+  recorded name, so what it writes is owned by the same `oidc:<name>` the
+  human owns directly.
+- The `sil_` grant and the surface-actor binding follow the principal, as
+  above.
+
+The recorded name is only a name: renaming the human in ZITADEL leaves the
+link on the same principal, and the next possession proof records the new
+name. Until then the relay acts under the old name, so items written through
+the surface are owned by `oidc:<old name>` and are not visible to the human's
+direct sessions under the new one.
 
 **Answering human input.** `requested_from.actor_refs` entries stay in the
 `actor_type:actor_id` form that mctl-agents' `validate_response` rebuilds

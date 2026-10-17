@@ -342,7 +342,7 @@ func newSurfaceStore(t *testing.T) *surfaceid.Store {
 func link(t *testing.T, ss *surfaceid.Store, login, telegramID string) *surfaceid.Link {
 	t.Helper()
 	ctx := context.Background()
-	c, err := ss.CreateChallenge(ctx, "github:"+login, surfaceid.SurfaceTelegram)
+	c, err := ss.CreateChallenge(ctx, "github:"+login, "", surfaceid.SurfaceTelegram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func TestAFailedMirrorRollsTheRedeemBack(t *testing.T) {
 	ss := newSurfaceStore(t)
 	ss.SetMirror(failingMirror{})
 	ctx := context.Background()
-	c, err := ss.CreateChallenge(ctx, "github:alice", surfaceid.SurfaceTelegram)
+	c, err := ss.CreateChallenge(ctx, "github:alice", "", surfaceid.SurfaceTelegram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,5 +561,57 @@ func TestLookupIdentityIsReadOnly(t *testing.T) {
 	}
 	if got, revoked, err := s.LookupIdentity(ctx, auth.ProviderGitHub, "", "77"); err != nil || !revoked || got.ID != p.ID {
 		t.Fatalf("revoked identity: %+v, %v, %v; want %s revoked", got, revoked, err, p.ID)
+	}
+}
+
+// mctl-api#646: a link that names a canonical principal mirrors to that
+// principal outright, with no GitHub lookup. One naming a principal that
+// does not exist, or is not human, is refused and the redeem rolled back.
+func TestPrincipalSurfaceLinkMirrorsToItsPrincipal(t *testing.T) {
+	s := newStoreForTest(t)
+	ss := newSurfaceStore(t)
+	ss.SetMirror(s)
+	ctx := context.Background()
+	zed, err := s.Provision(ctx, auth.Identity{Provider: "zitadel", Issuer: "https://auth.example", Subject: "zsub-9", Display: "zed@example.com", Kind: auth.KindHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bot, err := s.Provision(ctx, auth.Identity{Provider: "zitadel", Issuer: "https://auth.example", Subject: "zsub-bot", Display: "bot", Kind: auth.KindService})
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeem := func(principal, telegramID string) (*surfaceid.Link, error) {
+		t.Helper()
+		c, err := ss.CreateChallenge(ctx, principal, "oidc:x", surfaceid.SurfaceTelegram)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ss.Redeem(ctx, surfaceid.SurfaceTelegram, c.Code, telegramID)
+	}
+
+	l, err := redeem(zed.ID, "3003")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid, revoked, found := telegramIdentity(t, s, "3003"); !found || revoked || pid != zed.ID {
+		t.Fatalf("mirror = %q revoked=%v found=%v; want zed's principal", pid, revoked, found)
+	}
+	if _, err := ss.Revoke(ctx, l.ID, zed.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, revoked, _ := telegramIdentity(t, s, "3003"); !revoked {
+		t.Fatal("revoking the link left the mirrored identity live")
+	}
+
+	for name, principal := range map[string]string{"unknown": "prn_01JZZZ00000000000000000000", "service": bot.ID} {
+		if _, err := redeem(principal, "4004"); err == nil {
+			t.Errorf("%s: redeem succeeded", name)
+		}
+		if _, err := ss.Resolve(ctx, surfaceid.SurfaceTelegram, "4004"); !errors.Is(err, surfaceid.ErrLinkNotFound) {
+			t.Errorf("%s: a link exists without its mirror: %v", name, err)
+		}
+		if _, _, found := telegramIdentity(t, s, "4004"); found {
+			t.Errorf("%s: mirrored", name)
+		}
 	}
 }
