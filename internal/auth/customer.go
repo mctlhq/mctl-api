@@ -39,6 +39,12 @@ const (
 	ScopeResourceOwner = "urn:zitadel:iam:user:resourceowner"
 	// ClaimResourceOwnerID is the id of the organization the user belongs to.
 	ClaimResourceOwnerID = "urn:zitadel:iam:user:resourceowner:id"
+	// ScopeOrgIDPrefix, followed by an organization id, makes ZITADEL sign
+	// the user in to that organization, under its login policy.
+	ScopeOrgIDPrefix = "urn:zitadel:iam:org:id:"
+	// ScopeIdPIDPrefix, followed by an IdP id, sends the user straight to
+	// that identity provider instead of the login page.
+	ScopeIdPIDPrefix = "urn:zitadel:iam:org:idp:id:"
 
 	// The identity hook's claims; the names match internal/zitadelhook.
 	ClaimCustomerOrg         = "mctl:org"

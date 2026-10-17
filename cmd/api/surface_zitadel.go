@@ -54,6 +54,25 @@ func (c config) customersProvider() (*auth.OIDCProviderConfigEntry, error) {
 	return found, nil
 }
 
+// customersGitHubIdPID is the GitHub IdP the OAuth customer sign-in entry
+// sends ZITADEL to (mctl-web#158), or "" so that no customer entry is
+// offered. The id is the identity hook's ZITADEL_HOOK_GITHUB_IDP_ID: the
+// same zitadel-iac Secret writes it next to ZITADEL_HOOK_CUSTOMERS_ORG_ID,
+// so it is taken only when that org is entry's customers_org_id. An IdP
+// paired with an organization that could not be confirmed is not offered.
+func (c config) customersGitHubIdPID(entry auth.OIDCProviderConfigEntry) string {
+	zc := c.ZitadelHook
+	if entry.CustomersOrgID == "" || zc.GitHubIdPID == "" {
+		return ""
+	}
+	if zc.CustomersOrgID != entry.CustomersOrgID || !auth.ValidZitadelID(zc.GitHubIdPID) {
+		slog.Warn("OAuth customer GitHub sign-in not offered: ZITADEL_HOOK_GITHUB_IDP_ID does not belong to the customers organization of this provider",
+			"provider", entry.Name)
+		return ""
+	}
+	return zc.GitHubIdPID
+}
+
 // surfaceZitadelOptions wires POST /api/v1/surface-principals/zitadel, or
 // returns nil (the route answers 503) without a customers organization.
 // MCTL_WEB_CLIENT_ID is the client of purpose "create" and

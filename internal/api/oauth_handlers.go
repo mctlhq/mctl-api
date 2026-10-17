@@ -171,12 +171,12 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	upstream, ok := h.pickOAuthUpstream(w, r)
+	upstream, customer, ok := h.pickOAuthUpstream(w, r)
 	if !ok {
 		return
 	}
 	if upstream == auth.UpstreamZitadel {
-		h.startZitadelAuthorize(w, r, clientID, redirectURI, state, codeChallenge)
+		h.startZitadelAuthorize(w, r, clientID, redirectURI, state, codeChallenge, customer)
 		return
 	}
 
