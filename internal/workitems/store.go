@@ -147,7 +147,7 @@ CREATE INDEX IF NOT EXISTS work_item_create_requests_item ON work_item_create_re
 
 const itemColumns = `id, tenant, owner_principal, visibility, origin_surface, title, external_key,
 	state, waiting_reason, superseded_by, state_version, created_by, created_at, updated_at,
-	completed_at, schema_version`
+	completed_at, schema_version, owner_principal_id`
 
 const executionColumns = `id, work_item_id, engine, engine_ref, attempt, resumed_from_execution_id,
 	phase, started_at, ended_at`
@@ -224,7 +224,7 @@ func scanItem(row pgx.Row) (*WorkItem, error) {
 	var w WorkItem
 	if err := row.Scan(&w.ID, &w.Tenant, &w.OwnerPrincipal, &w.Visibility, &w.OriginSurface, &w.Title,
 		&w.ExternalKey, &w.State, &w.WaitingReason, &w.SupersededBy, &w.StateVersion, &w.CreatedBy,
-		&w.CreatedAt, &w.UpdatedAt, &w.CompletedAt, &w.SchemaVersion); err != nil {
+		&w.CreatedAt, &w.UpdatedAt, &w.CompletedAt, &w.SchemaVersion, &w.OwnerPrincipalID); err != nil {
 		return nil, err
 	}
 	w.CreatedAt = w.CreatedAt.UTC()
@@ -328,7 +328,7 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*WorkItem, bool, er
 			}
 		}
 
-		w, err := scanItem(tx.QueryRow(ctx, `INSERT INTO work_items (`+itemColumns+`, owner_principal_id)
+		w, err := scanItem(tx.QueryRow(ctx, `INSERT INTO work_items (`+itemColumns+`)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,'`+StateActive+`','','',1,$3,$8,$8,NULL,$9,$10)
 			RETURNING `+itemColumns,
 			WorkItemIDPrefix+uuid.NewString(), in.Tenant, in.Actor, in.Visibility, in.OriginSurface,

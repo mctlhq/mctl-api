@@ -722,6 +722,7 @@ components:
         id: {type: string, example: wi_5c8e0f3a-1b2c-4d5e-8f90-123456789abc}
         tenant: {type: string}
         owner_principal: {type: string, description: 'Derived from authentication, e.g. github:alice or service:mctl-agent.'}
+        owner_principal_id: {type: string, pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$', description: "The owner's canonical principal, recorded at creation. Absent for an item whose owner had none recorded. Informational: access is decided by owner_principal."}
         visibility: {type: string, enum: [tenant, private]}
         origin_surface: {type: string}
         title: {type: string, maxLength: 256}
