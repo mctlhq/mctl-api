@@ -17,10 +17,12 @@ package principals
 import (
 	"context"
 	"errors"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -161,5 +163,77 @@ func TestCustomerDeletionPendingReadFailureIsUnknown(t *testing.T) {
 	cancel()
 	if _, err := s.CustomerDeletionPending(ctx, "730003"); err == nil {
 		t.Fatal("failed read reported a clean absence")
+	}
+}
+
+func TestCustomerDeletionLockDoesNotBorrowAuthenticationPool(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	config := s.pool.Config()
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.pool.Close()
+	s.pool = pool
+	other, err := NewStore(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	err = s.WithCustomerDeletionLock(ctx, "lock-test", "customer", func(runCtx context.Context) error {
+		var n int
+		if err := s.pool.QueryRow(runCtx, "SELECT 1").Scan(&n); err != nil {
+			return err
+		}
+		ran := false
+		if err := other.WithCustomerDeletionLock(runCtx, "lock-test", "customer", func(context.Context) error { ran = true; return nil }); err == nil || ran {
+			return errors.New("another replica entered the locked stage")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := other.WithCustomerDeletionLock(ctx, "lock-test", "customer", func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("lock was not released: %v", err)
+	}
+}
+
+func TestCustomerDeletionLockLossCancelsStages(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := s.WithCustomerDeletionLock(ctx, "lost-lock", "customer", func(runCtx context.Context) error {
+		var terminated bool
+		if err := s.pool.QueryRow(runCtx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='mctl-customer-deletion-lock' AND pid<>pg_backend_pid()").Scan(&terminated); err != nil {
+			return err
+		}
+		if !terminated {
+			return errors.New("lock session not terminated")
+		}
+		<-runCtx.Done()
+		return runCtx.Err()
+	})
+	if err == nil || !strings.Contains(err.Error(), "lock session lost") {
+		t.Fatalf("lost session did not fail cleanup: %v", err)
+	}
+}
+
+func TestCustomerDeletionApprovalRechecksIdentityAfterExternalObservation(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	p, err := s.ResolveCustomer(ctx, customer("approval-race", 730003, "race-customer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.PrepareCustomerDeletion(ctx, "race-tenant", p.ID, "https://auth.mctl.ai", "admin", func(*CustomerDeletion) error {
+		_, err := s.LinkIdentity(ctx, p.ID, auth.Identity{Provider: "dex", Issuer: "https://staff.example", Subject: "race", Kind: auth.KindHuman})
+		return err
+	})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("changed identity accepted: %v", err)
 	}
 }

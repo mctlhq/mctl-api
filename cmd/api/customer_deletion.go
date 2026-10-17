@@ -52,7 +52,7 @@ func customerDeletionOptions(cfg config, store *principals.Store, cache *princip
 		return nil
 	}
 	p := &customerdelete.Providers{
-		Issuer: provider.Issuer, CustomerOrg: cfg.ZitadelHook.CustomersOrgID, GitHubIDP: cfg.ZitadelHook.GitHubIdPID,
+		Issuer: provider.Issuer, CustomerOrg: provider.CustomersOrgID, GitHubIDP: cfg.customersGitHubIdPID(provider),
 		ClientID: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_CLIENT_ID"), ClientSecret: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_CLIENT_SECRET"),
 		SiteBase: envOr("CUSTOMER_DELETION_SITE_URL", "https://mctl.ai"), SessionAudience: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_PROJECT_ID"),
 		PortalBase: cfg.BackstageInternalURL, PortalToken: os.Getenv("BACKSTAGE_TOKEN"),

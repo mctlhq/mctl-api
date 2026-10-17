@@ -35,7 +35,7 @@ var errCustomerDeletionUnobserved = errors.New("customer deletion observation un
 var customerDeletionTenantName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
 
 type CustomerDeletionStore interface {
-	WithCustomerDeletionLock(context.Context, string, string, func() error) error
+	WithCustomerDeletionLock(context.Context, string, string, func(context.Context) error) error
 
 	PrepareCustomerDeletion(context.Context, string, string, string, string, ...func(*principals.CustomerDeletion) error) (*principals.CustomerDeletion, error)
 	CustomerDeletion(context.Context, string, string) (*principals.CustomerDeletion, error)
@@ -211,7 +211,7 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	phase := stage
-	run := func() error {
+	run := func(ctx context.Context) error {
 		if stage == "begin" {
 			exists, err := h.opts.GitReader.TenantExists(tenant)
 			if err != nil {
@@ -221,12 +221,12 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 				return err
 			}
 			if d.Status == "prepared" {
-				if err := o.VerifyCustomer(r.Context(), d); err != nil {
+				if err := o.VerifyCustomer(ctx, d); err != nil {
 					return err
 				}
 			}
 
-			if err := o.Store.BeginCustomerDeletion(r.Context(), tenant, pid); err != nil {
+			if err := o.Store.BeginCustomerDeletion(ctx, tenant, pid); err != nil {
 				return err
 			}
 			o.ForgetPrincipals(pid)
@@ -243,42 +243,42 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 			return errors.New("GitOps tenant absence not confirmed")
 		}
 		phase = "platform"
-		if err := o.CheckPlatformGone(r.Context(), tenant); err != nil {
+		if err := o.CheckPlatformGone(ctx, tenant); err != nil {
 			return fmt.Errorf("platform postcondition: %w", err)
 		}
 		phase = "zitadel"
-		if err := o.DeleteCustomer(r.Context(), d); err != nil {
+		if err := o.DeleteCustomer(ctx, d); err != nil {
 			return fmt.Errorf("IdP deletion: %w", err)
 		}
 		phase = "site-sessions"
-		if err := o.RevokeSiteSessions(r.Context(), d); err != nil {
+		if err := o.RevokeSiteSessions(ctx, d); err != nil {
 			return fmt.Errorf("site session revocation: %w", err)
 		}
 		phase = "portal"
-		if err := o.CleanPortal(r.Context(), d); err != nil {
+		if err := o.CleanPortal(ctx, d); err != nil {
 			return fmt.Errorf("portal cleanup: %w", err)
 		}
 		if _, err := o.RevokeSessions(pid, "customer_account_deleted"); err != nil {
 			return err
 		}
 		phase = "principal"
-		if err := o.Store.FinishCustomerDeletion(r.Context(), tenant, pid); err != nil {
+		if err := o.Store.FinishCustomerDeletion(ctx, tenant, pid); err != nil {
 			return err
 		}
 		o.ForgetPrincipals(pid)
 		phase = "portal-release"
-		return o.ReleasePortal(r.Context(), d)
+		return o.ReleasePortal(ctx, d)
 	}
-	err = o.Store.WithCustomerDeletionLock(r.Context(), tenant, pid, func() error {
-		fresh, err := o.Store.CustomerDeletion(r.Context(), tenant, pid)
+	err = o.Store.WithCustomerDeletionLock(r.Context(), tenant, pid, func(ctx context.Context) error {
+		fresh, err := o.Store.CustomerDeletion(ctx, tenant, pid)
 		if err != nil {
 			return err
 		}
 		if fresh.Status == "complete" {
-			return o.ReleasePortal(r.Context(), fresh)
+			return o.ReleasePortal(ctx, fresh)
 		}
 		d = fresh
-		return run()
+		return run(ctx)
 	})
 	status := "succeeded"
 	if err != nil {

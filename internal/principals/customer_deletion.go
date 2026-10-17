@@ -16,8 +16,10 @@ package principals
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -65,8 +67,65 @@ func (s *Store) CustomerDeletion(ctx context.Context, tenant, pid string) (*Cust
 
 // WithCustomerDeletionLock serializes external effects across API replicas.
 // Its lock is separate from the short store transactions used by each stage.
-func (s *Store) WithCustomerDeletionLock(ctx context.Context, tenant, pid string, fn func() error) error {
-	return s.withTx(ctx, "customer-deletion-run|"+tenant+"|"+pid, func(pgx.Tx) error { return fn() })
+func (s *Store) WithCustomerDeletionLock(ctx context.Context, tenant, pid string, fn func(context.Context) error) error {
+	select {
+	case s.deletionSlots <- struct{}{}:
+		defer func() { <-s.deletionSlots }()
+	default:
+		return errors.New("customer deletion workers busy; retry")
+	}
+	// Never borrow the authentication pool while nested stage transactions run.
+	config := s.pool.Config().ConnConfig.Copy()
+	config.RuntimeParams["application_name"] = "mctl-customer-deletion-lock"
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		return fmt.Errorf("deletion lock connect: %w", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
+	var acquired bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock(hashtext($1))", "customer-deletion-run|"+tenant+"|"+pid).Scan(&acquired); err != nil {
+		return err
+	}
+	if !acquired {
+		return errors.New("customer deletion already running; retry")
+	}
+	// Closing this dedicated session releases its lock. Detect a lost session
+	// and cancel provider/stage I/O rather than silently proceeding unlocked.
+	runCtx, cancel := context.WithCancelCause(ctx)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				pingCtx, pingCancel := context.WithTimeout(runCtx, time.Second)
+				err := conn.Ping(pingCtx)
+				pingCancel()
+				if err != nil {
+					cancel(fmt.Errorf("deletion lock session lost: %w", err))
+					return
+				}
+			}
+		}
+	}()
+	err = fn(runCtx)
+	close(stop)
+	<-done
+	if cause := context.Cause(runCtx); cause != nil {
+		err = cause
+	}
+	cancel(nil)
+	return err
 }
 
 // PrepareCustomerDeletion accepts a human with exactly a GitHub identity and a
@@ -77,17 +136,15 @@ func (s *Store) PrepareCustomerDeletion(ctx context.Context, tenant, pid, issuer
 		return nil, ErrInvalid
 	}
 	var result *CustomerDeletion
-	err := s.withTx(ctx, "customer-deletion|"+tenant+"|"+pid, func(tx pgx.Tx) error {
+	existed := false
+	load := func(tx pgx.Tx) error {
+		existed = false
 		if err := lockPrincipalTx(ctx, tx, pid); err != nil {
 			return err
 		}
 		previous, err := scanCustomerDeletion(tx.QueryRow(ctx, `SELECT `+customerDeletionColumns+` FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2`, tenant, pid))
 		if err == nil {
-			for _, check := range validate {
-				if err := check(previous); err != nil {
-					return err
-				}
-			}
+			existed = true
 			result = previous
 			return nil
 		}
@@ -138,13 +195,32 @@ func (s *Store) PrepareCustomerDeletion(ctx context.Context, tenant, pid, issuer
 		if count != 2 || d.GitHubID == "" || d.Subject == "" || strings.TrimSpace(d.Login) == "" {
 			return fmt.Errorf("%w: target is not a complete customer identity", ErrInvalid)
 		}
-		for _, check := range validate {
-			if err := check(d); err != nil {
-				return err
-			}
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO customer_deletions (`+customerDeletionColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, d.Tenant, d.PrincipalID, d.GitHubID, d.Login, d.Issuer, d.Subject, d.Actor, d.Status)
 		result = d
+		return nil
+	}
+	key := "customer-deletion|" + tenant + "|" + pid
+	if err := s.withTx(ctx, key, load); err != nil {
+		return nil, err
+	}
+	approved := *result
+	// Network/GitOps observations never hold a DB transaction or principal lock.
+	for _, check := range validate {
+		if err := check(&approved); err != nil {
+			return nil, err
+		}
+	}
+	err := s.withTx(ctx, key, func(tx pgx.Tx) error {
+		if err := load(tx); err != nil {
+			return err
+		}
+		if *result != approved {
+			return fmt.Errorf("%w: customer identity changed during approval", ErrInvalid)
+		}
+		if existed {
+			return nil
+		}
+		d := result
+		_, err := tx.Exec(ctx, `INSERT INTO customer_deletions (`+customerDeletionColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, d.Tenant, d.PrincipalID, d.GitHubID, d.Login, d.Issuer, d.Subject, d.Actor, d.Status)
 		return err
 	})
 	return result, err

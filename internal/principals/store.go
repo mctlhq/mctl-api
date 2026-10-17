@@ -106,8 +106,9 @@ CREATE INDEX IF NOT EXISTS external_identities_github_display
 
 // Store is the Postgres-backed principal store.
 type Store struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool          *pgxpool.Pool
+	deletionSlots chan struct{}
+	now           func() time.Time
 	// beforeCustomerLink, in tests, runs in ResolveCustomer between its
 	// provision and its link, the window two transactions leave open.
 	beforeCustomerLink func()
@@ -131,7 +132,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		return nil, fmt.Errorf("customer deletion schema: %w", err)
 	}
 	slog.Info("principal store initialized")
-	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Store{pool: pool, deletionSlots: make(chan struct{}, 2), now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 // Close releases the pool.

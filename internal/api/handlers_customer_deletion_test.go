@@ -52,8 +52,8 @@ type deletionStore struct {
 	prepared, finished int
 }
 
-func (s *deletionStore) WithCustomerDeletionLock(_ context.Context, _, _ string, fn func() error) error {
-	return fn()
+func (s *deletionStore) WithCustomerDeletionLock(ctx context.Context, _, _ string, fn func(context.Context) error) error {
+	return fn(ctx)
 }
 func (s *deletionStore) CustomerDeletion(context.Context, string, string) (*principals.CustomerDeletion, error) {
 	if s.job == nil {
