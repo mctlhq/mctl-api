@@ -463,6 +463,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/identity/links", h.ListIdentityLinks)
 			r.Delete("/identity/links/{id}", h.UnlinkIdentity)
 			r.Post("/admin/principals/{from}/merge-into/{into}", h.MergePrincipals)
+			r.Post("/admin/principals/{id}/disable", h.DisablePrincipal)
 			// Read-only: proposes a principalId per GitOps member entry.
 			r.Get("/admin/tenant-members/principal-plan", h.TenantMemberPrincipalPlan)
 			r.Post("/auth/logout", h.Logout)
