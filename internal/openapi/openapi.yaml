@@ -3285,9 +3285,9 @@ paths:
       responses:
         '201': {description: 'Challenge created; the code is shown once'}
         '400': {description: Invalid body or an identity field in it}
-        '403': {description: 'Not a human acting directly with a GitHub login or a resolved principal (human_principal_required), or a prn_ link outside principal mode (principal_mode_required)'}
+        '403': {description: 'Not a human acting directly with a GitHub login or a resolved principal, or a name the link cannot record (human_principal_required); or a prn_ link outside principal mode (principal_mode_required)'}
         '429': {description: Too many open challenges}
-        '503': {description: Surface identity store not configured}
+        '503': {description: 'Surface identity store not configured, or the caller''s principal could not be resolved because the principal store did not answer (surface_identity_unavailable)'}
   /api/v1/surface-identities/redeem:
     post:
       summary: Redeem a challenge as the surface that observed it
@@ -3353,17 +3353,42 @@ paths:
   /api/v1/surface-identities:
     get:
       summary: List the caller's surface identity links
-      description: A human admin may pass `principal=github:<login>` or `principal=prn_…`.
+      description: |
+        The links of every holder form the caller is (mctl-api#646, #663):
+        a GitHub session is `github:<login>` and its resolved `prn_`; a
+        `prn_` session is that `prn_` and `github:<login>` of each live
+        GitHub identity of its principal. `principal=` narrows the list to
+        one of those holders; a human admin may name anyone's
+        (`github:<login>` or `prn_…`).
       tags: [Surface Identity]
       parameters:
         - {name: principal, in: query, required: false, schema: {type: string}}
       responses:
-        '200': {description: Links, live and revoked}
+        '200':
+          description: Links, live and revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [principal, holders, links]
+                properties:
+                  principal:
+                    type: string
+                    description: The holder form asked for; by default the session's own (`github:<login>` for a GitHub session, else its `prn_`). Not necessarily the holder of every link listed.
+                  holders:
+                    type: array
+                    items: {type: string}
+                    description: Every holder whose links are listed.
+                  links:
+                    type: array
+                    description: Newest first. Each link names its own holder in `principal`.
+                    items: {type: object}
         '403': {description: 'Not a human acting directly, or not an admin for another principal'}
+        '503': {description: 'Which holders are the caller''s could not be read: the principal store did not answer or is not configured, or the caller''s principal could not be resolved (surface_identity_unavailable)'}
   /api/v1/surface-identities/{id}/revoke:
     post:
       summary: Revoke a surface identity link
-      description: The linked human or a human admin. Relayed requests for it fail from then on.
+      description: The linked human, from a session of either holder form (as for the list), or a human admin. Relayed requests for it fail from then on.
       tags: [Surface Identity]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
@@ -3371,6 +3396,7 @@ paths:
         '200': {description: Revoked (or already revoked)}
         '403': {description: Not a human acting directly}
         '404': {description: No such link visible to the caller}
+        '503': {description: 'Which holders are the caller''s could not be read (surface_identity_unavailable)'}
   /api/v1/roadmap/epics:
     get:
       summary: List the epics in the roadmap publication
