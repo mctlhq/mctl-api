@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -398,6 +399,8 @@ type relayPrincipals struct {
 	err     error
 	seen    []auth.Identity
 	checked []string
+	// kinds overrides a principal's kind; every other one is human.
+	kinds map[string]string
 }
 
 func (p *relayPrincipals) ResolvePrincipal(_ context.Context, id auth.Identity) (string, error) {
@@ -422,6 +425,18 @@ func (p *relayPrincipals) CheckPrincipal(_ context.Context, principalID string) 
 		}
 	}
 	return auth.ErrIdentityRefused
+}
+
+// CheckHumanPrincipal is CheckPrincipal that refuses a principal kinds
+// names as non-human.
+func (p *relayPrincipals) CheckHumanPrincipal(ctx context.Context, principalID string) error {
+	if err := p.CheckPrincipal(ctx, principalID); err != nil {
+		return err
+	}
+	if kind, ok := p.kinds[principalID]; ok && kind != auth.KindHuman {
+		return fmt.Errorf("%w: %s is a %s principal", auth.ErrIdentityRefused, principalID, kind)
+	}
+	return nil
 }
 
 // The relay resolves the human's principal the way authentication does, and

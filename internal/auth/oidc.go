@@ -132,6 +132,10 @@ type User struct {
 	// or the delegating agent run (NewDelegatedUser).
 	principalID    string
 	viaPrincipalID string
+	// principalUnresolved records that AttachPrincipal tried to resolve
+	// principalID and the store could not answer (not a refusal): an empty
+	// principalID then means "unknown", never "this caller has none".
+	principalUnresolved bool
 
 	// tokenPrincipal records that principalID was not resolved from an
 	// identity but carried in: a local OAuth token's pid claim in principal
