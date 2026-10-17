@@ -136,7 +136,10 @@ on failure) moves every live identity of `from` onto `into` and disables
 stay on `from`, and `moved_identities` counts live ones only. It is refused
 when both hold a live identity of the same provider and issuer, or either
 is not human, or `into` is disabled, or `from` is disabled while still
-holding live identities. A retry is safe: when `from` is already disabled
+holding live identities. It is also refused with 409
+`principal_last_admin` when `from` is the last active `ADMIN_PRINCIPALS`
+principal (the same check as a disable, below; `into` counts as the other
+admin only when it is itself in `ADMIN_PRINCIPALS`). A retry is safe: when `from` is already disabled
 with no live identity left, the answer is 200 with `already_merged: true`
 and nothing changes. The store does not record which principal it went
 into, so the answer carries a `detail` saying the earlier target may
@@ -173,9 +176,10 @@ locks of the target and every other admin principal, so two admins
 disabling each other at once cannot both succeed. A principal named in
 `ADMIN_PRINCIPALS` that does not exist, is disabled, or is not human does
 not count as another admin. With `ADMIN_PRINCIPALS` empty there is no
-admin principal to protect and the check does not apply. Only this endpoint
-enforces it: a merge (or a direct status change) can still disable the last
-admin principal (follow-up #650).
+admin principal to protect and the check does not apply. A merge whose
+`from` is an admin runs the same check under the same locks (#650), so a
+merge and a disable of two admins at once cannot both succeed either. The
+store's `SetStatus` enforces nothing and is used only by tests.
 
 The principal's identities are left bound and live, not revoked:
 

@@ -334,6 +334,9 @@ func (s *Store) Identities(ctx context.Context, principalID string) ([]ExternalI
 
 // SetStatus enables or disables a principal. A disabled principal is refused
 // at authentication (within the resolver's cache TTL).
+//
+// It enforces no invariant, the last-admin one included: admin paths use
+// DisablePrincipal or MergePrincipals, which do. Only tests call it.
 func (s *Store) SetStatus(ctx context.Context, principalID, status string) error {
 	if status != StatusActive && status != StatusDisabled {
 		return fmt.Errorf("%w: unknown status %q", ErrInvalid, status)

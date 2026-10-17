@@ -55,9 +55,9 @@ var (
 	// ErrMergeConflict: both principals hold a live identity of the same
 	// provider and issuer, so merging would give one principal two.
 	ErrMergeConflict = errors.New("both principals hold an identity of the same provider")
-	// ErrLastAdmin: disabling the principal would leave no active principal
-	// among the platform admins (ADMIN_PRINCIPALS), so nobody could
-	// administer the platform any more.
+	// ErrLastAdmin: disabling the principal, directly or by merging it
+	// away, would leave no active principal among the platform admins
+	// (ADMIN_PRINCIPALS), so nobody could administer the platform any more.
 	ErrLastAdmin = errors.New("the principal is the last active admin principal")
 	// ErrNotHuman: the operation applies to human principals only, and this
 	// one is a service or agent principal.
@@ -223,30 +223,69 @@ func (s *Store) UnlinkIdentity(ctx context.Context, principalID, identityID stri
 // must be active, and they must not both hold a live identity of the same
 // provider and issuer.
 //
+// admins is ADMIN_PRINCIPALS. A merge disables from, so when from is one of
+// them it keeps the same invariant as DisablePrincipal: at least one other
+// admin must be an active human principal, checked under every admin's
+// lock, or the merge is ErrLastAdmin. into counts only when it is itself an
+// admin; receiving the identities does not make it one.
+//
 // A retry is safe: a from that is already disabled and holds no live
 // identity (what a completed merge leaves, and nothing else does, since an
 // unlink never removes the last one) answers AlreadyMerged without changing
 // anything. The store does not record which principal it went into; the
 // principal.merge audit row does. A from that is disabled but still holds
 // live identities was disabled for another reason and is refused.
-func (s *Store) MergePrincipals(ctx context.Context, from, into string) (MergeResult, error) {
+func (s *Store) MergePrincipals(ctx context.Context, from, into string, admins []string) (MergeResult, error) {
 	if from == "" || into == "" || from == into {
 		return MergeResult{}, fmt.Errorf("%w: merge needs two different principals", ErrInvalid)
 	}
-	return s.mergePrincipals(ctx, from, into)
+	return s.mergePrincipals(ctx, from, into, admins)
 }
 
-func (s *Store) mergePrincipals(ctx context.Context, from, into string) (MergeResult, error) {
+// otherAdmins returns the admins other than id, and whether id is one.
+func otherAdmins(id string, admins []string) (others []string, isAdmin bool) {
+	for _, a := range admins {
+		if a == id {
+			isAdmin = true
+		} else if a != "" {
+			others = append(others, a)
+		}
+	}
+	return others, isAdmin
+}
+
+// lastAdminTx answers ErrLastAdmin when none of others is an active human
+// principal. The caller holds the locks of id and every one of others.
+func lastAdminTx(ctx context.Context, tx pgx.Tx, others []string) error {
+	var n int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM principals
+		WHERE id = ANY($1) AND kind=$2 AND status=$3`,
+		others, auth.KindHuman, StatusActive).Scan(&n); err != nil {
+		return fmt.Errorf("principals: count other admins: %w", err)
+	}
+	if n == 0 {
+		return ErrLastAdmin
+	}
+	return nil
+}
+
+func (s *Store) mergePrincipals(ctx context.Context, from, into string, admins []string) (MergeResult, error) {
 	var none MergeResult
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return none, fmt.Errorf("principals: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	// Both principal locks, in a fixed order, so two merges of the same pair
-	// in opposite directions cannot deadlock.
+	// Both principal locks, and every admin's when from is an admin, in a
+	// fixed order, so two merges of the same pair in opposite directions,
+	// or a merge and a disable, cannot deadlock.
+	others, fromAdmin := otherAdmins(from, admins)
 	keys := []string{from, into}
+	if fromAdmin {
+		keys = append(keys, others...)
+	}
 	sort.Strings(keys)
+	keys = slices.Compact(keys)
 	for _, k := range keys {
 		if err := lockPrincipalTx(ctx, tx, k); err != nil {
 			return none, err
@@ -286,6 +325,11 @@ func (s *Store) mergePrincipals(ctx context.Context, from, into string) (MergeRe
 	}
 	if conflicts > 0 {
 		return none, ErrMergeConflict
+	}
+	if fromAdmin {
+		if err := lastAdminTx(ctx, tx, others); err != nil {
+			return none, err
+		}
 	}
 	tag, err := tx.Exec(ctx, `UPDATE external_identities SET principal_id=$2 WHERE principal_id=$1 AND revoked_at IS NULL`, from, into)
 	if err != nil {
@@ -331,17 +375,10 @@ func (s *Store) DisablePrincipal(ctx context.Context, id string, admins []string
 	if id == "" {
 		return none, fmt.Errorf("%w: no principal to disable", ErrInvalid)
 	}
-	isAdmin := false
+	others, isAdmin := otherAdmins(id, admins)
 	keys := []string{id}
-	for _, a := range admins {
-		if a == id {
-			isAdmin = true
-		} else if a != "" {
-			keys = append(keys, a)
-		}
-	}
-	if !isAdmin {
-		keys = keys[:1]
+	if isAdmin {
+		keys = append(keys, others...)
 	}
 	sort.Strings(keys)
 	keys = slices.Compact(keys)
@@ -375,14 +412,8 @@ func (s *Store) DisablePrincipal(ctx context.Context, id string, admins []string
 		return res, nil
 	}
 	if isAdmin {
-		var others int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM principals
-			WHERE id = ANY($1) AND id <> $2 AND kind=$3 AND status=$4`,
-			keys, id, auth.KindHuman, StatusActive).Scan(&others); err != nil {
-			return none, fmt.Errorf("principals: count other admins: %w", err)
-		}
-		if others == 0 {
-			return none, ErrLastAdmin
+		if err := lastAdminTx(ctx, tx, others); err != nil {
+			return none, err
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE principals SET status=$2 WHERE id=$1`, id, StatusDisabled); err != nil {

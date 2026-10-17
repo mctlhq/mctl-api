@@ -192,7 +192,7 @@ func TestMergePrincipalsMovesIdentitiesAndDisablesTheSource(t *testing.T) {
 	p, _ := s.Provision(ctx, github(1, "alice"))
 	q, _ := s.Provision(ctx, zitadel("z1", "alice"))
 
-	res, err := s.MergePrincipals(ctx, q.ID, p.ID)
+	res, err := s.MergePrincipals(ctx, q.ID, p.ID, nil)
 	if err != nil || res.Moved != 1 || res.AlreadyMerged {
 		t.Fatalf("merge = %+v, %v; want 1 moved", res, err)
 	}
@@ -214,24 +214,24 @@ func TestMergePrincipalsRefusesConflictsAndBadPairs(t *testing.T) {
 		t.Fatal(err)
 	}
 	q, _ := s.Provision(ctx, zitadel("z2", "alice-other"))
-	if _, err := s.MergePrincipals(ctx, q.ID, p.ID); !errors.Is(err, ErrMergeConflict) {
+	if _, err := s.MergePrincipals(ctx, q.ID, p.ID, nil); !errors.Is(err, ErrMergeConflict) {
 		t.Fatalf("err = %v, want ErrMergeConflict", err)
 	}
-	if _, err := s.MergePrincipals(ctx, p.ID, p.ID); !errors.Is(err, ErrInvalid) {
+	if _, err := s.MergePrincipals(ctx, p.ID, p.ID, nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("self merge err = %v, want ErrInvalid", err)
 	}
 	agent, _ := s.Provision(ctx, auth.Identity{Provider: auth.ProviderAgent, Subject: "agent:a", Kind: auth.KindAgent})
 	r, _ := s.Provision(ctx, github(2, "bob"))
-	if _, err := s.MergePrincipals(ctx, agent.ID, r.ID); !errors.Is(err, ErrInvalid) {
+	if _, err := s.MergePrincipals(ctx, agent.ID, r.ID, nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("agent merge err = %v, want ErrInvalid", err)
 	}
 	if err := s.SetStatus(ctx, r.ID, StatusDisabled); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.MergePrincipals(ctx, q.ID, r.ID); !errors.Is(err, auth.ErrPrincipalDisabled) {
+	if _, err := s.MergePrincipals(ctx, q.ID, r.ID, nil); !errors.Is(err, auth.ErrPrincipalDisabled) {
 		t.Fatalf("into disabled err = %v, want ErrPrincipalDisabled", err)
 	}
-	if _, err := s.MergePrincipals(ctx, "prn_missing", p.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := s.MergePrincipals(ctx, "prn_missing", p.ID, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing err = %v, want ErrNotFound", err)
 	}
 }
@@ -247,7 +247,7 @@ func TestResolverForgetsMergedAndUnlinkedPrincipals(t *testing.T) {
 	if got, err := r.ResolvePrincipal(ctx, zitadel("z1", "alice")); err != nil || got != q.ID {
 		t.Fatalf("before merge = %q, %v; want %s", got, err, q.ID)
 	}
-	if _, err := s.MergePrincipals(ctx, q.ID, p.ID); err != nil {
+	if _, err := s.MergePrincipals(ctx, q.ID, p.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Still cached: this is the window Forget closes.
@@ -294,7 +294,7 @@ func TestMergePrincipalsLeavesRevokedIdentitiesOnTheSource(t *testing.T) {
 			}
 		}
 	}
-	res, err := s.MergePrincipals(ctx, q.ID, p.ID)
+	res, err := s.MergePrincipals(ctx, q.ID, p.ID, nil)
 	if err != nil || res.Moved != 1 {
 		t.Fatalf("merge = %+v, %v; want 1 live identity moved", res, err)
 	}
@@ -311,10 +311,10 @@ func TestMergePrincipalsIsSafeToRetryAndRefusesADisabledSource(t *testing.T) {
 	ctx := context.Background()
 	p, _ := s.Provision(ctx, github(1, "alice"))
 	q, _ := s.Provision(ctx, zitadel("z1", "alice"))
-	if res, err := s.MergePrincipals(ctx, q.ID, p.ID); err != nil || res.Moved != 1 {
+	if res, err := s.MergePrincipals(ctx, q.ID, p.ID, nil); err != nil || res.Moved != 1 {
 		t.Fatalf("merge = %+v, %v", res, err)
 	}
-	res, err := s.MergePrincipals(ctx, q.ID, p.ID)
+	res, err := s.MergePrincipals(ctx, q.ID, p.ID, nil)
 	if err != nil || !res.AlreadyMerged || res.Moved != 0 {
 		t.Fatalf("retry = %+v, %v; want already merged, nothing moved", res, err)
 	}
@@ -326,7 +326,7 @@ func TestMergePrincipalsIsSafeToRetryAndRefusesADisabledSource(t *testing.T) {
 	if err := s.SetStatus(ctx, d.ID, StatusDisabled); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.MergePrincipals(ctx, d.ID, p.ID); !errors.Is(err, auth.ErrPrincipalDisabled) {
+	if _, err := s.MergePrincipals(ctx, d.ID, p.ID, nil); !errors.Is(err, auth.ErrPrincipalDisabled) {
 		t.Fatalf("disabled source err = %v, want ErrPrincipalDisabled", err)
 	}
 	if ids, _ := s.Identities(ctx, d.ID); len(ids) != 1 || ids[0].PrincipalID != d.ID {
@@ -371,7 +371,7 @@ func TestDisablePrincipalRefusesItsIdentitiesAndIsSafeToRetry(t *testing.T) {
 	// Still disabled with a live identity, so a merge from it is refused as
 	// disabled, not answered as already merged.
 	p, _ := s.Provision(ctx, github(1, "alice"))
-	if _, err := s.MergePrincipals(ctx, q.ID, p.ID); !errors.Is(err, auth.ErrPrincipalDisabled) {
+	if _, err := s.MergePrincipals(ctx, q.ID, p.ID, nil); !errors.Is(err, auth.ErrPrincipalDisabled) {
 		t.Fatalf("merge from a disabled principal err = %v, want ErrPrincipalDisabled", err)
 	}
 }
@@ -457,6 +457,91 @@ func TestDisablePrincipalMutualAdminDisableLeavesOne(t *testing.T) {
 		}
 		if active != 1 {
 			t.Fatalf("round %d: %d admins active after a mutual disable (errs %v), want 1", round, active, errs)
+		}
+		if (errs[0] == nil) == (errs[1] == nil) || (!errors.Is(errs[0], ErrLastAdmin) && !errors.Is(errs[1], ErrLastAdmin)) {
+			t.Fatalf("round %d: errs %v, want one success and one ErrLastAdmin", round, errs)
+		}
+	}
+}
+
+// A merge disables from, so it keeps the last-admin invariant too
+// (mctl-api#650): into counts only when it is itself an admin, and a retry
+// of a completed merge is still a no-op.
+func TestMergePrincipalsKeepsTheLastAdmin(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	a, _ := s.Provision(ctx, github(1, "alice"))
+	b, _ := s.Provision(ctx, github(2, "bob"))
+	agent, _ := s.Provision(ctx, auth.Identity{Provider: auth.ProviderAgent, Subject: "agent:admin", Kind: auth.KindAgent})
+	c, _ := s.Provision(ctx, zitadel("z1", "carol"))
+	g, _ := s.Provision(ctx, github(4, "gina"))
+	if err := s.SetStatus(ctx, b.ID, StatusDisabled); err != nil {
+		t.Fatal(err)
+	}
+	admins := []string{a.ID, b.ID, agent.ID, "prn_01M51RRWSHH3VR3W4RTYY9238K", ""}
+	if _, err := s.MergePrincipals(ctx, a.ID, c.ID, admins); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("merge of the last admin into a non-admin err = %v, want ErrLastAdmin", err)
+	}
+	if got, _ := s.Get(ctx, a.ID); got == nil || got.Status != StatusActive {
+		t.Fatalf("a refused merge changed the last admin: %+v", got)
+	}
+	if got, err := s.Provision(ctx, github(1, "alice")); err != nil || got.ID != a.ID {
+		t.Fatalf("after a refused merge github(1) resolves to %v (%v), want %s", got, err, a.ID)
+	}
+	// A non-admin from is not affected by the admin set.
+	if _, err := s.MergePrincipals(ctx, g.ID, c.ID, admins); err != nil {
+		t.Fatalf("non-admin merge err = %v", err)
+	}
+	// An active admin into counts as the other admin.
+	f, _ := s.Provision(ctx, zitadel("z3", "frank"))
+	admins = append(admins, f.ID)
+	if res, err := s.MergePrincipals(ctx, a.ID, f.ID, admins); err != nil || res.Moved != 1 {
+		t.Fatalf("merge of an admin into another admin = %+v, %v", res, err)
+	}
+	if res, err := s.MergePrincipals(ctx, a.ID, f.ID, admins); err != nil || !res.AlreadyMerged {
+		t.Fatalf("retry of a completed admin merge = %+v, %v; want AlreadyMerged", res, err)
+	}
+	// And a disable of f, now the last one, is still refused.
+	if _, err := s.DisablePrincipal(ctx, f.ID, admins); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("disable of the remaining admin err = %v, want ErrLastAdmin", err)
+	}
+}
+
+// Two admins merged away at once, or one merged away while the other is
+// disabled: at most one succeeds, so at least one admin stays active.
+func TestMergePrincipalsConcurrentWithAdminRemovalLeavesOne(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	for round := 0; round < 20; round++ {
+		a, _ := s.Provision(ctx, github(int64(200+2*round), "a"+strconv.Itoa(round)))
+		b, _ := s.Provision(ctx, github(int64(201+2*round), "b"+strconv.Itoa(round)))
+		c, _ := s.Provision(ctx, zitadel("zc"+strconv.Itoa(round), "c"+strconv.Itoa(round)))
+		d, _ := s.Provision(ctx, zitadel("zd"+strconv.Itoa(round), "d"+strconv.Itoa(round)))
+		admins := []string{a.ID, b.ID}
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, errs[0] = s.MergePrincipals(ctx, a.ID, c.ID, admins)
+		}()
+		go func() {
+			defer wg.Done()
+			if round%2 == 0 {
+				_, errs[1] = s.MergePrincipals(ctx, b.ID, d.ID, admins)
+			} else {
+				_, errs[1] = s.DisablePrincipal(ctx, b.ID, admins)
+			}
+		}()
+		wg.Wait()
+		active := 0
+		for _, id := range admins {
+			if got, _ := s.Get(ctx, id); got != nil && got.Status == StatusActive {
+				active++
+			}
+		}
+		if active != 1 {
+			t.Fatalf("round %d: %d admins active (errs %v), want 1", round, active, errs)
 		}
 		if (errs[0] == nil) == (errs[1] == nil) || (!errors.Is(errs[0], ErrLastAdmin) && !errors.Is(errs[1], ErrLastAdmin)) {
 			t.Fatalf("round %d: errs %v, want one success and one ErrLastAdmin", round, errs)
