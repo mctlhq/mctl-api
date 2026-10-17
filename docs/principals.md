@@ -181,7 +181,7 @@ gets a customer entry, `upstream=customer`, labelled "Sign in with GitHub":
 
 | `OAUTH_UPSTREAM` | Chooser |
 |---|---|
-| `zitadel` | Sign in with GitHub (customers), Sign in with MCTL (staff, ZITADEL) |
+| `zitadel` | Sign in with GitHub (new customers), Sign in with MCTL account (staff and partner organizations) |
 | `both` | the same two, then GitHub as legacy |
 | `github` | no chooser, no customer entry |
 
@@ -189,8 +189,13 @@ The customer entry starts the same ZITADEL authorization with two more
 scopes, `urn:zitadel:iam:org:id:<customers_org_id>` and
 `urn:zitadel:iam:org:idp:id:<github idp id>`, exactly as mctl.ai does
 (mctl-web `cloudflare-worker/zitadel.js`): ZITADEL signs the person in to
-`customers` and goes straight to GitHub. The staff entry and the code
-exchange are unchanged. The choice is not stored with the pending
+`customers` and goes straight to GitHub. The other entry, "Sign in with
+MCTL account", is for everyone who already has a ZITADEL account in
+another organization: staff and partner organizations alike, which is why
+it does not say "staff". Such a person pressing "Sign in with GitHub" would
+get a separate customers account, refused with `customer_conflict` because
+their GitHub identity already belongs to their principal. That entry and
+the code exchange are unchanged. The choice is not stored with the pending
 authorization: whether the person signs in as a customer is decided in the
 callback from the verified ID token's organization (see "Self-service
 customers" in `docs/federation.md`), so choosing the entry grants nothing.

@@ -249,6 +249,11 @@ func TestCustomerGitHubEntry(t *testing.T) {
 		if !strings.Contains(rec.Body.String(), "Sign in with GitHub</a>") {
 			t.Errorf("mode %s: the customer entry is not labelled Sign in with GitHub", mode)
 		}
+		// Partner organizations use the other entry too, so it must not
+		// read as staff-only.
+		if !strings.Contains(rec.Body.String(), "Sign in with MCTL account</a>") || strings.Contains(rec.Body.String(), "staff,") {
+			t.Errorf("mode %s: the account entry is not labelled Sign in with MCTL account", mode)
+		}
 		scopes := authorizeScopes(t, h.get(authorizeQuery("&upstream=customer")))
 		if !contains(scopes, orgScope) || !contains(scopes, idpScope) || !contains(scopes, auth.ScopeResourceOwner) || !contains(scopes, "openid") {
 			t.Fatalf("mode %s: customer scopes = %v, want %s and %s", mode, scopes, orgScope, idpScope)

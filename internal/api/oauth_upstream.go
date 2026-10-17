@@ -275,11 +275,14 @@ func (h *Handlers) pickOAuthUpstream(w http.ResponseWriter, r *http.Request) (up
 	}
 	if customers {
 		d.Lines = []string{
-			"Customers: sign in with your GitHub account.",
-			"MCTL staff: sign in with your MCTL account at auth.mctl.ai.",
+			"New customers: sign in with your GitHub account.",
+			"Already have an MCTL account (staff and partner organizations)? Sign in with it at auth.mctl.ai.",
 		}
 		d.Primary = &oauthPageLink{Href: choose(oauthUpstreamCustomer), Text: "Sign in with GitHub"}
-		d.More = []oauthPageLink{{Href: staff.Href, Text: "Sign in with MCTL (staff, ZITADEL)"}}
+		// Not "staff": partner organizations sign in here too, and the
+		// GitHub entry would make them a stray customers account that
+		// conflicts with their existing principal.
+		d.More = []oauthPageLink{{Href: staff.Href, Text: "Sign in with MCTL account"}}
 	}
 	if mode == OAuthUpstreamBoth {
 		if customers {
