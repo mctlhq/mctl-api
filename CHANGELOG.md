@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.96.1](https://github.com/mctlhq/mctl-api/compare/4.96.0...4.96.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **surface-identity:** close the P3 follow-ups on prn_ links ([402a4de](https://github.com/mctlhq/mctl-api/commit/402a4dee6f6330a9d2df824218e772b00d588d32))
+* **surface-identity:** keep revoke and admin reads off unknown holders ([8efdfd5](https://github.com/mctlhq/mctl-api/commit/8efdfd517313a88c95718c56674d1d65125be306)), closes [#663](https://github.com/mctlhq/mctl-api/issues/663)
+
 ## [4.96.0](https://github.com/mctlhq/mctl-api/compare/4.95.0...4.96.0) (2026-10-17)
 
 
