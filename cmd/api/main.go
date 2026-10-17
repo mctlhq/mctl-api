@@ -1613,6 +1613,9 @@ func (c config) validate() error {
 	if _, err := parseLegacyApprover(c.LegacyApproverRaw); err != nil {
 		return err
 	}
+	if err := c.ZitadelHook.validate(); err != nil {
+		return err
+	}
 	// Only enforced when the OAuth server is actually constructed — the same
 	// gate main uses at the NewOAuthServer call. OAUTH_TOKEN_TTL governs
 	// nothing on a deployment that never issues tokens, and refusing to start

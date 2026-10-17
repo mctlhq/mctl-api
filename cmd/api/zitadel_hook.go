@@ -15,6 +15,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -35,6 +36,10 @@ type zitadelHookConfig struct {
 	IntentKeys        []string
 	CreateKeys        []string
 	TokenKeys         []string
+	// CustomerCreateGitHubIDs is ZITADEL_HOOK_CUSTOMER_CREATE_GITHUB_IDS:
+	// the GitHub numeric ids that may create a new customers account, or
+	// "*" for anyone. Unset creates nobody.
+	CustomerCreateGitHubIDs []string
 }
 
 func loadZitadelHookConfig() zitadelHookConfig {
@@ -48,7 +53,20 @@ func loadZitadelHookConfig() zitadelHookConfig {
 		IntentKeys:        splitCSV(os.Getenv("ZITADEL_HOOK_INTENT_SIGNING_KEYS")),
 		CreateKeys:        splitCSV(os.Getenv("ZITADEL_HOOK_CREATE_SIGNING_KEYS")),
 		TokenKeys:         splitCSV(os.Getenv("ZITADEL_HOOK_TOKEN_SIGNING_KEYS")),
+
+		CustomerCreateGitHubIDs: splitCSV(os.Getenv("ZITADEL_HOOK_CUSTOMER_CREATE_GITHUB_IDS")),
 	}
+}
+
+// validate refuses a malformed creation allowlist at boot. Left to New, it
+// would only switch the hook off, which also stops existing customers from
+// signing in; checked whether or not the hook is configured, so the value
+// is right before the hook is switched on.
+func (zc zitadelHookConfig) validate() error {
+	if _, err := zitadelhook.ParseCustomerCreateAllowlist(zc.CustomerCreateGitHubIDs); err != nil {
+		return fmt.Errorf("ZITADEL_HOOK_CUSTOMER_CREATE_GITHUB_IDS: %w", err)
+	}
+	return nil
 }
 
 // zitadelHookOptions builds the hook, or returns nil (routes answer 503)
@@ -66,6 +84,8 @@ func zitadelHookOptions(cfg config, tenants zitadelhook.TenantLister) *api.Zitad
 		UsernameDomain:    zc.UsernameDomain,
 		ClaimClientIDs:    zc.ClaimClientIDs,
 		ReservedLogins:    append(append([]string{}, cfg.AdminUsers...), zc.ReservedLogins...),
+
+		CustomerCreateGitHubIDs: zc.CustomerCreateGitHubIDs,
 	}, tenants, nil)
 	if err != nil {
 		slog.Error("zitadel identity hook disabled: incomplete configuration", "error", err)

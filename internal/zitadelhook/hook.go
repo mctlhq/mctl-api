@@ -19,7 +19,8 @@
 //   - Intent: a response execution on
 //     zitadel.user.v2.UserService/RetrieveIdentityProviderIntent. For the
 //     customers GitHub IdP it fetches the person's primary verified email
-//     from GitHub, refuses reserved and non-user logins, and replaces the
+//     from GitHub, refuses reserved and non-user logins and new accounts
+//     whose GitHub id is not on the creation allowlist, and replaces the
 //     user action with a fully specified createUser (organization set
 //     explicitly) or updateUser. Interrupts on error.
 //   - CreateGate: a request execution on every user-creating method. A user
@@ -152,8 +153,32 @@ type Config struct {
 	// account: admins (ADMIN_USERS) and service logins. Compared
 	// case-insensitively.
 	ReservedLogins []string
+	// CustomerCreateGitHubIDs are the GitHub numeric ids allowed to create
+	// a NEW customers account (ParseCustomerCreateAllowlist). Empty allows
+	// nobody, so creation is closed until it is listed; exactly "*" allows
+	// anyone (the public cutover). Existing accounts sign in regardless.
+	CustomerCreateGitHubIDs []string
 	// GitHubAPIURL overrides https://api.github.com (tests only).
 	GitHubAPIURL string
+}
+
+// CreateAnyone is the CustomerCreateGitHubIDs entry that opens creation to
+// every GitHub account.
+const CreateAnyone = "*"
+
+// ParseCustomerCreateAllowlist validates a creation allowlist: GitHub
+// numeric ids, or exactly CreateAnyone alone. An empty list is valid and
+// allows nobody.
+func ParseCustomerCreateAllowlist(entries []string) ([]string, error) {
+	if len(entries) == 1 && entries[0] == CreateAnyone {
+		return entries, nil
+	}
+	for _, e := range entries {
+		if !digitsRE.MatchString(e) {
+			return nil, fmt.Errorf("customer creation allowlist entry %q: want GitHub numeric ids, or exactly %q alone", e, CreateAnyone)
+		}
+	}
+	return entries, nil
 }
 
 // TenantLister reads tenant membership from the gitops checkout. A read
@@ -166,9 +191,12 @@ type TenantLister interface {
 type Hook struct {
 	cfg      Config
 	reserved map[string]bool
-	clients  map[string]bool
-	tenants  TenantLister
-	http     *http.Client
+	// createAnyone and createIDs are CustomerCreateGitHubIDs.
+	createAnyone bool
+	createIDs    map[string]bool
+	clients      map[string]bool
+	tenants      TenantLister
+	http         *http.Client
 }
 
 // New validates cfg and returns a Hook. tenants may not be nil: reserving
@@ -193,6 +221,9 @@ func New(cfg Config, tenants TenantLister, client *http.Client) (*Hook, error) {
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("zitadelhook: missing %s", strings.Join(missing, ", "))
 	}
+	if _, err := ParseCustomerCreateAllowlist(cfg.CustomerCreateGitHubIDs); err != nil {
+		return nil, fmt.Errorf("zitadelhook: %w", err)
+	}
 	if cfg.UsernameDomain == "" {
 		cfg.UsernameDomain = defaultUsernameDomain
 	}
@@ -202,7 +233,14 @@ func New(cfg Config, tenants TenantLister, client *http.Client) (*Hook, error) {
 	if client == nil {
 		client = &http.Client{Timeout: githubRequestTimeout}
 	}
-	h := &Hook{cfg: cfg, reserved: map[string]bool{}, clients: map[string]bool{}, tenants: tenants, http: client}
+	h := &Hook{cfg: cfg, reserved: map[string]bool{}, clients: map[string]bool{}, createIDs: map[string]bool{}, tenants: tenants, http: client}
+	for _, id := range cfg.CustomerCreateGitHubIDs {
+		if id == CreateAnyone {
+			h.createAnyone = true
+		} else {
+			h.createIDs[id] = true
+		}
+	}
 	for _, l := range cfg.ReservedLogins {
 		if l = strings.ToLower(strings.TrimSpace(l)); l != "" {
 			h.reserved[l] = true
@@ -259,6 +297,16 @@ func replace(reason string, v any) Result {
 const msgNoVerifiedEmail = "Verify an email address in GitHub, then sign in again."
 
 const msgNotAllowed = "This GitHub account cannot create an MCTL account."
+
+// Message shown to a person whose GitHub account is not (yet) allowed to
+// create a customers account.
+const msgCreateNotAllowed = "New MCTL accounts are by invitation only for now. Contact mctl support to be invited."
+
+// mayCreate reports whether the GitHub id may create a new customers
+// account. Only creation asks: an existing account signs in regardless.
+func (h *Hook) mayCreate(githubID string) bool {
+	return h.createAnyone || h.createIDs[githubID]
+}
 
 // ---------------------------------------------------------------- intent
 
@@ -332,7 +380,13 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 
 	// At creation the login is checked before GitHub is asked anything, so
 	// a reserved login is always a 403, never a 503 from a GitHub outage.
+	// The allowlist comes first: it needs no I/O, and an id not on it is
+	// refused whatever else holds. The reason carries the GitHub id, never
+	// the email, so a refused request can be put on the list.
 	if existingUserID == "" {
+		if !h.mayCreate(info.UserID) {
+			return refuse(http.StatusForbidden, "intent_customer_create_not_allowed:"+info.UserID, msgCreateNotAllowed)
+		}
 		reserved, rErr := h.loginReservedAtCreation(login)
 		if rErr != nil {
 			return failure("intent_reserved_unreadable")
@@ -743,6 +797,12 @@ func (h *Hook) gateCreateUser(p requestPayload) Result {
 	}
 	if req.Username != h.username(link.UserName) {
 		return no("gate_username")
+	}
+	// The same allowlist as Intent, held here too: the gate is what every
+	// creation passes, whatever produced the request. Before the
+	// reserved check, as in Intent: it needs no I/O.
+	if !h.mayCreate(link.UserID) {
+		return refuse(http.StatusForbidden, "gate_customer_create_not_allowed:"+link.UserID, msgCreateNotAllowed)
 	}
 	reserved, err := h.loginReservedAtCreation(link.UserName)
 	if err != nil {

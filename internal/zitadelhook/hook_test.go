@@ -49,8 +49,15 @@ type ghEmail struct {
 }
 
 // newHook returns a hook against a fake GitHub that serves emails (or the
-// given status) for token "tok".
+// given status) for token "tok". Creation is open to anyone, so the tests
+// of every other rule are not about the allowlist.
 func newHook(t *testing.T, tenants TenantLister, emails []ghEmail, status int) *Hook {
+	t.Helper()
+	return newHookCreating(t, []string{CreateAnyone}, tenants, emails, status)
+}
+
+// newHookCreating is newHook with the creation allowlist set to createIDs.
+func newHookCreating(t *testing.T, createIDs []string, tenants TenantLister, emails []ghEmail, status int) *Hook {
 	t.Helper()
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/user/emails" || r.Header.Get("Authorization") != "Bearer tok" {
@@ -75,6 +82,8 @@ func newHook(t *testing.T, tenants TenantLister, emails []ghEmail, status int) *
 		ClaimClientIDs:    []string{clientWeb},
 		ReservedLogins:    []string{"AdminOne"},
 		GitHubAPIURL:      gh.URL,
+
+		CustomerCreateGitHubIDs: createIDs,
 	}, tenants, gh.Client())
 	if err != nil {
 		t.Fatal(err)
@@ -721,5 +730,81 @@ func TestNewRequiresConfig(t *testing.T) {
 	}
 	if _, err := New(full, nil, nil); err == nil {
 		t.Fatal("nil tenants must be refused")
+	}
+}
+
+// ---------------------------------------------------------------- creation allowlist
+
+// Only listed GitHub ids create a customers account, in Intent and again in
+// the gate; an empty list creates nobody. The refusal names the GitHub id
+// so it can be listed, and never the email.
+func TestCustomerCreateAllowlist(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ids   []string
+		allow bool
+	}{
+		"listed":     {[]string{"1", "4242"}, true},
+		"anyone":     {[]string{CreateAnyone}, true},
+		"not listed": {[]string{"1", "42"}, false},
+		"empty":      {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHookCreating(t, tc.ids, nil, verified, 0)
+			intent := h.Intent(context.Background(), intentBody(idpGitHub, "4242", "Bob-B", "", nil))
+			gate := h.CreateGate(context.Background(), createBodyFrom(t, goodCreate(), loginClient))
+			if tc.allow {
+				if intent.Reason != "intent_create" || gate.Reason != "gate_customer_create" || len(gate.Body) != 0 {
+					t.Fatalf("intent %s, gate %s %s; want the account created", intent.Reason, gate.Reason, gate.Body)
+				}
+				return
+			}
+			refusedWith(t, intent, http.StatusForbidden)
+			refusedWith(t, gate, http.StatusForbidden)
+			if intent.Reason != "intent_customer_create_not_allowed:4242" || gate.Reason != "gate_customer_create_not_allowed:4242" {
+				t.Fatalf("reasons %q, %q; want the not-allowed reason with the GitHub id", intent.Reason, gate.Reason)
+			}
+			for _, r := range []Result{intent, gate} {
+				if strings.Contains(r.Reason, "@") || strings.Contains(string(r.Body), "example.com") {
+					t.Fatalf("refusal %q %s carries an email", r.Reason, r.Body)
+				}
+			}
+		})
+	}
+}
+
+// The allowlist gates creation only: an existing account signs in, its
+// tokens get their claims, and other organizations pass.
+func TestCustomerCreateAllowlistLeavesTheRestAlone(t *testing.T) {
+	h := newHookCreating(t, nil, nil, verified, 0)
+	if r := h.Intent(context.Background(), intentBody(idpGitHub, "4242", "Bob-B", "user-1", nil)); r.Reason != "intent_update" {
+		t.Fatalf("existing account: intent %s, want intent_update", r.Reason)
+	}
+	if r := h.Intent(context.Background(), intentBody("999", "4242", "Bob-B", "", nil)); r.Reason != "intent_other_idp" {
+		t.Fatalf("other IdP: intent %s, want intent_other_idp", r.Reason)
+	}
+	other := map[string]any{"organizationId": orgAdmins, "username": "ops", "human": map[string]any{"email": map[string]any{"email": "ops@example.com"}}}
+	if r := h.CreateGate(context.Background(), createBodyFrom(t, other, "iac-user")); r.Reason != "gate_other_org" || len(r.Body) != 0 {
+		t.Fatalf("other org: gate %s %s, want a pass", r.Reason, r.Body)
+	}
+	c := claimsOf(t, h.TokenClaims(context.Background(), tokenBody(orgCustomers, clientWeb, map[string]string{MetaGitHubID: "4242", MetaGitHubLogin: "bob"})))
+	if c[ClaimGitHubID] != "4242" {
+		t.Fatalf("token claims %v, want the GitHub id", c)
+	}
+}
+
+func TestParseCustomerCreateAllowlist(t *testing.T) {
+	for _, ok := range [][]string{nil, {}, {"1"}, {"268260640", "47027422"}, {CreateAnyone}} {
+		if _, err := ParseCustomerCreateAllowlist(ok); err != nil {
+			t.Errorf("%q: %v, want valid", ok, err)
+		}
+	}
+	for _, bad := range [][]string{{"bob"}, {"1", CreateAnyone}, {CreateAnyone, CreateAnyone}, {"01"}, {"1 2"}, {"-1"}} {
+		if _, err := ParseCustomerCreateAllowlist(bad); err == nil {
+			t.Errorf("%q: valid, want an error", bad)
+		}
+		c := Config{CustomersOrgID: "a", GitHubIdPID: "b", LoginClientUserID: "c", ClaimClientIDs: []string{"d"}, CustomerCreateGitHubIDs: bad}
+		if _, err := New(c, fakeTenants{}, nil); err == nil {
+			t.Errorf("New with %q: want an error", bad)
+		}
 	}
 }
