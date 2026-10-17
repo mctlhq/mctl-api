@@ -383,8 +383,8 @@ func TestDisablePrincipalRefusesNonHumansAndUnknowns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DisablePrincipal(ctx, agent.ID, nil); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("agent disable err = %v, want ErrInvalid", err)
+	if _, err := s.DisablePrincipal(ctx, agent.ID, nil); !errors.Is(err, ErrNotHuman) {
+		t.Fatalf("agent disable err = %v, want ErrNotHuman", err)
 	}
 	if got, _ := s.Get(ctx, agent.ID); got == nil || got.Status != StatusActive {
 		t.Fatalf("a refused disable changed the agent: %+v", got)
@@ -458,7 +458,7 @@ func TestDisablePrincipalMutualAdminDisableLeavesOne(t *testing.T) {
 		if active != 1 {
 			t.Fatalf("round %d: %d admins active after a mutual disable (errs %v), want 1", round, active, errs)
 		}
-		if (errs[0] == nil) == (errs[1] == nil) || !(errors.Is(errs[0], ErrLastAdmin) || errors.Is(errs[1], ErrLastAdmin)) {
+		if (errs[0] == nil) == (errs[1] == nil) || (!errors.Is(errs[0], ErrLastAdmin) && !errors.Is(errs[1], ErrLastAdmin)) {
 			t.Fatalf("round %d: errs %v, want one success and one ErrLastAdmin", round, errs)
 		}
 	}

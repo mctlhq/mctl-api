@@ -145,7 +145,7 @@ with the actor, `from` and `into`.
 
 A principal that must stop acting but that no merge can absorb is disabled
 instead: `POST /api/v1/admin/principals/{id}/disable` with body
-`{"reason": "..."}` (required, trimmed, at most 500 bytes). The case it was
+`{"reason": "..."}` (required, trimmed, at most 500 characters). The case it was
 built for is an orphan whose only identity is a ZITADEL user removed at the
 IdP: merging it into the admin's own principal is refused because both hold
 a ZITADEL identity of the same issuer, and `DELETE /identity/links` acts on
@@ -173,7 +173,9 @@ locks of the target and every other admin principal, so two admins
 disabling each other at once cannot both succeed. A principal named in
 `ADMIN_PRINCIPALS` that does not exist, is disabled, or is not human does
 not count as another admin. With `ADMIN_PRINCIPALS` empty there is no
-admin principal to protect and the check does not apply.
+admin principal to protect and the check does not apply. Only this endpoint
+enforces it: a merge (or a direct status change) can still disable the last
+admin principal (follow-up #650).
 
 The principal's identities are left bound and live, not revoked:
 

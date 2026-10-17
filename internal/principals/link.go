@@ -59,6 +59,9 @@ var (
 	// among the platform admins (ADMIN_PRINCIPALS), so nobody could
 	// administer the platform any more.
 	ErrLastAdmin = errors.New("the principal is the last active admin principal")
+	// ErrNotHuman: the operation applies to human principals only, and this
+	// one is a service or agent principal.
+	ErrNotHuman = errors.New("not a human principal")
 )
 
 // DisableResult is what DisablePrincipal did. AlreadyDisabled marks a retry
@@ -320,7 +323,7 @@ func (s *Store) mergePrincipals(ctx context.Context, from, into string) (MergeRe
 // other must be an active human principal, checked under every admin's
 // lock, so two admins disabling each other at once cannot both succeed.
 // A principal that does not exist counts as not active. Only a human
-// principal is disabled; a service or agent principal is ErrInvalid. A
+// principal is disabled; a service or agent principal is ErrNotHuman. A
 // principal that is already disabled is a no-op (AlreadyDisabled), whoever
 // it is.
 func (s *Store) DisablePrincipal(ctx context.Context, id string, admins []string) (DisableResult, error) {
@@ -360,12 +363,12 @@ func (s *Store) DisablePrincipal(ctx context.Context, id string, admins []string
 		return none, err
 	}
 	if p.Kind != auth.KindHuman {
-		return none, fmt.Errorf("%w: only a human principal is disabled here, not a %s principal", ErrInvalid, p.Kind)
+		return none, fmt.Errorf("%w: only a human principal is disabled here, not a %s principal", ErrNotHuman, p.Kind)
 	}
 	var res DisableResult
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM external_identities
 		WHERE principal_id=$1 AND revoked_at IS NULL`, id).Scan(&res.LiveIdentities); err != nil {
-		return none, err
+		return none, fmt.Errorf("principals: count live identities: %w", err)
 	}
 	if p.Status != StatusActive {
 		res.AlreadyDisabled = true
@@ -376,14 +379,14 @@ func (s *Store) DisablePrincipal(ctx context.Context, id string, admins []string
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM principals
 			WHERE id = ANY($1) AND id <> $2 AND kind=$3 AND status=$4`,
 			keys, id, auth.KindHuman, StatusActive).Scan(&others); err != nil {
-			return none, err
+			return none, fmt.Errorf("principals: count other admins: %w", err)
 		}
 		if others == 0 {
 			return none, ErrLastAdmin
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE principals SET status=$2 WHERE id=$1`, id, StatusDisabled); err != nil {
-		return none, err
+		return none, fmt.Errorf("principals: disable: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return none, fmt.Errorf("principals: commit: %w", err)

@@ -958,9 +958,10 @@ func mergeFailureReason(err error) string {
 	}
 }
 
-// maxDisableReasonBytes bounds the reason an admin gives for a disable; it
-// is copied into the audit row.
-const maxDisableReasonBytes = 500
+// maxDisableReasonChars bounds the reason an admin gives for a disable, in
+// characters (runes, as JSON Schema's maxLength counts); it is copied into
+// the audit row.
+const maxDisableReasonChars = 500
 
 // DisablePrincipal: POST /api/v1/admin/principals/{id}/disable, body
 // {"reason": "..."}. Disables a human principal that must stop acting and
@@ -1004,9 +1005,10 @@ func (h *Handlers) DisablePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reason := strings.TrimSpace(body.Reason)
-	if reason == "" || len(reason) > maxDisableReasonBytes || !utf8.ValidString(reason) {
+	// encoding/json has already replaced invalid UTF-8 with U+FFFD.
+	if reason == "" || utf8.RuneCountInString(reason) > maxDisableReasonChars {
 		audited("failed", "invalid")
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("reason is required, valid UTF-8, at most %d bytes", maxDisableReasonBytes))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("reason is required, at most %d characters", maxDisableReasonChars))
 		return
 	}
 	params["reason"] = reason
@@ -1041,8 +1043,10 @@ func (h *Handlers) DisablePrincipal(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, principals.ErrNotFound):
 			refusal = "not_found"
-		case errors.Is(err, principals.ErrInvalid):
+		case errors.Is(err, principals.ErrNotHuman):
 			refusal = disableCodeNotHuman
+		case errors.Is(err, principals.ErrInvalid):
+			refusal = "invalid"
 		case errors.Is(err, principals.ErrLastAdmin):
 			refusal = disableCodeLastAdmin
 		}
@@ -1053,6 +1057,8 @@ func (h *Handlers) DisablePrincipal(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "principal not found")
 		case disableCodeNotHuman:
 			writeErrorCode(w, http.StatusBadRequest, disableCodeNotHuman, "only a human principal can be disabled here", nil)
+		case "invalid":
+			writeError(w, http.StatusBadRequest, "not a principal id")
 		case disableCodeLastAdmin:
 			writeErrorCode(w, http.StatusConflict, disableCodeLastAdmin, "the principal is the last active admin principal", nil)
 		default:

@@ -1297,6 +1297,19 @@ func TestDisablePrincipalDisablesAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// The reason limit counts characters, as the spec's maxLength does: 500
+// Cyrillic characters (1000 bytes) are accepted.
+func TestDisablePrincipalCountsReasonCharacters(t *testing.T) {
+	d := newDisableHarness(t)
+	reason := strings.Repeat("я", maxDisableReasonChars)
+	if rec := disableAs(d.h, d.admin, disableTarget, `{"reason":"`+reason+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("disable with a %d-character reason = %d %s", maxDisableReasonChars, rec.Code, rec.Body.String())
+	}
+	if e := d.lastAudit(t); e.Parameters["reason"] != reason {
+		t.Fatalf("audit reason = %q", e.Parameters["reason"])
+	}
+}
+
 // A failed session revocation does not undo the committed disable; it is
 // answered 200 and recorded in the audit row.
 func TestDisablePrincipalRecordsAFailedSessionRevocation(t *testing.T) {
@@ -1334,11 +1347,12 @@ func TestDisablePrincipalRefusalsAreAudited(t *testing.T) {
 		{name: "no body", body: ``, code: http.StatusBadRequest, refusal: "invalid"},
 		{name: "empty reason", body: `{"reason":"   "}`, code: http.StatusBadRequest, refusal: "invalid"},
 		{name: "unknown field", body: `{"reason":"x","force":true}`, code: http.StatusBadRequest, refusal: "invalid"},
-		{name: "reason too long", body: `{"reason":"` + strings.Repeat("a", maxDisableReasonBytes+1) + `"}`, code: http.StatusBadRequest, refusal: "invalid"},
+		{name: "reason too long", body: `{"reason":"` + strings.Repeat("я", maxDisableReasonChars+1) + `"}`, code: http.StatusBadRequest, refusal: "invalid"},
 		{name: "bad target", target: "prn_lower", body: `{"reason":"x"}`, code: http.StatusBadRequest, refusal: "invalid"},
 		{name: "self", target: disableAdmin, body: `{"reason":"x"}`, code: http.StatusConflict, refusal: disableCodeSelf, apiCode: disableCodeSelf},
 		{name: "not found", storeErr: principals.ErrNotFound, code: http.StatusNotFound, refusal: "not_found", reachDB: true},
-		{name: "not human", storeErr: principals.ErrInvalid, code: http.StatusBadRequest, refusal: disableCodeNotHuman, apiCode: disableCodeNotHuman, reachDB: true},
+		{name: "store invalid", storeErr: principals.ErrInvalid, code: http.StatusBadRequest, refusal: "invalid", reachDB: true},
+		{name: "not human", storeErr: principals.ErrNotHuman, code: http.StatusBadRequest, refusal: disableCodeNotHuman, apiCode: disableCodeNotHuman, reachDB: true},
 		{name: "last admin", storeErr: principals.ErrLastAdmin, code: http.StatusConflict, refusal: disableCodeLastAdmin, apiCode: disableCodeLastAdmin, reachDB: true},
 		{name: "store error", storeErr: errors.New("dial tcp 10.0.0.7:5432: connection refused"), code: http.StatusServiceUnavailable, refusal: "store_error", apiCode: linkCodeUnavailable, reachDB: true},
 	}
