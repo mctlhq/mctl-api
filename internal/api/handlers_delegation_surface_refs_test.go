@@ -16,6 +16,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -48,7 +49,7 @@ func (e *sidEnv) surfaceRefRows(id, actor string) int {
 // then present bob's sil_ ref (resolveSurfaceLink binds through exactly that
 // row). The route stays on the delegation allowlist.
 func TestDelegatedSurfaceRef_BindsOnlyTheSubjectsOwnIdentity(t *testing.T) {
-	e := newSIDEnv(t)
+	e := newSIDEnvWith(t, &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE", "bob": "prn_BOB"}})
 	e.link("alice", "telegram", "4242")
 	e.link("bob", "telegram", "5555")
 	revoked := e.link("alice", "portal", "p-alice")
@@ -58,7 +59,8 @@ func TestDelegatedSurfaceRef_BindsOnlyTheSubjectsOwnIdentity(t *testing.T) {
 	_, created := e.relayCreate("telegram", "4242", nil)
 	id := created["work_item"].(map[string]any)["id"].(string)
 	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: id})
-	e.users["as-alice"] = auth.NewDelegatedUser("alice", []string{e.tenant}, agent)
+	// As agentPrincipalGate builds it from an xr_/aar_/wi_ grant.
+	e.users["as-alice"] = auth.NewDelegatedPrincipalUser("alice", "prn_ALICE", true, []string{e.tenant}, agent)
 	path := "/api/v1/work-items/" + id + "/surface-refs"
 
 	// The subject's own identity: allowed and written.
@@ -310,5 +312,113 @@ func TestAgentPrincipalGate_OverlongRefIsResolvedAsSentAndAuditedBounded(t *test
 	}
 	if len(got) > maxGrantRefBytes || !utf8.ValidString(got) || got == "" {
 		t.Fatalf("audited grant_ref has %d bytes, valid UTF-8 %v; want non-empty, <= %d and valid", len(got), utf8.ValidString(got), maxGrantRefBytes)
+	}
+}
+
+// ownerPrincipals answers each login with a fixed principal or error, for
+// the surface-actor binding's owner lookup.
+type ownerPrincipals map[string]ownerAnswer
+
+type ownerAnswer struct {
+	pid string
+	err error
+}
+
+func (p ownerPrincipals) ResolvePrincipal(_ context.Context, id auth.Identity) (string, error) {
+	a := p[id.Display]
+	return a.pid, a.err
+}
+
+// mctl-api#629: the surface-actor binding compares principals, never login
+// strings. A ZITADEL-only human (a grant's stored prn_, no GitHub login)
+// binds a surface identity whose owner resolves to the same principal. A
+// subject that shares the owner's login string but is another principal is
+// refused, which a login comparison would have let through.
+func TestDelegatedSurfaceRef_BindsByPrincipalNotLogin(t *testing.T) {
+	// alice's GitHub login belongs to the ZITADEL human's principal: a
+	// principal with no single live GitHub identity signs in ZITADEL-only.
+	e := newSIDEnvWith(t, ownerPrincipals{"alice": {pid: "prn_ZED"}, "bob": {pid: "prn_BOB"}})
+	e.link("alice", "telegram", "4242")
+	e.link("bob", "telegram", "5555")
+	_, created := e.relayCreate("telegram", "4242", nil)
+	id := created["work_item"].(map[string]any)["id"].(string)
+	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: id})
+	zed := auth.NewDelegatedPrincipalUser("zed@example.com", "prn_ZED", false, []string{e.tenant}, agent)
+	if _, gh := zed.GitHubLogin(); gh {
+		t.Fatal("the ZITADEL subject must have no GitHub login")
+	}
+	e.users["as-zed"] = zed
+	e.users["as-other-alice"] = auth.NewDelegatedPrincipalUser("alice", "prn_OTHER", true, []string{e.tenant}, agent)
+	e.users["as-unresolved"] = auth.NewDelegatedUser("alice", []string{e.tenant}, agent)
+	path := "/api/v1/work-items/" + id + "/surface-refs"
+	bind := func(who, actor string) (int, map[string]any) {
+		return e.do(who, "POST", path, map[string]any{
+			"surface": "telegram", "external_id": "chat-" + who + "-" + actor, "actor_external_id": actor,
+		})
+	}
+
+	if code, body := bind("as-zed", "4242"); code != http.StatusCreated {
+		t.Fatalf("ZITADEL-only subject binding its own principal's identity = %d %v", code, body)
+	}
+	if code, body := bind("as-zed", "5555"); code != http.StatusForbidden || body["code"] != delegationCodeNotBound {
+		t.Errorf("ZITADEL-only subject binding another principal's identity = %d %v, want 403 %s", code, body, delegationCodeNotBound)
+	}
+	if code, body := bind("as-other-alice", "4242"); code != http.StatusForbidden || body["code"] != delegationCodeNotBound {
+		t.Errorf("same login, another principal = %d %v, want 403 %s", code, body, delegationCodeNotBound)
+	}
+	// No resolved principal is a refusal, never a match on the login.
+	if code, body := bind("as-unresolved", "4242"); code != http.StatusForbidden || body["code"] != delegationCodeUnresolved {
+		t.Errorf("subject without a principal = %d %v, want 403 %s", code, body, delegationCodeUnresolved)
+	}
+	if n := e.surfaceRefRows(id, "5555"); n != 0 {
+		t.Errorf("a refused binding wrote %d rows", n)
+	}
+	if n := e.surfaceRefRows(id, "4242"); n != 1 {
+		t.Errorf("rows for 4242 = %d, want zed's binding only", n)
+	}
+}
+
+// The owner lookup fails closed: an owner whose principal is disabled or
+// refused is nobody's identity (the same grant_not_bound as any other), and
+// a principal store that could not answer, or is not configured, is a 503,
+// never read as a mismatch or a match.
+func TestDelegatedSurfaceRef_OwnerLookupFailsClosed(t *testing.T) {
+	for name, tt := range map[string]struct {
+		answer   ownerAnswer
+		noStore  bool
+		wantCode int
+		wantErr  string
+	}{
+		"disabled owner":         {answer: ownerAnswer{err: auth.ErrPrincipalDisabled}, wantCode: http.StatusForbidden, wantErr: delegationCodeNotBound},
+		"refused owner":          {answer: ownerAnswer{err: auth.ErrIdentityRefused}, wantCode: http.StatusForbidden, wantErr: delegationCodeNotBound},
+		"no principal, no error": {wantCode: http.StatusForbidden, wantErr: delegationCodeNotBound},
+		"store outage":           {answer: ownerAnswer{err: errors.New("principal store down")}, wantCode: http.StatusServiceUnavailable, wantErr: delegationCodeUnavailable},
+		"store not configured":   {noStore: true, wantCode: http.StatusServiceUnavailable, wantErr: delegationCodeUnavailable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// alice resolves normally while the relay creates the item; the
+			// answer under test applies to the binding's owner lookup only.
+			owners := ownerPrincipals{"alice": {pid: "prn_ALICE"}}
+			var pr auth.PrincipalResolver = owners
+			if tt.noStore {
+				pr = nil
+			}
+			e := newSIDEnvWith(t, pr)
+			e.link("alice", "telegram", "4242")
+			_, created := e.relayCreate("telegram", "4242", nil)
+			id := created["work_item"].(map[string]any)["id"].(string)
+			owners["alice"] = tt.answer
+			agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: id})
+			e.users["as-zed"] = auth.NewDelegatedPrincipalUser("zed@example.com", "prn_ZED", false, []string{e.tenant}, agent)
+			code, body := e.do("as-zed", "POST", "/api/v1/work-items/"+id+"/surface-refs", map[string]any{
+				"surface": "telegram", "external_id": "chat-z", "actor_external_id": "4242",
+			})
+			if code != tt.wantCode || body["code"] != tt.wantErr {
+				t.Fatalf("= %d %v, want %d %s", code, body, tt.wantCode, tt.wantErr)
+			}
+			if e.surfaceRefRows(id, "4242") != 0 {
+				t.Fatal("a refused binding was written")
+			}
+		})
 	}
 }

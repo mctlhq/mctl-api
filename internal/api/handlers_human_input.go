@@ -16,7 +16,8 @@ package api
 //     was answered.
 //
 // Question and reason are shown only to someone who may answer (their
-// GitHub-verified "github:<login>" is in the request's actor_refs), to
+// GitHub-verified "github:<login>" or their resolved "principal:<prn_…>" is
+// in the request's actor_refs; see callerActorRefs), to
 // admins, and to the service principal that relays for a surface. Everyone
 // else does not learn the request exists.
 
@@ -26,12 +27,14 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/humaninput"
+	"github.com/mctlhq/mctl-api/internal/principals"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 )
 
@@ -102,24 +105,58 @@ type sealedHumanInput struct {
 // gitopsHumanInputFile carries where a request was found.
 type gitopsHumanInputFile struct{ Service, Proposal string }
 
-// callerActorRef is the respondent reference an authenticated caller answers
-// as: "github:<login>", the form mctl-agents writes into actor_refs, and
-// only when authentication PROVED a GitHub login (GitHub token, or the local
-// OAuth JWT minted after the GitHub callback). A Dex username that happens
-// to equal someone's GitHub login is not that person, so a caller without a
-// verified login has no reference and is never eligible.
-func callerActorRef(u *auth.User) (string, bool) {
-	login, ok := u.GitHubLogin()
-	if !ok {
-		return "", false
+// principalActorType is the actor_type of a respondent reference that names
+// a canonical principal: "principal:prn_…" (mctl-api#629). actor_refs keep
+// the "actor_type:actor_id" form, because mctl-agents' validate_response
+// rebuilds the respondent reference from exactly those two fields.
+const principalActorType = "principal"
+
+// callerActorRefs are the respondent references an authenticated caller may
+// answer as, in preference order, all derived from authentication and never
+// from a request body:
+//
+//   - "github:<login>", the form mctl-agents has always written, and only
+//     when authentication PROVED a GitHub login (GitHub token, or the local
+//     OAuth JWT minted after the GitHub callback). A Dex username that
+//     happens to equal someone's GitHub login is not that person.
+//   - "principal:<prn_…>", the caller's resolved canonical principal, for
+//     any IdP (mctl-api#629), and only for a human identity. A ZITADEL-only
+//     human has only this one. A caller whose principal could not be
+//     resolved has none: an unknown principal never matches anything. A
+//     service, surface or agent principal has none either, so a machine
+//     credential never answers even if actor_refs named its principal.
+//
+// A caller with neither has no reference and is never eligible.
+func callerActorRefs(u *auth.User) []string {
+	var refs []string
+	if login, ok := u.GitHubLogin(); ok {
+		refs = append(refs, "github:"+login)
 	}
-	return "github:" + login, true
+	if id, ok := u.Identity(); ok && id.Kind == auth.KindHuman && !u.IsService() {
+		if pid := u.PrincipalID(); strings.HasPrefix(pid, principals.PrincipalIDPrefix) && len(pid) > len(principals.PrincipalIDPrefix) {
+			refs = append(refs, principalActorType+":"+pid)
+		}
+	}
+	return refs
 }
 
-// callerCanRespond: the caller's verified reference is in actor_refs.
+// respondentRef is the first of the caller's references that the request's
+// actor_refs names, and false when none is. The order is fixed, so the same
+// caller always answers as the same reference.
+func respondentRef(u *auth.User, req *humaninput.Request) (string, bool) {
+	for _, ref := range callerActorRefs(u) {
+		if req.CanRespond(ref) {
+			return ref, true
+		}
+	}
+	return "", false
+}
+
+// callerCanRespond: one of the caller's verified references is in
+// actor_refs.
 func callerCanRespond(u *auth.User, req *humaninput.Request) bool {
-	ref, ok := callerActorRef(u)
-	return ok && req.CanRespond(ref)
+	_, ok := respondentRef(u, req)
+	return ok
 }
 
 // canSeeHumanInput: a potential respondent, an admin, or the service

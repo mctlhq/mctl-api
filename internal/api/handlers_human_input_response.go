@@ -6,7 +6,8 @@ package api
 // request.
 //
 // What this endpoint decides, and what it leaves to the workflow:
-//   - The respondent is ALWAYS derived from authentication ("github:<login>").
+//   - The respondent is ALWAYS derived from authentication ("github:<login>"
+//     or "principal:<prn_…>"; see callerActorRefs).
 //     The body has no respondent field, and the service principal cannot
 //     answer at all: a human answer relayed by a machine credential could
 //     not be told apart from the machine answering itself.
@@ -38,6 +39,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -148,9 +150,16 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := s.req
-	// Only a GitHub login proven by authentication can answer; see
-	// callerActorRef. Without one the caller has no respondent reference.
-	ref, verified := callerActorRef(user)
+	// Only a reference proven by authentication can answer: a verified
+	// GitHub login or the resolved principal (callerActorRefs). The
+	// respondent is the first of those actor_refs names, never a body field.
+	ref, eligible := respondentRef(user, req)
+	candidates := callerActorRefs(user)
+	if !eligible && len(candidates) > 0 {
+		// Audited and echoed on refusal so the caller sees who it was taken
+		// for; it is never delivered.
+		ref = candidates[0]
+	}
 	reject := func(code int, state, detail string) {
 		msg := state + ": " + detail
 		if state == "invalid_value" {
@@ -161,12 +170,12 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 		h.auditHumanInput(r, user, s, ref, "human_input.response_rejected", "failed", body.Surface, msg)
 		writeJSON(w, code, humanInputResponseResult{RequestID: id, Status: humanInputStatusRejected, State: state, Detail: detail, Respondent: ref})
 	}
-	if !verified {
-		reject(http.StatusForbidden, "not_eligible", "only a caller authenticated by GitHub can answer a human-input request")
+	if len(candidates) == 0 {
+		reject(http.StatusForbidden, "not_eligible", "only a caller authenticated by GitHub or with a resolved principal can answer a human-input request")
 		return
 	}
-	if !req.CanRespond(ref) {
-		reject(http.StatusForbidden, "not_eligible", ref+" is not an eligible respondent for this request")
+	if !eligible {
+		reject(http.StatusForbidden, "not_eligible", "no reference of this caller ("+strings.Join(candidates, ", ")+") is an eligible respondent for this request")
 		return
 	}
 	// Retention: an answer that could not be delivered before its request

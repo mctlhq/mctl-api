@@ -327,7 +327,9 @@ one. A grant with no stored principal (an undecided `aar_`), or whose
 principal is disabled, is 403 `grant_subject_unresolved`; it never falls
 back to the login string. A surface link (`sil_`) stores no principal and
 still resolves through its mirrored GitHub identity, so it requires a
-`github:` subject; it cannot authorize this operation.
+`github:` subject; it cannot authorize this operation. Binding a surface
+actor to a delegated subject, by contrast, compares principals (#629, next
+section).
 
 | Code | Status | Where | Meaning |
 |---|---|---|---|
@@ -355,6 +357,55 @@ service may still relay a free-text `approver`; every use writes one
 off only after a full natural DevLoop cycle (the Saturday cron and one
 issue-triggered loop) with mctl-agents#636 deployed records actor and
 subject separately and zero legacy relays.
+
+## Surface actors and human-input respondents by principal (#629)
+
+Two human paths used to key on a verified GitHub login, which refused a
+ZITADEL-only human (a principal with no single live GitHub identity). Both
+now compare canonical principals.
+
+**Binding a surface actor under delegation.** `POST
+/api/v1/work-items/{id}/surface-refs` with a non-empty `actor_external_id`,
+called by an agent run delegating as a human, binds that surface identity
+to the work item (and with it the identity's `sil_` grant). The binding is
+allowed only when the identity's live link resolves to the delegated
+subject's principal. The subject's principal is the one the gate resolved:
+for an `xr_`, `aar_` or `wi_` grant the stored `prn_`, whatever IdP the
+human signed in with. The link's owner (`github:<login>`, the only form a
+link names today) is resolved through the principal store exactly as the
+gate resolves a `sil_` subject, so the principal a surface actor is bound
+for is the principal its `sil_` grant later acts as. A subject that shares
+the owner's login string but is another principal is refused.
+
+| Outcome | Status | Code |
+|---|---|---|
+| the subject has no resolved principal | 403 | `grant_subject_unresolved` |
+| another principal's identity; unknown, revoked or expired link; owner disabled, refused or unresolvable | 403 | `grant_not_bound` (one answer, no existence oracle) |
+| the link or principal store could not be read, or is not configured | 503 | `delegation_unavailable` |
+
+A ZITADEL-only human still cannot *create* a surface link: a link challenge
+requires a GitHub-verified caller (`humanPrincipal`), and links name only
+`github:<login>`. The binding therefore helps a ZITADEL sign-in whose
+principal also owns a GitHub-named link (an ambiguous or unknown GitHub
+identity), and every principal once links can name a `prn_`.
+
+**Answering human input.** `requested_from.actor_refs` entries stay in the
+`actor_type:actor_id` form that mctl-agents' `validate_response` rebuilds
+from the signalled respondent. Besides `github:<login>`, an entry may now
+name a principal as `principal:<prn_…>`. A caller may answer as:
+
+1. `github:<login>`, when authentication proved that GitHub login;
+2. `principal:<prn_…>`, the caller's resolved principal, for any IdP, and
+   only for a human identity: a service, surface or agent principal never
+   answers, even if `actor_refs` named it.
+
+The respondent is the first of these that `actor_refs` names, matched
+exactly. Both are derived from authentication; the body cannot name a
+respondent. A caller whose principal is unresolved has no principal
+reference, so it never matches one. The ledger row keeps
+`respondent_principal_id` as before, and the audit `respondent` is the
+reference answered as. Existing `github:` refs keep working during the
+migration; mctl-agents writing `principal:` refs is its own change.
 
 ## Not in phase 1
 

@@ -680,3 +680,131 @@ func TestRespondHumanInput_RecordsTheRelayingSurface(t *testing.T) {
 		t.Fatalf("ledger row = %+v", row)
 	}
 }
+
+// principal_respondent names "principal:prn_…" and github:alice
+// (mctl-api#629).
+const (
+	hiPrincipal     = "hir-d73cb7abd994f364"
+	hiPrincipalHash = "sha256:d73cb7abd994f364fcb7eacdde756c2a99e057af506289f2372324bc1e8440e3"
+	hiPrincipalPRN  = "prn_01K7ZD0N1Y0000000000000000"
+)
+
+// newPrincipalRespondentHandlers serves only principal_respondent, which the
+// workflow is waiting on.
+func newPrincipalRespondentHandlers(t *testing.T) (*Handlers, *fakeDevLoopClient, *humaninput.MemoryLedger, *audit.Logger) {
+	t.Helper()
+	h, tc, ledger, log := newHumanInputResponseHandlers(t)
+	h.opts.GitReader = &humanInputGitReader{files: []gitops.HumanInputRequestFile{
+		{Service: "mctl-api", Proposal: "issue-264-p", Raw: humanInputFixture(t, "principal_respondent")},
+	}}
+	tc.humanInputStates[hiWF] = &temporalclient.HumanInputState{State: temporalclient.HumanInputWaitingForInput, RequestID: hiPrincipal}
+	return h, tc, ledger, log
+}
+
+func principalAnswer(v string) string {
+	return `{"request_hash":"` + hiPrincipalHash + `","value":"` + v + `"}`
+}
+
+// zitadelHuman is a ZITADEL sign-in with no GitHub login, resolved to prn.
+func zitadelHuman(t *testing.T, subject, prn string, groups ...string) *auth.User {
+	t.Helper()
+	u := auth.NewFederatedUser("zitadel", "https://auth.mctl.ai", subject, subject+"@example.com", auth.KindHuman)
+	u.Groups = groups
+	if prn != "" {
+		withPrincipal(t, u, prn)
+	}
+	if _, gh := u.GitHubLogin(); gh {
+		t.Fatal("a ZITADEL human must have no GitHub login")
+	}
+	return u
+}
+
+// A ZITADEL-only human named by "principal:prn_…" in actor_refs sees and
+// answers the request. The respondent delivered to the workflow and recorded
+// in the ledger and the audit trail is that principal reference, taken from
+// authentication.
+func TestRespondHumanInput_PrincipalRefAnswersForAZitadelOnlyHuman(t *testing.T) {
+	h, tc, ledger, log := newPrincipalRespondentHandlers(t)
+	tc.onSignal = workflowAccepts
+	zed := zitadelHuman(t, "z-zed", hiPrincipalPRN)
+	if _, v, raw := getHumanInput(t, h, zed, hiPrincipal); !v.CanRespond {
+		t.Fatalf("ZITADEL-only respondent cannot respond: %s", raw)
+	}
+	got := respond(t, h, zed, hiPrincipal, principalAnswer("keep"))
+	want := "principal:" + hiPrincipalPRN
+	if got.code != http.StatusOK || got.res.Status != "accepted" || got.res.Respondent != want {
+		t.Fatalf("respond = %d %s", got.code, got.raw)
+	}
+	if len(tc.humanInputSignals) != 1 {
+		t.Fatalf("signals = %v", tc.humanInputSignals)
+	}
+	if r := tc.humanInputSignals[0]["respondent"].(map[string]any); r["actor_type"] != "principal" || r["actor_id"] != hiPrincipalPRN {
+		t.Fatalf("signalled respondent = %v, want principal/%s", r, hiPrincipalPRN)
+	}
+	row, _ := ledger.Get(context.Background(), hiPrincipal)
+	if row == nil || row.Respondent != want || row.RespondentPrincipalID != hiPrincipalPRN {
+		t.Fatalf("ledger row = %+v", row)
+	}
+	audited := false
+	for _, e := range log.List(100) {
+		if e.Operation == "human_input.response_accepted" {
+			audited = e.Parameters["respondent"] == want
+		}
+	}
+	if !audited {
+		t.Fatalf("no response_accepted audit naming %s: %v", want, auditOps(log))
+	}
+}
+
+// The principal reference is matched exactly and only against the caller's
+// own resolved principal. Another principal, a caller whose principal is
+// unresolved, and an admin who is not named are all refused, and none of
+// them reaches the workflow.
+func TestRespondHumanInput_PrincipalRefIsExactAndFailsClosed(t *testing.T) {
+	h, tc, _, _ := newPrincipalRespondentHandlers(t)
+	tc.onSignal = workflowAccepts
+	for name, tt := range map[string]struct {
+		u    *auth.User
+		code int
+	}{
+		"another principal":      {zitadelHuman(t, "z-other", "prn_01K7ZD0N1Y0000000000000001"), http.StatusNotFound},
+		"unresolved principal":   {zitadelHuman(t, "z-zed", ""), http.StatusNotFound},
+		"admin, other principal": {zitadelHuman(t, "z-root", "prn_01K7ZD0N1Y0000000000000002", "admins"), http.StatusForbidden},
+		"admin, unresolved":      {zitadelHuman(t, "z-root2", "", "admins"), http.StatusForbidden},
+		// Machine credentials whose principal IS the named one still never
+		// answer: a principal ref is a human's.
+		"service principal named by prn": {withPrincipal(t, auth.NewServiceUser(), hiPrincipalPRN), http.StatusForbidden},
+		"agent principal named by prn":   {withPrincipal(t, auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: "wi-261"}), hiPrincipalPRN), http.StatusNotFound},
+		"surface principal named by prn": {withPrincipal(t, auth.NewSurfaceUser("telegram"), hiPrincipalPRN), http.StatusNotFound},
+	} {
+		if got := respond(t, h, tt.u, hiPrincipal, principalAnswer("keep")); got.code != tt.code {
+			t.Errorf("%s: %d %s, want %d", name, got.code, got.raw, tt.code)
+		}
+	}
+	if len(tc.humanInputSignals) != 0 {
+		t.Fatalf("an ineligible caller reached the workflow: %v", tc.humanInputSignals)
+	}
+}
+
+// github:<login> refs keep working next to principal refs. A GitHub caller
+// named both ways answers as github:<login>, the reference mctl-agents has
+// always matched. A GitHub caller named only by principal answers as that
+// principal.
+func TestRespondHumanInput_GitHubRefStillAnswersNextToPrincipalRefs(t *testing.T) {
+	for name, tt := range map[string]struct {
+		u    *auth.User
+		want string
+	}{
+		"github ref, no principal":         {auth.NewGitHubUser("alice", nil), "github:alice"},
+		"github ref and another principal": {withPrincipal(t, auth.NewGitHubUser("alice", nil), "prn_ALICE"), "github:alice"},
+		"only the principal is named":      {withPrincipal(t, auth.NewGitHubUser("carol", nil), hiPrincipalPRN), "principal:" + hiPrincipalPRN},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, tc, _, _ := newPrincipalRespondentHandlers(t)
+			tc.onSignal = workflowAccepts
+			if got := respond(t, h, tt.u, hiPrincipal, principalAnswer("drop")); got.code != http.StatusOK || got.res.Respondent != tt.want {
+				t.Fatalf("respond = %d %s, want respondent %s", got.code, got.raw, tt.want)
+			}
+		})
+	}
+}

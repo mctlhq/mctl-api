@@ -567,7 +567,7 @@ components:
           description: Full allow-list; present only for admins and the service principal.
         can_respond:
           type: boolean
-          description: Whether the caller's own GitHub-verified `github:<login>` is eligible.
+          description: Whether one of the caller's own references (GitHub-verified `github:<login>`, or `principal:<prn_…>` for a human's resolved principal) is eligible.
         created_at:
           type: string
         expires_at:
@@ -3568,12 +3568,15 @@ paths:
         (`resolved`, `timed_out`, ...) and falls back to `expired` only when
         the workflow cannot be asked.
 
-        A caller sees a request only if their `github:<login>` is in its
-        eligible actors, or they are an admin, or they are the service
-        principal relaying for a surface. The login must be proven by
-        authentication (a GitHub token, or an mctl-api OAuth token minted
-        after GitHub login); a Dex username is never treated as a GitHub
-        login. Other callers do not learn the request exists.
+        A caller sees a request only if their `github:<login>` or
+        `principal:<prn_…>` is in its eligible actors, or they are an admin,
+        or they are the service principal relaying for a surface. The login
+        must be proven by authentication (a GitHub token, or an mctl-api
+        OAuth token minted after GitHub login); a Dex username is never
+        treated as a GitHub login. The principal is the human caller's
+        resolved canonical principal, from any IdP (mctl-api#629); an
+        unresolved principal matches nothing. Other callers do not learn the
+        request exists.
 
         Each owning workflow execution is queried once per call, within one
         overall time budget; expired requests are not queried.
@@ -3705,10 +3708,12 @@ paths:
         Delivers one HumanInputResponse to the DevLoopWorkflow execution that
         sealed the request, as the `human_input_response` signal.
 
-        - The respondent is always derived from authentication as
-          `github:<login>`, and only when authentication proved the GitHub
-          login. The body cannot name a respondent (unknown fields are
-          rejected), and the service principal cannot answer.
+        - The respondent is always derived from authentication: the first
+          of `github:<login>` (only when authentication proved the GitHub
+          login) and `principal:<prn_…>` (the human caller's resolved
+          principal, mctl-api#629) that the request's `actor_refs` names.
+          The body cannot name a respondent (unknown fields are rejected),
+          and the service principal cannot answer.
         - Eligibility, `request_hash`, expiry and the typed value are
           checked here and again by the workflow, which has the final word.
         - Idempotent: resubmitting the same answer returns the same outcome.
