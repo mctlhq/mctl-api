@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.95.0](https://github.com/mctlhq/mctl-api/compare/4.94.1...4.95.0) (2026-10-17)
+
+
+### Features
+
+* **surface-identity:** let ZITADEL-only humans create surface links ([9300d53](https://github.com/mctlhq/mctl-api/commit/9300d534312322d83aacb552dfd22953475cdfa2))
+* **surface-identity:** let ZITADEL-only humans create surface links ([66e8398](https://github.com/mctlhq/mctl-api/commit/66e8398424ecd92945467237de700a562ad8e74e)), closes [#646](https://github.com/mctlhq/mctl-api/issues/646)
+* **work-items:** return the owner's principal id on reads ([25556e6](https://github.com/mctlhq/mctl-api/commit/25556e600c837cf1ccb7f0b27e63cb4ea1756289))
+* **work-items:** return the owner's principal id on reads ([b44feb3](https://github.com/mctlhq/mctl-api/commit/b44feb3fb70cc48a7af5246f8ad6affc1ddc3800))
+
+
+### Bug Fixes
+
+* **surface-identity:** accept non-ASCII names on principal links ([9eeb373](https://github.com/mctlhq/mctl-api/commit/9eeb37314246a49f12660eca6de4470c4aa685b2))
+* **surface-identity:** keep prn_ links usable and reachable ([ae92318](https://github.com/mctlhq/mctl-api/commit/ae923185c9d00aecf7ff2a95902361402a3fa1c2))
+
 ## [4.94.1](https://github.com/mctlhq/mctl-api/compare/4.94.0...4.94.1) (2026-10-17)
 
 
