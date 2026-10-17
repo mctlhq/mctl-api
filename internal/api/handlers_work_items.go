@@ -20,6 +20,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -745,12 +746,20 @@ func (h *Handlers) LinkWorkItemSurface(w http.ResponseWriter, r *http.Request) {
 // So under delegation a non-empty actor_external_id must be the delegated
 // subject's own live surface identity on that surface, read server-side from
 // surface_identity_links. The body only names the identity, and the owner
-// comes from the store. Any other identity is refused before the write:
-// another human's, an unknown, a revoked or an expired one. All of them get
-// the same grant_not_bound, so the route is not an existence oracle for
-// surface ids. An empty actor_external_id binds nothing (SurfaceRefBound
-// needs a match) and passes. A non-delegated caller, including the direct
-// surface relay, is unaffected.
+// comes from the store. Owner and subject are compared as canonical
+// principals (mctl-api#629), never as login strings: the subject is the
+// principal the gate resolved (a grant's stored prn_, for a human from any
+// IdP, so a ZITADEL-only human qualifies), and the link's owner is resolved
+// to its principal exactly as the gate resolves a sil_ subject
+// (surfaceLinkPrincipal). Any other identity is refused before the write:
+// another principal's, an unknown, a revoked or an expired one, or one whose
+// owner resolves to no active principal. All of them get the same
+// grant_not_bound, so the route is not an existence oracle for surface ids.
+// A subject without a resolved principal is refused outright, and a store
+// that cannot be read is a 503, never a mismatch or a match. An empty
+// actor_external_id binds nothing (SurfaceRefBound needs a match) and
+// passes. A non-delegated caller, including the direct surface relay, is
+// unaffected.
 func (h *Handlers) delegatedActorIsSubject(w http.ResponseWriter, r *http.Request, user *auth.User, surface, actorExternalID string) bool {
 	if actorExternalID == "" {
 		return true
@@ -769,10 +778,10 @@ func (h *Handlers) delegatedActorIsSubject(w http.ResponseWriter, r *http.Reques
 	if !delegated {
 		return true
 	}
-	login, ok := user.GitHubLogin()
-	if !ok {
+	subjectPID := user.PrincipalID()
+	if subjectPID == "" {
 		h.refuseDelegation(w, r, user, agentName, "", delegationCodeUnresolved, http.StatusForbidden,
-			"the delegated subject is not a GitHub principal")
+			"the delegated subject has no resolved principal")
 		return false
 	}
 	if h.opts.SurfaceIdentities == nil {
@@ -789,12 +798,62 @@ func (h *Handlers) delegatedActorIsSubject(w http.ResponseWriter, r *http.Reques
 		h.refuseDelegation(w, r, user, agentName, "", delegationCodeUnavailable, http.StatusServiceUnavailable,
 			"could not verify the surface identity")
 		return false
-	case link.Principal == "github:"+login:
-		return true
+	default:
+		owner, err := h.surfaceLinkPrincipal(r.Context(), link.Principal)
+		switch {
+		case errors.Is(err, errLinkOwnerUnresolved):
+			// Falls through: an owner with no active principal is nobody's
+			// identity to bind.
+		case err != nil:
+			slog.Error("delegation: surface identity owner lookup failed", "error", err)
+			h.refuseDelegation(w, r, user, agentName, "", delegationCodeUnavailable, http.StatusServiceUnavailable,
+				"could not verify the surface identity")
+			return false
+		case owner == subjectPID:
+			return true
+		}
 	}
 	h.refuseDelegation(w, r, user, agentName, "", delegationCodeNotBound, http.StatusForbidden,
 		"actor_external_id is not the delegated subject's surface identity")
 	return false
+}
+
+// errLinkOwnerUnresolved: a surface link's owner is no active principal. It
+// is only a definite answer: the principal store said disabled or refused,
+// or the link names no github:<login> at all. A login the store could not
+// resolve (principals.ErrUnresolved: no known GitHub identity, GitHub did
+// not answer, a failed read) is NOT this. It may be transient, so it stays
+// a 503 rather than reading "could not observe" as "no such owner".
+var errLinkOwnerUnresolved = errors.New("the surface link's owner resolves to no active principal")
+
+// surfaceLinkPrincipal resolves a live surface link's owner ("github:<login>",
+// the only form a link may name today) to its canonical principal. It keys
+// on the same login-only GitHub identity agentPrincipalGate builds for a
+// sil_ grant's subject (auth.NewDelegatedUser, then AttachPrincipal), so the
+// principal a surface actor is bound for is the principal its sil_ grant
+// later acts as. The login comes from the stored link, never from the
+// caller or the body. Like that gate, the lookup can ask GitHub for the
+// login's id and provision a principal for it, here on the surface-ref
+// write path. A store that could not answer is returned as its error, for
+// the caller to refuse with 503.
+func (h *Handlers) surfaceLinkPrincipal(ctx context.Context, linkPrincipal string) (string, error) {
+	login, ok := strings.CutPrefix(linkPrincipal, "github:")
+	if !ok || login == "" {
+		return "", errLinkOwnerUnresolved
+	}
+	if h.opts.Principals == nil {
+		return "", errors.New("principal store not configured")
+	}
+	pid, err := h.opts.Principals.ResolvePrincipal(ctx, auth.Identity{Provider: auth.ProviderGitHub, Display: login, Kind: auth.KindHuman})
+	switch {
+	case errors.Is(err, auth.ErrPrincipalDisabled), errors.Is(err, auth.ErrIdentityRefused):
+		return "", errLinkOwnerUnresolved
+	case err != nil:
+		return "", err
+	case pid == "":
+		return "", errLinkOwnerUnresolved
+	}
+	return pid, nil
 }
 
 // ListWorkItemEvents handles GET /api/v1/work-items/{id}/events.
