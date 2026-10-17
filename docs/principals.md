@@ -181,7 +181,7 @@ gets a customer entry, `upstream=customer`, labelled "Sign in with GitHub":
 
 | `OAUTH_UPSTREAM` | Chooser |
 |---|---|
-| `zitadel` | Sign in with GitHub (new customers), Sign in with MCTL account (staff and partner organizations) |
+| `zitadel` | Sign in with GitHub (customers, new and returning), Sign in with MCTL account (staff and partner accounts) |
 | `both` | the same two, then GitHub as legacy |
 | `github` | no chooser, no customer entry |
 
@@ -194,7 +194,8 @@ MCTL account", is for everyone who already has a ZITADEL account in
 another organization: staff and partner organizations alike, which is why
 it does not say "staff". Such a person pressing "Sign in with GitHub" would
 get a separate customers account, refused with `customer_conflict` because
-their GitHub identity already belongs to their principal. That entry and
+their GitHub identity already belongs to their principal; that 409 page
+points them to "Sign in with MCTL account". That entry and
 the code exchange are unchanged. The choice is not stored with the pending
 authorization: whether the person signs in as a customer is decided in the
 callback from the verified ID token's organization (see "Self-service

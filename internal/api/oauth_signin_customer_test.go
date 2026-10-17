@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -178,6 +179,9 @@ func TestZitadelSigninOfACustomerRefusals(t *testing.T) {
 			if n := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(tc.label, tc.result)) - before; n != 1 {
 				t.Errorf("%s +%v, want +1", tc.result, n)
 			}
+			if tc.result == "customer_conflict" && !strings.Contains(html.UnescapeString(rec.Body.String()), `choose "Sign in with MCTL account"`) {
+				t.Errorf("the conflict page does not point to Sign in with MCTL account: %s", rec.Body.String())
+			}
 			if len(h.store.calls) != 0 {
 				t.Fatalf("a customers token fell through to the link store: %+v", h.store.calls)
 			}
@@ -251,7 +255,7 @@ func TestCustomerGitHubEntry(t *testing.T) {
 		}
 		// Partner organizations use the other entry too, so it must not
 		// read as staff-only.
-		if !strings.Contains(rec.Body.String(), "Sign in with MCTL account</a>") || strings.Contains(rec.Body.String(), "staff,") {
+		if !strings.Contains(rec.Body.String(), "Sign in with MCTL account</a>") || strings.Contains(rec.Body.String(), "staff,") || !strings.Contains(rec.Body.String(), "Customers: sign in with your GitHub account.") {
 			t.Errorf("mode %s: the account entry is not labelled Sign in with MCTL account", mode)
 		}
 		scopes := authorizeScopes(t, h.get(authorizeQuery("&upstream=customer")))

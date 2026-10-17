@@ -77,7 +77,10 @@ func (h *Handlers) customerSigninPrincipal(w http.ResponseWriter, r *http.Reques
 		slog.Warn("oauth: customer identity conflicts with another principal", "github_id", id.Customer.GitHubID, "zitadel_subject", id.Subject, "error", err)
 		renderOAuthPage(w, http.StatusConflict, oauthPageData{Title: "Sign-in refused", Lines: []string{
 			"Your mctl account is already tied to a different mctl principal than your GitHub account, so mctl does not guess which one you are.",
-			"Ask a platform admin to resolve it, quoting GitHub id " + id.Customer.GitHubID + ".",
+			// The usual cause: a staff or partner user who already has a
+			// principal pressed the customer entry.
+			"If you have an MCTL staff or partner account, start the connection again and choose \"Sign in with MCTL account\" instead of \"Sign in with GitHub\".",
+			"Otherwise ask a platform admin to resolve it, quoting GitHub id " + id.Customer.GitHubID + ".",
 		}})
 		return "", "customer_conflict"
 	}
