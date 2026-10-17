@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.94.0](https://github.com/mctlhq/mctl-api/compare/4.93.0...4.94.0) (2026-10-17)
+
+
+### Features
+
+* **oauth:** draw the sign-in and link pages in one MCTL shell ([d1832ee](https://github.com/mctlhq/mctl-api/commit/d1832ee7c3f3be79dd9ecf973a344f3ea4ad8c25))
+* **oauth:** draw the sign-in and link pages in one MCTL shell ([4ddb27a](https://github.com/mctlhq/mctl-api/commit/4ddb27ab4201360bc69a573e8252659b833dd373))
+
 ## [4.93.0](https://github.com/mctlhq/mctl-api/compare/4.92.0...4.93.0) (2026-10-17)
 
 
