@@ -145,7 +145,9 @@ func TestCustomerDeletionRefusesUnrelatedAndRevokedIdentities(t *testing.T) {
 				t.Fatalf("unsafe target accepted: %v", err)
 			}
 			var count int
-			s.pool.QueryRow(ctx, `SELECT count(*) FROM customer_deletions`).Scan(&count)
+			if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM customer_deletions`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
 			if count != 0 {
 				t.Fatal("refused target left a deletion manifest")
 			}

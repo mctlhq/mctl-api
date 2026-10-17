@@ -38,7 +38,8 @@ type deletionReader struct {
 
 func (r *deletionReader) ListTenantsStrict() ([]gitops.Tenant, error) { return r.tenants, r.err }
 func (r *deletionReader) TenantExists(name string) (bool, error) {
-	for _, t := range r.tenants {
+	for i := range r.tenants {
+		t := &r.tenants[i]
 		if t.Name == name {
 			return true, r.err
 		}

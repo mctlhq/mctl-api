@@ -78,7 +78,8 @@ func (h *Handlers) customerMemberships(tenant, pid, login string, requireOwner b
 		return fmt.Errorf("%w: tenant listing", errCustomerDeletionUnobserved)
 	}
 	found := false
-	for _, t := range tenants {
+	for i := range tenants {
+		t := &tenants[i]
 		if err := t.PrincipalKeysErr(); err != nil {
 			return fmt.Errorf("%w: tenant membership parsing", errCustomerDeletionUnobserved)
 		}

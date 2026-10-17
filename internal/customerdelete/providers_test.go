@@ -37,6 +37,7 @@ func TestProvidersVerifyDeleteAndRetry(t *testing.T) {
 			if !ok || id != "lifecycle" || secret != "secret" {
 				t.Error("machine credential not sent as Basic auth")
 			}
+			r.Body = http.MaxBytesReader(w, r.Body, 4096)
 			if err := r.ParseForm(); err != nil {
 				t.Error(err)
 				w.WriteHeader(400)
@@ -45,41 +46,41 @@ func TestProvidersVerifyDeleteAndRetry(t *testing.T) {
 			if !strings.Contains(r.Form.Get("scope"), "urn:zitadel:iam:org:project:id:worker-project:aud") {
 				t.Error("Worker audience missing")
 			}
-			w.Write([]byte(`{"access_token":"machine-jwt"}`))
+			_, _ = w.Write([]byte(`{"access_token":"machine-jwt"}`))
 		case "/v2/users/7001":
 			if r.Method == "DELETE" {
 				deleted = true
 				deletes++
-				w.Write([]byte(`{}`))
+				_, _ = w.Write([]byte(`{}`))
 				return
 			}
 			if deleted {
 				w.WriteHeader(404)
-				w.Write([]byte(`{"code":5}`))
+				_, _ = w.Write([]byte(`{"code":5}`))
 				return
 			}
 			org := "customers"
 			if wrongOrg {
 				org = "staff"
 			}
-			json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"userId": "7001", "human": map[string]any{}, "details": map[string]string{"resourceOwner": org}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"userId": "7001", "human": map[string]any{}, "details": map[string]string{"resourceOwner": org}}})
 		case "/v2/users/7001/links/_search":
 			if malformedLinks {
-				w.Write([]byte(`{"result":[]}`))
+				_, _ = w.Write([]byte(`{"result":[]}`))
 				return
 			}
-			w.Write([]byte(`{"details":{"totalResult":"1"},"result":[{"idpId":"github-idp","userId":"123"}]}`))
+			_, _ = w.Write([]byte(`{"details":{"totalResult":"1"},"result":[{"idpId":"github-idp","userId":"123"}]}`))
 		case "/api/internal/customer-sessions/revoke":
 			sessions++
 			if partialSession {
 				w.WriteHeader(202)
-				w.Write([]byte(`{"complete":false}`))
+				_, _ = w.Write([]byte(`{"complete":false}`))
 				return
 			}
-			w.Write([]byte(`{"github_id":"123","subject":"7001","complete":true}`))
+			_, _ = w.Write([]byte(`{"github_id":"123","subject":"7001","complete":true}`))
 		case "/api/tenant-management/internal/tenants/acme/cleanup":
 			cleanups++
-			w.Write([]byte(`{"tenant":"acme","cleaned":true}`))
+			_, _ = w.Write([]byte(`{"tenant":"acme","cleaned":true}`))
 		default:
 			t.Errorf("unexpected provider path %s", r.URL.Path)
 			w.WriteHeader(404)
@@ -133,7 +134,7 @@ func TestProvidersDoNotForwardCredentialsOnRedirect(t *testing.T) {
 	forwarded := false
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { forwarded = true }))
 	defer other.Close()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, other.URL, 302) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, other.URL, http.StatusFound) }))
 	defer server.Close()
 	p := &Providers{Issuer: server.URL, ClientID: "lifecycle", ClientSecret: "secret"}
 	if err := p.VerifyCustomer(context.Background(), &principals.CustomerDeletion{Subject: "7001"}); err == nil {

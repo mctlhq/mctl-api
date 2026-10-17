@@ -72,7 +72,8 @@ func customerDeletionOptions(cfg config, store *principals.Store, cache *princip
 			if err != nil {
 				return err
 			}
-			for _, app := range apps {
+			for i := range apps {
+				app := &apps[i]
 				if app.Name == "tenant-"+tenant || strings.HasPrefix(app.Name, tenant+"-") || app.DestNamespace == tenant || app.DestNamespace == tenant+"-preview" {
 					return fmt.Errorf("tenant Argo application remains")
 				}

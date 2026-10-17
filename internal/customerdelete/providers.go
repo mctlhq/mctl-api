@@ -51,7 +51,7 @@ func (p *Providers) request(ctx context.Context, method, path, token, contentTyp
 	if err != nil {
 		return 0, nil, fmt.Errorf("provider request failed")
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(res.Body, 2*1024*1024+1))
 	if err != nil {
 		return res.StatusCode, nil, err
