@@ -107,14 +107,19 @@ func TestZitadelSigninOfACustomer(t *testing.T) {
 	const prn = "prn_01JCCCCCCCCCCCCCCCCCCCCCCC"
 	pr := &recordingResolver{signinResolver: signinResolver{prn: prn}}
 	h := newCustomerHarness(t, true, customerIDClaims(), pr)
-	before := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "issued"))
+	staffBefore := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "issued"))
+	before := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(oauthUpstreamZitadelCustomer, "issued"))
 	rec := h.callback(h.toZitadel(h.get(authorizeQuery(""))))
 	loc, _ := url.Parse(rec.Header().Get("Location"))
 	if rec.Code != http.StatusFound || loc.Query().Get("code") == "" {
 		t.Fatalf("callback = %d %q, want a code: %s", rec.Code, loc, rec.Body.String())
 	}
-	if n := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "issued")) - before; n != 1 {
-		t.Errorf("issued +%v, want +1", n)
+	// A customer sign-in is counted apart from a staff one.
+	if n := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(oauthUpstreamZitadelCustomer, "issued")) - before; n != 1 {
+		t.Errorf("zitadel_customer issued +%v, want +1", n)
+	}
+	if n := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "issued")) - staffBefore; n != 0 {
+		t.Errorf("zitadel issued +%v for a customer, want +0", n)
 	}
 	if len(h.store.calls) != 0 {
 		t.Fatalf("the link store was read for a customer: %+v", h.store.calls)
@@ -151,25 +156,26 @@ func TestZitadelSigninOfACustomerRefusals(t *testing.T) {
 		code          int
 		result        string
 		resolved      bool // the resolver was asked
+		label         string
 	}{
-		"organization not named":  {true, without(auth.ClaimResourceOwnerID), signinResolver{prn: "prn_x"}, http.StatusBadGateway, "invalid_token", false},
-		"no github id":            {true, without(auth.ClaimCustomerGitHubID), signinResolver{prn: "prn_x"}, http.StatusForbidden, "customer_unproven", false},
-		"hook refused":            {true, refused, signinResolver{prn: "prn_x"}, http.StatusForbidden, "customer_unproven", false},
-		"not in principal mode":   {false, customerIDClaims(), signinResolver{prn: "prn_x"}, http.StatusForbidden, "customer_not_enabled", false},
-		"subject owned elsewhere": {true, customerIDClaims(), signinResolver{err: fmt.Errorf("%w: %w: %w", auth.ErrIdentityRefused, principals.ErrCustomerConflict, principals.ErrIdentityOwnedElsewhere)}, http.StatusConflict, "customer_conflict", true},
-		"principal disabled":      {true, customerIDClaims(), signinResolver{err: auth.ErrPrincipalDisabled}, http.StatusForbidden, "principal_refused", true},
-		"store down":              {true, customerIDClaims(), signinResolver{err: errors.New("db down")}, http.StatusServiceUnavailable, "principal_unavailable", true},
+		"organization not named":  {true, without(auth.ClaimResourceOwnerID), signinResolver{prn: "prn_x"}, http.StatusBadGateway, "invalid_token", false, auth.UpstreamZitadel},
+		"no github id":            {true, without(auth.ClaimCustomerGitHubID), signinResolver{prn: "prn_x"}, http.StatusForbidden, "customer_unproven", false, auth.UpstreamZitadel},
+		"hook refused":            {true, refused, signinResolver{prn: "prn_x"}, http.StatusForbidden, "customer_unproven", false, auth.UpstreamZitadel},
+		"not in principal mode":   {false, customerIDClaims(), signinResolver{prn: "prn_x"}, http.StatusForbidden, "customer_not_enabled", false, oauthUpstreamZitadelCustomer},
+		"subject owned elsewhere": {true, customerIDClaims(), signinResolver{err: fmt.Errorf("%w: %w: %w", auth.ErrIdentityRefused, principals.ErrCustomerConflict, principals.ErrIdentityOwnedElsewhere)}, http.StatusConflict, "customer_conflict", true, oauthUpstreamZitadelCustomer},
+		"principal disabled":      {true, customerIDClaims(), signinResolver{err: auth.ErrPrincipalDisabled}, http.StatusForbidden, "principal_refused", true, oauthUpstreamZitadelCustomer},
+		"store down":              {true, customerIDClaims(), signinResolver{err: errors.New("db down")}, http.StatusServiceUnavailable, "principal_unavailable", true, oauthUpstreamZitadelCustomer},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			pr := &recordingResolver{signinResolver: tc.resolver}
 			h := newCustomerHarness(t, tc.principalMode, tc.claims, pr)
-			before := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, tc.result))
+			before := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(tc.label, tc.result))
 			rec := h.callback(h.toZitadel(h.get(authorizeQuery(""))))
 			if rec.Code != tc.code || rec.Header().Get("Location") != "" {
 				t.Fatalf("callback = %d Location=%q, want %d and no code: %s", rec.Code, rec.Header().Get("Location"), tc.code, rec.Body.String())
 			}
-			if n := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, tc.result)) - before; n != 1 {
+			if n := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(tc.label, tc.result)) - before; n != 1 {
 				t.Errorf("%s +%v, want +1", tc.result, n)
 			}
 			if len(h.store.calls) != 0 {

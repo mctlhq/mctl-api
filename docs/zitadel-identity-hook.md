@@ -233,7 +233,7 @@ Relying parties (mctl-web, and later C0) must refuse any token that carries
 | Env var | Required | Meaning |
 |---|---|---|
 | `ZITADEL_HOOK_CUSTOMERS_ORG_ID` | yes (unset = hook off) | customers org ID |
-| `ZITADEL_HOOK_GITHUB_IDP_ID` | yes | customers GitHub IdP ID; also the IdP the OAuth chooser's customer "Sign in with GitHub" sends ZITADEL to (`docs/principals.md`). Must be digits, or the boot is refused |
+| `ZITADEL_HOOK_GITHUB_IDP_ID` | yes | customers GitHub IdP ID; also the IdP the OAuth chooser's customer "Sign in with GitHub" sends ZITADEL to (`docs/principals.md`). Must be digits where that entry can be wired, or the boot is refused |
 | `ZITADEL_HOOK_LOGIN_CLIENT_USER_ID` | yes | Login V2 service user ID (the only allowed `CreateUser` caller in customers) |
 | `ZITADEL_HOOK_CLAIM_CLIENT_IDS` | yes | CSV of OIDC client IDs that get `mctl:*` claims (`mctl-web`, `mctl-web-dev`) |
 | `ZITADEL_HOOK_USERNAME_DOMAIN` | no, default `mctl.ai` | username suffix (`<login>@<domain>`) only; org domains are not compared |

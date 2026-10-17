@@ -128,4 +128,18 @@ func TestCustomersGitHubIdPWiring(t *testing.T) {
 	if o := oauthZitadelOptions(bad, &principals.Store{}, oauth); o == nil || o.CustomersGitHubIdPID != "" {
 		t.Fatalf("malformed IdP id: OAuth upstream options = %+v, want no GitHub IdP", o)
 	}
+	// Where the entry can never be wired the id feeds only the identity
+	// hook, and the boot is not refused for a feature that is off.
+	githubMode := withHook("395272528420931285", "not-digits")
+	githubMode.OAuthUpstreamRaw = "github"
+	noCustomers := zitadelUpstreamConfig("zitadel")
+	noCustomers.ZitadelHook.GitHubIdPID = "not-digits"
+	for name, c := range map[string]config{"OAUTH_UPSTREAM=github": githubMode, "no customers entry": noCustomers} {
+		if err := c.validate(); err != nil {
+			t.Errorf("%s with a malformed IdP id: validate() = %v, want no refusal", name, err)
+		}
+		if o := oauthZitadelOptions(c, &principals.Store{}, oauth); o != nil && o.CustomersGitHubIdPID != "" {
+			t.Errorf("%s: OAuth upstream options = %+v, want no GitHub IdP", name, o)
+		}
+	}
 }

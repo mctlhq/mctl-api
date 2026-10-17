@@ -198,10 +198,17 @@ customers" in `docs/federation.md`), so choosing the entry grants nothing.
 It fails closed. Without both ids, or with the hook's organization unset or
 different, no customer entry is offered and `zitadel` goes straight to
 ZITADEL as before. An `upstream=customer` that is not offered answers 400
-rather than becoming a staff sign-in. A `ZITADEL_HOOK_GITHUB_IDP_ID` that is
-not a ZITADEL resource id (digits) refuses the boot, since it is written
-into a scope string. The startup log line `OAuth ZITADEL upstream enabled`
-says `customer_github_signin=true` when the entry is offered.
+rather than becoming a staff sign-in; under `github` that includes a
+request carrying `upstream=customer`, where `upstream=` was ignored
+before. The 400 is a page, not an OAuth error to the client: only a
+person on the chooser makes this choice. Where the entry could be wired
+(a customers entry and `OAUTH_UPSTREAM` other than `github`), a
+`ZITADEL_HOOK_GITHUB_IDP_ID` that is not a ZITADEL resource id (digits)
+refuses the boot, since it is written into a scope string; elsewhere it
+is simply not offered. The startup log line `OAuth ZITADEL upstream
+enabled` says `customer_github_signin=true` when the entry is offered, and
+every ZITADEL sign-in that resolved to a customer is counted under
+`oauth_upstream_signins_total{upstream="zitadel_customer"}`.
 
 The ZITADEL leg uses its own confidential client
 (`OAUTH_ZITADEL_CLIENT_ID` / `OAUTH_ZITADEL_CLIENT_SECRET`, not the link
@@ -225,7 +232,10 @@ A pending authorization records its upstream: a GitHub callback cannot
 complete a ZITADEL authorization or the reverse, and an authorization whose
 upstream the current mode does not allow (one pending across a rollback)
 gets a 400. Sign-ins are counted in
-`oauth_upstream_signins_total{upstream,result}`. For `upstream="zitadel"`,
+`oauth_upstream_signins_total{upstream,result}`. A sign-in that resolved
+to a self-service customer is counted under `upstream="zitadel_customer"`
+from the point it was recognised (a token whose customer proof is refused
+stays under `zitadel`). For `upstream="zitadel"`,
 `result` is `issued`, `unlinked`, `refused`, `store_unavailable`,
 `principal_refused`, `principal_unavailable` (`principal` mode, as for GitHub),
 `invalid_token`, `upstream_error` (ZITADEL redirected back with an error),

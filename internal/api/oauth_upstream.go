@@ -121,6 +121,9 @@ const (
 	// oauthUpstreamCustomer is the chooser's customer entry: the ZITADEL
 	// upstream, started in the customers organization at its GitHub IdP.
 	oauthUpstreamCustomer = "customer"
+	// oauthUpstreamZitadelCustomer is the upstream label of a ZITADEL
+	// sign-in that resolved to a customer.
+	oauthUpstreamZitadelCustomer = "zitadel_customer"
 )
 
 var oauthUpstreamSignins = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -235,6 +238,11 @@ func (h *Handlers) pickOAuthUpstream(w http.ResponseWriter, r *http.Request) (up
 	chosen := r.URL.Query().Get(oauthUpstreamParam)
 	if chosen == oauthUpstreamCustomer {
 		if !customers {
+			// Answered directly, not through oauthError like the other
+			// refusals in handleOAuthAuthorize: this choice is only ever
+			// made by a person on the chooser page, so the browser is
+			// where it must be explained, and the client would get only
+			// an opaque error for an option it never offered.
 			renderOAuthPage(w, http.StatusBadRequest, oauthPageData{Title: "Sign-in option not available", Lines: []string{
 				"GitHub sign-in for customers is not available on this server. Start the connection again from your client.",
 			}})
@@ -357,8 +365,8 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
 		return
 	}
-	result := "error"
-	defer func() { oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, result).Inc() }()
+	result, label := "error", auth.UpstreamZitadel
+	defer func() { oauthUpstreamSignins.WithLabelValues(label, result).Inc() }()
 
 	if e := q.Get("error"); e != "" {
 		slog.Warn("ZITADEL OAuth returned error", "error", e, "description", q.Get("error_description"))
@@ -449,6 +457,10 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if customer != nil {
+			// Counted apart, so customer sign-ins are visible one by one:
+			// the chooser's choice is not stored, but this branch is
+			// where a customer is actually told from anyone else.
+			label = oauthUpstreamZitadelCustomer
 			id.Customer = customer
 			var principalID string
 			if principalID, result = h.customerSigninPrincipal(w, r, id); result != "" {

@@ -1678,13 +1678,17 @@ func (c config) validate() error {
 	}
 	// customers_org_id on two entries, or one that disagrees with the
 	// identity hook, would resolve a customer differently per path.
-	if _, err := c.customersProvider(); err != nil {
+	customers, err := c.customersProvider()
+	if err != nil {
 		return err
 	}
 	// The customer sign-in entry puts the GitHub IdP id into a ZITADEL
 	// scope (mctl-web#158); a malformed one refuses boot like a malformed
-	// customers_org_id does.
-	if id := c.ZitadelHook.GitHubIdPID; id != "" && !auth.ValidZitadelID(id) {
+	// customers_org_id does. Only where that entry could be wired: elsewhere
+	// the id feeds the identity hook alone, which takes it as it is, and
+	// customersGitHubIdPID still refuses to offer a malformed one.
+	if id := c.ZitadelHook.GitHubIdPID; id != "" && customers != nil &&
+		c.oauthUpstreamMode() != mctlapi.OAuthUpstreamGitHub && !auth.ValidZitadelID(id) {
 		return fmt.Errorf("ZITADEL_HOOK_GITHUB_IDP_ID %q is not a ZITADEL resource id", id)
 	}
 	if _, err := auth.ParseGitHubActionsOIDC(c.GitHubActionsOIDCRaw); err != nil {
