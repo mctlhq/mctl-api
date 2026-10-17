@@ -225,3 +225,14 @@ cannot leak conversation text into the ledger.
 
 `invoice_reconciled_cost` is defined and unused. It is the hook for a future
 provider billing export; reconciliation itself is out of scope for #266.
+
+## MCP
+
+`mctl_get_usage_summary` (admin-only, read-only) relays
+`GET /api/v1/usage/summary` with the caller's own token. It always sends
+`group_by` explicitly and defaults it to `devloop_stage` (the HTTP default stays
+`agent`). The aggregate `total` (count, token sums, and each of the three costs
+summed separately) is added only when `truncated` is false; a truncated result
+carries `total_unavailable_reason` instead. `calculated_cost` is labelled a
+list-price estimate. An unavailable ledger (503) is an error saying usage is
+unknown, never zero.
