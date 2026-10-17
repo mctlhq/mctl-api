@@ -199,7 +199,7 @@ func restartIfAbandoned(ctx context.Context, c DevLoopClient, issueURL, workflow
 		existing.NotRestarted = "the run finished with no abandon marker"
 		return existing
 	case !strings.HasPrefix(end.Ended, temporalclient.AbandonedEndedPrefix):
-		existing.NotRestarted = fmt.Sprintf("ended %q is not an abandon", truncateForAudit(end.Ended))
+		existing.NotRestarted = fmt.Sprintf("ended %s is not an abandon", quoteForAudit(end.Ended))
 		return existing
 	}
 	wf, runID, err := c.RestartAbandonedDevLoopWorkflow(ctx, issueURL)
@@ -963,10 +963,17 @@ func notRestartedSuffix(reason string) string {
 // audit message: it is cross-repo free text, quoted with %q.
 const auditEndedMax = 120
 
-func truncateForAudit(s string) string {
-	r := []rune(s)
-	if len(r) <= auditEndedMax {
-		return s
+// quoteForAudit quotes s with %q, cut after auditEndedMax runes. The cut is
+// on the original bytes, so invalid UTF-8 is escaped the same way whether or
+// not s is cut, and the marker sits outside the quotes, so a cut value never
+// reads as one that ends in an ellipsis.
+func quoteForAudit(s string) string {
+	n := 0
+	for i := range s {
+		if n == auditEndedMax {
+			return fmt.Sprintf("%q (truncated)", s[:i])
+		}
+		n++
 	}
-	return string(r[:auditEndedMax]) + "..."
+	return fmt.Sprintf("%q", s)
 }

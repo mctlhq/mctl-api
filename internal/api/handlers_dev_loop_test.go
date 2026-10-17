@@ -1098,17 +1098,19 @@ func TestStartDevLoopWorkflow_ResultReadHasItsOwnDeadline(t *testing.T) {
 	}
 	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: audit.NewLogger()}}
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+	// The shape production has: the router's middleware.Timeout(30s).
+	ctx, cancel := context.WithTimeout(req.Context(), 30*time.Second)
+	defer cancel()
 	rec := httptest.NewRecorder()
-	h.StartDevLoopWorkflow(rec, adminCtx(req))
+	h.StartDevLoopWorkflow(rec, adminCtx(req.WithContext(ctx)))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d %s", rec.Code, rec.Body.String())
 	}
 	if fake.endedDeadlineIn <= devLoopResultReadTimeout-time.Second || fake.endedDeadlineIn > devLoopResultReadTimeout {
 		t.Fatalf("result read deadline %v, want about %v", fake.endedDeadlineIn, devLoopResultReadTimeout)
 	}
-	// Through the router the request carries its own 30s timeout, so the
-	// invariant is not "no deadline" but "not the read's".
-	if fake.restartDeadlineIn != 0 && fake.restartDeadlineIn <= devLoopResultReadTimeout {
+	// The restart keeps the request's own budget, not the read's.
+	if fake.restartDeadlineIn <= devLoopResultReadTimeout {
 		t.Fatalf("the restart inherited the read deadline (%v left)", fake.restartDeadlineIn)
 	}
 }
@@ -1123,7 +1125,8 @@ func TestStartDevLoopWorkflow_SkippedRestartIsExplained(t *testing.T) {
 		"finished":           {implemented: true, want: "not restarted: the run reached the implement step"},
 		"no ended":           {want: "not restarted: the run finished with no abandon marker"},
 		"other ended":        {ended: "approval wait expired", want: `not restarted: ended "approval wait expired" is not an abandon`},
-		"long other ended":   {ended: strings.Repeat("x", 500), want: `not restarted: ended "` + strings.Repeat("x", auditEndedMax) + `..." is not an abandon`},
+		"long other ended":   {ended: strings.Repeat("x", 500), want: `not restarted: ended "` + strings.Repeat("x", auditEndedMax) + `" (truncated) is not an abandon`},
+		"exactly the cap":    {ended: strings.Repeat("y", auditEndedMax), want: `not restarted: ended "` + strings.Repeat("y", auditEndedMax) + `" is not an abandon`},
 		"abandoned after it": {ended: temporalclient.AbandonedEndedPrefix + "x", implemented: true, want: "not restarted: the run reached the implement step"},
 	}
 	for name, tc := range cases {

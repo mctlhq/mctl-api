@@ -2891,7 +2891,8 @@ paths:
         '200':
           description: >-
             Nothing new was started: a DevLoopWorkflow already exists for
-            this issue, running or closed and not abandoned. `run_id` and `status` describe
+            this issue, running, or closed and not restartable (anything but
+            a run abandoned before implement). `run_id` and `status` describe
             that existing execution, not a new one.
           content:
             application/json:
