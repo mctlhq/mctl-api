@@ -19,7 +19,6 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -188,17 +187,11 @@ func (z *oauthZitadel) oauthConfig(p *oidc.Provider, baseURL string) *oauth2.Con
 	}
 }
 
-var oauthPage = template.Must(template.New("oauth").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}} · mctl</title>
-<style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
-.primary{display:inline-block;font-size:1rem;padding:.5rem 1rem;border:1px solid;border-radius:.25rem;text-decoration:none}
-small{color:#666}</style></head>
-<body><h1>{{.Title}}</h1>{{range .Lines}}<p>{{.}}</p>{{end}}
-{{if .Primary}}<p><a class="primary" href="{{.Primary.Href}}">{{.Primary.Text}}</a></p>{{end}}
-{{range .More}}<p><a class="primary" href="{{.Href}}">{{.Text}}</a></p>{{end}}
-{{if .Secondary}}<p><small><a href="{{.Secondary.Href}}">{{.Secondary.Text}}</a></small></p>{{end}}
-</body></html>`))
+var oauthPage = shellPage("oauth", `{{if or .Primary .More}}<div class="actions">
+{{if .Primary}}<a href="{{.Primary.Href}}">{{.Primary.Text}}</a>{{end}}
+{{range .More}}<a class="secondary" href="{{.Href}}">{{.Text}}</a>{{end}}
+</div>{{end}}
+{{if .Secondary}}<p class="legacy"><a href="{{.Secondary.Href}}">{{.Secondary.Text}}</a></p>{{end}}`)
 
 type oauthPageLink struct{ Href, Text string }
 
@@ -206,18 +199,14 @@ type oauthPageData struct {
 	Title   string
 	Lines   []string
 	Primary *oauthPageLink
-	// More are further choices as prominent as Primary.
+	// More are further choices, drawn as secondary buttons below Primary.
 	More      []oauthPageLink
 	Secondary *oauthPageLink
 }
 
 func renderOAuthPage(w http.ResponseWriter, status int, d oauthPageData) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'")
-	w.WriteHeader(status)
-	_ = oauthPage.Execute(w, d)
+	renderShellPage(w, status, "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'", oauthPage,
+		shellData{Title: d.Title, Lines: d.Lines, Page: d})
 }
 
 // pickOAuthUpstream decides where an already validated authorization goes.
@@ -269,7 +258,7 @@ func (h *Handlers) pickOAuthUpstream(w http.ResponseWriter, r *http.Request) (up
 	}
 	staff := &oauthPageLink{Href: choose(auth.UpstreamZitadel), Text: "Sign in with MCTL (ZITADEL)"}
 	d := oauthPageData{
-		Title:   "Sign in to mctl",
+		Title:   "Sign in to MCTL",
 		Lines:   []string{"Sign in with your MCTL account at auth.mctl.ai. GitHub sign-in still works while it is being retired."},
 		Primary: staff,
 	}
@@ -484,7 +473,7 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	if z.opts.Store == nil {
 		result = "store_unavailable"
 		renderOAuthPage(w, http.StatusServiceUnavailable, oauthPageData{Title: "Sign-in unavailable", Lines: []string{
-			"mctl cannot look up linked identities right now, so it cannot tell who you are. Try again later.",
+			"MCTL cannot look up linked identities right now, so it cannot tell who you are. Try again later.",
 		}})
 		return
 	}
@@ -551,7 +540,7 @@ func (h *Handlers) refuseZitadelSignin(w http.ResponseWriter, display string, p 
 		renderOAuthPage(w, http.StatusForbidden, oauthPageData{
 			Title: "Your ZITADEL identity is not linked yet",
 			Lines: []string{
-				"ZITADEL user " + display + " is not linked to an mctl principal, so mctl cannot tell which account you are.",
+				"ZITADEL user " + display + " is not linked to an MCTL principal, so MCTL cannot tell which account you are.",
 				"Link it once: you sign in with GitHub and then with ZITADEL in the same browser. After that, start the connection again.",
 			},
 			Primary: linkHint,
@@ -566,7 +555,7 @@ func (h *Handlers) refuseZitadelSignin(w http.ResponseWriter, display string, p 
 		renderOAuthPage(w, http.StatusForbidden, oauthPageData{
 			Title: "Your ZITADEL identity is not linked to your account",
 			Lines: []string{
-				"ZITADEL user " + display + " has its own mctl principal (" + p.ID + "), which is not your existing account.",
+				"ZITADEL user " + display + " has its own MCTL principal (" + p.ID + "), which is not your existing account.",
 				"Linking will report that this identity already has a principal. A platform admin can then merge " + p.ID + " into your account; ask one, quoting the id.",
 			},
 			Primary: linkHint,
@@ -574,16 +563,16 @@ func (h *Handlers) refuseZitadelSignin(w http.ResponseWriter, display string, p 
 		return "unlinked"
 	case errors.Is(err, auth.ErrIdentityRefused):
 		renderOAuthPage(w, http.StatusForbidden, oauthPageData{Title: "Sign-in refused", Lines: []string{
-			"This ZITADEL identity was unlinked from its mctl principal and cannot sign in. Only a platform admin can restore it.",
+			"This ZITADEL identity was unlinked from its MCTL principal and cannot sign in. Only a platform admin can restore it.",
 		}})
 		return "refused"
 	case errors.Is(err, auth.ErrPrincipalDisabled):
-		renderOAuthPage(w, http.StatusForbidden, oauthPageData{Title: "Sign-in refused", Lines: []string{"Your mctl principal is disabled."}})
+		renderOAuthPage(w, http.StatusForbidden, oauthPageData{Title: "Sign-in refused", Lines: []string{"Your MCTL principal is disabled."}})
 		return "refused"
 	case errors.Is(err, principals.ErrGitHubLoginUnknown), errors.Is(err, principals.ErrAmbiguousGitHubIdentity):
 		slog.Warn("oauth: ZITADEL sign-in has no single GitHub login", "principal_id", p.ID, "error", err)
 		renderOAuthPage(w, http.StatusConflict, oauthPageData{Title: "Sign-in refused", Lines: []string{
-			"mctl cannot tell which GitHub login your principal (" + p.ID + ") uses, so it does not guess. Ask a platform admin, quoting the id.",
+			"MCTL cannot tell which GitHub login your principal (" + p.ID + ") uses, so it does not guess. Ask a platform admin, quoting the id.",
 		}})
 		return "refused"
 	default:
@@ -594,7 +583,7 @@ func (h *Handlers) refuseZitadelSignin(w http.ResponseWriter, display string, p 
 func zitadelStoreUnavailable(w http.ResponseWriter, err error) string {
 	slog.Error("oauth: principal store lookup failed", "error", err)
 	renderOAuthPage(w, http.StatusServiceUnavailable, oauthPageData{Title: "Sign-in unavailable", Lines: []string{
-		"mctl cannot look up linked identities right now, so it cannot tell who you are. Try again later.",
+		"MCTL cannot look up linked identities right now, so it cannot tell who you are. Try again later.",
 	}})
 	return "store_unavailable"
 }

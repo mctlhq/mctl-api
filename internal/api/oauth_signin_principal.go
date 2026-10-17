@@ -88,6 +88,6 @@ func signinPrincipalResult(w http.ResponseWriter, id auth.Identity, principalMod
 
 func renderSigninUnavailable(w http.ResponseWriter) {
 	renderOAuthPage(w, http.StatusServiceUnavailable, oauthPageData{Title: "Sign-in unavailable", Lines: []string{
-		"mctl cannot look up your account right now, so it cannot sign you in. Try again later.",
+		"MCTL cannot look up your account right now, so it cannot sign you in. Try again later.",
 	}})
 }

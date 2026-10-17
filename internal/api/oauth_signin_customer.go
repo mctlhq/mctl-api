@@ -45,8 +45,8 @@ func readSigninCustomer(w http.ResponseWriter, idt *oidc.IDToken, customersOrgID
 	case errors.Is(err, auth.ErrCustomerUnproven):
 		slog.Warn("oauth: ZITADEL customer sign-in without a proven GitHub identity", "zitadel_subject", idt.Subject, "error", err)
 		renderOAuthPage(w, http.StatusForbidden, oauthPageData{Title: "Sign-in refused", Lines: []string{
-			"Your mctl account has no GitHub identity mctl can rely on, so it cannot tell which account you are.",
-			"Sign in again with GitHub. If this keeps happening, contact mctl support.",
+			"Your MCTL account has no GitHub identity MCTL can rely on, so it cannot tell which account you are.",
+			"Sign in again with GitHub. If this keeps happening, contact MCTL support.",
 		}})
 		return nil, "customer_unproven"
 	default:
@@ -64,7 +64,7 @@ func readSigninCustomer(w http.ResponseWriter, idt *oidc.IDToken, customersOrgID
 func (h *Handlers) customerSigninPrincipal(w http.ResponseWriter, r *http.Request, id auth.Identity) (prn, stopped string) {
 	if h.opts.TenantAuthzMode != TenantAuthzPrincipal {
 		renderOAuthPage(w, http.StatusForbidden, oauthPageData{Title: "Not available yet", Lines: []string{
-			"Self-service mctl accounts cannot connect AI clients yet. Use the portal, or contact mctl support.",
+			"Self-service MCTL accounts cannot connect AI clients yet. Use the portal, or contact MCTL support.",
 		}})
 		return "", "customer_not_enabled"
 	}
@@ -76,7 +76,7 @@ func (h *Handlers) customerSigninPrincipal(w http.ResponseWriter, r *http.Reques
 	if errors.Is(err, principals.ErrCustomerConflict) {
 		slog.Warn("oauth: customer identity conflicts with another principal", "github_id", id.Customer.GitHubID, "zitadel_subject", id.Subject, "error", err)
 		renderOAuthPage(w, http.StatusConflict, oauthPageData{Title: "Sign-in refused", Lines: []string{
-			"Your mctl account is already tied to a different mctl principal than your GitHub account, so mctl does not guess which one you are.",
+			"Your MCTL account is already tied to a different MCTL principal than your GitHub account, so MCTL does not guess which one you are.",
 			// The usual cause: a staff or partner user who already has a
 			// principal pressed the customer entry.
 			"If you have an MCTL staff or partner account, start the connection again and choose \"Sign in with MCTL account\" instead of \"Sign in with GitHub\".",
