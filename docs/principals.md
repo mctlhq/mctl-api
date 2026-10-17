@@ -509,6 +509,16 @@ sign-in, say) whose principal authentication resolved is linked as that
 (`principalOf`), as its `subject`. A service, surface or agent, a relayed
 or delegated subject, and a human without a resolved principal get 403
 `human_principal_required`.
+A `prn_` link needs `TENANT_AUTHZ_MODE=principal`: its relayed subject's
+tenants come from the principal, and only principal mode resolves them, so
+outside it the challenge is 403 `principal_mode_required` rather than a link
+every tenant-scoped relay would refuse.
+
+One human can sign in through GitHub and through ZITADEL onto the same
+principal. The GitHub session also holds the links of its resolved `prn_`:
+it lists them alongside its `github:` links and may revoke them. A new link
+for an identity already held under the other form is still `link_conflict`;
+revoke the old one first.
 
 - The mirror writes a `prn_` link's telegram identity for that principal
   outright. A `prn_` that does not exist or is not human fails the redeem,
@@ -525,7 +535,9 @@ or delegated subject, and a human without a resolved principal get 403
 
 The recorded name is only a name: renaming the human in ZITADEL leaves the
 link on the same principal, and the next possession proof records the new
-name.
+name. Until then the relay acts under the old name, so items written through
+the surface are owned by `oidc:<old name>` and are not visible to the human's
+direct sessions under the new one.
 
 **Answering human input.** `requested_from.actor_refs` entries stay in the
 `actor_type:actor_id` form that mctl-agents' `validate_response` rebuilds

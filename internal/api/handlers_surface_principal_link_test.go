@@ -310,3 +310,74 @@ func TestDelegatedSurfaceRef_PrincipalLinkOwnerUncheckable(t *testing.T) {
 		t.Fatalf("= %d %v, want 503 %s", code, body, delegationCodeUnavailable)
 	}
 }
+
+// Outside principal mode a prn_ link would relay a subject with no tenants
+// (they come from the principal, and only principal mode resolves them), so
+// the challenge is refused up front rather than making a dead link. A
+// GitHub human links as before.
+func TestSurfaceIdentity_PrincipalLinkNeedsPrincipalMode(t *testing.T) {
+	pr := &relayPrincipals{byLogin: map[string]string{"zed@example.com": zedPRN}}
+	e := newSIDEnvOpts(t, pr, nil)
+	zed := auth.NewFederatedUser("zitadel", "https://auth.mctl.ai", "330001", "zed@example.com", auth.KindHuman)
+	if err := auth.AttachPrincipal(context.Background(), pr, zed); err != nil {
+		t.Fatal(err)
+	}
+	e.users["zed"] = zed
+	code, body := e.do("zed", "POST", "/api/v1/surface-identities/challenges", map[string]any{"surface": "telegram"})
+	if code != http.StatusForbidden || body["code"] != sidCodePrincipalModeRequired {
+		t.Errorf("legacy-mode challenge by zed = %d %v, want 403 %s", code, body, sidCodePrincipalModeRequired)
+	}
+	e.challenge("alice", "telegram")
+}
+
+// hankPRN is one human reachable through GitHub and through ZITADEL.
+const hankPRN = "prn_01JHANK0000000000000000000"
+
+// A human who signs in through GitHub and through ZITADEL onto one principal
+// keeps a link made in the ZITADEL session: the GitHub session lists and
+// revokes it. Someone else's GitHub session still does neither.
+func TestSurfaceIdentity_PrincipalLinkStaysTheHumansAcrossSessions(t *testing.T) {
+	e, pr := newZedEnv(t)
+	pr.byLogin["hank"] = hankPRN
+	pr.byLogin["hank@example.com"] = hankPRN
+	for name, u := range map[string]*auth.User{
+		"hank-zitadel": auth.NewFederatedUser("zitadel", "https://auth.mctl.ai", "330009", "hank@example.com", auth.KindHuman),
+		"hank-github":  auth.NewGitHubUser("hank", nil),
+	} {
+		if err := auth.AttachPrincipal(context.Background(), pr, u); err != nil {
+			t.Fatal(err)
+		}
+		if u.PrincipalID() != hankPRN {
+			t.Fatalf("%s principal = %q, want %s", name, u.PrincipalID(), hankPRN)
+		}
+		e.users[name] = u
+	}
+	code, body := e.redeem("telegram", e.challenge("hank-zitadel", "telegram"), "8080")
+	if code != http.StatusCreated {
+		t.Fatalf("redeem = %d %v", code, body)
+	}
+	id := body["link"].(map[string]any)["id"].(string)
+	// And a GitHub-held one, so the merged list is both.
+	if code, body := e.redeem("portal", e.challenge("hank-github", "portal"), "hank-portal"); code != http.StatusCreated {
+		t.Fatalf("github redeem = %d %v", code, body)
+	}
+
+	code, list := e.do("hank-github", "GET", "/api/v1/surface-identities", nil)
+	links, _ := list["links"].([]any)
+	if code != http.StatusOK || len(links) != 2 {
+		t.Fatalf("hank's GitHub session lists %d %v, want both links", code, list)
+	}
+	if code, list := e.do("hank-github", "GET", "/api/v1/surface-identities?principal="+hankPRN, nil); code != http.StatusOK || len(list["links"].([]any)) != 1 {
+		t.Errorf("hank's GitHub session listing %s = %d %v", hankPRN, code, list)
+	}
+	if code, _ := e.do("alice", "GET", "/api/v1/surface-identities?principal="+hankPRN, nil); code != http.StatusForbidden {
+		t.Errorf("alice listing hank's principal = %d, want 403", code)
+	}
+	if code, _ := e.do("alice", "POST", "/api/v1/surface-identities/"+id+"/revoke", nil); code != http.StatusNotFound {
+		t.Errorf("alice revoking hank's link = %d, want 404", code)
+	}
+	code, body = e.do("hank-github", "POST", "/api/v1/surface-identities/"+id+"/revoke", nil)
+	if code != http.StatusOK || body["link"].(map[string]any)["revoked_by"] != "github:hank" {
+		t.Fatalf("hank's GitHub session revoking the prn_ link = %d %v", code, body)
+	}
+}

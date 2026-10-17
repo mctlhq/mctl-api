@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -599,6 +600,14 @@ func (s *Store) Links(ctx context.Context, principal string) ([]Link, error) {
 // Revoke ends a link. Only its principal may, or an admin (asAdmin). A link
 // that is already revoked stays as it was and is returned unchanged.
 func (s *Store) Revoke(ctx context.Context, id, by string, asAdmin bool) (*Link, error) {
+	return s.RevokeAs(ctx, id, by, []string{by}, asAdmin)
+}
+
+// RevokeAs is Revoke for a caller who holds links under more than one form:
+// owners lists every holder the caller is (a github:<login> session whose
+// principal resolved also holds that prn_'s links, mctl-api#646), and by is
+// recorded as the revoker.
+func (s *Store) RevokeAs(ctx context.Context, id, by string, owners []string, asAdmin bool) (*Link, error) {
 	var out *Link
 	err := s.withTx(ctx, "surfaceid-revoke:"+id, func(tx pgx.Tx) error {
 		l, err := scanLink(tx.QueryRow(ctx, `SELECT `+linkColumns+` FROM surface_identity_links WHERE id=$1 FOR UPDATE`, id))
@@ -608,7 +617,7 @@ func (s *Store) Revoke(ctx context.Context, id, by string, asAdmin bool) (*Link,
 		if err != nil {
 			return err
 		}
-		if l.Principal != by && !asAdmin {
+		if !slices.Contains(owners, l.Principal) && !asAdmin {
 			// Someone else's link answers as if it did not exist.
 			return ErrLinkNotFound
 		}

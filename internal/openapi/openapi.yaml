@@ -3265,7 +3265,8 @@ paths:
         mctl-api#350. Only a human acting directly: a GitHub-authenticated
         human is linked as `github:<login>`, any other human with a resolved
         principal as its `prn_` id, the link recording the name it acted
-        under as `subject` (`oidc:<name>`, mctl-api#646). Returns a one-time
+        under as `subject` (`oidc:<name>`, mctl-api#646; that form needs
+        `TENANT_AUTHZ_MODE=principal`, else 403 `principal_mode_required`). Returns a one-time
         code, valid for 10 minutes, bound to the caller and the surface. The
         human sends it through that surface (e.g. to the Telegram bot), whose
         own principal redeems it. The body never names who is linked.
@@ -3283,7 +3284,7 @@ paths:
       responses:
         '201': {description: 'Challenge created; the code is shown once'}
         '400': {description: Invalid body or an identity field in it}
-        '403': {description: 'Not a human acting directly with a GitHub login or a resolved principal (human_principal_required)'}
+        '403': {description: 'Not a human acting directly with a GitHub login or a resolved principal (human_principal_required), or a prn_ link outside principal mode (principal_mode_required)'}
         '429': {description: Too many open challenges}
         '503': {description: Surface identity store not configured}
   /api/v1/surface-identities/redeem:

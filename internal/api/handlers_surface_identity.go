@@ -36,6 +36,8 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -65,7 +67,10 @@ const (
 	sidCodeNotFound         = "link_not_found"
 	sidCodeRouteNotAllowed  = "surface_route_not_allowed"
 	sidCodeActorNotAccepted = "actor_not_accepted"
-	sidMaxBodyBytes         = 4 << 10
+	// sidCodePrincipalModeRequired refuses a prn_ link outside principal
+	// mode (mctl-api#646).
+	sidCodePrincipalModeRequired = "principal_mode_required"
+	sidMaxBodyBytes              = 4 << 10
 )
 
 // surfaceRoute is one route a surface principal may call. relay routes run
@@ -344,6 +349,21 @@ func humanPrincipal(u *auth.User) (principal, subject string, ok bool) {
 	return pid, principalOf(u), true
 }
 
+// ownHolders is every holder form a human acting directly holds links under:
+// humanPrincipal's, and for a GitHub session whose canonical principal
+// resolved, that prn_ too. One human can sign in through GitHub and through
+// ZITADEL onto one principal (mctl-api#646), and a link made in the ZITADEL
+// session must stay theirs to list and revoke from the GitHub one.
+func ownHolders(u *auth.User, primary string) []string {
+	owners := []string{primary}
+	if strings.HasPrefix(primary, "github:") {
+		if pid := u.PrincipalID(); auth.ValidPrincipalID(pid) {
+			owners = append(owners, pid)
+		}
+	}
+	return owners
+}
+
 func (h *Handlers) surfaceIdentityUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
 	if h.opts.SurfaceIdentities == nil {
 		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "surface identity store not configured", nil)
@@ -423,6 +443,14 @@ func (h *Handlers) CreateSurfaceChallenge(w http.ResponseWriter, r *http.Request
 	if !ok {
 		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly,
 			"only a human acting directly, with a resolved principal, can request a link challenge", nil)
+		return
+	}
+	if subject != "" && !h.principalMode() {
+		// A prn_ link relays a subject whose tenants come from its
+		// principal, and only principal mode resolves them: outside it the
+		// link would be made and then refused on every tenant-scoped call.
+		writeErrorCode(w, http.StatusForbidden, sidCodePrincipalModeRequired,
+			"linking an account without a GitHub login requires TENANT_AUTHZ_MODE=principal", nil)
 		return
 	}
 	var body struct {
@@ -537,19 +565,29 @@ func (h *Handlers) ListSurfaceIdentities(w http.ResponseWriter, r *http.Request)
 		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only a human acting directly has links", nil)
 		return
 	}
+	owners := ownHolders(user, own)
 	principal := r.URL.Query().Get("principal")
+	holders := []string{principal}
 	switch {
 	case principal == "":
-		principal = own
-	case principal != own && !user.IsAdmin():
+		principal, holders = own, owners
+	case !slices.Contains(owners, principal) && !user.IsAdmin():
 		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only an admin may list another principal's links", nil)
 		return
 	}
-	links, err := h.opts.SurfaceIdentities.Links(r.Context(), principal)
-	if err != nil {
-		slog.Error("surface identity list failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "could not list links")
-		return
+	links := []surfaceid.Link{}
+	for _, holder := range holders {
+		held, err := h.opts.SurfaceIdentities.Links(r.Context(), holder)
+		if err != nil {
+			slog.Error("surface identity list failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "could not list links")
+			return
+		}
+		links = append(links, held...)
+	}
+	if len(holders) > 1 {
+		// Each holder's list is newest first; keep the merged one so.
+		sort.SliceStable(links, func(i, j int) bool { return links[i].CreatedAt.After(links[j].CreatedAt) })
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"principal": principal, "links": links})
 }
@@ -567,7 +605,7 @@ func (h *Handlers) RevokeSurfaceIdentity(w http.ResponseWriter, r *http.Request)
 		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only the linked human or a human admin can revoke a link", nil)
 		return
 	}
-	link, err := h.opts.SurfaceIdentities.Revoke(r.Context(), chi.URLParam(r, "id"), by, user.IsAdmin())
+	link, err := h.opts.SurfaceIdentities.RevokeAs(r.Context(), chi.URLParam(r, "id"), by, ownHolders(user, by), user.IsAdmin())
 	switch {
 	case errors.Is(err, surfaceid.ErrLinkNotFound):
 		writeErrorCode(w, http.StatusNotFound, sidCodeNotFound, "link not found", nil)
