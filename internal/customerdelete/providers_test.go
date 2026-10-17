@@ -80,7 +80,7 @@ func TestProvidersVerifyDeleteAndRetry(t *testing.T) {
 			_, _ = w.Write([]byte(`{"github_id":"123","subject":"7001","complete":true}`))
 		case "/api/tenant-management/internal/tenants/acme/cleanup":
 			cleanups++
-			_, _ = w.Write([]byte(`{"tenant":"acme","cleaned":true}`))
+			_, _ = w.Write([]byte(`{"tenant":"acme","cleaned":true,"scope":"customer"}`))
 		default:
 			t.Errorf("unexpected provider path %s", r.URL.Path)
 			w.WriteHeader(404)

@@ -189,7 +189,7 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	tenant, pid, stage := chi.URLParam(r, "tenant"), chi.URLParam(r, "principal"), chi.URLParam(r, "stage")
-	if !customerDeletionTenantName.MatchString(tenant) || !auth.ValidPrincipalID(pid) || (stage != "begin" && stage != "complete") {
+	if !customerDeletionTenantName.MatchString(tenant) || !auth.ValidPrincipalID(pid) || (stage != "begin" && stage != "complete" && stage != "resources") {
 		writeError(w, 400, "invalid deletion target or stage")
 		return
 	}
@@ -199,6 +199,10 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if d.Status == "complete" {
+		if stage == "resources" {
+			writeError(w, 409, "completed deletion cannot remove platform resources again")
+			return
+		}
 		if err := o.ReleasePortal(r.Context(), d); err != nil {
 			writeError(w, 503, "portal release incomplete")
 			return
@@ -212,6 +216,17 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 	}
 	phase := stage
 	run := func(ctx context.Context) error {
+		if stage == "resources" {
+			if d.Status != "deleting" {
+				return errors.New("resource deletion has not begun")
+			}
+			exists, err := h.opts.GitReader.TenantExists(tenant)
+			if err != nil {
+				return err
+			}
+			return h.customerMemberships(tenant, pid, d.Login, exists)
+		}
+
 		if stage == "begin" {
 			exists, err := h.opts.GitReader.TenantExists(tenant)
 			if err != nil {
@@ -275,6 +290,9 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 			return err
 		}
 		if fresh.Status == "complete" {
+			if stage == "resources" {
+				return errors.New("completed deletion cannot remove platform resources again")
+			}
 			return o.ReleasePortal(ctx, fresh)
 		}
 		d = fresh

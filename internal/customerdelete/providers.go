@@ -209,8 +209,9 @@ func (p *Providers) CleanPortal(ctx context.Context, d *principals.CustomerDelet
 	var result struct {
 		Tenant  string `json:"tenant"`
 		Cleaned bool   `json:"cleaned"`
+		Scope   string `json:"scope"`
 	}
-	if json.Unmarshal(data, &result) != nil || result.Tenant != d.Tenant || !result.Cleaned {
+	if json.Unmarshal(data, &result) != nil || result.Tenant != d.Tenant || !result.Cleaned || result.Scope != "customer" {
 		return fmt.Errorf("portal cleanup response malformed")
 	}
 	return nil

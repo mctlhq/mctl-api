@@ -206,3 +206,31 @@ func TestCustomerDeletionResumeNeverDeletesAReplacementWorkspace(t *testing.T) {
 		t.Fatal("replacement workspace mutated")
 	}
 }
+
+func TestCustomerDeletionResourceGuardRefusesReplacementAndCompletedReplay(t *testing.T) {
+	h, reader, store, calls, _ := deletionFixture()
+	admin := userWithPrincipal(t, "admin", []string{"admins"}, deletionAdmin)
+	if ok, w := prepareDeletion(t, h, admin); !ok {
+		t.Fatal(w.Body.String())
+	}
+	params := map[string]string{"tenant": "acme", "principal": deletionPID, "stage": "begin"}
+	if w := callAs(h, auth.NewServiceUser(), "POST", "/", params, h.AdvanceCustomerDeletion); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	params["stage"] = "resources"
+	*calls = nil
+	if w := callAs(h, auth.NewServiceUser(), "POST", "/", params, h.AdvanceCustomerDeletion); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	if len(*calls) != 0 {
+		t.Fatal("resource guard called external cleanup")
+	}
+	reader.tenants[0].Members[0].PrincipalID = deletionAdmin
+	if w := callAs(h, auth.NewServiceUser(), "POST", "/", params, h.AdvanceCustomerDeletion); w.Code == 200 {
+		t.Fatal("replacement workspace passed old resource guard")
+	}
+	store.job.Status = "complete"
+	if w := callAs(h, auth.NewServiceUser(), "POST", "/", params, h.AdvanceCustomerDeletion); w.Code != 409 {
+		t.Fatalf("completed deletion replayed resource removal: %d", w.Code)
+	}
+}
