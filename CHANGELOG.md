@@ -1,5 +1,15 @@
 # Changelog
 
+## [4.94.1](https://github.com/mctlhq/mctl-api/compare/4.94.0...4.94.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **deps:** bump google.golang.org/grpc to 1.83.2 ([4e33ba0](https://github.com/mctlhq/mctl-api/commit/4e33ba062b8a5d9d5e4efa549a3a598c93418b49))
+* **deps:** bump google.golang.org/grpc to 1.83.2 ([1eeccb8](https://github.com/mctlhq/mctl-api/commit/1eeccb84078edd576d7de3024dad95c218ed7326))
+* **principals:** keep the last admin in MergePrincipals ([79d4feb](https://github.com/mctlhq/mctl-api/commit/79d4febd21c5b4d2baf83405288821a6085a0839))
+* **principals:** keep the last admin in MergePrincipals ([0676e43](https://github.com/mctlhq/mctl-api/commit/0676e438d49f4065aa1d3f94b0ab0ef3834680cd))
+
 ## [4.94.0](https://github.com/mctlhq/mctl-api/compare/4.93.0...4.94.0) (2026-10-17)
 
 
