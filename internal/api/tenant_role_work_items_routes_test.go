@@ -32,10 +32,9 @@ import (
 // route through the router, against Postgres.
 
 var (
-	rrDevPRN   = "prn_01JD" + strings.Repeat("0", 22)
-	rrOwnerPRN = "prn_01JO" + strings.Repeat("0", 22)
-	rrViewPRN  = "prn_01JV" + strings.Repeat("0", 22)
-	rrZedPRN   = "prn_01JZ" + strings.Repeat("1", 22)
+	rrDevPRN  = "prn_01JD" + strings.Repeat("0", 22)
+	rrViewPRN = "prn_01JV" + strings.Repeat("0", 22)
+	rrZedPRN  = "prn_01JZ" + strings.Repeat("1", 22)
 )
 
 // rolesByPrincipal is a principal membership reader with one role per
@@ -133,8 +132,9 @@ func (re *roleEnv) storeState() string {
 // auditCount counts audit entries for operation with status.
 func (re *roleEnv) auditCount(operation, status string) int {
 	n := 0
-	for _, e := range re.audit.List(10000) {
-		if e.Operation == operation && e.Status == status {
+	entries := re.audit.List(10000)
+	for i := range entries {
+		if entries[i].Operation == operation && entries[i].Status == status {
 			n++
 		}
 	}
