@@ -71,6 +71,9 @@ reads to decide whether to create or update the user.
   and a `login` equal to the intent's user name (case-insensitive). A missing
   field is a refusal, not a pass.
 - An unparsable `userId` is `503`.
+- **New user, GitHub id not on the creation allowlist** → refused with `403`
+  (`intent_customer_create_not_allowed:<github id>`) before anything else is
+  read. See "Creation allowlist" below.
 - **New user, reserved login** → refused with `403` before GitHub is called.
   Tenant data that cannot be read → `503`.
 - `GET https://api.github.com/user/emails` with the intent's access token
@@ -113,6 +116,34 @@ that does not parse is an error (`503`), never an empty list.
 
 Sources 3 and 4 apply only at creation. A customer who later becomes a
 tenant member under their own login must not lock themselves out.
+
+### Creation allowlist
+
+Until the public cutover is decided, only listed GitHub accounts may create a
+**new** customers account. `ZITADEL_HOOK_CUSTOMER_CREATE_GITHUB_IDS` is a CSV
+of GitHub **numeric** ids (never logins: a login can be renamed and reused).
+
+- Unset or empty: nobody can create a customers account. Creation is closed
+  by default, so a hook deployed without the value refuses every new account
+  rather than opening sign-up.
+- Exactly `*`: anyone may create one (the public cutover). `*` mixed with ids
+  is malformed.
+- Anything else malformed refuses the mctl-api boot. It does not just switch
+  the hook off, because that would also stop existing customers from signing
+  in.
+
+It is enforced twice, on the GitHub id: in `/intent` before the account is
+proposed, and in the create gate (rule 9 below) on the link's user id. The
+refusal is `403` with "New MCTL accounts are by invitation only for now."
+The reason logged is `intent_customer_create_not_allowed:<github id>` or
+`gate_customer_create_not_allowed:<github id>`. It carries the id, so a
+refused person can be added, and never the email.
+
+The list only gates creation. An existing customers account (`/intent` with a
+`userId`) signs in and is updated as before, token claims are unchanged, and
+users of other organizations are not affected. To invite someone, add their
+GitHub id (`gh api users/<login> --jq .id`) and roll mctl-api. The env var is
+read at start.
 
 ## Create gate (`/create-user`)
 
@@ -205,9 +236,10 @@ Everything else passes through. In scope, all of these must hold:
    its login. The same key given twice with different values is refused.
 7. The email is verified.
 8. `username` is `<lowercase login>@mctl.ai`.
-9. The login is not reserved (as above).
+9. The link's GitHub id is on the creation allowlist (as above).
+10. The login is not reserved (as above).
 
-Rules 1–9 are exactly what `/intent` produces, so a hook-shaped request passes
+Rules 1–10 are exactly what `/intent` produces, so a hook-shaped request passes
 its own gate. A test pins this.
 
 ## Token claims (`/token-claims`)
@@ -238,6 +270,7 @@ Relying parties (mctl-web, and later C0) must refuse any token that carries
 | `ZITADEL_HOOK_CLAIM_CLIENT_IDS` | yes | CSV of OIDC client IDs that get `mctl:*` claims (`mctl-web`, `mctl-web-dev`) |
 | `ZITADEL_HOOK_USERNAME_DOMAIN` | no, default `mctl.ai` | username suffix (`<login>@<domain>`) only; org domains are not compared |
 | `ZITADEL_HOOK_RESERVED_LOGINS` | no | CSV of extra reserved logins; `ADMIN_USERS` is always added |
+| `ZITADEL_HOOK_CUSTOMER_CREATE_GITHUB_IDS` | no (unset = nobody) | CSV of GitHub numeric ids that may create a new customers account, or exactly `*` for anyone. A malformed value refuses boot |
 | `ZITADEL_HOOK_INTENT_SIGNING_KEYS` | yes, in practice | CSV; signing key(s) of the intent target |
 | `ZITADEL_HOOK_CREATE_SIGNING_KEYS` | yes, in practice | CSV; signing key(s) of the create-user target |
 | `ZITADEL_HOOK_TOKEN_SIGNING_KEYS` | yes, in practice | CSV; signing key(s) of the token target |
