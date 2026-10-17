@@ -264,6 +264,22 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// grant's decider, set by prepareApprovalGrant (R8).
 	if opName == "mctl-agents-approve" && !grantAuthorized {
 		if user.IsService() {
+			// The content digest binds the CWFT to what a human decided on;
+			// only a grant carries that decision, so a service principal
+			// may not assert one on its own (mctl-agents#681).
+			if input[expectedContentDigestParam] != "" {
+				h.logAudit(r, audit.Entry{
+					UserID:     user.ID,
+					Operation:  opName,
+					Status:     "denied",
+					RiskLevel:  string(op.RiskLevel),
+					Message:    "expected_content_digest without an action-approval grant refused",
+					Parameters: legacyRelayParams(user, opName, input),
+				})
+				writeErrorCode(w, http.StatusBadRequest, wiCodeActorNotAccepted,
+					"expected_content_digest is taken from an action-approval grant, not from the request body", nil)
+				return
+			}
 			relayed := input["approver"]
 			switch {
 			case relayed == "" || relayed == user.ID:

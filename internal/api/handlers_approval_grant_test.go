@@ -184,6 +184,10 @@ func TestApprovalGrant_BoundGrantApprovesOnceAsTheDecider(t *testing.T) {
 	if params["approver"] != "root" || params["service"] != "mctl-api" || params["slug"] != run.slug {
 		t.Errorf("submitted params = %v, want approver root for mctl-api/%s", params, run.slug)
 	}
+	// mctl-agents#681: the workflow is told the content the human decided.
+	if params[expectedContentDigestParam] != testContentDigest {
+		t.Errorf("submitted %s = %q, want the grant's artifact_hash %q", expectedContentDigestParam, params[expectedContentDigestParam], testContentDigest)
+	}
 	if st := g.approvalState(run.approval)["state"]; st != "consumed" {
 		t.Errorf("approval state = %v, want consumed", st)
 	}
@@ -213,6 +217,9 @@ func TestApprovalGrant_BoundGrantApprovesOnceAsTheDecider(t *testing.T) {
 		for _, entry := range g.audit.List(1000) {
 			if entry.Operation == op && entry.Parameters["approval_id"] == run.approval && entry.Parameters["target"] != "mctl-api/"+run.slug {
 				t.Errorf("%s audit target = %q, want mctl-api/%s", op, entry.Parameters["target"], run.slug)
+			}
+			if entry.Operation == op && entry.Parameters["approval_id"] == run.approval && entry.Parameters["artifact_hash"] != testContentDigest {
+				t.Errorf("%s audit artifact_hash = %q, want %q", op, entry.Parameters["artifact_hash"], testContentDigest)
 			}
 		}
 	}
@@ -472,6 +479,69 @@ func TestApprovalGrant_BodyApproverIsRefused(t *testing.T) {
 	}
 	if st := g.approvalState(run.approval)["state"]; st != "approved" {
 		t.Errorf("approval state = %v, want approved (unspent)", st)
+	}
+}
+
+// mctl-agents#681: the content digest the workflow checks is the grant's;
+// a body naming one -- the grant's own value, another, or empty -- is
+// refused and leaves the approval unspent.
+func TestApprovalGrant_BodyContentDigestIsRefused(t *testing.T) {
+	g := newGrantEnv(t)
+	run := g.grantedRun("681-body")
+	g.decide(run.approval, "approve")
+	for _, digest := range []string{testContentDigest, "sha256:" + strings.Repeat("b", 64), ""} {
+		in := approveInput(run.slug)
+		in[expectedContentDigestParam] = digest
+		res := g.execute(run.agent, run.approval, in)
+		if res.code != http.StatusBadRequest || res.body["code"] != wiCodeActorNotAccepted {
+			t.Errorf("%s %q = %d %s, want 400 %s", expectedContentDigestParam, digest, res.code, res.raw, wiCodeActorNotAccepted)
+		}
+	}
+	if g.submitted() != 0 {
+		t.Fatalf("submitted %d workflows", g.submitted())
+	}
+	if st := g.approvalState(run.approval)["state"]; st != "approved" {
+		t.Errorf("approval state = %v, want approved (unspent)", st)
+	}
+}
+
+// mctl-agents#681: a DevLoop grant that binds no proposal content -- none,
+// or something that is not a content digest -- is refused before anything
+// is spent or submitted, never exercised as an approval of whatever the
+// slug holds at flip time.
+func TestApprovalGrant_GrantWithoutContentDigestFailsClosed(t *testing.T) {
+	g := newGrantEnv(t)
+	for i, artifact := range []string{"", "sha256:args", "sha256:" + strings.Repeat("A", 64)} {
+		n := grantIssues.Add(1)
+		slug := fmt.Sprintf("issue-%d-x", n)
+		svc := auth.NewServiceUser()
+		item := g.open(svc, nil)
+		execID := g.attachExecution(svc, item["id"].(string), fmt.Sprintf("dev-loop-mctlhq-mctl-api-%d", n), "Running")
+		g.forgetApprovalsOf(execID)
+		body := g.devLoopGrantBody(execID, fmt.Sprintf("k-681-unbound-%d", i))
+		body["target"] = "mctl-api/" + slug
+		if artifact == "" {
+			delete(body, "artifact_hash")
+		} else {
+			body["artifact_hash"] = artifact
+		}
+		created := g.do(svc, "POST", "/api/v1/action-approvals", body)
+		if created.code != http.StatusCreated {
+			t.Fatalf("create grant (artifact %q) = %d %s", artifact, created.code, created.raw)
+		}
+		approval := created.body["approval"].(map[string]any)["id"].(string)
+		g.decide(approval, "approve")
+
+		res := g.execute(g.runAgent(execID), approval, approveInput(slug))
+		if res.code != http.StatusConflict || res.body["code"] != aarCodeContentUnbound {
+			t.Errorf("artifact %q = %d %s, want 409 %s", artifact, res.code, res.raw, aarCodeContentUnbound)
+		}
+		if st := g.approvalState(approval)["state"]; st != "approved" {
+			t.Errorf("artifact %q: approval state = %v, want approved (unspent)", artifact, st)
+		}
+	}
+	if g.submitted() != 0 {
+		t.Fatalf("submitted %d workflows, want 0", g.submitted())
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -41,6 +42,19 @@ const (
 	devLoopApprovalPolicyVersion = "v1"
 )
 
+// expectedContentDigestParam carries the grant's artifact_hash -- the
+// proposal content digest the human decided (mctl-agents#681) -- to the
+// approve workflow, which refuses to flip content that no longer hashes to
+// it. mctl-api never reads the proposal: the value is opaque here, bound by
+// the intent hash and passed through.
+const expectedContentDigestParam = "expected_content_digest"
+
+// aarCodeContentUnbound refuses a DevLoop grant that binds no proposal
+// content: approving it would flip whatever the slug holds at flip time.
+const aarCodeContentUnbound = "approval_content_unbound"
+
+var contentDigestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
 // approvalSpend is a loaded aar_ waiting to be bound to the request's
 // target and consumed right before the operation is submitted.
 type approvalSpend struct {
@@ -63,6 +77,11 @@ func (h *Handlers) prepareApprovalGrant(w http.ResponseWriter, r *http.Request, 
 	if _, named := input["approver"]; named {
 		return refuse(http.StatusBadRequest, wiCodeActorNotAccepted,
 			`approver is not an input on a grant-authorized approval: it is taken from the approval's decider`)
+	}
+	// mctl-agents#681: likewise the content digest comes from the grant.
+	if _, named := input[expectedContentDigestParam]; named {
+		return refuse(http.StatusBadRequest, wiCodeActorNotAccepted,
+			expectedContentDigestParam+` is not an input on a grant-authorized approval: it is taken from the approval's artifact_hash`)
 	}
 	if h.opts.WorkItems == nil {
 		writeErrorCode(w, http.StatusServiceUnavailable, wiCodeUnavailable, "work items are not configured", nil)
@@ -92,7 +111,14 @@ func (h *Handlers) prepareApprovalGrant(w http.ResponseWriter, r *http.Request, 
 		// recording nobody.
 		return refuse(http.StatusConflict, aarCodeNotApproved, "approval "+ref+" has no human decider")
 	}
+	// Fail closed (mctl-agents#681): a grant that binds no proposal content
+	// would approve whatever the slug holds when the workflow runs.
+	if !contentDigestRE.MatchString(a.ArtifactHash) {
+		return refuse(http.StatusConflict, aarCodeContentUnbound,
+			"approval "+ref+" binds no proposal content digest; ask for a new approval")
+	}
 	input["approver"] = approver
+	input[expectedContentDigestParam] = a.ArtifactHash
 	return &approvalSpend{approval: a}, true
 }
 
