@@ -2838,6 +2838,17 @@ paths:
         running or closed DevLoopWorkflow reports that instead of claiming a
         fresh start (issue #287). `started` says whether a new execution was
         actually submitted this call.
+
+        One closed execution is the exception (mctl-api#640): when the latest
+        run is Completed and its result says it was abandoned
+        (`ended: "abandoned: ..."`) before it reached the implement step
+        (`implement: null`), a new run starts on the same workflow id and the
+        outcome is `restarted_after_abandon`, with the abandoned run as
+        `previous_run_id`. Every other closed run — finished, abandoned after
+        implement, expired, failed, terminated, timed out — stays
+        `already_exists`. A Completed
+        run whose result cannot be read is a 502 and nothing is started. The
+        roadmap wave route never restarts.
       tags: [Agent Registry]
       requestBody:
         required: true
@@ -2852,7 +2863,9 @@ paths:
                   example: https://github.com/mctlhq/mctl-telegram/issues/296
       responses:
         '202':
-          description: A new DevLoopWorkflow was started
+          description: >-
+            A new DevLoopWorkflow run was started — the issue's first, or a
+            new one after an abandoned run (`restarted_after_abandon`)
           content:
             application/json:
               schema:
@@ -2864,18 +2877,22 @@ paths:
                   run_id:
                     type: string
                     description: The new run's id.
+                  previous_run_id:
+                    type: string
+                    description: The abandoned run this one replaced; only on `restarted_after_abandon`.
                   started:
                     type: boolean
                     example: true
                   outcome:
                     type: string
-                    enum: [started]
+                    enum: [started, restarted_after_abandon]
                   message:
                     type: string
         '200':
           description: >-
             Nothing new was started: a DevLoopWorkflow already exists for
-            this issue, running or closed. `run_id` and `status` describe
+            this issue, running, or closed and not restartable (anything but
+            a run abandoned before implement). `run_id` and `status` describe
             that existing execution, not a new one.
           content:
             application/json:
@@ -2912,7 +2929,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '502':
-          description: The existing DevLoop could not be read, or the start itself failed
+          description: >-
+            The existing DevLoop, or how its Completed run ended, could not be
+            read, or the start itself failed
           content:
             application/json:
               schema:

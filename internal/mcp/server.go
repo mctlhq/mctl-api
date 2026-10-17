@@ -2848,7 +2848,7 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_re
 
 Set use_temporal=true to route through the dev-workflow control plane's Temporal deployment instead (plan phase 4) — a durable DevLoopWorkflow that pins a registry-resolved agent version, then waits for a signalled approval (POST /api/v1/agents/dev-loop/{workflow_id}/approve) before running the implementer, rather than requiring a separate mctl_trigger_implementer call against a gitops .status.yaml flip. Defaults to false (the direct-Argo path this tool has always used) until that slice is proven in production. Requires the server's Temporal client to be configured — returns 503 otherwise.
 
-The Temporal start is idempotent on the workflow id dev-loop-mctlhq-{repo}-{issue}: calling this again for an issue that already has a DevLoopWorkflow never restarts or duplicates it, running or closed. The response's started field says whether anything new was actually submitted this call; started:false means nothing was — check the existing execution's run_id and status (also in the response) with mctl_get_dev_loop rather than assuming a fresh run began.`),
+The Temporal start is idempotent on the workflow id dev-loop-mctlhq-{repo}-{issue}: calling this again for an issue that already has a DevLoopWorkflow does not duplicate a running one or restart a closed one. The one exception is a loop an operator abandoned (mctl_abandon_dev_loop) before it reached the implement step: then a new run starts on the same workflow id, re-investigates the issue, and the response says outcome restarted_after_abandon with the abandoned run as previous_run_id. The response's started field says whether anything new was actually submitted this call; started:false means nothing was — check the existing execution's run_id and status (also in the response) with mctl_get_dev_loop rather than assuming a fresh run began.`),
 		mcplib.WithString("issue_url",
 			mcplib.Required(),
 			mcplib.Description("Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123"),
@@ -2921,9 +2921,11 @@ Human admins only, acting directly: a service or agent credential is refused 403
 func (s *Server) toolAbandonDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_abandon_dev_loop",
 		mcplib.WithTitleAnnotation("Abandon a DevLoopWorkflow"),
-		// Destructive: it ends a running loop for good, and nothing restarts
-		// a closed DevLoop under the same workflow id. Idempotent: a repeat
-		// against a finished execution only reports its final status.
+		// Destructive: it ends a running loop, and the run it ends is never
+		// resumed: mctl_trigger_issue(use_temporal=true) can only start a NEW
+		// run on the same workflow id, and only for a loop abandoned before
+		// the implement step (mctl-api#640). Idempotent: a repeat against a
+		// finished execution only reports its final status.
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithIdempotentHintAnnotation(true),

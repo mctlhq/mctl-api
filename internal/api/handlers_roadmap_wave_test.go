@@ -60,6 +60,7 @@ type waveDevLoop struct {
 	hang        map[string]bool // Describe waits for its deadline
 	slow        time.Duration   // Describe and Start each take this long
 	started     []string
+	restarted   []string
 }
 
 func (f *waveDevLoop) DescribeDevLoop(ctx context.Context, workflowID string) (string, error) {
@@ -112,6 +113,18 @@ func (f *waveDevLoop) StartDevLoopWorkflow(ctx context.Context, issueURL string)
 	f.started = append(f.started, wf)
 	f.statuses[wf] = "Running"
 	return wf, "run-" + wf, nil
+}
+
+// Every closed wave item reads as abandoned, so a wave that consulted the
+// marker would restart it; the wave route must not (mctl-api#640), and
+// restarted records any attempt.
+func (f *waveDevLoop) DevLoopEnded(ctx context.Context, workflowID, runID string) (temporalclient.DevLoopRunEnd, error) {
+	return temporalclient.DevLoopRunEnd{Ended: temporalclient.AbandonedEndedPrefix + "test"}, nil
+}
+
+func (f *waveDevLoop) RestartAbandonedDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
+	f.restarted = append(f.restarted, issueURL)
+	return "", "", errors.New("the wave route must not restart")
 }
 
 type waveEnv struct {
@@ -405,6 +418,11 @@ func TestRoadmapWave_AlreadyRunningAndAlreadyExistsReportRunID(t *testing.T) {
 	}
 	if got := byWF[wfs[1]]["run_id"]; got != "run-already-closed" {
 		t.Errorf("expected run_id=run-already-closed for an already_exists outcome, got %v", got)
+	}
+	// The closed item reads as abandoned (waveDevLoop.DevLoopEnded), yet a
+	// wave reports it and never restarts it.
+	if len(e.tc.restarted) != 0 {
+		t.Fatalf("the wave route restarted %v", e.tc.restarted)
 	}
 }
 
