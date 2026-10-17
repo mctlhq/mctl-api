@@ -78,8 +78,8 @@ type fakeDevLoopClient struct {
 	restartErr    error
 	restartedAsWF string
 	// Deadlines seen by DevLoopEnded and the restart (zero: none).
-	endedDeadlineIn    time.Duration
-	restartHadDeadline bool
+	endedDeadlineIn   time.Duration
+	restartDeadlineIn time.Duration // zero: the restart had no deadline
 }
 
 func (f *fakeDevLoopClient) DevLoopEnded(ctx context.Context, workflowID, runID string) (temporalclient.DevLoopRunEnd, error) {
@@ -95,7 +95,9 @@ func (f *fakeDevLoopClient) DevLoopEnded(ctx context.Context, workflowID, runID 
 
 func (f *fakeDevLoopClient) RestartAbandonedDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
 	f.restartCalls++
-	_, f.restartHadDeadline = ctx.Deadline()
+	if d, ok := ctx.Deadline(); ok {
+		f.restartDeadlineIn = time.Until(d)
+	}
 	if f.restartErr != nil {
 		return "", "", f.restartErr
 	}
@@ -1104,8 +1106,10 @@ func TestStartDevLoopWorkflow_ResultReadHasItsOwnDeadline(t *testing.T) {
 	if fake.endedDeadlineIn <= devLoopResultReadTimeout-time.Second || fake.endedDeadlineIn > devLoopResultReadTimeout {
 		t.Fatalf("result read deadline %v, want about %v", fake.endedDeadlineIn, devLoopResultReadTimeout)
 	}
-	if fake.restartHadDeadline {
-		t.Fatal("the restart inherited the read deadline")
+	// Through the router the request carries its own 30s timeout, so the
+	// invariant is not "no deadline" but "not the read's".
+	if fake.restartDeadlineIn != 0 && fake.restartDeadlineIn <= devLoopResultReadTimeout {
+		t.Fatalf("the restart inherited the read deadline (%v left)", fake.restartDeadlineIn)
 	}
 }
 
@@ -1116,9 +1120,11 @@ func TestStartDevLoopWorkflow_SkippedRestartIsExplained(t *testing.T) {
 		implemented bool
 		want        string
 	}{
-		"no ended":        {want: "not restarted: no ended reason recorded"},
-		"other ended":     {ended: "approval wait expired", want: `not restarted: ended "approval wait expired" is not an abandon`},
-		"after implement": {ended: temporalclient.AbandonedEndedPrefix + "x", implemented: true, want: "not restarted: abandoned after the implement step"},
+		"finished":           {implemented: true, want: "not restarted: the run reached the implement step"},
+		"no ended":           {want: "not restarted: the run finished with no abandon marker"},
+		"other ended":        {ended: "approval wait expired", want: `not restarted: ended "approval wait expired" is not an abandon`},
+		"long other ended":   {ended: strings.Repeat("x", 500), want: `not restarted: ended "` + strings.Repeat("x", auditEndedMax) + `..." is not an abandon`},
+		"abandoned after it": {ended: temporalclient.AbandonedEndedPrefix + "x", implemented: true, want: "not restarted: the run reached the implement step"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

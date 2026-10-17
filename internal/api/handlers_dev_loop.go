@@ -62,8 +62,9 @@ const (
 	devLoopOutcomeFailed         = "failed"
 	// devLoopOutcomeRestartedAfterAbandon is the one outcome only the
 	// single-issue route reports: the latest run was abandoned by an
-	// operator, so a new run started on the same workflow id (mctl-api#640). The roadmap wave route never
-	// produces it; see restartIfAbandoned.
+	// operator, so a new run started on the same workflow id
+	// (mctl-api#640). The roadmap wave route never produces it; see
+	// restartIfAbandoned.
 	devLoopOutcomeRestartedAfterAbandon = "restarted_after_abandon"
 )
 
@@ -190,14 +191,15 @@ func restartIfAbandoned(ctx context.Context, c DevLoopClient, issueURL, workflow
 			Err: fmt.Errorf("could not read how the existing DevLoop run %s ended: %w", existing.RunID, err)}
 	}
 	switch {
+	case end.Implemented:
+		// Abandoned or not: a run that reached implement left its work behind.
+		existing.NotRestarted = "the run reached the implement step"
+		return existing
 	case end.Ended == "":
-		existing.NotRestarted = "no ended reason recorded"
+		existing.NotRestarted = "the run finished with no abandon marker"
 		return existing
 	case !strings.HasPrefix(end.Ended, temporalclient.AbandonedEndedPrefix):
-		existing.NotRestarted = fmt.Sprintf("ended %q is not an abandon", end.Ended)
-		return existing
-	case end.Implemented:
-		existing.NotRestarted = "abandoned after the implement step"
+		existing.NotRestarted = fmt.Sprintf("ended %q is not an abandon", truncateForAudit(end.Ended))
 		return existing
 	}
 	wf, runID, err := c.RestartAbandonedDevLoopWorkflow(ctx, issueURL)
@@ -955,4 +957,16 @@ func notRestartedSuffix(reason string) string {
 		return ""
 	}
 	return ", not restarted: " + reason
+}
+
+// auditEndedMax caps how much of a workflow's own `ended` text goes into one
+// audit message: it is cross-repo free text, quoted with %q.
+const auditEndedMax = 120
+
+func truncateForAudit(s string) string {
+	r := []rune(s)
+	if len(r) <= auditEndedMax {
+		return s
+	}
+	return string(r[:auditEndedMax]) + "..."
 }
