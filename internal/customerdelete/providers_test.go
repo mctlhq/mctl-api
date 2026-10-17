@@ -144,3 +144,19 @@ func TestProvidersDoNotForwardCredentialsOnRedirect(t *testing.T) {
 		t.Fatal("credential was forwarded to another origin")
 	}
 }
+
+func TestCleanPortalRequiresCustomerScope(t *testing.T) {
+	for _, scope := range []string{"", "workspace", "customer"} {
+		t.Run(scope, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"tenant": "acme", "cleaned": true, "scope": scope})
+			}))
+			defer server.Close()
+			p := &Providers{PortalBase: server.URL, PortalToken: "test"}
+			err := p.CleanPortal(context.Background(), &principals.CustomerDeletion{Tenant: "acme", PrincipalID: "prn_01M45DR1GWC87109EH88VBJX25", Login: "alice"})
+			if (err == nil) != (scope == "customer") {
+				t.Fatalf("scope=%q error=%v", scope, err)
+			}
+		})
+	}
+}
