@@ -77,10 +77,16 @@ type fakeDevLoopClient struct {
 	restartRunID  string
 	restartErr    error
 	restartedAsWF string
+	// Deadlines seen by DevLoopEnded and the restart (zero: none).
+	endedDeadlineIn    time.Duration
+	restartHadDeadline bool
 }
 
 func (f *fakeDevLoopClient) DevLoopEnded(ctx context.Context, workflowID, runID string) (temporalclient.DevLoopRunEnd, error) {
 	f.endedReadRuns = append(f.endedReadRuns, runID)
+	if d, ok := ctx.Deadline(); ok {
+		f.endedDeadlineIn = time.Until(d)
+	}
 	if f.endedErr != nil {
 		return temporalclient.DevLoopRunEnd{}, f.endedErr
 	}
@@ -89,6 +95,7 @@ func (f *fakeDevLoopClient) DevLoopEnded(ctx context.Context, workflowID, runID 
 
 func (f *fakeDevLoopClient) RestartAbandonedDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
 	f.restartCalls++
+	_, f.restartHadDeadline = ctx.Deadline()
 	if f.restartErr != nil {
 		return "", "", f.restartErr
 	}
@@ -1074,6 +1081,60 @@ func TestStartDevLoopWorkflow_RestartFailuresAreFailed(t *testing.T) {
 			if len(entries) != 1 || entries[0].Status != "failed" || entries[0].Parameters["outcome"] != devLoopOutcomeFailed ||
 				entries[0].Parameters["previous_run_id"] != "run-old" {
 				t.Fatalf("expected one failed audit entry naming the abandoned run, got %+v", entries)
+			}
+		})
+	}
+}
+
+// The result read has its own short deadline, not the describe's leftovers,
+// and the restart does not inherit it.
+func TestStartDevLoopWorkflow_ResultReadHasItsOwnDeadline(t *testing.T) {
+	fake := &fakeDevLoopClient{
+		describeExec: &temporalclient.DevLoopExecution{Status: "Completed", RunID: "run-old"},
+		workflowID:   "dev-loop-mctlhq-mctl-telegram-1", restartRunID: "run-new",
+		ended: temporalclient.AbandonedEndedPrefix + "x",
+	}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: audit.NewLogger()}}
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+	rec := httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, adminCtx(req))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d %s", rec.Code, rec.Body.String())
+	}
+	if fake.endedDeadlineIn <= devLoopResultReadTimeout-time.Second || fake.endedDeadlineIn > devLoopResultReadTimeout {
+		t.Fatalf("result read deadline %v, want about %v", fake.endedDeadlineIn, devLoopResultReadTimeout)
+	}
+	if fake.restartHadDeadline {
+		t.Fatal("the restart inherited the read deadline")
+	}
+}
+
+// Each skipped restart says why in the audit trail.
+func TestStartDevLoopWorkflow_SkippedRestartIsExplained(t *testing.T) {
+	cases := map[string]struct {
+		ended       string
+		implemented bool
+		want        string
+	}{
+		"no ended":        {want: "not restarted: no ended reason recorded"},
+		"other ended":     {ended: "approval wait expired", want: `not restarted: ended "approval wait expired" is not an abandon`},
+		"after implement": {ended: temporalclient.AbandonedEndedPrefix + "x", implemented: true, want: "not restarted: abandoned after the implement step"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeDevLoopClient{
+				describeExec: &temporalclient.DevLoopExecution{Status: "Completed", RunID: "run-old"},
+				workflowID:   "dev-loop-mctlhq-mctl-telegram-1",
+				ended:        tc.ended, implemented: tc.implemented,
+			}
+			logger := audit.NewLogger()
+			h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+			req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+			rec := httptest.NewRecorder()
+			h.StartDevLoopWorkflow(rec, adminCtx(req))
+			entries := logger.List(10)
+			if rec.Code != http.StatusOK || len(entries) != 1 || !strings.Contains(entries[0].Message, tc.want) {
+				t.Fatalf("expected 200 and an audit message with %q, got %d %+v", tc.want, rec.Code, entries)
 			}
 		})
 	}

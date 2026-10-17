@@ -44,6 +44,13 @@ const shepherdQueryTimeout = 3 * time.Second
 // roadmapWaveCallTimeout, which is derived from ServerWriteTimeout.
 const devLoopDescribeTimeout = 10 * time.Second
 
+// devLoopResultReadTimeout bounds restartIfAbandoned's read of a Completed
+// run's result. It is its own deadline, not what the describe left over, so a
+// slow but successful describe cannot pre-decide the read into a 502; and it
+// is short, so describe plus read stay within 15s of the API-wide 30s and the
+// restart keeps the rest (mctl-api#640).
+const devLoopResultReadTimeout = 5 * time.Second
+
 // devLoopOutcome* is the shared vocabulary both the single-issue start route
 // and the roadmap wave route report; waveOutcome* in handlers_roadmap_wave.go
 // are aliases of these so the two routes cannot drift on what
@@ -53,9 +60,9 @@ const (
 	devLoopOutcomeAlreadyRunning = "already_running"
 	devLoopOutcomeAlreadyExists  = "already_exists"
 	devLoopOutcomeFailed         = "failed"
-	// devLoopOutcomeRestartedAfterAbandon is the single-issue route's only:
-	// the latest run was abandoned by an operator, so a new run started on
-	// the same workflow id (mctl-api#640). The roadmap wave route never
+	// devLoopOutcomeRestartedAfterAbandon is the one outcome only the
+	// single-issue route reports: the latest run was abandoned by an
+	// operator, so a new run started on the same workflow id (mctl-api#640). The roadmap wave route never
 	// produces it; see restartIfAbandoned.
 	devLoopOutcomeRestartedAfterAbandon = "restarted_after_abandon"
 )
@@ -70,7 +77,11 @@ type devLoopStartResult struct {
 	// PreviousRunID is the abandoned run a restarted_after_abandon start
 	// replaced; empty for every other outcome.
 	PreviousRunID string
-	Err           error
+	// NotRestarted says why an already_exists Completed run was not
+	// restarted, once its result was read — for the audit trail, so a
+	// skipped restart is not indistinguishable from one never considered.
+	NotRestarted string
+	Err          error
 }
 
 // startDevLoop implements the describe -> classify -> start decision shared
@@ -85,14 +96,12 @@ type devLoopStartResult struct {
 // classifyDevLoop and startDevLoopAfterNotFound: ExecuteRoadmapWave bounds
 // each one with its own fresh per-item Temporal-call timeout (so one item's
 // slow describe cannot eat its own start's budget, or another item's), while
-// this function bounds the reads with one devLoopDescribeTimeout deadline and
+// this function bounds the describe with devLoopDescribeTimeout and
 // otherwise lets the caller's context govern the start.
 //
 // This route alone adds a third path: an already_exists classification goes
 // through restartIfAbandoned (mctl-api#640), which the wave route deliberately
-// does not call. The describe and that path's result read share the one
-// deadline, so the reads together never take more than devLoopDescribeTimeout
-// of the request's budget and the start keeps the rest.
+// does not call; its result read has its own devLoopResultReadTimeout.
 //
 // TOCTOU: two callers racing can both observe NotFound between the describe
 // and the start; the second start is then absorbed by StartDevLoopWorkflow's
@@ -105,10 +114,10 @@ type devLoopStartResult struct {
 func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID string) devLoopStartResult {
 	dctx, cancel := context.WithTimeout(ctx, devLoopDescribeTimeout)
 	result := classifyDevLoop(dctx, c, workflowID)
-	if result.Outcome == devLoopOutcomeAlreadyExists {
-		result = restartIfAbandoned(dctx, ctx, c, issueURL, workflowID, result)
-	}
 	cancel()
+	if result.Outcome == devLoopOutcomeAlreadyExists {
+		return restartIfAbandoned(ctx, c, issueURL, workflowID, result)
+	}
 	if result.Outcome != "" {
 		return result
 	}
@@ -155,8 +164,8 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 // OpenExecutionsOfEngineRun to find beside the new one (execution_ambiguous);
 // runs from before mctl-agents 1.76.0 never opened one at all.
 //
-// readCtx bounds the result read (startDevLoop shares it with the describe);
-// ctx governs the restart itself.
+// ctx governs the restart; the result read is bounded by
+// devLoopResultReadTimeout derived from it.
 //
 // TOCTOU: the restart cannot be conditioned on which run closed (Temporal's
 // reuse policy is per call, not per run), so a run that started and
@@ -167,18 +176,28 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 // same class as startDevLoop's TOCTOU, not closable without dropping
 // USE_EXISTING. Both windows are a few milliseconds between admin calls on
 // one issue.
-func restartIfAbandoned(readCtx, ctx context.Context, c DevLoopClient, issueURL, workflowID string, existing devLoopStartResult) devLoopStartResult {
+func restartIfAbandoned(ctx context.Context, c DevLoopClient, issueURL, workflowID string, existing devLoopStartResult) devLoopStartResult {
 	// An empty run id would make the read "whatever run is latest now" and
 	// the echo guard below unreachable; without one the run is not restarted.
 	if existing.Status != devLoopStatusCompleted || existing.RunID == "" {
 		return existing
 	}
-	end, err := c.DevLoopEnded(readCtx, workflowID, existing.RunID)
+	rctx, cancel := context.WithTimeout(ctx, devLoopResultReadTimeout)
+	end, err := c.DevLoopEnded(rctx, workflowID, existing.RunID)
+	cancel()
 	if err != nil {
 		return devLoopStartResult{Outcome: devLoopOutcomeFailed, Status: existing.Status, RunID: existing.RunID,
 			Err: fmt.Errorf("could not read how the existing DevLoop run %s ended: %w", existing.RunID, err)}
 	}
-	if !strings.HasPrefix(end.Ended, temporalclient.AbandonedEndedPrefix) || end.Implemented {
+	switch {
+	case end.Ended == "":
+		existing.NotRestarted = "no ended reason recorded"
+		return existing
+	case !strings.HasPrefix(end.Ended, temporalclient.AbandonedEndedPrefix):
+		existing.NotRestarted = fmt.Sprintf("ended %q is not an abandon", end.Ended)
+		return existing
+	case end.Implemented:
+		existing.NotRestarted = "abandoned after the implement step"
 		return existing
 	}
 	wf, runID, err := c.RestartAbandonedDevLoopWorkflow(ctx, issueURL)
@@ -378,7 +397,7 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 			WorkflowName: workflowID,
 			Status:       "succeeded",
 			RiskLevel:    string(operations.RiskMedium),
-			Message:      "not started: already_exists (run " + result.RunID + ", status " + result.Status + ")",
+			Message:      "not started: already_exists (run " + result.RunID + ", status " + result.Status + notRestartedSuffix(result.NotRestarted) + ")",
 		})
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"workflow_id": workflowID,
@@ -927,4 +946,13 @@ func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 		"shepherd_in_loop":       shepherdInLoop,
 		"shepherd_in_loop_known": shepherdInLoopKnown,
 	})
+}
+
+// notRestartedSuffix renders devLoopStartResult.NotRestarted for the
+// already_exists audit message, or nothing when no result was read.
+func notRestartedSuffix(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return ", not restarted: " + reason
 }

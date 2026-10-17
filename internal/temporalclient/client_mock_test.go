@@ -116,6 +116,7 @@ func TestDevLoopEnded_ReadsThePinnedRunsResult(t *testing.T) {
 			mockClient.On("GetWorkflow", mock.Anything, "dev-loop-mctlhq-mctl-telegram-296", "run-1").Return(tc.run)
 			c := &Client{temporal: mockClient}
 			got, err := c.DevLoopEnded(context.Background(), "dev-loop-mctlhq-mctl-telegram-296", "run-1")
+			mockClient.AssertExpectations(t)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error, got %+v", got)
@@ -128,7 +129,6 @@ func TestDevLoopEnded_ReadsThePinnedRunsResult(t *testing.T) {
 			if err != nil || got != tc.want {
 				t.Fatalf("got %+v %v, want %+v", got, err, tc.want)
 			}
-			mockClient.AssertExpectations(t)
 		})
 	}
 }
