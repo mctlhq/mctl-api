@@ -820,14 +820,17 @@ func (h *Handlers) delegatedActorIsSubject(w http.ResponseWriter, r *http.Reques
 
 // errLinkOwnerUnresolved: a surface link's owner is no active principal. It
 // is only a definite answer: the principal store said disabled or refused,
-// or the link names no github:<login> at all. A login the store could not
-// resolve (principals.ErrUnresolved: no known GitHub identity, GitHub did
-// not answer, a failed read) is NOT this. It may be transient, so it stays
-// a 503 rather than reading "could not observe" as "no such owner".
+// or the link names neither a github:<login> nor a prn_ principal. A login
+// the store could not resolve (principals.ErrUnresolved: no known GitHub
+// identity, GitHub did not answer, a failed read) is NOT this. It may be
+// transient, so it stays a 503 rather than reading "could not observe" as
+// "no such owner".
 var errLinkOwnerUnresolved = errors.New("the surface link's owner resolves to no active principal")
 
-// surfaceLinkPrincipal resolves a live surface link's owner ("github:<login>",
-// the only form a link may name today) to its canonical principal. It keys
+// surfaceLinkPrincipal resolves a live surface link's owner to its canonical
+// principal. A prn_ owner (mctl-api#646) is that principal once the store
+// confirms it is active, the same check agentPrincipalGate's token
+// principal gets. A "github:<login>" owner is resolved as follows. It keys
 // on the same login-only GitHub identity agentPrincipalGate builds for a
 // sil_ grant's subject (auth.NewDelegatedUser, then AttachPrincipal), so the
 // principal a surface actor is bound for is the principal its sil_ grant
@@ -837,6 +840,19 @@ var errLinkOwnerUnresolved = errors.New("the surface link's owner resolves to no
 // write path. A store that could not answer is returned as its error, for
 // the caller to refuse with 503.
 func (h *Handlers) surfaceLinkPrincipal(ctx context.Context, linkPrincipal string) (string, error) {
+	if surfaceid.IsPrincipalID(linkPrincipal) {
+		checker, ok := h.opts.Principals.(auth.PrincipalChecker)
+		if !ok {
+			return "", errors.New("principal store cannot check principals")
+		}
+		switch err := checker.CheckPrincipal(ctx, linkPrincipal); {
+		case errors.Is(err, auth.ErrPrincipalDisabled), errors.Is(err, auth.ErrIdentityRefused):
+			return "", errLinkOwnerUnresolved
+		case err != nil:
+			return "", err
+		}
+		return linkPrincipal, nil
+	}
 	login, ok := strings.CutPrefix(linkPrincipal, "github:")
 	if !ok || login == "" {
 		return "", errLinkOwnerUnresolved

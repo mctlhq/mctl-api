@@ -58,7 +58,7 @@ func reason(err error) string {
 func TestChallengeRedeemsIntoALinkOnce(t *testing.T) {
 	s := newStoreForTest(t, 0)
 	ctx := context.Background()
-	c, err := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	c, err := s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestChallengeRedeemsIntoALinkOnce(t *testing.T) {
 func TestChallengeIsBoundToItsSurface(t *testing.T) {
 	s := newStoreForTest(t, 0)
 	ctx := context.Background()
-	c, _ := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	c, _ := s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram)
 	if _, err := s.Redeem(ctx, SurfacePortal, c.Code, "alice-session"); !errors.Is(err, ErrChallengeInvalid) || reason(err) != ReasonWrongSource {
 		t.Fatalf("wrong surface: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestChallengeIsBoundToItsSurface(t *testing.T) {
 func TestExpiredOrUnknownChallengeLinksNothing(t *testing.T) {
 	s := newStoreForTest(t, 0)
 	ctx := context.Background()
-	c, _ := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	c, _ := s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram)
 	real := s.now
 	s.now = func() time.Time { return real().Add(ChallengeTTL + time.Second) }
 	if _, err := s.Redeem(ctx, SurfaceTelegram, c.Code, "4242"); reason(err) != ReasonExpired {
@@ -140,22 +140,22 @@ func TestOnlyHumansOnKnownSurfacesGetChallenges(t *testing.T) {
 	s := newStoreForTest(t, 0)
 	ctx := context.Background()
 	for _, p := range []string{"service:mctl-agent", "surface:telegram", "oidc:alice", "github:", "alice", "github:al ice"} {
-		if _, err := s.CreateChallenge(ctx, p, SurfaceTelegram); !errors.Is(err, ErrInvalid) {
+		if _, err := s.CreateChallenge(ctx, p, "", SurfaceTelegram); !errors.Is(err, ErrInvalid) {
 			t.Errorf("principal %q: %v", p, err)
 		}
 	}
-	if _, err := s.CreateChallenge(ctx, "github:alice", "slack"); !errors.Is(err, ErrInvalid) {
+	if _, err := s.CreateChallenge(ctx, "github:alice", "", "slack"); !errors.Is(err, ErrInvalid) {
 		t.Errorf("unknown surface: %v", err)
 	}
 	for i := 0; i < MaxOpenChallenges; i++ {
-		if _, err := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram); err != nil {
+		if _, err := s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram); !errors.Is(err, ErrTooManyChallenges) {
+	if _, err := s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram); !errors.Is(err, ErrTooManyChallenges) {
 		t.Fatalf("over the cap: %v", err)
 	}
-	if _, err := s.CreateChallenge(ctx, "github:bob", SurfaceTelegram); err != nil {
+	if _, err := s.CreateChallenge(ctx, "github:bob", "", SurfaceTelegram); err != nil {
 		t.Fatalf("the cap is per principal: %v", err)
 	}
 }
@@ -163,7 +163,7 @@ func TestOnlyHumansOnKnownSurfacesGetChallenges(t *testing.T) {
 func TestRedeemRefusesMalformedExternalIDs(t *testing.T) {
 	s := newStoreForTest(t, 0)
 	ctx := context.Background()
-	c, _ := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	c, _ := s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram)
 	for _, id := range []string{"", "0", "-5", "12a", "github:alice", " 42"} {
 		if _, err := s.Redeem(ctx, SurfaceTelegram, c.Code, id); !errors.Is(err, ErrInvalid) {
 			t.Errorf("external_id %q: %v", id, err)
@@ -179,11 +179,11 @@ func TestRedeemRefusesMalformedExternalIDs(t *testing.T) {
 func TestAnIdentityLinksToOnePrincipal(t *testing.T) {
 	s := newStoreForTest(t, 0)
 	ctx := context.Background()
-	a, _ := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	a, _ := s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram)
 	if _, err := s.Redeem(ctx, SurfaceTelegram, a.Code, "4242"); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := s.CreateChallenge(ctx, "github:bob", SurfaceTelegram)
+	b, _ := s.CreateChallenge(ctx, "github:bob", "", SurfaceTelegram)
 	if _, err := s.Redeem(ctx, SurfaceTelegram, b.Code, "4242"); !errors.Is(err, ErrLinkConflict) {
 		t.Fatalf("second principal on one identity: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestAnIdentityLinksToOnePrincipal(t *testing.T) {
 		t.Fatalf("conflict moved the link to %s", l.Principal)
 	}
 	// Re-linking the same pair is idempotent and keeps the link.
-	again, _ := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	again, _ := s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram)
 	l, err := s.Redeem(ctx, SurfaceTelegram, again.Code, "4242")
 	if err != nil || l.Principal != "github:alice" {
 		t.Fatalf("relink: %+v %v", l, err)
@@ -201,7 +201,7 @@ func TestAnIdentityLinksToOnePrincipal(t *testing.T) {
 func TestRevokedAndExpiredLinksFailClosed(t *testing.T) {
 	s := newStoreForTest(t, time.Hour)
 	ctx := context.Background()
-	c, _ := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	c, _ := s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram)
 	l, err := s.Redeem(ctx, SurfaceTelegram, c.Code, "4242")
 	if err != nil || l.ExpiresAt == nil {
 		t.Fatalf("link = %+v %v", l, err)
@@ -223,7 +223,7 @@ func TestRevokedAndExpiredLinksFailClosed(t *testing.T) {
 		t.Fatalf("revoked link: %v", err)
 	}
 	// After revocation the identity can be linked again, even to someone else.
-	b, _ := s.CreateChallenge(ctx, "github:bob", SurfaceTelegram)
+	b, _ := s.CreateChallenge(ctx, "github:bob", "", SurfaceTelegram)
 	if l, err := s.Redeem(ctx, SurfaceTelegram, b.Code, "4242"); err != nil || l.Principal != "github:bob" {
 		t.Fatalf("relink after revoke: %+v %v", l, err)
 	}
@@ -236,7 +236,7 @@ func TestRevokedAndExpiredLinksFailClosed(t *testing.T) {
 func TestConcurrentRedeemsLinkOnce(t *testing.T) {
 	s := newStoreForTest(t, 0)
 	ctx := context.Background()
-	c, _ := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	c, _ := s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram)
 	const racers = 8
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -269,14 +269,14 @@ func TestConcurrentRedeemsLinkOnce(t *testing.T) {
 func TestRelinkingRenewsAnExpiringLink(t *testing.T) {
 	s := newStoreForTest(t, time.Hour)
 	ctx := context.Background()
-	c, _ := s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	c, _ := s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram)
 	first, err := s.Redeem(ctx, SurfaceTelegram, c.Code, "4242")
 	if err != nil {
 		t.Fatal(err)
 	}
 	real := s.now
 	s.now = func() time.Time { return real().Add(50 * time.Minute) }
-	c, _ = s.CreateChallenge(ctx, "github:alice", SurfaceTelegram)
+	c, _ = s.CreateChallenge(ctx, "github:alice", "", SurfaceTelegram)
 	again, err := s.Redeem(ctx, SurfaceTelegram, c.Code, "4242")
 	if err != nil || again.ID != first.ID {
 		t.Fatalf("relink = %+v, %v", again, err)
@@ -288,5 +288,56 @@ func TestRelinkingRenewsAnExpiringLink(t *testing.T) {
 	s.now = func() time.Time { return real().Add(time.Hour + time.Minute) }
 	if _, err := s.Resolve(ctx, SurfaceTelegram, "4242"); err != nil {
 		t.Fatalf("renewed link: %v", err)
+	}
+}
+
+// mctl-api#646: a link holder is github:<login> with no subject, or a
+// canonical principal with the oidc: name it acts under. The subject is
+// stored, renewed with the link, and read back by Resolve and LinkByID.
+func TestPrincipalLinksKeepTheirSubject(t *testing.T) {
+	s := newStoreForTest(t, time.Hour)
+	ctx := context.Background()
+	const prn = "prn_01JZED00000000000000000000"
+	for _, h := range []struct{ principal, subject string }{
+		{prn, ""},                     // a principal needs its name
+		{prn, "zed@example.com"},      // only an oidc: name
+		{prn, "github:zed"},           // never a GitHub one
+		{prn, "oidc:"},                // nor an empty one
+		{prn, "oidc:zed example.com"}, // nor one with a space
+		{"github:alice", "oidc:alice"},
+		{"prn_01jzed00000000000000000000", "oidc:zed@example.com"}, // not canonical
+		{"prn_", "oidc:zed@example.com"},
+	} {
+		if _, err := s.CreateChallenge(ctx, h.principal, h.subject, SurfaceTelegram); !errors.Is(err, ErrInvalid) {
+			t.Errorf("holder %q/%q: %v, want ErrInvalid", h.principal, h.subject, err)
+		}
+	}
+
+	c, err := s.CreateChallenge(ctx, prn, "oidc:zed@example.com", SurfaceTelegram)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Subject != "oidc:zed@example.com" {
+		t.Fatalf("challenge subject = %q", c.Subject)
+	}
+	l, err := s.Redeem(ctx, SurfaceTelegram, c.Code, "7070")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Principal != prn || l.Subject != "oidc:zed@example.com" {
+		t.Fatalf("link = %+v", l)
+	}
+	// A renewal by the same principal under a new name records the new one.
+	c, _ = s.CreateChallenge(ctx, prn, "oidc:zed@new.example", SurfaceTelegram)
+	again, err := s.Redeem(ctx, SurfaceTelegram, c.Code, "7070")
+	if err != nil || again.ID != l.ID || again.Subject != "oidc:zed@new.example" {
+		t.Fatalf("renewal = %+v, %v", again, err)
+	}
+	if got, err := s.Resolve(ctx, SurfaceTelegram, "7070"); err != nil || got.Subject != "oidc:zed@new.example" {
+		t.Fatalf("resolve = %+v %v", got, err)
+	}
+	surface, externalID, principal, subject, err := s.LinkByID(ctx, l.ID)
+	if err != nil || surface != SurfaceTelegram || externalID != "7070" || principal != prn || subject != "oidc:zed@new.example" {
+		t.Fatalf("LinkByID = %s %s %s %s %v", surface, externalID, principal, subject, err)
 	}
 }

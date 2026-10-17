@@ -24,7 +24,7 @@ import (
 func linkFor(t *testing.T, s *Store, principal, surface, externalID string) *Link {
 	t.Helper()
 	ctx := context.Background()
-	c, err := s.CreateChallenge(ctx, principal, surface)
+	c, err := s.CreateChallenge(ctx, principal, "", surface)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,12 +43,12 @@ func TestLinkByID_ReusesResolvesLivenessRules(t *testing.T) {
 	ctx := context.Background()
 
 	live := linkFor(t, s, "github:alice", SurfaceTelegram, "4242")
-	surface, externalID, principal, err := s.LinkByID(ctx, live.ID)
-	if err != nil || surface != SurfaceTelegram || externalID != "4242" || principal != "github:alice" {
+	surface, externalID, principal, subject, err := s.LinkByID(ctx, live.ID)
+	if err != nil || surface != SurfaceTelegram || externalID != "4242" || principal != "github:alice" || subject != "" {
 		t.Fatalf("live link = %q %q %q %v", surface, externalID, principal, err)
 	}
 
-	if _, _, _, err := s.LinkByID(ctx, "sil_doesnotexist"); !errors.Is(err, ErrLinkNotFound) {
+	if _, _, _, _, err := s.LinkByID(ctx, "sil_doesnotexist"); !errors.Is(err, ErrLinkNotFound) {
 		t.Fatalf("unknown id: err = %v, want ErrLinkNotFound", err)
 	}
 
@@ -56,7 +56,7 @@ func TestLinkByID_ReusesResolvesLivenessRules(t *testing.T) {
 	if _, err := s.Revoke(ctx, revoked.ID, "github:bob", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := s.LinkByID(ctx, revoked.ID); !errors.Is(err, ErrLinkRevoked) {
+	if _, _, _, _, err := s.LinkByID(ctx, revoked.ID); !errors.Is(err, ErrLinkRevoked) {
 		t.Fatalf("revoked link: err = %v, want ErrLinkRevoked", err)
 	}
 
@@ -65,7 +65,7 @@ func TestLinkByID_ReusesResolvesLivenessRules(t *testing.T) {
 	if _, err := expiring.pool.Exec(ctx, `UPDATE surface_identity_links SET expires_at=$1 WHERE id=$2`, expiring.now().Add(-time.Minute), exp.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := expiring.LinkByID(ctx, exp.ID); !errors.Is(err, ErrLinkExpired) {
+	if _, _, _, _, err := expiring.LinkByID(ctx, exp.ID); !errors.Is(err, ErrLinkExpired) {
 		t.Fatalf("expired link: err = %v, want ErrLinkExpired", err)
 	}
 }

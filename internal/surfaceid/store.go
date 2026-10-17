@@ -26,6 +26,15 @@
 //
 // This is not a principal model (mctlhq/.github#91). It maps exactly one
 // surface-native id to exactly one human principal, and nothing else.
+//
+// A link names its human in one of two forms. A GitHub-verified human is
+// "github:<login>", the form the first consumers key on, and Subject is
+// empty. A human with no GitHub identity (ZITADEL-only, mctl-api#646) is
+// the canonical principal id "prn_<ULID>", which is the authority, with
+// Subject holding the name that human's own requests carry
+// ("oidc:<name>"), so private work items owned by that name stay visible
+// through the link. Subject is recorded, like a delegation grant's subject
+// string, and never re-derived.
 package surfaceid
 
 import (
@@ -98,6 +107,7 @@ type Challenge struct {
 	Code      string    `json:"code"`
 	Surface   string    `json:"surface"`
 	Principal string    `json:"principal"`
+	Subject   string    `json:"subject,omitempty"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
@@ -107,6 +117,7 @@ type Link struct {
 	Surface    string     `json:"surface"`
 	ExternalID string     `json:"external_id"`
 	Principal  string     `json:"principal"`
+	Subject    string     `json:"subject,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
@@ -151,6 +162,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS surface_identity_links_live
 	ON surface_identity_links (surface, external_id) WHERE revoked_at IS NULL;
 CREATE INDEX IF NOT EXISTS surface_identity_links_principal
 	ON surface_identity_links (principal);
+-- mctl-api#646: the request name of a prn_ principal; '' for github: links.
+ALTER TABLE surface_identity_challenges ADD COLUMN IF NOT EXISTS subject TEXT NOT NULL DEFAULT '';
+ALTER TABLE surface_identity_links ADD COLUMN IF NOT EXISTS subject TEXT NOT NULL DEFAULT '';
 `
 
 // Store is the Postgres-backed link store.
@@ -201,9 +215,29 @@ func NewStore(ctx context.Context, connStr string, linkTTL time.Duration) (*Stor
 // Close releases the pool.
 func (s *Store) Close() { s.pool.Close() }
 
-// principalPattern: v1 links only GitHub-verified humans, the form every
-// initial consumer (human-input actor_refs, work-item owners) keys on.
-var principalPattern = regexp.MustCompile(`^github:[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
+// githubPrincipalPattern is a GitHub-verified human, the form every initial
+// consumer (human-input actor_refs, work-item owners) keys on.
+var githubPrincipalPattern = regexp.MustCompile(`^github:[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
+
+// prnPattern is a canonical principal id, as auth.ValidPrincipalID checks
+// it. Repeated here: internal/auth imports this package.
+var prnPattern = regexp.MustCompile(`^prn_[0-9A-HJKMNP-TV-Z]{26}$`)
+
+// oidcSubjectPattern bounds the request name a prn_ link carries.
+var oidcSubjectPattern = regexp.MustCompile(`^oidc:[!-~]{1,256}$`)
+
+// IsPrincipalID reports whether principal is a canonical principal id, the
+// form a link takes for a human with no GitHub identity.
+func IsPrincipalID(principal string) bool { return prnPattern.MatchString(principal) }
+
+// validHolder reports whether (principal, subject) may hold a link: a
+// github: login with no subject, or a prn_ id with its oidc: name.
+func validHolder(principal, subject string) bool {
+	if githubPrincipalPattern.MatchString(principal) {
+		return subject == ""
+	}
+	return prnPattern.MatchString(principal) && oidcSubjectPattern.MatchString(subject)
+}
 
 // externalIDPattern bounds a surface-native id per surface. A Telegram user
 // id is a positive integer; a portal subject is an opaque token.
@@ -253,8 +287,10 @@ func newID(prefix string) (string, error) {
 }
 
 // CreateChallenge mints a one-time challenge for principal on surface.
-func (s *Store) CreateChallenge(ctx context.Context, principal, surface string) (*Challenge, error) {
-	if !principalPattern.MatchString(principal) {
+// subject is "" for a github: principal and the oidc: request name for a
+// prn_ one (validHolder).
+func (s *Store) CreateChallenge(ctx context.Context, principal, subject, surface string) (*Challenge, error) {
+	if !validHolder(principal, subject) {
 		return nil, fmt.Errorf("%w: principal %q cannot hold a surface link", ErrInvalid, principal)
 	}
 	if !IsSurface(surface) {
@@ -269,7 +305,7 @@ func (s *Store) CreateChallenge(ctx context.Context, principal, surface string) 
 		return nil, fmt.Errorf("surfaceid: random: %w", err)
 	}
 	now := s.now()
-	c := &Challenge{ID: id, Code: code, Surface: surface, Principal: principal, ExpiresAt: now.Add(ChallengeTTL)}
+	c := &Challenge{ID: id, Code: code, Surface: surface, Principal: principal, Subject: subject, ExpiresAt: now.Add(ChallengeTTL)}
 	err = s.withTx(ctx, "surfaceid-challenge:"+principal, func(tx pgx.Tx) error {
 		// Housekeeping: nothing past its expiry by a day is worth keeping.
 		// It spans every principal, so it takes its own lock; a request that
@@ -292,8 +328,8 @@ func (s *Store) CreateChallenge(ctx context.Context, principal, surface string) 
 			return ErrTooManyChallenges
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO surface_identity_challenges
-			(id, code_hash, principal, surface, created_at, expires_at) VALUES ($1,$2,$3,$4,$5,$6)`,
-			c.ID, hashCode(code), principal, surface, now, c.ExpiresAt)
+			(id, code_hash, principal, subject, surface, created_at, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+			c.ID, hashCode(code), principal, subject, surface, now, c.ExpiresAt)
 		return err
 	})
 	if err != nil {
@@ -325,13 +361,13 @@ func (s *Store) Redeem(ctx context.Context, surface, code, externalID string) (*
 	now := s.now()
 	err := s.withTx(ctx, "surfaceid-link:"+surface+":"+externalID, func(tx pgx.Tx) error {
 		var (
-			id, principal, chSurface string
-			expires                  time.Time
-			consumed                 *time.Time
+			id, principal, subject, chSurface string
+			expires                           time.Time
+			consumed                          *time.Time
 		)
-		err := tx.QueryRow(ctx, `SELECT id, principal, surface, expires_at, consumed_at
+		err := tx.QueryRow(ctx, `SELECT id, principal, subject, surface, expires_at, consumed_at
 			FROM surface_identity_challenges WHERE code_hash=$1 FOR UPDATE`, hashCode(code)).
-			Scan(&id, &principal, &chSurface, &expires, &consumed)
+			Scan(&id, &principal, &subject, &chSurface, &expires, &consumed)
 		if errors.Is(err, pgx.ErrNoRows) {
 			refusal = &ChallengeError{Reason: ReasonUnknown}
 			return nil
@@ -375,6 +411,14 @@ func (s *Store) Redeem(ctx context.Context, surface, code, externalID string) (*
 				refusal = ErrLinkConflict
 				return consume(ReasonConflict)
 			}
+			// The same principal proved possession again; its request name
+			// is the one it carries now.
+			if existing.Subject != subject {
+				if _, err := tx.Exec(ctx, `UPDATE surface_identity_links SET subject=$2 WHERE id=$1`, existing.ID, subject); err != nil {
+					return err
+				}
+				existing.Subject = subject
+			}
 			// A fresh possession proof renews a link that expires.
 			if s.linkTTL > 0 {
 				exp := now.Add(s.linkTTL)
@@ -393,14 +437,14 @@ func (s *Store) Redeem(ctx context.Context, surface, code, externalID string) (*
 		if err != nil {
 			return err
 		}
-		l := &Link{ID: linkID, Surface: surface, ExternalID: externalID, Principal: principal, CreatedAt: now, Retired: retired}
+		l := &Link{ID: linkID, Surface: surface, ExternalID: externalID, Principal: principal, Subject: subject, CreatedAt: now, Retired: retired}
 		if s.linkTTL > 0 {
 			exp := now.Add(s.linkTTL)
 			l.ExpiresAt = &exp
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO surface_identity_links
-			(id, surface, external_id, principal, challenge_id, created_at, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-			l.ID, l.Surface, l.ExternalID, l.Principal, id, l.CreatedAt, l.ExpiresAt); err != nil {
+			(id, surface, external_id, principal, subject, challenge_id, created_at, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+			l.ID, l.Surface, l.ExternalID, l.Principal, l.Subject, id, l.CreatedAt, l.ExpiresAt); err != nil {
 			return err
 		}
 		if err := s.mirrorLink(ctx, tx, l); err != nil {
@@ -418,11 +462,11 @@ func (s *Store) Redeem(ctx context.Context, surface, code, externalID string) (*
 	return link, nil
 }
 
-const linkColumns = `id, surface, external_id, principal, created_at, expires_at, revoked_at, revoked_by`
+const linkColumns = `id, surface, external_id, principal, subject, created_at, expires_at, revoked_at, revoked_by`
 
 func scanLink(row pgx.Row) (*Link, error) {
 	var l Link
-	if err := row.Scan(&l.ID, &l.Surface, &l.ExternalID, &l.Principal, &l.CreatedAt, &l.ExpiresAt, &l.RevokedAt, &l.RevokedBy); err != nil {
+	if err := row.Scan(&l.ID, &l.Surface, &l.ExternalID, &l.Principal, &l.Subject, &l.CreatedAt, &l.ExpiresAt, &l.RevokedAt, &l.RevokedBy); err != nil {
 		return nil, err
 	}
 	l.CreatedAt = l.CreatedAt.UTC()
@@ -482,9 +526,10 @@ func (s *Store) Resolve(ctx context.Context, surface, externalID string) (*Link,
 }
 
 // LinkByID implements delegation.SurfaceLinkSource for a sil_ grant ref
-// (mctl-api#376 slice B): the link's surface, external id and principal
-// string. It reuses Resolve's own liveness rules rather than a second one:
-// a not-found row is ErrLinkNotFound, a revoked link ErrLinkRevoked, an
+// (mctl-api#376 slice B): the link's surface, external id, principal
+// string and subject (empty for a github: link). It reuses Resolve's own
+// liveness rules rather than a second one: a not-found row is
+// ErrLinkNotFound, a revoked link ErrLinkRevoked, an
 // expired one ErrLinkExpired -- exactly the sentinels Resolve yields, so a
 // caller checking one checks the other identically.
 //
@@ -497,21 +542,21 @@ func (s *Store) Resolve(ctx context.Context, surface, externalID string) (*Link,
 // to classify these three sentinels -- the reverse direction carries no
 // cycle, since this package imports neither internal/auth nor
 // internal/delegation.
-func (s *Store) LinkByID(ctx context.Context, id string) (surface, externalID, principal string, err error) {
+func (s *Store) LinkByID(ctx context.Context, id string) (surface, externalID, principal, subject string, err error) {
 	l, err := scanLink(s.pool.QueryRow(ctx, `SELECT `+linkColumns+` FROM surface_identity_links WHERE id=$1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", "", ErrLinkNotFound
+		return "", "", "", "", ErrLinkNotFound
 	}
 	if err != nil {
-		return "", "", "", fmt.Errorf("surfaceid: link by id: %w", err)
+		return "", "", "", "", fmt.Errorf("surfaceid: link by id: %w", err)
 	}
 	if l.RevokedAt != nil {
-		return "", "", "", ErrLinkRevoked
+		return "", "", "", "", ErrLinkRevoked
 	}
 	if s.expired(l, s.now()) {
-		return "", "", "", ErrLinkExpired
+		return "", "", "", "", ErrLinkExpired
 	}
-	return l.Surface, l.ExternalID, l.Principal, nil
+	return l.Surface, l.ExternalID, l.Principal, l.Subject, nil
 }
 
 // Links lists a principal's links, live and revoked, newest first.
