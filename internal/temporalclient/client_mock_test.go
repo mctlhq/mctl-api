@@ -97,12 +97,16 @@ func TestDevLoopEnded_ReadsThePinnedRunsResult(t *testing.T) {
 	cases := []struct {
 		name    string
 		run     *resultWorkflowRun
-		want    string
+		want    DevLoopRunEnd
 		wantErr bool
 	}{
-		{name: "abandoned", run: &resultWorkflowRun{result: `{"investigate":{},"implement":null,"ended":"abandoned: superseded"}`}, want: "abandoned: superseded"},
-		{name: "full pipeline", run: &resultWorkflowRun{result: `{"investigate":{},"ended":""}`}, want: ""},
-		{name: "predates the field", run: &resultWorkflowRun{result: `{"investigate":{}}`}, want: ""},
+		{name: "abandoned at approval", run: &resultWorkflowRun{result: `{"investigate":{},"implement":null,"ended":"abandoned: superseded"}`},
+			want: DevLoopRunEnd{Ended: "abandoned: superseded"}},
+		{name: "abandoned after implement", run: &resultWorkflowRun{result: `{"investigate":{},"implement":{"phase":"Succeeded"},"ended":"abandoned: cleanup"}`},
+			want: DevLoopRunEnd{Ended: "abandoned: cleanup", Implemented: true}},
+		{name: "full pipeline", run: &resultWorkflowRun{result: `{"investigate":{},"implement":{"phase":"Succeeded"},"ended":""}`},
+			want: DevLoopRunEnd{Implemented: true}},
+		{name: "predates the fields", run: &resultWorkflowRun{result: `{"investigate":{}}`}, want: DevLoopRunEnd{}},
 		{name: "read fails", run: &resultWorkflowRun{err: serviceerror.NewUnavailable("down")}, wantErr: true},
 		{name: "undecodable", run: &resultWorkflowRun{result: `{"ended":42}`}, wantErr: true},
 	}
@@ -114,15 +118,15 @@ func TestDevLoopEnded_ReadsThePinnedRunsResult(t *testing.T) {
 			got, err := c.DevLoopEnded(context.Background(), "dev-loop-mctlhq-mctl-telegram-296", "run-1")
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("expected an error, got %q", got)
+					t.Fatalf("expected an error, got %+v", got)
 				}
-				if got != "" {
-					t.Fatalf("a failed read must not return an answer, got %q", got)
+				if got != (DevLoopRunEnd{}) {
+					t.Fatalf("a failed read must not return an answer, got %+v", got)
 				}
 				return
 			}
 			if err != nil || got != tc.want {
-				t.Fatalf("got %q %v, want %q", got, err, tc.want)
+				t.Fatalf("got %+v %v, want %+v", got, err, tc.want)
 			}
 			mockClient.AssertExpectations(t)
 		})

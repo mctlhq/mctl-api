@@ -122,9 +122,12 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 // proposal, so a loop abandoned at its approval park would otherwise close
 // the issue to DevLoop for good.
 //
-//   - status Completed and the run's result says "abandoned: ..." -> start a
-//     new run on the same id and report restarted_after_abandon with the
-//     abandoned run as PreviousRunID.
+//   - status Completed, the run's result says "abandoned: ..." and its
+//     `implement` is null -> start a new run on the same id and report
+//     restarted_after_abandon with the abandoned run as PreviousRunID.
+//   - status Completed and abandoned, but implement ran -> already_exists:
+//     an abandon during implement or the merge watch leaves a PR behind,
+//     and a fresh investigate over that would not resume it.
 //   - status Completed with any other or no `ended` -> already_exists, as
 //     before: the loop finished, or ended for a reason that is not an
 //     operator's withdrawal (approval wait expired, issue closed, ...).
@@ -154,13 +157,13 @@ func restartIfAbandoned(ctx context.Context, c DevLoopClient, issueURL, workflow
 		return existing
 	}
 	rctx, cancel := context.WithTimeout(ctx, devLoopDescribeTimeout)
-	ended, err := c.DevLoopEnded(rctx, workflowID, existing.RunID)
+	end, err := c.DevLoopEnded(rctx, workflowID, existing.RunID)
 	cancel()
 	if err != nil {
 		return devLoopStartResult{Outcome: devLoopOutcomeFailed, Status: existing.Status, RunID: existing.RunID,
 			Err: fmt.Errorf("could not read how the existing DevLoop run %s ended: %w", existing.RunID, err)}
 	}
-	if !strings.HasPrefix(ended, temporalclient.AbandonedEndedPrefix) {
+	if !strings.HasPrefix(end.Ended, temporalclient.AbandonedEndedPrefix) || end.Implemented {
 		return existing
 	}
 	wf, runID, err := c.RestartAbandonedDevLoopWorkflow(ctx, issueURL)
@@ -368,7 +371,7 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 			"started":     false,
 			"outcome":     result.Outcome,
 			"status":      result.Status,
-			"message":     "A DevLoopWorkflow already ran for this issue and is not restarted; nothing new was started. Only a run that was abandoned is restarted.",
+			"message":     "A DevLoopWorkflow already ran for this issue and is not restarted; nothing new was started. Only a run abandoned before it reached the implement step is restarted.",
 		})
 	default: // devLoopOutcomeFailed
 		h.logAudit(r, audit.Entry{

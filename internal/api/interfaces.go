@@ -100,7 +100,7 @@ type DevLoopClient interface {
 	// an abandoned DevLoop a new run on the same workflow id, and nothing
 	// else that closed (mctl-api#640).
 	RestartAbandonedDevLoopWorkflow(ctx context.Context, issueURL string) (workflowID, runID string, err error)
-	DevLoopEnded(ctx context.Context, workflowID, runID string) (string, error)
+	DevLoopEnded(ctx context.Context, workflowID, runID string) (temporalclient.DevLoopRunEnd, error)
 	SignalApprove(ctx context.Context, workflowID string, payload map[string]string) error
 	SignalAbandon(ctx context.Context, workflowID, runID string, payload map[string]string) error
 	DescribeDevLoop(ctx context.Context, workflowID string) (status string, err error)

@@ -70,6 +70,7 @@ type fakeDevLoopClient struct {
 	// Restart-after-abandon (mctl-api#640): what DevLoopEnded answers for a
 	// run, or the error it fails with, and every restart.
 	ended         string
+	implemented   bool
 	endedErr      error
 	endedReadRuns []string
 	restartCalls  int
@@ -78,12 +79,12 @@ type fakeDevLoopClient struct {
 	restartedAsWF string
 }
 
-func (f *fakeDevLoopClient) DevLoopEnded(ctx context.Context, workflowID, runID string) (string, error) {
+func (f *fakeDevLoopClient) DevLoopEnded(ctx context.Context, workflowID, runID string) (temporalclient.DevLoopRunEnd, error) {
 	f.endedReadRuns = append(f.endedReadRuns, runID)
 	if f.endedErr != nil {
-		return "", f.endedErr
+		return temporalclient.DevLoopRunEnd{}, f.endedErr
 	}
-	return f.ended, nil
+	return temporalclient.DevLoopRunEnd{Ended: f.ended, Implemented: f.implemented}, nil
 }
 
 func (f *fakeDevLoopClient) RestartAbandonedDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
@@ -952,12 +953,14 @@ func TestGetDevLoopWorkflow_KnownSeparatesAnAnswerFromAFallback(t *testing.T) {
 func TestStartDevLoopWorkflow_RestartOnlyAfterAbandon(t *testing.T) {
 	const wf = "dev-loop-mctlhq-mctl-telegram-1"
 	type marker struct {
-		name  string
-		ended string
-		err   error
+		name        string
+		ended       string
+		implemented bool
+		err         error
 	}
 	markers := []marker{
 		{name: "abandoned", ended: temporalclient.AbandonedEndedPrefix + "superseded by #663"},
+		{name: "abandoned after implement", ended: temporalclient.AbandonedEndedPrefix + "operator cleanup", implemented: true},
 		{name: "other", ended: "approval wait expired"},
 		{name: "absent", ended: ""},
 		{name: "unreadable", err: serviceerror.NewUnavailable("temporal frontend unreachable")},
@@ -970,7 +973,7 @@ func TestStartDevLoopWorkflow_RestartOnlyAfterAbandon(t *testing.T) {
 				fake := &fakeDevLoopClient{
 					describeExec: &temporalclient.DevLoopExecution{Status: status, RunID: "run-old"},
 					workflowID:   wf, runID: "run-start", restartRunID: "run-new",
-					ended: m.ended, endedErr: m.err,
+					ended: m.ended, implemented: m.implemented, endedErr: m.err,
 				}
 				logger := audit.NewLogger()
 				h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}

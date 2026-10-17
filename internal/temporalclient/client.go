@@ -22,6 +22,7 @@ package temporalclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -200,37 +201,46 @@ func (c *Client) startDevLoop(ctx context.Context, issueURL string, reuse enumsp
 // AbandonedEndedPrefix starts DevLoopResult.ended on every path where a run
 // ends because an operator abandoned it: mctl-agents'
 // orchestrator/temporal/workflows/dev_loop.py builds it as
-// f"abandoned: {reason}", with a non-empty fallback reason. Every such path
-// returns before the implement step.
+// f"{ABANDONED_ENDED_PREFIX}{reason}", with a non-empty fallback reason.
+// Keep the two byte-for-byte identical.
 const AbandonedEndedPrefix = "abandoned: "
 
-// devLoopResultEnded is the one field of DevLoopResult that DevLoopEnded
-// reads. A pointer, so a result without the field (recorded before
-// mctl-agents#420 added it) decodes as nil and is told apart from "".
-type devLoopResultEnded struct {
-	Ended *string `json:"ended"`
+// DevLoopRunEnd is what a closed DevLoopWorkflow run's result says about how
+// it ended — the two DevLoopResult fields a restart decision needs.
+type DevLoopRunEnd struct {
+	// Ended is why the run ended, when it ended for a reason other than
+	// running the pipeline to the end ("abandoned: ...", "approval wait
+	// expired", ...). Empty on the full-pipeline path and on results
+	// recorded before mctl-agents#420 added the field.
+	Ended string
+	// Implemented is whether the run reached the implement step: the
+	// result's `implement` is present and not null. An abandon can arrive
+	// during or after implement (the merge watch), so "abandoned" alone does
+	// not mean nothing was done.
+	Implemented bool
 }
 
-// DevLoopEnded reads the `ended` field of a closed DevLoopWorkflow run's
-// result: why the run ended, when it ended for a reason other than running
-// the pipeline to the end ("abandoned: ...", "approval wait expired", ...).
+// devLoopResultEnd decodes only the DevLoopResult fields DevLoopRunEnd
+// carries; Implement stays raw because only its presence matters.
+type devLoopResultEnd struct {
+	Ended     string          `json:"ended"`
+	Implement json.RawMessage `json:"implement"`
+}
+
+// DevLoopEnded reads how a closed DevLoopWorkflow run ended, from its result.
 // runID pins the read to the run the caller described, so a run started in
 // between cannot answer for it.
 //
 // Call it only on a run described as Completed: for any other closed status
-// there is no result, and Get returns the failure instead. A result that
-// carries no `ended` field returns "" and a nil error — the workflow said
-// nothing about why it ended, which is not "abandoned". A failed read or an
-// undecodable result is an error, never "".
-func (c *Client) DevLoopEnded(ctx context.Context, workflowID, runID string) (string, error) {
-	var res devLoopResultEnded
+// there is no result, and Get returns the failure instead. A failed read or
+// an undecodable result is an error, never a zero DevLoopRunEnd.
+func (c *Client) DevLoopEnded(ctx context.Context, workflowID, runID string) (DevLoopRunEnd, error) {
+	var res devLoopResultEnd
 	if err := c.temporal.GetWorkflow(ctx, workflowID, runID).Get(ctx, &res); err != nil {
-		return "", fmt.Errorf("temporalclient: read result of %s run %s: %w", workflowID, runID, err)
+		return DevLoopRunEnd{}, fmt.Errorf("temporalclient: read result of %s run %s: %w", workflowID, runID, err)
 	}
-	if res.Ended == nil {
-		return "", nil
-	}
-	return *res.Ended, nil
+	implemented := len(res.Implement) > 0 && string(res.Implement) != "null"
+	return DevLoopRunEnd{Ended: res.Ended, Implemented: implemented}, nil
 }
 
 // SignalApprove signals an already-running DevLoopWorkflow's approve

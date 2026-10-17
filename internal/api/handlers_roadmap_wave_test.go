@@ -118,8 +118,8 @@ func (f *waveDevLoop) StartDevLoopWorkflow(ctx context.Context, issueURL string)
 // Every closed wave item reads as abandoned, so a wave that consulted the
 // marker would restart it; the wave route must not (mctl-api#640), and
 // restarted records any attempt.
-func (f *waveDevLoop) DevLoopEnded(ctx context.Context, workflowID, runID string) (string, error) {
-	return temporalclient.AbandonedEndedPrefix + "test", nil
+func (f *waveDevLoop) DevLoopEnded(ctx context.Context, workflowID, runID string) (temporalclient.DevLoopRunEnd, error) {
+	return temporalclient.DevLoopRunEnd{Ended: temporalclient.AbandonedEndedPrefix + "test"}, nil
 }
 
 func (f *waveDevLoop) RestartAbandonedDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
