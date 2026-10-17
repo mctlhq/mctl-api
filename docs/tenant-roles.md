@@ -64,5 +64,7 @@ principal it names.
 ## Repo sync and the portal
 
 mctl-api requires `developer` for `POST /repos/sync`. The portal plugin
-(`/api/github-app-connect/repos/sync`) still allows `viewer`; a companion
-portal issue to raise it to `developer` must be opened and linked here.
+(`/api/github-app-connect/repos/sync`) still allows `viewer`; raising it to
+`developer` is tracked in
+[mctl-portal#184](https://github.com/mctlhq/mctl-portal/issues/184). Until
+then a portal `viewer` is refused by mctl-api, not by the portal.

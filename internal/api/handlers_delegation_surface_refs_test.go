@@ -338,7 +338,7 @@ func (p ownerPrincipals) ResolvePrincipal(_ context.Context, id auth.Identity) (
 func TestDelegatedSurfaceRef_BindsByPrincipalNotLogin(t *testing.T) {
 	// alice's GitHub login belongs to the ZITADEL human's principal: a
 	// principal with no single live GitHub identity signs in ZITADEL-only.
-	e := newSIDEnvWith(t, ownerPrincipals{"alice": {pid: "prn_ZED"}, "bob": {pid: "prn_BOB"}})
+	e := newSIDEnvOpts(t, ownerPrincipals{"alice": {pid: "prn_ZED"}, "bob": {pid: "prn_BOB"}}, developerByPrincipal("prn_ZED", "prn_BOB"))
 	e.link("alice", "telegram", "4242")
 	e.link("bob", "telegram", "5555")
 	_, created := e.relayCreate("telegram", "4242", nil)
@@ -367,15 +367,38 @@ func TestDelegatedSurfaceRef_BindsByPrincipalNotLogin(t *testing.T) {
 	if code, body := bind("as-other-alice", "4242"); code != http.StatusForbidden || body["code"] != delegationCodeNotBound {
 		t.Errorf("same login, another principal = %d %v, want 403 %s", code, body, delegationCodeNotBound)
 	}
-	// No resolved principal is a refusal, never a match on the login.
-	if code, body := bind("as-unresolved", "4242"); code != http.StatusForbidden || body["code"] != delegationCodeUnresolved {
-		t.Errorf("subject without a principal = %d %v, want 403 %s", code, body, delegationCodeUnresolved)
+	// No resolved principal is a refusal, never a match on the login. In
+	// principal mode the tenant-role gate (mctl-api#489) refuses it first:
+	// a role cannot be read for a human with no principal.
+	if code, body := bind("as-unresolved", "4242"); code != http.StatusServiceUnavailable || body["code"] != wiCodeRoleUnavailable {
+		t.Errorf("subject without a principal = %d %v, want 503 %s", code, body, wiCodeRoleUnavailable)
 	}
 	if n := e.surfaceRefRows(id, "5555"); n != 0 {
 		t.Errorf("a refused binding wrote %d rows", n)
 	}
 	if n := e.surfaceRefRows(id, "4242"); n != 1 {
 		t.Errorf("rows for 4242 = %d, want zed's binding only", n)
+	}
+}
+
+// In the login-keyed rollback modes the role gate passes a delegated
+// subject with no principal on its GitHub login, and the binding still
+// refuses it: no resolved principal is never a match on the login.
+func TestDelegatedSurfaceRef_UnresolvedSubjectRefusedInLegacyMode(t *testing.T) {
+	e := newSIDEnvWith(t, ownerPrincipals{"alice": {pid: "prn_ALICE"}})
+	e.link("alice", "telegram", "4242")
+	_, created := e.relayCreate("telegram", "4242", nil)
+	id := created["work_item"].(map[string]any)["id"].(string)
+	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: id})
+	e.users["as-unresolved"] = auth.NewDelegatedUser("alice", []string{e.tenant}, agent)
+	code, body := e.do("as-unresolved", "POST", "/api/v1/work-items/"+id+"/surface-refs", map[string]any{
+		"surface": "telegram", "external_id": "chat-u", "actor_external_id": "4242",
+	})
+	if code != http.StatusForbidden || body["code"] != delegationCodeUnresolved {
+		t.Fatalf("subject without a principal = %d %v, want 403 %s", code, body, delegationCodeUnresolved)
+	}
+	if n := e.surfaceRefRows(id, "4242"); n != 0 {
+		t.Fatalf("a refused binding wrote %d rows", n)
 	}
 }
 
@@ -400,18 +423,21 @@ func TestDelegatedSurfaceRef_OwnerLookupFailsClosed(t *testing.T) {
 		"store not configured":   {noStore: true, wantCode: http.StatusServiceUnavailable, wantErr: delegationCodeUnavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
-			// alice resolves normally while the relay creates the item; the
-			// answer under test applies to the binding's owner lookup only.
-			owners := ownerPrincipals{"alice": {pid: "prn_ALICE"}}
+			// The item is a platform admin's, so creating it needs no
+			// principal store; the answer under test applies to the
+			// binding's owner lookup only.
+			owners := ownerPrincipals{"alice": tt.answer}
 			var pr auth.PrincipalResolver = owners
 			if tt.noStore {
 				pr = nil
 			}
-			e := newSIDEnvWith(t, pr)
+			e := newSIDEnvOpts(t, pr, developerByPrincipal())
 			e.link("alice", "telegram", "4242")
-			_, created := e.relayCreate("telegram", "4242", nil)
+			code, created := e.do("root", "POST", "/api/v1/work-items", map[string]any{"tenant": e.tenant, "title": "t"})
+			if code != http.StatusCreated {
+				t.Fatalf("create = %d %v", code, created)
+			}
 			id := created["work_item"].(map[string]any)["id"].(string)
-			owners["alice"] = tt.answer
 			agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: id})
 			e.users["as-zed"] = auth.NewDelegatedPrincipalUser("zed@example.com", "prn_ZED", false, []string{e.tenant}, agent)
 			code, body := e.do("as-zed", "POST", "/api/v1/work-items/"+id+"/surface-refs", map[string]any{

@@ -55,10 +55,8 @@ func newZedEnvWith(t *testing.T, noChecker bool) (*sidEnv, *relayPrincipals) {
 	}
 	var authz *auth.PrincipalAuthz
 	e := newSIDEnvOpts(t, store, func(o *Options) {
-		o.TenantAuthzMode = TenantAuthzPrincipal
-		tenant := o.TenantResolver.(sidTenants)["carol"][0]
-		authz = &auth.PrincipalAuthz{Members: tenantsByPrincipal{zedPRN: {tenant}, "prn_ALICE": {tenant}}}
-		o.PrincipalAuthz = authz
+		developerByPrincipal(zedPRN, "prn_ALICE")(o)
+		authz = o.PrincipalAuthz
 	})
 	zed := auth.NewFederatedUser("zitadel", "https://auth.mctl.ai", "330001", "zed@example.com", auth.KindHuman)
 	// As auth.Middleware does.

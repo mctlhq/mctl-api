@@ -3,6 +3,8 @@ package api
 import (
 	"strings"
 	"sync/atomic"
+
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 // stubRoles is a GitReader that answers MemberRoles only: every other
@@ -60,4 +62,26 @@ type ownerEverywhere struct{ GitReader }
 
 func (ownerEverywhere) MemberRoles(_, _ string) ([][]string, error) {
 	return [][]string{{"owner"}}, nil
+}
+
+// developerByPrincipal is a router option for the surface identity
+// harness: it runs the router in principal mode, the live mode, with each
+// of prns a member of the harness tenant and every principal a developer
+// of it, for tests whose subject is not the tenant-role decision. A
+// delegated or ZITADEL-only subject has no GitHub login, so the login-keyed
+// rollback modes would refuse it a role.
+func developerByPrincipal(prns ...string) func(*Options) {
+	return func(o *Options) {
+		o.TenantAuthzMode = TenantAuthzPrincipal
+		tenant := o.TenantResolver.(sidTenants)["carol"][0]
+		members := tenantsByPrincipal{}
+		for _, prn := range prns {
+			members[prn] = []string{tenant}
+		}
+		o.PrincipalAuthz = &auth.PrincipalAuthz{Members: members}
+		o.PrincipalMembership = &stubPrincipalMembership{
+			namespaces: []string{tenant},
+			roles:      map[string][][]string{tenant: {{"developer"}}},
+		}
+	}
 }
