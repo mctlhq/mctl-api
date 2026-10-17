@@ -44,6 +44,7 @@ func newStoreForTest(t *testing.T) *Store {
 	}
 	wipe := func() {
 		for _, q := range []string{
+			"DELETE FROM customer_deletions",
 			"DELETE FROM external_identities",
 			"DELETE FROM principals",
 			// The surface tables exist once any test built a surface store.

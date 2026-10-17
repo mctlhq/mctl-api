@@ -546,6 +546,8 @@ var builtinOperations = []Operation{
 		},
 		Parameters: []ParameterDef{
 			{Name: "tenant_name", Type: "string", Required: true, Description: "Workspace name to delete", Pattern: "^[a-z0-9][a-z0-9-]{1,62}$"},
+			{Name: "delete_customer_account", Type: "string", Required: false, Default: "false", Enum: []string{"true", "false"}, Description: "Also delete the exclusive customer owner account; direct human admin only"},
+			{Name: "customer_principal_id", Type: "string", Required: false, Description: "Exact customer owner principal for complete account deletion", Pattern: "^prn_[0-9A-HJKMNP-TV-Z]{26}$"},
 		},
 	},
 	{

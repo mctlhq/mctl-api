@@ -146,12 +146,18 @@ func (c *Client) ListApps(project string) ([]AppStatus, error) {
 			} `json:"status"`
 		} `json:"items"`
 	}
+	if err := validateListEnvelope(body); err != nil {
+		return nil, err
+	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("parsing argocd list response: %w", err)
 	}
 
 	apps := make([]AppStatus, 0, len(raw.Items))
 	for _, item := range raw.Items {
+		if item.Metadata.Name == "" {
+			return nil, fmt.Errorf("parsing argocd list response: missing metadata.name")
+		}
 		updatedAt, _ := time.Parse(time.RFC3339, item.Status.ReconciledAt)
 		apps = append(apps, AppStatus{
 			Name:       item.Metadata.Name,
@@ -234,6 +240,9 @@ func (c *Client) ListWorkloads() ([]Workload, error) {
 				} `json:"summary"`
 			} `json:"status"`
 		} `json:"items"`
+	}
+	if err := validateListEnvelope(body); err != nil {
+		return nil, err
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("parsing argocd list response: %w", err)
@@ -342,4 +351,17 @@ func (c *Client) doGet(url string) ([]byte, error) {
 	}
 
 	return body, nil
+}
+
+// validateListEnvelope requires an observed array, including for an empty list.
+func validateListEnvelope(body []byte) error {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return fmt.Errorf("parsing argocd list response: %w", err)
+	}
+	items := strings.TrimSpace(string(envelope["items"]))
+	if !strings.HasPrefix(items, "[") {
+		return fmt.Errorf("parsing argocd list response: missing items array")
+	}
+	return nil
 }

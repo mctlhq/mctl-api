@@ -126,6 +126,10 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("principals: create schema: %w", err)
 	}
+	if _, err := pool.Exec(ctx, customerDeletionSchema); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("customer deletion schema: %w", err)
+	}
 	slog.Info("principal store initialized")
 	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
 }

@@ -1095,6 +1095,9 @@ func (s *Server) toolDeleteTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 
 Retires all services in the workspace first, then removes the Kubernetes namespace,
 ArgoCD RBAC, and Vault policy.
+With delete_customer_account="true" and the exact customer_principal_id, also
+delete the exclusive customer owner identity, sessions and private portal data.
+This option requires a direct human platform administrator and refuses other memberships.
 This action is irreversible.
 
 Confirm the tenant name carefully before calling this tool.
@@ -1103,6 +1106,8 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			mcplib.Required(),
 			mcplib.Description("Workspace name to delete"),
 		),
+		mcplib.WithString("delete_customer_account", mcplib.Enum("true", "false"), mcplib.Description("Explicitly include customer account deletion (default false); confirm this scope with the user.")),
+		mcplib.WithString("customer_principal_id", mcplib.Description("Exact principal ID of the exclusive customer owner; required for complete account deletion.")),
 		mcplib.WithString("confirm",
 			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
 		),
@@ -1110,7 +1115,11 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		args := req.GetArguments()
-		if r := requireConfirm(args, fmt.Sprintf("delete workspace %q and all its services", args["tenant_name"])); r != nil {
+		scope := fmt.Sprintf("delete workspace %q and all its services", args["tenant_name"])
+		if args["delete_customer_account"] == "true" {
+			scope += fmt.Sprintf(" AND customer account %q, its identity, sessions and private portal data", args["customer_principal_id"])
+		}
+		if r := requireConfirm(args, scope); r != nil {
 			return r, nil
 		}
 		params := extractStringParams(args)

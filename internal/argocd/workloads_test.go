@@ -104,3 +104,19 @@ func TestListWorkloads_FailedReadIsAnError(t *testing.T) {
 		})
 	}
 }
+
+func TestApplicationListsRequireObservedArray(t *testing.T) {
+	for _, body := range []string{`{}`, `null`, `{"items":null}`, `{"items":{}}`, `{"items":[{}]}`, `{"items":[]}`} {
+		t.Run(body, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+			defer srv.Close()
+			c := NewClient(srv.URL, "token")
+			_, appsErr := c.ListApps("")
+			_, workloadsErr := c.ListWorkloads()
+			valid := body == `{"items":[]}`
+			if (appsErr == nil) != valid || (workloadsErr == nil) != valid {
+				t.Fatalf("valid=%v apps=%v workloads=%v", valid, appsErr, workloadsErr)
+			}
+		})
+	}
+}

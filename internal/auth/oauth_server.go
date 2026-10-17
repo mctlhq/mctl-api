@@ -135,6 +135,10 @@ type staleSyncSource interface {
 // It acts as a public-client OAuth server backed by GitHub for user authentication.
 // Access tokens are short-lived JWTs signed with HMAC-SHA256.
 type OAuthServer struct {
+	// TokenPrincipalChecker refuses a disabled/deleted principal at mint time,
+	// including pending authorization codes approved before account deletion.
+	TokenPrincipalChecker PrincipalChecker
+
 	// newClientID overrides the random id source for dynamic registrations.
 	// Nil in production; tests set it to force a collision with a static id.
 	newClientID func() string
@@ -1343,6 +1347,9 @@ type pendingRecord struct {
 // refused here, at sign-in, rather than by IssueJWT once the code has been
 // spent at the token endpoint.
 func (s *OAuthServer) IssueCode(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string) (string, error) {
+	if err := s.checkMintPrincipal(principalID); err != nil {
+		return "", err
+	}
 	if principalID != "" && !ValidPrincipalID(principalID) {
 		return "", fmt.Errorf("malformed principal id %q", principalID)
 	}
@@ -1448,10 +1455,25 @@ func (s *OAuthServer) ExchangeCode(ctx context.Context, code, codeVerifier, clie
 	return accessToken, refreshToken, nil
 }
 
+func (s *OAuthServer) checkMintPrincipal(pid string) error {
+	if s.TokenPrincipalChecker == nil || pid == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := s.TokenPrincipalChecker.CheckPrincipal(ctx, pid); err != nil {
+		return fmt.Errorf("token principal may not issue credentials: %w", err)
+	}
+	return nil
+}
+
 // IssueJWT creates a signed JWT access token for the given user. principalID
 // becomes the pid claim; with no login, the token is for a principal with
 // no GitHub login and its subject is the principal id.
 func (s *OAuthServer) IssueJWT(login, principalID string, groups []string) (string, error) {
+	if err := s.checkMintPrincipal(principalID); err != nil {
+		return "", err
+	}
 	if principalID != "" && !ValidPrincipalID(principalID) {
 		return "", fmt.Errorf("issue token: %q is not a principal id", principalID)
 	}
@@ -1480,6 +1502,9 @@ func (s *OAuthServer) IssueJWT(login, principalID string, groups []string) (stri
 
 // IssueRefreshToken creates and stores a refresh token for the given user and client.
 func (s *OAuthServer) IssueRefreshToken(login, principalID string, groups []string, clientID string) (string, error) {
+	if err := s.checkMintPrincipal(principalID); err != nil {
+		return "", err
+	}
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate refresh token: %w", err)

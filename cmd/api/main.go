@@ -320,6 +320,10 @@ func main() {
 		}
 	}
 
+	if oauthServer != nil && principalCache != nil {
+		oauthServer.TokenPrincipalChecker = principalCache
+	}
+
 	// Federation registry (mctl-api#374, slice A): the static-secret
 	// providers, the local-OAuth provider, the GitHub PAT provider, any
 	// explicit MCTL_OIDC_PROVIDERS entries, and the legacy Dex shim (unless
@@ -918,6 +922,7 @@ func main() {
 
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Registry:                       registry,
+		CustomerDeletion:               customerDeletionOptions(cfg, principalStore, principalCache, oauthServer, quotaReader, argoClient),
 		GitReader:                      gitReader,
 		ComponentSourceRepos:           gitReader,
 		ArgoCD:                         argoClient,
@@ -974,7 +979,7 @@ func main() {
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
 		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,
 		GitHubWebhookOwners:            cfg.GitHubWebhookOwners,
-		ZitadelHook:                    zitadelHookOptions(cfg, gitReader),
+		ZitadelHook:                    zitadelHookOptions(cfg, gitReader, customerDeletionPending(principalStore)),
 		GitHubEventOutbox:              githubEventOutboxOption(githubEventOutbox),
 		GitHubEventNotify:              githubEventNotify(githubEventRelay),
 		OAuthRegistrationToken:         cfg.OAuthRegistrationToken,

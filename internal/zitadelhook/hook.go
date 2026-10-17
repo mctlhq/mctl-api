@@ -158,6 +158,8 @@ type Config struct {
 	// nobody, so creation is closed until it is listed; exactly "*" allows
 	// anyone (the public cutover). Existing accounts sign in regardless.
 	CustomerCreateGitHubIDs []string
+	// CreationPending refuses re-registration until a durable deletion completes.
+	CreationPending func(context.Context, string) (bool, error)
 	// GitHubAPIURL overrides https://api.github.com (tests only).
 	GitHubAPIURL string
 }
@@ -386,6 +388,15 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 	if existingUserID == "" {
 		if !h.mayCreate(info.UserID) {
 			return refuse(http.StatusForbidden, "intent_customer_create_not_allowed:"+info.UserID, msgCreateNotAllowed)
+		}
+		if h.cfg.CreationPending != nil {
+			pending, err := h.cfg.CreationPending(ctx, info.UserID)
+			if err != nil {
+				return failure("intent_deletion_unreadable")
+			}
+			if pending {
+				return refuse(http.StatusForbidden, "intent_deletion_in_progress", msgNotAllowed)
+			}
 		}
 		reserved, rErr := h.loginReservedAtCreation(login)
 		if rErr != nil {
@@ -619,14 +630,14 @@ type metadataJSON struct {
 }
 
 // CreateGate handles the request execution on every user-creating method.
-func (h *Hook) CreateGate(_ context.Context, body []byte) Result {
+func (h *Hook) CreateGate(ctx context.Context, body []byte) Result {
 	var p requestPayload
 	if err := json.Unmarshal(body, &p); err != nil || len(p.Request) == 0 {
 		return failure("gate_unparsable")
 	}
 	switch p.FullMethod {
 	case MethodV2CreateUser:
-		return h.gateCreateUser(p)
+		return h.gateCreateUser(ctx, p)
 	case MethodV2AddHumanUser, MethodV2BetaAddHumanUser, MethodV3AlphaCreateUser,
 		MethodMgmtAddHumanUser, MethodMgmtImportHumanUser, MethodMgmtAddMachineUser,
 		MethodAdminImportData,
@@ -725,7 +736,7 @@ func containsOrgDomain(v any) bool {
 	return false
 }
 
-func (h *Hook) gateCreateUser(p requestPayload) Result {
+func (h *Hook) gateCreateUser(ctx context.Context, p requestPayload) Result {
 	var req createUserRequest
 	if err := json.Unmarshal(p.Request, &req); err != nil {
 		return failure("gate_unparsable_request")
@@ -803,6 +814,15 @@ func (h *Hook) gateCreateUser(p requestPayload) Result {
 	// reserved check, as in Intent: it needs no I/O.
 	if !h.mayCreate(link.UserID) {
 		return refuse(http.StatusForbidden, "gate_customer_create_not_allowed:"+link.UserID, msgCreateNotAllowed)
+	}
+	if h.cfg.CreationPending != nil {
+		pending, err := h.cfg.CreationPending(ctx, link.UserID)
+		if err != nil {
+			return failure("gate_deletion_unreadable")
+		}
+		if pending {
+			return no("gate_deletion_in_progress")
+		}
 	}
 	reserved, err := h.loginReservedAtCreation(link.UserName)
 	if err != nil {
