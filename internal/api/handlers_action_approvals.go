@@ -153,6 +153,12 @@ func (h *Handlers) auditActionApproval(r *http.Request, user *auth.User, op stri
 	if a.WorkItemID != "" {
 		params["work_item_id"] = a.WorkItemID
 	}
+	// The bound artifact -- for a DevLoop approval the proposal content
+	// digest (mctl-agents#681) -- so what was decided is answerable from the
+	// audit alone.
+	if a.ArtifactHash != "" {
+		params["artifact_hash"] = a.ArtifactHash
+	}
 	if a.DecidedBy != "" {
 		params["decided_by"] = a.DecidedBy
 	}
