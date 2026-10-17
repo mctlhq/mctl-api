@@ -181,6 +181,9 @@ func (h *Handlers) CreateExecutionRequest(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	if !h.requireWorkItemRole(w, r, user, item.Tenant, workItemExecutionRole, "execution-request") {
+		return
+	}
 	if !refuseExecutionIdentity(w, r) {
 		return
 	}
@@ -246,6 +249,9 @@ func (h *Handlers) GetExecutionRequest(w http.ResponseWriter, r *http.Request) {
 
 // executionPlatform admits the service principal acting directly, and
 // refuses (and audits) everyone else.
+// Claim, fulfil and reject (and snapshot sealing) carry no tenant role gate
+// (mctl-api#489): they admit the service principal only, which is stricter
+// than developer.
 func (h *Handlers) executionPlatform(w http.ResponseWriter, r *http.Request, op string) (*auth.User, bool) {
 	user, ok := h.workItemsUser(w, r)
 	if !ok {
