@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.96.0](https://github.com/mctlhq/mctl-api/compare/4.95.0...4.96.0) (2026-10-17)
+
+
+### Features
+
+* **operations:** declare the investigate owner principal param ([9b33b41](https://github.com/mctlhq/mctl-api/commit/9b33b4128fec8c4b54a1e8cf704bd41098b34632))
+* **operations:** declare the investigate owner principal param ([a1a25f2](https://github.com/mctlhq/mctl-api/commit/a1a25f20b297e8a127ea83a49bfa16d65d37f4bb))
+
 ## [4.95.0](https://github.com/mctlhq/mctl-api/compare/4.94.1...4.95.0) (2026-10-17)
 
 
