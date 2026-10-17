@@ -28,7 +28,12 @@ import (
 	"github.com/mctlhq/mctl-api/internal/principals"
 )
 
-func customerDeletionPending(store *principals.Store) func(context.Context, string) (bool, error) {
+func customerDeletionPending(store *principals.Store, required bool) func(context.Context, string) (bool, error) {
+	// A deployment with principals deliberately disabled/unconfigured has no
+	// lifecycle feature. An attempted but failed store read remains unknown.
+	if store == nil && !required {
+		return nil
+	}
 	return func(ctx context.Context, id string) (bool, error) {
 		if store == nil {
 			return false, errors.New("customer deletion store unavailable")
@@ -41,10 +46,15 @@ func customerDeletionOptions(cfg config, store *principals.Store, cache *princip
 	if os.Getenv("CUSTOMER_DELETION_ENABLED") != "true" {
 		return nil
 	}
+	provider, err := cfg.oauthZitadelProvider()
+	if err != nil {
+		slog.Error("complete customer deletion unavailable: ZITADEL provider configuration invalid")
+		return nil
+	}
 	p := &customerdelete.Providers{
-		Issuer: "https://auth.mctl.ai", CustomerOrg: cfg.ZitadelHook.CustomersOrgID, GitHubIDP: cfg.ZitadelHook.GitHubIdPID,
+		Issuer: provider.Issuer, CustomerOrg: cfg.ZitadelHook.CustomersOrgID, GitHubIDP: cfg.ZitadelHook.GitHubIdPID,
 		ClientID: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_CLIENT_ID"), ClientSecret: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_CLIENT_SECRET"),
-		SiteBase: "https://mctl.ai", SessionAudience: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_PROJECT_ID"),
+		SiteBase: envOr("CUSTOMER_DELETION_SITE_URL", "https://mctl.ai"), SessionAudience: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_PROJECT_ID"),
 		PortalBase: cfg.BackstageInternalURL, PortalToken: os.Getenv("BACKSTAGE_TOKEN"),
 	}
 	namespaces, ok := quota.(interface {

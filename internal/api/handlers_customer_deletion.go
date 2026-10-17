@@ -179,7 +179,7 @@ func (h *Handlers) prepareCustomerAccountDeletion(w http.ResponseWriter, r *http
 // delegated-human route. The target comes from the frozen approval manifest.
 func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
-	if u == nil || !u.IsService() {
+	if u == nil || !isDirectService(u) {
 		writeError(w, 403, "platform workflow principal required")
 		return
 	}

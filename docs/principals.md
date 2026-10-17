@@ -863,3 +863,31 @@ Each entry gets a `status`: `keyed` and `propose` are fine; `unresolved`
 never compared; retry) and `invalid` block. An unreadable tenant or a tenant key error also blocks.
 `complete` is true only with zero blockers; the output then becomes a
 human-reviewed mctl-gitops PR adding the keys.
+
+### Complete customer-account deletion
+
+`mctl_delete_tenant` preserves workspace-only deletion by default. A direct
+human platform administrator may explicitly set `delete_customer_account=true`
+and provide the exact `customer_principal_id`. The customer must be the sole
+principal-keyed owner with no other tenant/team membership. The API freezes an
+immutable manifest before any GitOps removal; callbacks cannot choose a fresh
+subject by display login. Failed observations remain retryable errors.
+
+`CUSTOMER_DELETION_ENABLED=true` requires the lifecycle machine credentials,
+configured ZITADEL provider, portal cleanup endpoints and pinned Worker identity.
+`CUSTOMER_DELETION_SITE_URL` overrides the production website default for other
+environments. Ordinary workspace deletion remains available without this flag.
+The workflow disables credentials, removes resources, deletes the customer IdP
+user and application sessions, purges active identity data, and releases the
+portal name only after all postconditions pass. Historical audit and the
+revocation manifest remain for safe retries and old-subject refusal.
+
+Revocation intentionally adds an uncached indexed tombstone lookup to principal
+authentication and credential minting. A warm API replica must refuse a deletion
+begun by another replica immediately; a negative TTL cache would allow deleted
+credentials for its lifetime. A configured-but-unavailable store therefore
+fails authentication closed. Deployments that deliberately disable principals
+or have no principal database retain the pre-existing signup behavior while
+full deletion is disabled. Measure these indexed reads before replacing this
+contract with a distributed invalidation mechanism; do not silently add a
+negative-cache grace period.

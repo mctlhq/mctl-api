@@ -64,7 +64,7 @@ func (p *Providers) request(ctx context.Context, method, path, token, contentTyp
 
 func (p *Providers) zitadelToken(ctx context.Context) (string, error) {
 	form := url.Values{"grant_type": {"client_credentials"}, "scope": {"urn:zitadel:iam:org:project:id:zitadel:aud urn:zitadel:iam:org:project:id:" + p.SessionAudience + ":aud"}}
-	status, data, err := p.request(ctx, "POST", p.Issuer+"/oauth/v2/token", "Basic "+base64.StdEncoding.EncodeToString([]byte(p.ClientID+":"+p.ClientSecret)), "application/x-www-form-urlencoded", []byte(form.Encode()))
+	status, data, err := p.request(ctx, "POST", strings.TrimRight(p.Issuer, "/")+"/oauth/v2/token", "Basic "+base64.StdEncoding.EncodeToString([]byte(p.ClientID+":"+p.ClientSecret)), "application/x-www-form-urlencoded", []byte(form.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -81,7 +81,7 @@ func (p *Providers) zitadelToken(ctx context.Context) (string, error) {
 }
 
 func (p *Providers) verifyCustomer(ctx context.Context, d *principals.CustomerDeletion, token string, allowAbsent bool) (bool, error) {
-	status, data, err := p.request(ctx, "GET", p.Issuer+"/v2/users/"+url.PathEscape(d.Subject), token, "", nil)
+	status, data, err := p.request(ctx, "GET", strings.TrimRight(p.Issuer, "/")+"/v2/users/"+url.PathEscape(d.Subject), token, "", nil)
 	if err != nil {
 		return false, err
 	}
@@ -107,7 +107,7 @@ func (p *Providers) verifyCustomer(ctx context.Context, d *principals.CustomerDe
 	if user.User.ID != d.Subject || user.User.Details.Owner != p.CustomerOrg || len(user.User.Human) == 0 || string(user.User.Human) == "null" {
 		return false, fmt.Errorf("target is not a human in the customer organization")
 	}
-	status, data, err = p.request(ctx, "POST", p.Issuer+"/v2/users/"+url.PathEscape(d.Subject)+"/links/_search", token, "application/json", []byte(`{"query":{"limit":2}}`))
+	status, data, err = p.request(ctx, "POST", strings.TrimRight(p.Issuer, "/")+"/v2/users/"+url.PathEscape(d.Subject)+"/links/_search", token, "application/json", []byte(`{"query":{"limit":2}}`))
 	if err != nil {
 		return false, err
 	}
@@ -153,7 +153,7 @@ func (p *Providers) DeleteCustomer(ctx context.Context, d *principals.CustomerDe
 	if !present {
 		return nil
 	}
-	path := p.Issuer + "/v2/users/" + url.PathEscape(d.Subject)
+	path := strings.TrimRight(p.Issuer, "/") + "/v2/users/" + url.PathEscape(d.Subject)
 	status, _, err := p.request(ctx, "DELETE", path, token, "", nil)
 	if err != nil {
 		return err

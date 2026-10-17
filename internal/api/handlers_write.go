@@ -422,6 +422,10 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if opName == "delete-tenant" && !h.prepareCustomerAccountDeletion(w, r, input) {
+		return
+	}
+
 	// Spend the grant last, after every check that could still refuse, so
 	// a refused request leaves the approval usable.
 	if grantAuthorized {
@@ -432,10 +436,6 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		// R8: input["approver"] is the grant's decider, set and validated
 		// with the rest of the input (prepareApprovalGrant).
 		approvalGrantAuditParams(auditParams, user, consumed)
-	}
-
-	if opName == "delete-tenant" && !h.prepareCustomerAccountDeletion(w, r, input) {
-		return
 	}
 
 	// Submit the Argo Workflow in the team's namespace (team-{name}).

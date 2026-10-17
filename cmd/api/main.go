@@ -979,7 +979,7 @@ func main() {
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
 		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,
 		GitHubWebhookOwners:            cfg.GitHubWebhookOwners,
-		ZitadelHook:                    zitadelHookOptions(cfg, gitReader, customerDeletionPending(principalStore)),
+		ZitadelHook:                    zitadelHookOptions(cfg, gitReader, customerDeletionPending(principalStore, (cfg.PrincipalDBConfigured && !cfg.PrincipalsDisabled) || os.Getenv("CUSTOMER_DELETION_ENABLED") == "true")),
 		GitHubEventOutbox:              githubEventOutboxOption(githubEventOutbox),
 		GitHubEventNotify:              githubEventNotify(githubEventRelay),
 		OAuthRegistrationToken:         cfg.OAuthRegistrationToken,
