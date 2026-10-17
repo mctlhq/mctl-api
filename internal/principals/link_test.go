@@ -334,6 +334,136 @@ func TestMergePrincipalsIsSafeToRetryAndRefusesADisabledSource(t *testing.T) {
 	}
 }
 
+// The orphan case (mctlhq/mctl-api#377): a principal whose only identity is
+// a removed ZITADEL user. Disabling it refuses that identity everywhere,
+// keeps it bound, and a retry changes nothing.
+func TestDisablePrincipalRefusesItsIdentitiesAndIsSafeToRetry(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	r := NewResolver(s, nil, false)
+	q, _ := s.Provision(ctx, zitadel("z-orphan", "orphan"))
+	if got, err := r.ResolvePrincipal(ctx, zitadel("z-orphan", "orphan")); err != nil || got != q.ID {
+		t.Fatalf("before disable = %q, %v", got, err)
+	}
+	res, err := s.DisablePrincipal(ctx, q.ID, nil)
+	if err != nil || res.AlreadyDisabled || res.LiveIdentities != 1 {
+		t.Fatalf("disable = %+v, %v; want disabled now with 1 live identity", res, err)
+	}
+	if got, _ := s.Get(ctx, q.ID); got == nil || got.Status != StatusDisabled {
+		t.Fatalf("principal after disable = %+v", got)
+	}
+	r.Forget(q.ID)
+	if _, err := r.ResolvePrincipal(ctx, zitadel("z-orphan", "orphan")); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("resolve after disable err = %v, want ErrPrincipalDisabled", err)
+	}
+	// The identity stays bound: its next sign-in does not provision a
+	// fresh, active principal.
+	if got, err := s.Provision(ctx, zitadel("z-orphan", "orphan")); err != nil || got.ID != q.ID || got.Status != StatusDisabled {
+		t.Fatalf("provision after disable = %+v, %v; want the disabled %s", got, err, q.ID)
+	}
+	if ids, _ := s.Identities(ctx, q.ID); len(ids) != 1 || ids[0].RevokedAt != nil {
+		t.Fatalf("identities after disable = %+v, want the one, still live", ids)
+	}
+	res, err = s.DisablePrincipal(ctx, q.ID, nil)
+	if err != nil || !res.AlreadyDisabled || res.LiveIdentities != 1 {
+		t.Fatalf("retry = %+v, %v; want already disabled", res, err)
+	}
+	// Still disabled with a live identity, so a merge from it is refused as
+	// disabled, not answered as already merged.
+	p, _ := s.Provision(ctx, github(1, "alice"))
+	if _, err := s.MergePrincipals(ctx, q.ID, p.ID); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("merge from a disabled principal err = %v, want ErrPrincipalDisabled", err)
+	}
+}
+
+func TestDisablePrincipalRefusesNonHumansAndUnknowns(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	agent, err := s.Provision(ctx, auth.Identity{Provider: auth.ProviderAgent, Subject: "agent:d", Kind: auth.KindAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DisablePrincipal(ctx, agent.ID, nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("agent disable err = %v, want ErrInvalid", err)
+	}
+	if got, _ := s.Get(ctx, agent.ID); got == nil || got.Status != StatusActive {
+		t.Fatalf("a refused disable changed the agent: %+v", got)
+	}
+	if _, err := s.DisablePrincipal(ctx, "prn_01M51RRWSHH3VR3W4RTYY9238K", nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown principal err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.DisablePrincipal(ctx, "", nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty id err = %v, want ErrInvalid", err)
+	}
+}
+
+// The last active ADMIN_PRINCIPALS principal is never disabled; an admin
+// that is disabled, not human, or does not exist does not count as another.
+func TestDisablePrincipalKeepsTheLastAdmin(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	a, _ := s.Provision(ctx, github(1, "alice"))
+	b, _ := s.Provision(ctx, github(2, "bob"))
+	agent, _ := s.Provision(ctx, auth.Identity{Provider: auth.ProviderAgent, Subject: "agent:admin", Kind: auth.KindAgent})
+	if err := s.SetStatus(ctx, b.ID, StatusDisabled); err != nil {
+		t.Fatal(err)
+	}
+	admins := []string{a.ID, b.ID, agent.ID, "prn_01M51RRWSHH3VR3W4RTYY9238K", ""}
+	if _, err := s.DisablePrincipal(ctx, a.ID, admins); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("last admin disable err = %v, want ErrLastAdmin", err)
+	}
+	if got, _ := s.Get(ctx, a.ID); got == nil || got.Status != StatusActive {
+		t.Fatalf("a refused disable changed the last admin: %+v", got)
+	}
+	if err := s.SetStatus(ctx, b.ID, StatusActive); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := s.DisablePrincipal(ctx, a.ID, admins); err != nil || res.AlreadyDisabled {
+		t.Fatalf("disable with another active admin = %+v, %v", res, err)
+	}
+	// Now b is the last one, and a retry on a stays a no-op.
+	if _, err := s.DisablePrincipal(ctx, b.ID, admins); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("disable of the remaining admin err = %v, want ErrLastAdmin", err)
+	}
+	if res, err := s.DisablePrincipal(ctx, a.ID, admins); err != nil || !res.AlreadyDisabled {
+		t.Fatalf("retry on a disabled admin = %+v, %v", res, err)
+	}
+}
+
+// Two admins disabling each other at once: at most one succeeds, so at
+// least one admin principal stays active.
+func TestDisablePrincipalMutualAdminDisableLeavesOne(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	for round := 0; round < 10; round++ {
+		a, _ := s.Provision(ctx, github(int64(100+2*round), "a"+strconv.Itoa(round)))
+		b, _ := s.Provision(ctx, github(int64(101+2*round), "b"+strconv.Itoa(round)))
+		admins := []string{a.ID, b.ID}
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		for i, id := range []string{a.ID, b.ID} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, errs[i] = s.DisablePrincipal(ctx, id, admins)
+			}()
+		}
+		wg.Wait()
+		active := 0
+		for _, id := range admins {
+			if got, _ := s.Get(ctx, id); got != nil && got.Status == StatusActive {
+				active++
+			}
+		}
+		if active != 1 {
+			t.Fatalf("round %d: %d admins active after a mutual disable (errs %v), want 1", round, active, errs)
+		}
+		if (errs[0] == nil) == (errs[1] == nil) || !(errors.Is(errs[0], ErrLastAdmin) || errors.Is(errs[1], ErrLastAdmin)) {
+			t.Fatalf("round %d: errs %v, want one success and one ErrLastAdmin", round, errs)
+		}
+	}
+}
+
 func customer(sub string, githubID int64, login string) auth.Identity {
 	id := zitadel(sub, login+"@mctl.ai")
 	id.Customer = &auth.CustomerProof{GitHubID: strconv.FormatInt(githubID, 10), GitHubLogin: login}

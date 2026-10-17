@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -54,7 +55,21 @@ var (
 	// ErrMergeConflict: both principals hold a live identity of the same
 	// provider and issuer, so merging would give one principal two.
 	ErrMergeConflict = errors.New("both principals hold an identity of the same provider")
+	// ErrLastAdmin: disabling the principal would leave no active principal
+	// among the platform admins (ADMIN_PRINCIPALS), so nobody could
+	// administer the platform any more.
+	ErrLastAdmin = errors.New("the principal is the last active admin principal")
 )
+
+// DisableResult is what DisablePrincipal did. AlreadyDisabled marks a retry
+// (or a principal disabled earlier, by a merge or otherwise): nothing
+// changed. LiveIdentities counts the identities still bound to it; they
+// stay bound, and every one of them is refused because the principal is
+// disabled.
+type DisableResult struct {
+	AlreadyDisabled bool
+	LiveIdentities  int
+}
 
 // MergeResult is what MergePrincipals did. AlreadyMerged marks a retry: from
 // was already disabled with no live identity left, so nothing moved and
@@ -280,6 +295,100 @@ func (s *Store) mergePrincipals(ctx context.Context, from, into string) (MergeRe
 		return none, fmt.Errorf("principals: commit: %w", err)
 	}
 	return MergeResult{Moved: int(tag.RowsAffected())}, nil
+}
+
+// DisablePrincipal disables a human principal on an admin's decision, for
+// a principal that must stop acting and that no merge can absorb (an
+// orphan whose only identity was removed at its IdP, for example).
+//
+// The principal's identities are deliberately left live, not revoked:
+//   - A disabled principal is already refused on every path. Authentication
+//     resolves each of its identities to auth.ErrPrincipalDisabled, and a
+//     local token naming it, whether issued before or refreshed after,
+//     fails CheckPrincipal on use. Revoking adds no refusal. (The admin
+//     handler also revokes its refresh sessions, so they stop renewing.)
+//   - The identities stay bound to the disabled principal, so none of them
+//     can be provisioned onto a fresh, active principal by its next
+//     sign-in. A revoked identity is refused as well, but the binding is
+//     the record of who this principal was.
+//   - MergePrincipals reads "disabled with no live identity" as "already
+//     merged away". Revoking here would make a disabled principal look
+//     merged, and a later merge from it would answer AlreadyMerged without
+//     moving anything.
+//
+// admins is ADMIN_PRINCIPALS. When the target is one of them, at least one
+// other must be an active human principal, checked under every admin's
+// lock, so two admins disabling each other at once cannot both succeed.
+// A principal that does not exist counts as not active. Only a human
+// principal is disabled; a service or agent principal is ErrInvalid. A
+// principal that is already disabled is a no-op (AlreadyDisabled), whoever
+// it is.
+func (s *Store) DisablePrincipal(ctx context.Context, id string, admins []string) (DisableResult, error) {
+	var none DisableResult
+	if id == "" {
+		return none, fmt.Errorf("%w: no principal to disable", ErrInvalid)
+	}
+	isAdmin := false
+	keys := []string{id}
+	for _, a := range admins {
+		if a == id {
+			isAdmin = true
+		} else if a != "" {
+			keys = append(keys, a)
+		}
+	}
+	if !isAdmin {
+		keys = keys[:1]
+	}
+	sort.Strings(keys)
+	keys = slices.Compact(keys)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return none, fmt.Errorf("principals: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// The same per-principal locks as a merge, in the same sorted order, so
+	// a disable never races a merge of the same principal or deadlocks
+	// with one.
+	for _, k := range keys {
+		if err := lockPrincipalTx(ctx, tx, k); err != nil {
+			return none, err
+		}
+	}
+	p, err := getPrincipalTx(ctx, tx, id)
+	if err != nil {
+		return none, err
+	}
+	if p.Kind != auth.KindHuman {
+		return none, fmt.Errorf("%w: only a human principal is disabled here, not a %s principal", ErrInvalid, p.Kind)
+	}
+	var res DisableResult
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM external_identities
+		WHERE principal_id=$1 AND revoked_at IS NULL`, id).Scan(&res.LiveIdentities); err != nil {
+		return none, err
+	}
+	if p.Status != StatusActive {
+		res.AlreadyDisabled = true
+		return res, nil
+	}
+	if isAdmin {
+		var others int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM principals
+			WHERE id = ANY($1) AND id <> $2 AND kind=$3 AND status=$4`,
+			keys, id, auth.KindHuman, StatusActive).Scan(&others); err != nil {
+			return none, err
+		}
+		if others == 0 {
+			return none, ErrLastAdmin
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE principals SET status=$2 WHERE id=$1`, id, StatusDisabled); err != nil {
+		return none, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return none, fmt.Errorf("principals: commit: %w", err)
+	}
+	return res, nil
 }
 
 // ErrCustomerConflict: a customers-organization ZITADEL identity cannot be

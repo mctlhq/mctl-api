@@ -143,8 +143,60 @@ into, so the answer carries a `detail` saying the earlier target may
 differ from `into`; the audit rows record it. Every outcome, refusals included, is audited
 with the actor, `from` and `into`.
 
+A principal that must stop acting but that no merge can absorb is disabled
+instead: `POST /api/v1/admin/principals/{id}/disable` with body
+`{"reason": "..."}` (required, trimmed, at most 500 bytes). The case it was
+built for is an orphan whose only identity is a ZITADEL user removed at the
+IdP: merging it into the admin's own principal is refused because both hold
+a ZITADEL identity of the same issuer, and `DELETE /identity/links` acts on
+the caller's own identities only. Same gate as a merge (a platform admin
+acting directly; audit `principal.disable`, high risk). Every outcome after
+the admin check, refusals included, is audited with the actor, the target,
+the reason and, on failure, a classified `refusal`, never the store's error
+text.
+
+| Case | Answer |
+|---|---|
+| not a platform admin acting directly (relayed, surface, service, agent) | 403, not audited |
+| missing or empty reason, unknown body field, malformed principal id | 400 |
+| the admin's own principal did not resolve | 403 `actor_unresolved` (it cannot prove it is not the target) |
+| the target is the caller's own principal | 409 `principal_disable_self` |
+| no such principal | 404 |
+| a service or agent principal | 400 `principal_not_human` |
+| the last active `ADMIN_PRINCIPALS` principal | 409 `principal_last_admin` |
+| store unavailable | 503 `identity_link_unavailable` |
+| already disabled (a retry, or disabled by a merge) | 200, `already_disabled: true`, nothing changes |
+| active human | 200, disabled |
+
+The last-admin check runs in the same transaction as the update, under the
+locks of the target and every other admin principal, so two admins
+disabling each other at once cannot both succeed. A principal named in
+`ADMIN_PRINCIPALS` that does not exist, is disabled, or is not human does
+not count as another admin. With `ADMIN_PRINCIPALS` empty there is no
+admin principal to protect and the check does not apply.
+
+The principal's identities are left bound and live, not revoked:
+
+- A disabled principal is already refused everywhere. Each of its
+  identities resolves to `ErrPrincipalDisabled` at authentication, and a
+  local access token naming it fails the principal check on use. Revoking
+  would add no refusal.
+- The binding keeps the identity from being provisioned onto a fresh,
+  active principal at its next sign-in, and records who the principal was.
+- A merge reads "disabled with no live identity" as "already merged away".
+  Revoking here would make the disabled principal look merged, and a later
+  merge from it would answer `already_merged` without moving anything.
+
+Its local OAuth refresh sessions are revoked after the commit
+(`sessions_revoked` in the answer), so they stop renewing. That step is
+best effort: the principal is already refused on every token, so a failed
+revocation leaves `sessions_revoked: null` and `sessions_revoke=failed` in
+the audit row rather than failing the call. The resolver cache for the
+target is dropped, also on a retry, so the disable takes effect on the next
+request. There is no MCP tool for this; it is an HTTP admin operation only.
+
 The resolver caches answers for 5 minutes, including the principal id and
-its disabled flag. A merge and an unlink therefore drop the cached answers
+its disabled flag. A merge, a disable and an unlink therefore drop the cached answers
 for the principals involved (`Resolver.Forget`), so the next request
 re-reads the store: moved identities act as `into`, and an unlinked one is
 refused. A resolution already reading the store when that happens returns

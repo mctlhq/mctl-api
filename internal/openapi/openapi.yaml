@@ -4376,6 +4376,57 @@ paths:
         '403': {description: 'grant_not_bound or grant_subject_unresolved'}
         '503': {description: delegation_unavailable}
 
+  /api/v1/admin/principals/{id}/disable:
+    post:
+      summary: Disable a human principal (platform admin)
+      description: |
+        For a principal that must stop acting and that no merge can absorb,
+        such as an orphan whose only identity was removed at its IdP. A
+        platform admin acting directly only (relayed, surface, service and
+        agent callers get 403, as does an admin whose own principal did not
+        resolve). Refused for a service or agent principal
+        (`principal_not_human`), the caller's own principal
+        (`principal_disable_self`) and the last active ADMIN_PRINCIPALS
+        principal (`principal_last_admin`). Idempotent: an already disabled
+        principal answers 200 with `already_disabled: true`. Its identities
+        stay bound and live (each is refused because the principal is
+        disabled); its local refresh sessions are revoked best effort
+        (`sessions_revoked` is null when that failed). Every outcome after
+        the admin check, refusals included, is audited as
+        `principal.disable` with the actor, the target and the reason.
+      tags: [Identity]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason: {type: string, minLength: 1, maxLength: 500, description: 'Why; copied into the audit row. Trimmed; at most 500 bytes.'}
+              required: [reason]
+      responses:
+        '200':
+          description: Disabled now, or already disabled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  principal_id: {type: string}
+                  status: {type: string, enum: [disabled]}
+                  already_disabled: {type: boolean}
+                  live_identities: {type: integer, description: Identities still bound to the principal}
+                  sessions_revoked: {type: integer, nullable: true, description: Refresh sessions revoked now; null when the revocation failed}
+        '400': {description: 'A missing or invalid body or reason, a malformed principal id, or principal_not_human'}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin acting directly, or the caller has no resolved principal}
+        '404': {description: No such principal}
+        '409': {description: 'principal_disable_self or principal_last_admin'}
+        '503': {description: identity_link_unavailable (the principal store is not configured or failed)}
+
   /api/v1/action-approvals/{id}:
     get:
       summary: One action approval request
