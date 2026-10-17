@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.98.0](https://github.com/mctlhq/mctl-api/compare/4.97.0...4.98.0) (2026-10-17)
+
+
+### Features
+
+* **agents:** issue-489-authz-decide-tenant-roles-for-work-items ([2e226e1](https://github.com/mctlhq/mctl-api/commit/2e226e133bcd4c747cd4f9d52bfe4921f1725279))
+
 ## [4.97.0](https://github.com/mctlhq/mctl-api/compare/4.96.1...4.97.0) (2026-10-17)
 
 
