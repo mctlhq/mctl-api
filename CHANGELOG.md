@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.93.0](https://github.com/mctlhq/mctl-api/compare/4.92.0...4.93.0) (2026-10-17)
+
+
+### Features
+
+* **dev-loop:** restart a DevLoop whose last run was abandoned ([3360fe3](https://github.com/mctlhq/mctl-api/commit/3360fe354472f2624a2877b7ecd9f3298f8f64fb))
+
 ## [4.92.0](https://github.com/mctlhq/mctl-api/compare/4.91.0...4.92.0) (2026-10-17)
 
 
