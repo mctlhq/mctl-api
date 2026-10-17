@@ -518,6 +518,18 @@ func TestSurfaceIdentity_ZitadelSessionReachesTheHumansGitHubLinks(t *testing.T)
 	if code, body := e.do("hank-zitadel", "POST", "/api/v1/surface-identities/"+ghLink+"/revoke", nil); code != http.StatusServiceUnavailable || body["code"] != sidCodeUnavailable {
 		t.Errorf("revoke with the store down = %d %v, want 503 %s", code, body, sidCodeUnavailable)
 	}
+	// The session's own prn_ is a holder it is known to be: its list is
+	// whole and served (mctl-api#671). Any other named holder, its own
+	// github: login included, is unknown: 503, never 403 or a short list.
+	if code, body := e.do("hank-zitadel", "GET", "/api/v1/surface-identities?principal="+hankPRN, nil); code != http.StatusOK ||
+		len(body["links"].([]any)) != 1 || body["links"].([]any)[0].(map[string]any)["id"] != prnLink {
+		t.Errorf("listing the own prn_ with the store down = %d %v, want 200 with %s", code, body, prnLink)
+	}
+	for _, named := range []string{"github:hank", "github:nobody", zedPRN} {
+		if code, body := e.do("hank-zitadel", "GET", "/api/v1/surface-identities?principal="+named, nil); code != http.StatusServiceUnavailable || body["code"] != sidCodeUnavailable {
+			t.Errorf("listing %s with the store down = %d %v, want 503 %s", named, code, body, sidCodeUnavailable)
+		}
+	}
 	// A link the session's own prn_ holds stays revocable meanwhile.
 	if code, body := e.do("hank-zitadel", "POST", "/api/v1/surface-identities/"+prnLink+"/revoke", nil); code != http.StatusOK {
 		t.Errorf("revoking the prn_ link with the store down = %d %v, want 200", code, body)
@@ -550,8 +562,9 @@ func TestSurfaceIdentity_ZitadelSessionWithoutIdentityStore(t *testing.T) {
 
 // A human whose principal authentication could not resolve (the store did
 // not answer) is told 503, not 403 "not a human" (mctl-api#663). A GitHub
-// session in that state still links as github:<login>, but cannot list or
-// revoke: the prn_ links it may hold are unknown, not absent.
+// session in that state still links as github:<login>, lists and revokes
+// that holder's links, but cannot list all its links or name another
+// holder: the prn_ links it may hold are unknown, not absent.
 func TestSurfaceIdentity_UnresolvedPrincipalIs503(t *testing.T) {
 	e, pr := newZedEnv(t)
 	aliceLink := e.link("alice", "telegram", "4242")
@@ -583,6 +596,19 @@ func TestSurfaceIdentity_UnresolvedPrincipalIs503(t *testing.T) {
 		}
 		if code, got := e.do(tc.who, tc.method, tc.path, body); code != http.StatusServiceUnavailable || got["code"] != sidCodeUnavailable {
 			t.Errorf("%s %s %s = %d %v, want 503 %s", tc.who, tc.method, tc.path, code, got, sidCodeUnavailable)
+		}
+	}
+	// The holder authentication proved is known: its links are served
+	// (mctl-api#671). Her prn_ and anyone else's are unknown: 503, not 403.
+	if code, body := e.do("alice-down", "GET", "/api/v1/surface-identities?principal=github:alice", nil); code != http.StatusOK ||
+		len(body["links"].([]any)) != 1 || body["links"].([]any)[0].(map[string]any)["id"] != aliceLink {
+		t.Errorf("alice-down listing github:alice = %d %v, want 200 with %s", code, body, aliceLink)
+	} else if holders, _ := body["holders"].([]any); len(holders) != 1 || holders[0] != "github:alice" {
+		t.Errorf("alice-down listing github:alice: holders = %v, want [github:alice]", body["holders"])
+	}
+	for _, named := range []string{"prn_ALICE", "github:bob"} {
+		if code, body := e.do("alice-down", "GET", "/api/v1/surface-identities?principal="+named, nil); code != http.StatusServiceUnavailable || body["code"] != sidCodeUnavailable {
+			t.Errorf("alice-down listing %s = %d %v, want 503 %s", named, code, body, sidCodeUnavailable)
 		}
 	}
 	e.challenge("alice-down", "telegram")

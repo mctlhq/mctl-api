@@ -692,18 +692,27 @@ func (h *Handlers) ListSurfaceIdentities(w http.ResponseWriter, r *http.Request)
 	// set is not needed, so a principal store that cannot answer does not
 	// stand in the way.
 	if principal == "" || !user.IsAdmin() {
-		owners, err := h.ownHolders(r.Context(), user, own)
-		if err != nil {
-			// An incomplete set is never listed as if it were whole, nor
-			// read as "not the caller's" for a named holder.
-			slog.Error("surface identity list: the caller's holders could not be read", "principal", own, "error", err)
+		// As for revoke, an incomplete set still serves a named holder the
+		// caller is known to be: that holder's list is whole, and reading
+		// it never consults the unknown part of the set.
+		owners, incomplete := h.ownHolders(r.Context(), user, own)
+		switch {
+		case principal == "" && incomplete != nil:
+			// The merged list would be short: never listed as if whole.
+			slog.Error("surface identity list: the caller's holders could not be read", "principal", own, "error", incomplete)
 			writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not determine which links are the caller's", nil)
 			return
-		}
-		switch {
 		case principal == "":
 			principal, holders = own, owners
-		case !slices.Contains(owners, principal):
+		case slices.Contains(owners, principal):
+			// A holder the caller is known to be.
+		case incomplete != nil:
+			// "Not among the known holders" is unknown, not "not the
+			// caller's": 503, never 403.
+			slog.Error("surface identity list: the caller's holders could not be read", "principal", own, "error", incomplete)
+			writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not determine which links are the caller's", nil)
+			return
+		default:
 			writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only an admin may list another principal's links", nil)
 			return
 		}
