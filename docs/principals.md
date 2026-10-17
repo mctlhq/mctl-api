@@ -201,13 +201,16 @@ ZITADEL as before. An `upstream=customer` that is not offered answers 400
 rather than becoming a staff sign-in; under `github` that includes a
 request carrying `upstream=customer`, where `upstream=` was ignored
 before. The 400 is a page, not an OAuth error to the client: only a
-person on the chooser makes this choice. Where the entry could be wired
-(a customers entry and `OAUTH_UPSTREAM` other than `github`), a
-`ZITADEL_HOOK_GITHUB_IDP_ID` that is not a ZITADEL resource id (digits)
-refuses the boot, since it is written into a scope string; elsewhere it
-is simply not offered. The startup log line `OAuth ZITADEL upstream
-enabled` says `customer_github_signin=true` when the entry is offered, and
-every ZITADEL sign-in that resolved to a customer is counted under
+person on the chooser makes this choice. A `ZITADEL_HOOK_GITHUB_IDP_ID`
+that is not a ZITADEL resource id (digits) is never offered, since it is
+written into a scope string. It also refuses the boot where the entry
+could be wired (a customers entry and `OAUTH_UPSTREAM` other than
+`github`), unless `MCTL_FEDERATION_DISABLED` is on: like the other
+`MCTL_OIDC_PROVIDERS` checks, the kill switch skips it so a rollback is
+never blocked, and the entry is then just not offered. The startup log
+line `OAuth ZITADEL upstream enabled` says `customer_github_signin=true`
+when the entry is offered, and every ZITADEL sign-in whose verified token
+names the customers organization is counted under
 `oauth_upstream_signins_total{upstream="zitadel_customer"}`.
 
 The ZITADEL leg uses its own confidential client
@@ -232,10 +235,14 @@ A pending authorization records its upstream: a GitHub callback cannot
 complete a ZITADEL authorization or the reverse, and an authorization whose
 upstream the current mode does not allow (one pending across a rollback)
 gets a 400. Sign-ins are counted in
-`oauth_upstream_signins_total{upstream,result}`. A sign-in that resolved
-to a self-service customer is counted under `upstream="zitadel_customer"`
-from the point it was recognised (a token whose customer proof is refused
-stays under `zitadel`). For `upstream="zitadel"`,
+`oauth_upstream_signins_total{upstream,result}`. A sign-in whose verified
+ID token names the customers organization is counted under
+`upstream="zitadel_customer"`, refusals included (`customer_unproven`,
+`customer_conflict`, `customer_not_enabled`, `principal_*`), so a hook or
+claim-client misconfiguration shows there. A token that names no
+organization cannot be placed and stays under `zitadel` as
+`invalid_token`. Queries on `upstream="zitadel"` no longer see customer
+sign-ins. For `upstream="zitadel"`,
 `result` is `issued`, `unlinked`, `refused`, `store_unavailable`,
 `principal_refused`, `principal_unavailable` (`principal` mode, as for GitHub),
 `invalid_token`, `upstream_error` (ZITADEL redirected back with an error),

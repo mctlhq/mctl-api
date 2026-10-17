@@ -451,16 +451,23 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	}
 
 	if z.opts.CustomersOrgID != "" {
+		// Counted apart from the moment the verified token names the
+		// customers organization, before its proof is judged, so a
+		// customer refused as unproven (a hook or claim-client
+		// misconfiguration) shows under the customer label too. The
+		// chooser's choice is not stored; this is where a customer is
+		// told from anyone else. A token naming no organization cannot be
+		// placed and stays under zitadel.
+		var owner map[string]any
+		if idt.Claims(&owner) == nil && owner[auth.ClaimResourceOwnerID] == z.opts.CustomersOrgID {
+			label = oauthUpstreamZitadelCustomer
+		}
 		customer, stopped := readSigninCustomer(w, idt, z.opts.CustomersOrgID)
 		if stopped != "" {
 			result = stopped
 			return
 		}
 		if customer != nil {
-			// Counted apart, so customer sign-ins are visible one by one:
-			// the chooser's choice is not stored, but this branch is
-			// where a customer is actually told from anyone else.
-			label = oauthUpstreamZitadelCustomer
 			id.Customer = customer
 			var principalID string
 			if principalID, result = h.customerSigninPrincipal(w, r, id); result != "" {

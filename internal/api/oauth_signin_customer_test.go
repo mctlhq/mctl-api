@@ -159,8 +159,8 @@ func TestZitadelSigninOfACustomerRefusals(t *testing.T) {
 		label         string
 	}{
 		"organization not named":  {true, without(auth.ClaimResourceOwnerID), signinResolver{prn: "prn_x"}, http.StatusBadGateway, "invalid_token", false, auth.UpstreamZitadel},
-		"no github id":            {true, without(auth.ClaimCustomerGitHubID), signinResolver{prn: "prn_x"}, http.StatusForbidden, "customer_unproven", false, auth.UpstreamZitadel},
-		"hook refused":            {true, refused, signinResolver{prn: "prn_x"}, http.StatusForbidden, "customer_unproven", false, auth.UpstreamZitadel},
+		"no github id":            {true, without(auth.ClaimCustomerGitHubID), signinResolver{prn: "prn_x"}, http.StatusForbidden, "customer_unproven", false, oauthUpstreamZitadelCustomer},
+		"hook refused":            {true, refused, signinResolver{prn: "prn_x"}, http.StatusForbidden, "customer_unproven", false, oauthUpstreamZitadelCustomer},
 		"not in principal mode":   {false, customerIDClaims(), signinResolver{prn: "prn_x"}, http.StatusForbidden, "customer_not_enabled", false, oauthUpstreamZitadelCustomer},
 		"subject owned elsewhere": {true, customerIDClaims(), signinResolver{err: fmt.Errorf("%w: %w: %w", auth.ErrIdentityRefused, principals.ErrCustomerConflict, principals.ErrIdentityOwnedElsewhere)}, http.StatusConflict, "customer_conflict", true, oauthUpstreamZitadelCustomer},
 		"principal disabled":      {true, customerIDClaims(), signinResolver{err: auth.ErrPrincipalDisabled}, http.StatusForbidden, "principal_refused", true, oauthUpstreamZitadelCustomer},
@@ -193,9 +193,15 @@ func TestZitadelSigninOfACustomerRefusals(t *testing.T) {
 func TestZitadelSigninOfAnotherOrganizationIsUnchanged(t *testing.T) {
 	pr := &recordingResolver{signinResolver: signinResolver{prn: "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ"}}
 	h := newCustomerHarness(t, true, map[string]any{auth.ClaimResourceOwnerID: "393497610436019469"}, pr)
+	staff := oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "issued")
+	customer := oauthUpstreamSignins.WithLabelValues(oauthUpstreamZitadelCustomer, "issued")
+	staffBefore, customerBefore := testutil.ToFloat64(staff), testutil.ToFloat64(customer)
 	rec := h.callback(h.toZitadel(h.get(authorizeQuery(""))))
 	if rec.Code != http.StatusFound {
 		t.Fatalf("callback = %d: %s", rec.Code, rec.Body.String())
+	}
+	if ds, dc := testutil.ToFloat64(staff)-staffBefore, testutil.ToFloat64(customer)-customerBefore; ds != 1 || dc != 0 {
+		t.Errorf("issued: zitadel +%v, zitadel_customer +%v; want +1 and +0", ds, dc)
 	}
 	if len(h.store.calls) != 1 || len(pr.ids) != 1 || pr.ids[0].Customer != nil {
 		t.Fatalf("store calls %+v, resolver %+v; want the link path without a customer proof", h.store.calls, pr.ids)
