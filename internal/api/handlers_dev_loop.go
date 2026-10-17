@@ -168,7 +168,9 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 // USE_EXISTING. Both windows are a few milliseconds between admin calls on
 // one issue.
 func restartIfAbandoned(readCtx, ctx context.Context, c DevLoopClient, issueURL, workflowID string, existing devLoopStartResult) devLoopStartResult {
-	if existing.Status != devLoopStatusCompleted {
+	// An empty run id would make the read "whatever run is latest now" and
+	// the echo guard below unreachable; without one the run is not restarted.
+	if existing.Status != devLoopStatusCompleted || existing.RunID == "" {
 		return existing
 	}
 	end, err := c.DevLoopEnded(readCtx, workflowID, existing.RunID)

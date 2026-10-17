@@ -1079,6 +1079,26 @@ func TestStartDevLoopWorkflow_RestartFailuresAreFailed(t *testing.T) {
 	}
 }
 
+// A Completed run described without a run id is not restarted: the result
+// read could not be pinned to it.
+func TestStartDevLoopWorkflow_NoRunIDIsNotRestarted(t *testing.T) {
+	fake := &fakeDevLoopClient{
+		describeExec: &temporalclient.DevLoopExecution{Status: "Completed"},
+		workflowID:   "dev-loop-mctlhq-mctl-telegram-1",
+		ended:        temporalclient.AbandonedEndedPrefix + "x",
+	}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: audit.NewLogger()}}
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/start", bytes.NewBufferString(`{"issue_url":"https://github.com/mctlhq/mctl-telegram/issues/1"}`))
+	rec := httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, adminCtx(req))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), devLoopOutcomeAlreadyExists) {
+		t.Fatalf("expected 200 %s, got %d %s", devLoopOutcomeAlreadyExists, rec.Code, rec.Body.String())
+	}
+	if len(fake.endedReadRuns) != 0 || fake.restartCalls != 0 {
+		t.Fatalf("reads %v, restarts %d", fake.endedReadRuns, fake.restartCalls)
+	}
+}
+
 // A running loop is already_running: its result is never read, even when it
 // would say abandoned, and nothing restarts.
 func TestStartDevLoopWorkflow_RunningLoopNeverReadsTheMarker(t *testing.T) {
