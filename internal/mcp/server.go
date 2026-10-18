@@ -2234,7 +2234,7 @@ not produce a trace, one of "workflow_name_unknown", "audit_unavailable",
 "no_traceparent_in_audit_record".`),
 		mcplib.WithString("id",
 			mcplib.Required(),
-			mcplib.Description("Incident ID (full UUID or 8-char prefix)"),
+			mcplib.Description("Incident ID (full ID, or a unique prefix of at least 8 characters; an ambiguous prefix is rejected)"),
 		),
 	)
 
@@ -2286,7 +2286,7 @@ Records the current user as the acknowledger. Use this when you've reviewed an i
 and want to signal that someone is aware of it.`),
 		mcplib.WithString("id",
 			mcplib.Required(),
-			mcplib.Description("Incident ID (full UUID or 8-char prefix)"),
+			mcplib.Description("Incident ID (full ID, or a unique prefix of at least 8 characters; an ambiguous prefix is rejected)"),
 		),
 	)
 
@@ -2317,7 +2317,7 @@ Optionally provide a reason for the resolution. This closes the incident and rec
 the resolution timestamp.`),
 		mcplib.WithString("id",
 			mcplib.Required(),
-			mcplib.Description("Incident ID (full UUID or 8-char prefix)"),
+			mcplib.Description("Incident ID (full ID, or a unique prefix of at least 8 characters; an ambiguous prefix is rejected)"),
 		),
 		mcplib.WithString("reason",
 			mcplib.Description("Optional resolution reason"),
