@@ -28,9 +28,9 @@ import (
 )
 
 // newTestAlertStore connects to a real Postgres instance, matching the
-// TEST_DATABASE_URL-gated pattern used by internal/alerts/store_test.go —
-// this repo has no Postgres service in CI, so these tests only run when
-// pointed at a local/ephemeral instance. Cleanup uses a second pool since
+// TEST_DATABASE_URL-gated pattern used by internal/alerts/store_test.go.
+// CI sets TEST_DATABASE_URL against its postgres service (validate.yml);
+// locally the tests skip unless it points at an ephemeral instance. Cleanup uses a second pool since
 // alerts.Store doesn't expose its underlying pool outside its own package.
 func newTestAlertStore(t *testing.T) *alerts.Store {
 	t.Helper()
@@ -44,6 +44,7 @@ func newTestAlertStore(t *testing.T) *alerts.Store {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
+	t.Cleanup(s.Close)
 
 	cleanupPool, err := pgxpool.New(ctx, connStr)
 	if err != nil {
