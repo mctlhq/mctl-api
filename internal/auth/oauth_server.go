@@ -31,6 +31,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mctlhq/mctl-api/internal/auth/cimd"
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
@@ -1179,7 +1180,11 @@ func (s *OAuthServer) IsRedirectURIAllowedCtx(ctx context.Context, clientID, uri
 			return false
 		}
 		if !cimd.RedirectAllowed(doc.RedirectURIs, uri) {
-			slog.Warn("oauth: redirect_uri not in the client metadata document", "client_id", clientID, "redirect_uri", uri, "dropped_redirect_uris", doc.DroppedRedirectURIs)
+			dropped := make([]string, len(doc.DroppedRedirectURIs))
+			for i, d := range doc.DroppedRedirectURIs {
+				dropped[i] = clipForLog(d)
+			}
+			slog.Warn("oauth: redirect_uri not in the client metadata document", "client_id", clientID, "redirect_uri", clipForLog(uri), "redirect_uri_len", len(uri), "dropped_redirect_uris", dropped)
 			return false
 		}
 		return true
@@ -1972,4 +1977,22 @@ func (s *refreshTokenStore) gcLoop() {
 			return true
 		})
 	}
+}
+
+// maxLoggedRedirectLen bounds a redirect_uri written to the log. The value on
+// /authorize is caller-supplied and reaches the log before any other check, so
+// an unbounded write would let one request emit an arbitrarily large record
+// (the same reason internal/api clips echoed values).
+const maxLoggedRedirectLen = 256
+
+// clipForLog cuts s to maxLoggedRedirectLen on a rune boundary.
+func clipForLog(s string) string {
+	if len(s) <= maxLoggedRedirectLen {
+		return s
+	}
+	i := maxLoggedRedirectLen
+	for i > maxLoggedRedirectLen-utf8.UTFMax && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return s[:i] + "…"
 }

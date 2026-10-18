@@ -15,10 +15,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -99,6 +101,27 @@ func TestCIMDRedirectDecidedByDocumentAlone(t *testing.T) {
 		if rec.Code != http.StatusBadRequest || rec.Header().Get("Location") != "" {
 			t.Errorf("%s: %d Location=%q", u, rec.Code, rec.Header().Get("Location"))
 		}
+	}
+}
+
+// A refused redirect_uri is logged clipped: /authorize takes it from the query
+// before any other check, so one request must not write an unbounded record.
+func TestCIMDRefusedRedirectIsLoggedClipped(t *testing.T) {
+	h, _ := cimdEnv(t, cimdDoc(cbURL, "http://localhost/callback"))
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	long := "https://evil.example.com/" + strings.Repeat("a", 100_000)
+	if rec := authorize(h, cimdID, long); rec.Code != http.StatusBadRequest {
+		t.Fatalf("code %d", rec.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "redirect_uri not in the client metadata document") || !strings.Contains(out, "http://localhost/callback") {
+		t.Fatalf("missing log line or dropped entry: %.300s", out)
+	}
+	if len(out) > 4096 {
+		t.Fatalf("log output is %d bytes; the redirect_uri was not clipped", len(out))
 	}
 }
 

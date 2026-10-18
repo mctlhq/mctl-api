@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -501,7 +502,9 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 	if utf8.RuneCountInString(name) > maxNameRunes {
 		name = string([]rune(name)[:maxNameRunes])
 	}
-	return Document{ClientID: clientID, ClientName: name, RedirectURIs: accepted, DroppedRedirectURIs: dropped}, nil
+	// Clipped so an append by a caller can never write into the backing array
+	// of a cached document shared by concurrent requests.
+	return Document{ClientID: clientID, ClientName: name, RedirectURIs: slices.Clip(accepted), DroppedRedirectURIs: dropped}, nil
 }
 
 // RedirectAllowed reports whether uri matches an entry of the document's
