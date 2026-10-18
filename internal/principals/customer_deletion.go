@@ -311,18 +311,31 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 		}
 		// Older surface links were keyed by the verified GitHub login rather
 		// than the immutable principal. Remove both forms before name reuse.
-		for _, table := range []string{"surface_identity_links", "surface_identity_challenges"} {
-			if _, err := tx.Exec(ctx, "DELETE FROM "+table+" WHERE principal=$1 OR lower(principal)=$2", pid, "github:"+strings.ToLower(login)); err != nil {
+		// These tables belong to independently configured stores. Their absence
+		// is supported (surface store disabled, or refresh store in another DB).
+		// RevokeSessions has already revoked the configured refresh store.
+		for _, cleanup := range []struct{ table, query string }{
+			{"surface_identity_links", "DELETE FROM surface_identity_links WHERE principal=$1 OR lower(principal)=$2"},
+			{"surface_identity_challenges", "DELETE FROM surface_identity_challenges WHERE principal=$1 OR lower(principal)=$2"},
+			{"oauth_refresh_tokens", "DELETE FROM oauth_refresh_tokens WHERE principal_id=$1"},
+		} {
+			var present bool
+			if err := tx.QueryRow(ctx, `SELECT to_regclass('public.'||$1) IS NOT NULL`, cleanup.table).Scan(&present); err != nil {
+				return err
+			}
+			if !present {
+				continue
+			}
+			args := []any{pid}
+			if cleanup.table != "oauth_refresh_tokens" {
+				args = append(args, "github:"+strings.ToLower(login))
+			}
+			if _, err := tx.Exec(ctx, cleanup.query, args...); err != nil {
 				return err
 			}
 		}
-		for _, query := range []string{
-			`DELETE FROM oauth_refresh_tokens WHERE principal_id=$1`,
-			`DELETE FROM external_identities WHERE principal_id=$1`,
-		} {
-			if _, err := tx.Exec(ctx, query, pid); err != nil {
-				return err
-			}
+		if _, err := tx.Exec(ctx, `DELETE FROM external_identities WHERE principal_id=$1`, pid); err != nil {
+			return err
 		}
 		tag, err := tx.Exec(ctx, `DELETE FROM principals WHERE id=$1 AND status='disabled' AND kind='human'`, pid)
 		if err != nil {

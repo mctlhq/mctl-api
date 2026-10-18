@@ -17,6 +17,7 @@ package principals
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
@@ -459,5 +460,64 @@ func TestCustomerDeletionPrepareStorageFailureIsUnknown(t *testing.T) {
 	stop()
 	if _, err := s.PrepareCustomerDeletion(cancelled, "storage-unknown", p.ID, id.Issuer, "admin"); !errors.Is(err, ErrUnresolved) {
 		t.Fatalf("unreadable preparation classified as observed conflict: %v", err)
+	}
+}
+
+// Each optional store can be disabled or use another database independently.
+func TestCustomerDeletionFinishesWithoutOptionalStoreTables(t *testing.T) {
+	for mask := 1; mask < 8; mask++ {
+		t.Run(fmt.Sprintf("absent-%d", mask), func(t *testing.T) {
+			s := newStoreForTest(t)
+			ctx := context.Background()
+			sid, err := surfaceid.NewStore(ctx, os.Getenv("TEST_DATABASE_URL"), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sid.Close()
+			if _, err := refreshstore.NewPostgresStore(ctx, os.Getenv("TEST_DATABASE_URL")); err != nil {
+				t.Fatal(err)
+			}
+			// Preserve shared fixture tables and their data. Tests using this DB
+			// run serially; cleanup restores the names even when an assertion fails.
+			for i, table := range []string{"surface_identity_links", "surface_identity_challenges", "oauth_refresh_tokens"} {
+				if mask&(1<<i) == 0 {
+					continue
+				}
+				if _, err := s.pool.Exec(ctx, "ALTER TABLE "+table+" RENAME TO deletion_fixture_"+table); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if _, err := s.pool.Exec(ctx, "ALTER TABLE deletion_fixture_"+table+" RENAME TO "+table); err != nil {
+						t.Error(err)
+					}
+				})
+			}
+			old := customer("optional-old", 739001, "optional-customer")
+			p, err := s.ResolveCustomer(ctx, old)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, err := s.PrepareCustomerDeletion(ctx, "optional-test", p.ID, old.Issuer, "admin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.BeginCustomerDeletion(ctx, d.Tenant, p.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.FinishCustomerDeletion(ctx, d.Tenant, p.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.FinishCustomerDeletion(ctx, d.Tenant, p.ID); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			d, err = s.CustomerDeletion(ctx, d.Tenant, p.ID)
+			if err != nil || d.Status != "complete" {
+				t.Fatalf("completion: %+v %v", d, err)
+			}
+			fresh, err := s.ResolveCustomer(ctx, customer("optional-new", 739001, "optional-customer"))
+			if err != nil || fresh.ID == p.ID {
+				t.Fatalf("fresh signup: %+v %v", fresh, err)
+			}
+		})
 	}
 }
