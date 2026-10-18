@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.101.0](https://github.com/mctlhq/mctl-api/compare/4.100.1...4.101.0) (2026-10-18)
+
+
+### Miscellaneous Chores
+
+* release 4.101.0 ([e47d240](https://github.com/mctlhq/mctl-api/commit/e47d240f5fa9e89f8e8a115b21197b6bd5bade37))
+
 ## [4.100.1](https://github.com/mctlhq/mctl-api/compare/4.100.0...4.100.1) (2026-10-18)
 
 
