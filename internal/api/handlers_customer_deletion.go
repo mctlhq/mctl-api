@@ -109,14 +109,18 @@ func (h *Handlers) guardCustomerTenantCreation(w http.ResponseWriter, r *http.Re
 	if op != "create-tenant" || h.opts.CustomerTenantDeletionPending == nil {
 		return true
 	}
+	actor := "anonymous"
+	if user := auth.UserFromContext(r.Context()); user != nil {
+		actor = user.ID
+	}
 	pending, err := h.opts.CustomerTenantDeletionPending(r.Context(), input["tenant_name"])
 	if err != nil {
-		h.logAudit(r, audit.Entry{Operation: op, Status: "denied", Message: "tenant deletion state could not be observed", Parameters: input})
+		h.logAudit(r, audit.Entry{UserID: actor, Operation: op, Status: "denied", Message: "tenant deletion state could not be observed", Parameters: input})
 		writeError(w, 503, "tenant deletion state could not be observed")
 		return false
 	}
 	if pending {
-		h.logAudit(r, audit.Entry{Operation: op, Status: "denied", Message: "tenant name is frozen by an account deletion", Parameters: input})
+		h.logAudit(r, audit.Entry{UserID: actor, Operation: op, Status: "denied", Message: "tenant name is frozen by an account deletion", Parameters: input})
 		writeError(w, 409, "tenant name is frozen by an account deletion")
 		return false
 	}
