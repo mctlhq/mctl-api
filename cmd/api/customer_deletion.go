@@ -42,6 +42,18 @@ func customerDeletionPending(store *principals.Store, required bool) func(contex
 	}
 }
 
+func customerTenantDeletionPending(store *principals.Store, required bool) func(context.Context, string) (bool, error) {
+	if store == nil && !required {
+		return nil
+	}
+	return func(ctx context.Context, tenant string) (bool, error) {
+		if store == nil {
+			return false, errors.New("customer deletion store unavailable")
+		}
+		return store.CustomerTenantDeletionPending(ctx, tenant)
+	}
+}
+
 func customerDeletionOptions(cfg config, store *principals.Store, cache *principals.Resolver, oauth *auth.OAuthServer, quota api.QuotaReader, argo api.ArgoStatusClient) *api.CustomerDeletionOptions {
 	if os.Getenv("CUSTOMER_DELETION_ENABLED") != "true" {
 		return nil

@@ -17,3 +17,13 @@ func TestCustomerDeletionPendingDistinguishesDisabledAndUnavailableStore(t *test
 		t.Fatalf("unavailable store must be unknown: %v %v", pending, err)
 	}
 }
+
+func TestCustomerTenantDeletionProbePreservesUnknownStore(t *testing.T) {
+	if customerTenantDeletionPending(nil, false) != nil {
+		t.Fatal("unconfigured probe changed creation")
+	}
+	probe := customerTenantDeletionPending(nil, true)
+	if pending, err := probe(context.Background(), "acme"); err == nil || pending {
+		t.Fatalf("missing store became clear: %v %v", pending, err)
+	}
+}

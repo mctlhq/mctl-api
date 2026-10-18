@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/principals"
@@ -48,14 +49,20 @@ func (r *deletionReader) TenantExists(name string) (bool, error) {
 }
 
 type deletionStore struct {
+	readErr            error
 	job                *principals.CustomerDeletion
 	prepared, finished int
 }
+
+func (s *deletionStore) ReleaseCustomerDeletion(context.Context, string, string) error { return nil }
 
 func (s *deletionStore) WithCustomerDeletionLock(ctx context.Context, _, _ string, fn func(context.Context) error) error {
 	return fn(ctx)
 }
 func (s *deletionStore) CustomerDeletion(context.Context, string, string) (*principals.CustomerDeletion, error) {
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
 	if s.job == nil {
 		return nil, pgx.ErrNoRows
 	}
@@ -232,5 +239,56 @@ func TestCustomerDeletionResourceGuardRefusesReplacementAndCompletedReplay(t *te
 	store.job.Status = "complete"
 	if w := callAs(h, auth.NewServiceUser(), "POST", "/", params, h.AdvanceCustomerDeletion); w.Code != 409 {
 		t.Fatalf("completed deletion replayed resource removal: %d", w.Code)
+	}
+}
+
+func TestCustomerDeletionNameFreezeCoversAdministratorCreation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pending bool
+		err     error
+		status  int
+	}{
+		{"pending", true, nil, 409}, {"unknown", false, errors.New("database unavailable"), 503}, {"clear", false, nil, 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handlers{opts: Options{CustomerTenantDeletionPending: func(_ context.Context, name string) (bool, error) {
+				if name != "acme" {
+					t.Fatal("wrong name")
+				}
+				return tc.pending, tc.err
+			}}}
+			r := httptest.NewRequest("POST", "/", nil)
+			w := httptest.NewRecorder()
+			allowed := h.guardCustomerTenantCreation(w, r, "create-tenant", map[string]string{"tenant_name": "acme"})
+			if allowed != (tc.status == 200) || w.Code != tc.status {
+				t.Fatalf("allowed=%v status=%d", allowed, w.Code)
+			}
+		})
+	}
+}
+
+func TestCustomerDeletionUnreadableManifestIsRetryable(t *testing.T) {
+	h, _, store, _, _ := deletionFixture()
+	store.readErr = errors.New("database unavailable")
+	params := map[string]string{"tenant": "acme", "principal": deletionPID, "stage": "begin"}
+	if w := callAs(h, auth.NewServiceUser(), "POST", "/", params, h.AdvanceCustomerDeletion); w.Code != 503 {
+		t.Fatalf("unknown read returned %d", w.Code)
+	}
+	store.readErr = nil
+	if w := callAs(h, auth.NewServiceUser(), "POST", "/", params, h.AdvanceCustomerDeletion); w.Code != 409 {
+		t.Fatalf("absent manifest returned %d", w.Code)
+	}
+}
+func TestCustomerDeletionRefusalsAreAudited(t *testing.T) {
+	h, _, _, _, _ := deletionFixture()
+	logger := audit.NewLogger()
+	h.opts.AuditLog = logger
+	if ok, _ := prepareDeletion(t, h, userWithPrincipal(t, "alice", nil, deletionPID)); ok {
+		t.Fatal("non-admin allowed")
+	}
+	entries := logger.List(10)
+	if len(entries) != 1 || entries[0].Status != "denied" || entries[0].Parameters["principal_id"] != deletionPID {
+		t.Fatalf("missing refusal audit: %+v", entries)
 	}
 }

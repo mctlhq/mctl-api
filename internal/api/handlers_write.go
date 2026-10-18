@@ -422,6 +422,10 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !h.guardCustomerTenantCreation(w, r, opName, input) {
+		return
+	}
+
 	if opName == "delete-tenant" && !h.prepareCustomerAccountDeletion(w, r, input) {
 		return
 	}

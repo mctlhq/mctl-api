@@ -44,8 +44,10 @@ const customerDeletionSchema = `CREATE TABLE IF NOT EXISTS customer_deletions (
  subject TEXT NOT NULL, actor TEXT NOT NULL,
  status TEXT NOT NULL CHECK (status IN ('prepared','deleting','complete')),
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), completed_at TIMESTAMPTZ,
+ released_at TIMESTAMPTZ,
  PRIMARY KEY (tenant_name, principal_id)
 );
+ALTER TABLE customer_deletions ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ;
 CREATE UNIQUE INDEX IF NOT EXISTS customer_deletion_pending_github
  ON customer_deletions(github_id) WHERE status <> 'complete';
 CREATE INDEX IF NOT EXISTS customer_deletion_subject ON customer_deletions(issuer,subject);
@@ -121,7 +123,7 @@ func (s *Store) WithCustomerDeletionLock(ctx context.Context, tenant, pid string
 	err = fn(runCtx)
 	close(stop)
 	<-done
-	if cause := context.Cause(runCtx); cause != nil {
+	if cause := context.Cause(runCtx); cause != nil && ctx.Err() == nil {
 		err = cause
 	}
 	cancel(nil)
@@ -226,9 +228,30 @@ func (s *Store) PrepareCustomerDeletion(ctx context.Context, tenant, pid, issuer
 	return result, err
 }
 
+// CustomerTenantDeletionPending also fences administrator/MCP name reuse
+// after resource removal, while identity/session cleanup is still running.
+func (s *Store) CustomerTenantDeletionPending(ctx context.Context, tenant string) (bool, error) {
+	var pending bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE tenant_name=$1 AND (status<>'complete' OR released_at IS NULL))`, tenant).Scan(&pending)
+	return pending, err
+}
+
+// ReleaseCustomerDeletion records the final portal acknowledgment. Until it
+// is durable, both GitHub registration and administrator name reuse stay frozen.
+func (s *Store) ReleaseCustomerDeletion(ctx context.Context, tenant, pid string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE customer_deletions SET released_at=COALESCE(released_at,now()) WHERE tenant_name=$1 AND principal_id=$2 AND status='complete'`, tenant, pid)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrInvalid
+	}
+	return nil
+}
+
 func (s *Store) CustomerDeletionPending(ctx context.Context, githubID string) (bool, error) {
 	var pending bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE github_id=$1 AND status<>'complete')`, githubID).Scan(&pending)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE github_id=$1 AND (status<>'complete' OR released_at IS NULL))`, githubID).Scan(&pending)
 	return pending, err
 }
 
@@ -306,13 +329,19 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 		for _, query := range []string{
 			`DELETE FROM oauth_refresh_tokens WHERE principal_id=$1`,
 			`DELETE FROM external_identities WHERE principal_id=$1`,
-			`DELETE FROM principals WHERE id=$1 AND status='disabled' AND kind='human'`,
 		} {
 			if _, err := tx.Exec(ctx, query, pid); err != nil {
 				return err
 			}
 		}
-		_, err := tx.Exec(ctx, `UPDATE customer_deletions SET status='complete',completed_at=now() WHERE tenant_name=$1 AND principal_id=$2`, tenant, pid)
+		tag, err := tx.Exec(ctx, `DELETE FROM principals WHERE id=$1 AND status='disabled' AND kind='human'`, pid)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return ErrInvalid
+		}
+		_, err = tx.Exec(ctx, `UPDATE customer_deletions SET status='complete',completed_at=now() WHERE tenant_name=$1 AND principal_id=$2`, tenant, pid)
 		return err
 	})
 }

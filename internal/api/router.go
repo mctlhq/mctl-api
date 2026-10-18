@@ -15,6 +15,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
@@ -47,7 +48,8 @@ import (
 
 // Options holds all dependencies for the API router.
 type Options struct {
-	CustomerDeletion *CustomerDeletionOptions
+	CustomerDeletion              *CustomerDeletionOptions
+	CustomerTenantDeletionPending func(context.Context, string) (bool, error)
 
 	Registry       *operations.Registry
 	GitReader      GitReader

@@ -65,6 +65,9 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if err := s.FinishCustomerDeletion(ctx, d.Tenant, p.ID); err == nil {
 		t.Fatal("completion before begin was accepted")
 	}
+	if frozen, err := s.CustomerTenantDeletionPending(ctx, d.Tenant); err != nil || !frozen {
+		t.Fatalf("tenant name was not frozen: %v %v", frozen, err)
+	}
 	pending, err := s.CustomerDeletionPending(ctx, d.GitHubID)
 	if err != nil || !pending {
 		t.Fatalf("pending=%v error=%v", pending, err)
@@ -89,6 +92,18 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if _, err := s.ResolveCustomer(ctx, old); !errors.Is(err, auth.ErrIdentityRefused) {
 		t.Fatalf("old subject accepted during deletion: %v", err)
 	}
+	if _, err := s.pool.Exec(ctx, `UPDATE principals SET status='active' WHERE id=$1`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishCustomerDeletion(ctx, d.Tenant, p.ID); err == nil {
+		t.Fatal("reactivated principal reported removed")
+	}
+	if manifest, err := s.CustomerDeletion(ctx, d.Tenant, p.ID); err != nil || manifest.Status != "deleting" {
+		t.Fatalf("failed cleanup changed manifest: %+v %v", manifest, err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE principals SET status='disabled' WHERE id=$1`, p.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.FinishCustomerDeletion(ctx, d.Tenant, p.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +112,12 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	}
 	if _, err := s.ResolveCustomer(ctx, old); !errors.Is(err, auth.ErrIdentityRefused) {
 		t.Fatalf("old subject recreated after deletion: %v", err)
+	}
+	if pending, err := s.CustomerTenantDeletionPending(ctx, d.Tenant); err != nil || !pending {
+		t.Fatalf("name unfrozen before portal release acknowledgment: %v %v", pending, err)
+	}
+	if err := s.ReleaseCustomerDeletion(ctx, d.Tenant, p.ID); err != nil {
+		t.Fatal(err)
 	}
 	fresh, err := s.ResolveCustomer(ctx, customer("delete-new", 730001, "delete-customer"))
 	if err != nil {
@@ -108,6 +129,9 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	pending, err = s.CustomerDeletionPending(ctx, d.GitHubID)
 	if err != nil || pending {
 		t.Fatalf("completed deletion still blocks fresh signup: %v %v", pending, err)
+	}
+	if frozen, err := s.CustomerTenantDeletionPending(ctx, d.Tenant); err != nil || frozen {
+		t.Fatalf("completed deletion still freezes name: %v %v", frozen, err)
 	}
 	var remaining int
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM oauth_refresh_tokens WHERE principal_id=$1`, p.ID).Scan(&remaining); err != nil || remaining != 0 {

@@ -41,6 +41,7 @@ type CustomerDeletionStore interface {
 	CustomerDeletion(context.Context, string, string) (*principals.CustomerDeletion, error)
 	BeginCustomerDeletion(context.Context, string, string) error
 	FinishCustomerDeletion(context.Context, string, string) error
+	ReleaseCustomerDeletion(context.Context, string, string) error
 }
 
 // CustomerDeletionOptions is deliberately opt-in. Missing providers refuse the
@@ -102,7 +103,35 @@ func (h *Handlers) customerMemberships(tenant, pid, login string, requireOwner b
 	return nil
 }
 
-func (h *Handlers) prepareCustomerAccountDeletion(w http.ResponseWriter, r *http.Request, input map[string]string) bool {
+// All API create paths, including administrators, respect the durable name
+// freeze while identity cleanup runs outside the shared GitOps mutex.
+func (h *Handlers) guardCustomerTenantCreation(w http.ResponseWriter, r *http.Request, op string, input map[string]string) bool {
+	if op != "create-tenant" || h.opts.CustomerTenantDeletionPending == nil {
+		return true
+	}
+	pending, err := h.opts.CustomerTenantDeletionPending(r.Context(), input["tenant_name"])
+	if err != nil {
+		writeError(w, 503, "tenant deletion state could not be observed")
+		return false
+	}
+	if pending {
+		writeError(w, 409, "tenant name is frozen by an account deletion")
+		return false
+	}
+	return true
+}
+
+func (h *Handlers) prepareCustomerAccountDeletion(w http.ResponseWriter, r *http.Request, input map[string]string) (allowed bool) {
+	completed := false
+	defer func() {
+		if !allowed && !completed && (input["delete_customer_account"] == "true" || input["customer_principal_id"] != "") {
+			actor := "anonymous"
+			if user := auth.UserFromContext(r.Context()); user != nil {
+				actor = user.ID
+			}
+			h.logAudit(r, audit.Entry{UserID: actor, Operation: "customer.delete.prepare", Status: "denied", RiskLevel: "high", Message: "Customer deletion preparation did not submit a workflow", Parameters: map[string]string{"tenant": input["tenant_name"], "principal_id": input["customer_principal_id"]}})
+		}
+	}()
 	if input["delete_customer_account"] != "true" {
 		if input["customer_principal_id"] != "" {
 			writeError(w, 400, "customer_principal_id requires delete_customer_account=true")
@@ -136,6 +165,11 @@ func (h *Handlers) prepareCustomerAccountDeletion(w http.ResponseWriter, r *http
 			writeError(w, 503, "customer deletion is awaiting portal release")
 			return false
 		}
+		if err := o.Store.ReleaseCustomerDeletion(r.Context(), tenant, pid); err != nil {
+			writeError(w, 503, "customer deletion release could not be recorded")
+			return false
+		}
+		completed = true
 		writeJSON(w, 200, map[string]string{"status": "complete", "tenant": tenant, "principal_id": pid})
 		return false
 	}
@@ -195,7 +229,11 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 	}
 	d, err := o.Store.CustomerDeletion(r.Context(), tenant, pid)
 	if err != nil {
-		writeError(w, 409, "approved customer deletion manifest unavailable")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, 409, "approved customer deletion manifest unavailable")
+		} else {
+			writeError(w, 503, "approved customer deletion manifest unreadable")
+		}
 		return
 	}
 	if d.Status == "complete" {
@@ -205,6 +243,10 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 		}
 		if err := o.ReleasePortal(r.Context(), d); err != nil {
 			writeError(w, 503, "portal release incomplete")
+			return
+		}
+		if err := o.Store.ReleaseCustomerDeletion(r.Context(), tenant, pid); err != nil {
+			writeError(w, 503, "customer deletion release could not be recorded")
 			return
 		}
 		writeJSON(w, 200, map[string]string{"status": "complete"})
@@ -282,7 +324,10 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 		}
 		o.ForgetPrincipals(pid)
 		phase = "portal-release"
-		return o.ReleasePortal(ctx, d)
+		if err := o.ReleasePortal(ctx, d); err != nil {
+			return err
+		}
+		return o.Store.ReleaseCustomerDeletion(ctx, tenant, pid)
 	}
 	err = o.Store.WithCustomerDeletionLock(r.Context(), tenant, pid, func(ctx context.Context) error {
 		fresh, err := o.Store.CustomerDeletion(ctx, tenant, pid)
@@ -293,7 +338,10 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 			if stage == "resources" {
 				return errors.New("completed deletion cannot remove platform resources again")
 			}
-			return o.ReleasePortal(ctx, fresh)
+			if err := o.ReleasePortal(ctx, fresh); err != nil {
+				return err
+			}
+			return o.Store.ReleaseCustomerDeletion(ctx, tenant, pid)
 		}
 		d = fresh
 		return run(ctx)
@@ -302,7 +350,11 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		status = "failed"
 	}
-	h.logAudit(r, audit.Entry{UserID: u.ID, Operation: "customer.delete." + stage, Status: status, RiskLevel: "high", Parameters: map[string]string{"tenant": tenant, "principal_id": pid}})
+	message := ""
+	if err != nil {
+		message = err.Error()
+	}
+	h.logAudit(r, audit.Entry{UserID: u.ID, Operation: "customer.delete." + stage, Status: status, Message: message, RiskLevel: "high", Parameters: map[string]string{"tenant": tenant, "principal_id": pid}})
 	if err != nil {
 		writeErrorCode(w, 503, "customer_deletion_incomplete", "Customer deletion incomplete; retry", map[string]interface{}{"stage": phase})
 		return

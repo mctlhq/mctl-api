@@ -49,7 +49,7 @@ func (p *Providers) request(ctx context.Context, method, path, token, contentTyp
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("provider request failed")
+		return 0, nil, fmt.Errorf("provider request failed: %w", err)
 	}
 	defer func() { _ = res.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(res.Body, 2*1024*1024+1))

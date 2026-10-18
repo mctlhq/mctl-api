@@ -920,9 +920,11 @@ func main() {
 
 	var draining atomic.Bool
 
+	deletionProbeRequired := (cfg.PrincipalDBConfigured && !cfg.PrincipalsDisabled) || os.Getenv("CUSTOMER_DELETION_ENABLED") == "true"
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Registry:                       registry,
 		CustomerDeletion:               customerDeletionOptions(cfg, principalStore, principalCache, oauthServer, quotaReader, argoClient),
+		CustomerTenantDeletionPending:  customerTenantDeletionPending(principalStore, deletionProbeRequired),
 		GitReader:                      gitReader,
 		ComponentSourceRepos:           gitReader,
 		ArgoCD:                         argoClient,
@@ -979,7 +981,7 @@ func main() {
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
 		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,
 		GitHubWebhookOwners:            cfg.GitHubWebhookOwners,
-		ZitadelHook:                    zitadelHookOptions(cfg, gitReader, customerDeletionPending(principalStore, (cfg.PrincipalDBConfigured && !cfg.PrincipalsDisabled) || os.Getenv("CUSTOMER_DELETION_ENABLED") == "true")),
+		ZitadelHook:                    zitadelHookOptions(cfg, gitReader, customerDeletionPending(principalStore, deletionProbeRequired)),
 		GitHubEventOutbox:              githubEventOutboxOption(githubEventOutbox),
 		GitHubEventNotify:              githubEventNotify(githubEventRelay),
 		OAuthRegistrationToken:         cfg.OAuthRegistrationToken,

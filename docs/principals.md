@@ -891,3 +891,10 @@ or have no principal database retain the pre-existing signup behavior while
 full deletion is disabled. Measure these indexed reads before replacing this
 contract with a distributed invalidation mechanism; do not silently add a
 negative-cache grace period.
+
+
+The final portal release is acknowledged durably as `released_at`. Both the
+GitHub creation probe and API administrator/MCP tenant creation keep the name
+frozen until that acknowledgment is recorded, even after principal removal has
+committed. A failed final acknowledgment is retried against the completed old
+manifest; it does not rerun resource deletion or touch a replacement principal.
