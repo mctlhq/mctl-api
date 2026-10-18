@@ -111,6 +111,12 @@ type OAuthZitadelOptions struct {
 	// the instance login page, which has no GitHub button. Empty offers
 	// no customer entry and leaves the sign-in as it was.
 	CustomersGitHubIdPID string
+	// RedirectBaseURL replaces the public base URL in the redirect_uri sent
+	// to ZITADEL (OAUTH_ZITADEL_REDIRECT_BASE_URL). It exists for a local
+	// end-to-end run behind a tunnel whose host changes every start: the
+	// browser returns to http://localhost:8080 while clients reach the
+	// tunnel. Empty, as in every deployment, keeps the base URL.
+	RedirectBaseURL string
 }
 
 const (
@@ -170,6 +176,11 @@ func (z *oauthZitadel) offersCustomers() bool {
 }
 
 func (z *oauthZitadel) oauthConfig(p *oidc.Provider, baseURL string) *oauth2.Config {
+	// The authorize request and the code exchange both come through here,
+	// so the redirect_uri they send cannot differ.
+	if z.opts.RedirectBaseURL != "" {
+		baseURL = z.opts.RedirectBaseURL
+	}
 	scopes := []string{oidc.ScopeOpenID, "profile"}
 	if z.opts.CustomersOrgID != "" {
 		// The ID token must name the user's organization, or a customer

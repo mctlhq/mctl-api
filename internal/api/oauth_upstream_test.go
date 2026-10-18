@@ -82,6 +82,8 @@ type upstreamHarness struct {
 	oauth  *auth.OAuthServer
 	idp    *fakeIdP
 	store  *fakeLinkedStore
+	// zitadelRedirect is the redirect_uri ZITADEL must be sent.
+	zitadelRedirect string
 }
 
 // newUpstreamHarness builds the router for mode. store nil means a
@@ -97,7 +99,7 @@ func newUpstreamHarness(t *testing.T, mode OAuthUpstreamMode, store *fakeLinkedS
 	if store != nil {
 		zopts.Store = store
 	}
-	return &upstreamHarness{t: t, oauth: o, idp: idp, store: store,
+	return &upstreamHarness{t: t, oauth: o, idp: idp, store: store, zitadelRedirect: "https://api.example" + oauthZitadelCallbackPath,
 		router: NewRouter(Options{OAuthServer: o, OAuthUpstream: mode, OAuthZitadel: zopts})}
 }
 
@@ -128,7 +130,7 @@ func (h *upstreamHarness) toZitadel(rec *httptest.ResponseRecorder) string {
 	}
 	u, _ := url.Parse(loc)
 	q := u.Query()
-	if q.Get("client_id") != testOAuthZClientID || q.Get("redirect_uri") != "https://api.example"+oauthZitadelCallbackPath ||
+	if q.Get("client_id") != testOAuthZClientID || q.Get("redirect_uri") != h.zitadelRedirect ||
 		q.Get("code_challenge_method") != "S256" || q.Get("nonce") == "" || q.Get("state") == "" {
 		h.t.Fatalf("ZITADEL authorize params: %v", q)
 	}
@@ -244,6 +246,40 @@ func TestZitadelSigninIssuesTheLinkedGitHubLoginsCode(t *testing.T) {
 	// The state is single use.
 	if rec := h.callback(state); rec.Code != http.StatusBadRequest {
 		t.Fatalf("replayed callback = %d, want 400", rec.Code)
+	}
+}
+
+// OAUTH_ZITADEL_REDIRECT_BASE_URL moves only the redirect_uri ZITADEL is
+// sent, and the authorize request and the code exchange move together:
+// ZITADEL refuses an exchange whose redirect_uri differs.
+func TestZitadelRedirectBaseURL(t *testing.T) {
+	for name, base := range map[string]string{"default": "", "override": "http://localhost:8080"} {
+		t.Run(name, func(t *testing.T) {
+			idp := newFakeIdP(t)
+			idp.clientID, idp.clientSecret = testOAuthZClientID, testOAuthZClientSecret
+			o := auth.NewOAuthServer("https://api.example", "gh-client", "gh-secret", []byte("test-secret"),
+				[]string{testClientRedirect}, auth.NewGitHubValidator([]string{"mashkovd"}))
+			o.TenantResolver = fakeTenants{"mashkovd": {"acme"}}
+			zopts := &OAuthZitadelOptions{ProviderName: "zitadel", Issuer: idp.srv.URL, ClientID: testOAuthZClientID,
+				ClientSecret: testOAuthZClientSecret, Store: linkedTo("mashkovd"), RedirectBaseURL: base}
+			want := "https://api.example" + oauthZitadelCallbackPath
+			if base != "" {
+				want = base + oauthZitadelCallbackPath
+			}
+			idp.redirectURI = want
+			h := &upstreamHarness{t: t, oauth: o, idp: idp, zitadelRedirect: want,
+				router: NewRouter(Options{OAuthServer: o, OAuthUpstream: OAuthUpstreamZitadel, OAuthZitadel: zopts})}
+
+			rec := h.callback(h.toZitadel(h.get(authorizeQuery(""))))
+			loc, _ := url.Parse(rec.Header().Get("Location"))
+			if rec.Code != http.StatusFound || !strings.HasPrefix(loc.String(), testClientRedirect) || loc.Query().Get("code") == "" {
+				t.Fatalf("callback = %d %q, want a code for the client: %s", rec.Code, loc, rec.Body.String())
+			}
+			// The rest of the OAuth server still answers under BASE_URL.
+			if md := h.get("/.well-known/oauth-authorization-server"); !strings.Contains(md.Body.String(), `"issuer":"https://api.example"`) {
+				t.Fatalf("metadata = %s, want the issuer unchanged", md.Body.String())
+			}
+		})
 	}
 }
 

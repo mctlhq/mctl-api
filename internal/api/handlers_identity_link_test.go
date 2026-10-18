@@ -131,6 +131,9 @@ type fakeIdP struct {
 	username      string // preferred_username; "dmitrii" when empty
 	// extra claims added to the ID token
 	extra map[string]any
+	// redirectURI, when set, is the redirect_uri the token endpoint
+	// requires, as ZITADEL does: the one the authorize request carried.
+	redirectURI string
 }
 
 const testLinkClientID, testLinkClientSecret = "link-client", "link-secret"
@@ -196,7 +199,8 @@ func (f *fakeIdP) token(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
 	if id != f.clientID || secret != f.clientSecret || r.PostForm.Get("code") != "z-code" ||
-		base64.RawURLEncoding.EncodeToString(sum[:]) != f.challenge {
+		base64.RawURLEncoding.EncodeToString(sum[:]) != f.challenge ||
+		(f.redirectURI != "" && r.PostForm.Get("redirect_uri") != f.redirectURI) {
 		http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
 		return
 	}
