@@ -44,7 +44,7 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := refresh.Insert("deletion-test-token", "test-client", refreshstore.Session{PrincipalID: p.ID}, time.Now().Add(time.Hour)); err != nil {
+	if err := refresh.Insert("deletion-test-token-"+p.ID, "test-client", refreshstore.Session{PrincipalID: p.ID}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	for _, holder := range []string{p.ID, "github:delete-customer", "github:other-customer"} {
@@ -54,6 +54,14 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 		if _, err := s.pool.Exec(ctx, `INSERT INTO surface_identity_links(id,surface,external_id,principal,challenge_id,created_at) VALUES($1,'telegram',$1,$1,$1,now())`, holder); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// Two replicas may both have cached the active identity and local JWT.
+	replica := NewResolver(s, nil, false)
+	if _, err := replica.ResolvePrincipal(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := replica.CheckPrincipal(ctx, p.ID); err != nil {
+		t.Fatal(err)
 	}
 	d, err := s.PrepareCustomerDeletion(ctx, "delete-test", p.ID, old.Issuer, "admin-approval")
 	if err != nil {
@@ -72,13 +80,17 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if err != nil || !pending {
 		t.Fatalf("pending=%v error=%v", pending, err)
 	}
-	// Two replicas may both have cached the active identity and local JWT.
-	replica := NewResolver(s, nil, false)
-	if _, err := replica.ResolvePrincipal(ctx, old); err != nil {
-		t.Fatal(err)
+	// The approved prepared intent already fences customer actions, even if
+	// workflow submission fails or begin is queued. It cannot create a new
+	// workspace after an ordinary removal of the original workspace.
+	if err := replica.CheckPrincipal(ctx, p.ID); !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("prepared intent still permits API actions: %v", err)
 	}
-	if err := replica.CheckPrincipal(ctx, p.ID); err != nil {
-		t.Fatal(err)
+	if err := replica.CheckHumanPrincipal(ctx, p.ID); !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("prepared human still acts: %v", err)
+	}
+	if _, err := replica.ResolvePrincipal(ctx, old); !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("prepared subject signs in: %v", err)
 	}
 	if err := s.BeginCustomerDeletion(ctx, d.Tenant, p.ID); err != nil {
 		t.Fatal(err)

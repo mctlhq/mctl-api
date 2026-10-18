@@ -939,3 +939,10 @@ GitHub creation probe and API administrator/MCP tenant creation keep the name
 frozen until that acknowledgment is recorded, even after principal removal has
 committed. A failed final acknowledgment is retried against the completed old
 manifest; it does not rerun resource deletion or touch a replacement principal.
+
+The immutable approved manifest fences the principal and old subject immediately
+at `prepared`, before workflow submission or its `begin` callback. This prevents
+a still-active customer from creating another workspace while submission is
+retrying or the workflow is queued. The same uncached cross-replica checks apply
+to existing API tokens and fresh token issuance. Database credential revocation
+still runs idempotently in `begin`; the earlier deny fence must never wait for it.

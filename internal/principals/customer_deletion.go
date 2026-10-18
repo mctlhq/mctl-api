@@ -257,13 +257,13 @@ func (s *Store) CustomerDeletionPending(ctx context.Context, githubID string) (b
 
 func (s *Store) CustomerSubjectDeleted(ctx context.Context, issuer, subject string) (bool, error) {
 	var deleted bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE issuer=$1 AND subject=$2 AND status IN ('deleting','complete'))`, issuer, subject).Scan(&deleted)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE issuer=$1 AND subject=$2 AND status IN ('prepared','deleting','complete'))`, issuer, subject).Scan(&deleted)
 	return deleted, err
 }
 
 func (s *Store) CustomerPrincipalDeleted(ctx context.Context, pid string) (bool, error) {
 	var deleted bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE principal_id=$1 AND status IN ('deleting','complete'))`, pid).Scan(&deleted)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE principal_id=$1 AND status IN ('prepared','deleting','complete'))`, pid).Scan(&deleted)
 	return deleted, err
 }
 
