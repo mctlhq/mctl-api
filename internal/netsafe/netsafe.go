@@ -14,9 +14,11 @@
 
 // Package netsafe provides an HTTP client that can reach public addresses
 // only, for fetching a URL a third party chose (a client metadata document).
-// It refuses every non-public destination, checks the address actually being
-// connected to (so DNS rebinding cannot reach a refused address), ignores
-// proxy environment variables and follows no redirect.
+// It refuses every non-public destination, ignores proxy environment
+// variables and follows no redirect. DNS rebinding cannot reach a refused
+// address because the dialer resolves the host once, filters the answers with
+// PublicAddr and connects to the accepted IP literal itself: there is no
+// second resolution between the check and the connect.
 package netsafe
 
 import (
@@ -60,6 +62,7 @@ var refused = mustPrefixes(
 	"100.64.0.0/10",
 	"192.0.0.0/24",
 	"192.0.2.0/24",
+	"192.88.99.0/24", // deprecated 6to4 relay anycast
 	"198.18.0.0/15",
 	"198.51.100.0/24",
 	"203.0.113.0/24",
@@ -68,6 +71,11 @@ var refused = mustPrefixes(
 	"fe80::/10",
 	"2001:db8::/32",
 	"100::/64",
+	"::/96",          // IPv4-compatible IPv6 (Is4In6 matches only ::ffff:)
+	"2002::/16",      // 6to4, which carries an IPv4 address
+	"2001::/32",      // Teredo, which carries an IPv4 address
+	"64:ff9b:1::/48", // local-use NAT64
+	"fec0::/10",      // deprecated site-local
 )
 
 func mustPrefixes(s ...string) []netip.Prefix {
@@ -107,7 +115,13 @@ func PublicAddr(ip netip.Addr) bool {
 }
 
 // controlPublic is the net.Dialer Control hook: it sees the address of the
-// socket about to connect and refuses a non-public one.
+// socket about to connect and refuses a non-public one. As the dialer is
+// wired it is redundant: DialContext dials only an IP literal PublicAddr has
+// just accepted, so no input reaches it that the loop has not judged, and no
+// test can tell it apart from its absence. That PublicAddr filter is what
+// holds the guarantee (pinned by TestResolvedNonPublicRefused and
+// TestDirectIPAndPortRefused). The hook stays as defence in depth against a
+// change that hands the dialer the host name instead of the literal.
 func controlPublic(_, address string, _ syscall.RawConn) error {
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
@@ -134,9 +148,7 @@ func Client(opts Options) *http.Client {
 	}
 	dialer := &net.Dialer{
 		Timeout: opts.Timeout,
-		// Control runs on the socket actually being connected, after any
-		// resolution: the decision is made on the connected address, not on
-		// an earlier DNS answer.
+		// Defence in depth only; see controlPublic.
 		Control: controlPublic,
 	}
 	tr := &http.Transport{

@@ -56,13 +56,14 @@ const (
 	maxRedirectURIs  = 20
 	maxRedirectBytes = 2048
 	maxNameRunes     = 100
-	minTTL           = 5 * time.Minute
+	minTTL           = 30 * time.Second
 	maxTTL           = 24 * time.Hour
 	defaultTTL       = time.Hour
 	negativeTTL      = 5 * time.Minute
 	cacheEntries     = 1024
 	hostPerMinute    = 10
 	maxConcurrent    = 8
+	fetchTimeout     = 10 * time.Second
 )
 
 // Document is the validated subset of a metadata document.
@@ -150,9 +151,11 @@ type Options struct {
 	HTTPClient *http.Client
 	// Now overrides the clock in tests.
 	Now func() time.Time
-	// HostPerMinute and MaxConcurrent override the limits in tests.
+	// HostPerMinute, MaxConcurrent and FetchTimeout override the limits in
+	// tests.
 	HostPerMinute int
 	MaxConcurrent int
+	FetchTimeout  time.Duration
 }
 
 // Resolver fetches, validates and caches metadata documents.
@@ -161,6 +164,7 @@ type Resolver struct {
 	client  *http.Client
 	now     func() time.Time
 	perHost int
+	timeout time.Duration
 	sem     chan struct{}
 	sf      singleflight.Group
 
@@ -195,18 +199,23 @@ func NewResolver(o Options) *Resolver {
 	if conc <= 0 {
 		conc = maxConcurrent
 	}
+	timeout := o.FetchTimeout
+	if timeout <= 0 {
+		timeout = fetchTimeout
+	}
 	allowed := make([]string, 0, len(o.AllowedHosts))
 	for _, h := range o.AllowedHosts {
 		allowed = append(allowed, strings.ToLower(strings.TrimSpace(h)))
 	}
 	return &Resolver{
-		allowed: allowed, client: c, now: now, perHost: per,
+		allowed: allowed, client: c, now: now, perHost: per, timeout: timeout,
 		sem: make(chan struct{}, conc), lru: list.New(),
 		cache: map[string]*list.Element{}, rate: map[string][]time.Time{},
 	}
 }
 
-// maxRateHosts bounds the per-host rate map before stale hosts are swept.
+// maxRateHosts is the hard bound on the per-host rate map: a host not yet in
+// it is refused while it is full of hosts seen within the last minute.
 const maxRateHosts = 1024
 
 func (r *Resolver) hostAllowed(host string) bool {
@@ -243,9 +252,12 @@ func (r *Resolver) Resolve(ctx context.Context, clientID string) (Document, erro
 			return doc, err
 		}
 		// Detach from the first caller's lifetime: the shared fetch must not be
-		// aborted (or cached as a failure) because one browser went away. The
-		// netsafe client's own timeout bounds it.
-		doc, ttl, err := r.fetch(context.WithoutCancel(ctx), u, clientID)
+		// aborted (or cached as a failure) because one browser went away.
+		// WithoutCancel also drops the caller's deadline, so the fetch gets its
+		// own here rather than relying on the injected client's timeout.
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.timeout)
+		defer cancel()
+		doc, ttl, err := r.fetch(fctx, u, clientID)
 		if errors.Is(err, ErrRateLimited) {
 			// Not the document's fault: refuse, but do not cache it.
 			return Document{}, err
@@ -302,11 +314,19 @@ func (r *Resolver) allowHost(host string) bool {
 	defer r.mu.Unlock()
 	now := r.now()
 	cut := now.Add(-time.Minute)
-	if len(r.rate) > maxRateHosts {
+	if _, known := r.rate[host]; !known && len(r.rate) >= maxRateHosts {
 		for h, ts := range r.rate {
 			if len(ts) == 0 || !ts[len(ts)-1].After(cut) {
 				delete(r.rate, h)
 			}
+		}
+		if len(r.rate) >= maxRateHosts {
+			// Every slot was used within the minute: refuse the new host
+			// rather than grow past the bound. With a .suffix allowlist entry
+			// a caller picks the hosts and can fill the map, refusing other
+			// untracked hosts for a minute; that is why the README asks for
+			// exact hosts in production.
+			return false
 		}
 	}
 	kept := r.rate[host][:0]
@@ -361,13 +381,32 @@ func (r *Resolver) fetch(ctx context.Context, u *url.URL, clientID string) (Docu
 	return doc, cacheTTL(resp.Header.Get("Cache-Control")), nil
 }
 
+// cacheTTL is how long a document served with Cache-Control cc is cached:
+// the smallest max-age when several are given, defaultTTL with none, and
+// minTTL for no-store, a bare no-cache or max-age=0, always within
+// [minTTL, maxTTL]. The short floor lets a client that revokes a redirect URI
+// see it take effect within seconds while a busy client's sign-ins are not
+// refused by the per-host rate limit. An invalid max-age is ignored (RFC 9111
+// section 5.2) and an over-large one is clamped (section 1.2.2). A qualified
+// no-cache="field" restricts only header fields this cache never reuses.
 func cacheTTL(cc string) time.Duration {
-	ttl := defaultTTL
+	ttl, seen := defaultTTL, false
 	for _, d := range strings.Split(cc, ",") {
 		d = strings.ToLower(strings.TrimSpace(d))
+		if d == "no-store" || d == "no-cache" {
+			return minTTL
+		}
 		if v, ok := strings.CutPrefix(d, "max-age="); ok {
-			if n, err := strconv.Atoi(strings.Trim(v, `"`)); err == nil && n >= 0 {
-				ttl = time.Duration(n) * time.Second
+			v = strings.Trim(v, `"`)
+			if v == "" || strings.Trim(v, "0123456789") != "" {
+				continue
+			}
+			t := maxTTL
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n < int64(maxTTL/time.Second) {
+				t = time.Duration(n) * time.Second
+			}
+			if !seen || t < ttl {
+				ttl, seen = t, true
 			}
 		}
 	}
@@ -427,9 +466,14 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 		if u.Fragment != "" || u.User != nil {
 			return bad("redirect_uri %q must not contain a fragment or userinfo", s)
 		}
-		switch strings.ToLower(u.Scheme) {
-		case "javascript", "data", "vbscript", "file", "blob":
-			return bad("redirect_uri %q has a disallowed scheme", s)
+		// An allowlist, not a denylist: https with a host, or http on a
+		// loopback IP literal (RFC 8252 section 7.3). url.Parse lower-cases
+		// the scheme.
+		switch {
+		case u.Scheme == "https" && u.Host != "" && u.Hostname() != "":
+		case u.Scheme == "http" && isLoopbackIP(u.Hostname()):
+		default:
+			return bad("redirect_uri %q must be https or loopback http", s)
 		}
 	}
 	name, _ := str("client_name")

@@ -37,6 +37,8 @@ func TestPublicAddr(t *testing.T) {
 		"::1", "::", "fc00::1", "fd12::1", "fe80::1", "ff02::1", "2001:db8::1",
 		"::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:169.254.169.254",
 		"64:ff9b::7f00:1", "64:ff9b::a00:1", "64:ff9b::a9fe:a9fe",
+		"192.88.99.1", "::7f00:1", "::a9fe:a9fe", "2002:7f00:1::", "2002:808:808::1",
+		"2001:0:4136:e378:8000:63bf:3fff:fdd2", "64:ff9b:1::a00:1", "fec0::1",
 	}
 	for _, s := range refusedList {
 		if PublicAddr(netip.MustParseAddr(s)) {
@@ -99,8 +101,9 @@ func TestDirectIPAndPortRefused(t *testing.T) {
 	}
 }
 
-// The Control hook alone refuses a connect to a non-public address, which is
-// what defeats a DNS answer that changes between lookup and connect.
+// The Control hook refuses a non-public address when called. As the dialer is
+// wired it is defence in depth only (see controlPublic): the PublicAddr filter
+// in DialContext is what the end-to-end tests above pin.
 func TestControlHookRefusesNonPublic(t *testing.T) {
 	for _, a := range []string{"127.0.0.1:443", "[::1]:443", "10.0.0.1:443", "[::ffff:127.0.0.1]:443"} {
 		if err := controlPublic("tcp", a, nil); !errors.Is(err, ErrNonPublic) {
