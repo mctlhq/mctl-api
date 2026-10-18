@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,6 +76,10 @@ type Document struct {
 	ClientID     string
 	ClientName   string
 	RedirectURIs []string
+	// DroppedRedirectURIs lists the well-formed entries outside the scheme
+	// allowlist that parseDocument ignored. They never match; they are kept
+	// only so a refused redirect can be explained in the logs.
+	DroppedRedirectURIs []string
 }
 
 // IsCIMDURL reports whether s has the shape of a CIMD client_id: https, a
@@ -459,6 +464,8 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 	if len(uris) > maxRedirectURIs {
 		return bad("too many redirect_uris")
 	}
+	accepted := make([]string, 0, len(uris))
+	var dropped []string
 	for _, s := range uris {
 		if len(s) > maxRedirectBytes {
 			return bad("redirect_uri too long")
@@ -472,20 +479,32 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 		}
 		// An allowlist, not a denylist: https with a host, or http on a
 		// loopback IP literal (RFC 8252 section 7.3). url.Parse lower-cases
-		// the scheme.
+		// the scheme. Any other entry that passed the checks above is
+		// dropped rather than refusing the document, so a client that also
+		// lists, say, http://localhost/callback (Codex does) keeps its usable
+		// entries; RedirectAllowed only ever sees the accepted set. A
+		// malformed entry (relative, fragment, userinfo, too long) stays
+		// fatal by choice, even when its scheme would have been dropped.
 		switch {
 		case u.Scheme == "https" && u.Host != "" && u.Hostname() != "":
 		case u.Scheme == "http" && isLoopbackIP(u.Hostname()):
 		default:
-			return bad("redirect_uri %q must be https or loopback http", s)
+			dropped = append(dropped, s)
+			continue
 		}
+		accepted = append(accepted, s)
+	}
+	if len(accepted) == 0 {
+		return bad("no redirect_uri is https or loopback http")
 	}
 	name, _ := str("client_name")
 	name = strings.TrimSpace(name)
 	if utf8.RuneCountInString(name) > maxNameRunes {
 		name = string([]rune(name)[:maxNameRunes])
 	}
-	return Document{ClientID: clientID, ClientName: name, RedirectURIs: uris}, nil
+	// Clipped so an append by a caller can never write into the backing array
+	// of a cached document shared by concurrent requests.
+	return Document{ClientID: clientID, ClientName: name, RedirectURIs: slices.Clip(accepted), DroppedRedirectURIs: dropped}, nil
 }
 
 // RedirectAllowed reports whether uri matches an entry of the document's
