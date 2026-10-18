@@ -300,3 +300,19 @@ func TestResolveByFingerprint_NoMatch_NotAnError(t *testing.T) {
 		t.Fatal("expected resolved=false when no matching open alert exists")
 	}
 }
+
+func TestEscapeLike(t *testing.T) {
+	cases := map[string]string{
+		"abc": "abc",
+		"a%b": `a\%b`,
+		"a_b": `a\_b`,
+		`a\b`: `a\\b`,
+		`%_\`: `\%\_\\`,
+		"":    "",
+	}
+	for in, want := range cases {
+		if got := escapeLike(in); got != want {
+			t.Errorf("escapeLike(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

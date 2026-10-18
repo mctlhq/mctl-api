@@ -32,6 +32,21 @@ import (
 // tenant actually owns the id — that would reopen the same leak.
 var ErrIDConflict = errors.New("alerts store: id already exists")
 
+// ErrNotFound is returned when no incident matches the requested id or prefix.
+var ErrNotFound = errors.New("alerts store: incident not found")
+
+// ErrPrefixTooShort is returned by GetByPrefix when there is no exact id match
+// and the prefix is shorter than MinPrefixLen.
+var ErrPrefixTooShort = errors.New("alerts store: id prefix too short")
+
+// ErrAmbiguousPrefix is returned by GetByPrefix when a prefix matches more
+// than one incident. It deliberately carries no ids or tenant names.
+var ErrAmbiguousPrefix = errors.New("alerts store: id prefix matches more than one incident")
+
+// MinPrefixLen is the minimum length of an id prefix accepted by GetByPrefix
+// when there is no exact match.
+const MinPrefixLen = 8
+
 const alertSchema = `
 CREATE TABLE IF NOT EXISTS alerts (
     id              TEXT PRIMARY KEY,
@@ -239,6 +254,9 @@ func (s *Store) Get(ctx context.Context, id string) (*Alert, error) {
 	err := scanAlert(s.pool.QueryRow(ctx,
 		`SELECT `+alertColumns+` FROM alerts WHERE id=$1`, id), a)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("alerts store: get: %w", ErrNotFound)
+		}
 		return nil, fmt.Errorf("alerts store: get: %w", err)
 	}
 
@@ -246,21 +264,59 @@ func (s *Store) Get(ctx context.Context, id string) (*Alert, error) {
 	return a, nil
 }
 
-// GetByPrefix finds an alert by ID prefix (minimum 8 chars).
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// escapeLike escapes LIKE metacharacters so the input is matched literally.
+func escapeLike(s string) string { return likeEscaper.Replace(s) }
+
+// GetByPrefix resolves an incident by id. An exact id match always wins, at
+// any length. Otherwise the prefix must be at least MinPrefixLen characters,
+// is matched literally (LIKE wildcards are escaped), and must match exactly
+// one incident. It returns ErrPrefixTooShort, ErrNotFound or
+// ErrAmbiguousPrefix accordingly; it never picks one of several matches.
 func (s *Store) GetByPrefix(ctx context.Context, prefix string) (*Alert, error) {
-	if len(prefix) >= 36 {
-		return s.Get(ctx, prefix)
+	a, err := s.Get(ctx, prefix)
+	if err == nil {
+		return a, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
 	}
 
-	a := &Alert{}
-	err := scanAlert(s.pool.QueryRow(ctx,
-		`SELECT `+alertColumns+` FROM alerts WHERE id LIKE $1 ORDER BY created_at DESC LIMIT 1`, prefix+"%"), a)
+	if len(prefix) < MinPrefixLen {
+		return nil, ErrPrefixTooShort
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+alertColumns+` FROM alerts WHERE id LIKE $1 ESCAPE '\' ORDER BY id LIMIT 2`,
+		escapeLike(prefix)+"%")
 	if err != nil {
 		return nil, fmt.Errorf("alerts store: get by prefix: %w", err)
 	}
+	defer rows.Close()
 
-	a.Evidence, _ = s.getEvidence(ctx, a.ID)
-	return a, nil
+	var found []*Alert
+	for rows.Next() {
+		m := &Alert{}
+		if err := scanAlert(rows, m); err != nil {
+			return nil, fmt.Errorf("alerts store: get by prefix: %w", err)
+		}
+		found = append(found, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("alerts store: get by prefix: %w", err)
+	}
+	rows.Close()
+
+	switch len(found) {
+	case 0:
+		return nil, ErrNotFound
+	case 1:
+		found[0].Evidence, _ = s.getEvidence(ctx, found[0].ID)
+		return found[0], nil
+	default:
+		return nil, ErrAmbiguousPrefix
+	}
 }
 
 // ResolveByFingerprint resolves the open alert matching tenant+fingerprint,

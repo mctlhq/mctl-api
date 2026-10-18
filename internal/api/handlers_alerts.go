@@ -17,6 +17,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -233,7 +234,7 @@ func (h *Handlers) GetIncident(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	a, err := h.opts.AlertStore.GetByPrefix(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "incident not found: "+id)
+		writeIncidentLookupError(w, id, err)
 		return
 	}
 
@@ -269,7 +270,7 @@ func (h *Handlers) UpdateIncident(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	existing, err := h.opts.AlertStore.GetByPrefix(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "incident not found: "+id)
+		writeIncidentLookupError(w, id, err)
 		return
 	}
 
@@ -343,7 +344,7 @@ func (h *Handlers) AcknowledgeIncident(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	existing, err := h.opts.AlertStore.GetByPrefix(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "incident not found: "+id)
+		writeIncidentLookupError(w, id, err)
 		return
 	}
 
@@ -387,7 +388,7 @@ func (h *Handlers) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	existing, err := h.opts.AlertStore.GetByPrefix(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "incident not found: "+id)
+		writeIncidentLookupError(w, id, err)
 		return
 	}
 
@@ -469,4 +470,20 @@ func (h *Handlers) IncidentSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, sum)
+}
+
+// writeIncidentLookupError maps an AlertStore.GetByPrefix error to a stable
+// HTTP status. A failed lookup never reaches Update.
+func writeIncidentLookupError(w http.ResponseWriter, id string, err error) {
+	switch {
+	case errors.Is(err, alerts.ErrPrefixTooShort):
+		writeError(w, http.StatusBadRequest, "incident id prefix must be at least 8 characters")
+	case errors.Is(err, alerts.ErrNotFound):
+		writeError(w, http.StatusNotFound, "incident not found: "+id)
+	case errors.Is(err, alerts.ErrAmbiguousPrefix):
+		writeError(w, http.StatusConflict, "incident id prefix is ambiguous; use a longer prefix or the full id")
+	default:
+		slog.Error("incident lookup failed", "id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to look up incident")
+	}
 }
