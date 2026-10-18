@@ -511,6 +511,47 @@ checking the protocol by hand with a chosen client, and advertising waits
 until the allowlist covers every CIMD client in use (mctl-api#693). The
 pre-split `OAUTH_CIMD_ENABLED` is retired and refuses startup when set.
 
+A document declares how its client authenticates at `/oauth/token`, and
+only two methods are accepted (mctl-api#694):
+
+- `none`: a public client, proven by PKCE alone. It must send no client
+  assertion.
+- `private_key_jwt` (RFC 7523; ChatGPT uses it): the document also names
+  `token_endpoint_auth_signing_alg` (`RS256` or `ES256`) and a `jwks_uri` on
+  the `client_id`'s own host. An inline `jwks` is refused. The key set is
+  fetched like the document: allowlist, netsafe, size limit, per-host budget,
+  cached by `Cache-Control`. Only public signature keys are admitted (RSA of
+  at least 2048 bits, EC P-256). An assertion with an unknown `kid` triggers
+  at most one refetch per 30 s per set, which is how a rotated-in key is
+  picked up.
+
+  Every token request from such a client, both `authorization_code` and
+  `refresh_token`, needs `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`
+  and a `client_assertion`, and then `client_id` may be omitted. The
+  assertion is checked as follows:
+  - it is signed with the document's algorithm, whatever its header says, so
+    `alg=none` and HS256 confusion are refused;
+  - `iss` and `sub` equal the `client_id`;
+  - `aud` is exactly one value, the issuer (`https://api.mctl.ai`) or the
+    token endpoint URL, compared as exact strings;
+  - `exp` is at most 5 minutes ahead; `exp`, `nbf` and `iat` get 60 s of
+    skew;
+  - `jti` is present and has not been used before. It is recorded in the
+    shared flow store (kind `jti`) until `exp` plus the skew, so one
+    assertion is accepted once across replicas. A store that cannot record
+    it is a `server_error`, never a pass.
+
+A failed client authentication answers `401 invalid_client` and is counted in
+`oauth_client_auth_failures_total{grant_type,assertion}`. The client is
+authenticated before the code is redeemed or the refresh token rotated, so a
+failed attempt consumes neither. There is no downgrade: a code records the
+method the client declared when it was issued and is redeemed only with that
+method, even if the document later says `none`. While CIMD is off, a URL
+`client_id` that is not pre-registered is refused at the token endpoint, since
+its required method cannot be known. Discovery lists `private_key_jwt` and
+`token_endpoint_auth_signing_alg_values_supported` only while
+`OAUTH_CIMD_ACCEPT=true`.
+
 These limits are deliberate:
 
 - **Exact hosts.** List one exact host per known client. The fetch budget

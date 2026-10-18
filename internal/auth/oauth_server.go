@@ -45,6 +45,12 @@ import (
 // with HTTP 500 / error:"server_error" when they encounter this sentinel.
 var ErrServerError = errors.New("server_error")
 
+// ErrInvalidClient means client authentication failed (RFC 6749 section 5.2
+// invalid_client): a missing, invalid or replayed client assertion, an
+// assertion from a client that must not send one, or a CIMD client whose
+// document could not be resolved to an authentication method.
+var ErrInvalidClient = errors.New("invalid_client")
+
 // errResolverNotConfigured is returned by resolveGroupsChecked when
 // OAuthServer.TenantResolver is nil. It is not a failure: callers treat it as
 // "feature off" and keep whatever groups the session already carried, so a
@@ -281,6 +287,7 @@ type OAuthServer struct {
 	CIMDAdvertise bool
 
 	consents sync.Map // token → consentMem, used when FlowStore is nil
+	jtis     sync.Map // client_id + "\x00" + jti → expiry, used when FlowStore is nil
 
 	codes         authCodeStore
 	refreshTokens refreshTokenStore
@@ -1403,6 +1410,16 @@ func (s *OAuthServer) IssueCode(ctx context.Context, login, principalID, clientI
 		CodeChallenge: codeChallenge,
 		CreatedAt:     time.Now(),
 	}
+	if s.IsCIMDClient(clientID) {
+		// Recorded so the code can only be redeemed with the authentication
+		// the client declared when it was issued, even if its document later
+		// says none.
+		doc, err := s.CIMD.Resolve(ctx, clientID)
+		if err != nil {
+			return "", fmt.Errorf("resolve client metadata document: %w", err)
+		}
+		entry.AuthMethod = doc.AuthMethod
+	}
 	if s.FlowStore == nil {
 		s.codes.store(code, entry)
 		return code, nil
@@ -1461,8 +1478,20 @@ func takeFlow(ctx context.Context, st flowstore.Store, kind, key string, v any) 
 }
 
 // ExchangeCode validates an authorization code + PKCE verifier and returns a signed JWT.
-// The code is consumed (one-time use).
+// The code is consumed (one-time use). It sends no client authentication, so
+// a private_key_jwt client is refused; see ExchangeCodeWithClientAuth.
 func (s *OAuthServer) ExchangeCode(ctx context.Context, code, codeVerifier, clientID, redirectURI string) (string, string, error) {
+	return s.ExchangeCodeWithClientAuth(ctx, code, codeVerifier, clientID, redirectURI, ClientAssertion{})
+}
+
+// ExchangeCodeWithClientAuth is ExchangeCode for a request that may carry
+// a client assertion. The client is authenticated before the code is taken,
+// so a request that fails authentication does not consume it.
+func (s *OAuthServer) ExchangeCodeWithClientAuth(ctx context.Context, code, codeVerifier, clientID, redirectURI string, ca ClientAssertion) (string, string, error) {
+	method, err := s.authenticateClient(ctx, clientID, ca)
+	if err != nil {
+		return "", "", err
+	}
 	entry, ok, err := s.takeCode(ctx, code)
 	if err != nil {
 		return "", "", err
@@ -1472,6 +1501,9 @@ func (s *OAuthServer) ExchangeCode(ctx context.Context, code, codeVerifier, clie
 	}
 	if entry.ClientID != clientID {
 		return "", "", errors.New("client_id mismatch")
+	}
+	if entry.AuthMethod == cimd.AuthMethodPrivateKeyJWT && method != cimd.AuthMethodPrivateKeyJWT {
+		return "", "", fmt.Errorf("%w: the code was issued to a private_key_jwt client", ErrInvalidClient)
 	}
 	if entry.RedirectURI != redirectURI {
 		return "", "", errors.New("redirect_uri mismatch")
@@ -1570,7 +1602,20 @@ func (s *OAuthServer) IssueRefreshToken(login, principalID string, groups []stri
 }
 
 // RefreshAccessToken validates a refresh token, rotates it, and issues a new access token.
+// It sends no client authentication, so a private_key_jwt client is refused;
+// see RefreshAccessTokenWithClientAuth.
 func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string, string, error) {
+	return s.RefreshAccessTokenWithClientAuth(context.Background(), refreshToken, clientID, ClientAssertion{})
+}
+
+// RefreshAccessTokenWithClientAuth is RefreshAccessToken for a request that
+// may carry a client assertion. The client is authenticated before the
+// token is rotated, so a request that fails authentication leaves the
+// session as it was.
+func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refreshToken, clientID string, ca ClientAssertion) (string, string, error) {
+	if _, err := s.authenticateClient(ctx, clientID, ca); err != nil {
+		return "", "", err
+	}
 	if s.RefreshStore != nil {
 		newToken := deriveSuccessorRefreshToken(s.JWTSecret, refreshToken)
 		ttl := s.RefreshTokenTTL
@@ -1835,6 +1880,10 @@ type authCodeEntry struct {
 	RedirectURI   string
 	CodeChallenge string
 	CreatedAt     time.Time
+	// AuthMethod is the CIMD client's declared token endpoint authentication
+	// at issue time; empty for every other client (and for codes issued
+	// before it was recorded).
+	AuthMethod string `json:",omitempty"`
 }
 
 type pendingAuth struct {

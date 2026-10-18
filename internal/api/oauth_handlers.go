@@ -28,7 +28,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/auth/cimd"
 )
 
 // OAuthMeta is returned by /.well-known/oauth-authorization-server (RFC 8414).
@@ -43,6 +46,9 @@ type OAuthMeta struct {
 	GrantTypesSupported               []string `json:"grant_types_supported"`
 	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
+	// TokenEndpointAuthSigningAlgValuesSupported is present only while a
+	// private_key_jwt client can be served (RFC 8414 section 2).
+	TokenEndpointAuthSigningAlgValuesSupported []string `json:"token_endpoint_auth_signing_alg_values_supported,omitempty"`
 	// ClientIDMetadataDocumentSupported is advertised only while CIMD is
 	// accepted and OAUTH_CIMD_ADVERTISE is on.
 	ClientIDMetadataDocumentSupported bool `json:"client_id_metadata_document_supported,omitempty"`
@@ -73,8 +79,10 @@ func (h *Handlers) handleOAuthMeta(w http.ResponseWriter, r *http.Request) {
 		ResponseTypesSupported:            []string{"code"},
 		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
 		CodeChallengeMethodsSupported:     []string{"S256"},
-		TokenEndpointAuthMethodsSupported: []string{"none"},
+		TokenEndpointAuthMethodsSupported: h.opts.OAuthServer.TokenEndpointAuthMethods(),
 		ClientIDMetadataDocumentSupported: h.opts.OAuthServer.CIMDAdvertised(),
+
+		TokenEndpointAuthSigningAlgValuesSupported: h.opts.OAuthServer.TokenEndpointAuthSigningAlgs(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(meta)
@@ -314,12 +322,26 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 	oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, res).Inc()
 }
 
+// oauthClientAuthFailures counts token requests refused as invalid_client,
+// by grant and by whether a client assertion was sent: "sent" is a
+// private_key_jwt client whose assertion failed, "absent" one that sent none
+// (or a CIMD client_id while CIMD is off). The reason is in the WARN log.
+var oauthClientAuthFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "oauth_client_auth_failures_total",
+	Help: "Token requests refused as invalid_client (mctl-api#694).",
+}, []string{"grant_type", "assertion"})
+
+func init() { prometheus.MustRegister(oauthClientAuthFailures) }
+
 // handleOAuthToken exchanges an authorization code or refresh token for an access token.
 //
 // POST /oauth/token
 // Content-Type: application/x-www-form-urlencoded
 // grant_type=authorization_code&code=...&code_verifier=...&client_id=...&redirect_uri=...
 // grant_type=refresh_token&refresh_token=...&client_id=...
+//
+// A private_key_jwt CIMD client adds client_assertion_type and
+// client_assertion (RFC 7523) to both grants, and may then omit client_id.
 func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 	o := h.opts.OAuthServer
 	if o == nil {
@@ -335,6 +357,15 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 
 	grantType := r.FormValue("grant_type")
 	clientID := r.FormValue("client_id")
+	ca := auth.ClientAssertion{
+		Type:      r.FormValue("client_assertion_type"),
+		Assertion: r.FormValue("client_assertion"),
+	}
+	if clientID == "" && ca.Assertion != "" {
+		// RFC 7521 section 4.2: the assertion names the client. This only
+		// picks the document; verification requires iss == sub == client_id.
+		clientID = cimd.UnverifiedClientID(ca.Assertion)
+	}
 	var (
 		accessToken  string
 		refreshToken string
@@ -350,14 +381,14 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			tokenError(w, "invalid_request", "code, code_verifier, client_id and redirect_uri are required")
 			return
 		}
-		accessToken, refreshToken, err = o.ExchangeCode(r.Context(), code, codeVerifier, clientID, redirectURI)
+		accessToken, refreshToken, err = o.ExchangeCodeWithClientAuth(r.Context(), code, codeVerifier, clientID, redirectURI, ca)
 	case "refresh_token":
 		refreshGrant := r.FormValue("refresh_token")
 		if refreshGrant == "" || clientID == "" {
 			tokenError(w, "invalid_request", "refresh_token and client_id are required")
 			return
 		}
-		accessToken, refreshToken, err = o.RefreshAccessToken(refreshGrant, clientID)
+		accessToken, refreshToken, err = o.RefreshAccessTokenWithClientAuth(r.Context(), refreshGrant, clientID, ca)
 	default:
 		tokenError(w, "unsupported_grant_type", "supported grant_type values are authorization_code and refresh_token")
 		return
@@ -426,6 +457,21 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error":             "server_error",
 				"error_description": "internal server error",
+			})
+			return
+		}
+		if errors.Is(err, auth.ErrInvalidClient) {
+			assertion := "absent"
+			if ca.Assertion != "" {
+				assertion = "sent"
+			}
+			oauthClientAuthFailures.WithLabelValues(grantType, assertion).Inc()
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error":             "invalid_client",
+				"error_description": "client authentication failed",
 			})
 			return
 		}

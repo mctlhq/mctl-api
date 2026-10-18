@@ -75,6 +75,28 @@ func (s *PostgresStore) Put(ctx context.Context, kind, key string, payload []byt
 	return nil
 }
 
+// PutOnce inserts the entry, or replaces one that has expired but not yet
+// been collected, in one statement. A live row leaves the conflict update's
+// WHERE false, so no row is returned and the key is reported as taken.
+func (s *PostgresStore) PutOnce(ctx context.Context, kind, key string, payload []byte, ttl time.Duration) (bool, error) {
+	var fresh bool
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO oauth_flow_entries (kind, key_hash, payload, expires_at)
+		 VALUES ($1, $2, $3, now() + $4::bigint * interval '1 microsecond')
+		 ON CONFLICT (kind, key_hash) DO UPDATE
+		     SET payload = EXCLUDED.payload, expires_at = EXCLUDED.expires_at
+		     WHERE oauth_flow_entries.expires_at <= now()
+		 RETURNING true`,
+		kind, keyHash(key), payload, ttl.Microseconds()).Scan(&fresh)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("oauth flow store: put once %s: %w", kind, err)
+	}
+	return fresh, nil
+}
+
 // Take deletes the entry and returns it in one statement, so two replicas
 // racing on the same key cannot both receive it. An expired row is deleted
 // too and reported as not found.

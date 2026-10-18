@@ -57,6 +57,20 @@ func (m *memFlowStore) Take(_ context.Context, kind, key string) ([]byte, bool, 
 	return p, true, nil
 }
 
+func (m *memFlowStore) PutOnce(_ context.Context, kind, key string, payload []byte, ttl time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.putErr != nil {
+		return false, m.putErr
+	}
+	k := kind + "\x00" + key
+	if _, ok := m.entries[k]; ok && time.Now().Before(m.exp[k]) {
+		return false, nil
+	}
+	m.entries[k], m.exp[k] = payload, time.Now().Add(ttl)
+	return true, nil
+}
+
 func (m *memFlowStore) GC(context.Context) error { return nil }
 
 var _ flowstore.Store = (*memFlowStore)(nil)

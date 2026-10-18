@@ -234,19 +234,19 @@ func TestDocumentValidation(t *testing.T) {
 	f0 := newFixture(t, nil)
 	id := f0.url
 	cases := map[string]string{
-		"other client_id":   `{"client_id":"https://evil.example.com/x","redirect_uris":["https://a/cb"],"token_endpoint_auth_method":"none"}`,
-		"no redirect_uris":  fmt.Sprintf(`{"client_id":%q,"token_endpoint_auth_method":"none"}`, id),
-		"empty uris":        fmt.Sprintf(`{"client_id":%q,"redirect_uris":[],"token_endpoint_auth_method":"none"}`, id),
-		"relative uri":      fmt.Sprintf(`{"client_id":%q,"redirect_uris":["/cb"],"token_endpoint_auth_method":"none"}`, id),
-		"not a list":        fmt.Sprintf(`{"client_id":%q,"redirect_uris":"https://a/cb","token_endpoint_auth_method":"none"}`, id),
-		"wrong auth method": fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a/cb"],"token_endpoint_auth_method":"private_key_jwt"}`, id),
-		"missing method":    fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a/cb"]}`, id),
-		"client_secret":     doc(id, `,"client_secret":"s"`),
-		"secret expiry":     doc(id, `,"client_secret_expires_at":0`),
-		"fragment uri":      fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://app.example.com/cb#f"],"token_endpoint_auth_method":"none"}`, id),
-		"userinfo uri":      fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://u:p@app.example.com/cb"],"token_endpoint_auth_method":"none"}`, id),
-		"javascript uri":    fmt.Sprintf(`{"client_id":%q,"redirect_uris":["javascript:alert(1)"],"token_endpoint_auth_method":"none"}`, id),
-		"data uri":          fmt.Sprintf(`{"client_id":%q,"redirect_uris":["data:text/html,x"],"token_endpoint_auth_method":"none"}`, id),
+		"other client_id":                  `{"client_id":"https://evil.example.com/x","redirect_uris":["https://a/cb"],"token_endpoint_auth_method":"none"}`,
+		"no redirect_uris":                 fmt.Sprintf(`{"client_id":%q,"token_endpoint_auth_method":"none"}`, id),
+		"empty uris":                       fmt.Sprintf(`{"client_id":%q,"redirect_uris":[],"token_endpoint_auth_method":"none"}`, id),
+		"relative uri":                     fmt.Sprintf(`{"client_id":%q,"redirect_uris":["/cb"],"token_endpoint_auth_method":"none"}`, id),
+		"not a list":                       fmt.Sprintf(`{"client_id":%q,"redirect_uris":"https://a/cb","token_endpoint_auth_method":"none"}`, id),
+		"private_key_jwt without jwks_uri": fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a/cb"],"token_endpoint_auth_method":"private_key_jwt"}`, id),
+		"missing method":                   fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a/cb"]}`, id),
+		"client_secret":                    doc(id, `,"client_secret":"s"`),
+		"secret expiry":                    doc(id, `,"client_secret_expires_at":0`),
+		"fragment uri":                     fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://app.example.com/cb#f"],"token_endpoint_auth_method":"none"}`, id),
+		"userinfo uri":                     fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://u:p@app.example.com/cb"],"token_endpoint_auth_method":"none"}`, id),
+		"javascript uri":                   fmt.Sprintf(`{"client_id":%q,"redirect_uris":["javascript:alert(1)"],"token_endpoint_auth_method":"none"}`, id),
+		"data uri":                         fmt.Sprintf(`{"client_id":%q,"redirect_uris":["data:text/html,x"],"token_endpoint_auth_method":"none"}`, id),
 	}
 	// The scheme is an allowlist: everything but https and loopback http is
 	// dropped, including schemes no denylist named, so a document listing
