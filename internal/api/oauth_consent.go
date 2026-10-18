@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -176,7 +177,7 @@ func (h *Handlers) requestConsent(w http.ResponseWriter, r *http.Request, c auth
 	if account == "" {
 		account = c.PrincipalID
 	}
-	renderShellPage(w, http.StatusOK, "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", consentPage,
+	renderShellPage(w, http.StatusOK, "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"+consentFormTarget(redirect)+"; frame-ancestors 'none'", consentPage,
 		shellData{Title: "Authorize this application?", Lines: []string{
 			"An application is asking to access MCTL on your behalf.",
 			"Application: " + name,
@@ -185,6 +186,40 @@ func (h *Handlers) requestConsent(w http.ResponseWriter, r *http.Request, c auth
 			"You are signed in as " + account + ". The application does not choose this account.",
 		}, Page: consentPageData{Token: token}})
 	return "consent_required"
+}
+
+// consentFormTarget is the extra form-action source the consent page needs:
+// the decision is answered with a 302 to the client's redirect_uri, and
+// browsers apply form-action to the redirects of a form submission too
+// (Chrome blocked ChatGPT's return on 'self' alone). The URI was already
+// matched against the client's document; a host with characters outside a
+// plain origin adds nothing, which leaves the redirect blocked rather than
+// the policy open.
+func consentFormTarget(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	if !consentSourceChars(scheme, false) || scheme == "" {
+		return ""
+	}
+	if scheme != "http" && scheme != "https" {
+		// A native client's private-use scheme: a scheme source.
+		return " " + scheme + ":"
+	}
+	if u.Host == "" || !consentSourceChars(u.Host, true) {
+		return ""
+	}
+	return " " + scheme + "://" + u.Host
+}
+
+func consentSourceChars(s string, host bool) bool {
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '-', r == '+':
+		case host && (r >= 'A' && r <= 'Z' || r == ':' || r == '[' || r == ']'):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 type consentPageData struct{ Token string }

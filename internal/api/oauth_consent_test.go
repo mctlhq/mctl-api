@@ -399,8 +399,33 @@ func TestConsentPageInShellNamesPrincipalWithoutLogin(t *testing.T) {
 	if !strings.Contains(body, "signed in as "+testPRN+".") {
 		t.Errorf("page does not name the principal:\n%s", body)
 	}
-	if h := rec.Header().Get("Content-Security-Policy"); !strings.Contains(h, "form-action 'self'") {
-		t.Errorf("CSP %q does not allow the consent form", h)
+	if h := rec.Header().Get("Content-Security-Policy"); !strings.Contains(h, "form-action 'self' https://app.example.com;") {
+		t.Errorf("CSP %q does not allow the consent form and its redirect to the client", h)
+	}
+}
+
+// The decision is a 302 to the client, and browsers hold that redirect to
+// form-action: the page must allow exactly the redirect's origin, and
+// nothing when the URI is not a plain origin.
+func TestConsentFormTarget(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://chatgpt.com/connector/oauth/O5rDjGVhvXke": " https://chatgpt.com",
+		"http://127.0.0.1:33418/callback":                  " http://127.0.0.1:33418",
+		"HTTPS://Example.COM/cb":                           " https://Example.COM",
+		"cursor://anysphere.cursor-mcp/oauth/callback":     " cursor:",
+		"https://a.example/cb;x":                           " https://a.example",
+		"/relative":                                        "",
+	} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		if got := consentFormTarget(u); got != want {
+			t.Errorf("consentFormTarget(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	if got := consentFormTarget(&url.URL{Scheme: "https", Host: "a.example; script-src *"}); got != "" {
+		t.Errorf("a host with policy syntax got %q, want nothing", got)
 	}
 }
 
