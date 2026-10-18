@@ -967,3 +967,10 @@ principal owners. A cancellation retry with no matching receipt must observe tha
 unreleased deletion holds the tenant name (unreadable is 503, another owner 409).
 An absent pair performs no portal mutation: it confirms the desired final state,
 not evidence that such a deletion previously existed.
+
+Before `begin` disables credentials, it rechecks under the principal lock that
+exactly the approved live GitHub and ZITADEL identities still belong to that
+principal. An administrator merge/relink during the queued interval refuses
+begin without touching the new identity owner; the prepared intent remains
+cancellable. Once disabled, existing identity-mutation rules prevent moving its
+live identities while the teardown continues.

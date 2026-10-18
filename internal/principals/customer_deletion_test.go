@@ -340,3 +340,38 @@ func TestPreparedCustomerDeletionCancellationRestoresExistingIdentity(t *testing
 		t.Fatalf("begun principal restored: %v", err)
 	}
 }
+
+func TestCustomerDeletionBeginRefusesIdentityMovedByAdministrator(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	id := customer("merge-before-begin", 730005, "merge-customer")
+	source, err := s.ResolveCustomer(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepareCustomerDeletion(ctx, "merge-before-begin", source.ID, id.Issuer, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := s.Provision(ctx, auth.Identity{Provider: "zitadel", Issuer: "https://staff.example.test", Subject: "different-account", Kind: auth.KindHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MergePrincipals(ctx, source.ID, target.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BeginCustomerDeletion(ctx, "merge-before-begin", source.ID); err == nil {
+		t.Fatal("deletion began against identities now owned by another principal")
+	}
+	if d, err := s.CustomerDeletion(ctx, "merge-before-begin", source.ID); err != nil || d.Status != "prepared" {
+		t.Fatalf("identity drift advanced deletion: %+v %v", d, err)
+	}
+	if p, err := s.Get(ctx, target.ID); err != nil || p.Status != StatusActive {
+		t.Fatalf("merged target affected: %+v %v", p, err)
+	}
+	if err := s.CancelCustomerDeletion(ctx, "merge-before-begin", source.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishCustomerCancellation(ctx, "merge-before-begin", source.ID); err != nil {
+		t.Fatal(err)
+	}
+}

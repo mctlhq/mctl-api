@@ -289,6 +289,23 @@ func (s *Store) BeginCustomerDeletion(ctx context.Context, tenant, pid string) e
 		if status == "complete" {
 			return nil
 		}
+		if status == "prepared" {
+			// An administrator may merge/relink while the workflow is queued.
+			// Under the principal lock, prove the approved identities still
+			// belong exclusively to this principal before any deletion begins.
+			var total, matching int
+			err := tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE e.revoked_at IS NULL AND (
+              (e.provider='github' AND e.issuer='' AND e.subject=d.github_id) OR
+              (e.provider='zitadel' AND e.issuer=d.issuer AND e.subject=d.subject)))
+              FROM external_identities e JOIN customer_deletions d ON d.principal_id=e.principal_id
+              WHERE d.tenant_name=$1 AND d.principal_id=$2`, tenant, pid).Scan(&total, &matching)
+			if err != nil {
+				return err
+			}
+			if total != 2 || matching != 2 {
+				return fmt.Errorf("%w: approved customer identities changed before begin", ErrInvalid)
+			}
+		}
 		tag, err := tx.Exec(ctx, `UPDATE principals SET status='disabled' WHERE id=$1 AND kind='human'`, pid)
 		if err != nil {
 			return err
