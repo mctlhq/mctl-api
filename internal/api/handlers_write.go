@@ -438,7 +438,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !h.guardCustomerTenantCreation(w, r, opName, input) {
+	if !h.guardCustomerTenantCreation(w, r, op, input) {
 		return
 	}
 

@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 
 	"github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -96,11 +95,17 @@ func customerDeletionOptions(cfg config, store *principals.Store, cache *princip
 			}
 			for i := range apps {
 				app := &apps[i]
-				if app.Name == "tenant-"+tenant || strings.HasPrefix(app.Name, tenant+"-") || app.DestNamespace == tenant || app.DestNamespace == tenant+"-preview" {
+				if customerDeletionAppRemains(tenant, app.Name, app.DestNamespace) {
 					return fmt.Errorf("tenant Argo application remains")
 				}
 			}
 			return nil
 		},
 	}
+}
+
+// Service ownership follows the destination namespace, never a name prefix.
+// A sibling name can be created after the removed tenant leaves GitOps.
+func customerDeletionAppRemains(tenant, name, namespace string) bool {
+	return name == "tenant-"+tenant || namespace == tenant || namespace == tenant+"-preview"
 }

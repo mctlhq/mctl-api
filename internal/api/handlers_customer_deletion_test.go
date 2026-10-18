@@ -25,6 +25,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/principals"
 )
 
@@ -269,7 +270,7 @@ func TestCustomerDeletionNameFreezeCoversAdministratorCreation(t *testing.T) {
 			}}}
 			r := httptest.NewRequest("POST", "/", nil)
 			w := httptest.NewRecorder()
-			allowed := h.guardCustomerTenantCreation(w, r, "create-tenant", map[string]string{"tenant_name": "acme"})
+			allowed := h.guardCustomerTenantCreation(w, r, operations.Operation{Name: "create-tenant"}, map[string]string{"tenant_name": "acme"})
 			if allowed != (tc.status == 200) || w.Code != tc.status {
 				t.Fatalf("allowed=%v status=%d", allowed, w.Code)
 			}

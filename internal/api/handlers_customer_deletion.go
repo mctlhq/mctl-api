@@ -27,6 +27,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/principals"
 )
 
@@ -105,8 +106,8 @@ func (h *Handlers) customerMemberships(tenant, pid, login string, requireOwner b
 
 // All API create paths, including administrators, respect the durable name
 // freeze while identity cleanup runs outside the shared GitOps mutex.
-func (h *Handlers) guardCustomerTenantCreation(w http.ResponseWriter, r *http.Request, op string, input map[string]string) bool {
-	if op != "create-tenant" || h.opts.CustomerTenantDeletionPending == nil {
+func (h *Handlers) guardCustomerTenantCreation(w http.ResponseWriter, r *http.Request, op operations.Operation, input map[string]string) bool {
+	if op.Name != "create-tenant" || h.opts.CustomerTenantDeletionPending == nil {
 		return true
 	}
 	actor := "anonymous"
@@ -115,12 +116,12 @@ func (h *Handlers) guardCustomerTenantCreation(w http.ResponseWriter, r *http.Re
 	}
 	pending, err := h.opts.CustomerTenantDeletionPending(r.Context(), input["tenant_name"])
 	if err != nil {
-		h.logAudit(r, audit.Entry{UserID: actor, Operation: op, Status: "denied", Message: "tenant deletion state could not be observed", Parameters: input})
+		h.logAudit(r, audit.Entry{UserID: actor, Operation: op.Name, Status: "denied", RiskLevel: "high", Message: "tenant deletion state could not be observed", Parameters: redactSecrets(op, input)})
 		writeError(w, 503, "tenant deletion state could not be observed")
 		return false
 	}
 	if pending {
-		h.logAudit(r, audit.Entry{UserID: actor, Operation: op, Status: "denied", Message: "tenant name is frozen by an account deletion", Parameters: input})
+		h.logAudit(r, audit.Entry{UserID: actor, Operation: op.Name, Status: "denied", RiskLevel: "high", Message: "tenant name is frozen by an account deletion", Parameters: redactSecrets(op, input)})
 		writeError(w, 409, "tenant name is frozen by an account deletion")
 		return false
 	}
