@@ -644,11 +644,16 @@ func TestCIMDFlags(t *testing.T) {
 		{"true", "", true, false},
 		{"true", "false", true, false},
 		{"True", " true ", true, true},
+		{"false", "true", false, false},
+		{"", "true", false, false},
 	} {
 		c := config{OAuthCIMDAcceptRaw: tc.accept, OAuthCIMDAdvertiseRaw: tc.advertise}
-		if a, d := c.cimdFlags(); a != tc.wantAccept || d != tc.wantAdvertise {
-			t.Errorf("accept=%q advertise=%q: got (%v, %v), want (%v, %v)", tc.accept, tc.advertise, a, d, tc.wantAccept, tc.wantAdvertise)
+		if a, d, err := c.cimdFlags(); err != nil || a != tc.wantAccept || d != tc.wantAdvertise {
+			t.Errorf("accept=%q advertise=%q: got (%v, %v, %v), want (%v, %v)", tc.accept, tc.advertise, a, d, err, tc.wantAccept, tc.wantAdvertise)
 		}
+	}
+	if _, _, err := (config{OAuthCIMDAcceptRaw: "yes"}).cimdFlags(); err == nil {
+		t.Error("a misspelt flag must be an error, not false")
 	}
 }
 

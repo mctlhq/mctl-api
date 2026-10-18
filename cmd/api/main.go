@@ -211,7 +211,8 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		// validate has already parsed the allowlist, so this cannot fail.
+		// validate has already refused bad CIMD settings; this exit is only
+		// a backstop.
 		if err := cfg.configureCIMD(oauthServer); err != nil {
 			slog.Error("invalid configuration", "error", err)
 			stopSignals()
@@ -2405,20 +2406,25 @@ func (c config) validateCIMD() error {
 	return nil
 }
 
-// cimdFlags returns OAUTH_CIMD_ACCEPT and OAUTH_CIMD_ADVERTISE. Call it only
-// after validate, which has refused any value it would read as false here.
-func (c config) cimdFlags() (accept, advertise bool) {
-	accept, _ = strictFlag("OAUTH_CIMD_ACCEPT", c.OAuthCIMDAcceptRaw)
-	advertise, _ = strictFlag("OAUTH_CIMD_ADVERTISE", c.OAuthCIMDAdvertiseRaw)
-	return accept, accept && advertise
+// cimdFlags parses OAUTH_CIMD_ACCEPT and OAUTH_CIMD_ADVERTISE. The second
+// result is true only while both are, since advertising without accepting is
+// never wired.
+func (c config) cimdFlags() (accept, advertise bool, err error) {
+	if accept, err = strictFlag("OAUTH_CIMD_ACCEPT", c.OAuthCIMDAcceptRaw); err != nil {
+		return false, false, err
+	}
+	if advertise, err = strictFlag("OAUTH_CIMD_ADVERTISE", c.OAuthCIMDAdvertiseRaw); err != nil {
+		return false, false, err
+	}
+	return accept, accept && advertise, nil
 }
 
 // configureCIMD wires the CIMD flags into o: a resolver while accepting, and
 // discovery advertisement only when OAUTH_CIMD_ADVERTISE is on as well.
 func (c config) configureCIMD(o *auth.OAuthServer) error {
-	accept, advertise := c.cimdFlags()
-	if !accept {
-		return nil
+	accept, advertise, err := c.cimdFlags()
+	if err != nil || !accept {
+		return err
 	}
 	hosts, err := cimd.ParseAllowedHosts(c.OAuthCIMDAllowedHostsRaw)
 	if err != nil {
