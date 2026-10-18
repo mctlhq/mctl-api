@@ -459,6 +459,7 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 	if len(uris) > maxRedirectURIs {
 		return bad("too many redirect_uris")
 	}
+	accepted := make([]string, 0, len(uris))
 	for _, s := range uris {
 		if len(s) > maxRedirectBytes {
 			return bad("redirect_uri too long")
@@ -472,20 +473,27 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 		}
 		// An allowlist, not a denylist: https with a host, or http on a
 		// loopback IP literal (RFC 8252 section 7.3). url.Parse lower-cases
-		// the scheme.
+		// the scheme. Any other well-formed entry is dropped rather than
+		// refusing the document, so a client that also lists, say,
+		// http://localhost/callback (Codex does) keeps its usable entries;
+		// RedirectAllowed only ever sees the accepted set.
 		switch {
 		case u.Scheme == "https" && u.Host != "" && u.Hostname() != "":
 		case u.Scheme == "http" && isLoopbackIP(u.Hostname()):
 		default:
-			return bad("redirect_uri %q must be https or loopback http", s)
+			continue
 		}
+		accepted = append(accepted, s)
+	}
+	if len(accepted) == 0 {
+		return bad("no redirect_uri is https or loopback http")
 	}
 	name, _ := str("client_name")
 	name = strings.TrimSpace(name)
 	if utf8.RuneCountInString(name) > maxNameRunes {
 		name = string([]rune(name)[:maxNameRunes])
 	}
-	return Document{ClientID: clientID, ClientName: name, RedirectURIs: uris}, nil
+	return Document{ClientID: clientID, ClientName: name, RedirectURIs: accepted}, nil
 }
 
 // RedirectAllowed reports whether uri matches an entry of the document's

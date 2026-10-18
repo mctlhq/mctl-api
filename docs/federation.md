@@ -506,6 +506,12 @@ Two limits are deliberate:
 - **Exact hosts.** List one exact host per known client. The fetch budget
   (10 per minute) is per host and shared by every document on it, and a
   `.suffix` entry lets a caller pick hosts and fill the bounded rate map.
+- **Unusable redirect entries are dropped.** A well-formed `redirect_uris`
+  entry that is neither https nor loopback-IP http (for example
+  `http://localhost/callback`, which Codex lists) is ignored rather than
+  refusing the document; a document left with none is refused, and a malformed
+  entry still refuses it. The `redirect_uri` of a request must match the
+  accepted set exactly (loopback IPs with any port), with no normalisation.
 - **Loopback is the host spelled exactly `127.0.0.1` or `[::1]`.** The check
   compares text, so other loopback addresses and other spellings of these two
   (`127.000.000.001`, `[::0001]`) are refused. This is stricter than RFC 8252

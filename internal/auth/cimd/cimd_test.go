@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -69,7 +70,7 @@ func TestRedirectAllowed(t *testing.T) {
 		"https://app.example.com/cb",
 		"http://127.0.0.1:8000/callback",
 		"http://[::1]:9/cb?x=1",
-		// parseDocument refuses localhost, so no document can hold this
+		// parseDocument drops localhost, so no resolved document holds this
 		// entry; it stays to pin that localhost gets exact match only.
 		"http://localhost:8000/cb",
 	}
@@ -248,7 +249,8 @@ func TestDocumentValidation(t *testing.T) {
 		"data uri":          fmt.Sprintf(`{"client_id":%q,"redirect_uris":["data:text/html,x"],"token_endpoint_auth_method":"none"}`, id),
 	}
 	// The scheme is an allowlist: everything but https and loopback http is
-	// refused, including schemes no denylist named.
+	// dropped, including schemes no denylist named, so a document listing
+	// nothing else is refused.
 	for _, u := range []string{
 		"about:blank", "filesystem:https://a/x", "jar:https://a/x!/", "intent://cb#Intent;end", "ftp://app.example.com/cb",
 		"ws://app.example.com/cb", "wss://app.example.com/cb", "view-source:https://a/", "com.example.app:/cb",
@@ -273,6 +275,47 @@ func TestAllowedRedirectSchemes(t *testing.T) {
 	d, err := f.resolver().Resolve(context.Background(), f.url)
 	if err != nil || len(d.RedirectURIs) != len(uris) {
 		t.Fatalf("%v %v", d, err)
+	}
+}
+
+// A well-formed entry outside the allowlist is dropped, not fatal: the
+// document resolves with only its usable entries, and a dropped entry never
+// matches. This is the shape of the Codex document.
+func TestUnusableRedirectEntriesAreDropped(t *testing.T) {
+	f := newFixture(t, nil)
+	uris := []string{"http://127.0.0.1/callback", "http://localhost/callback", "javascript:alert(1)", "https://app.example.com/cb", "com.example.app:/cb"}
+	body, _ := json.Marshal(map[string]any{"client_id": f.url, "redirect_uris": uris, "token_endpoint_auth_method": "none"})
+	f.h = serve(string(body))
+	d, err := f.resolver().Resolve(context.Background(), f.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"http://127.0.0.1/callback", "https://app.example.com/cb"}
+	if !slices.Equal(d.RedirectURIs, want) {
+		t.Fatalf("redirect_uris = %v, want %v", d.RedirectURIs, want)
+	}
+	for _, u := range []string{"http://127.0.0.1:51234/callback", "https://app.example.com/cb"} {
+		if !RedirectAllowed(d.RedirectURIs, u) {
+			t.Errorf("%q must be allowed", u)
+		}
+	}
+	for _, u := range []string{"http://localhost/callback", "http://localhost:51234/callback", "javascript:alert(1)", "com.example.app:/cb"} {
+		if RedirectAllowed(d.RedirectURIs, u) {
+			t.Errorf("%q must be refused", u)
+		}
+	}
+}
+
+// A malformed entry still refuses the whole document: dropping is only for
+// well-formed entries outside the scheme allowlist.
+func TestMalformedRedirectEntryStillRefusesTheDocument(t *testing.T) {
+	for _, bad := range []string{"/cb", "https://app.example.com/cb#f", "https://u:p@app.example.com/cb"} {
+		f := newFixture(t, nil)
+		body, _ := json.Marshal(map[string]any{"client_id": f.url, "redirect_uris": []string{"https://app.example.com/ok", bad}, "token_endpoint_auth_method": "none"})
+		f.h = serve(string(body))
+		if _, err := f.resolver().Resolve(context.Background(), f.url); !errors.Is(err, ErrInvalidDocument) {
+			t.Errorf("%q: %v", bad, err)
+		}
 	}
 }
 
