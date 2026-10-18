@@ -2218,7 +2218,9 @@ func (s *Server) toolGetIncident() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Get full details of an incident including evidence, analysis, and PR information.
 
-Accepts a full incident ID or an 8-character prefix (as shown in Telegram notifications).
+Accepts a full incident ID or a unique prefix of at least 8 characters (Telegram
+notifications show 8). A prefix that matches more than one incident is refused
+with 409; retry with a longer prefix or the full ID.
 Returns the incident with all collected evidence (logs, alerts, workflow data).
 
 Also returns trace_id (the 32-hex trace to open in Tempo, then pivot to Loki) with

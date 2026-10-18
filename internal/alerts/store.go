@@ -248,6 +248,11 @@ func (s *Store) Update(ctx context.Context, a *Alert) error {
 	return nil
 }
 
+// Close releases the store's connection pool.
+func (s *Store) Close() {
+	s.pool.Close()
+}
+
 // Get returns a single alert with evidence.
 func (s *Store) Get(ctx context.Context, id string) (*Alert, error) {
 	a := &Alert{}
