@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.100.0](https://github.com/mctlhq/mctl-api/compare/4.99.1...4.100.0) (2026-10-18)
+
+
+### Features
+
+* **agents:** issue-375-feat-unified-identity-add-cimd-while-kee ([abc14bb](https://github.com/mctlhq/mctl-api/commit/abc14bbda1cfaf41b484276596afb41af18fe648))
+
 ## [4.99.1](https://github.com/mctlhq/mctl-api/compare/4.99.0...4.99.1) (2026-10-18)
 
 

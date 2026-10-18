@@ -1,0 +1,475 @@
+// Copyright 2025 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package cimd resolves OAuth Client ID Metadata Documents: an https URL used
+// as a client_id whose document, fetched from that URL, names the client's
+// redirect URIs. The document says which CLIENT is asking; it can never name
+// a principal, tenant or group (those come from the upstream sign-in only).
+//
+// Everything fails closed: an unknown host, a failed or rate-limited fetch and
+// a malformed document are all refusals.
+package cimd
+
+import (
+	"container/list"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"mime"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"golang.org/x/sync/singleflight"
+
+	"github.com/mctlhq/mctl-api/internal/netsafe"
+)
+
+// Typed failures, for logs and metrics. The HTTP answer is the same 400.
+var (
+	ErrNotAllowed      = errors.New("cimd: host is not allowed")
+	ErrFetch           = errors.New("cimd: metadata document could not be fetched")
+	ErrInvalidDocument = errors.New("cimd: invalid metadata document")
+	ErrRateLimited     = errors.New("cimd: fetch refused by rate limit")
+)
+
+const (
+	maxURLBytes      = 512
+	maxBodyBytes     = 64 << 10
+	maxRedirectURIs  = 20
+	maxRedirectBytes = 2048
+	maxNameRunes     = 100
+	minTTL           = 5 * time.Minute
+	maxTTL           = 24 * time.Hour
+	defaultTTL       = time.Hour
+	negativeTTL      = 5 * time.Minute
+	cacheEntries     = 1024
+	hostPerMinute    = 10
+	maxConcurrent    = 8
+)
+
+// Document is the validated subset of a metadata document.
+type Document struct {
+	ClientID     string
+	ClientName   string
+	RedirectURIs []string
+}
+
+// IsCIMDURL reports whether s has the shape of a CIMD client_id: https, a
+// host name (no IP literal), port absent or 443, a non-empty path other than
+// "/", no userinfo, query, fragment or dot segments, at most 512 bytes. It
+// does no network access and does not consult the allowlist.
+func IsCIMDURL(s string) bool {
+	_, ok := parseCIMDURL(s)
+	return ok
+}
+
+func parseCIMDURL(s string) (*url.URL, bool) {
+	if s == "" || len(s) > maxURLBytes || strings.ContainsAny(s, "\\#?") {
+		return nil, false
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme != "https" || u.Opaque != "" {
+		return nil, false
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil, false
+	}
+	host := u.Hostname()
+	if host == "" || net.ParseIP(host) != nil || strings.Contains(host, ":") {
+		return nil, false
+	}
+	if p := u.Port(); p != "" && p != "443" {
+		return nil, false
+	}
+	if u.Port() == "" && strings.HasSuffix(u.Host, ":") {
+		return nil, false
+	}
+	if u.Path == "" || u.Path == "/" {
+		return nil, false
+	}
+	for _, seg := range strings.Split(u.EscapedPath(), "/") {
+		d := strings.ToLower(seg)
+		if d == "." || d == ".." || d == "%2e" || d == "%2e%2e" || d == ".%2e" || d == "%2e." {
+			return nil, false
+		}
+	}
+	return u, true
+}
+
+// ParseAllowedHosts parses OAUTH_CIMD_ALLOWED_HOSTS: a comma list of exact
+// host names or ".suffix" entries (matching subdomains). An empty list, an
+// empty entry, or an entry that is not a plain host name is an error.
+func ParseAllowedHosts(raw string) ([]string, error) {
+	var out []string
+	for _, e := range strings.Split(raw, ",") {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			if strings.TrimSpace(raw) == "" {
+				break
+			}
+			return nil, errors.New("OAUTH_CIMD_ALLOWED_HOSTS: empty entry")
+		}
+		h := strings.TrimPrefix(e, ".")
+		if h == "" || strings.ContainsAny(h, "/:@*? #\\") || strings.HasPrefix(h, ".") || strings.HasSuffix(h, ".") {
+			return nil, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q is not a host name or .suffix", e)
+		}
+		if net.ParseIP(h) != nil {
+			return nil, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q is an IP literal", e)
+		}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("OAUTH_CIMD_ALLOWED_HOSTS: required (and non-empty) when OAUTH_CIMD_ENABLED=true")
+	}
+	return out, nil
+}
+
+// Options configures a Resolver.
+type Options struct {
+	// AllowedHosts is the mandatory host allowlist (see ParseAllowedHosts).
+	AllowedHosts []string
+	// HTTPClient fetches documents. Default netsafe.Client.
+	HTTPClient *http.Client
+	// Now overrides the clock in tests.
+	Now func() time.Time
+	// HostPerMinute and MaxConcurrent override the limits in tests.
+	HostPerMinute int
+	MaxConcurrent int
+}
+
+// Resolver fetches, validates and caches metadata documents.
+type Resolver struct {
+	allowed []string
+	client  *http.Client
+	now     func() time.Time
+	perHost int
+	sem     chan struct{}
+	sf      singleflight.Group
+
+	mu    sync.Mutex
+	lru   *list.List
+	cache map[string]*list.Element
+	rate  map[string][]time.Time
+}
+
+type cacheEntry struct {
+	key     string
+	doc     Document
+	err     error
+	expires time.Time
+}
+
+// NewResolver builds a Resolver.
+func NewResolver(o Options) *Resolver {
+	c := o.HTTPClient
+	if c == nil {
+		c = netsafe.Client(netsafe.Options{Timeout: 5 * time.Second})
+	}
+	now := o.Now
+	if now == nil {
+		now = time.Now
+	}
+	per := o.HostPerMinute
+	if per <= 0 {
+		per = hostPerMinute
+	}
+	conc := o.MaxConcurrent
+	if conc <= 0 {
+		conc = maxConcurrent
+	}
+	allowed := make([]string, 0, len(o.AllowedHosts))
+	for _, h := range o.AllowedHosts {
+		allowed = append(allowed, strings.ToLower(strings.TrimSpace(h)))
+	}
+	return &Resolver{
+		allowed: allowed, client: c, now: now, perHost: per,
+		sem: make(chan struct{}, conc), lru: list.New(),
+		cache: map[string]*list.Element{}, rate: map[string][]time.Time{},
+	}
+}
+
+// maxRateHosts bounds the per-host rate map before stale hosts are swept.
+const maxRateHosts = 1024
+
+func (r *Resolver) hostAllowed(host string) bool {
+	host = strings.ToLower(host)
+	for _, a := range r.allowed {
+		if a == "" {
+			continue
+		}
+		if strings.HasPrefix(a, ".") {
+			if strings.HasSuffix(host, a) && len(host) > len(a) {
+				return true
+			}
+		} else if host == a {
+			return true
+		}
+	}
+	return false
+}
+
+// Resolve returns the validated document for clientID.
+func (r *Resolver) Resolve(ctx context.Context, clientID string) (Document, error) {
+	u, ok := parseCIMDURL(clientID)
+	if !ok {
+		return Document{}, fmt.Errorf("%w: not a CIMD URL", ErrInvalidDocument)
+	}
+	if !r.hostAllowed(u.Hostname()) {
+		return Document{}, ErrNotAllowed
+	}
+	if doc, err, hit := r.cached(clientID); hit {
+		return doc, err
+	}
+	v, err, _ := r.sf.Do(clientID, func() (any, error) {
+		if doc, err, hit := r.cached(clientID); hit {
+			return doc, err
+		}
+		// Detach from the first caller's lifetime: the shared fetch must not be
+		// aborted (or cached as a failure) because one browser went away. The
+		// netsafe client's own timeout bounds it.
+		doc, ttl, err := r.fetch(context.WithoutCancel(ctx), u, clientID)
+		if errors.Is(err, ErrRateLimited) {
+			// Not the document's fault: refuse, but do not cache it.
+			return Document{}, err
+		}
+		if err != nil && ctx.Err() != nil {
+			// The caller went away: that says nothing about the document.
+			return Document{}, err
+		}
+		r.store(clientID, doc, err, ttl)
+		return doc, err
+	})
+	if err != nil {
+		return Document{}, err
+	}
+	return v.(Document), nil
+}
+
+func (r *Resolver) cached(key string) (Document, error, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	el, ok := r.cache[key]
+	if !ok {
+		return Document{}, nil, false
+	}
+	e := el.Value.(*cacheEntry)
+	if !r.now().Before(e.expires) {
+		r.lru.Remove(el)
+		delete(r.cache, key)
+		return Document{}, nil, false
+	}
+	r.lru.MoveToFront(el)
+	return e.doc, e.err, true
+}
+
+func (r *Resolver) store(key string, doc Document, err error, ttl time.Duration) {
+	if err != nil {
+		ttl = negativeTTL
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if el, ok := r.cache[key]; ok {
+		r.lru.Remove(el)
+	}
+	r.cache[key] = r.lru.PushFront(&cacheEntry{key: key, doc: doc, err: err, expires: r.now().Add(ttl)})
+	for r.lru.Len() > cacheEntries {
+		old := r.lru.Back()
+		r.lru.Remove(old)
+		delete(r.cache, old.Value.(*cacheEntry).key)
+	}
+}
+
+func (r *Resolver) allowHost(host string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	cut := now.Add(-time.Minute)
+	if len(r.rate) > maxRateHosts {
+		for h, ts := range r.rate {
+			if len(ts) == 0 || !ts[len(ts)-1].After(cut) {
+				delete(r.rate, h)
+			}
+		}
+	}
+	kept := r.rate[host][:0]
+	for _, t := range r.rate[host] {
+		if t.After(cut) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= r.perHost {
+		r.rate[host] = kept
+		return false
+	}
+	r.rate[host] = append(kept, now)
+	return true
+}
+
+func (r *Resolver) fetch(ctx context.Context, u *url.URL, clientID string) (Document, time.Duration, error) {
+	select {
+	case r.sem <- struct{}{}:
+		defer func() { <-r.sem }()
+	default:
+		return Document{}, 0, ErrRateLimited
+	}
+	if !r.allowHost(strings.ToLower(u.Hostname())) {
+		return Document{}, 0, ErrRateLimited
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, clientID, nil)
+	if err != nil {
+		return Document{}, 0, fmt.Errorf("%w: %v", ErrFetch, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return Document{}, 0, fmt.Errorf("%w: %v", ErrFetch, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return Document{}, 0, fmt.Errorf("%w: status %d", ErrFetch, resp.StatusCode)
+	}
+	mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || mt != "application/json" {
+		return Document{}, 0, fmt.Errorf("%w: content type %q", ErrFetch, resp.Header.Get("Content-Type"))
+	}
+	body, err := netsafe.ReadLimited(resp, maxBodyBytes)
+	if err != nil {
+		return Document{}, 0, fmt.Errorf("%w: %v", ErrFetch, err)
+	}
+	doc, err := parseDocument(body, clientID)
+	if err != nil {
+		return Document{}, 0, err
+	}
+	return doc, cacheTTL(resp.Header.Get("Cache-Control")), nil
+}
+
+func cacheTTL(cc string) time.Duration {
+	ttl := defaultTTL
+	for _, d := range strings.Split(cc, ",") {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if v, ok := strings.CutPrefix(d, "max-age="); ok {
+			if n, err := strconv.Atoi(strings.Trim(v, `"`)); err == nil && n >= 0 {
+				ttl = time.Duration(n) * time.Second
+			}
+		}
+	}
+	return min(max(ttl, minTTL), maxTTL)
+}
+
+func parseDocument(body []byte, clientID string) (Document, error) {
+	bad := func(format string, a ...any) (Document, error) {
+		return Document{}, fmt.Errorf("%w: %s", ErrInvalidDocument, fmt.Sprintf(format, a...))
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
+		return bad("not a JSON object")
+	}
+	str := func(k string) (string, bool) {
+		v, ok := raw[k]
+		if !ok {
+			return "", false
+		}
+		var s string
+		if json.Unmarshal(v, &s) != nil {
+			return "", false
+		}
+		return s, true
+	}
+	if id, ok := str("client_id"); !ok || id != clientID {
+		return bad("client_id does not equal the document URL")
+	}
+	for _, k := range []string{"client_secret", "client_secret_expires_at"} {
+		if _, ok := raw[k]; ok {
+			return bad("%s must not be present", k)
+		}
+	}
+	if m, ok := raw["token_endpoint_auth_method"]; ok {
+		var s string
+		if json.Unmarshal(m, &s) != nil || s != "none" {
+			return bad("token_endpoint_auth_method must be none")
+		}
+	} else {
+		return bad("token_endpoint_auth_method must be none")
+	}
+	var uris []string
+	if v, ok := raw["redirect_uris"]; !ok || json.Unmarshal(v, &uris) != nil || len(uris) == 0 {
+		return bad("redirect_uris must be a non-empty list of strings")
+	}
+	if len(uris) > maxRedirectURIs {
+		return bad("too many redirect_uris")
+	}
+	for _, s := range uris {
+		if len(s) > maxRedirectBytes {
+			return bad("redirect_uri too long")
+		}
+		u, err := url.Parse(s)
+		if err != nil || !u.IsAbs() || u.Scheme == "" {
+			return bad("redirect_uri %q is not an absolute URI", s)
+		}
+		if u.Fragment != "" || u.User != nil {
+			return bad("redirect_uri %q must not contain a fragment or userinfo", s)
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "javascript", "data", "vbscript", "file", "blob":
+			return bad("redirect_uri %q has a disallowed scheme", s)
+		}
+	}
+	name, _ := str("client_name")
+	name = strings.TrimSpace(name)
+	if utf8.RuneCountInString(name) > maxNameRunes {
+		name = string([]rune(name)[:maxNameRunes])
+	}
+	return Document{ClientID: clientID, ClientName: name, RedirectURIs: uris}, nil
+}
+
+// RedirectAllowed reports whether uri matches an entry of the document's
+// redirect_uris: exactly, or (RFC 8252 §7.3) for an http entry on the IP
+// literal 127.0.0.1 or [::1], with any port. Scheme, host, path and query
+// must still match exactly. "localhost" gets no port exemption (§8.3).
+func RedirectAllowed(entries []string, uri string) bool {
+	if uri == "" || strings.Contains(uri, "\\") {
+		return false
+	}
+	for _, e := range entries {
+		if e == uri {
+			return true
+		}
+	}
+	u, err := url.Parse(uri)
+	if err != nil || u.Scheme != "http" || u.User != nil || u.Fragment != "" || !isLoopbackIP(u.Hostname()) {
+		return false
+	}
+	for _, e := range entries {
+		if strings.Contains(e, "\\") {
+			continue
+		}
+		eu, err := url.Parse(e)
+		if err != nil || eu.Scheme != "http" || eu.User != nil || eu.Fragment != "" || !isLoopbackIP(eu.Hostname()) {
+			continue
+		}
+		if eu.Hostname() == u.Hostname() && eu.EscapedPath() == u.EscapedPath() && eu.RawQuery == u.RawQuery && eu.ForceQuery == u.ForceQuery {
+			return true
+		}
+	}
+	return false
+}
+
+func isLoopbackIP(h string) bool { return h == "127.0.0.1" || h == "::1" }

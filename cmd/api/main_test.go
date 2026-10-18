@@ -264,6 +264,26 @@ func TestConfigValidate(t *testing.T) {
 			wantVar: "OAUTH_PREREGISTERED_CLIENTS",
 		},
 		{
+			name:    "OAUTH_CIMD_ENABLED with an empty allowlist is refused",
+			cfg:     config{OAuthCIMDEnabled: true},
+			wantErr: true,
+			wantVar: "OAUTH_CIMD_ALLOWED_HOSTS",
+		},
+		{
+			name:    "OAUTH_CIMD_ENABLED with an unparsable allowlist is refused",
+			cfg:     config{OAuthCIMDEnabled: true, OAuthCIMDAllowedHostsRaw: "https://a.example.com/x"},
+			wantErr: true,
+			wantVar: "OAUTH_CIMD_ALLOWED_HOSTS",
+		},
+		{
+			name: "OAUTH_CIMD_ENABLED with an allowlist is accepted",
+			cfg:  config{OAuthCIMDEnabled: true, OAuthCIMDAllowedHostsRaw: "app.example.com,.example.org"},
+		},
+		{
+			name: "an unset OAUTH_CIMD_ENABLED needs no allowlist",
+			cfg:  config{},
+		},
+		{
 			name:    "well-formed OAUTH_PREREGISTERED_CLIENTS is accepted with OAuth disabled",
 			cfg:     config{OAuthPreregisteredClientsRaw: `[{"client_id":"c","redirect_uris":["https://x/cb"]}]`},
 			wantErr: false,
