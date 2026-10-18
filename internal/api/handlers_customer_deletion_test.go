@@ -49,12 +49,21 @@ func (r *deletionReader) TenantExists(name string) (bool, error) {
 }
 
 type deletionStore struct {
-	readErr            error
-	job                *principals.CustomerDeletion
-	prepared, finished int
+	releaseErr             error
+	releaseCalls, released int
+	readErr                error
+	job                    *principals.CustomerDeletion
+	prepared, finished     int
 }
 
-func (s *deletionStore) ReleaseCustomerDeletion(context.Context, string, string) error { return nil }
+func (s *deletionStore) ReleaseCustomerDeletion(context.Context, string, string) error {
+	s.releaseCalls++
+	if s.releaseErr != nil {
+		return s.releaseErr
+	}
+	s.released++
+	return nil
+}
 
 func (s *deletionStore) WithCustomerDeletionLock(ctx context.Context, _, _ string, fn func(context.Context) error) error {
 	return fn(ctx)
@@ -290,5 +299,59 @@ func TestCustomerDeletionRefusalsAreAudited(t *testing.T) {
 	entries := logger.List(10)
 	if len(entries) != 1 || entries[0].Status != "denied" || entries[0].Parameters["principal_id"] != deletionPID {
 		t.Fatalf("missing refusal audit: %+v", entries)
+	}
+}
+
+func TestPreparedCustomerDeletionResumesAfterOrdinaryWorkspaceRemoval(t *testing.T) {
+	h, reader, store, calls, _ := deletionFixture()
+	admin := userWithPrincipal(t, "admin", []string{"admins"}, deletionAdmin)
+	if ok, w := prepareDeletion(t, h, admin); !ok {
+		t.Fatal(w.Body.String())
+	}
+	reader.tenants = nil
+	*calls = nil
+	if ok, w := prepareDeletion(t, h, admin); !ok {
+		t.Fatalf("prepared recovery refused: %s", w.Body.String())
+	}
+	if store.prepared != 1 || !reflect.DeepEqual(*calls, []string{"freeze"}) {
+		t.Fatalf("approved target recaptured: %d %v", store.prepared, *calls)
+	}
+	reader.err = errors.New("GitOps unreadable")
+	if ok, w := prepareDeletion(t, h, admin); ok || w.Code != 503 {
+		t.Fatalf("unknown treated as absent: %v %d", ok, w.Code)
+	}
+	reader.err = nil
+	reader.tenants = []gitops.Tenant{{Name: "acme", Members: []gitops.TenantMember{{PrincipalID: deletionAdmin, Role: "owner"}}}}
+	if ok, w := prepareDeletion(t, h, admin); ok || w.Code != 409 {
+		t.Fatalf("replacement owner accepted: %v %d", ok, w.Code)
+	}
+}
+
+func TestCustomerDeletionRecordsReleaseOnlyAfterPortalAcknowledgment(t *testing.T) {
+	h, _, store, calls, fail := deletionFixture()
+	store.job = &principals.CustomerDeletion{Tenant: "acme", PrincipalID: deletionPID, Login: "alice", Status: "complete"}
+	params := map[string]string{"tenant": "acme", "principal": deletionPID, "stage": "complete"}
+	*fail = "release"
+	if w := callAs(h, auth.NewServiceUser(), "POST", "/", params, h.AdvanceCustomerDeletion); w.Code != 503 {
+		t.Fatal(w.Body.String())
+	}
+	if store.releaseCalls != 0 {
+		t.Fatal("recorded release before portal acknowledgment")
+	}
+	*fail = ""
+	store.releaseErr = errors.New("ledger unavailable")
+	if w := callAs(h, auth.NewServiceUser(), "POST", "/", params, h.AdvanceCustomerDeletion); w.Code != 503 {
+		t.Fatal(w.Body.String())
+	}
+	if store.released != 0 {
+		t.Fatal("failed durable acknowledgment reported released")
+	}
+	store.releaseErr = nil
+	*calls = nil
+	if w := callAs(h, auth.NewServiceUser(), "POST", "/", params, h.AdvanceCustomerDeletion); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	if store.released != 1 || store.finished != 0 || !reflect.DeepEqual(*calls, []string{"release"}) {
+		t.Fatalf("completed recovery repeated cleanup: %d %d %v", store.released, store.finished, *calls)
 	}
 }

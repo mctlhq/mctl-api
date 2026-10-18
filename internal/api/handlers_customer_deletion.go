@@ -111,10 +111,12 @@ func (h *Handlers) guardCustomerTenantCreation(w http.ResponseWriter, r *http.Re
 	}
 	pending, err := h.opts.CustomerTenantDeletionPending(r.Context(), input["tenant_name"])
 	if err != nil {
+		h.logAudit(r, audit.Entry{Operation: op, Status: "denied", Message: "tenant deletion state could not be observed", Parameters: input})
 		writeError(w, 503, "tenant deletion state could not be observed")
 		return false
 	}
 	if pending {
+		h.logAudit(r, audit.Entry{Operation: op, Status: "denied", Message: "tenant name is frozen by an account deletion", Parameters: input})
 		writeError(w, 409, "tenant name is frozen by an account deletion")
 		return false
 	}
@@ -174,10 +176,18 @@ func (h *Handlers) prepareCustomerAccountDeletion(w http.ResponseWriter, r *http
 		return false
 	}
 	var d *principals.CustomerDeletion
-	if previous != nil && previous.Status == "deleting" {
+	if previous != nil && (previous.Status == "prepared" || previous.Status == "deleting") {
 		exists, err := h.opts.GitReader.TenantExists(tenant)
-		if err != nil || h.customerMemberships(tenant, pid, previous.Login, exists) != nil {
-			writeError(w, 409, "customer ownership or absence could not be verified")
+		if err != nil {
+			writeError(w, 503, "customer workspace presence could not be observed")
+			return false
+		}
+		if err := h.customerMemberships(tenant, pid, previous.Login, exists); err != nil {
+			status := 409
+			if errors.Is(err, errCustomerDeletionUnobserved) {
+				status = 503
+			}
+			writeError(w, status, "customer ownership or absence could not be verified")
 			return false
 		}
 		d = previous
@@ -315,6 +325,7 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 		if err := o.CleanPortal(ctx, d); err != nil {
 			return fmt.Errorf("portal cleanup: %w", err)
 		}
+		phase = "sessions"
 		if _, err := o.RevokeSessions(pid, "customer_account_deleted"); err != nil {
 			return err
 		}
