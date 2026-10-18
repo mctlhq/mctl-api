@@ -520,7 +520,8 @@ func RedirectAllowed(entries []string, uri string) bool {
 	return false
 }
 
-// isLoopbackIP accepts only 127.0.0.1 and ::1. This is deliberately stricter
+// isLoopbackIP accepts only the host text 127.0.0.1 or ::1, so other spellings
+// of the same addresses are refused too. This is deliberately stricter
 // than RFC 8252 section 7.3, which allows any loopback address: no known native
 // client uses another one, and every accepted form widens what a document can
 // name. Do not widen it to 127.0.0.0/8 without such a client (mctl-api#687).

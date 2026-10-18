@@ -506,7 +506,9 @@ Two limits are deliberate:
 - **Exact hosts.** List one exact host per known client. The fetch budget
   (10 per minute) is per host and shared by every document on it, and a
   `.suffix` entry lets a caller pick hosts and fill the bounded rate map.
-- **Loopback is `127.0.0.1` and `[::1]` only.** This is stricter than RFC 8252
+- **Loopback is the host spelled exactly `127.0.0.1` or `[::1]`.** The check
+  compares text, so other loopback addresses and other spellings of these two
+  (`127.000.000.001`, `[::0001]`) are refused. This is stricter than RFC 8252
   section 7.3, which allows any loopback address. Widen it only for a real
   native client that needs it.
 
