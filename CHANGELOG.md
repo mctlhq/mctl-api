@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.99.0](https://github.com/mctlhq/mctl-api/compare/4.98.0...4.99.0) (2026-10-17)
+
+
+### Features
+
+* **agents:** issue-651-feat-finops-expose-model-usage-devloop-c ([929d1d9](https://github.com/mctlhq/mctl-api/commit/929d1d96c2821a1aa0ae7bf289772654492d390d))
+* **agents:** issue-651-feat-finops-expose-model-usage-devloop-c ([f1b0d4a](https://github.com/mctlhq/mctl-api/commit/f1b0d4abe280a6e4936a8cf51016d4c38c0f5287))
+
 ## [4.98.0](https://github.com/mctlhq/mctl-api/compare/4.97.0...4.98.0) (2026-10-17)
 
 
