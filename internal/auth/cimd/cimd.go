@@ -61,8 +61,16 @@ const (
 	minTTL           = 30 * time.Second
 	maxTTL           = 24 * time.Hour
 	defaultTTL       = time.Hour
-	negativeTTL      = 5 * time.Minute
-	cacheEntries     = 1024
+	// negativeTTL is how long a document refused for its content
+	// (ErrInvalidDocument) is remembered: the client's own configuration,
+	// which does not change from one request to the next.
+	negativeTTL = 5 * time.Minute
+	// fetchErrTTL is how long a failed fetch (ErrFetch) is remembered. Since
+	// mctl-api#694 every token request resolves the document, so a fetch
+	// failure refuses the client's refreshes too, not only new sign-ins; it
+	// is kept as short as the fetch floor (mctl-api#702).
+	fetchErrTTL  = minTTL
+	cacheEntries = 1024
 	// hostPerMinute budgets fetches per host, shared by every document on
 	// it. It assumes the production policy of one known client per exact
 	// allowlisted host: a host serving 6 or more no-store documents under
@@ -344,7 +352,10 @@ func (r *Resolver) cachedEntry(key string) (cacheEntry, bool) {
 }
 
 func (r *Resolver) store(key string, doc Document, err error, ttl time.Duration) {
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrFetch):
+		ttl = fetchErrTTL
+	case err != nil:
 		ttl = negativeTTL
 	}
 	r.storeEntry(&cacheEntry{key: key, doc: doc, err: err, expires: r.now().Add(ttl)})

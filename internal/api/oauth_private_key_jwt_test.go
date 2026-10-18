@@ -61,6 +61,7 @@ type pkjwtEnv struct {
 	o          *auth.OAuthServer
 	mu         sync.Mutex
 	doc        string
+	docStatus  int
 	jwksStatus int
 	clock      time.Time
 	jti        atomic.Int64
@@ -95,6 +96,10 @@ func newPKJWTEnv(t *testing.T) *pkjwtEnv {
 				return
 			}
 			_, _ = w.Write(jwks)
+			return
+		}
+		if e.docStatus != 0 {
+			w.WriteHeader(e.docStatus)
 			return
 		}
 		_, _ = w.Write([]byte(e.doc))
@@ -465,5 +470,32 @@ func TestMetadataListsPrivateKeyJWTOnlyWithCIMD(t *testing.T) {
 	m = meta()
 	if _, ok := m["token_endpoint_auth_signing_alg_values_supported"]; ok || fmt.Sprint(m["token_endpoint_auth_methods_supported"]) != "[none]" {
 		t.Fatalf("off: %v", m)
+	}
+}
+
+// A document that cannot be fetched at the token endpoint is a retryable
+// server error, remembered only for the fetch floor, so the client's
+// refresh works again 30 s after its host recovers (mctl-api#702).
+func TestDocumentFetchFailureAtTokenEndpointRecovers(t *testing.T) {
+	e := newPKJWTEnv(t)
+	rec, body := tokenRequest(e.h, withAssertion(codeGrant(e.code(t)), e.assertion(t, "https://api.mctl.ai")))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exchange: %d %s", rec.Code, rec.Body.String())
+	}
+	grant := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {body["refresh_token"].(string)}, "client_id": {cimdID}}
+	e.mu.Lock()
+	e.docStatus = http.StatusServiceUnavailable
+	e.mu.Unlock()
+	e.setDoc(pkjwtDocBody(cimd.AuthMethodPrivateKeyJWT), 2*time.Hour)
+	rec, body = tokenRequest(e.h, withAssertion(grant, e.assertion(t, "https://api.mctl.ai")))
+	if rec.Code != http.StatusInternalServerError || body["error"] != "server_error" {
+		t.Fatalf("want 500 server_error, got %d %s", rec.Code, rec.Body.String())
+	}
+	e.mu.Lock()
+	e.docStatus = 0
+	e.mu.Unlock()
+	e.setDoc(pkjwtDocBody(cimd.AuthMethodPrivateKeyJWT), time.Minute)
+	if rec, _ := tokenRequest(e.h, withAssertion(grant, e.assertion(t, "https://api.mctl.ai"))); rec.Code != http.StatusOK {
+		t.Fatalf("after recovery: %d %s", rec.Code, rec.Body.String())
 	}
 }

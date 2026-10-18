@@ -547,7 +547,9 @@ A failed client authentication answers `401 invalid_client` and is counted in
 `oauth_client_auth_failures_total{grant_type,assertion}`. A document or key
 set that could not be fetched, or whose fetch the rate limit refused, observed
 nothing about the client and answers `500 server_error`, which the client may
-retry. A key set that was fetched but holds no usable key is the client's
+retry. Such a fetch failure is remembered for 30 s, the fetch floor, since it
+now blocks the client's refreshes as well as its sign-ins; a document refused
+for its content is remembered for 5 minutes. A key set that was fetched but holds no usable key is the client's
 configuration and stays `invalid_client`. The client is authenticated before
 the code is redeemed or the refresh token rotated, so a failed attempt
 consumes neither. There is no downgrade: the method is read from the
