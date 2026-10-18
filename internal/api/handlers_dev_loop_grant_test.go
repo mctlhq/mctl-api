@@ -49,6 +49,10 @@ func (e *workItemsEnv) forgetApprovalsOf(execID string) {
 	})
 }
 
+// testContentDigest is the proposal content digest a DevLoop grant binds
+// (mctl-agents#681).
+const testContentDigest = "sha256:5d7c0d221b7ca6ff07f9cbe5a05dc78a252bdceeede030599304ed449c485a81"
+
 func (e *workItemsEnv) devLoopGrantBody(execID, key string) map[string]any {
 	return map[string]any{
 		"execution_id":    execID,
@@ -57,6 +61,7 @@ func (e *workItemsEnv) devLoopGrantBody(execID, key string) map[string]any {
 		"args_digest":     "sha256:args",
 		"policy_rule_id":  "dev-loop.human-approval",
 		"policy_version":  "v1",
+		"artifact_hash":   testContentDigest,
 		"idempotency_key": key,
 		"expires_at":      time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 	}

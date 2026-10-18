@@ -463,6 +463,11 @@
       "name": "mctl_get_commerce_receipt",
       "enabled": false,
       "reason": "Reads one tenant's commerce receipt: ids, digests, the five facts and the approval/policy reference; no arguments, results or payment proofs. A foreign tenant and a missing id answer the same. Not enabled on the shared portal: that is a separate owner decision (mctl-api#569)."
+    },
+    {
+      "name": "mctl_get_usage_summary",
+      "enabled": false,
+      "reason": "Admin-only aggregate of the model-usage ledger: token and cost sums per stage/agent/model/repo for DevLoop workflows; exposes internal workflow ids, repo/issue/PR numbers and estimated spend, no prompt or completion text. Not enabled on the shared portal pending an owner decision (mctl-api#651)."
     }
   ]
 }

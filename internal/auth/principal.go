@@ -183,6 +183,19 @@ func AttachPrincipal(ctx context.Context, pr PrincipalResolver, u *User) error {
 	if u == nil {
 		return nil
 	}
+	err := attachPrincipalID(ctx, pr, u)
+	u.principalUnresolved = err != nil && !errors.Is(err, ErrPrincipalDisabled) && !errors.Is(err, ErrIdentityRefused)
+	return err
+}
+
+// PrincipalUnresolved reports that this caller's principal could not be
+// resolved because the principal store did not answer (AttachPrincipal
+// degraded), as opposed to a caller that has no principal to resolve.
+func (u *User) PrincipalUnresolved() bool {
+	return u != nil && u.principalUnresolved
+}
+
+func attachPrincipalID(ctx context.Context, pr PrincipalResolver, u *User) error {
 	if u.tokenPrincipal {
 		return checkTokenPrincipal(ctx, pr, u)
 	}
@@ -210,6 +223,12 @@ func AttachPrincipal(ctx context.Context, pr PrincipalResolver, u *User) error {
 // any other error when it could not be read.
 type PrincipalChecker interface {
 	CheckPrincipal(ctx context.Context, principalID string) error
+}
+
+// HumanPrincipalChecker is PrincipalChecker for a principal that must also
+// be a human: a principal of another kind is ErrIdentityRefused.
+type HumanPrincipalChecker interface {
+	CheckHumanPrincipal(ctx context.Context, principalID string) error
 }
 
 // checkTokenPrincipal keeps the principal a local token was minted for only

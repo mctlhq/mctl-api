@@ -398,6 +398,8 @@ const (
 	memoryQuantityPattern = `^[0-9]{1,9}(\.[0-9]{1,3})?(Ki|Mi|Gi|Ti|k|M|G|T)?$`
 	// slugPattern: proposal directory name (some contain dots).
 	slugPattern = `^[a-z0-9][a-z0-9.-]{0,120}$`
+	// contentDigestPattern: a proposal content digest (mctl-agents#681).
+	contentDigestPattern = `^sha256:[0-9a-f]{64}$`
 )
 
 // mctlAgentsServiceEnum lists the services mctl-agents knows, plus "" for
@@ -909,6 +911,16 @@ var builtinOperations = []Operation{
 			{Name: "human_input_responses", Type: "string", Required: false, OmitWhenEmpty: true,
 				Description: "Optional. JSON array of accepted human-input answers for a DevLoop continuation (mctl-agents#473). Set only by the DevLoop; omit otherwise.",
 				Pattern:     `(?s)^\[.*\]$`},
+			// Owner principal for later-round questions (mctlhq/mctl-agents#684):
+			// a continuation pops work_item_id, so dev_loop.py carries the owner's
+			// prn_ from its round-1 request and the investigator names it as
+			// principal:<prn_> on a further question. cwft-mctl-agents-investigate
+			// declares it since mctlhq/mctl-gitops#1949; the investigator accepts
+			// the flag from mctl-agents 1.83.0 (#686). OmitWhenEmpty, like the
+			// answers it rides with.
+			{Name: "work_item_owner_principal_id", Type: "string", Required: false, OmitWhenEmpty: true,
+				Description: "Optional. Canonical principal (prn_...) of the work item owner, carried into a DevLoop human-input continuation (mctl-agents#684). Set only by the DevLoop; omit otherwise.",
+				Pattern:     `^prn_[0-9A-HJKMNP-TV-Z]{26}$`},
 			traceparentParam(),
 		}, append(agentPinParams("issue-investigator"),
 			devLoopCorrelationParams("temporal_workflow_id", "temporal_run_id", "execution_request_id")...)...),
@@ -939,6 +951,12 @@ var builtinOperations = []Operation{
 			// naming nobody (gitops#986). Human callers never reach the default anyway:
 			// the handler overwrites this with the authenticated caller.
 			{Name: "approver", Type: "string", Required: false, Description: "Identity of whoever approved (recorded in .status.yaml and the commit message). Taken from the authenticated caller; only the mctl-agent service principal may relay someone else's. Free text; passed to the workflow via env only.", Pattern: identityPattern, MaxLength: 256},
+			// mctl-agents#681: the proposal content digest the approval was
+			// decided for. On a grant-authorized approve it is the grant's
+			// artifact_hash, set by prepareApprovalGrant and never taken from
+			// the body; the workflow refuses to flip content that no longer
+			// hashes to it. Empty keeps recording the digest at flip time.
+			{Name: "expected_content_digest", Type: "string", Required: false, Description: "Proposal content digest (sha256:<64 hex>) the approval was decided for; the flip refuses content that no longer hashes to it. Set from the approval grant on a delegated approve.", Pattern: contentDigestPattern},
 		},
 	},
 	{

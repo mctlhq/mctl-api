@@ -492,7 +492,8 @@ store exactly as the gate resolves a `sil_` subject, so the principal a
 surface actor is bound for is the principal its `sil_` grant later acts as.
 Like the gate, that lookup may ask GitHub for the login's id and provision
 a principal for it, on this write path. A `prn_` owner (#646) is that
-principal once the store confirms it is active. A subject that shares the
+principal once the store confirms it is an active human (#663: the kind is
+checked here too, although only a human can hold a `prn_` link). A subject that shares the
 owner's login string but is another principal is refused.
 
 | Outcome | Status | Code |
@@ -507,25 +508,64 @@ two forms. A caller whose GitHub login authentication proved is linked as
 sign-in, say) whose principal authentication resolved is linked as that
 `prn_`, and the link records the name the human acted under, `oidc:<name>`
 (`principalOf`), as its `subject`. A service, surface or agent, a relayed
-or delegated subject, and a human without a resolved principal get 403
-`human_principal_required`.
+or delegated subject get 403 `human_principal_required`. A human whose
+principal authentication could not resolve because the principal store did
+not answer gets 503 `surface_identity_unavailable` on challenge, list and
+revoke instead (#663): that is "unknown", not "has no principal". A name the
+link cannot record (a non-printable character, too long) is 403
+`human_principal_required` and is logged.
 A `prn_` link needs `TENANT_AUTHZ_MODE=principal`: its relayed subject's
 tenants come from the principal, and only principal mode resolves them, so
 outside it the challenge is 403 `principal_mode_required` rather than a link
-every tenant-scoped relay would refuse.
+every tenant-scoped relay would refuse. The relay checks the same thing on
+every request (#663), because a link outlives a `TENANT_AUTHZ_MODE`
+rollback and a challenge minted before one can still be redeemed after it:
+a `prn_` link relayed outside principal mode is 403 `principal_mode_required`.
 
 One human can sign in through GitHub and through ZITADEL onto the same
-principal. The GitHub session also holds the links of its resolved `prn_`:
-it lists them alongside its `github:` links and may revoke them. A new link
-for an identity already held under the other form is still `link_conflict`;
-revoke the old one first.
+principal, and each session holds the other's links (#646, #663):
+
+- the GitHub session also holds its resolved `prn_`;
+- a `prn_` session also holds `github:<login>` for every live GitHub
+  identity of its principal, read from the principal store. A revoked
+  identity, or one whose login the store no longer knows (it moved to another
+  GitHub account), holds nothing.
+
+Either session lists both holders' links and may revoke them. Who the
+session holds links as is never guessed: if the principal store cannot
+answer (or, for a GitHub session, authentication could not resolve the
+principal), the list is 503, not a shorter list, a list naming a holder
+other than the session's own holder form is 503, not 403, and a revoke of a
+link none of the known holders holds is 503, not 404. The session's own
+holder form stays usable meanwhile (#671): its links can be listed by
+naming it (`?principal=github:<login>` from a GitHub session,
+`?principal=<prn_>` from a `prn_` session) and revoked, since that holder's
+list is whole whatever the rest of the set is. An admin listing a named
+holder, or revoking, needs no holder set at all. The derived
+`github:<login>` matches a link's holder exactly (the store compares logins
+case-insensitively); both are GitHub's spelling of the login, so they can
+differ only across a case-only rename no sign-in has recorded yet. The list
+response's `principal` is the holder form asked for, the session's own one
+by default, `holders` every holder whose links are listed, and each link
+names its own holder in `principal`. A new link for an identity already
+held under the other form is still `link_conflict`; revoke the old one
+first, from either session.
+
+The audit keys naming the holder mean the same in every
+`surface_identity.*` event: `principal` is the holder (`github:<login>` or
+`prn_…`) and `holder_subject` the recorded `oidc:` name of a `prn_` holder.
+`linked` and `revoked` also keep `subject`, which has always meant the holder
+there. `challenge_created` carried the name as `subject` only in 4.95.0
+(#660); it is `holder_subject` from the release after it, with no
+transition period: the key shipped one day before the change.
 
 - The mirror writes a `prn_` link's telegram identity for that principal
   outright. A `prn_` that does not exist or is not human fails the redeem,
   which is rolled back with the mirror.
-- The relay runs as the link's principal, checked active on every request
-  (`CheckPrincipal`): disabled is 403 `principal_disabled`, unknown or
-  refused 403 `identity_refused`, and a store that cannot answer is 503,
+- The relay runs as the link's principal, checked an active human on every
+  request (`CheckPrincipal`, then `CheckHumanPrincipal`): disabled is 403
+  `principal_disabled`, unknown, refused or not human 403 `identity_refused`,
+  and a store that cannot answer is 503,
   never a relay without a principal. A `prn_` link without a well-formed
   `oidc:` subject is 403 `link_not_found`. The relayed subject acts under the
   recorded name, so what it writes is owned by the same `oidc:<name>` the
@@ -537,7 +577,8 @@ The recorded name is only a name: renaming the human in ZITADEL leaves the
 link on the same principal, and the next possession proof records the new
 name. Until then the relay acts under the old name, so items written through
 the surface are owned by `oidc:<old name>` and are not visible to the human's
-direct sessions under the new one.
+direct sessions under the new one. A direct sign-in does not refresh it
+(deferred from #663): only a new possession proof does.
 
 **Answering human input.** `requested_from.actor_refs` entries stay in the
 `actor_type:actor_id` form that mctl-agents' `validate_response` rebuilds

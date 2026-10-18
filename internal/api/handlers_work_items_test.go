@@ -54,7 +54,7 @@ func newWorkItemsEnv(t *testing.T) *workItemsEnv {
 		store.Close()
 	})
 	env := &workItemsEnv{t: t, tenant: tenant, audit: audit.NewLogger(), connStr: connStr}
-	env.h = &Handlers{opts: Options{WorkItems: store, AuditLog: env.audit}}
+	env.h = &Handlers{opts: Options{WorkItems: store, AuditLog: env.audit, GitReader: ownerEverywhere{}}}
 	env.router = workItemsRouter(env.h)
 	return env
 }

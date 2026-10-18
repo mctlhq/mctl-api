@@ -64,6 +64,8 @@ func writeSnapshotError(w http.ResponseWriter, err error) {
 // 201 stores a new snapshot; 200 returns the one this execution already
 // sealed with the same bytes; 409 snapshot_divergence refuses different
 // bytes for the same execution.
+// It has no tenant role gate (mctl-api#489): sealing needs the service
+// principal, which is stricter than developer.
 func (h *Handlers) SealWorkItemSnapshot(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.workItemsUser(w, r)
 	if !ok {

@@ -291,3 +291,39 @@ func TestApprove_HumanUnaffectedByTheFlag(t *testing.T) {
 		t.Errorf("status = %d, approver = %q", *code, params["approver"])
 	}
 }
+
+// The content digest is what binds the approve CWFT to the content a human
+// decided on, and only an action-approval grant carries that decision. Off
+// the grant path a service principal may not assert one, relayed approver or
+// not; a human admin calling directly is the decider and may (mctl-agents#681).
+func TestApprove_ServiceMayNotAssertAContentDigest(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	for _, body := range []map[string]string{
+		{"service": "mctl-web", "slug": "issue-681", "expected_content_digest": digest},
+		{"service": "mctl-web", "slug": "issue-681", "approver": "mashkovd", "expected_content_digest": digest},
+	} {
+		router, exec, logger := newApproveRouter(t, false)
+		code, params := approveParams(t, router, exec, body, auth.NewServiceUser())
+		if *code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for %v", *code, body)
+		}
+		if params != nil {
+			t.Fatalf("a workflow was submitted with a self-asserted digest: %v", params)
+		}
+		denied := entriesFor(logger, "mctl-agents-approve")
+		if len(denied) != 1 || denied[0].Status != "denied" {
+			t.Errorf("want one denied audit entry, got %+v", denied)
+		}
+	}
+
+	router, exec := newTestRouter(t)
+	code, params := approveParams(t, router, exec, map[string]string{
+		"service": "mctl-web", "slug": "issue-681", "expected_content_digest": digest,
+	}, adminUser)
+	if *code != http.StatusAccepted {
+		t.Fatalf("human admin: status = %d, want 202", *code)
+	}
+	if params["expected_content_digest"] != digest {
+		t.Errorf("human admin digest = %q, want %q", params["expected_content_digest"], digest)
+	}
+}

@@ -51,6 +51,8 @@ const defaultWorkItemSurface = "api"
 // Typed error codes a client can branch on.
 const (
 	wiCodeUnavailable      = "work_items_unavailable"
+	wiCodeRoleForbidden    = "tenant_role_forbidden"
+	wiCodeRoleUnavailable  = "tenant_role_unavailable"
 	wiCodeNotFound         = "work_item_not_found"
 	wiCodeInvalid          = "invalid_request"
 	wiCodeActorNotAccepted = "actor_not_accepted"
@@ -392,6 +394,9 @@ func (h *Handlers) CreateWorkItem(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusForbidden, wiCodeTenantForbidden, "no access to tenant "+strconv.Quote(body.Tenant), nil)
 		return
 	}
+	if !h.requireWorkItemRole(w, r, user, body.Tenant, workItemWriteRole, "create") {
+		return
+	}
 	if body.Visibility == "" {
 		body.Visibility = workitems.VisibilityTenant
 	}
@@ -506,6 +511,9 @@ func (h *Handlers) TransitionWorkItem(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !h.requireWorkItemRole(w, r, user, item.Tenant, workItemWriteRole, "transition") {
+		return
+	}
 	var body transitionWorkItemBody
 	if !decodeWorkItemBody(w, r, &body) {
 		return
@@ -550,6 +558,9 @@ func (h *Handlers) AppendWorkItemIntent(w http.ResponseWriter, r *http.Request) 
 	}
 	item, ok := h.visibleWorkItem(w, r, user)
 	if !ok {
+		return
+	}
+	if !h.requireWorkItemRole(w, r, user, item.Tenant, workItemWriteRole, "intent") {
 		return
 	}
 	var body intentBody
@@ -610,6 +621,9 @@ func (h *Handlers) AttachWorkItemExecution(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	if !h.requireWorkItemRole(w, r, user, item.Tenant, workItemWriteRole, "execution") {
+		return
+	}
 	var body executionBody
 	if !decodeWorkItemBody(w, r, &body) {
 		return
@@ -651,6 +665,9 @@ func (h *Handlers) ResumeWorkItem(w http.ResponseWriter, r *http.Request) {
 	}
 	item, ok := h.visibleWorkItem(w, r, user)
 	if !ok {
+		return
+	}
+	if !h.requireWorkItemRole(w, r, user, item.Tenant, workItemExecutionRole, "resume") {
 		return
 	}
 	var body resumeBody
@@ -696,6 +713,9 @@ func (h *Handlers) LinkWorkItemSurface(w http.ResponseWriter, r *http.Request) {
 	}
 	item, ok := h.visibleWorkItem(w, r, user)
 	if !ok {
+		return
+	}
+	if !h.requireWorkItemRole(w, r, user, item.Tenant, workItemWriteRole, "surface-ref") {
 		return
 	}
 	var body surfaceRefBody
@@ -829,8 +849,10 @@ var errLinkOwnerUnresolved = errors.New("the surface link's owner resolves to no
 
 // surfaceLinkPrincipal resolves a live surface link's owner to its canonical
 // principal. A prn_ owner (mctl-api#646) is that principal once the store
-// confirms it is active, the same check agentPrincipalGate's token
-// principal gets. A "github:<login>" owner is resolved as follows. It keys
+// confirms it is an active human: the check agentPrincipalGate's token
+// principal gets, plus its kind, which humanPrincipal and the redeem's
+// mirrorLink already guarantee (mctl-api#663) but which is what binding a
+// surface actor rests on. A "github:<login>" owner is resolved as follows. It keys
 // on the same login-only GitHub identity agentPrincipalGate builds for a
 // sil_ grant's subject (auth.NewDelegatedUser, then AttachPrincipal), so the
 // principal a surface actor is bound for is the principal its sil_ grant
@@ -841,12 +863,8 @@ var errLinkOwnerUnresolved = errors.New("the surface link's owner resolves to no
 // the caller to refuse with 503.
 func (h *Handlers) surfaceLinkPrincipal(ctx context.Context, linkPrincipal string) (string, error) {
 	if surfaceid.IsPrincipalID(linkPrincipal) {
-		checker, ok := h.opts.Principals.(auth.PrincipalChecker)
-		if !ok {
-			return "", errors.New("principal store cannot check principals")
-		}
-		switch err := checker.CheckPrincipal(ctx, linkPrincipal); {
-		case errors.Is(err, auth.ErrPrincipalDisabled), errors.Is(err, auth.ErrIdentityRefused):
+		switch code, err := checkHumanPrincipal(ctx, h.opts.Principals, linkPrincipal); {
+		case code != "":
 			return "", errLinkOwnerUnresolved
 		case err != nil:
 			return "", err
@@ -900,4 +918,33 @@ func truncateRequestID(id string) string {
 		id = id[:len(id)-size]
 	}
 	return id
+}
+
+// requireWorkItemRole gates a work-item write on a minimum tenant role
+// (mctl-api#489). It runs after the visibility check, so a role refusal never
+// confirms that an item exists, and before any body decode or store write.
+//
+// Machine callers are decided by what the principal is, never by a GitHub
+// login: the service principal (auth.NewServiceUser) is a platform admin and
+// passes. An agent token acting for no human (auth.NewAgentUser) holds no
+// tenant groups (PrincipalAuthz.Apply clears them), so it never gets here; if
+// a future one carried a non-admin tenant scope, checkTenantRoleByPrincipal
+// refuses it as a non-human caller. A delegated or relayed request
+// (auth.NewDelegatedPrincipalUser, auth.NewRelayedPrincipalUser) is decided as
+// the human principal it names.
+func (h *Handlers) requireWorkItemRole(w http.ResponseWriter, r *http.Request, user *auth.User, tenant string, min operations.Role, operation string) bool {
+	d := h.checkTenantRole(user, tenant, min, "work item "+operation)
+	if !d.refused() {
+		return true
+	}
+	h.auditRoleRefusal(r, user, tenant, "work_item."+operation, operations.RiskLow, d)
+	switch d.status {
+	case http.StatusForbidden:
+		writeErrorCode(w, d.status, wiCodeRoleForbidden, d.message, nil)
+	case http.StatusServiceUnavailable:
+		writeErrorCode(w, d.status, wiCodeRoleUnavailable, d.message, nil)
+	default:
+		writeError(w, d.status, d.message)
+	}
+	return false
 }

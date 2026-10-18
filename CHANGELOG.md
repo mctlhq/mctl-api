@@ -1,5 +1,50 @@
 # Changelog
 
+## [4.99.1](https://github.com/mctlhq/mctl-api/compare/4.99.0...4.99.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **surface-identity:** serve a known own holder when the set is incomplete ([0a0e503](https://github.com/mctlhq/mctl-api/commit/0a0e5038784c20c08ac58cbdfdfcb8aeba128936))
+
+## [4.99.0](https://github.com/mctlhq/mctl-api/compare/4.98.0...4.99.0) (2026-10-17)
+
+
+### Features
+
+* **agents:** issue-651-feat-finops-expose-model-usage-devloop-c ([929d1d9](https://github.com/mctlhq/mctl-api/commit/929d1d96c2821a1aa0ae7bf289772654492d390d))
+* **agents:** issue-651-feat-finops-expose-model-usage-devloop-c ([f1b0d4a](https://github.com/mctlhq/mctl-api/commit/f1b0d4abe280a6e4936a8cf51016d4c38c0f5287))
+
+## [4.98.0](https://github.com/mctlhq/mctl-api/compare/4.97.0...4.98.0) (2026-10-17)
+
+
+### Features
+
+* **agents:** issue-489-authz-decide-tenant-roles-for-work-items ([2e226e1](https://github.com/mctlhq/mctl-api/commit/2e226e133bcd4c747cd4f9d52bfe4921f1725279))
+
+## [4.97.0](https://github.com/mctlhq/mctl-api/compare/4.96.1...4.97.0) (2026-10-17)
+
+
+### Features
+
+* **approval:** pass the grant's content digest to the approve workflow ([a9cf6b1](https://github.com/mctlhq/mctl-api/commit/a9cf6b16c789a276dbe7bda008a6c2d2cf7d430c))
+
+## [4.96.1](https://github.com/mctlhq/mctl-api/compare/4.96.0...4.96.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **surface-identity:** close the P3 follow-ups on prn_ links ([402a4de](https://github.com/mctlhq/mctl-api/commit/402a4dee6f6330a9d2df824218e772b00d588d32))
+* **surface-identity:** keep revoke and admin reads off unknown holders ([8efdfd5](https://github.com/mctlhq/mctl-api/commit/8efdfd517313a88c95718c56674d1d65125be306)), closes [#663](https://github.com/mctlhq/mctl-api/issues/663)
+
+## [4.96.0](https://github.com/mctlhq/mctl-api/compare/4.95.0...4.96.0) (2026-10-17)
+
+
+### Features
+
+* **operations:** declare the investigate owner principal param ([9b33b41](https://github.com/mctlhq/mctl-api/commit/9b33b4128fec8c4b54a1e8cf704bd41098b34632))
+* **operations:** declare the investigate owner principal param ([a1a25f2](https://github.com/mctlhq/mctl-api/commit/a1a25f20b297e8a127ea83a49bfa16d65d37f4bb))
+
 ## [4.95.0](https://github.com/mctlhq/mctl-api/compare/4.94.1...4.95.0) (2026-10-17)
 
 

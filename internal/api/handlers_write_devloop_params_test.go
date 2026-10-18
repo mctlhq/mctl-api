@@ -73,6 +73,8 @@ var devLoopSubmissions = []struct {
 			"temporal_workflow_id":  "dev-loop-mctlhq-mctl-agents-494",
 			"temporal_run_id":       "00000000-0000-0000-0000-000000000000",
 			"human_input_responses": `[{"request_id":"hir-0123456789abcdef","request_hash":"sha256:` + strings.Repeat("a", 64) + `","value":"library B","received_at":"2026-10-04T10:00:00Z"}]`,
+			// mctlhq/mctl-agents#684: the owner principal rides with the answers.
+			"work_item_owner_principal_id": "prn_01M39HRB7JRXZ2PHW5VVB695YZ",
 		},
 	},
 	{
@@ -360,6 +362,35 @@ func TestExecuteOperation_HumanInputResponsesShape(t *testing.T) {
 		assertStatus(t, w, http.StatusAccepted)
 		if _, ok := exec.submittedParams[len(exec.submittedParams)-1]["human_input_responses"]; ok {
 			t.Error("an empty human_input_responses reached the executor; it must be omitted")
+		}
+	})
+}
+
+// work_item_owner_principal_id (mctlhq/mctl-agents#684) reaches the
+// investigator only as a canonical prn_, and an empty value is an absence,
+// so a run that is not a continuation keeps the CWFT's exact argv.
+func TestExecuteOperation_WorkItemOwnerPrincipalIDShape(t *testing.T) {
+	const issue = "https://github.com/mctlhq/mctl-agents/issues/684"
+	for _, bad := range []string{"prn_", "prn_01m39hrb7jrxzzpHW5VVB695YZ", "github:mashkovd", "prn_01M39HRB7JRXZ2PHW5VVB695YZ x"} {
+		t.Run("rejected "+bad, func(t *testing.T) {
+			router, exec := newTestRouter(t)
+			w := postAs(t, router, "/api/v1/operations/mctl-agents-investigate/execute", map[string]string{
+				"issue_url": issue, "work_item_owner_principal_id": bad,
+			}, auth.NewServiceUser())
+			assertStatus(t, w, http.StatusBadRequest)
+			if len(exec.submittedParams) != 0 {
+				t.Fatal("a rejected submission reached the executor")
+			}
+		})
+	}
+	t.Run("empty omitted", func(t *testing.T) {
+		router, exec := newTestRouter(t)
+		w := postAs(t, router, "/api/v1/operations/mctl-agents-investigate/execute", map[string]string{
+			"issue_url": issue, "work_item_owner_principal_id": "",
+		}, auth.NewServiceUser())
+		assertStatus(t, w, http.StatusAccepted)
+		if _, ok := exec.submittedParams[len(exec.submittedParams)-1]["work_item_owner_principal_id"]; ok {
+			t.Error("an empty work_item_owner_principal_id reached the executor; it must be omitted")
 		}
 	})
 }

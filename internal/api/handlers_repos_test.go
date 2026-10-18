@@ -48,12 +48,12 @@ func captureBackstage(t *testing.T) (*httptest.Server, *[]*http.Request) {
 
 func TestSyncReposIgnoresBodyUserOverridesWithAuthenticated(t *testing.T) {
 	srv, seen := captureBackstage(t)
-	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL}}
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
 
 	req := withUser(
 		httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync",
 			strings.NewReader(`{"team":"labs","user":"someone-else"}`)),
-		&auth.User{ID: "real-caller", Groups: []string{"labs"}},
+		auth.NewGitHubUser("real-caller", []string{"labs"}),
 	)
 	rec := httptest.NewRecorder()
 	h.SyncRepos(rec, req)
@@ -71,12 +71,12 @@ func TestSyncReposIgnoresBodyUserOverridesWithAuthenticated(t *testing.T) {
 
 func TestSyncReposDefaultsToAuthenticatedUserWhenBodyOmitsUser(t *testing.T) {
 	srv, seen := captureBackstage(t)
-	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL}}
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
 
 	req := withUser(
 		httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync",
 			strings.NewReader(`{"team":"labs"}`)),
-		&auth.User{ID: "real-caller", Groups: []string{"labs"}},
+		auth.NewGitHubUser("real-caller", []string{"labs"}),
 	)
 	rec := httptest.NewRecorder()
 	h.SyncRepos(rec, req)
@@ -94,7 +94,7 @@ func TestSyncReposDefaultsToAuthenticatedUserWhenBodyOmitsUser(t *testing.T) {
 
 func TestSyncReposNilUserUnauthorized(t *testing.T) {
 	srv, seen := captureBackstage(t)
-	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL}}
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync",
 		strings.NewReader(`{"team":"labs"}`))
@@ -111,12 +111,12 @@ func TestSyncReposNilUserUnauthorized(t *testing.T) {
 
 func TestSyncReposCrossTenantForbidden(t *testing.T) {
 	srv, seen := captureBackstage(t)
-	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL}}
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
 
 	req := withUser(
 		httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync",
 			strings.NewReader(`{"team":"other-team"}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}},
+		auth.NewGitHubUser("u1", []string{"labs"}),
 	)
 	rec := httptest.NewRecorder()
 	h.SyncRepos(rec, req)
@@ -131,11 +131,11 @@ func TestSyncReposCrossTenantForbidden(t *testing.T) {
 
 func TestSyncReposMissingTeamBadRequest(t *testing.T) {
 	srv, seen := captureBackstage(t)
-	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL}}
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
 
 	req := withUser(
 		httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{}`)),
-		&auth.User{ID: "u1", Groups: []string{"labs"}},
+		auth.NewGitHubUser("u1", []string{"labs"}),
 	)
 	rec := httptest.NewRecorder()
 	h.SyncRepos(rec, req)
@@ -171,7 +171,7 @@ func TestReposProxiesSendBearerToken(t *testing.T) {
 			name: "sync",
 			request: withUser(
 				httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)),
-				&auth.User{ID: "u1", Groups: []string{"labs"}},
+				auth.NewGitHubUser("u1", []string{"labs"}),
 			),
 			invoke: func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.SyncRepos(w, r) },
 		},
@@ -183,6 +183,7 @@ func TestReposProxiesSendBearerToken(t *testing.T) {
 			h := &Handlers{opts: Options{
 				BackstageInternalURL:           srv.URL,
 				BackstageGithubAppConnectToken: "test-token",
+				GitReader:                      rolesOf("labs/real-caller=developer", "labs/u1=developer"),
 			}}
 
 			rec := httptest.NewRecorder()
@@ -223,7 +224,7 @@ func TestReposProxiesOmitAuthWhenTokenUnset(t *testing.T) {
 			name: "sync",
 			request: withUser(
 				httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)),
-				&auth.User{ID: "u1", Groups: []string{"labs"}},
+				auth.NewGitHubUser("u1", []string{"labs"}),
 			),
 			invoke: func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.SyncRepos(w, r) },
 		},
@@ -232,7 +233,7 @@ func TestReposProxiesOmitAuthWhenTokenUnset(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, seen := captureBackstage(t)
-			h := &Handlers{opts: Options{BackstageInternalURL: srv.URL}}
+			h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
 
 			rec := httptest.NewRecorder()
 			tc.invoke(h, rec, tc.request)
