@@ -294,6 +294,9 @@ func TestUnusableRedirectEntriesAreDropped(t *testing.T) {
 	if !slices.Equal(d.RedirectURIs, want) {
 		t.Fatalf("redirect_uris = %v, want %v", d.RedirectURIs, want)
 	}
+	if dropped := []string{"http://localhost/callback", "javascript:alert(1)", "com.example.app:/cb"}; !slices.Equal(d.DroppedRedirectURIs, dropped) {
+		t.Fatalf("dropped = %v, want %v", d.DroppedRedirectURIs, dropped)
+	}
 	for _, u := range []string{"http://127.0.0.1:51234/callback", "https://app.example.com/cb"} {
 		if !RedirectAllowed(d.RedirectURIs, u) {
 			t.Errorf("%q must be allowed", u)

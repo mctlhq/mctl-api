@@ -1178,7 +1178,11 @@ func (s *OAuthServer) IsRedirectURIAllowedCtx(ctx context.Context, clientID, uri
 			slog.Warn("oauth: client metadata document refused", "client_id", clientID, "error", err)
 			return false
 		}
-		return cimd.RedirectAllowed(doc.RedirectURIs, uri)
+		if !cimd.RedirectAllowed(doc.RedirectURIs, uri) {
+			slog.Warn("oauth: redirect_uri not in the client metadata document", "client_id", clientID, "redirect_uri", uri, "dropped_redirect_uris", doc.DroppedRedirectURIs)
+			return false
+		}
+		return true
 	}
 	for _, allowed := range s.AllowedRedirectURIs {
 		if strings.HasSuffix(allowed, "/*") {
