@@ -534,9 +534,13 @@ principal, and each session holds the other's links (#646, #663):
 Either session lists both holders' links and may revoke them. Who the
 session holds links as is never guessed: if the principal store cannot
 answer (or, for a GitHub session, authentication could not resolve the
-principal), the list is 503, not a shorter list, and a revoke of a link
-none of the known holders holds is 503, not 404. A link the session's own
-holder form holds stays revocable meanwhile, and an admin listing a named
+principal), the list is 503, not a shorter list, a list naming a holder
+other than the session's own holder form is 503, not 403, and a revoke of a
+link none of the known holders holds is 503, not 404. The session's own
+holder form stays usable meanwhile (#671): its links can be listed by
+naming it (`?principal=github:<login>` from a GitHub session,
+`?principal=<prn_>` from a `prn_` session) and revoked, since that holder's
+list is whole whatever the rest of the set is. An admin listing a named
 holder, or revoking, needs no holder set at all. The derived
 `github:<login>` matches a link's holder exactly (the store compares logins
 case-insensitively); both are GitHub's spelling of the login, so they can
