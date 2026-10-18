@@ -34,6 +34,9 @@ const (
 	KindCode    = "code"
 	// KindConsent is a CIMD consent decision waiting for the signed-in human.
 	KindConsent = "consent"
+	// KindJTI records a client assertion's jti until the assertion expires,
+	// so it authenticates at most one token request (RFC 7523 section 3).
+	KindJTI = "jti"
 )
 
 // Store keeps one-time entries until they are taken or expire.
@@ -49,6 +52,13 @@ type Store interface {
 	// store could not be read, which callers must not treat as "not found".
 	// An entry is returned at most once across all replicas.
 	Take(ctx context.Context, kind, key string) (payload []byte, found bool, err error)
+
+	// PutOnce stores payload under (kind, key) for ttl unless a live entry
+	// already holds that key. fresh is true only for the one caller, across
+	// all replicas, that created the entry; an expired entry counts as
+	// absent. err is set only when the store could not be written or read,
+	// which callers must not treat as either answer.
+	PutOnce(ctx context.Context, kind, key string, payload []byte, ttl time.Duration) (fresh bool, err error)
 
 	// GC deletes expired entries. Safe to call on a schedule from every
 	// replica.

@@ -578,6 +578,10 @@ func (failingFlowStore) Take(context.Context, string, string) ([]byte, bool, err
 	return nil, false, errors.New("db down")
 }
 
+func (failingFlowStore) PutOnce(context.Context, string, string, []byte, time.Duration) (bool, error) {
+	return false, errors.New("db down")
+}
+
 func (failingFlowStore) GC(context.Context) error { return nil }
 
 // A store that cannot be written ends the authorize leg with an OAuth

@@ -107,6 +107,7 @@ type fakeRefreshToken struct {
 	pid       string
 	clientID  string
 	groups    []string
+	method    string
 	familyID  string
 	rotatedTo string
 	revoked   bool
@@ -137,6 +138,7 @@ func (f *fakeRefreshStore) Insert(rawToken, clientID string, sess refreshstore.S
 		pid:      sess.PrincipalID,
 		clientID: clientID,
 		groups:   append([]string(nil), groups...),
+		method:   sess.AuthMethod,
 		familyID: fmt.Sprintf("%s-family-%d", login, f.seq),
 	}
 	return nil
@@ -171,9 +173,10 @@ func (f *fakeRefreshStore) Rotate(oldRawToken, newRawToken, clientID string, _ t
 		pid:      entry.pid,
 		clientID: entry.clientID,
 		groups:   append([]string(nil), entry.groups...),
+		method:   entry.method,
 		familyID: entry.familyID,
 	}
-	return refreshstore.Session{Login: entry.login, PrincipalID: entry.pid, Groups: append([]string(nil), entry.groups...)}, nil
+	return refreshstore.Session{Login: entry.login, PrincipalID: entry.pid, Groups: append([]string(nil), entry.groups...), AuthMethod: entry.method}, nil
 }
 
 func (f *fakeRefreshStore) RevokeFamily(rawToken, clientID, _ string) error {

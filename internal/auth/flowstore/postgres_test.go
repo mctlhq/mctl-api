@@ -160,3 +160,52 @@ func TestTakeOnFailedReadIsAnError(t *testing.T) {
 		t.Fatalf("Take on closed pool = %v, %v; want an error", found, err)
 	}
 }
+
+func TestPutOnceRefusesALiveKeyAndReusesAnExpiredOne(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	key := t.Name()
+	if fresh, err := s.PutOnce(ctx, KindJTI, key, []byte(`{}`), time.Minute); err != nil || !fresh {
+		t.Fatalf("first PutOnce = %v, %v; want true, nil", fresh, err)
+	}
+	if fresh, err := s.PutOnce(ctx, KindJTI, key, []byte(`{}`), time.Minute); err != nil || fresh {
+		t.Fatalf("second PutOnce = %v, %v; want false, nil", fresh, err)
+	}
+	// Same key, other kind: independent.
+	if fresh, err := s.PutOnce(ctx, KindCode, key, []byte(`{}`), time.Minute); err != nil || !fresh {
+		t.Fatalf("other kind = %v, %v; want true, nil", fresh, err)
+	}
+	// An expired row not yet collected counts as absent.
+	exp := key + "-expired"
+	if fresh, err := s.PutOnce(ctx, KindJTI, exp, []byte(`{}`), time.Millisecond); err != nil || !fresh {
+		t.Fatalf("short PutOnce = %v, %v", fresh, err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if fresh, err := s.PutOnce(ctx, KindJTI, exp, []byte(`{}`), time.Minute); err != nil || !fresh {
+		t.Fatalf("after expiry = %v, %v; want true, nil", fresh, err)
+	}
+}
+
+func TestPutOnceConcurrentHasOneWinner(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	var wins atomic.Int32
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fresh, err := s.PutOnce(ctx, KindJTI, t.Name(), []byte(`{}`), time.Minute)
+			if err != nil {
+				t.Error(err)
+			}
+			if fresh {
+				wins.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if wins.Load() != 1 {
+		t.Fatalf("winners = %d, want 1", wins.Load())
+	}
+}

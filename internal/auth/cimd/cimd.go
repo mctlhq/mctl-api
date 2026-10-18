@@ -38,6 +38,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	jose "github.com/go-jose/go-jose/v4"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/mctlhq/mctl-api/internal/netsafe"
@@ -66,6 +67,9 @@ const (
 	// it. It assumes the production policy of one known client per exact
 	// allowlisted host: a host serving 6 or more no-store documents under
 	// steady sign-ins would exceed it at the minTTL floor (mctl-api#687).
+	// A private_key_jwt client's key set is fetched under the same budget,
+	// so a no-store document and key set together use twice the fetches
+	// and leave half the headroom (mctl-api#694).
 	hostPerMinute = 10
 	maxConcurrent = 8
 	fetchTimeout  = 10 * time.Second
@@ -80,7 +84,29 @@ type Document struct {
 	// allowlist that parseDocument ignored. They never match; they are kept
 	// only so a refused redirect can be explained in the logs.
 	DroppedRedirectURIs []string
+	// AuthMethod is the token endpoint authentication the client declared:
+	// AuthMethodNone or AuthMethodPrivateKeyJWT. A private_key_jwt client
+	// must authenticate every token request; it is never served as none.
+	AuthMethod string
+	// SigningAlg and JWKSURI are set for AuthMethodPrivateKeyJWT only: the one
+	// algorithm its assertions may use and the key set they verify against,
+	// on the client_id's own host.
+	SigningAlg string
+	JWKSURI    string
 }
+
+// Token endpoint authentication methods a document may declare.
+const (
+	AuthMethodNone          = "none"
+	AuthMethodPrivateKeyJWT = "private_key_jwt"
+)
+
+// signingAlgs are the assertion algorithms a document may name. HMAC
+// algorithms are absent on purpose: a public key set cannot verify them.
+var signingAlgs = []string{"RS256", "ES256"}
+
+// SigningAlgs returns the assertion algorithms a document may name.
+func SigningAlgs() []string { return slices.Clone(signingAlgs) }
 
 // IsCIMDURL reports whether s has the shape of a CIMD client_id: https, a
 // host name (no IP literal), port absent or 443, a non-empty path other than
@@ -188,6 +214,13 @@ type cacheEntry struct {
 	doc     Document
 	err     error
 	expires time.Time
+	// keys and fetched are set on a key set entry ("jwks\x00" + jwks_uri),
+	// which shares the LRU with the documents.
+	keys    []jose.JSONWebKey
+	fetched time.Time
+	// refetchErr is why the last refetch failed while keys were kept. It
+	// answers a kid the kept keys lack until the next refetch is allowed.
+	refetchErr error
 }
 
 // NewResolver builds a Resolver.
@@ -285,32 +318,45 @@ func (r *Resolver) Resolve(ctx context.Context, clientID string) (Document, erro
 }
 
 func (r *Resolver) cached(key string) (Document, error, bool) {
+	e, ok := r.cachedEntry(key)
+	if !ok {
+		return Document{}, nil, false
+	}
+	return e.doc, e.err, true
+}
+
+// cachedEntry returns a copy of the live entry for key.
+func (r *Resolver) cachedEntry(key string) (cacheEntry, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	el, ok := r.cache[key]
 	if !ok {
-		return Document{}, nil, false
+		return cacheEntry{}, false
 	}
 	e := el.Value.(*cacheEntry)
 	if !r.now().Before(e.expires) {
 		r.lru.Remove(el)
 		delete(r.cache, key)
-		return Document{}, nil, false
+		return cacheEntry{}, false
 	}
 	r.lru.MoveToFront(el)
-	return e.doc, e.err, true
+	return *e, true
 }
 
 func (r *Resolver) store(key string, doc Document, err error, ttl time.Duration) {
 	if err != nil {
 		ttl = negativeTTL
 	}
+	r.storeEntry(&cacheEntry{key: key, doc: doc, err: err, expires: r.now().Add(ttl)})
+}
+
+func (r *Resolver) storeEntry(e *cacheEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if el, ok := r.cache[key]; ok {
+	if el, ok := r.cache[e.key]; ok {
 		r.lru.Remove(el)
 	}
-	r.cache[key] = r.lru.PushFront(&cacheEntry{key: key, doc: doc, err: err, expires: r.now().Add(ttl)})
+	r.cache[e.key] = r.lru.PushFront(e)
 	for r.lru.Len() > cacheEntries {
 		old := r.lru.Back()
 		r.lru.Remove(old)
@@ -449,13 +495,29 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 			return bad("%s must not be present", k)
 		}
 	}
-	if m, ok := raw["token_endpoint_auth_method"]; ok {
-		var s string
-		if json.Unmarshal(m, &s) != nil || s != "none" {
-			return bad("token_endpoint_auth_method must be none")
+	method, _ := str("token_endpoint_auth_method")
+	var alg, jwksURI string
+	switch method {
+	case AuthMethodNone:
+	case AuthMethodPrivateKeyJWT:
+		// The key set must come from the client_id's own host, fetched under
+		// the same allowlist and limits as the document. An inline jwks would
+		// let any document carry its own keys past that boundary.
+		if _, ok := raw["jwks"]; ok {
+			return bad("jwks must not be present; publish the keys at jwks_uri")
 		}
-	} else {
-		return bad("token_endpoint_auth_method must be none")
+		jwksURI, _ = str("jwks_uri")
+		ju, ok := parseCIMDURL(jwksURI)
+		cu, _ := parseCIMDURL(clientID)
+		if !ok || cu == nil || !strings.EqualFold(ju.Hostname(), cu.Hostname()) {
+			return bad("jwks_uri must be an https URL on the client_id's host")
+		}
+		alg, _ = str("token_endpoint_auth_signing_alg")
+		if !slices.Contains(signingAlgs, alg) {
+			return bad("token_endpoint_auth_signing_alg must be one of %s", strings.Join(signingAlgs, ", "))
+		}
+	default:
+		return bad("token_endpoint_auth_method must be none or private_key_jwt")
 	}
 	var uris []string
 	if v, ok := raw["redirect_uris"]; !ok || json.Unmarshal(v, &uris) != nil || len(uris) == 0 {
@@ -504,7 +566,10 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 	}
 	// Clipped so an append by a caller can never write into the backing array
 	// of a cached document shared by concurrent requests.
-	return Document{ClientID: clientID, ClientName: name, RedirectURIs: slices.Clip(accepted), DroppedRedirectURIs: dropped}, nil
+	return Document{
+		ClientID: clientID, ClientName: name, RedirectURIs: slices.Clip(accepted), DroppedRedirectURIs: dropped,
+		AuthMethod: method, SigningAlg: alg, JWKSURI: jwksURI,
+	}, nil
 }
 
 // RedirectAllowed reports whether uri matches an entry of the document's

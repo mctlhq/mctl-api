@@ -45,6 +45,12 @@ import (
 // with HTTP 500 / error:"server_error" when they encounter this sentinel.
 var ErrServerError = errors.New("server_error")
 
+// ErrInvalidClient means client authentication failed (RFC 6749 section 5.2
+// invalid_client): a missing, invalid or replayed client assertion, an
+// assertion from a client that must not send one, or a CIMD client whose
+// document could not be resolved to an authentication method.
+var ErrInvalidClient = errors.New("invalid_client")
+
 // errResolverNotConfigured is returned by resolveGroupsChecked when
 // OAuthServer.TenantResolver is nil. It is not a failure: callers treat it as
 // "feature off" and keep whatever groups the session already carried, so a
@@ -281,6 +287,7 @@ type OAuthServer struct {
 	CIMDAdvertise bool
 
 	consents sync.Map // token → consentMem, used when FlowStore is nil
+	jtis     sync.Map // client_id + "\x00" + jti → expiry, used when FlowStore is nil
 
 	codes         authCodeStore
 	refreshTokens refreshTokenStore
@@ -405,6 +412,9 @@ type RegisteredClient struct {
 	ClientName   string    `json:"client_name,omitempty"`
 	RedirectURIs []string  `json:"redirect_uris"`
 	CreatedAt    time.Time `json:"client_id_issued_at,omitempty"`
+	// AuthMethod is a CIMD client's token_endpoint_auth_method. It is never
+	// part of a registration response.
+	AuthMethod string `json:"-"`
 }
 
 // AddPreregisteredClient seeds a static public client. It is the narrower
@@ -1383,6 +1393,13 @@ type pendingRecord struct {
 // refused here, at sign-in, rather than by IssueJWT once the code has been
 // spent at the token endpoint.
 func (s *OAuthServer) IssueCode(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string) (string, error) {
+	return s.IssueCodeWithAuthMethod(ctx, login, principalID, clientID, redirectURI, codeChallenge, groups, "")
+}
+
+// IssueCodeWithAuthMethod is IssueCode for a CIMD client whose
+// token_endpoint_auth_method was read from its document at consent. With
+// none given, a CIMD client's document is resolved here instead.
+func (s *OAuthServer) IssueCodeWithAuthMethod(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod string) (string, error) {
 	if err := s.checkMintPrincipal(principalID); err != nil {
 		return "", err
 	}
@@ -1402,6 +1419,19 @@ func (s *OAuthServer) IssueCode(ctx context.Context, login, principalID, clientI
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
 		CreatedAt:     time.Now(),
+	}
+	if s.IsCIMDClient(clientID) {
+		// Recorded so the code can only be redeemed with the authentication
+		// the client declared when it was issued, even if its document later
+		// says none.
+		if authMethod == "" {
+			doc, err := s.CIMD.Resolve(ctx, clientID)
+			if err != nil {
+				return "", fmt.Errorf("resolve client metadata document: %w", err)
+			}
+			authMethod = doc.AuthMethod
+		}
+		entry.AuthMethod = authMethod
 	}
 	if s.FlowStore == nil {
 		s.codes.store(code, entry)
@@ -1461,8 +1491,20 @@ func takeFlow(ctx context.Context, st flowstore.Store, kind, key string, v any) 
 }
 
 // ExchangeCode validates an authorization code + PKCE verifier and returns a signed JWT.
-// The code is consumed (one-time use).
+// The code is consumed (one-time use). It sends no client authentication, so
+// a private_key_jwt client is refused; see ExchangeCodeWithClientAuth.
 func (s *OAuthServer) ExchangeCode(ctx context.Context, code, codeVerifier, clientID, redirectURI string) (string, string, error) {
+	return s.ExchangeCodeWithClientAuth(ctx, code, codeVerifier, clientID, redirectURI, ClientAssertion{})
+}
+
+// ExchangeCodeWithClientAuth is ExchangeCode for a request that may carry
+// a client assertion. The client is authenticated before the code is taken,
+// so a request that fails authentication does not consume it.
+func (s *OAuthServer) ExchangeCodeWithClientAuth(ctx context.Context, code, codeVerifier, clientID, redirectURI string, ca ClientAssertion) (string, string, error) {
+	method, err := s.authenticateClient(ctx, clientID, ca)
+	if err != nil {
+		return "", "", err
+	}
 	entry, ok, err := s.takeCode(ctx, code)
 	if err != nil {
 		return "", "", err
@@ -1472,6 +1514,9 @@ func (s *OAuthServer) ExchangeCode(ctx context.Context, code, codeVerifier, clie
 	}
 	if entry.ClientID != clientID {
 		return "", "", errors.New("client_id mismatch")
+	}
+	if entry.AuthMethod == cimd.AuthMethodPrivateKeyJWT && method != cimd.AuthMethodPrivateKeyJWT {
+		return "", "", fmt.Errorf("%w: the code was issued to a private_key_jwt client", ErrInvalidClient)
 	}
 	if entry.RedirectURI != redirectURI {
 		return "", "", errors.New("redirect_uri mismatch")
@@ -1483,7 +1528,13 @@ func (s *OAuthServer) ExchangeCode(ctx context.Context, code, codeVerifier, clie
 	if err != nil {
 		return "", "", err
 	}
-	refreshToken, err := s.IssueRefreshToken(entry.Login, entry.PrincipalID, entry.Groups, clientID)
+	// The session remembers a private_key_jwt client's method, so it can
+	// only be refreshed with it, whatever the document says later.
+	bound := ""
+	if method == cimd.AuthMethodPrivateKeyJWT {
+		bound = method
+	}
+	refreshToken, err := s.issueRefreshToken(entry.Login, entry.PrincipalID, entry.Groups, clientID, bound)
 	if err != nil {
 		return "", "", err
 	}
@@ -1538,6 +1589,12 @@ func (s *OAuthServer) IssueJWT(login, principalID string, groups []string) (stri
 
 // IssueRefreshToken creates and stores a refresh token for the given user and client.
 func (s *OAuthServer) IssueRefreshToken(login, principalID string, groups []string, clientID string) (string, error) {
+	return s.issueRefreshToken(login, principalID, groups, clientID, "")
+}
+
+// issueRefreshToken is IssueRefreshToken for a session bound to the client
+// authentication method it was issued under ("" for a public client).
+func (s *OAuthServer) issueRefreshToken(login, principalID string, groups []string, clientID, authMethod string) (string, error) {
 	if err := s.checkMintPrincipal(principalID); err != nil {
 		return "", err
 	}
@@ -1552,7 +1609,7 @@ func (s *OAuthServer) IssueRefreshToken(login, principalID string, groups []stri
 	}
 	expiresAt := time.Now().Add(ttl)
 	if s.RefreshStore != nil {
-		if err := s.RefreshStore.Insert(token, clientID, refreshstore.Session{Login: login, PrincipalID: principalID, Groups: groups}, expiresAt); err != nil {
+		if err := s.RefreshStore.Insert(token, clientID, refreshstore.Session{Login: login, PrincipalID: principalID, Groups: groups, AuthMethod: authMethod}, expiresAt); err != nil {
 			slog.Error("oauth: refresh store insert failed", "error", err)
 			return "", fmt.Errorf("store refresh token: %w", ErrServerError)
 		}
@@ -1563,6 +1620,7 @@ func (s *OAuthServer) IssueRefreshToken(login, principalID string, groups []stri
 		PrincipalID: principalID,
 		Groups:      groups,
 		ClientID:    clientID,
+		AuthMethod:  authMethod,
 		CreatedAt:   time.Now(),
 		ExpiresAt:   expiresAt,
 	})
@@ -1570,7 +1628,21 @@ func (s *OAuthServer) IssueRefreshToken(login, principalID string, groups []stri
 }
 
 // RefreshAccessToken validates a refresh token, rotates it, and issues a new access token.
+// It sends no client authentication, so a private_key_jwt client is refused;
+// see RefreshAccessTokenWithClientAuth.
 func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string, string, error) {
+	return s.RefreshAccessTokenWithClientAuth(context.Background(), refreshToken, clientID, ClientAssertion{})
+}
+
+// RefreshAccessTokenWithClientAuth is RefreshAccessToken for a request that
+// may carry a client assertion. The client is authenticated before the
+// token is rotated, so a request that fails authentication leaves the
+// session as it was.
+func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refreshToken, clientID string, ca ClientAssertion) (string, string, error) {
+	method, err := s.authenticateClient(ctx, clientID, ca)
+	if err != nil {
+		return "", "", err
+	}
 	if s.RefreshStore != nil {
 		newToken := deriveSuccessorRefreshToken(s.JWTSecret, refreshToken)
 		ttl := s.RefreshTokenTTL
@@ -1589,6 +1661,15 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 			}
 			slog.Error("oauth: refresh store unexpected error", "error", err)
 			return "", "", fmt.Errorf("oauth: %w", ErrServerError)
+		}
+		if err := checkSessionAuthMethod(sess.AuthMethod, method); err != nil {
+			// The token was presented without the authentication its session
+			// was issued under, so whoever holds it is not that client: the
+			// whole family goes, as for a replayed token.
+			if rerr := s.RefreshStore.RevokeFamily(newToken, clientID, "auth_method_downgrade"); rerr != nil {
+				slog.Error("oauth: refresh store revoke on auth method downgrade failed", "error", rerr)
+			}
+			return "", "", err
 		}
 		if err := s.refreshablePrincipal(sess.Login, sess.PrincipalID); err != nil {
 			return "", "", err
@@ -1621,6 +1702,10 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 	if entry.ClientID != clientID {
 		return "", "", errors.New("client_id mismatch")
 	}
+	// The token is already deleted, which revokes it in this store.
+	if err := checkSessionAuthMethod(entry.AuthMethod, method); err != nil {
+		return "", "", err
+	}
 	// The successor row records the groups only when they are a fresh
 	// resolution. A degraded or fail-closed fallback must not overwrite the
 	// snapshot: that would leave the next outage nothing to fall back on
@@ -1641,12 +1726,22 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 	if fresh {
 		snapshot = groups
 	}
-	newRefreshToken, err := s.IssueRefreshToken(entry.Login, entry.PrincipalID, snapshot, clientID)
+	newRefreshToken, err := s.issueRefreshToken(entry.Login, entry.PrincipalID, snapshot, clientID, entry.AuthMethod)
 	if err != nil {
 		return "", "", err
 	}
 	s.touchClient(clientID)
 	return accessToken, newRefreshToken, nil
+}
+
+// checkSessionAuthMethod refuses to refresh a private_key_jwt session with
+// any other client authentication, so a client whose document drops to none
+// cannot keep refreshing a session it once had to sign for.
+func checkSessionAuthMethod(bound, method string) error {
+	if bound == cimd.AuthMethodPrivateKeyJWT && method != cimd.AuthMethodPrivateKeyJWT {
+		return fmt.Errorf("%w: the session was issued to a private_key_jwt client", ErrInvalidClient)
+	}
+	return nil
 }
 
 // refreshablePrincipal refuses to refresh a session whose access tokens
@@ -1835,6 +1930,10 @@ type authCodeEntry struct {
 	RedirectURI   string
 	CodeChallenge string
 	CreatedAt     time.Time
+	// AuthMethod is the CIMD client's declared token endpoint authentication
+	// at issue time; empty for every other client (and for codes issued
+	// before it was recorded).
+	AuthMethod string `json:",omitempty"`
 }
 
 type pendingAuth struct {
@@ -1856,6 +1955,7 @@ type refreshTokenEntry struct {
 	PrincipalID string
 	Groups      []string
 	ClientID    string
+	AuthMethod  string
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
 }

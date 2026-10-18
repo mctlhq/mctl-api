@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -61,7 +62,7 @@ func (s *OAuthServer) ResolveCIMDClient(ctx context.Context, clientID string) (R
 	if err != nil {
 		return RegisteredClient{}, err
 	}
-	return RegisteredClient{ClientID: doc.ClientID, ClientName: doc.ClientName, RedirectURIs: doc.RedirectURIs}, nil
+	return RegisteredClient{ClientID: doc.ClientID, ClientName: doc.ClientName, RedirectURIs: doc.RedirectURIs, AuthMethod: doc.AuthMethod}, nil
 }
 
 // ClientKind classifies clientID for audit: static, cimd, dcr or
@@ -97,6 +98,9 @@ type ConsentEntry struct {
 	CodeChallenge string
 	ClientState   []byte
 	Upstream      string
+	// AuthMethod is the client's token_endpoint_auth_method as its document
+	// declared it at consent; the code is bound to it.
+	AuthMethod string
 	// BrowserHash is the SHA-256 (hex) of the consent token, held by the
 	// browser that signed in as a cookie.
 	BrowserHash string
@@ -161,4 +165,137 @@ func (s *OAuthServer) TakeConsent(ctx context.Context, token string) (ConsentEnt
 		return ConsentEntry{}, false, fmt.Errorf("take consent: %w", ErrServerError)
 	}
 	return e, ok, nil
+}
+
+// ClientAssertionTypeJWT is the only client_assertion_type accepted (RFC 7523
+// section 2.2).
+const ClientAssertionTypeJWT = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+
+// ClientAssertion is the client authentication a token request carries
+// (client_assertion_type and client_assertion). Both empty means none.
+type ClientAssertion struct {
+	Type      string
+	Assertion string
+}
+
+func (ca ClientAssertion) present() bool { return ca.Type != "" || ca.Assertion != "" }
+
+// AssertionAudiences are the aud values a client assertion may carry: the
+// issuer or the token endpoint URL, compared as exact strings.
+func (s *OAuthServer) AssertionAudiences() []string {
+	if s.BaseURL == "" {
+		return nil
+	}
+	return []string{s.BaseURL, s.BaseURL + "/oauth/token"}
+}
+
+// authenticateClient checks the client authentication of a token request
+// and returns the method it satisfied. Every client but a private_key_jwt
+// CIMD client is public and must send no assertion; a private_key_jwt client
+// must send a valid one, every time. A CIMD client_id is refused while CIMD
+// is off: without its document the required method is unknown, and unknown
+// is never served as none.
+func (s *OAuthServer) authenticateClient(ctx context.Context, clientID string, ca ClientAssertion) (string, error) {
+	if !s.IsCIMDClient(clientID) {
+		if cimd.IsCIMDURL(clientID) && !s.isStatic(clientID) {
+			return "", fmt.Errorf("%w: client metadata documents are not accepted", ErrInvalidClient)
+		}
+		if ca.present() {
+			return "", fmt.Errorf("%w: public client must not send a client assertion", ErrInvalidClient)
+		}
+		return cimd.AuthMethodNone, nil
+	}
+	doc, err := s.CIMD.Resolve(ctx, clientID)
+	if err != nil {
+		return "", clientAuthError(err)
+	}
+	switch doc.AuthMethod {
+	case cimd.AuthMethodNone:
+		if ca.present() {
+			return "", fmt.Errorf("%w: client declares none and must not send a client assertion", ErrInvalidClient)
+		}
+		return cimd.AuthMethodNone, nil
+	case cimd.AuthMethodPrivateKeyJWT:
+		if ca.Type != ClientAssertionTypeJWT || ca.Assertion == "" {
+			return "", fmt.Errorf("%w: private_key_jwt client must send client_assertion_type %s and client_assertion", ErrInvalidClient, ClientAssertionTypeJWT)
+		}
+		auds := s.AssertionAudiences()
+		if len(auds) == 0 {
+			return "", fmt.Errorf("%w: no issuer configured to check aud against", ErrInvalidClient)
+		}
+		a, err := s.CIMD.VerifyAssertion(ctx, doc, ca.Assertion, auds)
+		if err != nil {
+			return "", clientAuthError(err)
+		}
+		if err := s.consumeJTI(ctx, clientID, a); err != nil {
+			return "", err
+		}
+		return cimd.AuthMethodPrivateKeyJWT, nil
+	}
+	return "", fmt.Errorf("%w: unsupported token_endpoint_auth_method %q", ErrInvalidClient, doc.AuthMethod)
+}
+
+// clientAuthError maps a document or key set error to the token response.
+// A fetch that failed or was refused by the rate limit observed nothing
+// about the client, so it is a server error the client may retry, never
+// invalid_client, which tells a client its credentials are wrong.
+func clientAuthError(err error) error {
+	if errors.Is(err, cimd.ErrFetch) || errors.Is(err, cimd.ErrRateLimited) {
+		slog.Warn("oauth: client metadata could not be fetched", "error", err)
+		return fmt.Errorf("client authentication: %w: %w", ErrServerError, err)
+	}
+	return fmt.Errorf("%w: %w", ErrInvalidClient, err)
+}
+
+// errJTIReplayed is a client assertion whose jti was already used.
+var errJTIReplayed = errors.New("client assertion jti was already used")
+
+// consumeJTI records a's jti for its remaining lifetime, refusing one already
+// recorded. The shared store makes that hold across replicas; a store that
+// cannot be read or written is a server error, never a pass.
+func (s *OAuthServer) consumeJTI(ctx context.Context, clientID string, a cimd.Assertion) error {
+	key := clientID + "\x00" + a.JTI
+	ttl := max(a.RememberFor, time.Second)
+	if s.FlowStore == nil {
+		now := time.Now()
+		s.jtis.Range(func(k, v any) bool {
+			if now.After(v.(time.Time)) {
+				s.jtis.Delete(k)
+			}
+			return true
+		})
+		if _, loaded := s.jtis.LoadOrStore(key, now.Add(ttl)); loaded {
+			return fmt.Errorf("%w: %w", ErrInvalidClient, errJTIReplayed)
+		}
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, flowStoreTimeout)
+	defer cancel()
+	fresh, err := s.FlowStore.PutOnce(ctx, flowstore.KindJTI, key, []byte("{}"), ttl)
+	if err != nil {
+		slog.Error("oauth: flow store put jti failed", "error", err)
+		return fmt.Errorf("record client assertion: %w", ErrServerError)
+	}
+	if !fresh {
+		return fmt.Errorf("%w: %w", ErrInvalidClient, errJTIReplayed)
+	}
+	return nil
+}
+
+// TokenEndpointAuthMethods lists the token endpoint authentication methods
+// this server accepts, for discovery.
+func (s *OAuthServer) TokenEndpointAuthMethods() []string {
+	if s.CIMDEnabled() {
+		return []string{cimd.AuthMethodNone, cimd.AuthMethodPrivateKeyJWT}
+	}
+	return []string{cimd.AuthMethodNone}
+}
+
+// TokenEndpointAuthSigningAlgs lists the client assertion algorithms, for
+// discovery; nil when no private_key_jwt client can be served.
+func (s *OAuthServer) TokenEndpointAuthSigningAlgs() []string {
+	if s.CIMDEnabled() {
+		return cimd.SigningAlgs()
+	}
+	return nil
 }
