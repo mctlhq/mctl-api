@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"sync"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -409,37 +408,22 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	}
 	id := auth.Identity{Provider: z.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display, Kind: auth.KindHuman}
 
-	// issue ends the sign-in: it mints the mctl authorization code for
-	// login and principalID and redirects to the client. Groups come from
-	// the login outside principal mode only; a customer has no login and
-	// so no groups.
+	// issue ends the sign-in: it completes the authorization for login and
+	// principalID, through consent for a CIMD client. Groups come from the
+	// login outside principal mode only; a customer has no login and so no
+	// groups.
 	issue := func(login, principalID string) {
 		var groups []string
 		if h.opts.TenantAuthzMode != TenantAuthzPrincipal && login != "" {
 			groups = o.ResolveGroups(login)
 		}
-		mctlCode, err := o.IssueCode(r.Context(), login, principalID, pending.ClientID, pending.RedirectURI, pending.CodeChallenge, groups)
-		if err != nil {
-			slog.Error("failed to issue auth code", "error", err)
-			result = "internal_error"
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		target, err := url.Parse(pending.RedirectURI)
-		if err != nil {
-			result = "internal_error"
-			http.Error(w, "invalid redirect_uri", http.StatusInternalServerError)
-			return
-		}
-		cq := target.Query()
-		cq.Set("code", mctlCode)
-		if pending.ClientState != "" {
-			cq.Set("state", pending.ClientState)
-		}
-		target.RawQuery = cq.Encode()
-		result = "issued"
-		slog.Info("oauth: ZITADEL sign-in", "principal_id", principalID, "login", login, "zitadel_subject", idt.Subject)
-		http.Redirect(w, r, target.String(), http.StatusFound)
+		result = h.finishAuthorization(w, r, authzCompletion{
+			Login: login, PrincipalID: principalID, Groups: groups,
+			ClientID: pending.ClientID, RedirectURI: pending.RedirectURI,
+			CodeChallenge: pending.CodeChallenge, ClientState: pending.ClientState,
+			Upstream: auth.UpstreamZitadel,
+		})
+		slog.Info("oauth: ZITADEL sign-in", "principal_id", principalID, "login", login, "zitadel_subject", idt.Subject, "result", result)
 	}
 
 	if z.opts.CustomersOrgID != "" {

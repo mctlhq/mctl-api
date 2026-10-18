@@ -39,6 +39,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/auth/cimd"
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
@@ -209,6 +210,17 @@ func main() {
 				stopSignals()
 				os.Exit(1)
 			}
+		}
+		if cfg.OAuthCIMDEnabled {
+			// validate has already parsed the allowlist, so this cannot fail.
+			hosts, err := cimd.ParseAllowedHosts(cfg.OAuthCIMDAllowedHostsRaw)
+			if err != nil {
+				slog.Error("invalid configuration", "error", err)
+				stopSignals()
+				os.Exit(1)
+			}
+			oauthServer.CIMD = cimd.NewResolver(cimd.Options{AllowedHosts: hosts})
+			slog.Info("OAuth client ID metadata documents enabled", "allowed_hosts", hosts)
 		}
 		slog.Info("OAuth 2.0 server enabled", "upstream", cfg.oauthUpstreamMode(), "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL, "preregistered_clients", oauthServer.PreregisteredClientCount(), "groups_max_staleness", oauthServer.GroupsMaxStaleness, "groups_cache_ttl", oauthServer.GroupsCacheTTL)
 
@@ -1229,20 +1241,25 @@ type config struct {
 	// read; it is parsed by parsePreregisteredClients at startup and a
 	// malformed value refuses the boot rather than silently seeding nothing.
 	OAuthPreregisteredClientsRaw string
-	OAuthTokenTTL                time.Duration
-	OAuthRefreshTokenTTL         time.Duration
-	VaultAddr                    string
-	VaultToken                   string
-	VaultKubernetesRole          string
-	VaultKubernetesAuthPath      string
-	ArgoWebhookSecret            string
-	GitHubWebhookSecret          string
-	GitHubWebhookOwners          []string
-	ZitadelHook                  zitadelHookConfig
-	EventsValkeyURL              string
-	EventsValkeyPassword         string
-	OAuthRegistrationToken       string
-	TrustedProxyCIDRs            string
+	// OAuthCIMDEnabled is OAUTH_CIMD_ENABLED (Client ID Metadata Documents)
+	// and OAuthCIMDAllowedHostsRaw OAUTH_CIMD_ALLOWED_HOSTS, its mandatory
+	// host allowlist: enabled with an empty or unparsable list refuses boot.
+	OAuthCIMDEnabled         bool
+	OAuthCIMDAllowedHostsRaw string
+	OAuthTokenTTL            time.Duration
+	OAuthRefreshTokenTTL     time.Duration
+	VaultAddr                string
+	VaultToken               string
+	VaultKubernetesRole      string
+	VaultKubernetesAuthPath  string
+	ArgoWebhookSecret        string
+	GitHubWebhookSecret      string
+	GitHubWebhookOwners      []string
+	ZitadelHook              zitadelHookConfig
+	EventsValkeyURL          string
+	EventsValkeyPassword     string
+	OAuthRegistrationToken   string
+	TrustedProxyCIDRs        string
 	// The commerce dispatch signing key (COMMERCE_DISPATCH_KEY_ID,
 	// COMMERCE_DISPATCH_SIGNING_KEY) and the COMMERCE_DISABLED kill switch.
 	// A key that is set but unusable refuses the boot (validate).
@@ -1356,6 +1373,8 @@ func loadConfig() config {
 		OAuthJWTSecret:                 os.Getenv("OAUTH_JWT_SECRET"),
 		OAuthAllowedRedirectURIs:       oauthRedirectURIs,
 		OAuthPreregisteredClientsRaw:   os.Getenv("OAUTH_PREREGISTERED_CLIENTS"),
+		OAuthCIMDEnabled:               strings.EqualFold(strings.TrimSpace(os.Getenv("OAUTH_CIMD_ENABLED")), "true"),
+		OAuthCIMDAllowedHostsRaw:       os.Getenv("OAUTH_CIMD_ALLOWED_HOSTS"),
 		OAuthTokenTTL:                  parseDuration(os.Getenv("OAUTH_TOKEN_TTL"), time.Hour),
 		OAuthRefreshTokenTTL:           parseDuration(os.Getenv("OAUTH_REFRESH_TOKEN_TTL"), 30*24*time.Hour),
 		VaultAddr:                      os.Getenv("VAULT_ADDR"),
@@ -1639,6 +1658,11 @@ func (c config) validate() error {
 	for _, p := range pre {
 		if err := probe.AddPreregisteredClient(p.ClientID, p.ClientName, p.RedirectURIs); err != nil {
 			return fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
+		}
+	}
+	if c.OAuthCIMDEnabled {
+		if _, err := cimd.ParseAllowedHosts(c.OAuthCIMDAllowedHostsRaw); err != nil {
+			return err
 		}
 	}
 	if err := c.validateOAuthUpstream(); err != nil {
