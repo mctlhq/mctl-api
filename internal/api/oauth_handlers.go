@@ -43,7 +43,8 @@ type OAuthMeta struct {
 	GrantTypesSupported               []string `json:"grant_types_supported"`
 	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
-	// ClientIDMetadataDocumentSupported is advertised only while CIMD is on.
+	// ClientIDMetadataDocumentSupported is advertised only while CIMD is
+	// accepted and OAUTH_CIMD_ADVERTISE is on.
 	ClientIDMetadataDocumentSupported bool `json:"client_id_metadata_document_supported,omitempty"`
 }
 
@@ -73,7 +74,7 @@ func (h *Handlers) handleOAuthMeta(w http.ResponseWriter, r *http.Request) {
 		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
 		CodeChallengeMethodsSupported:     []string{"S256"},
 		TokenEndpointAuthMethodsSupported: []string{"none"},
-		ClientIDMetadataDocumentSupported: h.opts.OAuthServer.CIMDEnabled(),
+		ClientIDMetadataDocumentSupported: h.opts.OAuthServer.CIMDAdvertised(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(meta)

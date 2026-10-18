@@ -155,8 +155,12 @@ func TestCIMDDisabledBehavesAsBefore(t *testing.T) {
 	}
 }
 
-func TestMetadataAdvertisesCIMDOnlyWhenEnabled(t *testing.T) {
+// Discovery announces CIMD only while it is both accepted and advertised:
+// accepting alone keeps it out of discovery, so clients that prefer CIMD do
+// not switch to it (mctl-api#693).
+func TestMetadataAdvertisesCIMDOnlyWhenAcceptedAndAdvertised(t *testing.T) {
 	h, _ := cimdEnv(t, cimdDoc(cbURL))
+	h.opts.OAuthServer.CIMDAdvertise = true
 	get := func() map[string]any {
 		rec := httptest.NewRecorder()
 		h.handleOAuthMeta(rec, httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil))
@@ -165,11 +169,20 @@ func TestMetadataAdvertisesCIMDOnlyWhenEnabled(t *testing.T) {
 		return m
 	}
 	if get()["client_id_metadata_document_supported"] != true {
-		t.Fatal("must advertise when enabled")
+		t.Fatal("must advertise when accepted and advertised")
 	}
+	h.opts.OAuthServer.CIMDAdvertise = false
+	if _, ok := get()["client_id_metadata_document_supported"]; ok {
+		t.Fatal("must omit when accepted but not advertised")
+	}
+	// Accept-only still resolves a document: the flag only hides discovery.
+	if rec := authorize(h, cimdID, cbURL); rec.Code != http.StatusFound {
+		t.Fatalf("accept-only must still resolve the document: %d", rec.Code)
+	}
+	h.opts.OAuthServer.CIMDAdvertise = true
 	h.opts.OAuthServer.CIMD = nil
 	if _, ok := get()["client_id_metadata_document_supported"]; ok {
-		t.Fatal("must omit when disabled")
+		t.Fatal("must omit when not accepted, whatever CIMDAdvertise says")
 	}
 }
 

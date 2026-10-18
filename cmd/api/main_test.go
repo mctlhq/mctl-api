@@ -28,6 +28,7 @@ import (
 	"time"
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 // shrinkStoreInitDelay keeps the retry tests in microseconds instead of the
@@ -264,24 +265,62 @@ func TestConfigValidate(t *testing.T) {
 			wantVar: "OAUTH_PREREGISTERED_CLIENTS",
 		},
 		{
-			name:    "OAUTH_CIMD_ENABLED with an empty allowlist is refused",
-			cfg:     config{OAuthCIMDEnabled: true},
+			name:    "OAUTH_CIMD_ACCEPT with an empty allowlist is refused",
+			cfg:     config{OAuthCIMDAcceptRaw: "true"},
 			wantErr: true,
 			wantVar: "OAUTH_CIMD_ALLOWED_HOSTS",
 		},
 		{
-			name:    "OAUTH_CIMD_ENABLED with an unparsable allowlist is refused",
-			cfg:     config{OAuthCIMDEnabled: true, OAuthCIMDAllowedHostsRaw: "https://a.example.com/x"},
+			name:    "OAUTH_CIMD_ACCEPT with an unparsable allowlist is refused",
+			cfg:     config{OAuthCIMDAcceptRaw: "true", OAuthCIMDAllowedHostsRaw: "https://a.example.com/x"},
 			wantErr: true,
 			wantVar: "OAUTH_CIMD_ALLOWED_HOSTS",
 		},
 		{
-			name: "OAUTH_CIMD_ENABLED with an allowlist is accepted",
-			cfg:  config{OAuthCIMDEnabled: true, OAuthCIMDAllowedHostsRaw: "app.example.com,.example.org"},
+			name: "OAUTH_CIMD_ACCEPT with an allowlist is accepted",
+			cfg:  config{OAuthCIMDAcceptRaw: "true", OAuthCIMDAllowedHostsRaw: "app.example.com,.example.org"},
 		},
 		{
-			name: "an unset OAUTH_CIMD_ENABLED needs no allowlist",
+			name: "OAUTH_CIMD_ACCEPT and OAUTH_CIMD_ADVERTISE with an allowlist are accepted",
+			cfg:  config{OAuthCIMDAcceptRaw: " TRUE ", OAuthCIMDAdvertiseRaw: "true", OAuthCIMDAllowedHostsRaw: "app.example.com"},
+		},
+		{
+			name:    "OAUTH_CIMD_ADVERTISE without OAUTH_CIMD_ACCEPT is refused",
+			cfg:     config{OAuthCIMDAdvertiseRaw: "true", OAuthCIMDAllowedHostsRaw: "app.example.com"},
+			wantErr: true,
+			wantVar: "OAUTH_CIMD_ADVERTISE",
+		},
+		{
+			name:    "OAUTH_CIMD_ADVERTISE with OAUTH_CIMD_ACCEPT=false is refused",
+			cfg:     config{OAuthCIMDAcceptRaw: "false", OAuthCIMDAdvertiseRaw: "true", OAuthCIMDAllowedHostsRaw: "app.example.com"},
+			wantErr: true,
+			wantVar: "OAUTH_CIMD_ADVERTISE",
+		},
+		{
+			name:    "a misspelt OAUTH_CIMD_ACCEPT is refused, not read as false",
+			cfg:     config{OAuthCIMDAcceptRaw: "yes"},
+			wantErr: true,
+			wantVar: "OAUTH_CIMD_ACCEPT",
+		},
+		{
+			name:    "a misspelt OAUTH_CIMD_ADVERTISE is refused, not read as false",
+			cfg:     config{OAuthCIMDAcceptRaw: "true", OAuthCIMDAdvertiseRaw: "1", OAuthCIMDAllowedHostsRaw: "app.example.com"},
+			wantErr: true,
+			wantVar: "OAUTH_CIMD_ADVERTISE",
+		},
+		{
+			name:    "the retired OAUTH_CIMD_ENABLED refuses boot even as false",
+			cfg:     config{OAuthCIMDEnabledRaw: "false"},
+			wantErr: true,
+			wantVar: "OAUTH_CIMD_ENABLED",
+		},
+		{
+			name: "unset CIMD flags need no allowlist",
 			cfg:  config{},
+		},
+		{
+			name: "explicit false CIMD flags need no allowlist",
+			cfg:  config{OAuthCIMDAcceptRaw: "false", OAuthCIMDAdvertiseRaw: "false"},
 		},
 		{
 			name:    "well-formed OAUTH_PREREGISTERED_CLIENTS is accepted with OAuth disabled",
@@ -592,5 +631,44 @@ func TestBuildFederationRegistryHonoursKillSwitch(t *testing.T) {
 	}
 	if reg != nil {
 		t.Fatalf("switch on: buildFederationRegistry() = %v, want a nil registry (pre-registry chain)", reg)
+	}
+}
+
+func TestCIMDFlags(t *testing.T) {
+	for _, tc := range []struct {
+		accept, advertise         string
+		wantAccept, wantAdvertise bool
+	}{
+		{"", "", false, false},
+		{"false", "false", false, false},
+		{"true", "", true, false},
+		{"true", "false", true, false},
+		{"True", " true ", true, true},
+	} {
+		c := config{OAuthCIMDAcceptRaw: tc.accept, OAuthCIMDAdvertiseRaw: tc.advertise}
+		if a, d := c.cimdFlags(); a != tc.wantAccept || d != tc.wantAdvertise {
+			t.Errorf("accept=%q advertise=%q: got (%v, %v), want (%v, %v)", tc.accept, tc.advertise, a, d, tc.wantAccept, tc.wantAdvertise)
+		}
+	}
+}
+
+func TestConfigureCIMD(t *testing.T) {
+	for _, tc := range []struct {
+		accept, advertise          string
+		wantAccept, wantAdvertised bool
+	}{
+		{"", "", false, false},
+		{"true", "", true, false},
+		{"true", "false", true, false},
+		{"true", "true", true, true},
+	} {
+		var o auth.OAuthServer
+		c := config{OAuthCIMDAcceptRaw: tc.accept, OAuthCIMDAdvertiseRaw: tc.advertise, OAuthCIMDAllowedHostsRaw: "app.example.com"}
+		if err := c.configureCIMD(&o); err != nil {
+			t.Fatal(err)
+		}
+		if o.CIMDEnabled() != tc.wantAccept || o.CIMDAdvertised() != tc.wantAdvertised {
+			t.Errorf("accept=%q advertise=%q: enabled=%v advertised=%v, want %v %v", tc.accept, tc.advertise, o.CIMDEnabled(), o.CIMDAdvertised(), tc.wantAccept, tc.wantAdvertised)
+		}
 	}
 }

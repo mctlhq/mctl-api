@@ -273,9 +273,12 @@ type OAuthServer struct {
 	// the per-client scoping, and re-registering restores that.
 	ClientRegistrationTTL time.Duration
 
-	// CIMD resolves Client ID Metadata Documents (OAUTH_CIMD_ENABLED). Nil
+	// CIMD resolves Client ID Metadata Documents (OAUTH_CIMD_ACCEPT). Nil
 	// disables CIMD: an https client_id then resolves exactly as before.
 	CIMD *cimd.Resolver
+	// CIMDAdvertise (OAUTH_CIMD_ADVERTISE) announces CIMD in discovery. It
+	// has no effect while CIMD is nil.
+	CIMDAdvertise bool
 
 	consents sync.Map // token → consentMem, used when FlowStore is nil
 

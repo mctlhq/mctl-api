@@ -147,7 +147,7 @@ func ParseAllowedHosts(raw string) ([]string, error) {
 		out = append(out, e)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("OAUTH_CIMD_ALLOWED_HOSTS: required (and non-empty) when OAUTH_CIMD_ENABLED=true")
+		return nil, errors.New("OAUTH_CIMD_ALLOWED_HOSTS: required (and non-empty) when OAUTH_CIMD_ACCEPT=true")
 	}
 	return out, nil
 }

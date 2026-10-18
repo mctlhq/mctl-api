@@ -475,7 +475,7 @@ A grant has two identities that are never merged:
 - the **principal identity**: the human or service the upstream IdP
   (ZITADEL or GitHub) authenticated, resolved to the canonical `prn_...`.
 
-With `OAUTH_CIMD_ENABLED=true` an `https://` `client_id` is resolved from the
+With `OAUTH_CIMD_ACCEPT=true` an `https://` `client_id` is resolved from the
 document at that URL, fetched only from hosts in `OAUTH_CIMD_ALLOWED_HOSTS`
 through an SSRF-safe client (`internal/netsafe`: public addresses only,
 checked on the resolved address before the connect, no proxy, no redirect,
@@ -495,11 +495,21 @@ in parameters (`client_id`, `client_kind`, `client_name`, `redirect_host`,
 
 Before turning it on, confirm that no live client uses a URL-shaped
 `client_id` (an `https://` URL with a path) that is not pre-registered, or
-add its host to `OAUTH_CIMD_ALLOWED_HOSTS`. Once enabled, such a client_id is
+add its host to `OAUTH_CIMD_ALLOWED_HOSTS`. Once accepted, such a client_id is
 resolved as a document ahead of `OAUTH_ALLOWED_REDIRECT_URIS` and the
 loopback rule; on a host off the allowlist it is refused with `400`, with no
 fallback. A pre-registered client keeps its own exact redirect list and never
 consults a document.
+
+Accepting and advertising are separate switches. `OAUTH_CIMD_ACCEPT` only
+makes the server resolve a URL `client_id`; `OAUTH_CIMD_ADVERTISE` (which
+requires it) adds `client_id_metadata_document_supported` to discovery. A
+client that prefers CIMD switches to it as soon as it is advertised, and one
+whose host is off the allowlist or whose document is refused then gets `400`
+with no DCR fallback. So `ACCEPT=true`, `ADVERTISE=false` is the mode for
+checking the protocol by hand with a chosen client, and advertising waits
+until the allowlist covers every CIMD client in use (mctl-api#693). The
+pre-split `OAUTH_CIMD_ENABLED` is retired and refuses startup when set.
 
 These limits are deliberate:
 

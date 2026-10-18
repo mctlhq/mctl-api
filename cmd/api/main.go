@@ -211,16 +211,11 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		if cfg.OAuthCIMDEnabled {
-			// validate has already parsed the allowlist, so this cannot fail.
-			hosts, err := cimd.ParseAllowedHosts(cfg.OAuthCIMDAllowedHostsRaw)
-			if err != nil {
-				slog.Error("invalid configuration", "error", err)
-				stopSignals()
-				os.Exit(1)
-			}
-			oauthServer.CIMD = cimd.NewResolver(cimd.Options{AllowedHosts: hosts})
-			slog.Info("OAuth client ID metadata documents enabled", "allowed_hosts", hosts)
+		// validate has already parsed the allowlist, so this cannot fail.
+		if err := cfg.configureCIMD(oauthServer); err != nil {
+			slog.Error("invalid configuration", "error", err)
+			stopSignals()
+			os.Exit(1)
 		}
 		slog.Info("OAuth 2.0 server enabled", "upstream", cfg.oauthUpstreamMode(), "base_url", cfg.SelfURL, "redirect_uris", cfg.OAuthAllowedRedirectURIs, "token_ttl", cfg.OAuthTokenTTL, "preregistered_clients", oauthServer.PreregisteredClientCount(), "groups_max_staleness", oauthServer.GroupsMaxStaleness, "groups_cache_ttl", oauthServer.GroupsCacheTTL)
 
@@ -1248,10 +1243,18 @@ type config struct {
 	// read; it is parsed by parsePreregisteredClients at startup and a
 	// malformed value refuses the boot rather than silently seeding nothing.
 	OAuthPreregisteredClientsRaw string
-	// OAuthCIMDEnabled is OAUTH_CIMD_ENABLED (Client ID Metadata Documents)
-	// and OAuthCIMDAllowedHostsRaw OAUTH_CIMD_ALLOWED_HOSTS, its mandatory
-	// host allowlist: enabled with an empty or unparsable list refuses boot.
-	OAuthCIMDEnabled         bool
+	// Client ID Metadata Documents are two decisions (mctl-api#693).
+	// OAuthCIMDAcceptRaw is OAUTH_CIMD_ACCEPT: an https client_id is resolved
+	// from its document. OAuthCIMDAdvertiseRaw is OAUTH_CIMD_ADVERTISE:
+	// discovery tells every client so, and a client that prefers CIMD then
+	// switches to it. Both are strict "true"/"false"; advertising requires
+	// accepting. OAuthCIMDAllowedHostsRaw is OAUTH_CIMD_ALLOWED_HOSTS, the
+	// mandatory host allowlist while accepting. OAuthCIMDEnabledRaw holds the
+	// retired OAUTH_CIMD_ENABLED, which refuses boot when set so a stale value
+	// is never silently ignored.
+	OAuthCIMDAcceptRaw       string
+	OAuthCIMDAdvertiseRaw    string
+	OAuthCIMDEnabledRaw      string
 	OAuthCIMDAllowedHostsRaw string
 	OAuthTokenTTL            time.Duration
 	OAuthRefreshTokenTTL     time.Duration
@@ -1380,7 +1383,9 @@ func loadConfig() config {
 		OAuthJWTSecret:                 os.Getenv("OAUTH_JWT_SECRET"),
 		OAuthAllowedRedirectURIs:       oauthRedirectURIs,
 		OAuthPreregisteredClientsRaw:   os.Getenv("OAUTH_PREREGISTERED_CLIENTS"),
-		OAuthCIMDEnabled:               strings.EqualFold(strings.TrimSpace(os.Getenv("OAUTH_CIMD_ENABLED")), "true"),
+		OAuthCIMDAcceptRaw:             os.Getenv("OAUTH_CIMD_ACCEPT"),
+		OAuthCIMDAdvertiseRaw:          os.Getenv("OAUTH_CIMD_ADVERTISE"),
+		OAuthCIMDEnabledRaw:            os.Getenv("OAUTH_CIMD_ENABLED"),
 		OAuthCIMDAllowedHostsRaw:       os.Getenv("OAUTH_CIMD_ALLOWED_HOSTS"),
 		OAuthTokenTTL:                  parseDuration(os.Getenv("OAUTH_TOKEN_TTL"), time.Hour),
 		OAuthRefreshTokenTTL:           parseDuration(os.Getenv("OAUTH_REFRESH_TOKEN_TTL"), 30*24*time.Hour),
@@ -1667,10 +1672,8 @@ func (c config) validate() error {
 			return fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
 		}
 	}
-	if c.OAuthCIMDEnabled {
-		if _, err := cimd.ParseAllowedHosts(c.OAuthCIMDAllowedHostsRaw); err != nil {
-			return err
-		}
+	if err := c.validateCIMD(); err != nil {
+		return err
 	}
 	if err := c.validateOAuthUpstream(); err != nil {
 		return err
@@ -2361,4 +2364,68 @@ func commerceDispatchSigner(keyID, seedB64 string) (*commerce.DispatchSigner, er
 		return nil, fmt.Errorf("COMMERCE_DISPATCH_KEY_ID/COMMERCE_DISPATCH_SIGNING_KEY: %w", err)
 	}
 	return signer, nil
+}
+
+// strictFlag parses a boolean flag that must be spelled "true" or "false"
+// (any case, surrounding space ignored); empty means false. Anything else is
+// an error naming the variable, so a typo cannot silently mean false.
+func strictFlag(name, raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	}
+	return false, fmt.Errorf("%s must be \"true\" or \"false\", got %q", name, raw)
+}
+
+// validateCIMD checks the CIMD flags: no retired OAUTH_CIMD_ENABLED, strict
+// booleans, advertising only while accepting, and an allowlist that parses
+// while accepting.
+func (c config) validateCIMD() error {
+	if strings.TrimSpace(c.OAuthCIMDEnabledRaw) != "" {
+		return errors.New("OAUTH_CIMD_ENABLED is retired: use OAUTH_CIMD_ACCEPT and OAUTH_CIMD_ADVERTISE (mctl-api#693)")
+	}
+	accept, err := strictFlag("OAUTH_CIMD_ACCEPT", c.OAuthCIMDAcceptRaw)
+	if err != nil {
+		return err
+	}
+	advertise, err := strictFlag("OAUTH_CIMD_ADVERTISE", c.OAuthCIMDAdvertiseRaw)
+	if err != nil {
+		return err
+	}
+	if advertise && !accept {
+		return errors.New("OAUTH_CIMD_ADVERTISE=true requires OAUTH_CIMD_ACCEPT=true: advertising a capability the server refuses breaks every client that trusts it")
+	}
+	if accept {
+		if _, err := cimd.ParseAllowedHosts(c.OAuthCIMDAllowedHostsRaw); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cimdFlags returns OAUTH_CIMD_ACCEPT and OAUTH_CIMD_ADVERTISE. Call it only
+// after validate, which has refused any value it would read as false here.
+func (c config) cimdFlags() (accept, advertise bool) {
+	accept, _ = strictFlag("OAUTH_CIMD_ACCEPT", c.OAuthCIMDAcceptRaw)
+	advertise, _ = strictFlag("OAUTH_CIMD_ADVERTISE", c.OAuthCIMDAdvertiseRaw)
+	return accept, accept && advertise
+}
+
+// configureCIMD wires the CIMD flags into o: a resolver while accepting, and
+// discovery advertisement only when OAUTH_CIMD_ADVERTISE is on as well.
+func (c config) configureCIMD(o *auth.OAuthServer) error {
+	accept, advertise := c.cimdFlags()
+	if !accept {
+		return nil
+	}
+	hosts, err := cimd.ParseAllowedHosts(c.OAuthCIMDAllowedHostsRaw)
+	if err != nil {
+		return err
+	}
+	o.CIMD = cimd.NewResolver(cimd.Options{AllowedHosts: hosts})
+	o.CIMDAdvertise = advertise
+	slog.Info("OAuth client ID metadata documents accepted", "allowed_hosts", hosts, "advertised", advertise)
+	return nil
 }
