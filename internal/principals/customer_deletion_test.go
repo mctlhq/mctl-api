@@ -227,9 +227,11 @@ func TestCustomerDeletionLockDoesNotBorrowAuthenticationPool(t *testing.T) {
 		if err := s.pool.QueryRow(runCtx, "SELECT 1").Scan(&n); err != nil {
 			return err
 		}
-		ran := false
-		if err := other.WithCustomerDeletionLock(runCtx, "lock-test", "customer", func(context.Context) error { ran = true; return nil }); err == nil || ran {
-			return errors.New("another replica entered the locked stage")
+		for _, principal := range []string{"customer", "replacement-customer"} {
+			ran := false
+			if err := other.WithCustomerDeletionLock(runCtx, "lock-test", principal, func(context.Context) error { ran = true; return nil }); err == nil || ran {
+				return errors.New("another principal or replica entered the locked tenant stage")
+			}
 		}
 		return nil
 	})

@@ -44,6 +44,7 @@ type CustomerDeletionStore interface {
 	FinishCustomerDeletion(context.Context, string, string) error
 	ReleaseCustomerDeletion(context.Context, string, string) error
 	CancelCustomerDeletion(context.Context, string, string) error
+	CustomerTenantDeletionPending(context.Context, string) (bool, error)
 }
 
 // CustomerDeletionOptions is deliberately opt-in. Missing providers refuse the
@@ -436,6 +437,14 @@ func (h *Handlers) CancelCustomerDeletion(w http.ResponseWriter, r *http.Request
 	err := o.Store.WithCustomerDeletionLock(r.Context(), tenant, pid, func(ctx context.Context) error {
 		d, err := o.Store.CustomerDeletion(ctx, tenant, pid)
 		if errors.Is(err, pgx.ErrNoRows) {
+			pending, err := o.Store.CustomerTenantDeletionPending(ctx, tenant)
+			if err != nil {
+				return err
+			}
+			if pending {
+				conflict = true
+				return errors.New("another customer deletion holds this tenant name")
+			}
 			// A prior cancellation may have removed the local intent but failed
 			// its portal acknowledgment. No identity fields authorize this call.
 			d = &principals.CustomerDeletion{Tenant: tenant, PrincipalID: pid}

@@ -89,7 +89,7 @@ func (s *Store) WithCustomerDeletionLock(ctx context.Context, tenant, pid string
 		_ = conn.Close(closeCtx)
 	}()
 	var acquired bool
-	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock(hashtext($1))", "customer-deletion-run|"+tenant+"|"+pid).Scan(&acquired); err != nil {
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock(hashtext($1))", "customer-deletion-run|"+tenant).Scan(&acquired); err != nil {
 		return err
 	}
 	if !acquired {

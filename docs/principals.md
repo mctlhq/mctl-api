@@ -960,3 +960,10 @@ workspace resources. Historical cancellation/denial audit entries are retained.
 Disabling `CUSTOMER_DELETION_ENABLED` stops new deletion preparations. Already
 approved callback recovery and prepared cancellation remain configured so a
 rollout rollback cannot strand an existing customer fence.
+
+The external-effects run lock is tenant-keyed, including across successive
+principal owners. A cancellation retry with no matching manifest must observe
+that no other unreleased deletion holds the tenant name before contacting the
+portal; an unreadable read is 503 and another pending owner is 409. No-op
+cancellation of an absent pair confirms the desired final state, not evidence
+that such a deletion previously existed.

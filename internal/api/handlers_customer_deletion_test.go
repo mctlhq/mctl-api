@@ -50,6 +50,8 @@ func (r *deletionReader) TenantExists(name string) (bool, error) {
 }
 
 type deletionStore struct {
+	tenantPending          bool
+	tenantReadErr          error
 	cancelErr              error
 	releaseErr             error
 	releaseCalls, released int
@@ -436,5 +438,36 @@ func TestCustomerDeletionRollbackStopsNewIntentsButPreservesCancellation(t *test
 	store.job = &principals.CustomerDeletion{Tenant: "acme", PrincipalID: deletionPID, Status: "prepared"}
 	if w := callAs(h, admin, "POST", "/", map[string]string{"tenant": "acme", "principal": deletionPID}, h.CancelCustomerDeletion); w.Code != 200 {
 		t.Fatal(w.Body.String())
+	}
+}
+
+func (s *deletionStore) CustomerTenantDeletionPending(context.Context, string) (bool, error) {
+	return s.tenantPending, s.tenantReadErr
+}
+func TestStaleCustomerCancellationCannotReleaseAnotherDeletion(t *testing.T) {
+	h, _, store, calls, _ := deletionFixture()
+	admin := userWithPrincipal(t, "admin", []string{"admins"}, deletionAdmin)
+	params := map[string]string{"tenant": "acme", "principal": deletionPID}
+	store.tenantPending = true
+	if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 409 {
+		t.Fatal(w.Body.String())
+	}
+	if len(*calls) != 0 {
+		t.Fatal("stale cancellation touched replacement freeze")
+	}
+	store.tenantPending = false
+	store.tenantReadErr = errors.New("pending state unreadable")
+	if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 503 {
+		t.Fatal(w.Body.String())
+	}
+	if len(*calls) != 0 {
+		t.Fatal("unknown state became clear")
+	}
+	store.tenantReadErr = nil
+	if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	if !reflect.DeepEqual(*calls, []string{"cancel"}) {
+		t.Fatal("safe retry did not acknowledge portal")
 	}
 }
