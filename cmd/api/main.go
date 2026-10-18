@@ -1901,9 +1901,6 @@ func (c config) oauthZitadelProvider() (auth.OIDCProviderConfigEntry, error) {
 	return auth.OIDCProviderConfigEntry{}, fmt.Errorf("an MCTL_OIDC_PROVIDERS entry named %q (OAUTH_ZITADEL_PROVIDER)", c.OAuthZitadelProvider)
 }
 
-// oauthZitadelOptions wires the ZITADEL upstream when OAUTH_UPSTREAM selects
-// it. A missing principal store is not a boot failure (the store may only
-// be down): every ZITADEL sign-in then answers 503, never "not linked".
 // validateRedirectBaseURL accepts an empty OAUTH_ZITADEL_REDIRECT_BASE_URL
 // or a bare origin: https, or http on a loopback host, with no path, query,
 // fragment or credentials, since the callback path is appended to it.
@@ -1929,6 +1926,9 @@ func validateRedirectBaseURL(raw string) error {
 	return fmt.Errorf("OAUTH_ZITADEL_REDIRECT_BASE_URL must use https, or http on a loopback host, got %q", raw)
 }
 
+// oauthZitadelOptions wires the ZITADEL upstream when OAUTH_UPSTREAM selects
+// it. A missing principal store is not a boot failure (the store may only
+// be down): every ZITADEL sign-in then answers 503, never "not linked".
 func oauthZitadelOptions(cfg config, store *principals.Store, oauth *auth.OAuthServer) *mctlapi.OAuthZitadelOptions {
 	if oauth == nil || cfg.oauthUpstreamMode() == mctlapi.OAuthUpstreamGitHub {
 		return nil
