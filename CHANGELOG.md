@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.101.1](https://github.com/mctlhq/mctl-api/compare/4.101.0...4.101.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **netsafe:** refuse 2001::/23 and 3fff::/20; document CIMD limits ([148ec5b](https://github.com/mctlhq/mctl-api/commit/148ec5b68f6dbe52aef1b6c96166254ba9ade19f))
+* **netsafe:** refuse 2001::/23 and 3fff::/20; document CIMD limits ([e4a01fa](https://github.com/mctlhq/mctl-api/commit/e4a01faa6e1396e3aef7ec8b798a32e47552f5db)), closes [#687](https://github.com/mctlhq/mctl-api/issues/687)
+
 ## [4.101.0](https://github.com/mctlhq/mctl-api/compare/4.100.1...4.101.0) (2026-10-18)
 
 
