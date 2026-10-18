@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -1225,6 +1227,11 @@ type config struct {
 	OAuthZitadelClientID     string
 	OAuthZitadelClientSecret string
 	OAuthZitadelProvider     string
+	// OAuthZitadelRedirectBaseURL (OAUTH_ZITADEL_REDIRECT_BASE_URL) is a
+	// development knob: the base of the redirect_uri sent to ZITADEL when
+	// it must differ from SELF_URL, as in a local run behind a quick
+	// tunnel. Never set in a deployment; empty keeps SELF_URL.
+	OAuthZitadelRedirectBaseURL string
 	// ZITADEL client of the identity link flow (mctl-api#435): a
 	// confidential web app; both empty keeps the browser flow off.
 	// ZitadelLinkProvider names the MCTL_OIDC_PROVIDERS entry whose issuer
@@ -1378,6 +1385,7 @@ func loadConfig() config {
 		OAuthZitadelClientID:           os.Getenv("OAUTH_ZITADEL_CLIENT_ID"),
 		OAuthZitadelClientSecret:       os.Getenv("OAUTH_ZITADEL_CLIENT_SECRET"),
 		OAuthZitadelProvider:           envOr("OAUTH_ZITADEL_PROVIDER", "zitadel"),
+		OAuthZitadelRedirectBaseURL:    os.Getenv("OAUTH_ZITADEL_REDIRECT_BASE_URL"),
 		ZitadelLinkClientID:            os.Getenv("ZITADEL_LINK_CLIENT_ID"),
 		ZitadelLinkClientSecret:        os.Getenv("ZITADEL_LINK_CLIENT_SECRET"),
 		ZitadelLinkProvider:            envOr("ZITADEL_LINK_PROVIDER", "zitadel"),
@@ -1840,6 +1848,9 @@ func (c config) validateOAuthUpstream() error {
 	if err != nil {
 		return err
 	}
+	if err := validateRedirectBaseURL(c.OAuthZitadelRedirectBaseURL); err != nil {
+		return err
+	}
 	if mode == mctlapi.OAuthUpstreamGitHub {
 		return nil
 	}
@@ -1890,6 +1901,31 @@ func (c config) oauthZitadelProvider() (auth.OIDCProviderConfigEntry, error) {
 	return auth.OIDCProviderConfigEntry{}, fmt.Errorf("an MCTL_OIDC_PROVIDERS entry named %q (OAUTH_ZITADEL_PROVIDER)", c.OAuthZitadelProvider)
 }
 
+// validateRedirectBaseURL accepts an empty OAUTH_ZITADEL_REDIRECT_BASE_URL
+// or a bare origin: https, or http on a loopback host, with no path, query,
+// fragment or credentials, since the callback path is appended to it.
+// Plain http elsewhere would send the authorization code over the network
+// unencrypted.
+func validateRedirectBaseURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return fmt.Errorf("OAUTH_ZITADEL_REDIRECT_BASE_URL must be a bare origin such as http://localhost:8080, got %q", raw)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		h := u.Hostname()
+		if ip := net.ParseIP(h); h == "localhost" || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+	}
+	return fmt.Errorf("OAUTH_ZITADEL_REDIRECT_BASE_URL must use https, or http on a loopback host, got %q", raw)
+}
+
 // oauthZitadelOptions wires the ZITADEL upstream when OAUTH_UPSTREAM selects
 // it. A missing principal store is not a boot failure (the store may only
 // be down): every ZITADEL sign-in then answers 503, never "not linked".
@@ -1907,6 +1943,11 @@ func oauthZitadelOptions(cfg config, store *principals.Store, oauth *auth.OAuthS
 		ProviderName: entry.Name, Issuer: entry.Issuer,
 		ClientID: cfg.OAuthZitadelClientID, ClientSecret: cfg.OAuthZitadelClientSecret,
 		CustomersOrgID: entry.CustomersOrgID, CustomersGitHubIdPID: cfg.customersGitHubIdPID(entry),
+		RedirectBaseURL: cfg.OAuthZitadelRedirectBaseURL,
+	}
+	if opts.RedirectBaseURL != "" {
+		slog.Warn("OAuth ZITADEL upstream redirects to OAUTH_ZITADEL_REDIRECT_BASE_URL, not SELF_URL; development only",
+			"redirect_base_url", opts.RedirectBaseURL)
 	}
 	// Assigned only when non-nil: a nil *Store in the interface would not
 	// compare equal to nil and would be called.

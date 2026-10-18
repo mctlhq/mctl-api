@@ -141,6 +141,36 @@ func TestOAuthZitadelOptionsWiring(t *testing.T) {
 	}
 }
 
+// OAUTH_ZITADEL_REDIRECT_BASE_URL is a bare origin the callback path is
+// appended to; plain http is accepted only on loopback, and a bad value
+// refuses the boot under any upstream rather than waiting for a sign-in.
+func TestOAuthZitadelRedirectBaseURL(t *testing.T) {
+	for _, ok := range []string{"", "http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "https://dev.example"} {
+		c := zitadelUpstreamConfig("zitadel")
+		c.OAuthZitadelRedirectBaseURL = ok
+		if err := c.validate(); err != nil {
+			t.Errorf("%q: validate() = %v, want accepted", ok, err)
+		}
+		o := oauthZitadelOptions(c, &principals.Store{}, auth.NewOAuthServer("https://api.example", "", "", []byte("k"), nil, nil))
+		if o == nil || o.RedirectBaseURL != ok {
+			t.Errorf("%q: options = %+v, want it passed through", ok, o)
+		}
+	}
+	for _, bad := range []string{
+		"http://dev.example", "http://10.0.0.1:8080", "ftp://localhost", "localhost:8080",
+		"http://localhost:8080/", "http://localhost:8080/oauth", "http://localhost:8080?x=1",
+		"http://localhost:8080#f", "http://user@localhost:8080", "https://", "http://localhost.example",
+	} {
+		for _, mode := range []string{"github", "zitadel"} {
+			c := zitadelUpstreamConfig(mode)
+			c.OAuthZitadelRedirectBaseURL = bad
+			if err := c.validate(); err == nil || !strings.Contains(err.Error(), "OAUTH_ZITADEL_REDIRECT_BASE_URL") {
+				t.Errorf("mode %s, %q: validate() = %v, want a refusal naming OAUTH_ZITADEL_REDIRECT_BASE_URL", mode, bad, err)
+			}
+		}
+	}
+}
+
 // Under zitadel the OAuth server may have no GitHub app; linking needs one,
 // so its browser flow stays off instead of redirecting to GitHub with an
 // empty client id.

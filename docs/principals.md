@@ -323,6 +323,18 @@ without the GitHub app. Under `zitadel` the GitHub app stays optional; the
 link flow needs it, so without it linking answers 503. Rollback is
 `OAUTH_UPSTREAM=github`.
 
+`OAUTH_ZITADEL_REDIRECT_BASE_URL` is for local end-to-end runs only and is
+never set in a deployment. When it is set, it replaces `<SELF_URL>` in the
+redirect_uri sent to ZITADEL, for both the authorize request and the code
+exchange. Nothing else changes: the issuer, the metadata and the client
+callbacks stay on `SELF_URL`. This makes a local mctl-api behind a quick
+tunnel workable. Clients reach the tunnel's random host, while the browser
+comes back to `http://localhost:8080/oauth/zitadel/callback`, which a
+dev-mode ZITADEL app can register once. The pending authorization is held
+server-side, so no cookie has to cross from one host to the other. The value
+must be a bare origin: https, or http on a loopback host. Anything else
+refuses startup under every upstream.
+
 ## Backfill
 
 Runs automatically after the first successful gitops sync, on every start,
