@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.103.0](https://github.com/mctlhq/mctl-api/compare/4.102.0...4.103.0) (2026-10-18)
+
+
+### Features
+
+* **oauth:** split CIMD into OAUTH_CIMD_ACCEPT and OAUTH_CIMD_ADVERTISE ([2535724](https://github.com/mctlhq/mctl-api/commit/25357249e947974b15878d681ca3b0746919a4ed))
+* **oauth:** split CIMD into OAUTH_CIMD_ACCEPT and OAUTH_CIMD_ADVERTISE ([216d4d5](https://github.com/mctlhq/mctl-api/commit/216d4d599078fffb7b0d51ebe9dd898b799afbf5)), closes [#693](https://github.com/mctlhq/mctl-api/issues/693)
+
+
+### Bug Fixes
+
+* **cimd:** drop unusable redirect entries instead of the document ([5dd4e73](https://github.com/mctlhq/mctl-api/commit/5dd4e73d5001271b7ee3adee711b74596ad612a6))
+* **cimd:** drop unusable redirect entries instead of the document ([03eefce](https://github.com/mctlhq/mctl-api/commit/03eefceb2881c90be2a7b6b037dcc58a442466c2)), closes [#693](https://github.com/mctlhq/mctl-api/issues/693)
+* **cimd:** log dropped redirect entries on a refused redirect ([b88d520](https://github.com/mctlhq/mctl-api/commit/b88d5209c061a6a420fd4d3472c7ccead3c42ecd))
+* **oauth:** clip the logged redirect_uri; clip the cached slice ([0202331](https://github.com/mctlhq/mctl-api/commit/02023310ec5d98fb879f59c53fd16f93b856e5ae))
+
 ## [4.102.0](https://github.com/mctlhq/mctl-api/compare/4.101.1...4.102.0) (2026-10-18)
 
 
