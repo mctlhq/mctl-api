@@ -808,3 +808,36 @@ func TestParseCustomerCreateAllowlist(t *testing.T) {
 		}
 	}
 }
+
+func TestIntentBlocksCreationDuringDeletion(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pending bool
+		err     error
+		reason  string
+	}{
+		{"pending", true, nil, "intent_deletion_in_progress"},
+		{"unknown", false, errors.New("unavailable"), "intent_deletion_unreadable"},
+		{"complete", false, nil, "intent_create"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHook(t, nil, verified, 0)
+			h.cfg.CreationPending = func(_ context.Context, id string) (bool, error) {
+				if id != "4242" {
+					t.Fatalf("unexpected identity %s", id)
+				}
+				return tc.pending, tc.err
+			}
+			r := h.Intent(context.Background(), intentBody(idpGitHub, "4242", "bob", "", nil))
+			if r.Reason != tc.reason {
+				t.Fatalf("reason=%s want=%s", r.Reason, tc.reason)
+			}
+			if tc.pending {
+				refusedWith(t, r, http.StatusForbidden)
+			}
+			if tc.err != nil && r.Status != http.StatusServiceUnavailable {
+				t.Fatalf("unknown read status=%d", r.Status)
+			}
+		})
+	}
+}

@@ -106,8 +106,9 @@ CREATE INDEX IF NOT EXISTS external_identities_github_display
 
 // Store is the Postgres-backed principal store.
 type Store struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool          *pgxpool.Pool
+	deletionSlots chan struct{}
+	now           func() time.Time
 	// beforeCustomerLink, in tests, runs in ResolveCustomer between its
 	// provision and its link, the window two transactions leave open.
 	beforeCustomerLink func()
@@ -122,12 +123,22 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("principals: connect: %w", err)
 	}
-	if _, err := pool.Exec(ctx, schema); err != nil {
+	// Concurrent replicas must not race catalog DDL or index replacement.
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('principals-schema'))`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, schema); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, customerDeletionSchema)
+		return err
+	}); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("principals: create schema: %w", err)
+		return nil, fmt.Errorf("principals: initialize schema: %w", err)
 	}
 	slog.Info("principal store initialized")
-	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Store{pool: pool, deletionSlots: make(chan struct{}, 2), now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 // Close releases the pool.

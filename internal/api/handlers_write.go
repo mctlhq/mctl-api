@@ -438,6 +438,14 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !h.guardCustomerTenantCreation(w, r, op, input) {
+		return
+	}
+
+	if opName == "delete-tenant" && !h.prepareCustomerAccountDeletion(w, r, input) {
+		return
+	}
+
 	// Spend the grant last, after every check that could still refuse, so
 	// a refused request leaves the approval usable.
 	if grantAuthorized {

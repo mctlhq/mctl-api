@@ -904,3 +904,83 @@ Each entry gets a `status`: `keyed` and `propose` are fine; `unresolved`
 never compared; retry) and `invalid` block. An unreadable tenant or a tenant key error also blocks.
 `complete` is true only with zero blockers; the output then becomes a
 human-reviewed mctl-gitops PR adding the keys.
+
+### Complete customer-account deletion
+
+`mctl_delete_tenant` preserves workspace-only deletion by default. A direct
+human platform administrator may explicitly set `delete_customer_account=true`
+and provide the exact `customer_principal_id`. The customer must be the sole
+principal-keyed owner with no other tenant/team membership. The API freezes an
+immutable manifest before any GitOps removal; callbacks cannot choose a fresh
+subject by display login. Failed observations remain retryable errors.
+
+`CUSTOMER_DELETION_ENABLED=true` requires the lifecycle machine credentials,
+configured ZITADEL provider, portal cleanup endpoints and pinned Worker identity.
+`CUSTOMER_DELETION_SITE_URL` overrides the production website default for other
+environments. Ordinary workspace deletion remains available without this flag.
+The workflow disables credentials, removes resources, deletes the customer IdP
+user and application sessions, purges active identity data, and releases the
+portal name only after all postconditions pass. Historical audit and the
+revocation manifest remain for safe retries and old-subject refusal.
+
+Revocation intentionally adds an uncached indexed tombstone lookup to principal
+authentication and credential minting. A warm API replica must refuse a deletion
+begun by another replica immediately; a negative TTL cache would allow deleted
+credentials for its lifetime. A configured-but-unavailable store therefore
+fails authentication closed. Deployments that deliberately disable principals
+or have no principal database retain the pre-existing signup behavior while
+full deletion is disabled. Measure these indexed reads before replacing this
+contract with a distributed invalidation mechanism; do not silently add a
+negative-cache grace period.
+
+
+The final portal release is acknowledged durably as `released_at`. Both the
+GitHub creation probe and API administrator/MCP tenant creation keep the name
+frozen until that acknowledgment is recorded, even after principal removal has
+committed. A failed final acknowledgment is retried against the completed old
+manifest; it does not rerun resource deletion or touch a replacement principal.
+
+The immutable approved manifest fences the principal and old subject immediately
+at `prepared`, before workflow submission or its `begin` callback. This prevents
+a still-active customer from creating another workspace while submission is
+retrying or the workflow is queued. The same uncached cross-replica checks apply
+to existing API tokens and fresh token issuance. Database credential revocation
+still runs idempotently in `begin`; the earlier deny fence must never wait for it.
+
+Prepared cancellation uses `mctl_cancel_customer_deletion` with the exact tenant,
+principal and explicit confirmation. Only a direct human platform administrator
+may invoke it. Prepare, cancel and workflow callbacks share the cross-replica
+run lock. Cancellation stamps `cancelled_at` on a prepared intent first, making
+queued begin refuse and restoring the old principal/subject. Its exact identity
+fields and tenant-name fence remain durable until the portal acknowledges and
+the cancellation receipt can be removed. If the portal or final local
+acknowledgment is unavailable, retrying the same cancellation completes it. A deleting/complete manifest is never
+removed or reactivated; cancellation never restores independently removed
+workspace resources. Historical cancellation/denial audit entries are retained.
+
+Disabling `CUSTOMER_DELETION_ENABLED` stops new deletion preparations. Already
+approved callback recovery and prepared cancellation remain configured so a
+rollout rollback cannot strand an existing customer fence.
+
+The external-effects run lock is tenant-keyed, including across successive
+principal owners. A cancellation retry with no matching receipt must observe that no other
+unreleased deletion holds the tenant name (unreadable is 503, another owner 409).
+An absent pair performs no portal mutation: it confirms the desired final state,
+not evidence that such a deletion previously existed.
+
+Before `begin` disables credentials, it rechecks under the principal lock that
+exactly the approved live GitHub and ZITADEL identities still belong to that
+principal. An administrator merge/relink during the queued interval refuses
+begin without touching the new identity owner; the prepared intent remains
+cancellable. Once disabled, existing identity-mutation rules prevent moving its
+live identities while the teardown continues.
+
+Live and revoked surface mirrors are account-owned data, not extra authentication
+providers. Prepare and begin use the same identity reader: it permits only
+mirrors proven by surface_identity_links for the exact principal or its current
+verified GitHub alias, and still requires the two exact live authentication
+identities. Unproven/unrelated identities refuse deletion; read failures are
+unknown. Tests drive CreateChallenge/Redeem/Revoke with the real principal mirror,
+including a redeem between prepare and begin, complete cleanup isolation and
+relinking after fresh signup. The active GitHub unique index excludes cancelled
+receipts; startup migrates the old index under a cross-replica schema lock.

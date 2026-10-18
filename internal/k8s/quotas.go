@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -28,6 +29,18 @@ import (
 // QuotaClient fetches ResourceQuota usage from the Kubernetes API.
 type QuotaClient struct {
 	client kubernetes.Interface
+}
+
+// NamespaceAbsent distinguishes a documented NotFound from an unreadable API.
+func (c *QuotaClient) NamespaceAbsent(ctx context.Context, namespace string) (bool, error) {
+	_, err := c.client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // NewQuotaClient creates a QuotaClient using in-cluster config, falling back to KUBECONFIG.

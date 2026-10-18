@@ -40,6 +40,11 @@
       "reason": "Provisions a preview environment: creates namespaced workloads and consumes cluster quota. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
     },
     {
+      "name": "mctl_cancel_customer_deletion",
+      "enabled": false,
+      "reason": "Prepared-account deletion recovery changes identity access and is restricted to a direct human platform administrator on the API MCP connection. Keep it off the shared aggregate portal; the authenticated API independently rejects service, delegated and non-admin callers."
+    },
+    {
       "name": "mctl_create_tenant",
       "enabled": true,
       "reason": "Creates a tenant: namespace, quota and gitops scaffolding. A structural change to the platform. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."

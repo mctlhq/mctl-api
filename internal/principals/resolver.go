@@ -135,13 +135,52 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 	if id.Provider == auth.ProviderDev && !r.allowDev {
 		return "", fmt.Errorf("%w: the dev identity is only accepted when authentication is not required", auth.ErrIdentityRefused)
 	}
+	// Deletion tombstones are not cached: another replica can begin deletion
+	// while this replica still has a warm, previously active resolution.
+	if id.Customer != nil {
+		if observer, ok := r.store.(interface {
+			CustomerSubjectDeleted(context.Context, string, string) (bool, error)
+		}); ok {
+			checkCtx, cancel := context.WithTimeout(ctx, ResolveTimeout)
+			deleted, err := observer.CustomerSubjectDeleted(checkCtx, id.Issuer, id.Subject)
+			cancel()
+			if err != nil {
+				return "", fmt.Errorf("%w: customer deletion state unreadable", ErrUnresolved)
+			}
+			if deleted {
+				return "", auth.ErrIdentityRefused
+			}
+		}
+	}
 	c, err := r.cachedLookup(ctx, cacheKey(id), func(ctx context.Context) (*Principal, error) {
 		return r.resolve(ctx, id)
 	}, "provider", id.Provider)
 	if err != nil {
 		return "", err
 	}
+	if err := r.checkCustomerDeletion(ctx, c.principal); err != nil {
+		return "", err
+	}
 	return answer(c)
+}
+
+func (r *Resolver) checkCustomerDeletion(ctx context.Context, pid string) error {
+	observer, ok := r.store.(interface {
+		CustomerPrincipalDeleted(context.Context, string) (bool, error)
+	})
+	if !ok {
+		return nil
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, ResolveTimeout)
+	defer cancel()
+	deleted, err := observer.CustomerPrincipalDeleted(checkCtx, pid)
+	if err != nil {
+		return fmt.Errorf("%w: customer deletion state unreadable", ErrUnresolved)
+	}
+	if deleted {
+		return auth.ErrIdentityRefused
+	}
+	return nil
 }
 
 // CheckPrincipal implements auth.PrincipalChecker: whether the principal a
@@ -169,6 +208,9 @@ func (r *Resolver) CheckHumanPrincipal(ctx context.Context, principalID string) 
 }
 
 func (r *Resolver) checkPrincipal(ctx context.Context, principalID string) (cached, error) {
+	if err := r.checkCustomerDeletion(ctx, principalID); err != nil {
+		return cached{}, err
+	}
 	c, err := r.cachedLookup(ctx, "principal|"+principalID, func(ctx context.Context) (*Principal, error) {
 		p, err := r.store.Get(ctx, principalID)
 		if errors.Is(err, ErrNotFound) {

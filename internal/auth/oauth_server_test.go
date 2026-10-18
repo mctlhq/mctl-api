@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -120,4 +121,24 @@ func testPKCEChallenge(t *testing.T, verifier string) string {
 	h := sha256.New()
 	h.Write([]byte(verifier))
 	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+}
+
+func TestOAuthMintRefusesDeletedPrincipal(t *testing.T) {
+	const pid = "prn_01M45DR1GWC87109EH88VBJX25"
+	checker := &tpChecker{status: map[string]error{pid: fmt.Errorf("deleted")}}
+	server := NewOAuthServer("https://api.mctl.ai", "client", "secret", []byte("jwt-secret"), []string{"https://client.example/callback"}, NewGitHubValidator(nil))
+	server.TokenPrincipalChecker = checker
+	if token, err := server.IssueJWT("reviewer", pid, nil); err == nil || token != "" {
+		t.Fatal("deleted principal minted JWT")
+	}
+	if token, err := server.IssueRefreshToken("reviewer", pid, nil, "client"); err == nil || token != "" {
+		t.Fatal("deleted principal minted refresh token")
+	}
+	if code, err := server.IssueCode(context.Background(), "reviewer", pid, "client", "https://client.example/callback", "challenge", nil); err == nil || code != "" {
+		t.Fatal("deleted principal received authorization code")
+	}
+	delete(checker.status, pid)
+	if token, err := server.IssueJWT("reviewer", pid, nil); err != nil || token == "" {
+		t.Fatalf("active principal refused: %v", err)
+	}
 }

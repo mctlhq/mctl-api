@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -72,12 +73,17 @@ func (zc zitadelHookConfig) validate() error {
 // zitadelHookOptions builds the hook, or returns nil (routes answer 503)
 // when it is not configured or the configuration is incomplete. ADMIN_USERS
 // are always reserved logins.
-func zitadelHookOptions(cfg config, tenants zitadelhook.TenantLister) *api.ZitadelHookOptions {
+func zitadelHookOptions(cfg config, tenants zitadelhook.TenantLister, pending ...func(context.Context, string) (bool, error)) *api.ZitadelHookOptions {
 	zc := cfg.ZitadelHook
 	if zc.CustomersOrgID == "" {
 		return nil
 	}
+	var creationPending func(context.Context, string) (bool, error)
+	if len(pending) > 0 {
+		creationPending = pending[0]
+	}
 	hook, err := zitadelhook.New(zitadelhook.Config{
+		CreationPending:   creationPending,
 		CustomersOrgID:    zc.CustomersOrgID,
 		GitHubIdPID:       zc.GitHubIdPID,
 		LoginClientUserID: zc.LoginClientUserID,
