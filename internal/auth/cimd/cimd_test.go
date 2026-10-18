@@ -244,6 +244,15 @@ func TestDocumentValidation(t *testing.T) {
 		"javascript uri":    fmt.Sprintf(`{"client_id":%q,"redirect_uris":["javascript:alert(1)"],"token_endpoint_auth_method":"none"}`, id),
 		"data uri":          fmt.Sprintf(`{"client_id":%q,"redirect_uris":["data:text/html,x"],"token_endpoint_auth_method":"none"}`, id),
 	}
+	// The scheme is an allowlist: everything but https and loopback http is
+	// refused, including schemes no denylist named.
+	for _, u := range []string{
+		"about:blank", "filesystem:https://a/x", "jar:https://a/x!/", "intent://cb#Intent;end", "ftp://app.example.com/cb",
+		"ws://app.example.com/cb", "wss://app.example.com/cb", "view-source:https://a/", "com.example.app:/cb",
+		"http://app.example.com/cb", "http://localhost:8000/cb", "http://127.0.0.2/cb", "https:///cb", "HTTP://app.example.com/cb",
+	} {
+		cases["scheme "+u] = fmt.Sprintf(`{"client_id":%q,"redirect_uris":[%q],"token_endpoint_auth_method":"none"}`, id, u)
+	}
 	for name, body := range cases {
 		f := newFixture(t, serve(body))
 		f.url = id
@@ -253,15 +262,82 @@ func TestDocumentValidation(t *testing.T) {
 	}
 }
 
-func TestCancelledCallerIsNotNegativeCached(t *testing.T) {
+func TestAllowedRedirectSchemes(t *testing.T) {
+	f := newFixture(t, nil)
+	uris := []string{"https://app.example.com/cb", "http://127.0.0.1:8000/cb", "http://[::1]/cb"}
+	f.h = serve(fmt.Sprintf(`{"client_id":%q,"redirect_uris":["%s"],"token_endpoint_auth_method":"none"}`, f.url, strings.Join(uris, `","`)))
+	d, err := f.resolver().Resolve(context.Background(), f.url)
+	if err != nil || len(d.RedirectURIs) != len(uris) {
+		t.Fatalf("%v %v", d, err)
+	}
+}
+
+// The two halves of the cancellation fix are pinned separately: this test
+// fails without context.WithoutCancel, the next one without the ctx.Err guard.
+func TestCancelledCallerStillWarmsTheCache(t *testing.T) {
 	f := newFixture(t, nil)
 	f.h = serve(doc(f.url, ""))
 	r := f.resolver()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, _ = r.Resolve(ctx, f.url) // may succeed or fail; must not poison the cache
+	if f.hits.Load() != 1 {
+		t.Fatalf("the detached fetch must still run for a cancelled caller: hits = %d", f.hits.Load())
+	}
 	if _, err := r.Resolve(context.Background(), f.url); err != nil {
 		t.Fatalf("a cancelled caller must not poison the cache: %v", err)
+	}
+	if f.hits.Load() != 1 {
+		t.Fatalf("the detached fetch must warm the cache for the callers behind it: hits = %d", f.hits.Load())
+	}
+}
+
+func TestFailureSeenByDepartedCallerIsNotCached(t *testing.T) {
+	started, proceed := make(chan struct{}), make(chan struct{})
+	f := newFixture(t, nil)
+	f.h = func(w http.ResponseWriter, r *http.Request) {
+		if f.hits.Load() == 1 {
+			close(started)
+			<-proceed
+			w.WriteHeader(500)
+			return
+		}
+		serve(doc(f.url, ""))(w, r)
+	}
+	f.cl.Timeout = 5 * time.Second
+	r := f.resolver()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := r.Resolve(ctx, f.url); done <- err }()
+	<-started
+	cancel()
+	close(proceed)
+	if err := <-done; !errors.Is(err, ErrFetch) {
+		t.Fatalf("the leader must see the failure: %v", err)
+	}
+	if _, err := r.Resolve(context.Background(), f.url); err != nil {
+		t.Fatalf("a failure seen only by a departed caller must not be cached: %v", err)
+	}
+	if f.hits.Load() != 2 {
+		t.Fatalf("hits = %d", f.hits.Load())
+	}
+}
+
+func TestDetachedFetchHasItsOwnDeadline(t *testing.T) {
+	release := make(chan struct{})
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) { <-release })
+	t.Cleanup(func() { close(release) }) // runs before the server's Close
+	f.cl.Timeout = 0                     // an injected client with no timeout
+	r := NewResolver(Options{AllowedHosts: []string{"app.example.com"}, HTTPClient: f.cl, FetchTimeout: 100 * time.Millisecond})
+	done := make(chan error, 1)
+	go func() { _, err := r.Resolve(context.Background(), f.url); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrFetch) {
+			t.Fatalf("want ErrFetch, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the detached fetch is not bounded by its own deadline")
 	}
 }
 
@@ -281,15 +357,52 @@ func TestCaching(t *testing.T) {
 	if f.hits.Load() != 1 {
 		t.Fatalf("hits = %d", f.hits.Load())
 	}
-	f.advance(4 * time.Minute) // max-age clamped up to 5 minutes
-	_, _ = r.Resolve(context.Background(), f.url)
-	if f.hits.Load() != 1 {
-		t.Fatal("max-age must clamp to at least 5 minutes")
-	}
-	f.advance(2 * time.Minute)
+	f.advance(2 * time.Second) // max-age is honoured, with no floor
 	_, _ = r.Resolve(context.Background(), f.url)
 	if f.hits.Load() != 2 {
-		t.Fatalf("hits = %d", f.hits.Load())
+		t.Fatalf("max-age=1 must expire after a second: hits = %d", f.hits.Load())
+	}
+}
+
+func TestCacheTTL(t *testing.T) {
+	for cc, want := range map[string]time.Duration{
+		"":                        defaultTTL,
+		"public":                  defaultTTL,
+		"max-age=600":             10 * time.Minute,
+		"max-age=60":              time.Minute,
+		"max-age=0":               0,
+		"no-store":                0,
+		"No-Cache":                0,
+		`no-cache="set-cookie"`:   0,
+		"max-age=600, no-store":   0,
+		"max-age=abc":             0,
+		"max-age=-1":              0,
+		"max-age=600, max-age=60": time.Minute,
+		"max-age=60, max-age=600": time.Minute,
+		"max-age=999999":          maxTTL,
+		`max-age="120"`:           2 * time.Minute,
+	} {
+		if got := cacheTTL(cc); got != want {
+			t.Errorf("%q: %v, want %v", cc, got, want)
+		}
+	}
+}
+
+func TestNoStoreDocumentIsNotCached(t *testing.T) {
+	f := newFixture(t, nil)
+	f.h = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = fmt.Fprint(w, doc(f.url, ""))
+	}
+	r := f.resolver()
+	for i := 0; i < 2; i++ {
+		if _, err := r.Resolve(context.Background(), f.url); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f.hits.Load() != 2 {
+		t.Fatalf("a no-store document must be refetched: hits = %d", f.hits.Load())
 	}
 }
 
@@ -355,6 +468,40 @@ func TestRateLimitAndSemaphore(t *testing.T) {
 	r2.sem <- struct{}{}
 	if _, err := r2.Resolve(context.Background(), f.url); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("full semaphore must refuse: %v", err)
+	}
+}
+
+func TestRateStateIsHardBounded(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) })
+	r := NewResolver(Options{AllowedHosts: []string{".example.com"}, HTTPClient: f.cl, Now: func() time.Time {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.clock
+	}})
+	// Fill the map with hosts all seen within the minute, as a .suffix entry
+	// lets a caller do.
+	r.mu.Lock()
+	for i := 0; i < maxRateHosts; i++ {
+		r.rate[fmt.Sprintf("h%d.example.com", i)] = []time.Time{f.clock}
+	}
+	r.mu.Unlock()
+	if _, err := r.Resolve(context.Background(), "https://new.example.com/c.json"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("a new host must be refused while the map is full: %v", err)
+	}
+	r.mu.Lock()
+	n := len(r.rate)
+	r.mu.Unlock()
+	if n != maxRateHosts || f.hits.Load() != 0 {
+		t.Fatalf("len(rate) = %d, hits = %d", n, f.hits.Load())
+	}
+	// A host already tracked is still served.
+	if _, err := r.Resolve(context.Background(), "https://h1.example.com/c.json"); !errors.Is(err, ErrFetch) {
+		t.Fatalf("a known host must be fetched: %v", err)
+	}
+	// Once the entries are stale they are swept and the new host gets a slot.
+	f.advance(2 * time.Minute)
+	if _, err := r.Resolve(context.Background(), "https://new.example.com/c.json"); !errors.Is(err, ErrFetch) {
+		t.Fatalf("after the sweep the new host must be fetched: %v", err)
 	}
 }
 
