@@ -517,6 +517,32 @@ func TestRotateCarriesThePrincipal(t *testing.T) {
 	}
 }
 
+// TestRotateCarriesTheAuthMethod checks that a private_key_jwt session keeps
+// its method through rotation, a grace-window replay and the successor row,
+// so it can never be refreshed as a public client (mctl-api#694).
+func TestRotateCarriesTheAuthMethod(t *testing.T) {
+	s := newTestStore(t)
+	withShortGraceWindow(t, time.Hour)
+	exp := time.Now().Add(time.Hour)
+	tok1, tok2 := uniqueTok(t, "1"), uniqueTok(t, "2")
+	if err := s.Insert(tok1, "c", Session{Login: "erin", Groups: []string{}, AuthMethod: "private_key_jwt"}, exp); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	for i, step := range []struct{ old, next string }{{tok1, tok2}, {tok1, tok2}, {tok2, uniqueTok(t, "3")}} {
+		got, err := s.Rotate(step.old, step.next, "c", exp)
+		if err != nil || got.AuthMethod != "private_key_jwt" {
+			t.Fatalf("step %d: Rotate = %+v, %v", i, got, err)
+		}
+	}
+	tok4 := uniqueTok(t, "4")
+	if err := s.Insert(tok4, "c", Session{Login: "erin", Groups: []string{}}, exp); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if got, err := s.Rotate(tok4, uniqueTok(t, "5"), "c", exp); err != nil || got.AuthMethod != "" {
+		t.Fatalf("public session Rotate = %+v, %v", got, err)
+	}
+}
+
 func TestRevokePrincipal(t *testing.T) {
 	s := newTestStore(t)
 	const (

@@ -62,7 +62,7 @@ func (s *OAuthServer) ResolveCIMDClient(ctx context.Context, clientID string) (R
 	if err != nil {
 		return RegisteredClient{}, err
 	}
-	return RegisteredClient{ClientID: doc.ClientID, ClientName: doc.ClientName, RedirectURIs: doc.RedirectURIs}, nil
+	return RegisteredClient{ClientID: doc.ClientID, ClientName: doc.ClientName, RedirectURIs: doc.RedirectURIs, AuthMethod: doc.AuthMethod}, nil
 }
 
 // ClientKind classifies clientID for audit: static, cimd, dcr or
@@ -98,6 +98,9 @@ type ConsentEntry struct {
 	CodeChallenge string
 	ClientState   []byte
 	Upstream      string
+	// AuthMethod is the client's token_endpoint_auth_method as its document
+	// declared it at consent; the code is bound to it.
+	AuthMethod string
 	// BrowserHash is the SHA-256 (hex) of the consent token, held by the
 	// browser that signed in as a cookie.
 	BrowserHash string
@@ -204,7 +207,7 @@ func (s *OAuthServer) authenticateClient(ctx context.Context, clientID string, c
 	}
 	doc, err := s.CIMD.Resolve(ctx, clientID)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrInvalidClient, err)
+		return "", clientAuthError(err)
 	}
 	switch doc.AuthMethod {
 	case cimd.AuthMethodNone:
@@ -222,7 +225,7 @@ func (s *OAuthServer) authenticateClient(ctx context.Context, clientID string, c
 		}
 		a, err := s.CIMD.VerifyAssertion(ctx, doc, ca.Assertion, auds)
 		if err != nil {
-			return "", fmt.Errorf("%w: %w", ErrInvalidClient, err)
+			return "", clientAuthError(err)
 		}
 		if err := s.consumeJTI(ctx, clientID, a); err != nil {
 			return "", err
@@ -230,6 +233,18 @@ func (s *OAuthServer) authenticateClient(ctx context.Context, clientID string, c
 		return cimd.AuthMethodPrivateKeyJWT, nil
 	}
 	return "", fmt.Errorf("%w: unsupported token_endpoint_auth_method %q", ErrInvalidClient, doc.AuthMethod)
+}
+
+// clientAuthError maps a document or key set error to the token response.
+// A fetch that failed or was refused by the rate limit observed nothing
+// about the client, so it is a server error the client may retry, never
+// invalid_client, which tells a client its credentials are wrong.
+func clientAuthError(err error) error {
+	if errors.Is(err, cimd.ErrFetch) || errors.Is(err, cimd.ErrRateLimited) {
+		slog.Warn("oauth: client metadata could not be fetched", "error", err)
+		return fmt.Errorf("client authentication: %w: %w", ErrServerError, err)
+	}
+	return fmt.Errorf("%w: %w", ErrInvalidClient, err)
 }
 
 // errJTIReplayed is a client assertion whose jti was already used.

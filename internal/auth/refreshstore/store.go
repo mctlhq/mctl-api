@@ -30,6 +30,11 @@ type Session struct {
 	Login       string
 	PrincipalID string
 	Groups      []string
+	// AuthMethod is the token endpoint authentication the session was issued
+	// under ("private_key_jwt" for a CIMD client that declared it, empty
+	// otherwise). Rotation carries it forward, so the session cannot be
+	// refreshed later with a weaker method.
+	AuthMethod string
 }
 
 // ErrInvalidToken is returned when a refresh token is not found, expired, or revoked.

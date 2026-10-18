@@ -67,6 +67,9 @@ const (
 	// it. It assumes the production policy of one known client per exact
 	// allowlisted host: a host serving 6 or more no-store documents under
 	// steady sign-ins would exceed it at the minTTL floor (mctl-api#687).
+	// A private_key_jwt client's key set is fetched under the same budget,
+	// so a no-store document and key set together use twice the fetches
+	// and leave half the headroom (mctl-api#694).
 	hostPerMinute = 10
 	maxConcurrent = 8
 	fetchTimeout  = 10 * time.Second

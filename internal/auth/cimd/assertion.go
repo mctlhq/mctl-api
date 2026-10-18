@@ -39,6 +39,11 @@ import (
 // expired, or for a client that does not use private_key_jwt.
 var ErrAssertion = errors.New("cimd: invalid client assertion")
 
+// ErrInvalidKeySet is a JWK Set that was fetched but is not usable: not a
+// set, too large, or with no admissible signature key. Unlike ErrFetch it is
+// the client's published configuration, not a failure to observe it.
+var ErrInvalidKeySet = errors.New("cimd: invalid key set")
+
 const (
 	// MaxAssertionLifetime bounds how far ahead of now an assertion's exp may
 	// lie. It also bounds how long a jti has to be remembered.
@@ -116,8 +121,8 @@ func (r *Resolver) VerifyAssertion(ctx context.Context, doc Document, assertion 
 	}
 	var c jwt.Claims
 	verified := false
-	for _, k := range keys {
-		if tok.Claims(k.Key, &c) == nil {
+	for i := range keys {
+		if tok.Claims(keys[i].Key, &c) == nil {
 			verified = true
 			break
 		}
@@ -199,7 +204,8 @@ func (r *Resolver) keysFor(ctx context.Context, doc Document, kid string) ([]jos
 // pickKeys returns the keys usable for alg, narrowed to kid when given.
 func pickKeys(keys []jose.JSONWebKey, alg, kid string) []jose.JSONWebKey {
 	var out []jose.JSONWebKey
-	for _, k := range keys {
+	for i := range keys {
+		k := &keys[i]
 		if kid != "" && k.KeyID != kid {
 			continue
 		}
@@ -209,12 +215,12 @@ func pickKeys(keys []jose.JSONWebKey, alg, kid string) []jose.JSONWebKey {
 		switch k.Key.(type) {
 		case *rsa.PublicKey:
 			if alg == "RS256" {
-				out = append(out, k)
+				out = append(out, *k)
 			}
 		case *ecdsa.PublicKey:
 			// fetchKeys admits P-256 keys only.
 			if alg == "ES256" {
-				out = append(out, k)
+				out = append(out, *k)
 			}
 		}
 	}
@@ -266,15 +272,25 @@ func (r *Resolver) fetchKeys(ctx context.Context, uri string) ([]jose.JSONWebKey
 		Keys []json.RawMessage `json:"keys"`
 	}
 	if err := json.Unmarshal(body, &set); err != nil {
-		return nil, 0, fmt.Errorf("%w: jwks is not a JWK Set", ErrFetch)
+		return nil, 0, fmt.Errorf("%w: jwks is not a JWK Set", ErrInvalidKeySet)
 	}
 	if len(set.Keys) > maxJWKSKeys {
-		return nil, 0, fmt.Errorf("%w: jwks has more than %d keys", ErrFetch, maxJWKSKeys)
+		return nil, 0, fmt.Errorf("%w: jwks has more than %d keys", ErrInvalidKeySet, maxJWKSKeys)
 	}
 	var keys []jose.JSONWebKey
 	for _, raw := range set.Keys {
 		var k jose.JSONWebKey
 		if k.UnmarshalJSON(raw) != nil || !k.Valid() || (k.Use != "" && k.Use != "sig") {
+			continue
+		}
+		// A key restricted by key_ops to other operations is not a
+		// verification key. "sign" is admitted too: a set may list the
+		// private key's operations next to the public key. go-jose does not
+		// expose key_ops, so it is read from the entry itself.
+		var ops struct {
+			KeyOps []string `json:"key_ops"`
+		}
+		if json.Unmarshal(raw, &ops) != nil || (len(ops.KeyOps) > 0 && !slices.Contains(ops.KeyOps, "verify") && !slices.Contains(ops.KeyOps, "sign")) {
 			continue
 		}
 		// Only public key types are admitted, so a private key published by
@@ -294,7 +310,7 @@ func (r *Resolver) fetchKeys(ctx context.Context, uri string) ([]jose.JSONWebKey
 		keys = append(keys, k)
 	}
 	if len(keys) == 0 {
-		return nil, 0, fmt.Errorf("%w: jwks has no usable signature key", ErrFetch)
+		return nil, 0, fmt.Errorf("%w: jwks has no usable signature key", ErrInvalidKeySet)
 	}
 	return slices.Clip(keys), cacheTTL(resp.Header.Get("Cache-Control")), nil
 }

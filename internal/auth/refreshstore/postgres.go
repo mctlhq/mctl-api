@@ -55,6 +55,9 @@ CREATE INDEX IF NOT EXISTS oauth_refresh_tokens_login
 ALTER TABLE oauth_refresh_tokens ADD COLUMN IF NOT EXISTS principal_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS oauth_refresh_tokens_principal
     ON oauth_refresh_tokens (principal_id) WHERE principal_id <> '';
+-- The client authentication the session was issued under (mctl-api#694).
+-- Empty for every session but a private_key_jwt CIMD client's.
+ALTER TABLE oauth_refresh_tokens ADD COLUMN IF NOT EXISTS auth_method TEXT NOT NULL DEFAULT '';
 `
 
 // PostgresStore is a Postgres-backed implementation of Store.
@@ -143,9 +146,9 @@ func (s *PostgresStore) Insert(rawToken, clientID string, sess Session, expiresA
 	defer cancel()
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO oauth_refresh_tokens
-		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7)`,
-		tokenHash(rawToken), clientID, sess.Login, sess.PrincipalID, groupsJSON, uuid.New(), expiresAt,
+		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at, auth_method)
+		 VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8)`,
+		tokenHash(rawToken), clientID, sess.Login, sess.PrincipalID, groupsJSON, uuid.New(), expiresAt, sess.AuthMethod,
 	)
 	if err != nil {
 		return fmt.Errorf("oauth refresh store: insert: %w", err)
@@ -186,7 +189,7 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	var storedClientID, login, principalID string
+	var storedClientID, login, principalID, authMethod string
 	var groupsJSON []byte
 	var familyID uuid.UUID
 	var expiresAt time.Time
@@ -194,12 +197,12 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	var revokedAt *time.Time
 
 	err = tx.QueryRow(ctx,
-		`SELECT client_id, login, principal_id, groups, family_id, expires_at, rotated_at, revoked_at
+		`SELECT client_id, login, principal_id, groups, family_id, expires_at, rotated_at, revoked_at, auth_method
 		 FROM oauth_refresh_tokens
 		 WHERE token_hash = $1
 		 FOR UPDATE`,
 		oldHash,
-	).Scan(&storedClientID, &login, &principalID, &groupsJSON, &familyID, &expiresAt, &rotatedAt, &revokedAt)
+	).Scan(&storedClientID, &login, &principalID, &groupsJSON, &familyID, &expiresAt, &rotatedAt, &revokedAt, &authMethod)
 	if err == pgx.ErrNoRows {
 		return Session{}, ErrInvalidToken
 	}
@@ -230,7 +233,7 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	// an error rather than silently reporting successful revocation.
 	if rotatedAt != nil {
 		if time.Since(*rotatedAt) < rotationGraceWindow {
-			var childLogin, childPrincipalID string
+			var childLogin, childPrincipalID, childAuthMethod string
 			var childGroupsJSON []byte
 			var childRevokedAt *time.Time
 			var childRotatedAt *time.Time
@@ -243,12 +246,12 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 			// either the up-to-date row or a 40001 serialization error that
 			// the outer Rotate retry loop already handles.
 			lookupErr := tx.QueryRow(ctx,
-				`SELECT login, principal_id, groups, revoked_at, rotated_at, expires_at FROM oauth_refresh_tokens
+				`SELECT login, principal_id, groups, revoked_at, rotated_at, expires_at, auth_method FROM oauth_refresh_tokens
 				 WHERE token_hash = $1 AND parent_token_hash = $2
 				   AND family_id = $3 AND client_id = $4
 				 FOR UPDATE`,
 				newHash, oldHash, familyID, clientID,
-			).Scan(&childLogin, &childPrincipalID, &childGroupsJSON, &childRevokedAt, &childRotatedAt, &childExpiresAt)
+			).Scan(&childLogin, &childPrincipalID, &childGroupsJSON, &childRevokedAt, &childRotatedAt, &childExpiresAt, &childAuthMethod)
 			if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
 				// A real DB error (including a caught-and-surfaced
 				// serialization failure) must not be misreported as
@@ -274,7 +277,7 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 				}
 				slog.Info("oauth refresh token grace-window replay: re-issuing existing successor",
 					"family_id", familyID, "login", childLogin)
-				return Session{Login: childLogin, PrincipalID: childPrincipalID, Groups: childGroups}, nil
+				return Session{Login: childLogin, PrincipalID: childPrincipalID, Groups: childGroups, AuthMethod: childAuthMethod}, nil
 			}
 			return Session{}, ErrInvalidToken
 		}
@@ -326,9 +329,9 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	newGroupsJSON, _ := json.Marshal(groups)
 	_, err = tx.Exec(ctx,
 		`INSERT INTO oauth_refresh_tokens
-		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		newHash, clientID, login, principalID, newGroupsJSON, familyID, oldHash, now, newExpiresAt,
+		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at, auth_method)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		newHash, clientID, login, principalID, newGroupsJSON, familyID, oldHash, now, newExpiresAt, authMethod,
 	)
 	if err != nil {
 		return Session{}, fmt.Errorf("oauth refresh store: insert rotated: %w", err)
@@ -337,7 +340,7 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	if err := tx.Commit(ctx); err != nil {
 		return Session{}, fmt.Errorf("oauth refresh store: commit: %w", err)
 	}
-	return Session{Login: login, PrincipalID: principalID, Groups: groups}, nil
+	return Session{Login: login, PrincipalID: principalID, Groups: groups, AuthMethod: authMethod}, nil
 }
 
 // RevokeFamily revokes all non-revoked tokens in the same family as rawToken.

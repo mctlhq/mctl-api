@@ -403,16 +403,58 @@ func TestFetchKeysAdmitsOnlyUsableKeys(t *testing.T) {
 		pub(rsaKeyB(), "private", "RS256"),
 		pub(&ec384.PublicKey, "p384", ""),
 		jose.JSONWebKey{Key: &rsaKeyA().PublicKey, KeyID: "enc", Use: "enc"},
+		pub(&rsaKeyA().PublicKey, "ops-verify", "RS256"),
+		pub(&rsaKeyA().PublicKey, "ops-encrypt", "RS256"),
 	)
+	// go-jose does not marshal key_ops, so it is added to the set by hand.
+	var set struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(ks.jwks), &set); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range set.Keys {
+		switch k["kid"] {
+		case "ops-verify":
+			k["key_ops"] = []string{"verify"}
+		case "ops-encrypt":
+			k["key_ops"] = []string{"encrypt", "wrapKey"}
+		}
+	}
+	b, _ := json.Marshal(set)
+	ks.jwks = string(b)
 	keys, _, err := ks.resolver().fetchKeys(context.Background(), ks.jwksURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var kids []string
-	for _, k := range keys {
-		kids = append(kids, k.KeyID)
+	for i := range keys {
+		kids = append(kids, keys[i].KeyID)
 	}
-	if strings.Join(kids, ",") != "good-rsa,good-ec" {
+	if strings.Join(kids, ",") != "good-rsa,good-ec,ops-verify" {
 		t.Fatalf("admitted %v", kids)
+	}
+}
+
+// A key set that was fetched but holds nothing usable is the client's
+// configuration (ErrInvalidKeySet); one that could not be fetched is not
+// (ErrFetch). The token endpoint answers them differently.
+func TestKeySetErrorsAreClassified(t *testing.T) {
+	ks := newKeyServer(t, "RS256", pub(&mustRSA(1024).PublicKey, "weak", "RS256"))
+	r := ks.resolver()
+	if _, _, err := r.fetchKeys(context.Background(), ks.jwksURL); !errors.Is(err, ErrInvalidKeySet) || errors.Is(err, ErrFetch) {
+		t.Fatalf("no usable key: %v", err)
+	}
+	ks.mu.Lock()
+	ks.jwks = `{"keys":"nope"}`
+	ks.mu.Unlock()
+	if _, _, err := r.fetchKeys(context.Background(), ks.jwksURL); !errors.Is(err, ErrInvalidKeySet) || errors.Is(err, ErrFetch) {
+		t.Fatalf("not a set: %v", err)
+	}
+	ks.mu.Lock()
+	ks.jwksCode = http.StatusServiceUnavailable
+	ks.mu.Unlock()
+	if _, _, err := r.fetchKeys(context.Background(), ks.jwksURL); !errors.Is(err, ErrFetch) || errors.Is(err, ErrInvalidKeySet) {
+		t.Fatalf("503: %v", err)
 	}
 }

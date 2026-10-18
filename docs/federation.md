@@ -520,8 +520,10 @@ only two methods are accepted (mctl-api#694):
   `token_endpoint_auth_signing_alg` (`RS256` or `ES256`) and a `jwks_uri` on
   the `client_id`'s own host. An inline `jwks` is refused. The key set is
   fetched like the document: allowlist, netsafe, size limit, per-host budget,
-  cached by `Cache-Control`. Only public signature keys are admitted (RSA of
-  at least 2048 bits, EC P-256). An assertion with an unknown `kid` triggers
+  cached by `Cache-Control`. The key set shares the host's fetch budget with
+  the document. Only public signature keys are admitted (RSA of at least
+  2048 bits, EC P-256, `use` absent or `sig`, `key_ops` absent or including
+  `verify` or `sign`). An assertion with an unknown `kid` triggers
   at most one refetch per 30 s per set, which is how a rotated-in key is
   picked up.
 
@@ -542,11 +544,17 @@ only two methods are accepted (mctl-api#694):
     it is a `server_error`, never a pass.
 
 A failed client authentication answers `401 invalid_client` and is counted in
-`oauth_client_auth_failures_total{grant_type,assertion}`. The client is
-authenticated before the code is redeemed or the refresh token rotated, so a
-failed attempt consumes neither. There is no downgrade: a code records the
-method the client declared when it was issued and is redeemed only with that
-method, even if the document later says `none`. While CIMD is off, a URL
+`oauth_client_auth_failures_total{grant_type,assertion}`. A document or key
+set that could not be fetched, or whose fetch the rate limit refused, observed
+nothing about the client and answers `500 server_error`, which the client may
+retry. A key set that was fetched but holds no usable key is the client's
+configuration and stays `invalid_client`. The client is authenticated before
+the code is redeemed or the refresh token rotated, so a failed attempt
+consumes neither. There is no downgrade: the method is read from the
+document at consent and recorded on the code, and a code exchanged under
+`private_key_jwt` records it on the refresh session, which carries it through
+every rotation. Neither is redeemed with `none` after the document changes,
+and a refresh token presented that way has its whole family revoked. While CIMD is off, a URL
 `client_id` that is not pre-registered is refused at the token endpoint, since
 its required method cannot be known. Discovery lists `private_key_jwt` and
 `token_endpoint_auth_signing_alg_values_supported` only while

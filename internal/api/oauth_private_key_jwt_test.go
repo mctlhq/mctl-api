@@ -40,6 +40,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/cimd"
+	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 )
 
 var pkjwtKey = sync.OnceValue(func() *rsa.PrivateKey {
@@ -53,15 +54,16 @@ var pkjwtKey = sync.OnceValue(func() *rsa.PrivateKey {
 const pkjwtVerifier = "verifier-verifier-verifier-verifier-verifier"
 
 // pkjwtEnv is a server with CIMD on whose client cimdID declares
-// private_key_jwt with an RS256 key set on its own host. The document and
-// the clock can be changed by the test.
+// private_key_jwt with an RS256 key set on its own host. The document, the
+// key set's status and the clock can be changed by the test.
 type pkjwtEnv struct {
-	h     *Handlers
-	o     *auth.OAuthServer
-	mu    sync.Mutex
-	doc   string
-	clock time.Time
-	jti   atomic.Int64
+	h          *Handlers
+	o          *auth.OAuthServer
+	mu         sync.Mutex
+	doc        string
+	jwksStatus int
+	clock      time.Time
+	jti        atomic.Int64
 }
 
 func pkjwtDocBody(method string) string {
@@ -85,12 +87,16 @@ func newPKJWTEnv(t *testing.T) *pkjwtEnv {
 	}})
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		e.mu.Lock()
+		defer e.mu.Unlock()
 		if r.URL.Path == "/jwks.json" {
+			if e.jwksStatus != 0 {
+				w.WriteHeader(e.jwksStatus)
+				return
+			}
 			_, _ = w.Write(jwks)
 			return
 		}
-		e.mu.Lock()
-		defer e.mu.Unlock()
 		_, _ = w.Write([]byte(e.doc))
 	}))
 	t.Cleanup(srv.Close)
@@ -202,12 +208,149 @@ func TestPrivateKeyJWTCodeAndRefresh(t *testing.T) {
 	if got := testutil.ToFloat64(oauthClientAuthFailures.WithLabelValues("refresh_token", "absent")); got != before+1 {
 		t.Fatalf("metric %v -> %v", before, got)
 	}
-	rec, body = tokenRequest(e.h, withAssertion(url.Values{
+	rec, _ = tokenRequest(e.h, withAssertion(url.Values{
 		"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {cimdID},
 	}, e.assertion(t, "https://api.mctl.ai/oauth/token")))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("refresh: %d %s", rec.Code, rec.Body.String())
 	}
+}
+
+// pkjwtRefreshStore is a refreshstore.Store that carries a session's auth
+// method through rotation as PostgresStore does (its own tests prove that),
+// so the store-backed refresh path runs without a database.
+type pkjwtRefreshStore struct {
+	mu      sync.Mutex
+	rows    map[string]refreshstore.Session
+	family  map[string]string
+	revoked map[string]bool
+	rotated map[string]bool
+	reasons []string
+}
+
+func newPKJWTRefreshStore() *pkjwtRefreshStore {
+	return &pkjwtRefreshStore{rows: map[string]refreshstore.Session{}, family: map[string]string{},
+		revoked: map[string]bool{}, rotated: map[string]bool{}}
+}
+
+func (f *pkjwtRefreshStore) Insert(raw, _ string, sess refreshstore.Session, _ time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rows[raw], f.family[raw] = sess, raw
+	return nil
+}
+
+func (f *pkjwtRefreshStore) Rotate(old, next, _ string, _ time.Time) (refreshstore.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sess, ok := f.rows[old]
+	if !ok || f.revoked[f.family[old]] || f.rotated[old] {
+		return refreshstore.Session{}, refreshstore.ErrInvalidToken
+	}
+	f.rotated[old] = true
+	f.rows[next], f.family[next] = sess, f.family[old]
+	return sess, nil
+}
+
+func (f *pkjwtRefreshStore) RevokeFamily(raw, _, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revoked[f.family[raw]] = true
+	f.reasons = append(f.reasons, reason)
+	return nil
+}
+
+func (f *pkjwtRefreshStore) RevokePrincipal(string, string) (int64, error) { return 0, nil }
+func (f *pkjwtRefreshStore) GC() error                                     { return nil }
+
+// A session issued under private_key_jwt is not refreshed with none after
+// the client's document drops to none, in either refresh path, and the
+// refused token is spent.
+func TestPrivateKeyJWTRefreshNoDowngrade(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store *pkjwtRefreshStore
+	}{{"memory", nil}, {"store", newPKJWTRefreshStore()}} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newPKJWTEnv(t)
+			if tc.store != nil {
+				e.o.RefreshStore = tc.store
+			}
+			rec, body := tokenRequest(e.h, withAssertion(codeGrant(e.code(t)), e.assertion(t, "https://api.mctl.ai")))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("exchange: %d %s", rec.Code, rec.Body.String())
+			}
+			// One rotation first, so the binding is checked on a successor.
+			grant := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {body["refresh_token"].(string)}, "client_id": {cimdID}}
+			rec, body = tokenRequest(e.h, withAssertion(grant, e.assertion(t, "https://api.mctl.ai")))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("refresh: %d %s", rec.Code, rec.Body.String())
+			}
+			e.setDoc(pkjwtDocBody(cimd.AuthMethodNone), 2*time.Hour)
+			grant = url.Values{"grant_type": {"refresh_token"}, "refresh_token": {body["refresh_token"].(string)}, "client_id": {cimdID}}
+			rec, body = tokenRequest(e.h, grant)
+			wantInvalidClient(t, rec, body)
+			if tc.store != nil && (len(tc.store.reasons) != 1 || tc.store.reasons[0] != "auth_method_downgrade") {
+				t.Fatalf("family not revoked: %v", tc.store.reasons)
+			}
+			if rec, _ := tokenRequest(e.h, grant); rec.Code == http.StatusOK {
+				t.Fatal("refused refresh token still works")
+			}
+			// A session issued under none refreshes with none.
+			rec, body = tokenRequest(e.h, codeGrant(e.code(t)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("none exchange: %d %s", rec.Code, rec.Body.String())
+			}
+			grant.Set("refresh_token", body["refresh_token"].(string))
+			if rec, _ := tokenRequest(e.h, grant); rec.Code != http.StatusOK {
+				t.Fatalf("none refresh: %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// A key set that cannot be fetched observed nothing about the client: the
+// token request is a retryable server error, never invalid_client, and the
+// code is kept.
+func TestPrivateKeyJWTKeySetFetchFailureIsServerError(t *testing.T) {
+	e := newPKJWTEnv(t)
+	code := e.code(t)
+	e.mu.Lock()
+	e.jwksStatus = http.StatusServiceUnavailable
+	e.mu.Unlock()
+	rec, body := tokenRequest(e.h, withAssertion(codeGrant(code), e.assertion(t, "https://api.mctl.ai")))
+	if rec.Code != http.StatusInternalServerError || body["error"] != "server_error" {
+		t.Fatalf("want 500 server_error, got %d %s", rec.Code, rec.Body.String())
+	}
+	e.mu.Lock()
+	e.jwksStatus = 0
+	e.mu.Unlock()
+	// The failure is cached for minTTL; past it the same code redeems.
+	e.setDoc(pkjwtDocBody(cimd.AuthMethodPrivateKeyJWT), time.Minute)
+	if rec, _ := tokenRequest(e.h, withAssertion(codeGrant(code), e.assertion(t, "https://api.mctl.ai"))); rec.Code != http.StatusOK {
+		t.Fatalf("after recovery: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The method read from the document at consent binds the code: approval
+// does not fetch the document again, and a document that drops to none by
+// the time of the exchange does not unbind it.
+func TestConsentCarriesAuthMethodToCode(t *testing.T) {
+	e := newPKJWTEnv(t)
+	c := completion(cimdID)
+	sum := sha256.Sum256([]byte(pkjwtVerifier))
+	c.CodeChallenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	token, cookie, _ := requestConsentFor(t, e.h, c)
+	// Unreachable at approval: a re-resolve there would fail the grant.
+	e.setDoc("not json", 2*time.Hour)
+	rec := postConsent(e.h, token, "approve", cookie)
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if rec.Code != http.StatusFound || err != nil || loc.Query().Get("code") == "" {
+		t.Fatalf("approve: %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	e.setDoc(pkjwtDocBody(cimd.AuthMethodNone), 2*time.Hour)
+	rec, body := tokenRequest(e.h, codeGrant(loc.Query().Get("code")))
+	wantInvalidClient(t, rec, body)
 }
 
 // A request that fails client authentication does not consume the code.
