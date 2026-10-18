@@ -36,6 +36,7 @@ type CustomerDeletion struct {
 	Subject     string `json:"subject"`
 	Actor       string `json:"actor"`
 	Status      string `json:"status"`
+	Cancelled   bool   `json:"cancelled,omitempty"`
 }
 
 const customerDeletionSchema = `CREATE TABLE IF NOT EXISTS customer_deletions (
@@ -44,30 +45,34 @@ const customerDeletionSchema = `CREATE TABLE IF NOT EXISTS customer_deletions (
  subject TEXT NOT NULL, actor TEXT NOT NULL,
  status TEXT NOT NULL CHECK (status IN ('prepared','deleting','complete')),
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), completed_at TIMESTAMPTZ,
- released_at TIMESTAMPTZ,
+ released_at TIMESTAMPTZ, cancelled_at TIMESTAMPTZ,
  PRIMARY KEY (tenant_name, principal_id)
 );
 ALTER TABLE customer_deletions ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ;
+ALTER TABLE customer_deletions ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
 CREATE UNIQUE INDEX IF NOT EXISTS customer_deletion_pending_github
  ON customer_deletions(github_id) WHERE status <> 'complete';
 CREATE INDEX IF NOT EXISTS customer_deletion_subject ON customer_deletions(issuer,subject);
 CREATE INDEX IF NOT EXISTS customer_deletion_principal ON customer_deletions(principal_id);`
 
 const customerDeletionColumns = `tenant_name,principal_id,github_id,login,issuer,subject,actor,status`
+const customerDeletionSelectColumns = customerDeletionColumns + `,cancelled_at IS NOT NULL`
 
 func scanCustomerDeletion(row pgx.Row) (*CustomerDeletion, error) {
 	var d CustomerDeletion
-	if err := row.Scan(&d.Tenant, &d.PrincipalID, &d.GitHubID, &d.Login, &d.Issuer, &d.Subject, &d.Actor, &d.Status); err != nil {
+	if err := row.Scan(&d.Tenant, &d.PrincipalID, &d.GitHubID, &d.Login, &d.Issuer, &d.Subject, &d.Actor, &d.Status, &d.Cancelled); err != nil {
 		return nil, err
 	}
 	return &d, nil
 }
 
 func (s *Store) CustomerDeletion(ctx context.Context, tenant, pid string) (*CustomerDeletion, error) {
-	return scanCustomerDeletion(s.pool.QueryRow(ctx, `SELECT `+customerDeletionColumns+` FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2`, tenant, pid))
+	return scanCustomerDeletion(s.pool.QueryRow(ctx, `SELECT `+customerDeletionSelectColumns+` FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2`, tenant, pid))
 }
 
 // WithCustomerDeletionLock serializes external effects across API replicas.
+// Keyed by tenant alone: successive principal owners must not run concurrently.
+// The pid argument identifies the target for callers, not the lock granularity.
 // Its lock is separate from the short store transactions used by each stage.
 func (s *Store) WithCustomerDeletionLock(ctx context.Context, tenant, pid string, fn func(context.Context) error) error {
 	select {
@@ -144,8 +149,11 @@ func (s *Store) PrepareCustomerDeletion(ctx context.Context, tenant, pid, issuer
 		if err := lockPrincipalTx(ctx, tx, pid); err != nil {
 			return err
 		}
-		previous, err := scanCustomerDeletion(tx.QueryRow(ctx, `SELECT `+customerDeletionColumns+` FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2`, tenant, pid))
+		previous, err := scanCustomerDeletion(tx.QueryRow(ctx, `SELECT `+customerDeletionSelectColumns+` FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2`, tenant, pid))
 		if err == nil {
+			if previous.Cancelled {
+				return ErrInvalid
+			}
 			existed = true
 			result = previous
 			return nil
@@ -251,19 +259,19 @@ func (s *Store) ReleaseCustomerDeletion(ctx context.Context, tenant, pid string)
 
 func (s *Store) CustomerDeletionPending(ctx context.Context, githubID string) (bool, error) {
 	var pending bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE github_id=$1 AND (status<>'complete' OR released_at IS NULL))`, githubID).Scan(&pending)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE github_id=$1 AND cancelled_at IS NULL AND (status<>'complete' OR released_at IS NULL))`, githubID).Scan(&pending)
 	return pending, err
 }
 
 func (s *Store) CustomerSubjectDeleted(ctx context.Context, issuer, subject string) (bool, error) {
 	var deleted bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE issuer=$1 AND subject=$2 AND status IN ('prepared','deleting','complete'))`, issuer, subject).Scan(&deleted)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE issuer=$1 AND subject=$2 AND cancelled_at IS NULL AND status IN ('prepared','deleting','complete'))`, issuer, subject).Scan(&deleted)
 	return deleted, err
 }
 
 func (s *Store) CustomerPrincipalDeleted(ctx context.Context, pid string) (bool, error) {
 	var deleted bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE principal_id=$1 AND status IN ('prepared','deleting','complete'))`, pid).Scan(&deleted)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE principal_id=$1 AND cancelled_at IS NULL AND status IN ('prepared','deleting','complete'))`, pid).Scan(&deleted)
 	return deleted, err
 }
 
@@ -275,7 +283,7 @@ func (s *Store) BeginCustomerDeletion(ctx context.Context, tenant, pid string) e
 			return err
 		}
 		var status string
-		if err := tx.QueryRow(ctx, `SELECT status FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2 FOR UPDATE`, tenant, pid).Scan(&status); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT status FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2 AND cancelled_at IS NULL FOR UPDATE`, tenant, pid).Scan(&status); err != nil {
 			return err
 		}
 		if status == "complete" {
@@ -348,7 +356,19 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 
 // CancelCustomerDeletion is called under the run lock, before begin only.
 func (s *Store) CancelCustomerDeletion(ctx context.Context, tenant, pid string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2 AND status='prepared'`, tenant, pid)
+	tag, err := s.pool.Exec(ctx, `UPDATE customer_deletions SET cancelled_at=COALESCE(cancelled_at,now()) WHERE tenant_name=$1 AND principal_id=$2 AND status='prepared'`, tenant, pid)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrInvalid
+	}
+	return nil
+}
+
+// FinishCustomerCancellation releases the name only after portal acknowledgment.
+func (s *Store) FinishCustomerCancellation(ctx context.Context, tenant, pid string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2 AND status='prepared' AND cancelled_at IS NOT NULL`, tenant, pid)
 	if err != nil {
 		return err
 	}

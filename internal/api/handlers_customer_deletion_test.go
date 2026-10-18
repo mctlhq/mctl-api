@@ -50,6 +50,7 @@ func (r *deletionReader) TenantExists(name string) (bool, error) {
 }
 
 type deletionStore struct {
+	finishCancelErr        error
 	tenantPending          bool
 	tenantReadErr          error
 	cancelErr              error
@@ -367,7 +368,7 @@ func (s *deletionStore) CancelCustomerDeletion(context.Context, string, string) 
 	if s.job == nil || s.job.Status != "prepared" {
 		return errors.New("not prepared")
 	}
-	s.job = nil
+	s.job.Cancelled = true
 	return nil
 }
 
@@ -412,13 +413,26 @@ func TestCustomerDeletionCancellationIsPreparedOnlyAndRetryable(t *testing.T) {
 	if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 503 {
 		t.Fatal(w.Body.String())
 	}
-	if store.job != nil {
-		t.Fatal("queued workflow remains authorized during portal retry")
+	if store.job == nil || !store.job.Cancelled {
+		t.Fatal("durable cancellation receipt missing during portal retry")
 	}
+
 	if w := callAs(h, auth.NewServiceUser(), "POST", "/", map[string]string{"tenant": "acme", "principal": deletionPID, "stage": "begin"}, h.AdvanceCustomerDeletion); w.Code != 409 {
 		t.Fatal("cancelled intent began")
 	}
 	*fail = ""
+	store.finishCancelErr = errors.New("cancel acknowledgment unavailable")
+	*calls = nil
+	if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 503 {
+		t.Fatal(w.Body.String())
+	}
+	if store.job == nil || !store.job.Cancelled {
+		t.Fatal("unacknowledged cancellation lost durable receipt")
+	}
+	if pending, err := store.CustomerTenantDeletionPending(context.Background(), "acme"); err != nil || !pending {
+		t.Fatal("name unfrozen before cancellation acknowledgment")
+	}
+	store.finishCancelErr = nil
 	*calls = nil
 	if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 200 {
 		t.Fatal(w.Body.String())
@@ -442,7 +456,7 @@ func TestCustomerDeletionRollbackStopsNewIntentsButPreservesCancellation(t *test
 }
 
 func (s *deletionStore) CustomerTenantDeletionPending(context.Context, string) (bool, error) {
-	return s.tenantPending, s.tenantReadErr
+	return s.tenantPending || s.job != nil && (s.job.Status != "complete" || s.released == 0), s.tenantReadErr
 }
 func TestStaleCustomerCancellationCannotReleaseAnotherDeletion(t *testing.T) {
 	h, _, store, calls, _ := deletionFixture()
@@ -467,7 +481,19 @@ func TestStaleCustomerCancellationCannotReleaseAnotherDeletion(t *testing.T) {
 	if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
-	if !reflect.DeepEqual(*calls, []string{"cancel"}) {
-		t.Fatal("safe retry did not acknowledge portal")
+	if len(*calls) != 0 {
+		t.Fatal("absent cancellation fabricated a portal mutation")
 	}
+
+}
+
+func (s *deletionStore) FinishCustomerCancellation(context.Context, string, string) error {
+	if s.finishCancelErr != nil {
+		return s.finishCancelErr
+	}
+	if s.job == nil || !s.job.Cancelled {
+		return errors.New("cancellation receipt missing")
+	}
+	s.job = nil
+	return nil
 }

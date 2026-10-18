@@ -950,10 +950,11 @@ still runs idempotently in `begin`; the earlier deny fence must never wait for i
 Prepared cancellation uses `mctl_cancel_customer_deletion` with the exact tenant,
 principal and explicit confirmation. Only a direct human platform administrator
 may invoke it. Prepare, cancel and workflow callbacks share the cross-replica
-run lock. Cancellation deletes only a prepared local intent first, making any
-queued begin refuse, then idempotently unfreezes the portal. If the portal is
-unavailable, retrying the same cancellation completes that acknowledgment even
-when the local intent is already absent. A deleting/complete manifest is never
+run lock. Cancellation stamps `cancelled_at` on a prepared intent first, making
+queued begin refuse and restoring the old principal/subject. Its exact identity
+fields and tenant-name fence remain durable until the portal acknowledges and
+the cancellation receipt can be removed. If the portal or final local
+acknowledgment is unavailable, retrying the same cancellation completes it. A deleting/complete manifest is never
 removed or reactivated; cancellation never restores independently removed
 workspace resources. Historical cancellation/denial audit entries are retained.
 
@@ -962,8 +963,7 @@ approved callback recovery and prepared cancellation remain configured so a
 rollout rollback cannot strand an existing customer fence.
 
 The external-effects run lock is tenant-keyed, including across successive
-principal owners. A cancellation retry with no matching manifest must observe
-that no other unreleased deletion holds the tenant name before contacting the
-portal; an unreadable read is 503 and another pending owner is 409. No-op
-cancellation of an absent pair confirms the desired final state, not evidence
-that such a deletion previously existed.
+principal owners. A cancellation retry with no matching receipt must observe that no other
+unreleased deletion holds the tenant name (unreadable is 503, another owner 409).
+An absent pair performs no portal mutation: it confirms the desired final state,
+not evidence that such a deletion previously existed.

@@ -44,6 +44,7 @@ type CustomerDeletionStore interface {
 	FinishCustomerDeletion(context.Context, string, string) error
 	ReleaseCustomerDeletion(context.Context, string, string) error
 	CancelCustomerDeletion(context.Context, string, string) error
+	FinishCustomerCancellation(context.Context, string, string) error
 	CustomerTenantDeletionPending(context.Context, string) (bool, error)
 }
 
@@ -196,6 +197,10 @@ func (h *Handlers) prepareCustomerAccountDeletionLocked(w http.ResponseWriter, r
 		writeError(w, 503, "customer deletion state could not be read")
 		return false
 	}
+	if previous != nil && previous.Cancelled {
+		writeError(w, 409, "prepared cancellation is awaiting portal acknowledgment; retry cancellation")
+		return false
+	}
 	if previous != nil && previous.Status == "complete" {
 		if err := o.ReleasePortal(r.Context(), previous); err != nil {
 			writeError(w, 503, "customer deletion is awaiting portal release")
@@ -278,6 +283,10 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 		} else {
 			writeError(w, 503, "approved customer deletion manifest unreadable")
 		}
+		return
+	}
+	if d.Cancelled {
+		writeError(w, 409, "customer deletion was cancelled")
 		return
 	}
 	if d.Status == "complete" {
@@ -379,6 +388,9 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 		if err != nil {
 			return err
 		}
+		if fresh.Cancelled {
+			return errors.New("customer deletion was cancelled")
+		}
 		if fresh.Status == "complete" {
 			if stage == "resources" {
 				return errors.New("completed deletion cannot remove platform resources again")
@@ -445,9 +457,9 @@ func (h *Handlers) CancelCustomerDeletion(w http.ResponseWriter, r *http.Request
 				conflict = true
 				return errors.New("another customer deletion holds this tenant name")
 			}
-			// A prior cancellation may have removed the local intent but failed
-			// its portal acknowledgment. No identity fields authorize this call.
-			d = &principals.CustomerDeletion{Tenant: tenant, PrincipalID: pid}
+			// No local receipt means cancellation already completed or no intent
+			// existed. Do not fabricate an external mutation from URL fields.
+			return nil
 		} else {
 			if err != nil {
 				return err
@@ -456,15 +468,17 @@ func (h *Handlers) CancelCustomerDeletion(w http.ResponseWriter, r *http.Request
 				conflict = true
 				return errors.New("customer deletion has already begun")
 			}
-			// Remove the prepared intent FIRST, under the same run lock as
-			// begin. A queued/lost-lock workflow now refuses before any effect,
-			// even if the portal unfreeze fails and must be retried later.
+			// Invalidate begin FIRST, while retaining the name and exact
+			// identity fields until the portal acknowledges cancellation.
 			if err := o.Store.CancelCustomerDeletion(ctx, tenant, pid); err != nil {
 				return err
 			}
 			o.ForgetPrincipals(pid)
 		}
-		return o.CancelPortal(ctx, d)
+		if err := o.CancelPortal(ctx, d); err != nil {
+			return err
+		}
+		return o.Store.FinishCustomerCancellation(ctx, tenant, pid)
 	})
 	if err != nil {
 		message = err.Error()

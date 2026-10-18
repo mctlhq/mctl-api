@@ -309,8 +309,23 @@ func TestPreparedCustomerDeletionCancellationRestoresExistingIdentity(t *testing
 	if linked, err := s.ResolveCustomer(ctx, id); err != nil || linked.ID != p.ID {
 		t.Fatalf("cancel changed original identity: %+v %v", linked, err)
 	}
+	if pending, err := s.CustomerDeletionPending(ctx, "730004"); err != nil || pending {
+		t.Fatalf("cancelled customer signup still fenced: %v %v", pending, err)
+	}
+	if receipt, err := s.CustomerDeletion(ctx, "cancel-test", p.ID); err != nil || !receipt.Cancelled || receipt.Login != "cancel-customer" {
+		t.Fatalf("cancellation lost exact target receipt: %+v %v", receipt, err)
+	}
+	if pending, err := s.CustomerTenantDeletionPending(ctx, "cancel-test"); err != nil || !pending {
+		t.Fatalf("name released before portal cancel acknowledgment: %v %v", pending, err)
+	}
+	if _, err := s.PrepareCustomerDeletion(ctx, "cancel-test", p.ID, id.Issuer, "admin"); err == nil {
+		t.Fatal("cancel receipt reused as a new deletion intent")
+	}
+	if err := s.FinishCustomerCancellation(ctx, "cancel-test", p.ID); err != nil {
+		t.Fatal(err)
+	}
 	if pending, err := s.CustomerTenantDeletionPending(ctx, "cancel-test"); err != nil || pending {
-		t.Fatalf("cancelled name frozen: %v %v", pending, err)
+		t.Fatalf("acknowledged cancellation still freezes name: %v %v", pending, err)
 	}
 	if _, err := s.PrepareCustomerDeletion(ctx, "cancel-test", p.ID, id.Issuer, "admin"); err != nil {
 		t.Fatal(err)

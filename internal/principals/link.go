@@ -459,7 +459,7 @@ func (s *Store) ResolveCustomer(ctx context.Context, id auth.Identity) (*Princip
 	// A deleted IdP subject remains refused even while its signed JWT is
 	// cryptographically valid. A later signup has a different ZITADEL subject.
 	var deleted bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE issuer=$1 AND subject=$2 AND status IN ('prepared','deleting','complete'))`, id.Issuer, id.Subject).Scan(&deleted); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE issuer=$1 AND subject=$2 AND cancelled_at IS NULL AND status IN ('prepared','deleting','complete'))`, id.Issuer, id.Subject).Scan(&deleted); err != nil {
 		return nil, fmt.Errorf("customer deletion observation: %w", err)
 	}
 	if deleted {
