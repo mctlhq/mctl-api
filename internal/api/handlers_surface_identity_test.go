@@ -43,6 +43,7 @@ type sidEnv struct {
 	router http.Handler
 	audit  *audit.Logger
 	pool   *pgxpool.Pool
+	store  *surfaceid.Store
 	ev     *evidence.Store
 	users  map[string]*auth.User
 	tenant string
@@ -112,7 +113,7 @@ func newSIDEnvOpts(t *testing.T, principals auth.PrincipalResolver, mutate func(
 		items.Close()
 		ev.Close()
 	})
-	e := &sidEnv{t: t, audit: audit.NewLogger(), pool: pool, ev: ev, tenant: tenant, users: map[string]*auth.User{
+	e := &sidEnv{t: t, audit: audit.NewLogger(), pool: pool, store: store, ev: ev, tenant: tenant, users: map[string]*auth.User{
 		"alice":    auth.NewGitHubUser("alice", []string{"acme"}),
 		"bob":      auth.NewGitHubUser("bob", []string{"acme"}),
 		"carol":    auth.NewGitHubUser("carol", nil),
@@ -133,7 +134,7 @@ func newSIDEnvOpts(t *testing.T, principals auth.PrincipalResolver, mutate func(
 		})
 	}
 	opts := Options{
-		AuthMiddleware: fakeAuth, SurfaceIdentities: store, WorkItems: items, Evidence: ev, AuditLog: e.audit,
+		AuthMiddleware: fakeAuth, GitReader: ownerEverywhere{}, SurfaceIdentities: store, WorkItems: items, Evidence: ev, AuditLog: e.audit,
 		// alice is an admin in her own right; relaying must not carry it.
 		TenantResolver: sidTenants{"alice": {tenant, "admins"}, "bob": {"acme"}, "carol": {tenant}},
 		Principals:     principals,

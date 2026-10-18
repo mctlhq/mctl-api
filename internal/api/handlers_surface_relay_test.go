@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -397,6 +398,9 @@ type relayPrincipals struct {
 	byLogin map[string]string
 	err     error
 	seen    []auth.Identity
+	checked []string
+	// kinds overrides a principal's kind; every other one is human.
+	kinds map[string]string
 }
 
 func (p *relayPrincipals) ResolvePrincipal(_ context.Context, id auth.Identity) (string, error) {
@@ -405,6 +409,34 @@ func (p *relayPrincipals) ResolvePrincipal(_ context.Context, id auth.Identity) 
 		return "", p.err
 	}
 	return p.byLogin[id.Display], nil
+}
+
+// CheckPrincipal answers a stored principal (a delegation grant's,
+// mctl-api#571 R9) from the same table: the fixed error if set, active if
+// some login maps to it, otherwise no such principal.
+func (p *relayPrincipals) CheckPrincipal(_ context.Context, principalID string) error {
+	p.checked = append(p.checked, principalID)
+	if p.err != nil {
+		return p.err
+	}
+	for _, prn := range p.byLogin {
+		if prn == principalID {
+			return nil
+		}
+	}
+	return auth.ErrIdentityRefused
+}
+
+// CheckHumanPrincipal is CheckPrincipal that refuses a principal kinds
+// names as non-human.
+func (p *relayPrincipals) CheckHumanPrincipal(ctx context.Context, principalID string) error {
+	if err := p.CheckPrincipal(ctx, principalID); err != nil {
+		return err
+	}
+	if kind, ok := p.kinds[principalID]; ok && kind != auth.KindHuman {
+		return fmt.Errorf("%w: %s is a %s principal", auth.ErrIdentityRefused, principalID, kind)
+	}
+	return nil
 }
 
 // The relay resolves the human's principal the way authentication does, and
@@ -470,6 +502,14 @@ func TestSurfaceRelay_RecordsHumanAndSurfacePrincipals(t *testing.T) {
 	}
 	if owner != "prn_ALICE" || actor != "prn_ALICE" || via != "prn_TELEGRAM" {
 		t.Fatalf("owner=%q actor=%q via=%q; want the human, and the surface as via", owner, actor, via)
+	}
+	// The read payload carries the owner's principal (mctl-agents#668).
+	if got := body["work_item"].(map[string]any)["owner_principal_id"]; got != "prn_ALICE" {
+		t.Errorf("created owner_principal_id = %v, want prn_ALICE", got)
+	}
+	if code, read := e.do("telegram", "GET", "/api/v1/work-items/"+id, nil, SurfaceActorHeader, "4242"); code != http.StatusOK ||
+		read["work_item"].(map[string]any)["owner_principal_id"] != "prn_ALICE" {
+		t.Errorf("read = %d %v, want owner_principal_id prn_ALICE", code, read)
 	}
 	var audited bool
 	for _, a := range e.audit.List(100) {

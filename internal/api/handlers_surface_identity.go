@@ -17,7 +17,9 @@ package api
 // Surface identity links (mctl-api#350). A human links a surface-native
 // identity to themself by possession proof on both sides:
 //
-//  1. The human (GitHub-authenticated) asks for a challenge for one surface.
+//  1. The human (authenticated directly) asks for a challenge for one
+//     surface. A GitHub-verified human is linked as github:<login>, a human
+//     with no GitHub identity as its canonical principal (mctl-api#646).
 //  2. The code travels through that surface (the human sends it to the bot).
 //  3. That surface's own principal redeems it with the external id it saw.
 //
@@ -28,12 +30,14 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -63,7 +67,10 @@ const (
 	sidCodeNotFound         = "link_not_found"
 	sidCodeRouteNotAllowed  = "surface_route_not_allowed"
 	sidCodeActorNotAccepted = "actor_not_accepted"
-	sidMaxBodyBytes         = 4 << 10
+	// sidCodePrincipalModeRequired refuses a prn_ link outside principal
+	// mode (mctl-api#646).
+	sidCodePrincipalModeRequired = "principal_mode_required"
+	sidMaxBodyBytes              = 4 << 10
 )
 
 // surfaceRoute is one route a surface principal may call. relay routes run
@@ -79,10 +86,14 @@ type surfaceRoute struct {
 // else answers 403 before any handler runs: a surface credential is a narrow
 // relay capability, not an API key. Relay is opt-in per route, here.
 var surfaceRoutes = []surfaceRoute{
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/surface-principals/workspace-access/[^/]+$`), false},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-identities/redeem$`), false},
 	// The portal surface resolves a tenant creator's GitHub login to a
 	// principal (mctl-api#377); the handler refuses every other surface.
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-principals/github$`), false},
+	// The portal surface resolves a self-service customer by the ZITADEL
+	// ID token the customer signed in with (mctl-web site onboarding, C0).
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-principals/zitadel$`), false},
 	// Who the API resolved the relayed call to (mctl-api#376 D3): the
 	// surface as actor, the linked human as subject.
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/identity/self$`), true},
@@ -224,6 +235,9 @@ func (h *Handlers) relaySubject(w http.ResponseWriter, r *http.Request, acting *
 		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not resolve the surface identity", nil)
 		return nil, false
 	}
+	if surfaceid.IsPrincipalID(link.Principal) {
+		return h.relayPrincipalSubject(w, r, acting, link, refuse)
+	}
 	login, isGitHub := strings.CutPrefix(link.Principal, "github:")
 	if !isGitHub || login == "" {
 		return refuse(sidCodeNotFound, "the link does not name a GitHub principal")
@@ -266,22 +280,191 @@ func (h *Handlers) relaySubject(w http.ResponseWriter, r *http.Request, acting *
 	return subject, true
 }
 
-// humanPrincipal is the principal a caller may link: a GitHub login proven
-// by authentication, and nothing else (not the service principal, not a
-// surface, not a Dex username).
-func humanPrincipal(u *auth.User) (string, bool) {
+// relayPrincipalSubject is relaySubject for a link that names a canonical
+// principal (mctl-api#646). The principal is the authority and the link's
+// recorded oidc: name is the subject's name. Unlike a github: link, a
+// principal that cannot be checked is refused (503), never relayed without
+// one: the principal is all this subject is.
+func (h *Handlers) relayPrincipalSubject(w http.ResponseWriter, r *http.Request, acting *auth.User, link *surfaceid.Link,
+	refuse func(code, msg string) (*auth.User, bool)) (*auth.User, bool) {
+	surface, _ := acting.Surface()
+	if !h.principalMode() {
+		// The subject's tenants come from its principal, and only principal
+		// mode resolves them (authorizeSubject is a no-op outside it). The
+		// challenge refuses a prn_ link outside principal mode too, but a
+		// link outlives a TENANT_AUTHZ_MODE rollback, and a challenge minted
+		// before one can still be redeemed after it.
+		return refuse(sidCodePrincipalModeRequired, "a link held by a canonical principal relays only with TENANT_AUTHZ_MODE=principal")
+	}
+	name, ok := strings.CutPrefix(link.Subject, "oidc:")
+	if !ok || name == "" {
+		return refuse(sidCodeNotFound, "the link does not name a human principal")
+	}
+	subject := auth.NewRelayedPrincipalUser(name, link.Principal, acting)
+	if subject == nil {
+		return refuse(sidCodeNotFound, "the link does not name a human principal")
+	}
+	if err := auth.AttachPrincipal(r.Context(), h.opts.Principals, subject); err != nil {
+		switch {
+		case errors.Is(err, auth.ErrPrincipalDisabled):
+			return refuse(sidCodePrincipalDisabled, "the principal linked to this "+surface+" identity is disabled")
+		case errors.Is(err, auth.ErrIdentityRefused):
+			return refuse(sidCodeIdentityRefused, "the principal linked to this "+surface+" identity is refused")
+		}
+		slog.Error("surface relay: linked principal could not be checked", "principal", link.Principal, "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not verify the linked principal", nil)
+		return nil, false
+	}
+	if subject.PrincipalID() != link.Principal {
+		// AttachPrincipal keeps a token principal or clears it while
+		// returning an error (refused above); kept so a change there cannot
+		// swap the relayed principal.
+		return refuse(sidCodeNotFound, "the link does not name a resolvable principal")
+	}
+	// The subject is built as a human. Upstream, humanPrincipal links only a
+	// human and the redeem's mirrorLink refuses a non-human prn_, and a
+	// principal's kind never changes; checked here as well because this is
+	// where the link turns into a human subject. A github: link needs no
+	// such check: its principal is resolved from a GitHub identity, which
+	// the resolver only ever provisions as a human. The check shares
+	// CheckPrincipal's cache entry, so it is normally no second read.
+	if code, err := checkHumanPrincipal(r.Context(), h.opts.Principals, link.Principal); err != nil {
+		if code != "" {
+			return refuse(code, "the principal linked to this "+surface+" identity is not an active human")
+		}
+		slog.Error("surface relay: linked principal's kind could not be checked", "principal", link.Principal, "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not verify the linked principal", nil)
+		return nil, false
+	}
+	if err := h.authorizeSubject(subject); err != nil {
+		slog.Warn("surface relay: tenant access undecided", "subject", link.Subject, "principal", link.Principal, "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "cannot determine the relayed subject's tenant access right now", nil)
+		return nil, false
+	}
+	return subject, true
+}
+
+// checkHumanPrincipal asks the principal store whether prn is an active
+// human principal. On a definite no it returns the typed refusal code
+// (principal_disabled, identity_refused) with the error; an error with no
+// code means the store could not answer, for the caller to answer 503.
+func checkHumanPrincipal(ctx context.Context, pr auth.PrincipalResolver, prn string) (string, error) {
+	checker, ok := pr.(auth.HumanPrincipalChecker)
+	if !ok {
+		return "", errors.New("principal store cannot check a principal's kind")
+	}
+	err := checker.CheckHumanPrincipal(ctx, prn)
+	switch {
+	case errors.Is(err, auth.ErrPrincipalDisabled):
+		return sidCodePrincipalDisabled, err
+	case errors.Is(err, auth.ErrIdentityRefused):
+		return sidCodeIdentityRefused, err
+	}
+	return "", err
+}
+
+// errHolderUnresolved: the caller is a human acting directly, but who it
+// holds links as could not be read because the principal store did not
+// answer. Never read as "holds nothing": it is a 503.
+var errHolderUnresolved = errors.New("the caller's principal could not be resolved")
+
+// humanPrincipal is who a caller may link, acting directly: a GitHub login
+// proven by authentication as github:<login> (subject ""), or else a human
+// whose canonical principal authentication resolved, as that prn_ with its
+// request name principalOf(u) as subject (mctl-api#646). Never the service
+// principal, a surface, an agent, or a relayed or delegated subject.
+//
+// ok is false for a caller that is none of these. A human whose principal
+// authentication could not resolve (the store did not answer) is not that:
+// err is errHolderUnresolved then, for a 503 rather than a 403.
+func humanPrincipal(u *auth.User) (principal, subject string, ok bool, err error) {
 	if u.IsService() || u.ActingPrincipal() != "" {
 		// Nor a relayed subject: a link is made by the human directly.
-		return "", false
+		return "", "", false, nil
 	}
 	if _, isSurface := u.Surface(); isSurface {
-		return "", false
+		return "", "", false, nil
 	}
-	login, ok := u.GitHubLogin()
-	if !ok {
-		return "", false
+	if login, ok := u.GitHubLogin(); ok {
+		return "github:" + login, "", true, nil
 	}
-	return "github:" + login, true
+	// An agent, a service or a surface has an identity of another kind.
+	id, ok := u.Identity()
+	if !ok || id.Kind != auth.KindHuman {
+		return "", "", false, nil
+	}
+	pid := u.PrincipalID()
+	if !auth.ValidPrincipalID(pid) {
+		if pid == "" && u.PrincipalUnresolved() {
+			return "", "", false, errHolderUnresolved
+		}
+		return "", "", false, nil
+	}
+	return pid, principalOf(u), true, nil
+}
+
+// refuseNonHuman answers a caller humanPrincipal did not accept: 503 when
+// its principal could not be resolved, 403 human_principal_required with
+// msg otherwise.
+func refuseNonHuman(w http.ResponseWriter, err error, msg string) {
+	if err != nil {
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "the caller's principal could not be resolved; try again", nil)
+		return
+	}
+	writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, msg, nil)
+}
+
+// ownHolders is every holder form a human acting directly holds links under.
+// One human can sign in through GitHub and through ZITADEL onto one principal
+// (mctl-api#646), and a link made in either session stays theirs to list and
+// revoke from the other:
+//   - a GitHub session (primary github:<login>) also holds its resolved
+//     prn_; a principal authentication could not resolve is an error, not
+//     "no prn_ links";
+//   - a prn_ session also holds github:<login> for every live GitHub
+//     identity of that principal, read from the principal store. A failed
+//     or impossible read is an error, never "no github: links". A GitHub
+//     identity whose login the store no longer knows (display "": the
+//     login moved to another GitHub account) holds nothing under it.
+//
+// On error the holders returned are the ones known (primary, at least), and
+// the set is incomplete: a caller may act on a link one of them holds, but
+// must never read "not among them" as "not the caller's".
+//
+// The derived github:<display> holder matches a link's holder exactly, while
+// the principal store compares logins case-insensitively. Both come from
+// GitHub's own spelling of the login (the session's on the link, the last
+// provisioning's in display), so they differ only across a case-only rename
+// that no sign-in has yet recorded.
+func (h *Handlers) ownHolders(ctx context.Context, u *auth.User, primary string) ([]string, error) {
+	owners := []string{primary}
+	if strings.HasPrefix(primary, "github:") {
+		pid := u.PrincipalID()
+		switch {
+		case auth.ValidPrincipalID(pid):
+			owners = append(owners, pid)
+		case u.PrincipalUnresolved():
+			return owners, errHolderUnresolved
+		}
+		return owners, nil
+	}
+	if h.identityLink == nil || h.identityLink.opts.Store == nil {
+		return owners, errors.New("principal store not configured; cannot read the principal's GitHub identities")
+	}
+	ids, err := h.identityLink.opts.Store.Identities(ctx, primary)
+	if err != nil {
+		return owners, err
+	}
+	for i := range ids {
+		x := &ids[i]
+		if x.Provider != auth.ProviderGitHub || x.RevokedAt != nil || x.Display == "" {
+			continue
+		}
+		if holder := "github:" + x.Display; !slices.Contains(owners, holder) {
+			owners = append(owners, holder)
+		}
+	}
+	return owners, nil
 }
 
 func (h *Handlers) surfaceIdentityUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
@@ -305,11 +488,16 @@ var forbiddenLinkFields = []string{
 // decodeSurfaceBody decodes a small JSON body, refusing identity fields and
 // unknown keys.
 func decodeSurfaceBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, sidMaxBodyBytes))
+	return decodeSurfaceBodyLimit(w, r, v, sidMaxBodyBytes)
+}
+
+// decodeSurfaceBodyLimit is decodeSurfaceBody with its own size limit.
+func decodeSurfaceBodyLimit(w http.ResponseWriter, r *http.Request, v any, limit int) bool {
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, int64(limit)))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeErrorCode(w, http.StatusRequestEntityTooLarge, sidCodeInvalid, "request body exceeds "+strconv.Itoa(sidMaxBodyBytes)+" bytes", nil)
+			writeErrorCode(w, http.StatusRequestEntityTooLarge, sidCodeInvalid, "request body exceeds "+strconv.Itoa(limit)+" bytes", nil)
 			return false
 		}
 		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid, "could not read the body", nil)
@@ -337,6 +525,27 @@ func decodeSurfaceBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
+// holderAuditParams are the audit keys naming a link's holder, the same in
+// every surface_identity.* event (mctl-api#663): principal is the holder
+// (github:<login> or prn_…), holder_subject the oidc: name a prn_ holder
+// acts under (absent for a github: holder). linked and revoked also keep
+// their older key subject, which has always meant the holder there.
+func holderAuditParams(principal, subject string) map[string]string {
+	params := map[string]string{"principal": principal}
+	if subject != "" {
+		params["holder_subject"] = subject
+	}
+	return params
+}
+
+// linkAuditParams are a link's audit keys for linked and revoked.
+func linkAuditParams(l *surfaceid.Link) map[string]string {
+	params := holderAuditParams(l.Principal, l.Subject)
+	params["subject"] = l.Principal
+	params["link_id"], params["surface"], params["external_id"] = l.ID, l.Surface, l.ExternalID
+	return params
+}
+
 func (h *Handlers) auditSurfaceIdentity(r *http.Request, user *auth.User, op, status string, params map[string]string) {
 	params["acting_principal"] = user.ID
 	h.logAudit(r, audit.Entry{
@@ -354,10 +563,17 @@ func (h *Handlers) CreateSurfaceChallenge(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	principal, ok := humanPrincipal(user)
+	principal, subject, ok, err := humanPrincipal(user)
 	if !ok {
-		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly,
-			"only a human authenticated by GitHub can request a link challenge", nil)
+		refuseNonHuman(w, err, "only a human acting directly, with a resolved principal, can request a link challenge")
+		return
+	}
+	if subject != "" && !h.principalMode() {
+		// A prn_ link relays a subject whose tenants come from its
+		// principal, and only principal mode resolves them: outside it the
+		// link would be made and then refused on every tenant-scoped call.
+		writeErrorCode(w, http.StatusForbidden, sidCodePrincipalModeRequired,
+			"linking an account without a GitHub login requires TENANT_AUTHZ_MODE=principal", nil)
 		return
 	}
 	var body struct {
@@ -370,8 +586,16 @@ func (h *Handlers) CreateSurfaceChallenge(w http.ResponseWriter, r *http.Request
 		writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid, "surface must be telegram or portal", nil)
 		return
 	}
-	c, err := h.opts.SurfaceIdentities.CreateChallenge(r.Context(), principal, body.Surface)
+	c, err := h.opts.SurfaceIdentities.CreateChallenge(r.Context(), principal, subject, body.Surface)
 	switch {
+	case errors.Is(err, surfaceid.ErrInvalid):
+		// A name the link cannot record (validHolder); the surface was
+		// checked above. The only refusal of a well-formed human here, so
+		// it is logged: the answer alone reads like a non-human's.
+		slog.Warn("surface challenge: the caller's name cannot be recorded on a link",
+			"principal", principal, "holder_subject", subject, "error", err)
+		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "this account cannot hold a surface link", nil)
+		return
 	case errors.Is(err, surfaceid.ErrTooManyChallenges):
 		writeErrorCode(w, http.StatusTooManyRequests, sidCodeTooMany, "too many open challenges; redeem or wait for one to expire", nil)
 		return
@@ -381,8 +605,9 @@ func (h *Handlers) CreateSurfaceChallenge(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// The code is never audited or logged: it is a bearer secret until used.
-	h.auditSurfaceIdentity(r, user, "surface_identity.challenge_created", "succeeded",
-		map[string]string{"principal": principal, "surface": c.Surface, "challenge_id": c.ID})
+	params := holderAuditParams(principal, subject)
+	params["surface"], params["challenge_id"] = c.Surface, c.ID
+	h.auditSurfaceIdentity(r, user, "surface_identity.challenge_created", "succeeded", params)
 	writeJSON(w, http.StatusCreated, map[string]any{"challenge": c})
 }
 
@@ -439,46 +664,79 @@ func (h *Handlers) RedeemSurfaceChallenge(w http.ResponseWriter, r *http.Request
 	if old := link.Retired; old != nil {
 		// Retiring someone's expired link is a state change like any
 		// revoke: it leaves a trace.
-		h.auditSurfaceIdentity(r, user, "surface_identity.revoked", "succeeded", map[string]string{
-			"link_id": old.ID, "surface": old.Surface, "external_id": old.ExternalID,
-			"subject": old.Principal, "revoked_by": old.RevokedBy,
-		})
+		retired := linkAuditParams(old)
+		retired["revoked_by"] = old.RevokedBy
+		h.auditSurfaceIdentity(r, user, "surface_identity.revoked", "succeeded", retired)
 	}
-	params["link_id"] = link.ID
-	params["subject"] = link.Principal
-	h.auditSurfaceIdentity(r, user, "surface_identity.linked", "succeeded", params)
+	h.auditSurfaceIdentity(r, user, "surface_identity.linked", "succeeded", linkAuditParams(link))
 	writeJSON(w, http.StatusCreated, map[string]any{"link": link})
 }
 
 // ListSurfaceIdentities handles GET /api/v1/surface-identities: the caller's
-// own links; an admin may pass ?principal=github:<login>.
+// own links; an admin may pass ?principal=github:<login> or ?principal=prn_….
 func (h *Handlers) ListSurfaceIdentities(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.surfaceIdentityUser(w, r)
 	if !ok {
 		return
 	}
-	// Same reading as revoke: a GitHub-proven human first, and only then,
+	// Same reading as revoke: a human acting directly first, and only then,
 	// if an admin, anyone's links.
-	own, ok := humanPrincipal(user)
+	own, _, ok, err := humanPrincipal(user)
 	if !ok {
-		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only a human authenticated by GitHub has links", nil)
+		refuseNonHuman(w, err, "only a human acting directly has links")
 		return
 	}
 	principal := r.URL.Query().Get("principal")
-	switch {
-	case principal == "":
-		principal = own
-	case principal != own && !user.IsAdmin():
-		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only an admin may list another principal's links", nil)
-		return
+	holders := []string{principal}
+	// An admin naming a holder may list anyone's: the caller's own holder
+	// set is not needed, so a principal store that cannot answer does not
+	// stand in the way.
+	if principal == "" || !user.IsAdmin() {
+		// As for revoke, an incomplete set still serves a named holder the
+		// caller is known to be: that holder's list is whole, and reading
+		// it never consults the unknown part of the set.
+		owners, incomplete := h.ownHolders(r.Context(), user, own)
+		unknown := func() {
+			slog.Error("surface identity list: the caller's holders could not be read", "principal", own, "error", incomplete)
+			writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not determine which links are the caller's", nil)
+		}
+		switch {
+		case principal == "" && incomplete != nil:
+			// The merged list would be short: never listed as if whole.
+			unknown()
+			return
+		case principal == "":
+			principal, holders = own, owners
+		case slices.Contains(owners, principal):
+			// A holder the caller is known to be.
+		case incomplete != nil:
+			// "Not among the known holders" is unknown, not "not the
+			// caller's": 503, never 403.
+			unknown()
+			return
+		default:
+			writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only an admin may list another principal's links", nil)
+			return
+		}
 	}
-	links, err := h.opts.SurfaceIdentities.Links(r.Context(), principal)
-	if err != nil {
-		slog.Error("surface identity list failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "could not list links")
-		return
+	links := []surfaceid.Link{}
+	for _, holder := range holders {
+		held, err := h.opts.SurfaceIdentities.Links(r.Context(), holder)
+		if err != nil {
+			slog.Error("surface identity list failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "could not list links")
+			return
+		}
+		links = append(links, held...)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"principal": principal, "links": links})
+	if len(holders) > 1 {
+		// Each holder's list is newest first; keep the merged one so.
+		slices.SortStableFunc(links, func(a, b surfaceid.Link) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	}
+	// principal is the holder form asked for: the session's own
+	// (humanPrincipal) when none was named. holders is every holder whose
+	// links are listed, and each link names its own holder.
+	writeJSON(w, http.StatusOK, map[string]any{"principal": principal, "holders": holders, "links": links})
 }
 
 // RevokeSurfaceIdentity handles POST /api/v1/surface-identities/{id}/revoke:
@@ -489,13 +747,26 @@ func (h *Handlers) RevokeSurfaceIdentity(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	by, human := humanPrincipal(user)
+	by, _, human, err := humanPrincipal(user)
 	if !human {
-		writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only the linked human or a human admin can revoke a link", nil)
+		refuseNonHuman(w, err, "only the linked human or a human admin can revoke a link")
 		return
 	}
-	link, err := h.opts.SurfaceIdentities.Revoke(r.Context(), chi.URLParam(r, "id"), by, user.IsAdmin())
+	// An admin may revoke any link, so it needs no holder set. Anyone else
+	// may revoke a link held by a holder it is known to be even while the
+	// rest of its holders cannot be read: revoke is what a human reaches for
+	// when a surface account is compromised. Only "not among the known
+	// holders" is then unknown rather than 404.
+	holders, incomplete := []string{by}, error(nil)
+	if !user.IsAdmin() {
+		holders, incomplete = h.ownHolders(r.Context(), user, by)
+	}
+	link, err := h.opts.SurfaceIdentities.RevokeAs(r.Context(), chi.URLParam(r, "id"), by, holders, user.IsAdmin())
 	switch {
+	case errors.Is(err, surfaceid.ErrLinkNotFound) && incomplete != nil:
+		slog.Error("surface identity revoke: the caller's holders could not be read", "principal", by, "error", incomplete)
+		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not determine which links are the caller's", nil)
+		return
 	case errors.Is(err, surfaceid.ErrLinkNotFound):
 		writeErrorCode(w, http.StatusNotFound, sidCodeNotFound, "link not found", nil)
 		return
@@ -504,7 +775,6 @@ func (h *Handlers) RevokeSurfaceIdentity(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "could not revoke the link")
 		return
 	}
-	h.auditSurfaceIdentity(r, user, "surface_identity.revoked", "succeeded",
-		map[string]string{"link_id": link.ID, "surface": link.Surface, "external_id": link.ExternalID, "subject": link.Principal})
+	h.auditSurfaceIdentity(r, user, "surface_identity.revoked", "succeeded", linkAuditParams(link))
 	writeJSON(w, http.StatusOK, map[string]any{"link": link})
 }

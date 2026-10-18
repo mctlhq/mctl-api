@@ -10,7 +10,8 @@ import (
 )
 
 // The fixtures in testdata/ were sealed by mctl-agents' own seal_request
-// (orchestrator/human_input.py at origin/main 7ed8498) with
+// (orchestrator/human_input.py at origin/main 7ed8498; principal_respondent
+// at 2cda4de, which reproduces every earlier fixture byte for byte) with
 // testdata/gen_fixtures.py. Verifying them here is the cross-language
 // guarantee: if canonicalJSON drifts from Python's json.dumps by one byte,
 // these hashes stop matching.
@@ -31,6 +32,8 @@ func TestParseRequest_VerifiesPythonSealedRequests(t *testing.T) {
 		// question_hash normalisation edges; see gen_fixtures.py.
 		"casefold_edges":  "hir-f543f28e8926bf7f",
 		"two_respondents": "hir-88a9e66f157feb60",
+		// A "principal:prn_…" actor_ref (mctl-api#629).
+		"principal_respondent": "hir-d73cb7abd994f364",
 	} {
 		r, err := ParseRequest(loadFixture(t, name))
 		if err != nil {

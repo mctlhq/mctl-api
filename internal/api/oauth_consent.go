@@ -18,7 +18,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -143,45 +142,32 @@ func (h *Handlers) requestConsent(w http.ResponseWriter, r *http.Request, c auth
 		Name: consentCookie, Value: consentHash(token), Path: "/", MaxAge: 300,
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 	})
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
-	w.WriteHeader(http.StatusOK)
-	_ = consentPage.Execute(w, consentPageData{
-		Token: token, ClientName: name, ClientID: c.ClientID, RedirectHost: redirect.Host, Account: c.Login,
-	})
+	// A customer or a ZITADEL-only human in principal mode signs in with no
+	// GitHub login; the page then names the principal instead.
+	account := c.Login
+	if account == "" {
+		account = c.PrincipalID
+	}
+	renderShellPage(w, http.StatusOK, "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", consentPage,
+		shellData{Title: "Authorize this application?", Lines: []string{
+			"An application is asking to access MCTL on your behalf.",
+			"Application: " + name,
+			"Client ID: " + c.ClientID,
+			"Returns to: " + redirect.Host,
+			"You are signed in as " + account + ". The application does not choose this account.",
+		}, Page: consentPageData{Token: token}})
 	return "consent_required"
 }
 
-type consentPageData struct {
-	Token, ClientName, ClientID, RedirectHost, Account string
-}
+type consentPageData struct{ Token string }
 
-// consentPage is static HTML with no external assets. html/template escapes
-// every field, client_name included.
-var consentPage = template.Must(template.New("consent").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Authorize application</title>
-<style>body{font-family:system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem}
-dl{background:#f5f5f5;padding:1rem;border-radius:.5rem}dt{font-weight:600;margin-top:.5rem}dd{margin:0;word-break:break-all}
-.acct{border-top:1px solid #ccc;margin-top:1.5rem;padding-top:1rem}button{font-size:1rem;padding:.5rem 1.25rem;margin-right:.5rem}</style>
-</head><body>
-<h1>Authorize this application?</h1>
-<p>An application is asking to access mctl on your behalf.</p>
-<dl>
-<dt>Application</dt><dd>{{.ClientName}}</dd>
-<dt>Client ID</dt><dd>{{.ClientID}}</dd>
-<dt>Returns to</dt><dd>{{.RedirectHost}}</dd>
-</dl>
-<p class="acct">You are signed in as <strong>{{.Account}}</strong>. The application does not choose this account.</p>
-<form method="post" action="/oauth/consent">
+// consentPage is drawn in the page shell, which escapes every line,
+// client_name included.
+var consentPage = shellPage("consent", `<form class="actions" method="post" action="/oauth/consent">
 <input type="hidden" name="token" value="{{.Token}}">
 <button type="submit" name="decision" value="approve">Allow</button>
-<button type="submit" name="decision" value="deny">Deny</button>
-</form>
-</body></html>
-`))
+<button class="secondary" type="submit" name="decision" value="deny">Deny</button>
+</form>`)
 
 // handleOAuthConsent takes the consent decision of the human who signed in.
 //

@@ -1,5 +1,196 @@
 # Changelog
 
+## [4.99.1](https://github.com/mctlhq/mctl-api/compare/4.99.0...4.99.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **surface-identity:** serve a known own holder when the set is incomplete ([0a0e503](https://github.com/mctlhq/mctl-api/commit/0a0e5038784c20c08ac58cbdfdfcb8aeba128936))
+
+## [4.99.0](https://github.com/mctlhq/mctl-api/compare/4.98.0...4.99.0) (2026-10-17)
+
+
+### Features
+
+* **agents:** issue-651-feat-finops-expose-model-usage-devloop-c ([929d1d9](https://github.com/mctlhq/mctl-api/commit/929d1d96c2821a1aa0ae7bf289772654492d390d))
+* **agents:** issue-651-feat-finops-expose-model-usage-devloop-c ([f1b0d4a](https://github.com/mctlhq/mctl-api/commit/f1b0d4abe280a6e4936a8cf51016d4c38c0f5287))
+
+## [4.98.0](https://github.com/mctlhq/mctl-api/compare/4.97.0...4.98.0) (2026-10-17)
+
+
+### Features
+
+* **agents:** issue-489-authz-decide-tenant-roles-for-work-items ([2e226e1](https://github.com/mctlhq/mctl-api/commit/2e226e133bcd4c747cd4f9d52bfe4921f1725279))
+
+## [4.97.0](https://github.com/mctlhq/mctl-api/compare/4.96.1...4.97.0) (2026-10-17)
+
+
+### Features
+
+* **approval:** pass the grant's content digest to the approve workflow ([a9cf6b1](https://github.com/mctlhq/mctl-api/commit/a9cf6b16c789a276dbe7bda008a6c2d2cf7d430c))
+
+## [4.96.1](https://github.com/mctlhq/mctl-api/compare/4.96.0...4.96.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **surface-identity:** close the P3 follow-ups on prn_ links ([402a4de](https://github.com/mctlhq/mctl-api/commit/402a4dee6f6330a9d2df824218e772b00d588d32))
+* **surface-identity:** keep revoke and admin reads off unknown holders ([8efdfd5](https://github.com/mctlhq/mctl-api/commit/8efdfd517313a88c95718c56674d1d65125be306)), closes [#663](https://github.com/mctlhq/mctl-api/issues/663)
+
+## [4.96.0](https://github.com/mctlhq/mctl-api/compare/4.95.0...4.96.0) (2026-10-17)
+
+
+### Features
+
+* **operations:** declare the investigate owner principal param ([9b33b41](https://github.com/mctlhq/mctl-api/commit/9b33b4128fec8c4b54a1e8cf704bd41098b34632))
+* **operations:** declare the investigate owner principal param ([a1a25f2](https://github.com/mctlhq/mctl-api/commit/a1a25f20b297e8a127ea83a49bfa16d65d37f4bb))
+
+## [4.95.0](https://github.com/mctlhq/mctl-api/compare/4.94.1...4.95.0) (2026-10-17)
+
+
+### Features
+
+* **surface-identity:** let ZITADEL-only humans create surface links ([9300d53](https://github.com/mctlhq/mctl-api/commit/9300d534312322d83aacb552dfd22953475cdfa2))
+* **surface-identity:** let ZITADEL-only humans create surface links ([66e8398](https://github.com/mctlhq/mctl-api/commit/66e8398424ecd92945467237de700a562ad8e74e)), closes [#646](https://github.com/mctlhq/mctl-api/issues/646)
+* **work-items:** return the owner's principal id on reads ([25556e6](https://github.com/mctlhq/mctl-api/commit/25556e600c837cf1ccb7f0b27e63cb4ea1756289))
+* **work-items:** return the owner's principal id on reads ([b44feb3](https://github.com/mctlhq/mctl-api/commit/b44feb3fb70cc48a7af5246f8ad6affc1ddc3800))
+
+
+### Bug Fixes
+
+* **surface-identity:** accept non-ASCII names on principal links ([9eeb373](https://github.com/mctlhq/mctl-api/commit/9eeb37314246a49f12660eca6de4470c4aa685b2))
+* **surface-identity:** keep prn_ links usable and reachable ([ae92318](https://github.com/mctlhq/mctl-api/commit/ae923185c9d00aecf7ff2a95902361402a3fa1c2))
+
+## [4.94.1](https://github.com/mctlhq/mctl-api/compare/4.94.0...4.94.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **deps:** bump google.golang.org/grpc to 1.83.2 ([4e33ba0](https://github.com/mctlhq/mctl-api/commit/4e33ba062b8a5d9d5e4efa549a3a598c93418b49))
+* **deps:** bump google.golang.org/grpc to 1.83.2 ([1eeccb8](https://github.com/mctlhq/mctl-api/commit/1eeccb84078edd576d7de3024dad95c218ed7326))
+* **principals:** keep the last admin in MergePrincipals ([79d4feb](https://github.com/mctlhq/mctl-api/commit/79d4febd21c5b4d2baf83405288821a6085a0839))
+* **principals:** keep the last admin in MergePrincipals ([0676e43](https://github.com/mctlhq/mctl-api/commit/0676e438d49f4065aa1d3f94b0ab0ef3834680cd))
+
+## [4.94.0](https://github.com/mctlhq/mctl-api/compare/4.93.0...4.94.0) (2026-10-17)
+
+
+### Features
+
+* **oauth:** draw the sign-in and link pages in one MCTL shell ([d1832ee](https://github.com/mctlhq/mctl-api/commit/d1832ee7c3f3be79dd9ecf973a344f3ea4ad8c25))
+* **oauth:** draw the sign-in and link pages in one MCTL shell ([4ddb27a](https://github.com/mctlhq/mctl-api/commit/4ddb27ab4201360bc69a573e8252659b833dd373))
+
+## [4.93.0](https://github.com/mctlhq/mctl-api/compare/4.92.0...4.93.0) (2026-10-17)
+
+
+### Features
+
+* **dev-loop:** restart a DevLoop whose last run was abandoned ([3360fe3](https://github.com/mctlhq/mctl-api/commit/3360fe354472f2624a2877b7ecd9f3298f8f64fb))
+
+## [4.92.0](https://github.com/mctlhq/mctl-api/compare/4.91.0...4.92.0) (2026-10-17)
+
+
+### Features
+
+* **api:** admin endpoint to disable a human principal ([a977684](https://github.com/mctlhq/mctl-api/commit/a977684bc918436f0ed8faadf66f9959ca46d7b1))
+* **api:** admin endpoint to disable a human principal ([cadec85](https://github.com/mctlhq/mctl-api/commit/cadec85d19ad5af3dc7cbb8252805dc6d585bc8f))
+* **oauth:** offer customers a GitHub sign-in entry ([3676c09](https://github.com/mctlhq/mctl-api/commit/3676c091ff6af5d70217aec4ac3ed078ff795642))
+* **oauth:** offer customers a GitHub sign-in entry ([6a533d3](https://github.com/mctlhq/mctl-api/commit/6a533d372831b405177c744f62594a5022677ec3))
+* **unified-identity:** resolve surface actors and respondents by prn ([c9ed04c](https://github.com/mctlhq/mctl-api/commit/c9ed04c8dfabe69dface6bda1e5a3337d35074ab))
+* **unified-identity:** resolve surface actors and respondents by prn ([c72c452](https://github.com/mctlhq/mctl-api/commit/c72c45208a936f785141b546b364984b33cdcc36))
+* **zitadelhook:** allowlist new customers accounts by GitHub id ([df80207](https://github.com/mctlhq/mctl-api/commit/df802072de872218b9c49bdc3fd70ec28fc8db11))
+* **zitadelhook:** allowlist new customers accounts by GitHub id ([02deaf6](https://github.com/mctlhq/mctl-api/commit/02deaf6ac9852bc7a9efe4dd73bca105002ec8ed))
+
+
+### Bug Fixes
+
+* **api:** address [#649](https://github.com/mctlhq/mctl-api/issues/649) review on admin principal disable ([9e16900](https://github.com/mctlhq/mctl-api/commit/9e16900cd5714ef66e0a2bf761fb9b5775c5a2d6))
+* **oauth:** chooser hint covers returning customers ([ae4424b](https://github.com/mctlhq/mctl-api/commit/ae4424bd80711b2039744f06fbf51cd6a2958b17))
+* **oauth:** count customer sign-ins, scope the IdP id boot check ([d9d0f53](https://github.com/mctlhq/mctl-api/commit/d9d0f53305816501620019ace65208b54fb7ab06))
+* **oauth:** label customer sign-ins from the token's organization ([16267f3](https://github.com/mctlhq/mctl-api/commit/16267f3132971d411f6246be527af4dfc4d2b406))
+* **oauth:** label the account entry "Sign in with MCTL account" ([6fd69e1](https://github.com/mctlhq/mctl-api/commit/6fd69e14a21948bd638ea58a3c0c0f0ece4c9ad9))
+* **oauth:** match staff hint wording to the portal chooser ([b33f24d](https://github.com/mctlhq/mctl-api/commit/b33f24d3b1b4a5b4ec2d9d9567b281e3baeae8e2))
+* **oauth:** point staff and partners to the account button ([2e66225](https://github.com/mctlhq/mctl-api/commit/2e662250dc00ddcfa7539b3572979eaaf9b7c436))
+* **unified-identity:** document 503 for an unresolvable link owner ([cb4f80a](https://github.com/mctlhq/mctl-api/commit/cb4f80a64a6be5a38f463dd953d21629dd5885c0))
+
+## [4.91.0](https://github.com/mctlhq/mctl-api/compare/4.90.0...4.91.0) (2026-10-17)
+
+
+### Features
+
+* **agents:** issue-363-fix-roadmap-guard-eligible-dereference-a ([7b67d82](https://github.com/mctlhq/mctl-api/commit/7b67d82a344e6ef3993bd067e78f2480e6380045))
+* observe verified workspace access for the portal ([0744132](https://github.com/mctlhq/mctl-api/commit/0744132c997725c5367057526d19c9b463d871c3))
+* observe workspace readiness for the portal ([142c625](https://github.com/mctlhq/mctl-api/commit/142c625c4ce1f0157e993af67cde9a9f97ecd0df))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-363-fix-roadmap-guard-eligible-dereference-a ([8a23965](https://github.com/mctlhq/mctl-api/commit/8a239650cc7fac96a405364b16201be1f6a84e4d))
+* **agents:** address P1/P2 codex findings on issue-363-fix-roadmap-guard-eligible-dereference-a ([64f244b](https://github.com/mctlhq/mctl-api/commit/64f244b2168cbbca183080fd8fc4ae47a86717f5))
+* **agents:** address P1/P2 codex findings on issue-363-fix-roadmap-guard-eligible-dereference-a ([27fff9b](https://github.com/mctlhq/mctl-api/commit/27fff9be4802e8d6f56f251ebe5b10889329f93b))
+* **agents:** address P1/P2 codex findings on issue-363-fix-roadmap-guard-eligible-dereference-a ([7c6520d](https://github.com/mctlhq/mctl-api/commit/7c6520da08bdc689d1d34f419e49456d62aa7b12))
+
+## [4.90.0](https://github.com/mctlhq/mctl-api/compare/4.89.0...4.90.0) (2026-10-16)
+
+
+### Features
+
+* **auth:** resolve ZITADEL customers by their proven GitHub id ([5fd878a](https://github.com/mctlhq/mctl-api/commit/5fd878ac0be41e27a2e48c9be9ff658b5ac64576))
+* **auth:** resolve ZITADEL customers by their proven GitHub id ([f266b3d](https://github.com/mctlhq/mctl-api/commit/f266b3d04373aadcb57f9bc2de868be0c8135443))
+* **helm:** optional envFrom Secrets beyond the two fixed slots ([72cc1e8](https://github.com/mctlhq/mctl-api/commit/72cc1e81de896ca09942a04c8d9d091c8a5f4277))
+* **helm:** optional envFrom Secrets beyond the two fixed slots ([cdb82fd](https://github.com/mctlhq/mctl-api/commit/cdb82fd250c46f380d953ac7eb1f08e5b78a9a32))
+
+
+### Bug Fixes
+
+* **auth:** close the last review nits on customer resolution ([c1e3eca](https://github.com/mctlhq/mctl-api/commit/c1e3ecaac0dbee7873da1521a7591ebd62a5ffe3))
+* **auth:** refuse a disabled customer principal on every path ([3ab6c1e](https://github.com/mctlhq/mctl-api/commit/3ab6c1e3a88701cdbd6a586bbd648188e3212ecb))
+
+## [4.89.0](https://github.com/mctlhq/mctl-api/compare/4.88.1...4.89.0) (2026-10-15)
+
+
+### Features
+
+* **zitadel:** identity hook for the customers org ([ae4ed96](https://github.com/mctlhq/mctl-api/commit/ae4ed9631dc0f12b6fdd71344b2e5a7d88c40f80))
+* **zitadel:** identity hook for the customers org ([6df13cc](https://github.com/mctlhq/mctl-api/commit/6df13cc97be82638342eca1f635fd27d79128c61))
+
+
+### Bug Fixes
+
+* **zitadel:** close review gaps in the identity hook ([b7998e3](https://github.com/mctlhq/mctl-api/commit/b7998e37327352e4e9dbd6ddaff42ac662e93e8e))
+* **zitadel:** fail closed on members without a userId ([c155008](https://github.com/mctlhq/mctl-api/commit/c15500886ce63d09146f16d8bad4d0a6dd863ba9))
+* **zitadel:** pin github_id and github_login after creation ([495ac19](https://github.com/mctlhq/mctl-api/commit/495ac19f7470e33a91a2e1fec056f811182a9073))
+
+## [4.88.1](https://github.com/mctlhq/mctl-api/compare/4.88.0...4.88.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **erpact:** map sites on erpact.online back to their short names ([b3c7b15](https://github.com/mctlhq/mctl-api/commit/b3c7b154500fb52af99e16a6d3403396e51caac3))
+* **erpact:** map sites on erpact.online back to their short names ([c78dc85](https://github.com/mctlhq/mctl-api/commit/c78dc85b1074c109198f9890887cdd2e9829985d))
+
+## [4.88.0](https://github.com/mctlhq/mctl-api/compare/4.87.0...4.88.0) (2026-10-13)
+
+
+### Features
+
+* **api:** audit and gate the legacy approver relay ([#571](https://github.com/mctlhq/mctl-api/issues/571)) ([48140e1](https://github.com/mctlhq/mctl-api/commit/48140e1d8ab027b82f7596a73d6ee20a2ec68598))
+* **api:** audit and gate the legacy approver relay ([#571](https://github.com/mctlhq/mctl-api/issues/571)) ([4df8488](https://github.com/mctlhq/mctl-api/commit/4df84888728baca44d12dff6dd70b680c756b8f9))
+* **api:** let a DevLoop run approve through its human's aar_ grant ([2f9dc6e](https://github.com/mctlhq/mctl-api/commit/2f9dc6e6f6cb4d6ff7023368c77aefd60764482a))
+* **api:** let a DevLoop run approve through its human's aar_ grant ([55f168c](https://github.com/mctlhq/mctl-api/commit/55f168ca8609edc2cd8df5c671fab576b5b47f6e)), closes [#571](https://github.com/mctlhq/mctl-api/issues/571)
+* **api:** take the delegated subject from the grant's principal ([901d0e6](https://github.com/mctlhq/mctl-api/commit/901d0e64f474d2e751f2644592596cd3cf19fc77))
+* **api:** take the delegated subject from the grant's principal ([6efc0fa](https://github.com/mctlhq/mctl-api/commit/6efc0fafc032323e560d04176e64ba272b99f216))
+* **dev-loop:** approve a DevLoop through its we_-bound grant ([b8eb1a1](https://github.com/mctlhq/mctl-api/commit/b8eb1a1f68fdf451989e16283bedb391bfdccb80))
+* **dev-loop:** approve a DevLoop through its we_-bound grant ([d2f2c71](https://github.com/mctlhq/mctl-api/commit/d2f2c712e48a27f4557ed6023ac80a8bc2f0e3d1)), closes [#571](https://github.com/mctlhq/mctl-api/issues/571)
+
+
+### Bug Fixes
+
+* **api:** bind a DevLoop grant's target to its execution ([4e1fd5f](https://github.com/mctlhq/mctl-api/commit/4e1fd5fd6150012c2ec23edeba743f6381609389))
+* **api:** refuse an approval grant of another kind before validation ([74f397a](https://github.com/mctlhq/mctl-api/commit/74f397a83464fa51e3e10f8406351acd6eaf9d81))
+* count legacy approver relays and parse the flag strictly ([3d6d72a](https://github.com/mctlhq/mctl-api/commit/3d6d72aaf61703423b092214cc812336f8bf6b4e))
+* **dev-loop:** let the newest grant decide a DevLoop approval ([6311b05](https://github.com/mctlhq/mctl-api/commit/6311b05a3c35b24f5dfacbb6228c0761b7ea961e))
+* **dev-loop:** refuse approval over a denied, spent or expired grant ([dab23f3](https://github.com/mctlhq/mctl-api/commit/dab23f31a059814fb3ef680298c62d0594bbfc30))
+
 ## [4.87.0](https://github.com/mctlhq/mctl-api/compare/4.86.0...4.87.0) (2026-10-13)
 
 

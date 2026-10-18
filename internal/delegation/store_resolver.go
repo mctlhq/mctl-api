@@ -17,6 +17,7 @@ package delegation
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
@@ -157,14 +158,17 @@ func (s *StoreResolver) resolveWorkItem(ctx context.Context, ref string, bound a
 // resolveSurfaceLink binds a sil_ grant through work_item_surface_refs
 // (internal/workitems), the run token's own work item carrying a ref whose
 // (surface, actor_external_id) names this link -- a link has neither an
-// execution nor a work item id of its own. Its SubjectPrincipalID is left
-// "": the gate resolves and cross-checks it (design.md B2 step 10), because
-// a link row stores no principal id, only the mirrored identity does.
+// execution nor a work item id of its own. For a github: link its
+// SubjectPrincipalID is left "": the gate resolves and cross-checks it
+// (design.md B2 step 10), because that link stores no principal id, only
+// the mirrored identity does. A prn_ link (mctl-api#646) stores its
+// principal, so the grant carries it with the link's recorded oidc: name,
+// and a prn_ link without a well-formed name is ErrSubjectUnresolved.
 func (s *StoreResolver) resolveSurfaceLink(ctx context.Context, ref string, bound auth.AgentRun) (Grant, error) {
 	if s.links == nil || s.items == nil {
 		return Grant{}, ErrUnavailable
 	}
-	surface, externalID, principal, err := s.links.LinkByID(ctx, ref)
+	surface, externalID, principal, subject, err := s.links.LinkByID(ctx, ref)
 	if err != nil {
 		return Grant{}, surfaceLinkSourceErr(err)
 	}
@@ -174,6 +178,16 @@ func (s *StoreResolver) resolveSurfaceLink(ctx context.Context, ref string, boun
 	}
 	if !ok {
 		return Grant{}, ErrNotBound
+	}
+	if auth.ValidPrincipalID(principal) {
+		if name, ok := strings.CutPrefix(subject, "oidc:"); !ok || name == "" {
+			return Grant{}, ErrSubjectUnresolved
+		}
+		return Grant{
+			Ref: ref, Kind: KindSurfaceLink,
+			Subject: subject, SubjectPrincipalID: principal,
+			WorkItemID: bound.WorkItemID,
+		}, nil
 	}
 	return Grant{
 		Ref: ref, Kind: KindSurfaceLink,

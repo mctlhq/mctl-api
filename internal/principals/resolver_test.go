@@ -35,6 +35,7 @@ type fakeBackend struct {
 	err        error
 	provisions []auth.Identity
 	logins     []string
+	customers  []auth.Identity
 	// during runs inside Provision, while the resolver holds no lock.
 	during func()
 }
@@ -57,6 +58,13 @@ func (f *fakeBackend) Provision(_ context.Context, id auth.Identity) (*Principal
 	}
 	f.byIdentity[key] = p
 	return p, nil
+}
+
+// ResolveCustomer records the call and answers the principal of the
+// customer's GitHub id, as the store does once the link is in place.
+func (f *fakeBackend) ResolveCustomer(ctx context.Context, id auth.Identity) (*Principal, error) {
+	f.customers = append(f.customers, id)
+	return f.Provision(ctx, id.Customer.GitHubIdentity())
 }
 
 func (f *fakeBackend) Get(_ context.Context, id string) (*Principal, error) {
@@ -391,5 +399,59 @@ func TestResolverCheckPrincipal(t *testing.T) {
 	r.now = func() time.Time { return now }
 	if err := r.CheckPrincipal(ctx, "prn_B"); err != nil {
 		t.Fatalf("after FailureTTL: %v", err)
+	}
+}
+
+// CheckHumanPrincipal is CheckPrincipal that also refuses a principal of
+// another kind (mctl-api#663): a surface link's prn_ owner must be a human.
+func TestResolverCheckHumanPrincipal(t *testing.T) {
+	b := &fakeBackend{byIdentity: map[string]*Principal{
+		"github||1": {ID: "prn_H", Kind: auth.KindHuman, Status: StatusActive},
+		"github||2": {ID: "prn_S", Kind: auth.KindService, Status: StatusActive},
+		"github||3": {ID: "prn_D", Kind: auth.KindHuman, Status: StatusDisabled},
+	}}
+	r := newResolver(b, nil, false)
+	ctx := context.Background()
+	if err := r.CheckHumanPrincipal(ctx, "prn_H"); err != nil {
+		t.Fatalf("human: %v", err)
+	}
+	if err := r.CheckHumanPrincipal(ctx, "prn_S"); !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("service: %v, want ErrIdentityRefused", err)
+	}
+	if err := r.CheckPrincipal(ctx, "prn_S"); err != nil {
+		t.Fatalf("CheckPrincipal of an active service: %v, want no kind check", err)
+	}
+	if err := r.CheckHumanPrincipal(ctx, "prn_D"); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("disabled: %v, want ErrPrincipalDisabled", err)
+	}
+	b.err = errors.New("db down")
+	if err := r.CheckHumanPrincipal(ctx, "prn_X"); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("store error: %v, want ErrUnresolved", err)
+	}
+}
+
+// A customers-organization identity resolves through ResolveCustomer to the
+// principal of its GitHub id, never by provisioning the ZITADEL subject.
+func TestResolverRoutesCustomerIdentityByGitHubID(t *testing.T) {
+	b := &fakeBackend{}
+	r := newResolver(b, nil, false)
+	id := auth.Identity{
+		Provider: "zitadel", Issuer: "https://auth.example", Subject: "zsub-1", Display: "alice@mctl.ai", Kind: auth.KindHuman,
+		Customer: &auth.CustomerProof{GitHubID: "4242", GitHubLogin: "alice"},
+	}
+	got, err := r.ResolvePrincipal(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ResolvePrincipal: %v", err)
+	}
+	if want := "prn_github||4242"; got != want {
+		t.Fatalf("principal = %q, want the GitHub id's %q", got, want)
+	}
+	if len(b.customers) != 1 {
+		t.Fatalf("ResolveCustomer calls = %d, want 1", len(b.customers))
+	}
+	for _, p := range b.provisions {
+		if p.Provider == "zitadel" {
+			t.Fatalf("the ZITADEL subject was provisioned on its own: %+v", p)
+		}
 	}
 }

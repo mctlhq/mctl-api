@@ -420,6 +420,7 @@ func (s *Store) ActionApproval(ctx context.Context, id string) (*ActionApprovalR
 type ActionApprovalFilter struct {
 	State       string
 	ExecutionID string
+	ActionKind  string
 	RequestedBy string
 	Limit       int
 }
@@ -464,6 +465,9 @@ func (s *Store) ActionApprovals(ctx context.Context, f ActionApprovalFilter) ([]
 	}
 	if f.ExecutionID != "" {
 		where = append(where, "execution_id = "+arg(f.ExecutionID))
+	}
+	if f.ActionKind != "" {
+		where = append(where, "action_kind = "+arg(f.ActionKind))
 	}
 	if f.RequestedBy != "" {
 		where = append(where, "requested_by = "+arg(f.RequestedBy))

@@ -39,3 +39,22 @@ func TestParseWaveMaxAge(t *testing.T) {
 		}
 	}
 }
+
+func TestParseWaveCallTimeout(t *testing.T) {
+	for in, want := range map[string]time.Duration{
+		"":      3 * time.Second,
+		" ":     3 * time.Second,
+		"500ms": 500 * time.Millisecond,
+		" 8s ":  8 * time.Second,
+		"10s":   10 * time.Second,
+	} {
+		if got, err := parseWaveCallTimeout(in); err != nil || got != want {
+			t.Errorf("parseWaveCallTimeout(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"10", "30s", "0.2s", "0", "-1s", "soon"} {
+		if got, err := parseWaveCallTimeout(in); err == nil {
+			t.Errorf("parseWaveCallTimeout(%q) = %v, want an error", in, got)
+		}
+	}
+}

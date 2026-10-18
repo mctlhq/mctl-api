@@ -22,6 +22,7 @@ package temporalclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -157,10 +158,30 @@ func WorkflowIDForProposalRef(proposalRef string) (string, error) {
 // restarted and a running prior run is not errored on — both return that
 // same run's ID/run ID instead. (The Temporal default policies would
 // otherwise start a fresh run once the prior one closes, or error while one
-// is still running — mirror any change here in orchestrator/temporal/cli.py's
-// _connect/start, which uses the SDK default today.) Returns the workflow ID
-// and run ID.
+// is still running.) This route is stricter than mctl-agents'
+// orchestrator/temporal/start.py, whose CLI and intake-poller starts use
+// ALLOW_DUPLICATE_FAILED_ONLY so a Failed run stays restartable there; the
+// abandoned-run exception below is the same rule on both sides
+// (mctl-api#640). Returns the workflow ID and run ID.
 func (c *Client) StartDevLoopWorkflow(ctx context.Context, issueURL string) (workflowID, runID string, err error) {
+	return c.startDevLoop(ctx, issueURL, enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
+}
+
+// RestartAbandonedDevLoopWorkflow starts a new DevLoopWorkflow run on an
+// issue whose latest run closed — the caller has already established, via
+// DevLoopEnded, that the run was abandoned (mctl-api#640). It differs from
+// StartDevLoopWorkflow only in WorkflowIDReusePolicy ALLOW_DUPLICATE, which
+// is what lets a closed id start again; USE_EXISTING still absorbs a start
+// that races with a run already in progress instead of erroring.
+//
+// Temporal cannot make the reuse conditional on WHICH run closed, so this
+// method itself would restart any closed run: it must only ever be called
+// right after the caller observed an abandoned one.
+func (c *Client) RestartAbandonedDevLoopWorkflow(ctx context.Context, issueURL string) (workflowID, runID string, err error) {
+	return c.startDevLoop(ctx, issueURL, enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE)
+}
+
+func (c *Client) startDevLoop(ctx context.Context, issueURL string, reuse enumspb.WorkflowIdReusePolicy) (workflowID, runID string, err error) {
 	workflowID, err = WorkflowIDForIssueURL(issueURL)
 	if err != nil {
 		return "", "", err
@@ -168,13 +189,58 @@ func (c *Client) StartDevLoopWorkflow(ctx context.Context, issueURL string) (wor
 	run, err := c.temporal.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:                       workflowID,
 		TaskQueue:                TaskQueue,
-		WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
+		WorkflowIDReusePolicy:    reuse,
 		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	}, DevLoopWorkflowType, issueRef{IssueURL: issueURL})
 	if err != nil {
 		return "", "", fmt.Errorf("temporalclient: start workflow: %w", err)
 	}
 	return run.GetID(), run.GetRunID(), nil
+}
+
+// AbandonedEndedPrefix starts DevLoopResult.ended on every path where a run
+// ends because an operator abandoned it: mctl-agents'
+// orchestrator/temporal/workflows/dev_loop.py builds it as
+// f"{ABANDONED_ENDED_PREFIX}{reason}", with a non-empty fallback reason.
+// Keep the two byte-for-byte identical.
+const AbandonedEndedPrefix = "abandoned: "
+
+// DevLoopRunEnd is what a closed DevLoopWorkflow run's result says about how
+// it ended — the two DevLoopResult fields a restart decision needs.
+type DevLoopRunEnd struct {
+	// Ended is why the run ended, when it ended for a reason other than
+	// running the pipeline to the end ("abandoned: ...", "approval wait
+	// expired", ...). Empty on the full-pipeline path and on results
+	// recorded before mctl-agents#420 added the field.
+	Ended string
+	// Implemented is whether the run reached the implement step: the
+	// result's `implement` is present and not null. An abandon can arrive
+	// during or after implement (the merge watch), so "abandoned" alone does
+	// not mean nothing was done.
+	Implemented bool
+}
+
+// devLoopResultEnd decodes only the DevLoopResult fields DevLoopRunEnd
+// carries; Implement stays raw because only its presence matters.
+type devLoopResultEnd struct {
+	Ended     string          `json:"ended"`
+	Implement json.RawMessage `json:"implement"`
+}
+
+// DevLoopEnded reads how a closed DevLoopWorkflow run ended, from its result.
+// runID pins the read to the run the caller described, so a run started in
+// between cannot answer for it.
+//
+// Call it only on a run described as Completed: for any other closed status
+// there is no result, and Get returns the failure instead. A failed read or
+// an undecodable result is an error, never a zero DevLoopRunEnd.
+func (c *Client) DevLoopEnded(ctx context.Context, workflowID, runID string) (DevLoopRunEnd, error) {
+	var res devLoopResultEnd
+	if err := c.temporal.GetWorkflow(ctx, workflowID, runID).Get(ctx, &res); err != nil {
+		return DevLoopRunEnd{}, fmt.Errorf("temporalclient: read result of %s run %s: %w", workflowID, runID, err)
+	}
+	implemented := len(res.Implement) > 0 && string(res.Implement) != "null"
+	return DevLoopRunEnd{Ended: res.Ended, Implemented: implemented}, nil
 }
 
 // SignalApprove signals an already-running DevLoopWorkflow's approve

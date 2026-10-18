@@ -82,11 +82,12 @@ type Grant struct {
 	// SubjectPrincipalID is the grant's canonical principal id (prn_...).
 	// Never "" in a Grant this package returns for KindExecutionRequest,
 	// KindActionApproval or KindWorkItem -- an empty one is refused as
-	// ErrSubjectUnresolved before Resolve returns. For KindSurfaceLink it IS
-	// "": a surface link stores no principal id of its own (see the
-	// SurfaceLinkSource doc comment), and the caller (the gate,
-	// mctl-api#376 slice B2) resolves it from the mirrored identity and
-	// cross-checks it against Subject.
+	// ErrSubjectUnresolved before Resolve returns. For a KindSurfaceLink
+	// grant of a github: link it IS "": that link stores no principal id
+	// (see the SurfaceLinkSource doc comment), and the caller (the gate,
+	// mctl-api#376 slice B2) resolves it from the mirrored identity. A link
+	// that names a prn_ principal (mctl-api#646) is that principal, and
+	// Subject is its recorded oidc: name, exactly as for the other kinds.
 	SubjectPrincipalID string
 	// ExecutionID and WorkItemID are the grant's own binding scope: the
 	// execution or work item ANOTHER caller bound this grant to when it was
@@ -114,9 +115,9 @@ var (
 	// for a record id it does not own.
 	ErrNotBound = errors.New("delegation: grant is not bound to this run")
 	// ErrSubjectUnresolved is returned when a resolved grant's subject
-	// principal id is empty, or (for a github-namespaced check performed by
-	// the caller) not resolvable to a GitHub principal. There is
-	// deliberately no fallback to the adjacent principal string.
+	// principal id is empty. There is deliberately no fallback to the
+	// adjacent principal string: the caller takes the subject from the
+	// stored principal id (mctl-api#571 R9), whatever IdP it signed in with.
 	ErrSubjectUnresolved = errors.New("delegation: grant subject has no principal")
 	// ErrUnavailable is returned when a grant source is unconfigured or
 	// answers with anything other than "not found": a nil source, or a
@@ -170,7 +171,9 @@ type WorkItemSource interface {
 // binding comes from WorkItemSource.SurfaceRefBound and its principal id
 // from the caller's own mirror lookup (auth.AttachPrincipal); LinkByID
 // supplies only what a link DOES store: which surface-native identity it
-// names, and the (namespaced) principal string it was redeemed for.
+// names, the principal string it was redeemed for ("github:<login>", or
+// "prn_<ULID>" for a human with no GitHub identity, mctl-api#646), and
+// for a prn_ link the oidc: request name it recorded ("" otherwise).
 //
 // LinkByID returns surfaceid's own sentinels (ErrLinkNotFound,
 // ErrLinkRevoked, ErrLinkExpired) rather than this package's ErrNotBound:
@@ -180,7 +183,7 @@ type WorkItemSource interface {
 // imports internal/surfaceid, not the reverse, purely to classify these
 // three sentinels into ErrNotBound -- that direction carries no cycle.
 type SurfaceLinkSource interface {
-	LinkByID(ctx context.Context, id string) (surface, externalID, principal string, err error)
+	LinkByID(ctx context.Context, id string) (surface, externalID, principal, subject string, err error)
 }
 
 // boundTo reports whether rec is bound to run. A record that carries its

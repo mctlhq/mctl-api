@@ -2,6 +2,8 @@ package workitems
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -98,5 +100,28 @@ func TestActionApprovalRecordsPrincipalIDs(t *testing.T) {
 		decided_by_principal_id || '/' || decided_via_principal_id FROM action_approval_requests WHERE id=$1`, a.ID)
 	if len(got) != 1 || got[0] != "prn_AGENT/|prn_ROOT/prn_TELEGRAM" {
 		t.Fatalf("approval principals = %v", got)
+	}
+}
+
+// mctl-agents#668: every read of a work item carries the owner's recorded
+// principal, and an owner with none reads as absent, never as a guess.
+func TestWorkItemReadsCarryTheOwnerPrincipalID(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	w := open(t, s, CreateInput{Mutation: withPrincipals(as("github:alice"), "prn_ALICE", "")})
+	if w.OwnerPrincipalID != "prn_ALICE" {
+		t.Fatalf("created item owner principal = %q", w.OwnerPrincipalID)
+	}
+	got, err := s.Get(ctx, w.ID)
+	if err != nil || got.OwnerPrincipalID != "prn_ALICE" {
+		t.Fatalf("Get = %+v, %v", got, err)
+	}
+	none := open(t, s, CreateInput{Mutation: as("github:bob")})
+	raw, err := json.Marshal(none)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none.OwnerPrincipalID != "" || strings.Contains(string(raw), "owner_principal_id") {
+		t.Fatalf("an owner without a principal reads %q / %s", none.OwnerPrincipalID, raw)
 	}
 }

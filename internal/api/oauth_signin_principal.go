@@ -56,6 +56,12 @@ func (h *Handlers) signinPrincipal(w http.ResponseWriter, r *http.Request, id au
 		return "", ""
 	}
 	prn, err := h.opts.Principals.ResolvePrincipal(r.Context(), id)
+	return signinPrincipalResult(w, id, principalMode, prn, err)
+}
+
+// signinPrincipalResult is signinPrincipal's answer for a resolution that
+// has already run.
+func signinPrincipalResult(w http.ResponseWriter, id auth.Identity, principalMode bool, prn string, err error) (string, string) {
 	if err == nil && !auth.ValidPrincipalID(prn) {
 		// A resolver answering with no usable principal and no error has
 		// not resolved one: treat it like any other failed lookup.
@@ -82,6 +88,6 @@ func (h *Handlers) signinPrincipal(w http.ResponseWriter, r *http.Request, id au
 
 func renderSigninUnavailable(w http.ResponseWriter) {
 	renderOAuthPage(w, http.StatusServiceUnavailable, oauthPageData{Title: "Sign-in unavailable", Lines: []string{
-		"mctl cannot look up your account right now, so it cannot sign you in. Try again later.",
+		"MCTL cannot look up your account right now, so it cannot sign you in. Try again later.",
 	}})
 }

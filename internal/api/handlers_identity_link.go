@@ -6,8 +6,9 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
-	"html/template"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-chi/chi/v5"
@@ -46,13 +48,14 @@ type IdentityLinkStore interface {
 	Provision(ctx context.Context, id auth.Identity) (*principals.Principal, error)
 	LinkIdentity(ctx context.Context, principalID string, id auth.Identity) (string, error)
 	UnlinkIdentity(ctx context.Context, principalID, identityID string) (*principals.ExternalIdentity, error)
-	MergePrincipals(ctx context.Context, from, into string) (principals.MergeResult, error)
+	MergePrincipals(ctx context.Context, from, into string, admins []string) (principals.MergeResult, error)
+	DisablePrincipal(ctx context.Context, id string, admins []string) (principals.DisableResult, error)
 	Identities(ctx context.Context, principalID string) ([]principals.ExternalIdentity, error)
 }
 
 // IdentityLinkOptions configures linking. Store alone enables the API
-// endpoints (list, unlink, admin merge); the browser flow also needs the
-// ZITADEL client and the GitHub leg.
+// endpoints (list, unlink, admin merge and disable); the browser flow also
+// needs the ZITADEL client and the GitHub leg.
 type IdentityLinkOptions struct {
 	Store IdentityLinkStore
 	// ProviderName and Issuer are those of the federation entry the linked
@@ -85,10 +88,15 @@ type IdentityLinkOptions struct {
 
 // revokeSessions is RevokeSessions, or nothing to revoke without it.
 func (o *IdentityLinkOptions) revokeSessions(principalID string) (int64, error) {
+	return o.revokeSessionsFor(principalID, "identity_unlinked")
+}
+
+// revokeSessionsFor is revokeSessions with the recorded reason.
+func (o *IdentityLinkOptions) revokeSessionsFor(principalID, reason string) (int64, error) {
 	if o.RevokeSessions == nil {
 		return 0, nil
 	}
-	return o.RevokeSessions(principalID, "identity_unlinked")
+	return o.RevokeSessions(principalID, reason)
 }
 
 func (o *IdentityLinkOptions) forget(principalIDs ...string) {
@@ -128,6 +136,10 @@ const (
 	linkCodeRevoked        = "identity_revoked"
 	linkCodeLastIdentity   = "last_identity"
 	linkCodeMergeConflict  = "merge_conflict"
+	// Admin disable refusals (POST /admin/principals/{id}/disable).
+	disableCodeSelf      = "principal_disable_self"
+	disableCodeLastAdmin = "principal_last_admin"
+	disableCodeNotHuman  = "principal_not_human"
 )
 
 var identityLinksTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -186,9 +198,8 @@ type identityLinker struct {
 	byGitHub map[string]*linkChallenge
 	byZState map[string]*linkChallenge
 
-	oidcMu   sync.Mutex
-	provider *oidc.Provider
-	now      func() time.Time
+	lazyOIDCProvider
+	now func() time.Time
 }
 
 func newIdentityLinker(opts *IdentityLinkOptions) *identityLinker {
@@ -197,11 +208,12 @@ func newIdentityLinker(opts *IdentityLinkOptions) *identityLinker {
 		now = opts.clock
 	}
 	return &identityLinker{
-		opts:     opts,
-		byID:     map[string]*linkChallenge{},
-		byGitHub: map[string]*linkChallenge{},
-		byZState: map[string]*linkChallenge{},
-		now:      now,
+		opts:             opts,
+		lazyOIDCProvider: lazyOIDCProvider{issuer: opts.Issuer},
+		byID:             map[string]*linkChallenge{},
+		byGitHub:         map[string]*linkChallenge{},
+		byZState:         map[string]*linkChallenge{},
+		now:              now,
 	}
 }
 
@@ -286,23 +298,6 @@ func (l *identityLinker) dropLocked(id string, c *linkChallenge) {
 	delete(l.byZState, c.zitadelState)
 }
 
-// oidcProvider runs discovery once it first succeeds; a failure is retried
-// on the next link rather than at boot, so ZITADEL being down never delays
-// mctl-api's start.
-func (l *identityLinker) oidcProvider(ctx context.Context) (*oidc.Provider, error) {
-	l.oidcMu.Lock()
-	defer l.oidcMu.Unlock()
-	if l.provider != nil {
-		return l.provider, nil
-	}
-	p, err := oidc.NewProvider(ctx, l.opts.Issuer)
-	if err != nil {
-		return nil, err
-	}
-	l.provider = p
-	return p, nil
-}
-
 func (l *identityLinker) oauthConfig(p *oidc.Provider) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     l.opts.ClientID,
@@ -333,18 +328,11 @@ func setLinkCookie(w http.ResponseWriter, value string, maxAge int) {
 	})
 }
 
-var linkPage = template.Must(template.New("link").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}} · mctl</title>
-<style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
-code{background:#f2f2f2;padding:0 .25rem}button{font-size:1rem;padding:.5rem 1rem}</style></head>
-<body><h1>{{.Title}}</h1>{{range .Lines}}<p>{{.}}</p>{{end}}
-{{if .Continue}}<p><a href="{{.Continue}}">Continue to ZITADEL sign-in</a></p>{{end}}
-{{if .Confirm}}<form method="post" action="{{.Confirm.Action}}">
+var linkPage = shellPage("link", `{{if .Continue}}<div class="actions"><a href="{{.Continue}}">Continue to ZITADEL sign-in</a></div>{{end}}
+{{if .Confirm}}<form class="actions" method="post" action="{{.Confirm.Action}}">
 <input type="hidden" name="challenge" value="{{.Confirm.Challenge}}">
 <input type="hidden" name="csrf" value="{{.Confirm.CSRF}}">
-<button type="submit">Link these identities</button></form>{{end}}
-</body></html>`))
+<button type="submit">Link these identities</button></form>{{end}}`)
 
 type linkPageData struct {
 	Title string
@@ -357,12 +345,8 @@ type linkPageData struct {
 }
 
 func renderLinkPage(w http.ResponseWriter, status int, d linkPageData) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
-	w.WriteHeader(status)
-	_ = linkPage.Execute(w, d)
+	renderShellPage(w, status, "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", linkPage,
+		shellData{Title: d.Title, Lines: d.Lines, Page: d})
 }
 
 func linkFailed(w http.ResponseWriter, status int, msg string) {
@@ -470,7 +454,7 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 		// text (hosts, connection detail) stays in the log.
 		switch {
 		case errors.Is(err, auth.ErrIdentityRefused):
-			linkFailed(w, http.StatusForbidden, "Your GitHub identity is refused by mctl and cannot be used for linking.")
+			linkFailed(w, http.StatusForbidden, "Your GitHub identity is refused by MCTL and cannot be used for linking.")
 		default:
 			linkFailed(w, http.StatusServiceUnavailable, "The principal store is unavailable; nothing was changed. Try again later.")
 		}
@@ -479,7 +463,7 @@ func (h *Handlers) handleIdentityLinkGitHubCallback(w http.ResponseWriter, r *ht
 	// Provision returns a disabled principal as a value, not an error. The
 	// confirm step would refuse it too; stop before the ZITADEL sign-in.
 	if p.Status != principals.StatusActive {
-		linkFailed(w, http.StatusForbidden, "Your mctl principal is disabled.")
+		linkFailed(w, http.StatusForbidden, "Your MCTL principal is disabled.")
 		return
 	}
 
@@ -638,7 +622,7 @@ func (h *Handlers) handleIdentityLinkCallback(w http.ResponseWriter, r *http.Req
 		Lines: []string{
 			"GitHub: " + c.githubLogin,
 			"ZITADEL: " + display,
-			"Linking lets you sign in to mctl with ZITADEL as the same principal you use with GitHub (" + c.principalID + ").",
+			"Linking lets you sign in to MCTL with ZITADEL as the same principal you use with GitHub (" + c.principalID + ").",
 		},
 		Confirm: &struct{ Action, Challenge, CSRF string }{Action: linkConfirmPath, Challenge: c.id, CSRF: csrf},
 	})
@@ -710,12 +694,12 @@ func (h *Handlers) handleIdentityLinkConfirm(w http.ResponseWriter, r *http.Requ
 	switch {
 	case err == nil:
 		renderLinkPage(w, status, linkPageData{Title: "Identities linked", Lines: []string{
-			"ZITADEL user " + c.identity.Display + " now signs in as your mctl principal " + c.principalID + ".",
+			"ZITADEL user " + c.identity.Display + " now signs in as your MCTL principal " + c.principalID + ".",
 			"You can review or remove linked identities with GET /api/v1/identity/links.",
 		}})
 	case code == linkCodeOwnedElsewhere:
 		renderLinkPage(w, status, linkPageData{Title: "Not linked: this ZITADEL identity already has its own principal", Lines: []string{
-			"ZITADEL user " + c.identity.Display + " has already signed in to mctl on its own, which created a separate principal (" + owned.PrincipalID + ").",
+			"ZITADEL user " + c.identity.Display + " has already signed in to MCTL on its own, which created a separate principal (" + owned.PrincipalID + ").",
 			"Self-service never moves an identity between principals. A platform admin can merge " + owned.PrincipalID + " into " + c.principalID + " (an audited admin operation); ask one, quoting both ids.",
 		}})
 	case code == linkCodeAlreadyLinked:
@@ -903,7 +887,7 @@ func (h *Handlers) MergePrincipals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	from, into := chi.URLParam(r, "from"), chi.URLParam(r, "into")
-	res, err := h.identityLink.opts.Store.MergePrincipals(r.Context(), from, into)
+	res, err := h.identityLink.opts.Store.MergePrincipals(r.Context(), from, into, h.adminPrincipalList())
 	if err == nil {
 		// Cached answers still name from as an active principal; without
 		// this the moved identities keep acting as it for the cache TTL.
@@ -940,11 +924,25 @@ func (h *Handlers) MergePrincipals(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "principal not found")
 	case errors.Is(err, principals.ErrMergeConflict):
 		writeErrorCode(w, http.StatusConflict, linkCodeMergeConflict, err.Error(), nil)
+	case errors.Is(err, principals.ErrLastAdmin):
+		writeErrorCode(w, http.StatusConflict, disableCodeLastAdmin, "from is the last active admin principal; merging would disable it", nil)
 	case errors.Is(err, principals.ErrInvalid), errors.Is(err, auth.ErrPrincipalDisabled):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "principal store unavailable", nil)
 	}
+}
+
+// adminPrincipalList is ADMIN_PRINCIPALS as the store's last-admin check
+// takes it.
+func (h *Handlers) adminPrincipalList() []string {
+	admins := make([]string, 0, len(h.opts.AdminPrincipals))
+	for prn, ok := range h.opts.AdminPrincipals {
+		if ok {
+			admins = append(admins, prn)
+		}
+	}
+	return admins
 }
 
 func mergeFailureReason(err error) string {
@@ -953,6 +951,8 @@ func mergeFailureReason(err error) string {
 		return "not_found"
 	case errors.Is(err, principals.ErrMergeConflict):
 		return linkCodeMergeConflict
+	case errors.Is(err, principals.ErrLastAdmin):
+		return disableCodeLastAdmin
 	case errors.Is(err, principals.ErrInvalid):
 		return "invalid"
 	case errors.Is(err, auth.ErrPrincipalDisabled):
@@ -960,4 +960,131 @@ func mergeFailureReason(err error) string {
 	default:
 		return "store_error"
 	}
+}
+
+// maxDisableReasonChars bounds the reason an admin gives for a disable, in
+// characters (runes, as JSON Schema's maxLength counts); it is copied into
+// the audit row.
+const maxDisableReasonChars = 500
+
+// DisablePrincipal: POST /api/v1/admin/principals/{id}/disable, body
+// {"reason": "..."}. Disables a human principal that must stop acting and
+// that no merge can absorb: an orphan whose only identity was removed at its
+// IdP, which MergePrincipals refuses (merge_conflict) whenever the admin's
+// own principal holds an identity of the same issuer. Platform admins acting
+// directly only, as for a merge.
+//
+// Refused: a service or agent principal, the caller's own principal (and a
+// caller with no resolved principal, which cannot prove it is not the
+// target), and the last active ADMIN_PRINCIPALS principal. A principal that
+// is already disabled answers 200 with already_disabled, so a retry is safe.
+// Identities are left bound and live (principals.Store.DisablePrincipal says
+// why); its refresh sessions are revoked so they stop renewing. Every
+// outcome after the admin check is audited as principal.disable with actor,
+// target and reason.
+func (h *Handlers) DisablePrincipal(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if !isHumanAdmin(user) {
+		writeError(w, http.StatusForbidden, "only a platform admin acting directly may disable principals")
+		return
+	}
+	target := chi.URLParam(r, "id")
+	params := map[string]string{"actor_principal_id": user.PrincipalID(), "target_principal_id": target}
+	audited := func(status, refusal string) {
+		if refusal != "" {
+			params["refusal"] = refusal
+		}
+		h.logAudit(r, audit.Entry{
+			UserID: user.ID, Operation: "principal.disable", Status: status, RiskLevel: string(operations.RiskHigh), Parameters: params,
+		})
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		audited("failed", "invalid")
+		writeError(w, http.StatusBadRequest, "body must be {\"reason\": \"...\"}")
+		return
+	}
+	reason := strings.TrimSpace(body.Reason)
+	// encoding/json has already replaced invalid UTF-8 with U+FFFD.
+	if reason == "" || utf8.RuneCountInString(reason) > maxDisableReasonChars {
+		audited("failed", "invalid")
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("reason is required, at most %d characters", maxDisableReasonChars))
+		return
+	}
+	params["reason"] = reason
+	switch {
+	case !auth.ValidPrincipalID(target):
+		audited("failed", "invalid")
+		writeError(w, http.StatusBadRequest, "not a principal id")
+		return
+	case user.PrincipalID() == "":
+		audited("failed", "actor_unresolved")
+		writeError(w, http.StatusForbidden, "a caller without a resolved principal cannot disable principals")
+		return
+	case user.PrincipalID() == target:
+		audited("failed", disableCodeSelf)
+		writeErrorCode(w, http.StatusConflict, disableCodeSelf, "an admin cannot disable their own principal", nil)
+		return
+	}
+	if h.identityLink == nil || h.identityLink.opts.Store == nil {
+		audited("failed", "store_error")
+		writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "principal store not configured", nil)
+		return
+	}
+	res, err := h.identityLink.opts.Store.DisablePrincipal(r.Context(), target, h.adminPrincipalList())
+	if err != nil {
+		refusal := "store_error"
+		switch {
+		case errors.Is(err, principals.ErrNotFound):
+			refusal = "not_found"
+		case errors.Is(err, principals.ErrNotHuman):
+			refusal = disableCodeNotHuman
+		case errors.Is(err, principals.ErrInvalid):
+			refusal = "invalid"
+		case errors.Is(err, principals.ErrLastAdmin):
+			refusal = disableCodeLastAdmin
+		}
+		// A classified reason, never the store's error text.
+		audited("failed", refusal)
+		switch refusal {
+		case "not_found":
+			writeError(w, http.StatusNotFound, "principal not found")
+		case disableCodeNotHuman:
+			writeErrorCode(w, http.StatusBadRequest, disableCodeNotHuman, "only a human principal can be disabled here", nil)
+		case "invalid":
+			writeError(w, http.StatusBadRequest, "not a principal id")
+		case disableCodeLastAdmin:
+			writeErrorCode(w, http.StatusConflict, disableCodeLastAdmin, "the principal is the last active admin principal", nil)
+		default:
+			writeErrorCode(w, http.StatusServiceUnavailable, linkCodeUnavailable, "principal store unavailable", nil)
+		}
+		return
+	}
+	// Cached answers still name the principal as active; without this its
+	// identities keep acting for the cache TTL. Also on a retry, so a
+	// disable made some other way takes effect now too.
+	h.identityLink.opts.forget(target)
+	params["already_disabled"] = strconv.FormatBool(res.AlreadyDisabled)
+	params["live_identities"] = strconv.Itoa(res.LiveIdentities)
+	out := map[string]any{
+		"principal_id": target, "status": principals.StatusDisabled,
+		"already_disabled": res.AlreadyDisabled, "live_identities": res.LiveIdentities,
+	}
+	// Best effort, after the commit: the principal is already refused on
+	// every token it holds, so a failed revocation only leaves sessions that
+	// renew into refused tokens. It is recorded, not hidden.
+	if n, rerr := h.identityLink.opts.revokeSessionsFor(target, "principal_disabled"); rerr != nil {
+		slog.Warn("principal.disable: revoking refresh sessions failed", "principal", target, "error", rerr)
+		params["sessions_revoke"] = "failed"
+		out["sessions_revoked"] = nil
+	} else {
+		params["sessions_revoked"] = strconv.FormatInt(n, 10)
+		out["sessions_revoked"] = n
+	}
+	audited("succeeded", "")
+	writeJSON(w, http.StatusOK, out)
 }

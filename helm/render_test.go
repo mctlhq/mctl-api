@@ -60,10 +60,20 @@ type volume struct {
 	Secret    *secretVolumeSource    `yaml:"secret"`
 }
 
+type secretEnvSource struct {
+	Name     string `yaml:"name"`
+	Optional bool   `yaml:"optional"`
+}
+
+type envFromSource struct {
+	SecretRef *secretEnvSource `yaml:"secretRef"`
+}
+
 type container struct {
-	Name         string        `yaml:"name"`
-	Env          []envVar      `yaml:"env"`
-	VolumeMounts []volumeMount `yaml:"volumeMounts"`
+	Name         string          `yaml:"name"`
+	EnvFrom      []envFromSource `yaml:"envFrom"`
+	Env          []envVar        `yaml:"env"`
+	VolumeMounts []volumeMount   `yaml:"volumeMounts"`
 }
 
 type podSpec struct {
@@ -591,6 +601,7 @@ func TestHelmLintCleanAcrossOptionalValues(t *testing.T) {
 		{"--set", "oidcProvidersSecret=mctl-api-oidc-zitadel"},
 		{"--set", "zitadelLinkSecret=mctl-api-oidc-zitadel"},
 		{"--set", "oauthZitadelSecret=mctl-api-oidc-zitadel"},
+		{"--set", "envFromOptionalSecrets={mctl-api-zitadel-hook}"},
 	}
 	for _, extra := range cases {
 		args := append([]string{"lint", "."}, extra...)
@@ -652,5 +663,46 @@ func TestIngressRoutesIdentityLinkPath(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// envFromOptionalSecrets adds envFrom entries after the two required slots,
+// each marked optional so a Secret that does not exist yet cannot keep the
+// pod from starting. The required slots must stay required.
+func TestDeploymentEnvFromOptionalSecrets(t *testing.T) {
+	d, _ := renderDeployment(t,
+		"--set", "envFromSecret=mctl-api-secrets",
+		"--set", "envFromExtraSecret=mctl-api-events",
+		"--set", "envFromOptionalSecrets={mctl-api-zitadel-hook,mctl-api-other}",
+	)
+	got := mainContainer(t, d).EnvFrom
+	want := []secretEnvSource{
+		{Name: "mctl-api-secrets"},
+		{Name: "mctl-api-events"},
+		{Name: "mctl-api-zitadel-hook", Optional: true},
+		{Name: "mctl-api-other", Optional: true},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("envFrom has %d entries, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i].SecretRef == nil || *got[i].SecretRef != w {
+			t.Errorf("envFrom[%d] = %+v, want secretRef %+v", i, got[i].SecretRef, w)
+		}
+	}
+}
+
+func TestDeploymentDefaultRenderHasNoOptionalEnvFrom(t *testing.T) {
+	d, _ := renderDeployment(t,
+		"--set", "envFromSecret=mctl-api-secrets",
+		"--set", "envFromExtraSecret=mctl-api-events",
+	)
+	for _, e := range mainContainer(t, d).EnvFrom {
+		if e.SecretRef == nil || e.SecretRef.Optional {
+			t.Errorf("default render has an unexpected envFrom entry: %+v", e.SecretRef)
+		}
+	}
+	if n := len(mainContainer(t, d).EnvFrom); n != 2 {
+		t.Errorf("default render has %d envFrom entries, want 2", n)
 	}
 }

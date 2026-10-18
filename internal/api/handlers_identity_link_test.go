@@ -31,17 +31,23 @@ import (
 // ─── fakes ────────────────────────────────────────────────────────────────
 
 type fakeLinkStore struct {
-	mu       sync.Mutex
-	linkErr  error
-	linked   []auth.Identity
-	linkedTo []string
-	unlinkFn func(pid, xid string) (*principals.ExternalIdentity, error)
-	merged   [][2]string
-	mergeErr error
-	listErr  error
-	ids      []principals.ExternalIdentity // Identities' answer; nil: one live GitHub identity
-	provErr  error
-	disabled bool
+	mu          sync.Mutex
+	linkErr     error
+	linked      []auth.Identity
+	linkedTo    []string
+	unlinkFn    func(pid, xid string) (*principals.ExternalIdentity, error)
+	merged      [][2]string
+	mergeErr    error
+	mergeAdmins []string // the admins list of the last MergePrincipals call
+	listErr     error
+	ids         []principals.ExternalIdentity // Identities' answer; nil: one live GitHub identity
+	provErr     error
+	disabled    bool
+
+	disableErr     error
+	disabledIDs    []string // DisablePrincipal's targets, in order
+	disableAdmins  []string // the admins list of the last DisablePrincipal call
+	disableLiveIDs int
 }
 
 func (f *fakeLinkStore) Provision(_ context.Context, id auth.Identity) (*principals.Principal, error) {
@@ -70,7 +76,8 @@ func (f *fakeLinkStore) UnlinkIdentity(_ context.Context, pid, xid string) (*pri
 	return f.unlinkFn(pid, xid)
 }
 
-func (f *fakeLinkStore) MergePrincipals(_ context.Context, from, into string) (principals.MergeResult, error) {
+func (f *fakeLinkStore) MergePrincipals(_ context.Context, from, into string, admins []string) (principals.MergeResult, error) {
+	f.mergeAdmins = admins
 	if f.mergeErr != nil {
 		return principals.MergeResult{}, f.mergeErr
 	}
@@ -81,6 +88,16 @@ func (f *fakeLinkStore) MergePrincipals(_ context.Context, from, into string) (p
 	}
 	f.merged = append(f.merged, [2]string{from, into})
 	return principals.MergeResult{Moved: 1}, nil
+}
+
+func (f *fakeLinkStore) DisablePrincipal(_ context.Context, id string, admins []string) (principals.DisableResult, error) {
+	f.disableAdmins = admins
+	if f.disableErr != nil {
+		return principals.DisableResult{}, f.disableErr
+	}
+	res := principals.DisableResult{LiveIdentities: f.disableLiveIDs, AlreadyDisabled: slices.Contains(f.disabledIDs, id)}
+	f.disabledIDs = append(f.disabledIDs, id)
+	return res, nil
 }
 
 func (f *fakeLinkStore) Identities(_ context.Context, pid string) ([]principals.ExternalIdentity, error) {
@@ -112,6 +129,8 @@ type fakeIdP struct {
 	authTime      time.Time
 	audOverride   string
 	username      string // preferred_username; "dmitrii" when empty
+	// extra claims added to the ID token
+	extra map[string]any
 }
 
 const testLinkClientID, testLinkClientSecret = "link-client", "link-secret"
@@ -194,11 +213,15 @@ func (f *fakeIdP) token(w http.ResponseWriter, r *http.Request) {
 		username = f.username
 	}
 	now := time.Now()
-	payload, _ := json.Marshal(map[string]any{
+	claims := map[string]any{
 		"iss": f.srv.URL, "sub": "z-sub", "aud": aud, "nonce": nonce,
 		"iat": now.Unix(), "exp": now.Add(time.Hour).Unix(), "auth_time": f.authTime.Unix(),
 		"preferred_username": username,
-	})
+	}
+	for k, v := range f.extra {
+		claims[k] = v
+	}
+	payload, _ := json.Marshal(claims)
 	sig, _ := f.signer.Sign(payload)
 	idToken, _ := sig.CompactSerialize()
 	w.Header().Set("Content-Type", "application/json")
@@ -1081,7 +1104,10 @@ func TestUnlinkIdentityWithoutSessionsToRevoke(t *testing.T) {
 func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	store := &fakeLinkStore{}
 	fr := &forgetRecorder{}
-	h := &Handlers{identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store, ForgetPrincipals: fr.forget}), opts: Options{AuditLog: audit.NewLogger()}}
+	h := &Handlers{
+		identityLink: newIdentityLinker(&IdentityLinkOptions{Store: store, ForgetPrincipals: fr.forget}),
+		opts:         Options{AuditLog: audit.NewLogger(), AdminPrincipals: map[string]bool{"prn_boss": true, "prn_off": false}},
+	}
 	params := map[string]string{"from": "prn_q", "into": "prn_p"}
 
 	if rec := callAs(h, auth.NewGitHubUser("someone", []string{"team"}), http.MethodPost, "/", params, h.MergePrincipals); rec.Code != http.StatusForbidden {
@@ -1105,6 +1131,10 @@ func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	}
 	if e := h.opts.AuditLog.List(10); len(e) != 1 || !auditNames(e[0]) || e[0].Status != "succeeded" || e[0].Parameters["moved"] != "1" {
 		t.Fatalf("audit = %+v", e)
+	}
+	// The store gets ADMIN_PRINCIPALS for its last-admin check (#650).
+	if strings.Join(store.mergeAdmins, ",") != "prn_boss" {
+		t.Fatalf("admins passed to the store = %v, want [prn_boss]", store.mergeAdmins)
 	}
 	// A retry answers 200 again and says so.
 	rec = callAs(h, admin, http.MethodPost, "/", params, h.MergePrincipals)
@@ -1130,6 +1160,15 @@ func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	if e := h.opts.AuditLog.List(1); !auditNames(e[0]) || e[0].Status != "failed" || e[0].Parameters["reason"] != "merge_conflict" {
 		t.Fatalf("409 audit = %+v", e)
 	}
+	// Merging the last admin away is refused like a disable of it.
+	store.mergeErr = principals.ErrLastAdmin
+	rec = callAs(h, admin, http.MethodPost, "/", params, h.MergePrincipals)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), disableCodeLastAdmin) {
+		t.Fatalf("last-admin merge = %d %s, want 409 %s", rec.Code, rec.Body.String(), disableCodeLastAdmin)
+	}
+	if e := h.opts.AuditLog.List(1); !auditNames(e[0]) || e[0].Status != "failed" || e[0].Parameters["reason"] != disableCodeLastAdmin {
+		t.Fatalf("last-admin audit = %+v", e)
+	}
 	// The audit row carries a classified reason, never the store's text.
 	store.mergeErr = errors.New("dial tcp 10.0.0.7:5432: connection refused")
 	if rec := callAs(h, admin, http.MethodPost, "/", params, h.MergePrincipals); rec.Code != http.StatusServiceUnavailable {
@@ -1146,6 +1185,251 @@ func TestMergePrincipalsIsForHumanAdminsOnly(t *testing.T) {
 	}
 	if len(fr.calls) != 2 {
 		t.Fatalf("forget calls = %v, want one per successful merge (2) and none for failures", fr.calls)
+	}
+}
+
+const (
+	disableTarget = "prn_01M51RRWSHH3VR3W4RTYY9238K"
+	disableAdmin  = "prn_01M3AAAAAAAAAAAAAAAAAAAAAA"
+)
+
+// disableAs posts body to DisablePrincipal for {id} = target.
+func disableAs(h *Handlers, u *auth.User, target, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", target)
+	req = req.WithContext(auth.WithUser(context.WithValue(req.Context(), chi.RouteCtxKey, rctx), u))
+	rec := httptest.NewRecorder()
+	h.DisablePrincipal(rec, req)
+	return rec
+}
+
+type disableHarness struct {
+	h       *Handlers
+	store   *fakeLinkStore
+	forgets *forgetRecorder
+	revoked []string // "principal/reason" per RevokeSessions call
+	revErr  error
+	admin   *auth.User
+}
+
+func newDisableHarness(t *testing.T) *disableHarness {
+	t.Helper()
+	d := &disableHarness{store: &fakeLinkStore{}, forgets: &forgetRecorder{}}
+	d.h = &Handlers{
+		identityLink: newIdentityLinker(&IdentityLinkOptions{
+			Store: d.store, ForgetPrincipals: d.forgets.forget,
+			RevokeSessions: func(pid, reason string) (int64, error) {
+				d.revoked = append(d.revoked, pid+"/"+reason)
+				return 2, d.revErr
+			},
+		}),
+		opts: Options{AuditLog: audit.NewLogger(), AdminPrincipals: map[string]bool{disableAdmin: true, "prn_off": false}},
+	}
+	d.admin = userWithPrincipal(t, "boss", []string{"admins"}, disableAdmin)
+	return d
+}
+
+func (d *disableHarness) lastAudit(t *testing.T) audit.Entry {
+	t.Helper()
+	e := d.h.opts.AuditLog.List(1)
+	if len(e) != 1 {
+		t.Fatalf("no audit entry")
+	}
+	if e[0].Operation != "principal.disable" || e[0].UserID != "boss" || e[0].Parameters["actor_principal_id"] != disableAdmin {
+		t.Fatalf("audit entry does not name the actor: %+v", e[0])
+	}
+	return e[0]
+}
+
+func TestDisablePrincipalIsForHumanAdminsOnly(t *testing.T) {
+	d := newDisableHarness(t)
+	surface := auth.NewSurfaceUser("telegram")
+	for name, caller := range map[string]*auth.User{
+		"non-admin": userWithPrincipal(t, "someone", []string{"team"}, "prn_someone"),
+		"service":   auth.NewServiceUser(),
+		"agent":     auth.NewAgentUser("implementer", auth.AgentRun{}),
+		"surface":   surface,
+		"relayed":   auth.NewRelayedUser("boss", []string{"admins"}, surface),
+	} {
+		if rec := disableAs(d.h, caller, disableTarget, `{"reason":"orphan"}`); rec.Code != http.StatusForbidden {
+			t.Errorf("%s disable = %d, want 403", name, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	d.h.DisablePrincipal(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"reason":"x"}`)))
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("disable without a user = %d, want 403", rec.Code)
+	}
+	if len(d.store.disabledIDs) != 0 || d.store.disableAdmins != nil {
+		t.Fatal("a refused disable reached the store")
+	}
+}
+
+func TestDisablePrincipalDisablesAndIsIdempotent(t *testing.T) {
+	d := newDisableHarness(t)
+	d.store.disableLiveIDs = 1
+	rec := disableAs(d.h, d.admin, disableTarget, `{"reason":"  ZITADEL user removed 2026-10-16  "}`)
+	var out struct {
+		PrincipalID     string `json:"principal_id"`
+		Status          string `json:"status"`
+		AlreadyDisabled bool   `json:"already_disabled"`
+		LiveIdentities  int    `json:"live_identities"`
+		SessionsRevoked *int64 `json:"sessions_revoked"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); rec.Code != http.StatusOK || err != nil || out.PrincipalID != disableTarget ||
+		out.Status != "disabled" || out.AlreadyDisabled || out.LiveIdentities != 1 || out.SessionsRevoked == nil || *out.SessionsRevoked != 2 {
+		t.Fatalf("disable = %d %s", rec.Code, rec.Body.String())
+	}
+	if len(d.store.disabledIDs) != 1 || d.store.disabledIDs[0] != disableTarget {
+		t.Fatalf("store disabled %v", d.store.disabledIDs)
+	}
+	// Only the active ADMIN_PRINCIPALS entries are handed to the
+	// last-admin check.
+	if strings.Join(d.store.disableAdmins, ",") != disableAdmin {
+		t.Fatalf("admins passed to the store = %v, want [%s]", d.store.disableAdmins, disableAdmin)
+	}
+	if len(d.forgets.calls) != 1 || strings.Join(d.forgets.calls[0], ",") != disableTarget {
+		t.Fatalf("forgot %v, want [[%s]]", d.forgets.calls, disableTarget)
+	}
+	if len(d.revoked) != 1 || d.revoked[0] != disableTarget+"/principal_disabled" {
+		t.Fatalf("revoked %v", d.revoked)
+	}
+	e := d.lastAudit(t)
+	if e.Status != "succeeded" || e.Parameters["target_principal_id"] != disableTarget || e.Parameters["reason"] != "ZITADEL user removed 2026-10-16" ||
+		e.Parameters["already_disabled"] != "false" || e.Parameters["live_identities"] != "1" || e.Parameters["sessions_revoked"] != "2" ||
+		e.RiskLevel != "high" {
+		t.Fatalf("audit = %+v", e)
+	}
+
+	// A retry answers 200 again, says so, and still drops the cache.
+	rec = disableAs(d.h, d.admin, disableTarget, `{"reason":"retry"}`)
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); rec.Code != http.StatusOK || err != nil || !out.AlreadyDisabled {
+		t.Fatalf("retried disable = %d %s", rec.Code, rec.Body.String())
+	}
+	if e := d.lastAudit(t); e.Status != "succeeded" || e.Parameters["already_disabled"] != "true" {
+		t.Fatalf("retry audit = %+v", e)
+	}
+	if len(d.forgets.calls) != 2 {
+		t.Fatalf("forget calls = %v, want one per successful disable", d.forgets.calls)
+	}
+}
+
+// The reason limit counts characters, as the spec's maxLength does: 500
+// Cyrillic characters (1000 bytes) are accepted.
+func TestDisablePrincipalCountsReasonCharacters(t *testing.T) {
+	d := newDisableHarness(t)
+	reason := strings.Repeat("я", maxDisableReasonChars)
+	if rec := disableAs(d.h, d.admin, disableTarget, `{"reason":"`+reason+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("disable with a %d-character reason = %d %s", maxDisableReasonChars, rec.Code, rec.Body.String())
+	}
+	if e := d.lastAudit(t); e.Parameters["reason"] != reason {
+		t.Fatalf("audit reason = %q", e.Parameters["reason"])
+	}
+}
+
+// A failed session revocation does not undo the committed disable; it is
+// answered 200 and recorded in the audit row.
+func TestDisablePrincipalRecordsAFailedSessionRevocation(t *testing.T) {
+	d := newDisableHarness(t)
+	d.revErr = errors.New("dial tcp 10.0.0.7:5432: connection refused")
+	rec := disableAs(d.h, d.admin, disableTarget, `{"reason":"orphan"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"sessions_revoked":null`) {
+		t.Fatalf("disable with a failed revocation = %d %s", rec.Code, rec.Body.String())
+	}
+	e := d.lastAudit(t)
+	if e.Status != "succeeded" || e.Parameters["sessions_revoke"] != "failed" || e.Parameters["sessions_revoked"] != "" {
+		t.Fatalf("audit = %+v", e)
+	}
+	for k, v := range e.Parameters {
+		if strings.Contains(v, "10.0.0.7") {
+			t.Fatalf("audit parameter %s leaks the error: %q", k, v)
+		}
+	}
+}
+
+// Every refusal after the admin check is audited with a classified reason,
+// and none of them reaches the cache or the sessions.
+func TestDisablePrincipalRefusalsAreAudited(t *testing.T) {
+	cases := []struct {
+		name     string
+		caller   func(t *testing.T) *auth.User
+		target   string
+		body     string
+		storeErr error
+		code     int
+		refusal  string
+		apiCode  string
+		reachDB  bool
+	}{
+		{name: "no body", body: ``, code: http.StatusBadRequest, refusal: "invalid"},
+		{name: "empty reason", body: `{"reason":"   "}`, code: http.StatusBadRequest, refusal: "invalid"},
+		{name: "unknown field", body: `{"reason":"x","force":true}`, code: http.StatusBadRequest, refusal: "invalid"},
+		{name: "reason too long", body: `{"reason":"` + strings.Repeat("я", maxDisableReasonChars+1) + `"}`, code: http.StatusBadRequest, refusal: "invalid"},
+		{name: "bad target", target: "prn_lower", body: `{"reason":"x"}`, code: http.StatusBadRequest, refusal: "invalid"},
+		{name: "self", target: disableAdmin, body: `{"reason":"x"}`, code: http.StatusConflict, refusal: disableCodeSelf, apiCode: disableCodeSelf},
+		{name: "not found", storeErr: principals.ErrNotFound, code: http.StatusNotFound, refusal: "not_found", reachDB: true},
+		{name: "store invalid", storeErr: principals.ErrInvalid, code: http.StatusBadRequest, refusal: "invalid", reachDB: true},
+		{name: "not human", storeErr: principals.ErrNotHuman, code: http.StatusBadRequest, refusal: disableCodeNotHuman, apiCode: disableCodeNotHuman, reachDB: true},
+		{name: "last admin", storeErr: principals.ErrLastAdmin, code: http.StatusConflict, refusal: disableCodeLastAdmin, apiCode: disableCodeLastAdmin, reachDB: true},
+		{name: "store error", storeErr: errors.New("dial tcp 10.0.0.7:5432: connection refused"), code: http.StatusServiceUnavailable, refusal: "store_error", apiCode: linkCodeUnavailable, reachDB: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newDisableHarness(t)
+			d.store.disableErr = tc.storeErr
+			target := tc.target
+			if target == "" {
+				target = disableTarget
+			}
+			body := tc.body
+			if body == "" && tc.name != "no body" {
+				body = `{"reason":"orphan"}`
+			}
+			rec := disableAs(d.h, d.admin, target, body)
+			if rec.Code != tc.code {
+				t.Fatalf("disable = %d %s, want %d", rec.Code, rec.Body.String(), tc.code)
+			}
+			if tc.apiCode != "" && !strings.Contains(rec.Body.String(), `"`+tc.apiCode+`"`) {
+				t.Fatalf("body %s lacks code %s", rec.Body.String(), tc.apiCode)
+			}
+			if strings.Contains(rec.Body.String(), "10.0.0.7") {
+				t.Fatalf("response leaks the store error: %s", rec.Body.String())
+			}
+			e := d.lastAudit(t)
+			if e.Status != "failed" || e.Parameters["refusal"] != tc.refusal || e.Parameters["target_principal_id"] != target {
+				t.Fatalf("audit = %+v", e)
+			}
+			for k, v := range e.Parameters {
+				if strings.Contains(v, "10.0.0.7") {
+					t.Fatalf("audit parameter %s leaks the store error: %q", k, v)
+				}
+			}
+			if reached := d.store.disableAdmins != nil; reached != tc.reachDB {
+				t.Fatalf("store reached = %v, want %v", reached, tc.reachDB)
+			}
+			if len(d.forgets.calls) != 0 || len(d.revoked) != 0 {
+				t.Fatalf("a refused disable forgot %v / revoked %v", d.forgets.calls, d.revoked)
+			}
+		})
+	}
+}
+
+// An admin whose principal did not resolve cannot prove it is not the
+// target, so it is refused rather than let through.
+func TestDisablePrincipalRefusesAnUnresolvedActor(t *testing.T) {
+	d := newDisableHarness(t)
+	rec := disableAs(d.h, auth.NewGitHubUser("boss", []string{"admins"}), disableTarget, `{"reason":"orphan"}`)
+	if rec.Code != http.StatusForbidden || len(d.store.disabledIDs) != 0 {
+		t.Fatalf("unresolved admin disable = %d, store %v", rec.Code, d.store.disabledIDs)
+	}
+	e := d.h.opts.AuditLog.List(1)
+	if len(e) != 1 || e[0].Status != "failed" || e[0].Parameters["refusal"] != "actor_unresolved" {
+		t.Fatalf("audit = %+v", e)
+	}
+	off := &Handlers{opts: Options{AuditLog: audit.NewLogger()}}
+	if rec := disableAs(off, d.admin, disableTarget, `{"reason":"orphan"}`); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disable unconfigured = %d, want 503", rec.Code)
 	}
 }
 

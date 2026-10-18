@@ -168,6 +168,7 @@ A JSON array, parsed by `auth.ParseOIDCProviders` and validated in
 | `groups_claim` | no | `groups` | Claim read for groups: an array of strings, or (outside the trusted Dex slot) an object whose keys are the group names (ZITADEL's `urn:zitadel:iam:org:project:roles`). Any other shape, or non-string array elements, counts in `federation_groups_claim_unreadable_total{provider}` and is dropped. It reaches `User.Groups` only for the trusted Dex slot or when `grant_groups` is on (see "Groups" below). |
 | `kind` | no | `human` | One of `human`, `agent`, `service`. |
 | `grant_groups` | no | `false` | Whether this entry's groups reach `User.Groups`, i.e. grant tenant access. Off: the claim is dropped and counted in `federation_groups_withheld_total{provider}`. On: kept, with `admins` still stripped. Refused at boot on the trusted Dex slot. See "Groups" below. |
+| `customers_org_id` | no | — | The ZITADEL organization of self-service customer accounts (digits; `human` entries only; at most one entry). When set, every token from this entry must carry `urn:zitadel:iam:user:resourceowner:id` or it is refused, and a customers token resolves by its proven GitHub id. See "Self-service customers" below. |
 
 A malformed value, an entry missing `audiences`, an invalid
 `audience_enforcement` or `kind`, a reserved or surface-colliding name, or two
@@ -285,6 +286,47 @@ env change: remove the entry from `MCTL_OIDC_PROVIDERS` (or unset the
 variable if it is the only one). ZITADEL tokens are then unclaimed (401) and
 nothing else changes. If `auth.mctl.ai` is unreachable at boot, the entry is
 logged and omitted; mctl-api still starts.
+
+### Self-service customers (mctl-web site onboarding, stage C0)
+
+A customer signs in to ZITADEL with GitHub and lands in the organization
+`customers`. The identity hook (`docs/zitadel-identity-hook.md`) records the
+GitHub numeric id the IdP proved and issues it as `mctl:github_id`, next to
+`mctl:org`, `mctl:idp` and `mctl:github_login`. With `customers_org_id` set on
+the ZITADEL entry:
+
+- **The organization must be observable.** A token without
+  `urn:zitadel:iam:user:resourceowner:id` is refused (401): an organization
+  that could not be read is never taken to be "not customers". Clients must
+  request the scope `urn:zitadel:iam:user:resourceowner`; mctl-api's own
+  OAuth sign-in does whenever `customers_org_id` is set.
+- **A customer is keyed on GitHub, never on a login.** The principal is the
+  one holding the GitHub identity `('github', '', <github_id>)`, provisioned
+  on first sight; the ZITADEL identity is then linked to it. A reused GitHub
+  login therefore never reaches another person's principal. A ZITADEL subject
+  already linked elsewhere, or a GitHub id whose principal already has
+  another live ZITADEL identity, is a conflict (409 on the sign-in page and
+  the portal route) for an admin to merge, never a guess.
+- **Unproven is refused.** A customers token with `mctl:refused`, or without
+  a well-formed `mctl:github_id` and `mctl:github_login`, `mctl:org=customers`
+  and `mctl:idp=github`, is refused (401 bearer, 403 sign-in and portal
+  route). It never falls back to the ZITADEL-only principal.
+- **No groups.** A customer's groups claim is dropped even with
+  `grant_groups`; access comes from GitOps entries naming the principal.
+- **An explicit entry.** mctl-api's OAuth chooser offers customers
+  "Sign in with GitHub" once `ZITADEL_HOOK_GITHUB_IDP_ID` is also set; it
+  sends ZITADEL the customers organization and GitHub IdP scopes
+  (`docs/principals.md`, "Customer entry").
+- **Principal mode only.** The OAuth sign-in refuses a customer (403) unless
+  `TENANT_AUTHZ_MODE=principal`: outside it a token is authorized by a GitHub
+  login and its groups, which a customer has none of.
+- Users of every other organization are unaffected.
+
+`customers_org_id` must equal `ZITADEL_HOOK_CUSTOMERS_ORG_ID` when both are
+set, or the boot is refused.
+
+The portal resolves a customer with `POST /api/v1/surface-principals/zitadel`
+(see `docs/principals.md`).
 
 ## GitHub Actions: CI deploys (mctl-api#530)
 

@@ -29,6 +29,12 @@ cases = {
     response=ResponseSpec(type="single_choice", options=("Monday","Tuesday"), schema_ref=None),
     requested_from=RequestedFrom(audience="repo_operators", actor_refs=("github:alice","github:bob")),
     context_refs=()),
+ # A respondent named by canonical principal (mctl-api#629): a ZITADEL-only
+ # human has no GitHub login, only a prn_. github:alice stays answerable.
+ "principal_respondent": dict(question="Keep the old endpoint?", reason="Owner without GitHub.",
+    response=ResponseSpec(type="single_choice", options=("keep","drop"), schema_ref=None),
+    requested_from=RequestedFrom(audience="work_item_owner", actor_refs=("principal:prn_01K7ZD0N1Y0000000000000000","github:alice")),
+    context_refs=()),
  "multi_structured_round2": dict(question="Pick any.", reason="r", round=2, request_version=3,
     response=ResponseSpec(type="multi_choice", options=("x","y","z"), schema_ref="schema://x"),
     requested_from=RequestedFrom(audience="tenant_operators", actor_refs=("github:bob",)),

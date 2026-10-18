@@ -30,9 +30,22 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+// legacyRelayTotal counts the free-text approver relay on
+// mctl-agents-approve by outcome (relayed, refused), next to its audit entry:
+// the audit write is best-effort, and retiring the relay (mctl-api#571)
+// needs a "zero uses" that a lost row cannot fake.
+var legacyRelayTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "mctl_agents_approve_legacy_relay_total",
+	Help: "Free-text approver relays on mctl-agents-approve by a service principal, by outcome (relayed, refused).",
+}, []string{"outcome"})
+
+func init() { prometheus.MustRegister(legacyRelayTotal) }
 
 // ExecuteOperation validates input, enforces RBAC, and submits an Argo Workflow.
 func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
@@ -105,13 +118,31 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			"operation", opName, "parameters", strings.Join(dropped, ", "))
 	}
 
+	// An agent run exercising a human's action-approval grant (mctl-api#571
+	// R6): the grant, not the caller's admin status, authorizes
+	// mctl-agents-approve. Checked here, before the admin and tenant gates
+	// it replaces; spent right before submit. A delegated subject on any
+	// other grant kind falls through to the gates below and is refused there
+	// exactly as before (R7): delegation never confers admin.
+	var grantSpend *approvalSpend
+	if opName == devLoopApprovalKind {
+		if g := delegationGrantFrom(r.Context()); g != nil && g.Kind == delegation.KindActionApproval {
+			s, ok := h.prepareApprovalGrant(w, r, user, input, g.Ref)
+			if !ok {
+				return
+			}
+			grantSpend = s
+		}
+	}
+	grantAuthorized := grantSpend != nil
+
 	// AdminOnly platform-scoped ops (e.g. mctl-agents triggers) skip the
 	// tenant-access check — they have no team_name parameter and are
 	// gated only by admin group membership. The Executor labels them with
 	// the sentinel team "platform" for audit/UI grouping.
 	tenantParam := extractTenantParam(op, input)
 	if op.AdminOnly {
-		if !user.IsAdmin() {
+		if !grantAuthorized && !user.IsAdmin() {
 			h.logAudit(r, audit.Entry{
 				UserID:    user.ID,
 				Operation: opName,
@@ -176,7 +207,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		input["creator_principal_id"] = pid
-	} else if !ciAuthorized && !user.HasTenantAccess(tenantParam) {
+	} else if !ciAuthorized && !grantAuthorized && !user.HasTenantAccess(tenantParam) {
 		h.logAudit(r, audit.Entry{
 			UserID:    user.ID,
 			Operation: opName,
@@ -194,7 +225,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// developer, or a read-only viewer, could delete the tenant they belong
 	// to. create-tenant is the one operation with no tenant to hold a role
 	// in; its own rules are the branch above.
-	if opName != "create-tenant" && !ciAuthorized && !h.requireTenantRole(w, r, user, tenantParam, op.MinRole, opName, op.RiskLevel) {
+	if opName != "create-tenant" && !ciAuthorized && !grantAuthorized && !h.requireTenantRole(w, r, user, tenantParam, op.MinRole, opName, op.RiskLevel) {
 		return
 	}
 
@@ -222,10 +253,63 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	//
 	// The audit log below records user.ID either way, so the relayed value
 	// never displaces the record of who actually made the request.
-	if opName == "mctl-agents-approve" {
+	//
+	// The relay is being retired (mctl-api#571): an approval will be
+	// exercised through a server-held action-approval grant instead of a
+	// string. Until mctl-agents has moved over, every relay is audited as
+	// approver.legacy_relay, so "is anything still using it?" is a query;
+	// MCTL_AGENTS_APPROVE_LEGACY_APPROVER=false then refuses it.
+	//
+	// A grant-authorized call is not handled here: its approver is the
+	// grant's decider, set by prepareApprovalGrant (R8).
+	if opName == "mctl-agents-approve" && !grantAuthorized {
 		if user.IsService() {
-			if input["approver"] == "" {
+			// The content digest binds the CWFT to what a human decided on;
+			// only a grant carries that decision, so a service principal
+			// may not assert one on its own (mctl-agents#681).
+			if input[expectedContentDigestParam] != "" {
+				h.logAudit(r, audit.Entry{
+					UserID:     user.ID,
+					Operation:  opName,
+					Status:     "denied",
+					RiskLevel:  string(op.RiskLevel),
+					Message:    "expected_content_digest without an action-approval grant refused",
+					Parameters: legacyRelayParams(user, opName, input),
+				})
+				writeErrorCode(w, http.StatusBadRequest, wiCodeActorNotAccepted,
+					"expected_content_digest is taken from an action-approval grant, not from the request body", nil)
+				return
+			}
+			relayed := input["approver"]
+			switch {
+			case relayed == "" || relayed == user.ID:
 				input["approver"] = user.ID
+			case h.opts.LegacyApproverDisabled:
+				h.logAudit(r, audit.Entry{
+					UserID:     user.ID,
+					Operation:  opName,
+					Status:     "denied",
+					RiskLevel:  string(op.RiskLevel),
+					Message:    "free-text approver relay refused: MCTL_AGENTS_APPROVE_LEGACY_APPROVER is off",
+					Parameters: legacyRelayParams(user, opName, input),
+				})
+				legacyRelayTotal.WithLabelValues("refused").Inc()
+				writeErrorCode(w, http.StatusBadRequest, "legacy_approver_disabled",
+					"the free-text approver relay is disabled; approve through an action-approval grant", nil)
+				return
+			default:
+				// Counted as well as audited: an audit write that fails is
+				// only logged, and "zero relays" must not be read off a
+				// missing row (mctl-api#571 A7).
+				legacyRelayTotal.WithLabelValues("relayed").Inc()
+				h.logAudit(r, audit.Entry{
+					UserID:     user.ID,
+					Operation:  "approver.legacy_relay",
+					Status:     "succeeded",
+					RiskLevel:  string(op.RiskLevel),
+					Message:    fmt.Sprintf("%s relayed approver %q on %s", user.ID, relayed, opName),
+					Parameters: legacyRelayParams(user, opName, input),
+				})
 			}
 		} else {
 			if input["approver"] != "" && input["approver"] != user.ID {
@@ -260,6 +344,10 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			"error":            "validation failed: " + strings.Join(errs, "; "),
 			"validationErrors": errs,
 		})
+		return
+	}
+
+	if grantAuthorized && !h.bindApprovalGrant(w, r, user, grantSpend, input) {
 		return
 	}
 
@@ -348,6 +436,18 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, msg)
 			return
 		}
+	}
+
+	// Spend the grant last, after every check that could still refuse, so
+	// a refused request leaves the approval usable.
+	if grantAuthorized {
+		consumed, ok := h.spendApprovalGrant(w, r, user, grantSpend)
+		if !ok {
+			return
+		}
+		// R8: input["approver"] is the grant's decider, set and validated
+		// with the rest of the input (prepareApprovalGrant).
+		approvalGrantAuditParams(auditParams, user, consumed)
 	}
 
 	// Submit the Argo Workflow in the team's namespace (team-{name}).
@@ -600,4 +700,17 @@ func (h *Handlers) checkTenantNameCollision(tenant string) (status int, msg stri
 		return http.StatusBadRequest, "tenant_name: \"" + tenant + "\" overlaps the name of existing workspace \"" + other + "\"; choose a name that neither extends nor is extended by another workspace name"
 	}
 	return 0, ""
+}
+
+// legacyRelayParams is the evidence one approver relay leaves: who was
+// named, who named them, and for which proposal. Only the input the caller
+// sent; nothing here is resolved or trusted.
+func legacyRelayParams(user *auth.User, opName string, input map[string]string) map[string]string {
+	return map[string]string{
+		"approver":          input["approver"],
+		"calling_principal": user.ID,
+		"operation":         opName,
+		"service":           input["service"],
+		"slug":              input["slug"],
+	}
 }

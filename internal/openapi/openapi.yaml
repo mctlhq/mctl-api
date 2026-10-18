@@ -567,7 +567,7 @@ components:
           description: Full allow-list; present only for admins and the service principal.
         can_respond:
           type: boolean
-          description: Whether the caller's own GitHub-verified `github:<login>` is eligible.
+          description: Whether one of the caller's own references (GitHub-verified `github:<login>`, or `principal:<prn_…>` for a human's resolved principal) is eligible.
         created_at:
           type: string
         expires_at:
@@ -722,6 +722,7 @@ components:
         id: {type: string, example: wi_5c8e0f3a-1b2c-4d5e-8f90-123456789abc}
         tenant: {type: string}
         owner_principal: {type: string, description: 'Derived from authentication, e.g. github:alice or service:mctl-agent.'}
+        owner_principal_id: {type: string, pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$', description: "The owner's canonical principal, recorded at creation. Absent for an item whose owner had none recorded. Informational: access is decided by owner_principal."}
         visibility: {type: string, enum: [tenant, private]}
         origin_surface: {type: string}
         title: {type: string, maxLength: 256}
@@ -989,7 +990,8 @@ components:
                  approval_not_found, approval_idempotency_conflict, approval_already_decided,
                  approval_self_decision, approval_not_approved, approval_denied, approval_expired,
                  approval_intent_mismatch, approval_consumed, approval_requester_forbidden,
-                 approval_decider_forbidden, approval_reader_forbidden]
+                 approval_decider_forbidden, approval_reader_forbidden, approval_execution_invalid,
+                 approval_execution_not_open]
 
     ExecutionRequest:
       type: object
@@ -2067,6 +2069,29 @@ paths:
         | `preview-deploy` | Deploy ephemeral preview environment | low |
         | `preview-delete` | Remove preview environment | low |
 
+        **Grant-authorized approval (mctl-api#571).** `mctl-agents-approve`
+        is the one operation an agent run may call with
+        `X-MCTL-On-Behalf-Of: aar_…`. The action approval must be bound to
+        the run's `we_` (else 403 `grant_not_bound`), decided (a pending one
+        is 403 `grant_subject_unresolved`; denied, expired or consumed is
+        403 `grant_not_bound`), and approved for this exact intent: action
+        kind `mctl-agents-approve`, target `<service>/<slug>`, policy
+        `dev-loop.human-approval`/`v1` (else 409 `approval_intent_mismatch`).
+        The target must also belong to the run's own DevLoop: its
+        `<service>/<slug>` maps to the workflow id the `we_`'s `engine_ref`
+        names (else 409 `approval_intent_mismatch`; a target that maps to no
+        workflow id, or an approval whose `we_` no longer exists, is refused
+        with the same code: in each case the grant does not authorize this
+        request). That mapping keeps only
+        the slug's `issue-<n>-` prefix, so it binds the service and issue;
+        the exact slug is the one the approval was created for (the intent
+        hash) and is recorded in the decision and consume audit. It is consumed once,
+        before submit, and the recorded approver is its decider's name
+        without its `github:`/`oidc:` prefix, validated like any approver;
+        a body `approver` is refused (400 `actor_not_accepted`).
+        The grant replaces the admin check for this call only; every other
+        caller and grant kind is authorized as before.
+
         **Rate limit:** 20 requests/minute per user.
       tags: [Operations]
       parameters:
@@ -2814,6 +2839,17 @@ paths:
         running or closed DevLoopWorkflow reports that instead of claiming a
         fresh start (issue #287). `started` says whether a new execution was
         actually submitted this call.
+
+        One closed execution is the exception (mctl-api#640): when the latest
+        run is Completed and its result says it was abandoned
+        (`ended: "abandoned: ..."`) before it reached the implement step
+        (`implement: null`), a new run starts on the same workflow id and the
+        outcome is `restarted_after_abandon`, with the abandoned run as
+        `previous_run_id`. Every other closed run — finished, abandoned after
+        implement, expired, failed, terminated, timed out — stays
+        `already_exists`. A Completed
+        run whose result cannot be read is a 502 and nothing is started. The
+        roadmap wave route never restarts.
       tags: [Agent Registry]
       requestBody:
         required: true
@@ -2828,7 +2864,9 @@ paths:
                   example: https://github.com/mctlhq/mctl-telegram/issues/296
       responses:
         '202':
-          description: A new DevLoopWorkflow was started
+          description: >-
+            A new DevLoopWorkflow run was started — the issue's first, or a
+            new one after an abandoned run (`restarted_after_abandon`)
           content:
             application/json:
               schema:
@@ -2840,18 +2878,22 @@ paths:
                   run_id:
                     type: string
                     description: The new run's id.
+                  previous_run_id:
+                    type: string
+                    description: The abandoned run this one replaced; only on `restarted_after_abandon`.
                   started:
                     type: boolean
                     example: true
                   outcome:
                     type: string
-                    enum: [started]
+                    enum: [started, restarted_after_abandon]
                   message:
                     type: string
         '200':
           description: >-
             Nothing new was started: a DevLoopWorkflow already exists for
-            this issue, running or closed. `run_id` and `status` describe
+            this issue, running, or closed and not restartable (anything but
+            a run abandoned before implement). `run_id` and `status` describe
             that existing execution, not a new one.
           content:
             application/json:
@@ -2888,7 +2930,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '502':
-          description: The existing DevLoop could not be read, or the start itself failed
+          description: >-
+            The existing DevLoop, or how its Completed run ended, could not be
+            read, or the start itself failed
           content:
             application/json:
               schema:
@@ -3029,9 +3073,26 @@ paths:
         The durable "human flips it to accepted" step, expressed as a
         Temporal signal instead of a gitops .status.yaml edit. Unblocks the
         workflow's wait_condition so it proceeds to the implement step.
-        The optional body carries approval provenance; `approver` defaults
-        to the authenticated caller and is recorded in the proposal's
-        gitops approval block. **Admin access required.**
+        **A human admin acting directly only** (the service principal is
+        refused 403). The approver is the authenticated caller; a body
+        `approver` naming anyone else is refused 400.
+
+        mctl-api#571: the workflow id is resolved to the run's one open
+        `we_` execution (`engine=temporal`, `engine_ref` the workflow id or,
+        for a run dispatched from an execution request,
+        `<workflow_id>#<request_id>`), and that
+        execution's newest `mctl-agents-approve` action approval, in any
+        state, decides: a pending one is approved as the caller and
+        signalled as `{approval_ref}`; an approved, unconsumed one is
+        re-signalled as is. With no such
+        execution or approval the legacy `{approver}` payload is signalled
+        while `MCTL_AGENTS_APPROVE_LEGACY_APPROVER` is on, and 409
+        `approval_grant_missing` is returned once it is off. An execution
+        whose newest approval was denied, consumed or let expire is 409
+        (`approval_denied`, `approval_consumed`, `approval_expired`), never
+        the legacy payload: a recorded "no" is not an absent gate. Two open
+        executions for the same run are 409 `execution_ambiguous`; a store
+        that cannot be read is 503, never the legacy payload.
       tags: [Agent Registry]
       parameters:
         - name: workflow_id
@@ -3049,7 +3110,7 @@ paths:
               properties:
                 approver:
                   type: string
-                  description: Identity recorded as approved_by. Defaults to the authenticated caller.
+                  description: Accepted only when it equals the authenticated caller; anything else is 400.
                   example: mashkovd
                 reason:
                   type: string
@@ -3074,13 +3135,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Admin access required
+          description: Not a human admin acting directly (approval_decider_forbidden), or the action approval refused the decision (approval_self_decision)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: approval_grant_missing, execution_ambiguous, the run's grant is no longer live (approval_denied, approval_consumed, approval_expired; never answered with the legacy payload), or an action approval refusal (approval_already_decided)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Temporal client not configured
+          description: Temporal client not configured, or the DevLoop's approval grant could not be read (work_items_unavailable)
           content:
             application/json:
               schema:
@@ -3196,7 +3263,11 @@ paths:
     post:
       summary: Request a one-time link challenge for a surface
       description: |
-        mctl-api#350. Only a human authenticated by GitHub. Returns a one-time
+        mctl-api#350. Only a human acting directly: a GitHub-authenticated
+        human is linked as `github:<login>`, any other human with a resolved
+        principal as its `prn_` id, the link recording the name it acted
+        under as `subject` (`oidc:<name>`, mctl-api#646; that form needs
+        `TENANT_AUTHZ_MODE=principal`, else 403 `principal_mode_required`). Returns a one-time
         code, valid for 10 minutes, bound to the caller and the surface. The
         human sends it through that surface (e.g. to the Telegram bot), whose
         own principal redeems it. The body never names who is linked.
@@ -3214,9 +3285,9 @@ paths:
       responses:
         '201': {description: 'Challenge created; the code is shown once'}
         '400': {description: Invalid body or an identity field in it}
-        '403': {description: Not a GitHub-authenticated human}
+        '403': {description: 'Not a human acting directly with a GitHub login or a resolved principal, or a name the link cannot record (human_principal_required); or a prn_ link outside principal mode (principal_mode_required)'}
         '429': {description: Too many open challenges}
-        '503': {description: Surface identity store not configured}
+        '503': {description: 'Surface identity store not configured, or the caller''s principal could not be resolved because the principal store did not answer (surface_identity_unavailable)'}
   /api/v1/surface-identities/redeem:
     post:
       summary: Redeem a challenge as the surface that observed it
@@ -3282,24 +3353,50 @@ paths:
   /api/v1/surface-identities:
     get:
       summary: List the caller's surface identity links
-      description: A human admin may pass `principal=github:<login>`.
+      description: |
+        The links of every holder form the caller is (mctl-api#646, #663):
+        a GitHub session is `github:<login>` and its resolved `prn_`; a
+        `prn_` session is that `prn_` and `github:<login>` of each live
+        GitHub identity of its principal. `principal=` narrows the list to
+        one of those holders; a human admin may name anyone's
+        (`github:<login>` or `prn_…`).
       tags: [Surface Identity]
       parameters:
         - {name: principal, in: query, required: false, schema: {type: string}}
       responses:
-        '200': {description: Links, live and revoked}
-        '403': {description: Not a GitHub-authenticated human, or not an admin for another principal}
+        '200':
+          description: Links, live and revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [principal, holders, links]
+                properties:
+                  principal:
+                    type: string
+                    description: The holder form asked for; by default the session's own (`github:<login>` for a GitHub session, else its `prn_`). Not necessarily the holder of every link listed.
+                  holders:
+                    type: array
+                    items: {type: string}
+                    description: Every holder whose links are listed.
+                  links:
+                    type: array
+                    description: Newest first. Each link names its own holder in `principal`.
+                    items: {type: object}
+        '403': {description: 'Not a human acting directly, or not an admin for another principal'}
+        '503': {description: 'Which holders are the caller''s could not be read (not asked for an admin naming a holder): the principal store did not answer or is not configured, or the caller''s principal could not be resolved (surface_identity_unavailable)'}
   /api/v1/surface-identities/{id}/revoke:
     post:
       summary: Revoke a surface identity link
-      description: The linked human or a human admin. Relayed requests for it fail from then on.
+      description: The linked human, from a session of either holder form (as for the list), or a human admin. Relayed requests for it fail from then on.
       tags: [Surface Identity]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
       responses:
         '200': {description: Revoked (or already revoked)}
-        '403': {description: Not a GitHub-authenticated human}
+        '403': {description: Not a human acting directly}
         '404': {description: No such link visible to the caller}
+        '503': {description: 'The link is not held by any holder the caller is known to be, and the rest of its holders could not be read (surface_identity_unavailable)'}
   /api/v1/roadmap/epics:
     get:
       summary: List the epics in the roadmap publication
@@ -3521,12 +3618,15 @@ paths:
         (`resolved`, `timed_out`, ...) and falls back to `expired` only when
         the workflow cannot be asked.
 
-        A caller sees a request only if their `github:<login>` is in its
-        eligible actors, or they are an admin, or they are the service
-        principal relaying for a surface. The login must be proven by
-        authentication (a GitHub token, or an mctl-api OAuth token minted
-        after GitHub login); a Dex username is never treated as a GitHub
-        login. Other callers do not learn the request exists.
+        A caller sees a request only if their `github:<login>` or
+        `principal:<prn_…>` is in its eligible actors, or they are an admin,
+        or they are the service principal relaying for a surface. The login
+        must be proven by authentication (a GitHub token, or an mctl-api
+        OAuth token minted after GitHub login); a Dex username is never
+        treated as a GitHub login. The principal is the human caller's
+        resolved canonical principal, from any IdP (mctl-api#629); an
+        unresolved principal matches nothing. Other callers do not learn the
+        request exists.
 
         Each owning workflow execution is queried once per call, within one
         overall time budget; expired requests are not queried.
@@ -3658,10 +3758,12 @@ paths:
         Delivers one HumanInputResponse to the DevLoopWorkflow execution that
         sealed the request, as the `human_input_response` signal.
 
-        - The respondent is always derived from authentication as
-          `github:<login>`, and only when authentication proved the GitHub
-          login. The body cannot name a respondent (unknown fields are
-          rejected), and the service principal cannot answer.
+        - The respondent is always derived from authentication: the first
+          of `github:<login>` (only when authentication proved the GitHub
+          login) and `principal:<prn_…>` (the human caller's resolved
+          principal, mctl-api#629) that the request's `actor_refs` names.
+          The body cannot name a respondent (unknown fields are rejected),
+          and the service principal cannot answer.
         - Eligibility, `request_hash`, expiry and the typed value are
           checked here and again by the workflow, which has the final word.
         - Idempotent: resubmitting the same answer returns the same outcome.
@@ -4246,6 +4348,10 @@ paths:
         Every field is checked by the secret scanner (400
         `secret_in_text`). A new request needs `expires_at` in
         the future and at most 7 days ahead. A named `work_item_id` must exist.
+        A DevLoop gate (`action_kind` `mctl-agents-approve`, mctl-api#571)
+        must name an existing `we_` execution (400
+        `approval_execution_invalid`) that has not finished (409
+        `approval_execution_not_open`).
       tags: [Action Approvals]
       parameters:
         - {name: Idempotency-Key, in: header, required: false, schema: {type: string, maxLength: 512}}
@@ -4272,9 +4378,9 @@ paths:
       responses:
         '201': {description: Created in state pending, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
         '200': {description: This key already names this intent; the stored request, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
-        '400': {description: 'invalid_request (missing or oversized field, expiry outside the window, unknown work item), secret_in_text, intent_hash_mismatch, or actor_not_accepted (a body naming requested_by or another actor)', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '400': {description: 'invalid_request (missing or oversized field, expiry outside the window, unknown work item), secret_in_text, intent_hash_mismatch, actor_not_accepted (a body naming requested_by or another actor), or approval_execution_invalid', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '403': {description: approval_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
-        '409': {description: approval_idempotency_conflict, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '409': {description: 'approval_idempotency_conflict, or approval_execution_not_open', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
     get:
       summary: List action approval requests
@@ -4319,6 +4425,57 @@ paths:
         '401': {description: Authentication required}
         '403': {description: 'grant_not_bound or grant_subject_unresolved'}
         '503': {description: delegation_unavailable}
+
+  /api/v1/admin/principals/{id}/disable:
+    post:
+      summary: Disable a human principal (platform admin)
+      description: |
+        For a principal that must stop acting and that no merge can absorb,
+        such as an orphan whose only identity was removed at its IdP. A
+        platform admin acting directly only (relayed, surface, service and
+        agent callers get 403, as does an admin whose own principal did not
+        resolve). Refused for a service or agent principal
+        (`principal_not_human`), the caller's own principal
+        (`principal_disable_self`) and the last active ADMIN_PRINCIPALS
+        principal (`principal_last_admin`). Idempotent: an already disabled
+        principal answers 200 with `already_disabled: true`. Its identities
+        stay bound and live (each is refused because the principal is
+        disabled); its local refresh sessions are revoked best effort
+        (`sessions_revoked` is null when that failed). Every outcome after
+        the admin check, refusals included, is audited as
+        `principal.disable` with the actor, the target and the reason.
+      tags: [Identity]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason: {type: string, minLength: 1, maxLength: 500, description: 'Why; copied into the audit row. Trimmed; at most 500 characters.'}
+              required: [reason]
+      responses:
+        '200':
+          description: Disabled now, or already disabled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  principal_id: {type: string}
+                  status: {type: string, enum: [disabled]}
+                  already_disabled: {type: boolean}
+                  live_identities: {type: integer, description: Identities still bound to the principal}
+                  sessions_revoked: {type: integer, nullable: true, description: Refresh sessions revoked now; null when the revocation failed}
+        '400': {description: 'A missing or invalid body or reason, a malformed principal id, or principal_not_human'}
+        '401': {description: Authentication required}
+        '403': {description: Not a platform admin acting directly, or the caller has no resolved principal}
+        '404': {description: No such principal}
+        '409': {description: 'principal_disable_self or principal_last_admin'}
+        '503': {description: identity_link_unavailable (the principal store is not configured or failed)}
 
   /api/v1/action-approvals/{id}:
     get:

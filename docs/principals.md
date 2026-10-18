@@ -136,15 +136,73 @@ on failure) moves every live identity of `from` onto `into` and disables
 stay on `from`, and `moved_identities` counts live ones only. It is refused
 when both hold a live identity of the same provider and issuer, or either
 is not human, or `into` is disabled, or `from` is disabled while still
-holding live identities. A retry is safe: when `from` is already disabled
+holding live identities. It is also refused with 409
+`principal_last_admin` when `from` is the last active `ADMIN_PRINCIPALS`
+principal (the same check as a disable, below; `into` counts as the other
+admin only when it is itself in `ADMIN_PRINCIPALS`). A retry is safe: when `from` is already disabled
 with no live identity left, the answer is 200 with `already_merged: true`
 and nothing changes. The store does not record which principal it went
 into, so the answer carries a `detail` saying the earlier target may
 differ from `into`; the audit rows record it. Every outcome, refusals included, is audited
 with the actor, `from` and `into`.
 
+A principal that must stop acting but that no merge can absorb is disabled
+instead: `POST /api/v1/admin/principals/{id}/disable` with body
+`{"reason": "..."}` (required, trimmed, at most 500 characters). The case it was
+built for is an orphan whose only identity is a ZITADEL user removed at the
+IdP: merging it into the admin's own principal is refused because both hold
+a ZITADEL identity of the same issuer, and `DELETE /identity/links` acts on
+the caller's own identities only. Same gate as a merge (a platform admin
+acting directly; audit `principal.disable`, high risk). Every outcome after
+the admin check, refusals included, is audited with the actor, the target,
+the reason and, on failure, a classified `refusal`, never the store's error
+text.
+
+| Case | Answer |
+|---|---|
+| not a platform admin acting directly (relayed, surface, service, agent) | 403, not audited |
+| missing or empty reason, unknown body field, malformed principal id | 400 |
+| the admin's own principal did not resolve | 403 `actor_unresolved` (it cannot prove it is not the target) |
+| the target is the caller's own principal | 409 `principal_disable_self` |
+| no such principal | 404 |
+| a service or agent principal | 400 `principal_not_human` |
+| the last active `ADMIN_PRINCIPALS` principal | 409 `principal_last_admin` |
+| store unavailable | 503 `identity_link_unavailable` |
+| already disabled (a retry, or disabled by a merge) | 200, `already_disabled: true`, nothing changes |
+| active human | 200, disabled |
+
+The last-admin check runs in the same transaction as the update, under the
+locks of the target and every other admin principal, so two admins
+disabling each other at once cannot both succeed. A principal named in
+`ADMIN_PRINCIPALS` that does not exist, is disabled, or is not human does
+not count as another admin. With `ADMIN_PRINCIPALS` empty there is no
+admin principal to protect and the check does not apply. A merge whose
+`from` is an admin runs the same check under the same locks (#650), so a
+merge and a disable of two admins at once cannot both succeed either. The
+store's `SetStatus` enforces nothing and is used only by tests.
+
+The principal's identities are left bound and live, not revoked:
+
+- A disabled principal is already refused everywhere. Each of its
+  identities resolves to `ErrPrincipalDisabled` at authentication, and a
+  local access token naming it fails the principal check on use. Revoking
+  would add no refusal.
+- The binding keeps the identity from being provisioned onto a fresh,
+  active principal at its next sign-in, and records who the principal was.
+- A merge reads "disabled with no live identity" as "already merged away".
+  Revoking here would make the disabled principal look merged, and a later
+  merge from it would answer `already_merged` without moving anything.
+
+Its local OAuth refresh sessions are revoked after the commit
+(`sessions_revoked` in the answer), so they stop renewing. That step is
+best effort: the principal is already refused on every token, so a failed
+revocation leaves `sessions_revoked: null` and `sessions_revoke=failed` in
+the audit row rather than failing the call. The resolver cache for the
+target is dropped, also on a retry, so the disable takes effect on the next
+request. There is no MCP tool for this; it is an HTTP admin operation only.
+
 The resolver caches answers for 5 minutes, including the principal id and
-its disabled flag. A merge and an unlink therefore drop the cached answers
+its disabled flag. A merge, a disable and an unlink therefore drop the cached answers
 for the principals involved (`Resolver.Forget`), so the next request
 re-reads the store: moved identities act as `into`, and an unlinked one is
 refused. A resolution already reading the store when that happens returns
@@ -168,7 +226,56 @@ GitHub or not at all.
 `OAUTH_UPSTREAM` decides where `GET /oauth/authorize` (every MCP connector)
 signs people in: `github` (the default, unchanged), `zitadel`, or `both`
 (a page offering ZITADEL first and GitHub as legacy; the choice comes back
-as the same authorization plus `upstream=`, a parameter only `both` reads).
+as the same authorization plus `upstream=`).
+
+### Customer entry: "Sign in with GitHub" (mctl-web#158)
+
+A customer (ZITADEL organization `customers`, GitHub its only IdP) finds no
+GitHub button on the instance login page. So when the ZITADEL entry has
+`customers_org_id` and `ZITADEL_HOOK_GITHUB_IDP_ID` names that
+organization's GitHub IdP (the identity hook's Secret carries both, and
+`ZITADEL_HOOK_CUSTOMERS_ORG_ID` must equal `customers_org_id`), the chooser
+gets a customer entry, `upstream=customer`, labelled "Sign in with GitHub":
+
+| `OAUTH_UPSTREAM` | Chooser |
+|---|---|
+| `zitadel` | Sign in with GitHub (customers, new and returning), Sign in with MCTL account (staff and partner accounts) |
+| `both` | the same two, then GitHub as legacy |
+| `github` | no chooser, no customer entry |
+
+The customer entry starts the same ZITADEL authorization with two more
+scopes, `urn:zitadel:iam:org:id:<customers_org_id>` and
+`urn:zitadel:iam:org:idp:id:<github idp id>`, exactly as mctl.ai does
+(mctl-web `cloudflare-worker/zitadel.js`): ZITADEL signs the person in to
+`customers` and goes straight to GitHub. The other entry, "Sign in with
+MCTL account", is for everyone who already has a ZITADEL account in
+another organization: staff and partner organizations alike, which is why
+it does not say "staff". Such a person pressing "Sign in with GitHub" would
+get a separate customers account, refused with `customer_conflict` because
+their GitHub identity already belongs to their principal; that 409 page
+points them to "Sign in with MCTL account". That entry and
+the code exchange are unchanged. The choice is not stored with the pending
+authorization: whether the person signs in as a customer is decided in the
+callback from the verified ID token's organization (see "Self-service
+customers" in `docs/federation.md`), so choosing the entry grants nothing.
+
+It fails closed. Without both ids, or with the hook's organization unset or
+different, no customer entry is offered and `zitadel` goes straight to
+ZITADEL as before. An `upstream=customer` that is not offered answers 400
+rather than becoming a staff sign-in; under `github` that includes a
+request carrying `upstream=customer`, where `upstream=` was ignored
+before. The 400 is a page, not an OAuth error to the client: only a
+person on the chooser makes this choice. A `ZITADEL_HOOK_GITHUB_IDP_ID`
+that is not a ZITADEL resource id (digits) is never offered, since it is
+written into a scope string. It also refuses the boot where the entry
+could be wired (a customers entry and `OAUTH_UPSTREAM` other than
+`github`), unless `MCTL_FEDERATION_DISABLED` is on: like the other
+`MCTL_OIDC_PROVIDERS` checks, the kill switch skips it so a rollback is
+never blocked, and the entry is then just not offered. The startup log
+line `OAuth ZITADEL upstream enabled` says `customer_github_signin=true`
+when the entry is offered, and every ZITADEL sign-in whose verified token
+names the customers organization is counted under
+`oauth_upstream_signins_total{upstream="zitadel_customer"}`.
 
 The ZITADEL leg uses its own confidential client
 (`OAUTH_ZITADEL_CLIENT_ID` / `OAUTH_ZITADEL_CLIENT_SECRET`, not the link
@@ -192,7 +299,14 @@ A pending authorization records its upstream: a GitHub callback cannot
 complete a ZITADEL authorization or the reverse, and an authorization whose
 upstream the current mode does not allow (one pending across a rollback)
 gets a 400. Sign-ins are counted in
-`oauth_upstream_signins_total{upstream,result}`. For `upstream="zitadel"`,
+`oauth_upstream_signins_total{upstream,result}`. A sign-in whose verified
+ID token names the customers organization is counted under
+`upstream="zitadel_customer"`, refusals included (`customer_unproven`,
+`customer_conflict`, `customer_not_enabled`, `principal_*`), so a hook or
+claim-client misconfiguration shows there. A token that names no
+organization cannot be placed and stays under `zitadel` as
+`invalid_token`. Queries on `upstream="zitadel"` no longer see customer
+sign-ins. For `upstream="zitadel"`,
 `result` is `issued`, `unlinked`, `refused`, `store_unavailable`,
 `principal_refused`, `principal_unavailable` (`principal` mode, as for GitHub),
 `invalid_token`, `upstream_error` (ZITADEL redirected back with an error),
@@ -279,6 +393,211 @@ Every field comes from authentication and the delegation gate. Nothing is
 parsed out of a principal string or a login, and the same human resolves to
 the same `principal_id` whichever provider they signed in with.
 
+## DevLoop approval by grant (#571)
+
+A DevLoop's human approval is exercised by the agent run that waits for
+it, as that human, through an action approval (`aar_`). Four parties stay
+distinct: the **human** who decides (subject, a `prn_`), the **agent run**
+that submits (actor, `agent:<name>` with its `art_` token), the run's
+**execution** (`we_`, canonical; the Temporal workflow id is its
+`engine_ref`), and the **grant** that links them (`aar_`).
+
+1. The worker attaches its DevLoop to the issue's work item as a `we_`
+   (`engine=temporal`, `engine_ref=<workflow_id>`, or
+   `<workflow_id>#<request_id>` for a run dispatched from an execution
+   request) and, at the approval gate, creates an `aar_` for that `we_`:
+   action kind `mctl-agents-approve`, target `<service>/<slug>`, policy
+   `dev-loop.human-approval`/`v1`. Creating it still takes the
+   `mctl-agent` service token.
+2. A human admin approves with
+   `POST /api/v1/agents/dev-loop/{workflow_id}/approve`. The workflow id is
+   resolved to its one open `we_` (more than one is 409
+   `execution_ambiguous`), and the newest `aar_` of that kind for it, in
+   any state, decides the answer: a pending one is decided and its
+   `approval_ref` signalled, an approved and unspent one is signalled
+   again, and a denied, consumed or expired one is refused with that
+   state's 409 whatever the legacy flag says. No `aar_` (or no `we_`) is
+   the legacy relay while `MCTL_AGENTS_APPROVE_LEGACY_APPROVER` is on and
+   409 `approval_grant_missing` once it is off. A store error is 503
+   `work_items_unavailable`, never "none".
+3. The run calls `POST /api/v1/operations/mctl-agents-approve/execute`
+   with its run token and `X-MCTL-On-Behalf-Of: aar_…`. The delegation
+   gate binds the grant to the run's `we_` and takes the subject from the
+   grant's `decided_by_principal_id`; the operation then checks the grant
+   instead of the admin role, and spends it once
+   (`ConsumeActionApproval`, an intent-hash compare-and-set) before
+   anything is submitted. The recorded approver is the decider's name;
+   the body may not name one.
+
+The operation record carries `actor_kind=agent`, `actor_name`,
+`agent_run_id`, `execution_id`, `subject_principal_id` and `grant_ref`, and
+the audit trail has `action_approval.create`, `.decision` and `.consume`
+(each with a `_refused` counterpart).
+
+**Subject from the principal, for every IdP.** For an `xr_`, `aar_` or
+`wi_` grant the subject is the principal the grant stored, checked active
+on every request: a ZITADEL-only human approves the same way as a GitHub
+one. A grant with no stored principal (an undecided `aar_`), or whose
+principal is disabled, is 403 `grant_subject_unresolved`; it never falls
+back to the login string. A `sil_` grant of a `github:<login>` link stores
+no principal and still resolves through its mirrored GitHub identity, so it
+requires a `github:` subject; it cannot authorize this operation. A `sil_`
+grant of a `prn_` link (#646) carries the link's principal and is checked
+like the other kinds. Binding a surface actor to a delegated subject
+compares principals (#629, next section).
+
+| Code | Status | Where | Meaning |
+|---|---|---|---|
+| `grant_not_bound` | 403 | gate | the `aar_` is for another `we_` or work item, or is denied, expired or consumed |
+| `grant_subject_unresolved` | 403 | gate | no stored principal (undecided), disabled, or (`sil_`) a `github:` link without a GitHub subject or a `prn_` link without its recorded `oidc:` name |
+| `actor_not_accepted` | 400 | operation | the body names an `approver` |
+| `approval_intent_mismatch` | 409 | operation | another action kind, target or policy; a target that maps to no workflow id or not to the run's own DevLoop; or the approval's `we_` no longer exists |
+| `approval_consumed` / `approval_expired` | 409 | operation, approve route | spent or past its expiry |
+| `approval_denied` | 409 | approve route | the newest grant was denied |
+| `approval_grant_missing` | 409 | approve route | no grant and the legacy flag is off |
+| `execution_ambiguous` | 409 | approve route | more than one open `we_` for the workflow id |
+| `legacy_approver_disabled` | 400 | operation | free-text `approver` from a service principal with the flag off |
+| `delegation_unavailable` | 503 | gate | the grant could not be resolved (store outage) or delegation is not configured |
+| `work_items_unavailable` | 503 | operation, approve route | a work-item store read failed, or (approve route, flag off) the store is not configured |
+
+The target binding maps `<service>/<slug>` to a workflow id the way the
+shepherd does (`temporalclient.WorkflowIDForProposalRef`), which keeps only
+the slug's `issue-<n>-` prefix: it pins the service and the issue, and the
+intent hash pins the exact slug.
+
+**Retiring the legacy relay.** While the flag is on, the `mctl-agent`
+service may still relay a free-text `approver`; every use writes one
+`approver.legacy_relay` audit entry and increments
+`mctl_agents_approve_legacy_relay_total{outcome="relayed"}`. The flag goes
+off only after a full natural DevLoop cycle (the Saturday cron and one
+issue-triggered loop) with mctl-agents#636 deployed records actor and
+subject separately and zero legacy relays.
+
+## Surface actors and human-input respondents by principal (#629)
+
+Two human paths used to key on a verified GitHub login, which refused a
+ZITADEL-only human (a principal with no single live GitHub identity). Both
+now compare canonical principals.
+
+**Binding a surface actor under delegation.** `POST
+/api/v1/work-items/{id}/surface-refs` with a non-empty `actor_external_id`,
+called by an agent run delegating as a human, binds that surface identity
+to the work item (and with it the identity's `sil_` grant). The binding is
+allowed only when the identity's live link resolves to the delegated
+subject's principal. The subject's principal is the one the gate resolved:
+for an `xr_`, `aar_` or `wi_` grant the stored `prn_`, whatever IdP the
+human signed in with. The link's owner is read from the stored link, never
+from the caller. A `github:<login>` owner is resolved through the principal
+store exactly as the gate resolves a `sil_` subject, so the principal a
+surface actor is bound for is the principal its `sil_` grant later acts as.
+Like the gate, that lookup may ask GitHub for the login's id and provision
+a principal for it, on this write path. A `prn_` owner (#646) is that
+principal once the store confirms it is an active human (#663: the kind is
+checked here too, although only a human can hold a `prn_` link). A subject that shares the
+owner's login string but is another principal is refused.
+
+| Outcome | Status | Code |
+|---|---|---|
+| the subject has no resolved principal | 403 | `grant_subject_unresolved` |
+| another principal's identity; unknown, revoked or expired link; owner disabled or refused | 403 | `grant_not_bound` (one answer, no existence oracle) |
+| the link store could not be read; the owner's login could not be resolved (unknown GitHub identity, GitHub or principal store unavailable); the principal store is not configured or cannot check a `prn_` owner | 503 | `delegation_unavailable` |
+
+**Surface links for any human (#646).** A link names its holder in one of
+two forms. A caller whose GitHub login authentication proved is linked as
+`github:<login>`, as before. Any other human acting directly (a ZITADEL
+sign-in, say) whose principal authentication resolved is linked as that
+`prn_`, and the link records the name the human acted under, `oidc:<name>`
+(`principalOf`), as its `subject`. A service, surface or agent, a relayed
+or delegated subject get 403 `human_principal_required`. A human whose
+principal authentication could not resolve because the principal store did
+not answer gets 503 `surface_identity_unavailable` on challenge, list and
+revoke instead (#663): that is "unknown", not "has no principal". A name the
+link cannot record (a non-printable character, too long) is 403
+`human_principal_required` and is logged.
+A `prn_` link needs `TENANT_AUTHZ_MODE=principal`: its relayed subject's
+tenants come from the principal, and only principal mode resolves them, so
+outside it the challenge is 403 `principal_mode_required` rather than a link
+every tenant-scoped relay would refuse. The relay checks the same thing on
+every request (#663), because a link outlives a `TENANT_AUTHZ_MODE`
+rollback and a challenge minted before one can still be redeemed after it:
+a `prn_` link relayed outside principal mode is 403 `principal_mode_required`.
+
+One human can sign in through GitHub and through ZITADEL onto the same
+principal, and each session holds the other's links (#646, #663):
+
+- the GitHub session also holds its resolved `prn_`;
+- a `prn_` session also holds `github:<login>` for every live GitHub
+  identity of its principal, read from the principal store. A revoked
+  identity, or one whose login the store no longer knows (it moved to another
+  GitHub account), holds nothing.
+
+Either session lists both holders' links and may revoke them. Who the
+session holds links as is never guessed: if the principal store cannot
+answer (or, for a GitHub session, authentication could not resolve the
+principal), the list is 503, not a shorter list, a list naming a holder
+other than the session's own holder form is 503, not 403, and a revoke of a
+link none of the known holders holds is 503, not 404. The session's own
+holder form stays usable meanwhile (#671): its links can be listed by
+naming it (`?principal=github:<login>` from a GitHub session,
+`?principal=<prn_>` from a `prn_` session) and revoked, since that holder's
+list is whole whatever the rest of the set is. An admin listing a named
+holder, or revoking, needs no holder set at all. The derived
+`github:<login>` matches a link's holder exactly (the store compares logins
+case-insensitively); both are GitHub's spelling of the login, so they can
+differ only across a case-only rename no sign-in has recorded yet. The list
+response's `principal` is the holder form asked for, the session's own one
+by default, `holders` every holder whose links are listed, and each link
+names its own holder in `principal`. A new link for an identity already
+held under the other form is still `link_conflict`; revoke the old one
+first, from either session.
+
+The audit keys naming the holder mean the same in every
+`surface_identity.*` event: `principal` is the holder (`github:<login>` or
+`prn_…`) and `holder_subject` the recorded `oidc:` name of a `prn_` holder.
+`linked` and `revoked` also keep `subject`, which has always meant the holder
+there. `challenge_created` carried the name as `subject` only in 4.95.0
+(#660); it is `holder_subject` from the release after it, with no
+transition period: the key shipped one day before the change.
+
+- The mirror writes a `prn_` link's telegram identity for that principal
+  outright. A `prn_` that does not exist or is not human fails the redeem,
+  which is rolled back with the mirror.
+- The relay runs as the link's principal, checked an active human on every
+  request (`CheckPrincipal`, then `CheckHumanPrincipal`): disabled is 403
+  `principal_disabled`, unknown, refused or not human 403 `identity_refused`,
+  and a store that cannot answer is 503,
+  never a relay without a principal. A `prn_` link without a well-formed
+  `oidc:` subject is 403 `link_not_found`. The relayed subject acts under the
+  recorded name, so what it writes is owned by the same `oidc:<name>` the
+  human owns directly.
+- The `sil_` grant and the surface-actor binding follow the principal, as
+  above.
+
+The recorded name is only a name: renaming the human in ZITADEL leaves the
+link on the same principal, and the next possession proof records the new
+name. Until then the relay acts under the old name, so items written through
+the surface are owned by `oidc:<old name>` and are not visible to the human's
+direct sessions under the new one. A direct sign-in does not refresh it
+(deferred from #663): only a new possession proof does.
+
+**Answering human input.** `requested_from.actor_refs` entries stay in the
+`actor_type:actor_id` form that mctl-agents' `validate_response` rebuilds
+from the signalled respondent. Besides `github:<login>`, an entry may now
+name a principal as `principal:<prn_…>`. A caller may answer as:
+
+1. `github:<login>`, when authentication proved that GitHub login;
+2. `principal:<prn_…>`, the caller's resolved principal, for any IdP, and
+   only for a human identity: a service, surface or agent principal never
+   answers, even if `actor_refs` named it.
+
+The respondent is the first of these that `actor_refs` names, matched
+exactly. Both are derived from authentication; the body cannot name a
+respondent. A caller whose principal is unresolved has no principal
+reference, so it never matches one. The ledger row keeps
+`respondent_principal_id` as before, and the audit `respondent` is the
+reference answered as. Existing `github:` refs keep working during the
+migration; mctl-agents writing `principal:` refs is its own change.
+
 ## Not in phase 1
 
 Authorization and tenant membership still use `User.ID` and `User.Groups`,
@@ -336,6 +655,24 @@ from an outage. A resolution is audited as `principal.resolve_github`, a
 resolver refusal as `principal.resolve_github_refused`; a `503` is
 logged. This confers nothing new: the portal could already make any login
 the owner of a new tenant.
+
+A self-service customer (`docs/federation.md`, "Self-service customers") is
+resolved by its ZITADEL ID token instead, with `POST
+/api/v1/surface-principals/zitadel`, body `{"idToken": "...", "purpose":
+"create" | "signin"}` and `X-MCTL-Surface-Actor: zitadel:<sub of the token>`.
+mctl-api verifies the token itself: signature against the issuer's keys,
+issuer, expiry, and that it was issued to the client the purpose names, both
+as an audience and as `azp`: the mctl-web site's client
+(`MCTL_WEB_CLIENT_ID`) for `create`, the portal's (`ZITADEL_PORTAL_CLIENT_ID`)
+for `signin`. Any other client, the dev client included, is `401
+id_token_invalid`; a purpose whose client is not configured is `503`. The
+route answers `{"principalId", "githubId", "githubLogin"}`, keyed on the
+GitHub id the token proved. A token of another organization is `400
+not_a_customer`, an unproven customer `403 customer_unproven`, a conflict
+`409 customer_conflict`, a disabled principal or refused identity `403`, a
+failed read `503`. Only the portal surface may call it. Resolutions are
+audited as `principal.resolve_zitadel` and refusals as
+`principal.resolve_zitadel_refused`.
 
 ### `TENANT_AUTHZ_MODE`
 

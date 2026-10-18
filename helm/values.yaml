@@ -83,6 +83,12 @@ env:
   # decides on the principal (needs ADMIN_PRINCIPALS). Any other value
   # refuses boot.
   TENANT_AUTHZ_MODE: ""
+  # Whether the mctl-agent service principal may still relay a free-text
+  # approver on mctl-agents-approve (mctl-api#571). Empty or "true" keeps the
+  # relay, audited per use as approver.legacy_relay; "false" refuses it once
+  # mctl-agents approves through action-approval grants. Any other value
+  # refuses boot.
+  MCTL_AGENTS_APPROVE_LEGACY_APPROVER: ""
   # Platform admins by principal id (prn_...), comma-separated. The only
   # source of platform admin in principal mode (ADMIN_USERS is then
   # ignored); in shadow mode, when set, each request's admin decision is
@@ -103,6 +109,14 @@ envFromSecret: ""
 # The secret must have a key named "ssh-privatekey".
 gitopsSSHSecret: ""
 envFromExtraSecret: ""
+
+# Optional: more Secrets mounted as envFrom with `optional: true`, so the pod
+# still starts while one of them does not exist yet. For a Secret another
+# controller fills in later, e.g. mctl-api-zitadel-hook, which ZITADEL's
+# zitadel-iac writes after it creates the hook targets
+# (docs/zitadel-identity-hook.md). envFrom is read at container start: after
+# the Secret appears or changes, the pod needs a restart to see it.
+envFromOptionalSecrets: []
 
 # Optional: mount a GitHub App installation token as a file.
 #

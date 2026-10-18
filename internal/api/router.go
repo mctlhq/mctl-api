@@ -91,6 +91,9 @@ type Options struct {
 	OAuthUpstream OAuthUpstreamMode
 	// OAuthZitadel configures the ZITADEL upstream; nil keeps it off.
 	OAuthZitadel *OAuthZitadelOptions
+	// SurfaceZitadel configures POST /api/v1/surface-principals/zitadel;
+	// nil leaves it answering 503.
+	SurfaceZitadel *SurfaceZitadelOptions
 	// AlertStore persists incident alerts to PostgreSQL (optional — nil disables incident endpoints).
 	AlertStore *alerts.Store
 	// DomainStore persists custom domain registrations to PostgreSQL
@@ -129,6 +132,11 @@ type Options struct {
 	// (mctl-api#373 phase 1), as authentication does for a direct caller.
 	// Nil relays without a principal id.
 	Principals auth.PrincipalResolver
+	// LegacyApproverDisabled is MCTL_AGENTS_APPROVE_LEGACY_APPROVER=false
+	// (mctl-api#571). The zero value keeps the service principal's
+	// free-text approver relay on mctl-agents-approve, audited per use as
+	// approver.legacy_relay; true refuses it.
+	LegacyApproverDisabled bool
 	// TenantAuthzMode is TENANT_AUTHZ_MODE (mctl-api#377). The zero value
 	// behaves as legacy; shadow also compares the principal-keyed decision
 	// (tenantAuthzShadow) without acting on it.
@@ -161,6 +169,10 @@ type Options struct {
 	// DefaultRoadmapWaveMaxAge; negative means the configuration was
 	// invalid, and execution is refused.
 	RoadmapWaveMaxAge time.Duration
+	// RoadmapWaveDisabledReason names the setting that disabled wave
+	// execution; reported in responses. Empty falls back to
+	// ROADMAP_WAVE_MAX_AGE.
+	RoadmapWaveDisabledReason string
 
 	// Usage is the durable model-usage and cost ledger (mctl-api#266,
 	// ADR-012). Optional — nil makes the usage endpoints 503, which a caller
@@ -242,6 +254,11 @@ type Options struct {
 	GitHubEventOutbox GitHubEventOutbox
 	// GitHubEventNotify wakes the outbox relay after an insert (optional).
 	GitHubEventNotify func()
+	// ZitadelHook wires the ZITADEL Actions v2 identity hook for the
+	// customers org (handlers_zitadel_hook.go). Nil answers 503 on its
+	// three routes; each route also rejects calls without a valid
+	// ZITADEL-Signature under that target's own key.
+	ZitadelHook *ZitadelHookOptions
 	// OAuthRegistrationToken, when non-empty, requires Authorization: Bearer
 	// <token> on POST /oauth/register (RFC 7591 initial access token).
 	OAuthRegistrationToken string
@@ -252,9 +269,10 @@ type Options struct {
 
 // Handlers holds all API handler dependencies.
 type Handlers struct {
-	opts         Options
-	identityLink *identityLinker
-	oauthZitadel *oauthZitadel
+	opts           Options
+	identityLink   *identityLinker
+	oauthZitadel   *oauthZitadel
+	surfaceZitadel *surfaceZitadel
 	// principalSets memoizes shadow mode's principal-keyed tenant sets;
 	// nil reads the checkout on every comparison.
 	principalSets *principalSetCache
@@ -270,7 +288,10 @@ func NewRouter(opts Options) http.Handler {
 		h.identityLink = newIdentityLinker(opts.IdentityLink)
 	}
 	if opts.OAuthZitadel != nil {
-		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel}
+		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel, lazyOIDCProvider: lazyOIDCProvider{issuer: opts.OAuthZitadel.Issuer}}
+	}
+	if opts.SurfaceZitadel != nil {
+		h.surfaceZitadel = &surfaceZitadel{opts: opts.SurfaceZitadel, lazyOIDCProvider: lazyOIDCProvider{issuer: opts.SurfaceZitadel.Issuer}}
 	}
 
 	if opts.BackstageGithubAppConnectToken == "" {
@@ -366,6 +387,9 @@ func NewRouter(opts Options) http.Handler {
 	// Webhook callbacks (unauthenticated/token-validated)
 	r.Post("/api/v1/workflows/events/argo-complete", h.HandleArgoWorkflowComplete)
 	r.Post("/api/v1/webhooks/github", h.HandleGitHubWebhook)
+	r.Post(zitadelHookIntentPath, h.HandleZitadelIntent)
+	r.Post(zitadelHookCreatePath, h.HandleZitadelCreateUser)
+	r.Post(zitadelHookTokenPath, h.HandleZitadelTokenClaims)
 
 	// Authenticated API routes.
 	r.Group(func(r chi.Router) {
@@ -435,10 +459,12 @@ func NewRouter(opts Options) http.Handler {
 		r.Route("/api/v1", func(r chi.Router) {
 			// Auth endpoints.
 			r.Get("/whoami", h.Whoami)
+			r.Get("/surface-principals/workspace-access/{tenant}", h.ObserveWorkspaceAccess)
 			// The caller's linked identities (mctl-api#435).
 			r.Get("/identity/links", h.ListIdentityLinks)
 			r.Delete("/identity/links/{id}", h.UnlinkIdentity)
 			r.Post("/admin/principals/{from}/merge-into/{into}", h.MergePrincipals)
+			r.Post("/admin/principals/{id}/disable", h.DisablePrincipal)
 			// Read-only: proposes a principalId per GitOps member entry.
 			r.Get("/admin/tenant-members/principal-plan", h.TenantMemberPrincipalPlan)
 			r.Post("/auth/logout", h.Logout)
@@ -577,6 +603,8 @@ func NewRouter(opts Options) http.Handler {
 				// The portal resolves a tenant creator's GitHub login to a
 				// principal before it submits create-tenant (mctl-api#377).
 				r.Post("/surface-principals/github", h.ResolveGitHubPrincipal)
+				// ... and a self-service customer by its ZITADEL ID token.
+				r.Post("/surface-principals/zitadel", h.ResolveZitadelPrincipal)
 				r.Post("/surface-identities/{id}/revoke", h.RevokeSurfaceIdentity)
 				r.Patch("/work-items/{id}", h.TransitionWorkItem)
 				r.Post("/work-items/{id}/intents", h.AppendWorkItemIntent)

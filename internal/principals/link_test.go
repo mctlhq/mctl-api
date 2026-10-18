@@ -192,7 +192,7 @@ func TestMergePrincipalsMovesIdentitiesAndDisablesTheSource(t *testing.T) {
 	p, _ := s.Provision(ctx, github(1, "alice"))
 	q, _ := s.Provision(ctx, zitadel("z1", "alice"))
 
-	res, err := s.MergePrincipals(ctx, q.ID, p.ID)
+	res, err := s.MergePrincipals(ctx, q.ID, p.ID, nil)
 	if err != nil || res.Moved != 1 || res.AlreadyMerged {
 		t.Fatalf("merge = %+v, %v; want 1 moved", res, err)
 	}
@@ -214,24 +214,24 @@ func TestMergePrincipalsRefusesConflictsAndBadPairs(t *testing.T) {
 		t.Fatal(err)
 	}
 	q, _ := s.Provision(ctx, zitadel("z2", "alice-other"))
-	if _, err := s.MergePrincipals(ctx, q.ID, p.ID); !errors.Is(err, ErrMergeConflict) {
+	if _, err := s.MergePrincipals(ctx, q.ID, p.ID, nil); !errors.Is(err, ErrMergeConflict) {
 		t.Fatalf("err = %v, want ErrMergeConflict", err)
 	}
-	if _, err := s.MergePrincipals(ctx, p.ID, p.ID); !errors.Is(err, ErrInvalid) {
+	if _, err := s.MergePrincipals(ctx, p.ID, p.ID, nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("self merge err = %v, want ErrInvalid", err)
 	}
 	agent, _ := s.Provision(ctx, auth.Identity{Provider: auth.ProviderAgent, Subject: "agent:a", Kind: auth.KindAgent})
 	r, _ := s.Provision(ctx, github(2, "bob"))
-	if _, err := s.MergePrincipals(ctx, agent.ID, r.ID); !errors.Is(err, ErrInvalid) {
+	if _, err := s.MergePrincipals(ctx, agent.ID, r.ID, nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("agent merge err = %v, want ErrInvalid", err)
 	}
 	if err := s.SetStatus(ctx, r.ID, StatusDisabled); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.MergePrincipals(ctx, q.ID, r.ID); !errors.Is(err, auth.ErrPrincipalDisabled) {
+	if _, err := s.MergePrincipals(ctx, q.ID, r.ID, nil); !errors.Is(err, auth.ErrPrincipalDisabled) {
 		t.Fatalf("into disabled err = %v, want ErrPrincipalDisabled", err)
 	}
-	if _, err := s.MergePrincipals(ctx, "prn_missing", p.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := s.MergePrincipals(ctx, "prn_missing", p.ID, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing err = %v, want ErrNotFound", err)
 	}
 }
@@ -247,7 +247,7 @@ func TestResolverForgetsMergedAndUnlinkedPrincipals(t *testing.T) {
 	if got, err := r.ResolvePrincipal(ctx, zitadel("z1", "alice")); err != nil || got != q.ID {
 		t.Fatalf("before merge = %q, %v; want %s", got, err, q.ID)
 	}
-	if _, err := s.MergePrincipals(ctx, q.ID, p.ID); err != nil {
+	if _, err := s.MergePrincipals(ctx, q.ID, p.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Still cached: this is the window Forget closes.
@@ -294,7 +294,7 @@ func TestMergePrincipalsLeavesRevokedIdentitiesOnTheSource(t *testing.T) {
 			}
 		}
 	}
-	res, err := s.MergePrincipals(ctx, q.ID, p.ID)
+	res, err := s.MergePrincipals(ctx, q.ID, p.ID, nil)
 	if err != nil || res.Moved != 1 {
 		t.Fatalf("merge = %+v, %v; want 1 live identity moved", res, err)
 	}
@@ -311,10 +311,10 @@ func TestMergePrincipalsIsSafeToRetryAndRefusesADisabledSource(t *testing.T) {
 	ctx := context.Background()
 	p, _ := s.Provision(ctx, github(1, "alice"))
 	q, _ := s.Provision(ctx, zitadel("z1", "alice"))
-	if res, err := s.MergePrincipals(ctx, q.ID, p.ID); err != nil || res.Moved != 1 {
+	if res, err := s.MergePrincipals(ctx, q.ID, p.ID, nil); err != nil || res.Moved != 1 {
 		t.Fatalf("merge = %+v, %v", res, err)
 	}
-	res, err := s.MergePrincipals(ctx, q.ID, p.ID)
+	res, err := s.MergePrincipals(ctx, q.ID, p.ID, nil)
 	if err != nil || !res.AlreadyMerged || res.Moved != 0 {
 		t.Fatalf("retry = %+v, %v; want already merged, nothing moved", res, err)
 	}
@@ -326,10 +326,404 @@ func TestMergePrincipalsIsSafeToRetryAndRefusesADisabledSource(t *testing.T) {
 	if err := s.SetStatus(ctx, d.ID, StatusDisabled); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.MergePrincipals(ctx, d.ID, p.ID); !errors.Is(err, auth.ErrPrincipalDisabled) {
+	if _, err := s.MergePrincipals(ctx, d.ID, p.ID, nil); !errors.Is(err, auth.ErrPrincipalDisabled) {
 		t.Fatalf("disabled source err = %v, want ErrPrincipalDisabled", err)
 	}
 	if ids, _ := s.Identities(ctx, d.ID); len(ids) != 1 || ids[0].PrincipalID != d.ID {
 		t.Fatalf("a refused merge moved identities: %+v", ids)
+	}
+}
+
+// The orphan case (mctlhq/mctl-api#377): a principal whose only identity is
+// a removed ZITADEL user. Disabling it refuses that identity everywhere,
+// keeps it bound, and a retry changes nothing.
+func TestDisablePrincipalRefusesItsIdentitiesAndIsSafeToRetry(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	r := NewResolver(s, nil, false)
+	q, _ := s.Provision(ctx, zitadel("z-orphan", "orphan"))
+	if got, err := r.ResolvePrincipal(ctx, zitadel("z-orphan", "orphan")); err != nil || got != q.ID {
+		t.Fatalf("before disable = %q, %v", got, err)
+	}
+	res, err := s.DisablePrincipal(ctx, q.ID, nil)
+	if err != nil || res.AlreadyDisabled || res.LiveIdentities != 1 {
+		t.Fatalf("disable = %+v, %v; want disabled now with 1 live identity", res, err)
+	}
+	if got, _ := s.Get(ctx, q.ID); got == nil || got.Status != StatusDisabled {
+		t.Fatalf("principal after disable = %+v", got)
+	}
+	r.Forget(q.ID)
+	if _, err := r.ResolvePrincipal(ctx, zitadel("z-orphan", "orphan")); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("resolve after disable err = %v, want ErrPrincipalDisabled", err)
+	}
+	// The identity stays bound: its next sign-in does not provision a
+	// fresh, active principal.
+	if got, err := s.Provision(ctx, zitadel("z-orphan", "orphan")); err != nil || got.ID != q.ID || got.Status != StatusDisabled {
+		t.Fatalf("provision after disable = %+v, %v; want the disabled %s", got, err, q.ID)
+	}
+	if ids, _ := s.Identities(ctx, q.ID); len(ids) != 1 || ids[0].RevokedAt != nil {
+		t.Fatalf("identities after disable = %+v, want the one, still live", ids)
+	}
+	res, err = s.DisablePrincipal(ctx, q.ID, nil)
+	if err != nil || !res.AlreadyDisabled || res.LiveIdentities != 1 {
+		t.Fatalf("retry = %+v, %v; want already disabled", res, err)
+	}
+	// Still disabled with a live identity, so a merge from it is refused as
+	// disabled, not answered as already merged.
+	p, _ := s.Provision(ctx, github(1, "alice"))
+	if _, err := s.MergePrincipals(ctx, q.ID, p.ID, nil); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("merge from a disabled principal err = %v, want ErrPrincipalDisabled", err)
+	}
+}
+
+func TestDisablePrincipalRefusesNonHumansAndUnknowns(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	agent, err := s.Provision(ctx, auth.Identity{Provider: auth.ProviderAgent, Subject: "agent:d", Kind: auth.KindAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DisablePrincipal(ctx, agent.ID, nil); !errors.Is(err, ErrNotHuman) {
+		t.Fatalf("agent disable err = %v, want ErrNotHuman", err)
+	}
+	if got, _ := s.Get(ctx, agent.ID); got == nil || got.Status != StatusActive {
+		t.Fatalf("a refused disable changed the agent: %+v", got)
+	}
+	if _, err := s.DisablePrincipal(ctx, "prn_01M51RRWSHH3VR3W4RTYY9238K", nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown principal err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.DisablePrincipal(ctx, "", nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty id err = %v, want ErrInvalid", err)
+	}
+}
+
+// The last active ADMIN_PRINCIPALS principal is never disabled; an admin
+// that is disabled, not human, or does not exist does not count as another.
+func TestDisablePrincipalKeepsTheLastAdmin(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	a, _ := s.Provision(ctx, github(1, "alice"))
+	b, _ := s.Provision(ctx, github(2, "bob"))
+	agent, _ := s.Provision(ctx, auth.Identity{Provider: auth.ProviderAgent, Subject: "agent:admin", Kind: auth.KindAgent})
+	if err := s.SetStatus(ctx, b.ID, StatusDisabled); err != nil {
+		t.Fatal(err)
+	}
+	admins := []string{a.ID, b.ID, agent.ID, "prn_01M51RRWSHH3VR3W4RTYY9238K", ""}
+	if _, err := s.DisablePrincipal(ctx, a.ID, admins); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("last admin disable err = %v, want ErrLastAdmin", err)
+	}
+	if got, _ := s.Get(ctx, a.ID); got == nil || got.Status != StatusActive {
+		t.Fatalf("a refused disable changed the last admin: %+v", got)
+	}
+	if err := s.SetStatus(ctx, b.ID, StatusActive); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := s.DisablePrincipal(ctx, a.ID, admins); err != nil || res.AlreadyDisabled {
+		t.Fatalf("disable with another active admin = %+v, %v", res, err)
+	}
+	// Now b is the last one, and a retry on a stays a no-op.
+	if _, err := s.DisablePrincipal(ctx, b.ID, admins); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("disable of the remaining admin err = %v, want ErrLastAdmin", err)
+	}
+	if res, err := s.DisablePrincipal(ctx, a.ID, admins); err != nil || !res.AlreadyDisabled {
+		t.Fatalf("retry on a disabled admin = %+v, %v", res, err)
+	}
+}
+
+// Two admins disabling each other at once: at most one succeeds, so at
+// least one admin principal stays active.
+func TestDisablePrincipalMutualAdminDisableLeavesOne(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	for round := 0; round < 10; round++ {
+		a, _ := s.Provision(ctx, github(int64(100+2*round), "a"+strconv.Itoa(round)))
+		b, _ := s.Provision(ctx, github(int64(101+2*round), "b"+strconv.Itoa(round)))
+		admins := []string{a.ID, b.ID}
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		for i, id := range []string{a.ID, b.ID} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, errs[i] = s.DisablePrincipal(ctx, id, admins)
+			}()
+		}
+		wg.Wait()
+		active := 0
+		for _, id := range admins {
+			if got, _ := s.Get(ctx, id); got != nil && got.Status == StatusActive {
+				active++
+			}
+		}
+		if active != 1 {
+			t.Fatalf("round %d: %d admins active after a mutual disable (errs %v), want 1", round, active, errs)
+		}
+		if (errs[0] == nil) == (errs[1] == nil) || (!errors.Is(errs[0], ErrLastAdmin) && !errors.Is(errs[1], ErrLastAdmin)) {
+			t.Fatalf("round %d: errs %v, want one success and one ErrLastAdmin", round, errs)
+		}
+	}
+}
+
+// A merge disables from, so it keeps the last-admin invariant too
+// (mctl-api#650): into counts only when it is itself an admin, and a retry
+// of a completed merge is still a no-op.
+func TestMergePrincipalsKeepsTheLastAdmin(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	a, _ := s.Provision(ctx, github(1, "alice"))
+	b, _ := s.Provision(ctx, github(2, "bob"))
+	agent, _ := s.Provision(ctx, auth.Identity{Provider: auth.ProviderAgent, Subject: "agent:admin", Kind: auth.KindAgent})
+	c, _ := s.Provision(ctx, zitadel("z1", "carol"))
+	g, _ := s.Provision(ctx, github(4, "gina"))
+	if err := s.SetStatus(ctx, b.ID, StatusDisabled); err != nil {
+		t.Fatal(err)
+	}
+	admins := []string{a.ID, b.ID, agent.ID, "prn_01M51RRWSHH3VR3W4RTYY9238K", ""}
+	if _, err := s.MergePrincipals(ctx, a.ID, c.ID, admins); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("merge of the last admin into a non-admin err = %v, want ErrLastAdmin", err)
+	}
+	if got, _ := s.Get(ctx, a.ID); got == nil || got.Status != StatusActive {
+		t.Fatalf("a refused merge changed the last admin: %+v", got)
+	}
+	if got, err := s.Provision(ctx, github(1, "alice")); err != nil || got.ID != a.ID {
+		t.Fatalf("after a refused merge github(1) resolves to %v (%v), want %s", got, err, a.ID)
+	}
+	// A non-admin from is not affected by the admin set.
+	if _, err := s.MergePrincipals(ctx, g.ID, c.ID, admins); err != nil {
+		t.Fatalf("non-admin merge err = %v", err)
+	}
+	// An active admin into counts as the other admin.
+	f, _ := s.Provision(ctx, zitadel("z3", "frank"))
+	admins = append(admins, f.ID)
+	if res, err := s.MergePrincipals(ctx, a.ID, f.ID, admins); err != nil || res.Moved != 1 {
+		t.Fatalf("merge of an admin into another admin = %+v, %v", res, err)
+	}
+	if res, err := s.MergePrincipals(ctx, a.ID, f.ID, admins); err != nil || !res.AlreadyMerged {
+		t.Fatalf("retry of a completed admin merge = %+v, %v; want AlreadyMerged", res, err)
+	}
+	// And a disable of f, now the last one, is still refused.
+	if _, err := s.DisablePrincipal(ctx, f.ID, admins); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("disable of the remaining admin err = %v, want ErrLastAdmin", err)
+	}
+}
+
+// Two admins merged away at once, or one merged away while the other is
+// disabled: at most one succeeds, so at least one admin stays active.
+func TestMergePrincipalsConcurrentWithAdminRemovalLeavesOne(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	for round := 0; round < 20; round++ {
+		a, _ := s.Provision(ctx, github(int64(200+2*round), "a"+strconv.Itoa(round)))
+		b, _ := s.Provision(ctx, github(int64(201+2*round), "b"+strconv.Itoa(round)))
+		c, _ := s.Provision(ctx, zitadel("zc"+strconv.Itoa(round), "c"+strconv.Itoa(round)))
+		d, _ := s.Provision(ctx, zitadel("zd"+strconv.Itoa(round), "d"+strconv.Itoa(round)))
+		admins := []string{a.ID, b.ID}
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, errs[0] = s.MergePrincipals(ctx, a.ID, c.ID, admins)
+		}()
+		go func() {
+			defer wg.Done()
+			if round%2 == 0 {
+				_, errs[1] = s.MergePrincipals(ctx, b.ID, d.ID, admins)
+			} else {
+				_, errs[1] = s.DisablePrincipal(ctx, b.ID, admins)
+			}
+		}()
+		wg.Wait()
+		active := 0
+		for _, id := range admins {
+			if got, _ := s.Get(ctx, id); got != nil && got.Status == StatusActive {
+				active++
+			}
+		}
+		if active != 1 {
+			t.Fatalf("round %d: %d admins active (errs %v), want 1", round, active, errs)
+		}
+		if (errs[0] == nil) == (errs[1] == nil) || (!errors.Is(errs[0], ErrLastAdmin) && !errors.Is(errs[1], ErrLastAdmin)) {
+			t.Fatalf("round %d: errs %v, want one success and one ErrLastAdmin", round, errs)
+		}
+	}
+}
+
+func customer(sub string, githubID int64, login string) auth.Identity {
+	id := zitadel(sub, login+"@mctl.ai")
+	id.Customer = &auth.CustomerProof{GitHubID: strconv.FormatInt(githubID, 10), GitHubLogin: login}
+	return id
+}
+
+// Stage C0: a customer lands on the principal of the GitHub id the hook
+// proved, the ZITADEL subject is linked to it, and a second sign-in finds
+// the same principal.
+func TestResolveCustomerKeysOnTheGitHubID(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	p, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh, err := s.Provision(ctx, github(7, "bob"))
+	if err != nil || gh.ID != p.ID {
+		t.Fatalf("GitHub id 7 resolves to %v (%v), want the customer's %s", gh, err, p.ID)
+	}
+	again, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if err != nil || again.ID != p.ID {
+		t.Fatalf("second sign-in = %v (%v), want %s", again, err, p.ID)
+	}
+	ids, _ := s.Identities(ctx, p.ID)
+	if len(ids) != 2 {
+		t.Fatalf("identities = %+v, want the GitHub id and the ZITADEL subject", ids)
+	}
+}
+
+// A GitHub id that already has a principal (a legacy sign-up resolved it
+// through surface-principals/github) is reused, not duplicated.
+func TestResolveCustomerJoinsTheExistingPrincipalOfTheGitHubID(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	existing, err := s.Provision(ctx, github(7, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if err != nil || p.ID != existing.ID {
+		t.Fatalf("customer = %v (%v), want the existing %s", p, err, existing.ID)
+	}
+}
+
+// The Alice/Bob case: a login freed by one GitHub account and taken by
+// another resolves by id, so Bob never lands on Alice's principal.
+func TestResolveCustomerNeverMatchesAReusedLogin(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	alice, err := s.Provision(ctx, github(1, "shared"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := s.ResolveCustomer(ctx, customer("z2", 2, "shared"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bob.ID == alice.ID {
+		t.Fatalf("Bob resolved to Alice's principal %s through the reused login", alice.ID)
+	}
+}
+
+// A ZITADEL subject that already has a principal of its own is a conflict
+// for an admin, refused as such, and nothing moves.
+func TestResolveCustomerRefusesASubjectOwnedElsewhere(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	own, err := s.Provision(ctx, zitadel("z1", "bob@mctl.ai"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if !errors.Is(err, auth.ErrIdentityRefused) || !errors.Is(err, ErrCustomerConflict) || !errors.Is(err, ErrIdentityOwnedElsewhere) {
+		t.Fatalf("err = %v, want a refused customer conflict", err)
+	}
+	ids, _ := s.Identities(ctx, own.ID)
+	if len(ids) != 1 {
+		t.Fatalf("the subject moved: %+v", ids)
+	}
+	// Deliberate: the GitHub id's own principal exists after the refusal,
+	// with only its GitHub identity, for an admin to merge into.
+	gh, err := s.Provision(ctx, customer("z1", 7, "bob").Customer.GitHubIdentity())
+	if err != nil || gh.ID == own.ID {
+		t.Fatalf("GitHub principal = %+v, %v", gh, err)
+	}
+	if ids, _ := s.Identities(ctx, gh.ID); len(ids) != 1 || ids[0].Provider != auth.ProviderGitHub {
+		t.Fatalf("GitHub principal identities = %+v, want only the GitHub one", ids)
+	}
+}
+
+// A second ZITADEL account for the same GitHub id (a deleted and recreated
+// customer) is refused until an admin unlinks the first.
+func TestResolveCustomerRefusesASecondSubjectForTheSameGitHubID(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	if _, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.ResolveCustomer(ctx, customer("z9", 7, "bob"))
+	if !errors.Is(err, auth.ErrIdentityRefused) || !errors.Is(err, ErrPrincipalAlreadyLinked) {
+		t.Fatalf("err = %v, want refused: principal already linked", err)
+	}
+}
+
+func TestResolveCustomerRefusesARevokedGitHubIdentity(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	p, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE external_identities SET revoked_at=now() WHERE principal_id=$1 AND provider='github'`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob")); !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("err = %v, want refused", err)
+	}
+}
+
+func TestResolveCustomerRefusesADisabledPrincipal(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	p, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE principals SET status='disabled' WHERE id=$1`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob")); err != nil || got.ID != p.ID || got.Status != StatusDisabled {
+		t.Fatalf("ResolveCustomer = %+v, %v; want the disabled principal", got, err)
+	}
+	// Through the resolver, as every caller sees it: refused as disabled,
+	// not a failed read that bearer requests would degrade past.
+	r := NewResolver(s, nil, false)
+	if _, err := r.ResolvePrincipal(ctx, customer("z1", 7, "bob")); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("ResolvePrincipal err = %v, want ErrPrincipalDisabled", err)
+	}
+	// A disabled principal gets no new identity linked.
+	if _, err := r.ResolvePrincipal(ctx, customer("z2", 8, "carol")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE principals SET status='disabled' WHERE id=(SELECT principal_id FROM external_identities WHERE provider='github' AND subject='8')`); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ResolveCustomer(ctx, customer("z3", 8, "carol")); err != nil || got.Status != StatusDisabled {
+		t.Fatalf("ResolveCustomer = %+v, %v", got, err)
+	}
+	if _, _, err := s.LinkedGitHub(ctx, zitadel("z3", "carol")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("z3 was linked to a disabled principal: %v", err)
+	}
+}
+
+func TestResolveCustomerRefusesANonCustomerIdentity(t *testing.T) {
+	s := newStoreForTest(t)
+	if _, err := s.ResolveCustomer(context.Background(), zitadel("z1", "bob")); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+}
+
+// Disabled between the provision and the link (two transactions): still
+// refused as disabled through the resolver, not degraded as a failed read.
+func TestResolveCustomerDisabledBetweenProvisionAndLink(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	s.beforeCustomerLink = func() {
+		if _, err := s.pool.Exec(ctx, `UPDATE principals SET status='disabled' WHERE id=(SELECT principal_id FROM external_identities WHERE provider='github' AND subject='7')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := NewResolver(s, nil, false).ResolvePrincipal(ctx, customer("z1", 7, "bob")); !errors.Is(err, auth.ErrPrincipalDisabled) {
+		t.Fatalf("err = %v, want ErrPrincipalDisabled", err)
+	}
+	if _, _, err := s.LinkedGitHub(ctx, zitadel("z1", "bob")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("z1 was linked to a disabled principal: %v", err)
 	}
 }

@@ -79,6 +79,11 @@ type Identity struct {
 	// GitHub login-only case below.
 	Display string
 	Kind    string
+	// Customer is set only on a ZITADEL identity of the customers
+	// organization (customer.go). The resolver then keys the principal on
+	// the GitHub id it carries and links this identity to it, instead of
+	// provisioning a principal for the ZITADEL subject.
+	Customer *CustomerProof
 }
 
 // GitHubLoginOnly reports an identity whose GitHub login was proven earlier
@@ -153,7 +158,7 @@ func (u *User) Identity() (Identity, bool) {
 	case u.dexSubject != "":
 		return Identity{Provider: ProviderDex, Issuer: u.dexIssuer, Subject: u.dexSubject, Display: u.ID, Kind: KindHuman}, true
 	case u.oidcSubject != "":
-		return Identity{Provider: u.oidcProviderName, Issuer: u.oidcIssuer, Subject: u.oidcSubject, Display: u.ID, Kind: u.oidcKind}, true
+		return Identity{Provider: u.oidcProviderName, Issuer: u.oidcIssuer, Subject: u.oidcSubject, Display: u.ID, Kind: u.oidcKind, Customer: u.oidcCustomer}, true
 	case u.githubLogin && u.githubID > 0:
 		return Identity{Provider: ProviderGitHub, Subject: strconv.FormatInt(u.githubID, 10), Display: u.ID, Kind: KindHuman}, true
 	case u.githubLogin:
@@ -178,6 +183,19 @@ func AttachPrincipal(ctx context.Context, pr PrincipalResolver, u *User) error {
 	if u == nil {
 		return nil
 	}
+	err := attachPrincipalID(ctx, pr, u)
+	u.principalUnresolved = err != nil && !errors.Is(err, ErrPrincipalDisabled) && !errors.Is(err, ErrIdentityRefused)
+	return err
+}
+
+// PrincipalUnresolved reports that this caller's principal could not be
+// resolved because the principal store did not answer (AttachPrincipal
+// degraded), as opposed to a caller that has no principal to resolve.
+func (u *User) PrincipalUnresolved() bool {
+	return u != nil && u.principalUnresolved
+}
+
+func attachPrincipalID(ctx context.Context, pr PrincipalResolver, u *User) error {
 	if u.tokenPrincipal {
 		return checkTokenPrincipal(ctx, pr, u)
 	}
@@ -205,6 +223,12 @@ func AttachPrincipal(ctx context.Context, pr PrincipalResolver, u *User) error {
 // any other error when it could not be read.
 type PrincipalChecker interface {
 	CheckPrincipal(ctx context.Context, principalID string) error
+}
+
+// HumanPrincipalChecker is PrincipalChecker for a principal that must also
+// be a human: a principal of another kind is ErrIdentityRefused.
+type HumanPrincipalChecker interface {
+	CheckHumanPrincipal(ctx context.Context, principalID string) error
 }
 
 // checkTokenPrincipal keeps the principal a local token was minted for only

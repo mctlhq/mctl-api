@@ -24,6 +24,19 @@ import (
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
+// Minimum roles for the writes decided in mctl-api#489. Each is the only
+// place its minimum is declared.
+const (
+	// workItemWriteRole: every work-item write a person or surface makes
+	// (create, transition, intent, execution, surface-ref). viewer passes none.
+	workItemWriteRole = operations.RoleDeveloper
+	// workItemExecutionRole: asking the platform to run work (resume and
+	// execution requests).
+	workItemExecutionRole = operations.RoleDeveloper
+	// reposSyncRole: POST /repos/sync. The portal plugin must match it.
+	reposSyncRole = operations.RoleDeveloper
+)
+
 // Tenant role gate (mctl-api#478).
 //
 // Tenant membership says a caller may see a tenant; it does not say what
@@ -40,11 +53,16 @@ import (
 // one issued after it, and lets a role that was taken away stop working
 // within the checkout's refresh interval instead of at token expiry.
 //
-// The lookup is keyed on a GitHub login that authentication proved, because
-// members[].userId is a GitHub login. A caller whose identity is something
-// else (a Dex or other OIDC token, whose name can equal a member's login
-// without being that person) has no role here and is refused: unknown is
-// never owner.
+// In principal mode (TENANT_AUTHZ_MODE=principal, the current mode) the role
+// is read by the caller's prn_ principal from members[].principalId, so a
+// GitHub, ZITADEL or other OIDC human is decided alike and non-human callers
+// hold no tenant role.
+//
+// In legacy and shadow mode (rollback modes) the lookup is keyed on a GitHub
+// login that authentication proved, because members[].userId is a GitHub
+// login. A caller whose identity is something else (a Dex or other OIDC
+// token, whose name can equal a member's login without being that person) has
+// no role there and is refused: unknown is never owner.
 
 // roleRefusal describes why a caller may not perform a tenant write. Its
 // zero value means the caller may proceed.
@@ -219,17 +237,7 @@ func (h *Handlers) requireTenantRole(w http.ResponseWriter, r *http.Request, use
 	if !d.refused() {
 		return true
 	}
-	if d.auditStatus == "error" {
-		slog.Error("tenant role check could not be completed", "operation", operation, "tenant", tenant, "user", user.ID, "detail", d.detail)
-	}
-	h.logAudit(r, audit.Entry{
-		UserID:     user.ID,
-		Operation:  operation,
-		Parameters: map[string]string{"tenant": tenant},
-		Status:     d.auditStatus,
-		RiskLevel:  string(risk),
-		Message:    d.detail,
-	})
+	h.auditRoleRefusal(r, user, tenant, operation, risk, d)
 	writeError(w, d.status, d.message)
 	return false
 }
@@ -249,4 +257,20 @@ func (h *Handlers) operationMinRole(name string, fallback operations.Role) opera
 		return fallback
 	}
 	return op.MinRole
+}
+
+// auditRoleRefusal logs and audits a refused tenant-role decision. It is
+// shared by requireTenantRole and requireWorkItemRole.
+func (h *Handlers) auditRoleRefusal(r *http.Request, user *auth.User, tenant, operation string, risk operations.RiskLevel, d roleRefusal) {
+	if d.auditStatus == "error" {
+		slog.Error("tenant role check could not be completed", "operation", operation, "tenant", tenant, "user", user.ID, "detail", d.detail)
+	}
+	h.logAudit(r, audit.Entry{
+		UserID:     user.ID,
+		Operation:  operation,
+		Parameters: map[string]string{"tenant": tenant},
+		Status:     d.auditStatus,
+		RiskLevel:  string(risk),
+		Message:    d.detail,
+	})
 }

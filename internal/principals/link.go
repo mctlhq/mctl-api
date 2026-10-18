@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -54,7 +55,24 @@ var (
 	// ErrMergeConflict: both principals hold a live identity of the same
 	// provider and issuer, so merging would give one principal two.
 	ErrMergeConflict = errors.New("both principals hold an identity of the same provider")
+	// ErrLastAdmin: disabling the principal, directly or by merging it
+	// away, would leave no active principal among the platform admins
+	// (ADMIN_PRINCIPALS), so nobody could administer the platform any more.
+	ErrLastAdmin = errors.New("the principal is the last active admin principal")
+	// ErrNotHuman: the operation applies to human principals only, and this
+	// one is a service or agent principal.
+	ErrNotHuman = errors.New("not a human principal")
 )
+
+// DisableResult is what DisablePrincipal did. AlreadyDisabled marks a retry
+// (or a principal disabled earlier, by a merge or otherwise): nothing
+// changed. LiveIdentities counts the identities still bound to it; they
+// stay bound, and every one of them is refused because the principal is
+// disabled.
+type DisableResult struct {
+	AlreadyDisabled bool
+	LiveIdentities  int
+}
 
 // MergeResult is what MergePrincipals did. AlreadyMerged marks a retry: from
 // was already disabled with no live identity left, so nothing moved and
@@ -205,30 +223,69 @@ func (s *Store) UnlinkIdentity(ctx context.Context, principalID, identityID stri
 // must be active, and they must not both hold a live identity of the same
 // provider and issuer.
 //
+// admins is ADMIN_PRINCIPALS. A merge disables from, so when from is one of
+// them it keeps the same invariant as DisablePrincipal: at least one other
+// admin must be an active human principal, checked under every admin's
+// lock, or the merge is ErrLastAdmin. into counts only when it is itself an
+// admin; receiving the identities does not make it one.
+//
 // A retry is safe: a from that is already disabled and holds no live
 // identity (what a completed merge leaves, and nothing else does, since an
 // unlink never removes the last one) answers AlreadyMerged without changing
 // anything. The store does not record which principal it went into; the
 // principal.merge audit row does. A from that is disabled but still holds
 // live identities was disabled for another reason and is refused.
-func (s *Store) MergePrincipals(ctx context.Context, from, into string) (MergeResult, error) {
+func (s *Store) MergePrincipals(ctx context.Context, from, into string, admins []string) (MergeResult, error) {
 	if from == "" || into == "" || from == into {
 		return MergeResult{}, fmt.Errorf("%w: merge needs two different principals", ErrInvalid)
 	}
-	return s.mergePrincipals(ctx, from, into)
+	return s.mergePrincipals(ctx, from, into, admins)
 }
 
-func (s *Store) mergePrincipals(ctx context.Context, from, into string) (MergeResult, error) {
+// otherAdmins returns the admins other than id, and whether id is one.
+func otherAdmins(id string, admins []string) (others []string, isAdmin bool) {
+	for _, a := range admins {
+		if a == id {
+			isAdmin = true
+		} else if a != "" {
+			others = append(others, a)
+		}
+	}
+	return others, isAdmin
+}
+
+// lastAdminTx answers ErrLastAdmin when none of others is an active human
+// principal. The caller holds the locks of id and every one of others.
+func lastAdminTx(ctx context.Context, tx pgx.Tx, others []string) error {
+	var n int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM principals
+		WHERE id = ANY($1) AND kind=$2 AND status=$3`,
+		others, auth.KindHuman, StatusActive).Scan(&n); err != nil {
+		return fmt.Errorf("principals: count other admins: %w", err)
+	}
+	if n == 0 {
+		return ErrLastAdmin
+	}
+	return nil
+}
+
+func (s *Store) mergePrincipals(ctx context.Context, from, into string, admins []string) (MergeResult, error) {
 	var none MergeResult
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return none, fmt.Errorf("principals: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	// Both principal locks, in a fixed order, so two merges of the same pair
-	// in opposite directions cannot deadlock.
+	// Both principal locks, and every admin's when from is an admin, in a
+	// fixed order, so two merges of the same pair in opposite directions,
+	// or a merge and a disable, cannot deadlock.
+	others, fromAdmin := otherAdmins(from, admins)
 	keys := []string{from, into}
+	if fromAdmin {
+		keys = append(keys, others...)
+	}
 	sort.Strings(keys)
+	keys = slices.Compact(keys)
 	for _, k := range keys {
 		if err := lockPrincipalTx(ctx, tx, k); err != nil {
 			return none, err
@@ -269,6 +326,11 @@ func (s *Store) mergePrincipals(ctx context.Context, from, into string) (MergeRe
 	if conflicts > 0 {
 		return none, ErrMergeConflict
 	}
+	if fromAdmin {
+		if err := lastAdminTx(ctx, tx, others); err != nil {
+			return none, err
+		}
+	}
 	tag, err := tx.Exec(ctx, `UPDATE external_identities SET principal_id=$2 WHERE principal_id=$1 AND revoked_at IS NULL`, from, into)
 	if err != nil {
 		return none, err
@@ -280,4 +342,143 @@ func (s *Store) mergePrincipals(ctx context.Context, from, into string) (MergeRe
 		return none, fmt.Errorf("principals: commit: %w", err)
 	}
 	return MergeResult{Moved: int(tag.RowsAffected())}, nil
+}
+
+// DisablePrincipal disables a human principal on an admin's decision, for
+// a principal that must stop acting and that no merge can absorb (an
+// orphan whose only identity was removed at its IdP, for example).
+//
+// The principal's identities are deliberately left live, not revoked:
+//   - A disabled principal is already refused on every path. Authentication
+//     resolves each of its identities to auth.ErrPrincipalDisabled, and a
+//     local token naming it, whether issued before or refreshed after,
+//     fails CheckPrincipal on use. Revoking adds no refusal. (The admin
+//     handler also revokes its refresh sessions, so they stop renewing.)
+//   - The identities stay bound to the disabled principal, so none of them
+//     can be provisioned onto a fresh, active principal by its next
+//     sign-in. A revoked identity is refused as well, but the binding is
+//     the record of who this principal was.
+//   - MergePrincipals reads "disabled with no live identity" as "already
+//     merged away". Revoking here would make a disabled principal look
+//     merged, and a later merge from it would answer AlreadyMerged without
+//     moving anything.
+//
+// admins is ADMIN_PRINCIPALS. When the target is one of them, at least one
+// other must be an active human principal, checked under every admin's
+// lock, so two admins disabling each other at once cannot both succeed.
+// A principal that does not exist counts as not active. Only a human
+// principal is disabled; a service or agent principal is ErrNotHuman. A
+// principal that is already disabled is a no-op (AlreadyDisabled), whoever
+// it is.
+func (s *Store) DisablePrincipal(ctx context.Context, id string, admins []string) (DisableResult, error) {
+	var none DisableResult
+	if id == "" {
+		return none, fmt.Errorf("%w: no principal to disable", ErrInvalid)
+	}
+	others, isAdmin := otherAdmins(id, admins)
+	keys := []string{id}
+	if isAdmin {
+		keys = append(keys, others...)
+	}
+	sort.Strings(keys)
+	keys = slices.Compact(keys)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return none, fmt.Errorf("principals: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// The same per-principal locks as a merge, in the same sorted order, so
+	// a disable never races a merge of the same principal or deadlocks
+	// with one.
+	for _, k := range keys {
+		if err := lockPrincipalTx(ctx, tx, k); err != nil {
+			return none, err
+		}
+	}
+	p, err := getPrincipalTx(ctx, tx, id)
+	if err != nil {
+		return none, err
+	}
+	if p.Kind != auth.KindHuman {
+		return none, fmt.Errorf("%w: only a human principal is disabled here, not a %s principal", ErrNotHuman, p.Kind)
+	}
+	var res DisableResult
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM external_identities
+		WHERE principal_id=$1 AND revoked_at IS NULL`, id).Scan(&res.LiveIdentities); err != nil {
+		return none, fmt.Errorf("principals: count live identities: %w", err)
+	}
+	if p.Status != StatusActive {
+		res.AlreadyDisabled = true
+		return res, nil
+	}
+	if isAdmin {
+		if err := lastAdminTx(ctx, tx, others); err != nil {
+			return none, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE principals SET status=$2 WHERE id=$1`, id, StatusDisabled); err != nil {
+		return none, fmt.Errorf("principals: disable: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return none, fmt.Errorf("principals: commit: %w", err)
+	}
+	return res, nil
+}
+
+// ErrCustomerConflict: a customers-organization ZITADEL identity cannot be
+// attached to the principal of the GitHub id it proved: it belongs to
+// another principal, was revoked there, or that principal already holds
+// another identity of the same issuer. It wraps auth.ErrIdentityRefused,
+// so every caller refuses it; an admin resolves it (MergePrincipals or an
+// unlink), never the sign-in.
+var ErrCustomerConflict = errors.New("customer identity conflicts with the principal of its GitHub id")
+
+// ResolveCustomer resolves a customers-organization ZITADEL identity (stage
+// C0 of the site onboarding plan). The principal is the one of the GitHub
+// numeric id the identity hook proved, provisioned on first sight exactly
+// as a GitHub sign-in would; the ZITADEL identity is then linked to it.
+// Nothing is keyed on a login, and the ZITADEL subject never gets a
+// principal of its own.
+//
+// A disabled principal is returned as it is, unlinked, like Provision
+// returns one: the resolver's answer maps it to auth.ErrPrincipalDisabled
+// and caches that. A revoked GitHub identity or a link conflict is
+// auth.ErrIdentityRefused. Any other error is a failed read or write.
+//
+// The GitHub identity is provisioned before the link is tried, so a
+// refused conflict still leaves the principal of that GitHub id behind.
+// That is deliberate and idempotent: it is the principal the id gets on any
+// sign-in, and the admin who resolves the conflict merges into it.
+func (s *Store) ResolveCustomer(ctx context.Context, id auth.Identity) (*Principal, error) {
+	if id.Customer == nil {
+		return nil, fmt.Errorf("%w: not a customer identity", ErrInvalid)
+	}
+	if id.Provider == auth.ProviderGitHub || id.Kind != auth.KindHuman {
+		return nil, fmt.Errorf("%w: a customer identity is a human ZITADEL identity", ErrInvalid)
+	}
+	p, err := s.Provision(ctx, id.Customer.GitHubIdentity())
+	if err != nil {
+		return nil, err
+	}
+	if p.Status != StatusActive {
+		return p, nil
+	}
+	if s.beforeCustomerLink != nil {
+		s.beforeCustomerLink()
+	}
+	link := id
+	link.Customer = nil
+	switch _, err := s.LinkIdentity(ctx, p.ID, link); {
+	case err == nil:
+		return p, nil
+	case errors.Is(err, ErrIdentityOwnedElsewhere), errors.Is(err, ErrIdentityRevoked), errors.Is(err, ErrPrincipalAlreadyLinked):
+		return nil, fmt.Errorf("%w: %w: %w", auth.ErrIdentityRefused, ErrCustomerConflict, err)
+	case errors.Is(err, auth.ErrPrincipalDisabled):
+		// Disabled between Provision and the link: answer as above, with
+		// the principal, so the resolver refuses it as disabled.
+		p.Status = StatusDisabled
+		return p, nil
+	default:
+		return nil, err
+	}
 }

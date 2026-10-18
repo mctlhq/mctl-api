@@ -89,9 +89,9 @@ type delegationRoute struct {
 // ones where there is no prior grant to bind to. POST /work-items is
 // deliberately excluded: creation NAMES an owner, so there is no prior
 // grant to bind it to. POST /agent-run-tokens, POST /agents/dev-loop/*,
-// POST /operations/{name}/execute and every /surface-identities/* route are
-// excluded as privileged or identity-establishing (requirements.md "Open
-// questions").
+// every POST /operations/{name}/execute except mctl-agents-approve, and
+// every /surface-identities/* route are excluded as privileged or
+// identity-establishing (requirements.md "Open questions").
 var delegationRoutes = []delegationRoute{
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/intents$`)},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/work-items/[^/]+/surface-refs$`)},
@@ -103,6 +103,11 @@ var delegationRoutes = []delegationRoute{
 	// Read-only, and the one place a delegated run can see the subject and
 	// grant it is acting under (mctl-api#376 D3).
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/identity/self$`)},
+	// A DevLoop exercising its human's approval (mctl-api#571 R5). The one
+	// operation route: ExecuteOperation authorizes it from an
+	// action_approval grant alone, and refuses every other grant kind
+	// through its unchanged admin gate.
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/operations/mctl-agents-approve/execute$`)},
 }
 
 // delegationAllowlisted reports whether method+path may carry
@@ -187,30 +192,64 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 			writeErrorCode(w, http.StatusServiceUnavailable, delegationCodeUnavailable, "could not resolve the delegation grant", nil)
 			return
 		}
-		login, isGitHub := strings.CutPrefix(grant.Subject, "github:")
-		if !isGitHub || login == "" {
+		// The subject is the grant's stored principal (mctl-api#571 R9), for
+		// a human from any IdP: it decides tenants and what is recorded. Its
+		// name is still the grant's subject string, not re-derived from the
+		// principal, so whatever keys on principalOf(subject) -- private
+		// work-item visibility (canSeeWorkItem) -- follows that string. If the
+		// name was later re-linked to another principal, those checks see the
+		// name's current holder; a merged-away principal is refused below
+		// (ErrPrincipalDisabled). A sil_ grant of a github: link stores no
+		// principal: it is resolved from its mirrored GitHub identity below,
+		// so it still needs a GitHub subject. A sil_ grant of a prn_ link
+		// (mctl-api#646) carries its principal and is handled like the
+		// other kinds.
+		legacyLink := grant.Kind == delegation.KindSurfaceLink && grant.SubjectPrincipalID == ""
+		name, isGitHub := strings.CutPrefix(grant.Subject, "github:")
+		isOIDC := false
+		if !isGitHub {
+			name, isOIDC = strings.CutPrefix(grant.Subject, "oidc:")
+		}
+		switch {
+		case (!isGitHub && !isOIDC) || name == "":
 			h.refuseDelegation(w, r, user, agentName, ref, delegationCodeUnresolved, http.StatusForbidden,
-				"the grant does not name a GitHub principal")
+				"the grant does not name a human principal")
+			return
+		case legacyLink && !isGitHub:
+			h.refuseDelegation(w, r, user, agentName, ref, delegationCodeUnresolved, http.StatusForbidden,
+				"the surface link does not name a GitHub principal")
+			return
+		case !legacyLink && grant.SubjectPrincipalID == "":
+			h.refuseDelegation(w, r, user, agentName, ref, delegationCodeUnresolved, http.StatusForbidden,
+				"the grant names no principal")
 			return
 		}
 		var groups []string
 		// In principal mode the subject's tenants come from its principal
-		// (authorizeSubject below), never from its login.
-		if h.opts.TenantResolver != nil && !h.principalMode() {
+		// (authorizeSubject below), never from its login. Outside it only a
+		// GitHub login has tenants to look up; any other subject delegates
+		// with none.
+		if h.opts.TenantResolver != nil && !h.principalMode() && isGitHub {
 			// Same as authentication and as the surface relay: a failed
 			// lookup grants no tenant, even if the resolver returned a
 			// partial list alongside the error.
-			if g, gerr := h.opts.TenantResolver.GetTenantsForUser(login); gerr != nil {
+			if g, gerr := h.opts.TenantResolver.GetTenantsForUser(name); gerr != nil {
 				slog.Warn("delegation: tenant lookup failed; delegating with no tenant access", "subject", grant.Subject, "error", gerr)
 			} else {
 				groups = g
 			}
 		}
-		subject := auth.NewDelegatedUser(login, groups, user)
+		var subject *auth.User
+		if legacyLink {
+			subject = auth.NewDelegatedUser(name, groups, user)
+		} else {
+			subject = auth.NewDelegatedPrincipalUser(name, grant.SubjectPrincipalID, isGitHub, groups, user)
+		}
 		if subject == nil {
 			// Unreachable in practice: user.AgentName() already proved
-			// isAgent, and login is non-empty by the check above. Refused
-			// defensively rather than passing a nil user downstream.
+			// isAgent, and name and the principal are non-empty by the
+			// checks above. Refused defensively rather than passing a nil
+			// user downstream.
 			h.refuseDelegation(w, r, user, agentName, ref, delegationCodeUnresolved, http.StatusForbidden,
 				"the grant could not be resolved to a delegated subject")
 			return
@@ -234,13 +273,18 @@ func (h *Handlers) agentPrincipalGate(next http.Handler) http.Handler {
 			writeErrorCode(w, http.StatusServiceUnavailable, delegationCodeUnavailable, "could not resolve the delegated principal", nil)
 			return
 		}
-		// The one place the two independent derivations of the subject's
-		// principal (the stored grant column, and the live principal
-		// resolver) are cross-checked. For KindSurfaceLink, grant carries no
-		// SubjectPrincipalID of its own (a link stores none): this check is
-		// how it gets one, from whatever AttachPrincipal just resolved via
-		// the surface-link mirror.
-		if grant.Kind == delegation.KindSurfaceLink {
+		// Every other grant kind's subject IS its stored principal, which
+		// AttachPrincipal has just checked is still active. The comparison
+		// below cannot fail today (NewDelegatedPrincipalUser sets the id, and
+		// checkTokenPrincipal only clears it while returning an error, which
+		// was refused above); it is kept so a constructor change cannot
+		// silently swap the recorded subject.
+		//
+		// For a github: link's sil_ grant (legacyLink), grant carries no
+		// SubjectPrincipalID of its own
+		// (a link stores none): this check is how it gets one, from whatever
+		// AttachPrincipal just resolved via the surface-link mirror.
+		if legacyLink {
 			if subject.PrincipalID() == "" {
 				h.refuseDelegation(w, r, user, agentName, ref, delegationCodeUnresolved, http.StatusForbidden,
 					"the grant names no resolvable principal")

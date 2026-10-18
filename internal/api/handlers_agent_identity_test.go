@@ -233,22 +233,137 @@ func TestAgentPrincipalGate_ResolveErrorsMapToTypedRefusals(t *testing.T) {
 	}
 }
 
-// A grant naming a non-github: subject is refused as grant_subject_unresolved.
-func TestAgentPrincipalGate_NonGitHubSubjectIsUnresolved(t *testing.T) {
+// A grant must name a human: a subject outside the github:/oidc: namespaces
+// principalOf writes, or with an empty name, is grant_subject_unresolved
+// before any principal is consulted (mctl-api#571 R9).
+func TestAgentPrincipalGate_NonHumanSubjectIsUnresolved(t *testing.T) {
 	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1"})
+	for _, subj := range []string{"dex:alice", "service:mctl-agent", "agent:implementer", "github:", "oidc:", "alice", ""} {
+		pr := &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE"}}
+		h := &Handlers{opts: Options{
+			AuditLog:   audit.NewLogger(),
+			Principals: pr,
+			Delegation: &fakeDelegation{fn: func(string, auth.AgentRun) (delegation.Grant, error) {
+				return delegation.Grant{Kind: delegation.KindActionApproval, Subject: subj, SubjectPrincipalID: "prn_ALICE"}, nil
+			}},
+		}}
+		rec, next := runGate(h, delegatedReq(http.MethodGet, allowlistedRoute, agent, "aar_1"))
+		if next.called || rec.Code != http.StatusForbidden {
+			t.Fatalf("subject %q: called=%v code=%d", subj, next.called, rec.Code)
+		}
+		if body := decodeBody(t, rec); body["code"] != delegationCodeUnresolved {
+			t.Fatalf("subject %q: code = %v, want %s", subj, body["code"], delegationCodeUnresolved)
+		}
+		if len(pr.checked) != 0 || len(pr.seen) != 0 {
+			t.Fatalf("subject %q: the principal store was consulted (%v, %v)", subj, pr.checked, pr.seen)
+		}
+	}
+}
+
+// A6 at the gate: a human with no GitHub identity (a ZITADEL sign-in,
+// recorded as oidc:<name>) delegates through the grant's stored principal.
+// The principal is checked, never resolved from the name, and the subject's
+// principalOf reproduces the grant's subject string.
+func TestAgentPrincipalGate_NonGitHubHumanDelegatesByPrincipal(t *testing.T) {
+	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1", RunID: "art_1"})
+	pr := &relayPrincipals{byLogin: map[string]string{"zed@example.com": "prn_ZED"}}
+	tenants := &countingTenants{}
 	h := &Handlers{opts: Options{
-		AuditLog: audit.NewLogger(),
-		Delegation: &fakeDelegation{fn: func(string, auth.AgentRun) (delegation.Grant, error) {
-			return delegation.Grant{Subject: "dex:alice", SubjectPrincipalID: "prn_ALICE"}, nil
+		AuditLog:       audit.NewLogger(),
+		TenantResolver: tenants,
+		Principals:     pr,
+		Delegation: &fakeDelegation{fn: func(ref string, _ auth.AgentRun) (delegation.Grant, error) {
+			return delegation.Grant{Ref: ref, Kind: delegation.KindActionApproval, Subject: "oidc:zed@example.com", SubjectPrincipalID: "prn_ZED"}, nil
 		}},
 	}}
-	rec, next := runGate(h, delegatedReq(http.MethodGet, allowlistedRoute, agent, "xr_1"))
+	rec, next := runGate(h, delegatedReq(http.MethodGet, allowlistedRoute, agent, "aar_1"))
+	if !next.called || rec.Code != http.StatusOK {
+		t.Fatalf("called=%v code=%d %s", next.called, rec.Code, rec.Body.String())
+	}
+	u := next.user
+	if u.PrincipalID() != "prn_ZED" || u.IsAdmin() || u.IsAgent() {
+		t.Fatalf("subject = principal %q admin=%v agent=%v", u.PrincipalID(), u.IsAdmin(), u.IsAgent())
+	}
+	if _, gh := u.GitHubLogin(); gh {
+		t.Fatal("a non-GitHub subject must not carry a GitHub login")
+	}
+	if got := principalOf(u); got != "oidc:zed@example.com" {
+		t.Fatalf("principalOf = %q, want the grant's subject", got)
+	}
+	if id, _ := u.Identity(); id.Kind != auth.KindHuman {
+		t.Fatalf("Identity().Kind = %q, want human", id.Kind)
+	}
+	if len(pr.checked) != 1 || pr.checked[0] != "prn_ZED" || len(pr.seen) != 0 {
+		t.Fatalf("checked=%v seen=%v, want only a check of prn_ZED", pr.checked, pr.seen)
+	}
+	// Outside principal mode only a GitHub login has tenants to look up.
+	if tenants.calls != 0 || len(u.Groups) != 0 {
+		t.Fatalf("tenant lookups = %d, groups = %v, want none", tenants.calls, u.Groups)
+	}
+}
+
+// An xr_/aar_/wi_ grant with no stored principal is refused at the gate too,
+// whatever its subject string: the name is never a fallback.
+func TestAgentPrincipalGate_EmptyStoredPrincipalIsUnresolved(t *testing.T) {
+	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1"})
+	for _, kind := range []string{delegation.KindExecutionRequest, delegation.KindActionApproval, delegation.KindWorkItem} {
+		pr := &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE"}}
+		h := &Handlers{opts: Options{
+			AuditLog:   audit.NewLogger(),
+			Principals: pr,
+			Delegation: &fakeDelegation{fn: func(string, auth.AgentRun) (delegation.Grant, error) {
+				return delegation.Grant{Kind: kind, Subject: "github:alice"}, nil
+			}},
+		}}
+		rec, next := runGate(h, delegatedReq(http.MethodGet, allowlistedRoute, agent, "xr_1"))
+		if next.called || rec.Code != http.StatusForbidden {
+			t.Fatalf("%s: called=%v code=%d", kind, next.called, rec.Code)
+		}
+		if body := decodeBody(t, rec); body["code"] != delegationCodeUnresolved {
+			t.Fatalf("%s: code = %v, want %s", kind, body["code"], delegationCodeUnresolved)
+		}
+		if len(pr.seen) != 0 || len(pr.checked) != 0 {
+			t.Fatalf("%s: the login was resolved (%v, %v)", kind, pr.seen, pr.checked)
+		}
+	}
+}
+
+// A sil_ grant of a github: link stores no principal and is resolved from
+// its mirrored GitHub identity, so a non-GitHub subject without a stored
+// principal is refused (a prn_ link's grant carries one, mctl-api#646).
+func TestAgentPrincipalGate_SurfaceLinkNeedsGitHubSubject(t *testing.T) {
+	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1"})
+	pr := &relayPrincipals{byLogin: map[string]string{"dave": "prn_DAVE"}}
+	h := &Handlers{opts: Options{
+		AuditLog:   audit.NewLogger(),
+		Principals: pr,
+		Delegation: &fakeDelegation{fn: func(string, auth.AgentRun) (delegation.Grant, error) {
+			return delegation.Grant{Kind: delegation.KindSurfaceLink, Subject: "oidc:dave"}, nil
+		}},
+	}}
+	rec, next := runGate(h, delegatedReq(http.MethodGet, allowlistedRoute, agent, "sil_1"))
 	if next.called || rec.Code != http.StatusForbidden {
-		t.Fatalf("non-github subject: called=%v code=%d", next.called, rec.Code)
+		t.Fatalf("called=%v code=%d", next.called, rec.Code)
 	}
 	if body := decodeBody(t, rec); body["code"] != delegationCodeUnresolved {
 		t.Fatalf("code = %v, want %s", body["code"], delegationCodeUnresolved)
 	}
+}
+
+// resolveOnlyPrincipals resolves identities but cannot check a stored
+// principal (no PrincipalChecker).
+type resolveOnlyPrincipals string
+
+func (p resolveOnlyPrincipals) ResolvePrincipal(context.Context, auth.Identity) (string, error) {
+	return string(p), nil
+}
+
+// countingTenants counts tenant lookups and grants none.
+type countingTenants struct{ calls int }
+
+func (c *countingTenants) GetTenantsForUser(string) ([]string, error) {
+	c.calls++
+	return nil, nil
 }
 
 // T8: fail closed on AttachPrincipal -- a disabled subject is 403, a refused
@@ -363,26 +478,49 @@ func TestAgentPrincipalGate_SurfaceLinkPrincipalComesFromAttachPrincipal(t *test
 	})
 }
 
-// A grant whose stored SubjectPrincipalID disagrees with what AttachPrincipal
-// resolves live is refused: the cross-check at step 10 catches a stale or
-// forged column rather than picking one derivation over the other.
-func TestAgentPrincipalGate_MismatchedPrincipalIsRefused(t *testing.T) {
+// The grant's stored principal is the subject (mctl-api#571 R9): a login
+// that resolves to another principal today does not override it, and a
+// stored principal that no longer exists is refused rather than replaced by
+// the login's.
+func TestAgentPrincipalGate_StoredPrincipalIsTheSubject(t *testing.T) {
 	agent := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1"})
-	pr := &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE_LIVE"}}
-	h := &Handlers{opts: Options{
-		AuditLog:   audit.NewLogger(),
-		Principals: pr,
-		Delegation: &fakeDelegation{fn: func(string, auth.AgentRun) (delegation.Grant, error) {
-			return delegation.Grant{Kind: delegation.KindExecutionRequest, Subject: "github:alice", SubjectPrincipalID: "prn_ALICE_STALE"}, nil
-		}},
-	}}
-	rec, next := runGate(h, delegatedReq(http.MethodGet, allowlistedRoute, agent, "xr_1"))
-	if next.called || rec.Code != http.StatusForbidden {
-		t.Fatalf("called=%v code=%d", next.called, rec.Code)
+	grantFor := func(prn string) *fakeDelegation {
+		return &fakeDelegation{fn: func(string, auth.AgentRun) (delegation.Grant, error) {
+			return delegation.Grant{Kind: delegation.KindExecutionRequest, Subject: "github:alice", SubjectPrincipalID: prn}, nil
+		}}
 	}
-	if body := decodeBody(t, rec); body["code"] != delegationCodeUnresolved {
-		t.Fatalf("code = %v, want %s", body["code"], delegationCodeUnresolved)
-	}
+	t.Run("relinked login", func(t *testing.T) {
+		pr := &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE_NOW", "old-alice": "prn_ALICE_THEN"}}
+		h := &Handlers{opts: Options{AuditLog: audit.NewLogger(), Principals: pr, Delegation: grantFor("prn_ALICE_THEN")}}
+		rec, next := runGate(h, delegatedReq(http.MethodGet, allowlistedRoute, agent, "xr_1"))
+		if !next.called || rec.Code != http.StatusOK {
+			t.Fatalf("called=%v code=%d %s", next.called, rec.Code, rec.Body.String())
+		}
+		if next.user.PrincipalID() != "prn_ALICE_THEN" {
+			t.Fatalf("PrincipalID() = %q, want the stored prn_ALICE_THEN", next.user.PrincipalID())
+		}
+		if len(pr.seen) != 0 {
+			t.Fatalf("the login was resolved: %v", pr.seen)
+		}
+	})
+	t.Run("gone", func(t *testing.T) {
+		pr := &relayPrincipals{byLogin: map[string]string{"alice": "prn_ALICE_LIVE"}}
+		h := &Handlers{opts: Options{AuditLog: audit.NewLogger(), Principals: pr, Delegation: grantFor("prn_ALICE_STALE")}}
+		rec, next := runGate(h, delegatedReq(http.MethodGet, allowlistedRoute, agent, "xr_1"))
+		if next.called || rec.Code != http.StatusForbidden {
+			t.Fatalf("called=%v code=%d", next.called, rec.Code)
+		}
+		if body := decodeBody(t, rec); body["code"] != delegationCodeUnresolved {
+			t.Fatalf("code = %v, want %s", body["code"], delegationCodeUnresolved)
+		}
+	})
+	t.Run("no checker", func(t *testing.T) {
+		h := &Handlers{opts: Options{AuditLog: audit.NewLogger(), Principals: resolveOnlyPrincipals("prn_ALICE"), Delegation: grantFor("prn_ALICE")}}
+		rec, next := runGate(h, delegatedReq(http.MethodGet, allowlistedRoute, agent, "xr_1"))
+		if next.called || rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("called=%v code=%d, want 503 with no way to check the principal", next.called, rec.Code)
+		}
+	})
 }
 
 // A failed tenant lookup grants no tenant access, exactly as the surface

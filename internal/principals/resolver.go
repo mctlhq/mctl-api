@@ -64,6 +64,7 @@ var ErrUnresolved = errors.New("principal could not be resolved")
 // backend is the part of Store the resolver uses.
 type backend interface {
 	Provision(ctx context.Context, id auth.Identity) (*Principal, error)
+	ResolveCustomer(ctx context.Context, id auth.Identity) (*Principal, error)
 	ResolveGitHubLogin(ctx context.Context, login string) (*Principal, error)
 	Get(ctx context.Context, id string) (*Principal, error)
 }
@@ -101,6 +102,8 @@ type Resolver struct {
 type cached struct {
 	principal string
 	disabled  bool
+	// kind is the principal's kind (human, agent, service).
+	kind string
 	// failed marks a remembered failure (FailureTTL), not an answer.
 	failed bool
 	at     time.Time
@@ -148,6 +151,24 @@ func (r *Resolver) ResolvePrincipal(ctx context.Context, id auth.Identity) (stri
 // ErrUnresolved. Answers are cached like ResolvePrincipal's, under their own
 // key, so Forget drops them with the rest.
 func (r *Resolver) CheckPrincipal(ctx context.Context, principalID string) error {
+	_, err := r.checkPrincipal(ctx, principalID)
+	return err
+}
+
+// CheckHumanPrincipal implements auth.HumanPrincipalChecker: CheckPrincipal,
+// and a principal of another kind is auth.ErrIdentityRefused.
+func (r *Resolver) CheckHumanPrincipal(ctx context.Context, principalID string) error {
+	c, err := r.checkPrincipal(ctx, principalID)
+	if err != nil {
+		return err
+	}
+	if c.kind != auth.KindHuman {
+		return fmt.Errorf("%w: principal %q is a %s principal, not a human", auth.ErrIdentityRefused, principalID, c.kind)
+	}
+	return nil
+}
+
+func (r *Resolver) checkPrincipal(ctx context.Context, principalID string) (cached, error) {
 	c, err := r.cachedLookup(ctx, "principal|"+principalID, func(ctx context.Context) (*Principal, error) {
 		p, err := r.store.Get(ctx, principalID)
 		if errors.Is(err, ErrNotFound) {
@@ -156,10 +177,10 @@ func (r *Resolver) CheckPrincipal(ctx context.Context, principalID string) error
 		return p, err
 	}, "principal", principalID)
 	if err != nil {
-		return err
+		return cached{}, err
 	}
 	_, err = answer(c)
-	return err
+	return c, err
 }
 
 // cachedLookup answers key from the cache, or from fetch, whose answer it
@@ -195,7 +216,7 @@ func (r *Resolver) cachedLookup(ctx context.Context, key string, fetch func(cont
 		r.mu.Unlock()
 		return cached{}, fmt.Errorf("%w: %v", ErrUnresolved, err)
 	}
-	c = cached{principal: p.ID, disabled: p.Status == StatusDisabled, at: now}
+	c = cached{principal: p.ID, disabled: p.Status == StatusDisabled, kind: p.Kind, at: now}
 	r.mu.Lock()
 	if r.gen == gen {
 		r.cache[key] = c
@@ -252,6 +273,9 @@ func answer(c cached) (string, error) {
 }
 
 func (r *Resolver) resolve(ctx context.Context, id auth.Identity) (*Principal, error) {
+	if id.Customer != nil {
+		return r.store.ResolveCustomer(ctx, id)
+	}
 	if !id.GitHubLoginOnly() {
 		return r.store.Provision(ctx, id)
 	}

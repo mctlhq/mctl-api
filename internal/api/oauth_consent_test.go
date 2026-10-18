@@ -266,6 +266,29 @@ func TestConsentCookieBinding(t *testing.T) {
 	}
 }
 
+// The consent page is drawn in the page shell, and a sign-in with no GitHub
+// login (a customer, or a ZITADEL-only human in principal mode) names the
+// principal rather than an empty account.
+func TestConsentPageInShellNamesPrincipalWithoutLogin(t *testing.T) {
+	h, _ := cimdEnv(t, cimdDoc(cbURL))
+	c := completion(cimdID)
+	c.Login = ""
+	rec := httptest.NewRecorder()
+	if res := h.finishAuthorization(rec, httptest.NewRequest(http.MethodGet, "/cb", nil), c); res != "consent_required" {
+		t.Fatalf("result %q", res)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `data-shell="mctl"`) || !strings.Contains(body, `name="decision" value="deny"`) {
+		t.Fatalf("consent page not drawn in the shell:\n%s", body)
+	}
+	if !strings.Contains(body, "signed in as "+testPRN+".") {
+		t.Errorf("page does not name the principal:\n%s", body)
+	}
+	if h := rec.Header().Get("Content-Security-Policy"); !strings.Contains(h, "form-action 'self'") {
+		t.Errorf("CSP %q does not allow the consent form", h)
+	}
+}
+
 func TestConsentShownEveryTime(t *testing.T) {
 	h, _ := cimdEnv(t, cimdDoc(cbURL))
 	for i := 0; i < 2; i++ {

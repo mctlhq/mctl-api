@@ -60,6 +60,7 @@ type waveDevLoop struct {
 	hang        map[string]bool // Describe waits for its deadline
 	slow        time.Duration   // Describe and Start each take this long
 	started     []string
+	restarted   []string
 }
 
 func (f *waveDevLoop) DescribeDevLoop(ctx context.Context, workflowID string) (string, error) {
@@ -112,6 +113,18 @@ func (f *waveDevLoop) StartDevLoopWorkflow(ctx context.Context, issueURL string)
 	f.started = append(f.started, wf)
 	f.statuses[wf] = "Running"
 	return wf, "run-" + wf, nil
+}
+
+// Every closed wave item reads as abandoned, so a wave that consulted the
+// marker would restart it; the wave route must not (mctl-api#640), and
+// restarted records any attempt.
+func (f *waveDevLoop) DevLoopEnded(ctx context.Context, workflowID, runID string) (temporalclient.DevLoopRunEnd, error) {
+	return temporalclient.DevLoopRunEnd{Ended: temporalclient.AbandonedEndedPrefix + "test"}, nil
+}
+
+func (f *waveDevLoop) RestartAbandonedDevLoopWorkflow(ctx context.Context, issueURL string) (string, string, error) {
+	f.restarted = append(f.restarted, issueURL)
+	return "", "", errors.New("the wave route must not restart")
 }
 
 type waveEnv struct {
@@ -321,7 +334,9 @@ func TestRoadmapWave_ExecuteFailsClosed(t *testing.T) {
 		t.Fatalf("a refused request started %v", e.tc.started[started:])
 	}
 	var refusals int
-	for _, a := range e.audit.List(100) {
+	entries := e.audit.List(100)
+	for i := range entries {
+		a := &entries[i]
 		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" {
 			refusals++
 		}
@@ -403,6 +418,11 @@ func TestRoadmapWave_AlreadyRunningAndAlreadyExistsReportRunID(t *testing.T) {
 	}
 	if got := byWF[wfs[1]]["run_id"]; got != "run-already-closed" {
 		t.Errorf("expected run_id=run-already-closed for an already_exists outcome, got %v", got)
+	}
+	// The closed item reads as abandoned (waveDevLoop.DevLoopEnded), yet a
+	// wave reports it and never restarts it.
+	if len(e.tc.restarted) != 0 {
+		t.Fatalf("the wave route restarted %v", e.tc.restarted)
 	}
 }
 
@@ -491,7 +511,9 @@ func TestRoadmapWave_NoReaderAndUnknownEpicAreAuditedRefusals(t *testing.T) {
 		t.Fatalf("started %v", e.tc.started)
 	}
 	reasons := map[string]bool{}
-	for _, a := range e.audit.List(100) {
+	entries := e.audit.List(100)
+	for i := range entries {
+		a := &entries[i]
 		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" {
 			reasons[a.Parameters["reason"]] = true
 		}
@@ -611,12 +633,90 @@ func TestRoadmapWave_InactiveEpicsAreRefusedWithTypedReasons(t *testing.T) {
 		t.Fatalf("started %v", e.tc.started)
 	}
 	reasons := map[string]bool{}
-	for _, a := range e.audit.List(100) {
+	entries := e.audit.List(100)
+	for i := range entries {
+		a := &entries[i]
 		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" {
 			reasons[a.Parameters["reason"]] = true
 		}
 	}
 	if !reasons["epic_completed"] || !reasons["epic_paused"] {
 		t.Errorf("audited refusals = %v", reasons)
+	}
+}
+
+func TestRoadmapWaveBudgetFitsTheWriteTimeout(t *testing.T) {
+	if roadmapWaveBudget >= ServerWriteTimeout {
+		t.Fatal("budget must be below the write timeout")
+	}
+	if roadmapWaveMaxItems() < 1 {
+		t.Fatal("cap must admit at least one item")
+	}
+	if time.Duration(roadmapWaveMaxItems())*2*roadmapWaveCallTimeout > roadmapWaveBudget {
+		t.Fatal("cap does not fit the budget")
+	}
+}
+
+func waveAuditReasons(e *waveEnv) map[string]bool {
+	reasons := map[string]bool{}
+	entries := e.audit.List(100)
+	for i := range entries {
+		a := &entries[i]
+		if a.Operation == "roadmap-wave-execute" && a.Status == "failed" {
+			reasons[a.Parameters["reason"]] = true
+		}
+	}
+	return reasons
+}
+
+// A plan larger than the cap is reported non-executable by plan and refused
+// by execute, audited, with nothing started.
+func TestRoadmapWave_TooLargeIsRefusedAndPlanSaysSo(t *testing.T) {
+	e := newWaveEnv(t)
+	resp, exec := e.plan("enterprise-mcp")
+	n := len(exec["items"].([]string))
+	if n < 2 {
+		t.Skipf("fixture selects %d items", n)
+	}
+	prev := roadmapWaveCallTimeout
+	roadmapWaveCallTimeout = 10 * time.Second // cap floors to 1
+	t.Cleanup(func() { roadmapWaveCallTimeout = prev })
+
+	_, planOut := e.post(waveUser, "/api/v1/roadmap/waves/plan", map[string]any{"epic": "enterprise-mcp"})
+	_ = resp
+	if planOut["executable"] != false || planOut["max_items_per_execute"] != float64(roadmapWaveMaxItems()) {
+		t.Fatalf("plan = %v", planOut)
+	}
+	if r, _ := planOut["not_executable_reason"].(string); !strings.HasPrefix(r, "wave_too_large: ") {
+		t.Fatalf("reason = %q", r)
+	}
+	code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", exec)
+	details, _ := out["details"].(map[string]any)
+	if code != http.StatusUnprocessableEntity || out["code"] != "wave_too_large" ||
+		details["selected"] != float64(n) || details["max_items"] != float64(roadmapWaveMaxItems()) {
+		t.Fatalf("execute = %d %v", code, out)
+	}
+	if len(e.tc.started) != 0 || !waveAuditReasons(e)["wave_too_large"] {
+		t.Fatalf("started %v, audit %v", e.tc.started, waveAuditReasons(e))
+	}
+}
+
+// With no preamble reserve and a budget that exactly fits the plan, the time
+// spent before the loop makes execute refuse, audited, starting nothing.
+func TestRoadmapWave_BudgetExhaustedIsRefused(t *testing.T) {
+	e := newWaveEnv(t)
+	_, exec := e.plan("enterprise-mcp")
+	n := len(exec["items"].([]string))
+	pb, pr := roadmapWaveBudget, roadmapWavePreambleReserve
+	roadmapWavePreambleReserve = 0
+	roadmapWaveBudget = time.Duration(n) * 2 * roadmapWaveCallTimeout
+	t.Cleanup(func() { roadmapWaveBudget, roadmapWavePreambleReserve = pb, pr })
+
+	code, out := e.post(waveAdmin, "/api/v1/roadmap/waves/execute", exec)
+	if code != http.StatusServiceUnavailable || out["code"] != "wave_budget_exhausted" {
+		t.Fatalf("execute = %d %v", code, out)
+	}
+	if len(e.tc.started) != 0 || !waveAuditReasons(e)["wave_budget_exhausted"] {
+		t.Fatalf("started %v, audit %v", e.tc.started, waveAuditReasons(e))
 	}
 }

@@ -37,7 +37,7 @@ func (s *Server) toolPlanEpicWave() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Plan "start the next wave for this epic" without starting anything: the exact ready work items of one roadmap epic that a wave would start, from the published RoadmapPublication. Each selected item carries its issue and the exact DevLoop workflow id it would get; ready items that cannot be started (not bound to an exact issue) are listed as refused, never dropped.
 
-Only an active epic can be planned: a paused or completed epic is refused (epic_paused / epic_completed) with no override. Only items the published ready set lists as ready are eligible; required_only defaults to true. With items, exactly those ids are planned or the plan fails with invalid_selection naming each refused id — never a subset. The answer says whether the plan is executable now: the publication must be no older than the configured maximum (default 30 minutes).
+Only an active epic can be planned: a paused, completed or otherwise inactive epic is refused (epic_paused / epic_completed / epic_not_active) with no override. Only items the published ready set lists as ready are eligible; required_only defaults to true. With items, exactly those ids are planned or the plan fails with invalid_selection naming each refused id — never a subset. The answer says whether the plan is executable now: the publication must be no older than the configured maximum (default 30 minutes). A single start may contain at most max_items_per_execute items (returned by the plan); a larger plan is not executable (wave_too_large): plan again with explicit items.
 
 `+waveFlowNote+`
 
@@ -75,7 +75,7 @@ func (s *Server) toolStartEpicWave() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Start a wave planned with mctl_plan_epic_wave: one DevLoopWorkflow per selected work item, with the exact workflow ids the plan named. Admin-only.
 
-mctl-api reloads the latest verified RoadmapPublication and starts only if it is the very publication the plan came from (plan_stale otherwise), it is no older than the configured maximum (publication_too_old otherwise), and the request re-derives the identical plan (invalid_selection otherwise). Nothing is started on any refusal — never a subset. Per item the answer reports started, already_running, already_exists (a closed DevLoop is not restarted) or failed; re-running the same plan starts nothing twice. Cost: each started DevLoop runs an investigator (~$3 each).
+mctl-api reloads the latest verified RoadmapPublication and starts only if it is the very publication the plan came from (plan_stale otherwise), it is no older than the configured maximum (publication_too_old otherwise), and the request re-derives the identical plan (invalid_selection otherwise). Nothing is started on any refusal — never a subset. The call is synchronous and answers within the server's write deadline: a plan with more than max_items_per_execute items (reported by mctl_plan_epic_wave) is refused with wave_too_large and nothing starts (split it with explicit items); wave_budget_exhausted means nothing was started and the same plan may be retried. Per item the answer reports started, already_running, already_exists (a closed DevLoop is not restarted) or failed; re-running the same plan starts nothing twice. Cost: each started DevLoop runs an investigator (~$3 each).
 
 `+waveFlowNote),
 		mcplib.WithString("epic", mcplib.Required(), mcplib.Description(`The plan's epic, as planned.`)),
@@ -184,6 +184,10 @@ func (s *Server) wavePost(ctx context.Context, path string, body map[string]any,
 		hint = " Readiness is UNKNOWN, not empty."
 	case "epic_paused", "epic_completed", "epic_not_active":
 		hint = " The epic is not active: the standard wave start refuses it and has no override. Do not retry; tell the user."
+	case "wave_too_large":
+		hint = " Nothing was started. Plan again with explicit items, at most max_items_per_execute per plan, and start each plan."
+	case "wave_budget_exhausted":
+		hint = " Nothing was started. Retry the same plan."
 	case "wave_execution_disabled":
 		hint = " Wave execution is switched off by server configuration: do not retry or replan; only an operator can fix it."
 	}

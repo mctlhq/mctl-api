@@ -78,18 +78,20 @@ func (f *fakeWorkItems) SurfaceRefBound(_ context.Context, itemID, surface, acto
 // fakeLinks is a fully in-memory SurfaceLinkSource.
 type fakeLinks struct {
 	links map[string]struct{ surface, externalID, principal string }
-	err   error
+	// subjects is the recorded subject of a prn_ link, by link id.
+	subjects map[string]string
+	err      error
 }
 
-func (f *fakeLinks) LinkByID(_ context.Context, id string) (string, string, string, error) {
+func (f *fakeLinks) LinkByID(_ context.Context, id string) (string, string, string, string, error) {
 	if f.err != nil {
-		return "", "", "", f.err
+		return "", "", "", "", f.err
 	}
 	l, ok := f.links[id]
 	if !ok {
-		return "", "", "", surfaceid.ErrLinkNotFound
+		return "", "", "", "", surfaceid.ErrLinkNotFound
 	}
-	return l.surface, l.externalID, l.principal, nil
+	return l.surface, l.externalID, l.principal, f.subjects[id], nil
 }
 
 // T1: a run token bound to execution A presenting a grant bound to
@@ -233,6 +235,36 @@ func TestStoreResolver_SurfaceLinkHasNoStoredPrincipalID(t *testing.T) {
 	}
 	if grant.Subject != "github:dave" || grant.Kind != KindSurfaceLink {
 		t.Fatalf("grant = %+v", grant)
+	}
+}
+
+// mctl-api#646: a sil_ grant of a link that names a canonical principal
+// carries that principal and the link's recorded oidc: name, like the
+// stored-principal kinds. A prn_ link without a well-formed name is
+// ErrSubjectUnresolved, never a grant whose subject is the bare principal.
+func TestStoreResolver_PrincipalSurfaceLinkCarriesItsPrincipal(t *testing.T) {
+	const prn = "prn_01JZED00000000000000000000"
+	items := &fakeWorkItems{surfaceBound: map[string]bool{"wi_1|telegram|7070": true}}
+	links := &fakeLinks{
+		links: map[string]struct{ surface, externalID, principal string }{
+			"sil_zed": {"telegram", "7070", prn}, "sil_noname": {"telegram", "7070", prn},
+			"sil_github": {"telegram", "7070", prn}, "sil_empty": {"telegram", "7070", prn},
+		},
+		subjects: map[string]string{"sil_zed": "oidc:zed@example.com", "sil_github": "github:zed", "sil_empty": "oidc:"},
+	}
+	r := NewStoreResolver(items, links)
+	bound := auth.AgentRun{WorkItemID: "wi_1"}
+	grant, err := r.Resolve(context.Background(), "sil_zed", bound)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if grant.Kind != KindSurfaceLink || grant.SubjectPrincipalID != prn || grant.Subject != "oidc:zed@example.com" || grant.WorkItemID != "wi_1" {
+		t.Fatalf("grant = %+v", grant)
+	}
+	for _, ref := range []string{"sil_noname", "sil_github", "sil_empty"} {
+		if _, err := r.Resolve(context.Background(), ref, bound); !errors.Is(err, ErrSubjectUnresolved) {
+			t.Errorf("Resolve(%s) = %v, want ErrSubjectUnresolved", ref, err)
+		}
 	}
 }
 

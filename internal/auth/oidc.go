@@ -121,20 +121,30 @@ type User struct {
 	oidcIssuer       string
 	oidcSubject      string
 	oidcKind         string
+	// oidcCustomer is the GitHub identity a customers-organization token
+	// proved (customer.go); nil for every other caller.
+	oidcCustomer *CustomerProof
 
-	// principalID is the canonical principal (prn_...) resolved from that
-	// identity, and viaPrincipalID the relaying surface's principal. Set
-	// only by AttachPrincipal and NewRelayedUser.
+	// principalID is the canonical principal (prn_...): resolved from that
+	// identity by AttachPrincipal, or taken from a token or grant when
+	// tokenPrincipal is set. viaPrincipalID is the principal that carried
+	// the request for someone else: the relaying surface (NewRelayedUser)
+	// or the delegating agent run (NewDelegatedUser).
 	principalID    string
 	viaPrincipalID string
+	// principalUnresolved records that AttachPrincipal tried to resolve
+	// principalID and the store could not answer (not a refusal): an empty
+	// principalID then means "unknown", never "this caller has none".
+	principalUnresolved bool
 
-	// tokenPrincipal records that principalID came from a local OAuth
-	// token's pid claim in principal mode (mctl-api#377), not from
-	// resolving an identity: AttachPrincipal then checks that principal is
-	// still active instead of re-deriving one from the login. tokenPID is
-	// the same claim outside principal mode, kept only to compare with the
-	// principal the identity resolves to. Set only by ValidateJWT and
-	// userFromVerified.
+	// tokenPrincipal records that principalID was not resolved from an
+	// identity but carried in: a local OAuth token's pid claim in principal
+	// mode (mctl-api#377; ValidateJWT, userFromVerified), or the principal a
+	// delegation grant stored for its subject (mctl-api#571;
+	// NewDelegatedPrincipalUser). AttachPrincipal then checks that principal
+	// is still active instead of re-deriving one from the login. tokenPID is
+	// the pid claim outside principal mode, kept only to compare with the
+	// principal the identity resolves to.
 	tokenPrincipal bool
 	tokenPID       string
 
@@ -404,6 +414,28 @@ func NewRelayedUser(login string, groups []string, acting *User) *User {
 	}
 }
 
+// NewRelayedPrincipalUser builds the relayed subject from a link that names
+// a canonical principal (mctl-api#646), for a human with no GitHub
+// identity. id is the link's recorded request name without its "oidc:"
+// namespace, so the subject's principalOf string matches that human's own
+// requests. It carries no tenant groups: tenants come from the principal.
+// As in NewDelegatedPrincipalUser the principal is not resolved from the
+// name; it is marked as a token principal, so AttachPrincipal only checks
+// it is still active. Returns nil unless acting is a surface principal and
+// id and principalID are non-empty.
+func NewRelayedPrincipalUser(id, principalID string, acting *User) *User {
+	if principalID == "" {
+		return nil
+	}
+	u := NewRelayedUser(id, nil, acting)
+	if u == nil {
+		return nil
+	}
+	u.githubLogin = false
+	u.principalID, u.tokenPrincipal = principalID, true
+	return u
+}
+
 // NewDelegatedUser builds the subject an agent run token delegates to, from
 // a grant already bound to that run (mctl-api#376 slice B). Sibling of
 // NewRelayedUser, not a variant of it: it returns nil unless acting
@@ -437,6 +469,31 @@ func NewDelegatedUser(login string, groups []string, acting *User) *User {
 		workItemID:      acting.workItemID,
 		runID:           acting.runID,
 	}
+}
+
+// NewDelegatedPrincipalUser builds the delegated subject from the canonical
+// principal a grant stored (mctl-api#571 R9), for a human signed in through
+// any IdP. id is the grant subject's name without its namespace, so the
+// subject's principalOf string matches what the grant recorded; githubLogin
+// says whether that name is a GitHub login. It returns nil when
+// NewDelegatedUser would, or when principalID is empty: a subject is never
+// taken from its name alone.
+//
+// The principal is NOT resolved from the name. It is marked as a token
+// principal, so AttachPrincipal checks that the stored principal is still
+// active (PrincipalChecker) and clears it otherwise -- the same check a
+// local token's pid claim gets.
+func NewDelegatedPrincipalUser(id, principalID string, githubLogin bool, groups []string, acting *User) *User {
+	if principalID == "" {
+		return nil
+	}
+	u := NewDelegatedUser(id, groups, acting)
+	if u == nil {
+		return nil
+	}
+	u.githubLogin = githubLogin
+	u.principalID, u.tokenPrincipal = principalID, true
+	return u
 }
 
 // ActingPrincipal is the surface principal that carried a relayed request,
@@ -1153,6 +1210,7 @@ func userFromVerified(v *Verified) *User {
 			ID: v.Identity.Display, Groups: v.Claims.Groups,
 			oidcProviderName: v.Identity.Provider, oidcIssuer: v.Identity.Issuer,
 			oidcSubject: v.Identity.Subject, oidcKind: v.Identity.Kind,
+			oidcCustomer: v.Identity.Customer,
 		}
 	}
 }

@@ -449,10 +449,23 @@ func main() {
 	// ROADMAP_WAVE_MAX_AGE (mctl-api#334): how old the latest publication may
 	// be when a wave executes. Invalid turns wave execution off rather than
 	// running it against a bound nobody meant.
+	roadmapWaveDisabledReason := ""
 	roadmapWaveMaxAge, err := parseWaveMaxAge(os.Getenv("ROADMAP_WAVE_MAX_AGE"))
 	if err != nil {
+		roadmapWaveDisabledReason = "ROADMAP_WAVE_MAX_AGE is invalid" //nolint:gosec // env var name, not a credential
 		slog.Error("invalid ROADMAP_WAVE_MAX_AGE; roadmap wave execution is off", "error", err)
 		roadmapWaveMaxAge = -1
+	}
+	// ROADMAP_WAVE_CALL_TIMEOUT: per-Temporal-call bound, which sets the
+	// wave size cap. Invalid turns wave execution off.
+	if ct, err := parseWaveCallTimeout(os.Getenv("ROADMAP_WAVE_CALL_TIMEOUT")); err != nil {
+		slog.Error("invalid ROADMAP_WAVE_CALL_TIMEOUT; roadmap wave execution is off", "error", err)
+		roadmapWaveMaxAge = -1
+		if roadmapWaveDisabledReason == "" {
+			roadmapWaveDisabledReason = "ROADMAP_WAVE_CALL_TIMEOUT is invalid" //nolint:gosec // env var name, not a credential
+		}
+	} else {
+		mctlapi.SetRoadmapWaveCallTimeout(ct)
 	}
 
 	// Model usage / cost ledger (mctl-api#266, ADR-012). Optional — enabled
@@ -934,11 +947,13 @@ func main() {
 		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
+		SurfaceZitadel:                 surfaceZitadelOptions(cfg),
 		AlertStore:                     alertStore,
 		AgentRegistry:                  agentRegistryStore,
 		Lifecycle:                      lifecycleStore,
 		Roadmap:                        roadmapReader,
 		RoadmapWaveMaxAge:              roadmapWaveMaxAge,
+		RoadmapWaveDisabledReason:      roadmapWaveDisabledReason,
 		Usage:                          usageStore,
 		Commerce:                       commerceStore,
 		CommerceAcceptDisabled:         cfg.CommerceAcceptDisabled,
@@ -954,6 +969,7 @@ func main() {
 		TenantResolver:                 gitReader,
 		Principals:                     principalResolver,
 		TenantAuthzMode:                cfg.tenantAuthzMode(),
+		LegacyApproverDisabled:         cfg.legacyApproverDisabled(),
 		PrincipalMembership:            gitReader,
 		AdminPrincipals:                cfg.adminPrincipals(),
 		PrincipalAuthz:                 principalAuthz,
@@ -970,6 +986,7 @@ func main() {
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
 		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,
 		GitHubWebhookOwners:            cfg.GitHubWebhookOwners,
+		ZitadelHook:                    zitadelHookOptions(cfg, gitReader),
 		GitHubEventOutbox:              githubEventOutboxOption(githubEventOutbox),
 		GitHubEventNotify:              githubEventNotify(githubEventRelay),
 		OAuthRegistrationToken:         cfg.OAuthRegistrationToken,
@@ -980,7 +997,7 @@ func main() {
 		Addr:         ":" + cfg.Port,
 		Handler:      router,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: mctlapi.ServerWriteTimeout,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -1209,9 +1226,15 @@ type config struct {
 	// confidential web app; both empty keeps the browser flow off.
 	// ZitadelLinkProvider names the MCTL_OIDC_PROVIDERS entry whose issuer
 	// the linked identity must carry.
-	ZitadelLinkClientID      string
-	ZitadelLinkClientSecret  string
-	ZitadelLinkProvider      string
+	ZitadelLinkClientID     string
+	ZitadelLinkClientSecret string
+	ZitadelLinkProvider     string
+	// The ZITADEL clients whose ID tokens the portal may present to
+	// surface-principals/zitadel: the mctl-web site's (MCTL_WEB_CLIENT_ID,
+	// creating a workspace) and the portal's (ZITADEL_PORTAL_CLIENT_ID,
+	// signing in).
+	MctlWebClientID          string
+	ZitadelPortalClientID    string
 	OAuthJWTSecret           string
 	OAuthAllowedRedirectURIs []string
 	// OAuthPreregisteredClientsRaw is the OAUTH_PREREGISTERED_CLIENTS value as
@@ -1232,6 +1255,7 @@ type config struct {
 	ArgoWebhookSecret        string
 	GitHubWebhookSecret      string
 	GitHubWebhookOwners      []string
+	ZitadelHook              zitadelHookConfig
 	EventsValkeyURL          string
 	EventsValkeyPassword     string
 	OAuthRegistrationToken   string
@@ -1246,6 +1270,10 @@ type config struct {
 	// refuses new quotes and accepts only, so outstanding liability can still
 	// drain. It does not skip the dispatch-key check — dispatch stays live.
 	CommerceAcceptDisabled bool
+	// LegacyApproverRaw is MCTL_AGENTS_APPROVE_LEGACY_APPROVER (mctl-api#571):
+	// whether the service principal may still relay a free-text approver on
+	// mctl-agents-approve. Empty means on; validated at startup.
+	LegacyApproverRaw string
 	// TenantAuthzModeRaw is TENANT_AUTHZ_MODE (mctl-api#377), validated at
 	// boot: an unknown value, or principal before this build implements it,
 	// refuses to start.
@@ -1356,6 +1384,9 @@ func loadConfig() config {
 		ArgoWebhookSecret:              os.Getenv("ARGO_WEBHOOK_SECRET"),
 		GitHubWebhookSecret:            os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		GitHubWebhookOwners:            splitCSV(envOr("GITHUB_WEBHOOK_OWNERS", "mctlhq")),
+		ZitadelHook:                    loadZitadelHookConfig(),
+		MctlWebClientID:                os.Getenv("MCTL_WEB_CLIENT_ID"),
+		ZitadelPortalClientID:          os.Getenv("ZITADEL_PORTAL_CLIENT_ID"),
 		EventsValkeyURL:                os.Getenv("EVENTS_VALKEY_URL"),
 		EventsValkeyPassword:           os.Getenv("EVENTS_VALKEY_PASSWORD"),
 		OAuthRegistrationToken:         os.Getenv("OAUTH_REGISTRATION_TOKEN"),
@@ -1365,6 +1396,7 @@ func loadConfig() config {
 		CommerceDisabled:               killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
 		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
 		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
+		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
 		AdminPrincipalsRaw:             os.Getenv("ADMIN_PRINCIPALS"),
 		PrincipalsDisabled:             killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
 		PrincipalDBConfigured:          postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
@@ -1597,6 +1629,12 @@ func (c config) validate() error {
 	if err := c.validatePrincipalMode(mode); err != nil {
 		return err
 	}
+	if _, err := parseLegacyApprover(c.LegacyApproverRaw); err != nil {
+		return err
+	}
+	if err := c.ZitadelHook.validate(); err != nil {
+		return err
+	}
 	// Only enforced when the OAuth server is actually constructed — the same
 	// gate main uses at the NewOAuthServer call. OAUTH_TOKEN_TTL governs
 	// nothing on a deployment that never issues tokens, and refusing to start
@@ -1664,6 +1702,21 @@ func (c config) validate() error {
 	}
 	if _, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw); err != nil {
 		return err
+	}
+	// customers_org_id on two entries, or one that disagrees with the
+	// identity hook, would resolve a customer differently per path.
+	customers, err := c.customersProvider()
+	if err != nil {
+		return err
+	}
+	// The customer sign-in entry puts the GitHub IdP id into a ZITADEL
+	// scope (mctl-web#158); a malformed one refuses boot like a malformed
+	// customers_org_id does. Only where that entry could be wired: elsewhere
+	// the id feeds the identity hook alone, which takes it as it is, and
+	// customersGitHubIdPID still refuses to offer a malformed one.
+	if id := c.ZitadelHook.GitHubIdPID; id != "" && customers != nil &&
+		c.oauthUpstreamMode() != mctlapi.OAuthUpstreamGitHub && !auth.ValidZitadelID(id) {
+		return fmt.Errorf("ZITADEL_HOOK_GITHUB_IDP_ID %q is not a ZITADEL resource id", id)
 	}
 	if _, err := auth.ParseGitHubActionsOIDC(c.GitHubActionsOIDCRaw); err != nil {
 		return err
@@ -1842,6 +1895,7 @@ func oauthZitadelOptions(cfg config, store *principals.Store, oauth *auth.OAuthS
 	opts := &mctlapi.OAuthZitadelOptions{
 		ProviderName: entry.Name, Issuer: entry.Issuer,
 		ClientID: cfg.OAuthZitadelClientID, ClientSecret: cfg.OAuthZitadelClientSecret,
+		CustomersOrgID: entry.CustomersOrgID, CustomersGitHubIdPID: cfg.customersGitHubIdPID(entry),
 	}
 	// Assigned only when non-nil: a nil *Store in the interface would not
 	// compare equal to nil and would be called.
@@ -1850,7 +1904,8 @@ func oauthZitadelOptions(cfg config, store *principals.Store, oauth *auth.OAuthS
 	} else {
 		slog.Error("OAuth ZITADEL upstream has no principal store; ZITADEL sign-ins will answer 503")
 	}
-	slog.Info("OAuth ZITADEL upstream enabled", "provider", entry.Name, "issuer", entry.Issuer)
+	slog.Info("OAuth ZITADEL upstream enabled", "provider", entry.Name, "issuer", entry.Issuer,
+		"customer_github_signin", opts.CustomersGitHubIdPID != "")
 	return opts
 }
 
@@ -2029,6 +2084,28 @@ func tenantMemberLogins(reader *gitops.Reader) ([]string, error) {
 	return logins, nil
 }
 
+// parseLegacyApprover reads MCTL_AGENTS_APPROVE_LEGACY_APPROVER. Empty is on:
+// the relay stays until mctl-agents stops needing it (mctl-api#571). An
+// unrecognised value is an error rather than either answer, because both
+// answers are consequential: guessing "off" breaks every DevLoop approval,
+// guessing "on" keeps a path the operator meant to close.
+func parseLegacyApprover(v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf("MCTL_AGENTS_APPROVE_LEGACY_APPROVER=%q: want true or false", v)
+}
+
+// legacyApproverDisabled is the parsed flag, inverted for Options' zero
+// value. validate has already refused an unparsable value.
+func (c config) legacyApproverDisabled() bool {
+	on, err := parseLegacyApprover(c.LegacyApproverRaw)
+	return err == nil && !on
+}
+
 // killSwitchOn reads a kill-switch value (WORK_ITEMS_DISABLED,
 // ROADMAP_STATE_DISABLED, PRINCIPALS_DISABLED). It errs toward off: any value except an explicit
 // "false"/"f"/"0"/"no"/"off" (or empty) turns the feature off, so a template
@@ -2056,6 +2133,24 @@ func parseLinkTTL(v string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("SURFACE_LINK_TTL must be positive, got %s", v)
+	}
+	return d, nil
+}
+
+// parseWaveCallTimeout reads ROADMAP_WAVE_CALL_TIMEOUT: empty means the
+// default, any other value must be a Go duration within the allowed range.
+func parseWaveCallTimeout(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return mctlapi.DefaultRoadmapWaveCallTimeout, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, err
+	}
+	if d < mctlapi.MinRoadmapWaveCallTimeout || d > mctlapi.MaxRoadmapWaveCallTimeout {
+		return 0, fmt.Errorf("ROADMAP_WAVE_CALL_TIMEOUT must be between %s and %s, got %s",
+			mctlapi.MinRoadmapWaveCallTimeout, mctlapi.MaxRoadmapWaveCallTimeout, v)
 	}
 	return d, nil
 }
