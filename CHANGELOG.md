@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.100.1](https://github.com/mctlhq/mctl-api/compare/4.100.0...4.100.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **cimd:** 30s cache floor, ignore an invalid max-age ([1c6be55](https://github.com/mctlhq/mctl-api/commit/1c6be5507031ff4c7a80179d777b7063b08396c8)), closes [#684](https://github.com/mctlhq/mctl-api/issues/684)
+* **cimd:** allowlist redirect schemes, honour no-store, bound state ([0cf59fb](https://github.com/mctlhq/mctl-api/commit/0cf59fbfce4adf6999fe73445d5e6501443996dc)), closes [#684](https://github.com/mctlhq/mctl-api/issues/684)
+* **cimd:** hardening P3s from the [#624](https://github.com/mctlhq/mctl-api/issues/624) review ([2ee48ef](https://github.com/mctlhq/mctl-api/commit/2ee48ef08f5021f1abc34a47cf7924171415f9b4))
+* **netsafe:** refuse 6to4, Teredo, IPv4-compatible and site-local ([df4c1a2](https://github.com/mctlhq/mctl-api/commit/df4c1a29ade07fc921a15ee4961d0ba1f88cc4b2)), closes [#684](https://github.com/mctlhq/mctl-api/issues/684)
+* **oauth:** per-flow consent cookie, checked before the token is spent ([c336bbb](https://github.com/mctlhq/mctl-api/commit/c336bbbd1c2e2b6bc7b957837a02462899ff218d)), closes [#684](https://github.com/mctlhq/mctl-api/issues/684)
+
 ## [4.100.0](https://github.com/mctlhq/mctl-api/compare/4.99.1...4.100.0) (2026-10-18)
 
 
