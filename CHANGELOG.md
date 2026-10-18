@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.104.0](https://github.com/mctlhq/mctl-api/compare/4.103.0...4.104.0) (2026-10-18)
+
+
+### Features
+
+* **auth:** accept private_key_jwt for CIMD clients ([7f8706a](https://github.com/mctlhq/mctl-api/commit/7f8706a6f35ae2bf1aeee858e63cc36166bb8cef))
+* **auth:** accept private_key_jwt for CIMD clients ([b19fea4](https://github.com/mctlhq/mctl-api/commit/b19fea4ecd7cb8370b158c36f77bddbf0cf147ae)), closes [#694](https://github.com/mctlhq/mctl-api/issues/694)
+
+
+### Bug Fixes
+
+* **auth:** address [#699](https://github.com/mctlhq/mctl-api/issues/699) review on private_key_jwt ([6fac513](https://github.com/mctlhq/mctl-api/commit/6fac513c0ea683a0659f429fe1db281ea6911bb0))
+* **cimd:** answer an unknown kid with the refetch error during the floor ([586e3da](https://github.com/mctlhq/mctl-api/commit/586e3da08256b5ed0590caafadc575e01498b65d))
+* **cimd:** keep known keys when a key set refetch fails ([aed4bfe](https://github.com/mctlhq/mctl-api/commit/aed4bfe450868490bf40418ce78aa59633b857e6))
+
 ## [4.103.0](https://github.com/mctlhq/mctl-api/compare/4.102.0...4.103.0) (2026-10-18)
 
 
