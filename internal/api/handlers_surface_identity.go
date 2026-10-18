@@ -696,11 +696,14 @@ func (h *Handlers) ListSurfaceIdentities(w http.ResponseWriter, r *http.Request)
 		// caller is known to be: that holder's list is whole, and reading
 		// it never consults the unknown part of the set.
 		owners, incomplete := h.ownHolders(r.Context(), user, own)
+		unknown := func() {
+			slog.Error("surface identity list: the caller's holders could not be read", "principal", own, "error", incomplete)
+			writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not determine which links are the caller's", nil)
+		}
 		switch {
 		case principal == "" && incomplete != nil:
 			// The merged list would be short: never listed as if whole.
-			slog.Error("surface identity list: the caller's holders could not be read", "principal", own, "error", incomplete)
-			writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not determine which links are the caller's", nil)
+			unknown()
 			return
 		case principal == "":
 			principal, holders = own, owners
@@ -709,8 +712,7 @@ func (h *Handlers) ListSurfaceIdentities(w http.ResponseWriter, r *http.Request)
 		case incomplete != nil:
 			// "Not among the known holders" is unknown, not "not the
 			// caller's": 503, never 403.
-			slog.Error("surface identity list: the caller's holders could not be read", "principal", own, "error", incomplete)
-			writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not determine which links are the caller's", nil)
+			unknown()
 			return
 		default:
 			writeErrorCode(w, http.StatusForbidden, sidCodeHumanOnly, "only an admin may list another principal's links", nil)
