@@ -180,8 +180,11 @@ func (r *Resolver) keysFor(ctx context.Context, doc Document, kid string) ([]jos
 	}
 	v, err, _ := r.sf.Do(key, func() (any, error) {
 		e, hit := r.cachedEntry(key)
-		if hit && (e.err != nil || r.now().Sub(e.fetched) < minTTL) {
-			return e.keys, e.err
+		if hit && e.err != nil {
+			return nil, e.err
+		}
+		if hit && r.now().Sub(e.fetched) < minTTL {
+			return e.keys, e.refetchErr
 		}
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.timeout)
 		defer cancel()
@@ -191,7 +194,7 @@ func (r *Resolver) keysFor(ctx context.Context, doc Document, kid string) ([]jos
 		}
 		if err != nil && hit {
 			// Only the fetch time moves, so the next refetch is still floored.
-			r.storeEntry(&cacheEntry{key: key, keys: e.keys, fetched: r.now(), expires: e.expires})
+			r.storeEntry(&cacheEntry{key: key, keys: e.keys, refetchErr: err, fetched: r.now(), expires: e.expires})
 			return e.keys, err
 		}
 		if err != nil {

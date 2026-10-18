@@ -346,9 +346,11 @@ func TestFailedRefetchKeepsKnownKeys(t *testing.T) {
 		t.Fatalf("known key after a failed refetch: %v", err)
 	}
 	// The failed attempt still floors the next refetch.
+	// Until then the unknown kid keeps getting the fetch error, not
+	// ErrAssertion: the cause is the same outage.
 	before := ks.jwksHits.Load()
-	if _, err := r.VerifyAssertion(context.Background(), d, sign(t, rsaKeyB(), jose.RS256, "b", claimsAt(ks.url, ks.clock)), auds); err == nil {
-		t.Fatal("unknown kid verified")
+	if _, err := r.VerifyAssertion(context.Background(), d, sign(t, rsaKeyB(), jose.RS256, "b", claimsAt(ks.url, ks.clock)), auds); !errors.Is(err, ErrFetch) {
+		t.Fatalf("unknown kid within the floor: %v", err)
 	}
 	if ks.jwksHits.Load() != before {
 		t.Fatal("refetch was not floored after a failure")

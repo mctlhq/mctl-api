@@ -218,6 +218,9 @@ type cacheEntry struct {
 	// which shares the LRU with the documents.
 	keys    []jose.JSONWebKey
 	fetched time.Time
+	// refetchErr is why the last refetch failed while keys were kept. It
+	// answers a kid the kept keys lack until the next refetch is allowed.
+	refetchErr error
 }
 
 // NewResolver builds a Resolver.
