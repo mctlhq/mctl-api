@@ -39,13 +39,14 @@ func TestPublicAddr(t *testing.T) {
 		"64:ff9b::7f00:1", "64:ff9b::a00:1", "64:ff9b::a9fe:a9fe",
 		"192.88.99.1", "::7f00:1", "::a9fe:a9fe", "2002:7f00:1::", "2002:808:808::1",
 		"2001:0:4136:e378:8000:63bf:3fff:fdd2", "64:ff9b:1::a00:1", "fec0::1",
+		"2001:2::1", "2001:3::1", "2001:4:112::1", "2001:1ff:ffff::1", "3fff::1", "3fff:fff:ffff::1",
 	}
 	for _, s := range refusedList {
 		if PublicAddr(netip.MustParseAddr(s)) {
 			t.Errorf("%s must be refused", s)
 		}
 	}
-	for _, s := range []string{"8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111", "::ffff:8.8.8.8", "64:ff9b::808:808"} {
+	for _, s := range []string{"8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111", "::ffff:8.8.8.8", "64:ff9b::808:808", "2001:200::1", "3fff:1000::1"} {
 		if !PublicAddr(netip.MustParseAddr(s)) {
 			t.Errorf("%s must be allowed", s)
 		}

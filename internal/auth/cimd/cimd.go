@@ -61,9 +61,13 @@ const (
 	defaultTTL       = time.Hour
 	negativeTTL      = 5 * time.Minute
 	cacheEntries     = 1024
-	hostPerMinute    = 10
-	maxConcurrent    = 8
-	fetchTimeout     = 10 * time.Second
+	// hostPerMinute budgets fetches per host, shared by every document on
+	// it. It assumes the production policy of one known client per exact
+	// allowlisted host: a host serving 6 or more no-store documents under
+	// steady sign-ins would exceed it at the minTTL floor (mctl-api#687).
+	hostPerMinute = 10
+	maxConcurrent = 8
+	fetchTimeout  = 10 * time.Second
 )
 
 // Document is the validated subset of a metadata document.
@@ -516,4 +520,9 @@ func RedirectAllowed(entries []string, uri string) bool {
 	return false
 }
 
+// isLoopbackIP accepts only the host text 127.0.0.1 or ::1, so other spellings
+// of the same addresses are refused too. This is deliberately stricter
+// than RFC 8252 section 7.3, which allows any loopback address: no known native
+// client uses another one, and every accepted form widens what a document can
+// name. Do not widen it to 127.0.0.0/8 without such a client (mctl-api#687).
 func isLoopbackIP(h string) bool { return h == "127.0.0.1" || h == "::1" }
