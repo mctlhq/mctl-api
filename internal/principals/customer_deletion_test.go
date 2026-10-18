@@ -89,6 +89,9 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if err := replica.CheckPrincipal(ctx, p.ID); !errors.Is(err, auth.ErrIdentityRefused) {
 		t.Fatalf("cached local token survived cross-replica deletion: %v", err)
 	}
+	if err := replica.CheckHumanPrincipal(ctx, p.ID); !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("human-only checker bypassed cross-replica deletion: %v", err)
+	}
 	if _, err := s.ResolveCustomer(ctx, old); !errors.Is(err, auth.ErrIdentityRefused) {
 		t.Fatalf("old subject accepted during deletion: %v", err)
 	}
