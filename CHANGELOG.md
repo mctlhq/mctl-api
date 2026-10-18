@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.105.1](https://github.com/mctlhq/mctl-api/compare/4.105.0...4.105.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **incidents:** pin that refused incident lookups change nothing ([ef42f5f](https://github.com/mctlhq/mctl-api/commit/ef42f5faaaf9a8d4940129b24fe1a73135e82870))
+* **incidents:** pin that refused incident lookups change nothing ([d67ca18](https://github.com/mctlhq/mctl-api/commit/d67ca18e0b32cd13ae72180410bc62cf8cc075fa)), closes [#707](https://github.com/mctlhq/mctl-api/issues/707)
+
 ## [4.105.0](https://github.com/mctlhq/mctl-api/compare/4.104.0...4.105.0) (2026-10-18)
 
 
