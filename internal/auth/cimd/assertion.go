@@ -57,8 +57,8 @@ const (
 	maxJWKSKeys       = 20
 	minRSABits        = 2048
 	// keysTTLOnError is how long a failed key set fetch is remembered. It is
-	// shorter than negativeTTL: a key outage refuses every token request of
-	// the client, not only new sign-ins.
+	// shorter than negativeTTL, like fetchErrTTL: a key outage refuses every
+	// token request of the client, not only new sign-ins.
 	keysTTLOnError = minTTL
 )
 

@@ -486,10 +486,35 @@ func TestNegativeCache(t *testing.T) {
 	if f.hits.Load() != 1 {
 		t.Fatalf("a cached failure must not refetch: %d", f.hits.Load())
 	}
-	f.advance(6 * time.Minute)
+	f.advance(minTTL - time.Second)
+	_, _ = r.Resolve(context.Background(), f.url)
+	if f.hits.Load() != 1 {
+		t.Fatal("a fetch failure must be kept until minTTL")
+	}
+	f.advance(time.Second)
 	_, _ = r.Resolve(context.Background(), f.url)
 	if f.hits.Load() != 2 {
-		t.Fatal("failure must expire after 5 minutes")
+		t.Fatalf("a fetch failure must expire after %v: every token request resolves the document", minTTL)
+	}
+}
+
+// A document refused for its content is the client's configuration and is
+// remembered for the longer negativeTTL.
+func TestNegativeCacheInvalidDocument(t *testing.T) {
+	f := newFixture(t, serve(`{"client_id":"https://other.example.com/c.json"}`))
+	r := f.resolver()
+	if _, err := r.Resolve(context.Background(), f.url); !errors.Is(err, ErrInvalidDocument) {
+		t.Fatal(err)
+	}
+	f.advance(negativeTTL - time.Second)
+	_, _ = r.Resolve(context.Background(), f.url)
+	if f.hits.Load() != 1 {
+		t.Fatalf("an invalid document must be kept for %v: hits = %d", negativeTTL, f.hits.Load())
+	}
+	f.advance(time.Second)
+	_, _ = r.Resolve(context.Background(), f.url)
+	if f.hits.Load() != 2 {
+		t.Fatal("an invalid document must expire after negativeTTL")
 	}
 }
 
