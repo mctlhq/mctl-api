@@ -974,3 +974,13 @@ principal. An administrator merge/relink during the queued interval refuses
 begin without touching the new identity owner; the prepared intent remains
 cancellable. Once disabled, existing identity-mutation rules prevent moving its
 live identities while the teardown continues.
+
+Live and revoked surface mirrors are account-owned data, not extra authentication
+providers. Prepare and begin use the same identity reader: it permits only
+mirrors proven by surface_identity_links for the exact principal or its current
+verified GitHub alias, and still requires the two exact live authentication
+identities. Unproven/unrelated identities refuse deletion; read failures are
+unknown. Tests drive CreateChallenge/Redeem/Revoke with the real principal mirror,
+including a redeem between prepare and begin, complete cleanup isolation and
+relinking after fresh signup. The active GitHub unique index excludes cancelled
+receipts; startup migrates the old index under a cross-replica schema lock.

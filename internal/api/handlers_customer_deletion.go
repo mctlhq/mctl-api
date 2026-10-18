@@ -243,7 +243,7 @@ func (h *Handlers) prepareCustomerAccountDeletionLocked(w http.ResponseWriter, r
 		})
 		if err != nil {
 			status := 409
-			if errors.Is(err, errCustomerDeletionUnobserved) {
+			if errors.Is(err, errCustomerDeletionUnobserved) || errors.Is(err, principals.ErrUnresolved) {
 				status = 503
 			}
 			writeError(w, status, "exclusive customer identity and ownership could not be verified")

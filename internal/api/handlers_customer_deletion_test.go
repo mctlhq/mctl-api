@@ -50,6 +50,7 @@ func (r *deletionReader) TenantExists(name string) (bool, error) {
 }
 
 type deletionStore struct {
+	prepareErr             error
 	finishCancelErr        error
 	tenantPending          bool
 	tenantReadErr          error
@@ -84,6 +85,9 @@ func (s *deletionStore) CustomerDeletion(context.Context, string, string) (*prin
 	return &d, nil
 }
 func (s *deletionStore) PrepareCustomerDeletion(_ context.Context, tenant, pid, issuer, actor string, checks ...func(*principals.CustomerDeletion) error) (*principals.CustomerDeletion, error) {
+	if s.prepareErr != nil {
+		return nil, s.prepareErr
+	}
 	d := &principals.CustomerDeletion{Tenant: tenant, PrincipalID: pid, Issuer: issuer, Subject: "7001", GitHubID: "123", Login: "alice", Actor: actor, Status: "prepared"}
 	for _, check := range checks {
 		if err := check(d); err != nil {
@@ -496,4 +500,20 @@ func (s *deletionStore) FinishCustomerCancellation(context.Context, string, stri
 	}
 	s.job = nil
 	return nil
+}
+
+func TestCustomerDeletionUnknownStorageIsNotOwnershipConflict(t *testing.T) {
+	h, _, store, calls, _ := deletionFixture()
+	admin := userWithPrincipal(t, "admin", []string{"admins"}, deletionAdmin)
+	store.prepareErr = principals.ErrUnresolved
+	if ok, w := prepareDeletion(t, h, admin); ok || w.Code != 503 {
+		t.Fatalf("unknown storage returned %v %d", ok, w.Code)
+	}
+	if len(*calls) != 0 {
+		t.Fatal("unknown state froze the portal")
+	}
+	store.prepareErr = principals.ErrInvalid
+	if ok, w := prepareDeletion(t, h, admin); ok || w.Code != 409 {
+		t.Fatalf("observed conflict returned %v %d", ok, w.Code)
+	}
 }

@@ -47,14 +47,33 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if err := refresh.Insert("deletion-test-token-"+p.ID, "test-client", refreshstore.Session{PrincipalID: p.ID}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	for _, holder := range []string{p.ID, "github:delete-customer", "github:other-customer"} {
-		if _, err := s.pool.Exec(ctx, `INSERT INTO surface_identity_challenges(id,code_hash,principal,surface,created_at,expires_at) VALUES($1,$1,$1,'telegram',now(),now()+interval '1 hour')`, holder); err != nil {
+	sid.SetMirror(s)
+	redeem := func(holder, subject, externalID string) *surfaceid.Link {
+		challenge, err := sid.CreateChallenge(ctx, holder, subject, surfaceid.SurfaceTelegram)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.pool.Exec(ctx, `INSERT INTO surface_identity_links(id,surface,external_id,principal,challenge_id,created_at) VALUES($1,'telegram',$1,$1,$1,now())`, holder); err != nil {
+		linked, err := sid.Redeem(ctx, surfaceid.SurfaceTelegram, challenge.Code, externalID)
+		if err != nil {
 			t.Fatal(err)
 		}
+		return linked
 	}
+	redeem(p.ID, "oidc:delete-customer", "7300011")
+	revoked := redeem("github:delete-customer", "", "7300012")
+	if _, err := sid.Revoke(ctx, revoked.ID, "github:delete-customer", false); err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.Provision(ctx, github(730099, "other-customer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeem("github:other-customer", "", "7300991")
+	late, err := sid.CreateChallenge(ctx, p.ID, "oidc:delete-customer", surfaceid.SurfaceTelegram)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Two replicas may both have cached the active identity and local JWT.
 	replica := NewResolver(s, nil, false)
 	if _, err := replica.ResolvePrincipal(ctx, old); err != nil {
@@ -91,6 +110,10 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	}
 	if _, err := replica.ResolvePrincipal(ctx, old); !errors.Is(err, auth.ErrIdentityRefused) {
 		t.Fatalf("prepared subject signs in: %v", err)
+	}
+	// An already-issued challenge can redeem while the workflow is queued.
+	if _, err := sid.Redeem(ctx, surfaceid.SurfaceTelegram, late.Code, "7300013"); err != nil {
+		t.Fatal(err)
 	}
 	if err := s.BeginCustomerDeletion(ctx, d.Tenant, p.ID); err != nil {
 		t.Fatal(err)
@@ -162,6 +185,14 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if err != nil || len(ids) != 0 {
 		t.Fatalf("old identities remain: %v %v", ids, err)
 	}
+	if ids, err := s.Identities(ctx, other.ID); err != nil || len(ids) != 2 {
+		t.Fatalf("unrelated surface identity affected: %+v %v", ids, err)
+	}
+	redeem(fresh.ID, "oidc:delete-customer", "7300011")
+	if owner, revoked, found := telegramIdentity(t, s, "7300011"); !found || revoked || owner != fresh.ID {
+		t.Fatalf("fresh account could not reuse erased surface link: %s %v %v", owner, revoked, found)
+	}
+
 }
 
 func TestCustomerDeletionRefusesUnrelatedAndRevokedIdentities(t *testing.T) {
@@ -373,5 +404,60 @@ func TestCustomerDeletionBeginRefusesIdentityMovedByAdministrator(t *testing.T) 
 	}
 	if err := s.FinishCustomerCancellation(ctx, "merge-before-begin", source.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCancelledReceiptDoesNotOccupyActiveGitHubIndex(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	id := customer("cancel-index", 730006, "index-customer")
+	p, err := s.ResolveCustomer(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Recreate the pre-migration index, then exercise the real startup migration.
+	if _, err := s.pool.Exec(ctx, `CREATE UNIQUE INDEX customer_deletion_pending_github ON customer_deletions(github_id) WHERE status<>'complete'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepareCustomerDeletion(ctx, "cancel-index-a", p.ID, id.Issuer, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CancelCustomerDeletion(ctx, "cancel-index-a", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := NewStore(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	if _, err := upgraded.PrepareCustomerDeletion(ctx, "cancel-index-b", p.ID, id.Issuer, "admin"); err != nil {
+		t.Fatalf("cancel receipt occupied active GitHub uniqueness: %v", err)
+	}
+	if err := s.FinishCustomerCancellation(ctx, "cancel-index-a", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, err := s.CustomerPrincipalDeleted(ctx, p.ID); err != nil || !blocked {
+		t.Fatal("old cancellation erased the new intent fence")
+	}
+	if pending, err := s.CustomerTenantDeletionPending(ctx, "cancel-index-a"); err != nil || pending {
+		t.Fatal("old name not released after acknowledgment")
+	}
+	if pending, err := s.CustomerTenantDeletionPending(ctx, "cancel-index-b"); err != nil || !pending {
+		t.Fatal("new intent name fence lost")
+	}
+}
+
+func TestCustomerDeletionPrepareStorageFailureIsUnknown(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	id := customer("storage-unknown", 730007, "unknown-customer")
+	p, err := s.ResolveCustomer(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, stop := context.WithCancel(ctx)
+	stop()
+	if _, err := s.PrepareCustomerDeletion(cancelled, "storage-unknown", p.ID, id.Issuer, "admin"); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("unreadable preparation classified as observed conflict: %v", err)
 	}
 }

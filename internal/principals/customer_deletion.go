@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
@@ -50,8 +51,9 @@ const customerDeletionSchema = `CREATE TABLE IF NOT EXISTS customer_deletions (
 );
 ALTER TABLE customer_deletions ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ;
 ALTER TABLE customer_deletions ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
-CREATE UNIQUE INDEX IF NOT EXISTS customer_deletion_pending_github
- ON customer_deletions(github_id) WHERE status <> 'complete';
+CREATE UNIQUE INDEX IF NOT EXISTS customer_deletion_active_github
+ ON customer_deletions(github_id) WHERE status <> 'complete' AND cancelled_at IS NULL;
+DROP INDEX IF EXISTS customer_deletion_pending_github;
 CREATE INDEX IF NOT EXISTS customer_deletion_subject ON customer_deletions(issuer,subject);
 CREATE INDEX IF NOT EXISTS customer_deletion_principal ON customer_deletions(principal_id);`
 
@@ -168,49 +170,16 @@ func (s *Store) PrepareCustomerDeletion(ctx context.Context, tenant, pid, issuer
 		if p.Kind != auth.KindHuman || p.Status != StatusActive {
 			return fmt.Errorf("%w: target is not an active human", ErrInvalid)
 		}
-		rows, err := tx.Query(ctx, `SELECT provider,issuer,subject,display,revoked_at IS NOT NULL FROM external_identities WHERE principal_id=$1`, pid)
+		d, err := customerDeletionIdentityTx(ctx, tx, tenant, pid, issuer, actor)
 		if err != nil {
 			return err
-		}
-		d := &CustomerDeletion{Tenant: tenant, PrincipalID: pid, Issuer: issuer, Actor: actor, Status: "prepared"}
-		count := 0
-		for rows.Next() {
-			var provider, iss, sub, display string
-			var revoked bool
-			if err := rows.Scan(&provider, &iss, &sub, &display, &revoked); err != nil {
-				rows.Close()
-				return err
-			}
-			count++
-			if revoked {
-				rows.Close()
-				return fmt.Errorf("%w: revoked identity needs reconciliation", ErrInvalid)
-			}
-			switch {
-			case provider == auth.ProviderGitHub && iss == "":
-				d.GitHubID = sub
-				d.Login = display
-			case provider == "zitadel" && iss == issuer:
-				d.Subject = sub
-			default:
-				rows.Close()
-				return fmt.Errorf("%w: principal has an unrelated identity", ErrInvalid)
-			}
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		if count != 2 || d.GitHubID == "" || d.Subject == "" || strings.TrimSpace(d.Login) == "" {
-			return fmt.Errorf("%w: target is not a complete customer identity", ErrInvalid)
 		}
 		result = d
 		return nil
 	}
 	key := "customer-deletion|" + tenant + "|" + pid
 	if err := s.withTx(ctx, key, load); err != nil {
-		return nil, err
+		return nil, customerDeletionStorageError(err)
 	}
 	approved := *result
 	// Network/GitOps observations never hold a DB transaction or principal lock.
@@ -233,7 +202,7 @@ func (s *Store) PrepareCustomerDeletion(ctx context.Context, tenant, pid, issuer
 		_, err := tx.Exec(ctx, `INSERT INTO customer_deletions (`+customerDeletionColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, d.Tenant, d.PrincipalID, d.GitHubID, d.Login, d.Issuer, d.Subject, d.Actor, d.Status)
 		return err
 	})
-	return result, err
+	return result, customerDeletionStorageError(err)
 }
 
 // CustomerTenantDeletionPending also fences administrator/MCP name reuse
@@ -290,19 +259,15 @@ func (s *Store) BeginCustomerDeletion(ctx context.Context, tenant, pid string) e
 			return nil
 		}
 		if status == "prepared" {
-			// An administrator may merge/relink while the workflow is queued.
-			// Under the principal lock, prove the approved identities still
-			// belong exclusively to this principal before any deletion begins.
-			var total, matching int
-			err := tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE e.revoked_at IS NULL AND (
-              (e.provider='github' AND e.issuer='' AND e.subject=d.github_id) OR
-              (e.provider='zitadel' AND e.issuer=d.issuer AND e.subject=d.subject)))
-              FROM external_identities e JOIN customer_deletions d ON d.principal_id=e.principal_id
-              WHERE d.tenant_name=$1 AND d.principal_id=$2`, tenant, pid).Scan(&total, &matching)
+			approved, err := s.customerDeletionTx(ctx, tx, tenant, pid)
 			if err != nil {
 				return err
 			}
-			if total != 2 || matching != 2 {
+			current, err := customerDeletionIdentityTx(ctx, tx, tenant, pid, approved.Issuer, approved.Actor)
+			if err != nil {
+				return err
+			}
+			if current.GitHubID != approved.GitHubID || current.Subject != approved.Subject || !strings.EqualFold(current.Login, approved.Login) {
 				return fmt.Errorf("%w: approved customer identities changed before begin", ErrInvalid)
 			}
 		}
@@ -393,4 +358,73 @@ func (s *Store) FinishCustomerCancellation(ctx context.Context, tenant, pid stri
 		return ErrInvalid
 	}
 	return nil
+}
+
+func (s *Store) customerDeletionTx(ctx context.Context, tx pgx.Tx, tenant, pid string) (*CustomerDeletion, error) {
+	return scanCustomerDeletion(tx.QueryRow(ctx, `SELECT `+customerDeletionSelectColumns+` FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2`, tenant, pid))
+}
+
+// Authentication identities are exactly GitHub + the customer issuer. Proven
+// surface mirrors (live or revoked) are owned data to purge, not extra accounts.
+func customerDeletionIdentityTx(ctx context.Context, tx pgx.Tx, tenant, pid, issuer, actor string) (*CustomerDeletion, error) {
+	var hasSurface bool
+	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.surface_identity_links') IS NOT NULL`).Scan(&hasSurface); err != nil {
+		return nil, err
+	}
+	query := `SELECT provider,issuer,subject,display,revoked_at IS NOT NULL,false FROM external_identities WHERE principal_id=$1`
+	if hasSurface {
+		query = `SELECT e.provider,e.issuer,e.subject,e.display,e.revoked_at IS NOT NULL,
+   EXISTS(SELECT 1 FROM surface_identity_links l WHERE l.surface=e.provider AND l.external_id=e.subject AND
+    (l.principal=e.principal_id OR EXISTS(SELECT 1 FROM external_identities g WHERE g.principal_id=e.principal_id AND g.provider='github' AND g.issuer='' AND g.revoked_at IS NULL AND lower(l.principal)='github:'||lower(g.display))))
+   FROM external_identities e WHERE e.principal_id=$1`
+	}
+	rows, err := tx.Query(ctx, query, pid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	d := &CustomerDeletion{Tenant: tenant, PrincipalID: pid, Issuer: issuer, Actor: actor, Status: "prepared"}
+	count, invalid := 0, false
+	for rows.Next() {
+		var provider, iss, sub, display string
+		var revoked, mirror bool
+		if err := rows.Scan(&provider, &iss, &sub, &display, &revoked, &mirror); err != nil {
+			return nil, err
+		}
+		if mirror && iss == "" && !reservedProvider(provider) {
+			continue
+		}
+		count++
+		if revoked {
+			invalid = true
+			continue
+		}
+		switch {
+		case provider == auth.ProviderGitHub && iss == "":
+			d.GitHubID = sub
+			d.Login = display
+		case provider == "zitadel" && iss == issuer:
+			d.Subject = sub
+		default:
+			invalid = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if invalid || count != 2 || d.GitHubID == "" || d.Subject == "" || strings.TrimSpace(d.Login) == "" {
+		return nil, fmt.Errorf("%w: unrelated, revoked or unproven customer authentication identity", ErrInvalid)
+	}
+	return d, nil
+}
+
+func customerDeletionStorageError(err error) error {
+	if err == nil || errors.Is(err, ErrInvalid) || errors.Is(err, ErrNotFound) || errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	var conflict *pgconn.PgError
+	if errors.As(err, &conflict) && conflict.Code == "23505" {
+		return fmt.Errorf("%w: another customer deletion is pending", ErrInvalid)
+	}
+	return fmt.Errorf("%w: customer deletion storage: %w", ErrUnresolved, err)
 }
