@@ -318,6 +318,48 @@ func TestKeyRotationRefetchesOnceAfterFloor(t *testing.T) {
 	}
 }
 
+// A refetch that fails, here driven by an unknown kid during a key set
+// outage, keeps the keys already in hand until the cached set expires. The
+// unknown kid gets the fetch error, which the token endpoint answers as a
+// retryable server error.
+func TestFailedRefetchKeepsKnownKeys(t *testing.T) {
+	ks := newKeyServer(t, "RS256", pub(&rsaKeyA().PublicKey, "a", "RS256"))
+	r := ks.resolver()
+	d := resolveDoc(t, ks, r)
+	auds := []string{testAud}
+	signA := func(id string) string {
+		c := claimsAt(ks.url, ks.clock)
+		c.ID = id
+		return sign(t, rsaKeyA(), jose.RS256, "a", c)
+	}
+	if _, err := r.VerifyAssertion(context.Background(), d, signA("j0"), auds); err != nil {
+		t.Fatal(err)
+	}
+	ks.mu.Lock()
+	ks.jwksCode = http.StatusServiceUnavailable
+	ks.mu.Unlock()
+	ks.advance(minTTL)
+	if _, err := r.VerifyAssertion(context.Background(), d, sign(t, rsaKeyB(), jose.RS256, "b", claimsAt(ks.url, ks.clock)), auds); !errors.Is(err, ErrFetch) {
+		t.Fatalf("unknown kid during the outage: %v", err)
+	}
+	if _, err := r.VerifyAssertion(context.Background(), d, signA("j1"), auds); err != nil {
+		t.Fatalf("known key after a failed refetch: %v", err)
+	}
+	// The failed attempt still floors the next refetch.
+	before := ks.jwksHits.Load()
+	if _, err := r.VerifyAssertion(context.Background(), d, sign(t, rsaKeyB(), jose.RS256, "b", claimsAt(ks.url, ks.clock)), auds); err == nil {
+		t.Fatal("unknown kid verified")
+	}
+	if ks.jwksHits.Load() != before {
+		t.Fatal("refetch was not floored after a failure")
+	}
+	// The held keys do not outlive the set's own cache lifetime.
+	ks.advance(defaultTTL)
+	if _, err := r.VerifyAssertion(context.Background(), d, signA("j2"), auds); err == nil {
+		t.Fatal("held keys outlived the cached set")
+	}
+}
+
 func TestKeySetFailuresFailClosed(t *testing.T) {
 	weak := mustRSA(1024)
 	ec384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)

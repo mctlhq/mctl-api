@@ -164,7 +164,9 @@ func joseAlgs() []jose.SignatureAlgorithm {
 // key id kid (any usable key when kid is empty). On a cached set without
 // such a key it refetches once, at most every minTTL per set and within the
 // host's fetch budget, so a rotated-in key is picked up without letting
-// unknown kids drive fetches.
+// unknown kids drive fetches. A refetch that fails keeps the set already in
+// hand until it expires as cached, so a key the client still signs with is
+// not dropped for an outage at its key set.
 func (r *Resolver) keysFor(ctx context.Context, doc Document, kid string) ([]jose.JSONWebKey, error) {
 	key := "jwks\x00" + doc.JWKSURI
 	e, hit := r.cachedEntry(key)
@@ -177,7 +179,8 @@ func (r *Resolver) keysFor(ctx context.Context, doc Document, kid string) ([]jos
 		}
 	}
 	v, err, _ := r.sf.Do(key, func() (any, error) {
-		if e, hit := r.cachedEntry(key); hit && (e.err != nil || r.now().Sub(e.fetched) < minTTL) {
+		e, hit := r.cachedEntry(key)
+		if hit && (e.err != nil || r.now().Sub(e.fetched) < minTTL) {
 			return e.keys, e.err
 		}
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.timeout)
@@ -186,17 +189,23 @@ func (r *Resolver) keysFor(ctx context.Context, doc Document, kid string) ([]jos
 		if errors.Is(err, ErrRateLimited) || (err != nil && ctx.Err() != nil) {
 			return nil, err
 		}
+		if err != nil && hit {
+			// Only the fetch time moves, so the next refetch is still floored.
+			r.storeEntry(&cacheEntry{key: key, keys: e.keys, fetched: r.now(), expires: e.expires})
+			return e.keys, err
+		}
 		if err != nil {
 			ttl = keysTTLOnError
 		}
 		r.storeEntry(&cacheEntry{key: key, keys: keys, err: err, fetched: r.now(), expires: r.now().Add(ttl)})
 		return keys, err
 	})
+	held, _ := v.([]jose.JSONWebKey)
+	if ks := pickKeys(held, doc.SigningAlg, kid); len(ks) > 0 {
+		return ks, nil
+	}
 	if err != nil {
 		return nil, err
-	}
-	if ks := pickKeys(v.([]jose.JSONWebKey), doc.SigningAlg, kid); len(ks) > 0 {
-		return ks, nil
 	}
 	return nil, fmt.Errorf("%w: no usable key with kid %q", ErrAssertion, kid)
 }
