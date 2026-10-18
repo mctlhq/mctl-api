@@ -42,6 +42,10 @@ const consentTTL = 5 * time.Minute
 // CIMDEnabled reports whether Client ID Metadata Documents are resolved.
 func (s *OAuthServer) CIMDEnabled() bool { return s != nil && s.CIMD != nil }
 
+// CIMDAdvertised reports whether discovery announces CIMD: only while it is
+// resolved and OAUTH_CIMD_ADVERTISE is on.
+func (s *OAuthServer) CIMDAdvertised() bool { return s.CIMDEnabled() && s.CIMDAdvertise }
+
 // IsCIMDClient reports whether clientID is handled as a CIMD client.
 func (s *OAuthServer) IsCIMDClient(clientID string) bool {
 	return s != nil && s.CIMD != nil && cimd.IsCIMDURL(clientID) && !s.isStatic(clientID)

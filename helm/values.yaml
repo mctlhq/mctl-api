@@ -52,9 +52,11 @@ resources:
     memory: 256Mi
 
 env:
-  # OAUTH_CIMD_ENABLED=true enables Client ID Metadata Documents and requires
+  # OAUTH_CIMD_ACCEPT=true resolves Client ID Metadata Documents and requires
   # OAUTH_CIMD_ALLOWED_HOSTS (comma list; ".example.com" matches subdomains);
-  # an empty list refuses startup. Both are plain env entries.
+  # an empty list refuses startup. OAUTH_CIMD_ADVERTISE=true (needs ACCEPT)
+  # announces it in discovery. The retired OAUTH_CIMD_ENABLED refuses startup
+  # when set. All are plain env entries.
   # Tracing (vendor-neutral OTLP): set OTEL_EXPORTER_OTLP_ENDPOINT to export
   # spans; unset (default) means no exporter, propagation still works.
   # OTEL_SDK_DISABLED=true forces export off. OTEL_MCTL_RECORD_ENDUSER=true
