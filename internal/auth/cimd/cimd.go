@@ -56,6 +56,7 @@ const (
 	maxRedirectURIs  = 20
 	maxRedirectBytes = 2048
 	maxNameRunes     = 100
+	minTTL           = 30 * time.Second
 	maxTTL           = 24 * time.Hour
 	defaultTTL       = time.Hour
 	negativeTTL      = 5 * time.Minute
@@ -321,7 +322,10 @@ func (r *Resolver) allowHost(host string) bool {
 		}
 		if len(r.rate) >= maxRateHosts {
 			// Every slot was used within the minute: refuse the new host
-			// rather than grow past the bound.
+			// rather than grow past the bound. With a .suffix allowlist entry
+			// a caller picks the hosts and can fill the map, refusing other
+			// untracked hosts for a minute; that is why the README asks for
+			// exact hosts in production.
 			return false
 		}
 	}
@@ -378,29 +382,35 @@ func (r *Resolver) fetch(ctx context.Context, u *url.URL, clientID string) (Docu
 }
 
 // cacheTTL is how long a document served with Cache-Control cc is cached:
-// zero (not cached) for no-store, no-cache, max-age=0 or a max-age that does
-// not parse; the smallest max-age when several are given; defaultTTL with no
-// max-age; never more than maxTTL. There is no floor, so a client that
-// revokes a redirect URI is not held to a minimum window; the per-host rate
-// limit bounds the refetches a short lifetime causes.
+// the smallest max-age when several are given, defaultTTL with none, and
+// minTTL for no-store, a bare no-cache or max-age=0, always within
+// [minTTL, maxTTL]. The short floor lets a client that revokes a redirect URI
+// see it take effect within seconds while a busy client's sign-ins are not
+// refused by the per-host rate limit. An invalid max-age is ignored (RFC 9111
+// section 5.2) and an over-large one is clamped (section 1.2.2). A qualified
+// no-cache="field" restricts only header fields this cache never reuses.
 func cacheTTL(cc string) time.Duration {
 	ttl, seen := defaultTTL, false
 	for _, d := range strings.Split(cc, ",") {
 		d = strings.ToLower(strings.TrimSpace(d))
-		if d == "no-store" || d == "no-cache" || strings.HasPrefix(d, "no-cache=") {
-			return 0
+		if d == "no-store" || d == "no-cache" {
+			return minTTL
 		}
 		if v, ok := strings.CutPrefix(d, "max-age="); ok {
-			n, err := strconv.Atoi(strings.Trim(v, `"`))
-			if err != nil || n < 0 {
-				return 0
+			v = strings.Trim(v, `"`)
+			if v == "" || strings.Trim(v, "0123456789") != "" {
+				continue
 			}
-			if t := time.Duration(n) * time.Second; !seen || t < ttl {
+			t := maxTTL
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n < int64(maxTTL/time.Second) {
+				t = time.Duration(n) * time.Second
+			}
+			if !seen || t < ttl {
 				ttl, seen = t, true
 			}
 		}
 	}
-	return min(ttl, maxTTL)
+	return min(max(ttl, minTTL), maxTTL)
 }
 
 func parseDocument(body []byte, clientID string) (Document, error) {

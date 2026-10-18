@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -68,6 +69,8 @@ func TestRedirectAllowed(t *testing.T) {
 		"https://app.example.com/cb",
 		"http://127.0.0.1:8000/callback",
 		"http://[::1]:9/cb?x=1",
+		// parseDocument refuses localhost, so no document can hold this
+		// entry; it stays to pin that localhost gets exact match only.
 		"http://localhost:8000/cb",
 	}
 	yes := []string{
@@ -265,7 +268,8 @@ func TestDocumentValidation(t *testing.T) {
 func TestAllowedRedirectSchemes(t *testing.T) {
 	f := newFixture(t, nil)
 	uris := []string{"https://app.example.com/cb", "http://127.0.0.1:8000/cb", "http://[::1]/cb"}
-	f.h = serve(fmt.Sprintf(`{"client_id":%q,"redirect_uris":["%s"],"token_endpoint_auth_method":"none"}`, f.url, strings.Join(uris, `","`)))
+	body, _ := json.Marshal(map[string]any{"client_id": f.url, "redirect_uris": uris, "token_endpoint_auth_method": "none"})
+	f.h = serve(string(body))
 	d, err := f.resolver().Resolve(context.Background(), f.url)
 	if err != nil || len(d.RedirectURIs) != len(uris) {
 		t.Fatalf("%v %v", d, err)
@@ -357,30 +361,41 @@ func TestCaching(t *testing.T) {
 	if f.hits.Load() != 1 {
 		t.Fatalf("hits = %d", f.hits.Load())
 	}
-	f.advance(2 * time.Second) // max-age is honoured, with no floor
+	f.advance(minTTL - time.Second) // max-age=1 is raised to the floor
+	_, _ = r.Resolve(context.Background(), f.url)
+	if f.hits.Load() != 1 {
+		t.Fatalf("max-age=1 must be held for the %v floor: hits = %d", minTTL, f.hits.Load())
+	}
+	f.advance(2 * time.Second) // and no longer than that
 	_, _ = r.Resolve(context.Background(), f.url)
 	if f.hits.Load() != 2 {
-		t.Fatalf("max-age=1 must expire after a second: hits = %d", f.hits.Load())
+		t.Fatalf("hits = %d", f.hits.Load())
 	}
 }
 
 func TestCacheTTL(t *testing.T) {
 	for cc, want := range map[string]time.Duration{
-		"":                        defaultTTL,
-		"public":                  defaultTTL,
-		"max-age=600":             10 * time.Minute,
-		"max-age=60":              time.Minute,
-		"max-age=0":               0,
-		"no-store":                0,
-		"No-Cache":                0,
-		`no-cache="set-cookie"`:   0,
-		"max-age=600, no-store":   0,
-		"max-age=abc":             0,
-		"max-age=-1":              0,
-		"max-age=600, max-age=60": time.Minute,
-		"max-age=60, max-age=600": time.Minute,
-		"max-age=999999":          maxTTL,
-		`max-age="120"`:           2 * time.Minute,
+		"":                             defaultTTL,
+		"public":                       defaultTTL,
+		"max-age=600":                  10 * time.Minute,
+		"max-age=60":                   time.Minute,
+		"max-age=30":                   30 * time.Second,
+		"max-age=10":                   minTTL,
+		"max-age=0":                    minTTL,
+		"no-store":                     minTTL,
+		"No-Cache":                     minTTL,
+		`no-cache="set-cookie"`:        defaultTTL,
+		"max-age=600, no-store":        minTTL,
+		"max-age=abc":                  defaultTTL,
+		"max-age=":                     defaultTTL,
+		"max-age=1e5":                  defaultTTL,
+		"max-age=-1":                   defaultTTL,
+		"max-age=abc, max-age=60":      time.Minute,
+		"max-age=600, max-age=60":      time.Minute,
+		"max-age=60, max-age=600":      time.Minute,
+		"max-age=999999":               maxTTL,
+		"max-age=99999999999999999999": maxTTL,
+		`max-age="120"`:                2 * time.Minute,
 	} {
 		if got := cacheTTL(cc); got != want {
 			t.Errorf("%q: %v, want %v", cc, got, want)
@@ -388,7 +403,10 @@ func TestCacheTTL(t *testing.T) {
 	}
 }
 
-func TestNoStoreDocumentIsNotCached(t *testing.T) {
+// A no-store document is held only for the short floor: the sign-ins of a
+// busy client are not refused by the per-host rate limit, and a revoked
+// redirect URI stops working within minTTL.
+func TestNoStoreDocumentIsHeldForTheFloorOnly(t *testing.T) {
 	f := newFixture(t, nil)
 	f.h = func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -396,13 +414,18 @@ func TestNoStoreDocumentIsNotCached(t *testing.T) {
 		_, _ = fmt.Fprint(w, doc(f.url, ""))
 	}
 	r := f.resolver()
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 3*hostPerMinute; i++ {
 		if _, err := r.Resolve(context.Background(), f.url); err != nil {
-			t.Fatal(err)
+			t.Fatalf("sign-in %d: %v", i+1, err)
 		}
 	}
+	if f.hits.Load() != 1 {
+		t.Fatalf("hits = %d", f.hits.Load())
+	}
+	f.advance(minTTL)
+	_, _ = r.Resolve(context.Background(), f.url)
 	if f.hits.Load() != 2 {
-		t.Fatalf("a no-store document must be refetched: hits = %d", f.hits.Load())
+		t.Fatalf("a no-store document must be refetched after %v: hits = %d", minTTL, f.hits.Load())
 	}
 }
 

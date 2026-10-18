@@ -38,6 +38,10 @@ const consentCookie = "__Host-mctl_consent"
 // consentCookieName is the cookie of the flow whose token hashes to hash.
 func consentCookieName(hash string) string { return consentCookie + "_" + hash[:16] }
 
+func clearConsentCookie(w http.ResponseWriter, hash string) {
+	http.SetCookie(w, &http.Cookie{Name: consentCookieName(hash), Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+}
+
 // oauthConsentDecisions counts POST /oauth/consent outcomes: approve, deny,
 // or why the decision was refused (invalid_request, wrong_browser,
 // invalid_token, store_error, internal_error). It picks up a CIMD sign-in
@@ -230,6 +234,8 @@ func (h *Handlers) takeConsentDecision(w http.ResponseWriter, r *http.Request) s
 		return "store_error"
 	}
 	if !ok {
+		// A replayed or expired token tidies up its flow cookie too.
+		clearConsentCookie(w, hash)
 		http.Error(w, "invalid or expired consent", http.StatusBadRequest)
 		return "invalid_token"
 	}
@@ -237,7 +243,7 @@ func (h *Handlers) takeConsentDecision(w http.ResponseWriter, r *http.Request) s
 		http.Error(w, "invalid or expired consent", http.StatusBadRequest)
 		return "wrong_browser"
 	}
-	http.SetCookie(w, &http.Cookie{Name: consentCookieName(hash), Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+	clearConsentCookie(w, hash)
 	state := string(e.ClientState)
 	if decision == "deny" {
 		oauthError(w, e.RedirectURI, state, "access_denied", "the user denied the request")

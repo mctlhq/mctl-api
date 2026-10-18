@@ -281,15 +281,19 @@ func TestConsentCookieBinding(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("the refused attempts must not spend the token: %d", rec.Code)
 	}
-	var cleared bool
-	for _, c := range rec.Result().Cookies() {
-		cleared = cleared || (c.Name == cookie.Name && c.MaxAge < 0)
+	cleared := func(rec *httptest.ResponseRecorder) bool {
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == cookie.Name && c.MaxAge < 0 {
+				return true
+			}
+		}
+		return false
 	}
-	if !cleared {
+	if !cleared(rec) {
 		t.Error("the decision must clear its flow cookie")
 	}
-	if rec := postConsent(h, token, "approve", cookie); rec.Code != http.StatusBadRequest {
-		t.Fatalf("replay: %d", rec.Code)
+	if rec := postConsent(h, token, "approve", cookie); rec.Code != http.StatusBadRequest || !cleared(rec) {
+		t.Fatalf("a replay is refused and clears the cookie it carried: %d", rec.Code)
 	}
 	if rec := postConsent(h, other, "deny", otherCookie); rec.Code != http.StatusFound {
 		t.Fatalf("the other flow is untouched: %d", rec.Code)
