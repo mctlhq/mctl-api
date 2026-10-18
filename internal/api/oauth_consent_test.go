@@ -27,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/cimd"
@@ -157,8 +159,13 @@ func completion(clientID string) authzCompletion {
 
 func requestConsent(t *testing.T, h *Handlers) (token string, cookie *http.Cookie, body string) {
 	t.Helper()
+	return requestConsentFor(t, h, completion(cimdID))
+}
+
+func requestConsentFor(t *testing.T, h *Handlers, c authzCompletion) (token string, cookie *http.Cookie, body string) {
+	t.Helper()
 	rec := httptest.NewRecorder()
-	if res := h.finishAuthorization(rec, httptest.NewRequest(http.MethodGet, "/cb", nil), completion(cimdID)); res != "consent_required" {
+	if res := h.finishAuthorization(rec, httptest.NewRequest(http.MethodGet, "/cb", nil), c); res != "consent_required" {
 		t.Fatalf("result %q, body %s", res, rec.Body.String())
 	}
 	if rec.Header().Get("Location") != "" {
@@ -177,21 +184,25 @@ func requestConsent(t *testing.T, h *Handlers) (token string, cookie *http.Cooki
 	}
 	token = token[:j]
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == consentCookie {
+		if strings.HasPrefix(c.Name, consentCookie) {
 			cookie = c
 		}
 	}
-	if cookie == nil || !cookie.Secure || !cookie.HttpOnly || cookie.Path != "/" || cookie.Domain != "" {
+	if cookie == nil || !strings.HasPrefix(cookie.Name, "__Host-") || !cookie.Secure || !cookie.HttpOnly ||
+		cookie.Path != "/" || cookie.Domain != "" || cookie.SameSite != http.SameSiteLaxMode {
 		t.Fatalf("cookie: %+v", cookie)
 	}
 	return
 }
 
-func postConsent(h *Handlers, token, decision string, cookie *http.Cookie) *httptest.ResponseRecorder {
+// postConsent posts a decision with the cookies a browser would send.
+func postConsent(h *Handlers, token, decision string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/oauth/consent", strings.NewReader(url.Values{"token": {token}, "decision": {decision}}.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if cookie != nil {
-		req.AddCookie(cookie)
+	for _, c := range cookies {
+		if c != nil {
+			req.AddCookie(c)
+		}
 	}
 	rec := httptest.NewRecorder()
 	h.handleOAuthConsent(rec, req)
@@ -245,24 +256,88 @@ func TestConsentDeny(t *testing.T) {
 func TestConsentCookieBinding(t *testing.T) {
 	h, _ := cimdEnv(t, cimdDoc(cbURL))
 	token, cookie, _ := requestConsent(t, h)
-	if rec := postConsent(h, token, "approve", nil); rec.Code != http.StatusBadRequest {
-		t.Fatalf("missing cookie: %d", rec.Code)
-	}
-	// The token is spent by the refused attempt.
-	if rec := postConsent(h, token, "approve", cookie); rec.Code != http.StatusBadRequest {
-		t.Fatalf("spent token: %d", rec.Code)
-	}
-	token, cookie, _ = requestConsent(t, h)
+	other, otherCookie, _ := requestConsent(t, h)
 	bad := *cookie
 	bad.Value = "0000"
-	if rec := postConsent(h, token, "approve", &bad); rec.Code != http.StatusBadRequest {
-		t.Fatalf("mismatched cookie: %d", rec.Code)
+	for name, cookies := range map[string][]*http.Cookie{
+		"missing cookie":          nil,
+		"mismatched value":        {&bad},
+		"another flow's cookie":   {otherCookie},
+		"cookie under other name": {{Name: consentCookie, Value: cookie.Value}},
+	} {
+		if rec := postConsent(h, token, "approve", cookies...); rec.Code != http.StatusBadRequest || rec.Header().Get("Location") != "" {
+			t.Fatalf("%s: %d", name, rec.Code)
+		}
 	}
 	if rec := postConsent(h, "unknown", "approve", cookie); rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown token: %d", rec.Code)
 	}
 	if rec := postConsent(h, token, "maybe", cookie); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad decision: %d", rec.Code)
+	}
+	// None of the refused attempts spent the token: the cookie is checked
+	// first, so the browser that signed in can still decide.
+	rec := postConsent(h, token, "approve", cookie)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("the refused attempts must not spend the token: %d", rec.Code)
+	}
+	var cleared bool
+	for _, c := range rec.Result().Cookies() {
+		cleared = cleared || (c.Name == cookie.Name && c.MaxAge < 0)
+	}
+	if !cleared {
+		t.Error("the decision must clear its flow cookie")
+	}
+	if rec := postConsent(h, token, "approve", cookie); rec.Code != http.StatusBadRequest {
+		t.Fatalf("replay: %d", rec.Code)
+	}
+	if rec := postConsent(h, other, "deny", otherCookie); rec.Code != http.StatusFound {
+		t.Fatalf("the other flow is untouched: %d", rec.Code)
+	}
+}
+
+// Two consent pages open in one browser: the second flow's cookie must not
+// overwrite the first one's binding.
+func TestConcurrentConsentFlowsInOneBrowser(t *testing.T) {
+	h, _ := cimdEnv(t, cimdDoc(cbURL))
+	jar := map[string]*http.Cookie{} // a browser keeps one cookie per name
+	var tokens []string
+	for i := 0; i < 2; i++ {
+		token, cookie, _ := requestConsent(t, h)
+		jar[cookie.Name] = cookie
+		tokens = append(tokens, token)
+	}
+	var all []*http.Cookie
+	for _, c := range jar {
+		all = append(all, c)
+	}
+	for i, token := range tokens {
+		if rec := postConsent(h, token, "approve", all...); rec.Code != http.StatusFound {
+			t.Fatalf("tab %d: %d %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestConsentDecisionMetrics(t *testing.T) {
+	h, _ := cimdEnv(t, cimdDoc(cbURL))
+	count := func(result string) float64 {
+		return testutil.ToFloat64(oauthConsentDecisions.WithLabelValues(result))
+	}
+	before := map[string]float64{}
+	for _, r := range []string{"approve", "deny", "invalid_request", "wrong_browser", "invalid_token"} {
+		before[r] = count(r)
+	}
+	token, cookie, _ := requestConsent(t, h)
+	postConsent(h, token, "maybe", cookie)
+	postConsent(h, token, "approve")
+	postConsent(h, token, "approve", cookie)
+	postConsent(h, token, "approve", cookie)
+	token, cookie, _ = requestConsent(t, h)
+	postConsent(h, token, "deny", cookie)
+	for r, want := range map[string]float64{"approve": 1, "deny": 1, "invalid_request": 1, "wrong_browser": 1, "invalid_token": 1} {
+		if got := count(r) - before[r]; got != want {
+			t.Errorf("%s: %v, want %v", r, got, want)
+		}
 	}
 }
 
@@ -306,13 +381,14 @@ func TestNonCIMDClientsSkipConsentAndAreAuditedByKind(t *testing.T) {
 		t.Fatal(err)
 	}
 	dcr := o.RegisterClient("dcr", []string{"http://127.0.0.1:1/cb"})
-	for _, tc := range []struct{ id, kind, redirect string }{
-		{"portal", "static", "https://portal.example/cb"},
-		{dcr.ClientID, "dcr", "http://127.0.0.1:1/cb"},
-		{"plain-client", "allowlisted", "https://claude.ai/api/mcp/auth_callback"},
+	for _, tc := range []struct{ id, kind, redirect, principal string }{
+		{"portal", "static", "https://portal.example/cb", "prn_01JCCCCCCCCCCCCCCCCCCCCCCC"},
+		{dcr.ClientID, "dcr", "http://127.0.0.1:1/cb", "prn_01JDDDDDDDDDDDDDDDDDDDDDDD"},
+		{"plain-client", "allowlisted", "https://claude.ai/api/mcp/auth_callback", "prn_01JEEEEEEEEEEEEEEEEEEEEEEE"},
 	} {
 		c := completion(tc.id)
 		c.RedirectURI = tc.redirect
+		c.PrincipalID = tc.principal
 		rec := httptest.NewRecorder()
 		if res := h.finishAuthorization(rec, httptest.NewRequest(http.MethodGet, "/cb", nil), c); res != "issued" {
 			t.Fatalf("%s: %q", tc.kind, res)
@@ -321,12 +397,70 @@ func TestNonCIMDClientsSkipConsentAndAreAuditedByKind(t *testing.T) {
 			t.Fatalf("%s: %q", tc.kind, loc)
 		}
 		e := log.List(1)[0]
-		// A4: the same human resolves to the same principal whatever the client.
-		if e.Parameters["client_kind"] != tc.kind || e.PrincipalID != testPRN || e.Parameters["client_id"] != tc.id {
+		// The principal recorded is the one the sign-in produced, varied per
+		// row, never a fixed value or anything the client supplied.
+		if e.Parameters["client_kind"] != tc.kind || e.PrincipalID != tc.principal || e.Parameters["client_id"] != tc.id {
 			t.Fatalf("%s: %+v", tc.kind, e)
 		}
 	}
 	if n := len(log.List(10)); n != 3 {
 		t.Fatalf("one entry per issued code, got %d", n)
+	}
+}
+
+// A4: the principal of a CIMD grant is the one the upstream sign-in produced.
+// A document naming a principal, subject or login changes nothing.
+func TestConsentPrincipalComesFromSignIn(t *testing.T) {
+	b, _ := json.Marshal(map[string]any{
+		"client_id": cimdID, "redirect_uris": []string{cbURL}, "token_endpoint_auth_method": "none",
+		"principal_id": testPRN, "sub": testPRN, "login": "mallory",
+	})
+	h, log := cimdEnv(t, string(b))
+	for _, signedIn := range []struct{ login, principal string }{
+		{"bob", "prn_01JFFFFFFFFFFFFFFFFFFFFFFF"},
+		{"", "prn_01JGGGGGGGGGGGGGGGGGGGGGGG"},
+	} {
+		c := completion(cimdID)
+		c.Login, c.PrincipalID = signedIn.login, signedIn.principal
+		token, cookie, _ := requestConsentFor(t, h, c)
+		if rec := postConsent(h, token, "approve", cookie); rec.Code != http.StatusFound {
+			t.Fatalf("%s: %d", signedIn.principal, rec.Code)
+		}
+		e := log.List(1)[0]
+		if e.PrincipalID != signedIn.principal || e.UserID != signedIn.login {
+			t.Fatalf("want %s/%q from the sign-in, got %s/%q", signedIn.principal, signedIn.login, e.PrincipalID, e.UserID)
+		}
+	}
+}
+
+// A pre-registered client whose client_id is URL-shaped stays static: its own
+// list decides, exactly, port included, and its document is never consulted.
+func TestStaticClientBeatsCIMD(t *testing.T) {
+	h, log := cimdEnv(t, cimdDoc(cbURL, "http://127.0.0.1:8000/cb"))
+	o := h.opts.OAuthServer
+	if err := o.AddPreregisteredClient(cimdID, "Portal", []string{"http://127.0.0.1:8000/cb"}); err != nil {
+		t.Fatal(err)
+	}
+	if o.IsCIMDClient(cimdID) || o.ClientKind(cimdID) != auth.ClientKindStatic {
+		t.Fatalf("a static client must not be handled as CIMD: kind %q", o.ClientKind(cimdID))
+	}
+	if rec := authorize(h, cimdID, "http://127.0.0.1:8000/cb"); rec.Code != http.StatusFound {
+		t.Fatalf("registered redirect: %d", rec.Code)
+	}
+	// The document lists cbURL, and its loopback entry would match on any
+	// port; neither counts for a static client.
+	for _, u := range []string{cbURL, "http://127.0.0.1:9000/cb"} {
+		if rec := authorize(h, cimdID, u); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d", u, rec.Code)
+		}
+	}
+	c := completion(cimdID)
+	c.RedirectURI = "http://127.0.0.1:8000/cb"
+	rec := httptest.NewRecorder()
+	if res := h.finishAuthorization(rec, httptest.NewRequest(http.MethodGet, "/cb", nil), c); res != "issued" {
+		t.Fatalf("a static client gets no consent page: %q", res)
+	}
+	if e := log.List(1)[0]; e.Parameters["client_kind"] != auth.ClientKindStatic {
+		t.Fatalf("%+v", e)
 	}
 }

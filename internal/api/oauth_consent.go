@@ -22,13 +22,32 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
-// consentCookie binds a consent decision to the browser that signed in.
+// consentCookie prefixes the cookie that binds a consent decision to the
+// browser that signed in. Each flow gets its own cookie, named after its
+// token hash, so two consent pages open in one browser do not overwrite each
+// other's binding.
 const consentCookie = "__Host-mctl_consent"
+
+// consentCookieName is the cookie of the flow whose token hashes to hash.
+func consentCookieName(hash string) string { return consentCookie + "_" + hash[:16] }
+
+// oauthConsentDecisions counts POST /oauth/consent outcomes: approve, deny,
+// or why the decision was refused (invalid_request, wrong_browser,
+// invalid_token, store_error, internal_error). It picks up a CIMD sign-in
+// where oauth_upstream_signins{result="consent_required"} leaves it.
+var oauthConsentDecisions = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "oauth_consent_decisions_total",
+	Help: "POST /oauth/consent outcomes by result (mctl-api#684).",
+}, []string{"result"})
+
+func init() { prometheus.MustRegister(oauthConsentDecisions) }
 
 // authzCompletion is an authorization the upstream has signed a human in
 // for. Login, PrincipalID and Groups come from the upstream sign-in only;
@@ -139,7 +158,7 @@ func (h *Handlers) requestConsent(w http.ResponseWriter, r *http.Request, c auth
 		return "internal_error"
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name: consentCookie, Value: consentHash(token), Path: "/", MaxAge: 300,
+		Name: consentCookieName(consentHash(token)), Value: consentHash(token), Path: "/", MaxAge: 300,
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 	})
 	// A customer or a ZITADEL-only human in principal mode signs in with no
@@ -173,43 +192,56 @@ var consentPage = shellPage("consent", `<form class="actions" method="post" acti
 //
 // POST /oauth/consent  (form: token, decision=approve|deny)
 func (h *Handlers) handleOAuthConsent(w http.ResponseWriter, r *http.Request) {
-	o := h.opts.OAuthServer
-	if o == nil {
+	if h.opts.OAuthServer == nil {
 		http.NotFound(w, r)
 		return
 	}
+	oauthConsentDecisions.WithLabelValues(h.takeConsentDecision(w, r)).Inc()
+}
+
+// takeConsentDecision writes the response to a consent decision and returns
+// the metric result.
+func (h *Handlers) takeConsentDecision(w http.ResponseWriter, r *http.Request) string {
+	o := h.opts.OAuthServer
 	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
+		return "invalid_request"
 	}
 	token, decision := r.PostForm.Get("token"), r.PostForm.Get("decision")
 	if token == "" || (decision != "approve" && decision != "deny") {
 		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
+		return "invalid_request"
 	}
-	// The token is spent whatever happens next, so a replay or a wrong
-	// browser cannot retry it.
+	// The browser is checked before the token is spent: the hash is
+	// computable from the form alone, so a browser without the flow's cookie
+	// cannot consume a pending consent it does not own.
+	hash := consentHash(token)
+	cookie, cerr := r.Cookie(consentCookieName(hash))
+	if cerr != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(hash)) != 1 {
+		http.Error(w, "invalid or expired consent", http.StatusBadRequest)
+		return "wrong_browser"
+	}
+	// From here the token is spent whatever happens next, so a replay cannot
+	// retry it.
 	e, ok, err := o.TakeConsent(r.Context(), token)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return "store_error"
 	}
 	if !ok {
 		http.Error(w, "invalid or expired consent", http.StatusBadRequest)
-		return
+		return "invalid_token"
 	}
-	cookie, cerr := r.Cookie(consentCookie)
-	if cerr != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(e.BrowserHash)) != 1 ||
-		subtle.ConstantTimeCompare([]byte(consentHash(token)), []byte(e.BrowserHash)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(hash), []byte(e.BrowserHash)) != 1 {
 		http.Error(w, "invalid or expired consent", http.StatusBadRequest)
-		return
+		return "wrong_browser"
 	}
-	http.SetCookie(w, &http.Cookie{Name: consentCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: consentCookieName(hash), Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 	state := string(e.ClientState)
 	if decision == "deny" {
 		oauthError(w, e.RedirectURI, state, "access_denied", "the user denied the request")
-		return
+		return "deny"
 	}
 	loc, err := h.issueGrant(r, authzCompletion{
 		Login: e.Login, PrincipalID: e.PrincipalID, Groups: e.Groups, ClientID: e.ClientID,
@@ -219,7 +251,8 @@ func (h *Handlers) handleOAuthConsent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("failed to issue auth code", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return "internal_error"
 	}
 	http.Redirect(w, r, loc, http.StatusFound)
+	return "approve"
 }
