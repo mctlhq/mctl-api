@@ -1,5 +1,24 @@
 # Changelog
 
+## [4.105.0](https://github.com/mctlhq/mctl-api/compare/4.104.0...4.105.0) (2026-10-18)
+
+
+### Features
+
+* **agents:** issue-707-fix-incidents-make-incident-prefix-looku ([b87c1aa](https://github.com/mctlhq/mctl-api/commit/b87c1aac083fe5be9c7d04b79121390a39851b6d))
+* **oauth:** optional ZITADEL redirect base for local e2e runs ([8aa7bdf](https://github.com/mctlhq/mctl-api/commit/8aa7bdf0f45f2686befd4f9a40912ee4ad9b6773))
+* **oauth:** optional ZITADEL redirect base for local e2e runs ([dadbe2a](https://github.com/mctlhq/mctl-api/commit/dadbe2a5775d735aefb176838ff71ec1863e41f5))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-707-fix-incidents-make-incident-prefix-looku ([eac099f](https://github.com/mctlhq/mctl-api/commit/eac099f329479bcf4305329c84e98b50b909f708))
+* **agents:** issue-707-fix-incidents-make-incident-prefix-looku ([824b008](https://github.com/mctlhq/mctl-api/commit/824b0082fec52c8f7aeac0c18f0a091885914123))
+* **cimd:** remember a document fetch failure for minTTL only ([9fd762f](https://github.com/mctlhq/mctl-api/commit/9fd762f28668153b3f3b5f8603fcefb3bd1a60b7))
+* **cimd:** remember a document fetch failure for minTTL only ([a9c6c01](https://github.com/mctlhq/mctl-api/commit/a9c6c01fb0ecaaa0d0d00255243d6c813929e4d1)), closes [#702](https://github.com/mctlhq/mctl-api/issues/702)
+* **oauth:** allow the consent redirect in the page's form-action ([dd377f2](https://github.com/mctlhq/mctl-api/commit/dd377f27b46c3074af70654744d5cf2c395e472b))
+* **oauth:** allow the consent redirect in the page's form-action ([9e1a45e](https://github.com/mctlhq/mctl-api/commit/9e1a45e3d7f2b9af82c44d83841f76ce63049420))
+
 ## [4.104.0](https://github.com/mctlhq/mctl-api/compare/4.103.0...4.104.0) (2026-10-18)
 
 
