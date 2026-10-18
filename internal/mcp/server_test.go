@@ -1695,3 +1695,36 @@ func TestToolTriggerPortalServerAuthApply_PostsToTheEndpoint(t *testing.T) {
 		t.Errorf("body %q, want an empty object", s)
 	}
 }
+
+func TestCancelCustomerDeletionRequiresConfirmationAndExactTarget(t *testing.T) {
+	calls := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != "POST" || r.URL.Path != "/api/v1/internal/customer-deletions/acme/prn_01M45DR1GWC87109EH88VBJX25/cancel" {
+			t.Errorf("wrong cancellation route: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"status":"cancelled"}`))
+	}))
+	defer backend.Close()
+	_, handler := NewServer(backend.URL, "test-token").toolCancelCustomerDeletion()
+	args := map[string]any{"tenant_name": "acme", "customer_principal_id": "prn_01M45DR1GWC87109EH88VBJX25"}
+	call := func() *mcplib.CallToolResult {
+		result, err := handler(context.Background(), mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: "mctl_cancel_customer_deletion", Arguments: args}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	_ = call()
+	if calls != 0 {
+		t.Fatal("unconfirmed cancellation reached API")
+	}
+	args["confirm"] = "yes"
+	if result := call(); result.IsError || calls != 1 {
+		t.Fatalf("confirmed cancellation failed: %+v calls=%d", result, calls)
+	}
+	args["tenant_name"] = "../admin"
+	if result := call(); !result.IsError || calls != 1 {
+		t.Fatal("malformed target reached API")
+	}
+}

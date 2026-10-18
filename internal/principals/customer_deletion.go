@@ -345,3 +345,15 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 		return err
 	})
 }
+
+// CancelCustomerDeletion is called under the run lock, before begin only.
+func (s *Store) CancelCustomerDeletion(ctx context.Context, tenant, pid string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2 AND status='prepared'`, tenant, pid)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrInvalid
+	}
+	return nil
+}

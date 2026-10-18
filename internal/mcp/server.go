@@ -255,6 +255,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolProvisionDatabase())
 	srv.AddTool(s.toolRetireService())
 	srv.AddTool(s.toolDeleteTenant())
+	srv.AddTool(s.toolCancelCustomerDeletion())
 	srv.AddTool(s.toolSyncRepos())
 	srv.AddTool(s.toolRollbackService())
 	srv.AddTool(s.toolCreatePreview())
@@ -1134,6 +1135,34 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		return mcplib.NewToolResultText(string(body)), nil
 	}
 
+	return tool, handler
+}
+
+func (s *Server) toolCancelCustomerDeletion() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_cancel_customer_deletion",
+		mcplib.WithTitleAnnotation("Cancel Prepared Customer Deletion"),
+		mcplib.WithReadOnlyHintAnnotation(false), mcplib.WithDestructiveHintAnnotation(false), mcplib.WithIdempotentHintAnnotation(true),
+		mcplib.WithDescription("Cancel an approved customer deletion only before begin. Direct human platform administrator required. Restores the prepared account/name fence; never restores removed resources or cancels a deletion which has begun. Confirm the exact tenant and principal with the user. Retry the same cancellation if portal unfreeze is temporarily unavailable."),
+		mcplib.WithString("tenant_name", mcplib.Required(), mcplib.Description("Exact workspace name")),
+		mcplib.WithString("customer_principal_id", mcplib.Required(), mcplib.Description("Exact principal named by the prepared deletion")),
+		mcplib.WithString("confirm", mcplib.Description("Type yes only after explicit agreement to cancel this prepared deletion")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		if result := requireConfirm(args, fmt.Sprintf("cancel prepared deletion of workspace %q and customer %q", args["tenant_name"], args["customer_principal_id"])); result != nil {
+			return result, nil
+		}
+		tenant, _ := args["tenant_name"].(string)
+		pid, _ := args["customer_principal_id"].(string)
+		if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`).MatchString(tenant) || !auth.ValidPrincipalID(pid) {
+			return mcplib.NewToolResultError("Invalid cancellation target"), nil
+		}
+		body, err := s.apiPost(ctx, "/api/v1/internal/customer-deletions/"+url.PathEscape(tenant)+"/"+url.PathEscape(pid)+"/cancel", map[string]string{})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Cancellation incomplete: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
 	return tool, handler
 }
 

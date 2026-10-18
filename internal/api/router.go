@@ -462,6 +462,7 @@ func NewRouter(opts Options) http.Handler {
 		r.Route("/api/v1", func(r chi.Router) {
 			// Auth endpoints.
 			r.Get("/whoami", h.Whoami)
+			r.Post("/internal/customer-deletions/{tenant}/{principal}/cancel", h.CancelCustomerDeletion)
 			r.Post("/internal/customer-deletions/{tenant}/{principal}/{stage}", h.AdvanceCustomerDeletion)
 			r.Get("/surface-principals/workspace-access/{tenant}", h.ObserveWorkspaceAccess)
 			// The caller's linked identities (mctl-api#435).

@@ -243,3 +243,7 @@ func (p *Providers) FreezePortal(ctx context.Context, d *principals.CustomerDele
 func (p *Providers) ReleasePortal(ctx context.Context, d *principals.CustomerDeletion) error {
 	return p.portalLifecycle(ctx, d, "release")
 }
+
+func (p *Providers) CancelPortal(ctx context.Context, d *principals.CustomerDeletion) error {
+	return p.portalLifecycle(ctx, d, "cancel")
+}

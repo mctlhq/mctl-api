@@ -276,3 +276,50 @@ func TestCustomerDeletionApprovalRechecksIdentityAfterExternalObservation(t *tes
 		t.Fatalf("changed identity accepted: %v", err)
 	}
 }
+
+func TestPreparedCustomerDeletionCancellationRestoresExistingIdentity(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	id := customer("cancel-old", 730004, "cancel-customer")
+	p, err := s.ResolveCustomer(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replica := NewResolver(s, nil, false)
+	if err := replica.CheckPrincipal(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepareCustomerDeletion(ctx, "cancel-test", p.ID, id.Issuer, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveCustomer(ctx, id); !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("direct customer resolution bypassed prepared fence: %v", err)
+	}
+	if err := s.CancelCustomerDeletion(ctx, "cancel-test", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BeginCustomerDeletion(ctx, "cancel-test", p.ID); err == nil {
+		t.Fatal("queued begin survived cancellation")
+	}
+	if err := replica.CheckPrincipal(ctx, p.ID); err != nil {
+		t.Fatalf("cancelled customer still denied: %v", err)
+	}
+	if linked, err := s.ResolveCustomer(ctx, id); err != nil || linked.ID != p.ID {
+		t.Fatalf("cancel changed original identity: %+v %v", linked, err)
+	}
+	if pending, err := s.CustomerTenantDeletionPending(ctx, "cancel-test"); err != nil || pending {
+		t.Fatalf("cancelled name frozen: %v %v", pending, err)
+	}
+	if _, err := s.PrepareCustomerDeletion(ctx, "cancel-test", p.ID, id.Issuer, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BeginCustomerDeletion(ctx, "cancel-test", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CancelCustomerDeletion(ctx, "cancel-test", p.ID); err == nil {
+		t.Fatal("begun deletion cancelled")
+	}
+	if err := replica.CheckPrincipal(ctx, p.ID); !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("begun principal restored: %v", err)
+	}
+}

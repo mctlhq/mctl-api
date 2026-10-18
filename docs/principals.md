@@ -946,3 +946,17 @@ a still-active customer from creating another workspace while submission is
 retrying or the workflow is queued. The same uncached cross-replica checks apply
 to existing API tokens and fresh token issuance. Database credential revocation
 still runs idempotently in `begin`; the earlier deny fence must never wait for it.
+
+Prepared cancellation uses `mctl_cancel_customer_deletion` with the exact tenant,
+principal and explicit confirmation. Only a direct human platform administrator
+may invoke it. Prepare, cancel and workflow callbacks share the cross-replica
+run lock. Cancellation deletes only a prepared local intent first, making any
+queued begin refuse, then idempotently unfreezes the portal. If the portal is
+unavailable, retrying the same cancellation completes that acknowledgment even
+when the local intent is already absent. A deleting/complete manifest is never
+removed or reactivated; cancellation never restores independently removed
+workspace resources. Historical cancellation/denial audit entries are retained.
+
+Disabling `CUSTOMER_DELETION_ENABLED` stops new deletion preparations. Already
+approved callback recovery and prepared cancellation remain configured so a
+rollout rollback cannot strand an existing customer fence.

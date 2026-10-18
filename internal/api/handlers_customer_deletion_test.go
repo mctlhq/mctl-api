@@ -50,6 +50,7 @@ func (r *deletionReader) TenantExists(name string) (bool, error) {
 }
 
 type deletionStore struct {
+	cancelErr              error
 	releaseErr             error
 	releaseCalls, released int
 	readErr                error
@@ -115,7 +116,7 @@ func deletionFixture() (*Handlers, *deletionReader, *deletionStore, *[]string, *
 		}
 	}
 	h := &Handlers{opts: Options{GitReader: reader, AdminPrincipals: map[string]bool{deletionAdmin: true}, CustomerDeletion: &CustomerDeletionOptions{
-		Store: store, Issuer: "https://auth.mctl.ai", VerifyCustomer: step("verify"), DeleteCustomer: step("zitadel"), RevokeSiteSessions: step("site"), CleanPortal: step("portal"), FreezePortal: step("freeze"), ReleasePortal: step("release"),
+		Enabled: true, Store: store, Issuer: "https://auth.mctl.ai", VerifyCustomer: step("verify"), DeleteCustomer: step("zitadel"), RevokeSiteSessions: step("site"), CleanPortal: step("portal"), FreezePortal: step("freeze"), CancelPortal: step("cancel"), ReleasePortal: step("release"),
 		CheckPlatformGone: func(context.Context, string) error {
 			calls = append(calls, "platform")
 			if fail == "platform" {
@@ -354,5 +355,86 @@ func TestCustomerDeletionRecordsReleaseOnlyAfterPortalAcknowledgment(t *testing.
 	}
 	if store.released != 1 || store.finished != 0 || !reflect.DeepEqual(*calls, []string{"release"}) {
 		t.Fatalf("completed recovery repeated cleanup: %d %d %v", store.released, store.finished, *calls)
+	}
+}
+
+func (s *deletionStore) CancelCustomerDeletion(context.Context, string, string) error {
+	if s.cancelErr != nil {
+		return s.cancelErr
+	}
+	if s.job == nil || s.job.Status != "prepared" {
+		return errors.New("not prepared")
+	}
+	s.job = nil
+	return nil
+}
+
+func TestCustomerDeletionCancellationIsPreparedOnlyAndRetryable(t *testing.T) {
+	h, _, store, calls, fail := deletionFixture()
+	admin := userWithPrincipal(t, "admin", []string{"admins"}, deletionAdmin)
+	params := map[string]string{"tenant": "acme", "principal": deletionPID}
+	for _, user := range []*auth.User{auth.NewServiceUser(), userWithPrincipal(t, "alice", nil, deletionPID)} {
+		if w := callAs(h, user, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 403 {
+			t.Fatalf("non-admin cancellation %d", w.Code)
+		}
+	}
+	for _, state := range []string{"deleting", "complete"} {
+		store.job = &principals.CustomerDeletion{Tenant: "acme", PrincipalID: deletionPID, Status: state}
+		*calls = nil
+		if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 409 {
+			t.Fatalf("%s cancellation %d", state, w.Code)
+		}
+		if len(*calls) != 0 {
+			t.Fatal("begun deletion unfrozen")
+		}
+	}
+	store.job = &principals.CustomerDeletion{Tenant: "acme", PrincipalID: deletionPID, Status: "prepared"}
+	*calls = nil
+	store.readErr = errors.New("database read unavailable")
+	if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 503 {
+		t.Fatal(w.Body.String())
+	}
+	if len(*calls) != 0 || store.job == nil {
+		t.Fatal("unreadable intent was treated as absent")
+	}
+	store.readErr = nil
+	store.cancelErr = errors.New("database write unavailable")
+	if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 503 {
+		t.Fatal(w.Body.String())
+	}
+	if len(*calls) != 0 || store.job == nil {
+		t.Fatal("portal unfrozen before local cancellation")
+	}
+	store.cancelErr = nil
+	*fail = "cancel"
+	if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 503 {
+		t.Fatal(w.Body.String())
+	}
+	if store.job != nil {
+		t.Fatal("queued workflow remains authorized during portal retry")
+	}
+	if w := callAs(h, auth.NewServiceUser(), "POST", "/", map[string]string{"tenant": "acme", "principal": deletionPID, "stage": "begin"}, h.AdvanceCustomerDeletion); w.Code != 409 {
+		t.Fatal("cancelled intent began")
+	}
+	*fail = ""
+	*calls = nil
+	if w := callAs(h, admin, "POST", "/", params, h.CancelCustomerDeletion); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	if !reflect.DeepEqual(*calls, []string{"cancel"}) {
+		t.Fatal(*calls)
+	}
+}
+
+func TestCustomerDeletionRollbackStopsNewIntentsButPreservesCancellation(t *testing.T) {
+	h, _, store, _, _ := deletionFixture()
+	h.opts.CustomerDeletion.Enabled = false
+	admin := userWithPrincipal(t, "admin", []string{"admins"}, deletionAdmin)
+	if ok, w := prepareDeletion(t, h, admin); ok || w.Code != 503 {
+		t.Fatalf("disabled feature prepared deletion: %v %d", ok, w.Code)
+	}
+	store.job = &principals.CustomerDeletion{Tenant: "acme", PrincipalID: deletionPID, Status: "prepared"}
+	if w := callAs(h, admin, "POST", "/", map[string]string{"tenant": "acme", "principal": deletionPID}, h.CancelCustomerDeletion); w.Code != 200 {
+		t.Fatal(w.Body.String())
 	}
 }

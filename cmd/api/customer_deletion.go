@@ -54,12 +54,12 @@ func customerTenantDeletionPending(store *principals.Store, required bool) func(
 }
 
 func customerDeletionOptions(cfg config, store *principals.Store, cache *principals.Resolver, oauth *auth.OAuthServer, quota api.QuotaReader, argo api.ArgoStatusClient) *api.CustomerDeletionOptions {
-	if os.Getenv("CUSTOMER_DELETION_ENABLED") != "true" {
-		return nil
-	}
+	enabled := os.Getenv("CUSTOMER_DELETION_ENABLED") == "true"
 	provider, err := cfg.oauthZitadelProvider()
 	if err != nil {
-		slog.Error("complete customer deletion unavailable: ZITADEL provider configuration invalid")
+		if enabled {
+			slog.Error("complete customer deletion unavailable: ZITADEL provider configuration invalid")
+		}
 		return nil
 	}
 	p := &customerdelete.Providers{
@@ -72,12 +72,14 @@ func customerDeletionOptions(cfg config, store *principals.Store, cache *princip
 		NamespaceAbsent(context.Context, string) (bool, error)
 	})
 	if !p.Configured() || store == nil || cache == nil || oauth == nil || argo == nil || !ok {
-		slog.Error("complete customer deletion unavailable: configuration or required store missing")
+		if enabled {
+			slog.Error("complete customer deletion unavailable: configuration or required store missing")
+		}
 		return nil
 	}
 	return &api.CustomerDeletionOptions{
-		Store: store, Issuer: p.Issuer, VerifyCustomer: p.VerifyCustomer, DeleteCustomer: p.DeleteCustomer,
-		FreezePortal: p.FreezePortal, ReleasePortal: p.ReleasePortal,
+		Enabled: enabled, Store: store, Issuer: p.Issuer, VerifyCustomer: p.VerifyCustomer, DeleteCustomer: p.DeleteCustomer,
+		FreezePortal: p.FreezePortal, ReleasePortal: p.ReleasePortal, CancelPortal: p.CancelPortal,
 		RevokeSiteSessions: p.RevokeSiteSessions, CleanPortal: p.CleanPortal, RevokeSessions: oauth.RevokePrincipalSessions, ForgetPrincipals: cache.Forget,
 		CheckPlatformGone: func(ctx context.Context, tenant string) error {
 			for _, ns := range []string{tenant, tenant + "-preview"} {

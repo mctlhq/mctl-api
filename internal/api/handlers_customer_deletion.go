@@ -43,11 +43,13 @@ type CustomerDeletionStore interface {
 	BeginCustomerDeletion(context.Context, string, string) error
 	FinishCustomerDeletion(context.Context, string, string) error
 	ReleaseCustomerDeletion(context.Context, string, string) error
+	CancelCustomerDeletion(context.Context, string, string) error
 }
 
 // CustomerDeletionOptions is deliberately opt-in. Missing providers refuse the
 // complete-account option before a workspace deletion is submitted.
 type CustomerDeletionOptions struct {
+	Enabled            bool
 	Store              CustomerDeletionStore
 	Issuer             string
 	VerifyCustomer     func(context.Context, *principals.CustomerDeletion) error
@@ -55,6 +57,7 @@ type CustomerDeletionOptions struct {
 	RevokeSiteSessions func(context.Context, *principals.CustomerDeletion) error
 	CleanPortal        func(context.Context, *principals.CustomerDeletion) error
 	FreezePortal       func(context.Context, *principals.CustomerDeletion) error
+	CancelPortal       func(context.Context, *principals.CustomerDeletion) error
 	ReleasePortal      func(context.Context, *principals.CustomerDeletion) error
 	CheckPlatformGone  func(context.Context, string) error
 	RevokeSessions     func(string, string) (int64, error)
@@ -63,7 +66,7 @@ type CustomerDeletionOptions struct {
 
 func (o *CustomerDeletionOptions) configured() bool {
 	return o != nil && o.Store != nil && o.Issuer != "" && o.VerifyCustomer != nil && o.DeleteCustomer != nil &&
-		o.FreezePortal != nil && o.ReleasePortal != nil && o.RevokeSiteSessions != nil && o.CleanPortal != nil && o.CheckPlatformGone != nil && o.RevokeSessions != nil && o.ForgetPrincipals != nil
+		o.FreezePortal != nil && o.CancelPortal != nil && o.ReleasePortal != nil && o.RevokeSiteSessions != nil && o.CleanPortal != nil && o.CheckPlatformGone != nil && o.RevokeSessions != nil && o.ForgetPrincipals != nil
 }
 
 // customerMemberships uses a complete directory read and checks every tenant's
@@ -128,7 +131,32 @@ func (h *Handlers) guardCustomerTenantCreation(w http.ResponseWriter, r *http.Re
 	return true
 }
 
-func (h *Handlers) prepareCustomerAccountDeletion(w http.ResponseWriter, r *http.Request, input map[string]string) (allowed bool) {
+// Preparation and cancellation share the begin/complete run lock. Otherwise a
+// concurrent prepare could recreate a portal freeze after cancellation.
+func (h *Handlers) prepareCustomerAccountDeletion(w http.ResponseWriter, r *http.Request, input map[string]string) bool {
+	o := h.opts.CustomerDeletion
+	u := auth.UserFromContext(r.Context())
+	pid := input["customer_principal_id"]
+	if input["delete_customer_account"] != "true" || !o.configured() || !o.Enabled || u == nil || !isHumanAdmin(u) || u.IsAgent() || u.ViaPrincipalID() != "" || u.PrincipalID() == "" || !auth.ValidPrincipalID(pid) || pid == u.PrincipalID() || h.opts.AdminPrincipals[pid] {
+		return h.prepareCustomerAccountDeletionLocked(w, r, input)
+	}
+	allowed, ran := false, false
+	err := o.Store.WithCustomerDeletionLock(r.Context(), input["tenant_name"], pid, func(ctx context.Context) error {
+		ran = true
+		allowed = h.prepareCustomerAccountDeletionLocked(w, r.WithContext(ctx), input)
+		return nil
+	})
+	if err != nil {
+		h.logAudit(r, audit.Entry{UserID: u.ID, Operation: "customer.delete.prepare", Status: "denied", RiskLevel: "high", Message: err.Error(), Parameters: map[string]string{"tenant": input["tenant_name"], "principal_id": pid}})
+		if !ran || allowed {
+			writeError(w, 503, "customer deletion preparation busy or interrupted; retry")
+		}
+		return false
+	}
+	return allowed
+}
+
+func (h *Handlers) prepareCustomerAccountDeletionLocked(w http.ResponseWriter, r *http.Request, input map[string]string) (allowed bool) {
 	completed := false
 	defer func() {
 		if !allowed && !completed && (input["delete_customer_account"] == "true" || input["customer_principal_id"] != "") {
@@ -157,7 +185,7 @@ func (h *Handlers) prepareCustomerAccountDeletion(w http.ResponseWriter, r *http
 		return false
 	}
 	o := h.opts.CustomerDeletion
-	if !o.configured() {
+	if !o.configured() || !o.Enabled {
 		writeError(w, 503, "complete customer deletion is not configured")
 		return false
 	}
@@ -376,4 +404,68 @@ func (h *Handlers) AdvanceCustomerDeletion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, 200, map[string]string{"stage": stage, "status": "succeeded"})
+}
+
+// CancelCustomerDeletion only reverses an approved intent which has not begun.
+// It never reactivates a deleting/complete principal or restores removed data.
+func (h *Handlers) CancelCustomerDeletion(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	tenant, pid := chi.URLParam(r, "tenant"), chi.URLParam(r, "principal")
+	status, message := "denied", "cancellation refused"
+	defer func() {
+		actor := "anonymous"
+		if u != nil {
+			actor = u.ID
+		}
+		h.logAudit(r, audit.Entry{UserID: actor, Operation: "customer.delete.cancel", Status: status, RiskLevel: "high", Message: message, Parameters: map[string]string{"tenant": tenant, "principal_id": pid}})
+	}()
+	if u == nil || !isHumanAdmin(u) || u.IsAgent() || u.ViaPrincipalID() != "" || u.PrincipalID() == "" {
+		writeError(w, 403, "direct human platform administrator required")
+		return
+	}
+	if !customerDeletionTenantName.MatchString(tenant) || !auth.ValidPrincipalID(pid) || pid == u.PrincipalID() || h.opts.AdminPrincipals[pid] {
+		writeError(w, 400, "invalid or protected cancellation target")
+		return
+	}
+	o := h.opts.CustomerDeletion
+	if !o.configured() {
+		writeError(w, 503, "customer deletion is not configured")
+		return
+	}
+	conflict := false
+	err := o.Store.WithCustomerDeletionLock(r.Context(), tenant, pid, func(ctx context.Context) error {
+		d, err := o.Store.CustomerDeletion(ctx, tenant, pid)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// A prior cancellation may have removed the local intent but failed
+			// its portal acknowledgment. No identity fields authorize this call.
+			d = &principals.CustomerDeletion{Tenant: tenant, PrincipalID: pid}
+		} else {
+			if err != nil {
+				return err
+			}
+			if d.Status != "prepared" {
+				conflict = true
+				return errors.New("customer deletion has already begun")
+			}
+			// Remove the prepared intent FIRST, under the same run lock as
+			// begin. A queued/lost-lock workflow now refuses before any effect,
+			// even if the portal unfreeze fails and must be retried later.
+			if err := o.Store.CancelCustomerDeletion(ctx, tenant, pid); err != nil {
+				return err
+			}
+			o.ForgetPrincipals(pid)
+		}
+		return o.CancelPortal(ctx, d)
+	})
+	if err != nil {
+		message = err.Error()
+		code := 503
+		if conflict {
+			code = 409
+		}
+		writeError(w, code, "customer deletion cancellation incomplete or no longer permitted")
+		return
+	}
+	status, message = "succeeded", "prepared deletion cancelled"
+	writeJSON(w, 200, map[string]string{"status": "cancelled", "tenant": tenant, "principal_id": pid})
 }
