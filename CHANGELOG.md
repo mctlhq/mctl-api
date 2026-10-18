@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.99.1](https://github.com/mctlhq/mctl-api/compare/4.99.0...4.99.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **surface-identity:** serve a known own holder when the set is incomplete ([0a0e503](https://github.com/mctlhq/mctl-api/commit/0a0e5038784c20c08ac58cbdfdfcb8aeba128936))
+
 ## [4.99.0](https://github.com/mctlhq/mctl-api/compare/4.98.0...4.99.0) (2026-10-17)
 
 
