@@ -316,3 +316,38 @@ func TestEscapeLike(t *testing.T) {
 		}
 	}
 }
+
+func TestGetByPrefix_Outcomes(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	for i, id := range []string{"pfx-aaaa-0001", "pfx-aaaa-0002", "pfx-bbbb-0001", "short"} {
+		if _, err := s.Create(ctx, newAlert(id, "fp-"+string(rune('a'+i)))); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+
+	// Exact id wins at any length.
+	if a, err := s.GetByPrefix(ctx, "short"); err != nil || a.ID != "short" {
+		t.Fatalf("exact short id: a=%v err=%v", a, err)
+	}
+	// Too short.
+	if _, err := s.GetByPrefix(ctx, "pfx"); !errors.Is(err, ErrPrefixTooShort) {
+		t.Fatalf("want ErrPrefixTooShort, got %v", err)
+	}
+	// Ambiguous.
+	if _, err := s.GetByPrefix(ctx, "pfx-aaaa"); !errors.Is(err, ErrAmbiguousPrefix) {
+		t.Fatalf("want ErrAmbiguousPrefix, got %v", err)
+	}
+	// Unique prefix.
+	if a, err := s.GetByPrefix(ctx, "pfx-bbbb"); err != nil || a.ID != "pfx-bbbb-0001" {
+		t.Fatalf("unique prefix: a=%v err=%v", a, err)
+	}
+	// No match, and wildcards are literal.
+	if _, err := s.GetByPrefix(ctx, "nomatch-12345"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	if _, err := s.GetByPrefix(ctx, "pfx-%%%%-0001"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wildcard must be literal, got %v", err)
+	}
+}
