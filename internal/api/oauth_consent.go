@@ -29,10 +29,12 @@ import (
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
-// consentCookie prefixes the cookie that binds a consent decision to the
-// browser that signed in. Each flow gets its own cookie, named after its
-// token hash, so two consent pages open in one browser do not overwrite each
-// other's binding.
+// consentCookie prefixes the per-flow consent cookie. It is a CSRF defence
+// that also keeps flows apart: SameSite=Lax keeps it off a cross-site form
+// POST, and each flow's cookie is named after its token hash, so two consent
+// pages open in one browser do not overwrite each other. It is not a second
+// factor: its value is sha256(token), so any HTTP client holding the token can
+// send it. The single-use token is the secret that guards a consent.
 const consentCookie = "__Host-mctl_consent"
 
 // consentCookieName is the cookie of the flow whose token hashes to hash.
@@ -217,9 +219,11 @@ func (h *Handlers) takeConsentDecision(w http.ResponseWriter, r *http.Request) s
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return "invalid_request"
 	}
-	// The browser is checked before the token is spent: the hash is
-	// computable from the form alone, so a browser without the flow's cookie
-	// cannot consume a pending consent it does not own.
+	// The cookie is checked before the token is spent, so a cross-site POST
+	// or a replay from a browser without the flow's cookie is refused without
+	// burning the consent out from under the human. This rests on the
+	// browser's SameSite handling: the hash is computable from the token, so
+	// a non-browser client holding the token passes this check.
 	hash := consentHash(token)
 	cookie, cerr := r.Cookie(consentCookieName(hash))
 	if cerr != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(hash)) != 1 {

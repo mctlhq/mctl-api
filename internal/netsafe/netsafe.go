@@ -73,7 +73,8 @@ var refused = mustPrefixes(
 	"100::/64",
 	"::/96",          // IPv4-compatible IPv6 (Is4In6 matches only ::ffff:)
 	"2002::/16",      // 6to4, which carries an IPv4 address
-	"2001::/32",      // Teredo, which carries an IPv4 address
+	"2001::/23",      // IETF protocol assignments (RFC 2928), including Teredo, which carries an IPv4 address, and benchmarking
+	"3fff::/20",      // documentation (RFC 9637)
 	"64:ff9b:1::/48", // local-use NAT64
 	"fec0::/10",      // deprecated site-local
 )

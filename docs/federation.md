@@ -478,14 +478,17 @@ A grant has two identities that are never merged:
 With `OAUTH_CIMD_ENABLED=true` an `https://` `client_id` is resolved from the
 document at that URL, fetched only from hosts in `OAUTH_CIMD_ALLOWED_HOSTS`
 through an SSRF-safe client (`internal/netsafe`: public addresses only,
-checked on the connected socket, no proxy, no redirect, 5 s, 64 KiB). The
+checked on the resolved address before the connect, no proxy, no redirect,
+5 s, 64 KiB). The
 document decides `redirect_uri` alone; it can never name a principal, tenant
 or group, which come from the upstream sign-in only. A CIMD client is shown a
 consent page after sign-in on every authorization (single-use token, 5
-minutes, bound to the signing-in browser by a per-flow
-`__Host-mctl_consent_<hash prefix>` cookie that is checked before the token
-is spent; `POST /oauth/consent`; outcomes in
-`oauth_consent_decisions_total{result}`). Every issued code writes one
+minutes; `POST /oauth/consent`; outcomes in
+`oauth_consent_decisions_total{result}`). The token is the secret. A per-flow
+`__Host-mctl_consent_<hash prefix>` cookie, checked before the token is spent,
+is a CSRF defence that keeps a cross-site POST from burning the consent and
+keeps two tabs apart; it is not a second factor, since its value derives from
+the token. Every issued code writes one
 `oauth.grant_issued` audit entry: principal in the principal column, client
 in parameters (`client_id`, `client_kind`, `client_name`, `redirect_host`,
 `upstream`).
@@ -497,6 +500,15 @@ resolved as a document ahead of `OAUTH_ALLOWED_REDIRECT_URIS` and the
 loopback rule; on a host off the allowlist it is refused with `400`, with no
 fallback. A pre-registered client keeps its own exact redirect list and never
 consults a document.
+
+Two limits are deliberate:
+
+- **Exact hosts.** List one exact host per known client. The fetch budget
+  (10 per minute) is per host and shared by every document on it, and a
+  `.suffix` entry lets a caller pick hosts and fill the bounded rate map.
+- **Loopback is `127.0.0.1` and `[::1]` only.** This is stricter than RFC 8252
+  section 7.3, which allows any loopback address. Widen it only for a real
+  native client that needs it.
 
 ## `MCTL_FEDERATION_DISABLED`: the kill switch
 
