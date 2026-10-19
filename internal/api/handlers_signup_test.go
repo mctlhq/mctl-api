@@ -155,13 +155,21 @@ func TestSignupClaimChecksIdentityProfileAndWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &Handlers{opts: Options{Signup: &SignupOptions{Store: s}}}
+	missingActor := httptest.NewRequest("POST", "/api/v1/surface-principals/signup-claim", strings.NewReader(`{}`))
+	missingActor = missingActor.WithContext(auth.WithUser(missingActor.Context(), auth.NewSurfaceUser("portal")))
+	refused := httptest.NewRecorder()
+	h.surfacePrincipalGate(http.HandlerFunc(h.ClaimSignup)).ServeHTTP(refused, missingActor)
+	if refused.Code != 400 {
+		t.Fatalf("missing surface actor: %d", refused.Code)
+	}
 	claim := map[string]string{"principal_id": principal.ID, "tenant": "new-team", "memory": "2Gi", "cpu": "1", "memory_limit": "3Gi", "cpu_limit": "2", "pods": "10", "pvcs": "5", "services": "10"}
 	call := func() *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(claim)
-		r := httptest.NewRequest("POST", "/", strings.NewReader(string(raw)))
+		r := httptest.NewRequest("POST", "/api/v1/surface-principals/signup-claim", strings.NewReader(string(raw)))
 		r = r.WithContext(auth.WithUser(r.Context(), auth.NewSurfaceUser("portal")))
+		r.Header.Set(SurfaceActorHeader, "principal:"+principal.ID)
 		w := httptest.NewRecorder()
-		h.ClaimSignup(w, r)
+		h.surfacePrincipalGate(http.HandlerFunc(h.ClaimSignup)).ServeHTTP(w, r)
 		return w
 	}
 	claim["memory"] = "8Gi"

@@ -271,6 +271,10 @@ func (h *Handlers) ClaimSignup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid signup claim")
 		return
 	}
+	if r.Header.Get(SurfaceActorHeader) != "principal:"+b.Principal {
+		writeError(w, 403, "claim actor must match the customer principal")
+		return
+	}
 	if status, message := h.claimSignupPrincipal(r.Context(), b.Principal, b.Tenant, b.Memory, b.CPU, b.MemoryLimit, b.CPULimit, b.Pods, b.PVCs, b.Services); status != 0 {
 		writeError(w, status, message)
 		return
