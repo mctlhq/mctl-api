@@ -350,6 +350,15 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Starter quotas are fixed before validation/audit/submission. The GitOps
+	// generator independently enforces the same envelope, including preview/PVCs.
+	if opName == "create-tenant" && input["workspace_profile"] == "starter" {
+		input["quota_cpu_req"] = "250m"
+		input["quota_cpu_lim"] = "1"
+		input["quota_memory_req"] = "512Mi"
+		input["quota_memory_lim"] = "1Gi"
+		input["quota_pods"] = "5"
+	}
 	// Apply defaults then validate.
 	input = h.opts.Registry.ApplyDefaults(op, input)
 	if errs := h.opts.Registry.ValidateInput(op, input); len(errs) > 0 {
@@ -478,7 +487,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// Claim capacity only after every deterministic refusal, immediately before
 	// submission. An uncertain submit retains the claim for the same name.
 	if opName == "create-tenant" && !user.IsAdmin() && h.opts.Signup != nil {
-		if status, message := h.claimSignupPrincipal(r.Context(), user.PrincipalID(), tenantParam, input["quota_memory_req"], input["quota_cpu_req"], input["quota_memory_lim"], input["quota_cpu_lim"], input["quota_pods"], "5", "10"); status != 0 {
+		if status, message := h.claimSignupPrincipal(r.Context(), user.PrincipalID(), tenantParam, input["quota_memory_req"], input["quota_cpu_req"], input["quota_memory_lim"], input["quota_cpu_lim"], input["quota_pods"], "1", "5", input["workspace_profile"]); status != 0 {
 			h.logAudit(r, audit.Entry{UserID: user.ID, Operation: opName, Status: "denied", RiskLevel: string(op.RiskLevel), Message: message, Parameters: auditParams})
 			writeError(w, status, message)
 			return
