@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.108.1](https://github.com/mctlhq/mctl-api/compare/4.108.0...4.108.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **signup:** reserve CPU for starter deployment workflows ([7256e03](https://github.com/mctlhq/mctl-api/commit/7256e034fa971c428b4938d5e3d3ee2c2c49748b))
+* **signup:** reserve CPU for starter deployment workflows ([0244bac](https://github.com/mctlhq/mctl-api/commit/0244bac0ccbfa233d38b287be91ae0e9b2f43ca7))
+
 ## [4.108.0](https://github.com/mctlhq/mctl-api/compare/4.107.0...4.108.0) (2026-10-19)
 
 
