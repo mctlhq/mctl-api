@@ -473,6 +473,8 @@ compares principals (#629, next section).
 | `approval_grant_missing` | 409 | approve route | no grant and the legacy flag is off |
 | `execution_ambiguous` | 409 | approve route | more than one open `we_` for the workflow id |
 | `legacy_approver_disabled` | 400 | operation | free-text `approver` from a service principal with the flag off |
+| `approval_content_unbound` | 400 | operation | a non-grant approve without `expected_content_digest` (mctl-api#722); a service principal off the grant path always lands here or on `actor_not_accepted` |
+| `approval_content_digest_malformed` | 400 | operation | a non-grant approve whose `expected_content_digest` is not `sha256:<64 lowercase hex>` |
 | `delegation_unavailable` | 503 | gate | the grant could not be resolved (store outage) or delegation is not configured |
 | `work_items_unavailable` | 503 | operation, approve route | a work-item store read failed, or (approve route, flag off) the store is not configured |
 

@@ -2845,6 +2845,8 @@ This is distinct from mctl_approve_dev_loop, which signals a running Temporal De
 
 The approver parameter is optional: if omitted, the server defaults it to the authenticated caller's identity.
 
+expected_content_digest is required: the digest of the proposal content you reviewed. Compute it from the reviewed commit of mctl-gitops with scripts/proposal-content-digest.py --rev <commit> platform-gitops/agents-state/<service>/proposals/<slug>. The flip refuses content that no longer hashes to it; a call without it is refused with approval_content_unbound, a malformed one with approval_content_digest_malformed, and nothing is submitted.
+
 Cost: none (no model).
 Duration: <1 minute.
 Result: .status.yaml for the one named proposal flips to accepted in mctl-gitops main.
@@ -2861,6 +2863,11 @@ Admin-only.`),
 		),
 		mcplib.WithString("approver",
 			mcplib.Description("Optional. Identity of whoever approved (recorded in .status.yaml and the commit message). Defaults to the authenticated caller's identity if omitted."),
+		),
+		mcplib.WithString("expected_content_digest",
+			mcplib.Required(),
+			mcplib.Description("The digest of the proposal content you reviewed, sha256:<64 lowercase hex>. Compute it with mctl-gitops scripts/proposal-content-digest.py."),
+			mcplib.Pattern(`^sha256:[0-9a-f]{64}$`),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {

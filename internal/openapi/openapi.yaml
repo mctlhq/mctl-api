@@ -2151,6 +2151,19 @@ paths:
         The grant replaces the admin check for this call only; every other
         caller and grant kind is authorized as before.
 
+        **Direct approval is content-bound (mctl-api#722).** A
+        `mctl-agents-approve` call without a grant must carry
+        `expected_content_digest`, the `sha256:<64 lowercase hex>` digest of
+        the proposal content the approver reviewed (compute it with
+        mctl-gitops `scripts/proposal-content-digest.py --rev <commit>
+        <proposal-dir>`). Without one the call is refused with 400
+        `approval_content_unbound`, and a malformed one with 400
+        `approval_content_digest_malformed`; the approve workflow refuses
+        the same flip with the same codes. Both refusals are audited as a
+        denied `mctl-agents-approve` with the code in `parameters.code`, and
+        nothing is submitted. A service principal may not assert a digest
+        (400 `actor_not_accepted`), so without a grant it cannot approve.
+
         **Rate limit:** 20 requests/minute per user.
       tags: [Operations]
       parameters:

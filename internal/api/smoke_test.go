@@ -747,8 +747,9 @@ func TestSmoke_AgentsApproveApproverIdentity(t *testing.T) {
 
 	t.Run("approver defaults to the authenticated caller", func(t *testing.T) {
 		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
-			"service": "mctl-web",
-			"slug":    "issue-1-fix-foo",
+			"service":                 "mctl-web",
+			"slug":                    "issue-1-fix-foo",
+			"expected_content_digest": "sha256:" + strings.Repeat("b", 64),
 		}, adminUser)
 		assertStatus(t, w, http.StatusAccepted)
 		params := executor.submittedParams[len(executor.submittedParams)-1]
@@ -757,24 +758,22 @@ func TestSmoke_AgentsApproveApproverIdentity(t *testing.T) {
 		}
 	})
 
-	t.Run("the service principal may relay an explicit approver", func(t *testing.T) {
-		// The Temporal DevLoop worker submits with its service identity and
-		// carries the human approver from the signal payload — an explicit
-		// value must survive. This subtest used to make that request as a
-		// plain admin, which is what let ANY authenticated admin attribute an
-		// approval to a colleague (gitops#986); the relay is now the service
-		// principal's alone, so the request is made as the worker actually
-		// makes it.
+	t.Run("the service principal cannot approve without a grant", func(t *testing.T) {
+		// The Temporal DevLoop worker used to relay the human approver from
+		// its signal payload here (gitops#986). It now approves through an
+		// action-approval grant, the only way a service principal can carry
+		// the reviewed content digest (mctl-api#722), so a bare relay is
+		// refused before submit.
 		worker := auth.NewServiceUser()
+		before := len(executor.submittedParams)
 		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
 			"service":  "mctl-web",
 			"slug":     "issue-2-fix-bar",
 			"approver": "human-operator",
 		}, worker)
-		assertStatus(t, w, http.StatusAccepted)
-		params := executor.submittedParams[len(executor.submittedParams)-1]
-		if params["approver"] != "human-operator" {
-			t.Errorf("approver = %q, want explicit %q", params["approver"], "human-operator")
+		assertStatus(t, w, http.StatusBadRequest)
+		if len(executor.submittedParams) != before {
+			t.Error("a workflow was submitted for an unbound relay")
 		}
 	})
 

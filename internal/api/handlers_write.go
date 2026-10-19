@@ -280,6 +280,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// A grant-authorized call is not handled here: its approver is the
 	// grant's decider, set by prepareApprovalGrant (R8).
 	if opName == "mctl-agents-approve" && !grantAuthorized {
+		legacyRelay := false
 		if user.IsService() {
 			// The content digest binds the CWFT to what a human decided on;
 			// only a grant carries that decision, so a service principal
@@ -315,18 +316,9 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 					"the free-text approver relay is disabled; approve through an action-approval grant", nil)
 				return
 			default:
-				// Counted as well as audited: an audit write that fails is
-				// only logged, and "zero relays" must not be read off a
-				// missing row (mctl-api#571 A7).
-				legacyRelayTotal.WithLabelValues("relayed").Inc()
-				h.logAudit(r, audit.Entry{
-					UserID:     user.ID,
-					Operation:  "approver.legacy_relay",
-					Status:     "succeeded",
-					RiskLevel:  string(op.RiskLevel),
-					Message:    fmt.Sprintf("%s relayed approver %q on %s", user.ID, relayed, opName),
-					Parameters: legacyRelayParams(user, opName, input),
-				})
+				// Counted below: as relayed once the digest check has
+				// passed, as refused if it does not.
+				legacyRelay = true
 			}
 		} else {
 			if input["approver"] != "" && input["approver"] != user.ID {
@@ -347,6 +339,51 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			input["approver"] = user.ID
+		}
+
+		// The approve CWFT refuses a flip that is not bound to the content
+		// the approver reviewed (mctl-gitops#1979). Refuse it here first,
+		// with the same typed code, so a direct caller gets a 400 instead
+		// of a submitted workflow that fails (mctl-api#722). This runs
+		// before ValidateInput, which would report a malformed digest only
+		// as a generic pattern failure. A service principal reaching this
+		// point never carries a digest (refused above), so without a grant
+		// it cannot approve at all: only a grant holds a human's decision.
+		if code, msg := directApproveDigestRefusal(input[expectedContentDigestParam]); code != "" {
+			params := legacyRelayParams(user, opName, input)
+			params["code"] = code
+			h.logAudit(r, audit.Entry{
+				UserID:     user.ID,
+				Operation:  opName,
+				Status:     "denied",
+				RiskLevel:  string(op.RiskLevel),
+				Message:    code + ": " + msg,
+				Parameters: params,
+			})
+			// A relay attempt refused here is still an attempt: counted as
+			// refused, like legacy_approver_disabled, so the counter keeps
+			// showing whether anything still relays even when the audit
+			// write above fails (mctl-api#571 A7).
+			if legacyRelay {
+				legacyRelayTotal.WithLabelValues("refused").Inc()
+			}
+			writeErrorCode(w, http.StatusBadRequest, code, msg, nil)
+			return
+		}
+
+		if legacyRelay {
+			// Counted as well as audited: an audit write that fails is
+			// only logged, and "zero relays" must not be read off a
+			// missing row (mctl-api#571 A7).
+			legacyRelayTotal.WithLabelValues("relayed").Inc()
+			h.logAudit(r, audit.Entry{
+				UserID:     user.ID,
+				Operation:  "approver.legacy_relay",
+				Status:     "succeeded",
+				RiskLevel:  string(op.RiskLevel),
+				Message:    fmt.Sprintf("%s relayed approver %q on %s", user.ID, input["approver"], opName),
+				Parameters: legacyRelayParams(user, opName, input),
+			})
 		}
 	}
 
@@ -744,6 +781,22 @@ func (h *Handlers) checkTenantNameCollision(tenant string) (status int, msg stri
 		return http.StatusBadRequest, "tenant_name: \"" + tenant + "\" overlaps the name of existing workspace \"" + other + "\"; choose a name that neither extends nor is extended by another workspace name"
 	}
 	return 0, ""
+}
+
+// directApproveDigestRefusal returns the typed code and message refusing a
+// direct approve's content digest, or "" when the digest is well formed.
+// The malformed value is not echoed: it is caller input that failed
+// validation.
+func directApproveDigestRefusal(digest string) (string, string) {
+	switch {
+	case digest == "":
+		return aarCodeContentUnbound,
+			"expected_content_digest is required: pass the sha256 digest of the proposal content you reviewed (mctl-gitops scripts/proposal-content-digest.py)"
+	case !contentDigestRE.MatchString(digest):
+		return codeApprovalContentDigestMalformed,
+			"expected_content_digest must be sha256:<64 lowercase hex>"
+	}
+	return "", ""
 }
 
 // legacyRelayParams is the evidence one approver relay leaves: who was

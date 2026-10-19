@@ -959,7 +959,7 @@ var builtinOperations = []Operation{
 			// artifact_hash, set by prepareApprovalGrant and never taken from
 			// the body; the workflow refuses to flip content that no longer
 			// hashes to it. Empty keeps recording the digest at flip time.
-			{Name: "expected_content_digest", Type: "string", Required: false, Description: "Proposal content digest (sha256:<64 hex>) the approval was decided for; the flip refuses content that no longer hashes to it. Set from the approval grant on a delegated approve.", Pattern: contentDigestPattern},
+			{Name: "expected_content_digest", Type: "string", Required: false, Description: "Proposal content digest (sha256:<64 hex>) the approval was decided for; the flip refuses content that no longer hashes to it. Required on every approve: a direct caller passes the digest of the content it reviewed (mctl-gitops scripts/proposal-content-digest.py), a delegated approve gets it from the approval grant. Declared optional only because the grant fills it in after validation; the execute handler refuses a non-grant approve without it (approval_content_unbound).", Pattern: contentDigestPattern},
 			// Approval provenance: the id of the action approval this approve
 			// spends, so the workflow can name the exact grant it acts on. Set
 			// by prepareApprovalGrant from the grant it verified and is about

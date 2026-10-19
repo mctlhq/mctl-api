@@ -42,6 +42,13 @@ import (
 // the intent hash and passed through.
 const expectedContentDigestParam = "expected_content_digest"
 
+// codeApprovalContentDigestMalformed refuses a direct (non-grant) approve
+// whose expected_content_digest is not a sha256 digest (mctl-api#722). A
+// missing one is aarCodeContentUnbound. Both mirror the codes the approve
+// CWFT refuses with (mctl-gitops#1979), so a caller sees the same code
+// whichever layer stops it, and the API stops it before submit.
+const codeApprovalContentDigestMalformed = "approval_content_digest_malformed"
+
 // approvalRefParam carries the id of the grant a grant-authorized approve
 // spends to the approve workflow (approval provenance). Only the server
 // sets it, from the grant it has verified and is about to consume; a
