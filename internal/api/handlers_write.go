@@ -353,8 +353,8 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// Starter quotas are fixed before validation/audit/submission. The GitOps
 	// generator independently enforces the same envelope, including preview/PVCs.
 	if opName == "create-tenant" && input["workspace_profile"] == "starter" {
-		input["quota_cpu_req"] = "250m"
-		input["quota_cpu_lim"] = "1"
+		input["quota_cpu_req"] = "500m"
+		input["quota_cpu_lim"] = "2"
 		input["quota_memory_req"] = "512Mi"
 		input["quota_memory_lim"] = "1Gi"
 		input["quota_pods"] = "5"

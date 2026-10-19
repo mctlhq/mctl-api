@@ -104,7 +104,7 @@ func TestCreateTenantSignupGateCannotBeBypassedThroughOperations(t *testing.T) {
 	accepted := postAs(t, router, createTenantPath, body, user)
 	assertStatus(t, accepted, http.StatusAccepted)
 	last := exec.submittedParams[len(exec.submittedParams)-1]
-	if last["workspace_profile"] != "starter" || last["quota_memory_req"] != "512Mi" || last["quota_memory_lim"] != "1Gi" || last["quota_cpu_lim"] != "1" {
+	if last["workspace_profile"] != "starter" || last["quota_memory_req"] != "512Mi" || last["quota_memory_lim"] != "1Gi" || last["quota_cpu_lim"] != "2" {
 		t.Fatalf("caller enlarged starter profile: %+v", last)
 	}
 	if len(exec.submitted) != 3 {
