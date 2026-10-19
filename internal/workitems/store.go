@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 // openPhasesSQL is the SQL list of the non-terminal execution phases: the
@@ -166,33 +168,36 @@ const (
 // item resolve to one effect and one idempotent replay or 409.
 type Store struct {
 	pool *pgxpool.Pool
-	now  func() time.Time
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
+	now         func() time.Time
 }
 
 // NewStore connects and creates the schema if needed.
 func NewStore(ctx context.Context, connStr string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: connect: %w", err)
 	}
 	if _, err := pool.Exec(ctx, schema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("workitems: create schema: %w", err)
 	}
 	if _, err := pool.Exec(ctx, snapshotSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("workitems: create snapshot schema: %w", err)
 	}
 	if _, err := pool.Exec(ctx, actionApprovalSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("workitems: create action approval schema: %w", err)
 	}
 	if _, err := pool.Exec(ctx, executionRequestSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("workitems: create execution request schema: %w", err)
 	}
 	if _, err := pool.Exec(ctx, agentRunTokenSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("workitems: create agent run token schema: %w", err)
 	}
 	slog.Info("work-items store initialized")
@@ -200,7 +205,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 }
 
 // Close releases the pool.
-func (s *Store) Close() { s.pool.Close() }
+func (s *Store) Close() { s.releaseOnce.Do(func() { pgshared.Release(s.pool) }) }
 
 func (s *Store) withTx(ctx context.Context, lockKey string, fn func(pgx.Tx) error) error {
 	tx, err := s.pool.Begin(ctx)

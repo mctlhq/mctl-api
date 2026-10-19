@@ -20,11 +20,13 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 // ErrIDConflict is returned by Create when the alert's id collides with an
@@ -115,16 +117,19 @@ func scanAlert(row pgx.Row, a *Alert) error {
 // Store is a PostgreSQL-backed alert store.
 type Store struct {
 	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
 }
 
 // NewStore creates an alert store and auto-creates the schema.
 func NewStore(ctx context.Context, connStr string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("alerts store: connect: %w", err)
 	}
 	if _, err := pool.Exec(ctx, alertSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("alerts store: create schema: %w", err)
 	}
 	slog.Info("alert store initialized")
@@ -250,7 +255,7 @@ func (s *Store) Update(ctx context.Context, a *Alert) error {
 
 // Close releases the store's connection pool.
 func (s *Store) Close() {
-	s.pool.Close()
+	s.releaseOnce.Do(func() { pgshared.Release(s.pool) })
 }
 
 // Get returns a single alert with evidence.

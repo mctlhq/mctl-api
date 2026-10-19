@@ -21,6 +21,8 @@ import (
 	"log/slog"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 // Ingest validates in, then stores it or returns the record it already
@@ -44,6 +46,13 @@ func (s *Store) Ingest(ctx context.Context, in IngestInput) (*Evidence, bool, er
 	if err != nil {
 		return nil, false, err
 	}
+
+	// Resolved before the transaction, never inside it: the resolver is the
+	// work-items store, which with pgshared draws from the same pool as this
+	// one. A connection acquired while the transaction holds another can
+	// deadlock the pool once every slot is held by a waiting ingest. The cost
+	// is one lookup on replays and divergences too, which never store a ref.
+	corr := s.resolveExecution(ctx, p.ExecutionID())
 
 	var out *Evidence
 	created := false
@@ -96,7 +105,7 @@ func (s *Store) Ingest(ctx context.Context, in IngestInput) (*Evidence, bool, er
 		// derivation runs under a savepoint (pgx nests Begin as SAVEPOINT)
 		// and only the savepoint is rolled back on failure. The projection
 		// is rebuildable (RebuildRefs), so a skipped row is recoverable.
-		if err := s.deriveUnderSavepoint(ctx, tx, inserted); err != nil {
+		if err := s.deriveUnderSavepoint(ctx, tx, inserted, corr); err != nil {
 			slog.Warn("evidence: derived projection skipped", "evidence_id", inserted.ID, "error", err)
 		}
 		created = true
@@ -150,12 +159,12 @@ func checkSupersedesTarget(ctx context.Context, tx pgx.Tx, cols subjectColumns) 
 
 // deriveUnderSavepoint runs deriveAndStoreRef inside a savepoint of tx and
 // rolls back only that savepoint when it fails, leaving tx usable.
-func (s *Store) deriveUnderSavepoint(ctx context.Context, tx pgx.Tx, e *Evidence) error {
+func (s *Store) deriveUnderSavepoint(ctx context.Context, tx pgx.Tx, e *Evidence, corr *workitems.ExecutionCorrelation) error {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("savepoint: %w", err)
 	}
-	if err := s.deriveAndStoreRef(ctx, sp, e); err != nil {
+	if err := s.deriveAndStoreRef(ctx, sp, e, corr); err != nil {
 		if rbErr := sp.Rollback(ctx); rbErr != nil {
 			return fmt.Errorf("%w (rollback to savepoint: %v)", err, rbErr)
 		}

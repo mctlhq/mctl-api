@@ -19,10 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 // lifecycleSchema follows the repo convention: CREATE ... IF NOT EXISTS
@@ -222,16 +224,19 @@ func WithCaller(ctx context.Context, principalID, viaPrincipalID string) context
 // Store is a PostgreSQL-backed lifecycle ownership store.
 type Store struct {
 	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
 }
 
 // NewStore connects and auto-creates the schema.
 func NewStore(ctx context.Context, connStr string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle store: connect: %w", err)
 	}
 	if _, err := pool.Exec(ctx, lifecycleSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("lifecycle store: create schema: %w", err)
 	}
 	slog.Info("lifecycle ownership store initialized")
@@ -241,7 +246,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 // Close releases the pool.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
-		s.pool.Close()
+		s.releaseOnce.Do(func() { pgshared.Release(s.pool) })
 	}
 }
 

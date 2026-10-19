@@ -22,12 +22,14 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 // Deadlines (ADR 020 sec. 11).
@@ -314,8 +316,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS commerce_entitlement_allocations_inv
 // Store is the Postgres-backed commerce ledger.
 type Store struct {
 	pool *pgxpool.Pool
-	now  func() time.Time
-	auth PaymentAuthorizer
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
+	now         func() time.Time
+	auth        PaymentAuthorizer
 	// signer signs dispatch authorizations (dispatch.go); nil disables
 	// dispatch. Atomic so installing it cannot race a request in flight.
 	signer atomic.Pointer[DispatchSigner]
@@ -324,23 +329,23 @@ type Store struct {
 // NewStore connects, applies the schema and returns the store with the
 // simulated payment adapter installed.
 func NewStore(ctx context.Context, connStr string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("commerce: connect: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("commerce: ping: %w", err)
 	}
 	if _, err := pool.Exec(ctx, commerceSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("commerce: schema: %w", err)
 	}
 	s := &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}
 	// The adapter reads the store clock through the closure, so a test
 	// that moves s.now moves the adapter too.
 	if err := s.UseAuthorizer(SimulatedAuthorizer{now: func() time.Time { return s.now() }}); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, err
 	}
 	return s, nil
@@ -349,7 +354,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 // Close releases the pool.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
-		s.pool.Close()
+		s.releaseOnce.Do(func() { pgshared.Release(s.pool) })
 	}
 }
 

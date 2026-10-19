@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 const ledgerSchema = `
@@ -45,16 +47,19 @@ const deliveryColumns = `request_id, request_hash, workflow_id, run_id, responde
 // key is what makes the first claim win across replicas.
 type PostgresLedger struct {
 	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
 }
 
 // NewPostgresLedger connects and creates the table if needed.
 func NewPostgresLedger(ctx context.Context, connStr string) (*PostgresLedger, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("human-input ledger: connect: %w", err)
 	}
 	if _, err := pool.Exec(ctx, ledgerSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("human-input ledger: create schema: %w", err)
 	}
 	slog.Info("human-input ledger initialized")
@@ -62,7 +67,7 @@ func NewPostgresLedger(ctx context.Context, connStr string) (*PostgresLedger, er
 }
 
 // Close releases the pool.
-func (p *PostgresLedger) Close() { p.pool.Close() }
+func (p *PostgresLedger) Close() { p.releaseOnce.Do(func() { pgshared.Release(p.pool) }) }
 
 func scanDelivery(row pgx.Row) (*Delivery, error) {
 	var d Delivery

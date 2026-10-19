@@ -34,6 +34,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mctlhq/mctl-api/internal/agentregistry"
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
@@ -62,6 +63,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/loki"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 	"github.com/mctlhq/mctl-api/internal/principals"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
@@ -161,6 +163,9 @@ func main() {
 	// pgxpool.New and the schema Exec, then keeps only the pool. So it is safe
 	// to release it once the last store is built.
 	initCtx, cancelInit := context.WithTimeout(rootCtx, storeInitBudget)
+	// The stores below share one bounded pool per database URL instead of
+	// opening one each (mctl-api#508).
+	pgshared.EnableSharing()
 	// Every store below that is configured but fails init is recorded here,
 	// and GET /readyz answers 503 while any is (mctl-api#387): such a store
 	// stays nil for the pod's lifetime, so a pod that reported ready with it
@@ -375,6 +380,11 @@ func main() {
 	argoClient := argocd.NewClient(cfg.ArgoCDURL, cfg.ArgoCDToken)
 
 	var auditLog audit.Log
+	// readinessPool answers /readyz's Postgres check from its own connection:
+	// the audit logger's pool is the one almost every store shares, so a
+	// probe through it would queue behind request traffic and fail readiness
+	// whenever that pool is saturated.
+	var readinessPool *pgxpool.Pool
 	if dbURL := postgresURL(os.Getenv("AUDIT_DB_URL")); dbURL != "" {
 		pgLog, pgErr := initStore(initCtx, storeFailures, "audit log", func(ctx context.Context) (*audit.PostgresLogger, error) {
 			return audit.NewPostgresLogger(ctx, dbURL)
@@ -384,6 +394,12 @@ func main() {
 			auditLog = audit.NewLogger()
 		} else {
 			auditLog = pgLog
+			if p, err := pgshared.OpenDedicated(initCtx, dbURL, 1); err != nil {
+				slog.Warn("readiness probe pool unavailable; probing through the audit pool", "error", err)
+			} else {
+				readinessPool = p
+				defer readinessPool.Close()
+			}
 		}
 	} else {
 		auditLog = audit.NewLogger()
@@ -910,7 +926,9 @@ func main() {
 	}
 
 	var postgresReady mctlapi.ReadyCheck
-	if pinger, ok := auditLog.(interface{ Ping(context.Context) error }); ok {
+	if readinessPool != nil {
+		postgresReady = readinessPool.Ping
+	} else if pinger, ok := auditLog.(interface{ Ping(context.Context) error }); ok {
 		postgresReady = pinger.Ping
 	}
 
@@ -1670,6 +1688,9 @@ func (c config) validate() error {
 		return err
 	}
 	if _, err := parseApprovalMaxDecisionAge(c.ApprovalMaxDecisionAgeRaw); err != nil {
+		return err
+	}
+	if err := pgshared.ValidateEnv(); err != nil {
 		return err
 	}
 	if err := c.ZitadelHook.validate(); err != nil {

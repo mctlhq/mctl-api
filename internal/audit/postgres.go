@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 const schema = `
@@ -63,12 +64,12 @@ type PostgresLogger struct {
 // NewPostgresLogger creates a PostgreSQL-backed audit logger.
 // It auto-creates the schema on startup.
 func NewPostgresLogger(ctx context.Context, connStr string) (*PostgresLogger, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("audit postgres: connect: %w", err)
 	}
 	if _, err := pool.Exec(ctx, schema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("audit postgres: create schema: %w", err)
 	}
 	// Separate Exec, and deliberately not part of `schema`: CONCURRENTLY cannot

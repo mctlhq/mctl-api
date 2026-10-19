@@ -49,12 +49,14 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 // Surfaces a link may be created for, each with its own service principal.
@@ -172,10 +174,13 @@ ALTER TABLE surface_identity_links ADD COLUMN IF NOT EXISTS subject TEXT NOT NUL
 
 // Store is the Postgres-backed link store.
 type Store struct {
-	pool    *pgxpool.Pool
-	now     func() time.Time
-	linkTTL time.Duration
-	mirror  LinkMirror
+	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
+	now         func() time.Time
+	linkTTL     time.Duration
+	mirror      LinkMirror
 }
 
 // LinkMirror copies links into the canonical principal model
@@ -203,12 +208,12 @@ func (s *Store) mirrorLink(ctx context.Context, tx pgx.Tx, l *Link) error {
 // NewStore connects and creates the schema. linkTTL > 0 gives every new link
 // an expiry; 0 means links last until revoked.
 func NewStore(ctx context.Context, connStr string, linkTTL time.Duration) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("surfaceid: connect: %w", err)
 	}
 	if _, err := pool.Exec(ctx, schema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("surfaceid: create schema: %w", err)
 	}
 	slog.Info("surface identity store initialized", "link_ttl", linkTTL)
@@ -216,7 +221,7 @@ func NewStore(ctx context.Context, connStr string, linkTTL time.Duration) (*Stor
 }
 
 // Close releases the pool.
-func (s *Store) Close() { s.pool.Close() }
+func (s *Store) Close() { s.releaseOnce.Do(func() { pgshared.Release(s.pool) }) }
 
 // githubPrincipalPattern is a GitHub-verified human, the form every initial
 // consumer (human-input actor_refs, work-item owners) keys on.

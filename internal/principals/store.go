@@ -34,12 +34,14 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 // Principal statuses.
@@ -106,7 +108,10 @@ CREATE INDEX IF NOT EXISTS external_identities_github_display
 
 // Store is the Postgres-backed principal store.
 type Store struct {
-	pool          *pgxpool.Pool
+	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce   sync.Once
 	deletionSlots chan struct{}
 	now           func() time.Time
 	// beforeCustomerLink, in tests, runs in ResolveCustomer between its
@@ -119,7 +124,7 @@ type Store struct {
 // a redeemed link is mirrored into external_identities in the same
 // transaction.
 func NewStore(ctx context.Context, connStr string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("principals: connect: %w", err)
 	}
@@ -137,7 +142,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		_, err := tx.Exec(ctx, signupSchema)
 		return err
 	}); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("principals: initialize schema: %w", err)
 	}
 	slog.Info("principal store initialized")
@@ -145,7 +150,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 }
 
 // Close releases the pool.
-func (s *Store) Close() { s.pool.Close() }
+func (s *Store) Close() { s.releaseOnce.Do(func() { pgshared.Release(s.pool) }) }
 
 // Ping reports whether the database answers.
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
