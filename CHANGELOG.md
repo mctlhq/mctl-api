@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.108.0](https://github.com/mctlhq/mctl-api/compare/4.107.0...4.108.0) (2026-10-19)
+
+
+### Features
+
+* **signup:** fund only the bounded starter profile ([5f4171f](https://github.com/mctlhq/mctl-api/commit/5f4171f8d0bf53d80f2518b807f25713c475516b))
+* **signup:** fund only the bounded starter profile ([8081830](https://github.com/mctlhq/mctl-api/commit/80818306463263baaa1f2516b39e99178fae0ab4))
+
 ## [4.107.0](https://github.com/mctlhq/mctl-api/compare/4.106.0...4.107.0) (2026-10-19)
 
 
