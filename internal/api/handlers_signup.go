@@ -41,8 +41,11 @@ func (h *Handlers) signupAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if u != nil {
 		_, delegated = u.DelegatingAgent()
 	}
-	identity, proven := u.Identity()
-	if u == nil || !proven || identity.Kind != auth.KindHuman || delegated || !isHumanAdmin(u) || u.IsAgent() || u.ViaPrincipalID() != "" || u.PrincipalID() == "" {
+	if u == nil || delegated || !isHumanAdmin(u) || u.IsAgent() || u.ViaPrincipalID() != "" || u.PrincipalID() == "" {
+		writeError(w, 403, "direct human platform administrator required")
+		return false
+	}
+	if identity, proven := u.Identity(); !proven || identity.Kind != auth.KindHuman {
 		writeError(w, 403, "direct human platform administrator required")
 		return false
 	}
@@ -126,6 +129,7 @@ func (h *Handlers) ListSignupRequests(w http.ResponseWriter, r *http.Request) {
 		issues = append(issues, issue{ID: "unknown", Error: "legacy_traversal_metadata"})
 	}
 	if !*traversal && (page.Cursor == "" || page.Cursor == cursor) {
+		signupFailure(r.Context(), "request_list_pagination", errSignupInvalidResponse)
 		writeError(w, 503, "invitation pagination could not be observed")
 		return
 	}
@@ -236,6 +240,39 @@ func (h *Handlers) SetSignupCapacity(w http.ResponseWriter, r *http.Request) {
 	h.logAudit(r, audit.Entry{UserID: u.ID, Operation: "signup.capacity.set", Status: "succeeded", RiskLevel: "high", Parameters: map[string]string{"slots": strconv.Itoa(*b.Slots), "reason": b.Reason}})
 	h.GetSignupCapacity(w, r)
 }
+
+// Inspect all tenants before returning a membership result: an unreadable later
+// tenant outranks a known match. Legacy login and team grants also count.
+func (h *Handlers) signupExistingMembership(pid, login string) (bool, error) {
+	strict, ok := h.opts.GitReader.(interface {
+		ListTenantsStrict() ([]gitops.Tenant, error)
+	})
+	if !ok {
+		return false, errors.New("strict tenant reader unavailable")
+	}
+	tenants, err := strict.ListTenantsStrict()
+	if err != nil {
+		return false, err
+	}
+	found := false
+	for i := range tenants {
+		t := &tenants[i]
+		if err := t.PrincipalKeysErr(); err != nil {
+			return false, err
+		}
+		all := append([]gitops.TenantMember{}, t.Members...)
+		for _, team := range t.Teams {
+			all = append(all, team.Members...)
+		}
+		for _, m := range all {
+			if (pid != "" && m.PrincipalID == pid) || (login != "" && strings.EqualFold(m.UserID, login)) {
+				found = true
+			}
+		}
+	}
+	return found, nil
+}
+
 func (h *Handlers) DecideSignupRequest(w http.ResponseWriter, r *http.Request) {
 	if !h.signupAdmin(w, r) {
 		return
@@ -287,33 +324,23 @@ func (h *Handlers) DecideSignupRequest(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 503, "existing identity unreadable")
 			return
 		}
+		pid := ""
 		if existing != nil {
 			if revoked || existing.Status != principals.StatusActive {
 				writeError(w, 409, "GitHub identity is not active")
 				return
 			}
-			strict, ok := h.opts.GitReader.(interface {
-				ListTenantsStrict() ([]gitops.Tenant, error)
-			})
-			if !ok {
-				writeError(w, 503, "existing workspace ownership unreadable")
-				return
-			}
-			tenants, err := strict.ListTenantsStrict()
-			if err != nil {
-				signupFailure(r.Context(), "existing_workspace_read", err, "request_id", id)
-				writeError(w, 503, "existing workspace ownership unreadable")
-				return
-			}
-			for n := range tenants {
-				for k := range tenants[n].Members {
-					member := &tenants[n].Members[k]
-					if member.PrincipalID == existing.ID || (member.PrincipalID == "" && strings.EqualFold(member.UserID, login)) {
-						writeError(w, 409, "GitHub identity already belongs to an existing workspace")
-						return
-					}
-				}
-			}
+			pid = existing.ID
+		}
+		member, err := h.signupExistingMembership(pid, login)
+		if err != nil {
+			signupFailure(r.Context(), "existing_workspace_read", err, "request_id", id)
+			writeError(w, 503, "existing workspace ownership unreadable")
+			return
+		}
+		if member {
+			writeError(w, 409, "GitHub identity already belongs to an existing workspace")
+			return
 		}
 
 	}
@@ -523,7 +550,7 @@ func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory
 	return 0, ""
 }
 
-// RunSignupDeliveries retries only durable decisions, with leases and stable
+// Run retries only durable decisions, with leases and stable
 // provider idempotency. A delivery older than 23h stays pending for reconciliation.
 func (o *SignupOptions) Run(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)

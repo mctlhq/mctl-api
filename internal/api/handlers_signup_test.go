@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -93,7 +94,7 @@ func TestSignupApprovalAtZeroBudgetDoesNotGrantOrNotify(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":98765,"login":"test-user"}`))
 	}))
 	defer github.Close()
-	h := &Handlers{opts: Options{Signup: &SignupOptions{Store: s, GitHubURL: github.URL, SiteCall: func(_ context.Context, method, path string, _ []byte) ([]byte, error) {
+	h := &Handlers{opts: Options{GitReader: &signupFixtureReader{}, Signup: &SignupOptions{Store: s, GitHubURL: github.URL, SiteCall: func(_ context.Context, method, path string, _ []byte) ([]byte, error) {
 		if method != "GET" {
 			t.Fatal("notification before saved approval")
 		}
@@ -334,7 +335,7 @@ func TestSignupExplicitGitHubCorrectionWinsOverUnverifiedSubmission(t *testing.T
 		_, _ = w.Write([]byte(`{"id":98766001,"login":"corrected-user"}`))
 	}))
 	defer github.Close()
-	h := &Handlers{opts: Options{Signup: &SignupOptions{Store: s, GitHubURL: github.URL, SiteCall: func(context.Context, string, string, []byte) ([]byte, error) { return raw, nil }}}}
+	h := &Handlers{opts: Options{GitReader: &signupFixtureReader{}, Signup: &SignupOptions{Store: s, GitHubURL: github.URL, SiteCall: func(context.Context, string, string, []byte) ([]byte, error) { return raw, nil }}}}
 	r := httptest.NewRequest("POST", "/", strings.NewReader(`{"decision":"approved","reason":"Welcome","github":"corrected-user","confirm":"yes"}`))
 	route := chi.NewRouteContext()
 	route.URLParams.Add("id", original.ID)
@@ -446,10 +447,11 @@ func TestSignupExistingPrincipalIsNotAnInvitation(t *testing.T) {
 
 type signupFixtureReader struct {
 	GitReader
-	names  []string
-	exists bool
-	tenant *gitops.Tenant
-	err    error
+	tenants []gitops.Tenant
+	names   []string
+	exists  bool
+	tenant  *gitops.Tenant
+	err     error
 }
 
 func (r *signupFixtureReader) TenantNames() ([]string, error) { return r.names, nil }
@@ -479,5 +481,101 @@ func TestSignupHTTPFailureLogsSafeProviderDiagnostics(t *testing.T) {
 	}
 	if strings.Contains(log, "fixture-private-token") {
 		t.Fatal("private provider text was logged")
+	}
+}
+
+func (r *signupFixtureReader) ListTenantsStrict() ([]gitops.Tenant, error) { return r.tenants, r.err }
+
+func TestSignupMembershipIncludesLegacyAndTeamsAndRefusesUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tenants []gitops.Tenant
+		err     error
+		found   bool
+	}{
+		{"legacy without principal", []gitops.Tenant{{Members: []gitops.TenantMember{{UserID: "Customer"}}}}, nil, true},
+		{"team login", []gitops.Tenant{{Teams: []gitops.Team{{Members: []gitops.TenantMember{{UserID: "Customer"}}}}}}, nil, true},
+		{"team principal", []gitops.Tenant{{Teams: []gitops.Team{{Members: []gitops.TenantMember{{PrincipalID: "principal-test"}}}}}}, nil, true},
+		{"other legacy", []gitops.Tenant{{Members: []gitops.TenantMember{{UserID: "other"}}}}, nil, false},
+		{"listing failure", nil, errors.New("unreadable"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handlers{opts: Options{GitReader: &signupFixtureReader{tenants: tc.tenants, err: tc.err}}}
+			pid := ""
+			if tc.name == "team principal" {
+				pid = "principal-test"
+			}
+			found, err := h.signupExistingMembership(pid, "customer")
+			if found != tc.found || (err != nil) != (tc.err != nil) {
+				t.Fatalf("found=%v err=%v", found, err)
+			}
+		})
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "platform-gitops", "tenants", "broken")
+	if err := os.MkdirAll(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "values.yaml"), []byte("tenant:\n  name: broken\n  members:\n    - userId: other\n      principalId: malformed\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := gitops.NewReader("", "main", dir, nil, "", "")
+	broken, err := r.GetTenant("broken")
+	if err != nil || broken == nil || broken.PrincipalKeysErr() == nil {
+		t.Fatalf("fixture not unreadable: %v", err)
+	}
+	h := &Handlers{opts: Options{GitReader: &signupFixtureReader{tenants: append([]gitops.Tenant{{Members: []gitops.TenantMember{{UserID: "customer"}}}}, *broken)}}}
+	if found, err := h.signupExistingMembership("", "customer"); err == nil || found {
+		t.Fatalf("unknown became membership: %v %v", found, err)
+	}
+}
+
+func TestSignupApprovalRefusesUnallocatedLegacyAndTeamMembers(t *testing.T) {
+	s := signupStore(t)
+	ctx := context.Background()
+	if err := s.SetSignupCapacity(ctx, 1, "admin", "Reviewed one slot"); err != nil {
+		t.Fatal(err)
+	}
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":98766543,"login":"unallocated-legacy"}`))
+	}))
+	defer github.Close()
+	for _, tc := range []struct {
+		name   string
+		reader *signupFixtureReader
+		code   int
+	}{
+		{"legacy", &signupFixtureReader{tenants: []gitops.Tenant{{Members: []gitops.TenantMember{{UserID: "unallocated-legacy"}}}}}, 409},
+		{"team", &signupFixtureReader{tenants: []gitops.Tenant{{Teams: []gitops.Team{{Members: []gitops.TenantMember{{UserID: "unallocated-legacy"}}}}}}}, 409},
+		{"unknown", &signupFixtureReader{err: errors.New("partial listing")}, 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := principals.SignupRequest{ID: uuid.NewString(), CreatedAt: time.Now().UTC(), Name: "Test", Email: "test@example.com", GitHub: "unallocated-legacy", Project: "Project"}
+			cleanupSignupRows(t, original.ID)
+			raw, _ := json.Marshal(original)
+			h := &Handlers{opts: Options{GitReader: tc.reader, Signup: &SignupOptions{Store: s, GitHubURL: github.URL, SiteCall: func(_ context.Context, method, path string, _ []byte) ([]byte, error) {
+				if method != "GET" {
+					t.Fatal("unexpected notification")
+				}
+				return raw, nil
+			}}}}
+			r := httptest.NewRequest("POST", "/", strings.NewReader(`{"decision":"approved","reason":"Welcome","confirm":"yes"}`))
+			route := chi.NewRouteContext()
+			route.URLParams.Add("id", original.ID)
+			r = r.WithContext(context.WithValue(auth.WithUser(r.Context(), signupAdminUser(t)), chi.RouteCtxKey, route))
+			w := httptest.NewRecorder()
+			h.DecideSignupRequest(w, r)
+			if w.Code != tc.code {
+				t.Fatalf("status %d %s", w.Code, w.Body.String())
+			}
+			d, err := s.Signup(ctx, original.ID)
+			if err != nil || d.Status != "pending" || d.NotificationPending {
+				t.Fatalf("decision persisted: %+v %v", d, err)
+			}
+			capacity, err := s.SignupCapacity(ctx)
+			if err != nil || capacity.Used != 0 {
+				t.Fatalf("slot spent: %+v %v", capacity, err)
+			}
+		})
 	}
 }

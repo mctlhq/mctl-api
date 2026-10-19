@@ -55,7 +55,7 @@ type SignupDecision struct {
 	ExpiresAt           *time.Time    `json:"expires_at"`
 	Tenant              string        `json:"tenant"`
 	NotificationPending bool          `json:"notification_pending"`
-	Lease               string        `json:"lease,omitempty"`
+	Lease               string        `json:"-"`
 }
 type SignupCapacity struct {
 	Slots     int    `json:"slots"`
