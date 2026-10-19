@@ -126,6 +126,23 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// exactly as before (R7): delegation never confers admin.
 	var grantSpend *approvalSpend
 	if opName == devLoopApprovalKind {
+		// Approval provenance: approval_ref names the grant being spent and
+		// is set by the server alone (prepareApprovalGrant), so a body naming
+		// one is refused on every path -- grant, human admin and service --
+		// whatever its value, before anything is read or spent.
+		if _, named := input[approvalRefParam]; named {
+			h.logAudit(r, audit.Entry{
+				UserID:     user.ID,
+				Operation:  opName,
+				Status:     "denied",
+				RiskLevel:  string(op.RiskLevel),
+				Message:    approvalRefParam + " in the request body refused",
+				Parameters: legacyRelayParams(user, opName, input),
+			})
+			writeErrorCode(w, http.StatusBadRequest, wiCodeActorNotAccepted,
+				approvalRefParam+" is taken from an action-approval grant, not from the request body", nil)
+			return
+		}
 		if g := delegationGrantFrom(r.Context()); g != nil && g.Kind == delegation.KindActionApproval {
 			s, ok := h.prepareApprovalGrant(w, r, user, input, g.Ref)
 			if !ok {
@@ -456,6 +473,16 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		// R8: input["approver"] is the grant's decider, set and validated
 		// with the rest of the input (prepareApprovalGrant).
 		approvalGrantAuditParams(auditParams, user, consumed)
+	}
+
+	// Claim capacity only after every deterministic refusal, immediately before
+	// submission. An uncertain submit retains the claim for the same name.
+	if opName == "create-tenant" && !user.IsAdmin() && h.opts.Signup != nil {
+		if status, message := h.claimSignupPrincipal(r.Context(), user.PrincipalID(), tenantParam, input["quota_memory_req"], input["quota_cpu_req"], input["quota_memory_lim"], input["quota_cpu_lim"], input["quota_pods"], "5", "10"); status != 0 {
+			h.logAudit(r, audit.Entry{UserID: user.ID, Operation: opName, Status: "denied", RiskLevel: string(op.RiskLevel), Message: message, Parameters: auditParams})
+			writeError(w, status, message)
+			return
+		}
 	}
 
 	// Submit the Argo Workflow in the team's namespace (team-{name}).

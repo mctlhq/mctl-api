@@ -26,6 +26,9 @@ type hints struct {
 // none is a closed-world tool, and the portal allowlist reasons from
 // readOnlyHint alone.
 var recordedHints = map[string]hints{
+	"mctl_list_signup_requests":              {readOnly: true, destructive: false, idempotent: false},
+	"mctl_decide_signup_request":             {readOnly: false, destructive: true, idempotent: true},
+	"mctl_signup_capacity":                   {readOnly: false, destructive: true, idempotent: true},
 	"mctl_cancel_customer_deletion":          {readOnly: false, destructive: false, idempotent: true},
 	"mctl_abandon_dev_loop":                  {readOnly: false, destructive: true, idempotent: true},
 	"mctl_acknowledge_incident":              {readOnly: false, destructive: false, idempotent: true},
@@ -250,7 +253,7 @@ func TestReadOnlyToolsAreTheRecordedSet(t *testing.T) {
 		"mctl_list_agent_executions", "mctl_list_agent_versions", "mctl_list_agents", "mctl_list_commerce_invocations", "mctl_list_domains",
 		"mctl_list_incidents", "mctl_list_operations",
 		"mctl_list_platform_skills", "mctl_list_previews", "mctl_list_recent_agent_runs",
-		"mctl_list_recent_operations", "mctl_list_repos", "mctl_list_services", "mctl_list_tenant_skill_bindings",
+		"mctl_list_recent_operations", "mctl_list_repos", "mctl_list_services", "mctl_list_signup_requests", "mctl_list_tenant_skill_bindings",
 		"mctl_list_tenants", "mctl_list_work_item_execution_requests", "mctl_list_work_item_executions",
 		"mctl_list_work_item_snapshots", "mctl_list_workflows", "mctl_plan_epic_wave",
 		"mctl_read_platform_skill",

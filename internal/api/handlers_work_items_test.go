@@ -82,6 +82,7 @@ func workItemsRouter(h *Handlers) chi.Router {
 	r.Get("/api/v1/action-approvals/{id}", h.GetActionApproval)
 	r.Post("/api/v1/action-approvals/{id}/decision", h.DecideActionApproval)
 	r.Post("/api/v1/action-approvals/{id}/consume", h.ConsumeActionApproval)
+	r.Post("/api/v1/action-approvals/{id}/execute", h.MarkActionApprovalExecuted)
 	r.Post("/api/v1/work-items/{id}/execution-requests", h.CreateExecutionRequest)
 	r.Get("/api/v1/work-items/{id}/execution-requests", h.ListExecutionRequests)
 	r.Get("/api/v1/work-items/{id}/execution-requests/{request_id}", h.GetExecutionRequest)

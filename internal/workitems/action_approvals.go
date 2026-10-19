@@ -23,9 +23,10 @@ import (
 // at once, and each is single use.
 //
 //   - Immutable once created apart from its state transitions:
-//     pending -> approved | denied, approved -> consumed. `expired` is never
-//     stored: a pending or approved request past expires_at reads as expired
-//     (lazy expiry), and a decision or consume on it is refused.
+//     pending -> approved | denied, approved -> consumed, consumed ->
+//     executed. `expired` is never stored: a pending or approved request past
+//     expires_at reads as expired (lazy expiry), and a decision or consume on
+//     it is refused. A consumed or executed request never expires.
 //   - intent_hash binds the action: the server computes it from the bound
 //     fields (IntentHash) and a client-sent value must match.
 //   - Idempotent per (requested_by, idempotency_key): the same key with the
@@ -34,6 +35,10 @@ import (
 //   - Consume is one compare-and-set UPDATE, approved -> consumed, guarded by
 //     the state, the intent hash and the expiry together, so a receipt can
 //     authorize exactly one side effect however many callers race.
+//   - The execution mark is a second compare-and-set, consumed -> executed,
+//     guarded by the requester, the target and the artifact hash: the
+//     single-use record that the side effect a consume authorized was
+//     carried out, for exactly the bound target and artifact.
 //
 // Who may create, decide, consume or read is decided by the HTTP layer from
 // authentication; the store records the principals it is handed and refuses
@@ -55,6 +60,7 @@ const (
 	ApprovalApproved = "approved"
 	ApprovalDenied   = "denied"
 	ApprovalConsumed = "consumed"
+	ApprovalExecuted = "executed"
 	ApprovalExpired  = "expired"
 )
 
@@ -99,6 +105,10 @@ var (
 	// ErrApprovalStale: the decision is older than its freshness bound
 	// (fresh_until), though the request itself has not expired (mctl-api#700).
 	ErrApprovalStale = errors.New("action approval decision is stale")
+	// Execution mark refusals, one per reason.
+	ErrApprovalNotConsumed    = errors.New("action approval request is not consumed")
+	ErrApprovalExecuted       = errors.New("action approval request was already marked executed")
+	ErrApprovalTargetMismatch = errors.New("presented target or artifact_hash does not match the approved request")
 )
 
 const actionApprovalSchema = `
@@ -115,7 +125,7 @@ CREATE TABLE IF NOT EXISTS action_approval_requests (
     idempotency_key TEXT NOT NULL,
     requested_by    TEXT NOT NULL,
     intent_hash     TEXT NOT NULL,
-    state           TEXT NOT NULL CHECK (state IN ('pending', 'approved', 'denied', 'consumed')),
+    state           TEXT NOT NULL CHECK (state IN ('pending', 'approved', 'denied', 'consumed', 'executed')),
     expires_at      TIMESTAMPTZ NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL,
     decided_by      TEXT NOT NULL DEFAULT '',
@@ -166,6 +176,23 @@ UPDATE action_approval_requests SET
         WHEN work_item_id <> '' THEN 'work_item:' || work_item_id
         ELSE 'execution:' || execution_id END
 WHERE intent_source = '' AND decided_context_digest = '';
+-- Single-use execution mark: consumed -> executed. A table created before
+-- the state existed carries the narrower state CHECK under the same name;
+-- it is replaced in one ALTER (drop and add under one lock), and only while
+-- it does not admit 'executed' yet, so a restart is a no-op.
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'action_approval_requests'::regclass
+                     AND conname = 'action_approval_requests_state_check'
+                     AND pg_get_constraintdef(oid) LIKE '%''executed''%') THEN
+        ALTER TABLE action_approval_requests
+            DROP CONSTRAINT IF EXISTS action_approval_requests_state_check,
+            ADD CONSTRAINT action_approval_requests_state_check
+                CHECK (state IN ('pending', 'approved', 'denied', 'consumed', 'executed'));
+    END IF;
+END $$;
 `
 
 const actionApprovalColumns = `id, execution_id, action_kind, target, args_digest, policy_rule_id,
@@ -174,7 +201,7 @@ const actionApprovalColumns = `id, execution_id, action_kind, target, args_diges
 	requested_by_principal_id, via_principal_id, decided_by_principal_id, decided_via_principal_id,
 	actor_kind, actor_name, subject_principal_id, subject_kind, agent_run_id,
 		risk_level, side_effect, intent_source, policy_decision, policy_reasons,
-		decided_context_digest, authority_basis, authz_mode, fresh_until`
+		decided_context_digest, authority_basis, authz_mode, fresh_until, executed_at`
 
 // ActionApprovalRequest is one durable approval of one hashed side effect.
 // State is the effective state: `expired` for a pending or approved request
@@ -199,7 +226,9 @@ type ActionApprovalRequest struct {
 	DecidedAt      *time.Time `json:"decided_at,omitempty"`
 	Reason         string     `json:"reason,omitempty"`
 	ConsumedAt     *time.Time `json:"consumed_at,omitempty"`
-	SchemaVersion  string     `json:"schema_version"`
+	// ExecutedAt is when the consumed request was marked executed.
+	ExecutedAt    *time.Time `json:"executed_at,omitempty"`
+	SchemaVersion string     `json:"schema_version"`
 
 	// Canonical principal ids, dual-written since mctl-api#373 and served
 	// since #376 D1. Empty for a row written before they existed, or for a
@@ -405,7 +434,8 @@ func (in ActionApprovalInput) validate() error {
 	return nil
 }
 
-// effectiveState applies lazy expiry.
+// effectiveState applies lazy expiry. Only a request that was never spent
+// expires: consumed and executed are final records.
 func effectiveState(stored string, expiresAt, now time.Time) string {
 	if (stored == ApprovalPending || stored == ApprovalApproved) && !expiresAt.After(now) {
 		return ApprovalExpired
@@ -421,7 +451,7 @@ func scanActionApproval(row pgx.Row, now time.Time) (*ActionApprovalRequest, err
 		&a.SchemaVersion, &a.RequestedByPrincipalID, &a.ViaPrincipalID, &a.DecidedByPrincipalID,
 		&a.DecidedViaPrincipalID, &a.ActorKind, &a.ActorName, &a.SubjectPrincipalID, &a.SubjectKind,
 		&a.AgentRunID, &a.RiskLevel, &a.SideEffect, &a.IntentSource, &a.PolicyDecision, &a.PolicyReasons,
-		&a.DecidedContextDigest, &a.AuthorityBasis, &a.AuthzMode, &a.FreshUntil); err != nil {
+		&a.DecidedContextDigest, &a.AuthorityBasis, &a.AuthzMode, &a.FreshUntil, &a.ExecutedAt); err != nil {
 		return nil, err
 	}
 	if len(a.PolicyReasons) == 0 {
@@ -440,6 +470,10 @@ func scanActionApproval(row pgx.Row, now time.Time) (*ActionApprovalRequest, err
 	if a.ConsumedAt != nil {
 		t := a.ConsumedAt.UTC()
 		a.ConsumedAt = &t
+	}
+	if a.ExecutedAt != nil {
+		t := a.ExecutedAt.UTC()
+		a.ExecutedAt = &t
 	}
 	a.State = effectiveState(a.State, a.ExpiresAt, now)
 	return &a, nil
@@ -549,7 +583,7 @@ type ActionApprovalFilter struct {
 // ValidApprovalState reports whether state is a listable effective state.
 func ValidApprovalState(state string) bool {
 	switch state {
-	case ApprovalPending, ApprovalApproved, ApprovalDenied, ApprovalConsumed, ApprovalExpired:
+	case ApprovalPending, ApprovalApproved, ApprovalDenied, ApprovalConsumed, ApprovalExecuted, ApprovalExpired:
 		return true
 	}
 	return false
@@ -559,7 +593,7 @@ func ValidApprovalState(state string) bool {
 // state.
 func (s *Store) ActionApprovals(ctx context.Context, f ActionApprovalFilter) ([]ActionApprovalRequest, error) {
 	if f.State != "" && !ValidApprovalState(f.State) {
-		return nil, invalid("state must be one of pending, approved, denied, consumed, expired")
+		return nil, invalid("state must be one of pending, approved, denied, consumed, executed, expired")
 	}
 	if f.Limit <= 0 {
 		f.Limit = defaultApprovalList
@@ -731,7 +765,7 @@ func (s *Store) ConsumeActionApproval(ctx context.Context, id, intentHash string
 		return nil, err
 	}
 	switch cur.State {
-	case ApprovalConsumed:
+	case ApprovalConsumed, ApprovalExecuted:
 		return nil, fmt.Errorf("%w: %s", ErrApprovalConsumed, id)
 	case ApprovalDenied:
 		return nil, fmt.Errorf("%w: %s", ErrApprovalDenied, id)
@@ -751,4 +785,58 @@ func (s *Store) ConsumeActionApproval(ctx context.Context, id, intentHash string
 	// the clock moved between the two statements. Refuse rather than
 	// retry; the caller re-presents.
 	return nil, fmt.Errorf("%w: %s changed while consuming", ErrApprovalNotApproved, id)
+}
+
+// MarkActionApprovalExecuted records that the side effect a consumed request
+// authorized was carried out: one atomic compare-and-set from consumed to
+// executed that holds only for the request's own requester, the stored
+// target and a non-empty stored artifact hash equal to the presented ones.
+// It succeeds once per request however many callers race. On a refusal the
+// request is read back to name the reason; the refusal itself never depends
+// on that read. A request of another requester reads as not found.
+func (s *Store) MarkActionApprovalExecuted(ctx context.Context, id, target, artifactHash, caller string) (*ActionApprovalRequest, error) {
+	if err := checkText("target", target, MaxApprovalTargetBytes, true); err != nil {
+		return nil, err
+	}
+	if err := checkText("artifact_hash", artifactHash, MaxApprovalFieldBytes, true); err != nil {
+		return nil, err
+	}
+	if err := checkText("requested_by", caller, MaxExternalIDBytes, true); err != nil {
+		return nil, err
+	}
+	now := s.now()
+	out, err := scanActionApproval(s.pool.QueryRow(ctx, `UPDATE action_approval_requests
+		SET state='executed', executed_at=$5
+		WHERE id=$1 AND state='consumed' AND requested_by=$2 AND target=$3
+		  AND artifact_hash=$4 AND artifact_hash <> ''
+		RETURNING `+actionApprovalColumns, id, caller, target, artifactHash, now), now)
+	if err == nil {
+		return out, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("workitems: mark action approval executed: %w", err)
+	}
+	cur, err := s.getActionApproval(ctx, s.pool, id, "")
+	if err != nil {
+		return nil, err
+	}
+	if cur.RequestedBy != caller {
+		return nil, fmt.Errorf("workitems: action approval %s: %w", id, ErrApprovalNotFound)
+	}
+	switch cur.State {
+	case ApprovalExecuted:
+		return nil, fmt.Errorf("%w: %s", ErrApprovalExecuted, id)
+	case ApprovalDenied:
+		return nil, fmt.Errorf("%w: %s", ErrApprovalDenied, id)
+	case ApprovalConsumed:
+	default:
+		return nil, fmt.Errorf("%w: %s is %s", ErrApprovalNotConsumed, id, cur.State)
+	}
+	if cur.Target != target || cur.ArtifactHash == "" || cur.ArtifactHash != artifactHash {
+		return nil, fmt.Errorf("%w: %s", ErrApprovalTargetMismatch, id)
+	}
+	// Consumed and matching now, but the UPDATE saw otherwise: the request
+	// was consumed between the two statements. Refuse rather than retry;
+	// the caller re-presents.
+	return nil, fmt.Errorf("%w: %s changed while marking it executed", ErrApprovalNotConsumed, id)
 }

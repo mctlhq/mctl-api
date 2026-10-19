@@ -131,7 +131,10 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		if _, err := tx.Exec(ctx, schema); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, customerDeletionSchema)
+		if _, err := tx.Exec(ctx, customerDeletionSchema); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, signupSchema)
 		return err
 	}); err != nil {
 		pool.Close()

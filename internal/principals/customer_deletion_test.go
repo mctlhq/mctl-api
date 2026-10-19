@@ -83,6 +83,16 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if err := replica.CheckPrincipal(ctx, p.ID); err != nil {
 		t.Fatal(err)
 	}
+	signup := importTestSignup(t, s)
+	if err := s.SetSignupCapacity(ctx, 1, "admin", "Reviewed test capacity"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DecideSignup(ctx, signup.ID, "approved", "730001", "delete-customer", "admin", "Welcome"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimSignup(ctx, "730001", "delete-test", p.ID); err != nil {
+		t.Fatal(err)
+	}
 	d, err := s.PrepareCustomerDeletion(ctx, "delete-test", p.ID, old.Issuer, "admin-approval")
 	if err != nil {
 		t.Fatal(err)
@@ -146,6 +156,13 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if err := s.FinishCustomerDeletion(ctx, d.Tenant, p.ID); err != nil {
 		t.Fatal(err)
 	}
+	if allowed, err := s.SignupAllowed(ctx, "730001"); err != nil || allowed {
+		t.Fatalf("deletion retained invitation authority: %v %v", allowed, err)
+	}
+	if capacity, err := s.SignupCapacity(ctx); err != nil || capacity.Used != 0 {
+		t.Fatalf("deletion retained reserved slot: %+v %v", capacity, err)
+	}
+
 	if err := s.FinishCustomerDeletion(ctx, d.Tenant, p.ID); err != nil {
 		t.Fatal("retry:", err)
 	}

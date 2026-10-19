@@ -44,6 +44,8 @@ func newStoreForTest(t *testing.T) *Store {
 	}
 	wipe := func() {
 		for _, q := range []string{
+			"DELETE FROM signup_requests",
+			"UPDATE signup_capacity SET slots=0,actor='',reason=''",
 			"DELETE FROM customer_deletions",
 			"DELETE FROM external_identities",
 			"DELETE FROM principals",

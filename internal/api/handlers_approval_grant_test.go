@@ -188,6 +188,10 @@ func TestApprovalGrant_BoundGrantApprovesOnceAsTheDecider(t *testing.T) {
 	if params[expectedContentDigestParam] != testContentDigest {
 		t.Errorf("submitted %s = %q, want the grant's artifact_hash %q", expectedContentDigestParam, params[expectedContentDigestParam], testContentDigest)
 	}
+	// Approval provenance: the workflow is told which grant it acts on.
+	if params[approvalRefParam] != run.approval {
+		t.Errorf("submitted %s = %q, want the grant's id %q", approvalRefParam, params[approvalRefParam], run.approval)
+	}
 	if st := g.approvalState(run.approval)["state"]; st != "consumed" {
 		t.Errorf("approval state = %v, want consumed", st)
 	}
@@ -495,6 +499,29 @@ func TestApprovalGrant_BodyContentDigestIsRefused(t *testing.T) {
 		res := g.execute(run.agent, run.approval, in)
 		if res.code != http.StatusBadRequest || res.body["code"] != wiCodeActorNotAccepted {
 			t.Errorf("%s %q = %d %s, want 400 %s", expectedContentDigestParam, digest, res.code, res.raw, wiCodeActorNotAccepted)
+		}
+	}
+	if g.submitted() != 0 {
+		t.Fatalf("submitted %d workflows", g.submitted())
+	}
+	if st := g.approvalState(run.approval)["state"]; st != "approved" {
+		t.Errorf("approval state = %v, want approved (unspent)", st)
+	}
+}
+
+// Approval provenance: approval_ref is the grant's id, set by the server; a
+// body naming one -- the grant's own id, another, or empty -- is refused and
+// leaves the approval unspent.
+func TestApprovalGrant_BodyApprovalRefIsRefused(t *testing.T) {
+	g := newGrantEnv(t)
+	run := g.grantedRun("ref-body")
+	g.decide(run.approval, "approve")
+	for _, ref := range []string{run.approval, "aar_" + strings.Repeat("0", 32), ""} {
+		in := approveInput(run.slug)
+		in[approvalRefParam] = ref
+		res := g.execute(run.agent, run.approval, in)
+		if res.code != http.StatusBadRequest || res.body["code"] != wiCodeActorNotAccepted {
+			t.Errorf("%s %q = %d %s, want 400 %s", approvalRefParam, ref, res.code, res.raw, wiCodeActorNotAccepted)
 		}
 	}
 	if g.submitted() != 0 {

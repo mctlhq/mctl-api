@@ -168,7 +168,7 @@ may live in different databases.
   the line `mctl-action-intent/v1` followed by one line
   `<field>:<byte length>:<value>` per bound field in that order, computed by
   the server (a client-sent hash must match). State `pending` →
-  `approved` | `denied`, then `approved` → `consumed`; a pending or approved
+  `approved` | `denied`, then `approved` → `consumed` → `executed`; a pending or approved
   request past `expires_at` (at most 7 days ahead) reads as `expired`, and a
   decision or consume on it is refused. Create and consume: the requesting
   service principal only, `requested_by` from authentication, idempotent per
@@ -182,11 +182,18 @@ may live in different databases.
   directly only — never a service, a surface or a relayed request, never
   the requester. Consume is one compare-and-set `UPDATE` (`state='approved'`,
   matching `intent_hash`, unexpired) that records `consumed_at`, so a
-  receipt authorizes exactly one side effect. Reads: every request for a
+  receipt authorizes exactly one side effect. The execution mark is a
+  second compare-and-set (`state='consumed'`, the requester, the stored
+  `target` and a non-empty stored `artifact_hash` equal to the presented
+  ones) that records `executed_at`; refusals are 409
+  `approval_not_consumed`, `approval_executed`, `approval_denied` or
+  `approval_target_mismatch`. A consumed or executed request never expires.
+  Reads: every request for a
   human admin, its own requests for a service. Create, decision and consume
-  are audited (ids and hashes only), and so are refused decisions and
-  consumes (`action_approval.decision_refused` /
-  `action_approval.consume_refused`, with the typed code). mctl-api is the approval record;
+  are audited (ids and hashes only), and so are refused decisions,
+  consumes and execution marks (`action_approval.decision_refused` /
+  `action_approval.consume_refused` / `action_approval.execute_refused`,
+  with the typed code). mctl-api is the approval record;
   Temporal only waits on it and re-reads it after a best-effort wake-up.
 - **`SurfaceRef`** — correlates a work item to a surface-native
   conversation: `surface`, `external_id` (chat/thread/run identifier needed
@@ -398,6 +405,7 @@ shared 20/min budget it would starve the workflow triggers it feeds.
 | `GET /api/v1/action-approvals/{id}`                                    | read one, with lazy expiry |
 | `POST /api/v1/action-approvals/{id}/decision`                          | approve or deny (human admin only) |
 | `POST /api/v1/action-approvals/{id}/consume`                           | spend an approved request exactly once |
+| `POST /api/v1/action-approvals/{id}/execute`                           | mark a consumed request executed exactly once |
 | `GET /api/v1/work-items/{id}/events`                                   | lifecycle history |
 
 If the work-items store is not configured (`WORK_ITEMS_DB_URL` and

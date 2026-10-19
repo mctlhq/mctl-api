@@ -85,7 +85,7 @@ func (s *Store) ActionApprovalGrant(ctx context.Context, id string) (delegation.
 	}
 	switch effectiveState(state, expiresAt, s.now()) {
 	case ApprovalPending, ApprovalApproved:
-	default: // denied, consumed, expired
+	default: // denied, consumed, executed, expired
 		return delegation.Record{}, delegation.ErrNotBound
 	}
 	return rec, nil

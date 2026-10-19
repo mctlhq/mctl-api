@@ -679,6 +679,7 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 var closedApprovalCodes = map[string]string{
 	workitems.ApprovalDenied:   aarCodeDenied,
 	workitems.ApprovalConsumed: aarCodeConsumed,
+	workitems.ApprovalExecuted: aarCodeExecuted,
 	workitems.ApprovalExpired:  aarCodeExpired,
 }
 

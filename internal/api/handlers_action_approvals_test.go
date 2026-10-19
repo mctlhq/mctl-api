@@ -447,6 +447,7 @@ func TestActionApprovalRoutesAreRegistered(t *testing.T) {
 		"GET /api/v1/action-approvals/{id}",
 		"POST /api/v1/action-approvals/{id}/decision",
 		"POST /api/v1/action-approvals/{id}/consume",
+		"POST /api/v1/action-approvals/{id}/execute",
 	} {
 		if !found[want] {
 			t.Errorf("route not registered: %s", want)

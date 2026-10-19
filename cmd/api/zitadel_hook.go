@@ -82,14 +82,19 @@ func zitadelHookOptions(cfg config, tenants zitadelhook.TenantLister, pending ..
 	if len(pending) > 0 {
 		creationPending = pending[0]
 	}
+	var invitationAllowed func(context.Context, string) (bool, error)
+	if len(pending) > 1 {
+		invitationAllowed = pending[1]
+	}
 	hook, err := zitadelhook.New(zitadelhook.Config{
-		CreationPending:   creationPending,
-		CustomersOrgID:    zc.CustomersOrgID,
-		GitHubIdPID:       zc.GitHubIdPID,
-		LoginClientUserID: zc.LoginClientUserID,
-		UsernameDomain:    zc.UsernameDomain,
-		ClaimClientIDs:    zc.ClaimClientIDs,
-		ReservedLogins:    append(append([]string{}, cfg.AdminUsers...), zc.ReservedLogins...),
+		CreationPending:           creationPending,
+		CustomerInvitationAllowed: invitationAllowed,
+		CustomersOrgID:            zc.CustomersOrgID,
+		GitHubIdPID:               zc.GitHubIdPID,
+		LoginClientUserID:         zc.LoginClientUserID,
+		UsernameDomain:            zc.UsernameDomain,
+		ClaimClientIDs:            zc.ClaimClientIDs,
+		ReservedLogins:            append(append([]string{}, cfg.AdminUsers...), zc.ReservedLogins...),
 
 		CustomerCreateGitHubIDs: zc.CustomerCreateGitHubIDs,
 	}, tenants, nil)

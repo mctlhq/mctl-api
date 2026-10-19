@@ -21,8 +21,9 @@ import (
 // approval authority; a Temporal workflow only waits on it and re-reads it.
 //
 // Who may do what, always from authentication:
-//   - create and consume: a service principal acting directly (never a
-//     relayed surface). requested_by is the authenticated principal.
+//   - create, consume and mark executed: a service principal acting
+//     directly (never a relayed surface). requested_by is the authenticated
+//     principal; consume and mark executed act on its own requests only.
 //   - decide: a human admin acting directly: never a service principal,
 //     never a relayed surface, never the requester of the request.
 //   - read: a human admin reads every request; a service principal reads
@@ -45,6 +46,9 @@ const (
 	aarCodeExpired             = "approval_expired"
 	aarCodeIntentMismatch      = "approval_intent_mismatch"
 	aarCodeConsumed            = "approval_consumed"
+	aarCodeNotConsumed         = "approval_not_consumed"
+	aarCodeExecuted            = "approval_executed"
+	aarCodeTargetMismatch      = "approval_target_mismatch"
 	aarCodeRequesterForbidden  = "approval_requester_forbidden"
 	aarCodeDeciderForbidden    = "approval_decider_forbidden"
 	aarCodeReaderForbidden     = "approval_reader_forbidden"
@@ -119,6 +123,9 @@ var actionApprovalRefusals = []struct {
 	{governance.ErrDeciderDisabled, http.StatusConflict, aarCodeDeciderDisabled, true},
 	{governance.ErrAuthorityUnavailable, http.StatusServiceUnavailable, aarCodeAuthorityUnavailable, false},
 	{governance.ErrPolicyDrift, http.StatusConflict, aarCodePolicyDrift, true},
+	{workitems.ErrApprovalNotConsumed, http.StatusConflict, aarCodeNotConsumed, false},
+	{workitems.ErrApprovalExecuted, http.StatusConflict, aarCodeExecuted, false},
+	{workitems.ErrApprovalTargetMismatch, http.StatusConflict, aarCodeTargetMismatch, false},
 }
 
 // actionApprovalRefusalCode is the typed code of a store refusal, or "" for
@@ -222,7 +229,8 @@ func (h *Handlers) auditActionApproval(r *http.Request, user *auth.User, op stri
 	})
 }
 
-// auditActionApprovalRefusal records a refused decision or consume: the
+// auditActionApprovalRefusal records a refused decision, consume or
+// execution mark: the
 // signatures of a replay, an intent swap or a confused deputy. Ids and the
 // typed code only, never the reason text or a presented hash.
 func (h *Handlers) auditActionApprovalRefusal(r *http.Request, user *auth.User, op, id, code string) {
@@ -414,7 +422,7 @@ func (h *Handlers) ListActionApprovals(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f.State, f.ExecutionID = q.Get("state"), q.Get("execution_id")
 	if f.State != "" && !workitems.ValidApprovalState(f.State) {
-		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "state must be one of pending, approved, denied, consumed, expired", nil)
+		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "state must be one of pending, approved, denied, consumed, executed, expired", nil)
 		return
 	}
 	if limit := q.Get("limit"); limit != "" {
@@ -534,5 +542,56 @@ func (h *Handlers) ConsumeActionApproval(w http.ResponseWriter, r *http.Request)
 	}
 	h.auditActionApproval(r, user, "action_approval.consume", a, operations.RiskMedium,
 		map[string]string{"revalidation": reval.Revalidation})
+	h.writeApproval(w, http.StatusOK, a)
+}
+
+type actionExecuteBody struct {
+	Target       string `json:"target"`
+	ArtifactHash string `json:"artifact_hash"`
+}
+
+// MarkActionApprovalExecuted handles
+// POST /api/v1/action-approvals/{id}/execute: mark a consumed request
+// executed exactly once, for exactly its bound target and artifact. Only
+// the requesting service, on its own request, as for consume.
+func (h *Handlers) MarkActionApprovalExecuted(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.workItemsUser(w, r)
+	if !ok {
+		return
+	}
+	if !isDirectService(user) {
+		h.auditActionApprovalRefusal(r, user, "action_approval.execute_refused", chi.URLParam(r, "id"), aarCodeRequesterForbidden)
+		writeErrorCode(w, http.StatusForbidden, aarCodeRequesterForbidden,
+			"only the requesting service may mark an action approval executed", nil)
+		return
+	}
+	// Only the requester's own request: another's answers 404.
+	cur, ok := h.visibleActionApproval(w, r, user)
+	if !ok {
+		return
+	}
+	var body actionExecuteBody
+	if !decodeWorkItemBodyLimit(w, r, &body, maxActionApprovalBodyBytes) {
+		return
+	}
+	if body.Target == "" {
+		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "target is required", nil)
+		return
+	}
+	// Any non-empty value: the store compares it with the stored hash,
+	// which must itself be non-empty, and bounds its length.
+	if body.ArtifactHash == "" {
+		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "artifact_hash is required", nil)
+		return
+	}
+	a, err := h.opts.WorkItems.MarkActionApprovalExecuted(r.Context(), cur.ID, body.Target, body.ArtifactHash, principalOf(user))
+	if err != nil {
+		if code := actionApprovalRefusalCode(err); code != "" {
+			h.auditActionApprovalRefusal(r, user, "action_approval.execute_refused", cur.ID, code)
+		}
+		writeActionApprovalError(w, err)
+		return
+	}
+	h.auditActionApproval(r, user, "action_approval.execute", a, operations.RiskMedium)
 	h.writeApproval(w, http.StatusOK, a)
 }

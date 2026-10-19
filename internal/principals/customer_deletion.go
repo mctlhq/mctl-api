@@ -299,8 +299,8 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 		if err := lockPrincipalTx(ctx, tx, pid); err != nil {
 			return err
 		}
-		var status, login string
-		if err := tx.QueryRow(ctx, `SELECT status,login FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2 FOR UPDATE`, tenant, pid).Scan(&status, &login); err != nil {
+		var status, login, githubID string
+		if err := tx.QueryRow(ctx, `SELECT status,login,github_id FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2 FOR UPDATE`, tenant, pid).Scan(&status, &login, &githubID); err != nil {
 			return err
 		}
 		if status == "complete" {
@@ -333,6 +333,12 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 			if _, err := tx.Exec(ctx, cleanup.query, args...); err != nil {
 				return err
 			}
+		}
+		if err := signupLock(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE signup_requests SET status='released',notification_pending=false WHERE (principal_id=$1 OR github_id=$2) AND status IN ('approved','claimed')`, pid, githubID); err != nil {
+			return err
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM external_identities WHERE principal_id=$1`, pid); err != nil {
 			return err

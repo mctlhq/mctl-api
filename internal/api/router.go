@@ -49,6 +49,7 @@ import (
 
 // Options holds all dependencies for the API router.
 type Options struct {
+	Signup                        *SignupOptions
 	CustomerDeletion              *CustomerDeletionOptions
 	CustomerTenantDeletionPending func(context.Context, string) (bool, error)
 
@@ -477,6 +478,11 @@ func NewRouter(opts Options) http.Handler {
 		r.Route("/api/v1", func(r chi.Router) {
 			// Auth endpoints.
 			r.Get("/whoami", h.Whoami)
+			r.Get("/admin/signup/requests", h.ListSignupRequests)
+			r.Post("/admin/signup/requests/{id}/decision", h.DecideSignupRequest)
+			r.Get("/admin/signup/capacity", h.GetSignupCapacity)
+			r.Post("/admin/signup/capacity", h.SetSignupCapacity)
+			r.Post("/surface-principals/signup-claim", h.ClaimSignup)
 			r.Post("/internal/customer-deletions/{tenant}/{principal}/cancel", h.CancelCustomerDeletion)
 			r.Post("/internal/customer-deletions/{tenant}/{principal}/{stage}", h.AdvanceCustomerDeletion)
 			r.Get("/surface-principals/workspace-access/{tenant}", h.ObserveWorkspaceAccess)
@@ -638,6 +644,7 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/action-approvals", h.CreateActionApproval)
 				r.Post("/action-approvals/{id}/decision", h.DecideActionApproval)
 				r.Post("/action-approvals/{id}/consume", h.ConsumeActionApproval)
+				r.Post("/action-approvals/{id}/execute", h.MarkActionApprovalExecuted)
 				// Execution requests (mctl-api#368): a person or a relaying
 				// surface asks for a run; the platform supplies its identity.
 				r.Post("/work-items/{id}/execution-requests", h.CreateExecutionRequest)

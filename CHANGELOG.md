@@ -1,5 +1,26 @@
 # Changelog
 
+## [4.106.0](https://github.com/mctlhq/mctl-api/compare/4.105.1...4.106.0) (2026-10-19)
+
+
+### Features
+
+* administer invitations with funded workspace reservations ([84fd753](https://github.com/mctlhq/mctl-api/commit/84fd75396ae3ae7353ca5bca3a69a3a8c21fe403))
+* administer invitations with funded workspace reservations ([b5394f6](https://github.com/mctlhq/mctl-api/commit/b5394f69a2016374a33adbd7d5d3690d70117278))
+* **approval:** approval provenance and single-use execution mark ([f70d888](https://github.com/mctlhq/mctl-api/commit/f70d88884e16298e33f90a79585b4d67b426571e))
+* **approval:** approval provenance and single-use execution mark ([b9af9bf](https://github.com/mctlhq/mctl-api/commit/b9af9bf5e04e6080b74241ab4e499f735b4c645c))
+
+
+### Bug Fixes
+
+* **approval:** omit an empty approval_ref and accept any artifact hash ([a669cda](https://github.com/mctlhq/mctl-api/commit/a669cdad703127e39eeb7775812bf92dd1529ba8))
+* bind signup claim to authenticated surface actor ([f2771a4](https://github.com/mctlhq/mctl-api/commit/f2771a4fc7afe038804c6aebff348197cbd35667))
+* isolate queue failures and verify admission entry points ([6dafe00](https://github.com/mctlhq/mctl-api/commit/6dafe00a2f987b85fb36e4402235296d8dad0ce1))
+* preserve existing signup paths within admission budgets ([c704e93](https://github.com/mctlhq/mctl-api/commit/c704e93a99d73be8ff9e6a8b32af64225127a4c2))
+* reserve capacity after validation under private signup policy ([5a6c5b2](https://github.com/mctlhq/mctl-api/commit/5a6c5b249af14a62e4f3b0a27063af099e1a4c3e))
+* **signup:** guard claimed names and expose safe diagnostics ([9db22db](https://github.com/mctlhq/mctl-api/commit/9db22dbb9fb94779ef1b34ccdbc8e517bf084d9d))
+* **signup:** inspect all existing workspace memberships ([e367320](https://github.com/mctlhq/mctl-api/commit/e367320c26049d1c4363a614df747bf2caf3d4a1))
+
 ## [4.105.1](https://github.com/mctlhq/mctl-api/compare/4.105.0...4.105.1) (2026-10-18)
 
 
