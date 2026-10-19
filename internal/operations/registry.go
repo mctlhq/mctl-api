@@ -399,16 +399,10 @@ const (
 	// slugPattern: proposal directory name (some contain dots).
 	slugPattern = `^[a-z0-9][a-z0-9.-]{0,120}$`
 	// contentDigestPattern: a proposal content digest (mctl-agents#681).
-	contentDigestPattern = ContentDigestPattern
+	contentDigestPattern = `^sha256:[0-9a-f]{64}$`
 	// approvalRefPattern: an action approval id (aar_...).
 	approvalRefPattern = `^aar_[A-Za-z0-9_-]{1,124}$`
 )
-
-// ContentDigestPattern is the shape of a proposal content digest
-// (mctl-agents#681), exported so the execute handler can refuse a malformed
-// one with its own typed code before the generic validation runs
-// (mctl-api#722).
-const ContentDigestPattern = `^sha256:[0-9a-f]{64}$`
 
 // mctlAgentsServiceEnum lists the services mctl-agents knows, plus "" for
 // "all / unused".

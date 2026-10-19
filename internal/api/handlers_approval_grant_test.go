@@ -614,8 +614,11 @@ func TestApprovalGrant_EveryoneElseIsRefusedAsBefore(t *testing.T) {
 		t.Errorf("approval state = %v, want approved (unspent)", st)
 	}
 
-	// And a human admin acting directly still approves as before.
-	if res := g.execute(g.decider, "", approveInput(run.slug)); res.code != http.StatusAccepted {
+	// And a human admin acting directly still approves as before, bound to
+	// the content it reviewed (mctl-api#722).
+	direct := approveInput(run.slug)
+	direct[expectedContentDigestParam] = testContentDigest
+	if res := g.execute(g.decider, "", direct); res.code != http.StatusAccepted {
 		t.Errorf("human admin = %d %s, want 202", res.code, res.raw)
 	}
 }

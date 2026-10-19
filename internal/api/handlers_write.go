@@ -316,8 +316,8 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 					"the free-text approver relay is disabled; approve through an action-approval grant", nil)
 				return
 			default:
-				// Counted and audited below, once the digest check has
-				// passed: a relay refused there was not a use of it.
+				// Counted below: as relayed once the digest check has
+				// passed, as refused if it does not.
 				legacyRelay = true
 			}
 		} else {
@@ -360,6 +360,13 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 				Message:    code + ": " + msg,
 				Parameters: params,
 			})
+			// A relay attempt refused here is still an attempt: counted as
+			// refused, like legacy_approver_disabled, so the counter keeps
+			// showing whether anything still relays even when the audit
+			// write above fails (mctl-api#571 A7).
+			if legacyRelay {
+				legacyRelayTotal.WithLabelValues("refused").Inc()
+			}
 			writeErrorCode(w, http.StatusBadRequest, code, msg, nil)
 			return
 		}
@@ -776,9 +783,6 @@ func (h *Handlers) checkTenantNameCollision(tenant string) (status int, msg stri
 	return 0, ""
 }
 
-// legacyRelayParams is the evidence one approver relay leaves: who was
-// named, who named them, and for which proposal. Only the input the caller
-// sent; nothing here is resolved or trusted.
 // directApproveDigestRefusal returns the typed code and message refusing a
 // direct approve's content digest, or "" when the digest is well formed.
 // The malformed value is not echoed: it is caller input that failed
@@ -786,15 +790,18 @@ func (h *Handlers) checkTenantNameCollision(tenant string) (status int, msg stri
 func directApproveDigestRefusal(digest string) (string, string) {
 	switch {
 	case digest == "":
-		return codeApprovalContentUnbound,
+		return aarCodeContentUnbound,
 			"expected_content_digest is required: pass the sha256 digest of the proposal content you reviewed (mctl-gitops scripts/proposal-content-digest.py)"
-	case !contentDigestRe.MatchString(digest):
+	case !contentDigestRE.MatchString(digest):
 		return codeApprovalContentDigestMalformed,
 			"expected_content_digest must be sha256:<64 lowercase hex>"
 	}
 	return "", ""
 }
 
+// legacyRelayParams is the evidence one approver relay leaves: who was
+// named, who named them, and for which proposal. Only the input the caller
+// sent; nothing here is resolved or trusted.
 func legacyRelayParams(user *auth.User, opName string, input map[string]string) map[string]string {
 	return map[string]string{
 		"approver":          input["approver"],

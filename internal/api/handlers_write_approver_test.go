@@ -18,11 +18,14 @@ import (
 // mctl-agents-approve writes approved_by into .status.yaml and into the gitops
 // commit message, so the approver must be a fact about who called rather than
 // a field the caller fills in (gitops#986). These assert on the value that
-// reaches the executor — a 202 alone says nothing about what was recorded.
 // reviewedDigest is a well-formed proposal content digest: a direct approve
 // must carry one (mctl-api#722), so every approval meant to succeed sends it.
 var reviewedDigest = "sha256:" + strings.Repeat("a", 64)
 
+// mctl-agents-approve writes approved_by into .status.yaml and into the gitops
+// commit message, so the approver must be a fact about who called rather than
+// a field the caller fills in (gitops#986). These assert on the value that
+// reaches the executor — a 202 alone says nothing about what was recorded.
 func approveParams(t *testing.T, router http.Handler, exec *fakeExecutor, body map[string]string, user *auth.User) (*int, map[string]string) {
 	t.Helper()
 	before := len(exec.submittedParams)
@@ -85,11 +88,14 @@ func TestApprove_NamingYourselfIsAccepted(t *testing.T) {
 // (mctl-gitops#1979), and the API refuses it first, before submit
 // (mctl-api#722). This used to be the Temporal worker's relay; the worker now
 // approves through an action-approval grant. Nothing is defaulted on the way
-// out either: no "unknown" approver, no submit.
+// out either: no "unknown" approver, no submit. Naming someone else is a
+// relay attempt and is counted as refused; naming nobody or itself is not a
+// relay and moves no counter.
 func TestApprove_ServiceWithoutAGrantCannotApprove(t *testing.T) {
-	for _, approver := range []string{"", auth.ServiceUserID, "mashkovd", "unknown"} {
+	for approver, isRelay := range map[string]bool{"": false, auth.ServiceUserID: false, "mashkovd": true, "unknown": true} {
 		router, exec, logger := newApproveRouter(t, false)
 		before := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed"))
+		refused := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("refused"))
 		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
 			"service": "mctl-web", "slug": "issue-4", "approver": approver,
 		}, auth.NewServiceUser())
@@ -99,10 +105,17 @@ func TestApprove_ServiceWithoutAGrantCannotApprove(t *testing.T) {
 		if len(exec.submittedParams) != 0 {
 			t.Errorf("approver %q: a workflow was submitted: %v", approver, exec.submittedParams)
 		}
-		// A refused relay is not a use of the relay: neither counted nor
-		// audited as one, or "zero relays" could never be read off either.
+		// A refused relay is not a use of the relay, but it is an attempt:
+		// counted as refused, never as relayed or as a legacy_relay row.
 		if d := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed")) - before; d != 0 {
 			t.Errorf("approver %q: relayed counter moved by %v, want 0", approver, d)
+		}
+		want := 0.0
+		if isRelay {
+			want = 1
+		}
+		if d := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("refused")) - refused; d != want {
+			t.Errorf("approver %q: refused counter moved by %v, want %v", approver, d, want)
 		}
 		if n := len(entriesFor(logger, "approver.legacy_relay")); n != 0 {
 			t.Errorf("approver %q: %d legacy_relay entries, want 0", approver, n)
@@ -195,10 +208,12 @@ func entriesFor(logger *audit.Logger, operation string) []audit.Entry {
 // mctl-api#571 kept the free-text relay alive behind a flag, counting and
 // auditing every use. A relay carries no content digest, so since
 // mctl-api#722 it is refused even with the flag on, and the refusal is
-// audited as a denied approve with its typed code, never as a relay.
-func TestApprove_LegacyRelayWithoutADigestIsRefusedNotCounted(t *testing.T) {
+// audited as a denied approve with its typed code, never as a relay, and
+// counted as a refused attempt so the counter still shows who relays.
+func TestApprove_LegacyRelayWithoutADigestIsRefusedAndCounted(t *testing.T) {
 	router, exec, logger := newApproveRouter(t, false)
 	relayed := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed"))
+	refused := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("refused"))
 	code, params := approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-8", "approver": "mashkovd",
 	}, auth.NewServiceUser())
@@ -207,6 +222,9 @@ func TestApprove_LegacyRelayWithoutADigestIsRefusedNotCounted(t *testing.T) {
 	}
 	if d := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed")) - relayed; d != 0 {
 		t.Errorf("relayed counter moved by %v, want 0", d)
+	}
+	if d := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("refused")) - refused; d != 1 {
+		t.Errorf("refused counter moved by %v, want 1", d)
 	}
 	if n := len(entriesFor(logger, "approver.legacy_relay")); n != 0 {
 		t.Errorf("%d legacy_relay entries for a refused relay, want 0", n)
