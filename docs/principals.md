@@ -468,6 +468,7 @@ compares principals (#629, next section).
 | `actor_not_accepted` | 400 | operation | the body names an `approver`, `expected_content_digest` or `approval_ref` |
 | `approval_intent_mismatch` | 409 | operation | another action kind, target or policy; a target that maps to no workflow id or not to the run's own DevLoop; or the approval's `we_` no longer exists |
 | `approval_consumed` / `approval_expired` | 409 | operation, approve route | spent or past its expiry |
+| `approval_executed` | 409 | approve route | the newest grant was spent and marked executed |
 | `approval_denied` | 409 | approve route | the newest grant was denied |
 | `approval_grant_missing` | 409 | approve route | no grant and the legacy flag is off |
 | `execution_ambiguous` | 409 | approve route | more than one open `we_` for the workflow id |

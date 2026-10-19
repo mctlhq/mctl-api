@@ -3096,8 +3096,8 @@ paths:
         execution or approval the legacy `{approver}` payload is signalled
         while `MCTL_AGENTS_APPROVE_LEGACY_APPROVER` is on, and 409
         `approval_grant_missing` is returned once it is off. An execution
-        whose newest approval was denied, consumed or let expire is 409
-        (`approval_denied`, `approval_consumed`, `approval_expired`), never
+        whose newest approval was denied, consumed, executed or let expire is 409
+        (`approval_denied`, `approval_consumed`, `approval_executed`, `approval_expired`), never
         the legacy payload: a recorded "no" is not an absent gate. Two open
         executions for the same run are 409 `execution_ambiguous`; a store
         that cannot be read is 503, never the legacy payload.
@@ -3149,7 +3149,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: approval_grant_missing, execution_ambiguous, the run's grant is no longer live (approval_denied, approval_consumed, approval_expired; never answered with the legacy payload), or an action approval refusal (approval_already_decided)
+          description: approval_grant_missing, execution_ambiguous, the run's grant is no longer live (approval_denied, approval_consumed, approval_executed, approval_expired; never answered with the legacy payload), or an action approval refusal (approval_already_decided)
           content:
             application/json:
               schema:
@@ -4594,7 +4594,7 @@ paths:
               additionalProperties: false
               properties:
                 target: {type: string}
-                artifact_hash: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                artifact_hash: {type: string, minLength: 1, description: Must equal the request's stored artifact_hash}
               required: [target, artifact_hash]
       responses:
         '200': {description: Marked executed, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}

@@ -962,8 +962,10 @@ var builtinOperations = []Operation{
 			// Approval provenance: the id of the action approval this approve
 			// spends, so the workflow can name the exact grant it acts on. Set
 			// by prepareApprovalGrant from the grant it verified and is about
-			// to consume; refused in a request body on every path.
-			{Name: "approval_ref", Type: "string", Required: false, Description: "Id (aar_...) of the action approval this approve spends. Set by the server from the approval grant on a delegated approve; never accepted from a request body.", Pattern: approvalRefPattern},
+			// to consume; refused in a request body on every path. Omitted, not
+			// sent as "", off the grant path, so the argument is present only
+			// when a grant was spent.
+			{Name: "approval_ref", Type: "string", Required: false, Description: "Id (aar_...) of the action approval this approve spends. Set by the server from the approval grant on a delegated approve; never accepted from a request body.", Pattern: approvalRefPattern, OmitWhenEmpty: true},
 		},
 	},
 	{

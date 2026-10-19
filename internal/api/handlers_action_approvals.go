@@ -479,8 +479,10 @@ func (h *Handlers) MarkActionApprovalExecuted(w http.ResponseWriter, r *http.Req
 		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "target is required", nil)
 		return
 	}
-	if !contentDigestRE.MatchString(body.ArtifactHash) {
-		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "artifact_hash must be sha256:<64 lowercase hex>", nil)
+	// Any non-empty value: the store compares it with the stored hash,
+	// which must itself be non-empty, and bounds its length.
+	if body.ArtifactHash == "" {
+		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "artifact_hash is required", nil)
 		return
 	}
 	a, err := h.opts.WorkItems.MarkActionApprovalExecuted(r.Context(), cur.ID, body.Target, body.ArtifactHash, principalOf(user))

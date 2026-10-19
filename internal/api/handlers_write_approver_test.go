@@ -358,13 +358,19 @@ func TestApprove_BodyApprovalRefIsRefusedOffTheGrantPath(t *testing.T) {
 			}
 		}
 	}
-	// Without the field both paths still submit, and nothing sets one.
-	router, exec := newTestRouter(t)
-	code, params := approveParams(t, router, exec, map[string]string{"service": "mctl-web", "slug": "issue-ref"}, adminUser)
-	if *code != http.StatusAccepted {
-		t.Fatalf("human admin without approval_ref: status = %d, want 202", *code)
-	}
-	if params["approval_ref"] != "" {
-		t.Errorf("approval_ref set off the grant path: %v", params)
+	// Without the field both paths still submit, and the argument is absent
+	// altogether, not "": only a spent grant puts one in the submit.
+	for name, user := range map[string]*auth.User{
+		"human admin": adminUser,
+		"service":     auth.NewServiceUser(),
+	} {
+		router, exec := newTestRouter(t)
+		code, params := approveParams(t, router, exec, map[string]string{"service": "mctl-web", "slug": "issue-ref"}, user)
+		if *code != http.StatusAccepted {
+			t.Fatalf("%s without approval_ref: status = %d, want 202", name, *code)
+		}
+		if v, present := params["approval_ref"]; present {
+			t.Errorf("%s: approval_ref = %q submitted off the grant path, want it absent", name, v)
+		}
 	}
 }

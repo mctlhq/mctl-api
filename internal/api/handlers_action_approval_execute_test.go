@@ -134,6 +134,7 @@ func TestActionApprovals_ExecuteRefusalsAreTyped(t *testing.T) {
 		{"denied", denied["id"].(string), executeBody(target, executeArtifactHash), aarCodeDenied, "denied"},
 		{"wrong target", consumed["id"].(string), executeBody(target+"-other", executeArtifactHash), aarCodeTargetMismatch, "consumed"},
 		{"wrong artifact", consumed["id"].(string), executeBody(target, otherHash), aarCodeTargetMismatch, "consumed"},
+		{"non-digest artifact", consumed["id"].(string), executeBody(target, "sha256:diff"), aarCodeTargetMismatch, "consumed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := e.markExecuted(auth.NewServiceUser(), tc.id, tc.body)
@@ -153,12 +154,11 @@ func TestActionApprovals_ExecuteRefusalsAreTyped(t *testing.T) {
 	}
 	// Malformed bodies are refused before the store is asked.
 	for name, body := range map[string]any{
-		"no target":        map[string]any{"artifact_hash": executeArtifactHash},
-		"no artifact":      map[string]any{"target": target},
-		"artifact pattern": executeBody(target, "sha256:diff"),
-		"uppercase hex":    executeBody(target, "sha256:"+strings.Repeat("E", 64)),
-		"unknown field":    map[string]any{"target": target, "artifact_hash": executeArtifactHash, "state": "executed"},
-		"not an object":    `["x"]`,
+		"no target":      map[string]any{"artifact_hash": executeArtifactHash},
+		"no artifact":    map[string]any{"target": target},
+		"empty artifact": executeBody(target, ""),
+		"unknown field":  map[string]any{"target": target, "artifact_hash": executeArtifactHash, "state": "executed"},
+		"not an object":  `["x"]`,
 	} {
 		if res := e.markExecuted(auth.NewServiceUser(), consumed["id"].(string), body); res.code != http.StatusBadRequest {
 			t.Errorf("%s = %d %s, want 400", name, res.code, res.raw)
