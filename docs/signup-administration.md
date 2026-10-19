@@ -22,7 +22,9 @@ invitations or set capacity. The shared MCP portal hides these private tools.
    supplied login; both the original submission and verified selection are kept.
    Capacity exhaustion returns `signup_capacity_exhausted` and leaves the
    request pending, with no access or decision email. Rejection needs no slot.
-4. Inspect the request again: `notification_pending` means the durable email
+4. Inspect the request again: `decided_at` records the decision time and
+   `delivery_id` exposes the provider receipt after acknowledgement.
+   `notification_pending` means the durable email
    outbox has not acknowledged delivery. Provider acceptance does not prove
    mailbox delivery. Never ask the applicant to resubmit to retry notification.
 
@@ -70,3 +72,10 @@ maintenance (no automatic release API); do not infer absence from an unavailable
 
 The canonical rollout/capacity assessment is in
 [mctl-web's onboarding plan](https://github.com/mctlhq/mctl-web/blob/main/docs/plans/site-onboarding-review.md).
+
+Operational failures log the operation, error class/type, provider stage and
+observed HTTP status or SQLSTATE. Raw exception strings, provider URLs, bodies
+and applicant contact fields are deliberately excluded. A lost delivery lease
+is a debug event rather than an unexplained database warning. An existing
+workspace name cannot acquire a new claim; a bound same-name retry is allowed
+only when GitOps confirms the same principal still owns it.

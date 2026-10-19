@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +18,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/customerdelete"
+	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/principals"
 )
 
@@ -176,6 +181,16 @@ func TestSignupClaimChecksIdentityProfileAndWorkspace(t *testing.T) {
 		h.surfacePrincipalGate(http.HandlerFunc(h.ClaimSignup)).ServeHTTP(w, r)
 		return w
 	}
+	reader.exists = true
+	if w := call(); w.Code != 409 {
+		t.Fatalf("exact existing name claimed: %d %s", w.Code, w.Body.String())
+	}
+	reader.exists = false
+	reader.err = errors.New("tenant read failed")
+	if w := call(); w.Code != 503 {
+		t.Fatalf("unreadable name admitted: %d", w.Code)
+	}
+	reader.err = nil
 	reader.names = []string{"new"}
 	if w := call(); w.Code != 400 {
 		t.Fatalf("surface name collision: %d %s", w.Code, w.Body.String())
@@ -205,6 +220,16 @@ func TestSignupClaimChecksIdentityProfileAndWorkspace(t *testing.T) {
 			t.Fatalf("valid/retry: %d %s", w.Code, w.Body.String())
 		}
 	}
+	reader.exists = true
+	reader.tenant = &gitops.Tenant{Name: "new-team", Members: []gitops.TenantMember{{PrincipalID: principal.ID, Role: "owner"}}}
+	if w := call(); w.Code != 200 {
+		t.Fatalf("bound own-workspace retry: %d %s", w.Code, w.Body.String())
+	}
+	reader.tenant.Members[0].PrincipalID = "prn_01M45DR1GWC87109EH88VBJX26"
+	if w := call(); w.Code != 409 {
+		t.Fatalf("foreign-workspace retry: %d", w.Code)
+	}
+	reader.exists = false
 	claim["tenant"] = "second-team"
 	if w := call(); w.Code != 409 {
 		t.Fatalf("second workspace: %d %s", w.Code, w.Body.String())
@@ -421,7 +446,38 @@ func TestSignupExistingPrincipalIsNotAnInvitation(t *testing.T) {
 
 type signupFixtureReader struct {
 	GitReader
-	names []string
+	names  []string
+	exists bool
+	tenant *gitops.Tenant
+	err    error
 }
 
 func (r *signupFixtureReader) TenantNames() ([]string, error) { return r.names, nil }
+
+func (r *signupFixtureReader) TenantExists(string) (bool, error)        { return r.exists, r.err }
+func (r *signupFixtureReader) GetTenant(string) (*gitops.Tenant, error) { return r.tenant, r.err }
+
+func TestSignupHTTPFailureLogsSafeProviderDiagnostics(t *testing.T) {
+	s := signupStore(t)
+	var output bytes.Buffer
+	original := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(original) })
+	h := &Handlers{opts: Options{Signup: &SignupOptions{Store: s, SiteCall: func(context.Context, string, string, []byte) ([]byte, error) {
+		return nil, &customerdelete.SignupSiteError{Stage: "site_response", Status: 503, Cause: errors.New("fixture-private-token-and-email@example.com")}
+	}}}}
+	r := httptest.NewRequest("GET", "/", nil)
+	r = r.WithContext(auth.WithUser(r.Context(), signupAdminUser(t)))
+	w := httptest.NewRecorder()
+	h.ListSignupRequests(w, r)
+	if w.Code != 503 {
+		t.Fatal(w.Code)
+	}
+	log := output.String()
+	if !strings.Contains(log, "request_list_read") || !strings.Contains(log, "site_response") || !strings.Contains(log, `"http_status":503`) {
+		t.Fatalf("missing actionable context: %s", log)
+	}
+	if strings.Contains(log, "fixture-private-token") {
+		t.Fatal("private provider text was logged")
+	}
+}

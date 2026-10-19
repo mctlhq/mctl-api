@@ -37,7 +37,7 @@ func TestSignupZeroCapacityAndImmutableRecipient(t *testing.T) {
 		t.Fatalf("recipient overwrite: %v", err)
 	}
 	d, err := s.DecideSignup(ctx, r.ID, "rejected", "", "", "admin", "Pilot full")
-	if err != nil || d.Request.Email != "test@example.com" || !d.NotificationPending {
+	if err != nil || d.Request.Email != "test@example.com" || !d.NotificationPending || d.DecidedAt == nil {
 		t.Fatalf("rejection: %+v %v", d, err)
 	}
 }
@@ -116,6 +116,11 @@ func TestSignupClaimRetryExpiryAndDeliveryLease(t *testing.T) {
 	if err := s.AckSignupDelivery(ctx, r.ID, lease, "email-id"); err != nil {
 		t.Fatal(err)
 	}
+	acknowledged, err := s.Signup(ctx, r.ID)
+	if err != nil || acknowledged.NotificationPending || acknowledged.DeliveryID != "email-id" {
+		t.Fatalf("receipt not observable: %+v %v", acknowledged, err)
+	}
+
 	if _, err := s.pool.Exec(ctx, `UPDATE signup_requests SET expires_at=now()-interval '1 day' WHERE id=$1`, r.ID); err != nil {
 		t.Fatal(err)
 	}

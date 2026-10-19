@@ -50,6 +50,8 @@ type SignupDecision struct {
 	GitHubLogin         string        `json:"github_login"`
 	Actor               string        `json:"actor"`
 	Reason              string        `json:"reason"`
+	DecidedAt           *time.Time    `json:"decided_at"`
+	DeliveryID          string        `json:"delivery_id"`
 	ExpiresAt           *time.Time    `json:"expires_at"`
 	Tenant              string        `json:"tenant"`
 	NotificationPending bool          `json:"notification_pending"`
@@ -63,12 +65,12 @@ type SignupCapacity struct {
 	Reason    string `json:"reason"`
 }
 
-const signupColumns = `id::text,payload,created_at,status,coalesce(github_id,''),coalesce(github_login,''),actor,reason,expires_at,coalesce(tenant,''),notification_pending`
+const signupColumns = `id::text,payload,created_at,status,coalesce(github_id,''),coalesce(github_login,''),actor,reason,decided_at,expires_at,coalesce(tenant,''),notification_pending,coalesce(delivery_id,'')`
 
 func scanSignup(row pgx.Row) (SignupDecision, error) {
 	var d SignupDecision
 	var payload []byte
-	err := row.Scan(&d.Request.ID, &payload, &d.Request.CreatedAt, &d.Status, &d.GitHubID, &d.GitHubLogin, &d.Actor, &d.Reason, &d.ExpiresAt, &d.Tenant, &d.NotificationPending)
+	err := row.Scan(&d.Request.ID, &payload, &d.Request.CreatedAt, &d.Status, &d.GitHubID, &d.GitHubLogin, &d.Actor, &d.Reason, &d.DecidedAt, &d.ExpiresAt, &d.Tenant, &d.NotificationPending, &d.DeliveryID)
 	if err != nil {
 		return d, err
 	}
@@ -258,6 +260,13 @@ func (s *Store) claimSignup(ctx context.Context, githubID, tenant, pid string, p
 		return ErrSignupConflict
 	}
 	return err
+}
+
+// SignupClaimMatches observes an already-bound retry, never an unused approval.
+func (s *Store) SignupClaimMatches(ctx context.Context, pid, tenant string) (bool, error) {
+	var matches bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM signup_requests WHERE principal_id=$1 AND tenant=$2 AND status='claimed')`, pid, tenant).Scan(&matches)
+	return matches, err
 }
 
 // Delivery leases serialize retries across API replicas. The provider key is

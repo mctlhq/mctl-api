@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,7 +70,7 @@ func (p *Providers) zitadelToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if status != 200 {
-		return "", fmt.Errorf("IdP service authentication HTTP %d", status)
+		return "", &serviceAuthenticationError{status: status}
 	}
 	var body struct {
 		AccessToken string `json:"access_token"`
@@ -248,6 +249,22 @@ func (p *Providers) CancelPortal(ctx context.Context, d *principals.CustomerDele
 	return p.portalLifecycle(ctx, d, "cancel")
 }
 
+type serviceAuthenticationError struct{ status int }
+
+func (e *serviceAuthenticationError) Error() string {
+	return fmt.Sprintf("IdP service authentication HTTP %d", e.status)
+}
+
+// SignupSiteError exposes only safe stage/status diagnostics to callers.
+type SignupSiteError struct {
+	Stage  string
+	Status int
+	Cause  error
+}
+
+func (e *SignupSiteError) Error() string { return "invitation bridge unavailable" }
+func (e *SignupSiteError) Unwrap() error { return e.Cause }
+
 // SignupSite reaches only the Worker's private invitation bridge, authenticated
 // as the existing customer-lifecycle machine. It cannot call arbitrary URLs.
 func (p *Providers) SignupSite(ctx context.Context, method, path string, body []byte) ([]byte, error) {
@@ -256,14 +273,19 @@ func (p *Providers) SignupSite(ctx context.Context, method, path string, body []
 	}
 	token, err := p.zitadelToken(ctx)
 	if err != nil {
-		return nil, err
+		failure := &SignupSiteError{Stage: "service_authentication", Cause: err}
+		var status *serviceAuthenticationError
+		if errors.As(err, &status) {
+			failure.Status = status.status
+		}
+		return nil, failure
 	}
 	status, data, err := p.request(ctx, method, strings.TrimRight(p.SiteBase, "/")+path, token, "application/json", body)
 	if err != nil {
-		return nil, err
+		return nil, &SignupSiteError{Stage: "site_request", Status: status, Cause: err}
 	}
 	if status != 200 {
-		return nil, fmt.Errorf("invitation bridge HTTP %d", status)
+		return nil, &SignupSiteError{Stage: "site_response", Status: status}
 	}
 	return data, nil
 }

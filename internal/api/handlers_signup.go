@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -71,8 +70,11 @@ func (h *Handlers) importSignup(ctx context.Context, id string) (principals.Sign
 	if err != nil {
 		return principals.SignupDecision{}, err
 	}
-	if err = json.Unmarshal(raw, &r); err != nil || r.ID != id || !validSignup(r) {
-		return principals.SignupDecision{}, errors.New("invalid invitation source")
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return principals.SignupDecision{}, err
+	}
+	if r.ID != id || !validSignup(r) {
+		return principals.SignupDecision{}, errSignupInvalidResponse
 	}
 	if err := h.opts.Signup.Store.ImportSignup(ctx, r); err != nil {
 		return principals.SignupDecision{}, err
@@ -102,7 +104,18 @@ func (h *Handlers) ListSignupRequests(w http.ResponseWriter, r *http.Request) {
 		TraversalComplete *bool             `json:"traversal_complete"`
 		Observation       string            `json:"observation"`
 	}
-	if err != nil || json.Unmarshal(raw, &page) != nil || page.Requests == nil || (page.Complete == nil && page.TraversalComplete == nil) || len(page.Requests)+len(page.Issues) > 100 || len(page.Cursor) > 4096 {
+	if err != nil {
+		signupFailure(r.Context(), "request_list_read", err)
+		writeError(w, 503, "invitation listing could not be observed")
+		return
+	}
+	if err := json.Unmarshal(raw, &page); err != nil {
+		signupFailure(r.Context(), "request_list_decode", err)
+		writeError(w, 503, "invitation listing could not be observed")
+		return
+	}
+	if page.Requests == nil || (page.Complete == nil && page.TraversalComplete == nil) || len(page.Requests)+len(page.Issues) > 100 || len(page.Cursor) > 4096 {
+		signupFailure(r.Context(), "request_list_contract", errSignupInvalidResponse)
 		writeError(w, 503, "invitation listing could not be observed")
 		return
 	}
@@ -141,7 +154,8 @@ func (h *Handlers) ListSignupRequests(w http.ResponseWriter, r *http.Request) {
 	seen := map[string]bool{}
 	for _, rawItem := range page.Requests {
 		var item principals.SignupRequest
-		if json.Unmarshal(rawItem, &item) != nil {
+		if err := json.Unmarshal(rawItem, &item); err != nil {
+			signupFailure(r.Context(), "request_record_decode", err)
 			issues = append(issues, issue{ID: "unknown", Error: "invalid_record"})
 			continue
 		}
@@ -159,15 +173,18 @@ func (h *Handlers) ListSignupRequests(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if !validSignup(item) {
+			signupFailure(r.Context(), "request_record_validate", errSignupInvalidResponse, "request_id", item.ID)
 			issues = append(issues, issue{ID: item.ID, Error: "invalid_record"})
 			continue
 		}
 		if err := h.opts.Signup.Store.ImportSignup(r.Context(), item); err != nil {
+			signupFailure(r.Context(), "request_store_import", err, "request_id", item.ID)
 			issues = append(issues, issue{ID: item.ID, Error: "record_unreadable"})
 			continue
 		}
 		d, err := h.opts.Signup.Store.Signup(r.Context(), item.ID)
 		if err != nil {
+			signupFailure(r.Context(), "request_decision_read", err, "request_id", item.ID)
 			issues = append(issues, issue{ID: item.ID, Error: "decision_unreadable"})
 			continue
 		}
@@ -186,6 +203,7 @@ func (h *Handlers) GetSignupCapacity(w http.ResponseWriter, r *http.Request) {
 	}
 	c, err := h.opts.Signup.Store.SignupCapacity(r.Context())
 	if err != nil {
+		signupFailure(r.Context(), "capacity_read", err)
 		writeError(w, 503, "capacity unavailable")
 		return
 	}
@@ -211,6 +229,7 @@ func (h *Handlers) SetSignupCapacity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		signupFailure(r.Context(), "capacity_update", err)
 		writeError(w, 503, "capacity update failed")
 		return
 	}
@@ -238,6 +257,7 @@ func (h *Handlers) DecideSignupRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	d, err := h.importSignup(r.Context(), id)
 	if err != nil {
+		signupFailure(r.Context(), "request_import", err, "request_id", id)
 		writeError(w, 503, "saved request could not be verified")
 		return
 	}
@@ -253,6 +273,7 @@ func (h *Handlers) DecideSignupRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		githubID, login, err = h.resolveSignupGitHub(r.Context(), login)
 		if err != nil {
+			signupFailure(r.Context(), "github_lookup", err, "request_id", id)
 			writeError(w, 503, "GitHub identity could not be verified")
 			return
 		}
@@ -262,6 +283,7 @@ func (h *Handlers) DecideSignupRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		existing, revoked, err := h.opts.Signup.Store.LookupIdentity(r.Context(), auth.ProviderGitHub, "", githubID)
 		if err != nil && !errors.Is(err, principals.ErrNotFound) {
+			signupFailure(r.Context(), "existing_identity_read", err, "request_id", id)
 			writeError(w, 503, "existing identity unreadable")
 			return
 		}
@@ -279,6 +301,7 @@ func (h *Handlers) DecideSignupRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			tenants, err := strict.ListTenantsStrict()
 			if err != nil {
+				signupFailure(r.Context(), "existing_workspace_read", err, "request_id", id)
 				writeError(w, 503, "existing workspace ownership unreadable")
 				return
 			}
@@ -305,6 +328,7 @@ func (h *Handlers) DecideSignupRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		signupFailure(r.Context(), "decision_save", err, "request_id", id)
 		writeError(w, 503, "decision could not be saved")
 		return
 	}
@@ -322,28 +346,28 @@ func (h *Handlers) resolveSignupGitHub(ctx context.Context, login string) (strin
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", base+"/users/"+url.PathEscape(login), nil)
 	if err != nil {
-		return "", "", err
+		return "", "", &signupProviderError{stage: "request_build", cause: err}
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "MCTL-signup-administration")
 	res, err := client.Do(req)
 	if err != nil {
-		return "", "", errors.New("GitHub lookup failed")
+		return "", "", &signupProviderError{stage: "request", cause: err}
 	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != 200 {
-		return "", "", errors.New("GitHub lookup refused")
+		return "", "", &signupProviderError{stage: "response", status: res.StatusCode}
 	}
 	raw, err := io.ReadAll(io.LimitReader(res.Body, 32769))
 	if err != nil || len(raw) > 32768 {
-		return "", "", errors.New("GitHub response invalid")
+		return "", "", &signupProviderError{stage: "response_decode", status: res.StatusCode, cause: errSignupInvalidResponse}
 	}
 	var body struct {
 		ID    json.Number `json:"id"`
 		Login string      `json:"login"`
 	}
 	if json.Unmarshal(raw, &body) != nil || !signupID.MatchString(string(body.ID)) || !strings.EqualFold(body.Login, login) {
-		return "", "", errors.New("GitHub response invalid")
+		return "", "", &signupProviderError{stage: "response_decode", status: res.StatusCode, cause: errSignupInvalidResponse}
 	}
 	return string(body.ID), body.Login, nil
 }
@@ -384,6 +408,48 @@ func (h *Handlers) ClaimSignup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "workspace name is reserved")
 		return
 	}
+	if h.opts.GitReader == nil {
+		writeError(w, 503, "workspace existence unavailable")
+		return
+	}
+	exists, err := h.opts.GitReader.TenantExists(b.Tenant)
+	if err != nil {
+		signupFailure(r.Context(), "tenant_existence", err, "tenant", b.Tenant)
+		writeError(w, 503, "workspace existence unreadable")
+		return
+	}
+	if exists {
+		bound, err := o.Store.SignupClaimMatches(r.Context(), b.Principal, b.Tenant)
+		if err != nil {
+			signupFailure(r.Context(), "claim_retry_read", err, "tenant", b.Tenant)
+			writeError(w, 503, "workspace reservation unreadable")
+			return
+		}
+		if !bound {
+			writeError(w, 409, "workspace already exists")
+			return
+		}
+		tenant, err := h.opts.GitReader.GetTenant(b.Tenant)
+		if err != nil || tenant == nil {
+			if err == nil {
+				err = errSignupInvalidResponse
+			}
+			signupFailure(r.Context(), "retry_owner_read", err, "tenant", b.Tenant)
+			writeError(w, 503, "workspace ownership unreadable")
+			return
+		}
+		owned := false
+		for n := range tenant.Members {
+			member := &tenant.Members[n]
+			if member.PrincipalID == b.Principal && member.Role == "owner" {
+				owned = true
+			}
+		}
+		if !owned {
+			writeError(w, 409, "existing workspace belongs to another principal")
+			return
+		}
+	}
 	if status, message := h.checkTenantNameCollision(b.Tenant); status != 0 {
 		writeError(w, status, message)
 		return
@@ -405,7 +471,11 @@ func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory
 		return 503, "signup admission unavailable"
 	}
 	principal, err := o.Store.Get(ctx, pid)
+	if errors.Is(err, principals.ErrNotFound) {
+		return 403, "active customer principal required"
+	}
 	if err != nil {
+		signupFailure(ctx, "claim_principal_read", err, "principal_id", pid)
 		return 503, "principal unreadable"
 	}
 	if principal == nil || principal.Status != principals.StatusActive || principal.Kind != auth.KindHuman {
@@ -413,6 +483,7 @@ func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory
 	}
 	identities, err := o.Store.Identities(ctx, pid)
 	if err != nil {
+		signupFailure(ctx, "claim_identity_read", err, "principal_id", pid)
 		return 503, "identity unreadable"
 	}
 	githubID := ""
@@ -446,6 +517,7 @@ func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory
 		return 409, "workspace reservation unavailable"
 	}
 	if err != nil {
+		signupFailure(ctx, "claim_commit", err, "principal_id", pid, "tenant", tenant)
 		return 503, "workspace admission unreadable"
 	}
 	return 0, ""
@@ -464,32 +536,40 @@ func (o *SignupOptions) Run(ctx context.Context) {
 				break
 			}
 			if err != nil {
-				slog.Error("signup: delivery observation failed")
+				signupFailure(ctx, "delivery_lease_read", err)
 				break
 			}
 			if d.Status == "claimed" {
 				d.Status = "approved"
 			}
-			raw, _ := json.Marshal(d)
+			raw, err := json.Marshal(d)
+			if err != nil {
+				signupFailure(ctx, "delivery_encode", err, "request_id", d.Request.ID)
+				continue
+			}
 			data, err := o.SiteCall(ctx, "POST", "/api/internal/invitations/decision", raw)
 			if err != nil {
-				slog.Warn("signup: decision delivery pending", "request_id", d.Request.ID)
+				signupFailure(ctx, "delivery_bridge", err, "request_id", d.Request.ID)
 				continue
 			}
 			var receipt struct {
 				ID         string `json:"id"`
 				DeliveryID string `json:"delivery_id"`
 			}
-			if json.Unmarshal(data, &receipt) != nil || receipt.ID != d.Request.ID || receipt.DeliveryID == "" {
-				slog.Warn("signup: malformed delivery receipt", "request_id", d.Request.ID)
+			if err := json.Unmarshal(data, &receipt); err != nil {
+				signupFailure(ctx, "delivery_receipt_decode", err, "request_id", d.Request.ID)
+				continue
+			}
+			if receipt.ID != d.Request.ID || receipt.DeliveryID == "" {
+				signupFailure(ctx, "delivery_receipt_contract", errSignupInvalidResponse, "request_id", d.Request.ID)
 				continue
 			}
 			if err = o.Store.AckSignupDelivery(ctx, d.Request.ID, lease, receipt.DeliveryID); err != nil {
-				slog.Warn("signup: delivery acknowledgement pending", "request_id", d.Request.ID)
+				signupFailure(ctx, "delivery_acknowledge", err, "request_id", d.Request.ID)
 			}
 		}
 		if err := o.Store.CleanupSignupPII(ctx); err != nil {
-			slog.Warn("signup: retention sweep failed")
+			signupFailure(ctx, "retention_sweep", err)
 		}
 		select {
 		case <-ctx.Done():
