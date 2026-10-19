@@ -17,6 +17,7 @@ package customerdelete
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -156,6 +157,61 @@ func TestCleanPortalRequiresCustomerScope(t *testing.T) {
 			err := p.CleanPortal(context.Background(), &principals.CustomerDeletion{Tenant: "acme", PrincipalID: "prn_01M45DR1GWC87109EH88VBJX25", Login: "alice"})
 			if (err == nil) != (scope == "customer") {
 				t.Fatalf("scope=%q error=%v", scope, err)
+			}
+		})
+	}
+}
+
+func TestSignupSiteUsesLifecycleCredentialAndReportsSafeFailureStage(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		authStatus, siteStatus int
+		stage                  string
+		wantStatus             int
+	}{
+		{"authentication", 401, 200, "service_authentication", 401}, {"site", 200, 403, "site_response", 403}, {"redirect", 200, 302, "site_response", 302}, {"success", 200, 200, "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/oauth/v2/token" {
+					if id, secret, ok := r.BasicAuth(); !ok || id != "lifecycle" || secret != "fixture-secret" {
+						t.Error("missing lifecycle authentication")
+					}
+					w.WriteHeader(tc.authStatus)
+					_, _ = w.Write([]byte(`{"access_token":"fixture-jwt"}`))
+					return
+				}
+				calls++
+				if r.URL.Path != "/api/internal/invitations/requests" || r.Header.Get("Authorization") != "Bearer fixture-jwt" {
+					t.Error("wrong bridge route or credential")
+				}
+				w.Header().Set("Location", "https://unrelated.example")
+				w.WriteHeader(tc.siteStatus)
+				_, _ = w.Write([]byte(`{"requests":[]}`))
+			}))
+			defer server.Close()
+			provider := &Providers{Issuer: server.URL, SiteBase: server.URL, ClientID: "lifecycle", ClientSecret: "fixture-secret", SessionAudience: "worker-project"}
+			_, err := provider.SignupSite(context.Background(), "GET", "/api/internal/invitations/requests", nil)
+			if tc.stage == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				var failure *SignupSiteError
+				if !errors.As(err, &failure) || failure.Stage != tc.stage || failure.Status != tc.wantStatus {
+					t.Fatalf("wrong safe diagnostic: %#v", failure)
+				}
+				if strings.Contains(err.Error(), "fixture-secret") {
+					t.Fatal("credential in error text")
+				}
+			}
+			if tc.authStatus != 200 && calls != 0 {
+				t.Fatal("bridge called without service authentication")
+			}
+			before := calls
+			if _, err := provider.SignupSite(context.Background(), "GET", "/api/internal/invitations-evil/requests", nil); err == nil || calls != before {
+				t.Fatal("prefix escape reached a provider")
 			}
 		})
 	}

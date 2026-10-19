@@ -222,6 +222,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 
 	// Auth tools.
 	srv.AddTool(s.toolWhoami())
+	srv.AddTool(s.toolListSignupRequests())
+	srv.AddTool(s.toolDecideSignupRequest())
+	srv.AddTool(s.toolSignupCapacity())
 
 	// Read tools (safe, always available).
 	srv.AddTool(s.toolListTenants())
@@ -739,6 +742,8 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		mcplib.WithString("quota_memory_req",
 			mcplib.Description("Memory request quota (default: 1280Mi)"),
 		),
+		mcplib.WithString("quota_cpu_lim", mcplib.Description("CPU limit quota (default: 3; funded invited-customer profile: 2)")),
+		mcplib.WithString("quota_memory_lim", mcplib.Description("Memory limit quota (default: 4Gi; funded invited-customer profile: 3Gi)")),
 		mcplib.WithString("quota_pods",
 			mcplib.Description("Maximum pods (default: 10)"),
 		),

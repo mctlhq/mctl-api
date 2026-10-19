@@ -841,3 +841,55 @@ func TestIntentBlocksCreationDuringDeletion(t *testing.T) {
 		})
 	}
 }
+
+func TestDynamicInvitationGateFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		allowed bool
+		err     error
+		want    string
+	}{
+		{"approved", true, nil, "intent_create"}, {"absent", false, nil, "intent_customer_create_not_allowed:4242"}, {"unknown", false, errors.New("database unavailable"), "intent_invitation_unreadable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHookCreating(t, []string{"999"}, nil, verified, 0)
+			h.cfg.CustomerInvitationAllowed = func(context.Context, string) (bool, error) { return tc.allowed, tc.err }
+			result := h.Intent(context.Background(), intentBody(idpGitHub, "4242", "Bob-B", "", nil))
+			if result.Reason != tc.want {
+				t.Fatalf("reason %s, want %s", result.Reason, tc.want)
+			}
+		})
+	}
+}
+func TestStaticCohortDoesNotDependOnInvitationDatabase(t *testing.T) {
+	h := newHookCreating(t, []string{"4242"}, nil, verified, 0)
+	h.cfg.CustomerInvitationAllowed = func(context.Context, string) (bool, error) {
+		t.Fatal("static cohort queried invitation database")
+		return false, errors.New("unavailable")
+	}
+	if r := h.Intent(context.Background(), intentBody(idpGitHub, "4242", "Bob-B", "", nil)); r.Reason != "intent_create" {
+		t.Fatal(r.Reason)
+	}
+}
+
+func TestDynamicInvitationCreateGate(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		allowed    bool
+		err        error
+		wantStatus int
+	}{
+		{"approved", true, nil, http.StatusOK}, {"absent", false, nil, http.StatusForbidden}, {"unknown", false, errors.New("database unavailable"), http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHookCreating(t, []string{"999"}, nil, verified, 0)
+			h.cfg.CustomerInvitationAllowed = func(context.Context, string) (bool, error) { return tc.allowed, tc.err }
+			result := h.CreateGate(context.Background(), createBodyFrom(t, goodCreate(), loginClient))
+			if tc.wantStatus == http.StatusForbidden {
+				refusedWith(t, result, tc.wantStatus)
+			} else if result.Status != tc.wantStatus {
+				t.Fatalf("status %d reason %s, want %d", result.Status, result.Reason, tc.wantStatus)
+			}
+		})
+	}
+}
