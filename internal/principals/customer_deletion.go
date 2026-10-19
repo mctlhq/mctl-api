@@ -334,6 +334,12 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 				return err
 			}
 		}
+		if err := signupLock(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE signup_requests SET status='released',notification_pending=false WHERE principal_id=$1 AND status='claimed'`, pid); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `DELETE FROM external_identities WHERE principal_id=$1`, pid); err != nil {
 			return err
 		}

@@ -247,3 +247,23 @@ func (p *Providers) ReleasePortal(ctx context.Context, d *principals.CustomerDel
 func (p *Providers) CancelPortal(ctx context.Context, d *principals.CustomerDeletion) error {
 	return p.portalLifecycle(ctx, d, "cancel")
 }
+
+// SignupSite reaches only the Worker's private invitation bridge, authenticated
+// as the existing customer-lifecycle machine. It cannot call arbitrary URLs.
+func (p *Providers) SignupSite(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	if !strings.HasPrefix(path, "/api/internal/invitations/") {
+		return nil, fmt.Errorf("invalid invitation bridge path")
+	}
+	token, err := p.zitadelToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	status, data, err := p.request(ctx, method, strings.TrimRight(p.SiteBase, "/")+path, token, "application/json", body)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("invitation bridge HTTP %d", status)
+	}
+	return data, nil
+}

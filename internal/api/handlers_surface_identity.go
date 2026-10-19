@@ -86,6 +86,7 @@ type surfaceRoute struct {
 // else answers 403 before any handler runs: a surface credential is a narrow
 // relay capability, not an API key. Relay is opt-in per route, here.
 var surfaceRoutes = []surfaceRoute{
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-principals/signup-claim$`), false},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/surface-principals/workspace-access/[^/]+$`), false},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/surface-identities/redeem$`), false},
 	// The portal surface resolves a tenant creator's GitHub login to a

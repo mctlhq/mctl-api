@@ -157,7 +157,8 @@ type Config struct {
 	// a NEW customers account (ParseCustomerCreateAllowlist). Empty allows
 	// nobody, so creation is closed until it is listed; exactly "*" allows
 	// anyone (the public cutover). Existing accounts sign in regardless.
-	CustomerCreateGitHubIDs []string
+	CustomerCreateGitHubIDs   []string
+	CustomerInvitationAllowed func(context.Context, string) (bool, error)
 	// CreationPending refuses re-registration until a durable deletion completes.
 	CreationPending func(context.Context, string) (bool, error)
 	// GitHubAPIURL overrides https://api.github.com (tests only).
@@ -306,8 +307,14 @@ const msgCreateNotAllowed = "New MCTL accounts are by invitation only for now. C
 
 // mayCreate reports whether the GitHub id may create a new customers
 // account. Only creation asks: an existing account signs in regardless.
-func (h *Hook) mayCreate(githubID string) bool {
-	return h.createAnyone || h.createIDs[githubID]
+func (h *Hook) mayCreate(ctx context.Context, githubID string) (bool, error) {
+	if h.createAnyone || h.createIDs[githubID] {
+		return true, nil
+	}
+	if h.cfg.CustomerInvitationAllowed != nil {
+		return h.cfg.CustomerInvitationAllowed(ctx, githubID)
+	}
+	return false, nil
 }
 
 // ---------------------------------------------------------------- intent
@@ -386,7 +393,11 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 	// refused whatever else holds. The reason carries the GitHub id, never
 	// the email, so a refused request can be put on the list.
 	if existingUserID == "" {
-		if !h.mayCreate(info.UserID) {
+		allowed, err := h.mayCreate(ctx, info.UserID)
+		if err != nil {
+			return failure("intent_invitation_unreadable")
+		}
+		if !allowed {
 			return refuse(http.StatusForbidden, "intent_customer_create_not_allowed:"+info.UserID, msgCreateNotAllowed)
 		}
 		if h.cfg.CreationPending != nil {
@@ -812,7 +823,11 @@ func (h *Hook) gateCreateUser(ctx context.Context, p requestPayload) Result {
 	// The same allowlist as Intent, held here too: the gate is what every
 	// creation passes, whatever produced the request. Before the
 	// reserved check, as in Intent: it needs no I/O.
-	if !h.mayCreate(link.UserID) {
+	allowed, err := h.mayCreate(ctx, link.UserID)
+	if err != nil {
+		return failure("gate_invitation_unreadable")
+	}
+	if !allowed {
 		return refuse(http.StatusForbidden, "gate_customer_create_not_allowed:"+link.UserID, msgCreateNotAllowed)
 	}
 	if h.cfg.CreationPending != nil {
