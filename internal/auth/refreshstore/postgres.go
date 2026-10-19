@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 const schema = `
@@ -109,12 +110,12 @@ var rotationGraceWindow = defaultRotationGraceWindow
 
 // NewPostgresStore creates a PostgresStore and auto-creates the schema.
 func NewPostgresStore(ctx context.Context, connStr string) (*PostgresStore, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("oauth refresh store: connect: %w", err)
 	}
 	if _, err := pool.Exec(ctx, schema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("oauth refresh store: create schema: %w", err)
 	}
 	slog.Info("oauth refresh token store initialized")

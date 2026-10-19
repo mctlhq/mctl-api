@@ -23,6 +23,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 // schema is the two-table design from design.md: an immutable sealed record
@@ -219,20 +220,20 @@ type Store struct {
 
 // NewStore connects, applies the schema and returns a ready store.
 func NewStore(ctx context.Context, connStr string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("evidence: connect: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("evidence: ping: %w", err)
 	}
 	if _, err := pool.Exec(ctx, schema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("evidence: schema: %w", err)
 	}
 	if _, err := pool.Exec(ctx, schemaAmendment2); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("evidence: schema (ADR 018 Amendment 2): %w", err)
 	}
 	slog.Info("evidence store initialized")
@@ -242,7 +243,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 // Close releases the pool.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
-		s.pool.Close()
+		pgshared.Release(s.pool)
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 // Sentinel errors — handlers/MCP tools map these to specific HTTP statuses
@@ -218,12 +219,12 @@ type Store struct {
 
 // NewStore creates an agent registry store and auto-creates the schema.
 func NewStore(ctx context.Context, connStr string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("agentregistry: connect: %w", err)
 	}
 	if _, err := pool.Exec(ctx, agentRegistrySchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("agentregistry: create schema: %w", err)
 	}
 	slog.Info("agent registry store initialized")

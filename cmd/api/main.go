@@ -62,6 +62,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/loki"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 	"github.com/mctlhq/mctl-api/internal/principals"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
@@ -161,6 +162,9 @@ func main() {
 	// pgxpool.New and the schema Exec, then keeps only the pool. So it is safe
 	// to release it once the last store is built.
 	initCtx, cancelInit := context.WithTimeout(rootCtx, storeInitBudget)
+	// The stores below share one bounded pool per database URL instead of
+	// opening one each (mctl-api#508).
+	pgshared.EnableSharing()
 	// Every store below that is configured but fails init is recorded here,
 	// and GET /readyz answers 503 while any is (mctl-api#387): such a store
 	// stays nil for the pod's lifetime, so a pod that reported ready with it

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 const outboxSchema = `
@@ -63,19 +64,19 @@ type Outbox struct {
 
 // NewOutbox connects and creates the schema.
 func NewOutbox(ctx context.Context, connStr string) (*Outbox, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("event outbox: connect: %w", err)
 	}
 	if _, err := pool.Exec(ctx, outboxSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("event outbox: create schema: %w", err)
 	}
 	return &Outbox{pool: pool}, nil
 }
 
 // Close releases the pool.
-func (o *Outbox) Close() { o.pool.Close() }
+func (o *Outbox) Close() { pgshared.Release(o.pool) }
 
 // Enqueue stores an envelope once per event id. inserted=false means the same
 // delivery was already accepted (a GitHub redelivery).

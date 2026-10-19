@@ -23,6 +23,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 // lifecycleSchema follows the repo convention: CREATE ... IF NOT EXISTS
@@ -226,12 +227,12 @@ type Store struct {
 
 // NewStore connects and auto-creates the schema.
 func NewStore(ctx context.Context, connStr string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle store: connect: %w", err)
 	}
 	if _, err := pool.Exec(ctx, lifecycleSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("lifecycle store: create schema: %w", err)
 	}
 	slog.Info("lifecycle ownership store initialized")
@@ -241,7 +242,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 // Close releases the pool.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
-		s.pool.Close()
+		pgshared.Release(s.pool)
 	}
 }
 

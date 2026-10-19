@@ -24,6 +24,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 const schema = `
@@ -60,12 +61,12 @@ type PostgresStore struct {
 
 // NewPostgresStore creates a PostgresStore and auto-creates the schema.
 func NewPostgresStore(ctx context.Context, connStr string) (*PostgresStore, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("oauth client store: connect: %w", err)
 	}
 	if err := createSchema(ctx, pool); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("oauth client store: create schema: %w", err)
 	}
 	slog.Info("oauth client registration store initialized")
@@ -212,5 +213,5 @@ func (s *PostgresStore) GC(cutoff time.Time) error {
 
 // Close releases the connection pool.
 func (s *PostgresStore) Close() {
-	s.pool.Close()
+	pgshared.Release(s.pool)
 }

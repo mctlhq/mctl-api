@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 // ErrDomainConflict is returned by Create when the hostname is already
@@ -60,12 +61,12 @@ type Store struct {
 
 // NewStore creates a domains store and auto-creates the schema.
 func NewStore(ctx context.Context, connStr string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("domains store: connect: %w", err)
 	}
 	if _, err := pool.Exec(ctx, domainSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("domains store: create schema: %w", err)
 	}
 	// Separate Exec, not part of domainSchema: ListByTeam compares

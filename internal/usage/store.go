@@ -24,6 +24,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
 
 // usageSchema follows the repo convention: CREATE ... IF NOT EXISTS executed at
@@ -136,16 +137,16 @@ type Store struct {
 
 // NewStore connects, applies the schema and returns a ready store.
 func NewStore(ctx context.Context, connStr string, catalog *Catalog) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("usage: connect: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("usage: ping: %w", err)
 	}
 	if _, err := pool.Exec(ctx, usageSchema); err != nil {
-		pool.Close()
+		pgshared.Release(pool)
 		return nil, fmt.Errorf("usage: schema: %w", err)
 	}
 	return &Store{pool: pool, catalog: catalog}, nil
@@ -154,7 +155,7 @@ func NewStore(ctx context.Context, connStr string, catalog *Catalog) (*Store, er
 // Close releases the pool.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
-		s.pool.Close()
+		pgshared.Release(s.pool)
 	}
 }
 
