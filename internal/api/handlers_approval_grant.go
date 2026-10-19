@@ -42,6 +42,18 @@ import (
 // the intent hash and passed through.
 const expectedContentDigestParam = "expected_content_digest"
 
+// contentDigestRe is the shape a direct approve's digest must have.
+var contentDigestRe = regexp.MustCompile(operations.ContentDigestPattern)
+
+// Typed refusals of a direct (non-grant) approve whose content digest is
+// missing or malformed (mctl-api#722). They mirror the codes the approve
+// CWFT itself refuses with (mctl-gitops#1979), so a caller sees the same
+// code whichever layer stops it, and the API stops it before submit.
+const (
+	codeApprovalContentUnbound         = "approval_content_unbound"
+	codeApprovalContentDigestMalformed = "approval_content_digest_malformed"
+)
+
 // approvalRefParam carries the id of the grant a grant-authorized approve
 // spends to the approve workflow (approval provenance). Only the server
 // sets it, from the grant it has verified and is about to consume; a

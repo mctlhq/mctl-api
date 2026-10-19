@@ -19,6 +19,10 @@ import (
 // commit message, so the approver must be a fact about who called rather than
 // a field the caller fills in (gitops#986). These assert on the value that
 // reaches the executor — a 202 alone says nothing about what was recorded.
+// reviewedDigest is a well-formed proposal content digest: a direct approve
+// must carry one (mctl-api#722), so every approval meant to succeed sends it.
+var reviewedDigest = "sha256:" + strings.Repeat("a", 64)
+
 func approveParams(t *testing.T, router http.Handler, exec *fakeExecutor, body map[string]string, user *auth.User) (*int, map[string]string) {
 	t.Helper()
 	before := len(exec.submittedParams)
@@ -33,7 +37,7 @@ func approveParams(t *testing.T, router http.Handler, exec *fakeExecutor, body m
 func TestApprove_ApproverComesFromTheCaller(t *testing.T) {
 	router, exec := newTestRouter(t)
 	code, params := approveParams(t, router, exec, map[string]string{
-		"service": "mctl-web", "slug": "issue-1",
+		"service": "mctl-web", "slug": "issue-1", "expected_content_digest": reviewedDigest,
 	}, adminUser)
 
 	if *code != http.StatusAccepted {
@@ -47,7 +51,7 @@ func TestApprove_ApproverComesFromTheCaller(t *testing.T) {
 func TestApprove_ExplicitDifferentApproverIsRejected(t *testing.T) {
 	router, exec := newTestRouter(t)
 	code, params := approveParams(t, router, exec, map[string]string{
-		"service": "mctl-web", "slug": "issue-2", "approver": "someone-else",
+		"service": "mctl-web", "slug": "issue-2", "approver": "someone-else", "expected_content_digest": reviewedDigest,
 	}, adminUser)
 
 	if *code != http.StatusBadRequest {
@@ -64,7 +68,7 @@ func TestApprove_ExplicitDifferentApproverIsRejected(t *testing.T) {
 func TestApprove_NamingYourselfIsAccepted(t *testing.T) {
 	router, exec := newTestRouter(t)
 	code, params := approveParams(t, router, exec, map[string]string{
-		"service": "mctl-web", "slug": "issue-3", "approver": adminUser.ID,
+		"service": "mctl-web", "slug": "issue-3", "approver": adminUser.ID, "expected_content_digest": reviewedDigest,
 	}, adminUser)
 
 	if *code != http.StatusAccepted {
@@ -75,42 +79,34 @@ func TestApprove_NamingYourselfIsAccepted(t *testing.T) {
 	}
 }
 
-// The Temporal worker submits under the service principal while relaying the
-// human approver from its signal payload — which the dev-loop approve endpoint
-// took from ITS authenticated caller. That relay is the one legitimate case,
-// and it is allowed for this principal alone.
-func TestApprove_ServicePrincipalMayRelayAHumanApprover(t *testing.T) {
-	router, exec := newTestRouter(t)
-	worker := auth.NewServiceUser()
-
-	code, params := approveParams(t, router, exec, map[string]string{
-		"service": "mctl-web", "slug": "issue-4", "approver": "mashkovd",
-	}, worker)
-
-	if *code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202", *code)
-	}
-	if params["approver"] != "mashkovd" {
-		t.Errorf("approver = %q, want the relayed human identity", params["approver"])
-	}
-}
-
-// The registry no longer manufactures an approver: "unknown" is not an
-// identity, and the implementer refuses an approval naming nobody.
-func TestApprove_NoApproverIsDefaultedToUnknown(t *testing.T) {
-	router, exec := newTestRouter(t)
-	worker := auth.NewServiceUser()
-
-	_, params := approveParams(t, router, exec, map[string]string{
-		"service": "mctl-web", "slug": "issue-5",
-	}, worker)
-
-	if params["approver"] == "unknown" {
-		t.Error(`approver was defaulted to "unknown"; that is not an identity`)
-	}
-	// The service principal naming nobody records itself, which is at least true.
-	if params["approver"] != auth.ServiceUserID {
-		t.Errorf("approver = %q, want %q", params["approver"], auth.ServiceUserID)
+// A service principal off the grant path cannot carry a content digest (it
+// may not assert one, TestApprove_ServiceMayNotAssertAContentDigest), so it
+// cannot approve at all: the approve CWFT refuses an unbound flip
+// (mctl-gitops#1979), and the API refuses it first, before submit
+// (mctl-api#722). This used to be the Temporal worker's relay; the worker now
+// approves through an action-approval grant. Nothing is defaulted on the way
+// out either: no "unknown" approver, no submit.
+func TestApprove_ServiceWithoutAGrantCannotApprove(t *testing.T) {
+	for _, approver := range []string{"", auth.ServiceUserID, "mashkovd", "unknown"} {
+		router, exec, logger := newApproveRouter(t, false)
+		before := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed"))
+		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
+			"service": "mctl-web", "slug": "issue-4", "approver": approver,
+		}, auth.NewServiceUser())
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "approval_content_unbound") {
+			t.Errorf("approver %q: %d %s, want 400 approval_content_unbound", approver, w.Code, w.Body.String())
+		}
+		if len(exec.submittedParams) != 0 {
+			t.Errorf("approver %q: a workflow was submitted: %v", approver, exec.submittedParams)
+		}
+		// A refused relay is not a use of the relay: neither counted nor
+		// audited as one, or "zero relays" could never be read off either.
+		if d := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed")) - before; d != 0 {
+			t.Errorf("approver %q: relayed counter moved by %v, want 0", approver, d)
+		}
+		if n := len(entriesFor(logger, "approver.legacy_relay")); n != 0 {
+			t.Errorf("approver %q: %d legacy_relay entries, want 0", approver, n)
+		}
 	}
 }
 
@@ -196,55 +192,36 @@ func entriesFor(logger *audit.Logger, operation string) []audit.Entry {
 	return out
 }
 
-// mctl-api#571: while the relay is still allowed, every use leaves exactly
-// one approver.legacy_relay entry naming who was relayed, by whom, for which
-// proposal. That entry is the evidence the flag can be turned off.
-func TestApprove_LegacyRelayIsAuditedOncePerUse(t *testing.T) {
+// mctl-api#571 kept the free-text relay alive behind a flag, counting and
+// auditing every use. A relay carries no content digest, so since
+// mctl-api#722 it is refused even with the flag on, and the refusal is
+// audited as a denied approve with its typed code, never as a relay.
+func TestApprove_LegacyRelayWithoutADigestIsRefusedNotCounted(t *testing.T) {
 	router, exec, logger := newApproveRouter(t, false)
 	relayed := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed"))
 	code, params := approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-8", "approver": "mashkovd",
 	}, auth.NewServiceUser())
-	if d := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed")) - relayed; d != 1 {
-		t.Errorf("relayed counter moved by %v, want 1", d)
+	if *code != http.StatusBadRequest || params != nil {
+		t.Fatalf("status = %d, submitted = %v; want 400 and nothing submitted", *code, params)
 	}
-
-	if *code != http.StatusAccepted || params["approver"] != "mashkovd" {
-		t.Fatalf("status = %d, approver = %q; the relay must keep working while the flag is on", *code, params["approver"])
+	if d := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed")) - relayed; d != 0 {
+		t.Errorf("relayed counter moved by %v, want 0", d)
 	}
-	got := entriesFor(logger, "approver.legacy_relay")
-	if len(got) != 1 || got[0].Status != "succeeded" {
-		t.Fatalf("approver.legacy_relay entries = %+v, want exactly 1, succeeded", got)
+	if n := len(entriesFor(logger, "approver.legacy_relay")); n != 0 {
+		t.Errorf("%d legacy_relay entries for a refused relay, want 0", n)
+	}
+	denied := entriesFor(logger, "mctl-agents-approve")
+	if len(denied) != 1 || denied[0].Status != "denied" || denied[0].Parameters["code"] != "approval_content_unbound" {
+		t.Fatalf("want one denied entry with code approval_content_unbound, got %+v", denied)
 	}
 	want := map[string]string{
 		"approver": "mashkovd", "calling_principal": auth.ServiceUserID,
 		"operation": "mctl-agents-approve", "service": "mctl-web", "slug": "issue-8",
 	}
 	for k, v := range want {
-		if got[0].Parameters[k] != v {
-			t.Errorf("parameter %s = %q, want %q", k, got[0].Parameters[k], v)
-		}
-	}
-}
-
-// A service principal naming nobody, or itself, relays no one: that is not
-// the legacy path and must not count as a use of it, or the "zero uses"
-// gate before flag-off could never be met.
-func TestApprove_ServiceNamingNobodyIsNotALegacyRelay(t *testing.T) {
-	for _, approver := range []string{"", auth.ServiceUserID} {
-		router, exec, logger := newApproveRouter(t, true)
-		before := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed")) + testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("refused"))
-		code, params := approveParams(t, router, exec, map[string]string{
-			"service": "mctl-web", "slug": "issue-9", "approver": approver,
-		}, auth.NewServiceUser())
-		if *code != http.StatusAccepted || params["approver"] != auth.ServiceUserID {
-			t.Errorf("approver %q: status = %d, recorded %q", approver, *code, params["approver"])
-		}
-		if n := len(entriesFor(logger, "approver.legacy_relay")); n != 0 {
-			t.Errorf("approver %q: %d legacy_relay entries, want 0", approver, n)
-		}
-		if after := testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("relayed")) + testutil.ToFloat64(mctlapi.LegacyRelayTotal.WithLabelValues("refused")); after != before {
-			t.Errorf("approver %q: relay counter moved by %v, want 0", approver, after-before)
+		if denied[0].Parameters[k] != v {
+			t.Errorf("parameter %s = %q, want %q", k, denied[0].Parameters[k], v)
 		}
 	}
 }
@@ -285,7 +262,7 @@ func TestApprove_LegacyRelayRefusedWhenDisabled(t *testing.T) {
 func TestApprove_HumanUnaffectedByTheFlag(t *testing.T) {
 	router, exec, _ := newApproveRouter(t, true)
 	code, params := approveParams(t, router, exec, map[string]string{
-		"service": "mctl-web", "slug": "issue-11",
+		"service": "mctl-web", "slug": "issue-11", "expected_content_digest": reviewedDigest,
 	}, adminUser)
 	if *code != http.StatusAccepted || params["approver"] != adminUser.ID {
 		t.Errorf("status = %d, approver = %q", *code, params["approver"])
@@ -358,19 +335,74 @@ func TestApprove_BodyApprovalRefIsRefusedOffTheGrantPath(t *testing.T) {
 			}
 		}
 	}
-	// Without the field both paths still submit, and the argument is absent
-	// altogether, not "": only a spent grant puts one in the submit.
-	for name, user := range map[string]*auth.User{
-		"human admin": adminUser,
-		"service":     auth.NewServiceUser(),
+	// Without the field a direct human approve still submits, and the
+	// argument is absent altogether, not "": only a spent grant puts one in
+	// the submit. (A service principal off the grant path cannot approve at
+	// all: TestApprove_ServiceWithoutAGrantCannotApprove.)
+	router, exec := newTestRouter(t)
+	code, params := approveParams(t, router, exec, map[string]string{
+		"service": "mctl-web", "slug": "issue-ref", "expected_content_digest": reviewedDigest,
+	}, adminUser)
+	if *code != http.StatusAccepted {
+		t.Fatalf("human admin without approval_ref: status = %d, want 202", *code)
+	}
+	if v, present := params["approval_ref"]; present {
+		t.Errorf("human admin: approval_ref = %q submitted off the grant path, want it absent", v)
+	}
+}
+
+// mctl-api#722: a direct approve is bound to the content its approver
+// reviewed, or it is refused before anything is submitted, with the code the
+// approve CWFT itself would refuse with, and an audit row carrying that code.
+func TestApprove_DirectApproveWithoutADigestIsUnbound(t *testing.T) {
+	router, exec, logger := newApproveRouter(t, true)
+	w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
+		"service": "mctl-web", "slug": "issue-722",
+	}, adminUser)
+	assertDigestRefusal(t, w, exec, logger, "approval_content_unbound")
+}
+
+// A malformed digest gets its own code ahead of ValidateInput's generic
+// "validation failed", and the refused value is not echoed back or audited.
+func TestApprove_DirectApproveWithAMalformedDigestIsRefused(t *testing.T) {
+	for _, digest := range []string{
+		strings.Repeat("a", 64),                        // no prefix
+		"sha256:" + strings.Repeat("A", 64),            // uppercase hex
+		"sha256:" + strings.Repeat("a", 63),            // short
+		"sha256:" + strings.Repeat("a", 64) + "\nx: y", // trailing line
+		"sha512:" + strings.Repeat("a", 64),
 	} {
-		router, exec := newTestRouter(t)
-		code, params := approveParams(t, router, exec, map[string]string{"service": "mctl-web", "slug": "issue-ref"}, user)
-		if *code != http.StatusAccepted {
-			t.Fatalf("%s without approval_ref: status = %d, want 202", name, *code)
+		router, exec, logger := newApproveRouter(t, true)
+		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
+			"service": "mctl-web", "slug": "issue-722", "expected_content_digest": digest,
+		}, adminUser)
+		assertDigestRefusal(t, w, exec, logger, "approval_content_digest_malformed")
+		if strings.Contains(w.Body.String(), digest) {
+			t.Errorf("digest %q echoed in the refusal: %s", digest, w.Body.String())
 		}
-		if v, present := params["approval_ref"]; present {
-			t.Errorf("%s: approval_ref = %q submitted off the grant path, want it absent", name, v)
-		}
+	}
+}
+
+func assertDigestRefusal(t *testing.T, w *httptest.ResponseRecorder, exec *fakeExecutor, logger *audit.Logger, wantCode string) {
+	t.Helper()
+	var body struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if w.Code != http.StatusBadRequest || body.Code != wantCode {
+		t.Fatalf("got %d %s, want 400 %s", w.Code, w.Body.String(), wantCode)
+	}
+	if len(exec.submittedParams) != 0 {
+		t.Fatalf("a workflow was submitted: %v", exec.submittedParams)
+	}
+	denied := entriesFor(logger, "mctl-agents-approve")
+	if len(denied) != 1 || denied[0].Status != "denied" || denied[0].Parameters["code"] != wantCode {
+		t.Fatalf("want one denied audit entry with code %s, got %+v", wantCode, denied)
+	}
+	if denied[0].UserID != adminUser.ID || denied[0].Parameters["slug"] != "issue-722" {
+		t.Errorf("audit entry does not name the caller and proposal: %+v", denied[0])
+	}
+	if _, present := denied[0].Parameters["expected_content_digest"]; present {
+		t.Errorf("the refused digest was audited: %+v", denied[0].Parameters)
 	}
 }

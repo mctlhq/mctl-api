@@ -399,10 +399,16 @@ const (
 	// slugPattern: proposal directory name (some contain dots).
 	slugPattern = `^[a-z0-9][a-z0-9.-]{0,120}$`
 	// contentDigestPattern: a proposal content digest (mctl-agents#681).
-	contentDigestPattern = `^sha256:[0-9a-f]{64}$`
+	contentDigestPattern = ContentDigestPattern
 	// approvalRefPattern: an action approval id (aar_...).
 	approvalRefPattern = `^aar_[A-Za-z0-9_-]{1,124}$`
 )
+
+// ContentDigestPattern is the shape of a proposal content digest
+// (mctl-agents#681), exported so the execute handler can refuse a malformed
+// one with its own typed code before the generic validation runs
+// (mctl-api#722).
+const ContentDigestPattern = `^sha256:[0-9a-f]{64}$`
 
 // mctlAgentsServiceEnum lists the services mctl-agents knows, plus "" for
 // "all / unused".
@@ -959,7 +965,7 @@ var builtinOperations = []Operation{
 			// artifact_hash, set by prepareApprovalGrant and never taken from
 			// the body; the workflow refuses to flip content that no longer
 			// hashes to it. Empty keeps recording the digest at flip time.
-			{Name: "expected_content_digest", Type: "string", Required: false, Description: "Proposal content digest (sha256:<64 hex>) the approval was decided for; the flip refuses content that no longer hashes to it. Set from the approval grant on a delegated approve.", Pattern: contentDigestPattern},
+			{Name: "expected_content_digest", Type: "string", Required: false, Description: "Proposal content digest (sha256:<64 hex>) the approval was decided for; the flip refuses content that no longer hashes to it. Required on every approve: a direct caller passes the digest of the content it reviewed (mctl-gitops scripts/proposal-content-digest.py), a delegated approve gets it from the approval grant. Declared optional only because the grant fills it in after validation; the execute handler refuses a non-grant approve without it (approval_content_unbound).", Pattern: contentDigestPattern},
 			// Approval provenance: the id of the action approval this approve
 			// spends, so the workflow can name the exact grant it acts on. Set
 			// by prepareApprovalGrant from the grant it verified and is about

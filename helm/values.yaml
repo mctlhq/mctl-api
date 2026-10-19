@@ -89,7 +89,8 @@ env:
   # approver on mctl-agents-approve (mctl-api#571). Empty or "true" keeps the
   # relay, audited per use as approver.legacy_relay; "false" refuses it once
   # mctl-agents approves through action-approval grants. Any other value
-  # refuses boot.
+  # refuses boot. A relay carries no content digest, so since mctl-api#722 it
+  # is refused with approval_content_unbound even when the flag is on.
   MCTL_AGENTS_APPROVE_LEGACY_APPROVER: ""
   # How long an action approval stays spendable after a human decided it
   # (mctl-api#700), as a Go duration. Empty is 24h; it never extends past the

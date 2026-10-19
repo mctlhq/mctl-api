@@ -93,16 +93,10 @@ var devLoopSubmissions = []struct {
 		operation: "mctl-agents-investigate",
 		params:    map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/372"},
 	},
-	{
-		// dev_loop.py approve step, relaying the human approver.
-		name:      "approve",
-		operation: "mctl-agents-approve",
-		params: map[string]string{
-			"service":  "mctl-api",
-			"slug":     "issue-372-declare-pin-params",
-			"approver": "mashkovd",
-		},
-	},
+	// No approve row: dev_loop.py approves through an action-approval grant
+	// (handlers_approval_grant_test.go asserts what that submit carries); a
+	// bare service-principal approve has no content digest and is refused
+	// (mctl-api#722).
 	{
 		// dev_loop.py implement step.
 		name:      "implement, pinned",
