@@ -645,10 +645,14 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 	case workitems.ApprovalApproved:
 		return newest.ID, true
 	case workitems.ApprovalPending:
-		decided, err := h.opts.WorkItems.DecideActionApproval(ctx, workitems.ActionDecisionInput{
+		digest, ok := h.guardDecision(w, r, user, &newest, workitems.DecisionApprove, "")
+		if !ok {
+			return "", false
+		}
+		decided, err := h.opts.WorkItems.DecideActionApproval(ctx, h.decisionCapture(workitems.ActionDecisionInput{
 			ID: newest.ID, DecidedBy: principalOf(user), Decision: workitems.DecisionApprove, Reason: reason,
 			DecidedByPrincipalID: user.PrincipalID(), DecidedViaPrincipalID: user.ViaPrincipalID(),
-		})
+		}, digest))
 		if err != nil {
 			if code := actionApprovalRefusalCode(err); code != "" {
 				h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", newest.ID, code)

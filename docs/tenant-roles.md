@@ -68,3 +68,10 @@ mctl-api requires `developer` for `POST /repos/sync`. The portal plugin
 `developer` is tracked in
 [mctl-portal#184](https://github.com/mctlhq/mctl-portal/issues/184). Until
 then a portal `viewer` is refused by mctl-api, not by the portal.
+
+## Action approvals
+
+Decisions on action approvals are made by human platform admins only. What a
+reviewer is shown, what a decision is bound to, and what is re-checked when the
+approval is spent is specified in
+[decision-context-contract.md](decision-context-contract.md).

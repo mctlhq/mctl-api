@@ -11,6 +11,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/governance"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
@@ -49,6 +50,16 @@ const (
 	aarCodeReaderForbidden     = "approval_reader_forbidden"
 	aarCodeExecutionInvalid    = "approval_execution_invalid"
 	aarCodeExecutionNotOpen    = "approval_execution_not_open"
+
+	// Decision context and revalidation (mctl-api#700).
+	aarCodeContextIncomplete    = "approval_context_incomplete"
+	aarCodeContextInvalid       = "approval_context_invalid"
+	aarCodeContextChanged       = "approval_context_changed"
+	aarCodeStale                = "approval_stale"
+	aarCodeAuthorityRevoked     = "approval_authority_revoked"
+	aarCodeDeciderDisabled      = "approval_decider_disabled"
+	aarCodeAuthorityUnavailable = "approval_authority_unavailable"
+	aarCodePolicyDrift          = "approval_policy_drift"
 )
 
 // devLoopApprovalKind is the action kind of a DevLoop's human approval gate
@@ -80,21 +91,34 @@ func canSeeActionApproval(u *auth.User, a *workitems.ActionApprovalRequest) bool
 
 // actionApprovalRefusals maps each store refusal to its status and typed
 // code, in match order.
+//
+// reapproval marks a refusal no retry can cure: the approval can never be
+// spent, and details.reapproval_required=true tells the caller to ask for a
+// new one. Callers should key on that flag, not on the code text.
 var actionApprovalRefusals = []struct {
-	err    error
-	status int
-	code   string
+	err        error
+	status     int
+	code       string
+	reapproval bool
 }{
-	{workitems.ErrApprovalNotFound, http.StatusNotFound, aarCodeNotFound},
-	{workitems.ErrApprovalIdempotencyConflict, http.StatusConflict, aarCodeIdempotencyConflict},
-	{workitems.ErrApprovalIntentHash, http.StatusBadRequest, aarCodeIntentHashInvalid},
-	{workitems.ErrApprovalAlreadyDecided, http.StatusConflict, aarCodeAlreadyDecided},
-	{workitems.ErrApprovalSelfDecision, http.StatusForbidden, aarCodeSelfDecision},
-	{workitems.ErrApprovalNotApproved, http.StatusConflict, aarCodeNotApproved},
-	{workitems.ErrApprovalDenied, http.StatusConflict, aarCodeDenied},
-	{workitems.ErrApprovalExpired, http.StatusConflict, aarCodeExpired},
-	{workitems.ErrApprovalIntentMismatch, http.StatusConflict, aarCodeIntentMismatch},
-	{workitems.ErrApprovalConsumed, http.StatusConflict, aarCodeConsumed},
+	{workitems.ErrApprovalNotFound, http.StatusNotFound, aarCodeNotFound, false},
+	{workitems.ErrApprovalIdempotencyConflict, http.StatusConflict, aarCodeIdempotencyConflict, false},
+	{workitems.ErrApprovalIntentHash, http.StatusBadRequest, aarCodeIntentHashInvalid, false},
+	{workitems.ErrApprovalAlreadyDecided, http.StatusConflict, aarCodeAlreadyDecided, false},
+	{workitems.ErrApprovalSelfDecision, http.StatusForbidden, aarCodeSelfDecision, false},
+	{workitems.ErrApprovalNotApproved, http.StatusConflict, aarCodeNotApproved, false},
+	{workitems.ErrApprovalDenied, http.StatusConflict, aarCodeDenied, false},
+	{workitems.ErrApprovalExpired, http.StatusConflict, aarCodeExpired, true},
+	{workitems.ErrApprovalIntentMismatch, http.StatusConflict, aarCodeIntentMismatch, false},
+	{workitems.ErrApprovalConsumed, http.StatusConflict, aarCodeConsumed, false},
+	{governance.ErrContextIncomplete, http.StatusUnprocessableEntity, aarCodeContextIncomplete, false},
+	{governance.ErrContextInvalid, http.StatusBadRequest, aarCodeContextInvalid, false},
+	{governance.ErrContextChanged, http.StatusConflict, aarCodeContextChanged, true},
+	{governance.ErrApprovalStale, http.StatusConflict, aarCodeStale, true},
+	{governance.ErrAuthorityRevoked, http.StatusConflict, aarCodeAuthorityRevoked, true},
+	{governance.ErrDeciderDisabled, http.StatusConflict, aarCodeDeciderDisabled, true},
+	{governance.ErrAuthorityUnavailable, http.StatusServiceUnavailable, aarCodeAuthorityUnavailable, false},
+	{governance.ErrPolicyDrift, http.StatusConflict, aarCodePolicyDrift, true},
 }
 
 // actionApprovalRefusalCode is the typed code of a store refusal, or "" for
@@ -115,7 +139,15 @@ func writeActionApprovalError(w http.ResponseWriter, err error) {
 			if r.code == aarCodeNotFound {
 				msg = "action approval request not found"
 			}
-			writeErrorCode(w, r.status, r.code, msg, nil)
+			var details map[string]interface{}
+			if r.reapproval {
+				details = map[string]interface{}{"reapproval_required": true}
+			}
+			var inc *incompleteContextError
+			if errors.As(err, &inc) {
+				details = map[string]interface{}{"missing_fields": inc.missing}
+			}
+			writeErrorCode(w, r.status, r.code, msg, details)
 			return
 		}
 	}
@@ -138,7 +170,11 @@ func (h *Handlers) visibleActionApproval(w http.ResponseWriter, r *http.Request,
 
 // auditActionApproval records ids, hashes and the decision: never args or
 // the reason text.
-func (h *Handlers) auditActionApproval(r *http.Request, user *auth.User, op string, a *workitems.ActionApprovalRequest, risk operations.RiskLevel) {
+func (h *Handlers) auditActionApproval(r *http.Request, user *auth.User, op string, a *workitems.ActionApprovalRequest, risk operations.RiskLevel, extra ...map[string]string) {
+	// The classified risk beats the call site's default once the row has one.
+	if stored := governance.RiskOf(h.opts.Registry, a.ActionKind, a.RiskLevel); stored != "" {
+		risk = operations.RiskLevel(stored)
+	}
 	params := map[string]string{
 		"approval_id":    a.ID,
 		"execution_id":   a.ExecutionID,
@@ -161,6 +197,21 @@ func (h *Handlers) auditActionApproval(r *http.Request, user *auth.User, op stri
 	}
 	if a.DecidedBy != "" {
 		params["decided_by"] = a.DecidedBy
+	}
+	params["policy_version"] = a.PolicyVersion
+	if a.AuthorityBasis != "" {
+		params["authority_basis"] = a.AuthorityBasis
+	}
+	if a.DecidedContextDigest != "" {
+		params["context_digest"] = a.DecidedContextDigest
+	}
+	if a.FreshUntil != nil {
+		params["fresh_until"] = a.FreshUntil.Format(time.RFC3339)
+	}
+	for _, m := range extra {
+		for k, v := range m {
+			params[k] = v
+		}
 	}
 	h.logAudit(r, audit.Entry{
 		UserID:     user.ID,
@@ -188,10 +239,6 @@ func (h *Handlers) auditActionApprovalRefusal(r *http.Request, user *auth.User, 
 	})
 }
 
-func writeActionApproval(w http.ResponseWriter, status int, a *workitems.ActionApprovalRequest) {
-	writeJSON(w, status, map[string]any{"schema_version": workitems.ActionApprovalSchemaVersion, "approval": a})
-}
-
 type actionApprovalBody struct {
 	ExecutionID    string    `json:"execution_id"`
 	ActionKind     string    `json:"action_kind"`
@@ -204,6 +251,15 @@ type actionApprovalBody struct {
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	IntentHash     string    `json:"intent_hash,omitempty"`
+
+	// Decision context (mctl-api#700). All optional: risk_level is derived
+	// from the operation registry for a registered action_kind, and the rest
+	// default from the registered policy and the intent.
+	RiskLevel      string   `json:"risk_level,omitempty"`
+	SideEffect     string   `json:"side_effect,omitempty"`
+	IntentSource   string   `json:"intent_source,omitempty"`
+	PolicyDecision string   `json:"policy_decision,omitempty"`
+	PolicyReasons  []string `json:"policy_reasons,omitempty"`
 }
 
 // CreateActionApproval handles POST /api/v1/action-approvals. 201 stores a
@@ -237,18 +293,33 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	actor, subject := actorAndSubject(user)
+	intent := workitems.ActionIntent{
+		ExecutionID:   body.ExecutionID,
+		ActionKind:    body.ActionKind,
+		Target:        body.Target,
+		ArgsDigest:    body.ArgsDigest,
+		PolicyRuleID:  body.PolicyRuleID,
+		PolicyVersion: body.PolicyVersion,
+		ArtifactHash:  body.ArtifactHash,
+		WorkItemID:    body.WorkItemID,
+	}
+	cc, err := governance.FillCreateContext(governance.CreateContext{
+		RiskLevel: body.RiskLevel, SideEffect: body.SideEffect, IntentSource: body.IntentSource,
+		PolicyDecision: body.PolicyDecision, PolicyReasons: body.PolicyReasons,
+	}, intent, h.opts.Registry, h.approvalPolicies())
+	if err != nil {
+		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", aarCodeContextInvalid)
+		writeActionApprovalError(w, err)
+		return
+	}
 	in := workitems.ActionApprovalInput{
-		ActionIntent: workitems.ActionIntent{
-			ExecutionID:   body.ExecutionID,
-			ActionKind:    body.ActionKind,
-			Target:        body.Target,
-			ArgsDigest:    body.ArgsDigest,
-			PolicyRuleID:  body.PolicyRuleID,
-			PolicyVersion: body.PolicyVersion,
-			ArtifactHash:  body.ArtifactHash,
-			WorkItemID:    body.WorkItemID,
-		},
-		RequestedBy: principalOf(user),
+		ActionIntent:   intent,
+		RiskLevel:      cc.RiskLevel,
+		SideEffect:     cc.SideEffect,
+		IntentSource:   cc.IntentSource,
+		PolicyDecision: cc.PolicyDecision,
+		PolicyReasons:  cc.PolicyReasons,
+		RequestedBy:    principalOf(user),
 		// Recorded only (mctl-api#373 phase 1).
 		RequestedByPrincipalID: user.PrincipalID(),
 		ViaPrincipalID:         user.ViaPrincipalID(),
@@ -276,7 +347,7 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 	if created {
 		h.auditActionApproval(r, user, "action_approval.create", a, operations.RiskLow)
 	}
-	writeActionApproval(w, createdStatus(created), a)
+	h.writeApproval(w, createdStatus(created), a)
 }
 
 // requireOpenExecution admits a DevLoop approval only for an existing,
@@ -321,7 +392,7 @@ func (h *Handlers) GetActionApproval(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeActionApproval(w, http.StatusOK, a)
+	h.writeApproval(w, http.StatusOK, a)
 }
 
 // ListActionApprovals handles
@@ -359,12 +430,20 @@ func (h *Handlers) ListActionApprovals(w http.ResponseWriter, r *http.Request) {
 		writeActionApprovalError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"schema_version": workitems.ActionApprovalSchemaVersion, "approvals": list})
+	out := make([]approvalWithContext, len(list))
+	for i := range list {
+		out[i] = approvalWithContext{ActionApprovalRequest: &list[i], DecisionContext: h.decisionContext(&list[i])}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"schema_version": workitems.ActionApprovalSchemaVersion, "approvals": out})
 }
 
 type actionDecisionBody struct {
 	Decision string `json:"decision"`
 	Reason   string `json:"reason,omitempty"`
+	// ContextDigest, when sent, must equal the digest of the decision context
+	// as it stands now (GET decision_context.context_digest): it proves the
+	// reviewer approved what they were shown (mctl-api#700).
+	ContextDigest string `json:"context_digest,omitempty"`
 }
 
 // DecideActionApproval handles POST /api/v1/action-approvals/{id}/decision.
@@ -385,10 +464,19 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 	if !decodeWorkItemBodyLimit(w, r, &body, maxActionApprovalBodyBytes) {
 		return
 	}
-	a, err := h.opts.WorkItems.DecideActionApproval(r.Context(), workitems.ActionDecisionInput{
-		ID: chi.URLParam(r, "id"), DecidedBy: principalOf(user), Decision: body.Decision, Reason: body.Reason,
+	cur, err := h.opts.WorkItems.ActionApproval(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeActionApprovalError(w, err)
+		return
+	}
+	digest, ok := h.guardDecision(w, r, user, cur, body.Decision, body.ContextDigest)
+	if !ok {
+		return
+	}
+	a, err := h.opts.WorkItems.DecideActionApproval(r.Context(), h.decisionCapture(workitems.ActionDecisionInput{
+		ID: cur.ID, DecidedBy: principalOf(user), Decision: body.Decision, Reason: body.Reason,
 		DecidedByPrincipalID: user.PrincipalID(), DecidedViaPrincipalID: user.ViaPrincipalID(),
-	})
+	}, digest))
 	if err != nil {
 		if code := actionApprovalRefusalCode(err); code != "" {
 			h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", chi.URLParam(r, "id"), code)
@@ -397,7 +485,7 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	h.auditActionApproval(r, user, "action_approval.decision", a, operations.RiskMedium)
-	writeActionApproval(w, http.StatusOK, a)
+	h.writeApproval(w, http.StatusOK, a)
 }
 
 type actionConsumeBody struct {
@@ -426,6 +514,10 @@ func (h *Handlers) ConsumeActionApproval(w http.ResponseWriter, r *http.Request)
 	if !decodeWorkItemBodyLimit(w, r, &body, maxActionApprovalBodyBytes) {
 		return
 	}
+	reval, ok := h.revalidateApproval(w, r, user, cur)
+	if !ok {
+		return
+	}
 	a, err := h.opts.WorkItems.ConsumeActionApproval(r.Context(), cur.ID, body.IntentHash)
 	if err != nil {
 		if code := actionApprovalRefusalCode(err); code != "" {
@@ -434,6 +526,7 @@ func (h *Handlers) ConsumeActionApproval(w http.ResponseWriter, r *http.Request)
 		writeActionApprovalError(w, err)
 		return
 	}
-	h.auditActionApproval(r, user, "action_approval.consume", a, operations.RiskMedium)
-	writeActionApproval(w, http.StatusOK, a)
+	h.auditActionApproval(r, user, "action_approval.consume", a, operations.RiskMedium,
+		map[string]string{"revalidation": reval.Revalidation})
+	h.writeApproval(w, http.StatusOK, a)
 }
