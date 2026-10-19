@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -315,8 +316,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS commerce_entitlement_allocations_inv
 // Store is the Postgres-backed commerce ledger.
 type Store struct {
 	pool *pgxpool.Pool
-	now  func() time.Time
-	auth PaymentAuthorizer
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
+	now         func() time.Time
+	auth        PaymentAuthorizer
 	// signer signs dispatch authorizations (dispatch.go); nil disables
 	// dispatch. Atomic so installing it cannot race a request in flight.
 	signer atomic.Pointer[DispatchSigner]
@@ -350,7 +354,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 // Close releases the pool.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
-		pgshared.Release(s.pool)
+		s.releaseOnce.Do(func() { pgshared.Release(s.pool) })
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -167,7 +168,10 @@ const (
 // item resolve to one effect and one idempotent replay or 409.
 type Store struct {
 	pool *pgxpool.Pool
-	now  func() time.Time
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
+	now         func() time.Time
 }
 
 // NewStore connects and creates the schema if needed.
@@ -201,7 +205,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 }
 
 // Close releases the pool.
-func (s *Store) Close() { pgshared.Release(s.pool) }
+func (s *Store) Close() { s.releaseOnce.Do(func() { pgshared.Release(s.pool) }) }
 
 func (s *Store) withTx(ctx context.Context, lockKey string, fn func(pgx.Tx) error) error {
 	tx, err := s.pool.Begin(ctx)

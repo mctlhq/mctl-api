@@ -67,14 +67,15 @@ func parseExternalKey(externalKey string) (repository string, issueNumber, prNum
 	return m[1], &n, nil
 }
 
-// deriveAndStoreRef computes the best-effort projection for e and stores it
+// deriveAndStoreRef computes the best-effort projection for e from corr
+// (resolveExecution's answer, looked up before tx was opened) and stores it
 // in the same transaction as the evidence insert (tasks.md task 5). It
 // never returns an error that would roll back a valid ingest; a resolver
 // miss, a nil resolver, or an unparseable external_key all simply leave the
 // corresponding fields empty.
-func (s *Store) deriveAndStoreRef(ctx context.Context, tx pgx.Tx, e *Evidence) error {
+func (s *Store) deriveAndStoreRef(ctx context.Context, tx pgx.Tx, e *Evidence, corr *workitems.ExecutionCorrelation) error {
 	ref := EvidenceRef{EvidenceID: e.ID, DerivedAt: s.now()}
-	s.populateRef(ctx, &ref, e)
+	populateRef(&ref, e, corr)
 	_, err := tx.Exec(ctx, `INSERT INTO execution_evidence_refs (`+refColumns+`)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		ON CONFLICT (evidence_id) DO UPDATE SET
@@ -94,12 +95,8 @@ func (s *Store) deriveAndStoreRef(ctx context.Context, tx pgx.Tx, e *Evidence) e
 // implementer and shepherd runs today) resolves nothing in mctl-api yet, so
 // the projection stays empty — an honest absence, not an error (design.md
 // section 5, the "we_/ex- split" open question in requirements.md).
-func (s *Store) populateRef(ctx context.Context, ref *EvidenceRef, e *Evidence) {
-	if s.resolver == nil || e.ExecutionID == "" {
-		return
-	}
-	c, err := s.resolver.ResolveExecution(ctx, e.ExecutionID)
-	if err != nil || c == nil {
+func populateRef(ref *EvidenceRef, e *Evidence, c *workitems.ExecutionCorrelation) {
+	if c == nil || e.ExecutionID == "" {
 		return
 	}
 	ref.WorkExecutionID = e.ExecutionID
@@ -108,6 +105,20 @@ func (s *Store) populateRef(ctx context.Context, ref *EvidenceRef, e *Evidence) 
 	ref.EngineRef = c.EngineRef
 	ref.Tenant = c.Tenant
 	ref.Repository, ref.IssueNumber, ref.PRNumber = parseExternalKey(c.ExternalKey)
+}
+
+// resolveExecution asks the resolver about executionID, best-effort: a nil
+// resolver, an empty id, a miss or an error all answer nil. Callers must
+// run it outside any transaction of this store (see Ingest).
+func (s *Store) resolveExecution(ctx context.Context, executionID string) *workitems.ExecutionCorrelation {
+	if s.resolver == nil || executionID == "" {
+		return nil
+	}
+	c, err := s.resolver.ResolveExecution(ctx, executionID)
+	if err != nil {
+		return nil
+	}
+	return c
 }
 
 // RebuildRefs recomputes the derived projection for the named evidence ids
@@ -123,8 +134,9 @@ func (s *Store) RebuildRefs(ctx context.Context, ids []string) error {
 			}
 			return err
 		}
+		corr := s.resolveExecution(ctx, e.ExecutionID)
 		if err := withTx(ctx, s.pool, "evidence:"+id, func(tx pgx.Tx) error {
-			return s.deriveAndStoreRef(ctx, tx, e)
+			return s.deriveAndStoreRef(ctx, tx, e, corr)
 		}); err != nil {
 			return err
 		}

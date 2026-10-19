@@ -49,6 +49,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -173,10 +174,13 @@ ALTER TABLE surface_identity_links ADD COLUMN IF NOT EXISTS subject TEXT NOT NUL
 
 // Store is the Postgres-backed link store.
 type Store struct {
-	pool    *pgxpool.Pool
-	now     func() time.Time
-	linkTTL time.Duration
-	mirror  LinkMirror
+	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
+	now         func() time.Time
+	linkTTL     time.Duration
+	mirror      LinkMirror
 }
 
 // LinkMirror copies links into the canonical principal model
@@ -217,7 +221,7 @@ func NewStore(ctx context.Context, connStr string, linkTTL time.Duration) (*Stor
 }
 
 // Close releases the pool.
-func (s *Store) Close() { pgshared.Release(s.pool) }
+func (s *Store) Close() { s.releaseOnce.Do(func() { pgshared.Release(s.pool) }) }
 
 // githubPrincipalPattern is a GitHub-verified human, the form every initial
 // consumer (human-input actor_refs, work-item owners) keys on.

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -131,8 +132,11 @@ CREATE INDEX IF NOT EXISTS model_usage_run_idx         ON model_usage_records (t
 
 // Store is the durable ledger.
 type Store struct {
-	pool    *pgxpool.Pool
-	catalog *Catalog
+	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
+	catalog     *Catalog
 }
 
 // NewStore connects, applies the schema and returns a ready store.
@@ -155,7 +159,7 @@ func NewStore(ctx context.Context, connStr string, catalog *Catalog) (*Store, er
 // Close releases the pool.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
-		pgshared.Release(s.pool)
+		s.releaseOnce.Do(func() { pgshared.Release(s.pool) })
 	}
 }
 

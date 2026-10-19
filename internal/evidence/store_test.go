@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -514,5 +515,53 @@ func TestStorePurgeOlderThan(t *testing.T) {
 	}
 	if _, err := s.Get(ctx, stored.ID); !errors.Is(err, ErrEvidenceNotFound) {
 		t.Errorf("Get after purge = %v, want ErrEvidenceNotFound", err)
+	}
+}
+
+// poolResolver resolves through a query on the evidence store's own pool,
+// which is what *workitems.Store does in cmd/api once both stores share one
+// pool (pgshared).
+type poolResolver struct {
+	s *Store
+	c *workitems.ExecutionCorrelation
+}
+
+func (r poolResolver) ResolveExecution(ctx context.Context, _ string) (*workitems.ExecutionCorrelation, error) {
+	var one int
+	if err := r.s.pool.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil {
+		return nil, err
+	}
+	return r.c, nil
+}
+
+// Ingest must not ask the resolver for a connection while its transaction
+// holds one: on a shared pool that is a nested acquire, and with every slot
+// held by an ingest waiting for a second slot the pool deadlocks. A pool of
+// one connection makes the deadlock deterministic.
+func TestIngestResolvesOutsideItsTransaction(t *testing.T) {
+	connStr := os.Getenv("TEST_DATABASE_URL")
+	if connStr == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping Postgres-backed evidence store test")
+	}
+	sep := "?"
+	if strings.Contains(connStr, "?") {
+		sep = "&"
+	}
+	s, err := NewStore(context.Background(), connStr+sep+"pool_max_conns=1")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(s.Close)
+	workItem := "wi_nested-" + uniqueSuffix()
+	s.SetResolver(poolResolver{s: s, c: &workitems.ExecutionCorrelation{WorkItemID: workItem, Engine: "temporal"}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stored, _, err := s.Ingest(ctx, IngestInput{EnvelopeBytes: uniqueEnvelope(t, "", ""), IngestedBy: "test:writer"})
+	if err != nil {
+		t.Fatalf("Ingest on a one-connection pool = %v, want success", err)
+	}
+	if stored.Ref == nil || stored.Ref.WorkItemID != workItem {
+		t.Fatalf("projection = %+v, want work_item_id %s", stored.Ref, workItem)
 	}
 }

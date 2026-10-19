@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -223,6 +224,9 @@ func WithCaller(ctx context.Context, principalID, viaPrincipalID string) context
 // Store is a PostgreSQL-backed lifecycle ownership store.
 type Store struct {
 	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
 }
 
 // NewStore connects and auto-creates the schema.
@@ -242,7 +246,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 // Close releases the pool.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
-		pgshared.Release(s.pool)
+		s.releaseOnce.Do(func() { pgshared.Release(s.pool) })
 	}
 }
 

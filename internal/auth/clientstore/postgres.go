@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -57,6 +58,9 @@ const touchInterval = time.Hour
 // PostgresStore is a Postgres-backed implementation of Store.
 type PostgresStore struct {
 	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
 }
 
 // NewPostgresStore creates a PostgresStore and auto-creates the schema.
@@ -213,5 +217,5 @@ func (s *PostgresStore) GC(cutoff time.Time) error {
 
 // Close releases the connection pool.
 func (s *PostgresStore) Close() {
-	pgshared.Release(s.pool)
+	s.releaseOnce.Do(func() { pgshared.Release(s.pool) })
 }

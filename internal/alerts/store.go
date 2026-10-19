@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -116,6 +117,9 @@ func scanAlert(row pgx.Row, a *Alert) error {
 // Store is a PostgreSQL-backed alert store.
 type Store struct {
 	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
 }
 
 // NewStore creates an alert store and auto-creates the schema.
@@ -251,7 +255,7 @@ func (s *Store) Update(ctx context.Context, a *Alert) error {
 
 // Close releases the store's connection pool.
 func (s *Store) Close() {
-	pgshared.Release(s.pool)
+	s.releaseOnce.Do(func() { pgshared.Release(s.pool) })
 }
 
 // Get returns a single alert with evidence.

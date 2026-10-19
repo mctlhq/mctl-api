@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -107,7 +108,10 @@ CREATE INDEX IF NOT EXISTS external_identities_github_display
 
 // Store is the Postgres-backed principal store.
 type Store struct {
-	pool          *pgxpool.Pool
+	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce   sync.Once
 	deletionSlots chan struct{}
 	now           func() time.Time
 	// beforeCustomerLink, in tests, runs in ResolveCustomer between its
@@ -146,7 +150,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 }
 
 // Close releases the pool.
-func (s *Store) Close() { pgshared.Release(s.pool) }
+func (s *Store) Close() { s.releaseOnce.Do(func() { pgshared.Release(s.pool) }) }
 
 // Ping reports whether the database answers.
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }

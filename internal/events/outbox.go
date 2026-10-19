@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -60,6 +61,9 @@ type OutboxRow struct {
 // safe once the envelope is committed here.
 type Outbox struct {
 	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
 }
 
 // NewOutbox connects and creates the schema.
@@ -76,7 +80,7 @@ func NewOutbox(ctx context.Context, connStr string) (*Outbox, error) {
 }
 
 // Close releases the pool.
-func (o *Outbox) Close() { pgshared.Release(o.pool) }
+func (o *Outbox) Close() { o.releaseOnce.Do(func() { pgshared.Release(o.pool) }) }
 
 // Enqueue stores an envelope once per event id. inserted=false means the same
 // delivery was already accepted (a GitHub redelivery).

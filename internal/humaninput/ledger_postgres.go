@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -46,6 +47,9 @@ const deliveryColumns = `request_id, request_hash, workflow_id, run_id, responde
 // key is what makes the first claim win across replicas.
 type PostgresLedger struct {
 	pool *pgxpool.Pool
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
 }
 
 // NewPostgresLedger connects and creates the table if needed.
@@ -63,7 +67,7 @@ func NewPostgresLedger(ctx context.Context, connStr string) (*PostgresLedger, er
 }
 
 // Close releases the pool.
-func (p *PostgresLedger) Close() { pgshared.Release(p.pool) }
+func (p *PostgresLedger) Close() { p.releaseOnce.Do(func() { pgshared.Release(p.pool) }) }
 
 func scanDelivery(row pgx.Row) (*Delivery, error) {
 	var d Delivery

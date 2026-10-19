@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -211,7 +212,10 @@ const refColumns = `evidence_id, work_execution_id, work_item_id, tenant, engine
 // Store is the durable evidence store.
 type Store struct {
 	pool *pgxpool.Pool
-	now  func() time.Time
+	// The pool is shared (pgshared): a second Close must not drop
+	// another holder's reference.
+	releaseOnce sync.Once
+	now         func() time.Time
 	// resolver is the best-effort work-execution correlation lookup used
 	// to populate the derived projection (derive.go). Nil until SetResolver
 	// is called; a nil resolver simply leaves every projection empty.
@@ -243,7 +247,7 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 // Close releases the pool.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
-		pgshared.Release(s.pool)
+		s.releaseOnce.Do(func() { pgshared.Release(s.pool) })
 	}
 }
 

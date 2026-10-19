@@ -23,6 +23,18 @@
 // the role limit; the stores never set session state, so nothing leaks from
 // one store's queries into another's.
 //
+// Two rules follow from sharing:
+//
+//   - Never acquire a connection while holding one from the same pool. A
+//     store that calls another store from inside its own transaction draws
+//     both connections from one pool, and once every slot is held by a
+//     caller waiting for a second one, the pool deadlocks until contexts
+//     expire. Resolve cross-store facts before opening the transaction (as
+//     evidence.Ingest does).
+//   - Pools are keyed on the exact connection string, so two env vars
+//     naming one database with any spelling difference get two pools and
+//     twice the budget.
+//
 // Sharing is switched on by the binary (EnableSharing in cmd/api). Until then
 // every Open builds its own pool, as each store did before: tests close a
 // store's pool to simulate a failed read, and pgxpool has no way to report
@@ -32,6 +44,8 @@ package pgshared
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -41,10 +55,13 @@ import (
 )
 
 // DefaultMaxConns bounds a shared pool whose connection string does not set
-// pool_max_conns. Two replicas each holding one pool per database (the main
-// one and LIFECYCLE_DB_URL's) give 2 x 2 x 10 = 40, and a rolling update's
-// surge pod 60, all under the role's connectionLimit of 64.
-const DefaultMaxConns = 10
+// pool_max_conns. cmd/api holds one pool per distinct database URL: today the
+// main one and LIFECYCLE_DB_URL's, so two replicas give 2 x 2 x 16 = 64, the
+// `mctl-api` role's connectionLimit. That is the ceiling with every slot held
+// at once; the observed peak is under 50. Not counted: the readiness probe's
+// one connection per replica (OpenDedicated) and up to two customer-deletion
+// lock sessions per replica, which connect outside any pool.
+const DefaultMaxConns = 16
 
 type entry struct {
 	pool *pgxpool.Pool
@@ -66,6 +83,13 @@ func EnableSharing() {
 	sharing = true
 }
 
+// ValidateEnv reports a malformed DB_POOL_MAX_CONNS, so the binary can refuse
+// to boot on it instead of failing every store's init in turn.
+func ValidateEnv() error {
+	_, err := maxConnsFromEnv()
+	return err
+}
+
 // Open returns the pool shared by every caller with the same connStr,
 // creating it on first use (a new pool per call while sharing is off). Each
 // successful Open must be paired with exactly one Release, which replaces the
@@ -76,15 +100,19 @@ func EnableSharing() {
 func Open(ctx context.Context, connStr string) (*pgxpool.Pool, error) {
 	mu.Lock()
 	defer mu.Unlock()
-	if e, ok := byConn[connStr]; ok {
-		e.refs++
-		return e.pool, nil
+	if sharing {
+		if e, ok := byConn[connStr]; ok {
+			e.refs++
+			return e.pool, nil
+		}
 	}
 	cfg, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("pgshared: parse connection string: %w", err)
 	}
-	if !strings.Contains(connStr, "pool_max_conns") {
+	if hasPoolMaxConns(connStr) {
+		slog.Info("pgshared: pool size set by the connection string", "max_conns", cfg.MaxConns)
+	} else {
 		n, err := maxConnsFromEnv()
 		if err != nil {
 			return nil, err
@@ -93,7 +121,7 @@ func Open(ctx context.Context, connStr string) (*pgxpool.Pool, error) {
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("pgshared: new pool: %w", err)
 	}
 	if !sharing {
 		return pool, nil
@@ -103,9 +131,29 @@ func Open(ctx context.Context, connStr string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
+// OpenDedicated builds a pool of maxConns connections that is never shared,
+// so its caller never queues behind request traffic for a slot -- what a
+// readiness probe needs. Close it with pool.Close().
+func OpenDedicated(ctx context.Context, connStr string, maxConns int32) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		return nil, fmt.Errorf("pgshared: parse connection string: %w", err)
+	}
+	cfg.MaxConns = maxConns
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("pgshared: new dedicated pool: %w", err)
+	}
+	return pool, nil
+}
+
 // Release drops one reference to a pool returned by Open and closes the pool
 // once the last holder has released it. A pool that is not shared (sharing
 // off, or a test building a store on its own pool) is closed directly.
+//
+// In cmd/api the AUDIT_DB_URL pool never reaches zero: the audit logger and
+// the agent-registry, domains, OAuth flow and refresh-token stores have no
+// Close, so that pool lives until the process exits.
 func Release(pool *pgxpool.Pool) {
 	if pool == nil {
 		return
@@ -127,6 +175,21 @@ func Release(pool *pgxpool.Pool) {
 	delete(byPool, pool)
 	mu.Unlock()
 	pool.Close()
+}
+
+// hasPoolMaxConns reports whether connStr sets pool_max_conns itself. It is a
+// key in both forms pgx accepts -- a URL query parameter or a keyword/value
+// DSN pair -- so a value that merely contains the text does not count.
+func hasPoolMaxConns(connStr string) bool {
+	if u, err := url.Parse(connStr); err == nil && u.Scheme != "" {
+		return u.Query().Has("pool_max_conns")
+	}
+	for _, f := range strings.Fields(connStr) {
+		if k, _, ok := strings.Cut(f, "="); ok && k == "pool_max_conns" {
+			return true
+		}
+	}
+	return false
 }
 
 func maxConnsFromEnv() (int32, error) {

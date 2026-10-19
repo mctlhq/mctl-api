@@ -16,7 +16,9 @@ package pgshared
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,16 +42,6 @@ func isClosed(t *testing.T, pool *pgxpool.Pool) bool {
 	return strings.Contains(err.Error(), "closed pool")
 }
 
-func withSharing(t *testing.T) {
-	t.Helper()
-	EnableSharing()
-	t.Cleanup(func() {
-		mu.Lock()
-		defer mu.Unlock()
-		sharing = false
-	})
-}
-
 func TestOpenWithoutSharingBuildsAPoolPerCall(t *testing.T) {
 	ctx := context.Background()
 	a, err := Open(ctx, testConn)
@@ -71,6 +63,30 @@ func TestOpenWithoutSharingBuildsAPoolPerCall(t *testing.T) {
 		t.Fatal("closing one unshared pool closed another")
 	}
 	Release(b)
+}
+
+// A pool registered while sharing was on must not leak into an Open made
+// after it was switched off.
+func TestOpenWithoutSharingIgnoresTheRegistry(t *testing.T) {
+	ctx := context.Background()
+	EnableSharing()
+	shared, err := Open(ctx, testConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	sharing = false
+	mu.Unlock()
+	t.Cleanup(func() { Release(shared); resetRegistry(t) })
+
+	fresh, err := Open(ctx, testConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Release(fresh)
+	if fresh == shared {
+		t.Fatal("Open with sharing off returned a registered pool")
+	}
 }
 
 func TestOpenSharesOnePoolPerConnString(t *testing.T) {
@@ -116,7 +132,6 @@ func TestOpenSharesOnePoolPerConnString(t *testing.T) {
 }
 
 func TestOpenPoolSize(t *testing.T) {
-	withSharing(t)
 	ctx := context.Background()
 	cases := []struct {
 		name, conn, env string
@@ -125,9 +140,13 @@ func TestOpenPoolSize(t *testing.T) {
 		{"default", testConn, "", DefaultMaxConns},
 		{"env", testConn, "3", 3},
 		{"conn string wins", testConn + "&pool_max_conns=5", "3", 5},
+		{"keyword DSN wins", "host=127.0.0.1 port=1 user=u dbname=db sslmode=disable pool_max_conns=4", "3", 4},
+		// The key's text inside a value is not the key: the cap still applies.
+		{"text in a value", testConn + "&application_name=pool_max_conns_probe", "3", 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			withSharing(t)
 			t.Setenv("DB_POOL_MAX_CONNS", tc.env)
 			pool, err := Open(ctx, tc.conn)
 			if err != nil {
@@ -141,13 +160,44 @@ func TestOpenPoolSize(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsBadEnv(t *testing.T) {
+func TestOpenDedicatedIsNeverShared(t *testing.T) {
+	withSharing(t)
+	ctx := context.Background()
+	shared, err := Open(ctx, testConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Release(shared)
+	probe, err := OpenDedicated(ctx, testConn, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe == shared {
+		t.Fatal("OpenDedicated returned the shared pool")
+	}
+	if got := probe.Config().MaxConns; got != 1 {
+		t.Fatalf("dedicated MaxConns = %d, want 1", got)
+	}
+	probe.Close()
+	if isClosed(t, shared) {
+		t.Fatal("closing the dedicated pool closed the shared one")
+	}
+}
+
+func TestBadEnvIsRefused(t *testing.T) {
 	for _, v := range []string{"0", "-1", "ten"} {
 		t.Setenv("DB_POOL_MAX_CONNS", v)
+		if err := ValidateEnv(); err == nil {
+			t.Fatalf("ValidateEnv accepted DB_POOL_MAX_CONNS=%q", v)
+		}
 		if pool, err := Open(context.Background(), testConn); err == nil {
 			Release(pool)
-			t.Fatalf("DB_POOL_MAX_CONNS=%q accepted", v)
+			t.Fatalf("Open accepted DB_POOL_MAX_CONNS=%q", v)
 		}
+	}
+	t.Setenv("DB_POOL_MAX_CONNS", "")
+	if err := ValidateEnv(); err != nil {
+		t.Fatalf("ValidateEnv with the variable unset = %v", err)
 	}
 }
 
@@ -160,4 +210,28 @@ func TestReleaseClosesForeignPool(t *testing.T) {
 	if !isClosed(t, pool) {
 		t.Fatal("Release left a pool it did not hand out open")
 	}
+}
+
+// Run with -race: Open and Release from many goroutines on a few
+// connection strings must leave the registry empty and every pool closed.
+func TestConcurrentOpenRelease(t *testing.T) {
+	withSharing(t)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			conn := fmt.Sprintf("%s&application_name=c%d", testConn, i%3)
+			for j := 0; j < 20; j++ {
+				pool, err := Open(ctx, conn)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				Release(pool)
+			}
+		}(i)
+	}
+	wg.Wait()
 }
