@@ -23,13 +23,23 @@ invitations or set capacity. The shared MCP portal hides these private tools.
    outbox has not acknowledged delivery. Provider acceptance does not prove
    mailbox delivery. Never ask the applicant to resubmit to retry notification.
 
+Deployments without the customer identity hook keep their legacy provisioning
+path. When customer signup is configured, an unreadable/unconfigured database
+refuses admission; it never disables the gate. A one-time migration snapshots
+existing active human GitHub identities. Those existing customers may claim a
+funded slot without submitting a new invitation, but still face the profile and
+capacity limits. Restarting the API never adds newly registered identities to
+that snapshot. In public `*` mode, new customers likewise atomically claim the
+same budget; public mode never exempts them from capacity. The explicit existing
+pilot cohort retains its prior test exemption. Public switches remain closed.
+
 Unused approval lasts seven days. GitHub ownership is proven during OAuth,
 not by the supplied name/email. The site admission mirror helps render the UI;
 PostgreSQL and the identity hook remain authoritative. Customer provisioning
 claims a reservation before side effects and pins it to one principal and team
 name. Retry the same team name after an ambiguous failure. Do not free a claim
 by timeout: a workflow may already exist. Full verified customer deletion
-releases the claim in the final database transaction.
+releases the claim and removes legacy admission eligibility in the final database transaction.
 
 The current funded upper profile uses production requests up to 1 CPU/2 GiB,
 limits 2 CPU/3 GiB, up to 10 pods, 5 PVCs and 10 services, plus the existing

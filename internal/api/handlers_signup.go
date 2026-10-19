@@ -18,10 +18,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/principals"
 )
 
 type SignupOptions struct {
+	PublicFlow   bool
 	Store        *principals.Store
 	SiteCall     func(context.Context, string, string, []byte) ([]byte, error)
 	Cohort       map[string]bool
@@ -188,6 +190,39 @@ func (h *Handlers) DecideSignupRequest(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 409, "GitHub identity already belongs to the existing pilot cohort")
 			return
 		}
+		existing, revoked, err := h.opts.Signup.Store.LookupIdentity(r.Context(), auth.ProviderGitHub, "", githubID)
+		if err != nil && !errors.Is(err, principals.ErrNotFound) {
+			writeError(w, 503, "existing identity unreadable")
+			return
+		}
+		if existing != nil {
+			if revoked || existing.Status != principals.StatusActive {
+				writeError(w, 409, "GitHub identity is not active")
+				return
+			}
+			strict, ok := h.opts.GitReader.(interface {
+				ListTenantsStrict() ([]gitops.Tenant, error)
+			})
+			if !ok {
+				writeError(w, 503, "existing workspace ownership unreadable")
+				return
+			}
+			tenants, err := strict.ListTenantsStrict()
+			if err != nil {
+				writeError(w, 503, "existing workspace ownership unreadable")
+				return
+			}
+			for n := range tenants {
+				for k := range tenants[n].Members {
+					member := &tenants[n].Members[k]
+					if member.PrincipalID == existing.ID || (member.PrincipalID == "" && strings.EqualFold(member.UserID, login)) {
+						writeError(w, 409, "GitHub identity already belongs to an existing workspace")
+						return
+					}
+				}
+			}
+		}
+
 	}
 	u := auth.UserFromContext(r.Context())
 	d, err = h.opts.Signup.Store.DecideSignup(r.Context(), id, b.Decision, githubID, login, u.PrincipalID(), b.Reason)
@@ -276,6 +311,7 @@ func (h *Handlers) ClaimSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if status, message := h.claimSignupPrincipal(r.Context(), b.Principal, b.Tenant, b.Memory, b.CPU, b.MemoryLimit, b.CPULimit, b.Pods, b.PVCs, b.Services); status != 0 {
+		h.logAudit(r, audit.Entry{UserID: u.ID, Operation: "signup.claim", Status: "denied", RiskLevel: "medium", Message: message, Parameters: map[string]string{"principal_id": b.Principal, "tenant": b.Tenant}})
 		writeError(w, status, message)
 		return
 	}
@@ -314,10 +350,21 @@ func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory
 	if o.Cohort[githubID] {
 		return 0, ""
 	}
+	legacy, err := o.Store.SignupGrandfathered(ctx, githubID)
+	if err != nil {
+		return 503, "existing admission unreadable"
+	}
 	if (memory != "2Gi" && memory != "1280Mi") || (cpu != "1" && cpu != "500m") || memoryLimit != "3Gi" || cpuLimit != "2" || !signupBound(pods, 10) || !signupBound(pvcs, 5) || !signupBound(services, 10) {
 		return 409, "workspace profile differs from reserved signup capacity"
 	}
-	err = o.Store.ClaimSignup(ctx, githubID, tenant, pid)
+	if o.PublicFlow || legacy {
+		err = o.Store.ClaimPublicSignup(ctx, githubID, tenant, pid)
+	} else {
+		err = o.Store.ClaimSignup(ctx, githubID, tenant, pid)
+	}
+	if errors.Is(err, principals.ErrSignupCapacity) {
+		return 409, "signup_capacity_exhausted"
+	}
 	if errors.Is(err, principals.ErrSignupNotAllowed) || errors.Is(err, principals.ErrSignupConflict) {
 		return 409, "workspace reservation unavailable"
 	}

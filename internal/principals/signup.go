@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -24,6 +25,13 @@ CREATE TABLE IF NOT EXISTS signup_requests (
  decided_at timestamptz, expires_at timestamptz, tenant text, principal_id text,
  notification_pending boolean NOT NULL DEFAULT false, delivery_started_at timestamptz,
  delivery_lease uuid, delivery_leased_until timestamptz, delivery_id text);
+CREATE TABLE IF NOT EXISTS signup_legacy_github(subject text PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS signup_admission_cutover(singleton boolean PRIMARY KEY CHECK(singleton),initialized_at timestamptz NOT NULL DEFAULT now());
+WITH first_cutover AS (
+ INSERT INTO signup_admission_cutover(singleton) VALUES(true) ON CONFLICT DO NOTHING RETURNING initialized_at
+) INSERT INTO signup_legacy_github(subject)
+ SELECT DISTINCT x.subject FROM external_identities x JOIN principals p ON p.id=x.principal_id CROSS JOIN first_cutover
+ WHERE x.provider='github' AND x.revoked_at IS NULL AND p.status='active' AND p.kind='human' ON CONFLICT DO NOTHING;
 CREATE UNIQUE INDEX IF NOT EXISTS signup_live_github ON signup_requests(github_id)
  WHERE status IN ('approved','claimed');
 CREATE UNIQUE INDEX IF NOT EXISTS signup_claimed_tenant ON signup_requests(tenant) WHERE status='claimed';
@@ -197,7 +205,20 @@ func (s *Store) SignupAllowed(ctx context.Context, githubID string) (bool, error
 
 // ClaimSignup pins one reservation to one workspace before any provisioning.
 // Ambiguous workflow submission keeps the claim; it is never freed by a timeout.
+func (s *Store) SignupGrandfathered(ctx context.Context, githubID string) (bool, error) {
+	var allowed bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM signup_legacy_github WHERE subject=$1)`, githubID).Scan(&allowed)
+	return allowed, err
+}
 func (s *Store) ClaimSignup(ctx context.Context, githubID, tenant, pid string) error {
+	return s.claimSignup(ctx, githubID, tenant, pid, false)
+}
+
+// Public mode still spends the same bounded durable budget; '*' never bypasses it.
+func (s *Store) ClaimPublicSignup(ctx context.Context, githubID, tenant, pid string) error {
+	return s.claimSignup(ctx, githubID, tenant, pid, true)
+}
+func (s *Store) claimSignup(ctx context.Context, githubID, tenant, pid string, public bool) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := lockPrincipalTx(ctx, tx, pid); err != nil {
 			return err
@@ -217,6 +238,17 @@ func (s *Store) ClaimSignup(ctx context.Context, githubID, tenant, pid string) e
 		}
 		var id, status, currentTenant, currentPID string
 		err := tx.QueryRow(ctx, `SELECT id::text,status,coalesce(tenant,''),coalesce(principal_id,'') FROM signup_requests WHERE github_id=$1 AND status IN ('approved','claimed') FOR UPDATE`, githubID).Scan(&id, &status, &currentTenant, &currentPID)
+		if errors.Is(err, pgx.ErrNoRows) && public {
+			var slots, used int
+			if err := tx.QueryRow(ctx, `SELECT slots,(SELECT count(*) FROM signup_requests WHERE status IN ('approved','claimed')) FROM signup_capacity WHERE singleton=true`).Scan(&slots, &used); err != nil {
+				return err
+			}
+			if used >= slots {
+				return ErrSignupCapacity
+			}
+			_, err = tx.Exec(ctx, `INSERT INTO signup_requests(id,created_at,status,github_id,actor,reason,decided_at,tenant,principal_id) VALUES($1,now(),'claimed',$2,$3,'Public signup admission',now(),$4,$3)`, uuid.NewString(), githubID, pid, tenant)
+			return err
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrSignupNotAllowed
 		}
@@ -237,7 +269,7 @@ func (s *Store) ClaimSignup(ctx context.Context, githubID, tenant, pid string) e
 // Delivery leases serialize retries across API replicas. The provider key is
 // stable per immutable decision; older uncertain attempts need reconciliation.
 func (s *Store) LeaseSignupDelivery(ctx context.Context, lease string) (SignupDecision, error) {
-	d, err := scanSignup(s.pool.QueryRow(ctx, `UPDATE signup_requests SET delivery_lease=$1,delivery_leased_until=now()+interval '2 minutes',delivery_started_at=coalesce(delivery_started_at,now()) WHERE id=(SELECT id FROM signup_requests WHERE notification_pending AND status IN ('approved','claimed','rejected') AND payload IS NOT NULL AND (delivery_leased_until IS NULL OR delivery_leased_until<now()) AND (delivery_started_at IS NULL OR delivery_started_at>now()-interval '23 hours') ORDER BY decided_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING `+signupColumns, lease))
+	d, err := scanSignup(s.pool.QueryRow(ctx, `UPDATE signup_requests SET delivery_lease=$1,delivery_leased_until=now()+interval '2 minutes',delivery_started_at=coalesce(delivery_started_at,now()) WHERE id=(SELECT id FROM signup_requests WHERE notification_pending AND (status IN ('claimed','rejected') OR (status='approved' AND expires_at>now())) AND payload IS NOT NULL AND (delivery_leased_until IS NULL OR delivery_leased_until<now()) AND (delivery_started_at IS NULL OR delivery_started_at>now()-interval '23 hours') ORDER BY decided_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING `+signupColumns, lease))
 	d.Lease = lease
 	return d, err
 }
@@ -249,8 +281,16 @@ func (s *Store) AckSignupDelivery(ctx context.Context, id, lease, deliveryID str
 	return err
 }
 func (s *Store) CleanupSignupPII(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, `UPDATE signup_requests SET payload=NULL,reason='',notification_pending=false WHERE payload IS NOT NULL AND created_at<now()-interval '90 days'`)
-	return err
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := signupLock(ctx, tx); err != nil {
+			return err
+		}
+		if err := signupExpire(ctx, tx); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE signup_requests SET payload=NULL,reason='',notification_pending=false WHERE payload IS NOT NULL AND created_at<now()-interval '90 days'`)
+		return err
+	})
 }
 
 func (s *Store) ReleaseSignupClaim(ctx context.Context, pid string) error {

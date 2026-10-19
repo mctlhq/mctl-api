@@ -377,6 +377,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// All customer provisioning entry points consume the same reservation.
 	if opName == "create-tenant" && !user.IsAdmin() && h.opts.Signup != nil {
 		if status, message := h.claimSignupPrincipal(r.Context(), user.PrincipalID(), tenantParam, input["quota_memory_req"], input["quota_cpu_req"], input["quota_memory_lim"], input["quota_cpu_lim"], input["quota_pods"], "5", "10"); status != 0 {
+			h.logAudit(r, audit.Entry{UserID: user.ID, Operation: opName, Status: "denied", RiskLevel: string(op.RiskLevel), Message: message, Parameters: auditParams})
 			writeError(w, status, message)
 			return
 		}

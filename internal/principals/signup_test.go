@@ -149,3 +149,71 @@ func TestSignupExpiredUnusedApprovalReleasesBudget(t *testing.T) {
 		t.Fatalf("expired reservation not released: %v", err)
 	}
 }
+
+func TestSignupGrandfatherSnapshotRunsOnce(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	if _, err := s.Provision(ctx, github(8877001, "old-customer")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM signup_legacy_github;DELETE FROM signup_admission_cutover`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, signupSchema); err != nil {
+		t.Fatal(err)
+	}
+	if old, err := s.SignupGrandfathered(ctx, "8877001"); err != nil || !old {
+		t.Fatalf("existing customer lost admission: %v %v", old, err)
+	}
+	if _, err := s.Provision(ctx, github(8877002, "new-customer")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, signupSchema); err != nil {
+		t.Fatal(err)
+	}
+	if newCustomer, err := s.SignupGrandfathered(ctx, "8877002"); err != nil || newCustomer {
+		t.Fatalf("restart grandfathered new customer: %v %v", newCustomer, err)
+	}
+}
+func TestPublicSignupClaimsRemainBoundedUnderConcurrency(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	zeroPrincipal, err := s.Provision(ctx, github(7788000, "public-customer0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimPublicSignup(ctx, "7788000", "public-0", zeroPrincipal.ID); !errors.Is(err, ErrSignupCapacity) {
+		t.Fatalf("public zero budget: %v", err)
+	}
+
+	if err := s.SetSignupCapacity(ctx, 1, "admin", "Reviewed resource budget"); err != nil {
+		t.Fatal(err)
+	}
+	var accepted atomic.Int32
+	var wg sync.WaitGroup
+	for n := 0; n < 12; n++ {
+		id := fmt.Sprint(7788000 + n)
+		principal, err := s.Provision(ctx, github(int64(7788000+n), "public-customer"+fmt.Sprint(n)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wg.Add(1)
+		go func(id, pid, tenant string) {
+			defer wg.Done()
+			err := s.ClaimPublicSignup(ctx, id, tenant, pid)
+			if err == nil {
+				accepted.Add(1)
+			} else if !errors.Is(err, ErrSignupCapacity) {
+				t.Errorf("public admission: %v", err)
+			}
+		}(id, principal.ID, "public-"+fmt.Sprint(n))
+	}
+	wg.Wait()
+	if accepted.Load() != 1 {
+		t.Fatalf("public claims %d for one slot", accepted.Load())
+	}
+	capacity, err := s.SignupCapacity(ctx)
+	if err != nil || capacity.Used != 1 || capacity.Available != 0 {
+		t.Fatalf("capacity %+v %v", capacity, err)
+	}
+}
