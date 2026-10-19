@@ -44,6 +44,9 @@ func TestStoresShareOnePoolAgainstPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatalf("alerts.NewStore: %v", err)
 	}
+	// Idempotent: the explicit double Close below is the assertion, this one
+	// keeps an early failure from also failing the registry check.
+	defer as.Close()
 
 	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
