@@ -320,6 +320,13 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		writeActionApprovalError(w, err)
 		return
 	}
+	// Refused here, where the client can still supply what is missing:
+	// created incomplete, the request would only fail later at approve.
+	if missing := cc.Missing(); len(missing) > 0 {
+		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", aarCodeContextIncomplete)
+		writeActionApprovalError(w, &incompleteContextError{missing: missing})
+		return
+	}
 	in := workitems.ActionApprovalInput{
 		ActionIntent:   intent,
 		RiskLevel:      cc.RiskLevel,
@@ -531,6 +538,14 @@ func (h *Handlers) ConsumeActionApproval(w http.ResponseWriter, r *http.Request)
 	}
 	var body actionConsumeBody
 	if !decodeWorkItemBodyLimit(w, r, &body, maxActionApprovalBodyBytes) {
+		return
+	}
+	// The state refusal comes first: a pending or spent request is not an
+	// authority question, and answering one as approval_authority_revoked
+	// (reapproval_required) would make a caller discard a live request.
+	if err := workitems.ConsumeStateRefusal(cur); err != nil {
+		h.auditActionApprovalRefusal(r, user, "action_approval.consume_refused", cur.ID, actionApprovalRefusalCode(err))
+		writeActionApprovalError(w, err)
 		return
 	}
 	reval, ok := h.revalidateApproval(w, r, user, cur)

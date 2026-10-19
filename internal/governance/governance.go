@@ -278,6 +278,27 @@ type CreateContext struct {
 	PolicyReasons  []string
 }
 
+// Missing names the fields an approve requires that c still lacks, in the
+// decision context's own names. A request created without them could never
+// be approved, so create refuses it. intent_source is not checked: it is
+// derived from the execution id, whose absence the store refuses as invalid.
+func (c CreateContext) Missing() []string {
+	var missing []string
+	for _, f := range [][2]string{
+		{"risk_level", c.RiskLevel},
+		{"side_effect", c.SideEffect},
+		{"policy.decision", c.PolicyDecision},
+	} {
+		if f[1] == "" {
+			missing = append(missing, f[0])
+		}
+	}
+	if len(c.PolicyReasons) == 0 {
+		missing = append(missing, "policy.reasons")
+	}
+	return missing
+}
+
 // FillCreateContext completes a requested context at create time. The risk of
 // a registered action kind is the registry's: a contradicting client value is
 // ErrContextInvalid, so a client cannot downgrade a known operation. Omitted

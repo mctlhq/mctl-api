@@ -4433,11 +4433,11 @@ paths:
                 idempotency_key: {type: string, maxLength: 512}
                 expires_at: {type: string, format: date-time}
                 intent_hash: {type: string, description: Optional; verified against the server's hash}
-                risk_level: {type: string, enum: [low, medium, high], description: 'Optional; derived from the registry for a registered action_kind, and a contradicting value is 400 approval_context_invalid'}
-                side_effect: {type: string, enum: [none, read, write, destructive, external], description: Optional; defaults from the registered policy}
+                risk_level: {type: string, enum: [low, medium, high], description: 'Optional; derived from the registry for a registered action_kind, and a contradicting value is 400 approval_context_invalid; required for an unregistered action_kind (422 approval_context_incomplete)'}
+                side_effect: {type: string, enum: [none, read, write, destructive, external], description: 'Required unless the registered policy supplies it (422 approval_context_incomplete)'}
                 intent_source: {type: string, maxLength: 512, description: 'Optional; defaults to work_item:<wi_> or execution:<we_>'}
-                policy_decision: {type: string, maxLength: 512, description: Optional; defaults from the registered policy}
-                policy_reasons: {type: array, maxItems: 8, items: {type: string, maxLength: 128}, description: Optional; defaults from the registered policy}
+                policy_decision: {type: string, maxLength: 512, description: 'Required unless the registered policy supplies it (422 approval_context_incomplete)'}
+                policy_reasons: {type: array, maxItems: 8, items: {type: string, maxLength: 128}, description: 'Required unless the registered policy supplies it (422 approval_context_incomplete)'}
               required: [execution_id, action_kind, target, args_digest, policy_rule_id, policy_version, expires_at]
       responses:
         '201': {description: Created in state pending, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
@@ -4445,6 +4445,7 @@ paths:
         '400': {description: 'invalid_request (missing or oversized field, expiry outside the window, unknown work item), secret_in_text, intent_hash_mismatch, actor_not_accepted (a body naming requested_by or another actor), or approval_execution_invalid', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '403': {description: approval_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '409': {description: 'approval_idempotency_conflict, or approval_execution_not_open', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '422': {description: 'approval_context_incomplete: the decision context an approve requires is incomplete after the registry and policy defaults (details.missing_fields); nothing is stored', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
     get:
       summary: List action approval requests

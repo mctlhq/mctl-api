@@ -11,25 +11,50 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/governance"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
-// F6: a request lacking mandatory context cannot be approved, and stays
-// pending; a deny is never gated.
-func TestF6_IncompleteContextCannotBeApproved(t *testing.T) {
+// F6: a request lacking mandatory context is refused at create, where the
+// client can still supply it, and nothing is stored.
+func TestF6_IncompleteContextIsRefusedAtCreate(t *testing.T) {
 	e := newWorkItemsEnv(t)
 	b := e.approvalBody("k-incomplete")
 	delete(b, "side_effect")
 	res := e.do(auth.NewServiceUser(), "POST", "/api/v1/action-approvals", b)
-	if res.code != http.StatusCreated {
+	if res.code != http.StatusUnprocessableEntity || code(res) != aarCodeContextIncomplete {
 		t.Fatalf("create = %d %s", res.code, res.raw)
 	}
-	id := res.body["approval"].(map[string]any)["id"].(string)
-	dc := res.body["decision_context"].(map[string]any)
-	if dc["context_complete"] != false {
-		t.Fatalf("decision_context = %v", dc)
+	if missing, _ := res.body["details"].(map[string]any)["missing_fields"].([]any); len(missing) != 1 || missing[0] != "side_effect" {
+		t.Fatalf("details = %s", res.raw)
 	}
+	// The same key with the context supplied is a fresh create, not a
+	// replay of a stored incomplete row.
+	b["side_effect"] = "write"
+	if res := e.do(auth.NewServiceUser(), "POST", "/api/v1/action-approvals", b); res.code != http.StatusCreated {
+		t.Fatalf("complete create = %d %s", res.code, res.raw)
+	}
+}
 
-	res = e.decide(rootAdmin, id, "approve")
+// F6: a stored request lacking mandatory context (one created before the
+// create-time check) cannot be approved, and stays pending; a deny is never
+// gated.
+func TestF6_IncompleteContextCannotBeApproved(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	a, _, err := e.h.opts.WorkItems.CreateActionApproval(context.Background(), workitems.ActionApprovalInput{
+		ActionIntent: workitems.ActionIntent{
+			ExecutionID: e.tenant + "-exec", ActionKind: "github.merge_pr", Target: "mctlhq/mctl-api#1",
+			ArgsDigest: "sha256:args", PolicyRuleID: "merge-needs-human", PolicyVersion: "v3", ArtifactHash: "sha256:diff",
+		},
+		RiskLevel: "high", IntentSource: "execution:" + e.tenant + "-exec",
+		PolicyDecision: "require_approval", PolicyReasons: []string{"merge.needs-human"},
+		RequestedBy: "service:mctl-agent", IdempotencyKey: "k-legacy-incomplete", ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateActionApproval: %v", err)
+	}
+	id := a.ID
+
+	res := e.decide(rootAdmin, id, "approve")
 	if res.code != http.StatusUnprocessableEntity || code(res) != aarCodeContextIncomplete {
 		t.Fatalf("approve = %d %s", res.code, res.raw)
 	}
@@ -163,5 +188,74 @@ func TestF6_ContextGateDoesNotMaskTerminalRefusal(t *testing.T) {
 	}
 	if res := e.decide(rootAdmin, id, "approve"); res.code != http.StatusConflict || code(res) != aarCodeAlreadyDecided {
 		t.Fatalf("approve after deny = %d %s", res.code, res.raw)
+	}
+}
+
+// The state refusal of a consume precedes the authority revalidation
+// (mctl-api#700): with the decider's authority gone, a pending request
+// still answers approval_not_approved and a spent or executed one
+// approval_consumed, never approval_authority_revoked with
+// reapproval_required, which would make a caller discard it. An executed
+// request stays final through the reordering (the execution-mark invariant
+// from #716).
+func TestF3_ConsumeStateRefusalPrecedesRevalidation(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	pr := &relayPrincipals{byLogin: map[string]string{auth.ServiceUserID: "prn_SERVICE", "root": "prn_ROOT"}}
+	e.h.opts.TenantAuthzMode = TenantAuthzPrincipal
+	e.h.opts.Principals = pr
+	e.h.opts.AdminPrincipals = map[string]bool{"prn_ROOT": true}
+	svc, admin := auth.NewServiceUser(), auth.NewGitHubUser("root", []string{"admins"})
+	for _, u := range []*auth.User{svc, admin} {
+		if err := auth.AttachPrincipal(context.Background(), pr, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	consume := func(id string, hash any) wiResponse {
+		return e.do(svc, "POST", "/api/v1/action-approvals/"+id+"/consume", map[string]any{"intent_hash": hash})
+	}
+	refused := func(what string, res wiResponse, want string) {
+		t.Helper()
+		if res.code != http.StatusConflict || code(res) != want {
+			t.Fatalf("%s = %d %s, want 409 %s", what, res.code, res.raw, want)
+		}
+		if details, _ := res.body["details"].(map[string]any); details["reapproval_required"] == true {
+			t.Fatalf("%s says reapproval_required: %s", what, res.raw)
+		}
+	}
+
+	res := e.do(svc, "POST", "/api/v1/action-approvals", e.approvalBody("k-order"))
+	if res.code != http.StatusCreated {
+		t.Fatalf("create = %d %s", res.code, res.raw)
+	}
+	a := res.body["approval"].(map[string]any)
+	id, hash := a["id"].(string), a["intent_hash"]
+
+	// Pending, with the would-be decider's authority already gone.
+	e.h.opts.AdminPrincipals = map[string]bool{}
+	refused("pending consume", consume(id, hash), aarCodeNotApproved)
+	if st := e.approvalState(id)["state"]; st != "pending" {
+		t.Fatalf("state = %v, want pending", st)
+	}
+
+	// Approve and spend it with authority in place, then mark it executed.
+	e.h.opts.AdminPrincipals = map[string]bool{"prn_ROOT": true}
+	if d := e.decide(admin, id, "approve"); d.code != http.StatusOK {
+		t.Fatalf("decide = %d %s", d.code, d.raw)
+	}
+	if res := consume(id, hash); res.code != http.StatusOK {
+		t.Fatalf("consume = %d %s", res.code, res.raw)
+	}
+	e.h.opts.AdminPrincipals = map[string]bool{}
+	refused("consumed consume", consume(id, hash), aarCodeConsumed)
+	if res := e.do(svc, "POST", "/api/v1/action-approvals/"+id+"/execute",
+		map[string]any{"target": a["target"], "artifact_hash": a["artifact_hash"]}); res.code != http.StatusOK {
+		t.Fatalf("execute = %d %s", res.code, res.raw)
+	}
+	refused("executed consume", consume(id, hash), aarCodeConsumed)
+	if res := e.decide(admin, id, "approve"); res.code != http.StatusConflict {
+		t.Fatalf("approve executed = %d %s", res.code, res.raw)
+	}
+	if st := e.approvalState(id)["state"]; st != workitems.ApprovalExecuted {
+		t.Fatalf("state = %v, want executed", st)
 	}
 }

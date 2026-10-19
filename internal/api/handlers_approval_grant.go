@@ -195,7 +195,14 @@ func (h *Handlers) bindApprovalGrant(w http.ResponseWriter, r *http.Request, use
 // asks for a new one.
 func (h *Handlers) spendApprovalGrant(w http.ResponseWriter, r *http.Request, user *auth.User, s *approvalSpend) (*workitems.ActionApprovalRequest, bool) {
 	// Revalidate the decider's authority, the freshness, the context and the
-	// policy right before spending, so a refusal never reaches Submit.
+	// policy right before spending, so a refusal never reaches Submit. The
+	// state refusal comes first, as on the consume route: a request that is
+	// not approved is not an authority question.
+	if err := workitems.ConsumeStateRefusal(s.approval); err != nil {
+		h.auditActionApprovalRefusal(r, user, "action_approval.consume_refused", s.approval.ID, actionApprovalRefusalCode(err))
+		writeActionApprovalError(w, err)
+		return nil, false
+	}
 	reval, ok := h.revalidateApproval(w, r, user, s.approval)
 	if !ok {
 		return nil, false

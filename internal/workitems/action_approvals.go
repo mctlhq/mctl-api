@@ -739,6 +739,26 @@ func (s *Store) DecideActionApproval(ctx context.Context, in ActionDecisionInput
 	return out, nil
 }
 
+// ConsumeStateRefusal is the refusal a consume of a in its current state
+// gets, or nil when a is approved. A caller that checks more than the store
+// does before consuming (the authority revalidation) runs this first, so a
+// request that is not approved keeps its state refusal.
+func ConsumeStateRefusal(a *ActionApprovalRequest) error {
+	switch a.State {
+	case ApprovalApproved:
+		return nil
+	case ApprovalConsumed, ApprovalExecuted:
+		return fmt.Errorf("%w: %s", ErrApprovalConsumed, a.ID)
+	case ApprovalDenied:
+		return fmt.Errorf("%w: %s", ErrApprovalDenied, a.ID)
+	case ApprovalExpired:
+		return fmt.Errorf("%w: %s", ErrApprovalExpired, a.ID)
+	case ApprovalPending:
+		return fmt.Errorf("%w: %s is pending", ErrApprovalNotApproved, a.ID)
+	}
+	return fmt.Errorf("%w: %s is %s", ErrApprovalNotApproved, a.ID, a.State)
+}
+
 // ConsumeActionApproval spends an approved request: one atomic
 // compare-and-set from approved to consumed that holds only while the stored
 // intent hash equals the presented one and the request has not expired. On
@@ -764,15 +784,8 @@ func (s *Store) ConsumeActionApproval(ctx context.Context, id, intentHash string
 	if err != nil {
 		return nil, err
 	}
-	switch cur.State {
-	case ApprovalConsumed, ApprovalExecuted:
-		return nil, fmt.Errorf("%w: %s", ErrApprovalConsumed, id)
-	case ApprovalDenied:
-		return nil, fmt.Errorf("%w: %s", ErrApprovalDenied, id)
-	case ApprovalExpired:
-		return nil, fmt.Errorf("%w: %s", ErrApprovalExpired, id)
-	case ApprovalPending:
-		return nil, fmt.Errorf("%w: %s is pending", ErrApprovalNotApproved, id)
+	if err := ConsumeStateRefusal(cur); err != nil {
+		return nil, err
 	}
 	if cur.IntentHash != intentHash {
 		return nil, fmt.Errorf("%w: %s", ErrApprovalIntentMismatch, id)
