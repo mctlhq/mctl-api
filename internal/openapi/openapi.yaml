@@ -889,10 +889,11 @@ components:
         A durable, single-use human approval of ONE hashed side effect of one
         runtime execution (mctl-api#366). Immutable once created apart from
         its state transitions: `pending` -> `approved` | `denied`, then
-        `approved` -> `consumed`. `state` is the effective state: a pending or
-        approved request past `expires_at` reads as `expired` (lazy expiry;
+        `approved` -> `consumed`, then `consumed` -> `executed` (the
+        single-use execution mark). `state` is the effective state: a pending
+        or approved request past `expires_at` reads as `expired` (lazy expiry;
         `expired` is never stored), and a decision or consume on it is
-        refused. `requested_by` and `decided_by` come from authentication,
+        refused. A consumed or executed request never reads as expired. `requested_by` and `decided_by` come from authentication,
         never from a body.
       properties:
         id: {type: string, example: aar_0f8c2d1e9b7a4c3d8e6f5a4b3c2d1e0f}
@@ -915,13 +916,14 @@ components:
             the order execution_id, action_kind, target, args_digest,
             policy_rule_id, policy_version, artifact_hash, work_item_id (an
             absent optional field is the empty string).
-        state: {type: string, enum: [pending, approved, denied, consumed, expired]}
+        state: {type: string, enum: [pending, approved, denied, consumed, executed, expired]}
         expires_at: {type: string, format: date-time}
         created_at: {type: string, format: date-time}
         decided_by: {type: string}
         decided_at: {type: string, format: date-time}
         reason: {type: string}
         consumed_at: {type: string, format: date-time}
+        executed_at: {type: string, format: date-time, description: When the consumed request was marked executed}
         schema_version: {type: string, enum: [actionapproval/v1]}
         requested_by_principal_id: {type: string, description: 'Canonical principal (prn_) of the requester, when it resolved (mctl-api#373, served since #376 D1). Absent on rows written before it was recorded.'}
         via_principal_id: {type: string, description: Principal of the agent or surface that carried a delegated or relayed request}
@@ -989,7 +991,8 @@ components:
           enum: [work_items_unavailable, invalid_request, actor_not_accepted, secret_in_text, intent_hash_mismatch,
                  approval_not_found, approval_idempotency_conflict, approval_already_decided,
                  approval_self_decision, approval_not_approved, approval_denied, approval_expired,
-                 approval_intent_mismatch, approval_consumed, approval_requester_forbidden,
+                 approval_intent_mismatch, approval_consumed, approval_not_consumed,
+                 approval_executed, approval_target_mismatch, approval_requester_forbidden,
                  approval_decider_forbidden, approval_reader_forbidden, approval_execution_invalid,
                  approval_execution_not_open]
 
@@ -2088,7 +2091,12 @@ paths:
         hash) and is recorded in the decision and consume audit. It is consumed once,
         before submit, and the recorded approver is its decider's name
         without its `github:`/`oidc:` prefix, validated like any approver;
-        a body `approver` is refused (400 `actor_not_accepted`).
+        a body `approver` is refused (400 `actor_not_accepted`). The
+        workflow also receives `expected_content_digest` (the approval's
+        `artifact_hash`) and `approval_ref` (the approval's `aar_` id), both
+        set by the server from the grant. `approval_ref` is refused in a
+        request body on every path, grant-authorized or not (400
+        `actor_not_accepted`).
         The grant replaces the admin check for this call only; every other
         caller and grant kind is authorized as before.
 
@@ -4391,7 +4399,7 @@ paths:
         so `expired` finds pending and approved requests past `expires_at`.
       tags: [Action Approvals]
       parameters:
-        - {name: state, in: query, schema: {type: string, enum: [pending, approved, denied, consumed, expired]}}
+        - {name: state, in: query, schema: {type: string, enum: [pending, approved, denied, consumed, executed, expired]}}
         - {name: execution_id, in: query, schema: {type: string}}
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
       responses:
@@ -4557,6 +4565,43 @@ paths:
         '403': {description: approval_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '404': {description: approval_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '409': {description: 'approval_not_approved, approval_denied, approval_expired, approval_intent_mismatch or approval_consumed', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+
+  /api/v1/action-approvals/{id}/execute:
+    post:
+      summary: Mark a consumed action approval request executed, exactly once
+      description: |
+        The single-use execution mark. The requesting service only (anyone
+        else 403 `approval_requester_forbidden`; another service's request
+        404). One atomic compare-and-set from `consumed` to `executed`, which
+        holds only while the stored `target` equals the presented one and the
+        stored `artifact_hash` is non-empty and equals the presented one; it
+        records `executed_at`. Of any number of concurrent marks exactly one
+        succeeds. A refusal is typed and leaves the request as it was:
+        `approval_not_consumed` (pending, approved or expired),
+        `approval_executed`, `approval_denied`, `approval_target_mismatch`.
+        Marks and refusals are audited (`action_approval.execute`,
+        `action_approval.execute_refused`).
+      tags: [Action Approvals]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                target: {type: string}
+                artifact_hash: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+              required: [target, artifact_hash]
+      responses:
+        '200': {description: Marked executed, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
+        '400': {description: invalid_request, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '403': {description: approval_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '404': {description: approval_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '409': {description: 'approval_not_consumed, approval_executed, approval_denied or approval_target_mismatch', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
 
   /api/v1/work-items/{id}/resume:

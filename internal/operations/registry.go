@@ -400,6 +400,8 @@ const (
 	slugPattern = `^[a-z0-9][a-z0-9.-]{0,120}$`
 	// contentDigestPattern: a proposal content digest (mctl-agents#681).
 	contentDigestPattern = `^sha256:[0-9a-f]{64}$`
+	// approvalRefPattern: an action approval id (aar_...).
+	approvalRefPattern = `^aar_[A-Za-z0-9_-]{1,124}$`
 )
 
 // mctlAgentsServiceEnum lists the services mctl-agents knows, plus "" for
@@ -957,6 +959,11 @@ var builtinOperations = []Operation{
 			// the body; the workflow refuses to flip content that no longer
 			// hashes to it. Empty keeps recording the digest at flip time.
 			{Name: "expected_content_digest", Type: "string", Required: false, Description: "Proposal content digest (sha256:<64 hex>) the approval was decided for; the flip refuses content that no longer hashes to it. Set from the approval grant on a delegated approve.", Pattern: contentDigestPattern},
+			// Approval provenance: the id of the action approval this approve
+			// spends, so the workflow can name the exact grant it acts on. Set
+			// by prepareApprovalGrant from the grant it verified and is about
+			// to consume; refused in a request body on every path.
+			{Name: "approval_ref", Type: "string", Required: false, Description: "Id (aar_...) of the action approval this approve spends. Set by the server from the approval grant on a delegated approve; never accepted from a request body.", Pattern: approvalRefPattern},
 		},
 	},
 	{
