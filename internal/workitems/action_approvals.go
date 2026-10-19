@@ -151,6 +151,21 @@ ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS decided_context_di
 ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS authority_basis TEXT NOT NULL DEFAULT '';
 ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS authz_mode TEXT NOT NULL DEFAULT '';
 ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS fresh_until TIMESTAMPTZ;
+-- Backfill rows written before the decision-context columns existed, so a
+-- pending legacy approval is not stuck at approval_context_incomplete. A new
+-- row always has an intent_source (it is derived from the execution), so an
+-- empty one marks a legacy row; backfilled rows have one, which makes this
+-- idempotent and leaves new, deliberately incomplete requests alone.
+UPDATE action_approval_requests SET
+    side_effect = CASE WHEN side_effect = '' THEN 'write' ELSE side_effect END,
+    policy_decision = CASE WHEN policy_decision = '' THEN 'require_approval' ELSE policy_decision END,
+    policy_reasons = CASE WHEN cardinality(policy_reasons) = 0
+        THEN ARRAY['legacy.pre-governance'] ELSE policy_reasons END,
+    intent_source = CASE
+        WHEN intent_source <> '' THEN intent_source
+        WHEN work_item_id <> '' THEN 'work_item:' || work_item_id
+        ELSE 'execution:' || execution_id END
+WHERE intent_source = '' AND decided_context_digest = '';
 `
 
 const actionApprovalColumns = `id, execution_id, action_kind, target, args_digest, policy_rule_id,

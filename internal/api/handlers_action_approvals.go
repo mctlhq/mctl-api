@@ -469,9 +469,15 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 		writeActionApprovalError(w, err)
 		return
 	}
-	digest, ok := h.guardDecision(w, r, user, cur, body.Decision, body.ContextDigest)
-	if !ok {
-		return
+	// The completeness gate applies only to a decision that could succeed;
+	// terminal-state and self-decision refusals keep precedence.
+	digest := ""
+	if cur.State == workitems.ApprovalPending && cur.RequestedBy != principalOf(user) {
+		var ok bool
+		digest, ok = h.guardDecision(w, r, user, cur, body.Decision, body.ContextDigest)
+		if !ok {
+			return
+		}
 	}
 	a, err := h.opts.WorkItems.DecideActionApproval(r.Context(), h.decisionCapture(workitems.ActionDecisionInput{
 		ID: cur.ID, DecidedBy: principalOf(user), Decision: body.Decision, Reason: body.Reason,
