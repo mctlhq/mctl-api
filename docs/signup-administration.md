@@ -51,7 +51,7 @@ by timeout: a workflow may already exist. Full verified customer deletion
 releases the claim and invitation authority in the final database transaction.
 
 Funded invitations require `workspace_profile=starter`. Production requests are
-250m CPU/512 MiB, limits 1 CPU/1 GiB, at most 5 pods, 1 PVC and 5 services.
+500m CPU/512 MiB, limits 2 CPU/1 GiB, at most 5 pods, 1 PVC and 5 services.
 Preview requests are 100m CPU/256 MiB, limits 500m CPU/512 MiB, 3 pods,
 no PVCs and 3 services. Production PVC requests total at most 10 GiB; preview
 persistent storage is disabled. This fits the storage provider's minimum volume

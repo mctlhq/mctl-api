@@ -743,7 +743,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		mcplib.WithString("quota_memory_req",
 			mcplib.Description("Memory request quota (default: 1280Mi)"),
 		),
-		mcplib.WithString("quota_cpu_lim", mcplib.Description("CPU limit quota for standard provisioning (default: 3; starter fixes this to 1)")),
+		mcplib.WithString("quota_cpu_lim", mcplib.Description("CPU limit quota for standard provisioning (default: 3; starter fixes this to 2)")),
 		mcplib.WithString("quota_memory_lim", mcplib.Description("Memory limit quota for standard provisioning (default: 4Gi; starter fixes this to 1Gi)")),
 		mcplib.WithString("quota_pods",
 			mcplib.Description("Maximum pods (default: 10)"),

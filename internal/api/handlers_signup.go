@@ -530,8 +530,8 @@ func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory
 	if o.Cohort[githubID] {
 		return 0, ""
 	}
-	if profile != "starter" || memory != "512Mi" || cpu != "250m" || memoryLimit != "1Gi" || cpuLimit != "1" || !signupBound(pods, 5) || !signupBound(pvcs, 1) || !signupBound(services, 5) {
-		return 409, "workspace profile exceeds funded admission: use workspace_profile=starter (production 250m/512Mi, limits 1 CPU/1Gi, preview 100m/256Mi; PVC storage 10Gi production, no persistent preview disk)"
+	if profile != "starter" || memory != "512Mi" || cpu != "500m" || memoryLimit != "1Gi" || cpuLimit != "2" || !signupBound(pods, 5) || !signupBound(pvcs, 1) || !signupBound(services, 5) {
+		return 409, "workspace profile exceeds funded admission: use workspace_profile=starter (production 500m/512Mi, limits 2 CPU/1Gi, preview 100m/256Mi; PVC storage 10Gi production, no persistent preview disk)"
 	}
 
 	if o.PublicFlow {
