@@ -33,6 +33,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/evidence"
+	"github.com/mctlhq/mctl-api/internal/governance"
 	"github.com/mctlhq/mctl-api/internal/humaninput"
 	"github.com/mctlhq/mctl-api/internal/lifecycle"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
@@ -153,6 +154,19 @@ type Options struct {
 	// source of platform admin (auth.PrincipalAuthz); in shadow mode, when
 	// set, each request's legacy admin decision is compared with it.
 	AdminPrincipals map[string]bool
+	// Policies is the registered policy set action approvals are revalidated
+	// against (mctl-api#700). Nil means governance.Policies; tests inject
+	// another to exercise policy drift.
+	Policies governance.PolicySet
+	// RequireRegisteredPolicy is ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY:
+	// an approval under a policy rule that is not in Policies cannot be spent.
+	RequireRegisteredPolicy bool
+	// ApprovalMaxDecisionAge is ACTION_APPROVAL_MAX_DECISION_AGE: how long an
+	// approval stays spendable after it was decided. Zero means
+	// governance.DefaultMaxDecisionAge.
+	ApprovalMaxDecisionAge time.Duration
+	// Clock replaces time.Now for approval freshness; nil is time.Now.
+	Clock func() time.Time
 	// PrincipalAuthz decides, in principal mode, a relayed or delegated
 	// subject's tenants by its principal, exactly as the middleware decides
 	// a direct caller's (mctl-api#377 B5). Nil in principal mode makes every

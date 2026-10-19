@@ -96,6 +96,11 @@ func (g *grantEnv) createGrant(execID, key, target, kind string) string {
 	g.t.Helper()
 	body := g.devLoopGrantBody(execID, key)
 	body["target"], body["action_kind"] = target, kind
+	// An unregistered kind gets no risk level from the registry; the client
+	// supplies it, or an approve is refused as incomplete (mctl-api#700).
+	if _, ok := g.h.opts.Registry.Get(kind); !ok {
+		body["risk_level"] = "high"
+	}
 	res := g.do(auth.NewServiceUser(), "POST", "/api/v1/action-approvals", body)
 	if res.code != http.StatusCreated {
 		g.t.Fatalf("create grant = %d %s", res.code, res.raw)

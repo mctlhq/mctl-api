@@ -934,6 +934,15 @@ components:
         subject_principal_id: {type: string, description: 'Principal the request was made for when it was delegated or relayed; absent when the actor acted for itself'}
         subject_kind: {type: string, enum: [human], description: Kind of the subject; absent when the actor acted for itself}
         agent_run_id: {type: string, description: 'The agent run token (art_) the request was made with, if any', example: art_01M4QF0AJ9Y3C5V2KX7WQ4N8RT}
+        risk_level: {type: string, enum: [low, medium, high], description: 'Decision context (mctl-api#700). Derived from the operation registry for a registered action_kind'}
+        side_effect: {type: string, enum: [none, read, write, destructive, external]}
+        intent_source: {type: string, description: 'Reference to where the intent came from, e.g. work_item:wi_... or execution:we_...'}
+        policy_decision: {type: string, description: 'What the policy decided, e.g. require_approval'}
+        policy_reasons: {type: array, maxItems: 8, items: {type: string, maxLength: 128, pattern: '^[a-z0-9._:-]+$'}}
+        decided_context_digest: {type: string, description: 'context_digest of the decision context the approver was shown, captured at approve'}
+        authority_basis: {type: string, description: 'Authority the decision was made under (platform_admin); evidence, never authorization'}
+        authz_mode: {type: string, description: 'TENANT_AUTHZ_MODE at decision time'}
+        fresh_until: {type: string, format: date-time, description: 'The decision stops being spendable at this time (never after expires_at)'}
       required: [id, execution_id, action_kind, target, args_digest, policy_rule_id, policy_version, idempotency_key, requested_by, intent_hash, state, expires_at, created_at, schema_version]
 
     IdentityParty:
@@ -979,7 +988,41 @@ components:
       properties:
         schema_version: {type: string, enum: [actionapproval/v1]}
         approval: {$ref: '#/components/schemas/ActionApprovalRequest'}
+        decision_context: {$ref: '#/components/schemas/DecisionContext'}
       required: [schema_version, approval]
+
+    DecisionContext:
+      type: object
+      description: |
+        What a reviewer is shown and what a decision is bound to (mctl-api#700,
+        docs/decision-context-contract.md). References, digests, enums and
+        reason codes only: never args and never the free-text reason.
+        `context_digest` is sha256 over `mctl-decision-context/v1` and the
+        length-prefixed mandatory fields; send it as `context_digest` on the
+        decision to prove the reviewer approved what they saw.
+      properties:
+        schema_version: {type: string, enum: [decisioncontext/v1]}
+        target: {type: string}
+        args_digest: {type: string}
+        intent_hash: {type: string}
+        artifact_hash: {type: string}
+        risk_level: {type: string}
+        side_effect: {type: string}
+        intent_source: {type: string}
+        execution_id: {type: string}
+        policy:
+          type: object
+          properties:
+            rule_id: {type: string}
+            version: {type: string}
+            decision: {type: string}
+            reasons: {type: array, items: {type: string}}
+        authority_basis: {type: string, description: 'platform_admin or unrecorded'}
+        context_digest: {type: string}
+        decided_context_digest: {type: string}
+        context_complete: {type: boolean}
+        missing_fields: {type: array, items: {type: string}}
+      required: [schema_version, target, args_digest, intent_hash, risk_level, side_effect, intent_source, policy, context_digest, context_complete, missing_fields]
 
     ActionApprovalError:
       type: object
@@ -994,7 +1037,15 @@ components:
                  approval_intent_mismatch, approval_consumed, approval_not_consumed,
                  approval_executed, approval_target_mismatch, approval_requester_forbidden,
                  approval_decider_forbidden, approval_reader_forbidden, approval_execution_invalid,
-                 approval_execution_not_open]
+                 approval_execution_not_open, approval_context_incomplete, approval_context_invalid,
+                 approval_context_changed, approval_stale, approval_authority_revoked,
+                 approval_decider_disabled, approval_authority_unavailable, approval_policy_drift]
+        details:
+          type: object
+          description: 'reapproval_required=true: the approval can never be spent, request a new one. missing_fields: the empty mandatory context fields (approval_context_incomplete).'
+          properties:
+            reapproval_required: {type: boolean}
+            missing_fields: {type: array, items: {type: string}}
 
     ExecutionRequest:
       type: object
@@ -4382,6 +4433,11 @@ paths:
                 idempotency_key: {type: string, maxLength: 512}
                 expires_at: {type: string, format: date-time}
                 intent_hash: {type: string, description: Optional; verified against the server's hash}
+                risk_level: {type: string, enum: [low, medium, high], description: 'Optional; derived from the registry for a registered action_kind, and a contradicting value is 400 approval_context_invalid; required for an unregistered action_kind (422 approval_context_incomplete)'}
+                side_effect: {type: string, enum: [none, read, write, destructive, external], description: 'Required unless the registered policy supplies it (422 approval_context_incomplete)'}
+                intent_source: {type: string, maxLength: 512, description: 'Optional; defaults to work_item:<wi_> or execution:<we_>'}
+                policy_decision: {type: string, maxLength: 512, description: 'Required unless the registered policy supplies it (422 approval_context_incomplete)'}
+                policy_reasons: {type: array, maxItems: 8, items: {type: string, maxLength: 128}, description: 'Required unless the registered policy supplies it (422 approval_context_incomplete)'}
               required: [execution_id, action_kind, target, args_digest, policy_rule_id, policy_version, expires_at]
       responses:
         '201': {description: Created in state pending, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
@@ -4389,6 +4445,7 @@ paths:
         '400': {description: 'invalid_request (missing or oversized field, expiry outside the window, unknown work item), secret_in_text, intent_hash_mismatch, actor_not_accepted (a body naming requested_by or another actor), or approval_execution_invalid', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '403': {description: approval_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '409': {description: 'approval_idempotency_conflict, or approval_execution_not_open', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '422': {description: 'approval_context_incomplete: the decision context an approve requires is incomplete after the registry and policy defaults (details.missing_fields); nothing is stored', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
     get:
       summary: List action approval requests
@@ -4413,7 +4470,12 @@ paths:
                   schema_version: {type: string, enum: [actionapproval/v1]}
                   approvals:
                     type: array
-                    items: {$ref: '#/components/schemas/ActionApprovalRequest'}
+                    items:
+                      allOf:
+                        - $ref: '#/components/schemas/ActionApprovalRequest'
+                        - type: object
+                          properties:
+                            decision_context: {$ref: '#/components/schemas/DecisionContext'}
         '400': {description: invalid_request (unknown state or limit out of range), content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '403': {description: approval_reader_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
@@ -4510,7 +4572,10 @@ paths:
         and the requester can never decide its own request (403
         `approval_self_decision`). `decided_by` is the authenticated
         principal. Only a pending, unexpired request is decided: otherwise
-        409 `approval_already_decided` or `approval_expired`.
+        409 `approval_already_decided` or `approval_expired`. An `approve` of
+        a request whose decision context is incomplete is 422
+        `approval_context_incomplete` (details.missing_fields) and the
+        request stays pending; a `deny` is never gated.
       tags: [Action Approvals]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
@@ -4524,13 +4589,15 @@ paths:
               properties:
                 decision: {type: string, enum: [approve, deny]}
                 reason: {type: string, maxLength: 1024}
+                context_digest: {type: string, description: 'Optional; must equal the current decision_context.context_digest, else 409 approval_context_changed'}
               required: [decision]
       responses:
         '200': {description: Decided, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
         '400': {description: 'invalid_request, secret_in_text (a credential in reason), or actor_not_accepted (a body naming decided_by)', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '403': {description: 'approval_decider_forbidden or approval_self_decision', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '404': {description: approval_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
-        '409': {description: 'approval_already_decided or approval_expired', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '422': {description: 'approval_context_incomplete', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '409': {description: 'approval_already_decided, approval_expired or approval_context_changed', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
 
   /api/v1/action-approvals/{id}/consume:
@@ -4546,6 +4613,12 @@ paths:
         `approval_not_approved` (pending), `approval_denied`,
         `approval_expired`, `approval_intent_mismatch`, `approval_consumed`.
         A consumed receipt never authorizes a second side effect.
+        Before the spend the decider's authority, the decision's freshness,
+        the decision context and the policy version are re-checked
+        (mctl-api#700): `approval_context_changed`, `approval_stale`,
+        `approval_authority_revoked`, `approval_decider_disabled` and
+        `approval_policy_drift` are 409 with details.reapproval_required=true;
+        `approval_authority_unavailable` is 503 and may be retried.
       tags: [Action Approvals]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
@@ -4564,7 +4637,7 @@ paths:
         '400': {description: invalid_request, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '403': {description: approval_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '404': {description: approval_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
-        '409': {description: 'approval_not_approved, approval_denied, approval_expired, approval_intent_mismatch or approval_consumed', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '409': {description: 'approval_not_approved, approval_denied, approval_expired, approval_intent_mismatch, approval_consumed, approval_context_changed, approval_stale, approval_authority_revoked, approval_decider_disabled or approval_policy_drift', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
 
   /api/v1/action-approvals/{id}/execute:

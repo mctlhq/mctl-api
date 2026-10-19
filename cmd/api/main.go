@@ -55,6 +55,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/ghactions"
 	"github.com/mctlhq/mctl-api/internal/ghtoken"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/governance"
 	"github.com/mctlhq/mctl-api/internal/humaninput"
 	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/lifecycle"
@@ -982,6 +983,8 @@ func main() {
 		LegacyApproverDisabled:         cfg.legacyApproverDisabled(),
 		PrincipalMembership:            gitReader,
 		AdminPrincipals:                cfg.adminPrincipals(),
+		RequireRegisteredPolicy:        cfg.requireRegisteredPolicy(),
+		ApprovalMaxDecisionAge:         cfg.approvalMaxDecisionAge(),
 		PrincipalAuthz:                 principalAuthz,
 		MemberKeyPlan:                  memberKeyPlanOptions(principalStore, gitReader),
 		Delegation:                     delegationResolver,
@@ -1297,6 +1300,12 @@ type config struct {
 	// whether the service principal may still relay a free-text approver on
 	// mctl-agents-approve. Empty means on; validated at startup.
 	LegacyApproverRaw string
+	// ApprovalMaxDecisionAgeRaw is ACTION_APPROVAL_MAX_DECISION_AGE
+	// (mctl-api#700): a Go duration; empty is 24h.
+	ApprovalMaxDecisionAgeRaw string
+	// ApprovalStrictPolicyRaw is
+	// ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY (mctl-api#700); empty is off.
+	ApprovalStrictPolicyRaw string
 	// TenantAuthzModeRaw is TENANT_AUTHZ_MODE (mctl-api#377), validated at
 	// boot: an unknown value, or principal before this build implements it,
 	// refuses to start.
@@ -1423,6 +1432,8 @@ func loadConfig() config {
 		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
 		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
 		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
+		ApprovalMaxDecisionAgeRaw:      os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
+		ApprovalStrictPolicyRaw:        os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
 		AdminPrincipalsRaw:             os.Getenv("ADMIN_PRINCIPALS"),
 		PrincipalsDisabled:             killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
 		PrincipalDBConfigured:          postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
@@ -1656,6 +1667,9 @@ func (c config) validate() error {
 		return err
 	}
 	if _, err := parseLegacyApprover(c.LegacyApproverRaw); err != nil {
+		return err
+	}
+	if _, err := parseApprovalMaxDecisionAge(c.ApprovalMaxDecisionAgeRaw); err != nil {
 		return err
 	}
 	if err := c.ZitadelHook.validate(); err != nil {
@@ -2161,6 +2175,37 @@ func parseLegacyApprover(v string) (bool, error) {
 func (c config) legacyApproverDisabled() bool {
 	on, err := parseLegacyApprover(c.LegacyApproverRaw)
 	return err == nil && !on
+}
+
+// parseApprovalMaxDecisionAge reads ACTION_APPROVAL_MAX_DECISION_AGE: how
+// long an action approval stays spendable after it was decided. Empty is 24h.
+// A malformed or non-positive value refuses boot rather than silently
+// widening or removing the bound.
+func parseApprovalMaxDecisionAge(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return governance.DefaultMaxDecisionAge, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("ACTION_APPROVAL_MAX_DECISION_AGE=%q: want a positive duration such as 24h", v)
+	}
+	return d, nil
+}
+
+// approvalMaxDecisionAge is the parsed bound; validate has already refused an
+// unparsable value.
+func (c config) approvalMaxDecisionAge() time.Duration {
+	d, err := parseApprovalMaxDecisionAge(c.ApprovalMaxDecisionAgeRaw)
+	if err != nil {
+		return governance.DefaultMaxDecisionAge
+	}
+	return d
+}
+
+// requireRegisteredPolicy is ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY.
+func (c config) requireRegisteredPolicy() bool {
+	return killSwitchOn(c.ApprovalStrictPolicyRaw)
 }
 
 // killSwitchOn reads a kill-switch value (WORK_ITEMS_DISABLED,

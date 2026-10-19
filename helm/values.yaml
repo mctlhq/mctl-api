@@ -91,6 +91,14 @@ env:
   # mctl-agents approves through action-approval grants. Any other value
   # refuses boot.
   MCTL_AGENTS_APPROVE_LEGACY_APPROVER: ""
+  # How long an action approval stays spendable after a human decided it
+  # (mctl-api#700), as a Go duration. Empty is 24h; it never extends past the
+  # request's own expiry. 168h restores the previous 7-day horizon. An invalid
+  # value refuses boot.
+  ACTION_APPROVAL_MAX_DECISION_AGE: ""
+  # "true" refuses to spend an approval whose policy rule is not registered in
+  # the platform's policy set (mctl-api#700). Empty is off.
+  ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY: ""
   # Platform admins by principal id (prn_...), comma-separated. The only
   # source of platform admin in principal mode (ADMIN_USERS is then
   # ignored); in shadow mode, when set, each request's admin decision is

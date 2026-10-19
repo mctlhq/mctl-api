@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
@@ -101,6 +102,9 @@ func newDevLoopGrantEnv(t *testing.T) (*workItemsEnv, *fakeDevLoopClient) {
 	e := newWorkItemsEnv(t)
 	fake := &fakeDevLoopClient{}
 	e.h.opts.TemporalClient = fake
+	// The registry production wires: it sets the grant's risk level, which
+	// an approve requires (mctl-api#700).
+	e.h.opts.Registry = operations.NewRegistry()
 	return e, fake
 }
 

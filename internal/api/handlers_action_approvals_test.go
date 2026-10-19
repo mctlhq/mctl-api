@@ -20,13 +20,20 @@ import (
 // id, which the env's cleanup deletes by.
 func (e *workItemsEnv) approvalBody(key string) map[string]any {
 	return map[string]any{
-		"execution_id":    e.tenant + "-exec",
-		"action_kind":     "github.merge_pr",
-		"target":          "mctlhq/mctl-api#1",
-		"args_digest":     "sha256:args",
-		"policy_rule_id":  "merge-needs-human",
-		"policy_version":  "v3",
-		"artifact_hash":   "sha256:diff",
+		"execution_id":   e.tenant + "-exec",
+		"action_kind":    "github.merge_pr",
+		"target":         "mctlhq/mctl-api#1",
+		"args_digest":    "sha256:args",
+		"policy_rule_id": "merge-needs-human",
+		"policy_version": "v3",
+		"artifact_hash":  "sha256:diff",
+		// The decision context (mctl-api#700): github.merge_pr is no
+		// registered operation and merge-needs-human no registered policy,
+		// so the client supplies what a reviewer must be shown.
+		"risk_level":      "high",
+		"side_effect":     "write",
+		"policy_decision": "require_approval",
+		"policy_reasons":  []string{"merge.needs-human"},
 		"idempotency_key": key,
 		"expires_at":      time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 	}

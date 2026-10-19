@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -101,6 +102,9 @@ var (
 	ErrApprovalExpired        = errors.New("action approval request has expired")
 	ErrApprovalIntentMismatch = errors.New("presented intent_hash does not match the approved intent")
 	ErrApprovalConsumed       = errors.New("action approval request was already consumed")
+	// ErrApprovalStale: the decision is older than its freshness bound
+	// (fresh_until), though the request itself has not expired (mctl-api#700).
+	ErrApprovalStale = errors.New("action approval decision is stale")
 	// Execution mark refusals, one per reason.
 	ErrApprovalNotConsumed    = errors.New("action approval request is not consumed")
 	ErrApprovalExecuted       = errors.New("action approval request was already marked executed")
@@ -147,6 +151,31 @@ ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS actor_name TEXT NO
 ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS subject_principal_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS subject_kind TEXT NOT NULL DEFAULT '';
 ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS agent_run_id TEXT NOT NULL DEFAULT '';
+-- Decision context, captured authority and freshness (mctl-api#700).
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS risk_level TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS side_effect TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS intent_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS policy_decision TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS policy_reasons TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS decided_context_digest TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS authority_basis TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS authz_mode TEXT NOT NULL DEFAULT '';
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS fresh_until TIMESTAMPTZ;
+-- Backfill rows written before the decision-context columns existed, so a
+-- pending legacy approval is not stuck at approval_context_incomplete. A new
+-- row always has an intent_source (it is derived from the execution), so an
+-- empty one marks a legacy row; backfilled rows have one, which makes this
+-- idempotent and leaves new, deliberately incomplete requests alone.
+UPDATE action_approval_requests SET
+    side_effect = CASE WHEN side_effect = '' THEN 'write' ELSE side_effect END,
+    policy_decision = CASE WHEN policy_decision = '' THEN 'require_approval' ELSE policy_decision END,
+    policy_reasons = CASE WHEN cardinality(policy_reasons) = 0
+        THEN ARRAY['legacy.pre-governance'] ELSE policy_reasons END,
+    intent_source = CASE
+        WHEN intent_source <> '' THEN intent_source
+        WHEN work_item_id <> '' THEN 'work_item:' || work_item_id
+        ELSE 'execution:' || execution_id END
+WHERE intent_source = '' AND decided_context_digest = '';
 -- Single-use execution mark: consumed -> executed. A table created before
 -- the state existed carries the narrower state CHECK under the same name;
 -- it is replaced in one ALTER (drop and add under one lock), and only while
@@ -170,7 +199,9 @@ const actionApprovalColumns = `id, execution_id, action_kind, target, args_diges
 	policy_version, artifact_hash, work_item_id, idempotency_key, requested_by, intent_hash, state,
 	expires_at, created_at, decided_by, decided_at, reason, consumed_at, schema_version,
 	requested_by_principal_id, via_principal_id, decided_by_principal_id, decided_via_principal_id,
-	actor_kind, actor_name, subject_principal_id, subject_kind, agent_run_id, executed_at`
+	actor_kind, actor_name, subject_principal_id, subject_kind, agent_run_id,
+		risk_level, side_effect, intent_source, policy_decision, policy_reasons,
+		decided_context_digest, authority_basis, authz_mode, fresh_until, executed_at`
 
 // ActionApprovalRequest is one durable approval of one hashed side effect.
 // State is the effective state: `expired` for a pending or approved request
@@ -218,6 +249,23 @@ type ActionApprovalRequest struct {
 	SubjectPrincipalID string `json:"subject_principal_id,omitempty"`
 	SubjectKind        string `json:"subject_kind,omitempty"`
 	AgentRunID         string `json:"agent_run_id,omitempty"`
+
+	// The decision context a reviewer is shown (mctl-api#700): references,
+	// enums and reason codes only, never args or free text.
+	RiskLevel      string   `json:"risk_level,omitempty"`
+	SideEffect     string   `json:"side_effect,omitempty"`
+	IntentSource   string   `json:"intent_source,omitempty"`
+	PolicyDecision string   `json:"policy_decision,omitempty"`
+	PolicyReasons  []string `json:"policy_reasons,omitempty"`
+
+	// Captured when a human approved: the digest of the context they were
+	// shown, the authority they decided under, and how long the decision
+	// stays spendable (never past ExpiresAt). Evidence, not authorization:
+	// the authority is re-checked when the approval is spent.
+	DecidedContextDigest string     `json:"decided_context_digest,omitempty"`
+	AuthorityBasis       string     `json:"authority_basis,omitempty"`
+	AuthzMode            string     `json:"authz_mode,omitempty"`
+	FreshUntil           *time.Time `json:"fresh_until,omitempty"`
 }
 
 // ActionIntent is what an approval binds: the fields intent_hash covers.
@@ -288,6 +336,61 @@ type ActionApprovalInput struct {
 	ExpiresAt          time.Time
 	// IntentHash, when set, must equal IntentHash(ActionIntent).
 	IntentHash string
+
+	// Decision context (mctl-api#700); see ActionApprovalRequest.
+	RiskLevel      string
+	SideEffect     string
+	IntentSource   string
+	PolicyDecision string
+	PolicyReasons  []string
+}
+
+// Decision context bounds and vocabularies.
+const (
+	MaxPolicyReasons     = 8
+	MaxPolicyReasonBytes = 128
+)
+
+var policyReasonRE = regexp.MustCompile(`^[a-z0-9._:-]+$`)
+
+// ValidRiskLevel and ValidSideEffect are the closed vocabularies of the
+// decision context.
+func ValidRiskLevel(v string) bool {
+	return v == "low" || v == "medium" || v == "high"
+}
+
+func ValidSideEffect(v string) bool {
+	switch v {
+	case "none", "read", "write", "destructive", "external":
+		return true
+	}
+	return false
+}
+
+func (in ActionApprovalInput) validateContext() error {
+	if in.RiskLevel != "" && !ValidRiskLevel(in.RiskLevel) {
+		return invalid("risk_level must be low, medium or high")
+	}
+	if in.SideEffect != "" && !ValidSideEffect(in.SideEffect) {
+		return invalid("side_effect must be none, read, write, destructive or external")
+	}
+	for _, f := range [][2]string{{"intent_source", in.IntentSource}, {"policy_decision", in.PolicyDecision}} {
+		if err := checkText(f[0], f[1], MaxApprovalFieldBytes, false); err != nil {
+			return err
+		}
+		if err := scanSecrets(f[0], f[1]); err != nil {
+			return err
+		}
+	}
+	if len(in.PolicyReasons) > MaxPolicyReasons {
+		return invalid("policy_reasons must have at most %d entries", MaxPolicyReasons)
+	}
+	for _, r := range in.PolicyReasons {
+		if len(r) > MaxPolicyReasonBytes || !policyReasonRE.MatchString(r) {
+			return invalid("policy_reasons entries must be 1-%d bytes of [a-z0-9._:-]", MaxPolicyReasonBytes)
+		}
+	}
+	return nil
 }
 
 func (in ActionApprovalInput) validate() error {
@@ -319,6 +422,9 @@ func (in ActionApprovalInput) validate() error {
 	if in.WorkItemID != "" && !strings.HasPrefix(in.WorkItemID, WorkItemIDPrefix) {
 		return invalid("work_item_id must be a %s id", WorkItemIDPrefix)
 	}
+	if err := in.validateContext(); err != nil {
+		return err
+	}
 	if in.ExpiresAt.IsZero() {
 		return invalid("expires_at is required")
 	}
@@ -344,8 +450,16 @@ func scanActionApproval(row pgx.Row, now time.Time) (*ActionApprovalRequest, err
 		&a.State, &a.ExpiresAt, &a.CreatedAt, &a.DecidedBy, &a.DecidedAt, &a.Reason, &a.ConsumedAt,
 		&a.SchemaVersion, &a.RequestedByPrincipalID, &a.ViaPrincipalID, &a.DecidedByPrincipalID,
 		&a.DecidedViaPrincipalID, &a.ActorKind, &a.ActorName, &a.SubjectPrincipalID, &a.SubjectKind,
-		&a.AgentRunID, &a.ExecutedAt); err != nil {
+		&a.AgentRunID, &a.RiskLevel, &a.SideEffect, &a.IntentSource, &a.PolicyDecision, &a.PolicyReasons,
+		&a.DecidedContextDigest, &a.AuthorityBasis, &a.AuthzMode, &a.FreshUntil, &a.ExecutedAt); err != nil {
 		return nil, err
+	}
+	if len(a.PolicyReasons) == 0 {
+		a.PolicyReasons = nil
+	}
+	if a.FreshUntil != nil {
+		t := a.FreshUntil.UTC()
+		a.FreshUntil = &t
 	}
 	a.ExpiresAt = a.ExpiresAt.UTC()
 	a.CreatedAt = a.CreatedAt.UTC()
@@ -391,6 +505,10 @@ func (s *Store) CreateActionApproval(ctx context.Context, in ActionApprovalInput
 	// decision; the UNIQUE constraint is the backstop.
 	err := s.withTx(ctx, fmt.Sprintf("action-approval-create:%d:%s:%s", len(in.RequestedBy), in.RequestedBy, in.IdempotencyKey), func(tx pgx.Tx) error {
 		now := s.now()
+		reasons := in.PolicyReasons
+		if reasons == nil {
+			reasons = []string{}
+		}
 		existing, err := scanActionApproval(tx.QueryRow(ctx, `SELECT `+actionApprovalColumns+`
 			FROM action_approval_requests WHERE requested_by=$1 AND idempotency_key=$2`,
 			in.RequestedBy, in.IdempotencyKey), now)
@@ -424,14 +542,17 @@ func (s *Store) CreateActionApproval(ctx context.Context, in ActionApprovalInput
 				id, execution_id, action_kind, target, args_digest, policy_rule_id, policy_version,
 				artifact_hash, work_item_id, idempotency_key, requested_by, intent_hash, state,
 				expires_at, created_at, schema_version, requested_by_principal_id, via_principal_id,
-				actor_kind, actor_name, subject_principal_id, subject_kind, agent_run_id)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+				actor_kind, actor_name, subject_principal_id, subject_kind, agent_run_id,
+				risk_level, side_effect, intent_source, policy_decision, policy_reasons)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
+				$24,$25,$26,$27,$28)
 			RETURNING `+actionApprovalColumns,
 			ActionApprovalIDPrefix+strings.ReplaceAll(uuid.NewString(), "-", ""), in.ExecutionID, in.ActionKind,
 			in.Target, in.ArgsDigest, in.PolicyRuleID, in.PolicyVersion, in.ArtifactHash, in.WorkItemID,
 			in.IdempotencyKey, in.RequestedBy, hash, ApprovalPending, in.ExpiresAt.UTC(), now,
 			ActionApprovalSchemaVersion, in.RequestedByPrincipalID, in.ViaPrincipalID,
-			in.ActorKind, in.ActorName, in.SubjectPrincipalID, in.SubjectKind, in.AgentRunID), now)
+			in.ActorKind, in.ActorName, in.SubjectPrincipalID, in.SubjectKind, in.AgentRunID,
+			in.RiskLevel, in.SideEffect, in.IntentSource, in.PolicyDecision, reasons), now)
 		if err != nil {
 			return fmt.Errorf("workitems: insert action approval: %w", err)
 		}
@@ -541,6 +662,15 @@ type ActionDecisionInput struct {
 	DecidedViaPrincipalID string
 	Decision              string
 	Reason                string
+
+	// Captured on approve (mctl-api#700): the digest of the decision context
+	// the reviewer was shown, the authority basis and authz mode the decision
+	// was made under, and how long the decision stays spendable. FreshFor <= 0
+	// sets no freshness bound beyond expires_at.
+	ContextDigest  string
+	AuthorityBasis string
+	AuthzMode      string
+	FreshFor       time.Duration
 }
 
 // DecideActionApproval moves a pending request to approved or denied. A
@@ -582,11 +712,22 @@ func (s *Store) DecideActionApproval(ctx context.Context, in ActionDecisionInput
 			return fmt.Errorf("%w: %s is %s", ErrApprovalAlreadyDecided, cur.ID, cur.State)
 		}
 		now := s.now()
+		var freshUntil *time.Time
+		if to == ApprovalApproved && in.FreshFor > 0 {
+			// LEAST(expires_at, now+FreshFor); the row is locked FOR UPDATE.
+			t := now.Add(in.FreshFor)
+			if t.After(cur.ExpiresAt) {
+				t = cur.ExpiresAt
+			}
+			freshUntil = &t
+		}
 		out, err = scanActionApproval(tx.QueryRow(ctx, `UPDATE action_approval_requests
 			SET state=$2, decided_by=$3, decided_at=$4, reason=$5,
-			    decided_by_principal_id=$6, decided_via_principal_id=$7
+			    decided_by_principal_id=$6, decided_via_principal_id=$7,
+			    decided_context_digest=$8, authority_basis=$9, authz_mode=$10, fresh_until=$11
 			WHERE id=$1 AND state='pending' RETURNING `+actionApprovalColumns,
-			cur.ID, to, in.DecidedBy, now, in.Reason, in.DecidedByPrincipalID, in.DecidedViaPrincipalID), now)
+			cur.ID, to, in.DecidedBy, now, in.Reason, in.DecidedByPrincipalID, in.DecidedViaPrincipalID,
+			in.ContextDigest, in.AuthorityBasis, in.AuthzMode, freshUntil), now)
 		if err != nil {
 			return fmt.Errorf("workitems: decide action approval: %w", err)
 		}
@@ -596,6 +737,26 @@ func (s *Store) DecideActionApproval(ctx context.Context, in ActionDecisionInput
 		return nil, err
 	}
 	return out, nil
+}
+
+// ConsumeStateRefusal is the refusal a consume of a in its current state
+// gets, or nil when a is approved. A caller that checks more than the store
+// does before consuming (the authority revalidation) runs this first, so a
+// request that is not approved keeps its state refusal.
+func ConsumeStateRefusal(a *ActionApprovalRequest) error {
+	switch a.State {
+	case ApprovalApproved:
+		return nil
+	case ApprovalConsumed, ApprovalExecuted:
+		return fmt.Errorf("%w: %s", ErrApprovalConsumed, a.ID)
+	case ApprovalDenied:
+		return fmt.Errorf("%w: %s", ErrApprovalDenied, a.ID)
+	case ApprovalExpired:
+		return fmt.Errorf("%w: %s", ErrApprovalExpired, a.ID)
+	case ApprovalPending:
+		return fmt.Errorf("%w: %s is pending", ErrApprovalNotApproved, a.ID)
+	}
+	return fmt.Errorf("%w: %s is %s", ErrApprovalNotApproved, a.ID, a.State)
 }
 
 // ConsumeActionApproval spends an approved request: one atomic
@@ -611,6 +772,7 @@ func (s *Store) ConsumeActionApproval(ctx context.Context, id, intentHash string
 	out, err := scanActionApproval(s.pool.QueryRow(ctx, `UPDATE action_approval_requests
 		SET state='consumed', consumed_at=$3
 		WHERE id=$1 AND state='approved' AND intent_hash=$2 AND expires_at > $3
+			  AND (fresh_until IS NULL OR fresh_until > $3)
 		RETURNING `+actionApprovalColumns, id, intentHash, now), now)
 	if err == nil {
 		return out, nil
@@ -622,18 +784,15 @@ func (s *Store) ConsumeActionApproval(ctx context.Context, id, intentHash string
 	if err != nil {
 		return nil, err
 	}
-	switch cur.State {
-	case ApprovalConsumed, ApprovalExecuted:
-		return nil, fmt.Errorf("%w: %s", ErrApprovalConsumed, id)
-	case ApprovalDenied:
-		return nil, fmt.Errorf("%w: %s", ErrApprovalDenied, id)
-	case ApprovalExpired:
-		return nil, fmt.Errorf("%w: %s", ErrApprovalExpired, id)
-	case ApprovalPending:
-		return nil, fmt.Errorf("%w: %s is pending", ErrApprovalNotApproved, id)
+	if err := ConsumeStateRefusal(cur); err != nil {
+		return nil, err
 	}
 	if cur.IntentHash != intentHash {
 		return nil, fmt.Errorf("%w: %s", ErrApprovalIntentMismatch, id)
+	}
+	if cur.FreshUntil != nil && !cur.FreshUntil.After(now) {
+		return nil, fmt.Errorf("%w: %s was decided too long ago (fresh until %s)",
+			ErrApprovalStale, id, cur.FreshUntil.Format(time.RFC3339))
 	}
 	// Approved, matching and unexpired now, but the UPDATE saw otherwise:
 	// the clock moved between the two statements. Refuse rather than

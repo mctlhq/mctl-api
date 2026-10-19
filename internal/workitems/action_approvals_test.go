@@ -385,6 +385,73 @@ func TestActionApprovalServesPrincipalAndActorFields(t *testing.T) {
 	}
 }
 
+// The fresh_until bound (mctl-api#700): min(expires_at, now+FreshFor) at
+// approve, and a compare-and-set at consume.
+func TestActionApprovalFreshUntil(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	decide := func(key string, fresh time.Duration) *ActionApprovalRequest {
+		a := createApproval(t, s, approvalInput(s, key))
+		d, err := s.DecideActionApproval(ctx, ActionDecisionInput{ID: a.ID, DecidedBy: "github:root", Decision: DecisionApprove, FreshFor: fresh})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	short := decide("k-fresh-short", time.Minute)
+	if short.FreshUntil == nil || !short.FreshUntil.Before(short.ExpiresAt) {
+		t.Fatalf("fresh_until = %v, expires %v", short.FreshUntil, short.ExpiresAt)
+	}
+	clamped := decide("k-fresh-clamp", 24*time.Hour)
+	if clamped.FreshUntil == nil || !clamped.FreshUntil.Equal(clamped.ExpiresAt) {
+		t.Fatalf("fresh_until = %v, want expires_at %v", clamped.FreshUntil, clamped.ExpiresAt)
+	}
+	if none := decide("k-fresh-none", 0); none.FreshUntil != nil {
+		t.Fatalf("fresh_until = %v, want nil", none.FreshUntil)
+	}
+
+	realNow := s.now
+	s.now = func() time.Time { return realNow().Add(10 * time.Minute) }
+	if _, err := s.ConsumeActionApproval(ctx, short.ID, short.IntentHash); !errors.Is(err, ErrApprovalStale) {
+		t.Fatalf("consume stale = %v", err)
+	}
+	if got, err := s.ActionApproval(ctx, short.ID); err != nil || got.State != ApprovalApproved {
+		t.Fatalf("after stale = %+v %v", got, err)
+	}
+	if _, err := s.ConsumeActionApproval(ctx, clamped.ID, clamped.IntentHash); err != nil {
+		t.Fatalf("consume within freshness = %v", err)
+	}
+}
+
+// Rows written before the decision-context columns are backfilled by the
+// migration, once, and a row that has a context is left alone.
+func TestActionApprovalSchemaBackfillsLegacyContext(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	legacy := createApproval(t, s, approvalInput(s, "k-backfill"))
+	if _, err := s.pool.Exec(ctx, `UPDATE action_approval_requests
+		SET side_effect='', intent_source='', policy_decision='', policy_reasons='{}' WHERE id=$1`, legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	kept := createApproval(t, s, approvalInput(s, "k-backfill-kept"))
+	if _, err := s.pool.Exec(ctx, `UPDATE action_approval_requests SET side_effect='destructive' WHERE id=$1`, kept.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ { // idempotent
+		if _, err := s.pool.Exec(ctx, actionApprovalSchema); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ActionApproval(ctx, legacy.ID)
+	if err != nil || got.SideEffect == "" || got.PolicyDecision == "" || len(got.PolicyReasons) == 0 ||
+		got.IntentSource != "execution:"+storeTestExecution {
+		t.Fatalf("legacy = %+v %v", got, err)
+	}
+	if got, _ := s.ActionApproval(ctx, kept.ID); got.SideEffect != "destructive" {
+		t.Fatalf("kept = %+v", got)
+	}
+}
+
 // consumed is an approved request, spent.
 func consumed(t *testing.T, s *Store, key string) *ActionApprovalRequest {
 	t.Helper()

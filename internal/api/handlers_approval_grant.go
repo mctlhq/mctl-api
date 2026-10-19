@@ -35,13 +35,6 @@ import (
 // computed from the row when the run created the aar_, and it is recorded
 // in the decision and consume audit (target).
 
-// devLoopApprovalPolicyRule and devLoopApprovalPolicyVersion are what a
-// DevLoop approval grant is created under (R1).
-const (
-	devLoopApprovalPolicyRule    = "dev-loop.human-approval"
-	devLoopApprovalPolicyVersion = "v1"
-)
-
 // expectedContentDigestParam carries the grant's artifact_hash -- the
 // proposal content digest the human decided (mctl-agents#681) -- to the
 // approve workflow, which refuses to flip content that no longer hashes to
@@ -181,13 +174,14 @@ func (h *Handlers) bindApprovalGrant(w http.ResponseWriter, r *http.Request, use
 	if exec.Engine != workitems.EngineTemporal || run != workflowID {
 		return refuse("target " + target + " does not belong to the DevLoop this approval was decided for")
 	}
+	policyRule, policyVersion := h.devLoopPolicy()
 	s.intentHash = workitems.IntentHash(workitems.ActionIntent{
 		ExecutionID:   a.ExecutionID,
 		ActionKind:    devLoopApprovalKind,
 		Target:        target,
 		ArgsDigest:    a.ArgsDigest,
-		PolicyRuleID:  devLoopApprovalPolicyRule,
-		PolicyVersion: devLoopApprovalPolicyVersion,
+		PolicyRuleID:  policyRule,
+		PolicyVersion: policyVersion,
 		ArtifactHash:  a.ArtifactHash,
 		WorkItemID:    a.WorkItemID,
 	})
@@ -200,6 +194,19 @@ func (h *Handlers) bindApprovalGrant(w http.ResponseWriter, r *http.Request, use
 // this has still spent the approval: single use is the point, and the run
 // asks for a new one.
 func (h *Handlers) spendApprovalGrant(w http.ResponseWriter, r *http.Request, user *auth.User, s *approvalSpend) (*workitems.ActionApprovalRequest, bool) {
+	// Revalidate the decider's authority, the freshness, the context and the
+	// policy right before spending, so a refusal never reaches Submit. The
+	// state refusal comes first, as on the consume route: a request that is
+	// not approved is not an authority question.
+	if err := workitems.ConsumeStateRefusal(s.approval); err != nil {
+		h.auditActionApprovalRefusal(r, user, "action_approval.consume_refused", s.approval.ID, actionApprovalRefusalCode(err))
+		writeActionApprovalError(w, err)
+		return nil, false
+	}
+	reval, ok := h.revalidateApproval(w, r, user, s.approval)
+	if !ok {
+		return nil, false
+	}
 	a, err := h.opts.WorkItems.ConsumeActionApproval(r.Context(), s.approval.ID, s.intentHash)
 	if err != nil {
 		if code := actionApprovalRefusalCode(err); code != "" {
@@ -210,7 +217,8 @@ func (h *Handlers) spendApprovalGrant(w http.ResponseWriter, r *http.Request, us
 		writeActionApprovalError(w, err)
 		return nil, false
 	}
-	h.auditActionApproval(r, user, "action_approval.consume", a, operations.RiskMedium)
+	h.auditActionApproval(r, user, "action_approval.consume", a, operations.RiskMedium,
+		map[string]string{"revalidation": reval.Revalidation})
 	if a.DecidedBy != s.approval.DecidedBy {
 		// A decision is final, so this cannot happen; if it did, the
 		// approver already recorded in the input would not be the one who

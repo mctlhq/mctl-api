@@ -677,3 +677,17 @@ func TestConfigureCIMD(t *testing.T) {
 		}
 	}
 }
+
+func TestParseApprovalMaxDecisionAge(t *testing.T) {
+	if d, err := parseApprovalMaxDecisionAge(""); err != nil || d != 24*time.Hour {
+		t.Fatalf("default = %v, %v", d, err)
+	}
+	if d, err := parseApprovalMaxDecisionAge("168h"); err != nil || d != 168*time.Hour {
+		t.Fatalf("168h = %v, %v", d, err)
+	}
+	for _, bad := range []string{"soon", "0", "-1h"} {
+		if _, err := parseApprovalMaxDecisionAge(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
