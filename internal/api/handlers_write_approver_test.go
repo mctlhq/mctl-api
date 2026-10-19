@@ -15,9 +15,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-// mctl-agents-approve writes approved_by into .status.yaml and into the gitops
-// commit message, so the approver must be a fact about who called rather than
-// a field the caller fills in (gitops#986). These assert on the value that
 // reviewedDigest is a well-formed proposal content digest: a direct approve
 // must carry one (mctl-api#722), so every approval meant to succeed sends it.
 var reviewedDigest = "sha256:" + strings.Repeat("a", 64)
