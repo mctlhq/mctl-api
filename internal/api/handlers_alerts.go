@@ -17,6 +17,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -477,7 +478,7 @@ func (h *Handlers) IncidentSummary(w http.ResponseWriter, r *http.Request) {
 func writeIncidentLookupError(w http.ResponseWriter, id string, err error) {
 	switch {
 	case errors.Is(err, alerts.ErrPrefixTooShort):
-		writeError(w, http.StatusBadRequest, "incident id prefix must be at least 8 characters")
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("incident id prefix must be at least %d characters", alerts.MinPrefixLen))
 	case errors.Is(err, alerts.ErrNotFound):
 		writeError(w, http.StatusNotFound, "incident not found: "+id)
 	case errors.Is(err, alerts.ErrAmbiguousPrefix):
