@@ -25,7 +25,7 @@ import (
 
 // pgxpool connects lazily, so none of these tests needs a server: the port
 // below is never dialled except by isClosed, which only reads the error kind.
-const testConn = "postgres://u:p@127.0.0.1:1/db?sslmode=disable"
+const testConn = "postgres://u@127.0.0.1:1/db?sslmode=disable"
 
 func isClosed(t *testing.T, pool *pgxpool.Pool) bool {
 	t.Helper()
