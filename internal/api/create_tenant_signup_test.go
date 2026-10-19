@@ -42,7 +42,8 @@ func TestCreateTenantSignupGateCannotBeBypassedThroughOperations(t *testing.T) {
 	signup := &mctlapi.SignupOptions{Store: store, Cohort: map[string]bool{}}
 	log := audit.NewLogger()
 	exec := &fakeExecutor{}
-	router := mctlapi.NewRouter(mctlapi.Options{Registry: operations.NewRegistry(), GitReader: &fakeGitReader{tenants: []gitops.Tenant{}}, AuditLog: log, Executor: exec, Signup: signup})
+	reader := &fakeGitReader{tenants: []gitops.Tenant{}}
+	router := mctlapi.NewRouter(mctlapi.Options{Registry: operations.NewRegistry(), GitReader: reader, AuditLog: log, Executor: exec, Signup: signup})
 	body := map[string]string{"tenant_name": "budget-team", "quota_cpu_lim": "2", "quota_memory_lim": "3Gi"}
 	denied := postAs(t, router, createTenantPath, body, user)
 	assertStatus(t, denied, http.StatusConflict)
@@ -87,6 +88,14 @@ func TestCreateTenantSignupGateCannotBeBypassedThroughOperations(t *testing.T) {
 	if _, err := store.DecideSignup(ctx, request.ID, "approved", githubID, "budget-customer", "admin", "Welcome"); err != nil {
 		t.Fatal(err)
 	}
+	reader.tenants = []gitops.Tenant{{Name: "budget"}}
+	collision := postAs(t, router, createTenantPath, body, user)
+	assertStatus(t, collision, http.StatusBadRequest)
+	saved, err := store.Signup(ctx, request.ID)
+	if err != nil || saved.Status != "approved" || saved.Tenant != "" {
+		t.Fatalf("known refusal pinned a claim: %+v %v", saved, err)
+	}
+	reader.tenants = []gitops.Tenant{}
 	defaults := postAs(t, router, createTenantPath, map[string]string{"tenant_name": "budget-team"}, user)
 	assertStatus(t, defaults, http.StatusConflict)
 	if !strings.Contains(defaults.Body.String(), "quota_cpu_lim=2") {

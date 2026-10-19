@@ -20,6 +20,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/principals"
 )
 
@@ -99,18 +100,41 @@ func (h *Handlers) ListSignupRequests(w http.ResponseWriter, r *http.Request) {
 		Cursor            string            `json:"cursor"`
 		Complete          *bool             `json:"complete"`
 		TraversalComplete *bool             `json:"traversal_complete"`
+		Observation       string            `json:"observation"`
 	}
-	if err != nil || json.Unmarshal(raw, &page) != nil || page.Requests == nil || page.Issues == nil || page.Complete == nil || page.TraversalComplete == nil || len(page.Requests)+len(page.Issues) > 100 || len(page.Cursor) > 4096 || (!*page.TraversalComplete && (page.Cursor == "" || page.Cursor == cursor)) || (*page.Complete != (*page.TraversalComplete && len(page.Issues) == 0)) {
+	if err != nil || json.Unmarshal(raw, &page) != nil || page.Requests == nil || (page.Complete == nil && page.TraversalComplete == nil) || len(page.Requests)+len(page.Issues) > 100 || len(page.Cursor) > 4096 {
 		writeError(w, 503, "invitation listing could not be observed")
 		return
 	}
 	issues := []issue{}
+	traversal := page.TraversalComplete
+	if traversal == nil {
+		traversal = page.Complete
+		issues = append(issues, issue{ID: "unknown", Error: "legacy_traversal_metadata"})
+	}
+	if !*traversal && (page.Cursor == "" || page.Cursor == cursor) {
+		writeError(w, 503, "invitation pagination could not be observed")
+		return
+	}
+	if page.Issues == nil {
+		issues = append(issues, issue{ID: "unknown", Error: "issue_inventory_unavailable"})
+	}
+	if page.Complete == nil {
+		issues = append(issues, issue{ID: "unknown", Error: "completion_state_unavailable"})
+	} else if *page.Complete != (*traversal && len(page.Issues) == 0) {
+		issues = append(issues, issue{ID: "unknown", Error: "completion_state_conflict"})
+	}
 	for _, item := range page.Issues {
-		if _, err := uuid.Parse(item.ID); err != nil || item.Error != "record_unreadable" {
-			writeError(w, 503, "invalid invitation listing issues")
-			return
+		if _, err := uuid.Parse(item.ID); err != nil {
+			item.ID = "unknown"
+		}
+		if item.Error != "record_unreadable" {
+			item.Error = "bridge_record_issue"
 		}
 		issues = append(issues, item)
+	}
+	if page.Observation != "" && page.Observation != "complete" && len(issues) == 0 {
+		issues = append(issues, issue{ID: "unknown", Error: "bridge_observation_partial"})
 	}
 	result := []principals.SignupDecision{}
 	expired := []string{}
@@ -153,7 +177,7 @@ func (h *Handlers) ListSignupRequests(w http.ResponseWriter, r *http.Request) {
 	if len(issues) > 0 {
 		observation = "partial"
 	}
-	writeJSON(w, 200, map[string]any{"requests": result, "issues": issues, "expired": expired, "cursor": page.Cursor, "traversal_complete": *page.TraversalComplete, "complete": *page.TraversalComplete && len(issues) == 0, "observation": observation})
+	writeJSON(w, 200, map[string]any{"requests": result, "issues": issues, "expired": expired, "cursor": page.Cursor, "traversal_complete": *traversal, "complete": *traversal && len(issues) == 0, "observation": observation})
 
 }
 func (h *Handlers) GetSignupCapacity(w http.ResponseWriter, r *http.Request) {
@@ -356,6 +380,17 @@ func (h *Handlers) ClaimSignup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, "claim actor must match the customer principal")
 		return
 	}
+	if operations.IsReservedTenantName(b.Tenant) {
+		writeError(w, 400, "workspace name is reserved")
+		return
+	}
+	if status, message := h.checkTenantNameCollision(b.Tenant); status != 0 {
+		writeError(w, status, message)
+		return
+	}
+	if !h.guardCustomerTenantCreation(w, r, operations.Operation{Name: "create-tenant"}, map[string]string{"tenant_name": b.Tenant}) {
+		return
+	}
 	if status, message := h.claimSignupPrincipal(r.Context(), b.Principal, b.Tenant, b.Memory, b.CPU, b.MemoryLimit, b.CPULimit, b.Pods, b.PVCs, b.Services); status != 0 {
 		h.logAudit(r, audit.Entry{UserID: u.ID, Operation: "signup.claim", Status: "denied", RiskLevel: "medium", Message: message, Parameters: map[string]string{"principal_id": b.Principal, "tenant": b.Tenant}})
 		writeError(w, status, message)
@@ -396,14 +431,10 @@ func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory
 	if o.Cohort[githubID] {
 		return 0, ""
 	}
-	legacy, err := o.Store.SignupGrandfathered(ctx, githubID)
-	if err != nil {
-		return 503, "existing admission unreadable"
-	}
 	if (memory != "2Gi" && memory != "1280Mi") || (cpu != "1" && cpu != "500m") || memoryLimit != "3Gi" || cpuLimit != "2" || !signupBound(pods, 10) || !signupBound(pvcs, 5) || !signupBound(services, 10) {
 		return 409, "workspace profile exceeds funded admission: use requests 1 CPU/2Gi (or 500m/1280Mi), limits quota_cpu_lim=2 and quota_memory_lim=3Gi, at most 10 pods, 5 PVCs and 10 services"
 	}
-	if o.PublicFlow || legacy {
+	if o.PublicFlow {
 		err = o.Store.ClaimPublicSignup(ctx, githubID, tenant, pid)
 	} else {
 		err = o.Store.ClaimSignup(ctx, githubID, tenant, pid)

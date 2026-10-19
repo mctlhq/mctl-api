@@ -29,13 +29,16 @@ invitations or set capacity. The shared MCP portal hides these private tools.
 Deployments without the customer identity hook, or with the principal store
 explicitly disabled/absent by configuration, keep their static policy and legacy
 provisioning path. Once the approval store is configured, a failed store init or
-query refuses admission; it never disables the gate. A one-time migration snapshots
-existing active human GitHub identities. Those existing customers may claim a
-funded slot without submitting a new invitation, but still face the profile and
-capacity limits. Restarting the API never adds newly registered identities to
-that snapshot. In public `*` mode, new customers likewise atomically claim the
-same budget; public mode never exempts them from capacity. The explicit existing
-pilot cohort retains its prior test exemption. Public switches remain closed.
+query refuses admission; it never disables the gate. In the private rollout,
+only the explicit pilot cohort or an approved, unexpired invitation may create
+a customer workspace. Having a principal from an earlier API sign-in is not an
+invitation. Existing allocated workspace access is unchanged. The one-workspace
+rule for non-admins predates this change and remains in force; full verified
+deletion releases the reservation. At zero funded capacity, approving a new
+non-pilot allocation is deliberately refused even when the human account already
+exists. In public `*` mode, new customers atomically claim the same budget without
+an invitation; public mode never exempts them from capacity. Public switches stay
+closed in this delivery. The explicit pilot/admin exemptions remain unchanged.
 
 Unused approval lasts seven days. GitHub ownership is proven during OAuth,
 not by the supplied name/email. The site admission mirror helps render the UI;
@@ -43,7 +46,7 @@ PostgreSQL and the identity hook remain authoritative. Customer provisioning
 claims a reservation before side effects and pins it to one principal and team
 name. Retry the same team name after an ambiguous failure. Do not free a claim
 by timeout: a workflow may already exist. Full verified customer deletion
-releases the claim and removes legacy admission eligibility in the final database transaction.
+releases the claim and invitation authority in the final database transaction.
 
 The current funded upper profile uses production requests up to 1 CPU/2 GiB,
 limits 2 CPU/3 GiB, up to 10 pods, 5 PVCs and 10 services, plus the existing

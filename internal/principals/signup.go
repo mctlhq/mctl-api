@@ -25,13 +25,6 @@ CREATE TABLE IF NOT EXISTS signup_requests (
  decided_at timestamptz, expires_at timestamptz, tenant text, principal_id text,
  notification_pending boolean NOT NULL DEFAULT false, delivery_started_at timestamptz,
  delivery_lease uuid, delivery_leased_until timestamptz, delivery_id text);
-CREATE TABLE IF NOT EXISTS signup_legacy_github(subject text PRIMARY KEY);
-CREATE TABLE IF NOT EXISTS signup_admission_cutover(singleton boolean PRIMARY KEY CHECK(singleton),initialized_at timestamptz NOT NULL DEFAULT now());
-WITH first_cutover AS (
- INSERT INTO signup_admission_cutover(singleton) VALUES(true) ON CONFLICT DO NOTHING RETURNING initialized_at
-) INSERT INTO signup_legacy_github(subject)
- SELECT DISTINCT x.subject FROM external_identities x JOIN principals p ON p.id=x.principal_id CROSS JOIN first_cutover
- WHERE x.provider='github' AND x.revoked_at IS NULL AND p.status='active' AND p.kind='human' ON CONFLICT DO NOTHING;
 CREATE UNIQUE INDEX IF NOT EXISTS signup_live_github ON signup_requests(github_id)
  WHERE status IN ('approved','claimed');
 CREATE UNIQUE INDEX IF NOT EXISTS signup_claimed_tenant ON signup_requests(tenant) WHERE status='claimed';
@@ -206,11 +199,6 @@ func (s *Store) SignupAllowed(ctx context.Context, githubID string) (bool, error
 
 // ClaimSignup pins one reservation to one workspace before any provisioning.
 // Ambiguous workflow submission keeps the claim; it is never freed by a timeout.
-func (s *Store) SignupGrandfathered(ctx context.Context, githubID string) (bool, error) {
-	var allowed bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM signup_legacy_github WHERE subject=$1)`, githubID).Scan(&allowed)
-	return allowed, err
-}
 func (s *Store) ClaimSignup(ctx context.Context, githubID, tenant, pid string) error {
 	return s.claimSignup(ctx, githubID, tenant, pid, false)
 }

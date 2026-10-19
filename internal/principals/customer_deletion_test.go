@@ -93,9 +93,6 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if err := s.ClaimSignup(ctx, "730001", "delete-test", p.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(ctx, `INSERT INTO signup_legacy_github(subject) VALUES('730001')`); err != nil {
-		t.Fatal(err)
-	}
 	d, err := s.PrepareCustomerDeletion(ctx, "delete-test", p.ID, old.Issuer, "admin-approval")
 	if err != nil {
 		t.Fatal(err)
@@ -161,9 +158,6 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	}
 	if allowed, err := s.SignupAllowed(ctx, "730001"); err != nil || allowed {
 		t.Fatalf("deletion retained invitation authority: %v %v", allowed, err)
-	}
-	if legacy, err := s.SignupGrandfathered(ctx, "730001"); err != nil || legacy {
-		t.Fatalf("deletion retained legacy eligibility: %v %v", legacy, err)
 	}
 	if capacity, err := s.SignupCapacity(ctx); err != nil || capacity.Used != 0 {
 		t.Fatalf("deletion retained reserved slot: %+v %v", capacity, err)

@@ -150,31 +150,6 @@ func TestSignupExpiredUnusedApprovalReleasesBudget(t *testing.T) {
 	}
 }
 
-func TestSignupGrandfatherSnapshotRunsOnce(t *testing.T) {
-	s := newStoreForTest(t)
-	ctx := context.Background()
-	if _, err := s.Provision(ctx, github(8877001, "old-customer")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.pool.Exec(ctx, `DELETE FROM signup_legacy_github;DELETE FROM signup_admission_cutover`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.pool.Exec(ctx, signupSchema); err != nil {
-		t.Fatal(err)
-	}
-	if old, err := s.SignupGrandfathered(ctx, "8877001"); err != nil || !old {
-		t.Fatalf("existing customer lost admission: %v %v", old, err)
-	}
-	if _, err := s.Provision(ctx, github(8877002, "new-customer")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.pool.Exec(ctx, signupSchema); err != nil {
-		t.Fatal(err)
-	}
-	if newCustomer, err := s.SignupGrandfathered(ctx, "8877002"); err != nil || newCustomer {
-		t.Fatalf("restart grandfathered new customer: %v %v", newCustomer, err)
-	}
-}
 func TestPublicSignupClaimsRemainBoundedUnderConcurrency(t *testing.T) {
 	s := newStoreForTest(t)
 	ctx := context.Background()

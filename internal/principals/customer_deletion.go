@@ -340,9 +340,6 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 		if _, err := tx.Exec(ctx, `UPDATE signup_requests SET status='released',notification_pending=false WHERE (principal_id=$1 OR github_id=$2) AND status IN ('approved','claimed')`, pid, githubID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM signup_legacy_github WHERE subject=$1`, githubID); err != nil {
-			return err
-		}
 		if _, err := tx.Exec(ctx, `DELETE FROM external_identities WHERE principal_id=$1`, pid); err != nil {
 			return err
 		}

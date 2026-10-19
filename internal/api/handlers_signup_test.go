@@ -65,7 +65,7 @@ func TestSignupAdminRefusesServiceRelayAndNonAdmin(t *testing.T) {
 }
 func TestSignupUnknownListingIsNeverEmptyQueue(t *testing.T) {
 	s := signupStore(t)
-	for _, body := range []string{`{}`, `{"requests":[],"complete":false}`, `{"requests":[{}],"complete":true}`} {
+	for _, body := range []string{`{}`, `{"requests":[],"complete":false}`, `{"requests":null,"complete":true}`} {
 		h := &Handlers{opts: Options{Signup: &SignupOptions{Store: s, SiteCall: func(context.Context, string, string, []byte) ([]byte, error) { return []byte(body), nil }}}}
 		r := httptest.NewRequest("GET", "/", nil)
 		r = r.WithContext(auth.WithUser(r.Context(), signupAdminUser(t)))
@@ -157,7 +157,8 @@ func TestSignupClaimChecksIdentityProfileAndWorkspace(t *testing.T) {
 	if _, err := s.DecideSignup(ctx, request.ID, "approved", "987654321", "test-profile", "admin", "Welcome"); err != nil {
 		t.Fatal(err)
 	}
-	h := &Handlers{opts: Options{Signup: &SignupOptions{Store: s}}}
+	reader := &signupFixtureReader{}
+	h := &Handlers{opts: Options{GitReader: reader, Signup: &SignupOptions{Store: s}}}
 	missingActor := httptest.NewRequest("POST", "/api/v1/surface-principals/signup-claim", strings.NewReader(`{}`))
 	missingActor = missingActor.WithContext(auth.WithUser(missingActor.Context(), auth.NewSurfaceUser("portal")))
 	refused := httptest.NewRecorder()
@@ -175,6 +176,20 @@ func TestSignupClaimChecksIdentityProfileAndWorkspace(t *testing.T) {
 		h.surfacePrincipalGate(http.HandlerFunc(h.ClaimSignup)).ServeHTTP(w, r)
 		return w
 	}
+	reader.names = []string{"new"}
+	if w := call(); w.Code != 400 {
+		t.Fatalf("surface name collision: %d %s", w.Code, w.Body.String())
+	}
+	reader.names = []string{}
+	claim["tenant"] = "argocd"
+	if w := call(); w.Code != 400 {
+		t.Fatalf("reserved surface name: %d", w.Code)
+	}
+	before, err := s.Signup(ctx, request.ID)
+	if err != nil || before.Status != "approved" || before.Tenant != "" {
+		t.Fatalf("surface refusal spent claim: %+v %v", before, err)
+	}
+	claim["tenant"] = "new-team"
 	claim["memory"] = "8Gi"
 	if w := call(); w.Code != 409 {
 		t.Fatalf("oversized request: %d %s", w.Code, w.Body.String())
@@ -332,3 +347,81 @@ func TestSignupAmbiguousOrDisabledPrincipalIsRefused(t *testing.T) {
 		t.Fatalf("disabled principal admitted: %d", status)
 	}
 }
+
+func TestSignupBridgeCompatibilityProblemsAreExplicitlyPartial(t *testing.T) {
+	s := signupStore(t)
+	good := principals.SignupRequest{ID: uuid.NewString(), CreatedAt: time.Now().UTC(), Name: "Test", Email: "test@example.com", Project: "Project"}
+	cleanupSignupRows(t, good.ID)
+	for _, mode := range []string{"missing_issues", "missing_traversal", "missing_completion", "conflicting_completion", "new_issue_code", "provider_partial"} {
+		page := map[string]any{"requests": []any{good}, "issues": []any{}, "complete": true, "traversal_complete": true, "cursor": ""}
+		switch mode {
+		case "missing_issues":
+			delete(page, "issues")
+		case "missing_traversal":
+			delete(page, "traversal_complete")
+		case "missing_completion":
+			delete(page, "complete")
+		case "conflicting_completion":
+			page["complete"] = false
+		case "new_issue_code":
+			page["issues"] = []any{map[string]string{"id": good.ID, "error": "future_provider_error"}}
+			page["complete"] = false
+		case "provider_partial":
+			page["observation"] = "partial"
+		}
+		raw, _ := json.Marshal(page)
+		h := &Handlers{opts: Options{Signup: &SignupOptions{Store: s, SiteCall: func(context.Context, string, string, []byte) ([]byte, error) { return raw, nil }}}}
+		r := httptest.NewRequest("GET", "/", nil)
+		r = r.WithContext(auth.WithUser(r.Context(), signupAdminUser(t)))
+		w := httptest.NewRecorder()
+		h.ListSignupRequests(w, r)
+		var body map[string]any
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &body) != nil {
+			t.Fatalf("%s status %d", mode, w.Code)
+		}
+		if body["complete"] != false || body["traversal_complete"] != true || body["observation"] != "partial" || len(body["requests"].([]any)) != 1 || len(body["issues"].([]any)) == 0 {
+			t.Fatalf("%s lost partial observation: %s", mode, w.Body.String())
+		}
+	}
+}
+func TestSignupExistingPrincipalIsNotAnInvitation(t *testing.T) {
+	s := signupStore(t)
+	ctx := context.Background()
+	id := strconv.FormatInt(time.Now().UnixNano(), 10)
+	principal, err := s.Provision(ctx, auth.Identity{Provider: auth.ProviderGitHub, Subject: id, Display: "existing-budget-test", Kind: auth.KindHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSignupRows(t, principal.ID)
+	if err := s.SetSignupCapacity(ctx, 1, "admin", "Reviewed funded capacity"); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handlers{opts: Options{Signup: &SignupOptions{Store: s}}}
+	claim := func(name string) (int, string) {
+		return h.claimSignupPrincipal(ctx, principal.ID, name, "2Gi", "1", "3Gi", "2", "10", "5", "10")
+	}
+	if status, _ := claim("new-team"); status != 409 {
+		t.Fatalf("existing uninvited principal bypassed private signup: %d", status)
+	}
+	request := principals.SignupRequest{ID: uuid.NewString(), CreatedAt: time.Now().UTC(), Name: "Test", Email: "test@example.com", GitHub: "existing-budget-test", Project: "Test"}
+	cleanupSignupRows(t, request.ID)
+	if err := s.ImportSignup(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DecideSignup(ctx, request.ID, "approved", id, "existing-budget-test", "admin", "Welcome"); err != nil {
+		t.Fatal(err)
+	}
+	if status, message := claim("new-team"); status != 0 {
+		t.Fatalf("approved existing principal refused: %d %s", status, message)
+	}
+	if status, _ := claim("another-team"); status != 409 {
+		t.Fatalf("existing principal bypassed one-workspace rule: %d", status)
+	}
+}
+
+type signupFixtureReader struct {
+	GitReader
+	names []string
+}
+
+func (r *signupFixtureReader) TenantNames() ([]string, error) { return r.names, nil }
