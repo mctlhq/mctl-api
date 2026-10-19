@@ -13,9 +13,20 @@ still `policy_rule_id`/`policy_version`.
 ## Mandatory decision context
 
 `GET /api/v1/action-approvals/{id}` (and each list entry) returns
-`decision_context`. An `approve` is refused with 422
-`approval_context_incomplete` (`details.missing_fields`, request stays pending)
-unless all of these are present. A `deny` is never gated.
+`decision_context`. The context is checked twice:
+
+- **At create.** `POST /api/v1/action-approvals` fills what the registry and
+  the registered policy supply, then refuses with 422
+  `approval_context_incomplete` (`details.missing_fields`) if `risk_level`,
+  `side_effect`, `policy.decision` or `policy.reasons` is still empty. Nothing
+  is stored, so the same idempotency key with the context supplied is a fresh
+  create. A client creating an approval under a rule that is not in
+  `governance.Policies`, or for an `action_kind` that is not registered, must
+  send these fields itself.
+- **At approve.** An `approve` is refused with 422 `approval_context_incomplete`
+  (`details.missing_fields`, request stays pending) unless all of these are
+  present. This covers rows created before the create-time check. A `deny` is
+  never gated.
 
 | Field | Source |
 |---|---|
@@ -53,7 +64,11 @@ Captured when a human approves: `decided_context_digest`, `authority_basis`
 `fresh_until = min(expires_at, decided_at + ACTION_APPROVAL_MAX_DECISION_AGE)`.
 
 Revalidated when the approval is spent (`POST .../consume`, and the
-grant-authorized `mctl-agents-approve`), in this order, first failure wins:
+grant-authorized `mctl-agents-approve`). The approval's state is checked first:
+a request that is not `approved` keeps its state refusal (`approval_not_approved`
+while pending, `approval_consumed` once spent or executed, `approval_denied`,
+`approval_expired`) and is never answered with an authority code. For an
+approved request the facts are checked in this order, first failure wins:
 
 1. the recomputed context digest equals `decided_context_digest` (skipped for a
    legacy row without one);
@@ -78,6 +93,7 @@ Callers should key on `details.reapproval_required`, not on the code text.
 
 | Code | HTTP | `reapproval_required` | Finding |
 |---|---|---|---|
+| `approval_context_incomplete` (create) | 422 | n/a: nothing stored, send the missing fields | F6 |
 | `approval_context_incomplete` (decide) | 422 | no grant made | F6 |
 | `approval_context_invalid` (create) | 400 | n/a | F6 |
 | `approval_context_changed` | 409 | true | F6 |

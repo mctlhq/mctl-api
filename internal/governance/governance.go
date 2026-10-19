@@ -27,8 +27,10 @@ import (
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
-// Typed refusals. The first six mean the approval must be re-requested
-// (reapproval_required); ErrAuthorityUnavailable is a retryable fail-closed.
+// Typed refusals. ErrContextIncomplete and ErrContextInvalid are refusals of
+// the request as sent (no reapproval_required); ErrAuthorityUnavailable is a
+// retryable fail-closed; every other one means the approval must be
+// re-requested (reapproval_required).
 var (
 	ErrContextIncomplete    = errors.New("decision context is incomplete")
 	ErrContextInvalid       = errors.New("decision context contradicts the platform's own classification")
