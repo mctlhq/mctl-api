@@ -33,6 +33,8 @@ func TestStoresShareOnePoolAgainstPostgres(t *testing.T) {
 		t.Skip("TEST_DB_URL not set; skipping Postgres-backed pgshared test")
 	}
 	pgshared.WithSharing(t)
+	// The cap assertion below is about the default, not an exported override.
+	t.Setenv("DB_POOL_MAX_CONNS", "")
 	ctx := context.Background()
 
 	ps, err := principals.NewStore(ctx, connStr)

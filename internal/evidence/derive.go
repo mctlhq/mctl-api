@@ -17,6 +17,7 @@ package evidence
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"regexp"
 	"strconv"
 
@@ -116,6 +117,10 @@ func (s *Store) resolveExecution(ctx context.Context, executionID string) *worki
 	}
 	c, err := s.resolver.ResolveExecution(ctx, executionID)
 	if err != nil {
+		// Logged so a failed lookup, which RebuildRefs can repair, is told
+		// apart from an execution that does not correlate at all.
+		slog.Warn("evidence: execution lookup failed, projection left empty",
+			"execution_id", executionID, "error", err)
 		return nil
 	}
 	return c

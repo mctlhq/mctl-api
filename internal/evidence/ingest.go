@@ -50,7 +50,8 @@ func (s *Store) Ingest(ctx context.Context, in IngestInput) (*Evidence, bool, er
 	// Resolved before the transaction, never inside it: the resolver is the
 	// work-items store, which with pgshared draws from the same pool as this
 	// one. A connection acquired while the transaction holds another can
-	// deadlock the pool once every slot is held by a waiting ingest.
+	// deadlock the pool once every slot is held by a waiting ingest. The cost
+	// is one lookup on replays and divergences too, which never store a ref.
 	corr := s.resolveExecution(ctx, p.ExecutionID())
 
 	var out *Evidence

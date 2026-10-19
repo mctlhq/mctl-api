@@ -56,12 +56,13 @@ import (
 
 // DefaultMaxConns bounds a shared pool whose connection string does not set
 // pool_max_conns. cmd/api holds one pool per distinct database URL: today the
-// main one and LIFECYCLE_DB_URL's, so two replicas give 2 x 2 x 16 = 64, the
-// `mctl-api` role's connectionLimit. That is the ceiling with every slot held
-// at once; the observed peak is under 50. Not counted: the readiness probe's
-// one connection per replica (OpenDedicated) and up to two customer-deletion
-// lock sessions per replica, which connect outside any pool.
-const DefaultMaxConns = 16
+// main one and LIFECYCLE_DB_URL's. Each pod also holds up to three connections
+// outside any pool: the readiness probe's (OpenDedicated) and two
+// customer-deletion lock sessions. The deployment runs two replicas, and a
+// rolling update (maxSurge 25%, rounded up) adds a third pod, so the worst
+// case is 3 x (2 x 8 + 3) = 57 against the `mctl-api` role's connectionLimit
+// of 64. At most a handful of connections were ever active at once.
+const DefaultMaxConns = 8
 
 type entry struct {
 	pool *pgxpool.Pool
