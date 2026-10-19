@@ -439,7 +439,10 @@ that submits (actor, `agent:<name>` with its `art_` token), the run's
    instead of the admin role, and spends it once
    (`ConsumeActionApproval`, an intent-hash compare-and-set) before
    anything is submitted. The recorded approver is the decider's name;
-   the body may not name one.
+   the body may not name one. The workflow also receives
+   `expected_content_digest` and `approval_ref` (the `aar_` id), both set
+   by the server from the grant; `approval_ref` in a body is refused on
+   every path.
 
 The operation record carries `actor_kind=agent`, `actor_name`,
 `agent_run_id`, `execution_id`, `subject_principal_id` and `grant_ref`, and
@@ -462,9 +465,10 @@ compares principals (#629, next section).
 |---|---|---|---|
 | `grant_not_bound` | 403 | gate | the `aar_` is for another `we_` or work item, or is denied, expired or consumed |
 | `grant_subject_unresolved` | 403 | gate | no stored principal (undecided), disabled, or (`sil_`) a `github:` link without a GitHub subject or a `prn_` link without its recorded `oidc:` name |
-| `actor_not_accepted` | 400 | operation | the body names an `approver` |
+| `actor_not_accepted` | 400 | operation | the body names an `approver`, `expected_content_digest` or `approval_ref` |
 | `approval_intent_mismatch` | 409 | operation | another action kind, target or policy; a target that maps to no workflow id or not to the run's own DevLoop; or the approval's `we_` no longer exists |
 | `approval_consumed` / `approval_expired` | 409 | operation, approve route | spent or past its expiry |
+| `approval_executed` | 409 | approve route | the newest grant was spent and marked executed |
 | `approval_denied` | 409 | approve route | the newest grant was denied |
 | `approval_grant_missing` | 409 | approve route | no grant and the legacy flag is off |
 | `execution_ambiguous` | 409 | approve route | more than one open `we_` for the workflow id |

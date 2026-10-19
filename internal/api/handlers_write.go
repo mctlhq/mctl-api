@@ -126,6 +126,23 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// exactly as before (R7): delegation never confers admin.
 	var grantSpend *approvalSpend
 	if opName == devLoopApprovalKind {
+		// Approval provenance: approval_ref names the grant being spent and
+		// is set by the server alone (prepareApprovalGrant), so a body naming
+		// one is refused on every path -- grant, human admin and service --
+		// whatever its value, before anything is read or spent.
+		if _, named := input[approvalRefParam]; named {
+			h.logAudit(r, audit.Entry{
+				UserID:     user.ID,
+				Operation:  opName,
+				Status:     "denied",
+				RiskLevel:  string(op.RiskLevel),
+				Message:    approvalRefParam + " in the request body refused",
+				Parameters: legacyRelayParams(user, opName, input),
+			})
+			writeErrorCode(w, http.StatusBadRequest, wiCodeActorNotAccepted,
+				approvalRefParam+" is taken from an action-approval grant, not from the request body", nil)
+			return
+		}
 		if g := delegationGrantFrom(r.Context()); g != nil && g.Kind == delegation.KindActionApproval {
 			s, ok := h.prepareApprovalGrant(w, r, user, input, g.Ref)
 			if !ok {

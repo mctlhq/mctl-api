@@ -49,6 +49,12 @@ const (
 // the intent hash and passed through.
 const expectedContentDigestParam = "expected_content_digest"
 
+// approvalRefParam carries the id of the grant a grant-authorized approve
+// spends to the approve workflow (approval provenance). Only the server
+// sets it, from the grant it has verified and is about to consume; a
+// request body naming it is refused on every path (ExecuteOperation).
+const approvalRefParam = "approval_ref"
+
 // aarCodeContentUnbound refuses a DevLoop grant that binds no proposal
 // content: approving it would flip whatever the slug holds at flip time.
 const aarCodeContentUnbound = "approval_content_unbound"
@@ -119,6 +125,7 @@ func (h *Handlers) prepareApprovalGrant(w http.ResponseWriter, r *http.Request, 
 	}
 	input["approver"] = approver
 	input[expectedContentDigestParam] = a.ArtifactHash
+	input[approvalRefParam] = a.ID
 	return &approvalSpend{approval: a}, true
 }
 

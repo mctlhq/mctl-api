@@ -624,6 +624,7 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/action-approvals", h.CreateActionApproval)
 				r.Post("/action-approvals/{id}/decision", h.DecideActionApproval)
 				r.Post("/action-approvals/{id}/consume", h.ConsumeActionApproval)
+				r.Post("/action-approvals/{id}/execute", h.MarkActionApprovalExecuted)
 				// Execution requests (mctl-api#368): a person or a relaying
 				// surface asks for a run; the platform supplies its identity.
 				r.Post("/work-items/{id}/execution-requests", h.CreateExecutionRequest)

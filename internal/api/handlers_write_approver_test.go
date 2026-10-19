@@ -327,3 +327,50 @@ func TestApprove_ServiceMayNotAssertAContentDigest(t *testing.T) {
 		t.Errorf("human admin digest = %q, want %q", params["expected_content_digest"], digest)
 	}
 }
+
+// Approval provenance: approval_ref names the grant an approve spends and is
+// set by the server from that grant alone. Off the grant path there is no
+// grant, so a body naming one is refused for a human admin and for the
+// service principal alike, whatever its value, and audited.
+func TestApprove_BodyApprovalRefIsRefusedOffTheGrantPath(t *testing.T) {
+	ref := "aar_" + strings.Repeat("0", 32)
+	for name, user := range map[string]*auth.User{
+		"human admin": adminUser,
+		"service":     auth.NewServiceUser(),
+	} {
+		for _, value := range []string{ref, ""} {
+			for _, body := range []map[string]string{
+				{"service": "mctl-web", "slug": "issue-ref", "approval_ref": value},
+				{"service": "mctl-web", "slug": "issue-ref", "approver": "mashkovd", "approval_ref": value},
+			} {
+				router, exec, logger := newApproveRouter(t, false)
+				code, params := approveParams(t, router, exec, body, user)
+				if *code != http.StatusBadRequest {
+					t.Fatalf("%s: status = %d, want 400 for %v", name, *code, body)
+				}
+				if params != nil {
+					t.Fatalf("%s: a workflow was submitted with a body approval_ref: %v", name, params)
+				}
+				denied := entriesFor(logger, "mctl-agents-approve")
+				if len(denied) != 1 || denied[0].Status != "denied" {
+					t.Errorf("%s: want one denied audit entry, got %+v", name, denied)
+				}
+			}
+		}
+	}
+	// Without the field both paths still submit, and the argument is absent
+	// altogether, not "": only a spent grant puts one in the submit.
+	for name, user := range map[string]*auth.User{
+		"human admin": adminUser,
+		"service":     auth.NewServiceUser(),
+	} {
+		router, exec := newTestRouter(t)
+		code, params := approveParams(t, router, exec, map[string]string{"service": "mctl-web", "slug": "issue-ref"}, user)
+		if *code != http.StatusAccepted {
+			t.Fatalf("%s without approval_ref: status = %d, want 202", name, *code)
+		}
+		if v, present := params["approval_ref"]; present {
+			t.Errorf("%s: approval_ref = %q submitted off the grant path, want it absent", name, v)
+		}
+	}
+}

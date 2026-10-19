@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-api/internal/delegation"
 )
 
 // agentPrincipal and storeTestExecution scope this package's approvals: the
@@ -379,6 +381,154 @@ func TestActionApprovalServesPrincipalAndActorFields(t *testing.T) {
 			if v[0] != v[1] {
 				t.Errorf("%s: %s = %q, want %q", name, field, v[0], v[1])
 			}
+		}
+	}
+}
+
+// consumed is an approved request, spent.
+func consumed(t *testing.T, s *Store, key string) *ActionApprovalRequest {
+	t.Helper()
+	a := approved(t, s, key)
+	c, err := s.ConsumeActionApproval(context.Background(), a.ID, a.IntentHash)
+	if err != nil || c.State != ApprovalConsumed {
+		t.Fatalf("consume: %+v %v", c, err)
+	}
+	return c
+}
+
+// The execution mark is consumed -> executed once, for the stored target and
+// artifact hash only; every other state and every mismatch is refused with
+// its own error and leaves the request as it was.
+func TestMarkActionApprovalExecuted(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	in := approvalInput(s, "")
+	target, hash := in.Target, in.ArtifactHash
+
+	c := consumed(t, s, "k-exec-ok")
+	got, err := s.MarkActionApprovalExecuted(ctx, c.ID, target, hash, agentPrincipal)
+	if err != nil || got.State != ApprovalExecuted || got.ExecutedAt == nil || got.ConsumedAt == nil {
+		t.Fatalf("mark executed = %+v %v", got, err)
+	}
+	if read, err := s.ActionApproval(ctx, c.ID); err != nil || read.State != ApprovalExecuted || read.ExecutedAt == nil {
+		t.Fatalf("read back = %+v %v", read, err)
+	}
+	if list, err := s.ActionApprovals(ctx, ActionApprovalFilter{State: ApprovalExecuted, ExecutionID: storeTestExecution}); err != nil || len(list) != 1 || list[0].ID != c.ID || list[0].ExecutedAt == nil {
+		t.Fatalf("executed list = %+v %v", list, err)
+	}
+	if _, err := s.MarkActionApprovalExecuted(ctx, c.ID, target, hash, agentPrincipal); !errors.Is(err, ErrApprovalExecuted) {
+		t.Fatalf("second mark = %v", err)
+	}
+	// An executed request is no longer a live delegation grant.
+	if _, err := s.ActionApprovalGrant(ctx, c.ID); !errors.Is(err, delegation.ErrNotBound) {
+		t.Fatalf("grant of an executed request = %v", err)
+	}
+	// Executed is final: neither consumed again nor expired later.
+	if _, err := s.ConsumeActionApproval(ctx, c.ID, c.IntentHash); !errors.Is(err, ErrApprovalConsumed) {
+		t.Fatalf("consume executed = %v", err)
+	}
+	realNow := s.now
+	s.now = func() time.Time { return realNow().Add(2 * time.Hour) }
+	if read, _ := s.ActionApproval(ctx, c.ID); read.State != ApprovalExecuted {
+		t.Fatalf("executed later reads %s", read.State)
+	}
+	s.now = realNow
+
+	pending := createApproval(t, s, approvalInput(s, "k-exec-pending"))
+	ok := approved(t, s, "k-exec-approved")
+	denied := createApproval(t, s, approvalInput(s, "k-exec-denied"))
+	if _, err := s.DecideActionApproval(ctx, ActionDecisionInput{ID: denied.ID, DecidedBy: "github:root", Decision: DecisionDeny}); err != nil {
+		t.Fatal(err)
+	}
+	mismatched := consumed(t, s, "k-exec-mismatch")
+	for _, tc := range []struct {
+		name, id, target, hash, caller string
+		want                           error
+		state                          string
+	}{
+		{"pending", pending.ID, target, hash, agentPrincipal, ErrApprovalNotConsumed, ApprovalPending},
+		{"approved", ok.ID, target, hash, agentPrincipal, ErrApprovalNotConsumed, ApprovalApproved},
+		{"denied", denied.ID, target, hash, agentPrincipal, ErrApprovalDenied, ApprovalDenied},
+		{"wrong target", mismatched.ID, target + "-other", hash, agentPrincipal, ErrApprovalTargetMismatch, ApprovalConsumed},
+		{"wrong artifact", mismatched.ID, target, "sha256:other", agentPrincipal, ErrApprovalTargetMismatch, ApprovalConsumed},
+		{"another requester", mismatched.ID, target, hash, "service:someone-else", ErrApprovalNotFound, ApprovalConsumed},
+		{"missing", "aar_missing", target, hash, agentPrincipal, ErrApprovalNotFound, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := s.MarkActionApprovalExecuted(ctx, tc.id, tc.target, tc.hash, tc.caller); !errors.Is(err, tc.want) {
+				t.Fatalf("mark = %v, want %v", err, tc.want)
+			}
+			if tc.state == "" {
+				return
+			}
+			if read, err := s.ActionApproval(ctx, tc.id); err != nil || read.State != tc.state || read.ExecutedAt != nil {
+				t.Fatalf("after refusal = %+v %v, want %s and no executed_at", read, err, tc.state)
+			}
+		})
+	}
+	// The mismatched request is still markable with its own values.
+	if _, err := s.MarkActionApprovalExecuted(ctx, mismatched.ID, target, hash, agentPrincipal); err != nil {
+		t.Fatalf("mark after mismatches = %v", err)
+	}
+}
+
+// A consumed request that binds no artifact can never be marked executed:
+// an empty presented hash is invalid, and no presented hash equals "".
+func TestMarkActionApprovalExecutedNeedsABoundArtifact(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	in := approvalInput(s, "k-exec-unbound")
+	in.ArtifactHash = ""
+	a := createApproval(t, s, in)
+	a, err := s.DecideActionApproval(ctx, ActionDecisionInput{ID: a.ID, DecidedBy: "github:root", Decision: DecisionApprove})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ConsumeActionApproval(ctx, a.ID, a.IntentHash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MarkActionApprovalExecuted(ctx, a.ID, in.Target, "", agentPrincipal); err == nil {
+		t.Fatal("empty artifact_hash accepted")
+	}
+	if _, err := s.MarkActionApprovalExecuted(ctx, a.ID, in.Target, "sha256:diff", agentPrincipal); !errors.Is(err, ErrApprovalTargetMismatch) {
+		t.Fatalf("unbound = %v", err)
+	}
+	if read, _ := s.ActionApproval(ctx, a.ID); read.State != ApprovalConsumed {
+		t.Fatalf("unbound reads %s", read.State)
+	}
+}
+
+func TestMarkActionApprovalExecutedIsSingleUseUnderConcurrency(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	in := approvalInput(s, "")
+	for round := 0; round < 5; round++ {
+		a := consumed(t, s, "k-exec-race-"+string(rune('a'+round)))
+		const racers = 8
+		var wg sync.WaitGroup
+		errs := make([]error, racers)
+		start := make(chan struct{})
+		for i := range racers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				_, errs[i] = s.MarkActionApprovalExecuted(ctx, a.ID, in.Target, in.ArtifactHash, agentPrincipal)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		won := 0
+		for _, err := range errs {
+			switch {
+			case err == nil:
+				won++
+			case !errors.Is(err, ErrApprovalExecuted):
+				t.Fatalf("loser = %v", err)
+			}
+		}
+		if won != 1 {
+			t.Fatalf("round %d: %d marks succeeded, want exactly 1", round, won)
 		}
 	}
 }
