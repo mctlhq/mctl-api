@@ -131,3 +131,56 @@ func TestSignupClaimRefusesCustomerCallingSurfaceEndpoint(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+func TestSignupClaimChecksIdentityProfileAndWorkspace(t *testing.T) {
+	s := signupStore(t)
+	ctx := context.Background()
+	principal, err := s.Provision(ctx, auth.Identity{Provider: auth.ProviderGitHub, Subject: "987654321", Display: "test-profile", Kind: auth.KindHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := s.ReleaseSignupClaim(ctx, principal.ID); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := s.SetSignupCapacity(ctx, 1, "admin", "Reviewed test resource capacity"); err != nil {
+		t.Fatal(err)
+	}
+	request := principals.SignupRequest{ID: uuid.NewString(), CreatedAt: time.Now().UTC(), Name: "Test", Email: "test@example.com", GitHub: "test-profile", Project: "Test profile"}
+	if err := s.ImportSignup(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DecideSignup(ctx, request.ID, "approved", "987654321", "test-profile", "admin", "Welcome"); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handlers{opts: Options{Signup: &SignupOptions{Store: s}}}
+	claim := map[string]string{"principal_id": principal.ID, "tenant": "new-team", "memory": "2Gi", "cpu": "1", "memory_limit": "3Gi", "cpu_limit": "2", "pods": "10", "pvcs": "5", "services": "10"}
+	call := func() *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(claim)
+		r := httptest.NewRequest("POST", "/", strings.NewReader(string(raw)))
+		r = r.WithContext(auth.WithUser(r.Context(), auth.NewSurfaceUser("portal")))
+		w := httptest.NewRecorder()
+		h.ClaimSignup(w, r)
+		return w
+	}
+	claim["memory"] = "8Gi"
+	if w := call(); w.Code != 409 {
+		t.Fatalf("oversized request: %d %s", w.Code, w.Body.String())
+	}
+	claim["memory"] = "2Gi"
+	claim["pvcs"] = "100"
+	if w := call(); w.Code != 409 {
+		t.Fatalf("oversized storage count: %d %s", w.Code, w.Body.String())
+	}
+	claim["pvcs"] = "5"
+	for n := 0; n < 2; n++ {
+		if w := call(); w.Code != 200 {
+			t.Fatalf("valid/retry: %d %s", w.Code, w.Body.String())
+		}
+	}
+	claim["tenant"] = "second-team"
+	if w := call(); w.Code != 409 {
+		t.Fatalf("second workspace: %d %s", w.Code, w.Body.String())
+	}
+}

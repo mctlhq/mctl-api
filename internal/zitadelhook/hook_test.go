@@ -871,3 +871,25 @@ func TestStaticCohortDoesNotDependOnInvitationDatabase(t *testing.T) {
 		t.Fatal(r.Reason)
 	}
 }
+
+func TestDynamicInvitationCreateGate(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		allowed    bool
+		err        error
+		wantStatus int
+	}{
+		{"approved", true, nil, http.StatusOK}, {"absent", false, nil, http.StatusForbidden}, {"unknown", false, errors.New("database unavailable"), http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHookCreating(t, []string{"999"}, nil, verified, 0)
+			h.cfg.CustomerInvitationAllowed = func(context.Context, string) (bool, error) { return tc.allowed, tc.err }
+			result := h.CreateGate(context.Background(), createBodyFrom(t, goodCreate(), loginClient))
+			if tc.wantStatus == http.StatusForbidden {
+				refusedWith(t, result, tc.wantStatus)
+			} else if result.Status != tc.wantStatus {
+				t.Fatalf("status %d reason %s, want %d", result.Status, result.Reason, tc.wantStatus)
+			}
+		})
+	}
+}
