@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.107.0](https://github.com/mctlhq/mctl-api/compare/4.106.0...4.107.0) (2026-10-19)
+
+
+### Features
+
+* **agents:** issue-700-governance-define-authority-and-decision ([6720be5](https://github.com/mctlhq/mctl-api/commit/6720be58888348b3858b8830ebaf60a52f83a68c))
+
+
+### Bug Fixes
+
+* **approval:** audit decide pre-read refusals; complete test fixtures ([f7b249c](https://github.com/mctlhq/mctl-api/commit/f7b249c9850ff1f86bacd6c7aa9bb5592cd22707))
+* **approval:** state refusal before revalidation; refuse incomplete create ([5ad100d](https://github.com/mctlhq/mctl-api/commit/5ad100dcc72a474a60e9d37753eff56d0be3a49b))
+
 ## [4.106.0](https://github.com/mctlhq/mctl-api/compare/4.105.1...4.106.0) (2026-10-19)
 
 
