@@ -205,6 +205,12 @@ func (loginPrincipals) CheckPrincipal(_ context.Context, principalID string) err
 	return nil
 }
 
+// CheckHumanPrincipal is CheckPrincipal: every principal this resolver
+// produces stands for a human login.
+func (p loginPrincipals) CheckHumanPrincipal(ctx context.Context, principalID string) error {
+	return p.CheckPrincipal(ctx, principalID)
+}
+
 // Through the real router: an agent rotating grant refs across many human
 // subjects still hits ONE aggregate ceiling. Each subject stays far below the
 // global per-subject limit, so a 429 can only come from agentAggregateLimit

@@ -474,6 +474,11 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 	}
 	cur, err := h.opts.WorkItems.ActionApproval(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
+		// The pre-read refuses what the decide itself used to: audit it the
+		// same way, so an unknown id still leaves a decision_refused entry.
+		if code := actionApprovalRefusalCode(err); code != "" {
+			h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", chi.URLParam(r, "id"), code)
+		}
 		writeActionApprovalError(w, err)
 		return
 	}
