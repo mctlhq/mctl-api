@@ -736,14 +736,15 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		// (internal/operations/registry.go, create-tenant). Keep them in sync —
 		// cpu_req/memory_req previously advertised "1" and "2Gi" here while the
 		// registry applied 500m and 1280Mi.
+		mcplib.WithString("workspace_profile", mcplib.Enum("standard", "starter"), mcplib.Description("Funded invited customers require starter: fixed 512Mi production + 256Mi preview requests, one production PVC up to 10Gi, no persistent preview disk. Standard is for administrator/pilot provisioning.")),
 		mcplib.WithString("quota_cpu_req",
 			mcplib.Description("CPU request quota (default: 500m)"),
 		),
 		mcplib.WithString("quota_memory_req",
 			mcplib.Description("Memory request quota (default: 1280Mi)"),
 		),
-		mcplib.WithString("quota_cpu_lim", mcplib.Description("CPU limit quota (default: 3; funded invited-customer profile: 2)")),
-		mcplib.WithString("quota_memory_lim", mcplib.Description("Memory limit quota (default: 4Gi; funded invited-customer profile: 3Gi)")),
+		mcplib.WithString("quota_cpu_lim", mcplib.Description("CPU limit quota for standard provisioning (default: 3; starter fixes this to 1)")),
+		mcplib.WithString("quota_memory_lim", mcplib.Description("Memory limit quota for standard provisioning (default: 4Gi; starter fixes this to 1Gi)")),
 		mcplib.WithString("quota_pods",
 			mcplib.Description("Maximum pods (default: 10)"),
 		),

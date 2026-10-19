@@ -172,7 +172,7 @@ func TestSignupClaimChecksIdentityProfileAndWorkspace(t *testing.T) {
 	if refused.Code != 400 {
 		t.Fatalf("missing surface actor: %d", refused.Code)
 	}
-	claim := map[string]string{"principal_id": principal.ID, "tenant": "new-team", "memory": "2Gi", "cpu": "1", "memory_limit": "3Gi", "cpu_limit": "2", "pods": "10", "pvcs": "5", "services": "10"}
+	claim := map[string]string{"principal_id": principal.ID, "tenant": "new-team", "workspace_profile": "starter", "memory": "512Mi", "cpu": "250m", "memory_limit": "1Gi", "cpu_limit": "1", "pods": "5", "pvcs": "1", "services": "5"}
 	call := func() *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(claim)
 		r := httptest.NewRequest("POST", "/api/v1/surface-principals/signup-claim", strings.NewReader(string(raw)))
@@ -206,16 +206,21 @@ func TestSignupClaimChecksIdentityProfileAndWorkspace(t *testing.T) {
 		t.Fatalf("surface refusal spent claim: %+v %v", before, err)
 	}
 	claim["tenant"] = "new-team"
+	claim["workspace_profile"] = "standard"
+	if w := call(); w.Code != 409 {
+		t.Fatalf("unfunded standard profile admitted: %d", w.Code)
+	}
+	claim["workspace_profile"] = "starter"
 	claim["memory"] = "8Gi"
 	if w := call(); w.Code != 409 {
 		t.Fatalf("oversized request: %d %s", w.Code, w.Body.String())
 	}
-	claim["memory"] = "2Gi"
+	claim["memory"] = "512Mi"
 	claim["pvcs"] = "100"
 	if w := call(); w.Code != 409 {
 		t.Fatalf("oversized storage count: %d %s", w.Code, w.Body.String())
 	}
-	claim["pvcs"] = "5"
+	claim["pvcs"] = "1"
 	for n := 0; n < 2; n++ {
 		if w := call(); w.Code != 200 {
 			t.Fatalf("valid/retry: %d %s", w.Code, w.Body.String())
@@ -363,13 +368,13 @@ func TestSignupAmbiguousOrDisabledPrincipalIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &Handlers{opts: Options{Signup: &SignupOptions{Store: s}}}
-	if status, message := h.claimSignupPrincipal(ctx, principal.ID, "new-team", "2Gi", "1", "3Gi", "2", "10", "5", "10"); status != 409 || !strings.Contains(message, "ambiguous") {
+	if status, message := h.claimSignupPrincipal(ctx, principal.ID, "new-team", "512Mi", "250m", "1Gi", "1", "5", "1", "5", "starter"); status != 409 || !strings.Contains(message, "ambiguous") {
 		t.Fatalf("ambiguous identity: %d %s", status, message)
 	}
 	if err := s.SetStatus(ctx, principal.ID, principals.StatusDisabled); err != nil {
 		t.Fatal(err)
 	}
-	if status, _ := h.claimSignupPrincipal(ctx, principal.ID, "new-team", "2Gi", "1", "3Gi", "2", "10", "5", "10"); status != 403 {
+	if status, _ := h.claimSignupPrincipal(ctx, principal.ID, "new-team", "512Mi", "250m", "1Gi", "1", "5", "1", "5", "starter"); status != 403 {
 		t.Fatalf("disabled principal admitted: %d", status)
 	}
 }
@@ -424,7 +429,7 @@ func TestSignupExistingPrincipalIsNotAnInvitation(t *testing.T) {
 	}
 	h := &Handlers{opts: Options{Signup: &SignupOptions{Store: s}}}
 	claim := func(name string) (int, string) {
-		return h.claimSignupPrincipal(ctx, principal.ID, name, "2Gi", "1", "3Gi", "2", "10", "5", "10")
+		return h.claimSignupPrincipal(ctx, principal.ID, name, "512Mi", "250m", "1Gi", "1", "5", "1", "5", "starter")
 	}
 	if status, _ := claim("new-team"); status != 409 {
 		t.Fatalf("existing uninvited principal bypassed private signup: %d", status)

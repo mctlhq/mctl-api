@@ -481,6 +481,7 @@ var builtinOperations = []Operation{
 			{Name: "tenant_name", Type: "string", Required: true, Description: "Workspace name (DNS-safe, lowercase)", Pattern: "^[a-z0-9][a-z0-9-]{1,62}$"},
 			{Name: "display_name", Type: "string", Description: "Human-readable team name. Free text; passed to the workflow via env only.", Pattern: quotedTextPattern, MaxLength: 128},
 			{Name: "description", Type: "string", Description: "Team description. Free text; passed to the workflow via env only.", Pattern: quotedTextPattern, MaxLength: 1024},
+			{Name: "workspace_profile", Type: "string", Default: "standard", Enum: []string{"standard", "starter"}, Description: "Starter fixes production+preview CPU, memory and PVC-byte quotas; standard preserves administrator/pilot defaults."},
 			{Name: "quota_cpu_req", Type: "string", Default: "500m", Description: "CPU request quota", Pattern: cpuQuantityPattern},
 			{Name: "quota_cpu_lim", Type: "string", Default: "3", Description: "CPU limit quota", Pattern: cpuQuantityPattern},
 			{Name: "quota_memory_req", Type: "string", Default: "1280Mi", Description: "Memory request quota", Pattern: memoryQuantityPattern},

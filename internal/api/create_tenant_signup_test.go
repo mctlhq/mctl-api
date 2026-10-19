@@ -44,7 +44,7 @@ func TestCreateTenantSignupGateCannotBeBypassedThroughOperations(t *testing.T) {
 	exec := &fakeExecutor{}
 	reader := &fakeGitReader{tenants: []gitops.Tenant{}}
 	router := mctlapi.NewRouter(mctlapi.Options{Registry: operations.NewRegistry(), GitReader: reader, AuditLog: log, Executor: exec, Signup: signup})
-	body := map[string]string{"tenant_name": "budget-team", "quota_cpu_lim": "2", "quota_memory_lim": "3Gi"}
+	body := map[string]string{"tenant_name": "budget-team", "workspace_profile": "starter", "quota_cpu_lim": "16", "quota_memory_lim": "16Gi"}
 	denied := postAs(t, router, createTenantPath, body, user)
 	assertStatus(t, denied, http.StatusConflict)
 	if len(exec.submitted) != 0 {
@@ -98,11 +98,15 @@ func TestCreateTenantSignupGateCannotBeBypassedThroughOperations(t *testing.T) {
 	reader.tenants = []gitops.Tenant{}
 	defaults := postAs(t, router, createTenantPath, map[string]string{"tenant_name": "budget-team"}, user)
 	assertStatus(t, defaults, http.StatusConflict)
-	if !strings.Contains(defaults.Body.String(), "quota_cpu_lim=2") {
+	if !strings.Contains(defaults.Body.String(), "workspace_profile=starter") {
 		t.Fatalf("missing actionable profile guidance: %s", defaults.Body.String())
 	}
 	accepted := postAs(t, router, createTenantPath, body, user)
 	assertStatus(t, accepted, http.StatusAccepted)
+	last := exec.submittedParams[len(exec.submittedParams)-1]
+	if last["workspace_profile"] != "starter" || last["quota_memory_req"] != "512Mi" || last["quota_memory_lim"] != "1Gi" || last["quota_cpu_lim"] != "1" {
+		t.Fatalf("caller enlarged starter profile: %+v", last)
+	}
 	if len(exec.submitted) != 3 {
 		t.Fatalf("submitted %d, expected pilot, admin and funded customer", len(exec.submitted))
 	}

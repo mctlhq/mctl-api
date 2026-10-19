@@ -50,14 +50,24 @@ name. Retry the same team name after an ambiguous failure. Do not free a claim
 by timeout: a workflow may already exist. Full verified customer deletion
 releases the claim and invitation authority in the final database transaction.
 
-The current funded upper profile uses production requests up to 1 CPU/2 GiB,
-limits 2 CPU/3 GiB, up to 10 pods, 5 PVCs and 10 services, plus the existing
-preview profile (1 CPU/2 GiB requests). The MCP create operation's historical
-limits default to 3 CPU/4 GiB; an invited external customer must explicitly use
-`quota_cpu_lim=2` and `quota_memory_lim=3Gi`. Its smaller default production
-requests (500m/1280Mi) fit inside the funded ceiling. Other custom profiles are
-refused rather than spending the same slot on a larger workspace. Future quota
-changes require updating this contract and recalculating the funded budget.
+Funded invitations require `workspace_profile=starter`. Production requests are
+250m CPU/512 MiB, limits 1 CPU/1 GiB, at most 5 pods, 1 PVC and 5 services.
+Preview requests are 100m CPU/256 MiB, limits 500m CPU/512 MiB, 3 pods,
+no PVCs and 3 services. Production PVC requests total at most 10 GiB; preview
+persistent storage is disabled. This fits the storage provider's minimum volume
+size without provisioning a volume when the workspace is created. Ephemeral pod
+storage is not a persistent-disk entitlement. No change to shared database
+service entitlements or provider-level billing limits is implied by the PVC cap.
+
+The operation API normalizes starter quota parameters before validation and
+submission; the GitOps generator independently fixes both namespace envelopes,
+so oversized custom quota fields cannot expand the slot. The portal sends the
+same profile for customer and legacy landing creation. Standard provisioning
+remains available to administrators and the explicit pilot cohort, but cannot
+spend a funded starter slot. Deploy the GitOps workflow before API/portal and
+keep slots zero until all three are live and the resource assessment passes.
+Existing workspaces and eval environments are not converted to starter.
+
 
 Decisions retain actor, time and reason. The Worker stores immutable submissions
 for 90 days; the API redacts contact/project payload and reason after 90 days,

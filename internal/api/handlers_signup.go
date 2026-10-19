@@ -413,6 +413,7 @@ func (h *Handlers) ClaimSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b struct {
+		Profile     string `json:"workspace_profile"`
 		Principal   string `json:"principal_id"`
 		Tenant      string `json:"tenant"`
 		Memory      string `json:"memory"`
@@ -484,7 +485,7 @@ func (h *Handlers) ClaimSignup(w http.ResponseWriter, r *http.Request) {
 	if !h.guardCustomerTenantCreation(w, r, operations.Operation{Name: "create-tenant"}, map[string]string{"tenant_name": b.Tenant}) {
 		return
 	}
-	if status, message := h.claimSignupPrincipal(r.Context(), b.Principal, b.Tenant, b.Memory, b.CPU, b.MemoryLimit, b.CPULimit, b.Pods, b.PVCs, b.Services); status != 0 {
+	if status, message := h.claimSignupPrincipal(r.Context(), b.Principal, b.Tenant, b.Memory, b.CPU, b.MemoryLimit, b.CPULimit, b.Pods, b.PVCs, b.Services, b.Profile); status != 0 {
 		h.logAudit(r, audit.Entry{UserID: u.ID, Operation: "signup.claim", Status: "denied", RiskLevel: "medium", Message: message, Parameters: map[string]string{"principal_id": b.Principal, "tenant": b.Tenant}})
 		writeError(w, status, message)
 		return
@@ -492,7 +493,7 @@ func (h *Handlers) ClaimSignup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"admitted": true})
 }
 
-func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory, cpu, memoryLimit, cpuLimit, pods, pvcs, services string) (int, string) {
+func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory, cpu, memoryLimit, cpuLimit, pods, pvcs, services, profile string) (int, string) {
 	o := h.opts.Signup
 	if o == nil || o.Store == nil {
 		return 503, "signup admission unavailable"
@@ -529,9 +530,10 @@ func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory
 	if o.Cohort[githubID] {
 		return 0, ""
 	}
-	if (memory != "2Gi" && memory != "1280Mi") || (cpu != "1" && cpu != "500m") || memoryLimit != "3Gi" || cpuLimit != "2" || !signupBound(pods, 10) || !signupBound(pvcs, 5) || !signupBound(services, 10) {
-		return 409, "workspace profile exceeds funded admission: use requests 1 CPU/2Gi (or 500m/1280Mi), limits quota_cpu_lim=2 and quota_memory_lim=3Gi, at most 10 pods, 5 PVCs and 10 services"
+	if profile != "starter" || memory != "512Mi" || cpu != "250m" || memoryLimit != "1Gi" || cpuLimit != "1" || !signupBound(pods, 5) || !signupBound(pvcs, 1) || !signupBound(services, 5) {
+		return 409, "workspace profile exceeds funded admission: use workspace_profile=starter (production 250m/512Mi, limits 1 CPU/1Gi, preview 100m/256Mi; PVC storage 10Gi production, no persistent preview disk)"
 	}
+
 	if o.PublicFlow {
 		err = o.Store.ClaimPublicSignup(ctx, githubID, tenant, pid)
 	} else {
