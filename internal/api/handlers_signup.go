@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -40,7 +41,8 @@ func (h *Handlers) signupAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if u != nil {
 		_, delegated = u.DelegatingAgent()
 	}
-	if u == nil || delegated || !isHumanAdmin(u) || u.IsAgent() || u.ViaPrincipalID() != "" || u.PrincipalID() == "" {
+	identity, proven := u.Identity()
+	if u == nil || !proven || identity.Kind != auth.KindHuman || delegated || !isHumanAdmin(u) || u.IsAgent() || u.ViaPrincipalID() != "" || u.PrincipalID() == "" {
 		writeError(w, 403, "direct human platform administrator required")
 		return false
 	}
@@ -60,7 +62,7 @@ func signupDecode(r *http.Request, value any) error {
 }
 func validSignup(r principals.SignupRequest) bool {
 	_, err := uuid.Parse(r.ID)
-	return err == nil && r.CreatedAt.Before(time.Now().Add(time.Minute)) && r.CreatedAt.After(time.Now().Add(-90*24*time.Hour)) && len(r.Name) > 0 && len(r.Name) <= 100 && len(r.Email) <= 254 && strings.Contains(r.Email, "@") && !strings.ContainsAny(r.Email, "\r\n") && len(r.Project) > 0 && len(r.Project) <= 1000 && (r.GitHub == "" || signupLogin.MatchString(r.GitHub))
+	return err == nil && r.CreatedAt.Before(time.Now().Add(time.Minute)) && r.CreatedAt.After(time.Now().Add(-90*24*time.Hour)) && len(r.Name) > 0 && utf8.RuneCountInString(r.Name) <= 100 && len(r.Email) <= 254 && strings.Contains(r.Email, "@") && !strings.ContainsAny(r.Email, "\r\n") && len(r.Project) > 0 && utf8.RuneCountInString(r.Project) <= 1000 && (r.GitHub == "" || signupLogin.MatchString(r.GitHub))
 }
 func (h *Handlers) importSignup(ctx context.Context, id string) (principals.SignupDecision, error) {
 	var r principals.SignupRequest
@@ -85,30 +87,74 @@ func (h *Handlers) ListSignupRequests(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid cursor")
 		return
 	}
+
 	raw, err := h.opts.Signup.SiteCall(r.Context(), "GET", "/api/internal/invitations/requests?cursor="+url.QueryEscape(cursor), nil)
-	var page struct {
-		Requests []principals.SignupRequest `json:"requests"`
-		Cursor   string                     `json:"cursor"`
-		Complete *bool                      `json:"complete"`
+	type issue struct {
+		ID    string `json:"id"`
+		Error string `json:"error"`
 	}
-	if err != nil || json.Unmarshal(raw, &page) != nil || page.Complete == nil || len(page.Requests) > 100 || len(page.Cursor) > 4096 || (!*page.Complete && page.Cursor == "") {
+	var page struct {
+		Requests          []json.RawMessage `json:"requests"`
+		Issues            []issue           `json:"issues"`
+		Cursor            string            `json:"cursor"`
+		Complete          *bool             `json:"complete"`
+		TraversalComplete *bool             `json:"traversal_complete"`
+	}
+	if err != nil || json.Unmarshal(raw, &page) != nil || page.Requests == nil || page.Issues == nil || page.Complete == nil || page.TraversalComplete == nil || len(page.Requests)+len(page.Issues) > 100 || len(page.Cursor) > 4096 || (!*page.TraversalComplete && (page.Cursor == "" || page.Cursor == cursor)) || (*page.Complete != (*page.TraversalComplete && len(page.Issues) == 0)) {
 		writeError(w, 503, "invitation listing could not be observed")
 		return
 	}
-	result := []principals.SignupDecision{}
-	for _, item := range page.Requests {
-		if !validSignup(item) || h.opts.Signup.Store.ImportSignup(r.Context(), item) != nil {
-			writeError(w, 503, "invitation record could not be observed")
+	issues := []issue{}
+	for _, item := range page.Issues {
+		if _, err := uuid.Parse(item.ID); err != nil || item.Error != "record_unreadable" {
+			writeError(w, 503, "invalid invitation listing issues")
 			return
 		}
-		d, e := h.opts.Signup.Store.Signup(r.Context(), item.ID)
-		if e != nil {
-			writeError(w, 503, "invitation decision unavailable")
-			return
+		issues = append(issues, item)
+	}
+	result := []principals.SignupDecision{}
+	expired := []string{}
+	seen := map[string]bool{}
+	for _, rawItem := range page.Requests {
+		var item principals.SignupRequest
+		if json.Unmarshal(rawItem, &item) != nil {
+			issues = append(issues, issue{ID: "unknown", Error: "invalid_record"})
+			continue
+		}
+		if _, err := uuid.Parse(item.ID); err != nil {
+			issues = append(issues, issue{ID: "unknown", Error: "invalid_record"})
+			continue
+		}
+		if seen[item.ID] {
+			issues = append(issues, issue{ID: item.ID, Error: "duplicate_record"})
+			continue
+		}
+		seen[item.ID] = true
+		if !item.CreatedAt.IsZero() && item.CreatedAt.Before(time.Now().Add(-90*24*time.Hour)) {
+			expired = append(expired, item.ID)
+			continue
+		}
+		if !validSignup(item) {
+			issues = append(issues, issue{ID: item.ID, Error: "invalid_record"})
+			continue
+		}
+		if err := h.opts.Signup.Store.ImportSignup(r.Context(), item); err != nil {
+			issues = append(issues, issue{ID: item.ID, Error: "record_unreadable"})
+			continue
+		}
+		d, err := h.opts.Signup.Store.Signup(r.Context(), item.ID)
+		if err != nil {
+			issues = append(issues, issue{ID: item.ID, Error: "decision_unreadable"})
+			continue
 		}
 		result = append(result, d)
 	}
-	writeJSON(w, 200, map[string]any{"requests": result, "cursor": page.Cursor, "complete": *page.Complete})
+	observation := "complete"
+	if len(issues) > 0 {
+		observation = "partial"
+	}
+	writeJSON(w, 200, map[string]any{"requests": result, "issues": issues, "expired": expired, "cursor": page.Cursor, "traversal_complete": *page.TraversalComplete, "complete": *page.TraversalComplete && len(issues) == 0, "observation": observation})
+
 }
 func (h *Handlers) GetSignupCapacity(w http.ResponseWriter, r *http.Request) {
 	if !h.signupAdmin(w, r) {
@@ -174,7 +220,7 @@ func (h *Handlers) DecideSignupRequest(w http.ResponseWriter, r *http.Request) {
 	githubID, login := "", ""
 	if b.Decision == "approved" {
 		login = d.Request.GitHub
-		if login == "" {
+		if b.GitHub != "" {
 			login = b.GitHub
 		}
 		if !signupLogin.MatchString(login) {
@@ -355,7 +401,7 @@ func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory
 		return 503, "existing admission unreadable"
 	}
 	if (memory != "2Gi" && memory != "1280Mi") || (cpu != "1" && cpu != "500m") || memoryLimit != "3Gi" || cpuLimit != "2" || !signupBound(pods, 10) || !signupBound(pvcs, 5) || !signupBound(services, 10) {
-		return 409, "workspace profile differs from reserved signup capacity"
+		return 409, "workspace profile exceeds funded admission: use requests 1 CPU/2Gi (or 500m/1280Mi), limits quota_cpu_lim=2 and quota_memory_lim=3Gi, at most 10 pods, 5 PVCs and 10 services"
 	}
 	if o.PublicFlow || legacy {
 		err = o.Store.ClaimPublicSignup(ctx, githubID, tenant, pid)

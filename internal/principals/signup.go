@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Decisions and the global slot budget share a PostgreSQL transaction lock.
@@ -37,6 +37,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS signup_live_github ON signup_requests(github_i
 CREATE UNIQUE INDEX IF NOT EXISTS signup_claimed_tenant ON signup_requests(tenant) WHERE status='claimed';
 `
 
+var ErrSignupLeaseLost = errors.New("signup delivery lease lost")
 var ErrSignupCapacity = errors.New("signup capacity exhausted")
 var ErrSignupConflict = errors.New("signup decision or claim conflict")
 var ErrSignupNotAllowed = errors.New("signup invitation required")
@@ -219,7 +220,7 @@ func (s *Store) ClaimPublicSignup(ctx context.Context, githubID, tenant, pid str
 	return s.claimSignup(ctx, githubID, tenant, pid, true)
 }
 func (s *Store) claimSignup(ctx context.Context, githubID, tenant, pid string, public bool) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := lockPrincipalTx(ctx, tx, pid); err != nil {
 			return err
 		}
@@ -264,6 +265,11 @@ func (s *Store) claimSignup(ctx context.Context, githubID, tenant, pid string, p
 		_, err = tx.Exec(ctx, `UPDATE signup_requests SET status='claimed',tenant=$2,principal_id=$3 WHERE id=$1`, id, tenant, pid)
 		return err
 	})
+	var conflict *pgconn.PgError
+	if errors.As(err, &conflict) && conflict.Code == "23505" {
+		return ErrSignupConflict
+	}
+	return err
 }
 
 // Delivery leases serialize retries across API replicas. The provider key is
@@ -276,7 +282,7 @@ func (s *Store) LeaseSignupDelivery(ctx context.Context, lease string) (SignupDe
 func (s *Store) AckSignupDelivery(ctx context.Context, id, lease, deliveryID string) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE signup_requests SET notification_pending=false,delivery_id=$3,delivery_lease=NULL,delivery_leased_until=NULL WHERE id=$1 AND delivery_lease=$2 AND delivery_leased_until>now()`, id, lease, deliveryID)
 	if err == nil && tag.RowsAffected() != 1 {
-		return fmt.Errorf("signup delivery lease lost")
+		return ErrSignupLeaseLost
 	}
 	return err
 }
@@ -291,9 +297,4 @@ func (s *Store) CleanupSignupPII(ctx context.Context) error {
 		_, err := tx.Exec(ctx, `UPDATE signup_requests SET payload=NULL,reason='',notification_pending=false WHERE payload IS NOT NULL AND created_at<now()-interval '90 days'`)
 		return err
 	})
-}
-
-func (s *Store) ReleaseSignupClaim(ctx context.Context, pid string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE signup_requests SET status='released',notification_pending=false WHERE principal_id=$1 AND status='claimed'`, pid)
-	return err
 }

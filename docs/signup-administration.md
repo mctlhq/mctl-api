@@ -5,8 +5,10 @@ administrator. Service, agent, delegated and relayed callers cannot decide
 invitations or set capacity. The shared MCP portal hides these private tools.
 
 1. `mctl_list_signup_requests`: inspect saved contact data and current decision.
-   Follow the returned cursor until `complete=true`. A failed page is unknown,
-   never an empty queue. Contact data was supplied by the applicant.
+   Follow the returned cursor until `traversal_complete=true`.
+   `complete=false` or `observation=partial` surfaces unreadable individual
+   records alongside usable requests. A malformed/unreadable page is an error,
+   never an empty queue. Requests past retention are explicitly listed as expired. Contact data was supplied by the applicant.
 2. `mctl_signup_capacity` without arguments: inspect funded slots, reservations
    and availability. The initial budget is zero. A positive budget requires an
    independently reviewed resource assessment for production plus preview,
@@ -16,16 +18,18 @@ invitations or set capacity. The shared MCP portal hides these private tools.
    decision is `approved` or `rejected`. The reason is sent to the applicant's
    original email address. Approval resolves the public GitHub login to its
    numeric ID, refuses pilot-cohort duplicates and atomically reserves one
-   slot. A missing GitHub login requires the explicit `github` argument.
+   slot. The optional `github` argument explicitly selects or corrects the unverified
+   supplied login; both the original submission and verified selection are kept.
    Capacity exhaustion returns `signup_capacity_exhausted` and leaves the
    request pending, with no access or decision email. Rejection needs no slot.
 4. Inspect the request again: `notification_pending` means the durable email
    outbox has not acknowledged delivery. Provider acceptance does not prove
    mailbox delivery. Never ask the applicant to resubmit to retry notification.
 
-Deployments without the customer identity hook keep their legacy provisioning
-path. When customer signup is configured, an unreadable/unconfigured database
-refuses admission; it never disables the gate. A one-time migration snapshots
+Deployments without the customer identity hook, or with the principal store
+explicitly disabled/absent by configuration, keep their static policy and legacy
+provisioning path. Once the approval store is configured, a failed store init or
+query refuses admission; it never disables the gate. A one-time migration snapshots
 existing active human GitHub identities. Those existing customers may claim a
 funded slot without submitting a new invitation, but still face the profile and
 capacity limits. Restarting the API never adds newly registered identities to
@@ -58,7 +62,8 @@ decision. Automatic retries stop 23 hours after their first attempt, before the
 provider's 24-hour idempotency window; uncertain older pending deliveries need
 operator reconciliation. No automatic retry may mint a fresh key. Reconciliation
 of a stranded pre-provision claim or an uncertain old delivery remains an
-explicit operator task; do not infer absence from an unavailable provider.
+explicit operator task requiring verified absence and currently manual database
+maintenance (no automatic release API); do not infer absence from an unavailable provider.
 
 The canonical rollout/capacity assessment is in
 [mctl-web's onboarding plan](https://github.com/mctlhq/mctl-web/blob/main/docs/plans/site-onboarding-review.md).

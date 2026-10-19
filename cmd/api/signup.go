@@ -13,7 +13,7 @@ import (
 func signupOptions(cfg config, store *principals.Store) *api.SignupOptions {
 	// Legacy deployments without customer signup keep their existing operation
 	// path. A configured signup deployment never fails open on a database error.
-	if cfg.ZitadelHook.CustomersOrgID == "" {
+	if !signupConfigured(cfg) {
 		return nil
 	}
 	public := len(cfg.ZitadelHook.CustomerCreateGitHubIDs) == 1 && cfg.ZitadelHook.CustomerCreateGitHubIDs[0] == "*"
@@ -33,7 +33,13 @@ func (cfg config) ZitadelHookIssuer() string {
 	}
 	return p.Issuer
 }
-func signupInvitationAllowed(store *principals.Store) func(context.Context, string) (bool, error) {
+func signupConfigured(cfg config) bool {
+	return cfg.ZitadelHook.CustomersOrgID != "" && cfg.PrincipalDBConfigured && !cfg.PrincipalsDisabled
+}
+func signupInvitationAllowed(cfg config, store *principals.Store) func(context.Context, string) (bool, error) {
+	if !signupConfigured(cfg) {
+		return nil
+	}
 	return func(ctx context.Context, id string) (bool, error) {
 		if store == nil {
 			return false, errors.New("signup store unavailable")

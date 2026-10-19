@@ -217,3 +217,55 @@ func TestPublicSignupClaimsRemainBoundedUnderConcurrency(t *testing.T) {
 		t.Fatalf("capacity %+v %v", capacity, err)
 	}
 }
+
+func TestSignupConcurrentTenantConflictKeepsTheLoserRetryable(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	if err := s.SetSignupCapacity(ctx, 2, "admin", "Reviewed resource budget"); err != nil {
+		t.Fatal(err)
+	}
+	pids := make([]string, 2)
+	for n := 0; n < 2; n++ {
+		number := int64(9977000 + n)
+		principal, err := s.Provision(ctx, github(number, fmt.Sprint("tenant-racer", n)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pids[n] = principal.ID
+		r := importTestSignup(t, s)
+		if _, err := s.DecideSignup(ctx, r.ID, "approved", fmt.Sprint(number), "test-user", "admin", "Welcome"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	results := make([]error, 2)
+	var wg sync.WaitGroup
+	for n := 0; n < 2; n++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			results[n] = s.ClaimSignup(ctx, fmt.Sprint(9977000+n), "shared-team", pids[n])
+		}(n)
+	}
+	wg.Wait()
+	accepted, conflicted := 0, 0
+	for n, err := range results {
+		if err == nil {
+			accepted++
+			continue
+		}
+		if !errors.Is(err, ErrSignupConflict) {
+			t.Fatalf("expected semantic conflict: %v", err)
+		}
+		conflicted++
+		if err := s.ClaimSignup(ctx, fmt.Sprint(9977000+n), "other-team", pids[n]); err != nil {
+			t.Fatalf("name loser cannot retry: %v", err)
+		}
+	}
+	if accepted != 1 || conflicted != 1 {
+		t.Fatalf("accepted=%d conflicts=%d", accepted, conflicted)
+	}
+	capacity, err := s.SignupCapacity(ctx)
+	if err != nil || capacity.Used != 2 {
+		t.Fatalf("capacity %+v %v", capacity, err)
+	}
+}
