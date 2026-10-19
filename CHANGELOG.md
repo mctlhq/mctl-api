@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.109.0](https://github.com/mctlhq/mctl-api/compare/4.108.1...4.109.0) (2026-10-19)
+
+
+### Features
+
+* **approve:** require the reviewed content digest on direct approve ([5dc3ca8](https://github.com/mctlhq/mctl-api/commit/5dc3ca8d15ab3fcd7e266cbdf10327f3a527c609))
+* **approve:** require the reviewed content digest on direct approve ([6aeed3b](https://github.com/mctlhq/mctl-api/commit/6aeed3bb884d45b489c0a56585a79f1497f44160))
+
+
+### Bug Fixes
+
+* **approve:** count a digest-refused relay as refused ([2ac818a](https://github.com/mctlhq/mctl-api/commit/2ac818a83158d29eff2e4e8c5461ee315e7b6dd2))
+
 ## [4.108.1](https://github.com/mctlhq/mctl-api/compare/4.108.0...4.108.1) (2026-10-19)
 
 
