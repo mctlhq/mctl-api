@@ -51,6 +51,10 @@ and is resolved when the chain is read.
   never a message). A second terminal event for the same attempt is 409
   `decision_attempt_closed`.
 
+Decision writes have their own rate limit (150/min per principal),
+separate from evidence ingest's 120/min, so a burst of one never throttles
+the other.
+
 A retry is a new attempt; nothing is overwritten. Both tables refuse `UPDATE`
 with a trigger.
 
@@ -63,7 +67,12 @@ attempt that never reported an end and was followed by another reads
 `unknown`, not `failed`.
 
 A referenced record the store reports missing is listed with status
-`not_found`; one about another execution is `mismatch`. A reference that
+`not_found`; one about another execution is `mismatch`. An approval is
+`mismatch` when any binding field (execution, work item, action kind,
+target, args digest, rule, policy version) differs from the decision's, or
+its `intent_hash` differs from the one bound at write; `detail` names the
+fields. So an `approval_intent_mismatch` refusal reads `mismatch`, with the
+diverging fields shown. A reference that
 cannot be read at all fails the whole request with 503
 `decision_reference_unobservable`: a partial chain is never served as a
 complete one.
