@@ -147,6 +147,10 @@ type Options struct {
 	// behaves as legacy; shadow also compares the principal-keyed decision
 	// (tenantAuthzShadow) without acting on it.
 	TenantAuthzMode TenantAuthzMode
+	// AgentReceiptGateMode is MCTL_AGENT_RECEIPT_GATE (mctl-api#723): off,
+	// observe or enforce for the MCP agent receipt gate. The zero value is
+	// off.
+	AgentReceiptGateMode mctlmcp.AgentReceiptGateMode
 	// PrincipalMembership is the principal-keyed membership shadow mode
 	// reads. Nil makes every shadow comparison unresolved.
 	PrincipalMembership PrincipalMembershipReader
@@ -907,6 +911,7 @@ func NewRouter(opts Options) http.Handler {
 		// Auth: Authorization: Bearer <token> on every request.
 		if opts.MCPServer != nil {
 			opts.MCPServer.SetTenantOwnerChecker(h)
+			opts.MCPServer.SetAgentReceiptGate(h, opts.AgentReceiptGateMode)
 			mcpH := opts.MCPServer.NewStreamableHTTPHandler()
 			r.Post("/mcp", mcpH.ServeHTTP)
 			r.Get("/mcp", mcpH.ServeHTTP)

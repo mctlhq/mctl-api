@@ -610,6 +610,9 @@ func main() {
 		})
 		if wsErr != nil {
 			slog.Error("work-items store init failed; /api/v1/work-items and /api/v1/action-approvals routes will return 503", "error", wsErr)
+			if cfg.agentReceiptGateMode() == mctlmcp.AgentReceiptGateEnforce {
+				slog.Error("MCTL_AGENT_RECEIPT_GATE=enforce with no work-items store: every governed mctl-agent MCP call will be refused as agent_receipt_unverifiable")
+			}
 		} else {
 			workItemsStore = ws
 			defer ws.Close()
@@ -998,6 +1001,7 @@ func main() {
 		TenantResolver:                 gitReader,
 		Principals:                     principalResolver,
 		TenantAuthzMode:                cfg.tenantAuthzMode(),
+		AgentReceiptGateMode:           cfg.agentReceiptGateMode(),
 		LegacyApproverDisabled:         cfg.legacyApproverDisabled(),
 		PrincipalMembership:            gitReader,
 		AdminPrincipals:                cfg.adminPrincipals(),
@@ -1339,6 +1343,13 @@ type config struct {
 	// boot: an unknown value, or principal before this build implements it,
 	// refuses to start.
 	TenantAuthzModeRaw string
+	// AgentReceiptGateRaw is MCTL_AGENT_RECEIPT_GATE (mctl-api#723): off
+	// (default), observe or enforce. An unknown value refuses to start.
+	AgentReceiptGateRaw string
+	// WorkItemsConfigured is whether the work-items store (which holds the
+	// action approvals the receipt gate reads) is configured: not killed by
+	// WORK_ITEMS_DISABLED and given WORK_ITEMS_DB_URL or AUDIT_DB_URL.
+	WorkItemsConfigured bool
 	// AdminPrincipalsRaw is ADMIN_PRINCIPALS (mctl-api#377): the platform
 	// admins of principal mode, as principal ids. A malformed entry refuses
 	// boot in every mode.
@@ -1460,12 +1471,15 @@ func loadConfig() config {
 		CommerceDisabled:               killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
 		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
 		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
-		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
-		ApprovalMaxDecisionAgeRaw:      os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
-		ApprovalStrictPolicyRaw:        os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
-		AdminPrincipalsRaw:             os.Getenv("ADMIN_PRINCIPALS"),
-		PrincipalsDisabled:             killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
-		PrincipalDBConfigured:          postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
+		AgentReceiptGateRaw:            os.Getenv("MCTL_AGENT_RECEIPT_GATE"),
+		WorkItemsConfigured: !killSwitchOn(os.Getenv("WORK_ITEMS_DISABLED")) &&
+			(postgresURL(os.Getenv("WORK_ITEMS_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != ""),
+		LegacyApproverRaw:         os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
+		ApprovalMaxDecisionAgeRaw: os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
+		ApprovalStrictPolicyRaw:   os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
+		AdminPrincipalsRaw:        os.Getenv("ADMIN_PRINCIPALS"),
+		PrincipalsDisabled:        killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
+		PrincipalDBConfigured:     postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
 	}
 }
 
@@ -1695,6 +1709,16 @@ func (c config) validate() error {
 	if err := c.validatePrincipalMode(mode); err != nil {
 		return err
 	}
+	gate, err := mctlmcp.ParseAgentReceiptGateMode(c.AgentReceiptGateRaw)
+	if err != nil {
+		return err
+	}
+	if gate == mctlmcp.AgentReceiptGateEnforce && !c.WorkItemsConfigured {
+		// Without the approval store every governed agent call would be
+		// refused as unverifiable: make that a boot error, not a silent
+		// platform-wide refusal.
+		return errors.New("MCTL_AGENT_RECEIPT_GATE=enforce needs the work-items store (WORK_ITEMS_DB_URL or AUDIT_DB_URL, and WORK_ITEMS_DISABLED off)")
+	}
 	if _, err := parseLegacyApprover(c.LegacyApproverRaw); err != nil {
 		return err
 	}
@@ -1854,6 +1878,16 @@ func (p principalTenants) PrincipalTenants(principalID string) ([]string, []stri
 		return nil, nil, err
 	}
 	return m.Namespaces, m.Unreadable, nil
+}
+
+// agentReceiptGateMode is the parsed MCTL_AGENT_RECEIPT_GATE. validate has
+// already refused an unknown value.
+func (c config) agentReceiptGateMode() mctlmcp.AgentReceiptGateMode {
+	m, err := mctlmcp.ParseAgentReceiptGateMode(c.AgentReceiptGateRaw)
+	if err != nil {
+		return mctlmcp.AgentReceiptGateOff
+	}
+	return m
 }
 
 // tenantAuthzMode is the parsed TENANT_AUTHZ_MODE. validate has already

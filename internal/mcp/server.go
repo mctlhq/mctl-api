@@ -49,6 +49,11 @@ type Server struct {
 	// (stdio) means no filtering; see ownerOnlyToolFilter.
 	ownerChecker atomic.Pointer[TenantOwnerChecker]
 
+	// receiptGate requires an action approval receipt on governed tool calls
+	// from mctl-agent (mctl-api#723). Unset (stdio, or mode off) means no
+	// gate; see agentReceiptMiddleware.
+	receiptGate atomic.Pointer[agentReceiptGate]
+
 	// registeredTools is the tool count snapshotted at the end of
 	// NewMCPServer. ownerOnlyToolFilter uses it to tell a tools/call (one
 	// tool) from a tools/list without reading the live registry back through
@@ -210,6 +215,10 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		// every call that passes the owner-only check, continuing the
 		// _meta/HTTP trace context.
 		server.WithToolHandlerMiddleware(s.tracingMiddleware),
+		// Inside the span, so a refused governed call is traced. It also
+		// removes the reserved receipt arguments from every call, gate on or
+		// off, so no handler ever sees them.
+		server.WithToolHandlerMiddleware(s.agentReceiptMiddleware),
 		// Innermost, so a recovered panic flows back out through the tracing
 		// middleware as an error and the span is marked failed.
 		server.WithToolHandlerMiddleware(recoverToolPanic),
