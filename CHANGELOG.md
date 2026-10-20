@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.111.0](https://github.com/mctlhq/mctl-api/compare/4.110.0...4.111.0) (2026-10-20)
+
+
+### Features
+
+* **mcp:** receipt gate for governed agent tool calls ([0847e26](https://github.com/mctlhq/mctl-api/commit/0847e26a6419aa5867e3ed17253c2af46658bee4))
+* **mcp:** receipt gate for governed agent tool calls ([9dbca7d](https://github.com/mctlhq/mctl-api/commit/9dbca7d052dfe46fe3877a16abae0da5f39d269d))
+
+
+### Bug Fixes
+
+* **mcp:** bound receipt shape and refuse enforce without store ([47778de](https://github.com/mctlhq/mctl-api/commit/47778de3caa7903a14645dc19933090a09da309e))
+* **mcp:** state the receipt id character check positively ([22b39a2](https://github.com/mctlhq/mctl-api/commit/22b39a2f7c9f54bf63fdf73141cc2a93a99289c3))
+
 ## [4.110.0](https://github.com/mctlhq/mctl-api/compare/4.109.1...4.110.0) (2026-10-20)
 
 
