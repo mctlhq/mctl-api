@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.110.0](https://github.com/mctlhq/mctl-api/compare/4.109.1...4.110.0) (2026-10-20)
+
+
+### Features
+
+* **pgshared:** export shared pool stats and log pool sizes ([f7da38a](https://github.com/mctlhq/mctl-api/commit/f7da38ad69e5949d29682d74b1add89b6002f398))
+* **pgshared:** export shared pool stats and log pool sizes ([c7a9a93](https://github.com/mctlhq/mctl-api/commit/c7a9a93cdfe3300093070aedbeb248f8e6fd63a2)), closes [#731](https://github.com/mctlhq/mctl-api/issues/731)
+
 ## [4.109.1](https://github.com/mctlhq/mctl-api/compare/4.109.0...4.109.1) (2026-10-19)
 
 
