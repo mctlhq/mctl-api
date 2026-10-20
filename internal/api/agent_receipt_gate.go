@@ -25,7 +25,9 @@ const agentReceiptGateOperation = "agent-receipt-gate"
 
 // VerifyAgentReceipt implements mcp.AgentReceiptVerifier.
 func (h *Handlers) VerifyAgentReceipt(ctx context.Context, user *auth.User, c mcp.ReceiptCheck) string {
-	if h.opts.WorkItems == nil {
+	// The gate keeps nil out today, but this method must not rely on another
+	// package's guard: a nil caller here would panic outside recoverToolPanic.
+	if user == nil || h.opts.WorkItems == nil {
 		return mcp.ReceiptCodeUnverifiable
 	}
 	caller := principalOf(user)
@@ -61,6 +63,17 @@ func (h *Handlers) VerifyAgentReceipt(ctx context.Context, user *auth.User, c mc
 		return ""
 	}
 	_, err = h.opts.WorkItems.MarkActionApprovalExecuted(ctx, c.Ref, mcp.ReceiptTarget, c.ArtifactHash, caller)
+	code := spendErrorCode(err)
+	if code == mcp.ReceiptCodeUnverifiable {
+		slog.Warn("agent receipt gate: spend failed", "tool", c.Tool, "approval_id", c.Ref, "error", err)
+	}
+	return code
+}
+
+// spendErrorCode maps a MarkActionApprovalExecuted refusal to a receipt
+// code. These fire only when the request changed between the read above and
+// the compare-and-set (another call spent it, say).
+func spendErrorCode(err error) string {
 	switch {
 	case err == nil:
 		return ""
@@ -69,11 +82,14 @@ func (h *Handlers) VerifyAgentReceipt(ctx context.Context, user *auth.User, c mc
 	case errors.Is(err, workitems.ErrApprovalNotConsumed), errors.Is(err, workitems.ErrApprovalDenied):
 		return mcp.ReceiptCodeNotConsumed
 	case errors.Is(err, workitems.ErrApprovalTargetMismatch):
+		// The store raises this one error for a target OR an artifact hash
+		// mismatch (MarkActionApprovalExecuted). The target was compared
+		// above and cannot change after creation, so only the hash can
+		// differ here: this is an artifact mismatch, not a target one.
 		return mcp.ReceiptCodeArtifactMismatch
 	case errors.Is(err, workitems.ErrApprovalNotFound):
 		return mcp.ReceiptCodeNotFound
 	default:
-		slog.Warn("agent receipt gate: spend failed", "tool", c.Tool, "approval_id", c.Ref, "error", err)
 		return mcp.ReceiptCodeUnverifiable
 	}
 }
@@ -83,6 +99,10 @@ func (h *Handlers) VerifyAgentReceipt(ctx context.Context, user *auth.User, c mc
 // authorized, "denied" for one enforce refused, and "observed" for one
 // observe let through without a valid receipt.
 func (h *Handlers) AuditAgentReceipt(ctx context.Context, user *auth.User, o mcp.ReceiptOutcome) {
+	userID := ""
+	if user != nil {
+		userID = user.ID
+	}
 	status, msg := "succeeded", "governed agent call carried a valid receipt"
 	switch {
 	case o.Refused:
@@ -102,7 +122,7 @@ func (h *Handlers) AuditAgentReceipt(ctx context.Context, user *auth.User, o mcp
 		params["approval_id"] = o.Ref
 	}
 	h.logAuditCtx(ctx, audit.Entry{
-		UserID:     user.ID,
+		UserID:     userID,
 		Operation:  agentReceiptGateOperation,
 		Status:     status,
 		RiskLevel:  string(operations.RiskMedium),

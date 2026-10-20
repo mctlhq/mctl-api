@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -87,6 +89,46 @@ func TestVerifyAgentReceipt_SpendsOnceForItsOwnTool(t *testing.T) {
 	}
 }
 
+// The gate's shape check runs before the verifier: the ids the store mints
+// must pass it, or enforce would refuse every real receipt as malformed.
+func TestVerifyAgentReceipt_StoreIDsAreWellFormed(t *testing.T) {
+	env := newWorkItemsEnv(t)
+	for i := range 3 {
+		ref := env.receipt(env.receiptInput(fmt.Sprintf("shape-%d", i), receiptTool), "requested")
+		if !mcp.WellFormedReceipt(ref, "sha256:action") {
+			t.Fatalf("store id %q fails the gate's shape check", ref)
+		}
+	}
+}
+
+func TestSpendErrorCode(t *testing.T) {
+	for err, want := range map[error]string{
+		nil:                                 "",
+		workitems.ErrApprovalExecuted:       mcp.ReceiptCodeAlreadyExecuted,
+		workitems.ErrApprovalNotConsumed:    mcp.ReceiptCodeNotConsumed,
+		workitems.ErrApprovalDenied:         mcp.ReceiptCodeNotConsumed,
+		workitems.ErrApprovalTargetMismatch: mcp.ReceiptCodeArtifactMismatch,
+		workitems.ErrApprovalNotFound:       mcp.ReceiptCodeNotFound,
+		errors.New("connection reset"):      mcp.ReceiptCodeUnverifiable,
+	} {
+		wrapped := err
+		if err != nil {
+			wrapped = fmt.Errorf("workitems: aar_x: %w", err)
+		}
+		if got := spendErrorCode(wrapped); got != want {
+			t.Errorf("spendErrorCode(%v) = %q, want %q", err, got, want)
+		}
+	}
+}
+
+func TestAgentReceiptVerifier_NilUser(t *testing.T) {
+	env := newWorkItemsEnv(t)
+	if got := env.h.VerifyAgentReceipt(context.Background(), nil, mcp.ReceiptCheck{Tool: receiptTool, Ref: "aar_1", ArtifactHash: "x"}); got != mcp.ReceiptCodeUnverifiable {
+		t.Fatalf("nil user = %q", got)
+	}
+	env.h.AuditAgentReceipt(context.Background(), nil, mcp.ReceiptOutcome{Tool: receiptTool, Code: mcp.ReceiptCodeMissing})
+}
+
 func TestVerifyAgentReceipt_ObserveDoesNotSpend(t *testing.T) {
 	env := newWorkItemsEnv(t)
 	ref := env.receipt(env.receiptInput("observe", receiptTool), "consumed")
@@ -113,7 +155,7 @@ func TestVerifyAgentReceipt_Refusals(t *testing.T) {
 	cases := []struct {
 		name, tool, ref, hash, want string
 	}{
-		{"unknown id", receiptTool, "aar_does_not_exist", "sha256:action", mcp.ReceiptCodeNotFound},
+		{"unknown id", receiptTool, "aar_00000000000000000000000000000000", "sha256:action", mcp.ReceiptCodeNotFound},
 		{"other tool", "mctl_scale_service", consumed, "sha256:action", mcp.ReceiptCodeOperationMismatch},
 		{"artifact mismatch", receiptTool, consumed, "sha256:other", mcp.ReceiptCodeArtifactMismatch},
 		{"artifact missing", receiptTool, consumed, "", mcp.ReceiptCodeArtifactMismatch},

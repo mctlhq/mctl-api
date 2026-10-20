@@ -187,9 +187,9 @@ const (
 	maxReceiptHashBytes = 512
 )
 
-// wellFormedReceipt reports whether ref and artifactHash have a receipt's
+// WellFormedReceipt reports whether ref and artifactHash have a receipt's
 // shape: an "aar_" id of letters and digits, and a printable ASCII hash.
-func wellFormedReceipt(ref, artifactHash string) bool {
+func WellFormedReceipt(ref, artifactHash string) bool {
 	if len(ref) > maxReceiptRefBytes || !strings.HasPrefix(ref, receiptRefPrefix) || len(ref) == len(receiptRefPrefix) {
 		return false
 	}
@@ -319,7 +319,7 @@ func (s *Server) agentReceiptMiddleware(next server.ToolHandlerFunc) server.Tool
 		code := ReceiptCodeMissing
 		switch {
 		case ref == "":
-		case !wellFormedReceipt(ref, artifactHash):
+		case !WellFormedReceipt(ref, artifactHash):
 			// Neither field is stored or audited: either may be huge.
 			code, ref = ReceiptCodeMalformed, ""
 		default:
