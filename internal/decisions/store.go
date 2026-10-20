@@ -292,7 +292,8 @@ func (s *Store) Record(ctx context.Context, in DecisionInput) (*Decision, bool, 
 	if err := in.validate(); err != nil {
 		return nil, false, err
 	}
-	in.DecidedAt = in.DecidedAt.UTC()
+	// TIMESTAMPTZ keeps microseconds: digest the instant as it is stored.
+	in.DecidedAt = in.DecidedAt.UTC().Truncate(time.Microsecond)
 	if in.PolicyReasons == nil {
 		in.PolicyReasons = []string{}
 	}
@@ -446,7 +447,9 @@ func (s *Store) AppendAttempt(ctx context.Context, in AttemptInput) (*AttemptEve
 	if err := in.validate(); err != nil {
 		return nil, false, err
 	}
-	in.OccurredAt = in.OccurredAt.UTC()
+	// TIMESTAMPTZ keeps microseconds: normalize before comparing with a
+	// stored event, or a replay carrying nanoseconds reads as a conflict.
+	in.OccurredAt = in.OccurredAt.UTC().Truncate(time.Microsecond)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

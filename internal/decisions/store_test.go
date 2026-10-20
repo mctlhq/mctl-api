@@ -122,7 +122,7 @@ func (a action) decision(code, verdict, approvalID string) DecisionInput {
 		TargetDigest:   TargetDigest(a.target),
 		ArgsDigest:     a.args,
 		ActionDigest:   digestOf("action-" + a.executionID),
-		DecidedAt:      time.Now().UTC().Truncate(time.Microsecond),
+		DecidedAt:      time.Now().UTC(),
 		IdempotencyKey: "idem-" + uid(),
 		RecordedBy:     "svc-agents",
 	}
@@ -185,7 +185,7 @@ func event(decisionID string, attemptNo int, phase string) AttemptInput {
 		DecisionID:     decisionID,
 		AttemptNo:      attemptNo,
 		Phase:          phase,
-		OccurredAt:     time.Now().UTC().Truncate(time.Microsecond),
+		OccurredAt:     time.Now().UTC(),
 		IdempotencyKey: "ev-" + uid(),
 		RecordedBy:     "svc-agents",
 	}
@@ -557,7 +557,16 @@ func TestRecordIsIdempotent(t *testing.T) {
 	s, _, _ := newTestStores(t)
 	ctx := context.Background()
 	in := newAction().decision(CodeAllowed, VerdictAllow, "")
+	// Nanoseconds the database cannot keep: a replay must still match.
+	in.DecidedAt = in.DecidedAt.Truncate(time.Microsecond).Add(789 * time.Nanosecond)
 	d := mustRecord(t, s, in)
+	// The digest covers decided_at as stored, so it can be recomputed
+	// from the row.
+	stored := in
+	stored.DecidedAt = in.DecidedAt.Truncate(time.Microsecond)
+	if got, _ := s.Get(ctx, d.ID); got.ContentDigest != stored.contentDigest() || !got.DecidedAt.Equal(stored.DecidedAt) {
+		t.Fatalf("stored digest %s does not cover the stored decided_at %s", got.ContentDigest, got.DecidedAt)
+	}
 	again, created, err := s.Record(ctx, in)
 	if err != nil || created || again.ID != d.ID {
 		t.Fatalf("replay: %v created=%v err=%v, want %s", again, created, err, d.ID)
@@ -568,6 +577,21 @@ func TestRecordIsIdempotent(t *testing.T) {
 	}
 	if got, _ := s.Get(ctx, d.ID); got.Code != CodeAllowed {
 		t.Fatalf("stored code %q changed", got.Code)
+	}
+
+	// The same for attempt events: replays carrying nanoseconds return the
+	// stored event, for a start and for a terminal event.
+	start := event(d.ID, 0, PhaseStarted)
+	start.OccurredAt = start.OccurredAt.Truncate(time.Microsecond).Add(321 * time.Nanosecond)
+	first := mustAppend(t, s, start)
+	end := event(d.ID, first.AttemptNo, PhaseSucceeded)
+	end.OccurredAt = end.OccurredAt.Truncate(time.Microsecond).Add(654 * time.Nanosecond)
+	mustAppend(t, s, end)
+	for _, e := range []AttemptInput{start, end} {
+		got, created, err := s.AppendAttempt(ctx, e)
+		if err != nil || created || got.Phase != e.Phase {
+			t.Fatalf("%s replay: %+v created=%v err=%v, want the stored event", e.Phase, got, created, err)
+		}
 	}
 }
 
