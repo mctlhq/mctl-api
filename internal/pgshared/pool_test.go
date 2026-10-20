@@ -70,14 +70,17 @@ func TestOpenWithoutSharingBuildsAPoolPerCall(t *testing.T) {
 func TestOpenWithoutSharingIgnoresTheRegistry(t *testing.T) {
 	ctx := context.Background()
 	EnableSharing()
+	// Registered before anything can fail, so a failed Open below still
+	// switches sharing off for the tests that follow.
+	t.Cleanup(func() { resetRegistry(t) })
 	shared, err := Open(ctx, testConn)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { Release(shared) })
 	mu.Lock()
 	sharing = false
 	mu.Unlock()
-	t.Cleanup(func() { Release(shared); resetRegistry(t) })
 
 	fresh, err := Open(ctx, testConn)
 	if err != nil {
