@@ -595,12 +595,9 @@ func main() {
 	// AUDIT_DB_URL other stores depend on. Nil makes every /api/v1/work-items
 	// route answer 503.
 	var workItemsStore *workitems.Store
-	workItemsDBURL := postgresURL(os.Getenv("WORK_ITEMS_DB_URL"))
-	if workItemsDBURL == "" {
-		workItemsDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
-	}
+	workItemsDBURL, workItemsDisabled := workItemsStoreSource()
 	switch {
-	case killSwitchOn(os.Getenv("WORK_ITEMS_DISABLED")):
+	case workItemsDisabled:
 		slog.Warn("WORK_ITEMS_DISABLED is set; /api/v1/work-items and /api/v1/action-approvals routes will return 503")
 	case workItemsDBURL == "":
 		slog.Warn("no WORK_ITEMS_DB_URL or AUDIT_DB_URL; /api/v1/work-items and /api/v1/action-approvals routes will return 503")
@@ -1472,14 +1469,13 @@ func loadConfig() config {
 		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
 		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
 		AgentReceiptGateRaw:            os.Getenv("MCTL_AGENT_RECEIPT_GATE"),
-		WorkItemsConfigured: !killSwitchOn(os.Getenv("WORK_ITEMS_DISABLED")) &&
-			(postgresURL(os.Getenv("WORK_ITEMS_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != ""),
-		LegacyApproverRaw:         os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
-		ApprovalMaxDecisionAgeRaw: os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
-		ApprovalStrictPolicyRaw:   os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
-		AdminPrincipalsRaw:        os.Getenv("ADMIN_PRINCIPALS"),
-		PrincipalsDisabled:        killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
-		PrincipalDBConfigured:     postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
+		WorkItemsConfigured:            workItemsStoreConfigured(),
+		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
+		ApprovalMaxDecisionAgeRaw:      os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
+		ApprovalStrictPolicyRaw:        os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
+		AdminPrincipalsRaw:             os.Getenv("ADMIN_PRINCIPALS"),
+		PrincipalsDisabled:             killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
+		PrincipalDBConfigured:          postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
 	}
 }
 
@@ -2272,6 +2268,25 @@ func (c config) approvalMaxDecisionAge() time.Duration {
 // requireRegisteredPolicy is ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY.
 func (c config) requireRegisteredPolicy() bool {
 	return killSwitchOn(c.ApprovalStrictPolicyRaw)
+}
+
+// workItemsStoreSource is the one reading of the work-items store's
+// enable condition: the URL main opens (WORK_ITEMS_DB_URL, else
+// AUDIT_DB_URL) and whether WORK_ITEMS_DISABLED is on. main's init and
+// loadConfig both read it, so the boot check for MCTL_AGENT_RECEIPT_GATE=
+// enforce cannot drift from what main actually opens.
+func workItemsStoreSource() (dbURL string, disabled bool) {
+	dbURL = postgresURL(os.Getenv("WORK_ITEMS_DB_URL"))
+	if dbURL == "" {
+		dbURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+	}
+	return dbURL, killSwitchOn(os.Getenv("WORK_ITEMS_DISABLED"))
+}
+
+// workItemsStoreConfigured is whether main will try to open the store.
+func workItemsStoreConfigured() bool {
+	dbURL, disabled := workItemsStoreSource()
+	return !disabled && dbURL != ""
 }
 
 // killSwitchOn reads a kill-switch value (WORK_ITEMS_DISABLED,

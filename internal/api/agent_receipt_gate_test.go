@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"testing"
 	"time"
 
@@ -209,13 +210,38 @@ func TestAuditAgentReceipt_Statuses(t *testing.T) {
 		{mcp.ReceiptOutcome{Tool: receiptTool, Ref: "aar_1", Mode: mcp.AgentReceiptGateEnforce}, "succeeded"},
 		{mcp.ReceiptOutcome{Tool: receiptTool, Code: mcp.ReceiptCodeMissing, Mode: mcp.AgentReceiptGateEnforce, Refused: true}, "denied"},
 		{mcp.ReceiptOutcome{Tool: receiptTool, Code: mcp.ReceiptCodeMissing, Mode: mcp.AgentReceiptGateObserve}, "observed"},
+		{mcp.ReceiptOutcome{Tool: receiptTool, Code: mcp.ReceiptCodeMalformed, Mode: mcp.AgentReceiptGateObserve,
+			Malformed: `prefix=true ref_len=9 head="ab" hash_len=8`}, "observed"},
 	} {
 		env.h.AuditAgentReceipt(context.Background(), auth.NewServiceUser(), c.o)
 		got := env.audit.List(1)
 		if len(got) != 1 || got[0].Operation != agentReceiptGateOperation || got[0].Status != c.want ||
 			got[0].Parameters["tool"] != receiptTool || got[0].Parameters["code"] != c.o.Code ||
-			got[0].Parameters["policy_version"] != mcp.AgentReceiptGatePolicyVersion {
+			got[0].Parameters["policy_version"] != mcp.AgentReceiptGatePolicyVersion ||
+			got[0].Parameters["malformed"] != c.o.Malformed {
 			t.Errorf("%+v: audit = %+v", c.o, got)
+		}
+	}
+}
+
+// The counter is bumped before the best-effort audit write, so it counts a
+// decision even with no audit log at all. Its code label is bounded.
+func TestAuditAgentReceipt_Counter(t *testing.T) {
+	h := &Handlers{}
+	for _, c := range []struct {
+		code, label string
+	}{
+		{"", "valid"},
+		{mcp.ReceiptCodeMalformed, mcp.ReceiptCodeMalformed},
+		{mcp.ReceiptCodeUnverifiable, mcp.ReceiptCodeUnverifiable},
+		{"something_new", "other"},
+	} {
+		m := agentReceiptGateTotal.WithLabelValues(string(mcp.AgentReceiptGateObserve), c.label)
+		before := testutil.ToFloat64(m)
+		h.AuditAgentReceipt(context.Background(), auth.NewServiceUser(),
+			mcp.ReceiptOutcome{Tool: receiptTool, Code: c.code, Mode: mcp.AgentReceiptGateObserve})
+		if n := testutil.ToFloat64(m) - before; n != 1 {
+			t.Errorf("code %q: label %q moved by %v", c.code, c.label, n)
 		}
 	}
 }

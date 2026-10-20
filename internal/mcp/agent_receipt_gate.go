@@ -209,6 +209,31 @@ func WellFormedReceipt(ref, artifactHash string) bool {
 	return true
 }
 
+// maxMalformedEchoChars bounds how much of a malformed ref an audit row
+// shows.
+const maxMalformedEchoChars = 8
+
+// DescribeMalformedReceipt is a bounded, printable account of a receipt
+// WellFormedReceipt refused, for the audit row: whether the ref has the
+// "aar_" prefix, both lengths, and at most the first eight letters or
+// digits after the prefix. It never echoes anything else, so a broken
+// injection can be told from a probe without storing what the caller sent.
+func DescribeMalformedReceipt(ref, artifactHash string) string {
+	prefixed := strings.HasPrefix(ref, receiptRefPrefix)
+	tail := ref
+	if prefixed {
+		tail = ref[len(receiptRefPrefix):]
+	}
+	var head strings.Builder
+	for _, r := range tail {
+		if head.Len() == maxMalformedEchoChars || !isASCIIAlnum(r) {
+			break
+		}
+		head.WriteRune(r)
+	}
+	return fmt.Sprintf("prefix=%t ref_len=%d head=%q hash_len=%d", prefixed, len(ref), head.String(), len(artifactHash))
+}
+
 func isASCIIAlnum(r rune) bool {
 	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9'
 }
@@ -240,6 +265,9 @@ type ReceiptOutcome struct {
 	Code    string
 	Mode    AgentReceiptGateMode
 	Refused bool
+	// Malformed is DescribeMalformedReceipt's account when Code is
+	// ReceiptCodeMalformed, and empty otherwise.
+	Malformed string
 }
 
 // AgentReceiptVerifier checks receipts against the action approval store
@@ -316,12 +344,13 @@ func (s *Server) agentReceiptMiddleware(next server.ToolHandlerFunc) server.Tool
 			return next(ctx, req)
 		}
 		enforce := gate.mode == AgentReceiptGateEnforce
-		code := ReceiptCodeMissing
+		code, malformed := ReceiptCodeMissing, ""
 		switch {
 		case ref == "":
 		case !WellFormedReceipt(ref, artifactHash):
-			// Neither field is stored or audited: either may be huge.
-			code, ref = ReceiptCodeMalformed, ""
+			// Neither field is stored or audited as sent: either may be
+			// huge. Only the bounded description is.
+			code, malformed, ref = ReceiptCodeMalformed, DescribeMalformedReceipt(ref, artifactHash), ""
 		default:
 			code = gate.verifier.VerifyAgentReceipt(ctx, user, ReceiptCheck{
 				Tool: tool, Ref: ref, ArtifactHash: artifactHash, Redeem: enforce,
@@ -329,7 +358,7 @@ func (s *Server) agentReceiptMiddleware(next server.ToolHandlerFunc) server.Tool
 		}
 		refused := enforce && code != ""
 		gate.verifier.AuditAgentReceipt(ctx, user, ReceiptOutcome{
-			Tool: tool, Ref: ref, Code: code, Mode: gate.mode, Refused: refused,
+			Tool: tool, Ref: ref, Code: code, Mode: gate.mode, Refused: refused, Malformed: malformed,
 		})
 		if refused {
 			return mcplib.NewToolResultError(fmt.Sprintf(

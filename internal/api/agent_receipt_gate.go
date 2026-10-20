@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/mcp"
@@ -22,6 +24,35 @@ var _ mcp.AgentReceiptVerifier = (*Handlers)(nil)
 
 // agentReceiptGateOperation labels the gate's audit rows.
 const agentReceiptGateOperation = "agent-receipt-gate"
+
+// agentReceiptGateTotal counts the gate's decisions next to its audit rows,
+// because an audit write is best-effort: a row that failed to land must
+// still show up somewhere. code is "valid" for a receipt that authorized the
+// call, and one of the known refusal codes otherwise.
+var agentReceiptGateTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "mcp_agent_receipt_gate_total",
+	Help: "Governed MCP calls from mctl-agent seen by the receipt gate (mctl-api#723), by mode and receipt code.",
+}, []string{"mode", "code"})
+
+func init() { prometheus.MustRegister(agentReceiptGateTotal) }
+
+// receiptCodeLabels bounds the counter's code label to the codes the gate
+// defines; anything else counts as "other".
+var receiptCodeLabels = map[string]struct{}{
+	mcp.ReceiptCodeMissing: {}, mcp.ReceiptCodeMalformed: {}, mcp.ReceiptCodeNotFound: {},
+	mcp.ReceiptCodeOperationMismatch: {}, mcp.ReceiptCodeTargetMismatch: {}, mcp.ReceiptCodeNotConsumed: {},
+	mcp.ReceiptCodeAlreadyExecuted: {}, mcp.ReceiptCodeArtifactMismatch: {}, mcp.ReceiptCodeUnverifiable: {},
+}
+
+func receiptCodeLabel(code string) string {
+	if code == "" {
+		return "valid"
+	}
+	if _, ok := receiptCodeLabels[code]; ok {
+		return code
+	}
+	return "other"
+}
 
 // VerifyAgentReceipt implements mcp.AgentReceiptVerifier.
 func (h *Handlers) VerifyAgentReceipt(ctx context.Context, user *auth.User, c mcp.ReceiptCheck) string {
@@ -99,6 +130,7 @@ func spendErrorCode(err error) string {
 // authorized, "denied" for one enforce refused, and "observed" for one
 // observe let through without a valid receipt.
 func (h *Handlers) AuditAgentReceipt(ctx context.Context, user *auth.User, o mcp.ReceiptOutcome) {
+	agentReceiptGateTotal.WithLabelValues(string(o.Mode), receiptCodeLabel(o.Code)).Inc()
 	userID := ""
 	if user != nil {
 		userID = user.ID
@@ -120,6 +152,9 @@ func (h *Handlers) AuditAgentReceipt(ctx context.Context, user *auth.User, o mcp
 	}
 	if o.Ref != "" {
 		params["approval_id"] = o.Ref
+	}
+	if o.Malformed != "" {
+		params["malformed"] = o.Malformed
 	}
 	h.logAuditCtx(ctx, audit.Entry{
 		UserID:     userID,
