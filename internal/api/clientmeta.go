@@ -170,26 +170,34 @@ func truncateUA(ua string) string {
 }
 
 func (h *Handlers) logAudit(r *http.Request, entry audit.Entry) {
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	h.logAuditCtx(ctx, entry)
+}
+
+// logAuditCtx is logAudit for a caller that has the request's context but
+// not the request, such as an MCP tool middleware.
+func (h *Handlers) logAuditCtx(ctx context.Context, entry audit.Entry) {
 	if h.opts.AuditLog == nil {
 		return
 	}
-	if r != nil {
-		if m, ok := ClientMetaFromContext(r.Context()); ok {
-			entry.ClientIP = m.IP
-			entry.UserAgent = m.UserAgent
-			entry.RequestID = m.RequestID
+	if m, ok := ClientMetaFromContext(ctx); ok {
+		entry.ClientIP = m.IP
+		entry.UserAgent = m.UserAgent
+		entry.RequestID = m.RequestID
+	}
+	// The entry is about the authenticated caller (a relayed request's
+	// context user is the linked human, carrying the surface as its via
+	// principal). An entry naming anyone else keeps what it was given.
+	if u := auth.UserFromContext(ctx); u != nil && u.ID == entry.UserID {
+		if entry.PrincipalID == "" {
+			entry.PrincipalID = u.PrincipalID()
+			entry.ViaPrincipalID = u.ViaPrincipalID()
 		}
-		// The entry is about the authenticated caller (a relayed request's
-		// context user is the linked human, carrying the surface as its via
-		// principal). An entry naming anyone else keeps what it was given.
-		if u := auth.UserFromContext(r.Context()); u != nil && u.ID == entry.UserID {
-			if entry.PrincipalID == "" {
-				entry.PrincipalID = u.PrincipalID()
-				entry.ViaPrincipalID = u.ViaPrincipalID()
-			}
-			if entry.ViaExecutionID == "" {
-				entry.ViaExecutionID = u.ExecutionID()
-			}
+		if entry.ViaExecutionID == "" {
+			entry.ViaExecutionID = u.ExecutionID()
 		}
 	}
 	h.opts.AuditLog.Log(entry)

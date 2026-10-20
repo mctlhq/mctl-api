@@ -998,6 +998,7 @@ func main() {
 		TenantResolver:                 gitReader,
 		Principals:                     principalResolver,
 		TenantAuthzMode:                cfg.tenantAuthzMode(),
+		AgentReceiptGateMode:           cfg.agentReceiptGateMode(),
 		LegacyApproverDisabled:         cfg.legacyApproverDisabled(),
 		PrincipalMembership:            gitReader,
 		AdminPrincipals:                cfg.adminPrincipals(),
@@ -1339,6 +1340,9 @@ type config struct {
 	// boot: an unknown value, or principal before this build implements it,
 	// refuses to start.
 	TenantAuthzModeRaw string
+	// AgentReceiptGateRaw is MCTL_AGENT_RECEIPT_GATE (mctl-api#723): off
+	// (default), observe or enforce. An unknown value refuses to start.
+	AgentReceiptGateRaw string
 	// AdminPrincipalsRaw is ADMIN_PRINCIPALS (mctl-api#377): the platform
 	// admins of principal mode, as principal ids. A malformed entry refuses
 	// boot in every mode.
@@ -1460,6 +1464,7 @@ func loadConfig() config {
 		CommerceDisabled:               killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
 		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
 		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
+		AgentReceiptGateRaw:            os.Getenv("MCTL_AGENT_RECEIPT_GATE"),
 		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
 		ApprovalMaxDecisionAgeRaw:      os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
 		ApprovalStrictPolicyRaw:        os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
@@ -1695,6 +1700,9 @@ func (c config) validate() error {
 	if err := c.validatePrincipalMode(mode); err != nil {
 		return err
 	}
+	if _, err := mctlmcp.ParseAgentReceiptGateMode(c.AgentReceiptGateRaw); err != nil {
+		return err
+	}
 	if _, err := parseLegacyApprover(c.LegacyApproverRaw); err != nil {
 		return err
 	}
@@ -1859,6 +1867,16 @@ func (p principalTenants) PrincipalTenants(principalID string) ([]string, []stri
 // tenantAuthzMode is the parsed TENANT_AUTHZ_MODE. validate has already
 // refused a value that does not parse, so the fallback is never taken in
 // main.
+// agentReceiptGateMode is the parsed MCTL_AGENT_RECEIPT_GATE. validate has
+// already refused an unknown value.
+func (c config) agentReceiptGateMode() mctlmcp.AgentReceiptGateMode {
+	m, err := mctlmcp.ParseAgentReceiptGateMode(c.AgentReceiptGateRaw)
+	if err != nil {
+		return mctlmcp.AgentReceiptGateOff
+	}
+	return m
+}
+
 func (c config) tenantAuthzMode() mctlapi.TenantAuthzMode {
 	m, err := mctlapi.ParseTenantAuthzMode(c.TenantAuthzModeRaw)
 	if err != nil {

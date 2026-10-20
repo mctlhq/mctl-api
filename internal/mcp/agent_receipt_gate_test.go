@@ -1,0 +1,265 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	mcplib "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/mctlhq/mctl-api/internal/auth"
+)
+
+type fakeReceiptVerifier struct {
+	code    string
+	checks  []ReceiptCheck
+	audited []ReceiptOutcome
+}
+
+func (f *fakeReceiptVerifier) VerifyAgentReceipt(_ context.Context, _ *auth.User, c ReceiptCheck) string {
+	f.checks = append(f.checks, c)
+	return f.code
+}
+
+func (f *fakeReceiptVerifier) AuditAgentReceipt(_ context.Context, _ *auth.User, o ReceiptOutcome) {
+	f.audited = append(f.audited, o)
+}
+
+// runGate calls the middleware once and reports whether the wrapped handler
+// ran, with the arguments it saw.
+func runGate(t *testing.T, s *Server, user *auth.User, tool string, args map[string]any) (*mcplib.CallToolResult, bool, map[string]any) {
+	t.Helper()
+	ctx := context.Background()
+	if user != nil {
+		ctx = auth.WithUser(ctx, user)
+	}
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = tool
+	req.Params.Arguments = args
+	ran := false
+	var seen map[string]any
+	res, err := s.agentReceiptMiddleware(func(_ context.Context, r mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		ran = true
+		seen = r.GetArguments()
+		return mcplib.NewToolResultText("ok"), nil
+	})(ctx, req)
+	if err != nil {
+		t.Fatalf("middleware error: %v", err)
+	}
+	return res, ran, seen
+}
+
+func receiptArgs() map[string]any {
+	return map[string]any{
+		"service":                     "web",
+		ArgActionApprovalRef:          " aar_1 ",
+		ArgActionApprovalArtifactHash: "sha256:abc",
+	}
+}
+
+func gatedServer(mode AgentReceiptGateMode, code string) (*Server, *fakeReceiptVerifier) {
+	v := &fakeReceiptVerifier{code: code}
+	s := &Server{}
+	s.SetAgentReceiptGate(v, mode)
+	return s, v
+}
+
+func TestParseAgentReceiptGateMode(t *testing.T) {
+	for raw, want := range map[string]AgentReceiptGateMode{
+		"": AgentReceiptGateOff, "off": AgentReceiptGateOff, " observe ": AgentReceiptGateObserve, "enforce": AgentReceiptGateEnforce,
+	} {
+		got, err := ParseAgentReceiptGateMode(raw)
+		if err != nil || got != want {
+			t.Errorf("ParseAgentReceiptGateMode(%q) = %q, %v; want %q", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"on", "Enforce", "true", "enforced"} {
+		if _, err := ParseAgentReceiptGateMode(raw); err == nil {
+			t.Errorf("ParseAgentReceiptGateMode(%q) accepted an unknown mode", raw)
+		}
+	}
+}
+
+func TestAgentReceiptGate_OffStripsArgsAndChecksNothing(t *testing.T) {
+	s, v := gatedServer(AgentReceiptGateOff, ReceiptCodeNotFound)
+	_, ran, seen := runGate(t, s, auth.NewServiceUser(), "mctl_deploy_service", receiptArgs())
+	if !ran {
+		t.Fatal("off must not refuse")
+	}
+	if _, ok := seen[ArgActionApprovalRef]; ok {
+		t.Fatal("reserved argument reached the handler")
+	}
+	if _, ok := seen[ArgActionApprovalArtifactHash]; ok {
+		t.Fatal("reserved argument reached the handler")
+	}
+	if seen["service"] != "web" {
+		t.Fatalf("ordinary argument lost: %v", seen)
+	}
+	if len(v.checks)+len(v.audited) != 0 {
+		t.Fatalf("off consulted the verifier: %+v %+v", v.checks, v.audited)
+	}
+}
+
+func TestAgentReceiptGate_StripsArgsForEveryone(t *testing.T) {
+	s, _ := gatedServer(AgentReceiptGateEnforce, "")
+	_, ran, seen := runGate(t, s, auth.NewGitHubUser("alice", nil), "mctl_get_service_status", receiptArgs())
+	if !ran {
+		t.Fatal("ungated call refused")
+	}
+	if _, ok := seen[ArgActionApprovalRef]; ok {
+		t.Fatal("reserved argument reached the handler")
+	}
+}
+
+func TestAgentReceiptGate_ObserveMissingRunsAndAudits(t *testing.T) {
+	s, v := gatedServer(AgentReceiptGateObserve, "")
+	_, ran, _ := runGate(t, s, auth.NewServiceUser(), "mctl_deploy_service", map[string]any{"service": "web"})
+	if !ran {
+		t.Fatal("observe refused a call")
+	}
+	if len(v.checks) != 0 {
+		t.Fatal("verified a receipt that was not presented")
+	}
+	if len(v.audited) != 1 || v.audited[0].Code != ReceiptCodeMissing || v.audited[0].Refused || v.audited[0].Mode != AgentReceiptGateObserve {
+		t.Fatalf("audit = %+v", v.audited)
+	}
+}
+
+func TestAgentReceiptGate_ObserveChecksWithoutSpending(t *testing.T) {
+	s, v := gatedServer(AgentReceiptGateObserve, ReceiptCodeArtifactMismatch)
+	_, ran, _ := runGate(t, s, auth.NewServiceUser(), "mctl_deploy_service", receiptArgs())
+	if !ran {
+		t.Fatal("observe refused a call")
+	}
+	if len(v.checks) != 1 || v.checks[0].Redeem {
+		t.Fatalf("observe must check read-only: %+v", v.checks)
+	}
+	if v.audited[0].Code != ReceiptCodeArtifactMismatch || v.audited[0].Refused {
+		t.Fatalf("audit = %+v", v.audited)
+	}
+}
+
+func TestAgentReceiptGate_EnforceRefusesMissing(t *testing.T) {
+	s, v := gatedServer(AgentReceiptGateEnforce, "")
+	res, ran, _ := runGate(t, s, auth.NewServiceUser(), "mctl_deploy_service", map[string]any{"service": "web"})
+	if ran {
+		t.Fatal("enforce ran a governed call without a receipt")
+	}
+	if !res.IsError || !strings.Contains(resultText(t, res), ReceiptCodeMissing) {
+		t.Fatalf("result = %+v", res)
+	}
+	if len(v.audited) != 1 || !v.audited[0].Refused {
+		t.Fatalf("audit = %+v", v.audited)
+	}
+}
+
+func TestAgentReceiptGate_EnforceRefusesEachVerifierCode(t *testing.T) {
+	for _, code := range []string{
+		ReceiptCodeNotFound, ReceiptCodeOperationMismatch, ReceiptCodeTargetMismatch, ReceiptCodeNotConsumed,
+		ReceiptCodeAlreadyExecuted, ReceiptCodeArtifactMismatch, ReceiptCodeUnverifiable,
+	} {
+		s, _ := gatedServer(AgentReceiptGateEnforce, code)
+		res, ran, _ := runGate(t, s, auth.NewServiceUser(), "mctl_deploy_service", receiptArgs())
+		if ran || !res.IsError || !strings.Contains(resultText(t, res), code) {
+			t.Errorf("%s: ran=%v result=%+v", code, ran, res)
+		}
+	}
+}
+
+func TestAgentReceiptGate_EnforceRunsWithValidReceipt(t *testing.T) {
+	s, v := gatedServer(AgentReceiptGateEnforce, "")
+	_, ran, seen := runGate(t, s, auth.NewServiceUser(), "mctl_deploy_service", receiptArgs())
+	if !ran {
+		t.Fatal("valid receipt refused")
+	}
+	if _, ok := seen[ArgActionApprovalRef]; ok {
+		t.Fatal("reserved argument reached the handler")
+	}
+	want := ReceiptCheck{Tool: "mctl_deploy_service", Ref: "aar_1", ArtifactHash: "sha256:abc", Redeem: true}
+	if len(v.checks) != 1 || v.checks[0] != want {
+		t.Fatalf("checks = %+v, want %+v", v.checks, want)
+	}
+	if len(v.audited) != 1 || v.audited[0].Code != "" || v.audited[0].Refused {
+		t.Fatalf("audit = %+v", v.audited)
+	}
+}
+
+func TestAgentReceiptGate_OnlyDirectAgentPrincipalIsGated(t *testing.T) {
+	surface := auth.NewSurfaceUser("telegram")
+	for name, u := range map[string]*auth.User{
+		"anonymous": nil,
+		"human":     auth.NewGitHubUser("alice", []string{"admins"}),
+		"lookalike": auth.NewGitHubUser(auth.ServiceUserID, []string{"admins"}),
+		"surface":   surface,
+		"relayed":   auth.NewRelayedUser("alice", nil, surface),
+		"agent":     auth.NewAgentUser("investigator", auth.AgentRun{}),
+	} {
+		s, v := gatedServer(AgentReceiptGateEnforce, ReceiptCodeNotFound)
+		_, ran, _ := runGate(t, s, u, "mctl_deploy_service", nil)
+		if !ran || len(v.checks)+len(v.audited) != 0 {
+			t.Errorf("%s: gated (ran=%v checks=%d audits=%d)", name, ran, len(v.checks), len(v.audited))
+		}
+	}
+}
+
+func TestAgentReceiptGate_UngovernedToolsPass(t *testing.T) {
+	for _, tool := range []string{"mctl_get_service_status", "mctl_whoami", "mctl_resolve_incident", "mctl_list_services"} {
+		s, v := gatedServer(AgentReceiptGateEnforce, ReceiptCodeNotFound)
+		_, ran, _ := runGate(t, s, auth.NewServiceUser(), tool, nil)
+		if !ran || len(v.audited) != 0 {
+			t.Errorf("%s: gated", tool)
+		}
+	}
+}
+
+// Every registered tool is classified exactly once, so a new tool cannot
+// silently escape the gate (or be gated by accident).
+func TestAgentReceiptGate_ClassifiesEveryTool(t *testing.T) {
+	srv := NewServer("http://localhost:8080", "").NewMCPServer()
+	registered := map[string]bool{}
+	for name := range srv.ListTools() {
+		registered[name] = true
+		_, governed := governedAgentTools[name]
+		_, ungoverned := ungovernedAgentTools[name]
+		read := isAgentReadTool(name)
+		n := 0
+		for _, b := range []bool{governed, ungoverned, read} {
+			if b {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s: governed=%v ungoverned=%v read=%v; want exactly one", name, governed, ungoverned, read)
+		}
+	}
+	for name := range governedAgentTools {
+		if !registered[name] {
+			t.Errorf("governed tool %s is not registered", name)
+		}
+	}
+	for name := range ungovernedAgentTools {
+		if !registered[name] {
+			t.Errorf("ungoverned tool %s is not registered", name)
+		}
+	}
+}
+
+// The gate is on the real tools/call path, ahead of the tool handler.
+func TestAgentReceiptGate_RegisteredOnServer(t *testing.T) {
+	s := NewServer("http://127.0.0.1:1", "")
+	v := &fakeReceiptVerifier{}
+	s.SetAgentReceiptGate(v, AgentReceiptGateEnforce)
+	srv := s.NewMCPServer()
+	req, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": "mctl_scale_service", "arguments": map[string]any{"team": "t", "service": "web", "replicas": 2}},
+	})
+	b, _ := json.Marshal(srv.HandleMessage(auth.WithUser(context.Background(), auth.NewServiceUser()), req))
+	if !strings.Contains(string(b), ReceiptCodeMissing) {
+		t.Fatalf("response = %s", b)
+	}
+	if len(v.audited) != 1 || !v.audited[0].Refused {
+		t.Fatalf("audit = %+v", v.audited)
+	}
+}
