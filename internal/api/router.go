@@ -1074,9 +1074,6 @@ func rateLimitSubject(r *http.Request, user *auth.User) string {
 	return user.ID
 }
 
-// surfaceAggregateLimitPerMinute caps one surface principal across all the
-// end users it calls for, the ceiling rateLimitSubject's per-user split
-// would otherwise remove. Roughly Telegram's own bot send rate.
 // globalRequestsPerMinute is the per-principal limit every authenticated
 // route sits under; the per-group budgets below it are sized against it.
 const globalRequestsPerMinute = 300
@@ -1086,6 +1083,9 @@ const globalRequestsPerMinute = 300
 // globalRequestsPerMinute: both are spent by the same evidence writer.
 const evidenceIngestPerMinute = 120
 
+// surfaceAggregateLimitPerMinute caps one surface principal across all the
+// end users it calls for, the ceiling rateLimitSubject's per-user split
+// would otherwise remove. Roughly Telegram's own bot send rate.
 const surfaceAggregateLimitPerMinute = 1200
 
 // surfaceAggregateLimit applies limit to surface principals only, keyed on
