@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/mcp"
@@ -242,6 +243,31 @@ func TestAuditAgentReceipt_Counter(t *testing.T) {
 			mcp.ReceiptOutcome{Tool: receiptTool, Code: c.code, Mode: mcp.AgentReceiptGateObserve})
 		if n := testutil.ToFloat64(m) - before; n != 1 {
 			t.Errorf("code %q: label %q moved by %v", c.code, c.label, n)
+		}
+	}
+}
+
+// The mode label is bounded like the code label: an unvalidated mode counts
+// as "other" rather than adding a series per distinct value.
+func TestAuditAgentReceipt_CounterModeLabel(t *testing.T) {
+	h := &Handlers{}
+	for _, c := range []struct {
+		mode  mcp.AgentReceiptGateMode
+		label string
+	}{
+		{mcp.AgentReceiptGateOff, "off"},
+		{mcp.AgentReceiptGateObserve, "observe"},
+		{mcp.AgentReceiptGateEnforce, "enforce"},
+		{"", "other"},
+		{"Enforce", "other"},
+		{"something_new", "other"},
+	} {
+		m := agentReceiptGateTotal.WithLabelValues(c.label, "valid")
+		before := testutil.ToFloat64(m)
+		h.AuditAgentReceipt(context.Background(), auth.NewServiceUser(),
+			mcp.ReceiptOutcome{Tool: receiptTool, Mode: c.mode})
+		if n := testutil.ToFloat64(m) - before; n != 1 {
+			t.Errorf("mode %q: label %q moved by %v", c.mode, c.label, n)
 		}
 	}
 }

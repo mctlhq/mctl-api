@@ -44,6 +44,17 @@ var receiptCodeLabels = map[string]struct{}{
 	mcp.ReceiptCodeAlreadyExecuted: {}, mcp.ReceiptCodeArtifactMismatch: {}, mcp.ReceiptCodeUnverifiable: {},
 }
 
+// receiptModeLabel bounds the counter's mode label the same way: the boot
+// check admits only these modes today, but AuditAgentReceipt is exported, so
+// the label set must not depend on every caller having run that check.
+func receiptModeLabel(mode mcp.AgentReceiptGateMode) string {
+	switch mode {
+	case mcp.AgentReceiptGateOff, mcp.AgentReceiptGateObserve, mcp.AgentReceiptGateEnforce:
+		return string(mode)
+	}
+	return "other"
+}
+
 func receiptCodeLabel(code string) string {
 	if code == "" {
 		return "valid"
@@ -130,7 +141,7 @@ func spendErrorCode(err error) string {
 // authorized, "denied" for one enforce refused, and "observed" for one
 // observe let through without a valid receipt.
 func (h *Handlers) AuditAgentReceipt(ctx context.Context, user *auth.User, o mcp.ReceiptOutcome) {
-	agentReceiptGateTotal.WithLabelValues(string(o.Mode), receiptCodeLabel(o.Code)).Inc()
+	agentReceiptGateTotal.WithLabelValues(receiptModeLabel(o.Mode), receiptCodeLabel(o.Code)).Inc()
 	userID := ""
 	if user != nil {
 		userID = user.ID
