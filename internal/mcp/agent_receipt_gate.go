@@ -194,7 +194,7 @@ func wellFormedReceipt(ref, artifactHash string) bool {
 		return false
 	}
 	for _, r := range ref[len(receiptRefPrefix):] {
-		if !('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9') {
+		if !isASCIIAlnum(r) {
 			return false
 		}
 	}
@@ -207,6 +207,10 @@ func wellFormedReceipt(ref, artifactHash string) bool {
 		}
 	}
 	return true
+}
+
+func isASCIIAlnum(r rune) bool {
+	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9'
 }
 
 // isAgentReadTool mirrors the agent's read-verb rule for the ungoverned side.
