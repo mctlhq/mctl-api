@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
@@ -67,12 +68,15 @@ func gatedServer(mode AgentReceiptGateMode, code string) (*Server, *fakeReceiptV
 
 func TestParseAgentReceiptGateMode(t *testing.T) {
 	for raw, want := range map[string]AgentReceiptGateMode{
-		"": AgentReceiptGateOff, "off": AgentReceiptGateOff, " observe ": AgentReceiptGateObserve, "enforce": AgentReceiptGateEnforce,
+		"": AgentReceiptGateOff, "off": AgentReceiptGateOff, "observe": AgentReceiptGateObserve, "enforce": AgentReceiptGateEnforce,
 	} {
 		got, err := ParseAgentReceiptGateMode(raw)
 		if err != nil || got != want {
 			t.Errorf("ParseAgentReceiptGateMode(%q) = %q, %v; want %q", raw, got, err, want)
 		}
+	}
+	if got, err := ParseAgentReceiptGateMode("\tobserve\n"); err != nil || got != AgentReceiptGateObserve {
+		t.Errorf("surrounding whitespace: %q, %v", got, err)
 	}
 	for _, raw := range []string{"on", "Enforce", "true", "enforced"} {
 		if _, err := ParseAgentReceiptGateMode(raw); err == nil {
@@ -262,4 +266,88 @@ func TestAgentReceiptGate_RegisteredOnServer(t *testing.T) {
 	if len(v.audited) != 1 || !v.audited[0].Refused {
 		t.Fatalf("audit = %+v", v.audited)
 	}
+}
+
+// A receipt of the wrong shape is refused before the store or the audit
+// row sees it.
+func TestAgentReceiptGate_MalformedReceiptNeverReachesTheStore(t *testing.T) {
+	for name, args := range map[string]map[string]any{
+		"no prefix":      {ArgActionApprovalRef: "wi_123", ArgActionApprovalArtifactHash: "sha256:x"},
+		"prefix only":    {ArgActionApprovalRef: "aar_", ArgActionApprovalArtifactHash: "sha256:x"},
+		"bad characters": {ArgActionApprovalRef: "aar_1' OR 1=1", ArgActionApprovalArtifactHash: "sha256:x"},
+		"ref too long":   {ArgActionApprovalRef: "aar_" + strings.Repeat("a", maxReceiptRefBytes), ArgActionApprovalArtifactHash: "sha256:x"},
+		"hash too long":  {ArgActionApprovalRef: "aar_1", ArgActionApprovalArtifactHash: strings.Repeat("a", maxReceiptHashBytes+1)},
+		"hash control":   {ArgActionApprovalRef: "aar_1", ArgActionApprovalArtifactHash: "sha256:\x01x"},
+	} {
+		s, v := gatedServer(AgentReceiptGateEnforce, "")
+		res, ran, _ := runGate(t, s, auth.NewServiceUser(), "mctl_deploy_service", args)
+		if ran || !res.IsError || !strings.Contains(resultText(t, res), ReceiptCodeMalformed) {
+			t.Errorf("%s: ran=%v result=%+v", name, ran, res)
+		}
+		if len(v.checks) != 0 {
+			t.Errorf("%s: malformed receipt reached the verifier: %+v", name, v.checks)
+		}
+		if len(v.audited) != 1 || v.audited[0].Ref != "" || v.audited[0].Code != ReceiptCodeMalformed {
+			t.Errorf("%s: audit = %+v", name, v.audited)
+		}
+	}
+	// The longest well-formed values still pass.
+	s, v := gatedServer(AgentReceiptGateEnforce, "")
+	_, ran, _ := runGate(t, s, auth.NewServiceUser(), "mctl_deploy_service", map[string]any{
+		ArgActionApprovalRef:          "aar_" + strings.Repeat("a", maxReceiptRefBytes-len(receiptRefPrefix)),
+		ArgActionApprovalArtifactHash: strings.Repeat("a", maxReceiptHashBytes),
+	})
+	if !ran || len(v.checks) != 1 {
+		t.Fatalf("well-formed receipt at the limits refused (ran=%v checks=%d)", ran, len(v.checks))
+	}
+}
+
+// The wire path: mcp-go decodes params.arguments itself, so this pins that
+// the receipt is read from, and removed from, what a real tools/call
+// carries, in both the decoded map and the raw bytes a handler could read.
+func TestAgentReceiptGate_WireLevelStripping(t *testing.T) {
+	s := NewServer("http://127.0.0.1:1", "")
+	v := &fakeReceiptVerifier{}
+	s.SetAgentReceiptGate(v, AgentReceiptGateEnforce)
+	srv := s.NewMCPServer()
+	var seen mcplib.CallToolRequest
+	ran := false
+	// Replace a governed tool's handler with one that records its request.
+	srv.AddTool(mcplib.NewTool("mctl_deploy_service"), func(_ context.Context, r mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		ran, seen = true, r
+		return mcplib.NewToolResultText("ok"), nil
+	})
+	b := handleCall(t, srv, auth.NewServiceUser(), "mctl_deploy_service", map[string]any{
+		"service": "web", ArgActionApprovalRef: "aar_abc", ArgActionApprovalArtifactHash: "sha256:abc",
+	})
+	if !ran {
+		t.Fatalf("valid receipt refused: %s", b)
+	}
+	want := ReceiptCheck{Tool: "mctl_deploy_service", Ref: "aar_abc", ArtifactHash: "sha256:abc", Redeem: true}
+	if len(v.checks) != 1 || v.checks[0] != want {
+		t.Fatalf("checks = %+v, want %+v", v.checks, want)
+	}
+	args := seen.GetArguments()
+	if _, ok := args[ArgActionApprovalRef]; ok || args["service"] != "web" {
+		t.Fatalf("handler arguments = %v", args)
+	}
+	if raw, err := json.Marshal(seen.Params); err != nil || strings.Contains(string(raw), "aar_abc") || strings.Contains(string(raw), "sha256:abc") {
+		t.Fatalf("receipt still reachable from the request params: %s (%v)", raw, err)
+	}
+}
+
+func handleCall(t *testing.T, srv *server.MCPServer, u *auth.User, name string, args map[string]any) []byte {
+	t.Helper()
+	req, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": name, "arguments": args},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(srv.HandleMessage(auth.WithUser(context.Background(), u), req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

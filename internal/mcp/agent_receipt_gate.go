@@ -31,6 +31,12 @@ import (
 //     and never "missing".
 //   - Human principals, relayed requests and agent principals are not
 //     gated: only the direct mctl-agent service principal is.
+//
+// v1 binds an approval to the principal, the tool and one use. It does not
+// bind the call's arguments: the server does not recompute the arguments
+// digest, and the artifact hash is the one the agent recorded. A receipt is
+// spent before the handler runs, and the age of a consumed one is not
+// bounded. Only the hosted endpoint is gated; cmd/mcp's stdio server is not.
 
 // AgentReceiptGateMode is the parsed MCTL_AGENT_RECEIPT_GATE.
 type AgentReceiptGateMode string
@@ -76,6 +82,7 @@ const (
 // Refusal codes, one per reason.
 const (
 	ReceiptCodeMissing           = "agent_receipt_missing"
+	ReceiptCodeMalformed         = "agent_receipt_malformed"
 	ReceiptCodeNotFound          = "agent_receipt_not_found"
 	ReceiptCodeOperationMismatch = "agent_receipt_operation_mismatch"
 	ReceiptCodeTargetMismatch    = "agent_receipt_target_mismatch"
@@ -166,6 +173,40 @@ func toolSet(names ...string) map[string]struct{} {
 		m[n] = struct{}{}
 	}
 	return m
+}
+
+// Shape limits for a presented receipt. Its fields come from the one
+// principal the gate distrusts and an MCP argument is bounded only by the
+// request body, so a malformed value is refused before it reaches the store
+// read or an audit row. An approval id is "aar_" and 32 hex digits
+// (workitems.CreateActionApproval); the hash limit is the store's
+// MaxApprovalFieldBytes.
+const (
+	receiptRefPrefix    = "aar_"
+	maxReceiptRefBytes  = 64
+	maxReceiptHashBytes = 512
+)
+
+// wellFormedReceipt reports whether ref and artifactHash have a receipt's
+// shape: an "aar_" id of letters and digits, and a printable ASCII hash.
+func wellFormedReceipt(ref, artifactHash string) bool {
+	if len(ref) > maxReceiptRefBytes || !strings.HasPrefix(ref, receiptRefPrefix) || len(ref) == len(receiptRefPrefix) {
+		return false
+	}
+	for _, r := range ref[len(receiptRefPrefix):] {
+		if !('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9') {
+			return false
+		}
+	}
+	if len(artifactHash) > maxReceiptHashBytes {
+		return false
+	}
+	for _, r := range artifactHash {
+		if r < 0x21 || r > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // isAgentReadTool mirrors the agent's read-verb rule for the ungoverned side.
@@ -272,7 +313,12 @@ func (s *Server) agentReceiptMiddleware(next server.ToolHandlerFunc) server.Tool
 		}
 		enforce := gate.mode == AgentReceiptGateEnforce
 		code := ReceiptCodeMissing
-		if ref != "" {
+		switch {
+		case ref == "":
+		case !wellFormedReceipt(ref, artifactHash):
+			// Neither field is stored or audited: either may be huge.
+			code, ref = ReceiptCodeMalformed, ""
+		default:
 			code = gate.verifier.VerifyAgentReceipt(ctx, user, ReceiptCheck{
 				Tool: tool, Ref: ref, ArtifactHash: artifactHash, Redeem: enforce,
 			})
