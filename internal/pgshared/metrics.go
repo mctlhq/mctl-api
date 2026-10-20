@@ -30,6 +30,11 @@ import (
 // connection string, which carries the password, so it never becomes a label.
 // Pools whose strings differ only in parameters land on one label set and are
 // summed, which keeps Collect from emitting a duplicate series.
+//
+// The counters are sums over pools open at scrape time, so closing one of
+// several pools behind a label set makes them drop, which rate() and
+// increase() read as a counter reset. In cmd/api the shared pools live for
+// the whole process, so that happens only at shutdown.
 var (
 	poolLabels = []string{"host", "database"}
 
