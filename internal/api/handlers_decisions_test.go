@@ -90,8 +90,8 @@ func TestEvidenceWriter_ReachesDecisionAppendsOnly(t *testing.T) {
 // leaves evidence ingest, under the same principal, untouched, including
 // its share of the global per-principal limit.
 func TestDecisionWrites_HaveTheirOwnRateBucket(t *testing.T) {
-	if decisionWritesPerMinute+120 > 300 {
-		t.Fatalf("decision (%d) and evidence (120) budgets exceed the global 300/min", decisionWritesPerMinute)
+	if decisionWritesPerMinute+evidenceIngestPerMinute > 300 {
+		t.Fatalf("decision (%d) and evidence (%d) budgets exceed the global 300/min", decisionWritesPerMinute, evidenceIngestPerMinute)
 	}
 	router := NewRouter(Options{AuthMiddleware: injectUser(evidenceWriter(t))})
 	for i := 0; i < decisionWritesPerMinute; i++ {

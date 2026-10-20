@@ -47,9 +47,9 @@ const decisionsRoute = "/api/v1/decisions"
 
 // decisionWritesPerMinute is the decision routes' own budget. Every route
 // also sits under the global 300/min per-principal limit, which the
-// evidence writer shares with evidence ingest (120/min); 150 keeps the two
-// buckets' sum under it, so a burst of decision writes cannot use up the
-// global budget evidence ingest still has a right to.
+// evidence writer shares with evidence ingest (evidenceIngestPerMinute);
+// 150 keeps the two buckets' sum under it, so a burst of decision writes
+// cannot use up the global budget evidence ingest still has a right to.
 const decisionWritesPerMinute = 150
 
 // Typed error codes a client can branch on.

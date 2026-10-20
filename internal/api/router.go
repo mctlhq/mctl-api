@@ -684,7 +684,7 @@ func NewRouter(opts Options) http.Handler {
 			// retry burst (the producer's own non-fatality contract) must
 			// not be throttled into a false gap.
 			r.Group(func(r chi.Router) {
-				r.Use(httprate.Limit(120, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+				r.Use(httprate.Limit(evidenceIngestPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 					if user := auth.UserFromContext(r.Context()); user != nil {
 						return "evidence:" + rateLimitSubject(r, user), nil
 					}

@@ -53,6 +53,10 @@ const maxEvidenceBodyBytes = (evidence.MaxEvidenceBytes/3+1)*4 + 16<<10
 // call.
 const evidenceWriterRoute = "/api/v1/evidence/records"
 
+// evidenceIngestPerMinute is evidence ingest's own per-principal budget.
+// decisionWritesPerMinute is sized against it, so both refer to this value.
+const evidenceIngestPerMinute = 120
+
 // Typed error codes a client can branch on.
 const (
 	codeEvidenceUnsupportedAPIVersion = "evidence_unsupported_api_version"
