@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.112.0](https://github.com/mctlhq/mctl-api/compare/4.111.0...4.112.0) (2026-10-20)
+
+
+### Features
+
+* **mcp:** count receipt gate decisions and describe malformed refs ([6be853e](https://github.com/mctlhq/mctl-api/commit/6be853e8ef93be89ff885e5446a2e67cd44cdcf9))
+* **mcp:** count receipt gate decisions and describe malformed refs ([1a466f0](https://github.com/mctlhq/mctl-api/commit/1a466f01dd396f8773316b8c981113310b29d0da))
+
 ## [4.111.0](https://github.com/mctlhq/mctl-api/compare/4.110.0...4.111.0) (2026-10-20)
 
 
