@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.109.1](https://github.com/mctlhq/mctl-api/compare/4.109.0...4.109.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **db:** share one bounded pgxpool per database URL ([6236105](https://github.com/mctlhq/mctl-api/commit/6236105d14148fa94d6630a04c0b8736a45ae7fa))
+
 ## [4.109.0](https://github.com/mctlhq/mctl-api/compare/4.108.1...4.109.0) (2026-10-19)
 
 
