@@ -464,13 +464,13 @@ func NewRouter(opts Options) http.Handler {
 		// else (mctl-api#530).
 		r.Use(ciPrincipalGate)
 
-		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
+		// Global rate limit: globalRequestsPerMinute per user (fallback to per-IP).
 		// Loopback is skipped so MCP's in-process REST to localhost:8080 does
 		// not double-count against the same bucket as POST /mcp. Chi RealIP is
 		// not used on this group; Traefik cannot spoof RemoteAddr as loopback.
 		// The write 20/min group below does NOT skip loopback — MCP deploys
 		// must still be throttled.
-		r.Use(skipLoopbackRateLimit(httprate.Limit(300, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+		r.Use(skipLoopbackRateLimit(httprate.Limit(globalRequestsPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 			if user := auth.UserFromContext(r.Context()); user != nil {
 				return "user:" + rateLimitSubject(r, user), nil
 			}
@@ -684,7 +684,7 @@ func NewRouter(opts Options) http.Handler {
 			// retry burst (the producer's own non-fatality contract) must
 			// not be throttled into a false gap.
 			r.Group(func(r chi.Router) {
-				r.Use(httprate.Limit(120, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+				r.Use(httprate.Limit(evidenceIngestPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 					if user := auth.UserFromContext(r.Context()); user != nil {
 						return "evidence:" + rateLimitSubject(r, user), nil
 					}
@@ -1077,6 +1077,15 @@ func rateLimitSubject(r *http.Request, user *auth.User) string {
 // surfaceAggregateLimitPerMinute caps one surface principal across all the
 // end users it calls for, the ceiling rateLimitSubject's per-user split
 // would otherwise remove. Roughly Telegram's own bot send rate.
+// globalRequestsPerMinute is the per-principal limit every authenticated
+// route sits under; the per-group budgets below it are sized against it.
+const globalRequestsPerMinute = 300
+
+// evidenceIngestPerMinute is evidence ingest's own budget, keyed per
+// principal. With decisionWritesPerMinute it must stay under
+// globalRequestsPerMinute: both are spent by the same evidence writer.
+const evidenceIngestPerMinute = 120
+
 const surfaceAggregateLimitPerMinute = 1200
 
 // surfaceAggregateLimit applies limit to surface principals only, keyed on

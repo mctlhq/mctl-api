@@ -90,8 +90,9 @@ func TestEvidenceWriter_ReachesDecisionAppendsOnly(t *testing.T) {
 // leaves evidence ingest, under the same principal, untouched, including
 // its share of the global per-principal limit.
 func TestDecisionWrites_HaveTheirOwnRateBucket(t *testing.T) {
-	if decisionWritesPerMinute+120 > 300 {
-		t.Fatalf("decision (%d) and evidence (120) budgets exceed the global 300/min", decisionWritesPerMinute)
+	if decisionWritesPerMinute+evidenceIngestPerMinute > globalRequestsPerMinute {
+		t.Fatalf("decision (%d) and evidence (%d) budgets exceed the global %d/min",
+			decisionWritesPerMinute, evidenceIngestPerMinute, globalRequestsPerMinute)
 	}
 	router := NewRouter(Options{AuthMiddleware: injectUser(evidenceWriter(t))})
 	for i := 0; i < decisionWritesPerMinute; i++ {
@@ -106,7 +107,7 @@ func TestDecisionWrites_HaveTheirOwnRateBucket(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("write over budget: %d, want 429", rec.Code)
 	}
-	for i := 0; i < 120; i++ {
+	for i := 0; i < evidenceIngestPerMinute; i++ {
 		rec = httptest.NewRecorder()
 		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/evidence/records", bytes.NewReader([]byte("{}"))))
 		if rec.Code == http.StatusTooManyRequests {
@@ -203,7 +204,9 @@ func TestDecisions_RecordAttemptAndReconstruct(t *testing.T) {
 	}
 
 	attempts := "/api/v1/decisions/" + id + "/attempts"
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// Nanoseconds the database cannot keep: every event below is replayed
+	// after it is written, and must come back as the stored one.
+	now := time.Now().UTC().Truncate(time.Microsecond).Add(123 * time.Nanosecond).Format(time.RFC3339Nano)
 	for i, e := range []map[string]any{
 		{"phase": "started", "occurred_at": now, "idempotency_key": "s1"},
 		{"phase": "failed", "attempt_no": 1, "error_code": "github.timeout", "occurred_at": now, "idempotency_key": "f1"},
@@ -212,6 +215,9 @@ func TestDecisions_RecordAttemptAndReconstruct(t *testing.T) {
 	} {
 		if rec := doJSON(t, writer, http.MethodPost, attempts, e); rec.Code != http.StatusCreated {
 			t.Fatalf("event %d: %d %s", i, rec.Code, rec.Body.String())
+		}
+		if rec := doJSON(t, writer, http.MethodPost, attempts, e); rec.Code != http.StatusOK {
+			t.Fatalf("event %d replay: %d %s, want 200", i, rec.Code, rec.Body.String())
 		}
 	}
 	rec = doJSON(t, writer, http.MethodPost, attempts, map[string]any{"phase": "started", "occurred_at": now, "idempotency_key": "s3"})
