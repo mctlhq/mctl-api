@@ -63,3 +63,22 @@ func TestLoadConfig_WorkItemsConfigured(t *testing.T) {
 		}
 	}
 }
+
+// main opens the store from the same reading: WORK_ITEMS_DB_URL first, then
+// AUDIT_DB_URL.
+func TestWorkItemsStoreSource(t *testing.T) {
+	t.Setenv("WORK_ITEMS_DISABLED", "")
+	t.Setenv("WORK_ITEMS_DB_URL", "postgres://work/db")
+	t.Setenv("AUDIT_DB_URL", "postgres://audit/db")
+	if u, off := workItemsStoreSource(); u != postgresURL("postgres://work/db") || off {
+		t.Fatalf("both set: %q %v", u, off)
+	}
+	t.Setenv("WORK_ITEMS_DB_URL", "")
+	if u, _ := workItemsStoreSource(); u != postgresURL("postgres://audit/db") {
+		t.Fatalf("audit fallback: %q", u)
+	}
+	t.Setenv("WORK_ITEMS_DISABLED", "true")
+	if _, off := workItemsStoreSource(); !off {
+		t.Fatal("kill switch not read")
+	}
+}

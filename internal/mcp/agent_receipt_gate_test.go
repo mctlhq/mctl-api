@@ -10,6 +10,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 type fakeReceiptVerifier struct {
@@ -287,7 +288,8 @@ func TestAgentReceiptGate_MalformedReceiptNeverReachesTheStore(t *testing.T) {
 		if len(v.checks) != 0 {
 			t.Errorf("%s: malformed receipt reached the verifier: %+v", name, v.checks)
 		}
-		if len(v.audited) != 1 || v.audited[0].Ref != "" || v.audited[0].Code != ReceiptCodeMalformed {
+		if len(v.audited) != 1 || v.audited[0].Ref != "" || v.audited[0].Code != ReceiptCodeMalformed ||
+			v.audited[0].Malformed != DescribeMalformedReceipt(args[ArgActionApprovalRef].(string), args[ArgActionApprovalArtifactHash].(string)) {
 			t.Errorf("%s: audit = %+v", name, v.audited)
 		}
 	}
@@ -350,4 +352,32 @@ func handleCall(t *testing.T, srv *server.MCPServer, u *auth.User, name string, 
 		t.Fatal(err)
 	}
 	return b
+}
+
+// The gate's shape check refuses anything without the store's id prefix
+// before the store is read, so the two must agree. This runs without a
+// database, unlike the store-backed id test in internal/api.
+func TestReceiptRefPrefixMatchesTheStore(t *testing.T) {
+	if receiptRefPrefix != workitems.ActionApprovalIDPrefix {
+		t.Fatalf("receiptRefPrefix %q != workitems.ActionApprovalIDPrefix %q", receiptRefPrefix, workitems.ActionApprovalIDPrefix)
+	}
+}
+
+func TestDescribeMalformedReceipt(t *testing.T) {
+	long := "aar_" + strings.Repeat("ab", 40)
+	cases := []struct {
+		name, ref, hash, want string
+	}{
+		{"no prefix", "xyz_123", "h", `prefix=false ref_len=7 head="xyz" hash_len=1`},
+		{"too long", long, "", `prefix=true ref_len=84 head="abababab" hash_len=0`},
+		{"bad char", "aar_ab-cd", "sha256:x", `prefix=true ref_len=9 head="ab" hash_len=8`},
+		{"prefix only", "aar_", "", `prefix=true ref_len=4 head="" hash_len=0`},
+		{"no alnum echoed", "<script>", "", `prefix=false ref_len=8 head="" hash_len=0`},
+		{"bad hash", "aar_" + strings.Repeat("0", 32), "sha256:\x01", `prefix=true ref_len=36 head="00000000" hash_len=8`},
+	}
+	for _, c := range cases {
+		if got := DescribeMalformedReceipt(c.ref, c.hash); got != c.want {
+			t.Errorf("%s: got %s, want %s", c.name, got, c.want)
+		}
+	}
 }
