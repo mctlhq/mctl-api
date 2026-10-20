@@ -30,6 +30,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/commerce"
+	"github.com/mctlhq/mctl-api/internal/decisions"
 	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/evidence"
@@ -229,6 +230,9 @@ type Options struct {
 	// answer 503, never an empty list (requirements.md "Availability, gaps
 	// and retention").
 	Evidence *evidence.Store
+	// Decisions is the durable decision record (mctl-api#701). Optional —
+	// nil makes every /api/v1/decisions* route answer 503.
+	Decisions *decisions.Store
 	// HumanInputLedger is the idempotency/delivery record for human-input
 	// responses (mctl-api#261). Optional — nil makes the response endpoint
 	// 503: without it a response could be neither deduplicated nor
@@ -450,8 +454,8 @@ func NewRouter(opts Options) http.Handler {
 		r.Use(h.agentPrincipalGate)
 		// The usage writer reaches one route and nothing else.
 		r.Use(usageWriterGate)
-		// The evidence writer reaches one route and nothing else
-		// (mctl-api#409), the same shape as the usage writer above.
+		// The evidence writer reaches its append routes and nothing else
+		// (mctl-api#409, #701), the same shape as the usage writer above.
 		r.Use(evidenceWriterGate)
 		// The registry publisher reaches the registry publication routes and
 		// nothing else (mctlhq/mctl-agents#470).
@@ -689,6 +693,24 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/evidence/records", h.IngestEvidence)
 			})
 
+			// Decision records (mctl-api#701). Same producer and the same
+			// no-false-gap reasoning as evidence ingest, but their own
+			// bucket: a run makes one decision per policy checkpoint and up
+			// to two attempt events each, keyed on one fleet-wide service
+			// principal, so sharing evidence's budget would let decisions
+			// throttle evidence ingest. Sized against the global limit
+			// above: see decisionWritesPerMinute.
+			r.Group(func(r chi.Router) {
+				r.Use(httprate.Limit(decisionWritesPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					if user := auth.UserFromContext(r.Context()); user != nil {
+						return "decisions:" + rateLimitSubject(r, user), nil
+					}
+					return keyByTrustedIP(r)
+				})))
+				r.Post("/decisions", h.RecordDecision)
+				r.Post("/decisions/{id}/attempts", h.AppendDecisionAttempt)
+			})
+
 			// Agent run tokens (mctl-api#376): minting is isDirectService
 			// only, so every mint shares the exact same principal key as
 			// every other route on the 20/min write budget above. An agent
@@ -735,6 +757,9 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/evidence", h.ListEvidence)
 			r.Get("/work-items/{id}/evidence", h.ListWorkItemEvidence)
 			r.Get("/work-items/{id}/evidence/current", h.CurrentWorkItemEvidence)
+			// Decision record reads (mctl-api#701): admin-only.
+			r.Get("/decisions/{id}", h.GetDecision)
+			r.Get("/decisions", h.ListDecisions)
 
 			// Liveness read for one DevLoopWorkflow. Deliberately OUTSIDE the
 			// write group above: it has no side effects, and the shepherd

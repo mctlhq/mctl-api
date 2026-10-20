@@ -72,14 +72,16 @@ const (
 )
 
 // evidenceWriterGate confines the evidence-writer principal (mctl-api#409)
-// to appending evidence records. Everything else answers 403 before any
-// handler runs, mirroring usageWriterGate exactly.
+// to appending evidence records and, since mctl-api#701, decision records
+// and their attempt events. Everything else answers 403 before any handler
+// runs, mirroring usageWriterGate.
 func evidenceWriterGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if user := auth.UserFromContext(r.Context()); user.IsEvidenceWriter() &&
-			(r.Method != http.MethodPost || r.URL.Path != evidenceWriterRoute) {
+			(r.Method != http.MethodPost || r.URL.Path != evidenceWriterRoute) && !isDecisionWriteRoute(r) {
 			writeErrorCode(w, http.StatusForbidden, codeEvidenceWriterForbidden,
-				"the evidence writer may only call POST "+evidenceWriterRoute, nil)
+				"the evidence writer may only call POST "+evidenceWriterRoute+", POST "+decisionsRoute+
+					" and POST "+decisionsRoute+"/{id}/attempts", nil)
 			return
 		}
 		next.ServeHTTP(w, r)
