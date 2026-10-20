@@ -23,7 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-const secretConn = "postgres://u:hunter2@127.0.0.1:1/db?sslmode=disable&pool_max_conns=3"
+const secretConn = "postgres://u:hunter2@127.0.0.1:1/db?sslmode=disable&pool_max_conns=3" //nolint:gosec // G101: a fake password the test asserts never reaches a label
 
 func gather(t *testing.T) string {
 	t.Helper()
