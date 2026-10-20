@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.113.0](https://github.com/mctlhq/mctl-api/compare/4.112.0...4.113.0) (2026-10-20)
+
+
+### Features
+
+* **decisions:** persist durable decision and execution-attempt records ([c5419da](https://github.com/mctlhq/mctl-api/commit/c5419da3267101e0c4fcbfefc2c7036b4ba51bd5))
+* **decisions:** persist durable decision and execution-attempt records ([63a700c](https://github.com/mctlhq/mctl-api/commit/63a700cc33aea27cad526e4edaeaed688722790a))
+
+
+### Bug Fixes
+
+* **decisions:** bind only permitting decisions to their approval ([5779461](https://github.com/mctlhq/mctl-api/commit/57794612d1e0dbc554518dae8c06e2aab642e777))
+* **decisions:** normalize timestamps to microseconds before storing ([6d344b9](https://github.com/mctlhq/mctl-api/commit/6d344b9402bc575ae0c374d256d7ba3cf3a08a05))
+* **decisions:** own rate bucket, read-time binding check for refusals ([dcdda50](https://github.com/mctlhq/mctl-api/commit/dcdda50b2acc902dc292f9a20fa366ce7c4f11ae))
+
 ## [4.112.0](https://github.com/mctlhq/mctl-api/compare/4.111.0...4.112.0) (2026-10-20)
 
 
