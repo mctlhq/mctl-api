@@ -468,17 +468,22 @@ func TestRecordApprovalBinding(t *testing.T) {
 		t.Fatalf("approved on a denied aar_: %v, want ErrApprovalBinding", err)
 	}
 	// The denial itself records fine against the same aar_.
-	mustRecord(t, s, c.decision(CodeApprovalDenied, VerdictRequireApproval, denied.ID))
+	deniedDec := mustRecord(t, s, c.decision(CodeApprovalDenied, VerdictRequireApproval, denied.ID))
 
 	// A refusal keeps its reference even when the approval binds another
 	// intent: that is exactly what approval_intent_mismatch reports. It
-	// binds nothing, and the chain shows the approval as found.
+	// binds nothing, and the chain names the diverging field.
 	mismatch := mustRecord(t, s, other.decision(CodeApprovalIntentMismatch, VerdictRequireApproval, aar.ID))
 	if mismatch.IntentHash != "" {
 		t.Fatalf("refusal bound intent_hash %q", mismatch.IntentHash)
 	}
-	if mc := mustChain(t, s, mismatch.ID); mc.Result != ResultRefused || mc.Approval.Status != RefFound {
+	if mc := mustChain(t, s, mismatch.ID); mc.Result != ResultRefused || mc.Approval.Status != RefMismatch ||
+		mc.Approval.Detail != "args_digest differ from the approval" {
 		t.Fatalf("intent-mismatch chain: %q / %+v", mc.Result, mc.Approval)
+	}
+	// A refusal about the very action its approval binds reads found.
+	if dc := mustChain(t, s, deniedDec.ID); dc.Approval.Status != RefFound {
+		t.Fatalf("denial chain: %+v, want found", dc.Approval)
 	}
 
 	if _, _, err := s.Record(ctx, a.decision(CodeApproved, VerdictRequireApproval, "aar_missing")); !errors.Is(err, ErrApprovalNotFound) {

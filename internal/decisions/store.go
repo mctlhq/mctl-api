@@ -222,30 +222,51 @@ func scanEvent(row pgx.Row) (*AttemptEvent, error) {
 	return &e, nil
 }
 
-// checkApprovalBinding refuses an approval that is not bound to exactly
-// this action under exactly this rule, or that never reached a human
-// approval. It runs for permitting decisions only, against the stored aar_,
-// so a decision cannot claim an approval it does not have.
-func checkApprovalBinding(in *DecisionInput, a *workitems.ActionApprovalRequest) error {
+// actionBinding is what a decision and an approval must agree on for the
+// approval to be about this action.
+type actionBinding struct {
+	executionID, workItemID, actionKind, targetDigest, argsDigest, ruleID, policyVersion string
+}
+
+// bindingMismatches names every binding field on which b and the approval
+// disagree; nil when the approval is about exactly this action.
+func bindingMismatches(b actionBinding, a *workitems.ActionApprovalRequest) []string {
 	var mismatched []string
 	for _, f := range []struct {
 		name      string
 		got, want string
 	}{
-		{"execution_id", in.ExecutionID, a.ExecutionID},
-		{"action_kind", in.ActionKind, a.ActionKind},
-		{"target_digest", in.TargetDigest, TargetDigest(a.Target)},
-		{"args_digest", in.ArgsDigest, a.ArgsDigest},
-		{"rule_id", in.RuleID, a.PolicyRuleID},
-		{"policy_version", in.PolicyVersion, a.PolicyVersion},
+		{"execution_id", b.executionID, a.ExecutionID},
+		{"action_kind", b.actionKind, a.ActionKind},
+		{"target_digest", b.targetDigest, TargetDigest(a.Target)},
+		{"args_digest", b.argsDigest, a.ArgsDigest},
+		{"rule_id", b.ruleID, a.PolicyRuleID},
+		{"policy_version", b.policyVersion, a.PolicyVersion},
 	} {
 		if f.got != f.want {
 			mismatched = append(mismatched, f.name)
 		}
 	}
-	if in.WorkItemID != "" && a.WorkItemID != "" && in.WorkItemID != a.WorkItemID {
+	if b.workItemID != "" && a.WorkItemID != "" && b.workItemID != a.WorkItemID {
 		mismatched = append(mismatched, "work_item_id")
 	}
+	return mismatched
+}
+
+// checkApprovalBinding refuses an approval that is not bound to exactly
+// this action under exactly this rule, or that never reached a human
+// approval. It runs for permitting decisions only, against the stored aar_,
+// so a decision cannot claim an approval it does not have.
+func checkApprovalBinding(in *DecisionInput, a *workitems.ActionApprovalRequest) error {
+	// validate() admits an approval on a permitting decision only with
+	// code approved; refuse anything else here too rather than rely on it.
+	if in.Code != CodeApproved {
+		return fmt.Errorf("%w: only code approved is bound to an approval, got %s", ErrApprovalBinding, in.Code)
+	}
+	mismatched := bindingMismatches(actionBinding{
+		executionID: in.ExecutionID, workItemID: in.WorkItemID, actionKind: in.ActionKind,
+		targetDigest: in.TargetDigest, argsDigest: in.ArgsDigest, ruleID: in.RuleID, policyVersion: in.PolicyVersion,
+	}, a)
 	if len(mismatched) > 0 {
 		return fmt.Errorf("%w: %s differs from %s (%s)", ErrApprovalBinding,
 			strings.Join(mismatched, ", "), a.ID, "the approval binds a different action")

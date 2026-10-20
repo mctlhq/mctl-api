@@ -691,9 +691,22 @@ func NewRouter(opts Options) http.Handler {
 					return keyByTrustedIP(r)
 				})))
 				r.Post("/evidence/records", h.IngestEvidence)
-				// Decision records (mctl-api#701) come from the same
-				// producer, once per policy decision and attempt event,
-				// on the same budget and for the same reason.
+			})
+
+			// Decision records (mctl-api#701). Same producer and the same
+			// no-false-gap reasoning as evidence ingest, but their own
+			// bucket: a run makes one decision per policy checkpoint and up
+			// to two attempt events each, keyed on one fleet-wide service
+			// principal, so sharing evidence's budget would let decisions
+			// throttle evidence ingest. Sized against the global limit
+			// above: see decisionWritesPerMinute.
+			r.Group(func(r chi.Router) {
+				r.Use(httprate.Limit(decisionWritesPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					if user := auth.UserFromContext(r.Context()); user != nil {
+						return "decisions:" + rateLimitSubject(r, user), nil
+					}
+					return keyByTrustedIP(r)
+				})))
 				r.Post("/decisions", h.RecordDecision)
 				r.Post("/decisions/{id}/attempts", h.AppendDecisionAttempt)
 			})

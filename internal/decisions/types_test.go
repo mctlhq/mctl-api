@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 func TestDecisionInputValidate(t *testing.T) {
@@ -172,5 +174,24 @@ func TestGroupAttemptsAndResult(t *testing.T) {
 	}
 	if r := deriveResult(&Decision{}, nil); r != ResultRefused {
 		t.Errorf("refusal: %q", r)
+	}
+}
+
+// checkApprovalBinding binds only code approved, whatever validate() admits:
+// an approval that matches the action in every field is accepted for
+// approved and still refused for any other code.
+func TestCheckApprovalBindingRefusesOtherCodes(t *testing.T) {
+	a := newAction()
+	aar := &workitems.ActionApprovalRequest{
+		ExecutionID: a.executionID, ActionKind: a.kind, Target: a.target, ArgsDigest: a.args,
+		PolicyRuleID: a.rule, PolicyVersion: a.version, State: workitems.ApprovalApproved,
+	}
+	approved := a.decision(CodeApproved, VerdictRequireApproval, "aar_1")
+	if err := checkApprovalBinding(&approved, aar); err != nil {
+		t.Fatalf("matching approval refused for approved: %v", err)
+	}
+	allowed := a.decision(CodeAllowed, VerdictAllow, "aar_1")
+	if err := checkApprovalBinding(&allowed, aar); !errors.Is(err, ErrApprovalBinding) {
+		t.Fatalf("allowed bound to an approval: %v, want ErrApprovalBinding", err)
 	}
 }

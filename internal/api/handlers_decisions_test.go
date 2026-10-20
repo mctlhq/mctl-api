@@ -86,6 +86,35 @@ func TestEvidenceWriter_ReachesDecisionAppendsOnly(t *testing.T) {
 	}
 }
 
+// Decision writes spend their own budget: exhausting it throttles them and
+// leaves evidence ingest, under the same principal, untouched, including
+// its share of the global per-principal limit.
+func TestDecisionWrites_HaveTheirOwnRateBucket(t *testing.T) {
+	if decisionWritesPerMinute+120 > 300 {
+		t.Fatalf("decision (%d) and evidence (120) budgets exceed the global 300/min", decisionWritesPerMinute)
+	}
+	router := NewRouter(Options{AuthMiddleware: injectUser(evidenceWriter(t))})
+	for i := 0; i < decisionWritesPerMinute; i++ {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/decisions", bytes.NewReader([]byte("{}"))))
+		if rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("decision write %d throttled below its budget", i+1)
+		}
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/decisions/dec_1/attempts", bytes.NewReader([]byte("{}"))))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("write over budget: %d, want 429", rec.Code)
+	}
+	for i := 0; i < 120; i++ {
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/evidence/records", bytes.NewReader([]byte("{}"))))
+		if rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("evidence ingest %d throttled after decision writes", i+1)
+		}
+	}
+}
+
 func TestDecisions_UnconfiguredStoreAnswers503(t *testing.T) {
 	router := NewRouter(Options{AuthMiddleware: injectUser(adminUser())})
 	for _, c := range []struct{ method, path string }{

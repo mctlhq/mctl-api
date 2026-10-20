@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -203,11 +204,21 @@ func (s *Store) resolveApproval(ctx context.Context, d *Decision) (*ApprovalRef,
 		return nil, fmt.Errorf("%w: approval %s: %w", ErrUnobservable, d.ApprovalID, err)
 	}
 	ref := &ApprovalRef{ID: d.ApprovalID, Status: RefFound, Approval: a}
-	// A permitting decision's binding was checked at write; re-check it at
-	// read, so a chain never presents an approval that does not authorize
-	// this action. A refusal only names its approval and binds nothing.
+	// Every decision's digests are compared with the approval's, so a
+	// refusal naming an approval about another action (as
+	// approval_intent_mismatch does) reads mismatch, with the fields named.
+	// A permitting decision is also held to the intent_hash it bound at
+	// write, so a chain never presents an approval that does not authorize
+	// its action.
+	mismatched := bindingMismatches(actionBinding{
+		executionID: d.ExecutionID, workItemID: d.WorkItemID, actionKind: d.ActionKind,
+		targetDigest: d.TargetDigest, argsDigest: d.ArgsDigest, ruleID: d.RuleID, policyVersion: d.PolicyVersion,
+	}, a)
 	if d.IntentHash != "" && a.IntentHash != d.IntentHash {
-		ref.Status, ref.Detail = RefMismatch, "intent_hash differs from the one recorded with the decision"
+		mismatched = append(mismatched, "intent_hash")
+	}
+	if len(mismatched) > 0 {
+		ref.Status, ref.Detail = RefMismatch, strings.Join(mismatched, ", ")+" differ from the approval"
 	}
 	return ref, nil
 }
