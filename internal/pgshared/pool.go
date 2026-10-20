@@ -34,6 +34,12 @@
 //   - Pools are keyed on the exact connection string, so two env vars
 //     naming one database with any spelling difference get two pools and
 //     twice the budget.
+//   - A coarse lock held inside a transaction now stalls every store, not
+//     only its own. A pg_advisory_xact_lock waiter keeps its pool slot while
+//     it waits, and the slots are shared: principals' GitHub-login lock
+//     (principals.Provision) can hold several of them during a burst of
+//     cache misses, such as a rolling update. Keep such locks fine-grained or
+//     short, and watch mctl_api_db_pool_empty_acquires_total.
 //
 // Sharing is switched on by the binary (EnableSharing in cmd/api). Until then
 // every Open builds its own pool, as each store did before: tests close a
@@ -111,14 +117,14 @@ func Open(ctx context.Context, connStr string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pgshared: parse connection string: %w", err)
 	}
-	if hasPoolMaxConns(connStr) {
-		slog.Info("pgshared: pool size set by the connection string", "max_conns", cfg.MaxConns)
-	} else {
+	source := "connection string"
+	if !hasPoolMaxConns(connStr) {
 		n, err := maxConnsFromEnv()
 		if err != nil {
 			return nil, err
 		}
 		cfg.MaxConns = n
+		source = "DB_POOL_MAX_CONNS or default"
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -127,6 +133,11 @@ func Open(ctx context.Context, connStr string) (*pgxpool.Pool, error) {
 	if !sharing {
 		return pool, nil
 	}
+	// Logged once per shared pool, not per store: the size is the number the
+	// role's connection budget is built on, whichever way it was set.
+	slog.Info("pgshared: pool opened",
+		"host", cfg.ConnConfig.Host, "database", cfg.ConnConfig.Database,
+		"max_conns", cfg.MaxConns, "size_from", source)
 	byConn[connStr] = &entry{pool: pool, refs: 1}
 	byPool[pool] = connStr
 	return pool, nil

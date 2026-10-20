@@ -1053,6 +1053,17 @@ func main() {
 	// retire-service, previews, scaling, rollbacks) never send one.
 	go mctlapi.StartAuditReconciler(ctx, auditLog, executor, registry)
 
+	// Every store is built by now, so this is the process's whole share of
+	// the database roles' connection limits (gitops shared-pg cluster.yaml).
+	pools := pgshared.Pools()
+	poolSizes := make([]string, 0, len(pools))
+	var poolCeiling int32
+	for _, p := range pools {
+		poolSizes = append(poolSizes, fmt.Sprintf("%s/%s=%d", p.Host, p.Database, p.MaxConns))
+		poolCeiling += p.MaxConns
+	}
+	slog.Info("pgshared: pools", "count", len(pools), "max_conns_total", poolCeiling, "pools", poolSizes)
+
 	// Start server.
 	go func() {
 		slog.Info("mctl-api starting",
