@@ -52,6 +52,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/erpactsites"
 	"github.com/mctlhq/mctl-api/internal/events"
+	"github.com/mctlhq/mctl-api/internal/decisions"
 	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/ghactions"
 	"github.com/mctlhq/mctl-api/internal/ghtoken"
@@ -655,6 +656,39 @@ func main() {
 		}
 	}
 
+	// Durable decision records (mctl-api#701), in the evidence database
+	// next to the envelopes their attempts reference, with a kill switch.
+	// Nil makes every /api/v1/decisions* route answer 503.
+	var decisionStore *decisions.Store
+	switch {
+	case killSwitchOn(os.Getenv("DECISIONS_DISABLED")):
+		slog.Warn("DECISIONS_DISABLED is set; /api/v1/decisions* routes will return 503")
+	case evidenceDBURL == "":
+		slog.Warn("no EVIDENCE_DB_URL or AUDIT_DB_URL; /api/v1/decisions* routes will return 503")
+	default:
+		ds, dsErr := initStore(initCtx, storeFailures, "decisions", func(ctx context.Context) (*decisions.Store, error) {
+			return decisions.NewStore(ctx, evidenceDBURL)
+		})
+		if dsErr != nil {
+			slog.Error("decision store init failed; /api/v1/decisions* routes will return 503", "error", dsErr)
+		} else {
+			decisionStore = ds
+			defer ds.Close()
+			// A store left unwired stays a nil interface (never a typed nil),
+			// so a reference to it reads as unobservable, not absent.
+			var approvals decisions.ApprovalLookup
+			if workItemsStore != nil {
+				approvals = workItemsStore
+			}
+			var ev decisions.EvidenceLookup
+			if evidenceStore != nil {
+				ev = evidenceStore
+			}
+			decisionStore.SetLookups(approvals, ev)
+			startDecisionRetentionSweep(rootCtx, decisionStore)
+		}
+	}
+
 	// Surface identity links (mctl-api#350). Same shape as the work-items
 	// store: SURFACE_IDENTITY_DB_URL, else AUDIT_DB_URL, with a kill switch.
 	// SURFACE_LINK_TTL (a Go duration, e.g. 2160h) gives new links an
@@ -987,6 +1021,7 @@ func main() {
 		Commerce:                       commerceStore,
 		CommerceAcceptDisabled:         cfg.CommerceAcceptDisabled,
 		Evidence:                       evidenceStore,
+		Decisions:                      decisionStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,
@@ -2372,19 +2407,25 @@ const evidenceRetentionSweepInterval = 1 * time.Hour
 const maxEvidenceRetentionDays = 36500
 
 func parseEvidenceRetentionDays(v string) (int, error) {
+	return parseRetentionDays("EVIDENCE_RETENTION_DAYS", v)
+}
+
+// parseRetentionDays is parseEvidenceRetentionDays for any *_RETENTION_DAYS
+// variable, with the same bound and the same refusals.
+func parseRetentionDays(name, v string) (int, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0, nil
 	}
 	days, err := strconv.Atoi(v)
 	if err != nil {
-		return 0, fmt.Errorf("EVIDENCE_RETENTION_DAYS must be an integer, got %q", v)
+		return 0, fmt.Errorf("%s must be an integer, got %q", name, v)
 	}
 	if days < 0 {
-		return 0, fmt.Errorf("EVIDENCE_RETENTION_DAYS must not be negative, got %d", days)
+		return 0, fmt.Errorf("%s must not be negative, got %d", name, days)
 	}
 	if days > maxEvidenceRetentionDays {
-		return 0, fmt.Errorf("EVIDENCE_RETENTION_DAYS must be at most %d, got %d", maxEvidenceRetentionDays, days)
+		return 0, fmt.Errorf("%s must be at most %d, got %d", name, maxEvidenceRetentionDays, days)
 	}
 	return days, nil
 }
