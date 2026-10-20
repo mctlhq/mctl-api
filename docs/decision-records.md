@@ -30,10 +30,16 @@ idempotent per key: the same key with the same content returns the stored row
 `POST /api/v1/decisions` records one decision. `code: approved` requires an
 `approval_id`; the server reads that `aar_` and refuses (422
 `decision_approval_binding`) unless it binds the same execution, action kind,
-target, args digest, rule and policy version, and has been approved. A
-refusal code may name the approval it refers to (`approval_pending`, ...). An
-approval that cannot be read refuses the write with 503
-`decision_reference_unobservable`; it is never treated as absent.
+target, args digest, rule and policy version, and has been approved; its
+`intent_hash` is copied onto the decision. An approval that cannot be read
+refuses that write with 503 `decision_reference_unobservable`; it is never
+treated as absent.
+
+A refusal code may name the approval it is about (`approval_pending`,
+`approval_intent_mismatch`, `approval_lookup_error`, ...). That is a
+reference, not a claim of authority: it is not resolved or bound at write
+(the approval may bind a different intent, or be unreadable, by definition)
+and is resolved when the chain is read.
 
 `POST /api/v1/decisions/{id}/attempts` appends one event:
 

@@ -130,14 +130,20 @@ func writeDecisionError(w http.ResponseWriter, err error) {
 		{decisions.ErrAttemptNotFound, http.StatusConflict, codeDecisionAttemptNotFound},
 		{decisions.ErrAttemptClosed, http.StatusConflict, codeDecisionAttemptClosed},
 		{decisions.ErrTooManyAttempts, http.StatusConflict, codeDecisionTooManyAttempts},
-		// Could not observe a reference: the server cannot answer, which is
-		// never the same as "absent".
-		{decisions.ErrUnobservable, http.StatusServiceUnavailable, codeDecisionUnobservable},
 	} {
 		if errors.Is(err, m.target) {
 			writeErrorCode(w, m.status, m.code, err.Error(), nil)
 			return
 		}
+	}
+	// Could not observe a reference: the server cannot answer, which is
+	// never the same as "absent". The cause may be a driver error, so it is
+	// logged, not served.
+	if errors.Is(err, decisions.ErrUnobservable) {
+		slog.Error("decision reference unobservable", "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, codeDecisionUnobservable,
+			"a referenced approval or evidence record could not be read", nil)
+		return
 	}
 	slog.Error("decision store error", "error", err)
 	writeError(w, http.StatusInternalServerError, "decision store error")

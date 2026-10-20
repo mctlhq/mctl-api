@@ -48,11 +48,11 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/commerce"
 	"github.com/mctlhq/mctl-api/internal/dburl"
+	"github.com/mctlhq/mctl-api/internal/decisions"
 	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/erpactsites"
 	"github.com/mctlhq/mctl-api/internal/events"
-	"github.com/mctlhq/mctl-api/internal/decisions"
 	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/ghactions"
 	"github.com/mctlhq/mctl-api/internal/ghtoken"
@@ -679,10 +679,14 @@ func main() {
 			var approvals decisions.ApprovalLookup
 			if workItemsStore != nil {
 				approvals = workItemsStore
+			} else {
+				slog.Warn("no work-items store; decisions with code approved, and chains naming an approval, will return 503")
 			}
 			var ev decisions.EvidenceLookup
 			if evidenceStore != nil {
 				ev = evidenceStore
+			} else {
+				slog.Warn("no evidence store; decision chains whose attempts reference evidence will return 503")
 			}
 			decisionStore.SetLookups(approvals, ev)
 			startDecisionRetentionSweep(rootCtx, decisionStore)

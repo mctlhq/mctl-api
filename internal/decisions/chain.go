@@ -203,9 +203,10 @@ func (s *Store) resolveApproval(ctx context.Context, d *Decision) (*ApprovalRef,
 		return nil, fmt.Errorf("%w: approval %s: %w", ErrUnobservable, d.ApprovalID, err)
 	}
 	ref := &ApprovalRef{ID: d.ApprovalID, Status: RefFound, Approval: a}
-	// The binding was checked at write; re-check it at read, so a chain
-	// never presents an approval that does not authorize this action.
-	if a.IntentHash != d.IntentHash {
+	// A permitting decision's binding was checked at write; re-check it at
+	// read, so a chain never presents an approval that does not authorize
+	// this action. A refusal only names its approval and binds nothing.
+	if d.IntentHash != "" && a.IntentHash != d.IntentHash {
 		ref.Status, ref.Detail = RefMismatch, "intent_hash differs from the one recorded with the decision"
 	}
 	return ref, nil
@@ -245,9 +246,9 @@ func attemptRuntimeID(attempts []Attempt, no int) string {
 		if attempts[i].AttemptNo != no {
 			continue
 		}
-		for _, e := range attempts[i].Events {
-			if e.RuntimeExecutionID != "" {
-				return e.RuntimeExecutionID
+		for j := range attempts[i].Events {
+			if id := attempts[i].Events[j].RuntimeExecutionID; id != "" {
+				return id
 			}
 		}
 	}

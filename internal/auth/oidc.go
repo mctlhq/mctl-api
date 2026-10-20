@@ -617,8 +617,10 @@ func usageWriterToken() string {
 // record it writes is attributed to this principal.
 //
 // It holds exactly one permission, PermissionEvidenceWrite, is not an
-// admin, belongs to no tenant, and is confined to
-// POST /api/v1/evidence/records by the API's evidence-writer gate. Human
+// admin, belongs to no tenant, and is confined by the API's evidence-writer
+// gate to POST /api/v1/evidence/records and the two decision-record append
+// routes, POST /api/v1/decisions and POST /api/v1/decisions/{id}/attempts
+// (mctl-api#701). Human
 // admins keep their existing write access.
 const (
 	EvidenceWriterUserID    = "service:mctl-agents-evidence"

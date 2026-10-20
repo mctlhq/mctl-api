@@ -16,6 +16,7 @@ package decisions
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,7 +49,7 @@ func TestDecisionInputValidate(t *testing.T) {
 		"approval with wrong prefix": func(in *DecisionInput) {
 			in.Code, in.Verdict, in.ApprovalID = CodeApprovalDenied, VerdictRequireApproval, "we_1"
 		},
-		"over-long idempotency key":   func(in *DecisionInput) { in.IdempotencyKey = string(make([]byte, MaxKeyBytes+1)) },
+		"over-long idempotency key":   func(in *DecisionInput) { in.IdempotencyKey = strings.Repeat("k", MaxKeyBytes+1) },
 		"approved missing approval 2": func(in *DecisionInput) { in.Code = CodeApproved },
 	} {
 		in := base
@@ -95,6 +96,11 @@ func TestAttemptInputValidate(t *testing.T) {
 		"wrong decision prefix": event("aar_1", 0, PhaseStarted),
 		"missing occurred_at":   func() AttemptInput { e := event("dec_1", 0, PhaseStarted); e.OccurredAt = time.Time{}; return e }(),
 		"missing key":           func() AttemptInput { e := event("dec_1", 0, PhaseStarted); e.IdempotencyKey = ""; return e }(),
+		"over-long key": func() AttemptInput {
+			e := event("dec_1", 0, PhaseStarted)
+			e.IdempotencyKey = strings.Repeat("k", MaxKeyBytes+1)
+			return e
+		}(),
 	} {
 		if err := in.validate(); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: %v, want ErrInvalid", name, err)

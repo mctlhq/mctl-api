@@ -222,10 +222,10 @@ func scanEvent(row pgx.Row) (*AttemptEvent, error) {
 	return &e, nil
 }
 
-// checkApprovalBinding refuses an approval reference that is not bound to
-// exactly this action under exactly this rule, or (for a permitting
-// decision) one that never reached a human approval. It compares against
-// the stored aar_, so a decision cannot claim an approval it does not have.
+// checkApprovalBinding refuses an approval that is not bound to exactly
+// this action under exactly this rule, or that never reached a human
+// approval. It runs for permitting decisions only, against the stored aar_,
+// so a decision cannot claim an approval it does not have.
 func checkApprovalBinding(in *DecisionInput, a *workitems.ActionApprovalRequest) error {
 	var mismatched []string
 	for _, f := range []struct {
@@ -249,9 +249,6 @@ func checkApprovalBinding(in *DecisionInput, a *workitems.ActionApprovalRequest)
 	if len(mismatched) > 0 {
 		return fmt.Errorf("%w: %s differs from %s (%s)", ErrApprovalBinding,
 			strings.Join(mismatched, ", "), a.ID, "the approval binds a different action")
-	}
-	if in.Code != CodeApproved {
-		return nil
 	}
 	switch a.State {
 	case workitems.ApprovalApproved, workitems.ApprovalConsumed, workitems.ApprovalExecuted:
@@ -292,8 +289,13 @@ func (s *Store) Record(ctx context.Context, in DecisionInput) (*Decision, bool, 
 		return nil, false, err
 	}
 
+	// Only a permitting decision claims its approval as authority, so only
+	// it is resolved and bound at write. A refusal names the approval it is
+	// about, which may by definition bind something else
+	// (approval_intent_mismatch) or be unreadable (approval_lookup_error):
+	// it is kept as a reference and resolved, never bound, at read.
 	var intentHash string
-	if in.ApprovalID != "" {
+	if in.ApprovalID != "" && Permitted(in.Code) {
 		if s.approvals == nil {
 			return nil, false, fmt.Errorf("%w: approval %s: no action approval store", ErrUnobservable, in.ApprovalID)
 		}

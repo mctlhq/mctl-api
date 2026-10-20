@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -70,7 +71,9 @@ func (f *fakeEvidence) Get(_ context.Context, id string) (*evidence.Evidence, er
 type failingApprovals struct{ err error }
 
 // fixedApproval serves one stored approval as given.
-type fixedApproval struct{ a *workitems.ActionApprovalRequest }
+type fixedApproval struct {
+	a *workitems.ActionApprovalRequest
+}
 
 func (f fixedApproval) ActionApproval(context.Context, string) (*workitems.ActionApprovalRequest, error) {
 	return f.a, nil
@@ -217,17 +220,7 @@ func statuses(c *Chain) []string {
 	return out
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
+func equalStrings(a, b []string) bool { return slices.Equal(a, b) }
 
 // TestChainSuccess: an approved, consumed aar_ authorizes one decision whose
 // single attempt succeeds; the chain carries every link back to the intent.
@@ -477,6 +470,17 @@ func TestRecordApprovalBinding(t *testing.T) {
 	// The denial itself records fine against the same aar_.
 	mustRecord(t, s, c.decision(CodeApprovalDenied, VerdictRequireApproval, denied.ID))
 
+	// A refusal keeps its reference even when the approval binds another
+	// intent: that is exactly what approval_intent_mismatch reports. It
+	// binds nothing, and the chain shows the approval as found.
+	mismatch := mustRecord(t, s, other.decision(CodeApprovalIntentMismatch, VerdictRequireApproval, aar.ID))
+	if mismatch.IntentHash != "" {
+		t.Fatalf("refusal bound intent_hash %q", mismatch.IntentHash)
+	}
+	if mc := mustChain(t, s, mismatch.ID); mc.Result != ResultRefused || mc.Approval.Status != RefFound {
+		t.Fatalf("intent-mismatch chain: %q / %+v", mc.Result, mc.Approval)
+	}
+
 	if _, _, err := s.Record(ctx, a.decision(CodeApproved, VerdictRequireApproval, "aar_missing")); !errors.Is(err, ErrApprovalNotFound) {
 		t.Fatalf("missing aar_: %v, want ErrApprovalNotFound", err)
 	}
@@ -485,6 +489,8 @@ func TestRecordApprovalBinding(t *testing.T) {
 	if _, _, err := s.Record(ctx, a.decision(CodeApproved, VerdictRequireApproval, aar.ID)); !errors.Is(err, ErrUnobservable) {
 		t.Fatalf("failing lookup: %v, want ErrUnobservable", err)
 	}
+	// A refusal that could not read its approval still records it.
+	mustRecord(t, s, a.decision(CodeApprovalLookupError, VerdictRequireApproval, aar.ID))
 	s.SetLookups(nil, nil)
 	if _, _, err := s.Record(ctx, a.decision(CodeApproved, VerdictRequireApproval, aar.ID)); !errors.Is(err, ErrUnobservable) {
 		t.Fatalf("no lookup: %v, want ErrUnobservable", err)

@@ -208,7 +208,8 @@ type Decision struct {
 	ArgsDigest   string `json:"args_digest"`
 	ActionDigest string `json:"action_digest"`
 	// IntentHash is copied from the referenced aar_ as observed at record
-	// time, never taken from the caller. Empty without an approval.
+	// time, never taken from the caller. Set only on a permitting decision:
+	// a refusal's approval_id is a reference, not a binding.
 	IntentHash string `json:"intent_hash,omitempty"`
 
 	DecidedAt time.Time `json:"decided_at"`
