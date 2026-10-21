@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.114.0](https://github.com/mctlhq/mctl-api/compare/4.113.1...4.114.0) (2026-10-21)
+
+
+### Features
+
+* **incidents:** audit successful changes and record the resolver ([7cf6d9e](https://github.com/mctlhq/mctl-api/commit/7cf6d9e6441d07976710343848e9878854f80873))
+* **incidents:** audit successful changes and record the resolver ([5d58dc8](https://github.com/mctlhq/mctl-api/commit/5d58dc8762933a0276ad95a9291b8dbdafaa74ed))
+
+
+### Bug Fixes
+
+* **incidents:** keep the first resolver on a repeat resolve ([72abb8a](https://github.com/mctlhq/mctl-api/commit/72abb8aadf96b3f1a5e7f9ea3a084f61b65857c6))
+
 ## [4.113.1](https://github.com/mctlhq/mctl-api/compare/4.113.0...4.113.1) (2026-10-21)
 
 
