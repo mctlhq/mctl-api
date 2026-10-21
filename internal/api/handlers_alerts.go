@@ -36,6 +36,45 @@ import (
 // member may not (mctl-api#478).
 const incidentWriteRole = operations.RoleDeveloper
 
+// incidentChange is what a successful incident mutation records in the audit
+// log: the exact incident and the status move, never the free text (analysis,
+// resolution reason) the caller sent.
+type incidentChange struct {
+	ID, Tenant, Service    string
+	PreviousStatus, Status string
+}
+
+// auditIncidentChange writes the success row for an incident mutation.
+// requireTenantRole audits only refusals, so without this a change made by an
+// allowed caller left no trace of who made it. The operation names match the
+// refusal rows ("incident-update", "incident-ack", "incident-resolve"), and
+// logAudit fills in the caller's principal and, for an agent run token, its
+// execution id.
+func (h *Handlers) auditIncidentChange(r *http.Request, user *auth.User, op string, c incidentChange, extra map[string]string) {
+	params := map[string]string{
+		"incident_id": c.ID,
+		"tenant":      c.Tenant,
+		"status":      c.Status,
+		"actor":       principalOf(user),
+	}
+	if c.Service != "" {
+		params["service"] = c.Service
+	}
+	if c.PreviousStatus != "" {
+		params["previous_status"] = c.PreviousStatus
+	}
+	for k, v := range extra {
+		params[k] = v
+	}
+	h.logAudit(r, audit.Entry{
+		UserID:     user.ID,
+		Operation:  op,
+		Parameters: params,
+		Status:     "succeeded",
+		RiskLevel:  string(operations.RiskLow),
+	})
+}
+
 // CreateIncident handles POST /api/v1/incidents.
 func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 	if h.opts.AlertStore == nil {
@@ -143,13 +182,18 @@ func (h *Handlers) ResolveIncidentByFingerprint(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	resolved, err := h.opts.AlertStore.ResolveByFingerprint(r.Context(), body.Tenant, body.Fingerprint)
+	ids, err := h.opts.AlertStore.ResolveByFingerprint(r.Context(), body.Tenant, body.Fingerprint, principalOf(user))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve incident: "+err.Error())
 		return
 	}
+	for _, id := range ids {
+		h.auditIncidentChange(r, user, "incident-resolve", incidentChange{
+			ID: id, Tenant: body.Tenant, Status: alerts.StatusResolved,
+		}, map[string]string{"fingerprint": body.Fingerprint})
+	}
 
-	writeJSON(w, http.StatusOK, map[string]bool{"resolved": resolved})
+	writeJSON(w, http.StatusOK, map[string]bool{"resolved": len(ids) > 0})
 }
 
 // ListIncidents handles GET /api/v1/incidents.
@@ -297,8 +341,16 @@ func (h *Handlers) UpdateIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	previousStatus := existing.Status
 	if patch.Status != nil {
 		existing.Status = *patch.Status
+	}
+	// A PATCH that resolves is a resolve: it records who and when, the same
+	// as POST .../resolve, so the resolver is never lost by taking this path.
+	if existing.Status == alerts.StatusResolved && previousStatus != alerts.StatusResolved {
+		now := time.Now().UTC()
+		existing.ResolvedAt = &now
+		existing.ResolvedBy = principalOf(user)
 	}
 	if patch.Analysis != nil {
 		existing.Analysis = *patch.Analysis
@@ -324,6 +376,10 @@ func (h *Handlers) UpdateIncident(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update incident: "+err.Error())
 		return
 	}
+	h.auditIncidentChange(r, user, "incident-update", incidentChange{
+		ID: existing.ID, Tenant: existing.Tenant, Service: existing.Service,
+		PreviousStatus: previousStatus, Status: existing.Status,
+	}, nil)
 
 	labelStoredTrace(existing, traceNotDerived)
 	writeJSON(w, http.StatusOK, existing)
@@ -358,6 +414,7 @@ func (h *Handlers) AcknowledgeIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := user.ID
+	previousStatus := existing.Status
 
 	now := time.Now().UTC()
 	existing.AcknowledgedBy = userID
@@ -368,6 +425,10 @@ func (h *Handlers) AcknowledgeIncident(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to acknowledge incident: "+err.Error())
 		return
 	}
+	h.auditIncidentChange(r, user, "incident-ack", incidentChange{
+		ID: existing.ID, Tenant: existing.Tenant, Service: existing.Service,
+		PreviousStatus: previousStatus, Status: existing.Status,
+	}, nil)
 
 	labelStoredTrace(existing, traceNotDerived)
 	writeJSON(w, http.StatusOK, existing)
@@ -406,9 +467,11 @@ func (h *Handlers) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
+	previousStatus := existing.Status
 	now := time.Now().UTC()
 	existing.Status = alerts.StatusResolved
 	existing.ResolvedAt = &now
+	existing.ResolvedBy = principalOf(user)
 	if body.Reason != "" {
 		existing.Analysis = existing.Analysis + "\n\nResolution: " + body.Reason
 	}
@@ -417,6 +480,10 @@ func (h *Handlers) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve incident: "+err.Error())
 		return
 	}
+	h.auditIncidentChange(r, user, "incident-resolve", incidentChange{
+		ID: existing.ID, Tenant: existing.Tenant, Service: existing.Service,
+		PreviousStatus: previousStatus, Status: existing.Status,
+	}, nil)
 
 	labelStoredTrace(existing, traceNotDerived)
 	writeJSON(w, http.StatusOK, existing)

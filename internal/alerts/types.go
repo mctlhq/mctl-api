@@ -50,22 +50,26 @@ const (
 
 // Alert is the central incident record stored by mctl-api.
 type Alert struct {
-	ID             string     `json:"id"`
-	Source         string     `json:"source"`
-	Type           string     `json:"type"`
-	Tenant         string     `json:"tenant"`
-	Service        string     `json:"service"`
-	Summary        string     `json:"summary"`
-	Severity       string     `json:"severity"`
-	Status         string     `json:"status"`
-	Analysis       string     `json:"analysis"`
-	ProposedFix    string     `json:"proposed_fix"`
-	PRURL          string     `json:"pr_url"`
-	PRNumber       int        `json:"pr_number"`
-	Confidence     string     `json:"confidence"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
+	ID          string     `json:"id"`
+	Source      string     `json:"source"`
+	Type        string     `json:"type"`
+	Tenant      string     `json:"tenant"`
+	Service     string     `json:"service"`
+	Summary     string     `json:"summary"`
+	Severity    string     `json:"severity"`
+	Status      string     `json:"status"`
+	Analysis    string     `json:"analysis"`
+	ProposedFix string     `json:"proposed_fix"`
+	PRURL       string     `json:"pr_url"`
+	PRNumber    int        `json:"pr_number"`
+	Confidence  string     `json:"confidence"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	ResolvedAt  *time.Time `json:"resolved_at,omitempty"`
+	// ResolvedBy is the principal that moved the incident to resolved, in the
+	// form the audit log uses (principalOf). Empty for incidents resolved
+	// before it was recorded.
+	ResolvedBy     string     `json:"resolved_by,omitempty"`
 	AcknowledgedBy string     `json:"acknowledged_by,omitempty"`
 	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
 	// Fingerprint identifies the underlying failure class for dedup purposes.

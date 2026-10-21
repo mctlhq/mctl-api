@@ -255,12 +255,12 @@ func TestResolveByFingerprint(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	resolved, err := s.ResolveByFingerprint(ctx, "admins", "workflow_failed:run:r")
+	ids, err := s.ResolveByFingerprint(ctx, "admins", "workflow_failed:run:r", "service:test")
 	if err != nil {
 		t.Fatalf("resolve by fingerprint: %v", err)
 	}
-	if !resolved {
-		t.Fatal("expected resolved=true for an open matching alert")
+	if len(ids) != 1 || ids[0] != created.ID {
+		t.Fatalf("resolved ids = %v, want [%s]", ids, created.ID)
 	}
 
 	got, err := s.Get(ctx, created.ID)
@@ -272,6 +272,9 @@ func TestResolveByFingerprint(t *testing.T) {
 	}
 	if got.ResolvedAt == nil {
 		t.Fatal("expected resolved_at to be set")
+	}
+	if got.ResolvedBy != "service:test" {
+		t.Fatalf("resolved_by = %q, want service:test", got.ResolvedBy)
 	}
 
 	// A second, freshly-failing occurrence with the same fingerprint must
@@ -292,12 +295,12 @@ func TestResolveByFingerprint_NoMatch_NotAnError(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	resolved, err := s.ResolveByFingerprint(ctx, "admins", "workflow_failed:run:nonexistent")
+	ids, err := s.ResolveByFingerprint(ctx, "admins", "workflow_failed:run:nonexistent", "service:test")
 	if err != nil {
 		t.Fatalf("expected no error for a no-op resolve, got: %v", err)
 	}
-	if resolved {
-		t.Fatal("expected resolved=false when no matching open alert exists")
+	if len(ids) != 0 {
+		t.Fatalf("expected no resolved ids when no matching open alert exists, got %v", ids)
 	}
 }
 
