@@ -304,3 +304,43 @@ func TestMintAgentRunToken_RegistryErrorCarriesTypedCode(t *testing.T) {
 		t.Errorf("mint_refused audit rows = %d, want 1", n)
 	}
 }
+
+// A scope is the server's: the caller may name one defined for the agent,
+// and the token it gets resolves to exactly that scope (mctl-agents#737).
+func TestMintAgentRunToken_Scope(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	item := e.open(auth.NewServiceUser(), nil)
+	execID := e.attachExecution(auth.NewServiceUser(), item["id"].(string), "run-scope", "Running")
+	svc := auth.NewServiceUser()
+
+	res := e.mintRunToken(svc, map[string]any{"agent": "issue-investigator", "execution_id": execID, "scope": "no-such-scope"})
+	if res.code != http.StatusBadRequest || code(res) != artCodeScopeUnknown {
+		t.Fatalf("unknown scope = %d %s, want 400 %s", res.code, res.raw, artCodeScopeUnknown)
+	}
+	res = e.mintRunToken(svc, map[string]any{"agent": "implementer", "execution_id": execID, "scope": auth.AgentScopeInvestigate})
+	if res.code != http.StatusBadRequest || code(res) != artCodeScopeNotForAgent {
+		t.Fatalf("scope for another agent = %d %s, want 400 %s", res.code, res.raw, artCodeScopeNotForAgent)
+	}
+
+	res = e.mintRunToken(svc, map[string]any{"agent": "issue-investigator", "execution_id": execID, "scope": auth.AgentScopeInvestigate})
+	if res.code != http.StatusCreated {
+		t.Fatalf("mint = %d %s", res.code, res.raw)
+	}
+	if res.body["scope"] != auth.AgentScopeInvestigate {
+		t.Errorf("response scope = %v, want %s", res.body["scope"], auth.AgentScopeInvestigate)
+	}
+	run, err := e.h.opts.WorkItems.ResolveAgentRunToken(context.Background(), res.body["token"].(string))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if run.Scope != auth.AgentScopeInvestigate || run.WorkItemID != item["id"] {
+		t.Errorf("resolved run = %+v, want scope %s on %v", run, auth.AgentScopeInvestigate, item["id"])
+	}
+
+	// An unscoped mint stays unscoped.
+	res = e.mintRunToken(svc, map[string]any{"agent": "issue-investigator", "execution_id": execID})
+	run, err = e.h.opts.WorkItems.ResolveAgentRunToken(context.Background(), res.body["token"].(string))
+	if err != nil || run.Scope != "" {
+		t.Errorf("unscoped mint resolved to scope %q (err %v), want none", run.Scope, err)
+	}
+}

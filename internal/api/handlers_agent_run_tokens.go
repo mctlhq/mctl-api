@@ -47,6 +47,8 @@ const (
 	artCodeExecutionNotFound   = "execution_not_found"
 	artCodeExecutionTerminal   = "execution_terminal"
 	artCodeInvalidTTL          = "invalid_ttl"
+	artCodeScopeUnknown        = "agent_scope_unknown"
+	artCodeScopeNotForAgent    = "agent_scope_not_for_agent"
 	artCodePrincipalDisabled   = "agent_principal_disabled"
 	artCodeIdentityRefused     = "agent_identity_refused"
 	artCodeRegistryUnavailable = "agent_registry_error"
@@ -57,6 +59,8 @@ type agentRunTokenBody struct {
 	ExecutionID string   `json:"execution_id"`
 	TTLSeconds  *int     `json:"ttl_seconds,omitempty"`
 	Permissions []string `json:"permissions,omitempty"`
+	// Scope names a server-defined auth.AgentScope (mctlhq/mctl-agents#737).
+	Scope string `json:"scope,omitempty"`
 }
 
 // auditAgentRunTokenRefusal records a refused mint: the typed code and the
@@ -138,6 +142,23 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The scope's content is the server's; the caller only names one, and
+	// only one defined for this agent.
+	if body.Scope != "" {
+		scope, ok := auth.LookupAgentScope(body.Scope)
+		if !ok {
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeScopeUnknown)
+			writeErrorCode(w, http.StatusBadRequest, artCodeScopeUnknown, "scope "+strconv.Quote(body.Scope)+" is not defined", nil)
+			return
+		}
+		if !scope.AdmitsAgent(body.Agent) {
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeScopeNotForAgent)
+			writeErrorCode(w, http.StatusBadRequest, artCodeScopeNotForAgent,
+				"scope "+strconv.Quote(body.Scope)+" is not defined for agent "+strconv.Quote(body.Agent), nil)
+			return
+		}
+	}
+
 	ttl := workitems.DefaultAgentRunTokenTTL
 	if body.TTLSeconds != nil {
 		// Validated in raw seconds, before the multiplication below that can
@@ -173,7 +194,7 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 
 	row, secret, err := h.opts.WorkItems.MintAgentRunToken(r.Context(), workitems.MintAgentRunTokenInput{
 		Agent: body.Agent, AgentPrincipalID: agentUser.PrincipalID(), ExecutionID: body.ExecutionID,
-		Permissions: body.Permissions, TTL: ttl, IssuedByPrincipalID: user.PrincipalID(),
+		Permissions: body.Permissions, Scope: body.Scope, TTL: ttl, IssuedByPrincipalID: user.PrincipalID(),
 	})
 	if err != nil {
 		code, status := agentRunTokenErrorCode(err)
@@ -199,6 +220,7 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 			"ttl_seconds":            strconv.Itoa(int(ttl.Seconds())),
 			"expires_at":             row.ExpiresAt.Format(time.RFC3339),
 			"permissions":            strings.Join(row.Permissions, ","),
+			"scope":                  row.Scope,
 			"issued_by_principal_id": row.IssuedByPrincipalID,
 		},
 		Status:    "succeeded",
@@ -215,5 +237,6 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 		"work_item_id": row.WorkItemID,
 		"expires_at":   row.ExpiresAt,
 		"permissions":  row.Permissions,
+		"scope":        row.Scope,
 	})
 }

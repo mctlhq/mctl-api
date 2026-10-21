@@ -174,6 +174,10 @@ type User struct {
 	// agentPermissions are the permissions the run token was minted with,
 	// checked by HasPermission. Empty for every non-agent principal.
 	agentPermissions []string
+	// agentScope names the server-defined scope the run token was minted
+	// with (agent_scope.go, mctlhq/mctl-agents#737), or "" for an unscoped
+	// run token and every other principal.
+	agentScope string
 }
 
 // NewGitHubUser builds a principal whose ID is a GitHub-verified login.
@@ -221,6 +225,11 @@ func (u *User) IsAdmin() bool {
 // HasTenantAccess checks if the user can operate on a specific tenant.
 func (u *User) HasTenantAccess(tenant string) bool {
 	if u.IsAdmin() {
+		return true
+	}
+	// A scoped agent run reads every tenant; its route list, enforced by
+	// the API's agent scope gate, admits nothing that writes.
+	if s, ok := u.AgentScope(); ok && s.ReadAllTenants {
 		return true
 	}
 	for _, g := range u.Groups {
