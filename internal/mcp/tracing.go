@@ -91,6 +91,11 @@ func (t tracingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	defer span.End()
 	req = req.Clone(ctx)
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+	// A shadowing run's tool calls are counted on the REST layer too
+	// (mctlhq/mctl-agents#737): carry the scope it named onto the loopback.
+	if scope := auth.ShadowAgentScopeFromContext(ctx); scope != "" {
+		req.Header.Set(auth.AgentScopeShadowHeader, scope)
+	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		span.SetStatus(codes.Error, "request failed")

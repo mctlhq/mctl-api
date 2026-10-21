@@ -58,6 +58,9 @@ type AgentRun struct {
 	// RunID is the token's own id (art_<ulid>), safe to log and audit.
 	RunID       string
 	Permissions []string
+	// Scope names the server-defined scope the token was minted with
+	// (agent_scope.go), or "" for an unscoped token.
+	Scope string
 }
 
 // AgentRunResolver resolves a presented run-token bearer secret to the
@@ -71,8 +74,9 @@ type AgentRunResolver interface {
 // NewAgentUser builds the principal for one agent run token. Exported so
 // tests can construct the same principal auth.Middleware does, like
 // NewServiceUser and NewSurfaceUser; only Middleware mints it from a
-// resolved token. It is never an admin, belongs to no tenant, and its only
-// permissions are the ones run.Permissions lists.
+// resolved token. It is never an admin, belongs to no tenant unless its
+// scope reads every tenant (agent_scope.go), and its only permissions are
+// the ones run.Permissions lists.
 func NewAgentUser(name string, run AgentRun) *User {
 	return &User{
 		ID:               AgentPrincipalPrefix + name,
@@ -81,6 +85,7 @@ func NewAgentUser(name string, run AgentRun) *User {
 		workItemID:       run.WorkItemID,
 		runID:            run.RunID,
 		agentPermissions: append([]string(nil), run.Permissions...),
+		agentScope:       run.Scope,
 	}
 }
 

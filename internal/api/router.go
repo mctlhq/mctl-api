@@ -451,6 +451,10 @@ func NewRouter(opts Options) http.Handler {
 		// a grant in Postgres, so it belongs under the timeout above and
 		// before the rate limiter below, whose budget must key on the
 		// delegated subject once this gate has run.
+		// A scoped agent run reaches only its scope's routes
+		// (mctlhq/mctl-agents#737). Ahead of agentPrincipalGate, so the
+		// scope is judged on the agent itself, never on a delegated human.
+		r.Use(h.agentScopeGate)
 		r.Use(h.agentPrincipalGate)
 		// The usage writer reaches one route and nothing else.
 		r.Use(usageWriterGate)

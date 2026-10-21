@@ -219,6 +219,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		// removes the reserved receipt arguments from every call, gate on or
 		// off, so no handler ever sees them.
 		server.WithToolHandlerMiddleware(s.agentReceiptMiddleware),
+		// A scoped agent run reaches only the tools its scope names
+		// (mctlhq/mctl-agents#737); a refused call is still traced.
+		server.WithToolHandlerMiddleware(s.agentScopeMiddleware),
 		// Innermost, so a recovered panic flows back out through the tracing
 		// middleware as an error and the span is marked failed.
 		server.WithToolHandlerMiddleware(recoverToolPanic),
