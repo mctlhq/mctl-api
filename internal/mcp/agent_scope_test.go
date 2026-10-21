@@ -55,3 +55,32 @@ func TestAgentScopeMiddleware_OthersPassThrough(t *testing.T) {
 		t.Error("a shadowed call was refused")
 	}
 }
+
+func TestAgentScopeMiddleware_UnknownScopeAdmitsNothing(t *testing.T) {
+	ctx := auth.WithUser(context.Background(), auth.NewAgentUser("issue-investigator", auth.AgentRun{
+		WorkItemID: "wi_a", Scope: "no-such-scope",
+	}))
+	res, ran := runScope(t, ctx, "mctl_get_logs")
+	if ran || !res.IsError {
+		t.Fatal("a run token with a scope the server does not define called a tool")
+	}
+}
+
+// TestReadToolsAreRecordedReadOnly holds the scope's read-tool naming rule
+// to the recorded annotations: a tool the rule would admit must be recorded
+// read-only.
+func TestReadToolsAreRecordedReadOnly(t *testing.T) {
+	admitted := 0
+	for name, h := range recordedHints {
+		if !auth.IsReadTool(name) {
+			continue
+		}
+		admitted++
+		if !h.readOnly {
+			t.Errorf("%s is named as a read, so scoped runs may call it, but is recorded readOnly=false", name)
+		}
+	}
+	if admitted == 0 {
+		t.Fatal("no recorded tool is a read: the check proves nothing")
+	}
+}

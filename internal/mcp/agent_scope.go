@@ -25,12 +25,13 @@ const AgentScopeCodeDenied = "agent_scope_denied"
 // layer, so there is one series to read for the observe stage.
 var AgentScopeDecisions = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "mctl_agent_scope_decisions_total",
-	Help: "Agent run scope decisions by scope, mode (enforce, shadow), layer (rest, mcp) and verdict (allow, deny).",
+	Help: "Agent run scope decisions by scope, mode (enforce, shadow), layer (rest, mcp) and verdict (allow, deny, allow_unbound).",
 }, []string{"scope", "mode", "layer", "verdict"})
 
 func init() { prometheus.MustRegister(AgentScopeDecisions) }
 
-func verdictLabel(allowed bool) string {
+// AgentScopeVerdict is the verdict label for an allow/deny decision.
+func AgentScopeVerdict(allowed bool) string {
 	if allowed {
 		return "allow"
 	}
@@ -43,21 +44,24 @@ func (s *Server) agentScopeMiddleware(next server.ToolHandlerFunc) server.ToolHa
 	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		tool := req.Params.Name
 		user := auth.UserFromContext(ctx)
-		if scope, ok := user.AgentScope(); ok {
-			allowed := scope.AllowsTool(tool)
-			AgentScopeDecisions.WithLabelValues(scope.Name, "enforce", "mcp", verdictLabel(allowed)).Inc()
+		if name := user.AgentScopeName(); user.IsAgent() && name != "" {
+			// A scope name the server no longer defines admits nothing, the
+			// same as the REST gate: this layer stays closed on its own.
+			scope, ok := user.AgentScope()
+			allowed := ok && scope.AllowsTool(tool)
+			AgentScopeDecisions.WithLabelValues(name, "enforce", "mcp", AgentScopeVerdict(allowed)).Inc()
 			if !allowed {
-				slog.Warn("agent scope: tool refused", "scope", scope.Name, "tool", tool,
+				slog.Warn("agent scope: tool refused", "scope", name, "tool", tool,
 					"execution_id", user.ExecutionID(), "agent_run_id", user.AgentRunID())
 				return mcplib.NewToolResultError(fmt.Sprintf(
-					"%s: %s is outside the %q scope of this agent run", AgentScopeCodeDenied, tool, scope.Name)), nil
+					"%s: %s is outside the %q scope of this agent run", AgentScopeCodeDenied, tool, name)), nil
 			}
 			return next(ctx, req)
 		}
 		if name := auth.ShadowAgentScopeFromContext(ctx); name != "" {
 			if scope, ok := auth.LookupAgentScope(name); ok {
 				allowed := scope.AllowsTool(tool)
-				AgentScopeDecisions.WithLabelValues(scope.Name, "shadow", "mcp", verdictLabel(allowed)).Inc()
+				AgentScopeDecisions.WithLabelValues(scope.Name, "shadow", "mcp", AgentScopeVerdict(allowed)).Inc()
 				if !allowed {
 					slog.Info("agent scope shadow: tool would be refused", "scope", scope.Name, "tool", tool)
 				}

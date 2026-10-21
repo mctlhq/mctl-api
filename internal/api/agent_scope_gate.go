@@ -21,8 +21,8 @@ import (
 // scope would have decided it, and the scope is kept on the context so the
 // in-process MCP server carries it onto its tools' REST calls. That header
 // never changes how the request is authorized. In shadow, a route bound to
-// the run's own work item counts as allowed whatever the id: the static
-// token carries no work item to compare with.
+// the run's own work item is admitted whatever the id, since the static
+// token carries no work item to compare with, and counted allow_unbound.
 func (h *Handlers) agentScopeGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
@@ -44,7 +44,7 @@ func (h *Handlers) agentScopeGate(next http.Handler) http.Handler {
 			scope, ok := user.AgentScope()
 			// A scope name the server no longer defines admits nothing.
 			allowed := ok && scope.AllowsRoute(r.Method, r.URL.Path, user.WorkItemID())
-			mctlmcp.AgentScopeDecisions.WithLabelValues(user.AgentScopeName(), "enforce", "rest", verdictOf(allowed)).Inc()
+			mctlmcp.AgentScopeDecisions.WithLabelValues(user.AgentScopeName(), "enforce", "rest", mctlmcp.AgentScopeVerdict(allowed)).Inc()
 			if !allowed {
 				agentName, _ := user.AgentName()
 				h.logAudit(r, audit.Entry{
@@ -64,8 +64,16 @@ func (h *Handlers) agentScopeGate(next http.Handler) http.Handler {
 		}
 		if name := strings.TrimSpace(r.Header.Get(auth.AgentScopeShadowHeader)); name != "" && isDirectService(user) {
 			if scope, ok := auth.LookupAgentScope(name); ok {
-				allowed := scope.AllowsRoute(r.Method, r.URL.Path, shadowWorkItem(scope, r.Method, r.URL.Path))
-				mctlmcp.AgentScopeDecisions.WithLabelValues(scope.Name, "shadow", "rest", verdictOf(allowed)).Inc()
+				bound := shadowWorkItem(scope, r.Method, r.URL.Path)
+				allowed := scope.AllowsRoute(r.Method, r.URL.Path, bound)
+				verdict := mctlmcp.AgentScopeVerdict(allowed)
+				if allowed && bound != "" {
+					// Admitted only because shadow cannot check the work
+					// item: counted apart, so the observe stage does not
+					// read it as a clean allow.
+					verdict = "allow_unbound"
+				}
+				mctlmcp.AgentScopeDecisions.WithLabelValues(scope.Name, "shadow", "rest", verdict).Inc()
 				if !allowed {
 					slog.Info("agent scope shadow: route would be refused", "scope", scope.Name, "method", r.Method, "path", r.URL.Path)
 				}
@@ -88,11 +96,4 @@ func shadowWorkItem(scope *auth.AgentScope, method, path string) string {
 		}
 	}
 	return ""
-}
-
-func verdictOf(allowed bool) string {
-	if allowed {
-		return "allow"
-	}
-	return "deny"
 }

@@ -71,7 +71,10 @@ var (
 )
 
 // IsReadTool reports whether an mctl MCP tool name is a read by the
-// checkpoint's naming rule.
+// checkpoint's naming rule. The rule is held to the tools' recorded
+// read-only annotations by a test in internal/mcp
+// (TestReadToolsAreRecordedReadOnly), so a tool named like a read but
+// recorded as anything else fails the build instead of widening a scope.
 func IsReadTool(name string) bool {
 	bare := strings.TrimPrefix(name, "mctl_")
 	for _, v := range readVerbs {
@@ -91,9 +94,11 @@ func getRoute(pattern string) AgentScopeRoute {
 	return AgentScopeRoute{Method: http.MethodGet, Pattern: regexp.MustCompile(pattern)}
 }
 
-// mcpRoutes admit the MCP transport. What a call through it may do is
-// decided per tool (AgentScope.Tool), and every REST call a tool makes
-// comes back through the route list with the same token.
+// mcpRoutes admit the MCP transport. What a tools/call may do is decided
+// per tool (AgentScope.Tool), and every REST call a tool makes comes back
+// through the route list with the same token. resources/* and prompts/*
+// are not scope-checked: today they serve only static text and the
+// operations catalog; one that reads tenant data needs its own check.
 var mcpRoutes = []AgentScopeRoute{
 	{Method: http.MethodPost, Pattern: regexp.MustCompile(`^/mcp$`)},
 	{Method: http.MethodGet, Pattern: regexp.MustCompile(`^/mcp$`)},

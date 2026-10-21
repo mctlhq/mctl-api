@@ -133,7 +133,7 @@ func TestAgentScopeGate_UnknownScopeAdmitsNothing(t *testing.T) {
 func TestAgentScopeGate_ShadowCountsAndNeverRefuses(t *testing.T) {
 	router := scopeStubRouter(&Handlers{opts: Options{AuditLog: audit.NewLogger()}})
 	deny := mctlmcp.AgentScopeDecisions.WithLabelValues("investigate", "shadow", "rest", "deny")
-	allow := mctlmcp.AgentScopeDecisions.WithLabelValues("investigate", "shadow", "rest", "allow")
+	allow := mctlmcp.AgentScopeDecisions.WithLabelValues("investigate", "shadow", "rest", "allow_unbound")
 	deny0, allow0 := testutil.ToFloat64(deny), testutil.ToFloat64(allow)
 
 	svc := auth.NewServiceUser()
@@ -149,7 +149,7 @@ func TestAgentScopeGate_ShadowCountsAndNeverRefuses(t *testing.T) {
 		t.Errorf("shadow deny count += %v, want 1", got)
 	}
 	if got := testutil.ToFloat64(allow) - allow0; got != 1 {
-		t.Errorf("shadow allow count += %v, want 1", got)
+		t.Errorf("shadow allow_unbound count += %v, want 1: a bound route admitted without its work item", got)
 	}
 
 	// A caller other than the direct service cannot use the header.
