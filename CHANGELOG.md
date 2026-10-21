@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.115.0](https://github.com/mctlhq/mctl-api/compare/4.114.0...4.115.0) (2026-10-21)
+
+
+### Features
+
+* **agents:** issue-748-feat-mcp-read-only-agent-asset-index-and ([73a5ef1](https://github.com/mctlhq/mctl-api/commit/73a5ef13ade5a56d49509e4adade8a002d3d50af))
+* **agents:** issue-748-feat-mcp-read-only-agent-asset-index-and ([ba48fc4](https://github.com/mctlhq/mctl-api/commit/ba48fc408a624b81ce72c87c5eae5533645c3a69))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-748-feat-mcp-read-only-agent-asset-index-and ([72086aa](https://github.com/mctlhq/mctl-api/commit/72086aa5963ade3fafa228a1723b42092741cb9d))
+* **agents:** address P1/P2 codex findings on issue-748-feat-mcp-read-only-agent-asset-index-and ([9e1eaa1](https://github.com/mctlhq/mctl-api/commit/9e1eaa1362dd867ae071e968f1fa0d9ddd75c8c6))
+
 ## [4.114.0](https://github.com/mctlhq/mctl-api/compare/4.113.1...4.114.0) (2026-10-21)
 
 
