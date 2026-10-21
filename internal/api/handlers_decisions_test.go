@@ -90,8 +90,8 @@ func TestEvidenceWriter_ReachesDecisionAppendsOnly(t *testing.T) {
 // leaves evidence ingest, under the same principal, untouched, including
 // its share of the global per-principal limit.
 func TestDecisionWrites_HaveTheirOwnRateBucket(t *testing.T) {
-	if decisionWritesPerMinute+120 > 300 {
-		t.Fatalf("decision (%d) and evidence (120) budgets exceed the global 300/min", decisionWritesPerMinute)
+	if decisionWritesPerMinute+evidenceIngestPerMinute > 300 {
+		t.Fatalf("decision (%d) and evidence (%d) budgets exceed the global 300/min", decisionWritesPerMinute, evidenceIngestPerMinute)
 	}
 	router := NewRouter(Options{AuthMiddleware: injectUser(evidenceWriter(t))})
 	for i := 0; i < decisionWritesPerMinute; i++ {
@@ -106,7 +106,7 @@ func TestDecisionWrites_HaveTheirOwnRateBucket(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("write over budget: %d, want 429", rec.Code)
 	}
-	for i := 0; i < 120; i++ {
+	for i := 0; i < evidenceIngestPerMinute; i++ {
 		rec = httptest.NewRecorder()
 		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/evidence/records", bytes.NewReader([]byte("{}"))))
 		if rec.Code == http.StatusTooManyRequests {
@@ -203,15 +203,26 @@ func TestDecisions_RecordAttemptAndReconstruct(t *testing.T) {
 	}
 
 	attempts := "/api/v1/decisions/" + id + "/attempts"
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// A nanosecond remainder Postgres cannot store: a replay of the same
+	// event must still be recognized as the stored one, not a 409.
+	now := time.Now().UTC().Truncate(time.Microsecond).Add(321 * time.Nanosecond).Format(time.RFC3339Nano)
 	for i, e := range []map[string]any{
 		{"phase": "started", "occurred_at": now, "idempotency_key": "s1"},
 		{"phase": "failed", "attempt_no": 1, "error_code": "github.timeout", "occurred_at": now, "idempotency_key": "f1"},
 		{"phase": "started", "occurred_at": now, "idempotency_key": "s2"},
 		{"phase": "succeeded", "attempt_no": 2, "evidence_id": "ev-00000000000000e1", "occurred_at": now, "idempotency_key": "d2"},
 	} {
-		if rec := doJSON(t, writer, http.MethodPost, attempts, e); rec.Code != http.StatusCreated {
+		rec := doJSON(t, writer, http.MethodPost, attempts, e)
+		if rec.Code != http.StatusCreated {
 			t.Fatalf("event %d: %d %s", i, rec.Code, rec.Body.String())
+		}
+		var first struct{ Event decisions.AttemptEvent }
+		_ = json.Unmarshal(rec.Body.Bytes(), &first)
+		rec = doJSON(t, writer, http.MethodPost, attempts, e)
+		var replay struct{ Event decisions.AttemptEvent }
+		_ = json.Unmarshal(rec.Body.Bytes(), &replay)
+		if rec.Code != http.StatusOK || replay.Event.Seq == 0 || replay.Event.Seq != first.Event.Seq {
+			t.Fatalf("event %d replay: %d %s, want 200 with the stored event", i, rec.Code, rec.Body.String())
 		}
 	}
 	rec = doJSON(t, writer, http.MethodPost, attempts, map[string]any{"phase": "started", "occurred_at": now, "idempotency_key": "s3"})
