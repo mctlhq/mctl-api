@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.115.1](https://github.com/mctlhq/mctl-api/compare/4.115.0...4.115.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **agents:** accept mctl-claude-remote and mctl-alice in DevLoop enums ([5cd3a5d](https://github.com/mctlhq/mctl-api/commit/5cd3a5d122cc59a81317195d9f458ee00db0231f))
+* **agents:** accept mctl-claude-remote and mctl-alice in DevLoop enums ([be9f608](https://github.com/mctlhq/mctl-api/commit/be9f608af1ea3087baefb0027bb64231dae93356))
+
 ## [4.115.0](https://github.com/mctlhq/mctl-api/compare/4.114.0...4.115.0) (2026-10-21)
 
 
