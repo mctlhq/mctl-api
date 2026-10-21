@@ -2682,7 +2682,7 @@ Optional service/slug filters narrow the run scope. There is no force or unbound
 Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
 		mcplib.WithString("service",
 			mcplib.Description("Optional. Filter to one service. Leave empty to consider all services."),
-			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
+			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice"),
 		),
 		mcplib.WithString("slug",
 			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
@@ -2723,7 +2723,7 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_re
 			// shepherd PRs); the shepherd must drive those to merge too.
 			// Keep aligned with internal/operations/registry.go entry for
 			// `mctl-agents-shepherd` and with the implementer's enum.
-			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
+			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice"),
 		),
 		mcplib.WithString("slug",
 			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
@@ -2768,7 +2768,7 @@ Optional service filter narrows the sweep; dry_run=true prints every decision an
 Admin-only.`),
 		mcplib.WithString("service",
 			mcplib.Description("Optional. Reconcile only this service. Leave empty to sweep every service."),
-			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
+			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice"),
 		),
 		mcplib.WithString("dry_run",
 			mcplib.Description("Set to 'true' to print every would-be flip without writing .status.yaml or opening any PR. Default 'false'."),
@@ -2869,7 +2869,7 @@ Admin-only.`),
 		mcplib.WithString("service",
 			mcplib.Required(),
 			mcplib.Description("Service owning the proposal."),
-			mcplib.Enum("mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway"),
+			mcplib.Enum("mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice"),
 		),
 		mcplib.WithString("slug",
 			mcplib.Required(),
@@ -2961,6 +2961,8 @@ This calls the same handler/path as the REST endpoint (POST /api/v1/agents/dev-l
 
 This is distinct from the standalone mctl-agents-approve REST operation, which directly mutates a proposal's .status.yaml outside DevLoop's ownership (the gitops-file path used when a proposal was not started via use_temporal on mctl_trigger_issue). Use this tool only for workflow_ids returned by mctl_trigger_issue with use_temporal=true or by mctl_get_workflow_status for a dev-loop-* workflow.
 
+To approve with amendments, edit the proposal's requirements.md, design.md or tasks.md on mctl-gitops main through a PR before approving. The edit supersedes the pending grant, and the loop asks for a decision on the new one; approve that, and the implementer works from the amended files. The reason argument does not carry amendments, and neither does an @MCTL reinvestigate comment (mctlhq/mctl-agents#729).
+
 Human admins only, acting directly: a service or agent credential is refused 403 (mctl-api#571). Requires the server's Temporal client to be configured — returns 503 otherwise.`),
 		mcplib.WithString("workflow_id",
 			mcplib.Required(),
@@ -2970,7 +2972,7 @@ Human admins only, acting directly: a service or agent credential is refused 403
 		// caller, established by the credential this call is made with, and
 		// the endpoint rejects a body that tries to set it (gitops#986).
 		mcplib.WithString("reason",
-			mcplib.Description("Optional. Free-text reason for the approval, recorded on the signal payload."),
+			mcplib.Description("Optional. Free-text reason for the approval, recorded on the signal payload and in the audit log for audit only. The implementer never sees it, so it cannot carry amendments."),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {

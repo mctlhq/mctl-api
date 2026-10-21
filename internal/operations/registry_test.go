@@ -24,7 +24,7 @@ import "testing"
 var wantServices = []string{
 	"mctl-web", "mctl-docs", "mctl-api", "mctl-portal",
 	"mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github",
-	"newton-mcp-gateway",
+	"newton-mcp-gateway", "mctl-claude-remote", "mctl-alice",
 }
 
 // TestImplementAndShepherdServiceEnumCoversMctlAgentsServices guards against
