@@ -115,6 +115,11 @@
       "reason": "Admin-only read of one agent's registry entry: owner, every definition version with its lifecycle, and the active binding per environment. Read-only, but it exposes the agent registry's internals; not yet enabled on the shared portal, an owner decision."
     },
     {
+      "name": "mctl_get_agent_preflight",
+      "enabled": false,
+      "reason": "Admin-only read-only preflight of an agent and profile against the CI-equivalent platform rules. Exposes agent platform internals; not enabled on the shared portal."
+    },
+    {
       "name": "mctl_get_epic_status",
       "enabled": false,
       "reason": "Read-only roadmap epic status from the published RoadmapPublication (public mctlhq/.github data, no credentials). Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#333."
@@ -228,6 +233,11 @@
       "name": "mctl_list_agent_executions",
       "enabled": true,
       "reason": "Durable execution records of DevLoop runs: agent version, workflow id, result. Pipeline metadata; tenant-scoped upstream."
+    },
+    {
+      "name": "mctl_list_agent_assets",
+      "enabled": false,
+      "reason": "Admin-only read-only index of agent registry, gitops profiles, release intents, policy catalogs and skills with reverse references. Exposes agent platform internals; not enabled on the shared portal."
     },
     {
       "name": "mctl_list_agent_versions",

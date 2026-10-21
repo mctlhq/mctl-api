@@ -337,6 +337,8 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolPublishAgentVersion())
 	srv.AddTool(s.toolListAgentVersions())
 	srv.AddTool(s.toolResolveAgent())
+	srv.AddTool(s.toolListAgentAssets())
+	srv.AddTool(s.toolGetAgentPreflight())
 	srv.AddTool(s.toolPromoteAgent())
 	srv.AddTool(s.toolRollbackAgent())
 	srv.AddTool(s.toolListAgentExecutions())
@@ -3202,6 +3204,65 @@ Each version is immutable and carries the manifest, git SHA, image reference, an
 		body, err := s.apiGet(ctx, "/api/v1/agents/"+url.PathEscape(agent)+"/versions")
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list agent versions: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolListAgentAssets() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_agent_assets",
+		mcplib.WithTitleAnnotation("List Agent Assets"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription(`Read-only merged index of agent assets: the registry catalog, gitops execution profiles, release intents, agent-platform policy catalogs and platform skills, with reverse references (which profiles use a skill, tool, policyRef or model-policy task). Each source reports status ok or unavailable; an unavailable source is null, never empty. Admin-only. The index carries no eligibility or grant semantics.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		body, err := s.apiGet(ctx, "/api/v1/agent-assets")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list agent assets: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolGetAgentPreflight() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_agent_preflight",
+		mcplib.WithTitleAnnotation("Preflight Agent"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription(`Read-only preflight report: would this agent and profile pass the platform's CI-equivalent rules (budget and timeout ceilings, sandbox, known references, approval gates, capability discovery, binding lifecycle)? Give either environment, or definition_version and profile (optional profile_version). Resolves through the registry and falls back to the gitops profile, reporting which. Each check is pass, fail or unknown and names the CI rule it mirrors; unknown is never pass. Admin-only. This carries no eligibility semantics; validate-agent-platform.py in CI stays authoritative.`),
+		mcplib.WithString("agent_name",
+			mcplib.Required(),
+			mcplib.Description("Agent name, e.g. issue-investigator, implementer, shepherd"),
+		),
+		mcplib.WithString("environment",
+			mcplib.Enum(agentRegistryEnvironmentEnum...),
+			mcplib.Description("Environment to preflight. Give this or definition_version+profile, not both."),
+		),
+		mcplib.WithString("definition_version",
+			mcplib.Description("Explicit AgentDefinition version for a pin. Requires profile."),
+		),
+		mcplib.WithString("profile",
+			mcplib.Description("ExecutionProfile name to pair with definition_version."),
+		),
+		mcplib.WithString("profile_version",
+			mcplib.Description("Optional explicit ExecutionProfile version for the pin."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		agent := stringArg(req, "agent_name")
+		query := url.Values{}
+		for _, k := range []string{"environment", "definition_version", "profile", "profile_version"} {
+			if v := stringArg(req, k); v != "" {
+				query.Set(k, v)
+			}
+		}
+		path := "/api/v1/agents/" + url.PathEscape(agent) + "/preflight?" + query.Encode()
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to preflight agent: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

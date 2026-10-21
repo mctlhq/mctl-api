@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -59,6 +60,7 @@ type fakeGitReader struct {
 	imagePolicy            *gitops.ImageNamePolicy
 	imagePolicyErr         error
 	tenantExistsErr        error
+	agentPlatform          *gitops.AgentPlatformSnapshot
 	tenantNamesErr         error
 	serviceExistsErr       error
 	serviceExistsCalls     int
@@ -101,6 +103,15 @@ func (f *fakeGitReader) TenantExists(name string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// ReadAgentPlatformSnapshot returns the configured snapshot, or an error
+// when none is set.
+func (f *fakeGitReader) ReadAgentPlatformSnapshot() (*gitops.AgentPlatformSnapshot, error) {
+	if f.agentPlatform == nil {
+		return nil, errors.New("agent platform snapshot not configured")
+	}
+	return f.agentPlatform, nil
 }
 
 // ImageNamePolicy returns the configured policy, or by default one that

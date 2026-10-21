@@ -519,27 +519,13 @@ func (h *Handlers) ResolveBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agent := chi.URLParam(r, "name")
-	query := r.URL.Query()
-	environment := query.Get("environment")
-	definitionVersion := query.Get("definition_version")
-	profile := query.Get("profile")
-	profileVersion := query.Get("profile_version")
-
-	explicitPin := definitionVersion != "" || profile != ""
-	switch {
-	case environment != "" && explicitPin:
-		writeError(w, http.StatusBadRequest,
-			"specify either environment or definition_version+profile, not both")
-		return
-	case environment == "" && !explicitPin:
-		writeError(w, http.StatusBadRequest,
-			"missing selector: specify environment, or definition_version and profile")
-		return
-	case explicitPin && (definitionVersion == "" || profile == ""):
-		writeError(w, http.StatusBadRequest,
-			"an explicit pin requires both definition_version and profile")
+	sel, errMsg := parseBindingSelector(r)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
 		return
 	}
+	environment, definitionVersion, profile, profileVersion :=
+		sel.environment, sel.definitionVersion, sel.profile, sel.profileVersion
 
 	var resolved *agentregistry.ResolvedBinding
 	var err error
@@ -553,6 +539,38 @@ func (h *Handlers) ResolveBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resolved)
+}
+
+// bindingSelector is the parsed query of a resolve-style request: either an
+// environment, or an explicit definition_version+profile pin.
+type bindingSelector struct {
+	environment       string
+	definitionVersion string
+	profile           string
+	profileVersion    string
+}
+
+// parseBindingSelector validates the selector query parameters. It returns a
+// non-empty message for a 400. Shared by ResolveBinding and PreflightAgent so
+// both answer identically.
+func parseBindingSelector(r *http.Request) (bindingSelector, string) {
+	query := r.URL.Query()
+	sel := bindingSelector{
+		environment:       query.Get("environment"),
+		definitionVersion: query.Get("definition_version"),
+		profile:           query.Get("profile"),
+		profileVersion:    query.Get("profile_version"),
+	}
+	explicitPin := sel.definitionVersion != "" || sel.profile != ""
+	switch {
+	case sel.environment != "" && explicitPin:
+		return sel, "specify either environment or definition_version+profile, not both"
+	case sel.environment == "" && !explicitPin:
+		return sel, "missing selector: specify environment, or definition_version and profile"
+	case explicitPin && (sel.definitionVersion == "" || sel.profile == ""):
+		return sel, "an explicit pin requires both definition_version and profile"
+	}
+	return sel, ""
 }
 
 // RollbackBinding handles POST /api/v1/agents/{name}/bindings/rollback.

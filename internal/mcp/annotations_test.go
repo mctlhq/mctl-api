@@ -79,6 +79,8 @@ var recordedHints = map[string]hints{
 	"mctl_list_agent_executions":             {readOnly: true, destructive: false, idempotent: false},
 	"mctl_list_agent_versions":               {readOnly: true, destructive: false, idempotent: false},
 	"mctl_list_agents":                       {readOnly: true, destructive: false, idempotent: false},
+	"mctl_list_agent_assets":                 {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_agent_preflight":               {readOnly: true, destructive: false, idempotent: false},
 	"mctl_list_domains":                      {readOnly: true, destructive: false, idempotent: false},
 	"mctl_list_incidents":                    {readOnly: true, destructive: false, idempotent: false},
 	"mctl_list_operations":                   {readOnly: true, destructive: false, idempotent: false},
@@ -250,14 +252,14 @@ func TestReadOnlyToolsAreTheRecordedSet(t *testing.T) {
 		"mctl_get_ready_work_items", "mctl_get_resource_usage", "mctl_get_service_config", "mctl_get_service_logs",
 		"mctl_get_service_status", "mctl_get_tenant", "mctl_get_usage_summary", "mctl_get_work_item", "mctl_get_workflow_logs",
 		"mctl_get_workflow_status", "mctl_incident_summary", "mctl_inspect_lifecycle_conflict",
-		"mctl_list_agent_executions", "mctl_list_agent_versions", "mctl_list_agents", "mctl_list_commerce_invocations", "mctl_list_domains",
+		"mctl_list_agent_assets", "mctl_list_agent_executions", "mctl_list_agent_versions", "mctl_list_agents", "mctl_list_commerce_invocations", "mctl_list_domains",
 		"mctl_list_incidents", "mctl_list_operations",
 		"mctl_list_platform_skills", "mctl_list_previews", "mctl_list_recent_agent_runs",
 		"mctl_list_recent_operations", "mctl_list_repos", "mctl_list_services", "mctl_list_signup_requests", "mctl_list_tenant_skill_bindings",
 		"mctl_list_tenants", "mctl_list_work_item_execution_requests", "mctl_list_work_item_executions",
 		"mctl_list_work_item_snapshots", "mctl_list_workflows", "mctl_plan_epic_wave",
 		"mctl_read_platform_skill",
-		"mctl_resolve_agent", "mctl_whoami",
+		"mctl_get_agent_preflight", "mctl_resolve_agent", "mctl_whoami",
 	}
 	var got []string
 	for name, h := range recordedHints {
