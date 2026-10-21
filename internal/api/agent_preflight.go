@@ -141,7 +141,7 @@ func lifecycleStatus(kind, lc string) (status, detail string) {
 func checkBindingLifecycle(reg *registryFacts) PreflightCheck {
 	const id = "binding.lifecycle"
 	if reg.err != nil {
-		return check(id, statusUnknown, "registry error: "+reg.err.Error())
+		return check(id, statusUnknown, "registry read failed")
 	}
 	if reg.defLifecycle == "" && reg.profLifecycle == "" {
 		return check(id, statusUnknown, "no registry row and no release-intent registryLifecycle")
@@ -165,7 +165,7 @@ func checkBindingLifecycle(reg *registryFacts) PreflightCheck {
 func checkBindingCompatibility(reg *registryFacts) PreflightCheck {
 	const id = "binding.compatibility"
 	if reg.err != nil {
-		return check(id, statusUnknown, "registry error: "+reg.err.Error())
+		return check(id, statusUnknown, "registry read failed")
 	}
 	if reg.versionMismatch != "" {
 		return check(id, statusUnknown, reg.versionMismatch)

@@ -115,6 +115,11 @@
       "reason": "Admin-only read of one agent's registry entry: owner, every definition version with its lifecycle, and the active binding per environment. Read-only, but it exposes the agent registry's internals; not yet enabled on the shared portal, an owner decision."
     },
     {
+      "name": "mctl_get_agent_preflight",
+      "enabled": false,
+      "reason": "Admin-only read-only preflight of an agent and profile against the CI-equivalent platform rules. Exposes agent platform internals; not enabled on the shared portal."
+    },
+    {
       "name": "mctl_get_epic_status",
       "enabled": false,
       "reason": "Read-only roadmap epic status from the published RoadmapPublication (public mctlhq/.github data, no credentials). Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#333."
@@ -343,11 +348,6 @@
       "name": "mctl_remove_custom_domain",
       "enabled": true,
       "reason": "Removes a tenant custom domain, withdrawing routing for that hostname. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
-    },
-    {
-      "name": "mctl_preflight_agent",
-      "enabled": false,
-      "reason": "Admin-only read-only preflight of an agent and profile against the CI-equivalent platform rules. Exposes agent platform internals; not enabled on the shared portal."
     },
     {
       "name": "mctl_resolve_agent",

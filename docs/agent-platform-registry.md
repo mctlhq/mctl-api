@@ -332,7 +332,7 @@ platform skills, with reverse references (skill, tool, policyRef and
 model-policy task to profiles). Each source reports `ok` or `unavailable`;
 an unavailable source is `null`, never `[]`.
 
-`GET /api/v1/agents/{name}/preflight` (`mctl_preflight_agent`) takes the same
+`GET /api/v1/agents/{name}/preflight` (`mctl_get_agent_preflight`) takes the same
 selectors as `bindings/resolve` and reports nine checks, each `pass`, `fail`
 or `unknown` and naming the `validate-agent-platform.py` rule it mirrors. It
 resolves through the registry and falls back to gitops on not-found only

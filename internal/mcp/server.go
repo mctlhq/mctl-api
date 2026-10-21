@@ -338,7 +338,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListAgentVersions())
 	srv.AddTool(s.toolResolveAgent())
 	srv.AddTool(s.toolListAgentAssets())
-	srv.AddTool(s.toolPreflightAgent())
+	srv.AddTool(s.toolGetAgentPreflight())
 	srv.AddTool(s.toolPromoteAgent())
 	srv.AddTool(s.toolRollbackAgent())
 	srv.AddTool(s.toolListAgentExecutions())
@@ -3227,8 +3227,8 @@ func (s *Server) toolListAgentAssets() (mcplib.Tool, server.ToolHandlerFunc) {
 	return tool, handler
 }
 
-func (s *Server) toolPreflightAgent() (mcplib.Tool, server.ToolHandlerFunc) {
-	tool := mcplib.NewTool("mctl_preflight_agent",
+func (s *Server) toolGetAgentPreflight() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_agent_preflight",
 		mcplib.WithTitleAnnotation("Preflight Agent"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
