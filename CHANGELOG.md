@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.113.1](https://github.com/mctlhq/mctl-api/compare/4.113.0...4.113.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **api:** bound the receipt gate counter's mode label ([c8a5830](https://github.com/mctlhq/mctl-api/commit/c8a58309635f8d261c4bd7743515b885804b3048))
+* **deps:** build with Go 1.26.10 ([cd2b7e9](https://github.com/mctlhq/mctl-api/commit/cd2b7e91d9f754a1b53fe9d949876bcbeb7c0b56))
+* **deps:** build with Go 1.26.10 ([7290424](https://github.com/mctlhq/mctl-api/commit/7290424be789b9ee1ab7a97be7999770ece7421e))
+
 ## [4.113.0](https://github.com/mctlhq/mctl-api/compare/4.112.0...4.113.0) (2026-10-20)
 
 
