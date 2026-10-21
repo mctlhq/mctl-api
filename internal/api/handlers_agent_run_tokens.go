@@ -66,17 +66,39 @@ type agentRunTokenBody struct {
 // auditAgentRunTokenRefusal records a refused mint: the typed code and the
 // agent name only, in the shape auditActionApprovalRefusal already uses.
 func (h *Handlers) auditAgentRunTokenRefusal(r *http.Request, user *auth.User, agent, code string) {
+	h.auditAgentRunTokenRefusalBy(r, issuerOf(user), agent, code)
+}
+
+func (h *Handlers) auditAgentRunTokenRefusalBy(r *http.Request, iss agentRunIssuer, agent, code string) {
+	op := "agent_run_token.mint_refused"
+	if iss.Exchange {
+		op = "agent_run_token.exchange_refused"
+	}
 	h.logAudit(r, audit.Entry{
-		UserID:    user.ID,
-		Operation: "agent_run_token.mint_refused",
+		UserID:    iss.UserID,
+		Operation: op,
 		Parameters: map[string]string{
 			"agent":  agent,
 			"reason": code,
-			"actor":  principalOf(user),
+			"actor":  iss.Actor,
 		},
 		Status:    "failed",
 		RiskLevel: string(operations.RiskMedium),
 	})
+}
+
+// agentRunIssuer is who a run token is issued on the word of: the service
+// principal minting directly, or a verified agent pod exchanging its
+// ServiceAccount token (handlers_agent_run_token_exchange.go).
+type agentRunIssuer struct {
+	UserID      string
+	Actor       string
+	PrincipalID string
+	Exchange    bool
+}
+
+func issuerOf(user *auth.User) agentRunIssuer {
+	return agentRunIssuer{UserID: user.ID, Actor: principalOf(user), PrincipalID: user.PrincipalID()}
 }
 
 // agentRunTokenErrorCode maps a MintAgentRunToken store error to its status
@@ -127,38 +149,6 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.opts.AgentRegistry != nil {
-		known, err := h.opts.AgentRegistry.HasDefinition(r.Context(), body.Agent)
-		if err != nil {
-			slog.Error("agent run token: check agent registry", "error", err)
-			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeRegistryUnavailable)
-			writeErrorCode(w, http.StatusInternalServerError, artCodeRegistryUnavailable, "agent registry error", nil)
-			return
-		}
-		if !known {
-			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeAgentUnknown)
-			writeErrorCode(w, http.StatusBadRequest, artCodeAgentUnknown, "agent "+strconv.Quote(body.Agent)+" is not registered", nil)
-			return
-		}
-	}
-
-	// The scope's content is the server's; the caller only names one, and
-	// only one defined for this agent.
-	if body.Scope != "" {
-		scope, ok := auth.LookupAgentScope(body.Scope)
-		if !ok {
-			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeScopeUnknown)
-			writeErrorCode(w, http.StatusBadRequest, artCodeScopeUnknown, "scope "+strconv.Quote(body.Scope)+" is not defined", nil)
-			return
-		}
-		if !scope.AdmitsAgent(body.Agent) {
-			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeScopeNotForAgent)
-			writeErrorCode(w, http.StatusBadRequest, artCodeScopeNotForAgent,
-				"scope "+strconv.Quote(body.Scope)+" is not defined for agent "+strconv.Quote(body.Agent), nil)
-			return
-		}
-	}
-
 	ttl := workitems.DefaultAgentRunTokenTTL
 	if body.TTLSeconds != nil {
 		// Validated in raw seconds, before the multiplication below that can
@@ -173,6 +163,45 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 		ttl = time.Duration(*body.TTLSeconds) * time.Second
 	}
 
+	h.issueAgentRunToken(w, r, issuerOf(user), body, ttl, nil)
+}
+
+// issueAgentRunToken checks the agent and scope a run token is asked for,
+// mints it, audits it with extra, and writes the one response that carries
+// the plaintext token. Shared by the direct mint and the pod exchange.
+func (h *Handlers) issueAgentRunToken(w http.ResponseWriter, r *http.Request, iss agentRunIssuer, body agentRunTokenBody, ttl time.Duration, extra map[string]string) {
+	if h.opts.AgentRegistry != nil {
+		known, err := h.opts.AgentRegistry.HasDefinition(r.Context(), body.Agent)
+		if err != nil {
+			slog.Error("agent run token: check agent registry", "error", err)
+			h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodeRegistryUnavailable)
+			writeErrorCode(w, http.StatusInternalServerError, artCodeRegistryUnavailable, "agent registry error", nil)
+			return
+		}
+		if !known {
+			h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodeAgentUnknown)
+			writeErrorCode(w, http.StatusBadRequest, artCodeAgentUnknown, "agent "+strconv.Quote(body.Agent)+" is not registered", nil)
+			return
+		}
+	}
+
+	// The scope's content is the server's; the caller only names one, and
+	// only one defined for this agent.
+	if body.Scope != "" {
+		scope, ok := auth.LookupAgentScope(body.Scope)
+		if !ok {
+			h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodeScopeUnknown)
+			writeErrorCode(w, http.StatusBadRequest, artCodeScopeUnknown, "scope "+strconv.Quote(body.Scope)+" is not defined", nil)
+			return
+		}
+		if !scope.AdmitsAgent(body.Agent) {
+			h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodeScopeNotForAgent)
+			writeErrorCode(w, http.StatusBadRequest, artCodeScopeNotForAgent,
+				"scope "+strconv.Quote(body.Scope)+" is not defined for agent "+strconv.Quote(body.Agent), nil)
+			return
+		}
+	}
+
 	// The agent's own principal, resolved (and provisioned on first sight)
 	// through the same shared resolver every other identity uses, not a
 	// bespoke path. "" when the principal store is unavailable (phase 1
@@ -181,11 +210,11 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 	if err := auth.AttachPrincipal(r.Context(), h.opts.Principals, agentUser); err != nil {
 		switch {
 		case errors.Is(err, auth.ErrPrincipalDisabled):
-			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodePrincipalDisabled)
+			h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodePrincipalDisabled)
 			writeErrorCode(w, http.StatusForbidden, artCodePrincipalDisabled, "the agent principal is disabled", nil)
 			return
 		case errors.Is(err, auth.ErrIdentityRefused):
-			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeIdentityRefused)
+			h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodeIdentityRefused)
 			writeErrorCode(w, http.StatusForbidden, artCodeIdentityRefused, "the agent identity is refused", nil)
 			return
 		}
@@ -194,11 +223,11 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 
 	row, secret, err := h.opts.WorkItems.MintAgentRunToken(r.Context(), workitems.MintAgentRunTokenInput{
 		Agent: body.Agent, AgentPrincipalID: agentUser.PrincipalID(), ExecutionID: body.ExecutionID,
-		Permissions: body.Permissions, Scope: body.Scope, TTL: ttl, IssuedByPrincipalID: user.PrincipalID(),
+		Permissions: body.Permissions, Scope: body.Scope, TTL: ttl, IssuedByPrincipalID: iss.PrincipalID,
 	})
 	if err != nil {
 		code, status := agentRunTokenErrorCode(err)
-		h.auditAgentRunTokenRefusal(r, user, body.Agent, code)
+		h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, code)
 		if status == http.StatusInternalServerError {
 			slog.Error("agent run token: mint failed", "agent", body.Agent, "execution_id", body.ExecutionID, "error", err)
 			writeErrorCode(w, status, code, "agent run token mint failed", nil)
@@ -208,23 +237,31 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	params := map[string]string{
+		"token_id":               row.ID,
+		"agent":                  row.Agent,
+		"agent_principal_id":     row.AgentPrincipalID,
+		"execution_id":           row.ExecutionID,
+		"work_item_id":           row.WorkItemID,
+		"ttl_seconds":            strconv.Itoa(int(ttl.Seconds())),
+		"expires_at":             row.ExpiresAt.Format(time.RFC3339),
+		"permissions":            strings.Join(row.Permissions, ","),
+		"scope":                  row.Scope,
+		"issued_by_principal_id": row.IssuedByPrincipalID,
+	}
+	for k, v := range extra {
+		params[k] = v
+	}
+	op := "agent_run_token.mint"
+	if iss.Exchange {
+		op = "agent_run_token.exchange"
+	}
 	h.logAudit(r, audit.Entry{
-		UserID:    user.ID,
-		Operation: "agent_run_token.mint",
-		Parameters: map[string]string{
-			"token_id":               row.ID,
-			"agent":                  row.Agent,
-			"agent_principal_id":     row.AgentPrincipalID,
-			"execution_id":           row.ExecutionID,
-			"work_item_id":           row.WorkItemID,
-			"ttl_seconds":            strconv.Itoa(int(ttl.Seconds())),
-			"expires_at":             row.ExpiresAt.Format(time.RFC3339),
-			"permissions":            strings.Join(row.Permissions, ","),
-			"scope":                  row.Scope,
-			"issued_by_principal_id": row.IssuedByPrincipalID,
-		},
-		Status:    "succeeded",
-		RiskLevel: string(operations.RiskMedium),
+		UserID:     iss.UserID,
+		Operation:  op,
+		Parameters: params,
+		Status:     "succeeded",
+		RiskLevel:  string(operations.RiskMedium),
 	})
 
 	// The plaintext token appears here and nowhere else: never in the audit

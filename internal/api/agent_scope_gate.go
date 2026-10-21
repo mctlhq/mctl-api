@@ -36,6 +36,11 @@ func (h *Handlers) agentScopeGate(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+			// Every run may revoke its own token, whatever its scope.
+			if r.Method == http.MethodPost && r.URL.Path == "/api/v1"+agentRunTokenSelfRevokeRoute {
+				next.ServeHTTP(w, r)
+				return
+			}
 			scope, ok := user.AgentScope()
 			// A scope name the server no longer defines admits nothing.
 			allowed := ok && scope.AllowsRoute(r.Method, r.URL.Path, user.WorkItemID())

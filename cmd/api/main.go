@@ -896,6 +896,30 @@ func main() {
 		quotaReader = qc
 	}
 
+	// Agent run token exchange (mctlhq/mctl-agents#737): off unless
+	// AGENT_RUN_EXCHANGE_AUDIENCE names the audience the agent pods'
+	// projected tokens carry. Which template's runs become which agent and
+	// scope is the server's, not configuration.
+	var agentRunBinder mctlapi.AgentRunBinder
+	if aud := os.Getenv("AGENT_RUN_EXCHANGE_AUDIENCE"); aud != "" {
+		sas := map[string]bool{}
+		for _, sa := range strings.Split(envOr("AGENT_RUN_EXCHANGE_SERVICE_ACCOUNTS", "mctl-agents-runner"), ",") {
+			if sa = strings.TrimSpace(sa); sa != "" {
+				sas[sa] = true
+			}
+		}
+		b, bErr := k8s.NewAgentRunBinder(aud, envOr("AGENT_RUN_EXCHANGE_NAMESPACE", "argo-workflows"), sas,
+			map[string]k8s.AgentRunTemplate{
+				"mctl-agents-investigate": {Agent: "issue-investigator", Scope: auth.AgentScopeInvestigate},
+			})
+		if bErr != nil {
+			slog.Warn("agent run token exchange unavailable", "error", bErr)
+		} else {
+			agentRunBinder = b
+			slog.Info("agent run token exchange enabled", "audience", aud)
+		}
+	}
+
 	// Loki log client (optional — enabled when LOKI_URL is set).
 	var logQuerier mctlapi.LogQuerier
 	if lokiURL := os.Getenv("LOKI_URL"); lokiURL != "" {
@@ -1033,6 +1057,7 @@ func main() {
 		TemporalClient:                 devLoopClient,
 		HumanInputLedger:               humanInputLedger,
 		WorkItems:                      workItemsStore,
+		AgentRunBinder:                 agentRunBinder,
 		SurfaceIdentities:              surfaceIDs,
 		TenantResolver:                 gitReader,
 		Principals:                     principalResolver,
