@@ -468,10 +468,21 @@ func (h *Handlers) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
 	previousStatus := existing.Status
-	now := time.Now().UTC()
-	existing.Status = alerts.StatusResolved
-	existing.ResolvedAt = &now
-	existing.ResolvedBy = principalOf(user)
+	if previousStatus == alerts.StatusResolved {
+		// Already resolved: the first resolver and time stand. A repeat
+		// with nothing to add changes nothing and records nothing; one
+		// with a reason only appends it, and is audited as that.
+		if body.Reason == "" {
+			labelStoredTrace(existing, traceNotDerived)
+			writeJSON(w, http.StatusOK, existing)
+			return
+		}
+	} else {
+		now := time.Now().UTC()
+		existing.Status = alerts.StatusResolved
+		existing.ResolvedAt = &now
+		existing.ResolvedBy = principalOf(user)
+	}
 	if body.Reason != "" {
 		existing.Analysis = existing.Analysis + "\n\nResolution: " + body.Reason
 	}

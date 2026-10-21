@@ -1,17 +1,28 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/audit"
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 // The admin test caller of serveAsAdmin, as principalOf renders it.
 const incidentAuditActor = "oidc:tester"
+
+func serveAs(router http.Handler, userID, method, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	req = req.WithContext(auth.WithUser(req.Context(), &auth.User{ID: userID, Groups: []string{"admins"}}))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
 
 func incidentAuditRouter(h *Handlers) http.Handler {
 	r := chi.NewRouter()
@@ -92,6 +103,39 @@ func TestIncidentMutations_AuditSuccessAndRecordResolver(t *testing.T) {
 		}
 	})
 
+	// Resolving again neither moves the resolver nor the time: the second
+	// caller is someone else, and the record must still name the first.
+	t.Run("re-resolve-keeps-first-resolver", func(t *testing.T) {
+		first, _ := store.Get(context.Background(), "audit-res-0001")
+		rowsBefore := len(successRows(log, "incident-resolve"))
+
+		rec := serveAs(router, "someone-else", http.MethodPost, "/api/v1/incidents/audit-res-0001/resolve", ``)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		if got := len(successRows(log, "incident-resolve")); got != rowsBefore {
+			t.Fatalf("no-op re-resolve wrote %d audit rows", got-rowsBefore)
+		}
+
+		rec = serveAs(router, "someone-else", http.MethodPost, "/api/v1/incidents/audit-res-0001/resolve", `{"reason":"more"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		a, _ := store.Get(context.Background(), "audit-res-0001")
+		if a.ResolvedBy != incidentAuditActor || a.ResolvedAt == nil || !a.ResolvedAt.Equal(*first.ResolvedAt) {
+			t.Fatalf("re-resolve moved the resolution: resolved_by=%q resolved_at=%v, first %v",
+				a.ResolvedBy, a.ResolvedAt, first.ResolvedAt)
+		}
+		rows := successRows(log, "incident-resolve")
+		if len(rows) != rowsBefore+1 {
+			t.Fatalf("re-resolve with a reason: %d new rows, want 1", len(rows)-rowsBefore)
+		}
+		last := rows[len(rows)-1].Parameters
+		if last["previous_status"] != alerts.StatusResolved || last["actor"] != "oidc:someone-else" {
+			t.Fatalf("re-resolve row: %v", last)
+		}
+	})
+
 	t.Run("patch", func(t *testing.T) {
 		rec := serveAsAdmin(router, http.MethodPatch, "/api/v1/incidents/audit-pat-0001", `{"analysis":"x"}`)
 		if rec.Code != http.StatusOK {
@@ -119,6 +163,7 @@ func TestIncidentMutations_AuditSuccessAndRecordResolver(t *testing.T) {
 	})
 
 	t.Run("resolve-by-fingerprint", func(t *testing.T) {
+		before := len(successRows(log, "incident-resolve"))
 		// seedIncidents gives the i-th id the fingerprint lookup-fp-<i>.
 		rec := serveAsAdmin(router, http.MethodPost, "/api/v1/incidents/resolve-by-fingerprint",
 			`{"tenant":"admins","fingerprint":"lookup-fp-4"}`)
@@ -126,16 +171,17 @@ func TestIncidentMutations_AuditSuccessAndRecordResolver(t *testing.T) {
 			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 		}
 		rows := successRows(log, "incident-resolve")
-		if len(rows) != 2 {
-			t.Fatalf("%d incident-resolve rows, want 2 (resolve + by fingerprint)", len(rows))
+		if len(rows) != before+1 {
+			t.Fatalf("resolve by fingerprint wrote %d incident-resolve rows, want 1", len(rows)-before)
 		}
+		last := rows[len(rows)-1]
 		want := map[string]string{
 			"incident_id": "audit-fpr-0001", "tenant": "admins", "status": alerts.StatusResolved,
 			"fingerprint": "lookup-fp-4", "actor": incidentAuditActor,
 		}
 		for k, v := range want {
-			if rows[1].Parameters[k] != v {
-				t.Fatalf("parameter %s = %q, want %q (all: %v)", k, rows[1].Parameters[k], v, rows[1].Parameters)
+			if last.Parameters[k] != v {
+				t.Fatalf("parameter %s = %q, want %q (all: %v)", k, last.Parameters[k], v, last.Parameters)
 			}
 		}
 		if a, _ := store.Get(context.Background(), "audit-fpr-0001"); a.ResolvedBy != incidentAuditActor {
