@@ -597,6 +597,10 @@ func NewRouter(opts Options) http.Handler {
 			// win over the dynamic GET .../bindings/{revision} below, same
 			// static-beats-dynamic precedence as /agents/executions above.
 			r.Get("/agents/{name}/bindings/resolve", h.ResolveBinding)
+			// Read-only asset index and CI-equivalent preflight (mctl-api#748).
+			// Static segments win over {name}; no eligibility semantics.
+			r.Get("/agent-assets", h.ListAgentAssets)
+			r.Get("/agents/{name}/preflight", h.PreflightAgent)
 			r.Post("/agents/{name}/bindings/rollback", h.RollbackBinding)
 			r.Get("/agents/{name}/bindings/{revision}", h.GetBinding)
 

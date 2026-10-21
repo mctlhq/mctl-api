@@ -230,6 +230,11 @@
       "reason": "Durable execution records of DevLoop runs: agent version, workflow id, result. Pipeline metadata; tenant-scoped upstream."
     },
     {
+      "name": "mctl_list_agent_assets",
+      "enabled": false,
+      "reason": "Admin-only read-only index of agent registry, gitops profiles, release intents, policy catalogs and skills with reverse references. Exposes agent platform internals; not enabled on the shared portal."
+    },
+    {
       "name": "mctl_list_agent_versions",
       "enabled": true,
       "reason": "Published versions of an mctl-agents agent with manifest, git SHA, image reference and prompt hash; release metadata, no tenant data."
@@ -338,6 +343,11 @@
       "name": "mctl_remove_custom_domain",
       "enabled": true,
       "reason": "Removes a tenant custom domain, withdrawing routing for that hostname. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
+    },
+    {
+      "name": "mctl_preflight_agent",
+      "enabled": false,
+      "reason": "Admin-only read-only preflight of an agent and profile against the CI-equivalent platform rules. Exposes agent platform internals; not enabled on the shared portal."
     },
     {
       "name": "mctl_resolve_agent",

@@ -324,6 +324,25 @@ v1 `/resolve?environment=` path and the v1alpha2 `/bindings/resolve` path;
 explicit-pin arguments. A call passing only `agent_name` + `environment`
 (the pre-existing shape) is byte-identical to before this argument existed.
 
+### Read-only asset index and preflight (mctl-api#748)
+
+`GET /api/v1/agent-assets` (`mctl_list_agent_assets`) merges the registry
+catalog, gitops execution profiles, release intents, policy catalogs and
+platform skills, with reverse references (skill, tool, policyRef and
+model-policy task to profiles). Each source reports `ok` or `unavailable`;
+an unavailable source is `null`, never `[]`.
+
+`GET /api/v1/agents/{name}/preflight` (`mctl_preflight_agent`) takes the same
+selectors as `bindings/resolve` and reports nine checks, each `pass`, `fail`
+or `unknown` and naming the `validate-agent-platform.py` rule it mirrors. It
+resolves through the registry and falls back to gitops on not-found only
+(`selection`: `release-intent`, `explicit` or `naming-convention`). The
+verdict is `fail` if any check fails, else `unknown` if any is unknown, else
+`pass`.
+
+Both are admin-only and read-only, and carry no eligibility semantics: the
+Python validators in CI stay authoritative.
+
 All seven new tools default to `"enabled": false` in
 `docs/portal-allowlist.json`, matching `mctl_create_agent` and the rest of
 the v1 registry family — the portal does not expose any registry mutation

@@ -1288,7 +1288,10 @@ func (r *Reader) ComponentSourceRepo(team, component string) (string, error) {
 func (r *Reader) ListPlatformSkills() ([]PlatformSkill, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.listPlatformSkillsLocked()
+}
 
+func (r *Reader) listPlatformSkillsLocked() ([]PlatformSkill, error) {
 	dir := filepath.Join(r.localPath, "platform-gitops", "platform-skills", "catalog")
 	entries, err := os.ReadDir(dir)
 	if err != nil {

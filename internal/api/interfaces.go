@@ -59,6 +59,10 @@ type GitReader interface {
 	GetPlatformPolicy() (*gitops.PlatformSkillPolicy, error)
 	ListHumanInputRequests() ([]gitops.HumanInputRequestFile, error)
 	ImageNamePolicy() (*gitops.ImageNamePolicy, error)
+	// ReadAgentPlatformSnapshot reads the agent-platform profiles, policy,
+	// release intents and platform skills as one checkout. The error is the
+	// checkout being unavailable; per-source failures are in the snapshot.
+	ReadAgentPlatformSnapshot() (*gitops.AgentPlatformSnapshot, error)
 }
 
 // ArgoStatusClient is the subset of argocd.Client used by API handlers.

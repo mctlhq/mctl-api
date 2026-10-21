@@ -163,6 +163,7 @@ var ungovernedAgentTools = toolSet(
 	"mctl_whoami",
 	"mctl_incident_summary",
 	"mctl_resolve_agent",
+	"mctl_preflight_agent",
 	"mctl_resolve_incident",
 	"mctl_acknowledge_incident",
 )
