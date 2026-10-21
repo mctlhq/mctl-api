@@ -79,6 +79,7 @@ ALTER TABLE alerts ADD COLUMN IF NOT EXISTS occurrence_count INTEGER NOT NULL DE
 ALTER TABLE alerts ADD COLUMN IF NOT EXISTS last_seen_at     TIMESTAMPTZ;
 ALTER TABLE alerts ADD COLUMN IF NOT EXISTS trace_id         TEXT NOT NULL DEFAULT '';
 ALTER TABLE alerts ADD COLUMN IF NOT EXISTS workflow_name    TEXT NOT NULL DEFAULT '';
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS resolved_by      TEXT NOT NULL DEFAULT '';
 
 DROP INDEX IF EXISTS alerts_fingerprint_open;
 CREATE UNIQUE INDEX IF NOT EXISTS alerts_tenant_fingerprint_open
@@ -100,14 +101,14 @@ CREATE INDEX IF NOT EXISTS alert_evidence_alert_id ON alert_evidence (alert_id);
 const alertColumns = `id, source, type, tenant, service, summary, severity, status,
 		 analysis, proposed_fix, pr_url, pr_number, confidence,
 		 created_at, updated_at, resolved_at, acknowledged_by, acknowledged_at,
-		 fingerprint, occurrence_count, last_seen_at, trace_id, workflow_name`
+		 fingerprint, occurrence_count, last_seen_at, trace_id, workflow_name, resolved_by`
 
 func scanAlert(row pgx.Row, a *Alert) error {
 	if err := row.Scan(
 		&a.ID, &a.Source, &a.Type, &a.Tenant, &a.Service, &a.Summary, &a.Severity, &a.Status,
 		&a.Analysis, &a.ProposedFix, &a.PRURL, &a.PRNumber, &a.Confidence,
 		&a.CreatedAt, &a.UpdatedAt, &a.ResolvedAt, &a.AcknowledgedBy, &a.AcknowledgedAt,
-		&a.Fingerprint, &a.OccurrenceCount, &a.LastSeenAt, &a.TraceID, &a.WorkflowName,
+		&a.Fingerprint, &a.OccurrenceCount, &a.LastSeenAt, &a.TraceID, &a.WorkflowName, &a.ResolvedBy,
 	); err != nil {
 		return err
 	}
@@ -229,11 +230,12 @@ func (s *Store) Update(ctx context.Context, a *Alert) error {
 	_, err := s.pool.Exec(ctx,
 		`UPDATE alerts SET status=$2, analysis=$3, proposed_fix=$4, pr_url=$5, pr_number=$6,
 		 confidence=$7, updated_at=$8, resolved_at=$9, acknowledged_by=$10, acknowledged_at=$11,
-		 trace_id=CASE WHEN $12::text <> '' THEN $12::text ELSE trace_id END
+		 trace_id=CASE WHEN $12::text <> '' THEN $12::text ELSE trace_id END,
+		 resolved_by=$13
 		 WHERE id=$1`,
 		a.ID, a.Status, a.Analysis, a.ProposedFix, a.PRURL, a.PRNumber,
 		a.Confidence, a.UpdatedAt, a.ResolvedAt, a.AcknowledgedBy, a.AcknowledgedAt,
-		a.TraceID,
+		a.TraceID, a.ResolvedBy,
 	)
 	if err != nil {
 		return fmt.Errorf("alerts store: update: %w", err)
@@ -330,18 +332,25 @@ func (s *Store) GetByPrefix(ctx context.Context, prefix string) (*Alert, error) 
 }
 
 // ResolveByFingerprint resolves the open alert matching tenant+fingerprint,
-// if one exists. Zero rows affected (no matching open alert) is expected and
-// not an error — it just means nothing needed resolving.
-func (s *Store) ResolveByFingerprint(ctx context.Context, tenant, fingerprint string) (bool, error) {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE alerts SET status='resolved', resolved_at=now(), updated_at=now()
-		 WHERE tenant=$1 AND fingerprint=$2 AND status NOT IN ('resolved','suppressed')`,
-		tenant, fingerprint,
+// if one exists, recording resolvedBy as its resolver. It returns the ids it
+// resolved; none (no matching open alert) is expected and not an error, it
+// just means nothing needed resolving. The partial unique index keeps that
+// to at most one id today, but the caller audits whatever comes back.
+func (s *Store) ResolveByFingerprint(ctx context.Context, tenant, fingerprint, resolvedBy string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`UPDATE alerts SET status='resolved', resolved_at=now(), updated_at=now(), resolved_by=$3
+		 WHERE tenant=$1 AND fingerprint=$2 AND status NOT IN ('resolved','suppressed')
+		 RETURNING id`,
+		tenant, fingerprint, resolvedBy,
 	)
 	if err != nil {
-		return false, fmt.Errorf("alerts store: resolve by fingerprint: %w", err)
+		return nil, fmt.Errorf("alerts store: resolve by fingerprint: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("alerts store: resolve by fingerprint: %w", err)
+	}
+	return ids, nil
 }
 
 func (s *Store) getEvidence(ctx context.Context, alertID string) ([]Evidence, error) {
