@@ -30,7 +30,7 @@ func apReader(t *testing.T, synced bool) (*Reader, string) {
 
 func apWrite(t *testing.T, path, content string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -67,7 +67,7 @@ func TestAgentPlatform_SymlinkAndUnsynced(t *testing.T) {
 	r, root := apReader(t, true)
 	target := filepath.Join(t.TempDir(), "p.yaml")
 	apWrite(t, target, apProfile)
-	if err := os.MkdirAll(filepath.Join(root, "execution-profiles", "a"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "execution-profiles", "a"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, filepath.Join(root, "execution-profiles", "a", "profile.yaml")); err != nil {

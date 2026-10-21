@@ -343,12 +343,13 @@ func checkCapabilityDiscovery(spec *gitops.ExecutionProfileSpec, u func(string) 
 	if d.Enabled == nil {
 		return check(id, statusUnknown, "spec.capabilityDiscovery.enabled absent")
 	}
-	var bad []string
+	var bad, incomplete []string
 	aliases := map[string]bool{}
 	ids := map[string]bool{}
 	for i, p := range d.Providers {
 		if p.Alias == "" || p.ID == "" || p.Type == "" {
-			return check(id, statusUnknown, fmt.Sprintf("spec.capabilityDiscovery.providers[%d] needs type, id and alias", i))
+			incomplete = append(incomplete, fmt.Sprintf("spec.capabilityDiscovery.providers[%d] needs type, id and alias", i))
+			continue
 		}
 		if aliases[p.Alias] {
 			bad = append(bad, fmt.Sprintf("providers[%d]: duplicate alias %q", i, p.Alias))
@@ -368,6 +369,9 @@ func checkCapabilityDiscovery(spec *gitops.ExecutionProfileSpec, u func(string) 
 	}
 	if len(bad) > 0 {
 		return check(id, statusFail, strings.Join(bad, "; "))
+	}
+	if len(incomplete) > 0 {
+		return check(id, statusUnknown, strings.Join(incomplete, "; "))
 	}
 	return check(id, statusPass, "capability discovery rules satisfied")
 }

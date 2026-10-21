@@ -295,3 +295,40 @@ func TestListAgentAssets_RefsAndUnavailableSources(t *testing.T) {
 		t.Errorf("sources: %+v", sources)
 	}
 }
+
+// A real violation must not be masked by a later incomplete provider entry.
+func TestCapabilityDiscovery_FailNotMaskedByIncomplete(t *testing.T) {
+	s := goodSpec()
+	raw := `{"enabled": false, "providers": [
+		{"type": "mcp", "id": "mctl-api", "alias": "wrong"},
+		{"type": "mcp", "id": "other"}]}`
+	var d gitops.CapabilityDiscoverySpec
+	if err := json.Unmarshal([]byte(raw), &d); err != nil {
+		t.Fatal(err)
+	}
+	s.CapabilityDiscovery = &d
+	checks := evaluatePreflight(&s, nil, nil, errors.New("no policy"), nil)
+	if got := statusOf(checks, "profile.capability_discovery"); got != statusFail {
+		t.Fatalf("status = %s, want fail", got)
+	}
+}
+
+// Pins the json tag contract for registry spec_json.
+func TestExecutionProfileSpec_RegistryJSONContract(t *testing.T) {
+	raw := `{"version":"1.2.3","modelPolicyRef":{"task":"service_agent"},
+		"policyRef":"pr-shepherd","budgetUsd":10,"timeoutSeconds":600,
+		"runtime":{"sandbox":{"backend":"argo","clusterWorkflowTemplate":"cwft-a","approved":true}},
+		"approval":{"requiredBefore":["merge"]},
+		"capabilityDiscovery":{"enabled":true,"providers":[{"type":"mcp","id":"mctl-api","alias":"mctl"}]}}`
+	var s gitops.ExecutionProfileSpec
+	if err := json.Unmarshal([]byte(raw), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Version != "1.2.3" || s.ModelPolicyRef.Task != "service_agent" || s.PolicyRef != "pr-shepherd" ||
+		s.BudgetUsd == nil || *s.BudgetUsd != 10 || s.TimeoutSeconds == nil ||
+		s.Runtime.Sandbox.ClusterWorkflowTemplate != "cwft-a" || s.Runtime.Sandbox.Approved == nil ||
+		len(s.Approval.RequiredBefore) != 1 || s.CapabilityDiscovery == nil ||
+		len(s.CapabilityDiscovery.Providers) != 1 || s.CapabilityDiscovery.Providers[0].Alias != "mctl" {
+		t.Fatalf("registry JSON did not decode into spec: %+v", s)
+	}
+}

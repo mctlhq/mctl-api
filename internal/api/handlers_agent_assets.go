@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sort"
 
@@ -95,7 +96,8 @@ func buildRefs(profiles []gitops.AgentPlatformProfile) map[string]any {
 	policyRefs := map[string][]string{}
 	tasks := map[string][]string{}
 	providers := map[string][]string{}
-	for _, p := range profiles {
+	for i := range profiles {
+		p := &profiles[i]
 		pr := profileRefs{
 			Tools:               append([]string{}, p.Spec.Tools...),
 			Skills:              append([]string{}, p.Spec.Skills...),
@@ -154,7 +156,8 @@ func (h *Handlers) ListAgentAssets(w http.ResponseWriter, r *http.Request) {
 	if h.opts.AgentRegistry == nil {
 		sources["registry"] = unavailableSource("agent registry not configured")
 	} else if catalog, err := h.opts.AgentRegistry.ListCatalog(r.Context()); err != nil {
-		sources["registry"] = unavailableSource(err.Error())
+		slog.Error("failed to list agent catalog", "error", err)
+		sources["registry"] = unavailableSource("agent registry read failed")
 	} else {
 		if catalog == nil {
 			catalog = []agentregistry.CatalogSummary{}
@@ -256,8 +259,9 @@ func (h *Handlers) PreflightAgent(w http.ResponseWriter, r *http.Request) {
 		case isRegistryNotFound(err):
 			// fall through to gitops
 		default:
+			slog.Error("failed to resolve agent from registry", "agent", agent, "error", err)
 			facts.err = err
-			resp["registry_error"] = err.Error()
+			resp["registry_error"] = "agent registry read failed"
 		}
 	}
 
@@ -327,11 +331,12 @@ func (h *Handlers) PreflightAgent(w http.ResponseWriter, r *http.Request) {
 	checks := evaluatePreflight(spec, specErr, policy, policyErr, facts)
 
 	sources := map[string]sourceStatus{}
-	if h.opts.AgentRegistry == nil {
+	switch {
+	case h.opts.AgentRegistry == nil:
 		sources["registry"] = unavailableSource("agent registry not configured")
-	} else if facts.err != nil {
-		sources["registry"] = unavailableSource(facts.err.Error())
-	} else {
+	case facts.err != nil:
+		sources["registry"] = unavailableSource("agent registry read failed")
+	default:
 		sources["registry"] = okSource()
 	}
 	if snapErr != nil {
