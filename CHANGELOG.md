@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.116.0](https://github.com/mctlhq/mctl-api/compare/4.115.1...4.116.0) (2026-10-22)
+
+
+### Features
+
+* **auth:** exchange an agent pod's ServiceAccount token for a run token ([1c52a5d](https://github.com/mctlhq/mctl-api/commit/1c52a5d89466cbe392e767454e97d99b1bd698c7))
+* **auth:** server-defined scopes for agent run tokens ([643a67f](https://github.com/mctlhq/mctl-api/commit/643a67fbd6a929d0f735427b62115f19667458f7))
+
+
+### Bug Fixes
+
+* **api:** bound and quiet the unauthenticated run token exchange ([0a2d0d1](https://github.com/mctlhq/mctl-api/commit/0a2d0d1722b95d7077b0c800cc42e71686091d18))
+
 ## [4.115.1](https://github.com/mctlhq/mctl-api/compare/4.115.0...4.115.1) (2026-10-21)
 
 
