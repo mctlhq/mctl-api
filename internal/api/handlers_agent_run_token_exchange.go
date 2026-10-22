@@ -34,6 +34,11 @@ const MaxExchangedAgentRunTokenTTL = 2 * time.Hour
 // token, rather than one that expires mid-call.
 const minExchangedAgentRunTokenTTL = time.Minute
 
+// agentRunBindTimeout bounds the cluster reads one exchange makes. The route
+// is unauthenticated and sits outside the authenticated group's timeout, so
+// a wedged API server must not let its requests pile up.
+const agentRunBindTimeout = 10 * time.Second
+
 // agentRunTokenSelfRevokeRoute is relative to /api/v1.
 const agentRunTokenSelfRevokeRoute = "/agent-run-tokens/self/revoke"
 
@@ -61,15 +66,23 @@ func (h *Handlers) ExchangeAgentRunToken(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	binding, err := h.opts.AgentRunBinder.Bind(r.Context(), token)
+	ctx, cancel := context.WithTimeout(r.Context(), agentRunBindTimeout)
+	defer cancel()
+	binding, err := h.opts.AgentRunBinder.Bind(ctx, token)
 	var refusal *k8s.BindingRefusedError
 	switch {
 	case errors.As(err, &refusal):
-		h.auditAgentRunTokenRefusalBy(r, agentRunIssuer{UserID: "k8s:unbound", Actor: "k8s:unbound", Exchange: true}, "", refusal.Reason)
 		if refusal.Unauthenticated {
+			// No identity was established, so a row would record nothing
+			// but "someone sent a bad token", and would let any caller grow
+			// the audit table. Logged instead.
+			slog.Info("agent run token exchange: token not authenticated", "reason", refusal.Reason, "remote", r.RemoteAddr)
 			writeErrorCode(w, http.StatusUnauthorized, artCodeExchangeRefused, "the ServiceAccount token was not accepted", nil)
 			return
 		}
+		// A verified ServiceAccount token that binds to no run is the
+		// security event worth keeping.
+		h.auditAgentRunTokenRefusalBy(r, agentRunIssuer{UserID: "k8s:unbound", Actor: "k8s:unbound", Exchange: true}, "", refusal.Reason)
 		writeErrorCode(w, http.StatusForbidden, artCodeExchangeRefused, "the token does not bind to an agent run: "+refusal.Reason, nil)
 		return
 	case err != nil:

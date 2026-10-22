@@ -20,11 +20,19 @@ package k8s
 // (label + owner reference), and the Workflow names the agent, the scope
 // and the execution (its ClusterWorkflowTemplate and execution_id
 // parameter). Every link is read from the Kubernetes API.
+//
+// One link is trusted rather than read back: execution_id is the argument
+// the Workflow was submitted with. Investigate executions run on Temporal,
+// so no execution row names the Argo Workflow to cross-check against.
+// Forging it takes creating a Workflow from an allowed template as an
+// allowed ServiceAccount in Namespace, which is platform access already,
+// and the token it yields is bound to that execution's work item only.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -49,7 +57,20 @@ const (
 	workflowLabel = "workflows.argoproj.io/workflow"
 	// executionParam is the Workflow parameter carrying the run's execution.
 	executionParam = "execution_id"
+	// clusterTimeout bounds every read Bind makes. The exchange route is
+	// unauthenticated, so a slow API server must not hold its requests.
+	clusterTimeout = 10 * time.Second
 )
+
+// apiServerAudiences are the audiences ordinary pod tokens carry. An
+// exchange audience equal to one of them would accept any token of an
+// allowed ServiceAccount, not only the projected one meant for mctl-api.
+var apiServerAudiences = map[string]bool{
+	"https://kubernetes.default.svc":               true,
+	"https://kubernetes.default.svc.cluster.local": true,
+	"kubernetes.default.svc":                       true,
+	"api":                                          true,
+}
 
 var workflowGVR = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "workflows"}
 
@@ -106,6 +127,9 @@ type AgentRunBinder struct {
 // NewAgentRunBinder builds a binder on the in-cluster config (KUBECONFIG
 // for local development).
 func NewAgentRunBinder(audience, namespace string, serviceAccounts map[string]bool, templates map[string]AgentRunTemplate) (*AgentRunBinder, error) {
+	if err := checkAudience(audience); err != nil {
+		return nil, err
+	}
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		cfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
@@ -116,6 +140,7 @@ func NewAgentRunBinder(audience, namespace string, serviceAccounts map[string]bo
 			return nil, fmt.Errorf("k8s agent run binder: %w", err)
 		}
 	}
+	cfg.Timeout = clusterTimeout
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("k8s agent run binder: %w", err)
@@ -137,11 +162,11 @@ func newAgentRunBinder(cs kubernetes.Interface, dyn dynamic.Interface, audience,
 // Bind verifies a projected ServiceAccount token and returns the agent run
 // of the pod it was issued to.
 func (b *AgentRunBinder) Bind(ctx context.Context, token string) (*AgentRunBinding, error) {
-	if b.Audience == "" {
-		// An audience-less review accepts the API server's own audience,
-		// i.e. any ordinary pod token.
-		return nil, errors.New("k8s agent run binder: no audience configured")
+	if err := checkAudience(b.Audience); err != nil {
+		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, clusterTimeout)
+	defer cancel()
 	review, err := b.client.AuthenticationV1().TokenReviews().Create(ctx, &authnv1.TokenReview{
 		Spec: authnv1.TokenReviewSpec{Token: token, Audiences: []string{b.Audience}},
 	}, metav1.CreateOptions{})
@@ -153,7 +178,7 @@ func (b *AgentRunBinder) Bind(ctx context.Context, token string) (*AgentRunBindi
 	if !st.Authenticated {
 		return nil, &BindingRefusedError{Reason: "token_not_authenticated", Unauthenticated: true}
 	}
-	if !contains(st.Audiences, b.Audience) {
+	if !slices.Contains(st.Audiences, b.Audience) {
 		return nil, &BindingRefusedError{Reason: "token_audience", Unauthenticated: true}
 	}
 	ns, sa, ok := parseServiceAccount(st.User.Username)
@@ -195,7 +220,7 @@ func (b *AgentRunBinder) Bind(ctx context.Context, token string) (*AgentRunBindi
 	}
 	// The label alone is the pod's own claim; the controller owner
 	// reference ties it to this very Workflow object.
-	if !ownedBy(pod.OwnerReferences, "Workflow", wfName, string(wf.GetUID())) {
+	if !ownedBy(pod.OwnerReferences, workflowGVR.GroupVersion().String(), "Workflow", wfName, string(wf.GetUID())) {
 		return nil, refused("pod_not_owned_by_workflow")
 	}
 	if phase, _, _ := unstructured.NestedString(wf.Object, "status", "phase"); phase != "Running" {
@@ -219,6 +244,18 @@ func (b *AgentRunBinder) Bind(ctx context.Context, token string) (*AgentRunBindi
 	}, nil
 }
 
+func checkAudience(audience string) error {
+	switch {
+	case audience == "":
+		// An audience-less review accepts the API server's own audience,
+		// i.e. any ordinary pod token.
+		return errors.New("k8s agent run binder: no audience configured")
+	case apiServerAudiences[audience]:
+		return fmt.Errorf("k8s agent run binder: audience %q is the API server's own, which every pod token carries", audience)
+	}
+	return nil
+}
+
 func parseServiceAccount(username string) (ns, name string, ok bool) {
 	parts := strings.Split(username, ":")
 	if len(parts) != 4 || parts[0] != "system" || parts[1] != "serviceaccount" || parts[2] == "" || parts[3] == "" {
@@ -234,18 +271,13 @@ func single(v authnv1.ExtraValue) string {
 	return v[0]
 }
 
-func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
+func ownedBy(refs []metav1.OwnerReference, apiVersion, kind, name, uid string) bool {
+	if uid == "" {
+		return false
 	}
-	return false
-}
-
-func ownedBy(refs []metav1.OwnerReference, kind, name, uid string) bool {
 	for _, ref := range refs {
-		if ref.Controller != nil && *ref.Controller && ref.Kind == kind && ref.Name == name && string(ref.UID) == uid && uid != "" {
+		if ref.Controller != nil && *ref.Controller && ref.APIVersion == apiVersion && ref.Kind == kind &&
+			ref.Name == name && string(ref.UID) == uid {
 			return true
 		}
 	}

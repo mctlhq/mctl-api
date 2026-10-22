@@ -899,7 +899,12 @@ func main() {
 	// Agent run token exchange (mctlhq/mctl-agents#737): off unless
 	// AGENT_RUN_EXCHANGE_AUDIENCE names the audience the agent pods'
 	// projected tokens carry. Which template's runs become which agent and
-	// scope is the server's, not configuration.
+	// scope is the server's, not configuration. It must not be the API
+	// server's own audience (refused at startup). The exchange needs RBAC to
+	// create tokenreviews and get pods/workflows in the agent namespace, and
+	// a cluster whose bound tokens carry the pod-name/pod-uid extras
+	// (Kubernetes 1.30+); without them every exchange is refused with
+	// token_not_pod_bound.
 	var agentRunBinder mctlapi.AgentRunBinder
 	if aud := os.Getenv("AGENT_RUN_EXCHANGE_AUDIENCE"); aud != "" {
 		sas := map[string]bool{}

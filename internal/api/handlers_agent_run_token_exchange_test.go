@@ -13,13 +13,16 @@ import (
 )
 
 type fakeBinder struct {
-	binding *k8s.AgentRunBinding
-	err     error
-	tokens  []string
+	binding   *k8s.AgentRunBinding
+	err       error
+	tokens    []string
+	deadlines []time.Time
 }
 
-func (f *fakeBinder) Bind(_ context.Context, token string) (*k8s.AgentRunBinding, error) {
+func (f *fakeBinder) Bind(ctx context.Context, token string) (*k8s.AgentRunBinding, error) {
 	f.tokens = append(f.tokens, token)
+	d, _ := ctx.Deadline()
+	f.deadlines = append(f.deadlines, d)
 	return f.binding, f.err
 }
 
@@ -56,6 +59,10 @@ func TestExchangeAgentRunToken_MintsTheBoundRunsScopedToken(t *testing.T) {
 	}
 	if len(b.tokens) != 1 || b.tokens[0] != "sa-token" {
 		t.Errorf("binder saw %v, want the bearer", b.tokens)
+	}
+	// The cluster reads are bounded: the route is unauthenticated.
+	if d := b.deadlines[0]; d.IsZero() || time.Until(d) > agentRunBindTimeout {
+		t.Errorf("Bind ran with deadline %v, want one within %v", d, agentRunBindTimeout)
 	}
 	if res.body["agent"] != "issue-investigator" || res.body["scope"] != auth.AgentScopeInvestigate || res.body["execution_id"] != execID {
 		t.Errorf("exchanged token = %v", res.body)
@@ -97,6 +104,40 @@ func TestExchangeAgentRunToken_MintsTheBoundRunsScopedToken(t *testing.T) {
 	}
 	if !found {
 		t.Error("no agent_run_token.exchange audit row")
+	}
+}
+
+func TestExchangeAgentRunToken_AuditsOnlyAuthenticatedRefusals(t *testing.T) {
+	refusals := func(e *workItemsEnv) int {
+		n := 0
+		for _, entry := range e.audit.List(1000) {
+			if entry.Operation == "agent_run_token.exchange_refused" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Anyone can send a bad token to this route; that must not grow the
+	// audit table.
+	e, b, _ := exchangeEnv(t)
+	b.binding, b.err = nil, &k8s.BindingRefusedError{Reason: "token_not_authenticated", Unauthenticated: true}
+	for range 3 {
+		if res := e.exchange("garbage", nil); res.code != http.StatusUnauthorized {
+			t.Fatalf("exchange = %d %s", res.code, res.raw)
+		}
+	}
+	if n := refusals(e); n != 0 {
+		t.Errorf("%d audit rows for unauthenticated refusals, want 0", n)
+	}
+
+	// A real ServiceAccount token that binds to no run is recorded.
+	b.err = &k8s.BindingRefusedError{Reason: "workflow_template_not_allowed"}
+	if res := e.exchange("sa", nil); res.code != http.StatusForbidden {
+		t.Fatalf("exchange = %d %s", res.code, res.raw)
+	}
+	if n := refusals(e); n != 1 {
+		t.Errorf("%d audit rows for an authenticated refusal, want 1", n)
 	}
 }
 

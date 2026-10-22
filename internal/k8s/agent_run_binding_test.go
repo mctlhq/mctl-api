@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +151,9 @@ func TestAgentRunBinder_RefusesWhatDoesNotBind(t *testing.T) {
 		{"workflow gone", func(f *bindFixture) { f.wf = nil }, "workflow_not_found"},
 		{"label without owner", func(f *bindFixture) { f.pod.OwnerReferences = nil }, "pod_not_owned_by_workflow"},
 		{"owner is another object", func(f *bindFixture) { f.pod.OwnerReferences[0].UID = "wf-uid-old" }, "pod_not_owned_by_workflow"},
+		{"owner is a Workflow of another API group", func(f *bindFixture) {
+			f.pod.OwnerReferences[0].APIVersion = "example.com/v1"
+		}, "pod_not_owned_by_workflow"},
 		{"workflow finished", func(f *bindFixture) {
 			_ = unstructured.SetNestedField(f.wf.Object, "Failed", "status", "phase")
 		}, "workflow_not_running"},
@@ -195,5 +199,18 @@ func TestAgentRunBinder_RequiresAnAudience(t *testing.T) {
 	b.Audience = ""
 	if _, err := b.Bind(context.Background(), "sa-token"); err == nil {
 		t.Fatal("an audience-less binder bound a token")
+	}
+	for aud := range apiServerAudiences {
+		// The review would accept it: any pod token carries this audience.
+		f := newBindFixture()
+		f.status.Audiences = []string{aud}
+		b := f.binder()
+		b.Audience = aud
+		if _, err := b.Bind(context.Background(), "sa-token"); err == nil {
+			t.Fatalf("a binder on the API server's audience %q bound a token", aud)
+		}
+		if _, err := NewAgentRunBinder(aud, "argo-workflows", nil, nil); err == nil || !strings.Contains(err.Error(), "API server's own") {
+			t.Fatalf("NewAgentRunBinder(%q) = %v, want the audience refused", aud, err)
+		}
 	}
 }
