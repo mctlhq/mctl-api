@@ -56,6 +56,7 @@ var reservedCases = []struct {
 	{"local-path-storage", true, "exact"},
 	{"system-upgrade", true, "exact"},
 	{"observability-eval", true, "exact"},
+	{"tracing", true, "exact"},
 
 	// Prefix patterns.
 	{"kube-system-team", true, "prefix kube-"},

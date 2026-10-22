@@ -77,6 +77,7 @@ var reservedTenantNames = map[string]struct{}{
 	"local-path-storage": {},
 	"system-upgrade":     {},
 	"observability-eval": {},
+	"tracing":            {},
 }
 
 var (
