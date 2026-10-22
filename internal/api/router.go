@@ -224,6 +224,10 @@ type Options struct {
 	// WorkItems is the workitem/v1 store (mctl-api#349). Optional — nil makes
 	// every /api/v1/work-items route answer 503.
 	WorkItems *workitems.Store
+	// AgentRunBinder verifies an agent pod's projected ServiceAccount token
+	// for POST /api/v1/agent-run-tokens/exchange (mctlhq/mctl-agents#737).
+	// Optional: nil makes that route 503.
+	AgentRunBinder AgentRunBinder
 	// Evidence is the durable execution-evidence store (mctl-api#409, Tier B
 	// of evidence.mctl.ai/v1alpha1). Optional — nil makes every
 	// /api/v1/evidence* route (and GET /api/v1/work-items/{id}/evidence)
@@ -417,6 +421,16 @@ func NewRouter(opts Options) http.Handler {
 	r.Post(zitadelHookIntentPath, h.HandleZitadelIntent)
 	r.Post(zitadelHookCreatePath, h.HandleZitadelCreateUser)
 	r.Post(zitadelHookTokenPath, h.HandleZitadelTokenClaims)
+
+	// Agent pods exchange their projected ServiceAccount token for a scoped
+	// run token (mctlhq/mctl-agents#737). Outside the authenticated group:
+	// the bearer is a Kubernetes token, judged by TokenReview, never by
+	// AuthMiddleware. Its own budget, keyed by caller IP, so a pod that
+	// retries cannot starve anything else; every attempt costs a TokenReview.
+	r.Group(func(r chi.Router) {
+		r.Use(httprate.Limit(60, 1*time.Minute, httprate.WithKeyFuncs(keyByTrustedIP)))
+		r.Post("/api/v1/agent-run-tokens/exchange", h.ExchangeAgentRunToken)
+	})
 
 	// Authenticated API routes.
 	r.Group(func(r chi.Router) {
@@ -735,6 +749,7 @@ func NewRouter(opts Options) http.Handler {
 					return keyByTrustedIP(r)
 				})))
 				r.Post("/agent-run-tokens", h.MintAgentRunToken)
+				r.Post(agentRunTokenSelfRevokeRoute, h.RevokeOwnAgentRunToken)
 			})
 
 			// Work-item reads: side-effect free, outside the write budget.
