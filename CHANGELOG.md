@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.116.1](https://github.com/mctlhq/mctl-api/compare/4.116.0...4.116.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* **operations:** reserve the tracing namespace as a tenant name ([8430d88](https://github.com/mctlhq/mctl-api/commit/8430d88da46118c6ae03cbccb4fb4a14aa01b113))
+* **operations:** reserve the tracing namespace as a tenant name ([5bc0355](https://github.com/mctlhq/mctl-api/commit/5bc0355659dcbdb3daf90d1728e8c0385166ef33))
+
 ## [4.116.0](https://github.com/mctlhq/mctl-api/compare/4.115.1...4.116.0) (2026-10-22)
 
 
