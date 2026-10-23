@@ -272,7 +272,7 @@ func checkApprovalBinding(in *DecisionInput, a *workitems.ActionApprovalRequest)
 			strings.Join(mismatched, ", "), a.ID, "the approval binds a different action")
 	}
 	switch a.State {
-	case workitems.ApprovalApproved, workitems.ApprovalConsumed, workitems.ApprovalExecuted:
+	case workitems.ApprovalApproved, workitems.ApprovalConsumed, workitems.ApprovalInFlight, workitems.ApprovalExecuted:
 		return nil
 	case workitems.ApprovalExpired:
 		// Lazy expiry hides whether the request was ever decided; a

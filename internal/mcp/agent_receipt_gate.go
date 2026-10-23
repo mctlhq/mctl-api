@@ -3,7 +3,9 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -24,9 +26,16 @@ import (
 //     from every call before any handler sees them, whatever the mode.
 //   - Observe audits each governed call and changes nothing. A presented
 //     receipt is checked read-only there and is not spent.
-//   - Enforce refuses a governed call without a valid receipt and spends a
-//     valid one with the store's consumed -> executed compare-and-set, so
-//     one receipt authorizes one call.
+//   - Enforce refuses a governed call without a valid receipt. A valid one
+//     is reserved before the handler runs (consumed -> in_flight, one
+//     compare-and-set, so two concurrent calls cannot both pass), marked
+//     executed when the handler succeeded, and released back to consumed
+//     when it failed, so a failed call does not burn the human approval
+//     (mctl-api#772). One receipt authorizes one successful call.
+//   - A receipt is refused once its consumed_at is older than the
+//     configured age bound or its decision's fresh_until has passed
+//     (mctl-api#773): mctl-agents consumes it immediately before the call,
+//     so an old one is a crashed run or a replay.
 //   - A receipt that could not be checked is its own code, never "valid"
 //     and never "missing".
 //   - Human principals, relayed requests and agent principals are not
@@ -40,11 +49,15 @@ import (
 //     having no tenant, no admin and just the permissions it was minted
 //     with, which the REST calls behind every tool check.
 //
-// v1 binds an approval to the principal, the tool and one use. It does not
-// bind the call's arguments: the server does not recompute the arguments
-// digest, and the artifact hash is the one the agent recorded. A receipt is
-// spent before the handler runs, and the age of a consumed one is not
-// bounded. Only the hosted endpoint is gated; cmd/mcp's stdio server is not.
+// v1 binds an approval to the principal, the tool and one successful use. It
+// does not bind the call's arguments: the server does not recompute the
+// arguments digest, and the artifact hash is the one the agent recorded.
+// "Failed" is the handler's own verdict (a Go error or an isError result),
+// so a handler that reports failure after a partial side effect gets its
+// receipt back; a call whose request was cancelled or timed out has an
+// unknown outcome and spends it. A reservation whose settle cannot be written stays
+// in_flight and is never usable again: fail closed. Only the hosted
+// endpoint is gated; cmd/mcp's stdio server is not.
 
 // AgentReceiptGateMode is the parsed MCTL_AGENT_RECEIPT_GATE.
 type AgentReceiptGateMode string
@@ -98,7 +111,41 @@ const (
 	ReceiptCodeAlreadyExecuted   = "agent_receipt_already_executed"
 	ReceiptCodeArtifactMismatch  = "agent_receipt_artifact_mismatch"
 	ReceiptCodeUnverifiable      = "agent_receipt_unverifiable"
+	// ReceiptCodeInFlight: the receipt is reserved by another call that is
+	// still running (mctl-api#772).
+	ReceiptCodeInFlight = "agent_receipt_in_flight"
+	// ReceiptCodeStale: the receipt was consumed longer ago than the age
+	// bound, or its decision is past fresh_until (mctl-api#773).
+	ReceiptCodeStale = "agent_receipt_stale"
 )
+
+// DefaultAgentReceiptMaxAge is the receipt age bound when
+// MCTL_AGENT_RECEIPT_MAX_AGE is unset (mctl-api#773).
+const DefaultAgentReceiptMaxAge = 5 * time.Minute
+
+// MaxAgentReceiptMaxAge caps the configurable bound: a receipt is consumed
+// seconds before its call, and a bound of hours would make the check
+// meaningless.
+const MaxAgentReceiptMaxAge = time.Hour
+
+// ParseAgentReceiptMaxAge reads MCTL_AGENT_RECEIPT_MAX_AGE, a Go duration.
+// Empty is DefaultAgentReceiptMaxAge. A value that does not parse, is not
+// positive, or exceeds MaxAgentReceiptMaxAge is refused: a mistyped bound
+// must stop the boot, not silently widen or close the gate.
+func ParseAgentReceiptMaxAge(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return DefaultAgentReceiptMaxAge, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("MCTL_AGENT_RECEIPT_MAX_AGE %q is not a duration: %w", raw, err)
+	}
+	if d <= 0 || d > MaxAgentReceiptMaxAge {
+		return 0, fmt.Errorf("MCTL_AGENT_RECEIPT_MAX_AGE %s must be positive and at most %s", d, MaxAgentReceiptMaxAge)
+	}
+	return d, nil
+}
 
 // governedAgentTools is the explicit set of tools that need a receipt from
 // mctl-agent: the tools mctl-agents' BUILTIN_POLICY gates with
@@ -261,7 +308,8 @@ type ReceiptCheck struct {
 	Tool         string
 	Ref          string
 	ArtifactHash string
-	// Redeem spends the receipt (enforce). Without it the check is read-only.
+	// Redeem reserves the receipt for this call (enforce); the caller then
+	// settles it with SettleAgentReceipt. Without it the check is read-only.
 	Redeem bool
 }
 
@@ -285,7 +333,30 @@ type AgentReceiptVerifier interface {
 	// otherwise one of the ReceiptCode* values. A receipt it could not read
 	// is ReceiptCodeUnverifiable.
 	VerifyAgentReceipt(ctx context.Context, user *auth.User, check ReceiptCheck) string
+	// SettleAgentReceipt ends the reservation a redeeming check that
+	// answered "" made: executed when the call succeeded, back to consumed
+	// when it did not. An error leaves the receipt reserved, which no later
+	// call can use.
+	SettleAgentReceipt(ctx context.Context, user *auth.User, check ReceiptCheck, succeeded bool) error
 	AuditAgentReceipt(ctx context.Context, user *auth.User, outcome ReceiptOutcome)
+}
+
+// settleTimeout bounds the settle write. It runs on a context detached from
+// the request's cancellation: a client that hung up after the side effect
+// must not leave the receipt reserved.
+const settleTimeout = 10 * time.Second
+
+// callSucceeded decides how a reserved receipt is settled: true spends it,
+// false releases it for a retry. It is the handler's own verdict, except
+// when the request was cancelled or ran past its deadline while the handler
+// ran: the handler then usually reports an error even when the REST call
+// behind it already applied the side effect, so the outcome is unknown and
+// the receipt is spent, never handed back for a replay.
+func callSucceeded(ctx context.Context, res *mcplib.CallToolResult, err error) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	return err == nil && res != nil && !res.IsError
 }
 
 type agentReceiptGate struct {
@@ -373,6 +444,21 @@ func (s *Server) agentReceiptMiddleware(next server.ToolHandlerFunc) server.Tool
 				"%s: %s from mctl-agent needs a consumed action approval for this call (%s)",
 				code, tool, AgentReceiptGatePolicyVersion)), nil
 		}
-		return next(ctx, req)
+		if !enforce || code != "" {
+			return next(ctx, req)
+		}
+		// Enforce with a reserved receipt: settle it however the handler
+		// ends. recoverToolPanic sits inside this middleware, so a panic
+		// arrives here as an error.
+		check := ReceiptCheck{Tool: tool, Ref: ref, ArtifactHash: artifactHash, Redeem: true}
+		res, err := next(ctx, req)
+		succeeded := callSucceeded(ctx, res, err)
+		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+		defer cancel()
+		if serr := gate.verifier.SettleAgentReceipt(settleCtx, user, check, succeeded); serr != nil {
+			slog.Error("agent receipt gate: settle failed; the receipt stays reserved and cannot be used again",
+				"tool", tool, "approval_id", ref, "succeeded", succeeded, "error", serr)
+		}
+		return res, err
 	}
 }

@@ -49,6 +49,7 @@ const (
 	aarCodeConsumed            = "approval_consumed"
 	aarCodeNotConsumed         = "approval_not_consumed"
 	aarCodeExecuted            = "approval_executed"
+	aarCodeInFlight            = "approval_in_flight"
 	aarCodeTargetMismatch      = "approval_target_mismatch"
 	aarCodeRequesterForbidden  = "approval_requester_forbidden"
 	aarCodeDeciderForbidden    = "approval_decider_forbidden"
@@ -134,6 +135,7 @@ var actionApprovalRefusals = []struct {
 	{governance.ErrPolicyUnavailable, http.StatusServiceUnavailable, aarCodePolicyUnavailable, false},
 	{workitems.ErrApprovalNotConsumed, http.StatusConflict, aarCodeNotConsumed, false},
 	{workitems.ErrApprovalExecuted, http.StatusConflict, aarCodeExecuted, false},
+	{workitems.ErrApprovalInFlight, http.StatusConflict, aarCodeInFlight, false},
 	{workitems.ErrApprovalTargetMismatch, http.StatusConflict, aarCodeTargetMismatch, false},
 }
 
@@ -474,7 +476,7 @@ func (h *Handlers) ListActionApprovals(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f.State, f.ExecutionID = q.Get("state"), q.Get("execution_id")
 	if f.State != "" && !workitems.ValidApprovalState(f.State) {
-		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "state must be one of pending, approved, denied, consumed, executed, expired", nil)
+		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "state must be one of pending, approved, denied, consumed, in_flight, executed, expired", nil)
 		return
 	}
 	if limit := q.Get("limit"); limit != "" {

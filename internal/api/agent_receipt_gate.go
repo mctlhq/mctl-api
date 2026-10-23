@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -17,8 +18,9 @@ import (
 // The action approval store side of the MCP agent receipt gate
 // (mctl-api#723, internal/mcp/agent_receipt_gate.go). It reuses the action
 // approval model of mctl-api#366 as it is: a receipt is an aar_ request the
-// caller itself requested and consumed, and spending it is the existing
-// consumed -> executed compare-and-set.
+// caller itself requested and consumed. Spending it is a reservation
+// (consumed -> in_flight) before the handler and a settle (in_flight ->
+// executed, or back to consumed) after it (mctl-api#772).
 
 var _ mcp.AgentReceiptVerifier = (*Handlers)(nil)
 
@@ -42,6 +44,16 @@ var receiptCodeLabels = map[string]struct{}{
 	mcp.ReceiptCodeMissing: {}, mcp.ReceiptCodeMalformed: {}, mcp.ReceiptCodeNotFound: {},
 	mcp.ReceiptCodeOperationMismatch: {}, mcp.ReceiptCodeTargetMismatch: {}, mcp.ReceiptCodeNotConsumed: {},
 	mcp.ReceiptCodeAlreadyExecuted: {}, mcp.ReceiptCodeArtifactMismatch: {}, mcp.ReceiptCodeUnverifiable: {},
+	mcp.ReceiptCodeInFlight: {}, mcp.ReceiptCodeStale: {},
+}
+
+// receiptMaxAge is the configured receipt age bound (mctl-api#773), or the
+// default when none was set.
+func (h *Handlers) receiptMaxAge() time.Duration {
+	if h.opts.AgentReceiptMaxAge > 0 {
+		return h.opts.AgentReceiptMaxAge
+	}
+	return mcp.DefaultAgentReceiptMaxAge
 }
 
 // receiptModeLabel bounds the counter's mode label the same way: the boot
@@ -93,6 +105,8 @@ func (h *Handlers) VerifyAgentReceipt(ctx context.Context, user *auth.User, c mc
 	}
 	switch a.State {
 	case workitems.ApprovalConsumed:
+	case workitems.ApprovalInFlight:
+		return mcp.ReceiptCodeInFlight
 	case workitems.ApprovalExecuted:
 		return mcp.ReceiptCodeAlreadyExecuted
 	default:
@@ -101,31 +115,52 @@ func (h *Handlers) VerifyAgentReceipt(ctx context.Context, user *auth.User, c mc
 	if c.ArtifactHash == "" || a.ArtifactHash == "" || a.ArtifactHash != c.ArtifactHash {
 		return mcp.ReceiptCodeArtifactMismatch
 	}
+	if err := h.opts.WorkItems.ReceiptStaleness(a, h.receiptMaxAge()); err != nil {
+		return mcp.ReceiptCodeStale
+	}
 	if !c.Redeem {
 		return ""
 	}
-	_, err = h.opts.WorkItems.MarkActionApprovalExecuted(ctx, c.Ref, mcp.ReceiptTarget, c.ArtifactHash, caller)
+	_, err = h.opts.WorkItems.ReserveActionApproval(ctx, c.Ref, mcp.ReceiptTarget, c.ArtifactHash, caller, h.receiptMaxAge())
 	code := spendErrorCode(err)
 	if code == mcp.ReceiptCodeUnverifiable {
-		slog.Warn("agent receipt gate: spend failed", "tool", c.Tool, "approval_id", c.Ref, "error", err)
+		slog.Warn("agent receipt gate: reserve failed", "tool", c.Tool, "approval_id", c.Ref, "error", err)
 	}
 	return code
 }
 
-// spendErrorCode maps a MarkActionApprovalExecuted refusal to a receipt
-// code. These fire only when the request changed between the read above and
-// the compare-and-set (another call spent it, say).
+// SettleAgentReceipt implements mcp.AgentReceiptVerifier.
+func (h *Handlers) SettleAgentReceipt(ctx context.Context, user *auth.User, c mcp.ReceiptCheck, succeeded bool) error {
+	if user == nil || h.opts.WorkItems == nil {
+		return errors.New("agent receipt gate: no caller or no work-items store to settle with")
+	}
+	if _, err := h.opts.WorkItems.SettleActionApproval(ctx, c.Ref, principalOf(user), succeeded); err != nil {
+		return err
+	}
+	if !succeeded {
+		slog.Info("agent receipt gate: call failed, receipt released for a retry", "tool", c.Tool, "approval_id", c.Ref)
+	}
+	return nil
+}
+
+// spendErrorCode maps a ReserveActionApproval refusal to a receipt code.
+// These fire only when the request changed between the read above and the
+// compare-and-set (a concurrent call reserved it, say).
 func spendErrorCode(err error) string {
 	switch {
 	case err == nil:
 		return ""
 	case errors.Is(err, workitems.ErrApprovalExecuted):
 		return mcp.ReceiptCodeAlreadyExecuted
+	case errors.Is(err, workitems.ErrApprovalInFlight):
+		return mcp.ReceiptCodeInFlight
+	case errors.Is(err, workitems.ErrApprovalReceiptStale):
+		return mcp.ReceiptCodeStale
 	case errors.Is(err, workitems.ErrApprovalNotConsumed), errors.Is(err, workitems.ErrApprovalDenied):
 		return mcp.ReceiptCodeNotConsumed
 	case errors.Is(err, workitems.ErrApprovalTargetMismatch):
 		// The store raises this one error for a target OR an artifact hash
-		// mismatch (MarkActionApprovalExecuted). The target was compared
+		// mismatch (ReserveActionApproval). The target was compared
 		// above and cannot change after creation, so only the hash can
 		// differ here: this is an artifact mismatch, not a target one.
 		return mcp.ReceiptCodeArtifactMismatch

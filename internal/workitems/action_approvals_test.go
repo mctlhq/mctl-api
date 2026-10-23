@@ -599,3 +599,181 @@ func TestMarkActionApprovalExecutedIsSingleUseUnderConcurrency(t *testing.T) {
 		}
 	}
 }
+
+const testReceiptMaxAge = 5 * time.Minute
+
+// mctl-api#772: a reservation is consumed -> in_flight, then executed on
+// success or back to consumed on failure; a released receipt can be
+// reserved again, an executed one never.
+func TestReserveAndSettleActionApproval(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	in := approvalInput(s, "")
+	target, hash := in.Target, in.ArtifactHash
+
+	c := consumed(t, s, "k-reserve-ok")
+	r, err := s.ReserveActionApproval(ctx, c.ID, target, hash, agentPrincipal, testReceiptMaxAge)
+	if err != nil || r.State != ApprovalInFlight || r.ReservedAt == nil || r.ExecutedAt != nil {
+		t.Fatalf("reserve = %+v %v", r, err)
+	}
+	// In flight: neither reserved nor marked executed by anyone else.
+	if _, err := s.ReserveActionApproval(ctx, c.ID, target, hash, agentPrincipal, testReceiptMaxAge); !errors.Is(err, ErrApprovalInFlight) {
+		t.Fatalf("second reserve = %v", err)
+	}
+	if _, err := s.MarkActionApprovalExecuted(ctx, c.ID, target, hash, agentPrincipal); !errors.Is(err, ErrApprovalInFlight) {
+		t.Fatalf("mark executed while in flight = %v", err)
+	}
+	if _, err := s.ConsumeActionApproval(ctx, c.ID, c.IntentHash); !errors.Is(err, ErrApprovalConsumed) {
+		t.Fatalf("consume while in flight = %v", err)
+	}
+	// Only the requester settles.
+	if _, err := s.SettleActionApproval(ctx, c.ID, "service:someone-else", true); !errors.Is(err, ErrApprovalNotFound) {
+		t.Fatalf("settle by another requester = %v", err)
+	}
+	// A failed call releases it, and it is usable again.
+	rel, err := s.SettleActionApproval(ctx, c.ID, agentPrincipal, false)
+	if err != nil || rel.State != ApprovalConsumed || rel.ExecutedAt != nil {
+		t.Fatalf("release = %+v %v", rel, err)
+	}
+	if _, err := s.SettleActionApproval(ctx, c.ID, agentPrincipal, false); !errors.Is(err, ErrApprovalNotConsumed) {
+		t.Fatalf("release of a consumed request = %v", err)
+	}
+	if _, err := s.ReserveActionApproval(ctx, c.ID, target, hash, agentPrincipal, testReceiptMaxAge); err != nil {
+		t.Fatalf("reserve after release = %v", err)
+	}
+	done, err := s.SettleActionApproval(ctx, c.ID, agentPrincipal, true)
+	if err != nil || done.State != ApprovalExecuted || done.ExecutedAt == nil {
+		t.Fatalf("settle success = %+v %v", done, err)
+	}
+	if _, err := s.ReserveActionApproval(ctx, c.ID, target, hash, agentPrincipal, testReceiptMaxAge); !errors.Is(err, ErrApprovalExecuted) {
+		t.Fatalf("reserve executed = %v", err)
+	}
+	if _, err := s.SettleActionApproval(ctx, c.ID, agentPrincipal, false); !errors.Is(err, ErrApprovalExecuted) {
+		t.Fatalf("release executed = %v", err)
+	}
+	if list, err := s.ActionApprovals(ctx, ActionApprovalFilter{State: ApprovalInFlight, ExecutionID: storeTestExecution}); err != nil || len(list) != 0 {
+		t.Fatalf("in_flight list after settle = %+v %v", list, err)
+	}
+
+	pending := createApproval(t, s, approvalInput(s, "k-reserve-pending"))
+	ok := approved(t, s, "k-reserve-approved")
+	mismatched := consumed(t, s, "k-reserve-mismatch")
+	for _, tc := range []struct {
+		name, id, target, hash, caller string
+		want                           error
+		state                          string
+	}{
+		{"pending", pending.ID, target, hash, agentPrincipal, ErrApprovalNotConsumed, ApprovalPending},
+		{"approved", ok.ID, target, hash, agentPrincipal, ErrApprovalNotConsumed, ApprovalApproved},
+		{"wrong target", mismatched.ID, target + "-other", hash, agentPrincipal, ErrApprovalTargetMismatch, ApprovalConsumed},
+		{"wrong artifact", mismatched.ID, target, "sha256:other", agentPrincipal, ErrApprovalTargetMismatch, ApprovalConsumed},
+		{"another requester", mismatched.ID, target, hash, "service:someone-else", ErrApprovalNotFound, ApprovalConsumed},
+		{"missing", "aar_missing", target, hash, agentPrincipal, ErrApprovalNotFound, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := s.ReserveActionApproval(ctx, tc.id, tc.target, tc.hash, tc.caller, testReceiptMaxAge); !errors.Is(err, tc.want) {
+				t.Fatalf("reserve = %v, want %v", err, tc.want)
+			}
+			if tc.state == "" {
+				return
+			}
+			if read, err := s.ActionApproval(ctx, tc.id); err != nil || read.State != tc.state || read.ReservedAt != nil {
+				t.Fatalf("after refusal = %+v %v, want %s and no reserved_at", read, err, tc.state)
+			}
+		})
+	}
+	if _, err := s.ReserveActionApproval(ctx, mismatched.ID, target, hash, agentPrincipal, 0); err == nil {
+		t.Fatal("reserve with no age bound accepted")
+	}
+}
+
+// Two concurrent calls on one receipt: exactly one reserves it, the others
+// see it in flight; after the winner's failure it is reservable again.
+func TestReserveActionApprovalIsSingleUseUnderConcurrency(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	in := approvalInput(s, "")
+	for round := 0; round < 5; round++ {
+		a := consumed(t, s, "k-reserve-race-"+string(rune('a'+round)))
+		const racers = 8
+		var wg sync.WaitGroup
+		errs := make([]error, racers)
+		start := make(chan struct{})
+		for i := range racers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				_, errs[i] = s.ReserveActionApproval(ctx, a.ID, in.Target, in.ArtifactHash, agentPrincipal, testReceiptMaxAge)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		won := 0
+		for _, err := range errs {
+			switch {
+			case err == nil:
+				won++
+			case !errors.Is(err, ErrApprovalInFlight):
+				t.Fatalf("loser = %v", err)
+			}
+		}
+		if won != 1 {
+			t.Fatalf("round %d: %d reservations succeeded, want exactly 1", round, won)
+		}
+	}
+}
+
+// mctl-api#773: a consumed receipt older than the bound, or past its
+// decision's fresh_until, is refused and left consumed.
+func TestReserveActionApprovalRefusesAStaleReceipt(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	in := approvalInput(s, "")
+	old := consumed(t, s, "k-reserve-old")
+	young := consumed(t, s, "k-reserve-young")
+
+	realNow := s.now
+	t.Cleanup(func() { s.now = realNow })
+	s.now = func() time.Time { return realNow().Add(testReceiptMaxAge + time.Second) }
+	if err := s.ReceiptStaleness(old, testReceiptMaxAge); !errors.Is(err, ErrApprovalReceiptStale) {
+		t.Fatalf("staleness of an old receipt = %v", err)
+	}
+	if _, err := s.ReserveActionApproval(ctx, old.ID, in.Target, in.ArtifactHash, agentPrincipal, testReceiptMaxAge); !errors.Is(err, ErrApprovalReceiptStale) {
+		t.Fatalf("reserve old = %v", err)
+	}
+	if read, _ := s.ActionApproval(ctx, old.ID); read.State != ApprovalConsumed {
+		t.Fatalf("old receipt reads %s after the refusal", read.State)
+	}
+	// A wider bound admits the same receipt.
+	if _, err := s.ReserveActionApproval(ctx, young.ID, in.Target, in.ArtifactHash, agentPrincipal, 2*testReceiptMaxAge); err != nil {
+		t.Fatalf("reserve within a wider bound = %v", err)
+	}
+	s.now = realNow
+
+	// fresh_until: decided with a one-minute freshness, consumed at once,
+	// presented two minutes later, well inside the age bound.
+	a := createApproval(t, s, approvalInput(s, "k-reserve-fresh"))
+	d, err := s.DecideActionApproval(ctx, ActionDecisionInput{ID: a.ID, DecidedBy: "github:root", Decision: DecisionApprove, FreshFor: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := s.ConsumeActionApproval(ctx, d.ID, d.IntentHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return realNow().Add(2 * time.Minute) }
+	if err := s.ReceiptStaleness(fresh, testReceiptMaxAge); !errors.Is(err, ErrApprovalReceiptStale) {
+		t.Fatalf("staleness past fresh_until = %v", err)
+	}
+	if _, err := s.ReserveActionApproval(ctx, d.ID, in.Target, in.ArtifactHash, agentPrincipal, testReceiptMaxAge); !errors.Is(err, ErrApprovalReceiptStale) {
+		t.Fatalf("reserve past fresh_until = %v", err)
+	}
+	s.now = realNow
+	if err := s.ReceiptStaleness(fresh, testReceiptMaxAge); err != nil {
+		t.Fatalf("staleness of a fresh receipt = %v", err)
+	}
+	if err := s.ReceiptStaleness(&ActionApprovalRequest{ID: "aar_undated"}, testReceiptMaxAge); !errors.Is(err, ErrApprovalReceiptStale) {
+		t.Fatalf("staleness of an undated receipt = %v", err)
+	}
+}

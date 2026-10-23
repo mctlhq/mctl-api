@@ -152,6 +152,10 @@ type Options struct {
 	// observe or enforce for the MCP agent receipt gate. The zero value is
 	// off.
 	AgentReceiptGateMode mctlmcp.AgentReceiptGateMode
+	// AgentReceiptMaxAge is MCTL_AGENT_RECEIPT_MAX_AGE (mctl-api#773): how
+	// long after its consume a receipt still authorizes a call. Zero is
+	// mctlmcp.DefaultAgentReceiptMaxAge.
+	AgentReceiptMaxAge time.Duration
 	// PrincipalMembership is the principal-keyed membership shadow mode
 	// reads. Nil makes every shadow comparison unresolved.
 	PrincipalMembership PrincipalMembershipReader

@@ -3,8 +3,10 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -17,6 +19,22 @@ type fakeReceiptVerifier struct {
 	code    string
 	checks  []ReceiptCheck
 	audited []ReceiptOutcome
+	settled []settleCall
+	// settleErr is what SettleAgentReceipt answers.
+	settleErr error
+	// settleCtxErr records the context error the settle saw.
+	settleCtxErr error
+}
+
+type settleCall struct {
+	check     ReceiptCheck
+	succeeded bool
+}
+
+func (f *fakeReceiptVerifier) SettleAgentReceipt(ctx context.Context, _ *auth.User, c ReceiptCheck, succeeded bool) error {
+	f.settled = append(f.settled, settleCall{check: c, succeeded: succeeded})
+	f.settleCtxErr = ctx.Err()
+	return f.settleErr
 }
 
 func (f *fakeReceiptVerifier) VerifyAgentReceipt(_ context.Context, _ *auth.User, c ReceiptCheck) string {
@@ -187,6 +205,123 @@ func TestAgentReceiptGate_EnforceRunsWithValidReceipt(t *testing.T) {
 	}
 	if len(v.audited) != 1 || v.audited[0].Code != "" || v.audited[0].Refused {
 		t.Fatalf("audit = %+v", v.audited)
+	}
+	if len(v.settled) != 1 || v.settled[0] != (settleCall{check: want, succeeded: true}) {
+		t.Fatalf("settled = %+v, want one success for %+v", v.settled, want)
+	}
+}
+
+// mctl-api#772: a reserved receipt is settled however the handler ends:
+// executed after success, released after a Go error or an isError result,
+// on a context the request's cancellation does not reach.
+func TestAgentReceiptGate_EnforceSettlesByHandlerOutcome(t *testing.T) {
+	for name, c := range map[string]struct {
+		res  *mcplib.CallToolResult
+		err  error
+		want bool
+	}{
+		"success":       {mcplib.NewToolResultText("ok"), nil, true},
+		"tool error":    {mcplib.NewToolResultError("deploy refused"), nil, false},
+		"handler error": {nil, errors.New("upstream 502"), false},
+		"nil result":    {nil, nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, v := gatedServer(AgentReceiptGateEnforce, "")
+			ctx, cancel := context.WithCancel(auth.WithUser(context.Background(), auth.NewServiceUser()))
+			req := mcplib.CallToolRequest{}
+			req.Params.Name = "mctl_deploy_service"
+			req.Params.Arguments = receiptArgs()
+			defer cancel()
+			res, err := s.agentReceiptMiddleware(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+				return c.res, c.err
+			})(ctx, req)
+			if res != c.res || !errors.Is(err, c.err) {
+				t.Fatalf("result not passed through: %+v %v", res, err)
+			}
+			if len(v.settled) != 1 || v.settled[0].succeeded != c.want || v.settled[0].check.Ref != "aar_1" {
+				t.Fatalf("settled = %+v, want one with succeeded=%v", v.settled, c.want)
+			}
+		})
+	}
+}
+
+// A request cancelled or timed out while the handler ran has an unknown
+// outcome: the side effect may have landed before the handler saw the
+// cancellation, so the receipt is spent, not released for a replay. The
+// settle itself still runs, on a context the cancellation does not reach.
+func TestAgentReceiptGate_CancelledCallSpendsTheReceipt(t *testing.T) {
+	for name, c := range map[string]struct {
+		res *mcplib.CallToolResult
+		err error
+	}{
+		"handler error": {nil, context.Canceled},
+		"tool error":    {mcplib.NewToolResultError("request cancelled"), nil},
+		"success":       {mcplib.NewToolResultText("ok"), nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, v := gatedServer(AgentReceiptGateEnforce, "")
+			ctx, cancel := context.WithCancel(auth.WithUser(context.Background(), auth.NewServiceUser()))
+			req := mcplib.CallToolRequest{}
+			req.Params.Name = "mctl_deploy_service"
+			req.Params.Arguments = receiptArgs()
+			_, _ = s.agentReceiptMiddleware(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+				// The client hangs up while the handler runs.
+				cancel()
+				return c.res, c.err
+			})(ctx, req)
+			if len(v.settled) != 1 || !v.settled[0].succeeded {
+				t.Fatalf("settled = %+v, want the receipt spent", v.settled)
+			}
+			if v.settleCtxErr != nil {
+				t.Fatalf("settle ran on a cancelled context: %v", v.settleCtxErr)
+			}
+		})
+	}
+}
+
+// A failed settle leaves the receipt reserved; the call's own result still
+// reaches the caller.
+func TestAgentReceiptGate_SettleFailureKeepsTheResult(t *testing.T) {
+	s, v := gatedServer(AgentReceiptGateEnforce, "")
+	v.settleErr = errors.New("db down")
+	res, ran, _ := runGate(t, s, auth.NewServiceUser(), "mctl_deploy_service", receiptArgs())
+	if !ran || res == nil || res.IsError || len(v.settled) != 1 {
+		t.Fatalf("ran=%v res=%+v settled=%+v", ran, res, v.settled)
+	}
+}
+
+// Nothing is settled for a call that reserved nothing: observe, a refusal,
+// an ungoverned tool or an ungated principal.
+func TestAgentReceiptGate_SettlesOnlyAReservation(t *testing.T) {
+	for name, c := range map[string]struct {
+		mode AgentReceiptGateMode
+		code string
+		user *auth.User
+		tool string
+	}{
+		"observe valid":   {AgentReceiptGateObserve, "", auth.NewServiceUser(), "mctl_deploy_service"},
+		"enforce refused": {AgentReceiptGateEnforce, ReceiptCodeStale, auth.NewServiceUser(), "mctl_deploy_service"},
+		"ungoverned":      {AgentReceiptGateEnforce, "", auth.NewServiceUser(), "mctl_whoami"},
+		"human":           {AgentReceiptGateEnforce, "", auth.NewGitHubUser("alice", nil), "mctl_deploy_service"},
+	} {
+		s, v := gatedServer(c.mode, c.code)
+		runGate(t, s, c.user, c.tool, receiptArgs())
+		if len(v.settled) != 0 {
+			t.Errorf("%s: settled %+v", name, v.settled)
+		}
+	}
+}
+
+func TestParseAgentReceiptMaxAge(t *testing.T) {
+	for raw, want := range map[string]time.Duration{"": DefaultAgentReceiptMaxAge, "30s": 30 * time.Second, "1h": time.Hour} {
+		if got, err := ParseAgentReceiptMaxAge(raw); err != nil || got != want {
+			t.Errorf("ParseAgentReceiptMaxAge(%q) = %s, %v; want %s", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"5", "0", "0s", "-5m", "61m", "soon"} {
+		if _, err := ParseAgentReceiptMaxAge(raw); err == nil {
+			t.Errorf("ParseAgentReceiptMaxAge(%q) accepted", raw)
+		}
 	}
 }
 

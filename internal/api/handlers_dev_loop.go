@@ -710,6 +710,7 @@ var closedApprovalCodes = map[string]string{
 	workitems.ApprovalDenied:   aarCodeDenied,
 	workitems.ApprovalConsumed: aarCodeConsumed,
 	workitems.ApprovalExecuted: aarCodeExecuted,
+	workitems.ApprovalInFlight: aarCodeInFlight,
 	workitems.ApprovalExpired:  aarCodeExpired,
 }
 
