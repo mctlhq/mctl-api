@@ -174,8 +174,21 @@ type Store struct {
 	now         func() time.Time
 }
 
+// StoreOption configures a Store.
+type StoreOption func(*Store)
+
+// WithClock sets the store's clock, so the store and the API handlers can
+// share one time source for an approval's lifecycle (mctl-api#721).
+func WithClock(now func() time.Time) StoreOption {
+	return func(s *Store) {
+		if now != nil {
+			s.now = now
+		}
+	}
+}
+
 // NewStore connects and creates the schema if needed.
-func NewStore(ctx context.Context, connStr string) (*Store, error) {
+func NewStore(ctx context.Context, connStr string, opts ...StoreOption) (*Store, error) {
 	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: connect: %w", err)
@@ -201,7 +214,11 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		return nil, fmt.Errorf("workitems: create agent run token schema: %w", err)
 	}
 	slog.Info("work-items store initialized")
-	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
+	st := &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}
+	for _, o := range opts {
+		o(st)
+	}
+	return st, nil
 }
 
 // Close releases the pool.

@@ -31,6 +31,15 @@ func (h *Handlers) approvalPolicies() governance.PolicySet {
 	return governance.Policies
 }
 
+// policyStatusOf is the non-refusing policy status of an approval, for audit.
+func (h *Handlers) policyStatusOf(a *workitems.ActionApprovalRequest) string {
+	status, err := h.approvalPolicies().Check(a.PolicyRuleID, a.PolicyVersion)
+	if err != nil {
+		return governance.PolicyDrift
+	}
+	return status
+}
+
 func (h *Handlers) approvalNow() time.Time {
 	if h.opts.Clock != nil {
 		return h.opts.Clock()
@@ -84,6 +93,12 @@ func (h *Handlers) guardDecision(w http.ResponseWriter, r *http.Request, user *a
 	if decision != workitems.DecisionApprove {
 		return "", true
 	}
+	if status, err := h.approvalPolicies().Admit(a.PolicyRuleID, a.PolicyVersion, h.opts.RequireRegisteredPolicy); err != nil {
+		h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", a.ID, actionApprovalRefusalCode(err),
+			map[string]string{"policy_status": status})
+		writeActionApprovalError(w, err)
+		return "", false
+	}
 	c := h.decisionContext(a)
 	if !c.ContextComplete {
 		err := &incompleteContextError{missing: c.MissingFields}
@@ -126,7 +141,8 @@ func (h *Handlers) revalidateApproval(w http.ResponseWriter, r *http.Request, us
 	})
 	if err != nil {
 		if code := actionApprovalRefusalCode(err); code != "" {
-			h.auditActionApprovalRefusal(r, user, "action_approval.consume_refused", a.ID, code)
+			h.auditActionApprovalRefusal(r, user, "action_approval.consume_refused", a.ID, code,
+				map[string]string{"policy_status": res.PolicyStatus})
 		}
 		writeActionApprovalError(w, err)
 		return res, false

@@ -95,6 +95,7 @@ Callers should key on `details.reapproval_required`, not on the code text.
 |---|---|---|---|
 | `approval_context_incomplete` (create) | 422 | n/a: nothing stored, send the missing fields | F6 |
 | `approval_context_incomplete` (decide) | 422 | no grant made | F6 |
+| `approval_context_incomplete` (spend) | 409 | true: an approved row, e.g. a legacy one, whose mandatory context is incomplete is never spent | #721 |
 | `approval_context_invalid` (create) | 400 | n/a | F6 |
 | `approval_context_changed` | 409 | true | F6 |
 | `approval_stale` | 409 | true | F4 |
@@ -103,6 +104,14 @@ Callers should key on `details.reapproval_required`, not on the code text.
 | `approval_decider_disabled` | 409 | true | F3 |
 | `approval_authority_unavailable` | 503 | false: retry, the approval is not spent | F3 |
 | `approval_policy_drift` | 409 | true | F9 |
+| `approval_policy_unregistered` | 422 at create, 409 at decide and spend | false at create, true at decide and spend | strict policy (`ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY`) |
+| `approval_policy_unavailable` | 503 | false | strict policy with no registered policy set |
+
+## Precedence
+
+Structural and secret validation (400) is evaluated before governance
+completeness (422), in both create and decide. Terminal-state refusals keep
+precedence over governance refusals at decide and spend.
 
 ## Freshness
 

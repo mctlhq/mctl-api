@@ -158,7 +158,15 @@ func TestRevalidate(t *testing.T) {
 		"unregistered rule passes": {mutL: func(l *LiveAuthority) { l.Policies = PolicySet{} }},
 		"unregistered rule, strict": {
 			mutL: func(l *LiveAuthority) { l.Policies = PolicySet{}; l.StrictPolicy = true },
-			want: ErrPolicyDrift,
+			want: ErrPolicyUnavailable,
+		},
+		"unregistered rule, strict, other rules registered": {
+			mutL: func(l *LiveAuthority) { l.Policies = PolicySet{"q": {Version: "v1"}}; l.StrictPolicy = true },
+			want: ErrPolicyUnregistered,
+		},
+		"legacy approved row without digest, incomplete (spend)": {
+			mutA: func(a *workitems.ActionApprovalRequest) { a.DecidedContextDigest = ""; a.SideEffect = "" },
+			want: ErrSpendContextIncomplete,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

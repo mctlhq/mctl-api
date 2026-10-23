@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -107,6 +108,7 @@ func main() {
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
 	cfg := loadConfig()
+	logApprovalPolicy(cfg.requireRegisteredPolicy(), governance.Policies)
 	if err := cfg.validate(); err != nil {
 		slog.Error("invalid configuration", "error", err)
 		stopSignals()
@@ -604,7 +606,7 @@ func main() {
 		slog.Warn("no WORK_ITEMS_DB_URL or AUDIT_DB_URL; /api/v1/work-items and /api/v1/action-approvals routes will return 503")
 	default:
 		ws, wsErr := initStore(initCtx, storeFailures, "work items", func(ctx context.Context) (*workitems.Store, error) {
-			return workitems.NewStore(ctx, workItemsDBURL)
+			return workitems.NewStore(ctx, workItemsDBURL, workitems.WithClock(approvalClock))
 		})
 		if wsErr != nil {
 			slog.Error("work-items store init failed; /api/v1/work-items and /api/v1/action-approvals routes will return 503", "error", wsErr)
@@ -1072,6 +1074,7 @@ func main() {
 		PrincipalMembership:            gitReader,
 		AdminPrincipals:                cfg.adminPrincipals(),
 		RequireRegisteredPolicy:        cfg.requireRegisteredPolicy(),
+		Clock:                          approvalClock,
 		ApprovalMaxDecisionAge:         cfg.approvalMaxDecisionAge(),
 		PrincipalAuthz:                 principalAuthz,
 		MemberKeyPlan:                  memberKeyPlanOptions(principalStore, gitReader),
@@ -2332,6 +2335,21 @@ func (c config) approvalMaxDecisionAge() time.Duration {
 		return governance.DefaultMaxDecisionAge
 	}
 	return d
+}
+
+// approvalClock is the one time source of an action approval's lifecycle:
+// the work-items store and the API handlers both use it (mctl-api#721).
+func approvalClock() time.Time { return time.Now().UTC() }
+
+// logApprovalPolicy logs the strict mode and the registered rule ids and
+// versions at boot, for the rollout observation window (mctl-api#721).
+func logApprovalPolicy(strict bool, ps governance.PolicySet) {
+	rules := make([]string, 0, len(ps))
+	for id, p := range ps {
+		rules = append(rules, id+"@"+p.Version)
+	}
+	sort.Strings(rules)
+	slog.Info("action approval policy", "require_registered_policy", strict, "registered_rules", rules)
 }
 
 // requireRegisteredPolicy is ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY.

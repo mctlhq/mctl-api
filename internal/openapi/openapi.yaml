@@ -1039,7 +1039,7 @@ components:
                  approval_decider_forbidden, approval_reader_forbidden, approval_execution_invalid,
                  approval_execution_not_open, approval_context_incomplete, approval_context_invalid,
                  approval_context_changed, approval_stale, approval_authority_revoked,
-                 approval_decider_disabled, approval_authority_unavailable, approval_policy_drift]
+                 approval_decider_disabled, approval_authority_unavailable, approval_policy_drift, approval_policy_unregistered, approval_policy_unavailable]
         details:
           type: object
           description: 'reapproval_required=true: the approval can never be spent, request a new one. missing_fields: the empty mandatory context fields (approval_context_incomplete).'
