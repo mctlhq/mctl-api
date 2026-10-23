@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.118.0](https://github.com/mctlhq/mctl-api/compare/4.117.0...4.118.0) (2026-10-23)
+
+
+### Features
+
+* **agents:** issue-764-fix-dev-loop-temporal-client-that-fails ([f9e4663](https://github.com/mctlhq/mctl-api/commit/f9e4663cdf4a831a89fcc5caf438677105f788a6))
+
+
+### Bug Fixes
+
+* **agents:** issue-764-fix-dev-loop-temporal-client-that-fails ([f20d498](https://github.com/mctlhq/mctl-api/commit/f20d498607c5baba372d468763b41400d4afeeee))
+* **ci:** fix failing required checks on issue-764-fix-dev-loop-temporal-client-that-fails ([399ada9](https://github.com/mctlhq/mctl-api/commit/399ada9fdbac73445834450afead8c3311ea8696))
+
 ## [4.117.0](https://github.com/mctlhq/mctl-api/compare/4.116.1...4.117.0) (2026-10-23)
 
 
