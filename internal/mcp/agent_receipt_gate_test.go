@@ -386,37 +386,26 @@ func TestDescribeMalformedReceipt(t *testing.T) {
 // scope refuses every governed tool first. A scope that admits one would
 // reach the tool with no receipt at all, so no scope may.
 func TestAgentScopesAdmitNoGovernedTool(t *testing.T) {
-	srv := NewServer("http://localhost:8080", "").NewMCPServer()
-	tools := map[string]bool{}
-	for name := range srv.ListTools() {
-		tools[name] = true
-	}
-	for name := range governedAgentTools {
-		tools[name] = true
+	// TestAgentReceiptGate_ClassifiesEveryTool holds every governed tool to
+	// a registered one, so the governed set is the whole surface to check.
+	if len(governedAgentTools) == 0 {
+		t.Fatal("no governed tool is defined: the check proves nothing")
 	}
 	scopes := auth.AgentScopeNames()
 	if len(scopes) == 0 {
 		t.Fatal("no agent scope is defined: the check proves nothing")
 	}
-	checked := 0
 	for _, name := range scopes {
 		scope, ok := auth.LookupAgentScope(name)
 		if !ok {
 			t.Fatalf("scope %q is listed but cannot be looked up", name)
 		}
-		for tool := range tools {
-			if _, governed := governedAgentTools[tool]; !governed {
-				continue
-			}
-			checked++
+		for tool := range governedAgentTools {
 			for _, spelling := range []string{tool, strings.TrimPrefix(tool, "mctl_")} {
 				if scope.AllowsTool(spelling) {
 					t.Errorf("scope %q admits governed tool %s: agent principals are not receipt-gated, so extend the gate before granting it", name, spelling)
 				}
 			}
 		}
-	}
-	if checked == 0 {
-		t.Fatal("no governed tool was checked: the check proves nothing")
 	}
 }
