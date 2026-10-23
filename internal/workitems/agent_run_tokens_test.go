@@ -175,3 +175,56 @@ func TestMintAgentRunToken_TwoConcurrentMintsForOneExecutionBothSucceedAndAreInd
 		t.Fatalf("B must still resolve after A is revoked: %v", err)
 	}
 }
+
+// A token minted without an execution is bound to no work item and ends only
+// by expiry or revocation; an empty execution never means "unbound" unless
+// asked for.
+func TestMintAgentRunToken_WithoutExecution(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+
+	if _, _, err := s.MintAgentRunToken(ctx, MintAgentRunTokenInput{Agent: "issue-investigator", Scope: "investigate"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("empty execution without WithoutExecution: err = %v, want ErrNotFound", err)
+	}
+	_, exec := openExecution(t, s, PhaseRunning)
+	if _, _, err := s.MintAgentRunToken(ctx, MintAgentRunTokenInput{
+		Agent: "issue-investigator", ExecutionID: exec.ID, WithoutExecution: true,
+	}); !errors.Is(err, ErrAgentRunTokenBinding) {
+		t.Fatalf("both bound and unbound: err = %v, want ErrAgentRunTokenBinding", err)
+	}
+
+	row, secret, err := s.MintAgentRunToken(ctx, MintAgentRunTokenInput{
+		Agent: "issue-investigator", Scope: "investigate", TTL: time.Hour, WithoutExecution: true,
+	})
+	if err != nil {
+		t.Fatalf("MintAgentRunToken: %v", err)
+	}
+	if row.ExecutionID != "" || row.WorkItemID != "" {
+		t.Errorf("row = %+v, want no execution and no work item", row)
+	}
+	run, err := s.ResolveAgentRunToken(ctx, secret)
+	if err != nil {
+		t.Fatalf("a fresh unbound token must resolve: %v", err)
+	}
+	if run.ExecutionID != "" || run.WorkItemID != "" || run.Scope != "investigate" || run.RunID != row.ID {
+		t.Fatalf("resolved run = %+v", run)
+	}
+
+	if err := s.RevokeAgentRunToken(ctx, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveAgentRunToken(ctx, secret); !errors.Is(err, auth.ErrAgentRunNotFound) {
+		t.Fatalf("revoked unbound token: err = %v, want ErrAgentRunNotFound", err)
+	}
+
+	_, expired, err := s.MintAgentRunToken(ctx, MintAgentRunTokenInput{
+		Agent: "issue-investigator", Scope: "investigate", TTL: time.Hour, WithoutExecution: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	if _, err := s.ResolveAgentRunToken(ctx, expired); !errors.Is(err, auth.ErrAgentRunNotFound) {
+		t.Fatalf("expired unbound token: err = %v, want ErrAgentRunNotFound", err)
+	}
+}

@@ -27,6 +27,11 @@ package k8s
 // Forging it takes creating a Workflow from an allowed template as an
 // allowed ServiceAccount in Namespace, which is platform access already,
 // and the token it yields is bound to that execution's work item only.
+//
+// A template may also admit runs submitted without an execution (the
+// directive poller and manual triggers start investigate that way). Such a
+// run's token is bound to no work item, so its scope admits none of the
+// work-item routes: it can do strictly less than an execution-bound one.
 
 import (
 	"context"
@@ -78,12 +83,16 @@ var workflowGVR = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1
 type AgentRunTemplate struct {
 	Agent string
 	Scope string
+	// AllowWithoutExecution binds a run with no execution_id too, to no
+	// execution and no work item.
+	AllowWithoutExecution bool
 }
 
 // AgentRunBinding is a verified agent pod's run.
 type AgentRunBinding struct {
-	Agent          string
-	Scope          string
+	Agent string
+	Scope string
+	// ExecutionID is "" for a run its template admits without one.
 	ExecutionID    string
 	Namespace      string
 	ServiceAccount string
@@ -233,7 +242,7 @@ func (b *AgentRunBinder) Bind(ctx context.Context, token string) (*AgentRunBindi
 		return nil, refused("workflow_template_not_allowed")
 	}
 	execID := workflowParam(wf, executionParam)
-	if execID == "" {
+	if execID == "" && !tmpl.AllowWithoutExecution {
 		return nil, refused("workflow_without_execution")
 	}
 

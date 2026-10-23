@@ -61,6 +61,9 @@ type agentRunTokenBody struct {
 	Permissions []string `json:"permissions,omitempty"`
 	// Scope names a server-defined auth.AgentScope (mctlhq/mctl-agents#737).
 	Scope string `json:"scope,omitempty"`
+	// WithoutExecution is set only by the exchange, never decoded from a
+	// request: see workitems.MintAgentRunTokenInput.
+	WithoutExecution bool `json:"-"`
 }
 
 // auditAgentRunTokenRefusal records a refused mint: the typed code and the
@@ -224,6 +227,7 @@ func (h *Handlers) issueAgentRunToken(w http.ResponseWriter, r *http.Request, is
 	row, secret, err := h.opts.WorkItems.MintAgentRunToken(r.Context(), workitems.MintAgentRunTokenInput{
 		Agent: body.Agent, AgentPrincipalID: agentUser.PrincipalID(), ExecutionID: body.ExecutionID,
 		Permissions: body.Permissions, Scope: body.Scope, TTL: ttl, IssuedByPrincipalID: iss.PrincipalID,
+		WithoutExecution: body.WithoutExecution,
 	})
 	if err != nil {
 		code, status := agentRunTokenErrorCode(err)

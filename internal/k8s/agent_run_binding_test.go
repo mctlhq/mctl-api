@@ -182,6 +182,40 @@ func TestAgentRunBinder_RefusesWhatDoesNotBind(t *testing.T) {
 	}
 }
 
+// A template that admits runs without an execution binds them to none; the
+// rest of the chain is checked exactly as for any other run.
+func TestAgentRunBinder_BindsARunWithoutExecutionOnlyWhereAllowed(t *testing.T) {
+	noExecution := func(f *bindFixture) {
+		_ = unstructured.SetNestedSlice(f.wf.Object, []any{map[string]any{"name": "execution_id", "value": ""}}, "spec", "arguments", "parameters")
+	}
+	allow := func(b *AgentRunBinder) *AgentRunBinder {
+		tmpl := b.Templates["mctl-agents-investigate"]
+		tmpl.AllowWithoutExecution = true
+		b.Templates["mctl-agents-investigate"] = tmpl
+		return b
+	}
+
+	f := newBindFixture()
+	noExecution(f)
+	got, err := allow(f.binder()).Bind(context.Background(), "sa-token")
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if got.ExecutionID != "" || got.Scope != "investigate" || got.Workflow != testWF {
+		t.Errorf("binding = %+v", got)
+	}
+
+	// Allowing a run without an execution relaxes nothing else.
+	f = newBindFixture()
+	noExecution(f)
+	_ = unstructured.SetNestedField(f.wf.Object, "Failed", "status", "phase")
+	_, err = allow(f.binder()).Bind(context.Background(), "sa-token")
+	var refusal *BindingRefusedError
+	if !errors.As(err, &refusal) || refusal.Reason != "workflow_not_running" {
+		t.Errorf("finished workflow: err = %v, want workflow_not_running", err)
+	}
+}
+
 // A cluster that cannot be read is an unknown, never a refusal and never a
 // binding.
 func TestAgentRunBinder_UnreadableClusterIsNotARefusal(t *testing.T) {
