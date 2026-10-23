@@ -20,6 +20,7 @@ var ErrUnavailable = errors.New("temporalclient: configured but currently unreac
 // Backoff and first-attempt bounds. Variables so tests can shrink them.
 var (
 	redialInitialDelay = time.Second
+	redialTimeout      = 10 * time.Second
 	redialMaxDelay     = 30 * time.Second
 	firstDialTimeout   = 3 * time.Second
 )
@@ -51,7 +52,7 @@ func NewReconnecting(ctx context.Context, hostPort, namespace string) *Reconnect
 }
 
 func newReconnectingWithDialer(ctx context.Context, dial dialFunc) *Reconnecting {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(ctx) //nolint:gosec // G118: cancel is stored on Reconnecting and invoked by Close
 	r := &Reconnecting{dial: dial, cancel: cancel, done: make(chan struct{})}
 	fctx, fcancel := context.WithTimeout(ctx, firstDialTimeout)
 	c, err := dial(fctx)
@@ -73,14 +74,16 @@ func (r *Reconnecting) loop(ctx context.Context) {
 	attempts := 1
 	lastLog := time.Now()
 	for {
-		wait := delay/2 + rand.N(delay/2+1)
+		wait := delay/2 + rand.N(delay/2+1) //nolint:gosec // G404: backoff jitter, not security-sensitive
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
 		}
 		attempts++
-		c, err := r.dial(ctx)
+		dctx, dcancel := context.WithTimeout(ctx, redialTimeout)
+		c, err := r.dial(dctx)
+		dcancel()
 		if err == nil {
 			if ctx.Err() != nil {
 				c.Close()

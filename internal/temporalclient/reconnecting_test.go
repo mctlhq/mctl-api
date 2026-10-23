@@ -55,3 +55,22 @@ func TestReconnectingCloseStopsLoop(t *testing.T) {
 		t.Fatal("Close did not stop the re-dial loop")
 	}
 }
+
+func TestReconnectingImmediateSuccess(t *testing.T) {
+	m := &mocks.Client{}
+	m.On("Close").Return()
+	r := newReconnectingWithDialer(context.Background(), func(context.Context) (*Client, error) {
+		return &Client{temporal: m}, nil
+	})
+	if err := r.Available(); err != nil {
+		t.Fatalf("want available immediately, got %v", err)
+	}
+	done := make(chan struct{})
+	go func() { r.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked on a connected client")
+	}
+	m.AssertCalled(t, "Close")
+}
