@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.117.0](https://github.com/mctlhq/mctl-api/compare/4.116.1...4.117.0) (2026-10-23)
+
+
+### Features
+
+* **agents:** issue-721-governance-harden-action-approval-contra ([329f17c](https://github.com/mctlhq/mctl-api/commit/329f17c6c238494947bfe3bcb59a9b5702760a93))
+* **agents:** issue-721-governance-harden-action-approval-contra ([cde6eb0](https://github.com/mctlhq/mctl-api/commit/cde6eb0527e4666501e164543d5b38212c459cec))
+* **auth:** exchange run tokens for investigate runs without an execution ([1688c3e](https://github.com/mctlhq/mctl-api/commit/1688c3edbfeaea2b5da86aa40b8369918d5ef203))
+* **auth:** exchange run tokens for investigate runs without an execution ([ea3c09f](https://github.com/mctlhq/mctl-api/commit/ea3c09f73f6d35e21da5ba7e1249f658ae5b52da))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-721-governance-harden-action-approval-contra ([22b5c00](https://github.com/mctlhq/mctl-api/commit/22b5c004f3477f2379ead0c44b62111eff84c2ca))
+
 ## [4.116.1](https://github.com/mctlhq/mctl-api/compare/4.116.0...4.116.1) (2026-10-22)
 
 
