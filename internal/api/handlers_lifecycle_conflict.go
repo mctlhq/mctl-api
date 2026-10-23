@@ -164,8 +164,8 @@ const devLoopWorkflowIDPrefix = "dev-loop-" //nolint:gosec // G101 matches ID+li
 // same: a DEVLOOP-SHAPED stored id first, then reconstruction from
 // proposal_ref, then "no way to ask".
 func (h *Handlers) lifecycleLegacyFor(ctx context.Context, o *lifecycle.Ownership) legacyAnswer {
-	if h.opts.TemporalClient == nil {
-		return legacyAnswer{Answer: legacyAnswerUnknown, Reason: "dev-loop Temporal client not configured"}
+	if msg := h.temporalState(); msg != "" {
+		return legacyAnswer{Answer: legacyAnswerUnknown, Reason: msg}
 	}
 	stored := strings.TrimSpace(o.TemporalWorkflowID)
 	if strings.HasPrefix(stored, devLoopWorkflowIDPrefix) {

@@ -263,6 +263,9 @@ type Options struct {
 	// entry keeps GET /readyz at 503 and names the store; liveness (/healthz)
 	// is unaffected. Nil means not wired (tests) and is not_configured.
 	StoreInitFailures func() []string
+	// TemporalState reports "not_configured", "connecting" or "ok" for
+	// /readyz as information only; it never affects readiness (mctl-api#764).
+	TemporalState func() string
 	// GitopsSynced reports whether this pod's own gitops checkout has synced
 	// at least once. Unlike the shared dependencies above it is pod-local: a
 	// fresh pod that has not cloned yet would serve an empty catalogue, so
