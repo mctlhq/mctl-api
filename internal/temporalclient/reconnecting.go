@@ -113,7 +113,7 @@ func (r *Reconnecting) Available() error {
 
 func (r *Reconnecting) unavailable() error {
 	if p := r.lastErr.Load(); p != nil {
-		return fmt.Errorf("%w: %v", ErrUnavailable, *p)
+		return fmt.Errorf("%w: %w", ErrUnavailable, *p)
 	}
 	return ErrUnavailable
 }

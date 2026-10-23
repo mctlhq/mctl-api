@@ -74,3 +74,16 @@ func TestReconnectingImmediateSuccess(t *testing.T) {
 	}
 	m.AssertCalled(t, "Close")
 }
+
+func TestAvailableWrapsLastDialError(t *testing.T) {
+	dialErr := errors.New("connection refused")
+	r := &Reconnecting{}
+	r.lastErr.Store(&dialErr)
+	err := r.Available()
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Available() = %v, want ErrUnavailable", err)
+	}
+	if !errors.Is(err, dialErr) {
+		t.Fatalf("Available() = %v, want it to wrap the dial error", err)
+	}
+}
