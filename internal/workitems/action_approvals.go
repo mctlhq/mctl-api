@@ -175,7 +175,7 @@ UPDATE action_approval_requests SET
         WHEN intent_source <> '' THEN intent_source
         WHEN work_item_id <> '' THEN 'work_item:' || work_item_id
         ELSE 'execution:' || execution_id END
-WHERE intent_source = '' AND decided_context_digest = '';
+WHERE intent_source = '' AND decided_context_digest = '' AND state IN ('pending', 'approved');
 -- Single-use execution mark: consumed -> executed. A table created before
 -- the state existed carries the narrower state CHECK under the same name;
 -- it is replaced in one ALTER (drop and add under one lock), and only while
@@ -389,6 +389,26 @@ func (in ActionApprovalInput) validateContext() error {
 		if len(r) > MaxPolicyReasonBytes || !policyReasonRE.MatchString(r) {
 			return invalid("policy_reasons entries must be 1-%d bytes of [a-z0-9._:-]", MaxPolicyReasonBytes)
 		}
+	}
+	return nil
+}
+
+// ValidateStructure is the structural and secret validation of a create
+// request, exported so the handler can run it before governance completeness
+// (mctl-api#721): a malformed request is a 400 before it can be a 422.
+func (in ActionApprovalInput) ValidateStructure() error { return in.validate() }
+
+// ValidateDecisionInput is the structural validation of a decision (decision
+// value, reason), exported for the same precedence reason.
+func ValidateDecisionInput(decision, reason string) error {
+	if err := checkText("reason", reason, MaxApprovalReasonBytes, false); err != nil {
+		return err
+	}
+	if err := scanSecrets("reason", reason); err != nil {
+		return err
+	}
+	if decision != DecisionApprove && decision != DecisionDeny {
+		return invalid("decision must be %q or %q", DecisionApprove, DecisionDeny)
 	}
 	return nil
 }

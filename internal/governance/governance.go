@@ -40,6 +40,15 @@ var (
 	ErrDeciderDisabled      = errors.New("the decider's principal is no longer an active human")
 	ErrAuthorityUnavailable = errors.New("the decider's authority could not be verified")
 	ErrPolicyDrift          = errors.New("the policy version changed since the approval was decided")
+
+	// ErrSpendContextIncomplete: an approved row whose mandatory context is
+	// incomplete at spend time (e.g. a legacy row with no decided digest).
+	// The approval must be re-requested.
+	ErrSpendContextIncomplete = errors.New("approved decision context is incomplete")
+	// ErrPolicyUnregistered: strict mode, the rule is not registered.
+	ErrPolicyUnregistered = errors.New("the policy rule is not registered")
+	// ErrPolicyUnavailable: strict mode, but no policy set is configured.
+	ErrPolicyUnavailable = errors.New("the registered policy set is unavailable")
 )
 
 // AuthorityBasisPlatformAdmin is the basis recorded for a decision made by a
@@ -82,7 +91,35 @@ var Policies = PolicySet{
 const (
 	PolicyOK           = "ok"
 	PolicyUnregistered = "unregistered"
+	PolicyDrift        = "drift"
 )
+
+// Admit is Check plus the strict-mode refusals: in strict mode an empty set
+// is ErrPolicyUnavailable and an unregistered rule is ErrPolicyUnregistered.
+// Drift is refused in either mode.
+func (ps PolicySet) Admit(ruleID, version string, strict bool) (string, error) {
+	if strict && len(ps) == 0 {
+		return "", ErrPolicyUnavailable
+	}
+	status, err := ps.Check(ruleID, version)
+	if err != nil {
+		return PolicyDrift, err
+	}
+	if status == PolicyUnregistered && strict {
+		return status, fmt.Errorf("%w: %q", ErrPolicyUnregistered, ruleID)
+	}
+	return status, nil
+}
+
+// SpendContextIncompleteError carries the missing fields of an approved row
+// that is no longer (or never was) complete.
+type SpendContextIncompleteError struct{ Missing []string }
+
+func (e *SpendContextIncompleteError) Error() string {
+	return ErrSpendContextIncomplete.Error() + ": missing " + strings.Join(e.Missing, ", ")
+}
+
+func (e *SpendContextIncompleteError) Unwrap() error { return ErrSpendContextIncomplete }
 
 // Check compares an approval's policy version with the current one. An
 // unregistered rule is reported, not refused; strict callers refuse it.
@@ -365,6 +402,12 @@ type Result struct {
 func Revalidate(ctx context.Context, a *workitems.ActionApprovalRequest, live LiveAuthority) (Result, error) {
 	res := Result{Revalidation: "ok"}
 
+	// Step 0: an approved row must be complete when spent, including a
+	// legacy row that has no decided digest to compare against.
+	if c := DecisionContextOf(a, Live{Registry: live.Registry}); !c.ContextComplete {
+		return res, &SpendContextIncompleteError{Missing: c.MissingFields}
+	}
+
 	// F6: the context the reviewer approved is the context being spent.
 	if a.DecidedContextDigest != "" {
 		if cur := DecisionContextOf(a, Live{Registry: live.Registry}); cur.ContextDigest != a.DecidedContextDigest {
@@ -408,13 +451,10 @@ func Revalidate(ctx context.Context, a *workitems.ActionApprovalRequest, live Li
 	}
 
 	// F9: the policy has not moved on.
-	status, err := live.Policies.Check(a.PolicyRuleID, a.PolicyVersion)
+	status, err := live.Policies.Admit(a.PolicyRuleID, a.PolicyVersion, live.StrictPolicy)
+	res.PolicyStatus = status
 	if err != nil {
 		return res, err
 	}
-	if status == PolicyUnregistered && live.StrictPolicy {
-		return res, fmt.Errorf("%w: rule %q is not registered", ErrPolicyDrift, a.PolicyRuleID)
-	}
-	res.PolicyStatus = status
 	return res, nil
 }

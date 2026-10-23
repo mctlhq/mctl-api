@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -64,6 +65,10 @@ const (
 	aarCodeDeciderDisabled      = "approval_decider_disabled"
 	aarCodeAuthorityUnavailable = "approval_authority_unavailable"
 	aarCodePolicyDrift          = "approval_policy_drift"
+
+	// Hardening (mctl-api#721).
+	aarCodePolicyUnregistered = "approval_policy_unregistered"
+	aarCodePolicyUnavailable  = "approval_policy_unavailable"
 )
 
 // devLoopApprovalKind is the action kind of a DevLoop's human approval gate
@@ -115,6 +120,7 @@ var actionApprovalRefusals = []struct {
 	{workitems.ErrApprovalExpired, http.StatusConflict, aarCodeExpired, true},
 	{workitems.ErrApprovalIntentMismatch, http.StatusConflict, aarCodeIntentMismatch, false},
 	{workitems.ErrApprovalConsumed, http.StatusConflict, aarCodeConsumed, false},
+	{governance.ErrSpendContextIncomplete, http.StatusConflict, aarCodeContextIncomplete, true},
 	{governance.ErrContextIncomplete, http.StatusUnprocessableEntity, aarCodeContextIncomplete, false},
 	{governance.ErrContextInvalid, http.StatusBadRequest, aarCodeContextInvalid, false},
 	{governance.ErrContextChanged, http.StatusConflict, aarCodeContextChanged, true},
@@ -123,6 +129,9 @@ var actionApprovalRefusals = []struct {
 	{governance.ErrDeciderDisabled, http.StatusConflict, aarCodeDeciderDisabled, true},
 	{governance.ErrAuthorityUnavailable, http.StatusServiceUnavailable, aarCodeAuthorityUnavailable, false},
 	{governance.ErrPolicyDrift, http.StatusConflict, aarCodePolicyDrift, true},
+	{errCreatePolicyUnregistered, http.StatusUnprocessableEntity, aarCodePolicyUnregistered, false},
+	{governance.ErrPolicyUnregistered, http.StatusConflict, aarCodePolicyUnregistered, true},
+	{governance.ErrPolicyUnavailable, http.StatusServiceUnavailable, aarCodePolicyUnavailable, false},
 	{workitems.ErrApprovalNotConsumed, http.StatusConflict, aarCodeNotConsumed, false},
 	{workitems.ErrApprovalExecuted, http.StatusConflict, aarCodeExecuted, false},
 	{workitems.ErrApprovalTargetMismatch, http.StatusConflict, aarCodeTargetMismatch, false},
@@ -153,6 +162,10 @@ func writeActionApprovalError(w http.ResponseWriter, err error) {
 			var inc *incompleteContextError
 			if errors.As(err, &inc) {
 				details = map[string]interface{}{"missing_fields": inc.missing}
+			}
+			var spend *governance.SpendContextIncompleteError
+			if errors.As(err, &spend) {
+				details = map[string]interface{}{"missing_fields": spend.Missing, "reapproval_required": true}
 			}
 			writeErrorCode(w, r.status, r.code, msg, details)
 			return
@@ -233,19 +246,30 @@ func (h *Handlers) auditActionApproval(r *http.Request, user *auth.User, op stri
 // execution mark: the
 // signatures of a replay, an intent swap or a confused deputy. Ids and the
 // typed code only, never the reason text or a presented hash.
-func (h *Handlers) auditActionApprovalRefusal(r *http.Request, user *auth.User, op, id, code string) {
+func (h *Handlers) auditActionApprovalRefusal(r *http.Request, user *auth.User, op, id, code string, extra ...map[string]string) {
+	params := map[string]string{
+		"approval_id": id,
+		"reason":      code,
+		"actor":       principalOf(user),
+	}
+	for _, m := range extra {
+		for k, v := range m {
+			params[k] = v
+		}
+	}
 	h.logAudit(r, audit.Entry{
-		UserID:    user.ID,
-		Operation: op,
-		Parameters: map[string]string{
-			"approval_id": id,
-			"reason":      code,
-			"actor":       principalOf(user),
-		},
-		Status:    "failed",
-		RiskLevel: string(operations.RiskMedium),
+		UserID:     user.ID,
+		Operation:  op,
+		Parameters: params,
+		Status:     "failed",
+		RiskLevel:  string(operations.RiskMedium),
 	})
 }
+
+// errCreatePolicyUnregistered is the create-side refusal of an unregistered
+// policy rule in strict mode: a 422 the client can fix, unlike the spend-side
+// refusal, which requires a new approval.
+var errCreatePolicyUnregistered = errors.New("the policy rule is not registered")
 
 type actionApprovalBody struct {
 	ExecutionID    string    `json:"execution_id"`
@@ -311,29 +335,13 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		ArtifactHash:  body.ArtifactHash,
 		WorkItemID:    body.WorkItemID,
 	}
-	cc, err := governance.FillCreateContext(governance.CreateContext{
-		RiskLevel: body.RiskLevel, SideEffect: body.SideEffect, IntentSource: body.IntentSource,
-		PolicyDecision: body.PolicyDecision, PolicyReasons: body.PolicyReasons,
-	}, intent, h.opts.Registry, h.approvalPolicies())
-	if err != nil {
-		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", aarCodeContextInvalid)
-		writeActionApprovalError(w, err)
-		return
-	}
-	// Refused here, where the client can still supply what is missing:
-	// created incomplete, the request would only fail later at approve.
-	if missing := cc.Missing(); len(missing) > 0 {
-		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", aarCodeContextIncomplete)
-		writeActionApprovalError(w, &incompleteContextError{missing: missing})
-		return
-	}
 	in := workitems.ActionApprovalInput{
 		ActionIntent:   intent,
-		RiskLevel:      cc.RiskLevel,
-		SideEffect:     cc.SideEffect,
-		IntentSource:   cc.IntentSource,
-		PolicyDecision: cc.PolicyDecision,
-		PolicyReasons:  cc.PolicyReasons,
+		RiskLevel:      body.RiskLevel,
+		SideEffect:     body.SideEffect,
+		IntentSource:   body.IntentSource,
+		PolicyDecision: body.PolicyDecision,
+		PolicyReasons:  body.PolicyReasons,
 		RequestedBy:    principalOf(user),
 		// Recorded only (mctl-api#373 phase 1).
 		RequestedByPrincipalID: user.PrincipalID(),
@@ -350,6 +358,42 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		ExpiresAt:      body.ExpiresAt,
 		IntentHash:     body.IntentHash,
 	}
+	// Precedence (mctl-api#721): structural and secret validation (400)
+	// before governance completeness (422).
+	if err := in.ValidateStructure(); err != nil {
+		writeActionApprovalError(w, err)
+		return
+	}
+	cc, err := governance.FillCreateContext(governance.CreateContext{
+		RiskLevel: body.RiskLevel, SideEffect: body.SideEffect, IntentSource: body.IntentSource,
+		PolicyDecision: body.PolicyDecision, PolicyReasons: body.PolicyReasons,
+	}, intent, h.opts.Registry, h.approvalPolicies())
+	if err != nil {
+		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", aarCodeContextInvalid)
+		writeActionApprovalError(w, err)
+		return
+	}
+	// Refused here, where the client can still supply what is missing:
+	// created incomplete, the request would only fail later at approve.
+	if missing := cc.Missing(); len(missing) > 0 {
+		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", aarCodeContextIncomplete)
+		writeActionApprovalError(w, &incompleteContextError{missing: missing})
+		return
+	}
+	policyStatus, perr := h.approvalPolicies().Admit(intent.PolicyRuleID, intent.PolicyVersion, h.opts.RequireRegisteredPolicy)
+	if perr != nil {
+		code := actionApprovalRefusalCode(perr)
+		if errors.Is(perr, governance.ErrPolicyUnregistered) {
+			perr = fmt.Errorf("%w: %q", errCreatePolicyUnregistered, intent.PolicyRuleID)
+			code = aarCodePolicyUnregistered
+		}
+		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", code,
+			map[string]string{"policy_status": policyStatus})
+		writeActionApprovalError(w, perr)
+		return
+	}
+	in.RiskLevel, in.SideEffect, in.IntentSource = cc.RiskLevel, cc.SideEffect, cc.IntentSource
+	in.PolicyDecision, in.PolicyReasons = cc.PolicyDecision, cc.PolicyReasons
 	if subject != nil {
 		in.SubjectPrincipalID = subject.PrincipalID
 		in.SubjectKind = subject.Kind
@@ -360,7 +404,8 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if created {
-		h.auditActionApproval(r, user, "action_approval.create", a, operations.RiskLow)
+		h.auditActionApproval(r, user, "action_approval.create", a, operations.RiskLow,
+			map[string]string{"policy_status": policyStatus})
 	}
 	h.writeApproval(w, createdStatus(created), a)
 }
@@ -479,6 +524,12 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 	if !decodeWorkItemBodyLimit(w, r, &body, maxActionApprovalBodyBytes) {
 		return
 	}
+	// Precedence (mctl-api#721): a malformed decision is a 400 before any
+	// governance refusal.
+	if err := workitems.ValidateDecisionInput(body.Decision, body.Reason); err != nil {
+		writeActionApprovalError(w, err)
+		return
+	}
 	cur, err := h.opts.WorkItems.ActionApproval(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		// The pre-read refuses what the decide itself used to: audit it the
@@ -510,7 +561,8 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 		writeActionApprovalError(w, err)
 		return
 	}
-	h.auditActionApproval(r, user, "action_approval.decision", a, operations.RiskMedium)
+	h.auditActionApproval(r, user, "action_approval.decision", a, operations.RiskMedium,
+		map[string]string{"policy_status": h.policyStatusOf(a)})
 	h.writeApproval(w, http.StatusOK, a)
 }
 
@@ -561,7 +613,7 @@ func (h *Handlers) ConsumeActionApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	h.auditActionApproval(r, user, "action_approval.consume", a, operations.RiskMedium,
-		map[string]string{"revalidation": reval.Revalidation})
+		map[string]string{"revalidation": reval.Revalidation, "policy_status": reval.PolicyStatus})
 	h.writeApproval(w, http.StatusOK, a)
 }
 
