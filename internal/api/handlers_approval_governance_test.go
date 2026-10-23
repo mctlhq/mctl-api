@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -257,5 +258,103 @@ func TestF3_ConsumeStateRefusalPrecedesRevalidation(t *testing.T) {
 	}
 	if st := e.approvalState(id)["state"]; st != workitems.ApprovalExecuted {
 		t.Fatalf("state = %v, want executed", st)
+	}
+}
+
+// mctl-api#721: structural validation (400) precedes governance
+// completeness (422): a body both malformed and incomplete answers 400.
+func TestF721_StructureRefusalPrecedesCompleteness(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	b := e.approvalBody("k-721-order")
+	delete(b, "side_effect")
+	b["action_kind"] = strings.Repeat("x", workitems.MaxApprovalFieldBytes+1)
+	res := e.do(auth.NewServiceUser(), "POST", "/api/v1/action-approvals", b)
+	if res.code != http.StatusBadRequest {
+		t.Fatalf("create = %d %s, want 400", res.code, res.raw)
+	}
+	if code(res) == aarCodeContextIncomplete {
+		t.Fatalf("incompleteness masked the structural refusal: %s", res.raw)
+	}
+}
+
+// mctl-api#721: in strict mode create refuses an unregistered or unavailable
+// policy, and stores nothing.
+func TestF721_StrictPolicyRefusedAtCreate(t *testing.T) {
+	for name, tc := range map[string]struct {
+		policies governance.PolicySet
+		status   int
+		code     string
+	}{
+		"unregistered": {governance.PolicySet{"other-rule": {Version: "v1", Decision: "require_approval"}},
+			http.StatusUnprocessableEntity, aarCodePolicyUnregistered},
+		"unavailable": {governance.PolicySet{}, http.StatusServiceUnavailable, aarCodePolicyUnavailable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newWorkItemsEnv(t)
+			e.h.opts.Policies = tc.policies
+			e.h.opts.RequireRegisteredPolicy = true
+			res := e.do(auth.NewServiceUser(), "POST", "/api/v1/action-approvals", e.approvalBody("k-721-strict-"+name))
+			if res.code != tc.status || code(res) != tc.code {
+				t.Fatalf("create = %d %s", res.code, res.raw)
+			}
+			// Not strict: the same request is admitted, so nothing was stored.
+			e.h.opts.RequireRegisteredPolicy = false
+			if res := e.do(auth.NewServiceUser(), "POST", "/api/v1/action-approvals", e.approvalBody("k-721-strict-"+name)); res.code != http.StatusCreated {
+				t.Fatalf("non-strict create = %d %s", res.code, res.raw)
+			}
+		})
+	}
+}
+
+// mctl-api#721: a malformed decision is a 400 before any governance refusal
+// or lookup, even when the approve would otherwise be refused.
+func TestF721_MalformedDecisionPrecedesGovernance(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	id := e.requestApproval("k-721-decision")["id"].(string)
+	e.h.opts.Policies = governance.PolicySet{}
+	e.h.opts.RequireRegisteredPolicy = true
+	for name, body := range map[string]map[string]any{
+		"bad decision": {"decision": "maybe"},
+		"long reason":  {"decision": "approve", "reason": strings.Repeat("r", workitems.MaxApprovalReasonBytes+1)},
+	} {
+		res := e.do(rootAdmin, "POST", "/api/v1/action-approvals/"+id+"/decision", body)
+		if res.code != http.StatusBadRequest {
+			t.Fatalf("%s = %d %s, want 400", name, res.code, res.raw)
+		}
+	}
+	// Unknown id with a malformed decision is still 400, not 404.
+	if res := e.do(rootAdmin, "POST", "/api/v1/action-approvals/nope/decision", map[string]any{"decision": "maybe"}); res.code != http.StatusBadRequest {
+		t.Fatalf("unknown id = %d %s, want 400", res.code, res.raw)
+	}
+}
+
+// mctl-api#721: an approve is admitted against the policy set in strict mode;
+// a deny is never gated, and the request stays pending after a refusal.
+func TestF721_StrictPolicyRefusedAtApprove(t *testing.T) {
+	for name, tc := range map[string]struct {
+		policies governance.PolicySet
+		status   int
+		code     string
+	}{
+		"unregistered": {governance.PolicySet{"other-rule": {Version: "v1", Decision: "require_approval"}},
+			http.StatusConflict, aarCodePolicyUnregistered},
+		"unavailable": {governance.PolicySet{}, http.StatusServiceUnavailable, aarCodePolicyUnavailable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newWorkItemsEnv(t)
+			id := e.requestApproval("k-721-approve-" + name)["id"].(string)
+			e.h.opts.Policies = tc.policies
+			e.h.opts.RequireRegisteredPolicy = true
+			res := e.decide(rootAdmin, id, "approve")
+			if res.code != tc.status || code(res) != tc.code {
+				t.Fatalf("approve = %d %s", res.code, res.raw)
+			}
+			if got := e.approvalState(id)["state"]; got != "pending" {
+				t.Fatalf("state = %v, want pending", got)
+			}
+			if res := e.decide(rootAdmin, id, "deny"); res.code != http.StatusOK {
+				t.Fatalf("deny = %d %s", res.code, res.raw)
+			}
+		})
 	}
 }

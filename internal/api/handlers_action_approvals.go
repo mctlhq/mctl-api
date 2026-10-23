@@ -384,7 +384,7 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 	if perr != nil {
 		code := actionApprovalRefusalCode(perr)
 		if errors.Is(perr, governance.ErrPolicyUnregistered) {
-			perr = fmt.Errorf("%w: %v", errCreatePolicyUnregistered, perr)
+			perr = fmt.Errorf("%w: %q", errCreatePolicyUnregistered, intent.PolicyRuleID)
 			code = aarCodePolicyUnregistered
 		}
 		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", code,
