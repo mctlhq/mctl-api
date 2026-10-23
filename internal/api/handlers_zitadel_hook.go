@@ -16,9 +16,11 @@ package api
 
 import (
 	"context"
+	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-api/internal/zitadelhook"
@@ -65,7 +67,8 @@ func (h *Handlers) zitadelHookHandler(keys func(*ZitadelHookOptions) []string, r
 			return
 		}
 		res := run(opts.Hook, r.Context(), body)
-		slog.Info("zitadel hook", "target", name, "status", res.Status, "reason", res.Reason)
+		zitadelHookDecisions.WithLabelValues(name, res.Kind, zitadelHookReasonLabel(res.Reason)).Inc()
+		slog.Info("zitadel hook", "target", name, "status", res.Status, "kind", res.Kind, "reason", res.Reason)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(res.Status)
 		_, _ = w.Write(res.Body)
@@ -88,4 +91,25 @@ func (h *Handlers) HandleZitadelCreateUser(w http.ResponseWriter, r *http.Reques
 func (h *Handlers) HandleZitadelTokenClaims(w http.ResponseWriter, r *http.Request) {
 	h.zitadelHookHandler(func(o *ZitadelHookOptions) []string { return o.TokenKeys },
 		(*zitadelhook.Hook).TokenClaims, "token-claims")(w, r)
+}
+
+// zitadelHookDecisions counts every hook decision. The full Reason is in
+// the log line above; here a reason like
+// "intent_customer_create_not_allowed:<github id>" is cut at the colon, so
+// the label set stays bounded and a refused invitee pages an operator
+// (vm-rules/zitadel-hook-alerts.yaml) without putting ids in a metric.
+var zitadelHookDecisions = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "mctl_api_zitadel_hook_decisions_total",
+	Help: "ZITADEL identity hook decisions by target (intent, create, token), kind (pass, refuse, failure, replace) and reason.",
+}, []string{"target", "kind", "reason"})
+
+func init() {
+	prometheus.MustRegister(zitadelHookDecisions)
+}
+
+func zitadelHookReasonLabel(reason string) string {
+	if i := strings.IndexByte(reason, ':'); i >= 0 {
+		return reason[:i]
+	}
+	return reason
 }

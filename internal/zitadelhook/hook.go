@@ -271,20 +271,32 @@ type Result struct {
 	Body   []byte
 	// Reason is a short machine-readable tag for logs; never secret.
 	Reason string
+	// Kind classifies the outcome for metrics: KindPass, KindRefuse,
+	// KindFailure or KindReplace. A refusal and a pass share HTTP status
+	// 200, so the status alone cannot tell them apart.
+	Kind string
 }
 
-func pass(reason string) Result { return Result{Status: http.StatusOK, Reason: reason} }
+// Result kinds. Bounded on purpose: they become a metric label.
+const (
+	KindPass    = "pass"
+	KindRefuse  = "refuse"
+	KindFailure = "failure"
+	KindReplace = "replace"
+)
+
+func pass(reason string) Result { return Result{Status: http.StatusOK, Reason: reason, Kind: KindPass} }
 
 func refuse(code int, reason, message string) Result {
 	body, _ := json.Marshal(map[string]any{
 		"forwardedStatusCode":   code,
 		"forwardedErrorMessage": message,
 	})
-	return Result{Status: http.StatusOK, Body: body, Reason: reason}
+	return Result{Status: http.StatusOK, Body: body, Reason: reason, Kind: KindRefuse}
 }
 
 func failure(reason string) Result {
-	return Result{Status: http.StatusServiceUnavailable, Body: []byte(`{"error":"identity hook unavailable"}`), Reason: reason}
+	return Result{Status: http.StatusServiceUnavailable, Body: []byte(`{"error":"identity hook unavailable"}`), Reason: reason, Kind: KindFailure}
 }
 
 func replace(reason string, v any) Result {
@@ -292,7 +304,7 @@ func replace(reason string, v any) Result {
 	if err != nil {
 		return failure("marshal_failed")
 	}
-	return Result{Status: http.StatusOK, Body: body, Reason: reason}
+	return Result{Status: http.StatusOK, Body: body, Reason: reason, Kind: KindReplace}
 }
 
 // Message shown to a person refused for lack of a verified email. Login V2
