@@ -852,6 +852,7 @@ func main() {
 	// *temporalclient.Client pointer to an interface-typed field would
 	// produce a non-nil interface wrapping a nil pointer — requireTemporalAdmin's
 	// `h.opts.TemporalClient == nil` check would then wrongly see "configured".
+	// The nil interface now means only "TEMPORAL_ADDRESS unset".
 	// GitHub Actions dispatcher (optional — enabled when GITOPS_ACTIONS_TOKEN
 	// is set). Same nil-interface discipline as devLoopClient below: the
 	// field is left as its zero value when unconfigured, because assigning a
@@ -868,18 +869,27 @@ func main() {
 	}
 
 	var devLoopClient mctlapi.DevLoopClient
+	var temporalReconnecting *temporalclient.Reconnecting
 	if temporalAddress := os.Getenv("TEMPORAL_ADDRESS"); temporalAddress != "" {
 		temporalNamespace := os.Getenv("TEMPORAL_NAMESPACE")
 		if temporalNamespace == "" {
 			temporalNamespace = "mctl-agents"
 		}
-		tc, tcErr := temporalclient.New(temporalAddress, temporalNamespace)
-		if tcErr != nil {
-			slog.Warn("temporal client init failed", "error", tcErr)
-		} else {
-			devLoopClient = tc
-			defer tc.Close()
+		// Never nil once TEMPORAL_ADDRESS is set: a failed dial is retried
+		// in the background and the routes answer a distinct 503 meanwhile.
+		rc := temporalclient.NewReconnecting(rootCtx, temporalAddress, temporalNamespace)
+		devLoopClient = rc
+		temporalReconnecting = rc
+		defer rc.Close()
+	}
+	temporalState := func() string {
+		if temporalReconnecting == nil {
+			return "not_configured"
 		}
+		if temporalReconnecting.Available() != nil {
+			return "connecting"
+		}
+		return "ok"
 	}
 
 	executor := operations.NewExecutor()
@@ -1088,6 +1098,7 @@ func main() {
 		DexReady:                       dexReady,
 		VaultReady:                     vaultReady,
 		StoreInitFailures:              storeFailures.List,
+		TemporalState:                  temporalState,
 		GitopsSynced:                   func() bool { return !gitReader.LastSync().IsZero() },
 		Draining:                       draining.Load,
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,

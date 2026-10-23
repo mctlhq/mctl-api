@@ -155,6 +155,10 @@ func (h *Handlers) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if h.opts.TemporalState != nil {
+		checks["temporal"] = h.opts.TemporalState()
+	}
+
 	if h.opts.Draining != nil && h.opts.Draining() {
 		checks["shutdown"] = "draining"
 		ready = false

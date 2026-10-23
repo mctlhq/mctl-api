@@ -198,6 +198,8 @@ func (h *Handlers) loadHumanInputRequests() ([]sealedHumanInput, int, error) {
 type humanInputStates struct {
 	client DevLoopClient
 	cache  map[string]humanInputQueryResult
+	// unavailable is the reason the client cannot be asked ("" when usable).
+	unavailable string
 }
 
 type humanInputQueryResult struct {
@@ -206,7 +208,7 @@ type humanInputQueryResult struct {
 }
 
 func (h *Handlers) newHumanInputStates() *humanInputStates {
-	return &humanInputStates{client: h.opts.TemporalClient, cache: map[string]humanInputQueryResult{}}
+	return &humanInputStates{client: h.opts.TemporalClient, unavailable: h.temporalState(), cache: map[string]humanInputQueryResult{}}
 }
 
 func requestRunID(req *humaninput.Request) string {
@@ -218,8 +220,8 @@ func requestRunID(req *humaninput.Request) string {
 
 // state asks the owning workflow whether it is waiting on req.
 func (q *humanInputStates) state(ctx context.Context, req *humaninput.Request, now time.Time) (state, detail string) {
-	if q.client == nil {
-		return HumanInputUnknown, "dev-loop Temporal client not configured"
+	if q.unavailable != "" {
+		return HumanInputUnknown, q.unavailable
 	}
 	wf, runID := req.Execution.TemporalWorkflowID, requestRunID(req)
 	key := wf + "@" + runID
@@ -363,8 +365,8 @@ func (h *Handlers) ListHumanInputs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, `state must be "pending" or "all"`)
 		return
 	}
-	if filter == HumanInputPending && h.opts.TemporalClient == nil {
-		writeError(w, http.StatusServiceUnavailable, "dev-loop Temporal client not configured: pending state cannot be determined")
+	if msg := h.temporalState(); filter == HumanInputPending && msg != "" {
+		writeError(w, http.StatusServiceUnavailable, msg+": pending state cannot be determined")
 		return
 	}
 	workItem := r.URL.Query().Get("work_item_id")

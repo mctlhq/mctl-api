@@ -271,13 +271,35 @@ func startDevLoopAfterNotFound(ctx context.Context, c DevLoopClient, issueURL, w
 	}
 }
 
+// TemporalAvailability is implemented by clients that may be configured but
+// not yet connected (temporalclient.Reconnecting). Clients that do not
+// implement it are treated as available.
+type TemporalAvailability interface{ Available() error }
+
+const (
+	msgTemporalNotConfigured = "dev-loop Temporal client not configured"
+	msgTemporalUnreachable   = "dev-loop Temporal client configured but currently unreachable"
+)
+
+// temporalState returns "" when the DevLoop client is usable, else the
+// message to report.
+func (h *Handlers) temporalState() string {
+	if h.opts.TemporalClient == nil {
+		return msgTemporalNotConfigured
+	}
+	if a, ok := h.opts.TemporalClient.(TemporalAvailability); ok && a.Available() != nil {
+		return msgTemporalUnreachable
+	}
+	return ""
+}
+
 // requireTemporalAdmin mirrors requireAgentRegistryAdmin: configured,
 // authenticated, admin. The dev-loop trigger path is a separate optional
 // dependency from the agent registry store (a deployment can have one
 // without the other), so it gets its own nil check.
 func (h *Handlers) requireTemporalAdmin(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
-	if h.opts.TemporalClient == nil {
-		writeError(w, http.StatusServiceUnavailable, "dev-loop Temporal client not configured")
+	if msg := h.temporalState(); msg != "" {
+		writeError(w, http.StatusServiceUnavailable, msg)
 		return nil, false
 	}
 	user := auth.UserFromContext(r.Context())
@@ -422,6 +444,10 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 			RiskLevel:  string(operations.RiskMedium),
 			Message:    "failed to start dev-loop workflow: " + result.Err.Error(),
 		})
+		if errors.Is(result.Err, temporalclient.ErrUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, msgTemporalUnreachable)
+			return
+		}
 		writeError(w, http.StatusBadGateway, "failed to start dev-loop workflow: "+result.Err.Error())
 	}
 }
@@ -547,6 +573,10 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 			RiskLevel:    string(operations.RiskMedium),
 			Message:      "signal failed: " + err.Error(),
 		})
+		if errors.Is(err, temporalclient.ErrUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, msgTemporalUnreachable)
+			return
+		}
 		writeError(w, http.StatusBadGateway, "failed to signal approval: "+err.Error())
 		return
 	}
@@ -894,6 +924,10 @@ func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if temporalclient.IsNotFound(err) {
 			writeError(w, http.StatusNotFound, "workflow not found: "+workflowID)
+			return
+		}
+		if errors.Is(err, temporalclient.ErrUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, msgTemporalUnreachable)
 			return
 		}
 		writeError(w, http.StatusBadGateway, "failed to describe workflow: "+err.Error())

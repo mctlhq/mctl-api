@@ -110,6 +110,10 @@ func (h *Handlers) RespondHumanInput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "human-input responses are not configured")
 		return
 	}
+	if h.temporalState() == msgTemporalUnreachable {
+		writeError(w, http.StatusServiceUnavailable, msgTemporalUnreachable)
+		return
+	}
 	id := chi.URLParam(r, "request_id")
 	if !humanInputIDPattern.MatchString(id) {
 		writeError(w, http.StatusBadRequest, "request_id must look like hir-<16 hex>")
