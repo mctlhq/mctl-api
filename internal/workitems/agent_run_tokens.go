@@ -46,6 +46,9 @@ var (
 	ErrExecutionTerminal = errors.New("execution has already ended; no run token may be minted for it")
 	// ErrAgentRunTokenTTL: a requested ttl_seconds is not in (0, MaxAgentRunTokenTTL].
 	ErrAgentRunTokenTTL = errors.New("ttl_seconds must be positive and at most 86400")
+	// ErrAgentRunTokenBinding: a token was asked to be both bound to an
+	// execution and bound to none.
+	ErrAgentRunTokenBinding = errors.New("a run token without an execution cannot name one")
 )
 
 const agentRunTokenSchema = `
@@ -94,6 +97,11 @@ type MintAgentRunTokenInput struct {
 	Scope               string
 	TTL                 time.Duration
 	IssuedByPrincipalID string
+	// WithoutExecution mints a token bound to no execution and no work item,
+	// for a run that has none (the exchange, for a template that admits
+	// one). ExecutionID must then be empty. Such a token ends only by
+	// expiry or revocation, so the caller bounds its TTL by the run.
+	WithoutExecution bool
 }
 
 // MintAgentRunToken validates that ExecutionID names a non-terminal
@@ -110,18 +118,27 @@ func (s *Store) MintAgentRunToken(ctx context.Context, in MintAgentRunTokenInput
 		return nil, "", ErrAgentRunTokenTTL
 	}
 
-	var workItemID, phase string
-	err := s.pool.QueryRow(ctx,
-		`SELECT work_item_id, phase FROM work_item_executions WHERE id=$1`, in.ExecutionID,
-	).Scan(&workItemID, &phase)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, "", fmt.Errorf("workitems: mint agent run token: execution %s: %w", in.ExecutionID, ErrNotFound)
-	}
-	if err != nil {
-		return nil, "", fmt.Errorf("workitems: mint agent run token: load execution: %w", err)
-	}
-	if IsTerminalPhase(phase) {
-		return nil, "", fmt.Errorf("workitems: mint agent run token: execution %s: %w", in.ExecutionID, ErrExecutionTerminal)
+	var workItemID string
+	switch {
+	case in.WithoutExecution && in.ExecutionID != "":
+		return nil, "", ErrAgentRunTokenBinding
+	case in.WithoutExecution:
+		// Bound to nothing: execution_id and work_item_id stay "".
+	default:
+		// An empty ExecutionID finds no row: it never means "unbound".
+		var phase string
+		err := s.pool.QueryRow(ctx,
+			`SELECT work_item_id, phase FROM work_item_executions WHERE id=$1`, in.ExecutionID,
+		).Scan(&workItemID, &phase)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, "", fmt.Errorf("workitems: mint agent run token: execution %s: %w", in.ExecutionID, ErrNotFound)
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("workitems: mint agent run token: load execution: %w", err)
+		}
+		if IsTerminalPhase(phase) {
+			return nil, "", fmt.Errorf("workitems: mint agent run token: execution %s: %w", in.ExecutionID, ErrExecutionTerminal)
+		}
 	}
 
 	secret, err := randomAgentRunSecret()
@@ -199,9 +216,11 @@ func (s *Store) ResolveAgentRunToken(ctx context.Context, token string) (*auth.A
 	if !expiresAt.After(s.now()) {
 		return nil, auth.ErrAgentRunNotFound
 	}
-	// phase == "" is a dangling execution_id (the execution's work item was
-	// deleted out from under it); treated the same as a terminal phase.
-	if phase == "" || IsTerminalPhase(phase) {
+	// A token minted without an execution (execution_id '') ends only by
+	// expiry or revocation. Otherwise phase == "" is a dangling execution_id
+	// (the execution's work item was deleted out from under it), treated
+	// the same as a terminal phase.
+	if executionID != "" && (phase == "" || IsTerminalPhase(phase)) {
 		return nil, auth.ErrAgentRunNotFound
 	}
 	return &auth.AgentRun{

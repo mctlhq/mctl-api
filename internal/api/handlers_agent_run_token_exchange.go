@@ -107,6 +107,7 @@ func (h *Handlers) ExchangeAgentRunToken(w http.ResponseWriter, r *http.Request)
 
 	h.issueAgentRunToken(w, r, iss, agentRunTokenBody{
 		Agent: binding.Agent, ExecutionID: binding.ExecutionID, Scope: binding.Scope,
+		WithoutExecution: binding.ExecutionID == "",
 	}, ttl, map[string]string{
 		"pod": binding.Pod, "workflow": binding.Workflow, "template": binding.Template,
 	})

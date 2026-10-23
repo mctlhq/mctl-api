@@ -107,6 +107,54 @@ func TestExchangeAgentRunToken_MintsTheBoundRunsScopedToken(t *testing.T) {
 	}
 }
 
+// A run its template admits without an execution gets a token bound to no
+// execution and no work item: the scope then admits no work-item route, not
+// even the item a bound run could read.
+func TestExchangeAgentRunToken_ARunWithoutExecutionGetsAnUnboundToken(t *testing.T) {
+	e, b, execID := exchangeEnv(t)
+	b.binding.ExecutionID = ""
+	res := e.exchange("sa-token", map[string]any{"execution_id": execID})
+	if res.code != http.StatusCreated {
+		t.Fatalf("exchange = %d %s", res.code, res.raw)
+	}
+	if res.body["execution_id"] != "" || res.body["work_item_id"] != "" {
+		t.Errorf("exchanged token = %v, want no execution and no work item", res.body)
+	}
+	exp, err := time.Parse(time.RFC3339Nano, res.body["expires_at"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp.After(b.binding.Deadline) {
+		t.Errorf("expires_at %v is past the run's deadline %v", exp, b.binding.Deadline)
+	}
+	run, err := e.h.opts.WorkItems.ResolveAgentRunToken(context.Background(), res.body["token"].(string))
+	if err != nil {
+		t.Fatalf("resolve exchanged token: %v", err)
+	}
+	if run.ExecutionID != "" || run.WorkItemID != "" || run.Scope != auth.AgentScopeInvestigate {
+		t.Fatalf("resolved run = %+v", run)
+	}
+	scope, ok := auth.LookupAgentScope(run.Scope)
+	if !ok {
+		t.Fatal("investigate scope not defined")
+	}
+	if scope.AllowsRoute(http.MethodGet, "/api/v1/work-items/wi_any", run.WorkItemID) {
+		t.Error("an unbound token's scope admits a work-item route")
+	}
+}
+
+// The direct mint can never ask for an unbound token: the flag is not
+// decoded from a request body.
+func TestMintAgentRunToken_BodyCannotAskForAnUnboundToken(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	res := e.do(auth.NewServiceUser(), "POST", "/api/v1/agent-run-tokens", map[string]any{
+		"agent": "issue-investigator", "WithoutExecution": true, "without_execution": true,
+	})
+	if res.code != http.StatusBadRequest {
+		t.Fatalf("mint without execution_id = %d %s, want 400", res.code, res.raw)
+	}
+}
+
 func TestExchangeAgentRunToken_AuditsOnlyAuthenticatedRefusals(t *testing.T) {
 	refusals := func(e *workItemsEnv) int {
 		n := 0

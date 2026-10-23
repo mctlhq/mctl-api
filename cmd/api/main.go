@@ -917,7 +917,10 @@ func main() {
 		}
 		b, bErr := k8s.NewAgentRunBinder(aud, envOr("AGENT_RUN_EXCHANGE_NAMESPACE", "argo-workflows"), sas,
 			map[string]k8s.AgentRunTemplate{
-				"mctl-agents-investigate": {Agent: "issue-investigator", Scope: auth.AgentScopeInvestigate},
+				// The directive poller and manual triggers submit investigate
+				// without an execution; those runs get a token bound to no
+				// work item.
+				"mctl-agents-investigate": {Agent: "issue-investigator", Scope: auth.AgentScopeInvestigate, AllowWithoutExecution: true},
 			})
 		if bErr != nil {
 			slog.Warn("agent run token exchange unavailable", "error", bErr)
