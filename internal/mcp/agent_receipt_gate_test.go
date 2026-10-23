@@ -264,7 +264,7 @@ func TestAgentReceiptGate_CancelledCallSpendsTheReceipt(t *testing.T) {
 			req := mcplib.CallToolRequest{}
 			req.Params.Name = "mctl_deploy_service"
 			req.Params.Arguments = receiptArgs()
-			s.agentReceiptMiddleware(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			_, _ = s.agentReceiptMiddleware(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 				// The client hangs up while the handler runs.
 				cancel()
 				return c.res, c.err

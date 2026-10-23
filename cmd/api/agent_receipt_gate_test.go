@@ -103,7 +103,8 @@ func TestConfigValidate_AgentReceiptMaxAge(t *testing.T) {
 		if got := cfg.agentReceiptMaxAge(); got != want {
 			t.Errorf("MCTL_AGENT_RECEIPT_MAX_AGE=%q: %s, want %s", raw, got, want)
 		}
-	} // Surrounding whitespace is trimmed.
+	}
+	// Surrounding whitespace is trimmed.
 	if got := (config{AgentReceiptMaxAgeRaw: "\t2m\n"}).agentReceiptMaxAge(); got != 2*time.Minute {
 		t.Errorf("surrounding whitespace: %s", got)
 	}
