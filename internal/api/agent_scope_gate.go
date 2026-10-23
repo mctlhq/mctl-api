@@ -43,7 +43,7 @@ func (h *Handlers) agentScopeGate(next http.Handler) http.Handler {
 			}
 			scope, ok := user.AgentScope()
 			// A scope name the server no longer defines admits nothing.
-			allowed := ok && scope.AllowsRoute(r.Method, r.URL.Path, user.WorkItemID())
+			allowed := ok && scope.AllowsRoute(r.Method, r.URL.Path, user.WorkItemID(), user.ExecutionID())
 			mctlmcp.AgentScopeDecisions.WithLabelValues(user.AgentScopeName(), "enforce", "rest", mctlmcp.AgentScopeVerdict(allowed)).Inc()
 			if !allowed {
 				agentName, _ := user.AgentName()
@@ -64,8 +64,8 @@ func (h *Handlers) agentScopeGate(next http.Handler) http.Handler {
 		}
 		if name := strings.TrimSpace(r.Header.Get(auth.AgentScopeShadowHeader)); name != "" && isDirectService(user) {
 			if scope, ok := auth.LookupAgentScope(name); ok {
-				bound := shadowWorkItem(scope, r.Method, r.URL.Path)
-				allowed := scope.AllowsRoute(r.Method, r.URL.Path, bound)
+				bound, boundExec := shadowBinding(scope, r.Method, r.URL.Path)
+				allowed := scope.AllowsRoute(r.Method, r.URL.Path, bound, boundExec)
 				verdict := mctlmcp.AgentScopeVerdict(allowed)
 				if allowed && bound != "" {
 					// Admitted only because shadow cannot check the work
@@ -84,16 +84,22 @@ func (h *Handlers) agentScopeGate(next http.Handler) http.Handler {
 	})
 }
 
-// shadowWorkItem returns the id a bound route of scope names in path, so a
-// shadowed request is judged as if the run were bound to it.
-func shadowWorkItem(scope *auth.AgentScope, method, path string) string {
+// shadowBinding returns the work item and execution ids a bound route of
+// scope names in path, so a shadowed request is judged as if the run were
+// bound to them.
+func shadowBinding(scope *auth.AgentScope, method, path string) (workItemID, executionID string) {
 	for _, route := range scope.Routes {
 		if !route.BindWorkItem || route.Method != method {
 			continue
 		}
-		if m := route.Pattern.FindStringSubmatch(path); len(m) > 1 {
-			return m[1]
+		m := route.Pattern.FindStringSubmatch(path)
+		if len(m) < 2 {
+			continue
 		}
+		if route.BindExecution && len(m) > 2 {
+			return m[1], m[2]
+		}
+		return m[1], ""
 	}
-	return ""
+	return "", ""
 }

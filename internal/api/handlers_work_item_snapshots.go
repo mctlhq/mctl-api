@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
@@ -65,7 +66,8 @@ func writeSnapshotError(w http.ResponseWriter, err error) {
 // sealed with the same bytes; 409 snapshot_divergence refuses different
 // bytes for the same execution.
 // It has no tenant role gate (mctl-api#489): sealing needs the service
-// principal, which is stricter than developer.
+// principal, which is stricter than developer, or an agent run token bound
+// to this very execution (mctlhq/mctl-agents#717).
 func (h *Handlers) SealWorkItemSnapshot(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.workItemsUser(w, r)
 	if !ok {
@@ -73,7 +75,7 @@ func (h *Handlers) SealWorkItemSnapshot(w http.ResponseWriter, r *http.Request) 
 	}
 	// Executions are run by services; a person or a relayed surface never
 	// seals what an execution saw.
-	if _, relayed := user.RelaySurface(); relayed || !user.IsService() {
+	if _, relayed := user.RelaySurface(); relayed || !(user.IsService() || sealsOwnExecution(user, r)) {
 		writeErrorCode(w, http.StatusForbidden, wiCodeSnapshotForbidden,
 			"only the service running an execution may seal its context snapshot", nil)
 		return
@@ -117,6 +119,18 @@ func (h *Handlers) SealWorkItemSnapshot(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 	writeJSON(w, createdStatus(created), map[string]any{"schema_version": workitems.SchemaVersion, "snapshot": snap})
+}
+
+// sealsOwnExecution reports whether user is a scoped agent run token bound
+// to the work item and execution the request names. The scope gate already
+// requires the binding of a scoped run; it is checked again here so the
+// handler does not lean on the gate. An unscoped run token, which the gate
+// lets through, keeps the narrow behaviour it had and seals nothing.
+func sealsOwnExecution(user *auth.User, r *http.Request) bool {
+	if !user.IsAgent() || user.AgentScopeName() == "" || user.ExecutionID() == "" || user.WorkItemID() == "" {
+		return false
+	}
+	return chi.URLParam(r, "id") == user.WorkItemID() && chi.URLParam(r, "execution_id") == user.ExecutionID()
 }
 
 // GetWorkItemExecutionSnapshot handles

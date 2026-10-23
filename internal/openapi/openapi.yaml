@@ -4222,7 +4222,9 @@ paths:
         No `Idempotency-Key` is taken (400 if sent). `execution_sequence` is validation only and must equal the
         execution's attempt. A named prior execution or snapshot must exist
         on this work item and precede this execution. Only a service
-        principal may seal; a person or a relayed surface gets 403.
+        principal, or a scoped agent run token bound to this work item and
+        this execution, may seal; a person, a relayed surface or any other
+        agent run gets 403.
       tags: [Work Items]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}

@@ -34,7 +34,8 @@ import (
 // to scoped runs until a scope lists it.
 
 // AgentScopeInvestigate is the scope of an issue-investigator run: reads
-// across tenants, its own work item, and no mutation.
+// across tenants, its own work item, and one write: sealing the context
+// snapshot of its own execution.
 const AgentScopeInvestigate = "investigate"
 
 // AgentScope is one server-defined run scope.
@@ -44,9 +45,9 @@ type AgentScope struct {
 	// minted for.
 	Agents []string
 	// ReadAllTenants lets HasTenantAccess admit every tenant. It is safe
-	// only because Routes admits nothing but reads and the run's own work
-	// item: the tenant check is not where a scoped run's writes are
-	// stopped, the route list is.
+	// only because Routes admits nothing but reads and writes bound to the
+	// run's own work item and execution: the tenant check is not where a
+	// scoped run's writes are stopped, the route list is.
 	ReadAllTenants bool
 	Routes         []AgentScopeRoute
 	// Tool reports whether an mctl MCP tool may be called.
@@ -55,11 +56,13 @@ type AgentScope struct {
 
 // AgentScopeRoute admits one method on paths matching Pattern. With
 // BindWorkItem, Pattern's first submatch must equal the run's own work
-// item id.
+// item id; with BindExecution, its second must equal the run's own
+// execution id.
 type AgentScopeRoute struct {
-	Method       string
-	Pattern      *regexp.Regexp
-	BindWorkItem bool
+	Method        string
+	Pattern       *regexp.Regexp
+	BindWorkItem  bool
+	BindExecution bool
 }
 
 // readVerbs and readTools mirror mctl-agents' policy checkpoint
@@ -136,6 +139,12 @@ var agentScopes = map[string]*AgentScope{
 				Method: http.MethodGet, BindWorkItem: true,
 				Pattern: regexp.MustCompile(`^/api/v1/work-items/([^/]+)(/.*)?$`),
 			},
+			// Sealing what its own execution saw, so the run needs no
+			// static service token for it (mctlhq/mctl-agents#717).
+			AgentScopeRoute{
+				Method: http.MethodPost, BindWorkItem: true, BindExecution: true,
+				Pattern: regexp.MustCompile(`^/api/v1/work-items/([^/]+)/executions/([^/]+)/snapshot$`),
+			},
 		),
 	},
 }
@@ -168,8 +177,9 @@ func (s *AgentScope) AdmitsAgent(agent string) bool {
 }
 
 // AllowsRoute reports whether method+path is in the scope for a run bound
-// to workItemID. An empty workItemID never matches a bound route.
-func (s *AgentScope) AllowsRoute(method, path, workItemID string) bool {
+// to workItemID and executionID. An empty id never matches a route bound
+// to it.
+func (s *AgentScope) AllowsRoute(method, path, workItemID, executionID string) bool {
 	for _, r := range s.Routes {
 		if r.Method != method {
 			continue
@@ -179,6 +189,9 @@ func (s *AgentScope) AllowsRoute(method, path, workItemID string) bool {
 			continue
 		}
 		if r.BindWorkItem && (workItemID == "" || len(m) < 2 || m[1] != workItemID) {
+			continue
+		}
+		if r.BindExecution && (executionID == "" || len(m) < 3 || m[2] != executionID) {
 			continue
 		}
 		return true

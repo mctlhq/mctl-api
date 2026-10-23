@@ -38,6 +38,12 @@ func TestInvestigateScope_Routes(t *testing.T) {
 		method, path, workItem string
 		want                   bool
 	}{
+		// Sealing its own execution's snapshot is the one write.
+		{http.MethodPost, "/api/v1/work-items/wi_a/executions/we_1/snapshot", "wi_a", true},
+		{http.MethodPost, "/api/v1/work-items/wi_a/executions/we_2/snapshot", "wi_a", false},
+		{http.MethodPost, "/api/v1/work-items/wi_b/executions/we_1/snapshot", "wi_a", false},
+		{http.MethodPost, "/api/v1/work-items/wi_a/executions/we_1/snapshot", "", false},
+		{http.MethodPost, "/api/v1/work-items/wi_a/executions", "wi_a", false},
 		{http.MethodGet, "/api/v1/tenants", "wi_a", true},
 		{http.MethodGet, "/api/v1/logs/admins/mctl-api", "wi_a", true},
 		{http.MethodGet, "/api/v1/work-items/wi_a", "wi_a", true},
@@ -52,9 +58,12 @@ func TestInvestigateScope_Routes(t *testing.T) {
 		{http.MethodPost, "/api/v1/operations/deploy-service/execute", "wi_a", false},
 		{http.MethodPost, "/mcp", "wi_a", true},
 	} {
-		if got := s.AllowsRoute(c.method, c.path, c.workItem); got != c.want {
+		if got := s.AllowsRoute(c.method, c.path, c.workItem, "we_1"); got != c.want {
 			t.Errorf("AllowsRoute(%s %s, %q) = %v, want %v", c.method, c.path, c.workItem, got, c.want)
 		}
+	}
+	if s.AllowsRoute(http.MethodPost, "/api/v1/work-items/wi_a/executions/we_1/snapshot", "wi_a", "") {
+		t.Error("a run bound to no execution may seal a snapshot")
 	}
 	if !s.AdmitsAgent("issue-investigator") || s.AdmitsAgent("implementer") {
 		t.Error("investigate scope must be for issue-investigator only")
