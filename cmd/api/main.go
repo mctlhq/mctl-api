@@ -1083,6 +1083,7 @@ func main() {
 		Principals:                     principalResolver,
 		TenantAuthzMode:                cfg.tenantAuthzMode(),
 		AgentReceiptGateMode:           cfg.agentReceiptGateMode(),
+		AgentReceiptMaxAge:             cfg.agentReceiptMaxAge(),
 		LegacyApproverDisabled:         cfg.legacyApproverDisabled(),
 		PrincipalMembership:            gitReader,
 		AdminPrincipals:                cfg.adminPrincipals(),
@@ -1429,6 +1430,10 @@ type config struct {
 	// AgentReceiptGateRaw is MCTL_AGENT_RECEIPT_GATE (mctl-api#723): off
 	// (default), observe or enforce. An unknown value refuses to start.
 	AgentReceiptGateRaw string
+	// AgentReceiptMaxAgeRaw is MCTL_AGENT_RECEIPT_MAX_AGE (mctl-api#773): a
+	// Go duration, default 5m, at most 1h. An invalid value refuses to
+	// start.
+	AgentReceiptMaxAgeRaw string
 	// WorkItemsConfigured is whether the work-items store (which holds the
 	// action approvals the receipt gate reads) is configured: not killed by
 	// WORK_ITEMS_DISABLED and given WORK_ITEMS_DB_URL or AUDIT_DB_URL.
@@ -1555,6 +1560,7 @@ func loadConfig() config {
 		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
 		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
 		AgentReceiptGateRaw:            os.Getenv("MCTL_AGENT_RECEIPT_GATE"),
+		AgentReceiptMaxAgeRaw:          os.Getenv("MCTL_AGENT_RECEIPT_MAX_AGE"),
 		WorkItemsConfigured:            workItemsStoreConfigured(),
 		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
 		ApprovalMaxDecisionAgeRaw:      os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
@@ -1801,6 +1807,9 @@ func (c config) validate() error {
 		// platform-wide refusal.
 		return errors.New("MCTL_AGENT_RECEIPT_GATE=enforce needs the work-items store (WORK_ITEMS_DB_URL or AUDIT_DB_URL, and WORK_ITEMS_DISABLED off)")
 	}
+	if _, err := mctlmcp.ParseAgentReceiptMaxAge(c.AgentReceiptMaxAgeRaw); err != nil {
+		return err
+	}
 	if _, err := parseLegacyApprover(c.LegacyApproverRaw); err != nil {
 		return err
 	}
@@ -1960,6 +1969,16 @@ func (p principalTenants) PrincipalTenants(principalID string) ([]string, []stri
 		return nil, nil, err
 	}
 	return m.Namespaces, m.Unreadable, nil
+}
+
+// agentReceiptMaxAge is the parsed MCTL_AGENT_RECEIPT_MAX_AGE. validate has
+// already refused an invalid value.
+func (c config) agentReceiptMaxAge() time.Duration {
+	d, err := mctlmcp.ParseAgentReceiptMaxAge(c.AgentReceiptMaxAgeRaw)
+	if err != nil {
+		return mctlmcp.DefaultAgentReceiptMaxAge
+	}
+	return d
 }
 
 // agentReceiptGateMode is the parsed MCTL_AGENT_RECEIPT_GATE. validate has

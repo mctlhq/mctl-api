@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,17 +78,101 @@ func (env *workItemsEnv) state(ref string) string {
 	return a.State
 }
 
+func (env *workItemsEnv) settle(tool, ref string, succeeded bool) error {
+	return env.h.SettleAgentReceipt(context.Background(), auth.NewServiceUser(), mcp.ReceiptCheck{
+		Tool: tool, Ref: ref, ArtifactHash: "sha256:action", Redeem: true,
+	}, succeeded)
+}
+
+// mctl-api#772: a redeeming check reserves the receipt; a concurrent call
+// sees it in flight; a failed call releases it for a retry; a successful
+// one spends it for good.
 func TestVerifyAgentReceipt_SpendsOnceForItsOwnTool(t *testing.T) {
 	env := newWorkItemsEnv(t)
 	ref := env.receipt(env.receiptInput("ok", receiptTool), "consumed")
 	if code := env.verify(receiptTool, ref, "sha256:action", true); code != "" {
 		t.Fatalf("valid receipt refused: %s", code)
 	}
+	if got := env.state(ref); got != workitems.ApprovalInFlight {
+		t.Fatalf("state after reserve = %s, want in_flight", got)
+	}
+	for _, redeem := range []bool{false, true} {
+		if code := env.verify(receiptTool, ref, "sha256:action", redeem); code != mcp.ReceiptCodeInFlight {
+			t.Fatalf("concurrent call (redeem=%v) = %q, want %s", redeem, code, mcp.ReceiptCodeInFlight)
+		}
+	}
+	if err := env.settle(receiptTool, ref, false); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if got := env.state(ref); got != workitems.ApprovalConsumed {
+		t.Fatalf("state after a failed call = %s, want consumed", got)
+	}
+	if code := env.verify(receiptTool, ref, "sha256:action", true); code != "" {
+		t.Fatalf("retry after a failed call refused: %s", code)
+	}
+	if err := env.settle(receiptTool, ref, true); err != nil {
+		t.Fatalf("settle success: %v", err)
+	}
 	if got := env.state(ref); got != workitems.ApprovalExecuted {
-		t.Fatalf("state after spend = %s, want executed", got)
+		t.Fatalf("state after a successful call = %s, want executed", got)
 	}
 	if code := env.verify(receiptTool, ref, "sha256:action", true); code != mcp.ReceiptCodeAlreadyExecuted {
 		t.Fatalf("reuse = %q, want %s", code, mcp.ReceiptCodeAlreadyExecuted)
+	}
+	if err := env.settle(receiptTool, ref, false); err == nil {
+		t.Fatal("an executed receipt was released")
+	}
+}
+
+// mctl-api#773: a consumed receipt older than the configured bound is
+// refused as stale, read-only and redeeming, and is left consumed.
+func TestVerifyAgentReceipt_RefusesAStaleReceipt(t *testing.T) {
+	env := newWorkItemsEnv(t)
+	ref := env.receipt(env.receiptInput("stale", receiptTool), "consumed")
+	env.h.opts.AgentReceiptMaxAge = time.Millisecond
+	time.Sleep(5 * time.Millisecond)
+	for _, redeem := range []bool{false, true} {
+		if code := env.verify(receiptTool, ref, "sha256:action", redeem); code != mcp.ReceiptCodeStale {
+			t.Fatalf("old receipt (redeem=%v) = %q, want %s", redeem, code, mcp.ReceiptCodeStale)
+		}
+	}
+	if got := env.state(ref); got != workitems.ApprovalConsumed {
+		t.Fatalf("a stale refusal changed the state to %s", got)
+	}
+	env.h.opts.AgentReceiptMaxAge = time.Hour
+	if code := env.verify(receiptTool, ref, "sha256:action", false); code != "" {
+		t.Fatalf("the same receipt under a wide bound = %q", code)
+	}
+	env.h.opts.AgentReceiptMaxAge = 0
+	if got := env.h.receiptMaxAge(); got != mcp.DefaultAgentReceiptMaxAge {
+		t.Fatalf("unset bound = %s, want the default", got)
+	}
+}
+
+// The approval's fresh_until bounds the receipt too, inside the age bound.
+func TestVerifyAgentReceipt_RefusesAReceiptPastFreshUntil(t *testing.T) {
+	env := newWorkItemsEnv(t)
+	ctx := context.Background()
+	store := env.h.opts.WorkItems
+	in := env.receiptInput("fresh-until", receiptTool)
+	a, _, err := store.CreateActionApproval(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DecideActionApproval(ctx, workitems.ActionDecisionInput{
+		ID: a.ID, DecidedBy: "github:owner", Decision: workitems.DecisionApprove, FreshFor: time.Second,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ConsumeActionApproval(ctx, a.ID, workitems.IntentHash(in.ActionIntent)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if code := env.verify(receiptTool, a.ID, "sha256:action", true); code != mcp.ReceiptCodeStale {
+		t.Fatalf("receipt past fresh_until = %q, want %s", code, mcp.ReceiptCodeStale)
+	}
+	if got := env.state(a.ID); got != workitems.ApprovalConsumed {
+		t.Fatalf("state = %s, want consumed", got)
 	}
 }
 
@@ -107,6 +192,8 @@ func TestSpendErrorCode(t *testing.T) {
 	for err, want := range map[error]string{
 		nil:                                 "",
 		workitems.ErrApprovalExecuted:       mcp.ReceiptCodeAlreadyExecuted,
+		workitems.ErrApprovalInFlight:       mcp.ReceiptCodeInFlight,
+		workitems.ErrApprovalReceiptStale:   mcp.ReceiptCodeStale,
 		workitems.ErrApprovalNotConsumed:    mcp.ReceiptCodeNotConsumed,
 		workitems.ErrApprovalDenied:         mcp.ReceiptCodeNotConsumed,
 		workitems.ErrApprovalTargetMismatch: mcp.ReceiptCodeArtifactMismatch,
@@ -269,5 +356,40 @@ func TestAuditAgentReceipt_CounterModeLabel(t *testing.T) {
 		if n := testutil.ToFloat64(m) - before; n != 1 {
 			t.Errorf("mode %q: label %q moved by %v", c.mode, c.label, n)
 		}
+	}
+}
+
+// mctl-api#772: concurrent governed calls presenting one receipt, through
+// the verifier and the real store: exactly one is authorized, the rest are
+// refused as in flight.
+func TestVerifyAgentReceipt_ConcurrentCallsAuthorizeOne(t *testing.T) {
+	env := newWorkItemsEnv(t)
+	ref := env.receipt(env.receiptInput("race", receiptTool), "consumed")
+	const racers = 8
+	codes := make([]string, racers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			codes[i] = env.verify(receiptTool, ref, "sha256:action", true)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	won := 0
+	for _, c := range codes {
+		switch c {
+		case "":
+			won++
+		case mcp.ReceiptCodeInFlight:
+		default:
+			t.Fatalf("loser code %q", c)
+		}
+	}
+	if won != 1 {
+		t.Fatalf("%d calls authorized, want exactly 1 (%v)", won, codes)
 	}
 }

@@ -24,9 +24,11 @@ import (
 //
 //   - Immutable once created apart from its state transitions:
 //     pending -> approved | denied, approved -> consumed, consumed ->
-//     executed. `expired` is never stored: a pending or approved request past
-//     expires_at reads as expired (lazy expiry), and a decision or consume on
-//     it is refused. A consumed or executed request never expires.
+//     executed, and consumed -> in_flight -> executed | consumed for a
+//     receipt the MCP gate holds while its call runs. `expired` is never
+//     stored: a pending or approved request past expires_at reads as expired
+//     (lazy expiry), and a decision or consume on it is refused. A consumed,
+//     in-flight or executed request never expires.
 //   - intent_hash binds the action: the server computes it from the bound
 //     fields (IntentHash) and a client-sent value must match.
 //   - Idempotent per (requested_by, idempotency_key): the same key with the
@@ -39,6 +41,12 @@ import (
 //     guarded by the requester, the target and the artifact hash: the
 //     single-use record that the side effect a consume authorized was
 //     carried out, for exactly the bound target and artifact.
+//   - The MCP receipt gate (mctl-api#772) splits that mark in two: a
+//     reservation, consumed -> in_flight, under the same guards plus the
+//     receipt's age bound (mctl-api#773), before the tool handler runs, so
+//     two concurrent calls cannot both pass; then in_flight -> executed when
+//     the handler succeeded, or in_flight -> consumed when it failed, so a
+//     failed call does not burn the human approval.
 //
 // Who may create, decide, consume or read is decided by the HTTP layer from
 // authentication; the store records the principals it is handed and refuses
@@ -62,6 +70,9 @@ const (
 	ApprovalConsumed = "consumed"
 	ApprovalExecuted = "executed"
 	ApprovalExpired  = "expired"
+	// ApprovalInFlight is a consumed request the MCP receipt gate reserved
+	// for one call that is still running (mctl-api#772).
+	ApprovalInFlight = "in_flight"
 )
 
 // Decisions accepted by DecideActionApproval.
@@ -109,6 +120,11 @@ var (
 	ErrApprovalNotConsumed    = errors.New("action approval request is not consumed")
 	ErrApprovalExecuted       = errors.New("action approval request was already marked executed")
 	ErrApprovalTargetMismatch = errors.New("presented target or artifact_hash does not match the approved request")
+	// ErrApprovalInFlight: the request is reserved for a call still running.
+	ErrApprovalInFlight = errors.New("action approval request is reserved for a call in flight")
+	// ErrApprovalReceiptStale: a consumed request is older than the receipt
+	// age bound, or past its decision's fresh_until (mctl-api#773).
+	ErrApprovalReceiptStale = errors.New("consumed action approval is too old to authorize a call")
 )
 
 const actionApprovalSchema = `
@@ -193,6 +209,21 @@ BEGIN
                 CHECK (state IN ('pending', 'approved', 'denied', 'consumed', 'executed'));
     END IF;
 END $$;
+-- Receipt reservation: consumed -> in_flight -> executed | consumed
+-- (mctl-api#772). Same replace-once pattern as above, keyed on 'in_flight'.
+ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'action_approval_requests'::regclass
+                     AND conname = 'action_approval_requests_state_check'
+                     AND pg_get_constraintdef(oid) LIKE '%''in_flight''%') THEN
+        ALTER TABLE action_approval_requests
+            DROP CONSTRAINT IF EXISTS action_approval_requests_state_check,
+            ADD CONSTRAINT action_approval_requests_state_check
+                CHECK (state IN ('pending', 'approved', 'denied', 'consumed', 'in_flight', 'executed'));
+    END IF;
+END $$;
 `
 
 const actionApprovalColumns = `id, execution_id, action_kind, target, args_digest, policy_rule_id,
@@ -201,7 +232,7 @@ const actionApprovalColumns = `id, execution_id, action_kind, target, args_diges
 	requested_by_principal_id, via_principal_id, decided_by_principal_id, decided_via_principal_id,
 	actor_kind, actor_name, subject_principal_id, subject_kind, agent_run_id,
 		risk_level, side_effect, intent_source, policy_decision, policy_reasons,
-		decided_context_digest, authority_basis, authz_mode, fresh_until, executed_at`
+		decided_context_digest, authority_basis, authz_mode, fresh_until, executed_at, reserved_at`
 
 // ActionApprovalRequest is one durable approval of one hashed side effect.
 // State is the effective state: `expired` for a pending or approved request
@@ -227,7 +258,10 @@ type ActionApprovalRequest struct {
 	Reason         string     `json:"reason,omitempty"`
 	ConsumedAt     *time.Time `json:"consumed_at,omitempty"`
 	// ExecutedAt is when the consumed request was marked executed.
-	ExecutedAt    *time.Time `json:"executed_at,omitempty"`
+	ExecutedAt *time.Time `json:"executed_at,omitempty"`
+	// ReservedAt is when the MCP receipt gate last reserved the consumed
+	// request for a call (mctl-api#772).
+	ReservedAt    *time.Time `json:"reserved_at,omitempty"`
 	SchemaVersion string     `json:"schema_version"`
 
 	// Canonical principal ids, dual-written since mctl-api#373 and served
@@ -471,7 +505,7 @@ func scanActionApproval(row pgx.Row, now time.Time) (*ActionApprovalRequest, err
 		&a.SchemaVersion, &a.RequestedByPrincipalID, &a.ViaPrincipalID, &a.DecidedByPrincipalID,
 		&a.DecidedViaPrincipalID, &a.ActorKind, &a.ActorName, &a.SubjectPrincipalID, &a.SubjectKind,
 		&a.AgentRunID, &a.RiskLevel, &a.SideEffect, &a.IntentSource, &a.PolicyDecision, &a.PolicyReasons,
-		&a.DecidedContextDigest, &a.AuthorityBasis, &a.AuthzMode, &a.FreshUntil, &a.ExecutedAt); err != nil {
+		&a.DecidedContextDigest, &a.AuthorityBasis, &a.AuthzMode, &a.FreshUntil, &a.ExecutedAt, &a.ReservedAt); err != nil {
 		return nil, err
 	}
 	if len(a.PolicyReasons) == 0 {
@@ -494,6 +528,10 @@ func scanActionApproval(row pgx.Row, now time.Time) (*ActionApprovalRequest, err
 	if a.ExecutedAt != nil {
 		t := a.ExecutedAt.UTC()
 		a.ExecutedAt = &t
+	}
+	if a.ReservedAt != nil {
+		t := a.ReservedAt.UTC()
+		a.ReservedAt = &t
 	}
 	a.State = effectiveState(a.State, a.ExpiresAt, now)
 	return &a, nil
@@ -603,7 +641,7 @@ type ActionApprovalFilter struct {
 // ValidApprovalState reports whether state is a listable effective state.
 func ValidApprovalState(state string) bool {
 	switch state {
-	case ApprovalPending, ApprovalApproved, ApprovalDenied, ApprovalConsumed, ApprovalExecuted, ApprovalExpired:
+	case ApprovalPending, ApprovalApproved, ApprovalDenied, ApprovalConsumed, ApprovalInFlight, ApprovalExecuted, ApprovalExpired:
 		return true
 	}
 	return false
@@ -613,7 +651,7 @@ func ValidApprovalState(state string) bool {
 // state.
 func (s *Store) ActionApprovals(ctx context.Context, f ActionApprovalFilter) ([]ActionApprovalRequest, error) {
 	if f.State != "" && !ValidApprovalState(f.State) {
-		return nil, invalid("state must be one of pending, approved, denied, consumed, executed, expired")
+		return nil, invalid("state must be one of pending, approved, denied, consumed, in_flight, executed, expired")
 	}
 	if f.Limit <= 0 {
 		f.Limit = defaultApprovalList
@@ -767,7 +805,7 @@ func ConsumeStateRefusal(a *ActionApprovalRequest) error {
 	switch a.State {
 	case ApprovalApproved:
 		return nil
-	case ApprovalConsumed, ApprovalExecuted:
+	case ApprovalConsumed, ApprovalInFlight, ApprovalExecuted:
 		return fmt.Errorf("%w: %s", ErrApprovalConsumed, a.ID)
 	case ApprovalDenied:
 		return fmt.Errorf("%w: %s", ErrApprovalDenied, a.ID)
@@ -859,6 +897,8 @@ func (s *Store) MarkActionApprovalExecuted(ctx context.Context, id, target, arti
 	switch cur.State {
 	case ApprovalExecuted:
 		return nil, fmt.Errorf("%w: %s", ErrApprovalExecuted, id)
+	case ApprovalInFlight:
+		return nil, fmt.Errorf("%w: %s", ErrApprovalInFlight, id)
 	case ApprovalDenied:
 		return nil, fmt.Errorf("%w: %s", ErrApprovalDenied, id)
 	case ApprovalConsumed:
@@ -872,4 +912,137 @@ func (s *Store) MarkActionApprovalExecuted(ctx context.Context, id, target, arti
 	// was consumed between the two statements. Refuse rather than retry;
 	// the caller re-presents.
 	return nil, fmt.Errorf("%w: %s changed while marking it executed", ErrApprovalNotConsumed, id)
+}
+
+// ReceiptStaleness reports whether a consumed request may still authorize a
+// call through the MCP receipt gate (mctl-api#773): nil while it was
+// consumed less than maxAge ago and its decision's fresh_until, if any, has
+// not passed; ErrApprovalReceiptStale otherwise. A request without a
+// consumed_at is stale: the age of a receipt that cannot be dated is
+// unknown, not young. maxAge must be positive.
+func (s *Store) ReceiptStaleness(a *ActionApprovalRequest, maxAge time.Duration) error {
+	return receiptStaleness(a, maxAge, s.now())
+}
+
+func receiptStaleness(a *ActionApprovalRequest, maxAge time.Duration, now time.Time) error {
+	switch {
+	case maxAge <= 0:
+		return fmt.Errorf("%w: %s: no receipt age bound configured", ErrApprovalReceiptStale, a.ID)
+	case a.ConsumedAt == nil:
+		return fmt.Errorf("%w: %s has no consumed_at", ErrApprovalReceiptStale, a.ID)
+	case !a.ConsumedAt.After(now.Add(-maxAge)):
+		return fmt.Errorf("%w: %s was consumed at %s, more than %s ago",
+			ErrApprovalReceiptStale, a.ID, a.ConsumedAt.Format(time.RFC3339), maxAge)
+	case a.FreshUntil != nil && !a.FreshUntil.After(now):
+		return fmt.Errorf("%w: %s was decided too long ago (fresh until %s)",
+			ErrApprovalReceiptStale, a.ID, a.FreshUntil.Format(time.RFC3339))
+	}
+	return nil
+}
+
+// ReserveActionApproval reserves a consumed request for one MCP tool call
+// (mctl-api#772): one atomic compare-and-set from consumed to in_flight that
+// holds only for the request's own requester, the stored target, a
+// non-empty stored artifact hash equal to the presented one, and a receipt
+// that ReceiptStaleness would accept at this instant. However many callers
+// race, one wins; the others see ErrApprovalInFlight (or ErrApprovalExecuted
+// once the winner settled). The winner must settle the reservation with
+// SettleActionApproval. On a refusal the request is read back to name the
+// reason; the refusal itself never depends on that read. A request of
+// another requester reads as not found.
+func (s *Store) ReserveActionApproval(ctx context.Context, id, target, artifactHash, caller string, maxAge time.Duration) (*ActionApprovalRequest, error) {
+	if err := checkText("target", target, MaxApprovalTargetBytes, true); err != nil {
+		return nil, err
+	}
+	if err := checkText("artifact_hash", artifactHash, MaxApprovalFieldBytes, true); err != nil {
+		return nil, err
+	}
+	if err := checkText("requested_by", caller, MaxExternalIDBytes, true); err != nil {
+		return nil, err
+	}
+	if maxAge <= 0 {
+		return nil, invalid("the receipt age bound must be positive")
+	}
+	now := s.now()
+	out, err := scanActionApproval(s.pool.QueryRow(ctx, `UPDATE action_approval_requests
+		SET state='in_flight', reserved_at=$5
+		WHERE id=$1 AND state='consumed' AND requested_by=$2 AND target=$3
+		  AND artifact_hash=$4 AND artifact_hash <> ''
+		  AND consumed_at > $6
+		  AND (fresh_until IS NULL OR fresh_until > $5)
+		RETURNING `+actionApprovalColumns, id, caller, target, artifactHash, now, now.Add(-maxAge)), now)
+	if err == nil {
+		return out, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("workitems: reserve action approval: %w", err)
+	}
+	cur, err := s.getActionApproval(ctx, s.pool, id, "")
+	if err != nil {
+		return nil, err
+	}
+	if cur.RequestedBy != caller {
+		return nil, fmt.Errorf("workitems: action approval %s: %w", id, ErrApprovalNotFound)
+	}
+	switch cur.State {
+	case ApprovalExecuted:
+		return nil, fmt.Errorf("%w: %s", ErrApprovalExecuted, id)
+	case ApprovalInFlight:
+		return nil, fmt.Errorf("%w: %s", ErrApprovalInFlight, id)
+	case ApprovalDenied:
+		return nil, fmt.Errorf("%w: %s", ErrApprovalDenied, id)
+	case ApprovalConsumed:
+	default:
+		return nil, fmt.Errorf("%w: %s is %s", ErrApprovalNotConsumed, id, cur.State)
+	}
+	if cur.Target != target || cur.ArtifactHash == "" || cur.ArtifactHash != artifactHash {
+		return nil, fmt.Errorf("%w: %s", ErrApprovalTargetMismatch, id)
+	}
+	if err := receiptStaleness(cur, maxAge, now); err != nil {
+		return nil, err
+	}
+	// Consumed, matching and fresh now, but the UPDATE saw otherwise: the
+	// request changed between the two statements. Refuse rather than
+	// retry; the caller re-presents.
+	return nil, fmt.Errorf("%w: %s changed while reserving it", ErrApprovalNotConsumed, id)
+}
+
+// SettleActionApproval ends a reservation ReserveActionApproval made: one
+// compare-and-set from in_flight to executed when the call succeeded, or
+// back to consumed when it did not, so a failed call leaves the human
+// approval usable for a retry (still within the receipt age bound, which
+// keeps counting from consumed_at). Only the requester settles. A request
+// that is not in flight is ErrApprovalNotConsumed (or ErrApprovalExecuted),
+// and is left as it is.
+func (s *Store) SettleActionApproval(ctx context.Context, id, caller string, succeeded bool) (*ActionApprovalRequest, error) {
+	if err := checkText("requested_by", caller, MaxExternalIDBytes, true); err != nil {
+		return nil, err
+	}
+	now := s.now()
+	q, args := `UPDATE action_approval_requests SET state='consumed'
+		WHERE id=$1 AND state='in_flight' AND requested_by=$2
+		RETURNING `+actionApprovalColumns, []any{id, caller}
+	if succeeded {
+		q, args = `UPDATE action_approval_requests SET state='executed', executed_at=$3
+		WHERE id=$1 AND state='in_flight' AND requested_by=$2
+		RETURNING `+actionApprovalColumns, []any{id, caller, now}
+	}
+	out, err := scanActionApproval(s.pool.QueryRow(ctx, q, args...), now)
+	if err == nil {
+		return out, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("workitems: settle action approval: %w", err)
+	}
+	cur, err := s.getActionApproval(ctx, s.pool, id, "")
+	if err != nil {
+		return nil, err
+	}
+	if cur.RequestedBy != caller {
+		return nil, fmt.Errorf("workitems: action approval %s: %w", id, ErrApprovalNotFound)
+	}
+	if cur.State == ApprovalExecuted {
+		return nil, fmt.Errorf("%w: %s", ErrApprovalExecuted, id)
+	}
+	return nil, fmt.Errorf("%w: %s is %s, not in flight", ErrApprovalNotConsumed, id, cur.State)
 }

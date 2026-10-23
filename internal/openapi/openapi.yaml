@@ -890,10 +890,13 @@ components:
         runtime execution (mctl-api#366). Immutable once created apart from
         its state transitions: `pending` -> `approved` | `denied`, then
         `approved` -> `consumed`, then `consumed` -> `executed` (the
-        single-use execution mark). `state` is the effective state: a pending
+        single-use execution mark). The MCP receipt gate reserves a consumed
+        request as `in_flight` while the governed tool call it authorizes
+        runs, then settles it to `executed` on success or back to `consumed`
+        on failure (mctl-api#772). `state` is the effective state: a pending
         or approved request past `expires_at` reads as `expired` (lazy expiry;
         `expired` is never stored), and a decision or consume on it is
-        refused. A consumed or executed request never reads as expired. `requested_by` and `decided_by` come from authentication,
+        refused. A consumed, in-flight or executed request never reads as expired. `requested_by` and `decided_by` come from authentication,
         never from a body.
       properties:
         id: {type: string, example: aar_0f8c2d1e9b7a4c3d8e6f5a4b3c2d1e0f}
@@ -916,7 +919,7 @@ components:
             the order execution_id, action_kind, target, args_digest,
             policy_rule_id, policy_version, artifact_hash, work_item_id (an
             absent optional field is the empty string).
-        state: {type: string, enum: [pending, approved, denied, consumed, executed, expired]}
+        state: {type: string, enum: [pending, approved, denied, consumed, in_flight, executed, expired]}
         expires_at: {type: string, format: date-time}
         created_at: {type: string, format: date-time}
         decided_by: {type: string}
@@ -924,6 +927,7 @@ components:
         reason: {type: string}
         consumed_at: {type: string, format: date-time}
         executed_at: {type: string, format: date-time, description: When the consumed request was marked executed}
+        reserved_at: {type: string, format: date-time, description: When the MCP receipt gate last reserved the consumed request for a call (mctl-api#772)}
         schema_version: {type: string, enum: [actionapproval/v1]}
         requested_by_principal_id: {type: string, description: 'Canonical principal (prn_) of the requester, when it resolved (mctl-api#373, served since #376 D1). Absent on rows written before it was recorded.'}
         via_principal_id: {type: string, description: Principal of the agent or surface that carried a delegated or relayed request}
@@ -1035,7 +1039,7 @@ components:
                  approval_not_found, approval_idempotency_conflict, approval_already_decided,
                  approval_self_decision, approval_not_approved, approval_denied, approval_expired,
                  approval_intent_mismatch, approval_consumed, approval_not_consumed,
-                 approval_executed, approval_target_mismatch, approval_requester_forbidden,
+                 approval_executed, approval_in_flight, approval_target_mismatch, approval_requester_forbidden,
                  approval_decider_forbidden, approval_reader_forbidden, approval_execution_invalid,
                  approval_execution_not_open, approval_context_incomplete, approval_context_invalid,
                  approval_context_changed, approval_stale, approval_authority_revoked,
@@ -4469,7 +4473,7 @@ paths:
         so `expired` finds pending and approved requests past `expires_at`.
       tags: [Action Approvals]
       parameters:
-        - {name: state, in: query, schema: {type: string, enum: [pending, approved, denied, consumed, executed, expired]}}
+        - {name: state, in: query, schema: {type: string, enum: [pending, approved, denied, consumed, in_flight, executed, expired]}}
         - {name: execution_id, in: query, schema: {type: string}}
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
       responses:

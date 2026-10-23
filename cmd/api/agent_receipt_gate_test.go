@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 )
@@ -80,5 +81,27 @@ func TestWorkItemsStoreSource(t *testing.T) {
 	t.Setenv("WORK_ITEMS_DISABLED", "true")
 	if _, off := workItemsStoreSource(); !off {
 		t.Fatal("kill switch not read")
+	}
+}
+
+// MCTL_AGENT_RECEIPT_MAX_AGE (mctl-api#773) refuses the boot on a value that
+// does not parse, is not positive or exceeds the cap, and defaults to 5m.
+func TestConfigValidate_AgentReceiptMaxAge(t *testing.T) {
+	for _, raw := range []string{"5", "five minutes", "0s", "-1m", "2h"} {
+		cfg := config{AgentReceiptMaxAgeRaw: raw, CommerceDisabled: true}
+		if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "MCTL_AGENT_RECEIPT_MAX_AGE") {
+			t.Errorf("MCTL_AGENT_RECEIPT_MAX_AGE=%q: validate() = %v, want a refusal naming it", raw, err)
+		}
+	}
+	for raw, want := range map[string]time.Duration{
+		"": mctlmcp.DefaultAgentReceiptMaxAge, "90s": 90 * time.Second, " 2m ": 2 * time.Minute, "1h": time.Hour,
+	} {
+		cfg := config{AgentReceiptMaxAgeRaw: raw, CommerceDisabled: true}
+		if err := cfg.validate(); err != nil {
+			t.Errorf("MCTL_AGENT_RECEIPT_MAX_AGE=%q: validate() = %v", raw, err)
+		}
+		if got := cfg.agentReceiptMaxAge(); got != want {
+			t.Errorf("MCTL_AGENT_RECEIPT_MAX_AGE=%q: %s, want %s", raw, got, want)
+		}
 	}
 }
