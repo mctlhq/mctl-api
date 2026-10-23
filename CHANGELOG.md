@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.118.1](https://github.com/mctlhq/mctl-api/compare/4.118.0...4.118.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **mcp:** spend a receipt whose call was cancelled mid-handler ([8ea480e](https://github.com/mctlhq/mctl-api/commit/8ea480e28686c5526336f8238dc80b12f7d891b1)), closes [#772](https://github.com/mctlhq/mctl-api/issues/772)
+* **mcp:** spend agent receipts after the handler, bound their age ([0c7e163](https://github.com/mctlhq/mctl-api/commit/0c7e16362991221c5afc5fc8b3fc6447b925a79c))
+* **mcp:** spend agent receipts after the handler, bound their age ([2cd6f9b](https://github.com/mctlhq/mctl-api/commit/2cd6f9bef81f2d9469a0bda077e30819b4451565))
+
 ## [4.118.0](https://github.com/mctlhq/mctl-api/compare/4.117.0...4.118.0) (2026-10-23)
 
 
