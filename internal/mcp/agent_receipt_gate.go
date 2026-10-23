@@ -54,7 +54,8 @@ import (
 // arguments digest, and the artifact hash is the one the agent recorded.
 // "Failed" is the handler's own verdict (a Go error or an isError result),
 // so a handler that reports failure after a partial side effect gets its
-// receipt back. A reservation whose settle cannot be written stays
+// receipt back; a call whose request was cancelled or timed out has an
+// unknown outcome and spends it. A reservation whose settle cannot be written stays
 // in_flight and is never usable again: fail closed. Only the hosted
 // endpoint is gated; cmd/mcp's stdio server is not.
 
@@ -345,8 +346,16 @@ type AgentReceiptVerifier interface {
 // must not leave the receipt reserved.
 const settleTimeout = 10 * time.Second
 
-// callSucceeded is the handler's own verdict on its call.
-func callSucceeded(res *mcplib.CallToolResult, err error) bool {
+// callSucceeded decides how a reserved receipt is settled: true spends it,
+// false releases it for a retry. It is the handler's own verdict, except
+// when the request was cancelled or ran past its deadline while the handler
+// ran: the handler then usually reports an error even when the REST call
+// behind it already applied the side effect, so the outcome is unknown and
+// the receipt is spent, never handed back for a replay.
+func callSucceeded(ctx context.Context, res *mcplib.CallToolResult, err error) bool {
+	if ctx.Err() != nil {
+		return true
+	}
 	return err == nil && res != nil && !res.IsError
 }
 
@@ -443,7 +452,7 @@ func (s *Server) agentReceiptMiddleware(next server.ToolHandlerFunc) server.Tool
 		// arrives here as an error.
 		check := ReceiptCheck{Tool: tool, Ref: ref, ArtifactHash: artifactHash, Redeem: true}
 		res, err := next(ctx, req)
-		succeeded := callSucceeded(res, err)
+		succeeded := callSucceeded(ctx, res, err)
 		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
 		defer cancel()
 		if serr := gate.verifier.SettleAgentReceipt(settleCtx, user, check, succeeded); serr != nil {

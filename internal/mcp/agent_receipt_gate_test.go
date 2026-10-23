@@ -231,9 +231,8 @@ func TestAgentReceiptGate_EnforceSettlesByHandlerOutcome(t *testing.T) {
 			req := mcplib.CallToolRequest{}
 			req.Params.Name = "mctl_deploy_service"
 			req.Params.Arguments = receiptArgs()
+			defer cancel()
 			res, err := s.agentReceiptMiddleware(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-				// The client hangs up while the handler runs.
-				cancel()
 				return c.res, c.err
 			})(ctx, req)
 			if res != c.res || !errors.Is(err, c.err) {
@@ -241,6 +240,37 @@ func TestAgentReceiptGate_EnforceSettlesByHandlerOutcome(t *testing.T) {
 			}
 			if len(v.settled) != 1 || v.settled[0].succeeded != c.want || v.settled[0].check.Ref != "aar_1" {
 				t.Fatalf("settled = %+v, want one with succeeded=%v", v.settled, c.want)
+			}
+		})
+	}
+}
+
+// A request cancelled or timed out while the handler ran has an unknown
+// outcome: the side effect may have landed before the handler saw the
+// cancellation, so the receipt is spent, not released for a replay. The
+// settle itself still runs, on a context the cancellation does not reach.
+func TestAgentReceiptGate_CancelledCallSpendsTheReceipt(t *testing.T) {
+	for name, c := range map[string]struct {
+		res *mcplib.CallToolResult
+		err error
+	}{
+		"handler error": {nil, context.Canceled},
+		"tool error":    {mcplib.NewToolResultError("request cancelled"), nil},
+		"success":       {mcplib.NewToolResultText("ok"), nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, v := gatedServer(AgentReceiptGateEnforce, "")
+			ctx, cancel := context.WithCancel(auth.WithUser(context.Background(), auth.NewServiceUser()))
+			req := mcplib.CallToolRequest{}
+			req.Params.Name = "mctl_deploy_service"
+			req.Params.Arguments = receiptArgs()
+			s.agentReceiptMiddleware(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+				// The client hangs up while the handler runs.
+				cancel()
+				return c.res, c.err
+			})(ctx, req)
+			if len(v.settled) != 1 || !v.settled[0].succeeded {
+				t.Fatalf("settled = %+v, want the receipt spent", v.settled)
 			}
 			if v.settleCtxErr != nil {
 				t.Fatalf("settle ran on a cancelled context: %v", v.settleCtxErr)

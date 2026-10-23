@@ -94,7 +94,7 @@ func TestConfigValidate_AgentReceiptMaxAge(t *testing.T) {
 		}
 	}
 	for raw, want := range map[string]time.Duration{
-		"": mctlmcp.DefaultAgentReceiptMaxAge, "90s": 90 * time.Second, " 2m ": 2 * time.Minute, "1h": time.Hour,
+		"": mctlmcp.DefaultAgentReceiptMaxAge, "90s": 90 * time.Second, "2m": 2 * time.Minute, "1h": time.Hour,
 	} {
 		cfg := config{AgentReceiptMaxAgeRaw: raw, CommerceDisabled: true}
 		if err := cfg.validate(); err != nil {
@@ -103,5 +103,8 @@ func TestConfigValidate_AgentReceiptMaxAge(t *testing.T) {
 		if got := cfg.agentReceiptMaxAge(); got != want {
 			t.Errorf("MCTL_AGENT_RECEIPT_MAX_AGE=%q: %s, want %s", raw, got, want)
 		}
+	}	// Surrounding whitespace is trimmed.
+	if got := (config{AgentReceiptMaxAgeRaw: "\t2m\n"}).agentReceiptMaxAge(); got != 2*time.Minute {
+		t.Errorf("surrounding whitespace: %s", got)
 	}
 }
