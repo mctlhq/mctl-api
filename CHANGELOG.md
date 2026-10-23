@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.119.0](https://github.com/mctlhq/mctl-api/compare/4.118.1...4.119.0) (2026-10-23)
+
+
+### Features
+
+* **auth:** let an investigate run token seal its own snapshot ([f45d338](https://github.com/mctlhq/mctl-api/commit/f45d3387432fae271877f92884ae9ae838692336))
+* **auth:** let an investigate run token seal its own snapshot ([df2ed29](https://github.com/mctlhq/mctl-api/commit/df2ed29646c47ae112d3f4dac1e4511db0ec0782))
+
+
+### Bug Fixes
+
+* **api:** seal check asks the run's scope for the route itself ([38edf6a](https://github.com/mctlhq/mctl-api/commit/38edf6a89d6501f6fc43a12768edb9353f48bb46))
+
 ## [4.118.1](https://github.com/mctlhq/mctl-api/compare/4.118.0...4.118.1) (2026-10-23)
 
 
