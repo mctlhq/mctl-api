@@ -18,6 +18,7 @@ import (
 	"context"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -143,6 +144,16 @@ var agentScopes = map[string]*AgentScope{
 func LookupAgentScope(name string) (*AgentScope, bool) {
 	s, ok := agentScopes[name]
 	return s, ok
+}
+
+// AgentScopeNames returns the name of every defined scope, sorted.
+func AgentScopeNames() []string {
+	names := make([]string, 0, len(agentScopes))
+	for n := range agentScopes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // AdmitsAgent reports whether a token with this scope may be minted for

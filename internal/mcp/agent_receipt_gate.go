@@ -30,7 +30,12 @@ import (
 //   - A receipt that could not be checked is its own code, never "valid"
 //     and never "missing".
 //   - Human principals, relayed requests and agent principals are not
-//     gated: only the direct mctl-agent service principal is.
+//     gated: only the direct mctl-agent service principal is. An agent
+//     principal (a run token) needs no receipt because no run scope admits
+//     a governed tool: the scope refuses the call first.
+//     TestAgentScopesAdmitNoGovernedTool holds that; a scope that must
+//     reach a governed tool has to extend this gate to agent principals
+//     before it can pass.
 //
 // v1 binds an approval to the principal, the tool and one use. It does not
 // bind the call's arguments: the server does not recompute the arguments
