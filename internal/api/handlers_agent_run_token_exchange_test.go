@@ -138,7 +138,7 @@ func TestExchangeAgentRunToken_ARunWithoutExecutionGetsAnUnboundToken(t *testing
 	if !ok {
 		t.Fatal("investigate scope not defined")
 	}
-	if scope.AllowsRoute(http.MethodGet, "/api/v1/work-items/wi_any", run.WorkItemID) {
+	if scope.AllowsRoute(http.MethodGet, "/api/v1/work-items/wi_any", run.WorkItemID, run.ExecutionID) {
 		t.Error("an unbound token's scope admits a work-item route")
 	}
 }

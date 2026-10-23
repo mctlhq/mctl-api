@@ -115,6 +115,44 @@ func TestWorkItemSnapshots_OnlyAServiceSeals(t *testing.T) {
 	}
 }
 
+// A scoped investigate run seals its own execution's snapshot with its run
+// token (mctlhq/mctl-agents#717), and nothing else: not another execution,
+// not another work item, and not with an unscoped run token.
+func TestWorkItemSnapshots_ScopedRunSealsOnlyItsOwnExecution(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	alice, svc := e.user("alice"), auth.NewServiceUser()
+	id := e.open(alice, nil)["id"].(string)
+	other := e.open(alice, nil)["id"].(string)
+	res := e.do(svc, "POST", "/api/v1/work-items/"+id+"/executions", map[string]any{"engine": "temporal", "engine_ref": "dev-loop-717", "phase": "Running"})
+	eid := res.body["execution"].(map[string]any)["id"].(string)
+	run := func(workItem, execution, scope string) *auth.User {
+		return auth.NewAgentUser("issue-investigator", auth.AgentRun{
+			Agent: "issue-investigator", ExecutionID: execution, WorkItemID: workItem, RunID: "art_seal", Scope: scope,
+		})
+	}
+	seal := func(workItem, execution string) string {
+		return "/api/v1/work-items/" + workItem + "/executions/" + execution + "/snapshot"
+	}
+	for name, c := range map[string]struct {
+		user *auth.User
+		path string
+	}{
+		"another execution":     {run(id, eid, auth.AgentScopeInvestigate), seal(id, "we_other")},
+		"another work item":     {run(id, eid, auth.AgentScopeInvestigate), seal(other, eid)},
+		"bound to no execution": {run(id, "", auth.AgentScopeInvestigate), seal(id, eid)},
+		"unscoped run token":    {run(id, eid, ""), seal(id, eid)},
+	} {
+		res := e.do(c.user, "POST", c.path, sealBody(`{"a":1}`, 1))
+		if res.code != http.StatusForbidden || code(res) != wiCodeSnapshotForbidden {
+			t.Errorf("%s: seal = %d %s, want 403 %s", name, res.code, res.raw, wiCodeSnapshotForbidden)
+		}
+	}
+	res = e.do(run(id, eid, auth.AgentScopeInvestigate), "POST", seal(id, eid), sealBody(`{"a":1}`, 1))
+	if res.code != http.StatusCreated {
+		t.Fatalf("own execution: seal = %d %s, want 201", res.code, res.raw)
+	}
+}
+
 func TestWorkItemSnapshots_RejectsBadBodies(t *testing.T) {
 	e := newWorkItemsEnv(t)
 	alice, svc := e.user("alice"), auth.NewServiceUser()

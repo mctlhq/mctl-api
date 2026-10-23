@@ -46,6 +46,7 @@ func scopeStubRouter(h *Handlers) http.Handler {
 	r.Get("/api/v1/audit", ok)
 	r.Post("/api/v1/incidents/{id}/resolve", ok)
 	r.Post("/api/v1/work-items/{id}/executions", ok)
+	r.Post("/api/v1/work-items/{id}/executions/{execution_id}/snapshot", ok)
 	r.Post("/mcp", ok)
 	return r
 }
@@ -74,6 +75,10 @@ func TestAgentScopeGate_ScopedRunReachesOnlyItsScope(t *testing.T) {
 		{http.MethodGet, "/api/v1/work-items/wi_own", http.StatusOK},
 		{http.MethodGet, "/api/v1/work-items/wi_own/executions", http.StatusOK},
 		{http.MethodPost, "/mcp", http.StatusOK},
+		// The one write: sealing its own execution's snapshot.
+		{http.MethodPost, "/api/v1/work-items/wi_own/executions/we_scope1/snapshot", http.StatusOK},
+		{http.MethodPost, "/api/v1/work-items/wi_own/executions/we_other/snapshot", http.StatusForbidden},
+		{http.MethodPost, "/api/v1/work-items/wi_other/executions/we_scope1/snapshot", http.StatusForbidden},
 		// Not its work item.
 		{http.MethodGet, "/api/v1/work-items/wi_other", http.StatusForbidden},
 		// A read the scope does not list.
@@ -106,8 +111,8 @@ func TestAgentScopeGate_ScopedRunReachesOnlyItsScope(t *testing.T) {
 			t.Errorf("denied audit row lacks the run: %v", e.Parameters)
 		}
 	}
-	if denied != 4 {
-		t.Errorf("agent_scope.denied audit rows = %d, want 4", denied)
+	if denied != 6 {
+		t.Errorf("agent_scope.denied audit rows = %d, want 6", denied)
 	}
 }
 
@@ -145,11 +150,13 @@ func TestAgentScopeGate_ShadowCountsAndNeverRefuses(t *testing.T) {
 		t.Error("shadow scope not carried on the context")
 	}
 	serveUser(router, svc, http.MethodGet, "/api/v1/work-items/wi_any", auth.AgentScopeShadowHeader, "investigate")
+	// A route bound to the execution too is judged against the ids it names.
+	serveUser(router, svc, http.MethodPost, "/api/v1/work-items/wi_any/executions/we_any/snapshot", auth.AgentScopeShadowHeader, "investigate")
 	if got := testutil.ToFloat64(deny) - deny0; got != 1 {
 		t.Errorf("shadow deny count += %v, want 1", got)
 	}
-	if got := testutil.ToFloat64(allow) - allow0; got != 1 {
-		t.Errorf("shadow allow_unbound count += %v, want 1: a bound route admitted without its work item", got)
+	if got := testutil.ToFloat64(allow) - allow0; got != 2 {
+		t.Errorf("shadow allow_unbound count += %v, want 2: bound routes admitted without their ids", got)
 	}
 
 	// A caller other than the direct service cannot use the header.
