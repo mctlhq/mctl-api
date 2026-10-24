@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.120.1](https://github.com/mctlhq/mctl-api/compare/4.120.0...4.120.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **previews:** keep the Kubernetes error out of the 503 body ([21c2233](https://github.com/mctlhq/mctl-api/commit/21c2233a43c63d961e8f860ec361d6cb057b8c71))
+* **previews:** keep the Kubernetes error out of the 503 body ([ba82d04](https://github.com/mctlhq/mctl-api/commit/ba82d04d00e0a3fa437b5d1e87c910b28785da73)), closes [#698](https://github.com/mctlhq/mctl-api/issues/698)
+
 ## [4.120.0](https://github.com/mctlhq/mctl-api/compare/4.119.0...4.120.0) (2026-10-24)
 
 
