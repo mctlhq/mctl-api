@@ -16,12 +16,13 @@ package api
 
 import (
 	"context"
-	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/mctlhq/mctl-api/internal/zitadelhook"
 )

@@ -912,7 +912,12 @@ func (h *Hook) TokenClaims(_ context.Context, body []byte) Result {
 	if fn != functionPreUserinfo && fn != functionPreAccessToken {
 		return failure("token_unknown_function")
 	}
-	empty := func(reason string) Result { return Result{Status: http.StatusOK, Body: []byte(`{}`), Reason: reason} }
+	// A pass-through for tokens the hook does not decorate; still a pass
+	// for the decision metric, so it must carry a Kind like the
+	// constructors do.
+	empty := func(reason string) Result {
+		return Result{Status: http.StatusOK, Body: []byte(`{}`), Reason: reason, Kind: KindPass}
+	}
 	if p.User == nil || p.User.ResourceOwner != h.cfg.CustomersOrgID {
 		return empty("token_other_org")
 	}

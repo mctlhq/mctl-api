@@ -662,8 +662,14 @@ func TestTokenClaimsNone(t *testing.T) {
 		"unlisted client": tokenBody(orgCustomers, "other-client", meta),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if c := claimsOf(t, h.TokenClaims(context.Background(), body)); len(c) != 0 {
+			r := h.TokenClaims(context.Background(), body)
+			if c := claimsOf(t, r); len(c) != 0 {
 				t.Fatalf("claims %v, want none", c)
+			}
+			// The pass-through is counted by the decision metric; an empty
+			// Kind would hide it in an unlabelled series.
+			if r.Kind != KindPass {
+				t.Fatalf("Kind = %q, want %q", r.Kind, KindPass)
 			}
 		})
 	}
