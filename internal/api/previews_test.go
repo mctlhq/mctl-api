@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -66,6 +67,24 @@ func TestListPreviewsFailClosed(t *testing.T) {
 		if _, ok := body["items"]; ok {
 			t.Fatalf("%s: items present", name)
 		}
+	}
+}
+
+func TestListPreviewsFailureHidesTheKubernetesError(t *testing.T) {
+	u := auth.NewGitHubUser("u1", []string{"labs"})
+	k8sErr := errors.New(`deployments.apps is forbidden: User "system:serviceaccount:mctl-api:mctl-api" cannot list resource "deployments"`)
+	rec := callListPreviews(stubPreviewLister{err: k8sErr}, "/api/v1/previews?team=labs", u)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, leak := range []string{"serviceaccount", "forbidden", "deployments"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("response leaks %q: %s", leak, body)
+		}
+	}
+	if !strings.Contains(body, "could not list previews in labs-preview") {
+		t.Fatalf("response lost the namespace: %s", body)
 	}
 }
 
