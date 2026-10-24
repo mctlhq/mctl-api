@@ -64,6 +64,8 @@ type Options struct {
 	MCPServer *mctlmcp.Server
 	// QuotaReader fetches live K8s resource usage (optional — nil in local/test).
 	QuotaReader QuotaReader
+	// PreviewLister lists preview Helm releases (optional — nil means listing is unavailable).
+	PreviewLister PreviewLister
 	// LogQuerier queries Loki for service logs (optional — nil outside cluster).
 	LogQuerier LogQuerier
 	// ComponentSourceRepos answers which repository is registered for a

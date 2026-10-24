@@ -907,6 +907,12 @@ func main() {
 	} else {
 		quotaReader = qc
 	}
+	var previewLister mctlapi.PreviewLister
+	if pc, pErr := k8s.NewPreviewClientFromEnv(); pErr != nil {
+		slog.Warn("k8s preview client unavailable, preview listing will return 503", "error", pErr)
+	} else {
+		previewLister = pc
+	}
 
 	// Agent run token exchange (mctlhq/mctl-agents#737): off unless
 	// AGENT_RUN_EXCHANGE_AUDIENCE names the audience the agent pods'
@@ -1049,6 +1055,7 @@ func main() {
 		AuthMiddleware:                 authMiddleware,
 		MCPServer:                      mcpSrv,
 		QuotaReader:                    quotaReader,
+		PreviewLister:                  previewLister,
 		LogQuerier:                     logQuerier,
 		WorkflowLogArchive:             workflowLogArchive,
 		BackstageInternalURL:           cfg.BackstageInternalURL,

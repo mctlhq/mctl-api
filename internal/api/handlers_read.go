@@ -33,6 +33,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
@@ -700,50 +701,36 @@ func (h *Handlers) ListPreviews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Preview ArgoCD apps follow the naming convention: preview-{team}-{service}-{id}
-	// List all apps in the team's project and filter for preview prefix.
-	apps, err := h.opts.ArgoCD.ListApps(team)
-	if err != nil {
-		if errors.Is(err, argocd.ErrUnauthenticated) {
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"items": []interface{}{},
-				"count": 0,
-				"error": "ArgoCD token invalid or expired — update ARGOCD_TOKEN in Vault at platform/mctl-api/argocd-token",
-			})
-			return
-		}
-		if errors.Is(err, argocd.ErrForbidden) {
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"items": []interface{}{},
-				"count": 0,
-				"note":  "ArgoCD access denied for project: " + team,
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"items": []interface{}{},
-			"count": 0,
-			"note":  "ArgoCD query failed: " + err.Error(),
-		})
+	ns := team + "-preview"
+	if h.opts.PreviewLister == nil {
+		writeError(w, http.StatusServiceUnavailable, "preview listing unavailable: kubernetes client not configured")
 		return
 	}
-
-	prefix := "preview-" + team + "-"
-	if service != "" {
-		prefix = "preview-" + team + "-" + service + "-"
-	}
-
-	var previews []argocd.AppStatus
-	for i := range apps {
-		if strings.HasPrefix(apps[i].Name, prefix) {
-			previews = append(previews, apps[i])
+	previews, err := h.opts.PreviewLister.ListPreviewReleases(r.Context(), team, service)
+	if err != nil {
+		if errors.Is(err, k8s.ErrNamespaceAbsent) {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"items":             []k8s.PreviewRelease{},
+				"count":             0,
+				"team":              team,
+				"namespace":         ns,
+				"preview_namespace": "absent",
+			})
+			return
 		}
+		slog.Warn("listing previews failed", "team", team, "namespace", ns, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "could not list previews in "+ns+": "+err.Error())
+		return
 	}
-
+	if previews == nil {
+		previews = []k8s.PreviewRelease{}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"items": previews,
-		"count": len(previews),
-		"team":  team,
+		"items":             previews,
+		"count":             len(previews),
+		"team":              team,
+		"namespace":         ns,
+		"preview_namespace": "present",
 	})
 }
 
