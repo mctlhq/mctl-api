@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.120.0](https://github.com/mctlhq/mctl-api/compare/4.119.0...4.120.0) (2026-10-24)
+
+
+### Features
+
+* **agents:** issue-698-mctl-list-previews-reports-count-0-when ([4bf9ecf](https://github.com/mctlhq/mctl-api/commit/4bf9ecf668231a40797cb856a0bb730bb21ab184))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-698-mctl-list-previews-reports-count-0-when ([728551f](https://github.com/mctlhq/mctl-api/commit/728551f7e1d3e3e51c334f631eeeac6cfa873f55))
+* **agents:** issue-698-mctl-list-previews-reports-count-0-when ([18c9ac3](https://github.com/mctlhq/mctl-api/commit/18c9ac313c1a1ed81e19756d6699627f257b9cd1))
+
 ## [4.119.0](https://github.com/mctlhq/mctl-api/compare/4.118.1...4.119.0) (2026-10-23)
 
 
