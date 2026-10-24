@@ -718,8 +718,10 @@ func (h *Handlers) ListPreviews(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		// The raw Kubernetes error names the service account and its RBAC, so
+		// it stays in the log; the caller gets only the namespace.
 		slog.Warn("listing previews failed", "team", team, "namespace", ns, "error", err)
-		writeError(w, http.StatusServiceUnavailable, "could not list previews in "+ns+": "+err.Error())
+		writeError(w, http.StatusServiceUnavailable, "could not list previews in "+ns)
 		return
 	}
 	if previews == nil {
