@@ -31,7 +31,7 @@ import (
 // ErrNamespaceAbsent is returned only for an observed NotFound on the preview namespace.
 var ErrNamespaceAbsent = errors.New("preview namespace absent")
 
-var previewIDPattern = regexp.MustCompile(`^[a-z0-9]{1,6}$`)
+var previewIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}$`)
 
 // PreviewRelease is one preview Helm release observed through its Deployment.
 type PreviewRelease struct {
@@ -87,9 +87,17 @@ func (c *PreviewClient) ListPreviewReleases(ctx context.Context, team, service s
 	for i := range list.Items {
 		d := &list.Items[i]
 		rel := d.Labels["app.kubernetes.io/instance"]
-		svc, id, ok := ParsePreviewRelease(rel)
-		if !ok || (service != "" && svc != service) {
+		if !strings.HasPrefix(rel, "preview-") {
 			continue
+		}
+		// Releases that do not parse are still reported (empty service/id)
+		// when unfiltered, so a running preview is never silently dropped.
+		svc, id, ok := ParsePreviewRelease(rel)
+		if service != "" && (!ok || svc != service) {
+			continue
+		}
+		if !ok {
+			svc, id = "", ""
 		}
 		if _, dup := byRelease[rel]; dup {
 			continue

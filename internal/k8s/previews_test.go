@@ -61,6 +61,23 @@ func TestListPreviewReleases(t *testing.T) {
 	}
 }
 
+func TestListPreviewReleasesLongAndOddIDs(t *testing.T) {
+	cs := fake.NewSimpleClientset(nsObj(),
+		dep("a", "preview-web-abcdefgh", "Helm"),
+		dep("b", "preview-web-UPPER", "Helm"),
+		dep("c", "preview-noid", "Helm"),
+	)
+	c := NewPreviewClient(cs)
+	all, err := c.ListPreviewReleases(context.Background(), "labs", "")
+	if err != nil || len(all) != 3 {
+		t.Fatalf("all: %+v err %v", all, err)
+	}
+	f, err := c.ListPreviewReleases(context.Background(), "labs", "web")
+	if err != nil || len(f) != 1 || f[0].PreviewID != "abcdefgh" {
+		t.Fatalf("filtered: %+v err %v", f, err)
+	}
+}
+
 func TestListPreviewReleasesErrors(t *testing.T) {
 	list := func(err error) *fake.Clientset {
 		cs := fake.NewSimpleClientset(nsObj())
@@ -104,7 +121,7 @@ func TestParsePreviewRelease(t *testing.T) {
 		{"preview-api-x1", "api", "x1", true},
 		{"psa-abc123", "", "", false},
 		{"preview--abc123", "", "", false},
-		{"preview-api-abcdefg", "", "", false},
+		{"preview-api-abcdefg", "api", "abcdefg", true},
 		{"preview-api-ABC", "", "", false},
 		{"preview-api", "", "", false},
 	}
