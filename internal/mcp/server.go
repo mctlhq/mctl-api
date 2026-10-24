@@ -2131,8 +2131,10 @@ func (s *Server) toolListPreviews() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`List active preview environments for a team.
 
-Shows all preview ArgoCD applications with their health status, sync state, and namespace.
-Preview environments follow the naming pattern: preview-{team}-{service}-{id}.
+Lists the preview Helm releases deployed by mctl_create_preview into the {team}-preview namespace,
+named preview-{service}-{id}, with replica readiness and creation time. A failed read is a tool
+error, never an empty list. An empty list with preview_namespace "absent" means the preview
+namespace does not exist.
 
 Use this to check which previews are running before creating new ones or cleaning up stale ones.`),
 		mcplib.WithString("team",

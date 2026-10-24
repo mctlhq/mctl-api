@@ -23,6 +23,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/erpactsites"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/loki"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
@@ -31,6 +32,11 @@ import (
 // QuotaReader fetches live Kubernetes ResourceQuota usage for a namespace.
 type QuotaReader interface {
 	GetNamespaceUsage(ctx context.Context, namespace string) (used, hard map[string]string, err error)
+}
+
+// PreviewLister lists preview Helm releases in a team's preview namespace.
+type PreviewLister interface {
+	ListPreviewReleases(ctx context.Context, team, service string) ([]k8s.PreviewRelease, error)
 }
 
 // GitReader is the subset of gitops.Reader used by API handlers.

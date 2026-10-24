@@ -43,8 +43,8 @@ func (c *QuotaClient) NamespaceAbsent(ctx context.Context, namespace string) (bo
 	return false, nil
 }
 
-// NewQuotaClient creates a QuotaClient using in-cluster config, falling back to KUBECONFIG.
-func NewQuotaClient() (*QuotaClient, error) {
+// newClientset builds a clientset from in-cluster config, falling back to KUBECONFIG.
+func newClientset() (kubernetes.Interface, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		// Fallback to KUBECONFIG for local dev.
@@ -53,14 +53,32 @@ func NewQuotaClient() (*QuotaClient, error) {
 			&clientcmd.ConfigOverrides{},
 		).ClientConfig()
 		if err != nil {
-			return nil, fmt.Errorf("k8s quota client: %w", err)
+			return nil, fmt.Errorf("k8s client: %w", err)
 		}
 	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("k8s quota client: %w", err)
+		return nil, fmt.Errorf("k8s client: %w", err)
+	}
+	return cs, nil
+}
+
+// NewQuotaClient creates a QuotaClient using in-cluster config, falling back to KUBECONFIG.
+func NewQuotaClient() (*QuotaClient, error) {
+	cs, err := newClientset()
+	if err != nil {
+		return nil, err
 	}
 	return &QuotaClient{client: cs}, nil
+}
+
+// NewPreviewClientFromEnv creates a PreviewClient using in-cluster config, falling back to KUBECONFIG.
+func NewPreviewClientFromEnv() (*PreviewClient, error) {
+	cs, err := newClientset()
+	if err != nil {
+		return nil, err
+	}
+	return NewPreviewClient(cs), nil
 }
 
 // GetNamespaceUsage returns the used and hard quota values from the first ResourceQuota in the namespace.
