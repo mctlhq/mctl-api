@@ -339,3 +339,89 @@ func TestCustomerGitHubStartNeedsBothIDs(t *testing.T) {
 		t.Fatalf("customer start without an IdP id = %d Location=%q, want 503 and no redirect", rec.Code, rec.Header().Get("Location"))
 	}
 }
+
+// A customer's MCP token names only the principal: the hook proved the
+// GitHub identity at sign-in, but the token carries no login. The repo
+// routes must still act as that customer's GitHub login, read from the one
+// live GitHub identity of their own principal (namax66, 2026-10-25:
+// mctl_sync_repos answered "a linked GitHub identity is required").
+func TestCustomerTokenSyncsReposAsTheirGitHubLogin(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	const prn = "prn_01JCCCCCCCCCCCCCCCCCCCCCCC"
+	pr := &recordingResolver{signinResolver: signinResolver{prn: prn}}
+	h := newCustomerHarness(t, true, customerIDClaims(), pr)
+	loc, _ := url.Parse(h.callback(h.toZitadel(h.get(authorizeQuery("")))).Header().Get("Location"))
+	access, _, err := h.oauth.ExchangeCode(context.Background(), loc.Query().Get("code"), testVerifier, "client", testClientRedirect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var user *auth.User
+	mw := auth.Middleware(nil, nil, nil, h.oauth, auth.WithPrincipalResolver(activePrincipals{}),
+		auth.WithPrincipalAuthz(&auth.PrincipalAuthz{Members: tenantsByPrincipal{prn: {"labs"}}, Admins: map[string]bool{}}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	req.Header.Set("Authorization", "Bearer "+access)
+	rec := httptest.NewRecorder()
+	mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { user = auth.UserFromContext(r.Context()) })).ServeHTTP(rec, req)
+	if user == nil {
+		t.Fatalf("customer token refused: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := user.GitHubLogin(); ok {
+		t.Fatal("precondition: a customer token is expected to carry no GitHub login")
+	}
+
+	srv, seen := fakeGithubAppConnect(t, "svc")
+	live := principals.ExternalIdentity{ID: "xid_gh", PrincipalID: prn, Provider: auth.ProviderGitHub, Subject: "268260640", Display: "mctl-reviewer"}
+	newHandlers := func(store *fakeLinkStore) *Handlers {
+		hd := reposTestHandlers(srv.URL, "svc")
+		hd.opts.TenantAuthzMode = TenantAuthzPrincipal
+		hd.opts.PrincipalMembership = &principalRoles{byPRN: map[string]map[string][][]string{prn: {"labs": {{"developer"}}}}}
+		hd.identityLink = newIdentityLinker(&IdentityLinkOptions{Store: store})
+		return hd
+	}
+	sync := func(hd *Handlers) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		hd.SyncRepos(rec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)), user))
+		return rec
+	}
+
+	if rec := sync(newHandlers(&fakeLinkStore{ids: []principals.ExternalIdentity{{ID: "xid_z", PrincipalID: prn, Provider: "zitadel", Subject: "z-sub"}, live}})); rec.Code != http.StatusOK {
+		t.Fatalf("sync = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if len(*seen) != 1 || (*seen)[0].URL.Query().Get("user") != "mctl-reviewer" || (*seen)[0].URL.Query().Get("team") != "labs" {
+		t.Fatalf("upstream calls %d, want one sync as mctl-reviewer for labs", len(*seen))
+	}
+	rec = httptest.NewRecorder()
+	newHandlers(&fakeLinkStore{ids: []principals.ExternalIdentity{live}}).GetRepoInstallURL(rec,
+		withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos/install-url?team=labs&repo=a/b", nil), user))
+	if rec.Code != http.StatusOK || len(*seen) != 2 || (*seen)[1].URL.Query().Get("user") != "mctl-reviewer" {
+		t.Fatalf("install-url = %d, calls %d; want 200 as mctl-reviewer", rec.Code, len(*seen))
+	}
+
+	revoked := live
+	now := revoked.VerifiedAt
+	revoked.RevokedAt = &now
+	second := live
+	second.ID, second.Subject, second.Display = "xid_gh2", "1", "other-login"
+	for name, c := range map[string]struct {
+		store *fakeLinkStore
+		want  int
+	}{
+		"no GitHub identity":     {&fakeLinkStore{ids: []principals.ExternalIdentity{{ID: "xid_z", PrincipalID: prn, Provider: "zitadel", Subject: "z-sub"}}}, http.StatusConflict},
+		"only a revoked one":     {&fakeLinkStore{ids: []principals.ExternalIdentity{revoked}}, http.StatusConflict},
+		"two live ones":          {&fakeLinkStore{ids: []principals.ExternalIdentity{live, second}}, http.StatusConflict},
+		"store read fails":       {&fakeLinkStore{listErr: errors.New("pg down")}, http.StatusServiceUnavailable},
+		"login with no display":  {&fakeLinkStore{ids: []principals.ExternalIdentity{{ID: "xid_gh", PrincipalID: prn, Provider: auth.ProviderGitHub, Subject: "268260640"}}}, http.StatusConflict},
+		"display is not a login": {&fakeLinkStore{ids: []principals.ExternalIdentity{{ID: "xid_gh", PrincipalID: prn, Provider: auth.ProviderGitHub, Subject: "268260640", Display: "bad login"}}}, http.StatusConflict},
+	} {
+		before := len(*seen)
+		if rec := sync(newHandlers(c.store)); rec.Code != c.want || len(*seen) != before {
+			t.Errorf("%s: sync = %d (upstream +%d), want %d and no upstream call; body=%s", name, rec.Code, len(*seen)-before, c.want, rec.Body.String())
+		}
+	}
+	// No store wired: an unreadable identity is 503, never "not linked".
+	hd := newHandlers(nil)
+	hd.identityLink = nil
+	if rec := sync(hd); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("no store: sync = %d, want 503", rec.Code)
+	}
+}
