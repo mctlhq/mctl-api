@@ -725,10 +725,11 @@ func (s *Server) toolCreateTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 This provisions:
 - Kubernetes namespace with resource quotas
 - Network policies: intra-namespace traffic is allowed; outbound internet
-  egress is DENIED unless allow_internet_egress is set to "true". Argo
+  egress is ALLOWED unless allow_internet_egress is set to "false". The
+  cluster network and node addresses stay unreachable either way. Argo
   Workflow pods get internet access regardless, so builds and deploys work
-  either way — set the flag only when the workspace's own pods must reach
-  external APIs.
+  in both modes — set "false" for a workspace whose pods must not reach
+  external hosts.
 - Vault secret scope for the team
 - ArgoCD RBAC (team members can view/sync their apps)
 - SSO access to Argo Workflows UI
@@ -767,7 +768,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		// boolean here would be silently discarded and the default applied.
 		mcplib.WithString("allow_internet_egress",
 			mcplib.Enum("true", "false"),
-			mcplib.Description(`Allow outbound internet egress from this workspace's pods: "true" or "false" (default: "false")`),
+			mcplib.Description(`Allow outbound internet egress from this workspace's pods: "true" or "false" (default: "true")`),
 		),
 		mcplib.WithString("contact_email",
 			mcplib.Description("Team contact email"),
