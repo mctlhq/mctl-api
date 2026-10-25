@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.122.1](https://github.com/mctlhq/mctl-api/compare/4.122.0...4.122.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* **repos:** act as a principal's linked GitHub login on repo routes ([c339db7](https://github.com/mctlhq/mctl-api/commit/c339db7dabc9a68c85191d402798fa40c668783c))
+* **repos:** act as a principal's linked GitHub login on repo routes ([1ac7556](https://github.com/mctlhq/mctl-api/commit/1ac755610bbb8f600eb2c2c23bf2ca99161f37ff))
+
 ## [4.122.0](https://github.com/mctlhq/mctl-api/compare/4.121.0...4.122.0) (2026-10-25)
 
 
