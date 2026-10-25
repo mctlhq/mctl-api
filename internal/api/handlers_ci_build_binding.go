@@ -67,7 +67,10 @@ func (h *Handlers) CIBuildRepoBinding(w http.ResponseWriter, r *http.Request) {
 	}
 	if !user.IsCI() || user.CIJobWorkflowRef() != buildImageWorkflowRef ||
 		!strings.EqualFold(user.CIRepository(), buildImageRepository) {
-		slog.Warn("ci build binding refused", "user", user.ID, "job_workflow_ref", user.CIJobWorkflowRef())
+		// repository is what tells a reusable call of build-image.yaml from
+		// another repository apart: its job_workflow_ref is the right one.
+		slog.Warn("ci build binding refused", "user", user.ID,
+			"job_workflow_ref", user.CIJobWorkflowRef(), "repository", user.CIRepository())
 		writeErrorCode(w, http.StatusForbidden, codeCIBuildBindingDenied,
 			"only "+buildImageWorkflowRef+" may call this route", nil)
 		return
