@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.122.0](https://github.com/mctlhq/mctl-api/compare/4.121.0...4.122.0) (2026-10-25)
+
+
+### Features
+
+* **agents:** issue-584-mctl-list-repos-always-fails-backstage-r ([f3b0cad](https://github.com/mctlhq/mctl-api/commit/f3b0cadb94297c00831a254350fc5501b3150a6d))
+
+
+### Bug Fixes
+
+* **agents:** issue-584-mctl-list-repos-always-fails-backstage-r ([c1174b5](https://github.com/mctlhq/mctl-api/commit/c1174b5d19092f5422d38e87e69fa964fd3598ea))
+* **repos:** refuse truncated or oversized github-app-connect bodies ([7d0b03f](https://github.com/mctlhq/mctl-api/commit/7d0b03f9bc64e0ea45cd20e95e8b709e61c1d6d5))
+
 ## [4.121.0](https://github.com/mctlhq/mctl-api/compare/4.120.2...4.121.0) (2026-10-25)
 
 
