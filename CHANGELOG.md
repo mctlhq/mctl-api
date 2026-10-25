@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.123.1](https://github.com/mctlhq/mctl-api/compare/4.123.0...4.123.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* **api:** log the token repository on a build-binding refusal ([4460077](https://github.com/mctlhq/mctl-api/commit/4460077de74bc875cec473dbe18cfbe9e2703a49))
+* **api:** log the token repository on a build-binding refusal ([824d899](https://github.com/mctlhq/mctl-api/commit/824d899e2b355e3ebe2fb4178aa890829aa20b41))
+
 ## [4.123.0](https://github.com/mctlhq/mctl-api/compare/4.122.1...4.123.0) (2026-10-25)
 
 
