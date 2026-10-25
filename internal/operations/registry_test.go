@@ -130,14 +130,14 @@ func TestApproveAcceptsEveryMctlAgentsService(t *testing.T) {
 	}
 }
 
-// TestCreateTenantDefaultsToClosedEgress pins the security-relevant default.
-// ApplyDefaults fills in anything the caller omits, and MCP callers omitted
-// this parameter entirely until it was added to the tool schema, so this
-// single value decided the network posture of every workspace created through
-// the agent path. It must stay "false" to match helm-charts/tenant/values.yaml
-// (allowInternetEgress: false), wft-create-tenant.yaml and the Backstage
-// scaffolder template.
-func TestCreateTenantDefaultsToClosedEgress(t *testing.T) {
+// TestCreateTenantDefaultsToOpenEgress pins the security-relevant default.
+// ApplyDefaults fills in anything the caller omits, so this single value
+// decides the network posture of every workspace created through the API or
+// agent path. It is "true" by owner decision (2026-10-25) and must match
+// helm-charts/tenant/values.yaml (allowInternetEgress: true),
+// wft-create-tenant.yaml and the Backstage scaffolder template, which all
+// moved together in mctl-gitops#2140. Change all four together or none.
+func TestCreateTenantDefaultsToOpenEgress(t *testing.T) {
 	reg := NewRegistry()
 	op, ok := reg.Get("create-tenant")
 	if !ok {
@@ -147,17 +147,17 @@ func TestCreateTenantDefaultsToClosedEgress(t *testing.T) {
 	input := map[string]string{"tenant_name": "example"}
 	filled := reg.ApplyDefaults(op, input)
 
-	if got := filled["allow_internet_egress"]; got != "false" {
-		t.Errorf("allow_internet_egress default = %q, want \"false\" (open egress must be opt-in)", got)
+	if got := filled["allow_internet_egress"]; got != "true" {
+		t.Errorf("allow_internet_egress default = %q, want \"true\" (matches the tenant chart default)", got)
 	}
 
-	// An explicit opt-in must still survive ApplyDefaults.
-	optIn := reg.ApplyDefaults(op, map[string]string{
+	// An explicit opt-out must still survive ApplyDefaults.
+	optOut := reg.ApplyDefaults(op, map[string]string{
 		"tenant_name":           "example",
-		"allow_internet_egress": "true",
+		"allow_internet_egress": "false",
 	})
-	if got := optIn["allow_internet_egress"]; got != "true" {
-		t.Errorf("explicit allow_internet_egress overridden: got %q, want \"true\"", got)
+	if got := optOut["allow_internet_egress"]; got != "false" {
+		t.Errorf("explicit allow_internet_egress overridden: got %q, want \"false\"", got)
 	}
 }
 

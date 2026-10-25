@@ -487,14 +487,13 @@ var builtinOperations = []Operation{
 			{Name: "quota_memory_req", Type: "string", Default: "1280Mi", Description: "Memory request quota", Pattern: memoryQuantityPattern},
 			{Name: "quota_memory_lim", Type: "string", Default: "4Gi", Description: "Memory limit quota", Pattern: memoryQuantityPattern},
 			{Name: "quota_pods", Type: "string", Default: "10", Description: "Maximum pods", Pattern: `^[0-9]{1,4}$`},
-			// Closed by default, matching the tenant chart's
-			// networking.allowInternetEgress (false) and the create-tenant
-			// WorkflowTemplate's own default. mctl-api was the one component
-			// still defaulting to "true", so every MCP-created tenant got open
-			// egress regardless of intent. Argo Workflow pods keep internet
-			// access unconditionally via allow-workflow-internet-egress, so
-			// builds and deploys work either way.
-			{Name: "allow_internet_egress", Type: "string", Default: "false", Description: "Allow outbound internet egress from tenant pods (default: false)", Enum: []string{"true", "false"}},
+			// Open by default (owner decision, 2026-10-25), matching the tenant
+			// chart's networking.allowInternetEgress, the create-tenant
+			// WorkflowTemplate and the Backstage template (mctl-gitops#2140).
+			// The chart's allow-internet-egress policy still excludes RFC1918
+			// and the node public CIDRs. Pass "false" to keep a workspace
+			// closed.
+			{Name: "allow_internet_egress", Type: "string", Default: "true", Description: "Allow outbound internet egress from tenant pods (default: true)", Enum: []string{"true", "false"}},
 			{Name: "contact_email", Type: "string", Description: "Team contact email", Pattern: emailPattern, MaxLength: 254},
 			{Name: "creator_user_id", Type: "string", Description: "GitHub user ID of the workspace creator", Pattern: `^[A-Za-z0-9._@-]{1,256}$`},
 			{Name: "creator_principal_id", Type: "string", Description: "Canonical principal of the workspace creator; set by the server from the session", Pattern: `^prn_[0-9A-HJKMNP-TV-Z]{26}$`},
