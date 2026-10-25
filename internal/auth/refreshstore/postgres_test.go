@@ -384,6 +384,73 @@ func TestRotateReuseAfterGraceWindow_RevokesFamily(t *testing.T) {
 	}
 }
 
+// A refusal from accept is decided before rotateTx writes, so it leaves the
+// presented token exactly as it was: a later attempt with it rotates
+// normally instead of being read as a replay past the grace window.
+func TestRotateIfRefusalLeavesTokenUnrotated(t *testing.T) {
+	s := newTestStore(t)
+	withShortGraceWindow(t, 50*time.Millisecond)
+
+	exp := time.Now().Add(time.Hour)
+	tok1 := uniqueTok(t, "1")
+	tok2 := uniqueTok(t, "2")
+	tok3 := uniqueTok(t, "3")
+	if err := s.Insert(tok1, "c2", Session{Login: "dave", Groups: []string{}}, exp); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	errRefused := errors.New("refused")
+	var seen Session
+	_, err := s.RotateIf(tok1, tok2, "c2", exp, func(sess Session) error { seen = sess; return errRefused })
+	if !errors.Is(err, errRefused) {
+		t.Fatalf("RotateIf with a refusing accept: got %v, want the refusal", err)
+	}
+	if seen.Login != "dave" {
+		t.Fatalf("accept saw session %+v, want login dave", seen)
+	}
+	var n int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM oauth_refresh_tokens WHERE token_hash = $1`, tokenHash(tok2)).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("refused rotation wrote its successor (rows %d, %v)", n, err)
+	}
+
+	time.Sleep(60 * time.Millisecond) // past the grace window: a spent token would now read as reuse
+	if _, err := s.Rotate(tok1, tok3, "c2", exp); err != nil {
+		t.Fatalf("token after a refusal: %v, want it still rotatable", err)
+	}
+}
+
+// A replay into a family that is already revoked returns ErrInvalidToken,
+// not a second ErrReuseDetected: there is nothing left to revoke, and the
+// replaying client is retrying, not newly stealing.
+func TestReplayIntoRevokedFamilyIsNotNewReuse(t *testing.T) {
+	s := newTestStore(t)
+	withShortGraceWindow(t, 50*time.Millisecond)
+
+	exp := time.Now().Add(time.Hour)
+	tok1 := uniqueTok(t, "1")
+	if err := s.Insert(tok1, "c2", Session{Login: "dave", Groups: []string{}}, exp); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if _, err := s.Rotate(tok1, uniqueTok(t, "2"), "c2", exp); err != nil {
+		t.Fatalf("first Rotate: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if _, err := s.Rotate(tok1, uniqueTok(t, "3"), "c2", exp); !errors.Is(err, ErrReuseDetected) {
+		t.Fatalf("first replay: got %v, want ErrReuseDetected", err)
+	}
+	for i := range 2 {
+		_, err := s.Rotate(tok1, uniqueTok(t, fmt.Sprintf("r%d", i)), "c2", exp)
+		if errors.Is(err, ErrReuseDetected) || !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("replay %d into the revoked family: got %v, want ErrInvalidToken", i, err)
+		}
+	}
+	var reason string
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT revoked_reason FROM oauth_refresh_tokens WHERE token_hash = $1`, tokenHash(tok1)).Scan(&reason); err != nil || reason != "reuse_detected" {
+		t.Fatalf("revoked_reason %q, %v; want the original reuse_detected", reason, err)
+	}
+}
+
 func TestConcurrentRotationRace(t *testing.T) {
 	s := newTestStore(t)
 

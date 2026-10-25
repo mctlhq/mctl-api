@@ -144,7 +144,7 @@ func (f *fakeRefreshStore) Insert(rawToken, clientID string, sess refreshstore.S
 	return nil
 }
 
-func (f *fakeRefreshStore) Rotate(oldRawToken, newRawToken, clientID string, _ time.Time) (refreshstore.Session, error) {
+func (f *fakeRefreshStore) RotateIf(oldRawToken, newRawToken, clientID string, _ time.Time, accept func(refreshstore.Session) error) (refreshstore.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	entry, ok := f.tokens[oldRawToken]
@@ -166,6 +166,11 @@ func (f *fakeRefreshStore) Rotate(oldRawToken, newRawToken, clientID string, _ t
 	}
 	if entry.clientID != clientID {
 		return refreshstore.Session{}, refreshstore.ErrClientMismatch
+	}
+	if accept != nil {
+		if err := accept(refreshstore.Session{Login: entry.login, PrincipalID: entry.pid, Groups: append([]string(nil), entry.groups...), AuthMethod: entry.method}); err != nil {
+			return refreshstore.Session{}, err
+		}
 	}
 	entry.rotatedTo = newRawToken
 	f.tokens[newRawToken] = &fakeRefreshToken{

@@ -61,15 +61,25 @@ type Store interface {
 	// with SHA-256 before writing so the raw value never rests in the database.
 	Insert(rawToken, clientID string, sess Session, expiresAt time.Time) error
 
-	// Rotate atomically invalidates oldRawToken and stores newRawToken with the same
-	// family_id. Returns the original token's Session so the caller
+	// RotateIf atomically invalidates oldRawToken and stores newRawToken with
+	// the same family_id. Returns the original token's Session so the caller
 	// can issue a new access token.
+	//
+	// accept, when non-nil, sees that Session before anything is written and
+	// may refuse it; its error is returned as is and the token is left
+	// exactly as it was. A refusal decided after the rotation committed would
+	// spend the token: the client keeps the old one, and its next attempt is
+	// a replay past the grace window, which revokes the family as stolen.
+	// accept may run more than once (serialization retries), so it must be
+	// side-effect free.
 	//
 	// Errors:
 	//   ErrInvalidToken   — token not found, expired, or already revoked
+	//                       (including a replay into an already revoked family)
 	//   ErrClientMismatch — client_id does not match the stored value
 	//   ErrReuseDetected  — token was already rotated (reuse attack); whole family revoked
-	Rotate(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time) (Session, error)
+	//   accept's error    — accept refused the session; nothing was written
+	RotateIf(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time, accept func(Session) error) (Session, error)
 
 	// RevokeFamily revokes all tokens that share a family_id with rawToken.
 	// If clientID is non-empty, only tokens matching that client_id are revoked.

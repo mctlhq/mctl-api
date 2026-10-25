@@ -1649,7 +1649,37 @@ func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refr
 		if ttl == 0 {
 			ttl = 30 * 24 * time.Hour
 		}
-		sess, err := s.RefreshStore.Rotate(refreshToken, newToken, clientID, time.Now().Add(ttl))
+		// Both refusals are decided inside the rotation, before it writes.
+		// Decided after it, they spent the token: on 2026-10-17 the principal
+		// cutover refused the portal's pid-less session only once its
+		// successor was committed, the portal kept the old token, and its
+		// next attempt was read as a replay and revoked the family as stolen.
+		var refused error
+		downgrade := false
+		accept := func(sess refreshstore.Session) error {
+			refused, downgrade = nil, false
+			if err := checkSessionAuthMethod(sess.AuthMethod, method); err != nil {
+				refused, downgrade = err, true
+				return err
+			}
+			if err := s.refreshablePrincipal(sess.Login, sess.PrincipalID); err != nil {
+				refused = err
+				return err
+			}
+			return nil
+		}
+		sess, err := s.RefreshStore.RotateIf(refreshToken, newToken, clientID, time.Now().Add(ttl), accept)
+		if err != nil && refused != nil && errors.Is(err, refused) {
+			if downgrade {
+				// The token was presented without the authentication its
+				// session was issued under, so whoever holds it is not that
+				// client: the whole family goes, as for a replayed token.
+				if rerr := s.RefreshStore.RevokeFamily(refreshToken, clientID, "auth_method_downgrade"); rerr != nil {
+					slog.Error("oauth: refresh store revoke on auth method downgrade failed", "error", rerr)
+				}
+			}
+			return "", "", err
+		}
 		if err != nil {
 			// Map store errors to the same string used by the in-memory path so
 			// oauth_handlers.go doesn't need to import the refreshstore package.
@@ -1661,18 +1691,6 @@ func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refr
 			}
 			slog.Error("oauth: refresh store unexpected error", "error", err)
 			return "", "", fmt.Errorf("oauth: %w", ErrServerError)
-		}
-		if err := checkSessionAuthMethod(sess.AuthMethod, method); err != nil {
-			// The token was presented without the authentication its session
-			// was issued under, so whoever holds it is not that client: the
-			// whole family goes, as for a replayed token.
-			if rerr := s.RefreshStore.RevokeFamily(newToken, clientID, "auth_method_downgrade"); rerr != nil {
-				slog.Error("oauth: refresh store revoke on auth method downgrade failed", "error", rerr)
-			}
-			return "", "", err
-		}
-		if err := s.refreshablePrincipal(sess.Login, sess.PrincipalID); err != nil {
-			return "", "", err
 		}
 		// The row rotate() just wrote still carries storedGroups verbatim --
 		// refreshstore.Store.Rotate has no parameter for new groups, and

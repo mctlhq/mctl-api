@@ -291,3 +291,36 @@ func TestRefresh_CarriesThePrincipal(t *testing.T) {
 		}
 	}
 }
+
+// A refresh refused for its principal is refused before the store rotates,
+// so it does not spend the token. Refused after the rotation, the client
+// kept the old token, its retry read as a replay past the grace window, and
+// the family was revoked as stolen (the Cloudflare portal on 2026-10-17).
+func TestRefresh_RefusalDoesNotSpendTheToken(t *testing.T) {
+	o := tpServer(true)
+	store := newFakeRefreshStore()
+	o.RefreshStore = store
+	rt, err := o.IssueRefreshToken("alice", "", []string{"acme"}, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := range 2 {
+		_, _, err := o.RefreshAccessToken(rt, "c")
+		if err == nil || errors.Is(err, ErrServerError) {
+			t.Fatalf("attempt %d: got %v, want an invalid grant", attempt, err)
+		}
+	}
+	store.mu.Lock()
+	e := store.tokens[rt]
+	spent, revoked := e.rotatedTo != "", e.revoked
+	store.mu.Unlock()
+	if spent || revoked {
+		t.Fatalf("refused refresh left the token rotated=%v revoked=%v", spent, revoked)
+	}
+	// Leaving principal mode makes the same session refreshable again: the
+	// refusal changed nothing in the store.
+	o.PrincipalMode = false
+	if _, _, err := o.RefreshAccessToken(rt, "c"); err != nil {
+		t.Fatalf("refresh after the refusal: %v", err)
+	}
+}
