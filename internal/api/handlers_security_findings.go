@@ -229,6 +229,24 @@ func (h *Handlers) authorizeRemediation(w http.ResponseWriter, r *http.Request, 
 	return h.requireTenantRole(w, r, user, tenant, operations.RoleDeveloper, "security."+operation, operations.RiskLow)
 }
 
+// agentOwnsAttempt confines an agent run to attempts started for its own work
+// item; other principals pass.
+func (h *Handlers) agentOwnsAttempt(w http.ResponseWriter, r *http.Request, user *auth.User, attempt string) bool {
+	if !user.IsAgent() {
+		return true
+	}
+	wi, err := h.opts.SecurityFindings.AttemptWorkItem(r.Context(), attempt)
+	if err != nil {
+		writeSecurityError(w, err)
+		return false
+	}
+	if wi != user.WorkItemID() {
+		writeErrorCode(w, http.StatusForbidden, codeSecurityForbidden, "agent run may only act on its own work item", nil)
+		return false
+	}
+	return true
+}
+
 func (h *Handlers) auditSecurity(r *http.Request, user *auth.User, operation string, params map[string]string) {
 	h.logAudit(r, audit.Entry{
 		UserID: user.ID, Operation: "security." + operation, Parameters: params,
@@ -315,7 +333,8 @@ func (h *Handlers) IngestSecurityObservations(w http.ResponseWriter, r *http.Req
 		return
 	}
 	batch := securityfindings.Batch{DeliveryID: strings.TrimSpace(req.DeliveryID), Observations: make([]securityfindings.ObservationInput, len(req.Observations))}
-	for i, it := range req.Observations {
+	for i := range req.Observations {
+		it := &req.Observations[i]
 		obs := it.ObservationInput
 		// Any provider text in the payload is untrusted evidence. It never
 		// reaches identity, dedup scope, authority or strength.
@@ -496,6 +515,12 @@ func (h *Handlers) StartSecurityRemediation(w http.ResponseWriter, r *http.Reque
 	if !decodeSecurityBody(w, r, &in) {
 		return
 	}
+	// An agent run acts only for the work item and execution it was minted for.
+	if user.IsAgent() && (strings.TrimSpace(in.WorkItemID) != user.WorkItemID() ||
+		(strings.TrimSpace(in.ExecutionID) != "" && strings.TrimSpace(in.ExecutionID) != user.ExecutionID())) {
+		writeErrorCode(w, http.StatusForbidden, codeSecurityForbidden, "agent run may only act on its own work item", nil)
+		return
+	}
 	in.OccurrenceID, in.IdempotencyKey, in.Actor = occ, key, securityActor(user)
 	if in.StartSource == "" {
 		in.StartSource = in.Actor.Source
@@ -569,6 +594,9 @@ func (h *Handlers) RecordSecurityFix(w http.ResponseWriter, r *http.Request) {
 	if !ok || !h.authorizeRemediation(w, r, user, tenant, "record_fix") {
 		return
 	}
+	if !h.agentOwnsAttempt(w, r, user, attempt) {
+		return
+	}
 	var in securityfindings.RecordFixInput
 	if !decodeSecurityBody(w, r, &in) {
 		return
@@ -588,6 +616,9 @@ func (h *Handlers) RecordSecurityFix(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) RecordSecurityVerification(w http.ResponseWriter, r *http.Request) {
 	user, attempt, tenant, key, ok := h.attemptMutation(w, r)
 	if !ok || !h.authorizeRemediation(w, r, user, tenant, "record_verification") {
+		return
+	}
+	if !h.agentOwnsAttempt(w, r, user, attempt) {
 		return
 	}
 	var in securityfindings.RecordVerificationInput

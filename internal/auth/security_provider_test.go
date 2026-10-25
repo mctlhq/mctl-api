@@ -19,6 +19,7 @@ import (
 	"testing"
 )
 
+//nolint:gosec // test fixtures, not credentials
 const (
 	secTrivyToken      = "trivy-provider-token-0123456789abcdef"
 	secDependabotToken = "dependabot-provider-token-0123456789ab"

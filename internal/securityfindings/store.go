@@ -463,6 +463,19 @@ func (s *Store) OccurrenceTenant(ctx context.Context, id string) (string, error)
 	return t, nil
 }
 
+// AttemptWorkItem returns the work item a remediation attempt was started for.
+func (s *Store) AttemptWorkItem(ctx context.Context, id string) (string, error) {
+	var wi string
+	err := s.pool.QueryRow(ctx, `SELECT work_item_id FROM security_remediation_attempts WHERE id = $1`, id).Scan(&wi)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("securityfindings: attempt work item: %w", err)
+	}
+	return wi, nil
+}
+
 // AttemptRef returns the occurrence and tenant of a remediation attempt.
 func (s *Store) AttemptRef(ctx context.Context, id string) (occurrenceID, tenant string, err error) {
 	err = s.pool.QueryRow(ctx, `SELECT occurrence_id, tenant FROM security_remediation_attempts WHERE id = $1`, id).Scan(&occurrenceID, &tenant)
