@@ -433,7 +433,7 @@ func TestSyncRepos_PrincipalMode(t *testing.T) {
 			srv, seen := captureBackstage(t)
 			pm := &stubPrincipalMembership{roles: map[string][][]string{"labs": {{tc.role}}}, rolesErr: tc.rolesErr}
 			// The login reader says owner: it must not be consulted.
-			h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: ownerEverywhere{},
+			h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, BackstageGithubAppConnectToken: "t", GitReader: ownerEverywhere{},
 				TenantAuthzMode: TenantAuthzPrincipal, PrincipalMembership: pm, AuditLog: audit.NewLogger()}}
 			u := principalUser(t, auth.NewGitHubUser("vic", nil), rrViewPRN, map[string][]string{rrViewPRN: {"labs"}})
 			req := withUser(httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)), u)

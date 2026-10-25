@@ -48,7 +48,7 @@ func captureBackstage(t *testing.T) (*httptest.Server, *[]*http.Request) {
 
 func TestSyncReposIgnoresBodyUserOverridesWithAuthenticated(t *testing.T) {
 	srv, seen := captureBackstage(t)
-	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, BackstageGithubAppConnectToken: "t", GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
 
 	req := withUser(
 		httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync",
@@ -71,7 +71,7 @@ func TestSyncReposIgnoresBodyUserOverridesWithAuthenticated(t *testing.T) {
 
 func TestSyncReposDefaultsToAuthenticatedUserWhenBodyOmitsUser(t *testing.T) {
 	srv, seen := captureBackstage(t)
-	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, BackstageGithubAppConnectToken: "t", GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
 
 	req := withUser(
 		httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync",
@@ -94,7 +94,7 @@ func TestSyncReposDefaultsToAuthenticatedUserWhenBodyOmitsUser(t *testing.T) {
 
 func TestSyncReposNilUserUnauthorized(t *testing.T) {
 	srv, seen := captureBackstage(t)
-	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, BackstageGithubAppConnectToken: "t", GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync",
 		strings.NewReader(`{"team":"labs"}`))
@@ -111,7 +111,7 @@ func TestSyncReposNilUserUnauthorized(t *testing.T) {
 
 func TestSyncReposCrossTenantForbidden(t *testing.T) {
 	srv, seen := captureBackstage(t)
-	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, BackstageGithubAppConnectToken: "t", GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
 
 	req := withUser(
 		httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync",
@@ -131,7 +131,7 @@ func TestSyncReposCrossTenantForbidden(t *testing.T) {
 
 func TestSyncReposMissingTeamBadRequest(t *testing.T) {
 	srv, seen := captureBackstage(t)
-	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
+	h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, BackstageGithubAppConnectToken: "t", GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
 
 	req := withUser(
 		httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{}`)),
@@ -148,103 +148,187 @@ func TestSyncReposMissingTeamBadRequest(t *testing.T) {
 	}
 }
 
-// Backstage's github-app-connect plugin now rejects unauthenticated calls
-// (mctl-portal#79), so ListRepos, GetRepoInstallURL, and SyncRepos must all
-// attach the BackstageGithubAppConnectToken credential when it is configured.
-func TestReposProxiesSendBearerToken(t *testing.T) {
-	cases := []struct {
-		name    string
-		request *http.Request
-		invoke  func(h *Handlers, w http.ResponseWriter, r *http.Request)
-	}{
-		{
-			name:    "list",
-			request: httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=labs", nil),
-			invoke:  func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.ListRepos(w, r) },
+// fakeGithubAppConnect models the plugin's user/service split: user-only
+// routes refuse any static token, /service/* accept only the service token.
+func fakeGithubAppConnect(t *testing.T, serviceToken string) (*httptest.Server, *[]*http.Request) {
+	t.Helper()
+	var seen []*http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Clone(r.Context()))
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.Contains(r.URL.Path, "/service/") || r.Header.Get("Authorization") != "Bearer "+serviceToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"Authentication required"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"repos":["mctlhq/labs-app"],"url":"https://github.com/apps/x","state":"s"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &seen
+}
+
+func reposTestHandlers(url, token string) *Handlers {
+	return &Handlers{opts: Options{
+		BackstageInternalURL:           url,
+		BackstageGithubAppConnectToken: token,
+		GitReader:                      rolesOf("labs/real-caller=developer", "labs/u1=developer"),
+	}}
+}
+
+func TestListReposAgainstServiceAuthBackstage(t *testing.T) {
+	srv, seen := fakeGithubAppConnect(t, "svc")
+	h := reposTestHandlers(srv.URL, "svc")
+	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=labs", nil), auth.NewGitHubUser("u1", []string{"labs"}))
+	rec := httptest.NewRecorder()
+	h.ListRepos(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"repos"`) {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(*seen) != 1 || (*seen)[0].URL.Path != githubAppConnectServiceReposPath {
+		t.Fatalf("unexpected upstream calls: %v", *seen)
+	}
+}
+
+func TestListReposNilUserAndCrossTenant(t *testing.T) {
+	srv, seen := fakeGithubAppConnect(t, "svc")
+	h := reposTestHandlers(srv.URL, "svc")
+	rec := httptest.NewRecorder()
+	h.ListRepos(rec, httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=labs", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("nil user status=%d, want 401", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	h.ListRepos(rec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=other", nil), auth.NewGitHubUser("u1", []string{"labs"})))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-tenant status=%d, want 403", rec.Code)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("expected zero upstream calls, got %d", len(*seen))
+	}
+}
+
+func TestListReposUpstreamCredentialRefusedIs502(t *testing.T) {
+	srv, _ := fakeGithubAppConnect(t, "svc")
+	h := reposTestHandlers(srv.URL, "wrong")
+	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=labs", nil), auth.NewGitHubUser("u1", []string{"labs"}))
+	rec := httptest.NewRecorder()
+	h.ListRepos(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want 502", rec.Code)
+	}
+}
+
+func TestReposProxiesUnsetTokenIs503(t *testing.T) {
+	srv, seen := fakeGithubAppConnect(t, "svc")
+	h := reposTestHandlers(srv.URL, "")
+	u := auth.NewGitHubUser("u1", []string{"labs"})
+	reqs := map[string]func(){
+		"list": func() {
+			rec := httptest.NewRecorder()
+			h.ListRepos(rec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=labs", nil), u))
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Errorf("list status=%d", rec.Code)
+			}
 		},
-		{
-			name:    "install-url",
-			request: httptest.NewRequest(http.MethodGet, "/api/v1/repos/install-url?team=labs&repo=mctlhq/labs-app", nil),
-			invoke:  func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.GetRepoInstallURL(w, r) },
+		"install-url": func() {
+			rec := httptest.NewRecorder()
+			h.GetRepoInstallURL(rec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos/install-url?team=labs&repo=a/b", nil), u))
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Errorf("install-url status=%d", rec.Code)
+			}
 		},
-		{
-			name: "sync",
-			request: withUser(
-				httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)),
-				auth.NewGitHubUser("u1", []string{"labs"}),
-			),
-			invoke: func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.SyncRepos(w, r) },
+		"sync": func() {
+			rec := httptest.NewRecorder()
+			h.SyncRepos(rec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)), u))
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Errorf("sync status=%d", rec.Code)
+			}
 		},
 	}
+	for _, f := range reqs {
+		f()
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("expected zero upstream calls, got %d", len(*seen))
+	}
+}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, seen := captureBackstage(t)
-			h := &Handlers{opts: Options{
-				BackstageInternalURL:           srv.URL,
-				BackstageGithubAppConnectToken: "test-token",
-				GitReader:                      rolesOf("labs/real-caller=developer", "labs/u1=developer"),
-			}}
+func TestReposProxiesSendBearerTokenOnServicePaths(t *testing.T) {
+	srv, seen := fakeGithubAppConnect(t, "svc")
+	h := reposTestHandlers(srv.URL, "svc")
+	u := auth.NewGitHubUser("u1", []string{"labs"})
+	h.ListRepos(httptest.NewRecorder(), withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=labs", nil), u))
+	h.GetRepoInstallURL(httptest.NewRecorder(), withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos/install-url?team=labs&repo=a/b", nil), u))
+	h.SyncRepos(httptest.NewRecorder(), withUser(httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)), u))
+	if len(*seen) != 3 {
+		t.Fatalf("expected 3 upstream calls, got %d", len(*seen))
+	}
+	for _, r := range *seen {
+		if !strings.Contains(r.URL.Path, "/service/") || r.Header.Get("Authorization") != "Bearer svc" {
+			t.Errorf("bad upstream call %s auth=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+	}
+}
 
-			rec := httptest.NewRecorder()
-			tc.invoke(h, rec, tc.request)
+func TestGetRepoInstallURLUsesLoginAndRefusesWithout(t *testing.T) {
+	srv, seen := fakeGithubAppConnect(t, "svc")
+	h := reposTestHandlers(srv.URL, "svc")
+	rec := httptest.NewRecorder()
+	h.GetRepoInstallURL(rec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos/install-url?team=labs&repo=a/b", nil), auth.NewGitHubUser("u1", []string{"labs"})))
+	if rec.Code != http.StatusOK || len(*seen) != 1 || (*seen)[0].URL.Query().Get("user") != "u1" {
+		t.Fatalf("status=%d seen=%d", rec.Code, len(*seen))
+	}
+	// No GitHub login: a plain principal is not a proven GitHub identity.
+	rec = httptest.NewRecorder()
+	h.GetRepoInstallURL(rec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos/install-url?team=labs&repo=a/b", nil), &auth.User{ID: "zitadel-1", Groups: []string{"labs"}}))
+	if rec.Code != http.StatusConflict || len(*seen) != 1 {
+		t.Fatalf("status=%d seen=%d, want 409 and no extra call", rec.Code, len(*seen))
+	}
+}
 
-			if len(*seen) != 1 {
-				t.Fatalf("expected exactly 1 upstream call, got %d (status %d, body %q)",
-					len(*seen), rec.Code, rec.Body.String())
+// A failed or oversized upstream read must not be relayed as the upstream's
+// 200: the caller would get a truncated repo list or broken JSON.
+func TestReposProxyRefusesTruncatedOrOversizedBody(t *testing.T) {
+	cases := map[string]http.HandlerFunc{
+		"oversized": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"repos":["`))
+			_, _ = w.Write([]byte(strings.Repeat("a", maxBackstageReposBody)))
+			_, _ = w.Write([]byte(`"]}`))
+		},
+		"cut mid-body": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", "1000")
+			_, _ = w.Write([]byte(`{"repos":["mctlhq/a"`))
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hj.Hijack()
+				_ = conn.Close()
 			}
-			if got := (*seen)[0].Header.Get("Authorization"); got != "Bearer test-token" {
-				t.Errorf("upstream Authorization = %q, want %q — Backstage rejects anonymous github-app-connect calls",
-					got, "Bearer test-token")
+		},
+	}
+	for name, handler := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(handler)
+			t.Cleanup(srv.Close)
+			h := reposTestHandlers(srv.URL, "svc")
+			rec := httptest.NewRecorder()
+			h.ListRepos(rec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=labs", nil), auth.NewGitHubUser("u1", []string{"labs"})))
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status=%d, want 502; body=%.200q", rec.Code, rec.Body.String())
 			}
 		})
 	}
 }
 
-// An unset BackstageGithubAppConnectToken must not produce a malformed
-// "Bearer " header; Backstage should reject the call on its own terms
-// rather than on a header we invented.
-func TestReposProxiesOmitAuthWhenTokenUnset(t *testing.T) {
-	cases := []struct {
-		name    string
-		request *http.Request
-		invoke  func(h *Handlers, w http.ResponseWriter, r *http.Request)
-	}{
-		{
-			name:    "list",
-			request: httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=labs", nil),
-			invoke:  func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.ListRepos(w, r) },
-		},
-		{
-			name:    "install-url",
-			request: httptest.NewRequest(http.MethodGet, "/api/v1/repos/install-url?team=labs&repo=mctlhq/labs-app", nil),
-			invoke:  func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.GetRepoInstallURL(w, r) },
-		},
-		{
-			name: "sync",
-			request: withUser(
-				httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)),
-				auth.NewGitHubUser("u1", []string{"labs"}),
-			),
-			invoke: func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.SyncRepos(w, r) },
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, seen := captureBackstage(t)
-			h := &Handlers{opts: Options{BackstageInternalURL: srv.URL, GitReader: rolesOf("labs/real-caller=developer", "labs/u1=developer")}}
-
-			rec := httptest.NewRecorder()
-			tc.invoke(h, rec, tc.request)
-
-			if len(*seen) != 1 {
-				t.Fatalf("expected exactly 1 upstream call, got %d (status %d, body %q)",
-					len(*seen), rec.Code, rec.Body.String())
-			}
-			if _, ok := (*seen)[0].Header["Authorization"]; ok {
-				t.Error("Authorization header set despite an empty BackstageGithubAppConnectToken")
-			}
-		})
+// SyncRepos binds installations to a GitHub login, so a caller without a
+// proven one is refused before any upstream call. Today the tenant-role check
+// refuses such a sign-in first (403); the login check (409) is the backstop.
+// Either is correct; what must never happen is an upstream sync.
+func TestSyncReposRefusesWithoutGitHubLogin(t *testing.T) {
+	srv, seen := fakeGithubAppConnect(t, "svc")
+	h := reposTestHandlers(srv.URL, "svc")
+	h.opts.GitReader = rolesOf("labs/zitadel-1=developer")
+	rec := httptest.NewRecorder()
+	h.SyncRepos(rec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)), &auth.User{ID: "zitadel-1", Groups: []string{"labs"}}))
+	if (rec.Code != http.StatusForbidden && rec.Code != http.StatusConflict) || len(*seen) != 0 {
+		t.Fatalf("status=%d seen=%d, want 403/409 and no upstream call; body=%q", rec.Code, len(*seen), rec.Body.String())
 	}
 }
