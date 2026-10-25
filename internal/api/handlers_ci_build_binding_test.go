@@ -15,10 +15,13 @@
 package api_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -114,6 +117,33 @@ func TestCIBuildBinding_OnlyTheBuildWorkflowMayAsk(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A reusable call of build-image.yaml from another repository carries the
+// right job_workflow_ref, so only the token's repository in the refusal log
+// says why it was refused.
+func TestCIBuildBinding_RefusalLogNamesTheRepository(t *testing.T) {
+	var out bytes.Buffer
+	original := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&out, nil)))
+	t.Cleanup(func() { slog.SetDefault(original) })
+
+	router, _ := newBindingRouter(t, bindingAnswer(true))
+	w := getAs(t, router, buildBindingPath+buildBindingQuery, auth.NewCIJobUser("mctlhq/mctl-telegram", "1001", buildImageWfRef))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403: %s", w.Code, w.Body.String())
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) != nil || rec["msg"] != "ci build binding refused" {
+			continue
+		}
+		if rec["repository"] != "mctlhq/mctl-telegram" || rec["job_workflow_ref"] != buildImageWfRef {
+			t.Fatalf("refusal log lacks the caller's repository: %s", line)
+		}
+		return
+	}
+	t.Fatalf("no refusal was logged:\n%s", out.String())
 }
 
 func TestCIBuildBinding_LookupFailureIsNotUnbound(t *testing.T) {
