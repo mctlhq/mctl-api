@@ -83,8 +83,8 @@ type Options struct {
 	GitHubAPIBaseURL string
 	// BackstageGithubAppConnectToken authorizes calls to Backstage's
 	// github-app-connect plugin (repos list/sync/install-url). When empty,
-	// proxied requests carry no Authorization header (matches
-	// authorizeGithubAppConnect's no-op-when-unset behavior).
+	// the repos routes answer 503 without
+	// calling Backstage.
 	BackstageGithubAppConnectToken string
 	// AllowedOrigins is the list of origins permitted by CORS.
 	// If empty, no Access-Control-Allow-Origin header is set (deny all cross-origin).
@@ -335,7 +335,7 @@ func NewRouter(opts Options) http.Handler {
 	}
 
 	if opts.BackstageGithubAppConnectToken == "" {
-		slog.Warn("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN is unset; repos list/sync/install-url will proxy to backstage without credentials",
+		slog.Warn("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN is unset; repos list/sync/install-url answer 503 (no credential configured)",
 			"routes", "GET /api/v1/repos, GET /api/v1/repos/install-url, POST /api/v1/repos/sync")
 	}
 
