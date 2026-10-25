@@ -481,7 +481,10 @@ repository PAT.
   may call it. Every other caller, admins included, gets
   `403 ci_build_binding_denied`. The workflow is dispatched with a token
   that every namespace can read, so the dispatch itself proves nothing; the
-  OIDC token proves which workflow file, on which ref, is asking.
+  OIDC token proves which workflow file, on which ref, is asking. The
+  token's `repository` must also be `mctlhq/mctl-gitops`: a reusable call
+  of build-image.yaml from another repository carries the same
+  `job_workflow_ref`.
 - `team` must be a valid team name and `repo` a full `owner/name`, each
   given exactly once; anything else is a 400.
 - 200 `{"team","repo","bound"}`. `bound` comes from the portal's binding

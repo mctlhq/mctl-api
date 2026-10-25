@@ -95,11 +95,12 @@ func TestCIBuildBinding_AnswersTheBindingToTheBuildWorkflow(t *testing.T) {
 func TestCIBuildBinding_OnlyTheBuildWorkflowMayAsk(t *testing.T) {
 	admin := &auth.User{ID: "admin", Groups: []string{"admins"}}
 	cases := map[string]*auth.User{
-		"no workflow ref":         auth.NewCIUser("mctlhq/mctl-gitops", "3003"),
-		"another gitops workflow": auth.NewCIJobUser("mctlhq/mctl-gitops", "3003", "mctlhq/mctl-gitops/.github/workflows/gitops-bump.yaml@refs/heads/main"),
-		"build-image off main":    auth.NewCIJobUser("mctlhq/mctl-gitops", "3003", "mctlhq/mctl-gitops/.github/workflows/build-image.yaml@refs/heads/feature"),
-		"same file elsewhere":     auth.NewCIJobUser("mctlhq/mctl-telegram", "1001", "mctlhq/mctl-telegram/.github/workflows/build-image.yaml@refs/heads/main"),
-		"a platform admin":        admin,
+		"no workflow ref":                       auth.NewCIUser("mctlhq/mctl-gitops", "3003"),
+		"another gitops workflow":               auth.NewCIJobUser("mctlhq/mctl-gitops", "3003", "mctlhq/mctl-gitops/.github/workflows/gitops-bump.yaml@refs/heads/main"),
+		"build-image off main":                  auth.NewCIJobUser("mctlhq/mctl-gitops", "3003", "mctlhq/mctl-gitops/.github/workflows/build-image.yaml@refs/heads/feature"),
+		"same file elsewhere":                   auth.NewCIJobUser("mctlhq/mctl-telegram", "1001", "mctlhq/mctl-telegram/.github/workflows/build-image.yaml@refs/heads/main"),
+		"reusable call from another repository": auth.NewCIJobUser("mctlhq/mctl-telegram", "1001", buildImageWfRef),
+		"a platform admin":                      admin,
 	}
 	for name, u := range cases {
 		t.Run(name, func(t *testing.T) {

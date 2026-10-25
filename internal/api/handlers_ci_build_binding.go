@@ -35,7 +35,10 @@ import (
 // Only that workflow may ask. A GitHub Actions token is accepted from any
 // repository of a trusted owner, so the route pins the token's
 // job_workflow_ref, which GitHub sets to the workflow file and ref the job
-// ran, and which a tenant cannot mint for mctl-gitops' main branch.
+// ran, and which a tenant cannot mint for mctl-gitops' main branch. It also
+// pins the token's repository to mctl-gitops: when another repository calls
+// build-image.yaml as a reusable workflow, job_workflow_ref still names
+// build-image.yaml, but repository names the caller.
 
 const (
 	codeCIBuildBindingDenied = "ci_build_binding_denied"
@@ -44,8 +47,12 @@ const (
 
 	// buildImageWorkflowRef is the only job_workflow_ref this route serves.
 	// build-image.yaml is also called as a reusable workflow, and GitHub
-	// sets job_workflow_ref to the called file in that case too.
+	// sets job_workflow_ref to the called file in that case too, hence
+	// buildImageRepository.
 	buildImageWorkflowRef = "mctlhq/mctl-gitops/.github/workflows/build-image.yaml@refs/heads/main"
+
+	// buildImageRepository is the only token repository this route serves.
+	buildImageRepository = "mctlhq/mctl-gitops"
 )
 
 // CIBuildRepoBinding answers whether repo is connected to team in the
@@ -58,7 +65,8 @@ func (h *Handlers) CIBuildRepoBinding(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	if !user.IsCI() || user.CIJobWorkflowRef() != buildImageWorkflowRef {
+	if !user.IsCI() || user.CIJobWorkflowRef() != buildImageWorkflowRef ||
+		!strings.EqualFold(user.CIRepository(), buildImageRepository) {
 		slog.Warn("ci build binding refused", "user", user.ID, "job_workflow_ref", user.CIJobWorkflowRef())
 		writeErrorCode(w, http.StatusForbidden, codeCIBuildBindingDenied,
 			"only "+buildImageWorkflowRef+" may call this route", nil)
