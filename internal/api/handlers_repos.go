@@ -98,7 +98,20 @@ func (h *Handlers) proxyGithubAppConnect(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBackstageReposBody))
+	// A body that failed mid-read or exceeds the cap is a failed read, not a
+	// shorter answer: relaying it would hand the caller a truncated repo list
+	// (or broken JSON) under the upstream's 200.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBackstageReposBody+1))
+	if err != nil {
+		slog.Error("failed to read backstage github-app-connect response", "error", err, "route", path, "team", query.Get("team"))
+		writeError(w, http.StatusBadGateway, "failed to read backstage response")
+		return
+	}
+	if len(body) > maxBackstageReposBody {
+		slog.Error("backstage github-app-connect response exceeds cap", "limit", maxBackstageReposBody, "route", path, "team", query.Get("team"))
+		writeError(w, http.StatusBadGateway, "backstage response too large")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body) //nolint:errcheck

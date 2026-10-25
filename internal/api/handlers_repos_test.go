@@ -285,3 +285,50 @@ func TestGetRepoInstallURLUsesLoginAndRefusesWithout(t *testing.T) {
 		t.Fatalf("status=%d seen=%d, want 409 and no extra call", rec.Code, len(*seen))
 	}
 }
+
+// A failed or oversized upstream read must not be relayed as the upstream's
+// 200: the caller would get a truncated repo list or broken JSON.
+func TestReposProxyRefusesTruncatedOrOversizedBody(t *testing.T) {
+	cases := map[string]http.HandlerFunc{
+		"oversized": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"repos":["`))
+			_, _ = w.Write([]byte(strings.Repeat("a", maxBackstageReposBody)))
+			_, _ = w.Write([]byte(`"]}`))
+		},
+		"cut mid-body": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", "1000")
+			_, _ = w.Write([]byte(`{"repos":["mctlhq/a"`))
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hj.Hijack()
+				_ = conn.Close()
+			}
+		},
+	}
+	for name, handler := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(handler)
+			t.Cleanup(srv.Close)
+			h := reposTestHandlers(srv.URL, "svc")
+			rec := httptest.NewRecorder()
+			h.ListRepos(rec, withUser(httptest.NewRequest(http.MethodGet, "/api/v1/repos?team=labs", nil), auth.NewGitHubUser("u1", []string{"labs"})))
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status=%d, want 502; body=%.200q", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// SyncRepos binds installations to a GitHub login, so a caller without a
+// proven one is refused before any upstream call. Today the tenant-role check
+// refuses such a sign-in first (403); the login check (409) is the backstop.
+// Either is correct; what must never happen is an upstream sync.
+func TestSyncReposRefusesWithoutGitHubLogin(t *testing.T) {
+	srv, seen := fakeGithubAppConnect(t, "svc")
+	h := reposTestHandlers(srv.URL, "svc")
+	h.opts.GitReader = rolesOf("labs/zitadel-1=developer")
+	rec := httptest.NewRecorder()
+	h.SyncRepos(rec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/repos/sync", strings.NewReader(`{"team":"labs"}`)), &auth.User{ID: "zitadel-1", Groups: []string{"labs"}}))
+	if (rec.Code != http.StatusForbidden && rec.Code != http.StatusConflict) || len(*seen) != 0 {
+		t.Fatalf("status=%d seen=%d, want 403/409 and no upstream call; body=%q", rec.Code, len(*seen), rec.Body.String())
+	}
+}
