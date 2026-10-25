@@ -63,15 +63,3 @@ jobs:
           # still asserting on. Forcing serial package execution avoids that
           # cross-package race entirely, at the cost of some CI wall time.
           go test -p 1 ./...
-
-      - name: Notify Telegram on failure
-        if: failure()
-        uses: appleboy/telegram-action@master
-        with:
-          to: ${{ secrets.TELEGRAM_CHAT_ID }}
-          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          message: |
-            ❌ *mctl-api validate failed*
-            Branch: `${{ github.ref_name }}`
-            Commit: `${{ github.sha }}`
-            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
