@@ -127,6 +127,65 @@ func githubLoginOf(user *auth.User) (string, bool) {
 	return login, true
 }
 
+// repoCallerLogin is the GitHub login the repo routes act as, or false after
+// writing the response.
+//
+// A token that proves a login carries it. A person whose token names only
+// a principal (a ZITADEL customer, whose GitHub identity the identity hook
+// proved at sign-in, or a ZITADEL-only human linked to GitHub later) has
+// no login on the token; their login is the one live GitHub identity their
+// own principal holds. Anything other than exactly one such identity is
+// 409, and a principal or store that could not be read is 503: "could not
+// read" is never "not linked".
+func (h *Handlers) repoCallerLogin(w http.ResponseWriter, r *http.Request, user *auth.User) (string, bool) {
+	if login, ok := githubLoginOf(user); ok {
+		return login, true
+	}
+	if !isDirectPerson(user) {
+		writeError(w, http.StatusConflict, "a linked GitHub identity is required")
+		return "", false
+	}
+	pid := user.PrincipalID()
+	if !auth.ValidPrincipalID(pid) {
+		if user.PrincipalUnresolved() {
+			writeError(w, http.StatusServiceUnavailable, "the caller's principal could not be resolved")
+			return "", false
+		}
+		writeError(w, http.StatusConflict, "a linked GitHub identity is required")
+		return "", false
+	}
+	if h.identityLink == nil || h.identityLink.opts.Store == nil {
+		writeError(w, http.StatusServiceUnavailable, "principal store not configured; cannot read the caller's GitHub identity")
+		return "", false
+	}
+	ids, err := h.identityLink.opts.Store.Identities(r.Context(), pid)
+	if err != nil {
+		slog.Error("repos: reading the caller's identities failed", "principal_id", pid, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "principal store unavailable")
+		return "", false
+	}
+	var logins []string
+	for i := range ids {
+		x := &ids[i]
+		if x.Provider == auth.ProviderGitHub && x.RevokedAt == nil && x.Display != "" {
+			logins = append(logins, x.Display)
+		}
+	}
+	switch {
+	case len(logins) == 0:
+		writeError(w, http.StatusConflict, "a linked GitHub identity is required")
+		return "", false
+	case len(logins) > 1:
+		writeError(w, http.StatusConflict, "your account holds more than one GitHub identity; ask a platform admin to resolve it")
+		return "", false
+	case !auth.ValidGitHubLogin(logins[0]):
+		slog.Error("repos: stored GitHub login is not a valid login", "principal_id", pid)
+		writeError(w, http.StatusConflict, "a linked GitHub identity is required")
+		return "", false
+	}
+	return logins[0], true
+}
+
 // ListRepos proxies to Backstage's github-app-connect plugin to list repos for a team.
 // GET /api/v1/repos?team=<teamName>
 func (h *Handlers) ListRepos(w http.ResponseWriter, r *http.Request) {
@@ -175,9 +234,8 @@ func (h *Handlers) GetRepoInstallURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"access denied to team"}`, http.StatusForbidden)
 		return
 	}
-	login, ok := githubLoginOf(user)
+	login, ok := h.repoCallerLogin(w, r, user)
 	if !ok {
-		writeError(w, http.StatusConflict, "a linked GitHub identity is required")
 		return
 	}
 
@@ -214,9 +272,8 @@ func (h *Handlers) SyncRepos(w http.ResponseWriter, r *http.Request) {
 	if !h.requireTenantRole(w, r, user, req.Team, reposSyncRole, "repos-sync", operations.RiskLow) {
 		return
 	}
-	login, ok := githubLoginOf(user)
+	login, ok := h.repoCallerLogin(w, r, user)
 	if !ok {
-		writeError(w, http.StatusConflict, "a linked GitHub identity is required")
 		return
 	}
 
