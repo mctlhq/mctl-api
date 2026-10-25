@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.121.0](https://github.com/mctlhq/mctl-api/compare/4.120.2...4.121.0) (2026-10-25)
+
+
+### Features
+
+* **tenants:** default create-tenant internet egress to open ([5348231](https://github.com/mctlhq/mctl-api/commit/5348231a7a7cede951d2ee920e931a5628eb1755))
+* **tenants:** default create-tenant internet egress to open ([8a1d25c](https://github.com/mctlhq/mctl-api/commit/8a1d25c66b17005891718f6dfcea8adb82f9d885))
+
 ## [4.120.2](https://github.com/mctlhq/mctl-api/compare/4.120.1...4.120.2) (2026-10-25)
 
 
