@@ -1692,8 +1692,8 @@ func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refr
 			slog.Error("oauth: refresh store unexpected error", "error", err)
 			return "", "", fmt.Errorf("oauth: %w", ErrServerError)
 		}
-		// The row rotate() just wrote still carries storedGroups verbatim --
-		// refreshstore.Store.Rotate has no parameter for new groups, and
+		// The session RotateIf returned still carries storedGroups verbatim --
+		// refreshstore.Store.RotateIf has no parameter for new groups, and
 		// adding one would change the interface, the PostgresStore schema and
 		// the in-flight-rotation grace path (design.md "Both refresh paths").
 		// That snapshot's staleness is no longer load-bearing because
