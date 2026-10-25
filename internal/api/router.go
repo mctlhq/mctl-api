@@ -956,6 +956,9 @@ func NewRouter(opts Options) http.Handler {
 			// Operation registry (metadata only).
 			r.Get("/operations", h.ListOperations)
 			r.Get("/operations/{name}", h.GetOperation)
+			// The build workflow's binding check; ciPrincipalGate lets a CI
+			// principal reach it and the handler pins the workflow.
+			r.Get("/ci/build-repo-binding", h.CIBuildRepoBinding)
 		})
 
 		// MCP Streamable HTTP transport — single endpoint for Claude Desktop, Cursor, etc.

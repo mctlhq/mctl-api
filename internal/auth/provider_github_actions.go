@@ -219,6 +219,10 @@ func (p *githubActionsProvider) Verify(ctx context.Context, raw string) (*Verifi
 		return nil, p.refuse("ref", "repository", repo, "ref", ref, "ref_type", refType)
 	}
 
+	// Optional: the deploy route does not read it, and a token without it
+	// (or with a non-string value) simply serves no workflow-pinned route.
+	jobWorkflowRef, _ := stringClaim(tok.Claims, "job_workflow_ref")
+
 	// GitHub names are case-insensitive: one repository is one display and
 	// one rate-limit bucket however the token spells it.
 	repo = strings.ToLower(repo)
@@ -230,6 +234,6 @@ func (p *githubActionsProvider) Verify(ctx context.Context, raw string) (*Verifi
 			Display:  "ci:" + repo,
 			Kind:     KindService,
 		},
-		Claims: Claims{CIRepository: repo},
+		Claims: Claims{CIRepository: repo, CIJobWorkflowRef: jobWorkflowRef},
 	}, nil
 }

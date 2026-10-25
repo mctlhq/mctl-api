@@ -397,9 +397,10 @@ Each refusal logs `github actions token refused` with a `reason` (`issuer`,
 ### What it may call
 
 - **Route gate** (`ciPrincipalGate`). Every route except
-  `POST /api/v1/operations/deploy-service/execute` answers
-  `403 ci_route_not_allowed`. That includes `/mcp`, every read and every
-  other operation. An encoded path is refused.
+  `POST /api/v1/operations/deploy-service/execute` and
+  `GET /api/v1/ci/build-repo-binding` answers `403 ci_route_not_allowed`.
+  That includes `/mcp`, every other read and every other operation. An
+  encoded path is refused.
 - **Request policy** (`authorizeCIDeploy`, on the raw request before
   defaults). This replaces the tenant role check for this principal only.
   Every refusal is a `403 ci_deploy_denied` (or 503, see below) and an audit
@@ -464,6 +465,31 @@ deploy:
 
 No repository secret is needed. The body must stay flat (no nested
 `parameters` object) and must not carry any field outside the allowlist.
+
+### The build workflow's repository-binding check
+
+`GET /api/v1/ci/build-repo-binding?team=<team>&repo=<owner>/<name>` answers
+whether a GitHub App installation binds that repository to that team. It
+exists for one caller: mctl-gitops `build-image.yaml`, which builds images
+for components that are not registered yet (an `onboard`). Before this
+route, a private repository connected only through the GitHub App could not
+be onboarded, because the workflow could see neither the repository nor a
+repository PAT.
+
+- Only a GitHub Actions principal whose `job_workflow_ref` is exactly
+  `mctlhq/mctl-gitops/.github/workflows/build-image.yaml@refs/heads/main`
+  may call it. Every other caller, admins included, gets
+  `403 ci_build_binding_denied`. The workflow is dispatched with a token
+  that every namespace can read, so the dispatch itself proves nothing; the
+  OIDC token proves which workflow file, on which ref, is asking. The
+  token's `repository` must also be `mctlhq/mctl-gitops`: a reusable call
+  of build-image.yaml from another repository carries the same
+  `job_workflow_ref`.
+- `team` must be a valid team name and `repo` a full `owner/name`, each
+  given exactly once; anything else is a 400.
+- 200 `{"team","repo","bound"}`. `bound` comes from the portal's binding
+  lookup. A lookup that fails is a 503, never `bound: false`; the workflow
+  refuses the build on anything but a 200 with `bound: true`.
 
 ## Client identity versus principal identity (CIMD, mctl-api#375)
 
