@@ -72,6 +72,11 @@ type Claims struct {
 	// minted for (githubActionsProvider only). Authorization compares it to
 	// the deploy request and the component's registered source repository.
 	CIRepository string
+	// CIJobWorkflowRef is the token's job_workflow_ref: the workflow file
+	// and ref whose job requested it ("owner/repo/.github/workflows/x.yaml@
+	// refs/heads/main"), empty when the token carried none. Only routes
+	// that serve one specific workflow read it.
+	CIJobWorkflowRef string
 	// TokenPrincipal is the principal a local OAuth token was minted for,
 	// accepted as the caller's principal (principal mode), and TokenPID the
 	// same claim outside principal mode, recorded only for comparison.

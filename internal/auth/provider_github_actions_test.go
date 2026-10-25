@@ -252,3 +252,35 @@ func TestGitHubActions_NameAndIssuerAreReserved(t *testing.T) {
 		t.Fatalf("the dedicated provider must be accepted: %v", err)
 	}
 }
+
+func TestGitHubActions_CarriesJobWorkflowRef(t *testing.T) {
+	const ref = "mctlhq/mctl-gitops/.github/workflows/build-image.yaml@refs/heads/main"
+	claims := ghaClaims()
+	claims["job_workflow_ref"] = ref
+	v, err := ghaVerify(t, ghaConfig(), []string{DefaultGitHubActionsAudience}, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := userFromVerified(v); u.CIJobWorkflowRef() != ref {
+		t.Fatalf("CIJobWorkflowRef() = %q, want %q", u.CIJobWorkflowRef(), ref)
+	}
+
+	// Absent or not a string: still a CI principal (the deploy route does
+	// not read it), with no workflow ref to match a pinned route.
+	for _, bad := range []any{nil, 42} {
+		c := ghaClaims()
+		if bad != nil {
+			c["job_workflow_ref"] = bad
+		}
+		v, err := ghaVerify(t, ghaConfig(), []string{DefaultGitHubActionsAudience}, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u := userFromVerified(v); !u.IsCI() || u.CIJobWorkflowRef() != "" {
+			t.Fatalf("job_workflow_ref %v: user %+v", bad, u)
+		}
+	}
+	if (&User{ID: "human"}).CIJobWorkflowRef() != "" {
+		t.Fatal("a non-CI principal has no workflow ref")
+	}
+}

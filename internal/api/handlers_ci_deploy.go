@@ -67,20 +67,29 @@ type ComponentSourceRepoReader interface {
 	ComponentSourceRepo(team, component string) (string, error)
 }
 
-// ciPrincipalGate confines a CI principal to the one deploy route. Every
-// other route -- /mcp, every read, every other operation -- answers 403
-// before a handler runs, in the shape of registryPublisherGate. An encoded
-// path is refused for the same reason as there: chi routes on RawPath.
+// ciPrincipalGate confines a CI principal to the deploy route and the build
+// workflow's binding check (ciBuildBindingRoute, which pins the workflow
+// itself). Every other route -- /mcp, every read, every other operation --
+// answers 403 before a handler runs, in the shape of registryPublisherGate.
+// An encoded path is refused for the same reason as there: chi routes on
+// RawPath.
 func ciPrincipalGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if user := auth.UserFromContext(r.Context()); user.IsCI() &&
-			(r.Method != http.MethodPost || r.URL.RawPath != "" || r.URL.Path != ciDeployRoute) {
+		if user := auth.UserFromContext(r.Context()); user.IsCI() && !ciRouteAllowed(r) {
 			writeErrorCode(w, http.StatusForbidden, codeCIRouteForbidden,
-				"a GitHub Actions principal may only call POST "+ciDeployRoute, nil)
+				"a GitHub Actions principal may only call POST "+ciDeployRoute+" or GET "+ciBuildBindingRoute, nil)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func ciRouteAllowed(r *http.Request) bool {
+	if r.URL.RawPath != "" {
+		return false
+	}
+	return (r.Method == http.MethodPost && r.URL.Path == ciDeployRoute) ||
+		(r.Method == http.MethodGet && r.URL.Path == ciBuildBindingRoute)
 }
 
 // authorizeCIDeploy decides a CI principal's deploy request on the raw,

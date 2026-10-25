@@ -40,12 +40,22 @@ func TestCIPrincipal_IsConfinedToTheDeployRoute(t *testing.T) {
 		}
 	}
 	const allowed = "POST /api/v1/operations/{name}/execute"
+	const buildBinding = "GET " + ciBuildBindingRoute
+	if _, ok := got[buildBinding]; !ok {
+		t.Errorf("the sweep never reached %s", buildBinding)
+	}
 	for route, res := range got {
 		gated := res.status == http.StatusForbidden && res.code == codeCIRouteForbidden
 		switch {
 		case route == allowed && res.code == codeCIRouteForbidden:
 			// The sweep calls it as /operations/x/execute, which is not the
 			// deploy route: refused by the gate is right.
+		case route == buildBinding:
+			// The gate lets it through; the handler refuses every workflow
+			// but build-image.yaml on main, and this principal is not it.
+			if res.status != http.StatusForbidden || res.code != codeCIBuildBindingDenied {
+				t.Errorf("%s: got %d %q, want 403 %s", route, res.status, res.code, codeCIBuildBindingDenied)
+			}
 		case route != allowed && !gated:
 			t.Errorf("%s: got %d %q, want 403 %s", route, res.status, res.code, codeCIRouteForbidden)
 		}

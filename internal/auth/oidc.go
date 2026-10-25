@@ -85,6 +85,9 @@ type User struct {
 	ci             bool
 	ciRepository   string
 	ciRepositoryID string
+	// ciJobWorkflowRef is the token's job_workflow_ref (see
+	// Claims.CIJobWorkflowRef); empty when the token carried none.
+	ciJobWorkflowRef string
 
 	// surface is set only on a per-surface service principal
 	// ("surface:telegram"), authenticated by that surface's own token
@@ -712,8 +715,14 @@ func (u *User) IsRegistryPublisher() bool { return u != nil && u.registryPublish
 // ("owner/repo"), whose immutable id is repositoryID (mctl-api#530).
 // Production builds it only from a verified token (userFromVerified).
 func NewCIUser(repository, repositoryID string) *User {
+	return NewCIJobUser(repository, repositoryID, "")
+}
+
+// NewCIJobUser is NewCIUser for a token that also named the workflow its
+// job ran (job_workflow_ref).
+func NewCIJobUser(repository, repositoryID, jobWorkflowRef string) *User {
 	repository = strings.ToLower(repository)
-	return &User{ID: "ci:" + repository, ci: true, ciRepository: repository, ciRepositoryID: repositoryID}
+	return &User{ID: "ci:" + repository, ci: true, ciRepository: repository, ciRepositoryID: repositoryID, ciJobWorkflowRef: jobWorkflowRef}
 }
 
 // IsCI reports whether this principal authenticated with a GitHub Actions
@@ -727,6 +736,15 @@ func (u *User) CIRepository() string {
 		return ""
 	}
 	return u.ciRepository
+}
+
+// CIJobWorkflowRef is the job_workflow_ref a CI principal's token named,
+// empty for every other principal and for a token without one.
+func (u *User) CIJobWorkflowRef() string {
+	if !u.IsCI() {
+		return ""
+	}
+	return u.ciJobWorkflowRef
 }
 
 // registryPublisherUnsetLogged makes the "not configured" line below appear
@@ -1211,7 +1229,7 @@ func userFromVerified(v *Verified) *User {
 		// member. Marked ci even if a claim were somehow empty, so the
 		// route gate still confines it; authorizeCIDeploy refuses an empty
 		// repository.
-		u := NewCIUser(v.Claims.CIRepository, v.Identity.Subject)
+		u := NewCIJobUser(v.Claims.CIRepository, v.Identity.Subject, v.Claims.CIJobWorkflowRef)
 		u.ID = v.Identity.Display
 		return u
 	case v.Identity.Provider == ProviderDex:
