@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.120.2](https://github.com/mctlhq/mctl-api/compare/4.120.1...4.120.2) (2026-10-25)
+
+
+### Bug Fixes
+
+* **auth:** refuse a refresh before rotating, not after ([2ba86ca](https://github.com/mctlhq/mctl-api/commit/2ba86ca6681c0eb533c1c8756649b624ecc79134))
+* **auth:** refuse a refresh before rotating, not after ([5a71b51](https://github.com/mctlhq/mctl-api/commit/5a71b510a3bc7b670d4c59616dfbcfe8e0e3ede5))
+
 ## [4.120.1](https://github.com/mctlhq/mctl-api/compare/4.120.0...4.120.1) (2026-10-24)
 
 
