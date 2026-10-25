@@ -49,6 +49,16 @@ func TestSpecParses(t *testing.T) {
 		"/api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}":             {"get"},
 		"/api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/receipt":     {"get"},
 		"/api/v1/commerce/tenants/{tenant}/invocations/{invocation_id}/transitions": {"get", "post"},
+		"/api/v1/security/observations":                                             {"post"},
+		"/api/v1/security/findings":                                                 {"get"},
+		"/api/v1/security/findings/{id}":                                            {"get"},
+		"/api/v1/security/occurrences":                                              {"get"},
+		"/api/v1/security/occurrences/{id}":                                         {"get"},
+		"/api/v1/security/occurrences/{id}/triage":                                  {"post"},
+		"/api/v1/security/occurrences/{id}/remediation-attempts":                    {"post"},
+		"/api/v1/security/occurrences/{id}/dismiss":                                 {"post"},
+		"/api/v1/security/remediation-attempts/{id}/fix":                            {"post"},
+		"/api/v1/security/remediation-attempts/{id}/verifications":                  {"post"},
 	} {
 		for _, m := range methods {
 			if _, ok := doc.Paths[path][m]; !ok {

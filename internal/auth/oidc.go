@@ -72,6 +72,12 @@ type User struct {
 	// one-for-one on usageWriter, and unexported for the same reason.
 	evidenceWriter bool
 
+	// securityProvider is the configured ref of a security-provider
+	// principal, authenticated by its own entry in
+	// MCTL_SECURITY_PROVIDER_TOKENS (mctl-api#774). Unexported for the same
+	// reason as service: it is how the caller authenticated, not a claim.
+	securityProvider string
+
 	// registryPublisher is set only on the registry-publisher principal,
 	// authenticated by MCTL_REGISTRY_PUBLISHER_TOKEN (mctlhq/mctl-agents#470).
 	// Unexported for the same reason as service.
@@ -585,6 +591,14 @@ func (u *User) HasPermission(permission string) bool {
 		return u.usageWriter || u.IsAdmin()
 	case PermissionEvidenceWrite:
 		return u.evidenceWriter || u.IsAdmin()
+	case PermissionSecurityIngest:
+		return u.securityProvider != "" || u.IsAdmin()
+	case PermissionSecurityRemediate:
+		// Held by the direct service principal and, through the agent
+		// branch above, by an agent run minted with it. Not by a
+		// security provider, and not implicitly by a human admin: a
+		// human acts through the tenant role rules instead.
+		return u.service
 	}
 	return false
 }
@@ -909,6 +923,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	usageWriter := usageWriterToken()
 	evidenceWriter := evidenceWriterToken()
 	registryPublisher := registryPublisherToken()
+	securityProviders := securityProviderTokens()
 	var cfg middlewareConfig
 	for _, o := range opts {
 		o(&cfg)
@@ -917,7 +932,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	federationDisabled := federationKillSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED"))
 	registry := cfg.federationRegistry
 	if !federationDisabled && registry == nil {
-		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter, registryPublisher)
+		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter, registryPublisher, securityProviders)
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -998,6 +1013,8 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					user = ew
 				} else if rp := registryPublisherUserFor(registryPublisher, token); rp != nil {
 					user = rp
+				} else if sp := securityProviderUserFor(securityProviders, token); sp != nil {
+					user = sp
 				} else if isJWT(token) {
 					// Peek at the JWT issuer to route to the correct verifier.
 					if oauth != nil && jwtIssuer(token) == oauth.BaseURL {
@@ -1128,13 +1145,14 @@ func federationKillSwitchOn(v string) bool {
 // federation_config.go, with audience enforcement); this default is what
 // every existing caller of Middleware -- including every test in this
 // package -- exercises unchanged.
-func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher string) *Registry {
+func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher string, securityProviders map[string]string) *Registry {
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
 		newSurfaceProvider(func() map[string]string { return surfaces }),
 		newUsageWriterProvider(func() string { return usageWriter }),
 		newEvidenceWriterProvider(func() string { return evidenceWriter }),
 		newRegistryPublisherProvider(func() string { return registryPublisher }),
+		newSecurityProviderProvider(func() map[string]string { return securityProviders }),
 	}
 	var jwtProviders []Provider
 	if oauth != nil && oauth.BaseURL != "" {
@@ -1208,6 +1226,8 @@ func userFromVerified(v *Verified) *User {
 		return NewEvidenceWriterUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == RegistryPublisherUserID:
 		return NewRegistryPublisherUser()
+	case v.Identity.Provider == ProviderService && strings.HasPrefix(v.Identity.Subject, SecurityProviderUserPrefix):
+		return NewSecurityProviderUser(strings.TrimPrefix(v.Identity.Subject, SecurityProviderUserPrefix))
 	case v.Identity.Provider == ProviderGitHub:
 		u := NewGitHubUser(v.Identity.Display, v.Claims.Groups)
 		if v.Identity.Subject != "" {

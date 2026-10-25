@@ -101,6 +101,25 @@ spec:
                   key: MCTL_EVIDENCE_WRITER_TOKEN
                   optional: true
             {{- end }}
+            {{- if .Values.securityProviders }}
+            # Non-secret provider configuration (mctl-api#774): the ref, the
+            # strongest verification each provider may assert and the tenants
+            # it may report for. A provider's authority comes from here and
+            # from its token, never from a request body.
+            - name: SECURITY_PROVIDERS
+              value: {{ .Values.securityProviders | toJson | quote }}
+            {{- end }}
+            {{- if .Values.securityProviderTokensSecret }}
+            # Optional on purpose: a missing Secret leaves every security
+            # provider disabled (only admins can ingest observations), it
+            # does not keep the pod from starting.
+            - name: MCTL_SECURITY_PROVIDER_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.securityProviderTokensSecret }}
+                  key: MCTL_SECURITY_PROVIDER_TOKENS
+                  optional: true
+            {{- end }}
             {{- if .Values.registryPublisherTokenSecret }}
             # Optional on purpose: a missing Secret leaves the
             # registry-publisher principal disabled (only admins can publish

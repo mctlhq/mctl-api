@@ -1441,6 +1441,264 @@ components:
         authorization: {$ref: '#/components/schemas/CommerceDispatchAuthorization'}
         replayed: {type: boolean}
 
+    SecurityFindingError:
+      type: object
+      description: Error with a typed code a client can branch on.
+      properties:
+        error: {type: string}
+        code:
+          type: string
+          enum: [security_findings_store_unavailable, not_found, invalid_request, invalid_transition,
+                 remediation_attempt_active, verification_not_bound, subject_too_weak, finding_alias_conflict,
+                 idempotency_key_reused, version_conflict, work_item_not_found, work_items_unavailable,
+                 forbidden, security_provider_route_not_allowed, internal_error]
+      required: [error]
+    SecurityEvidenceRef:
+      type: object
+      description: A reference to evidence held elsewhere. The store keeps references, never scanner or code payloads.
+      properties:
+        kind: {type: string, description: 'e.g. assurance_finding, pull_request, scan_report'}
+        ref: {type: string, maxLength: 512}
+        digest: {type: string}
+      required: [kind, ref]
+    SecuritySubject:
+      type: object
+      description: |
+        The concrete thing an occurrence is about. A subject needs a repository
+        or resource AND at least one of package_purl, path, location or
+        artifact_digest; otherwise the item is rejected as subject_too_weak.
+        The revision is deliberately not part of the subject.
+      properties:
+        repository: {type: string}
+        resource: {type: string}
+        package_purl: {type: string}
+        path: {type: string}
+        location: {type: string}
+        artifact_digest: {type: string, description: 'algorithm:hex, e.g. sha256:...'}
+        service: {type: string}
+        rule_id: {type: string, description: 'Set by the server for rule identities; ignored on input'}
+    SecurityUntrusted:
+      type: object
+      description: |
+        Provider free text. Inert data: no transition, policy or authorization
+        code reads it. Bounded (title 256 B, severity 32 B, description 4096 B).
+      properties:
+        title: {type: string, maxLength: 256}
+        description: {type: string, maxLength: 4096}
+        severity: {type: string, maxLength: 32}
+        claimed_provider: {type: string, description: 'Any provider text the payload carried; never used for identity, scope, authority or strength'}
+    SecurityObservationInput:
+      type: object
+      properties:
+        tenant: {type: string, description: 'Must be in the authenticated provider''s configured tenants'}
+        identity: {type: string, description: 'CVE-YYYY-N, GHSA-xxxx-xxxx-xxxx, or a provider-scoped rule id'}
+        aliases: {type: array, maxItems: 16, items: {type: string}}
+        subject: {$ref: '#/components/schemas/SecuritySubject'}
+        source_finding_id: {type: string}
+        claimed_action: {type: string, enum: [present, fixed, absent, withdrawn], default: present}
+        observed_revision: {type: string}
+        observed_artifact_digest: {type: string}
+        evidence_refs: {type: array, maxItems: 32, items: {$ref: '#/components/schemas/SecurityEvidenceRef'}}
+        observed_at: {type: string, format: date-time}
+        untrusted: {$ref: '#/components/schemas/SecurityUntrusted'}
+        provider: {type: string, description: 'Untrusted: stored as untrusted.claimed_provider, never used for authority'}
+      required: [tenant, identity, subject]
+    SecurityIngestRequest:
+      type: object
+      properties:
+        delivery_id: {type: string}
+        observations:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: {$ref: '#/components/schemas/SecurityObservationInput'}
+      required: [observations]
+    SecurityItemResult:
+      type: object
+      properties:
+        status: {type: string, enum: [created, duplicate, rejected]}
+        code: {type: string, enum: [subject_too_weak, finding_alias_conflict, invalid_request, tenant_not_allowed, internal_error]}
+        message: {type: string}
+        finding_id: {type: string}
+        occurrence_id: {type: string}
+        observation_id: {type: string}
+        transition: {type: string, description: 'The state the occurrence entered because of this observation, when it changed'}
+      required: [status]
+    SecurityIngestResponse:
+      type: object
+      properties:
+        results: {type: array, items: {$ref: '#/components/schemas/SecurityItemResult'}}
+      required: [results]
+    SecurityObservation:
+      type: object
+      description: Append-only evidence on an occurrence.
+      properties:
+        id: {type: string, description: 'sob_...'}
+        occurrence_id: {type: string}
+        provider_ref: {type: string, description: 'From the authenticated principal'}
+        observation_hash: {type: string}
+        delivery_id: {type: string}
+        source_finding_id: {type: string}
+        claimed_action: {type: string, enum: [present, fixed, absent, withdrawn]}
+        observed_revision: {type: string}
+        observed_artifact_digest: {type: string}
+        evidence_refs: {type: array, items: {$ref: '#/components/schemas/SecurityEvidenceRef'}}
+        untrusted: {$ref: '#/components/schemas/SecurityUntrusted'}
+        observed_at: {type: string, format: date-time}
+        ingested_at: {type: string, format: date-time}
+    SecurityAttempt:
+      type: object
+      description: One remediation cycle of an occurrence.
+      properties:
+        id: {type: string, description: 'sra_...'}
+        occurrence_id: {type: string}
+        seq: {type: integer}
+        work_item_id: {type: string}
+        execution_id: {type: string}
+        devloop_workflow_id: {type: string}
+        started_by: {type: string}
+        start_source: {type: string}
+        affected_revisions: {type: array, items: {type: string}}
+        candidate_revision: {type: string}
+        landed_revision: {type: string}
+        landed_artifact_digest: {type: string}
+        landed_ref: {type: string}
+        outcome: {type: string, enum: [resolved, superseded, cancelled_dismissed], description: 'Absent while the attempt is active'}
+        started_at: {type: string, format: date-time}
+        landed_at: {type: string, format: date-time}
+        ended_at: {type: string, format: date-time}
+    SecurityVerification:
+      type: object
+      description: Immutable record of one verification of a landed fix.
+      properties:
+        id: {type: string, description: 'svr_...'}
+        attempt_id: {type: string}
+        occurrence_id: {type: string}
+        mechanism: {type: string, enum: [deterministic_regression_test, assurance_replay, scanner_rerun_exact_revision, provider_claim, manual]}
+        declared_strength: {type: string}
+        derived_strength: {type: string, description: 'The lower of the mechanism and the recorder''s ceiling'}
+        result: {type: string, enum: [passed, failed, unavailable, error, timeout, unverifiable]}
+        revision: {type: string}
+        artifact_digest: {type: string}
+        evidence_refs: {type: array, items: {$ref: '#/components/schemas/SecurityEvidenceRef'}}
+        recorded_by: {type: string}
+        source_observation_id: {type: string}
+        recorded_at: {type: string, format: date-time}
+    SecurityEvent:
+      type: object
+      description: One append-only lifecycle record of an occurrence.
+      properties:
+        occurrence_id: {type: string}
+        seq: {type: integer}
+        kind: {type: string}
+        from_state: {type: string}
+        to_state: {type: string}
+        actor_principal: {type: string}
+        actor_principal_id: {type: string}
+        via_principal_id: {type: string}
+        source: {type: string}
+        reason: {type: string}
+        refs: {type: object, additionalProperties: {type: string}}
+        created_at: {type: string, format: date-time}
+    SecurityOccurrence:
+      type: object
+      description: One concrete affected subject. The only level that owns lifecycle state.
+      properties:
+        id: {type: string, description: 'soc_...'}
+        finding_id: {type: string}
+        tenant: {type: string}
+        subject_fingerprint: {type: string, description: 'SHA-256 over the canonical JSON of the normalized subject'}
+        subject: {$ref: '#/components/schemas/SecuritySubject'}
+        state: {type: string, enum: [open, triaged, fixing, awaiting_verification, resolved, reopened, unverifiable, dismissed]}
+        state_version: {type: integer, format: int64}
+        active_attempt_id: {type: string}
+        current_affected_revision: {type: string, description: 'Read projection only'}
+        current_affected_artifact: {type: string, description: 'Read projection only'}
+        dismissal_reason: {type: string}
+        dismissal_authority_ref: {type: string}
+        dismissed_by: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        last_observed_at: {type: string, format: date-time}
+        observations: {type: array, items: {$ref: '#/components/schemas/SecurityObservation'}}
+        remediation_attempts: {type: array, items: {$ref: '#/components/schemas/SecurityAttempt'}}
+        verifications: {type: array, items: {$ref: '#/components/schemas/SecurityVerification'}}
+        events: {type: array, items: {$ref: '#/components/schemas/SecurityEvent'}}
+    SecurityFinding:
+      type: object
+      description: Canonical problem identity and grouping.
+      properties:
+        id: {type: string, description: 'sf_...'}
+        tenant: {type: string}
+        identity_kind: {type: string, enum: [cve, ghsa, rule]}
+        identity_key: {type: string, description: 'e.g. cve:CVE-2024-1234'}
+        created_at: {type: string, format: date-time}
+        last_observed_at: {type: string, format: date-time}
+        schema_version: {type: string, example: securityfinding/v1}
+        aliases: {type: array, items: {type: string}}
+        occurrences: {type: array, items: {$ref: '#/components/schemas/SecurityOccurrence'}}
+    SecurityMutationResult:
+      type: object
+      properties:
+        occurrence_id: {type: string}
+        attempt_id: {type: string}
+        verification_id: {type: string}
+        state: {type: string}
+        state_version: {type: integer, format: int64}
+        transition: {type: string}
+        replayed: {type: boolean}
+      required: [occurrence_id, state, state_version]
+    SecurityTriageRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason: {type: string, maxLength: 1024}
+        expected_state_version: {type: integer, format: int64}
+    SecurityStartRemediationRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        work_item_id: {type: string, description: 'An existing WorkItem (wi_...) in the occurrence''s tenant'}
+        execution_id: {type: string}
+        devloop_workflow_id: {type: string}
+        start_source: {type: string}
+        expected_state_version: {type: integer, format: int64}
+      required: [work_item_id]
+    SecurityRecordFixRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        candidate_revision: {type: string}
+        landed: {type: boolean, description: 'true when the fix has landed; then landed_revision or landed_artifact_digest is required'}
+        landed_revision: {type: string}
+        landed_artifact_digest: {type: string}
+        landed_ref: {type: string, description: 'e.g. the merged pull request'}
+        expected_state_version: {type: integer, format: int64}
+    SecurityRecordVerificationRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        The strength is not a request field: it is derived as the lower of the
+        declared mechanism and the ceiling configured for the authenticated
+        recorder.
+      properties:
+        mechanism: {type: string, enum: [deterministic_regression_test, assurance_replay, scanner_rerun_exact_revision, provider_claim, manual]}
+        result: {type: string, enum: [passed, failed, unavailable, error, timeout, unverifiable]}
+        revision: {type: string}
+        artifact_digest: {type: string}
+        evidence_refs: {type: array, maxItems: 32, items: {$ref: '#/components/schemas/SecurityEvidenceRef'}}
+        expected_state_version: {type: integer, format: int64}
+      required: [mechanism, result]
+    SecurityDismissRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason: {type: string, enum: [false_positive, accepted_risk, duplicate, not_applicable, provider_withdrawn]}
+        authority_ref: {type: string, maxLength: 512}
+        note: {type: string, maxLength: 4096}
+        expected_state_version: {type: integer, format: int64}
+      required: [reason, authority_ref]
+
 paths:
   /healthz:
     get:
@@ -5689,6 +5947,231 @@ paths:
         '409': {description: Row already dispatched or terminal, or payment state unknown, content: {application/json: {schema: {$ref: '#/components/schemas/CommerceError'}}}}
         '503': {description: Commerce ledger not configured}
 
+  /api/v1/security/observations:
+    post:
+      summary: Ingest a batch of security observations
+      description: |
+        SecurityFinding v1 (mctl-api#774). Requires `security:ingest`: a
+        configured security-provider principal (which may call no other
+        route) or an admin. The provider ref, its tenants and its strongest
+        verification come only from the authenticated principal and server
+        configuration; any `provider` text in the payload is stored as
+        untrusted evidence. Up to 100 items are processed independently and
+        each gets a result (`created`, `duplicate`, or `rejected` with a code),
+        so one item never drops another. Redelivery of the same content is a
+        `duplicate`. There is no Idempotency-Key: dedup is by content hash.
+      tags: [SecurityFindings]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SecurityIngestRequest'}
+      responses:
+        '200': {description: One result per item, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityIngestResponse'}}}}
+        '400': {description: invalid_request, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '403': {description: caller lacks security:ingest, the provider is not configured, or a provider called another route}
+        '503': {description: security_findings_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+
+  /api/v1/security/findings:
+    get:
+      summary: List security findings
+      description: Tenant-scoped; rows in tenants the caller cannot access are not found. Newest first.
+      tags: [SecurityFindings]
+      parameters:
+        - {name: tenant, in: query, schema: {type: string}}
+        - {name: state, in: query, description: 'Findings with an occurrence in this state', schema: {type: string}}
+        - {name: repository, in: query, schema: {type: string}}
+        - {name: identity, in: query, description: 'A CVE, GHSA or alias key', schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, maximum: 200}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: Findings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  findings: {type: array, items: {$ref: '#/components/schemas/SecurityFinding'}}
+                  next_cursor: {type: string}
+        '404': {description: The requested tenant is not accessible, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '503': {description: security_findings_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+
+  /api/v1/security/findings/{id}:
+    get:
+      summary: One finding with its full tree
+      description: The finding with every occurrence and, under each, its observations, remediation attempts, verifications and events.
+      tags: [SecurityFindings]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: The finding, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFinding'}}}}
+        '404': {description: not_found (including a finding in a tenant the caller cannot access), content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '503': {description: security_findings_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+
+  /api/v1/security/occurrences:
+    get:
+      summary: List security occurrences
+      tags: [SecurityFindings]
+      parameters:
+        - {name: finding_id, in: query, schema: {type: string}}
+        - {name: tenant, in: query, schema: {type: string}}
+        - {name: state, in: query, schema: {type: string}}
+        - {name: repository, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, maximum: 200}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: Occurrence summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  occurrences: {type: array, items: {$ref: '#/components/schemas/SecurityOccurrence'}}
+                  next_cursor: {type: string}
+        '404': {description: The requested tenant is not accessible, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '503': {description: security_findings_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+
+  /api/v1/security/occurrences/{id}:
+    get:
+      summary: One occurrence with its full history
+      tags: [SecurityFindings]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: The occurrence, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityOccurrence'}}}}
+        '404': {description: not_found, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '503': {description: security_findings_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+
+  /api/v1/security/occurrences/{id}/triage:
+    post:
+      summary: Triage an occurrence
+      description: Moves `open` or `reopened` to `triaged`. Needs `security:remediate` or a human with the developer role on the tenant. Accepts `Idempotency-Key`.
+      tags: [SecurityFindings]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 255}}
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SecurityTriageRequest'}
+      responses:
+        '200': {description: Triaged, or replayed, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityMutationResult'}}}}
+        '403': {description: forbidden}
+        '404': {description: not_found, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '409': {description: 'invalid_transition, version_conflict or idempotency_key_reused', content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '503': {description: security_findings_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+
+  /api/v1/security/occurrences/{id}/remediation-attempts:
+    post:
+      summary: Start a remediation attempt
+      description: |
+        Creates a new attempt bound to an existing WorkItem of the occurrence's
+        tenant and moves the occurrence to `fixing`. Allowed from `open`,
+        `triaged`, `reopened` and `unverifiable`. At most one attempt per
+        occurrence is active (enforced by a database partial unique index).
+        Needs `security:remediate` or a human with the developer role.
+      tags: [SecurityFindings]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 255}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SecurityStartRemediationRequest'}
+      responses:
+        '201': {description: Started, or replayed, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityMutationResult'}}}}
+        '400': {description: invalid_request, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '403': {description: forbidden}
+        '404': {description: 'not_found or work_item_not_found', content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '409': {description: 'remediation_attempt_active, invalid_transition, version_conflict or idempotency_key_reused', content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '503': {description: 'security_findings_store_unavailable or work_items_unavailable', content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+
+  /api/v1/security/occurrences/{id}/dismiss:
+    post:
+      summary: Dismiss an occurrence (human only)
+      description: |
+        Records accepted risk or a false positive, separately from technical
+        remediation. Needs an authenticated human: a human platform admin, or
+        a human holding at least the owner role on the occurrence's tenant. A
+        service, agent, surface or provider principal is refused with 403.
+        Closes any active attempt as `cancelled_dismissed`.
+      tags: [SecurityFindings]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 255}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SecurityDismissRequest'}
+      responses:
+        '200': {description: Dismissed, or replayed, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityMutationResult'}}}}
+        '400': {description: invalid_request (unsupported reason or missing authority_ref), content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '403': {description: Not a human with the required role}
+        '404': {description: not_found, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '409': {description: 'invalid_transition (e.g. a resolved occurrence), version_conflict or idempotency_key_reused', content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '503': {description: security_findings_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+
+  /api/v1/security/remediation-attempts/{id}/fix:
+    post:
+      summary: Record a candidate or landed fix
+      description: |
+        On the active attempt. A landed fix (merged PR, landed revision or
+        artifact digest) moves the occurrence to `awaiting_verification`, never
+        directly to `resolved`. Needs `security:remediate` or a human with the
+        developer role.
+      tags: [SecurityFindings]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 255}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SecurityRecordFixRequest'}
+      responses:
+        '200': {description: Recorded, or replayed, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityMutationResult'}}}}
+        '400': {description: invalid_request, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '403': {description: forbidden}
+        '404': {description: not_found, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '409': {description: 'invalid_transition, version_conflict or idempotency_key_reused', content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '503': {description: security_findings_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+
+  /api/v1/security/remediation-attempts/{id}/verifications:
+    post:
+      summary: Record a verification of the landed fix
+      description: |
+        The verification must carry the attempt's landed revision and/or
+        artifact digest (each one the attempt has set must match), otherwise
+        422 `verification_not_bound` and nothing changes. A `passed` result
+        whose derived strength meets the configured minimum (default
+        `scanner_rerun_exact_revision`) resolves the occurrence; a weaker pass
+        is recorded and the occurrence stays `awaiting_verification`. `failed`
+        returns it to `fixing` with the attempt still active; `unavailable`,
+        `error` and `timeout` never resolve anything; `unverifiable` moves it
+        to `unverifiable`. Needs `security:remediate` or a human with the
+        developer role.
+      tags: [SecurityFindings]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 255}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SecurityRecordVerificationRequest'}
+      responses:
+        '201': {description: Recorded, or replayed, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityMutationResult'}}}}
+        '400': {description: invalid_request, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '403': {description: forbidden}
+        '404': {description: not_found, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '409': {description: 'invalid_transition, version_conflict or idempotency_key_reused', content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '422': {description: verification_not_bound, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+        '503': {description: security_findings_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
+
 tags:
   - name: Health
     description: Health and readiness probes
@@ -5752,3 +6235,5 @@ tags:
     description: actionapproval/v1 durable single-use approvals of runtime agent side effects (mctl-api#366)
   - name: Commerce
     description: ADR 020 commerce ledger — terms, quotes, invocation records, receipts and history (mctl-api#547); tenant budgets, holds and the simulated PaymentAuthorizer (mctl-api#548)
+  - name: SecurityFindings
+    description: SecurityFinding v1 durable store — findings, occurrences, observations, remediation attempts and verifications (mctl-api#774, docs/security-findings.md)

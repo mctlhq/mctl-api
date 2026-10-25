@@ -7,6 +7,7 @@ package helm_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path"
@@ -335,6 +336,65 @@ func TestDeploymentBothSurfaceTokenSecretsRenderIndependently(t *testing.T) {
 	}
 	if got, want := telegramEnv.ValueFrom.SecretKeyRef.Key, "MCTL_SURFACE_TELEGRAM_TOKEN"; got != want {
 		t.Errorf("MCTL_SURFACE_TELEGRAM_TOKEN secretKeyRef.key = %q, want %q", got, want)
+	}
+}
+
+func TestDeploymentDefaultRenderHasNoSecurityProviders(t *testing.T) {
+	d, _ := renderDeployment(t)
+	c := mainContainer(t, d)
+
+	for _, name := range []string{"SECURITY_PROVIDERS", "MCTL_SECURITY_PROVIDER_TOKENS"} {
+		if _, ok := findEnv(c, name); ok {
+			t.Errorf("default render should not set %s", name)
+		}
+	}
+}
+
+func TestDeploymentEmptySecurityProviderValuesRenderUnchanged(t *testing.T) {
+	_, defaultOut := renderDeployment(t)
+	_, emptyOut := renderDeployment(t, "--set", "securityProviderTokensSecret=")
+
+	if !bytes.Equal(defaultOut, emptyOut) {
+		t.Error("empty securityProviderTokensSecret should render byte-identical output to the default")
+	}
+}
+
+func TestDeploymentRendersSecurityProviders(t *testing.T) {
+	d, _ := renderDeployment(t,
+		"--set", "securityProviders[0].ref=trivy",
+		"--set", "securityProviders[0].max_strength=scanner_rerun_exact_revision",
+		"--set", "securityProviders[0].tenants[0]=admins",
+		"--set", "securityProviderTokensSecret=mctl-api-security-providers",
+	)
+	c := mainContainer(t, d)
+
+	cfg, ok := findEnv(c, "SECURITY_PROVIDERS")
+	if !ok {
+		t.Fatal("expected SECURITY_PROVIDERS env to be rendered")
+	}
+	var providers []struct {
+		Ref         string   `json:"ref"`
+		MaxStrength string   `json:"max_strength"`
+		Tenants     []string `json:"tenants"`
+	}
+	if err := json.Unmarshal([]byte(cfg.Value), &providers); err != nil {
+		t.Fatalf("SECURITY_PROVIDERS is not JSON: %v (%q)", err, cfg.Value)
+	}
+	if len(providers) != 1 || providers[0].Ref != "trivy" || providers[0].MaxStrength != "scanner_rerun_exact_revision" ||
+		len(providers[0].Tenants) != 1 || providers[0].Tenants[0] != "admins" {
+		t.Errorf("SECURITY_PROVIDERS = %+v", providers)
+	}
+
+	tokens, ok := findEnv(c, "MCTL_SECURITY_PROVIDER_TOKENS")
+	if !ok {
+		t.Fatal("expected MCTL_SECURITY_PROVIDER_TOKENS env to be rendered")
+	}
+	if tokens.Value != "" || tokens.ValueFrom == nil || tokens.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("MCTL_SECURITY_PROVIDER_TOKENS must come from a secretKeyRef only: %+v", tokens)
+	}
+	ref := tokens.ValueFrom.SecretKeyRef
+	if ref.Name != "mctl-api-security-providers" || ref.Key != "MCTL_SECURITY_PROVIDER_TOKENS" || !ref.Optional {
+		t.Errorf("secretKeyRef = %+v", ref)
 	}
 }
 
