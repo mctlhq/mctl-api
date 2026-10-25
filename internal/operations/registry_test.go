@@ -130,13 +130,13 @@ func TestApproveAcceptsEveryMctlAgentsService(t *testing.T) {
 	}
 }
 
-// TestCreateTenantDefaultsToClosedEgress pins the security-relevant default.
-// ApplyDefaults fills in anything the caller omits, and MCP callers omitted
-// this parameter entirely until it was added to the tool schema, so this
-// single value decided the network posture of every workspace created through
-// the agent path. It must stay "false" to match helm-charts/tenant/values.yaml
-// (allowInternetEgress: false), wft-create-tenant.yaml and the Backstage
-// scaffolder template.
+// TestCreateTenantDefaultsToOpenEgress pins the security-relevant default.
+// ApplyDefaults fills in anything the caller omits, so this single value
+// decides the network posture of every workspace created through the API or
+// agent path. It is "true" by owner decision (2026-10-25) and must match
+// helm-charts/tenant/values.yaml (allowInternetEgress: true),
+// wft-create-tenant.yaml and the Backstage scaffolder template, which all
+// moved together in mctl-gitops#2140. Change all four together or none.
 func TestCreateTenantDefaultsToOpenEgress(t *testing.T) {
 	reg := NewRegistry()
 	op, ok := reg.Get("create-tenant")
