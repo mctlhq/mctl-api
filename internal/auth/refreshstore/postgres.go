@@ -162,9 +162,14 @@ func (s *PostgresStore) Insert(rawToken, clientID string, sess Session, expiresA
 // if all retries fail it returns ErrServerError (transient DB failure, not a
 // bad token) so callers map it to HTTP 500 rather than invalid_grant.
 func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time) (Session, error) {
+	return s.RotateIf(oldRawToken, newRawToken, clientID, newExpiresAt, nil)
+}
+
+// RotateIf is Rotate with a precondition; see Store.RotateIf.
+func (s *PostgresStore) RotateIf(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time, accept func(Session) error) (Session, error) {
 	backoff := []time.Duration{5 * time.Millisecond, 15 * time.Millisecond}
 	for attempt := range 3 {
-		sess, err := s.rotateTx(oldRawToken, newRawToken, clientID, newExpiresAt)
+		sess, err := s.rotateTx(oldRawToken, newRawToken, clientID, newExpiresAt, accept)
 		if err == nil || !isSerializationFailure(err) {
 			return sess, err
 		}
@@ -177,7 +182,7 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 	return Session{}, ErrServerError
 }
 
-func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time) (Session, error) {
+func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time, accept func(Session) error) (Session, error) {
 	oldHash := tokenHash(oldRawToken)
 	newHash := tokenHash(newRawToken)
 
@@ -233,6 +238,17 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	// legitimate session. Fail closed: if the revocation write fails, return
 	// an error rather than silently reporting successful revocation.
 	if rotatedAt != nil {
+		// A replay into a family that is already revoked is no new evidence:
+		// there is nothing left to revoke, and the client is typically
+		// retrying a token it kept after an earlier refusal. Reporting each
+		// retry as a fresh theft buried the one revocation that mattered
+		// (family 06cef92a: one revocation on 2026-10-17, then a "reuse
+		// detected; family revoked" WARN every ~2h for a week).
+		if revokedAt != nil {
+			slog.Info("oauth refresh token replay into a revoked family",
+				"family_id", familyID, "client_id", storedClientID)
+			return Session{}, ErrInvalidToken
+		}
 		if time.Since(*rotatedAt) < rotationGraceWindow {
 			var childLogin, childPrincipalID, childAuthMethod string
 			var childGroupsJSON []byte
@@ -273,12 +289,18 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 				if err := json.Unmarshal(childGroupsJSON, &childGroups); err != nil {
 					return Session{}, fmt.Errorf("oauth refresh store: grace unmarshal groups: %w", err)
 				}
+				childSess := Session{Login: childLogin, PrincipalID: childPrincipalID, Groups: childGroups, AuthMethod: childAuthMethod}
+				if accept != nil {
+					if err := accept(childSess); err != nil {
+						return Session{}, err
+					}
+				}
 				if commitErr := tx.Commit(ctx); commitErr != nil {
 					return Session{}, fmt.Errorf("oauth refresh store: grace commit: %w", commitErr)
 				}
 				slog.Info("oauth refresh token grace-window replay: re-issuing existing successor",
 					"family_id", familyID, "login", childLogin)
-				return Session{Login: childLogin, PrincipalID: childPrincipalID, Groups: childGroups, AuthMethod: childAuthMethod}, nil
+				return childSess, nil
 			}
 			return Session{}, ErrInvalidToken
 		}
@@ -314,6 +336,14 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	if err := json.Unmarshal(groupsJSON, &groups); err != nil {
 		groups = nil
 	}
+	sess := Session{Login: login, PrincipalID: principalID, Groups: groups, AuthMethod: authMethod}
+	if accept != nil {
+		// Before any write: a refused session keeps its token un-rotated,
+		// and the deferred Rollback releases the row lock.
+		if err := accept(sess); err != nil {
+			return Session{}, err
+		}
+	}
 
 	now := time.Now().UTC()
 
@@ -341,7 +371,7 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	if err := tx.Commit(ctx); err != nil {
 		return Session{}, fmt.Errorf("oauth refresh store: commit: %w", err)
 	}
-	return Session{Login: login, PrincipalID: principalID, Groups: groups, AuthMethod: authMethod}, nil
+	return sess, nil
 }
 
 // RevokeFamily revokes all non-revoked tokens in the same family as rawToken.

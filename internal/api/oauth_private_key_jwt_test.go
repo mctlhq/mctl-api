@@ -245,12 +245,17 @@ func (f *pkjwtRefreshStore) Insert(raw, _ string, sess refreshstore.Session, _ t
 	return nil
 }
 
-func (f *pkjwtRefreshStore) Rotate(old, next, _ string, _ time.Time) (refreshstore.Session, error) {
+func (f *pkjwtRefreshStore) RotateIf(old, next, _ string, _ time.Time, accept func(refreshstore.Session) error) (refreshstore.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	sess, ok := f.rows[old]
 	if !ok || f.revoked[f.family[old]] || f.rotated[old] {
 		return refreshstore.Session{}, refreshstore.ErrInvalidToken
+	}
+	if accept != nil {
+		if err := accept(sess); err != nil {
+			return refreshstore.Session{}, err
+		}
 	}
 	f.rotated[old] = true
 	f.rows[next], f.family[next] = sess, f.family[old]
