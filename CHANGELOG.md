@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.123.0](https://github.com/mctlhq/mctl-api/compare/4.122.1...4.123.0) (2026-10-25)
+
+
+### Features
+
+* **ci:** let build-image.yaml check a repo's App binding via OIDC ([1f1ad3c](https://github.com/mctlhq/mctl-api/commit/1f1ad3cba3e44a9739d0c282ec4dffe72fcebdc1))
+* **ci:** let build-image.yaml check a repo's App binding via OIDC ([a05c392](https://github.com/mctlhq/mctl-api/commit/a05c3921c974ae67a04a429b4e548d789274ca06))
+
+
+### Bug Fixes
+
+* **ci:** also pin the build-binding caller's repository to mctl-gitops ([ad0d369](https://github.com/mctlhq/mctl-api/commit/ad0d36945ab6e6333c96f771f55a19668075d4d2))
+
 ## [4.122.1](https://github.com/mctlhq/mctl-api/compare/4.122.0...4.122.1) (2026-10-25)
 
 
