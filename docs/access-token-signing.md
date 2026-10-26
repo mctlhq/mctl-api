@@ -30,20 +30,45 @@ is HS256 and `OAUTH_JWT_REQUIRE_AUD` is false; asymmetric tokens always need `au
 
 ## Rollout
 
-Production is mctl-gitops `bootstrap/templates/mctl-platform/mctl-api.yaml`
-(2 replicas). Env changes take effect only after a rollout of both replicas.
+Production is mctl-gitops
+`platform-gitops/bootstrap/templates/mctl-platform/mctl-api.yaml` (2
+replicas). An env change in that file rolls both replicas by itself. A change
+that reaches the pod only through `mctl-api-secrets` (a new mapping, a Vault
+write) does not: `envFrom` is read at container start, so bump
+`ROLLOUT_MARKER` in the same file, in its own PR, after the ExternalSecret
+has synced.
 
 | Step | Change | Watch before the next step |
 |---|---|---|
 | A | Deploy with defaults. `aud` minted and enforced. | `oauth_jwt_audless_accepted_total` stops increasing after at least one token TTL |
 | B | `OAUTH_JWT_REQUIRE_AUD=true` | |
-| C0 | Write the Vault property under `platform/mctl-api/oauth` with `vault kv patch` (never `put`), then add a `secretKey`/`remoteRef` entry for `OAUTH_JWT_SIGNING_KEYS` to `bootstrap/templates/mctl-platform/mctl-api-secrets.yaml` in a separate mctl-gitops PR. The ExternalSecret maps keys one by one, so a Vault write alone never reaches the pod. | The env var is present on both replicas |
+| C0 | Three changes, in this order. (1) Write the Vault property under `platform/mctl-api/oauth` with `vault kv patch` (never `put`). (2) In a separate mctl-gitops PR, merged only after (1), add a `secretKey`/`remoteRef` entry for `OAUTH_JWT_SIGNING_KEYS` to `platform-gitops/bootstrap/templates/mctl-platform/mctl-api-secrets.yaml`. (3) Once the ExternalSecret reports `SecretSynced`, bump `ROLLOUT_MARKER`. | The env var is present on both replicas, `oauth_jwt_signing_keys{state="active"}` is 1 on each, and `/.well-known/jwks.json` serves the public key |
 | C | `OAUTH_JWT_SIGNING_ALG=EdDSA` (only after C0 is live) | `oauth_jwt_verifications_total{alg="EdDSA",result="ok"}` rises |
 | D | `OAUTH_JWT_ACCEPT_HS256=false` | `oauth_jwt_verifications_total{alg="HS256",result="ok"}` stays flat for one TTL |
-| E | Only after A is everywhere: other services may mint tokens with `aud=https://mcp.mctl.ai` | |
+| E | Not part of this rollout: minting any audience other than `OAUTH_ACCESS_TOKEN_AUDIENCE` (for example `https://mcp.mctl.ai`) is delivered by the MCP gateway epic, mctlhq/.github#236 (G1 #237, G2 #238) | |
+
+The ordering inside C0 matters:
+
+- The ExternalSecret maps keys one by one, so a Vault write alone never
+  reaches the pod.
+- ESO fails the whole ExternalSecret when one `remoteRef` does not resolve.
+  Merging the mapping before the Vault property exists stops the sync of
+  every key in `mctl-api-secrets`, `OAUTH_JWT_SECRET` and `DB_PASSWORD`
+  included.
+- Pipe the key set into `vault kv patch ... jwt-signing-keys=-` from the
+  command that builds it, so no private key lands in a file, an argument or
+  shell history. Store compact JSON with no trailing newline: the stored
+  value is then byte-identical to what was checked. Before the mapping PR,
+  parse the stored value with the deployed release's
+  `parseAccessTokenKeySet`, because a malformed value refuses boot.
+
+Read the gates as `sum by (alg,result)(...{namespace="mctl-api"})` and
+check pod start times: a restart resets the counters, which can hide a rise
+inside a "flat" window. After D, HS256 shows up only as
+`result="alg_refused"`.
 
 Every key-set change needs an ExternalSecret refresh (up to 1h or a force
-sync) plus a rollout of both replicas.
+sync) plus a `ROLLOUT_MARKER` bump.
 
 ## Rotation
 
@@ -55,8 +80,20 @@ it immediately.
 
 ## Rollback
 
-Revert in reverse order: `OAUTH_JWT_ACCEPT_HS256=true`, then
-`OAUTH_JWT_SIGNING_ALG=HS256`, then `OAUTH_JWT_REQUIRE_AUD=false`. Keep the
-EdDSA key as retained (`retired_at` set, and `active` left empty in
-`OAUTH_JWT_SIGNING_KEYS`) for one retention window so issued tokens keep
-validating; retained asymmetric keys verify regardless of the signing alg.
+Revert in reverse order, one mctl-gitops PR per step:
+
+1. Delete `OAUTH_JWT_ACCEPT_HS256` (back to `true`).
+2. Delete `OAUTH_JWT_SIGNING_ALG` (back to `HS256`).
+3. Delete `OAUTH_JWT_REQUIRE_AUD` (back to `false`).
+
+Step 1 must be live before step 2: boot refuses `OAUTH_JWT_SIGNING_ALG=HS256`
+while `OAUTH_JWT_ACCEPT_HS256=false`, so reverting the alg first leaves the
+new replicas failing to start. Both lines can also go in one PR, since each
+new replica then boots with both defaults.
+
+Issued EdDSA tokens keep verifying after step 2 without touching Vault:
+asymmetric keys from `OAUTH_JWT_SIGNING_KEYS` verify regardless of the
+signing alg, and the active key never expires. To retire the EdDSA key, patch
+it to retained (`retired_at` set, `active` left empty), refresh and bump
+`ROLLOUT_MARKER`; it then verifies for one `OAUTH_JWT_KEY_RETENTION` window
+and drops out. Keep the `OAUTH_JWT_SIGNING_KEYS` mapping until then.
