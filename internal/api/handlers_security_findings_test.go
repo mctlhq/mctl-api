@@ -315,15 +315,16 @@ func TestSecurityRemediation_RunnerFlow(t *testing.T) {
 	store := newSecurityStore(t)
 	tenant := secTenant()
 	occ := openOccurrence(t, store, tenant)
-	runner := auth.NewAgentUser("remediator", auth.AgentRun{Permissions: []string{auth.PermissionSecurityRemediate}})
+	wi := secItems.add(tenant)
+	runner := auth.NewAgentUser("remediator", auth.AgentRun{WorkItemID: wi, Permissions: []string{auth.PermissionSecurityRemediate}})
 	router := NewRouter(secOpts(runner, store, nil))
 
-	// A viewer-level human is refused; an unknown WorkItem is a 404.
-	if rec := secDo(router, http.MethodPost, "/api/v1/security/occurrences/"+occ.OccurrenceID+"/remediation-attempts",
+	// An unknown WorkItem is a 404 for a non-agent principal (an agent is
+	// bound to its own work item and gets a 403 instead).
+	if rec := secDo(NewRouter(secOpts(adminUser(), store, nil)), http.MethodPost, "/api/v1/security/occurrences/"+occ.OccurrenceID+"/remediation-attempts",
 		map[string]any{"work_item_id": "wi_missing"}); rec.Code != http.StatusNotFound || bodyCode(rec) != "work_item_not_found" {
 		t.Fatalf("missing work item: %d %s", rec.Code, rec.Body.String())
 	}
-	wi := secItems.add(tenant)
 	rec := secDo(router, http.MethodPost, "/api/v1/security/occurrences/"+occ.OccurrenceID+"/remediation-attempts", map[string]any{"work_item_id": wi})
 	var started securityfindings.MutationResult
 	_ = json.Unmarshal(rec.Body.Bytes(), &started)
@@ -358,6 +359,44 @@ func TestSecurityRemediation_RunnerFlow(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &verified)
 	if rec.Code != http.StatusCreated || verified.State != "resolved" {
 		t.Fatalf("verify: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// An agent bound to one work item cannot start, fix or verify on behalf of
+// another work item, a mismatched execution, or an attempt it does not own.
+func TestSecurityRemediation_AgentIsBoundToItsWorkItem(t *testing.T) {
+	store := newSecurityStore(t)
+	tenant := secTenant()
+	wiA, wiB := secItems.add(tenant), secItems.add(tenant)
+	agentA := auth.NewAgentUser("remediator", auth.AgentRun{
+		ExecutionID: "we_a", WorkItemID: wiA, Permissions: []string{auth.PermissionSecurityRemediate}})
+	routerA := NewRouter(secOpts(agentA, store, nil))
+	start := func(r http.Handler, occID string, body map[string]any) *httptest.ResponseRecorder {
+		return secDo(r, http.MethodPost, "/api/v1/security/occurrences/"+occID+"/remediation-attempts", body)
+	}
+
+	occ := openOccurrence(t, store, tenant)
+	if rec := start(routerA, occ.OccurrenceID, map[string]any{"work_item_id": wiB}); rec.Code != http.StatusForbidden {
+		t.Errorf("other work item: want 403, got %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := start(routerA, occ.OccurrenceID, map[string]any{"work_item_id": wiA, "execution_id": "we_other"}); rec.Code != http.StatusForbidden {
+		t.Errorf("mismatched execution: want 403, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// An attempt started (by a non-agent principal) for work item B.
+	rec := start(NewRouter(secOpts(adminUser(), store, nil)), occ.OccurrenceID, map[string]any{"work_item_id": wiB})
+	var started securityfindings.MutationResult
+	_ = json.Unmarshal(rec.Body.Bytes(), &started)
+	if rec.Code != http.StatusCreated || started.AttemptID == "" {
+		t.Fatalf("admin start: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := secDo(routerA, http.MethodPost, "/api/v1/security/remediation-attempts/"+started.AttemptID+"/fix",
+		map[string]any{"landed": true, "landed_revision": "abc123"}); rec.Code != http.StatusForbidden {
+		t.Errorf("fix on foreign attempt: want 403, got %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := secDo(routerA, http.MethodPost, "/api/v1/security/remediation-attempts/"+started.AttemptID+"/verifications",
+		map[string]any{"mechanism": "scanner_rerun_exact_revision", "result": "passed", "revision": "abc123"}); rec.Code != http.StatusForbidden {
+		t.Errorf("verify on foreign attempt: want 403, got %d %s", rec.Code, rec.Body.String())
 	}
 }
 
