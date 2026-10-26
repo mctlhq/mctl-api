@@ -271,3 +271,22 @@ func TestRevokeOwnAgentRunToken(t *testing.T) {
 		t.Errorf("service self revoke = %d, want 400", rev.code)
 	}
 }
+
+// A pod whose template names a tenant-bound scope gets nothing from the
+// exchange: the binding carries no tenant, and a BoundTenant scope without
+// one is never minted. The support token is minted from a tenant member's
+// own bearer, never projected into a pod.
+func TestExchangeAgentRunToken_RefusesATenantBoundScope(t *testing.T) {
+	e, b, _ := exchangeEnv(t)
+	b.binding.Agent, b.binding.Scope, b.binding.Template = "mctl-support", auth.AgentScopeSupport, "mctl-support"
+	res := e.exchange("sa-token", nil)
+	if res.code != http.StatusBadRequest || code(res) != artCodeTenantRequired {
+		t.Fatalf("exchange with a support binding = %d %s, want 400 %s", res.code, res.raw, artCodeTenantRequired)
+	}
+	if _, ok := res.body["token"]; ok {
+		t.Fatal("a refused exchange returned a token")
+	}
+	if n := e.auditOpCount("agent_run_token.exchange_refused", artCodeTenantRequired); n != 1 {
+		t.Errorf("refusal audit rows = %d, want 1", n)
+	}
+}

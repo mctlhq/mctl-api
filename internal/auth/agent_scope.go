@@ -17,9 +17,11 @@ package auth
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Agent run scopes (mctlhq/mctl-agents#737).
@@ -38,6 +40,10 @@ import (
 // snapshot of its own execution.
 const AgentScopeInvestigate = "investigate"
 
+// AgentScopeSupport is the scope of a tenant support run: reads of exactly
+// one tenant, the one the token was minted for, and nothing else.
+const AgentScopeSupport = "support"
+
 // AgentScope is one server-defined run scope.
 type AgentScope struct {
 	Name string
@@ -49,7 +55,16 @@ type AgentScope struct {
 	// run's own work item and execution: the tenant check is not where a
 	// scoped run's writes are stopped, the route list is.
 	ReadAllTenants bool
-	Routes         []AgentScopeRoute
+	// BoundTenant means a token with this scope is minted for exactly one
+	// tenant and every check compares against it. Mutually exclusive with
+	// ReadAllTenants.
+	BoundTenant bool
+	// MintByTenantMember lets a human member of the bound tenant (or an
+	// admin) mint the scope, instead of the service principal.
+	MintByTenantMember bool
+	// DefaultTTL and MaxTTL override the workitems defaults when non-zero.
+	DefaultTTL, MaxTTL time.Duration
+	Routes             []AgentScopeRoute
 	// Tool reports whether an mctl MCP tool may be called.
 	Tool func(name string) bool
 }
@@ -63,6 +78,12 @@ type AgentScopeRoute struct {
 	Pattern       *regexp.Regexp
 	BindWorkItem  bool
 	BindExecution bool
+	// BindTenant requires the named submatch "tenant" to equal the bound
+	// tenant.
+	BindTenant bool
+	// RequireTenantQuery names a query key a list route must carry, equal to
+	// the bound tenant.
+	RequireTenantQuery string
 }
 
 // readVerbs and readTools mirror mctl-agents' policy checkpoint
@@ -97,6 +118,53 @@ func IsReadTool(name string) bool {
 func getRoute(pattern string) AgentScopeRoute {
 	return AgentScopeRoute{Method: http.MethodGet, Pattern: regexp.MustCompile(pattern)}
 }
+
+func tenantRoute(pattern string) AgentScopeRoute {
+	r := getRoute(pattern)
+	r.BindTenant = true
+	return r
+}
+
+func listRoute(pattern, queryKey string) AgentScopeRoute {
+	r := getRoute(pattern)
+	r.RequireTenantQuery = queryKey
+	return r
+}
+
+// supportTools are the MCP tools (without the mctl_ prefix) a support run
+// may call. Each is also a read under IsReadTool.
+var supportTools = map[string]bool{
+	"whoami": true, "get_service_status": true, "list_services": true, "get_service_logs": true,
+	"get_service_config": true, "list_workflows": true, "get_workflow_status": true,
+	"get_workflow_logs": true, "get_resource_usage": true, "list_incidents": true,
+	"get_incident": true, "incident_summary": true, "list_operations": true, "get_operation": true,
+	"list_domains": true, "list_platform_skills": true, "read_platform_skill": true,
+}
+
+// SupportToolNames returns the sorted bare names of the support tool list.
+func SupportToolNames() []string {
+	names := make([]string, 0, len(supportTools))
+	for n := range supportTools {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// supportTenantTools are the supportTools that take a tenant argument, and
+// so must carry the bound tenant.
+var supportTenantTools = map[string]bool{
+	"get_service_status": true, "list_services": true, "get_service_logs": true,
+	"get_service_config": true, "list_workflows": true, "get_resource_usage": true,
+	"list_incidents": true, "list_domains": true,
+}
+
+// tenantQueryKeys are the query parameters that name a tenant. On a
+// tenant-bound scope each must be absent or equal the bound tenant, once.
+var tenantQueryKeys = []string{"team", "tenant", "team_name", "namespace"}
+
+// tenantToolArgs are the MCP tool arguments that name a tenant.
+var tenantToolArgs = []string{"team", "team_name", "tenant"}
 
 // mcpRoutes admit the MCP transport. What a tools/call may do is decided
 // per tool (AgentScope.Tool), and every REST call a tool makes comes back
@@ -147,6 +215,29 @@ var agentScopes = map[string]*AgentScope{
 			},
 		),
 	},
+	AgentScopeSupport: {
+		Name: AgentScopeSupport, Agents: []string{"mctl-support"},
+		BoundTenant: true, MintByTenantMember: true,
+		DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour,
+		Tool: func(n string) bool { return IsReadTool(n) && supportTools[strings.TrimPrefix(n, "mctl_")] },
+		Routes: append(append([]AgentScopeRoute(nil), mcpRoutes...),
+			getRoute(`^/api/v1/whoami$`),
+			tenantRoute(`^/api/v1/status/(?P<tenant>[^/]+)/[^/]+$`),
+			tenantRoute(`^/api/v1/services/(?P<tenant>[^/]+)/[^/]+$`),
+			tenantRoute(`^/api/v1/logs/(?P<tenant>[^/]+)/[^/]+$`),
+			tenantRoute(`^/api/v1/resources/(?P<tenant>[^/]+)$`),
+			listRoute(`^/api/v1/services$`, "team"),
+			listRoute(`^/api/v1/workflows$`, "team"),
+			listRoute(`^/api/v1/domains$`, "team"),
+			listRoute(`^/api/v1/incidents$`, "tenant"),
+			// The owning tenant is read from the data and checked in the handler.
+			getRoute(`^/api/v1/workflows/[^/]+(/logs)?$`),
+			getRoute(`^/api/v1/incidents/(summary|[^/]+)$`),
+			// Static catalog, and HasTenantAccess-filtered.
+			getRoute(`^/api/v1/operations(/[^/]+)?$`),
+			getRoute(`^/api/v1/platform-skills(/[^/]+)?$`),
+		),
+	},
 }
 
 // LookupAgentScope returns the scope named name.
@@ -176,27 +267,105 @@ func (s *AgentScope) AdmitsAgent(agent string) bool {
 	return false
 }
 
+// AgentScopeRequest is one request judged against a scope.
+type AgentScopeRequest struct {
+	Method, Path string
+	Query        url.Values
+	WorkItemID   string
+	ExecutionID  string
+	// Tenant is the tenant a BoundTenant token is bound to.
+	Tenant string
+}
+
 // AllowsRoute reports whether method+path is in the scope for a run bound
 // to workItemID and executionID. An empty id never matches a route bound
-// to it.
+// to it. It carries no query and no tenant, so a BoundTenant scope refuses
+// everything through it.
 func (s *AgentScope) AllowsRoute(method, path, workItemID, executionID string) bool {
+	return s.Allows(AgentScopeRequest{Method: method, Path: path, WorkItemID: workItemID, ExecutionID: executionID})
+}
+
+// Allows reports whether the request is in the scope. For a BoundTenant
+// scope it also requires every tenant-naming query parameter to equal the
+// bound tenant exactly once, every BindTenant path segment to equal it, and
+// RequireTenantQuery list filters to be present.
+func (s *AgentScope) Allows(req AgentScopeRequest) bool {
+	if s.BoundTenant {
+		if req.Tenant == "" {
+			return false
+		}
+		for _, k := range tenantQueryKeys {
+			vals := req.Query[k]
+			if len(vals) > 1 || (len(vals) == 1 && vals[0] != req.Tenant) {
+				return false
+			}
+		}
+	}
 	for _, r := range s.Routes {
-		if r.Method != method {
+		if r.Method != req.Method {
 			continue
 		}
-		m := r.Pattern.FindStringSubmatch(path)
+		m := r.Pattern.FindStringSubmatch(req.Path)
 		if m == nil {
 			continue
 		}
-		if r.BindWorkItem && (workItemID == "" || len(m) < 2 || m[1] != workItemID) {
+		if r.BindWorkItem && (req.WorkItemID == "" || len(m) < 2 || m[1] != req.WorkItemID) {
 			continue
 		}
-		if r.BindExecution && (executionID == "" || len(m) < 3 || m[2] != executionID) {
+		if r.BindExecution && (req.ExecutionID == "" || len(m) < 3 || m[2] != req.ExecutionID) {
 			continue
+		}
+		if s.BoundTenant {
+			if r.BindTenant {
+				idx := r.Pattern.SubexpIndex("tenant")
+				if idx < 0 || idx >= len(m) || m[idx] != req.Tenant {
+					continue
+				}
+			}
+			if r.RequireTenantQuery != "" {
+				if vals := req.Query[r.RequireTenantQuery]; len(vals) != 1 || vals[0] != req.Tenant {
+					continue
+				}
+			}
 		}
 		return true
 	}
 	return false
+}
+
+// AllowsToolCall reports whether an mctl MCP tool may be called with args.
+// For a BoundTenant scope the tool predicate must pass, every present
+// tenant argument must equal tenant, and a tool that takes a tenant must
+// carry one.
+func (s *AgentScope) AllowsToolCall(name string, args map[string]any, tenant string) bool {
+	if !s.AllowsTool(name) {
+		return false
+	}
+	if !s.BoundTenant {
+		return true
+	}
+	if tenant == "" {
+		return false
+	}
+	for _, k := range tenantToolArgs {
+		if v, ok := args[k]; ok {
+			if str, isStr := v.(string); !isStr || str != tenant {
+				return false
+			}
+		}
+	}
+	if supportTenantTools[strings.TrimPrefix(name, "mctl_")] {
+		has := false
+		for _, k := range tenantToolArgs {
+			if _, ok := args[k]; ok {
+				has = true
+			}
+		}
+		if !has {
+			return false
+		}
+	}
+	return true
 }
 
 // AllowsTool reports whether an mctl MCP tool may be called in the scope.

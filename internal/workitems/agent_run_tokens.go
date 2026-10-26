@@ -69,6 +69,10 @@ CREATE INDEX IF NOT EXISTS agent_run_tokens_execution ON agent_run_tokens (execu
 -- The server-defined scope the token was minted with (auth.AgentScope,
 -- mctlhq/mctl-agents#737); '' is an unscoped token.
 ALTER TABLE agent_run_tokens ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT '';
+-- The tenant a BoundTenant scope is limited to, and the principal that
+-- minted the token on its behalf.
+ALTER TABLE agent_run_tokens ADD COLUMN IF NOT EXISTS tenant TEXT NOT NULL DEFAULT '';
+ALTER TABLE agent_run_tokens ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
 `
 
 // AgentRunToken is one minted run token's durable row. The plaintext secret
@@ -82,6 +86,8 @@ type AgentRunToken struct {
 	Permissions         []string
 	Scope               string
 	IssuedByPrincipalID string
+	Tenant              string
+	ViaPrincipalID      string
 	CreatedAt           time.Time
 	ExpiresAt           time.Time
 	RevokedAt           *time.Time
@@ -97,6 +103,10 @@ type MintAgentRunTokenInput struct {
 	Scope               string
 	TTL                 time.Duration
 	IssuedByPrincipalID string
+	// Tenant and ViaPrincipalID bind a BoundTenant scope to its tenant and
+	// record the caller who minted it.
+	Tenant         string
+	ViaPrincipalID string
 	// WithoutExecution mints a token bound to no execution and no work item,
 	// for a run that has none (the exchange, for a template that admits
 	// one). ExecutionID must then be empty. Such a token ends only by
@@ -150,7 +160,8 @@ func (s *Store) MintAgentRunToken(ctx context.Context, in MintAgentRunTokenInput
 	row := &AgentRunToken{
 		ID: AgentRunTokenIDPrefix + uuid.NewString(), Agent: in.Agent, AgentPrincipalID: in.AgentPrincipalID,
 		ExecutionID: in.ExecutionID, WorkItemID: workItemID, Permissions: append([]string(nil), in.Permissions...),
-		Scope: in.Scope, IssuedByPrincipalID: in.IssuedByPrincipalID, CreatedAt: now, ExpiresAt: now.Add(ttl),
+		Scope: in.Scope, IssuedByPrincipalID: in.IssuedByPrincipalID,
+		Tenant: in.Tenant, ViaPrincipalID: in.ViaPrincipalID, CreatedAt: now, ExpiresAt: now.Add(ttl),
 	}
 	if row.Permissions == nil {
 		row.Permissions = []string{}
@@ -158,10 +169,10 @@ func (s *Store) MintAgentRunToken(ctx context.Context, in MintAgentRunTokenInput
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO agent_run_tokens
 			(id, token_hash, agent, agent_principal_id, execution_id, work_item_id, permissions,
-			 issued_by_principal_id, created_at, expires_at, scope)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			 issued_by_principal_id, created_at, expires_at, scope, tenant, via_principal_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		row.ID, hash[:], row.Agent, row.AgentPrincipalID, row.ExecutionID, row.WorkItemID, row.Permissions,
-		row.IssuedByPrincipalID, row.CreatedAt, row.ExpiresAt, row.Scope)
+		row.IssuedByPrincipalID, row.CreatedAt, row.ExpiresAt, row.Scope, row.Tenant, row.ViaPrincipalID)
 	if err != nil {
 		return nil, "", fmt.Errorf("workitems: mint agent run token: insert: %w", err)
 	}
@@ -191,6 +202,7 @@ func (s *Store) ResolveAgentRunToken(ctx context.Context, token string) (*auth.A
 	hash := sha256.Sum256([]byte(token))
 	var (
 		id, agent, executionID, workItemID, scope string
+		tenant, viaPrincipalID                    string
 		permissions                               []string
 		expiresAt                                 time.Time
 		revokedAt                                 *time.Time
@@ -198,12 +210,12 @@ func (s *Store) ResolveAgentRunToken(ctx context.Context, token string) (*auth.A
 	)
 	err := s.pool.QueryRow(ctx,
 		`SELECT t.id, t.agent, t.execution_id, t.work_item_id, t.permissions, t.expires_at, t.revoked_at,
-		        COALESCE(e.phase, ''), t.scope
+		        COALESCE(e.phase, ''), t.scope, t.tenant, t.via_principal_id
 		 FROM agent_run_tokens t
 		 LEFT JOIN work_item_executions e ON e.id = t.execution_id
 		 WHERE t.token_hash = $1`,
 		hash[:],
-	).Scan(&id, &agent, &executionID, &workItemID, &permissions, &expiresAt, &revokedAt, &phase, &scope)
+	).Scan(&id, &agent, &executionID, &workItemID, &permissions, &expiresAt, &revokedAt, &phase, &scope, &tenant, &viaPrincipalID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, auth.ErrAgentRunNotFound
 	}
@@ -226,7 +238,7 @@ func (s *Store) ResolveAgentRunToken(ctx context.Context, token string) (*auth.A
 	return &auth.AgentRun{
 		Agent: agent, ExecutionID: executionID, WorkItemID: workItemID, RunID: id,
 		Permissions: append([]string(nil), permissions...),
-		Scope:       scope,
+		Scope:       scope, Tenant: tenant, RequestedBy: viaPrincipalID,
 	}, nil
 }
 

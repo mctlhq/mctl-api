@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net/http"
+	"net/url"
 	"testing"
 )
 
@@ -89,5 +90,139 @@ func TestScopedAgent_TenantAccessAndAdmin(t *testing.T) {
 	// The scope rides on the agent field: a non-agent principal never has one.
 	if _, ok := (&User{ID: "alice", agentScope: AgentScopeInvestigate}).AgentScope(); ok {
 		t.Error("a non-agent principal reported a scope")
+	}
+}
+
+func TestScopesTenantBindingIsExclusive(t *testing.T) {
+	for _, n := range AgentScopeNames() {
+		s, _ := LookupAgentScope(n)
+		if s.BoundTenant && s.ReadAllTenants {
+			t.Errorf("scope %s is both BoundTenant and ReadAllTenants", n)
+		}
+	}
+	s, ok := LookupAgentScope(AgentScopeSupport)
+	if !ok || s.ReadAllTenants || !s.BoundTenant {
+		t.Fatalf("support scope = %+v, want BoundTenant and not ReadAllTenants", s)
+	}
+}
+
+func TestSupportScope_ToolList(t *testing.T) {
+	s, _ := LookupAgentScope(AgentScopeSupport)
+	for _, n := range SupportToolNames() {
+		if !IsReadTool(n) {
+			t.Errorf("support tool %s is not a read tool", n)
+		}
+		if !s.AllowsTool("mctl_" + n) {
+			t.Errorf("support scope refuses its own tool %s", n)
+		}
+	}
+	for _, n := range []string{"mctl_deploy_service", "mctl_resolve_incident", "mctl_list_tenants", "mctl_get_dev_loop"} {
+		if s.AllowsTool(n) {
+			t.Errorf("support scope admits %s", n)
+		}
+	}
+}
+
+func TestSupportScope_Allows(t *testing.T) {
+	s, _ := LookupAgentScope(AgentScopeSupport)
+	q := func(kv ...string) url.Values {
+		v := url.Values{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			v.Add(kv[i], kv[i+1])
+		}
+		return v
+	}
+	for _, c := range []struct {
+		name, method, path, tenant string
+		query                      url.Values
+		want                       bool
+	}{
+		{"own status", "GET", "/api/v1/status/labs/app", "labs", nil, true},
+		{"own logs", "GET", "/api/v1/logs/labs/app", "labs", nil, true},
+		{"own resources", "GET", "/api/v1/resources/labs", "labs", nil, true},
+		{"other status", "GET", "/api/v1/status/karabu/app", "labs", nil, false},
+		{"case differs", "GET", "/api/v1/status/Labs/app", "labs", nil, false},
+		{"suffixed", "GET", "/api/v1/status/labs2/app", "labs", nil, false},
+		{"empty bound tenant", "GET", "/api/v1/status/labs/app", "", nil, false},
+		{"list with filter", "GET", "/api/v1/services", "labs", q("team", "labs"), true},
+		{"list without filter", "GET", "/api/v1/services", "labs", nil, false},
+		{"list other filter", "GET", "/api/v1/services", "labs", q("team", "karabu"), false},
+		{"list duplicate filter", "GET", "/api/v1/services", "labs", q("team", "labs", "team", "karabu"), false},
+		{"incidents tenant filter", "GET", "/api/v1/incidents", "labs", q("tenant", "labs"), true},
+		{"incidents wrong key", "GET", "/api/v1/incidents", "labs", q("team", "labs"), false},
+		{"stray namespace param", "GET", "/api/v1/status/labs/app", "labs", q("namespace", "other"), false},
+		{"data-derived workflow", "GET", "/api/v1/workflows/wf-1", "labs", nil, true},
+		{"tenants not listed", "GET", "/api/v1/tenants", "labs", nil, false},
+		{"previews not listed", "GET", "/api/v1/previews", "labs", nil, false},
+		{"agent-runs not listed", "GET", "/api/v1/agent-runs", "labs", nil, false},
+		{"mcp post", "POST", "/mcp", "labs", nil, true},
+		{"write route", "POST", "/api/v1/operations/deploy-service/execute", "labs", nil, false},
+		{"put", "PUT", "/api/v1/services/labs/app", "labs", nil, false},
+		{"delete", "DELETE", "/api/v1/services/labs/app", "labs", nil, false},
+	} {
+		got := s.Allows(AgentScopeRequest{Method: c.method, Path: c.path, Query: c.query, Tenant: c.tenant})
+		if got != c.want {
+			t.Errorf("%s: Allows = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if s.AllowsRoute("GET", "/api/v1/status/labs/app", "", "") {
+		t.Error("AllowsRoute with no tenant admitted a bound scope")
+	}
+}
+
+func TestSupportScope_AllowsToolCall(t *testing.T) {
+	s, _ := LookupAgentScope(AgentScopeSupport)
+	for _, c := range []struct {
+		name string
+		tool string
+		args map[string]any
+		want bool
+	}{
+		{"own team", "mctl_get_service_status", map[string]any{"team": "labs", "service": "x"}, true},
+		{"other team", "mctl_get_service_status", map[string]any{"team": "karabu"}, false},
+		{"list without tenant", "mctl_list_services", map[string]any{}, false},
+		{"list own", "mctl_list_incidents", map[string]any{"tenant": "labs"}, true},
+		{"team_name other", "mctl_get_service_logs", map[string]any{"team_name": "karabu"}, false},
+		{"tenant other on any tool", "mctl_whoami", map[string]any{"tenant": "karabu"}, false},
+		{"non-string tenant", "mctl_list_domains", map[string]any{"team": 5}, false},
+		{"no tenant tool", "mctl_get_incident", map[string]any{"id": "x"}, true},
+		{"write tool", "mctl_deploy_service", map[string]any{"team_name": "labs"}, false},
+	} {
+		if got := s.AllowsToolCall(c.tool, c.args, "labs"); got != c.want {
+			t.Errorf("%s: AllowsToolCall = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if s.AllowsToolCall("mctl_whoami", nil, "") {
+		t.Error("empty bound tenant admitted a tool")
+	}
+}
+
+func TestHasTenantAccess_BoundAgent(t *testing.T) {
+	u := NewAgentUser("mctl-support", AgentRun{Scope: AgentScopeSupport, Tenant: "labs"})
+	if !u.HasTenantAccess("labs") {
+		t.Error("bound agent refused its own tenant")
+	}
+	for _, other := range []string{"", "karabu", "Labs", "admins"} {
+		if u.HasTenantAccess(other) {
+			t.Errorf("bound agent admitted %q", other)
+		}
+	}
+	u.Groups = []string{"karabu"}
+	if u.HasTenantAccess("karabu") {
+		t.Error("bound agent admitted a tenant through a group")
+	}
+	unbound := NewAgentUser("mctl-support", AgentRun{Scope: AgentScopeSupport})
+	if unbound.HasTenantAccess("labs") || unbound.HasTenantAccess("") {
+		t.Error("bound scope with no tenant admitted a tenant")
+	}
+	if _, ok := unbound.BoundTenant(); ok {
+		t.Error("BoundTenant true for an empty tenant")
+	}
+	inv := NewAgentUser("issue-investigator", AgentRun{Scope: AgentScopeInvestigate})
+	if !inv.HasTenantAccess("anything") {
+		t.Error("investigate scope no longer reads every tenant")
+	}
+	if got, _ := NewAgentUser("mctl-support", AgentRun{Scope: AgentScopeSupport, Tenant: "labs", RequestedBy: "p1"}).BoundTenant(); got != "labs" {
+		t.Errorf("BoundTenant = %q", got)
 	}
 }
