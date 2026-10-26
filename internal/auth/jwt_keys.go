@@ -132,7 +132,7 @@ func parseAccessTokenKeySet(raw string, retention time.Duration, now func() time
 		}
 		ks.keys[e.Kid] = k
 	}
-	if ks.active == nil {
+	if ks.active == nil && doc.Active != "" {
 		return nil, fmt.Errorf("oauth signing keys: active kid %q names no entry", doc.Active)
 	}
 	return ks, nil
@@ -325,6 +325,11 @@ func (c JWTSigningConfig) build(accessTTL time.Duration, now func() time.Time) (
 	ks, err := parseAccessTokenKeySet(c.KeysJSON, retention, now)
 	if err != nil {
 		return nil, fmt.Errorf("OAUTH_JWT_SIGNING_KEYS: %w", err)
+	}
+	// An empty "active" is allowed only for HS256 (rollback): every entry is
+	// then a retained key that keeps verifying outstanding tokens.
+	if alg != JWTAlgHS256 && ks.active == nil {
+		return nil, errors.New("OAUTH_JWT_SIGNING_KEYS: no active key")
 	}
 	if alg != JWTAlgHS256 && ks.active.alg != alg {
 		return nil, fmt.Errorf("OAUTH_JWT_SIGNING_KEYS: active key %q is %s but OAUTH_JWT_SIGNING_ALG is %s", ks.active.kid, ks.active.alg, alg)

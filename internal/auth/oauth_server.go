@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	jose "github.com/go-jose/go-jose/v4"
 	"log/slog"
 	"net/url"
 	"slices"
@@ -34,6 +33,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/mctlhq/mctl-api/internal/auth/cimd"
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
@@ -2048,10 +2048,13 @@ func (s *OAuthServer) verifyAccessToken(token string) (*jwtPayload, error) {
 	alg = metricAlg(hdr.Alg)
 
 	// Pin alg before any key work.
-	asym := s.signingAlg == JWTAlgEdDSA || s.signingAlg == JWTAlgES256
+	// Asymmetric algs are admitted whenever a key set is configured, not only
+	// the active signing alg, so retained keys keep verifying across a
+	// rollback to HS256 or an alg rotation. lookup pins kid and alg to the
+	// same key, so this does not open algorithm confusion.
 	switch {
 	case hdr.Alg == JWTAlgHS256 && !s.RejectHS256:
-	case asym && hdr.Alg == s.signingAlg:
+	case (hdr.Alg == JWTAlgEdDSA || hdr.Alg == JWTAlgES256) && s.keys != nil:
 	default:
 		return fail("alg_refused", errUnacceptedAlg)
 	}

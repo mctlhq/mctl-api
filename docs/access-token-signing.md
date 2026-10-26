@@ -57,4 +57,6 @@ it immediately.
 
 Revert in reverse order: `OAUTH_JWT_ACCEPT_HS256=true`, then
 `OAUTH_JWT_SIGNING_ALG=HS256`, then `OAUTH_JWT_REQUIRE_AUD=false`. Keep the
-EdDSA key as retained for one retention window so issued tokens keep validating.
+EdDSA key as retained (`retired_at` set, and `active` left empty in
+`OAUTH_JWT_SIGNING_KEYS`) for one retention window so issued tokens keep
+validating; retained asymmetric keys verify regardless of the signing alg.

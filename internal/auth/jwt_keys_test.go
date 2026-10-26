@@ -351,3 +351,32 @@ func TestSigningConfigValidate(t *testing.T) {
 		}
 	}
 }
+
+func TestRetainedKeyVerifiesAfterRollbackAndRotation(t *testing.T) {
+	_, edPriv, ec := genKeys(t)
+	edDoc := keysJSON(t, signingKeysDoc{Active: "k1", Keys: []signingKeyEntry{
+		{Kid: "k1", Alg: JWTAlgEdDSA, PrivateKeyPEM: pemPriv(t, edPriv)}}})
+	tok, err := newSigner(t, JWTAlgEdDSA, edDoc).IssueJWT("alice", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := ptrTime(time.Now())
+	// Rotation EdDSA -> ES256 with the EdDSA key retained.
+	rot := keysJSON(t, signingKeysDoc{Active: "k2", Keys: []signingKeyEntry{
+		{Kid: "k2", Alg: JWTAlgES256, PrivateKeyPEM: pemPriv(t, ec)},
+		{Kid: "k1", Alg: JWTAlgEdDSA, PrivateKeyPEM: pemPriv(t, edPriv), RetiredAt: now}}})
+	if _, err := newSigner(t, JWTAlgES256, rot).verifyAccessToken(tok); err != nil {
+		t.Fatalf("rotation: retained EdDSA token refused: %v", err)
+	}
+	// Rollback to HS256 with only retained keys and no active kid.
+	back := keysJSON(t, signingKeysDoc{Keys: []signingKeyEntry{
+		{Kid: "k1", Alg: JWTAlgEdDSA, PrivateKeyPEM: pemPriv(t, edPriv), RetiredAt: now}}})
+	o := newSigner(t, JWTAlgHS256, back)
+	if _, err := o.verifyAccessToken(tok); err != nil {
+		t.Fatalf("rollback: retained EdDSA token refused: %v", err)
+	}
+	// Without an active key an asymmetric signing alg is refused.
+	if err := (JWTSigningConfig{Alg: JWTAlgEdDSA, KeysJSON: back, AcceptHS256: true}).Validate(0); err == nil {
+		t.Fatal("asymmetric alg accepted without an active key")
+	}
+}
