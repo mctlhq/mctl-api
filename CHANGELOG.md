@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.126.0](https://github.com/mctlhq/mctl-api/compare/4.125.0...4.126.0) (2026-10-26)
+
+
+### Features
+
+* **agents:** issue-811-feat-auth-tenant-bound-support-agent-sco ([347b3e6](https://github.com/mctlhq/mctl-api/commit/347b3e63cfd6ebe1132c8c7a94fce6d6e5867e38))
+* **agents:** issue-811-feat-auth-tenant-bound-support-agent-sco ([33237a5](https://github.com/mctlhq/mctl-api/commit/33237a592867fac62c6e11ab3eca71215285b052))
+
+
+### Bug Fixes
+
+* **auth:** bind the member-minted support token to its own tenant's execution ([694f165](https://github.com/mctlhq/mctl-api/commit/694f16532f88018d8e23087428db8713daa4a233))
+* **auth:** check tenant membership before tenant existence on mint ([55006fa](https://github.com/mctlhq/mctl-api/commit/55006fae20e233029c2799814775baf891465041))
+
 ## [4.125.0](https://github.com/mctlhq/mctl-api/compare/4.124.0...4.125.0) (2026-10-26)
 
 
