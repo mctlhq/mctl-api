@@ -204,6 +204,18 @@ func TestMintSupportToken(t *testing.T) {
 		t.Errorf("default ttl too long: %v", exp)
 	}
 
+	// A human relayed by a registered surface mints like a direct one; the
+	// bare surface principal does not. Surface() is true only for the
+	// latter: a relayed subject records the surface as relaySurface.
+	relayed := auth.NewRelayedUser("carol", []string{ten}, auth.NewSurfaceUser("telegram"))
+	_ = auth.AttachPrincipal(context.Background(), supportPrincipals{}, relayed)
+	if res := mint(relayed, ten, nil); res.code != http.StatusCreated || res.body["tenant"] != ten {
+		t.Errorf("surface-relayed member mint = %d %s", res.code, res.raw)
+	}
+	if res := mint(auth.NewSurfaceUser("telegram"), ten, nil); res.code != http.StatusForbidden || code(res) != artCodeRequesterForbidden {
+		t.Errorf("bare surface mint = %d %s", res.code, res.raw)
+	}
+
 	before := e.auditOpCount("agent_run_token.mint_refused", artCodeTenantForbidden)
 	if res := mint(supportHuman("bob", "karabu"), ten, nil); res.code != http.StatusForbidden || code(res) != artCodeTenantForbidden {
 		t.Errorf("non-member mint = %d %s", res.code, res.raw)
