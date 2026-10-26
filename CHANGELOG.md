@@ -1,5 +1,24 @@
 # Changelog
 
+## [4.125.0](https://github.com/mctlhq/mctl-api/compare/4.124.0...4.125.0) (2026-10-26)
+
+
+### Features
+
+* **agents:** issue-801-ci-security-upload-trivy-sarif-to-github ([621ffd2](https://github.com/mctlhq/mctl-api/commit/621ffd22e6b4cfb94e6a8175770df03d30203a41))
+* **agents:** issue-801-ci-security-upload-trivy-sarif-to-github ([d3f64b2](https://github.com/mctlhq/mctl-api/commit/d3f64b25f9b6886d3a6b03db83527b77df6e2dac))
+* **agents:** issue-802-feat-security-github-code-scanning-alert ([0e3b410](https://github.com/mctlhq/mctl-api/commit/0e3b4107bf3c8da5bc1c4d51159344d7ed190656))
+* **agents:** issue-802-feat-security-github-code-scanning-alert ([4ba9d40](https://github.com/mctlhq/mctl-api/commit/4ba9d408db9cba2cef90cb4aafb0cfc88f127274))
+* **agents:** issue-805-feat-auth-asymmetric-jwt-signing-jwks-an ([e8c232e](https://github.com/mctlhq/mctl-api/commit/e8c232edcaa14ab7a2aee58e7e0768002611d9da))
+* **agents:** issue-805-feat-auth-asymmetric-jwt-signing-jwks-an ([86c10ed](https://github.com/mctlhq/mctl-api/commit/86c10edbfdf927656b7dc828b7db0efc15eebc70))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-802-feat-security-github-code-scanning-alert ([75c7a7a](https://github.com/mctlhq/mctl-api/commit/75c7a7a0233015f37c9aeaf7607528c905514534))
+* **agents:** address P1/P2 codex findings on issue-805-feat-auth-asymmetric-jwt-signing-jwks-an ([9399617](https://github.com/mctlhq/mctl-api/commit/93996176845f96cb7784e47dc8698ec964844465))
+* **ci:** fix failing required checks on issue-802-feat-security-github-code-scanning-alert ([2d58b43](https://github.com/mctlhq/mctl-api/commit/2d58b4380a5e99662ce4938f99b074ae42a038bd))
+
 ## [4.124.0](https://github.com/mctlhq/mctl-api/compare/4.123.1...4.124.0) (2026-10-26)
 
 
