@@ -1090,6 +1090,8 @@ func main() {
 	if signup != nil && signup.Store != nil {
 		go signup.Run(rootCtx)
 	}
+	securityProviders := auth.LoadSecurityProviders()
+	codeScanningSecret, codeScanningConfig, codeScanningIngester := codeScanningReceiver(cfg.GitHubWebhookSecret, securityProviders, securityFindingsStore)
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Signup:                         signup,
 		Registry:                       registry,
@@ -1125,7 +1127,10 @@ func main() {
 		CommerceAcceptDisabled:         cfg.CommerceAcceptDisabled,
 		Evidence:                       evidenceStore,
 		SecurityFindings:               securityFindingsStore,
-		SecurityProviders:              auth.LoadSecurityProviders(),
+		SecurityProviders:              securityProviders,
+		CodeScanningWebhookSecret:      codeScanningSecret,
+		CodeScanningConfig:             codeScanningConfig,
+		CodeScanningIngester:           codeScanningIngester,
 		Decisions:                      decisionStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
@@ -2825,4 +2830,29 @@ func (c config) configureCIMD(o *auth.OAuthServer) error {
 	o.CIMDAdvertise = advertise
 	slog.Info("OAuth client ID metadata documents accepted", "allowed_hosts", hosts, "advertised", advertise)
 	return nil
+}
+
+// codeScanningReceiver validates the GitHub Code Scanning receiver's
+// configuration (mctl-api#802). Any problem disables only that receiver,
+// which then answers 503; it never stops the API from starting.
+func codeScanningReceiver(orgWebhookSecret string, providers map[string]auth.SecurityProviderConfig, store *securityfindings.Store) (string, *mctlapi.CodeScanningConfig, mctlapi.SecurityIngester) {
+	secret := strings.TrimSpace(os.Getenv("GITHUB_CODE_SCANNING_WEBHOOK_SECRET"))
+	rawCfg := strings.TrimSpace(os.Getenv("SECURITY_GITHUB_CODE_SCANNING"))
+	if secret == "" && rawCfg == "" {
+		return "", nil, nil
+	}
+	if !mctlapi.CodeScanningSecretUsable(secret, orgWebhookSecret) {
+		slog.Error("GITHUB_CODE_SCANNING_WEBHOOK_SECRET is unset, too short or equal to GITHUB_WEBHOOK_SECRET; code scanning receiver disabled")
+		return "", nil, nil
+	}
+	parsed, err := mctlapi.ParseCodeScanningConfig(rawCfg, providers)
+	if err != nil {
+		slog.Error("invalid code scanning receiver configuration; receiver disabled", "error", err)
+		return "", nil, nil
+	}
+	var ing mctlapi.SecurityIngester
+	if store != nil {
+		ing = store
+	}
+	return secret, parsed, ing
 }

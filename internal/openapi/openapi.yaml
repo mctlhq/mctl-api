@@ -1842,6 +1842,47 @@ paths:
         '503':
           description: Event outbox unavailable; GitHub keeps the delivery marked failed
 
+  /api/v1/security/webhooks/github-code-scanning:
+    post:
+      summary: GitHub Code Scanning webhook receiver
+      description: |
+        Receives repository `code_scanning_alert` deliveries (created, appeared_in_branch,
+        reopened, reopened_by_user, fixed, closed_by_user) and records one SecurityFinding v1
+        observation (mctl-api#774, mctl-api#802). No bearer token: the request is authenticated
+        by `X-Hub-Signature-256`, an HMAC-SHA256 of the raw body with the dedicated
+        `GITHUB_CODE_SCANNING_WEBHOOK_SECRET` (distinct from `GITHUB_WEBHOOK_SECRET`).
+        Provider ref (`github-code-scanning`), principal, tenant and strength come from server
+        configuration (`SECURITY_PROVIDERS`, `SECURITY_GITHUB_CODE_SCANNING`) only. The source
+        finding id is `github:<repository>/code-scanning/<alert number>`. 202 `accepted` or
+        `duplicate` is returned only after the store durably recorded the observation.
+        Counted by `mctl_security_webhook_deliveries_total{provider,result}`. The body is capped at 1 MiB.
+      security: []
+      tags: [Webhooks]
+      parameters:
+        - {name: X-GitHub-Event, in: header, required: true, schema: {type: string}}
+        - {name: X-GitHub-Delivery, in: header, required: true, schema: {type: string}}
+        - {name: X-Hub-Signature-256, in: header, required: true, schema: {type: string, example: 'sha256=<hex>'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: The GitHub `code_scanning_alert` webhook payload.
+      responses:
+        '202':
+          description: '`accepted`, `duplicate`, or `ignored` (other event, action, repository or tool)'
+        '400':
+          description: Malformed payload or missing alert number, rule id, path or delivery id
+        '401':
+          description: Missing or invalid signature
+        '413':
+          description: Body larger than 1 MiB
+        '422':
+          description: The store rejected the observation
+        '503':
+          description: Receiver not configured, or the store is unavailable; GitHub keeps the delivery marked failed
+
   /api/v1/tenants:
     get:
       summary: List all team workspaces

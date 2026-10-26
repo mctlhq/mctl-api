@@ -250,6 +250,17 @@ type Options struct {
 	// strongest allowed verification. A provider's authority comes from
 	// here and from its token, never from a request body.
 	SecurityProviders map[string]auth.SecurityProviderConfig
+	// CodeScanningWebhookSecret is the dedicated HMAC secret of
+	// POST /api/v1/security/webhooks/github-code-scanning (mctl-api#802). It
+	// must be at least CodeScanningMinSecretLen long and differ from
+	// GitHubWebhookSecret, or the receiver answers 503.
+	CodeScanningWebhookSecret string
+	// CodeScanningConfig is the validated SECURITY_GITHUB_CODE_SCANNING; nil
+	// disables the receiver.
+	CodeScanningConfig *CodeScanningConfig
+	// CodeScanningIngester is the #774 store the receiver writes to; nil
+	// answers 503.
+	CodeScanningIngester SecurityIngester
 	// Decisions is the durable decision record (mctl-api#701). Optional —
 	// nil makes every /api/v1/decisions* route answer 503.
 	Decisions *decisions.Store
@@ -438,6 +449,7 @@ func NewRouter(opts Options) http.Handler {
 	// Webhook callbacks (unauthenticated/token-validated)
 	r.Post("/api/v1/workflows/events/argo-complete", h.HandleArgoWorkflowComplete)
 	r.Post("/api/v1/webhooks/github", h.HandleGitHubWebhook)
+	r.Post("/api/v1/security/webhooks/github-code-scanning", h.HandleGitHubCodeScanningWebhook)
 	r.Post(zitadelHookIntentPath, h.HandleZitadelIntent)
 	r.Post(zitadelHookCreatePath, h.HandleZitadelCreateUser)
 	r.Post(zitadelHookTokenPath, h.HandleZitadelTokenClaims)
