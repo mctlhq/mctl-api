@@ -205,6 +205,16 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 				"permissions are not accepted for scope "+strconv.Quote(body.Scope)+"; the scope defines them", nil)
 			return
 		}
+		// Membership before existence: a non-member gets the same 403
+		// whether the tenant exists or not, so the mint endpoint is not a
+		// tenant-name oracle for any authenticated human.
+		member := slices.Contains(user.Groups, body.Tenant)
+		if !member && !user.IsAdmin() {
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeTenantForbidden)
+			writeErrorCode(w, http.StatusForbidden, artCodeTenantForbidden,
+				"not a member of tenant "+strconv.Quote(body.Tenant), nil)
+			return
+		}
 		if h.opts.GitReader == nil {
 			writeErrorCode(w, http.StatusServiceUnavailable, artCodeUnavailable, "tenant lookup not configured", nil)
 			return
@@ -223,13 +233,6 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 		if !exists {
 			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeTenantNotFound)
 			writeErrorCode(w, http.StatusNotFound, artCodeTenantNotFound, "tenant not found: "+body.Tenant, nil)
-			return
-		}
-		member := slices.Contains(user.Groups, body.Tenant)
-		if !member && !user.IsAdmin() {
-			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeTenantForbidden)
-			writeErrorCode(w, http.StatusForbidden, artCodeTenantForbidden,
-				"not a member of tenant "+strconv.Quote(body.Tenant), nil)
 			return
 		}
 		// The execution the token binds to must be the bound tenant's own.

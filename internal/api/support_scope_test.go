@@ -232,6 +232,14 @@ func TestMintSupportToken(t *testing.T) {
 	if res := mint(supportHuman("root", "admins"), "nowhere", nil); res.code != http.StatusNotFound || code(res) != artCodeTenantNotFound {
 		t.Errorf("unknown tenant = %d %s", res.code, res.raw)
 	}
+	// A non-member gets the same 403 for a missing tenant as for a foreign
+	// one: the mint endpoint is not a tenant-name oracle.
+	if res := mint(supportHuman("mallory", "other"), "nowhere", nil); res.code != http.StatusForbidden || code(res) != artCodeTenantForbidden {
+		t.Errorf("non-member, unknown tenant = %d %s", res.code, res.raw)
+	}
+	if res := mint(supportHuman("mallory", "other"), ten, nil); res.code != http.StatusForbidden || code(res) != artCodeTenantForbidden {
+		t.Errorf("non-member, existing tenant = %d %s", res.code, res.raw)
+	}
 	// A checkout that cannot be read is not an absent tenant.
 	if res := mint(supportHuman("root", "admins"), "broken", nil); res.code != http.StatusServiceUnavailable || code(res) != artCodeTenantLookupFailed {
 		t.Errorf("unreadable tenant lookup = %d %s", res.code, res.raw)
