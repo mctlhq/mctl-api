@@ -46,20 +46,22 @@ import (
 // requiredStringArgs lists, per tool, the required string arguments that used
 // to be read with an unchecked type assertion.
 var requiredStringArgs = map[string][]string{
-	"mctl_get_service_status":   {"team", "service"},
-	"mctl_get_workflow_status":  {"workflow_name"},
-	"mctl_get_resource_usage":   {"team"},
-	"mctl_get_tenant":           {"name"},
-	"mctl_get_service_config":   {"team", "service"},
-	"mctl_list_repos":           {"team"},
-	"mctl_grant_repo_access":    {"team", "repo"},
-	"mctl_sync_repos":           {"team"},
-	"mctl_add_custom_domain":    {"team", "service", "domain"},
-	"mctl_get_operation":        {"name"},
-	"mctl_list_previews":        {"team"},
-	"mctl_get_incident":         {"id"},
-	"mctl_acknowledge_incident": {"id"},
-	"mctl_resolve_incident":     {"id"},
+	"mctl_get_service_status":    {"team", "service"},
+	"mctl_get_workflow_status":   {"workflow_name"},
+	"mctl_get_resource_usage":    {"team"},
+	"mctl_get_service_pods":      {"team", "service"},
+	"mctl_list_namespace_events": {"team"},
+	"mctl_get_tenant":            {"name"},
+	"mctl_get_service_config":    {"team", "service"},
+	"mctl_list_repos":            {"team"},
+	"mctl_grant_repo_access":     {"team", "repo"},
+	"mctl_sync_repos":            {"team"},
+	"mctl_add_custom_domain":     {"team", "service", "domain"},
+	"mctl_get_operation":         {"name"},
+	"mctl_list_previews":         {"team"},
+	"mctl_get_incident":          {"id"},
+	"mctl_acknowledge_incident":  {"id"},
+	"mctl_resolve_incident":      {"id"},
 }
 
 // callTool drives the real tools/call path. It returns the tool result, or

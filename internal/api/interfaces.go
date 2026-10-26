@@ -39,6 +39,12 @@ type PreviewLister interface {
 	ListPreviewReleases(ctx context.Context, team, service string) ([]k8s.PreviewRelease, error)
 }
 
+// WorkloadReader reads pod state and events from a tenant namespace.
+type WorkloadReader interface {
+	ListServicePods(ctx context.Context, namespace, workload string) ([]k8s.PodState, error)
+	ListEvents(ctx context.Context, namespace string, q k8s.EventQuery) ([]k8s.Event, bool, error)
+}
+
 // GitReader is the subset of gitops.Reader used by API handlers.
 type GitReader interface {
 	ListTenants() ([]gitops.Tenant, error)

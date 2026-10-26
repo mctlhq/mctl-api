@@ -190,6 +190,16 @@
       "reason": "CPU, memory and pod quota usage for a team workspace; capacity figures only, tenant-scoped by the upstream."
     },
     {
+      "name": "mctl_get_service_pods",
+      "enabled": true,
+      "reason": "Allow-listed pod state of one service (phase, container states, termination reason and exit code, restarts, requests and limits); no env, volume or secret values, tenant-scoped by the upstream."
+    },
+    {
+      "name": "mctl_list_namespace_events",
+      "enabled": true,
+      "reason": "Kubernetes events of a tenant namespace over a bounded window, capped at 200 and secret-scanned; tenant-scoped by the upstream."
+    },
+    {
       "name": "mctl_get_service_config",
       "enabled": true,
       "reason": "Service configuration as recorded in GitOps: image tag, host, port, component type, database flag. No secret values; tenant-scoped upstream."
