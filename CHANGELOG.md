@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.124.0](https://github.com/mctlhq/mctl-api/compare/4.123.1...4.124.0) (2026-10-26)
+
+
+### Features
+
+* **agents:** issue-774-feat-api-securityfinding-v1-store-and-ap ([8023be0](https://github.com/mctlhq/mctl-api/commit/8023be01825a1009380cdd4d35bf4377f63b491e))
+* **agents:** issue-774-feat-api-securityfinding-v1-store-and-ap ([2ee37c6](https://github.com/mctlhq/mctl-api/commit/2ee37c653ca48ee5ebb684ff8e62fca51e018c92))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-774-feat-api-securityfinding-v1-store-and-ap ([eec0a88](https://github.com/mctlhq/mctl-api/commit/eec0a883205b84789c861e591d9cd533b0a0ecd9))
+* **agents:** address P1/P2 codex findings on issue-774-feat-api-securityfinding-v1-store-and-ap ([62bd2f5](https://github.com/mctlhq/mctl-api/commit/62bd2f58c2ec59e74f1f5331ebe48afea9d14a65))
+
 ## [4.123.1](https://github.com/mctlhq/mctl-api/compare/4.123.0...4.123.1) (2026-10-25)
 
 
