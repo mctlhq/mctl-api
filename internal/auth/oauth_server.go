@@ -33,6 +33,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/mctlhq/mctl-api/internal/auth/cimd"
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
@@ -156,7 +157,23 @@ type OAuthServer struct {
 	GitHubClientID     string
 	GitHubClientSecret string
 	// JWTSecret is the HMAC-SHA256 signing key for issued access tokens.
+	// It also stays required once asymmetric signing is on: refresh-token
+	// derivation (deriveSuccessorRefreshToken) uses it as key material.
 	JWTSecret []byte
+	// AccessTokenAudience is the aud minted into and required of access
+	// tokens; empty selects BaseURL.
+	AccessTokenAudience string
+	// RejectHS256 refuses every HS256 access token (OAUTH_JWT_ACCEPT_HS256
+	// false). The zero value accepts them.
+	RejectHS256 bool
+	// RequireAud ends the grace for aud-less HS256 tokens
+	// (OAUTH_JWT_REQUIRE_AUD).
+	RequireAud bool
+	// signingAlg is the alg new access tokens are signed with ("" = HS256).
+	signingAlg string
+	keys       *accessTokenKeySet
+	// onHMAC is a test hook called before any HMAC is computed on verify.
+	onHMAC func()
 	// PrincipalMode is TENANT_AUTHZ_MODE=principal (mctl-api#377): an
 	// access token is then accepted only with a pid claim, which names the
 	// caller's principal; groups are not resolved from the login, and a
@@ -1579,10 +1596,17 @@ func (s *OAuthServer) IssueJWT(login, principalID string, groups []string) (stri
 	payload := jwtPayload{
 		Issuer:    s.BaseURL,
 		Subject:   subject,
+		Audience:  audience{s.accessAudience()},
 		PID:       principalID,
 		Groups:    groups,
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(ttl).Unix(),
+	}
+	if s.signingAlg == JWTAlgEdDSA || s.signingAlg == JWTAlgES256 {
+		if s.keys == nil || s.keys.active == nil {
+			return "", errors.New("issue token: no active signing key")
+		}
+		return signJWTAsymmetric(payload, s.keys.active)
 	}
 	return signJWT(payload, s.JWTSecret)
 }
@@ -1817,7 +1841,7 @@ func (s *OAuthServer) RevokePrincipalSessions(principalID, reason string) (int64
 
 // ValidateJWT validates a JWT issued by this server and returns the User.
 func (s *OAuthServer) ValidateJWT(token string) (*User, error) {
-	payload, err := verifyJWT(token, s.JWTSecret, s.BaseURL)
+	payload, err := s.verifyAccessToken(token)
 	if err != nil {
 		return nil, err
 	}
@@ -1879,11 +1903,52 @@ func verifyPKCE(verifier, challenge string) bool {
 
 // ─── Minimal JWT (HMAC-SHA256, no external library) ───────────────────────────
 
-var jwtHeader = base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+// jwtHeader is the JOSE header of an access token.
+type jwtHeader struct {
+	Alg string `json:"alg"`
+	Typ string `json:"typ,omitempty"`
+	Kid string `json:"kid,omitempty"`
+}
+
+// audience is the aud claim: a JSON string or an array of strings
+// (RFC 7519 section 4.1.3). Minting always emits a single string.
+type audience []string
+
+func (a *audience) UnmarshalJSON(b []byte) error {
+	var one string
+	if err := json.Unmarshal(b, &one); err == nil {
+		*a = audience{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(b, &many); err != nil {
+		return errors.New("aud must be a string or an array of strings")
+	}
+	*a = audience(many)
+	return nil
+}
+
+func (a audience) MarshalJSON() ([]byte, error) {
+	if len(a) == 1 {
+		return json.Marshal(a[0])
+	}
+	return json.Marshal([]string(a))
+}
+
+func (a audience) contains(want string) bool {
+	want = normalizeIssuer(want)
+	for _, v := range a {
+		if normalizeIssuer(v) == want {
+			return true
+		}
+	}
+	return false
+}
 
 type jwtPayload struct {
-	Issuer  string `json:"iss"`
-	Subject string `json:"sub"`
+	Issuer   string   `json:"iss"`
+	Subject  string   `json:"sub"`
+	Audience audience `json:"aud,omitempty"`
 	// PID is the canonical principal the token was minted for
 	// (mctl-api#377). Subject is the GitHub login, or the principal id
 	// itself for a principal with no GitHub login.
@@ -1893,45 +1958,158 @@ type jwtPayload struct {
 	ExpiresAt int64    `json:"exp"`
 }
 
+func (s *OAuthServer) accessAudience() string {
+	if s.AccessTokenAudience != "" {
+		return s.AccessTokenAudience
+	}
+	return s.BaseURL
+}
+
+func encodeJWTHeader(h jwtHeader) (string, error) {
+	b, err := json.Marshal(h)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 func signJWT(payload jwtPayload, secret []byte) (string, error) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
+	hdr, err := encodeJWTHeader(jwtHeader{Alg: JWTAlgHS256, Typ: "JWT"})
+	if err != nil {
+		return "", err
+	}
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadJSON)
-	sigInput := jwtHeader + "." + payloadB64
+	sigInput := hdr + "." + payloadB64
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(sigInput))
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return sigInput + "." + sig, nil
 }
 
+func signJWTAsymmetric(payload jwtPayload, key *accessTokenKey) (string, error) {
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	hdr, err := encodeJWTHeader(jwtHeader{Alg: key.alg, Typ: "JWT", Kid: key.kid})
+	if err != nil {
+		return "", err
+	}
+	sigInput := hdr + "." + base64.RawURLEncoding.EncodeToString(payloadJSON)
+	sig, err := key.sign([]byte(sigInput))
+	if err != nil {
+		return "", err
+	}
+	return sigInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// verifyJWT verifies an HS256 token against a bare secret and issuer, with the
+// default policy (HS256 accepted, aud-less grace on, audience = issuer).
 func verifyJWT(token string, secret []byte, expectedIssuer string) (*jwtPayload, error) {
+	return (&OAuthServer{JWTSecret: secret, BaseURL: expectedIssuer}).verifyAccessToken(token)
+}
+
+// metricAlg bounds the alg label's cardinality.
+func metricAlg(alg string) string {
+	switch alg {
+	case JWTAlgHS256, JWTAlgEdDSA, JWTAlgES256:
+		return alg
+	case "none", "":
+		return "none"
+	}
+	return "other"
+}
+
+// verifyAccessToken is the single verification path for access tokens minted
+// by this server. Order: parse header, pin alg, check signature (HMAC or
+// key lookup), then iss, exp and aud.
+func (s *OAuthServer) verifyAccessToken(token string) (*jwtPayload, error) {
+	alg := "unknown"
+	fail := func(result string, err error) (*jwtPayload, error) {
+		oauthJWTVerifications.WithLabelValues(alg, result).Inc()
+		return nil, err
+	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return nil, errors.New("malformed JWT")
+		return fail("malformed", errors.New("malformed JWT"))
 	}
-	sigInput := parts[0] + "." + parts[1]
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(sigInput))
-	expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	if !hmac.Equal([]byte(expectedSig), []byte(parts[2])) {
-		return nil, errors.New("invalid JWT signature")
-	}
-	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	hdrJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return nil, errors.New("malformed JWT payload")
+		return fail("malformed", errors.New("malformed JWT header"))
 	}
+	var hdr jwtHeader
+	if err := json.Unmarshal(hdrJSON, &hdr); err != nil {
+		return fail("malformed", errors.New("malformed JWT header"))
+	}
+	alg = metricAlg(hdr.Alg)
+
+	// Pin alg before any key work.
+	// Asymmetric algs are admitted whenever a key set is configured, not only
+	// the active signing alg, so retained keys keep verifying across a
+	// rollback to HS256 or an alg rotation. lookup pins kid and alg to the
+	// same key, so this does not open algorithm confusion.
+	switch {
+	case hdr.Alg == JWTAlgHS256 && !s.RejectHS256:
+	case (hdr.Alg == JWTAlgEdDSA || hdr.Alg == JWTAlgES256) && s.keys != nil:
+	default:
+		return fail("alg_refused", errUnacceptedAlg)
+	}
+
+	var payloadJSON []byte
+	if hdr.Alg == JWTAlgHS256 {
+		if s.onHMAC != nil {
+			s.onHMAC()
+		}
+		mac := hmac.New(sha256.New, s.JWTSecret)
+		mac.Write([]byte(parts[0] + "." + parts[1]))
+		expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+		if !hmac.Equal([]byte(expectedSig), []byte(parts[2])) {
+			return fail("bad_signature", errors.New("invalid JWT signature"))
+		}
+		payloadJSON, err = base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return fail("malformed", errors.New("malformed JWT payload"))
+		}
+	} else {
+		key, err := s.keys.lookup(hdr.Kid, hdr.Alg)
+		if err != nil {
+			return fail("unknown_kid", err)
+		}
+		jws, err := jose.ParseSigned(token, []jose.SignatureAlgorithm{jose.SignatureAlgorithm(hdr.Alg)})
+		if err != nil {
+			return fail("malformed", errors.New("malformed JWT"))
+		}
+		payloadJSON, err = jws.Verify(key.public)
+		if err != nil {
+			return fail("bad_signature", errors.New("invalid JWT signature"))
+		}
+	}
+
 	var payload jwtPayload
 	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
-		return nil, errors.New("malformed JWT payload")
+		return fail("malformed", errors.New("malformed JWT payload"))
 	}
-	if payload.Issuer != expectedIssuer {
-		return nil, fmt.Errorf("unexpected JWT issuer: %q", payload.Issuer)
+	if payload.Issuer != s.BaseURL {
+		return fail("iss_mismatch", fmt.Errorf("unexpected JWT issuer: %q", payload.Issuer))
 	}
 	if time.Now().Unix() > payload.ExpiresAt {
-		return nil, errors.New("JWT expired")
+		return fail("expired", errors.New("JWT expired"))
 	}
+	if len(payload.Audience) > 0 {
+		if !payload.Audience.contains(s.accessAudience()) {
+			return fail("aud_mismatch", errors.New("JWT audience does not include this API"))
+		}
+	} else {
+		if hdr.Alg != JWTAlgHS256 || s.RequireAud {
+			return fail("aud_missing", errors.New("JWT has no audience"))
+		}
+		oauthJWTAudlessAccepted.Inc()
+	}
+	oauthJWTVerifications.WithLabelValues(alg, "ok").Inc()
 	return &payload, nil
 }
 

@@ -1,3 +1,5 @@
+# OAUTH_JWT_SIGNING_KEYS (asymmetric access-token keys) arrives through the existing
+# envFromSecret; see docs/access-token-signing.md.
 replicaCount: 1
 
 image:

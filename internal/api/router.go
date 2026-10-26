@@ -403,6 +403,7 @@ func NewRouter(opts Options) http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(httprate.Limit(60, 1*time.Minute, httprate.WithKeyFuncs(keyByTrustedIP)))
 		r.Get("/.well-known/oauth-authorization-server", h.handleOAuthMeta)
+		r.Get("/.well-known/jwks.json", h.handleJWKS)
 		// RFC 9728 Protected Resource Metadata — registered at both the root path
 		// and the /mcp-suffixed alias since clients probe either form.
 		r.Get("/.well-known/oauth-protected-resource", h.handleProtectedResourceMeta)
