@@ -193,6 +193,13 @@ func main() {
 		oauthServer.TenantResolver = gitReader
 		oauthServer.AccessTokenTTL = cfg.OAuthTokenTTL
 		oauthServer.RefreshTokenTTL = cfg.OAuthRefreshTokenTTL
+		// validate has already parsed this; the exit is only a backstop.
+		// OAUTH_JWT_SECRET stays required: refresh-token derivation uses it.
+		if err := oauthServer.ConfigureSigning(cfg.jwtSigningConfig()); err != nil {
+			slog.Error("invalid configuration", "error", err)
+			stopSignals()
+			os.Exit(1)
+		}
 		// Principal mode (mctl-api#377): tokens are accepted by their pid
 		// claim only, and a session with none is not refreshed.
 		oauthServer.PrincipalMode = cfg.tenantAuthzMode() == mctlapi.TenantAuthzPrincipal
@@ -1441,6 +1448,13 @@ type config struct {
 	OAuthCIMDAllowedHostsRaw string
 	OAuthTokenTTL            time.Duration
 	OAuthRefreshTokenTTL     time.Duration
+	// Access-token audience, signing algorithm and key set (mctl-api#805).
+	OAuthAccessTokenAudience string
+	OAuthJWTSigningAlg       string
+	OAuthJWTSigningKeys      string
+	OAuthJWTKeyRetention     time.Duration
+	OAuthJWTRejectHS256      bool
+	OAuthJWTRequireAud       bool
 	VaultAddr                string
 	VaultToken               string
 	VaultKubernetesRole      string
@@ -1590,6 +1604,12 @@ func loadConfig() config {
 		OAuthCIMDAllowedHostsRaw:       os.Getenv("OAUTH_CIMD_ALLOWED_HOSTS"),
 		OAuthTokenTTL:                  parseDuration(os.Getenv("OAUTH_TOKEN_TTL"), time.Hour),
 		OAuthRefreshTokenTTL:           parseDuration(os.Getenv("OAUTH_REFRESH_TOKEN_TTL"), 30*24*time.Hour),
+		OAuthAccessTokenAudience:       os.Getenv("OAUTH_ACCESS_TOKEN_AUDIENCE"),
+		OAuthJWTSigningAlg:             os.Getenv("OAUTH_JWT_SIGNING_ALG"),
+		OAuthJWTSigningKeys:            os.Getenv("OAUTH_JWT_SIGNING_KEYS"),
+		OAuthJWTKeyRetention:           parseDuration(os.Getenv("OAUTH_JWT_KEY_RETENTION"), 0),
+		OAuthJWTRejectHS256:            os.Getenv("OAUTH_JWT_ACCEPT_HS256") == "false",
+		OAuthJWTRequireAud:             os.Getenv("OAUTH_JWT_REQUIRE_AUD") == "true",
 		VaultAddr:                      os.Getenv("VAULT_ADDR"),
 		VaultToken:                     os.Getenv("VAULT_TOKEN"),
 		VaultKubernetesRole:            os.Getenv("VAULT_KUBERNETES_ROLE"),
@@ -1910,6 +1930,12 @@ func (c config) validate() error {
 			"so a longer lifetime only widens the window on a leak", maxOAuthTokenTTL, c.OAuthTokenTTL)
 	}
 
+	if oauthEnabled {
+		if err := c.jwtSigningConfig().Validate(c.OAuthTokenTTL); err != nil {
+			return err
+		}
+	}
+
 	// The commerce dispatch signing key (mctlhq/mctl-agents#626 item 5): a
 	// key that is set but unusable refuses this boot. Left off at runtime it
 	// would only show as dispatch answering 503 while every reservation
@@ -2060,6 +2086,23 @@ func (c config) oauthUpstreamMode() mctlapi.OAuthUpstreamMode {
 		return mctlapi.OAuthUpstreamGitHub
 	}
 	return m
+}
+
+// jwtSigningConfig is the access-token signing policy from the environment.
+// Audience defaults to SELF_URL.
+func (c config) jwtSigningConfig() auth.JWTSigningConfig {
+	aud := c.OAuthAccessTokenAudience
+	if aud == "" {
+		aud = c.SelfURL
+	}
+	return auth.JWTSigningConfig{
+		Audience:     aud,
+		Alg:          c.OAuthJWTSigningAlg,
+		KeysJSON:     c.OAuthJWTSigningKeys,
+		KeyRetention: c.OAuthJWTKeyRetention,
+		AcceptHS256:  !c.OAuthJWTRejectHS256,
+		RequireAud:   c.OAuthJWTRequireAud,
+	}
 }
 
 // oauthEnabled is the gate for constructing the OAuth server. github keeps

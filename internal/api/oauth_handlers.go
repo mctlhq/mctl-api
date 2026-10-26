@@ -52,6 +52,8 @@ type OAuthMeta struct {
 	// ClientIDMetadataDocumentSupported is advertised only while CIMD is
 	// accepted and OAUTH_CIMD_ADVERTISE is on.
 	ClientIDMetadataDocumentSupported bool `json:"client_id_metadata_document_supported,omitempty"`
+	// JWKSURI is advertised only while an asymmetric signing key is configured.
+	JWKSURI string `json:"jwks_uri,omitempty"`
 }
 
 // oauthScope is the only OAuth scope this server issues or advertises.
@@ -84,8 +86,28 @@ func (h *Handlers) handleOAuthMeta(w http.ResponseWriter, r *http.Request) {
 
 		TokenEndpointAuthSigningAlgValuesSupported: h.opts.OAuthServer.TokenEndpointAuthSigningAlgs(),
 	}
+	if _, ok := h.opts.OAuthServer.PublicJWKS(); ok {
+		meta.JWKSURI = base + "/.well-known/jwks.json"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(meta)
+}
+
+// handleJWKS serves the public access-token verification keys (RFC 7517).
+// 404 while no asymmetric key is configured.
+func (h *Handlers) handleJWKS(w http.ResponseWriter, r *http.Request) {
+	if h.opts.OAuthServer == nil {
+		http.NotFound(w, r)
+		return
+	}
+	set, ok := h.opts.OAuthServer.PublicJWKS()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/jwk-set+json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_ = json.NewEncoder(w).Encode(set)
 }
 
 // ProtectedResourceMeta is returned by /.well-known/oauth-protected-resource

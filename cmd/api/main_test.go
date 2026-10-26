@@ -225,6 +225,21 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "asymmetric alg without keys is rejected",
+			cfg:     config{OAuthGitHubClientID: ghID, OAuthJWTSecret: secret, OAuthTokenTTL: time.Hour, OAuthJWTSigningAlg: "EdDSA"},
+			wantErr: true, wantVar: "OAUTH_JWT_SIGNING_KEYS",
+		},
+		{
+			name:    "malformed key set is rejected even with HS256",
+			cfg:     config{OAuthGitHubClientID: ghID, OAuthJWTSecret: secret, OAuthTokenTTL: time.Hour, OAuthJWTSigningKeys: "{oops"},
+			wantErr: true, wantVar: "OAUTH_JWT_SIGNING_KEYS",
+		},
+		{
+			name:    "HS256 refused while HS256 is the signing alg",
+			cfg:     config{OAuthGitHubClientID: ghID, OAuthJWTSecret: secret, OAuthTokenTTL: time.Hour, OAuthJWTRejectHS256: true},
+			wantErr: true, wantVar: "OAUTH_JWT_ACCEPT_HS256",
+		},
+		{
 			name:    "one nanosecond over the ceiling is rejected",
 			cfg:     config{OAuthGitHubClientID: ghID, OAuthJWTSecret: secret, OAuthTokenTTL: maxOAuthTokenTTL + 1},
 			wantErr: true,
