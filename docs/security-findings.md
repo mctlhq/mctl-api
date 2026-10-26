@@ -271,3 +271,26 @@ immediately.
 - **Minimum strength below `scanner_rerun_exact_revision`** is allowed by
   configuration but not the default.
 - **Observation retention** is not part of this slice.
+
+## GitHub Code Scanning receiver (mctl-api#802)
+
+`POST /api/v1/security/webhooks/github-code-scanning` receives repository
+`code_scanning_alert` webhook deliveries and records one observation each.
+
+- Channel credential: `GITHUB_CODE_SCANNING_WEBHOOK_SECRET`, an HMAC-SHA256 key (at least 32
+  characters, different from `GITHUB_WEBHOOK_SECRET`) checked against `X-Hub-Signature-256`.
+  No `MCTL_SECURITY_PROVIDER_TOKENS` token is used; the call into the store is in-process.
+- Configuration: `SECURITY_PROVIDERS` must contain `github-code-scanning`; the non-secret
+  `SECURITY_GITHUB_CODE_SCANNING` (helm `securityCodeScanning`) holds `repositories`
+  (full name to tenant, tenants within the provider's tenants), `tools` and `actions`.
+  Any problem disables only this route (503).
+- Provider ref `github-code-scanning` and principal `service:security-provider:github-code-scanning`
+  are fixed by the server; payload text never changes them.
+- `source_finding_id` is `github:<repository>/code-scanning/<alert number>`; ref, commit and
+  action are not part of it. Actions map: `created`, `appeared_in_branch`, `reopened`,
+  `reopened_by_user` to present; `fixed` to fixed; `closed_by_user` to withdrawn. Revision is
+  `commit_oid`, else the most recent instance commit, and empty for the user-only actions.
+- Answers: 202 `accepted`/`duplicate` only after the store recorded the observation; 202
+  `ignored` for other events, actions, repositories and tools; 400/413/422 `rejected`; 401
+  `signature_invalid`; 503 `store_unavailable`.
+- Metric: `mctl_security_webhook_deliveries_total{provider,result}`.

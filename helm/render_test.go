@@ -398,6 +398,33 @@ func TestDeploymentRendersSecurityProviders(t *testing.T) {
 	}
 }
 
+func TestDeploymentRendersSecurityCodeScanning(t *testing.T) {
+	d, _ := renderDeployment(t)
+	if _, ok := findEnv(mainContainer(t, d), "SECURITY_GITHUB_CODE_SCANNING"); ok {
+		t.Error("default render should not set SECURITY_GITHUB_CODE_SCANNING")
+	}
+	d, _ = renderDeployment(t,
+		"--set", "securityCodeScanning.repositories.mctlhq/mctl-api=admins",
+		"--set", "securityCodeScanning.tools[0]=Trivy",
+		"--set", "securityCodeScanning.actions[0]=created",
+	)
+	env, ok := findEnv(mainContainer(t, d), "SECURITY_GITHUB_CODE_SCANNING")
+	if !ok {
+		t.Fatal("expected SECURITY_GITHUB_CODE_SCANNING env")
+	}
+	var cfg struct {
+		Repositories map[string]string `json:"repositories"`
+		Tools        []string          `json:"tools"`
+		Actions      []string          `json:"actions"`
+	}
+	if err := json.Unmarshal([]byte(env.Value), &cfg); err != nil {
+		t.Fatalf("not JSON: %v (%q)", err, env.Value)
+	}
+	if cfg.Repositories["mctlhq/mctl-api"] != "admins" || len(cfg.Tools) != 1 || len(cfg.Actions) != 1 {
+		t.Errorf("config = %+v", cfg)
+	}
+}
+
 func TestDeploymentDefaultRenderKeepsOIDCProvidersLiteral(t *testing.T) {
 	d, _ := renderDeployment(t)
 	c := mainContainer(t, d)

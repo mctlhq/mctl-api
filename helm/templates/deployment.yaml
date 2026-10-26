@@ -109,6 +109,13 @@ spec:
             - name: SECURITY_PROVIDERS
               value: {{ .Values.securityProviders | toJson | quote }}
             {{- end }}
+            {{- if .Values.securityCodeScanning }}
+            # Non-secret GitHub Code Scanning receiver configuration
+            # (mctl-api#802). The dedicated HMAC secret
+            # (GITHUB_CODE_SCANNING_WEBHOOK_SECRET) is supplied externally.
+            - name: SECURITY_GITHUB_CODE_SCANNING
+              value: {{ .Values.securityCodeScanning | toJson | quote }}
+            {{- end }}
             {{- if .Values.securityProviderTokensSecret }}
             # Optional on purpose: a missing Secret leaves every security
             # provider disabled (only admins can ingest observations), it

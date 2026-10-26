@@ -171,6 +171,13 @@ securityProviders: []
 # POST /api/v1/security/observations. The reference is optional, so an absent
 # Secret leaves the providers disabled rather than failing the pod.
 securityProviderTokensSecret: ""
+# Optional: GitHub Code Scanning webhook receiver (mctl-api#802), rendered
+# into SECURITY_GITHUB_CODE_SCANNING. Keys: repositories (full name -> tenant,
+# tenants must belong to the github-code-scanning securityProviders entry),
+# tools and actions (created, appeared_in_branch, reopened, reopened_by_user,
+# fixed, closed_by_user). The dedicated HMAC secret
+# GITHUB_CODE_SCANNING_WEBHOOK_SECRET is NOT set here; it is wired externally.
+securityCodeScanning: {}
 
 # Optional: Secret holding MCTL_REGISTRY_PUBLISHER_TOKEN, the bearer token of
 # the registry-publisher principal (service:mctl-agents-registry-publisher,
