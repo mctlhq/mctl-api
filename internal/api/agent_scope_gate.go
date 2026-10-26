@@ -43,7 +43,11 @@ func (h *Handlers) agentScopeGate(next http.Handler) http.Handler {
 			}
 			scope, ok := user.AgentScope()
 			// A scope name the server no longer defines admits nothing.
-			allowed := ok && scope.AllowsRoute(r.Method, r.URL.Path, user.WorkItemID(), user.ExecutionID())
+			boundTenant, _ := user.BoundTenant()
+			allowed := ok && scope.Allows(auth.AgentScopeRequest{
+				Method: r.Method, Path: r.URL.Path, Query: r.URL.Query(),
+				WorkItemID: user.WorkItemID(), ExecutionID: user.ExecutionID(), Tenant: boundTenant,
+			})
 			mctlmcp.AgentScopeDecisions.WithLabelValues(user.AgentScopeName(), "enforce", "rest", mctlmcp.AgentScopeVerdict(allowed)).Inc()
 			if !allowed {
 				agentName, _ := user.AgentName()
@@ -53,6 +57,7 @@ func (h *Handlers) agentScopeGate(next http.Handler) http.Handler {
 					Parameters: map[string]string{
 						"agent": agentName, "scope": user.AgentScopeName(), "route": r.Method + " " + r.URL.Path,
 						"execution_id": user.ExecutionID(), "work_item_id": user.WorkItemID(), "agent_run_id": user.AgentRunID(),
+						"bound_tenant": boundTenant,
 					},
 				})
 				writeErrorCode(w, http.StatusForbidden, mctlmcp.AgentScopeCodeDenied,
@@ -63,7 +68,11 @@ func (h *Handlers) agentScopeGate(next http.Handler) http.Handler {
 			return
 		}
 		if name := strings.TrimSpace(r.Header.Get(auth.AgentScopeShadowHeader)); name != "" && isDirectService(user) {
-			if scope, ok := auth.LookupAgentScope(name); ok {
+			if scope, ok := auth.LookupAgentScope(name); ok && scope.BoundTenant {
+				// A static token carries no bound tenant, so the scope
+				// cannot be judged: counted apart, never as an allow.
+				mctlmcp.AgentScopeDecisions.WithLabelValues(scope.Name, "shadow", "rest", "shadow_unbound_tenant").Inc()
+			} else if ok {
 				bound, boundExec := shadowBinding(scope, r.Method, r.URL.Path)
 				allowed := scope.AllowsRoute(r.Method, r.URL.Path, bound, boundExec)
 				verdict := mctlmcp.AgentScopeVerdict(allowed)

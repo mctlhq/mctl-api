@@ -84,3 +84,73 @@ func TestReadToolsAreRecordedReadOnly(t *testing.T) {
 		t.Fatal("no recorded tool is a read: the check proves nothing")
 	}
 }
+
+func runScopeArgs(t *testing.T, ctx context.Context, tool string, args map[string]any) (*mcplib.CallToolResult, bool) {
+	t.Helper()
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = tool
+	req.Params.Arguments = args
+	ran := false
+	res, err := (&Server{}).agentScopeMiddleware(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		ran = true
+		return mcplib.NewToolResultText("ok"), nil
+	})(ctx, req)
+	if err != nil {
+		t.Fatalf("middleware error: %v", err)
+	}
+	return res, ran
+}
+
+func TestSupportToolsAreRegisteredReads(t *testing.T) {
+	for _, n := range auth.SupportToolNames() {
+		h, ok := recordedHints["mctl_"+n]
+		if !ok {
+			t.Errorf("support tool %s is not a registered tool", n)
+			continue
+		}
+		if !h.readOnly {
+			t.Errorf("support tool %s is not recorded read-only", n)
+		}
+	}
+}
+
+func TestAgentScopeMiddleware_SupportIsBoundToItsTenant(t *testing.T) {
+	ctx := auth.WithUser(context.Background(), auth.NewAgentUser("mctl-support", auth.AgentRun{
+		ExecutionID: "we_a", Scope: auth.AgentScopeSupport, Tenant: "labs",
+	}))
+	allowed := []struct {
+		tool string
+		args map[string]any
+	}{
+		{"mctl_get_service_status", map[string]any{"team": "labs", "service": "x"}},
+		{"mctl_list_incidents", map[string]any{"tenant": "labs"}},
+		{"mctl_get_service_logs", map[string]any{"team": "labs", "service": "x"}},
+	}
+	for _, c := range allowed {
+		if _, ran := runScopeArgs(t, ctx, c.tool, c.args); !ran {
+			t.Errorf("%s %v was refused", c.tool, c.args)
+		}
+	}
+	denied := []struct {
+		tool string
+		args map[string]any
+	}{
+		{"mctl_get_service_status", map[string]any{"team": "karabu", "service": "x"}},
+		{"mctl_list_services", map[string]any{}},
+		{"mctl_get_resource_usage", map[string]any{"team": "karabu"}},
+		{"mctl_list_domains", map[string]any{"team_name": "karabu"}},
+		{"mctl_list_incidents", map[string]any{"tenant": "karabu"}},
+		{"mctl_deploy_service", map[string]any{"team_name": "labs"}},
+		{"mctl_list_tenants", map[string]any{}},
+	}
+	for _, c := range denied {
+		res, ran := runScopeArgs(t, ctx, c.tool, c.args)
+		if ran {
+			t.Errorf("%s %v ran for a support run", c.tool, c.args)
+			continue
+		}
+		if !res.IsError || !strings.Contains(res.Content[0].(mcplib.TextContent).Text, AgentScopeCodeDenied) {
+			t.Errorf("%s refusal = %+v, want %s", c.tool, res, AgentScopeCodeDenied)
+		}
+	}
+}

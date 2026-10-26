@@ -25,6 +25,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +53,10 @@ const (
 	artCodePrincipalDisabled   = "agent_principal_disabled"
 	artCodeIdentityRefused     = "agent_identity_refused"
 	artCodeRegistryUnavailable = "agent_registry_error"
+	artCodeTenantRequired      = "agent_scope_tenant_required"
+	artCodeTenantUnexpected    = "agent_scope_tenant_unexpected"
+	artCodeTenantForbidden     = "agent_scope_tenant_forbidden"
+	artCodeTenantNotFound      = "tenant_not_found"
 )
 
 type agentRunTokenBody struct {
@@ -61,6 +66,8 @@ type agentRunTokenBody struct {
 	Permissions []string `json:"permissions,omitempty"`
 	// Scope names a server-defined auth.AgentScope (mctlhq/mctl-agents#737).
 	Scope string `json:"scope,omitempty"`
+	// Tenant binds a BoundTenant scope to the one tenant it may read.
+	Tenant string `json:"tenant,omitempty"`
 	// WithoutExecution is set only by the exchange, never decoded from a
 	// request: see workitems.MintAgentRunTokenInput.
 	WithoutExecution bool `json:"-"`
@@ -100,6 +107,15 @@ type agentRunIssuer struct {
 	Exchange    bool
 }
 
+// isHumanMinter is a person, acting directly or relayed by a registered
+// surface, who may mint a scope on a tenant member's word. An agent, a
+// delegated agent request, the service principal and a bare surface are not.
+func isHumanMinter(u *auth.User) bool {
+	_, surface := u.Surface()
+	_, delegated := u.DelegatingAgent()
+	return !u.IsAgent() && !delegated && !u.IsService() && !surface && u.PrincipalID() != ""
+}
+
 func issuerOf(user *auth.User) agentRunIssuer {
 	return agentRunIssuer{UserID: user.ID, Actor: principalOf(user), PrincipalID: user.PrincipalID()}
 }
@@ -136,7 +152,8 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	if !isDirectService(user) {
+	direct := isDirectService(user)
+	if !direct && !isHumanMinter(user) {
 		h.auditAgentRunTokenRefusal(r, user, "", artCodeRequesterForbidden)
 		writeErrorCode(w, http.StatusForbidden, artCodeRequesterForbidden,
 			"only the service principal acting directly may mint an agent run token", nil)
@@ -147,26 +164,82 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 	if !decodeWorkItemBodyLimit(w, r, &body, maxAgentRunTokenBodyBytes) {
 		return
 	}
+	scope, _ := auth.LookupAgentScope(body.Scope)
+	memberMint := scope != nil && scope.MintByTenantMember
+	if !direct && !memberMint {
+		h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeRequesterForbidden)
+		writeErrorCode(w, http.StatusForbidden, artCodeRequesterForbidden,
+			"only the service principal acting directly may mint an agent run token", nil)
+		return
+	}
+	if memberMint && direct {
+		// A scope minted on a tenant member's word is never minted on the
+		// service principal's own.
+		h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeRequesterForbidden)
+		writeErrorCode(w, http.StatusForbidden, artCodeRequesterForbidden,
+			"scope "+strconv.Quote(body.Scope)+" is minted for a tenant member, not the service principal", nil)
+		return
+	}
 	if body.Agent == "" || body.ExecutionID == "" {
 		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "agent and execution_id are required", nil)
 		return
 	}
 
+	var extra map[string]string
+	if memberMint {
+		if body.Tenant == "" {
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeTenantRequired)
+			writeErrorCode(w, http.StatusBadRequest, artCodeTenantRequired, "tenant is required for scope "+strconv.Quote(body.Scope), nil)
+			return
+		}
+		if h.opts.GitReader == nil {
+			writeErrorCode(w, http.StatusServiceUnavailable, artCodeUnavailable, "tenant lookup not configured", nil)
+			return
+		}
+		if _, err := h.opts.GitReader.GetTenant(body.Tenant); err != nil {
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeTenantNotFound)
+			writeErrorCode(w, http.StatusNotFound, artCodeTenantNotFound, "tenant not found: "+body.Tenant, nil)
+			return
+		}
+		member := slices.Contains(user.Groups, body.Tenant)
+		if !member && !user.IsAdmin() {
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeTenantForbidden)
+			writeErrorCode(w, http.StatusForbidden, artCodeTenantForbidden,
+				"not a member of tenant "+strconv.Quote(body.Tenant), nil)
+			return
+		}
+		extra = map[string]string{
+			"tenant":           body.Tenant,
+			"via_principal_id": user.PrincipalID(),
+			"admin_override":   strconv.FormatBool(!member),
+		}
+	}
+
 	ttl := workitems.DefaultAgentRunTokenTTL
+	maxTTL := workitems.MaxAgentRunTokenTTL
+	if scope != nil {
+		if scope.DefaultTTL > 0 {
+			ttl = scope.DefaultTTL
+		}
+		if scope.MaxTTL > 0 {
+			maxTTL = scope.MaxTTL
+		}
+	}
 	if body.TTLSeconds != nil {
 		// Validated in raw seconds, before the multiplication below that can
 		// overflow int64 for an absurdly large ttl_seconds and wrap into a
 		// small or negative Duration -- which would then pass the store's
 		// own ttl > MaxAgentRunTokenTTL check unnoticed.
-		maxSeconds := int(workitems.MaxAgentRunTokenTTL / time.Second)
+		maxSeconds := int(maxTTL / time.Second)
 		if *body.TTLSeconds <= 0 || *body.TTLSeconds > maxSeconds {
-			writeErrorCode(w, http.StatusBadRequest, artCodeInvalidTTL, "ttl_seconds must be positive and at most 86400", nil)
+			writeErrorCode(w, http.StatusBadRequest, artCodeInvalidTTL,
+				"ttl_seconds must be positive and at most "+strconv.Itoa(maxSeconds), nil)
 			return
 		}
 		ttl = time.Duration(*body.TTLSeconds) * time.Second
 	}
 
-	h.issueAgentRunToken(w, r, issuerOf(user), body, ttl, nil)
+	h.issueAgentRunToken(w, r, issuerOf(user), body, ttl, extra)
 }
 
 // issueAgentRunToken checks the agent and scope a run token is asked for,
@@ -186,6 +259,23 @@ func (h *Handlers) issueAgentRunToken(w http.ResponseWriter, r *http.Request, is
 			writeErrorCode(w, http.StatusBadRequest, artCodeAgentUnknown, "agent "+strconv.Quote(body.Agent)+" is not registered", nil)
 			return
 		}
+	}
+
+	// A tenant binding belongs to a BoundTenant scope and to nothing else; a
+	// BoundTenant scope without one admits nothing, so it is never minted.
+	var boundScope bool
+	if sc, ok := auth.LookupAgentScope(body.Scope); ok {
+		boundScope = sc.BoundTenant
+	}
+	if boundScope && body.Tenant == "" {
+		h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodeTenantRequired)
+		writeErrorCode(w, http.StatusBadRequest, artCodeTenantRequired, "scope "+strconv.Quote(body.Scope)+" requires a tenant", nil)
+		return
+	}
+	if !boundScope && body.Tenant != "" {
+		h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodeTenantUnexpected)
+		writeErrorCode(w, http.StatusBadRequest, artCodeTenantUnexpected, "tenant is not accepted for this scope", nil)
+		return
 	}
 
 	// The scope's content is the server's; the caller only names one, and
@@ -224,10 +314,14 @@ func (h *Handlers) issueAgentRunToken(w http.ResponseWriter, r *http.Request, is
 		slog.Warn("agent run token: agent principal not resolved; minting without one", "agent", body.Agent, "error", err)
 	}
 
+	viaPrincipal := ""
+	if body.Tenant != "" {
+		viaPrincipal = iss.PrincipalID
+	}
 	row, secret, err := h.opts.WorkItems.MintAgentRunToken(r.Context(), workitems.MintAgentRunTokenInput{
 		Agent: body.Agent, AgentPrincipalID: agentUser.PrincipalID(), ExecutionID: body.ExecutionID,
 		Permissions: body.Permissions, Scope: body.Scope, TTL: ttl, IssuedByPrincipalID: iss.PrincipalID,
-		WithoutExecution: body.WithoutExecution,
+		WithoutExecution: body.WithoutExecution, Tenant: body.Tenant, ViaPrincipalID: viaPrincipal,
 	})
 	if err != nil {
 		code, status := agentRunTokenErrorCode(err)
@@ -270,7 +364,7 @@ func (h *Handlers) issueAgentRunToken(w http.ResponseWriter, r *http.Request, is
 
 	// The plaintext token appears here and nowhere else: never in the audit
 	// entry above, never in a log line.
-	writeJSON(w, http.StatusCreated, map[string]any{
+	resp := map[string]any{
 		"token_id":     row.ID,
 		"token":        secret,
 		"agent":        row.Agent,
@@ -279,5 +373,9 @@ func (h *Handlers) issueAgentRunToken(w http.ResponseWriter, r *http.Request, is
 		"expires_at":   row.ExpiresAt,
 		"permissions":  row.Permissions,
 		"scope":        row.Scope,
-	})
+	}
+	if row.Tenant != "" {
+		resp["tenant"] = row.Tenant
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }

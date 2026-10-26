@@ -48,7 +48,8 @@ func (s *Server) agentScopeMiddleware(next server.ToolHandlerFunc) server.ToolHa
 			// A scope name the server no longer defines admits nothing, the
 			// same as the REST gate: this layer stays closed on its own.
 			scope, ok := user.AgentScope()
-			allowed := ok && scope.AllowsTool(tool)
+			boundTenant, _ := user.BoundTenant()
+			allowed := ok && scope.AllowsToolCall(tool, req.GetArguments(), boundTenant)
 			AgentScopeDecisions.WithLabelValues(name, "enforce", "mcp", AgentScopeVerdict(allowed)).Inc()
 			if !allowed {
 				slog.Warn("agent scope: tool refused", "scope", name, "tool", tool,
@@ -59,7 +60,9 @@ func (s *Server) agentScopeMiddleware(next server.ToolHandlerFunc) server.ToolHa
 			return next(ctx, req)
 		}
 		if name := auth.ShadowAgentScopeFromContext(ctx); name != "" {
-			if scope, ok := auth.LookupAgentScope(name); ok {
+			if scope, ok := auth.LookupAgentScope(name); ok && scope.BoundTenant {
+				AgentScopeDecisions.WithLabelValues(scope.Name, "shadow", "mcp", "shadow_unbound_tenant").Inc()
+			} else if ok {
 				allowed := scope.AllowsTool(tool)
 				AgentScopeDecisions.WithLabelValues(scope.Name, "shadow", "mcp", AgentScopeVerdict(allowed)).Inc()
 				if !allowed {

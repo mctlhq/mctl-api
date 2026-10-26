@@ -228,3 +228,33 @@ func TestMintAgentRunToken_WithoutExecution(t *testing.T) {
 		t.Fatalf("expired unbound token: err = %v, want ErrAgentRunNotFound", err)
 	}
 }
+
+func TestMintAgentRunToken_TenantBindingRoundTrips(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	_, exec := openExecution(t, s, PhaseRunning)
+
+	_, secret, err := s.MintAgentRunToken(ctx, MintAgentRunTokenInput{
+		Agent: "mctl-support", ExecutionID: exec.ID, Scope: auth.AgentScopeSupport,
+		Tenant: "labs", ViaPrincipalID: "prn_alice", TTL: 10 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("MintAgentRunToken: %v", err)
+	}
+	run, err := s.ResolveAgentRunToken(ctx, secret)
+	if err != nil {
+		t.Fatalf("ResolveAgentRunToken: %v", err)
+	}
+	if run.Tenant != "labs" || run.RequestedBy != "prn_alice" || run.Scope != auth.AgentScopeSupport {
+		t.Errorf("resolved run = %+v, want tenant labs, requested by prn_alice", run)
+	}
+
+	_, plain, err := s.MintAgentRunToken(ctx, MintAgentRunTokenInput{Agent: "implementer", ExecutionID: exec.ID})
+	if err != nil {
+		t.Fatalf("MintAgentRunToken: %v", err)
+	}
+	run, err = s.ResolveAgentRunToken(ctx, plain)
+	if err != nil || run.Tenant != "" || run.RequestedBy != "" {
+		t.Errorf("unbound token resolved as %+v, %v", run, err)
+	}
+}

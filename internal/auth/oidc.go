@@ -187,6 +187,10 @@ type User struct {
 	// with (agent_scope.go, mctlhq/mctl-agents#737), or "" for an unscoped
 	// run token and every other principal.
 	agentScope string
+	// boundTenant and runRequestedBy are the tenant a BoundTenant scope is
+	// limited to and the principal that minted the token.
+	boundTenant    string
+	runRequestedBy string
 }
 
 // NewGitHubUser builds a principal whose ID is a GitHub-verified login.
@@ -236,10 +240,17 @@ func (u *User) HasTenantAccess(tenant string) bool {
 	if u.IsAdmin() {
 		return true
 	}
-	// A scoped agent run reads every tenant; its route list, enforced by
-	// the API's agent scope gate, admits nothing that writes.
-	if s, ok := u.AgentScope(); ok && s.ReadAllTenants {
-		return true
+	if s, ok := u.AgentScope(); ok {
+		// A tenant-bound run admits its own tenant and nothing else; an
+		// empty tenant is never "platform", and groups are never consulted.
+		if s.BoundTenant {
+			return tenant != "" && tenant == u.boundTenant
+		}
+		// A scoped agent run reads every tenant; its route list, enforced by
+		// the API's agent scope gate, admits nothing that writes.
+		if s.ReadAllTenants {
+			return true
+		}
 	}
 	for _, g := range u.Groups {
 		if g == tenant {

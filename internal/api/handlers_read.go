@@ -370,6 +370,9 @@ func (h *Handlers) ListWorkflows(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		team := auditEntryTenant(e)
+		if _, bound := user.BoundTenant(); bound && team == "" {
+			continue
+		}
 		if !user.IsAdmin() && (e.ParametersUnreadable || (team != "" && !user.HasTenantAccess(team))) {
 			// An unreadable row's empty team is "unknown", not "platform".
 			continue
@@ -434,6 +437,15 @@ func (h *Handlers) GetWorkflow(w http.ResponseWriter, r *http.Request) {
 		slog.Error("audit record has unreadable parameters", "workflow", name, "id", entry.ID)
 		writeError(w, http.StatusServiceUnavailable, "audit record for workflow is unreadable, workflow may exist")
 		return
+	}
+	if _, bound := user.BoundTenant(); bound {
+		// A tenant-bound principal reads only a workflow the audit log
+		// attributes to its tenant: a cron run, an unattributed record or
+		// another tenant's record is refused.
+		if entry == nil || auditEntryTenant(entry) == "" || !user.HasTenantAccess(auditEntryTenant(entry)) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
 	}
 	if entry == nil {
 		// The audit log only records operator-initiated submissions

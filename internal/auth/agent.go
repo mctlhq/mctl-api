@@ -61,6 +61,10 @@ type AgentRun struct {
 	// Scope names the server-defined scope the token was minted with
 	// (agent_scope.go), or "" for an unscoped token.
 	Scope string
+	// Tenant is the tenant a BoundTenant scope is bound to, and RequestedBy
+	// the principal id of the caller who minted the token. Empty otherwise.
+	Tenant      string
+	RequestedBy string
 }
 
 // AgentRunResolver resolves a presented run-token bearer secret to the
@@ -86,6 +90,8 @@ func NewAgentUser(name string, run AgentRun) *User {
 		runID:            run.RunID,
 		agentPermissions: append([]string(nil), run.Permissions...),
 		agentScope:       run.Scope,
+		boundTenant:      run.Tenant,
+		runRequestedBy:   run.RequestedBy,
 	}
 }
 
@@ -127,4 +133,26 @@ func (u *User) AgentRunID() string {
 		return ""
 	}
 	return u.runID
+}
+
+// BoundTenant returns the tenant a tenant-bound agent run is limited to,
+// and false for every other principal, including a bound scope that
+// resolved with no tenant.
+func (u *User) BoundTenant() (string, bool) {
+	if u == nil || !u.IsAgent() || u.boundTenant == "" {
+		return "", false
+	}
+	if s, ok := u.AgentScope(); !ok || !s.BoundTenant {
+		return "", false
+	}
+	return u.boundTenant, true
+}
+
+// AgentRunRequestedBy is the principal id of the human who minted this
+// agent run token, or "".
+func (u *User) AgentRunRequestedBy() string {
+	if u == nil {
+		return ""
+	}
+	return u.runRequestedBy
 }
