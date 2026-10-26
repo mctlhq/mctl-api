@@ -219,13 +219,16 @@ func mapCodeScanningAlert(p *codeScanningPayload, repoKey, tenant, deliveryID st
 	case strings.TrimSpace(inst.Location.Path) == "":
 		return securityfindings.ObservationInput{}, errors.New("alert.most_recent_instance.location.path is required")
 	}
-	location := ""
+	// Location must be stable across deliveries for one alert: it is part of
+	// the subject fingerprint, and line ranges shift when code moves.
+	location := "alert:" + strconv.FormatInt(a.Number, 10)
+	lines := ""
 	if inst.Location.StartLine > 0 {
 		end := inst.Location.EndLine
 		if end <= 0 {
 			end = inst.Location.StartLine
 		}
-		location = strconv.Itoa(inst.Location.StartLine) + ":" + strconv.Itoa(end)
+		lines = strconv.Itoa(inst.Location.StartLine) + ":" + strconv.Itoa(end)
 	}
 	revision := ""
 	if !codeScanningUserActions[p.Action] {
@@ -254,8 +257,8 @@ func mapCodeScanningAlert(p *codeScanningPayload, repoKey, tenant, deliveryID st
 			Title:           truncate(a.Rule.Description, securityfindings.MaxUntrustedTitle),
 			Severity:        truncate(sev, securityfindings.MaxUntrustedSeverity),
 			ClaimedProvider: truncate(strings.TrimSpace(a.Tool.Name+" "+a.Tool.Version), securityfindings.MaxUntrustedProvider),
-			Description: truncate(fmt.Sprintf("action=%s ref=%s message=%s", p.Action,
-				firstNonEmpty(p.Ref, inst.Ref), inst.Message.Text), securityfindings.MaxUntrustedDescripton),
+			Description: truncate(fmt.Sprintf("action=%s ref=%s lines=%s message=%s", p.Action,
+				firstNonEmpty(p.Ref, inst.Ref), lines, inst.Message.Text), securityfindings.MaxUntrustedDescripton),
 		},
 	}
 	if strings.HasPrefix(a.HTMLURL, "https://github.com/") && len(a.HTMLURL) <= securityfindings.MaxRefLen {

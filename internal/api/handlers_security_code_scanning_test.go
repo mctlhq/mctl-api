@@ -19,6 +19,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -32,7 +33,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/securityfindings"
 )
 
-const (
+const ( //nolint:gosec // test fixtures, not credentials
 	csSecret    = "code-scanning-secret-0123456789abcdef"
 	csOrgSecret = "org-webhook-secret-0123456789abcdef!"
 	csSHA       = "0123456789abcdef0123456789abcdef01234567"
@@ -145,7 +146,7 @@ func TestCodeScanningValidDelivery(t *testing.T) {
 	o := ing.batch.Observations[0]
 	if o.Tenant != "admins" || o.Identity != "CVE-2026-1" || o.SourceFindingID != "github:mctlhq/mctl-api/code-scanning/7" ||
 		o.ClaimedAction != securityfindings.ClaimPresent || o.ObservedRevision != csSHA ||
-		o.Subject.Repository != "mctlhq/mctl-api" || o.Subject.Path != "go.mod" || o.Subject.Location != "3:4" || o.Subject.RuleID != "CVE-2026-1" {
+		o.Subject.Repository != "mctlhq/mctl-api" || o.Subject.Path != "go.mod" || o.Subject.Location != "alert:7" || o.Subject.RuleID != "CVE-2026-1" {
 		t.Errorf("observation = %+v", o)
 	}
 	if strings.Contains(o.Untrusted.ClaimedProvider, "evil") {
@@ -319,5 +320,25 @@ func TestCodeScanningMetricsPreinitialized(t *testing.T) {
 			t.Fatalf("series = %d", n)
 		}
 		_ = csCount(r)
+	}
+}
+
+func TestCodeScanningLocationStableAcrossLineShifts(t *testing.T) {
+	mk := func(start, end int) securityfindings.ObservationInput {
+		raw := fmt.Sprintf(`{"action":"fixed","alert":{"number":7,"rule":{"id":"CVE-2026-1"},
+"most_recent_instance":{"location":{"path":"go.mod","start_line":%d,"end_line":%d}}}}`, start, end)
+		var p codeScanningPayload
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		o, err := mapCodeScanningAlert(&p, "mctlhq/mctl-api", "admins", "d1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	a, b := mk(10, 12), mk(14, 16)
+	if a.Subject != b.Subject {
+		t.Errorf("subjects differ: %+v vs %+v", a.Subject, b.Subject)
 	}
 }
