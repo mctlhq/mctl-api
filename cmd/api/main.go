@@ -68,6 +68,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/pgshared"
 	"github.com/mctlhq/mctl-api/internal/principals"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
+	"github.com/mctlhq/mctl-api/internal/securityfindings"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
 	"github.com/mctlhq/mctl-api/internal/telemetry"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
@@ -658,6 +659,46 @@ func main() {
 		}
 	}
 
+	// SecurityFinding v1 store (mctl-api#774): SECURITY_FINDINGS_DB_URL, else
+	// EVIDENCE_DB_URL, else AUDIT_DB_URL, with a kill switch. Nil makes every
+	// /api/v1/security* route answer 503, never an empty list. An unknown
+	// SECURITY_FINDING_MIN_VERIFICATION_STRENGTH disables the store rather
+	// than silently weakening the resolution policy.
+	var securityFindingsStore *securityfindings.Store
+	securityDBURL := postgresURL(os.Getenv("SECURITY_FINDINGS_DB_URL"))
+	if securityDBURL == "" {
+		securityDBURL = evidenceDBURL
+	}
+	switch {
+	case killSwitchOn(os.Getenv("SECURITY_FINDINGS_DISABLED")):
+		slog.Warn("SECURITY_FINDINGS_DISABLED is set; /api/v1/security* routes will return 503")
+	case securityDBURL == "":
+		slog.Warn("no SECURITY_FINDINGS_DB_URL, EVIDENCE_DB_URL or AUDIT_DB_URL; /api/v1/security* routes will return 503")
+	default:
+		minStrength := securityfindings.DefaultMinStrength
+		if v := strings.TrimSpace(os.Getenv("SECURITY_FINDING_MIN_VERIFICATION_STRENGTH")); v != "" {
+			parsed, perr := securityfindings.ParseStrength(v)
+			if perr != nil {
+				slog.Error("invalid SECURITY_FINDING_MIN_VERIFICATION_STRENGTH; /api/v1/security* routes will return 503", "error", perr)
+				break
+			}
+			minStrength = parsed
+		}
+		opts := []securityfindings.StoreOption{securityfindings.WithMinStrength(minStrength)}
+		if workItemsStore != nil {
+			opts = append(opts, securityfindings.WithWorkItems(workItemsStore))
+		}
+		sfs, sfErr := initStore(initCtx, storeFailures, "security-findings", func(ctx context.Context) (*securityfindings.Store, error) {
+			return securityfindings.NewStore(ctx, securityDBURL, opts...)
+		})
+		if sfErr != nil {
+			slog.Error("security findings store init failed; /api/v1/security* routes will return 503", "error", sfErr)
+		} else {
+			securityFindingsStore = sfs
+			defer sfs.Close()
+		}
+	}
+
 	// Durable decision records (mctl-api#701), in the evidence database
 	// next to the envelopes their attempts reference, with a kill switch.
 	// Nil makes every /api/v1/decisions* route answer 503.
@@ -1076,6 +1117,8 @@ func main() {
 		Commerce:                       commerceStore,
 		CommerceAcceptDisabled:         cfg.CommerceAcceptDisabled,
 		Evidence:                       evidenceStore,
+		SecurityFindings:               securityFindingsStore,
+		SecurityProviders:              auth.LoadSecurityProviders(),
 		Decisions:                      decisionStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,

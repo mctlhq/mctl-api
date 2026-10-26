@@ -144,3 +144,23 @@ func (p *registryPublisherProvider) Verify(_ context.Context, raw string) (*Veri
 	}
 	return &Verified{Identity: Identity{Provider: ProviderService, Subject: RegistryPublisherUserID, Display: RegistryPublisherUserID, Kind: KindService}}, nil
 }
+
+// securityProviderProvider is the static-secret provider for the
+// per-provider security tokens (MCTL_SECURITY_PROVIDER_TOKENS, mctl-api#774).
+// Like surfaceProvider it closes over a map validated once at startup.
+type securityProviderProvider struct{ tokens func() map[string]string }
+
+func newSecurityProviderProvider(tokens func() map[string]string) *securityProviderProvider {
+	return &securityProviderProvider{tokens: tokens}
+}
+
+func (*securityProviderProvider) Name() string           { return ProviderService }
+func (*securityProviderProvider) Claims(tokenShape) bool { return true }
+
+func (p *securityProviderProvider) Verify(_ context.Context, raw string) (*Verified, error) {
+	u := securityProviderUserFor(p.tokens(), raw)
+	if u == nil {
+		return nil, ErrNoProvider
+	}
+	return &Verified{Identity: Identity{Provider: ProviderService, Subject: u.ID, Display: u.ID, Kind: KindService}}, nil
+}

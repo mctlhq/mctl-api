@@ -41,6 +41,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/openapi"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
+	"github.com/mctlhq/mctl-api/internal/securityfindings"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
 	"github.com/mctlhq/mctl-api/internal/usage"
 	"github.com/mctlhq/mctl-api/internal/workitems"
@@ -240,6 +241,15 @@ type Options struct {
 	// answer 503, never an empty list (requirements.md "Availability, gaps
 	// and retention").
 	Evidence *evidence.Store
+	// SecurityFindings is the durable SecurityFinding v1 store
+	// (mctl-api#774). Optional: nil makes every /api/v1/security* route
+	// answer 503 security_findings_store_unavailable, never an empty list.
+	SecurityFindings *securityfindings.Store
+	// SecurityProviders is the server-side configuration of the security
+	// providers (SECURITY_PROVIDERS), keyed by ref: their tenants and
+	// strongest allowed verification. A provider's authority comes from
+	// here and from its token, never from a request body.
+	SecurityProviders map[string]auth.SecurityProviderConfig
 	// Decisions is the durable decision record (mctl-api#701). Optional —
 	// nil makes every /api/v1/decisions* route answer 503.
 	Decisions *decisions.Store
@@ -484,6 +494,9 @@ func NewRouter(opts Options) http.Handler {
 		// The evidence writer reaches its append routes and nothing else
 		// (mctl-api#409, #701), the same shape as the usage writer above.
 		r.Use(evidenceWriterGate)
+		// A security provider reaches the observation ingest route and
+		// nothing else (mctl-api#774).
+		r.Use(securityProviderGate)
 		// The registry publisher reaches the registry publication routes and
 		// nothing else (mctlhq/mctl-agents#470).
 		r.Use(registryPublisherGate)
@@ -723,6 +736,30 @@ func NewRouter(opts Options) http.Handler {
 				})))
 				r.Post("/evidence/records", h.IngestEvidence)
 			})
+
+			// Security observation ingest (mctl-api#774). Its own bucket for
+			// the same reason as evidence ingest: a provider's retry burst
+			// must not be throttled into a gap.
+			r.Group(func(r chi.Router) {
+				r.Use(httprate.Limit(securityIngestPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					if user := auth.UserFromContext(r.Context()); user != nil {
+						return "security-ingest:" + rateLimitSubject(r, user), nil
+					}
+					return keyByTrustedIP(r)
+				})))
+				r.Post("/security/observations", h.IngestSecurityObservations)
+			})
+
+			// SecurityFinding v1 reads and lifecycle writes (mctl-api#774).
+			r.Get("/security/findings", h.ListSecurityFindings)
+			r.Get("/security/findings/{id}", h.GetSecurityFinding)
+			r.Get("/security/occurrences", h.ListSecurityOccurrences)
+			r.Get("/security/occurrences/{id}", h.GetSecurityOccurrence)
+			r.Post("/security/occurrences/{id}/triage", h.TriageSecurityOccurrence)
+			r.Post("/security/occurrences/{id}/remediation-attempts", h.StartSecurityRemediation)
+			r.Post("/security/occurrences/{id}/dismiss", h.DismissSecurityOccurrence)
+			r.Post("/security/remediation-attempts/{id}/fix", h.RecordSecurityFix)
+			r.Post("/security/remediation-attempts/{id}/verifications", h.RecordSecurityVerification)
 
 			// Decision records (mctl-api#701). Same producer and the same
 			// no-false-gap reasoning as evidence ingest, but their own

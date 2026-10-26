@@ -155,6 +155,21 @@ usageWriterTokenSecret: ""
 # rather than failing the pod.
 evidenceWriterTokenSecret: ""
 
+# Optional: security providers for SecurityFinding ingest (mctl-api#774).
+# A list of {ref, max_strength, tenants}: the provider's name, the strongest
+# verification it may assert (deterministic_regression_test, assurance_replay,
+# scanner_rerun_exact_revision, provider_claim or manual) and the tenants it
+# may report for. Rendered into SECURITY_PROVIDERS. Empty leaves only admins
+# able to ingest.
+securityProviders: []
+# Optional: Secret holding MCTL_SECURITY_PROVIDER_TOKENS, one "ref=token" line
+# per provider listed above (tokens of at least 32 characters, unique across
+# every principal). Each provider authenticates as
+# service:security-provider:<ref> and may only call
+# POST /api/v1/security/observations. The reference is optional, so an absent
+# Secret leaves the providers disabled rather than failing the pod.
+securityProviderTokensSecret: ""
+
 # Optional: Secret holding MCTL_REGISTRY_PUBLISHER_TOKEN, the bearer token of
 # the registry-publisher principal (service:mctl-agents-registry-publisher,
 # mctlhq/mctl-agents#470). It may only create an agent definition, publish a
