@@ -143,7 +143,9 @@ func TestSupportHandlers_DataDerivedTenant(t *testing.T) {
 	}
 }
 
-// supportTenants answers GetTenant for the tenants a mint test names.
+// supportTenants answers the tenant lookups a mint test names: "nowhere" is
+// a definite absence, "broken" is a checkout that cannot be read, anything
+// else exists.
 type supportTenants struct{ GitReader }
 
 func (supportTenants) GetTenant(name string) (*gitops.Tenant, error) {
@@ -151,6 +153,16 @@ func (supportTenants) GetTenant(name string) (*gitops.Tenant, error) {
 		return nil, errors.New("not found")
 	}
 	return &gitops.Tenant{Name: name}, nil
+}
+
+func (supportTenants) TenantExists(name string) (bool, error) {
+	switch name {
+	case "nowhere":
+		return false, nil
+	case "broken":
+		return false, errors.New("checkout unreadable")
+	}
+	return true, nil
 }
 
 type supportPrincipals struct{}
@@ -168,6 +180,9 @@ func supportHuman(login string, groups ...string) *auth.User {
 func TestMintSupportToken(t *testing.T) {
 	e := newWorkItemsEnv(t)
 	e.h.opts.GitReader = supportTenants{}
+	// The bound tenant is the env's own: the execution a support token binds
+	// to must be one of that tenant's work items.
+	ten := e.tenant
 	item := e.open(auth.NewServiceUser(), nil)
 	execID := e.attachExecution(auth.NewServiceUser(), item["id"].(string), "run-1", "Running")
 	mint := func(u *auth.User, tenant string, extra map[string]any) wiResponse {
@@ -181,8 +196,8 @@ func TestMintSupportToken(t *testing.T) {
 		return e.mintRunToken(u, body)
 	}
 
-	res := mint(supportHuman("alice", "labs"), "labs", nil)
-	if res.code != http.StatusCreated || res.body["tenant"] != "labs" {
+	res := mint(supportHuman("alice", ten), ten, nil)
+	if res.code != http.StatusCreated || res.body["tenant"] != ten {
 		t.Fatalf("member mint = %d %s", res.code, res.raw)
 	}
 	if exp, _ := time.Parse(time.RFC3339Nano, res.body["expires_at"].(string)); time.Until(exp) > 11*time.Minute {
@@ -190,34 +205,73 @@ func TestMintSupportToken(t *testing.T) {
 	}
 
 	before := e.auditOpCount("agent_run_token.mint_refused", artCodeTenantForbidden)
-	if res := mint(supportHuman("bob", "karabu"), "labs", nil); res.code != http.StatusForbidden || code(res) != artCodeTenantForbidden {
+	if res := mint(supportHuman("bob", "karabu"), ten, nil); res.code != http.StatusForbidden || code(res) != artCodeTenantForbidden {
 		t.Errorf("non-member mint = %d %s", res.code, res.raw)
 	}
 	if n := e.auditOpCount("agent_run_token.mint_refused", artCodeTenantForbidden) - before; n != 1 {
 		t.Errorf("refusal audit rows = %d, want 1", n)
 	}
 
-	if res := mint(supportHuman("root", "admins"), "labs", nil); res.code != http.StatusCreated {
+	// Admin override: allowed, and the mint audit row says so.
+	if res := mint(supportHuman("root", "admins"), ten, nil); res.code != http.StatusCreated {
 		t.Errorf("admin mint = %d %s", res.code, res.raw)
 	}
-	if res := mint(supportHuman("alice", "labs"), "", nil); res.code != http.StatusBadRequest || code(res) != artCodeTenantRequired {
+	overrides := 0
+	for _, entry := range e.audit.List(1000) {
+		if entry.Operation == "agent_run_token.mint" && entry.Parameters["admin_override"] == "true" {
+			overrides++
+		}
+	}
+	if overrides != 1 {
+		t.Errorf("mint audit rows with admin_override=true = %d, want 1", overrides)
+	}
+
+	if res := mint(supportHuman("alice", ten), "", nil); res.code != http.StatusBadRequest || code(res) != artCodeTenantRequired {
 		t.Errorf("missing tenant = %d %s", res.code, res.raw)
 	}
 	if res := mint(supportHuman("root", "admins"), "nowhere", nil); res.code != http.StatusNotFound || code(res) != artCodeTenantNotFound {
 		t.Errorf("unknown tenant = %d %s", res.code, res.raw)
 	}
-	if res := mint(supportHuman("alice", "labs"), "labs", map[string]any{"ttl_seconds": 3601}); res.code != http.StatusBadRequest || code(res) != artCodeInvalidTTL {
+	// A checkout that cannot be read is not an absent tenant.
+	if res := mint(supportHuman("root", "admins"), "broken", nil); res.code != http.StatusServiceUnavailable || code(res) != artCodeTenantLookupFailed {
+		t.Errorf("unreadable tenant lookup = %d %s", res.code, res.raw)
+	}
+	if res := mint(supportHuman("alice", ten), ten, map[string]any{"ttl_seconds": 3601}); res.code != http.StatusBadRequest || code(res) != artCodeInvalidTTL {
 		t.Errorf("long ttl = %d %s", res.code, res.raw)
 	}
-	if res := mint(auth.NewServiceUser(), "labs", nil); res.code != http.StatusForbidden || code(res) != artCodeRequesterForbidden {
+	// The scope defines the permissions; a member cannot add any.
+	if res := mint(supportHuman("alice", ten), ten, map[string]any{"permissions": []string{"security.remediate"}}); res.code != http.StatusBadRequest || code(res) != artCodePermissionsUnexpected {
+		t.Errorf("member mint with permissions = %d %s", res.code, res.raw)
+	}
+	if res := mint(supportHuman("root", "admins"), ten, map[string]any{"permissions": []string{"usage.write"}}); res.code != http.StatusBadRequest || code(res) != artCodePermissionsUnexpected {
+		t.Errorf("admin mint with permissions = %d %s", res.code, res.raw)
+	}
+	// The execution must be the bound tenant's own: a live execution of
+	// another tenant's work item is refused, for a member and for an admin.
+	other := ten + "-other"
+	otherItem := e.open(auth.NewServiceUser(), map[string]any{"tenant": other})
+	otherExec := e.attachExecution(auth.NewServiceUser(), otherItem["id"].(string), "run-other", "Running")
+	for _, u := range []*auth.User{supportHuman("alice", ten), supportHuman("root", "admins")} {
+		res := mint(u, ten, map[string]any{"execution_id": otherExec})
+		if res.code != http.StatusForbidden || code(res) != artCodeExecutionForeign {
+			t.Errorf("foreign execution mint by %s = %d %s", u.ID, res.code, res.raw)
+		}
+		if _, ok := res.body["token"]; ok {
+			t.Fatal("a refused mint returned a token")
+		}
+	}
+	if res := mint(supportHuman("alice", ten), ten, map[string]any{"execution_id": "we_missing"}); res.code != http.StatusNotFound || code(res) != artCodeExecutionNotFound {
+		t.Errorf("unknown execution = %d %s", res.code, res.raw)
+	}
+	if res := mint(auth.NewServiceUser(), ten, nil); res.code != http.StatusForbidden || code(res) != artCodeRequesterForbidden {
 		t.Errorf("service principal mint = %d %s", res.code, res.raw)
 	}
 	agent := auth.NewAgentUser("issue-investigator", auth.AgentRun{Scope: auth.AgentScopeInvestigate})
-	if res := mint(agent, "labs", nil); res.code != http.StatusForbidden {
+	if res := mint(agent, ten, nil); res.code != http.StatusForbidden {
 		t.Errorf("agent mint = %d %s", res.code, res.raw)
 	}
 	res = e.mintRunToken(auth.NewServiceUser(), map[string]any{
-		"agent": "issue-investigator", "execution_id": execID, "scope": "investigate", "tenant": "labs",
+		"agent": "issue-investigator", "execution_id": execID, "scope": "investigate", "tenant": ten,
 	})
 	if res.code != http.StatusBadRequest || code(res) != artCodeTenantUnexpected {
 		t.Errorf("tenant on investigate = %d %s", res.code, res.raw)

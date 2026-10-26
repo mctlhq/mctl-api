@@ -123,7 +123,7 @@ func TestAgentScopeMiddleware_SupportIsBoundToItsTenant(t *testing.T) {
 		args map[string]any
 	}{
 		{"mctl_get_service_status", map[string]any{"team": "labs", "service": "x"}},
-		{"mctl_list_incidents", map[string]any{"tenant": "labs"}},
+		{"mctl_list_incidents", map[string]any{"team": "labs"}},
 		{"mctl_get_service_logs", map[string]any{"team": "labs", "service": "x"}},
 	}
 	for _, c := range allowed {

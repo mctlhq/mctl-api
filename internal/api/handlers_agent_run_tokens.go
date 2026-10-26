@@ -42,21 +42,24 @@ const maxAgentRunTokenBodyBytes = 4 << 10
 
 // Typed error codes a client can branch on.
 const (
-	artCodeUnavailable         = "agent_run_tokens_unavailable"
-	artCodeRequesterForbidden  = "agent_run_token_requester_forbidden"
-	artCodeAgentUnknown        = "agent_unknown"
-	artCodeExecutionNotFound   = "execution_not_found"
-	artCodeExecutionTerminal   = "execution_terminal"
-	artCodeInvalidTTL          = "invalid_ttl"
-	artCodeScopeUnknown        = "agent_scope_unknown"
-	artCodeScopeNotForAgent    = "agent_scope_not_for_agent"
-	artCodePrincipalDisabled   = "agent_principal_disabled"
-	artCodeIdentityRefused     = "agent_identity_refused"
-	artCodeRegistryUnavailable = "agent_registry_error"
-	artCodeTenantRequired      = "agent_scope_tenant_required"
-	artCodeTenantUnexpected    = "agent_scope_tenant_unexpected"
-	artCodeTenantForbidden     = "agent_scope_tenant_forbidden"
-	artCodeTenantNotFound      = "tenant_not_found"
+	artCodeUnavailable           = "agent_run_tokens_unavailable"
+	artCodeRequesterForbidden    = "agent_run_token_requester_forbidden"
+	artCodeAgentUnknown          = "agent_unknown"
+	artCodeExecutionNotFound     = "execution_not_found"
+	artCodeExecutionTerminal     = "execution_terminal"
+	artCodeInvalidTTL            = "invalid_ttl"
+	artCodeScopeUnknown          = "agent_scope_unknown"
+	artCodeScopeNotForAgent      = "agent_scope_not_for_agent"
+	artCodePrincipalDisabled     = "agent_principal_disabled"
+	artCodeIdentityRefused       = "agent_identity_refused"
+	artCodeRegistryUnavailable   = "agent_registry_error"
+	artCodeTenantRequired        = "agent_scope_tenant_required"
+	artCodeTenantUnexpected      = "agent_scope_tenant_unexpected"
+	artCodeTenantForbidden       = "agent_scope_tenant_forbidden"
+	artCodeTenantNotFound        = "tenant_not_found"
+	artCodeTenantLookupFailed    = "tenant_lookup_failed"
+	artCodePermissionsUnexpected = "agent_scope_permissions_unexpected"
+	artCodeExecutionForeign      = "execution_not_in_tenant"
 )
 
 type agentRunTokenBody struct {
@@ -192,11 +195,32 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 			writeErrorCode(w, http.StatusBadRequest, artCodeTenantRequired, "tenant is required for scope "+strconv.Quote(body.Scope), nil)
 			return
 		}
+		// The scope's content is the server's: a member names the scope and
+		// the tenant, nothing else. A permission list on top would be carried
+		// verbatim onto the agent principal (HasPermission returns exactly
+		// the minted list), so it is refused rather than ignored.
+		if len(body.Permissions) > 0 {
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodePermissionsUnexpected)
+			writeErrorCode(w, http.StatusBadRequest, artCodePermissionsUnexpected,
+				"permissions are not accepted for scope "+strconv.Quote(body.Scope)+"; the scope defines them", nil)
+			return
+		}
 		if h.opts.GitReader == nil {
 			writeErrorCode(w, http.StatusServiceUnavailable, artCodeUnavailable, "tenant lookup not configured", nil)
 			return
 		}
-		if _, err := h.opts.GitReader.GetTenant(body.Tenant); err != nil {
+		// TenantExists, not GetTenant: it validates the name and the checkout
+		// age, and it keeps "could not read" apart from "absent". Only a
+		// definite absence is 404; a failed read is 503, never a refusal
+		// dressed as not-found.
+		exists, err := h.opts.GitReader.TenantExists(body.Tenant)
+		if err != nil {
+			slog.Error("agent run token: tenant lookup failed", "tenant", body.Tenant, "error", err)
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeTenantLookupFailed)
+			writeErrorCode(w, http.StatusServiceUnavailable, artCodeTenantLookupFailed, "tenant lookup failed", nil)
+			return
+		}
+		if !exists {
 			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeTenantNotFound)
 			writeErrorCode(w, http.StatusNotFound, artCodeTenantNotFound, "tenant not found: "+body.Tenant, nil)
 			return
@@ -206,6 +230,31 @@ func (h *Handlers) MintAgentRunToken(w http.ResponseWriter, r *http.Request) {
 			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeTenantForbidden)
 			writeErrorCode(w, http.StatusForbidden, artCodeTenantForbidden,
 				"not a member of tenant "+strconv.Quote(body.Tenant), nil)
+			return
+		}
+		// The execution the token binds to must be the bound tenant's own.
+		// Otherwise a member could attach a support token to any live
+		// execution (another tenant's work item, another agent's run) and
+		// the row and the mint audit would attribute the token to that run.
+		// An execution records no agent, so the agent half of that binding
+		// cannot be checked here; the tenant half is what the row and the
+		// gate rely on.
+		corr, err := h.opts.WorkItems.ResolveExecution(r.Context(), body.ExecutionID)
+		if err != nil {
+			slog.Error("agent run token: resolve execution", "execution_id", body.ExecutionID, "error", err)
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, "agent_run_token_mint_failed")
+			writeErrorCode(w, http.StatusInternalServerError, "agent_run_token_mint_failed", "agent run token mint failed", nil)
+			return
+		}
+		if corr == nil {
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeExecutionNotFound)
+			writeErrorCode(w, http.StatusNotFound, artCodeExecutionNotFound, "execution not found: "+body.ExecutionID, nil)
+			return
+		}
+		if corr.Tenant != body.Tenant {
+			h.auditAgentRunTokenRefusal(r, user, body.Agent, artCodeExecutionForeign)
+			writeErrorCode(w, http.StatusForbidden, artCodeExecutionForeign,
+				"execution "+strconv.Quote(body.ExecutionID)+" does not belong to tenant "+strconv.Quote(body.Tenant), nil)
 			return
 		}
 		extra = map[string]string{
