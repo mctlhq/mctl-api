@@ -3,6 +3,9 @@ name: security
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
   schedule:
     - cron: "17 4 * * 1"
 
@@ -29,8 +32,25 @@ jobs:
   trivy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v7
+      # Report-only scan: produces SARIF for Code Scanning and never fails on
+      # findings. It runs before the gate so a failing gate cannot skip it.
+      - name: Trivy filesystem scan (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "0"
+          ignore-unfixed: true
+          version: v0.69.3
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -40,3 +60,10 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           version: v0.69.3
+      # Skipped for fork and Dependabot PRs, whose read-only token cannot upload.
+      - name: Upload Trivy SARIF to Code Scanning
+        if: always() && hashFiles('trivy-results.sarif') != '' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'))
+        uses: github/codeql-action/upload-sarif@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3.39.1
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-fs
