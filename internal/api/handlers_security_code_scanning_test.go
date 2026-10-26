@@ -33,9 +33,9 @@ import (
 	"github.com/mctlhq/mctl-api/internal/securityfindings"
 )
 
-const ( //nolint:gosec // test fixtures, not credentials
-	csSecret    = "code-scanning-secret-0123456789abcdef"
-	csOrgSecret = "org-webhook-secret-0123456789abcdef!"
+const (
+	csSecret    = "code-scanning-secret-0123456789abcdef" //nolint:gosec // test fixture
+	csOrgSecret = "org-webhook-secret-0123456789abcdef!"  //nolint:gosec // test fixture
 	csSHA       = "0123456789abcdef0123456789abcdef01234567"
 )
 
