@@ -793,3 +793,23 @@ func TestDeploymentDefaultRenderHasNoOptionalEnvFrom(t *testing.T) {
 		t.Errorf("default render has %d envFrom entries, want 2", n)
 	}
 }
+
+func TestDeploymentSupportIncidentProducerToken(t *testing.T) {
+	d, _ := renderDeployment(t)
+	if _, ok := findEnv(mainContainer(t, d), "MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN"); ok {
+		t.Error("default render should not set MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN")
+	}
+
+	d, _ = renderDeployment(t, "--set", "supportIncidentProducerTokenSecret=mctl-api-support-incident-producer")
+	env, ok := findEnv(mainContainer(t, d), "MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN")
+	if !ok {
+		t.Fatal("expected MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN env to be rendered")
+	}
+	if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+		t.Fatal("expected a secretKeyRef")
+	}
+	ref := env.ValueFrom.SecretKeyRef
+	if ref.Name != "mctl-api-support-incident-producer" || ref.Key != "MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN" || !ref.Optional {
+		t.Errorf("unexpected secretKeyRef: %+v", ref)
+	}
+}

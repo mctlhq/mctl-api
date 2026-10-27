@@ -142,7 +142,7 @@ func securityProviderTokens() map[string]string {
 		return nil
 	}
 	configured := LoadSecurityProviders()
-	others := []string{"MCTL_AGENT_SERVICE_TOKEN", usageWriterTokenEnv, evidenceWriterTokenEnv, registryPublisherTokenEnv}
+	others := []string{"MCTL_AGENT_SERVICE_TOKEN", usageWriterTokenEnv, evidenceWriterTokenEnv, registryPublisherTokenEnv, supportIncidentProducerTokenEnv}
 	for _, env := range surfaceTokenEnv {
 		others = append(others, env)
 	}

@@ -523,6 +523,9 @@ func NewRouter(opts Options) http.Handler {
 		// The registry publisher reaches the registry publication routes and
 		// nothing else (mctlhq/mctl-agents#470).
 		r.Use(registryPublisherGate)
+		// The support incident producer files incidents and nothing else
+		// (mctl-api#830).
+		r.Use(supportIncidentProducerGate)
 		// A GitHub Actions principal reaches the deploy route and nothing
 		// else (mctl-api#530).
 		r.Use(ciPrincipalGate)
@@ -620,6 +623,7 @@ func NewRouter(opts Options) http.Handler {
 
 			// Incident endpoints (alert store).
 			r.Get("/incidents/summary", h.IncidentSummary)
+			r.Get("/incidents/support/aggregation", h.SupportIncidentAggregation)
 			r.Get("/incidents", h.ListIncidents)
 			r.Get("/incidents/{id}", h.GetIncident)
 			r.Post("/incidents", h.CreateIncident)

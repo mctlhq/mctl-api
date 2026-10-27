@@ -468,3 +468,60 @@ func TestOnlyAdminsAndTheUsageWriterMayWriteUsage(t *testing.T) {
 		}
 	}
 }
+
+const supportProducerToken32 = "support-producer-token-0123456789abcdef"
+
+func TestSupportIncidentProducerAuthenticatesNarrowly(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	t.Setenv("MCTL_AGENT_SERVICE_TOKEN", "svc-token-123")
+	t.Setenv("MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN", supportProducerToken32)
+	for _, disabled := range []string{"", "1"} {
+		t.Setenv("MCTL_FEDERATION_DISABLED", disabled)
+		u := authAs(t, supportProducerToken32)
+		if u == nil || !u.IsSupportIncidentProducer() || u.ID != SupportIncidentProducerUserID {
+			t.Fatalf("federation_disabled=%q: user = %+v", disabled, u)
+		}
+		if u.IsAdmin() || u.HasTenantAccess("x") || u.HasPermission(PermissionUsageWrite) || u.HasPermission(PermissionEvidenceWrite) {
+			t.Fatalf("producer holds more than it should: %+v", u)
+		}
+		id, ok := u.Identity()
+		if !ok || id.Provider != ProviderService || id.Kind != KindService {
+			t.Fatalf("identity = %+v ok=%v", id, ok)
+		}
+	}
+}
+
+func TestSupportIncidentProducerTokenThatCouldBeConfusedIsRefused(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
+	for _, env := range []string{
+		"MCTL_AGENT_SERVICE_TOKEN", "MCTL_USAGE_WRITER_TOKEN", "MCTL_EVIDENCE_WRITER_TOKEN",
+		"MCTL_REGISTRY_PUBLISHER_TOKEN", "MCTL_SURFACE_TELEGRAM_TOKEN",
+	} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv("MCTL_AGENT_SERVICE_TOKEN", "svc-token-123")
+			t.Setenv(env, supportProducerToken32)
+			t.Setenv("MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN", supportProducerToken32)
+			if u := authAs(t, supportProducerToken32); u != nil && u.IsSupportIncidentProducer() {
+				t.Fatal("minted the producer from a shared token")
+			}
+			// Reciprocity: the producer does not win the token either.
+			if env != "MCTL_AGENT_SERVICE_TOKEN" {
+				if u := authAs(t, supportProducerToken32); u != nil && (u.IsUsageWriter() || u.IsEvidenceWriter() || u.IsRegistryPublisher() || u.ID == "surface:telegram") {
+					t.Fatalf("the other principal still authenticates: %+v", u)
+				}
+			}
+		})
+	}
+	t.Run("too short", func(t *testing.T) {
+		t.Setenv("MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN", "short")
+		if u := authAs(t, "short"); u != nil && u.IsSupportIncidentProducer() {
+			t.Fatal("minted from a short token")
+		}
+	})
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv("MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN", "")
+		if u := authAs(t, ""); u != nil && u.IsSupportIncidentProducer() {
+			t.Fatal("minted from an empty token")
+		}
+	})
+}

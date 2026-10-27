@@ -473,3 +473,42 @@ func (s *Store) Summary(ctx context.Context) (*Summary, error) {
 	}
 	return sum, nil
 }
+
+// SupportAggregate is one group of open support incidents sharing a
+// fingerprint and type, across tenants.
+type SupportAggregate struct {
+	Fingerprint     string   `json:"fingerprint"`
+	Type            string   `json:"type"`
+	AffectedTenants []string `json:"affected_tenants"`
+	Count           int      `json:"count"`
+}
+
+// SupportAggregation groups open source=support incidents by
+// (fingerprint, type), ordered by count descending then fingerprint. It
+// returns an empty non-nil slice when there are none.
+func (s *Store) SupportAggregation(ctx context.Context) ([]SupportAggregate, error) {
+	rows, err := s.pool.Query(ctx, `SELECT fingerprint, type, array_agg(DISTINCT tenant ORDER BY tenant), count(*)
+FROM alerts
+WHERE source = 'support' AND fingerprint <> '' AND status NOT IN ('resolved', 'suppressed')
+GROUP BY fingerprint, type
+ORDER BY count(*) DESC, fingerprint`)
+	if err != nil {
+		return nil, fmt.Errorf("alerts store: support aggregation: %w", err)
+	}
+	defer rows.Close()
+
+	out := []SupportAggregate{}
+	for rows.Next() {
+		var a SupportAggregate
+		var n int64
+		if err := rows.Scan(&a.Fingerprint, &a.Type, &a.AffectedTenants, &n); err != nil {
+			return nil, fmt.Errorf("alerts store: support aggregation scan: %w", err)
+		}
+		a.Count = int(n)
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("alerts store: support aggregation: %w", err)
+	}
+	return out, nil
+}

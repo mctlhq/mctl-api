@@ -115,6 +115,9 @@ func principalOf(u *auth.User) string {
 	if name, ok := u.AgentName(); ok {
 		return auth.AgentPrincipalPrefix + name
 	}
+	if u.IsSupportIncidentProducer() {
+		return u.ID
+	}
 	if u.IsService() {
 		return "service:" + u.ID
 	}
