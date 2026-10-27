@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.129.0](https://github.com/mctlhq/mctl-api/compare/4.128.1...4.129.0) (2026-10-27)
+
+
+### Features
+
+* **workitems:** accept an a2a execution engine ([1b3743e](https://github.com/mctlhq/mctl-api/commit/1b3743ebe8139c6af45cd8380025a22ec251d265))
+* **workitems:** accept an a2a execution engine ([17ca1ad](https://github.com/mctlhq/mctl-api/commit/17ca1adfbf8df075f2188b483dba82e0163f6ba5))
+
 ## [4.128.1](https://github.com/mctlhq/mctl-api/compare/4.128.0...4.128.1) (2026-10-27)
 
 
