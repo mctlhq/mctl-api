@@ -2,12 +2,12 @@ package mcp
 
 import (
 	"context"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
