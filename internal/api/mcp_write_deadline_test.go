@@ -2,13 +2,13 @@ package api
 
 import (
 	"context"
-
-	"github.com/mctlhq/mctl-api/internal/auth"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 // With the extension the handler may outlive the server's WriteTimeout (here
