@@ -371,8 +371,9 @@ func (p *PostgresLogger) ListSupport(ctx context.Context, f SupportFilter) ([]En
 			return rows.Scan(append(dest, &pid, &vpid, &vexec, &tenant)...)
 		})
 		if err != nil {
-			slog.Error("audit postgres: scan failed", "error", err)
-			continue
+			// A row that cannot be read is a failed read, not a shorter page:
+			// an admin answering "who read my data" must not get a silent gap.
+			return nil, fmt.Errorf("audit postgres: list support: scan: %w", err)
 		}
 		e.PrincipalID, e.ViaPrincipalID, e.ViaExecutionID, e.Tenant = pid, vpid, vexec, tenant
 		entries = append(entries, e)
