@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.131.0](https://github.com/mctlhq/mctl-api/compare/4.130.0...4.131.0) (2026-10-27)
+
+
+### Features
+
+* **agents:** issue-830-feat-incidents-support-incident-producer ([214a687](https://github.com/mctlhq/mctl-api/commit/214a687580aaa4847c1c662f9aa4533252756072))
+* **agents:** issue-830-feat-incidents-support-incident-producer ([b8f9649](https://github.com/mctlhq/mctl-api/commit/b8f964945f5cfa09da586ca587340627117ef5ab))
+
+
+### Bug Fixes
+
+* **incidents:** never hand the support producer another incident's row ([3498d51](https://github.com/mctlhq/mctl-api/commit/3498d51347a6e2a880f9eaf6999ee79ae14c2196))
+
 ## [4.130.0](https://github.com/mctlhq/mctl-api/compare/4.129.0...4.130.0) (2026-10-27)
 
 
