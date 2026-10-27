@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.136.0](https://github.com/mctlhq/mctl-api/compare/4.135.0...4.136.0) (2026-10-27)
+
+
+### Features
+
+* **agents:** issue-843-test-mcp-router-wiring-test-for-mcpwrite ([8b03011](https://github.com/mctlhq/mctl-api/commit/8b03011d1ef37b11900f6443304b3ccd90ff6a97))
+
 ## [4.135.0](https://github.com/mctlhq/mctl-api/compare/4.134.0...4.135.0) (2026-10-27)
 
 
