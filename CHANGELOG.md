@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.132.0](https://github.com/mctlhq/mctl-api/compare/4.131.0...4.132.0) (2026-10-27)
+
+
+### Features
+
+* **usage:** accept price_source and skip catalog pricing for third-party rows ([0003e8d](https://github.com/mctlhq/mctl-api/commit/0003e8d086d104622b23bcada506ac7b7243d2f8))
+* **usage:** accept price_source and skip catalog pricing for third-party rows ([1580eab](https://github.com/mctlhq/mctl-api/commit/1580eab5d3f133dde16a2ab17d1135306b6334c9)), closes [#827](https://github.com/mctlhq/mctl-api/issues/827)
+
+
+### Bug Fixes
+
+* **usage:** price provider_free rows that report their own cost ([762c12f](https://github.com/mctlhq/mctl-api/commit/762c12f1221371a09703e1f8c1ace7d3fe4d3e73))
+* **usage:** refuse the provider_free marker on catalog rows ([be6a8a8](https://github.com/mctlhq/mctl-api/commit/be6a8a8b56d2b4bffd2e92d6ea3caa8d29caa362))
+
 ## [4.131.0](https://github.com/mctlhq/mctl-api/compare/4.130.0...4.131.0) (2026-10-27)
 
 
