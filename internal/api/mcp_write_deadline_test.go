@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 // With the extension the handler may outlive the server's WriteTimeout (here
@@ -65,5 +68,62 @@ func TestRequestTimeout(t *testing.T) {
 	}
 	if got := deadline(requestTimeout(30*time.Second, 0), http.MethodPost, "/mcp"); !near(got, 30*time.Second) {
 		t.Fatalf("unconfigured POST /mcp deadline %s, want 30s", got)
+	}
+}
+
+type deadlineQuota struct{ left *time.Duration }
+
+func (q deadlineQuota) GetNamespaceUsage(ctx context.Context, _ string) (used, hard map[string]string, err error) {
+	if d, ok := ctx.Deadline(); ok {
+		*q.left = time.Until(d)
+	}
+	return nil, nil, nil
+}
+
+// The authenticated group of NewRouter must install requestTimeout with
+// Options.MCPWriteTimeout: POST /mcp gets it, other routes keep 30s.
+func TestNewRouterRequestDeadlines(t *testing.T) {
+	var mcpLeft, mcpGetLeft, apiLeft time.Duration
+	stub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		d, ok := r.Context().Deadline()
+		if !ok {
+			t.Errorf("%s /mcp: no deadline", r.Method)
+			return
+		}
+		if r.Method == http.MethodPost {
+			mcpLeft = time.Until(d)
+		} else {
+			mcpGetLeft = time.Until(d)
+		}
+	})
+	router := NewRouter(Options{
+		AuthMiddleware:  tokenUsers(map[string]*auth.User{"tok": supportHuman("root", "admins")}),
+		MCPWriteTimeout: 75 * time.Second,
+		mcpHandler:      stub,
+		GitReader:       supportTenants{},
+		QuotaReader:     deadlineQuota{left: &apiLeft},
+	})
+	do := func(method, target string) {
+		t.Helper()
+		req := httptest.NewRequest(method, target, nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s %s: status %d: %s", method, target, rec.Code, rec.Body.String())
+		}
+	}
+	do(http.MethodPost, "/mcp")
+	do(http.MethodGet, "/mcp")
+	do(http.MethodGet, "/api/v1/resources/labs")
+	near := func(got, want time.Duration) bool { return got > want-time.Second && got <= want }
+	if !near(mcpLeft, 75*time.Second) {
+		t.Fatalf("POST /mcp deadline %s, want 75s", mcpLeft)
+	}
+	if !near(mcpGetLeft, 30*time.Second) {
+		t.Fatalf("GET /mcp deadline %s, want 30s", mcpGetLeft)
+	}
+	if !near(apiLeft, 30*time.Second) {
+		t.Fatalf("GET /api/v1/resources/labs deadline %s, want 30s", apiLeft)
 	}
 }
