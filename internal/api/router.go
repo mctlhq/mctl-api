@@ -68,6 +68,11 @@ type Options struct {
 	// ServerWriteTimeout (mctl-api#814: mctl_ask_support waits for an answer).
 	// Zero, or a value not above ServerWriteTimeout, changes nothing.
 	MCPWriteTimeout time.Duration
+
+	// mcpHandler, when set (in-package tests only), replaces
+	// MCPServer.NewStreamableHTTPHandler() so a test can observe the request
+	// context /mcp is served with. Production code cannot set it.
+	mcpHandler http.Handler
 	// QuotaReader fetches live K8s resource usage (optional — nil in local/test).
 	QuotaReader QuotaReader
 	// PreviewLister lists preview Helm releases (optional — nil means listing is unavailable).
@@ -1043,11 +1048,17 @@ func NewRouter(opts Options) http.Handler {
 		// POST /mcp  → send request (can return a streaming SSE response)
 		// GET  /mcp  → listen stream (no session binding under stateless mode)
 		// Auth: Authorization: Bearer <token> on every request.
+		var mcpH http.Handler
 		if opts.MCPServer != nil {
 			opts.MCPServer.SetTenantOwnerChecker(h)
 			opts.MCPServer.SetAgentReceiptGate(h, opts.AgentReceiptGateMode)
 			opts.MCPServer.SetScopedCallAuditor(h)
-			mcpH := opts.MCPServer.NewStreamableHTTPHandler()
+			mcpH = opts.MCPServer.NewStreamableHTTPHandler()
+		}
+		if opts.mcpHandler != nil {
+			mcpH = opts.mcpHandler
+		}
+		if mcpH != nil {
 			r.Post("/mcp", extendWriteDeadline(opts.MCPWriteTimeout, mcpH).ServeHTTP)
 			r.Get("/mcp", mcpH.ServeHTTP)
 			r.Delete("/mcp", mcpH.ServeHTTP)

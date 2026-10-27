@@ -610,15 +610,11 @@ func (s *Server) supportAwait(ctx, budgetCtx context.Context, cfg *SupportConfig
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return nil, ctx.Err()
 	}
+	if lastErr != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("task %s is not finished and could not be read (%s); continue with mctl_get_support_task", id, lastErr.Error())), nil
+	}
 	// No poll attempted (the send used the whole budget): the send reply is
 	// the last successful read, so this is an unfinished task, not an error.
-	if lastErr != nil {
-		reason := "no poll completed within the wait"
-		if lastErr != nil {
-			reason = lastErr.Error()
-		}
-		return mcplib.NewToolResultError(fmt.Sprintf("task %s is not finished and could not be read (%s); continue with mctl_get_support_task", id, reason)), nil
-	}
 	return supportResultJSON(supportAnswer{
 		TaskID:    id,
 		ContextID: last.ContextID,
