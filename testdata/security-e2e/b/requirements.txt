@@ -1,0 +1,2 @@
+# E2E fixture for mctlhq/mctl-gitops#2168. Never merge.
+urllib3==1.24.1
