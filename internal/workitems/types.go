@@ -78,6 +78,11 @@ const (
 const (
 	EngineTemporal = "temporal"
 	EngineArgo     = "argo"
+	// EngineA2A is a task served by an A2A agent service, which runs on
+	// neither Temporal nor Argo: engine_ref is the A2A task id. The support
+	// agent opens one per support task so its run token binds to it
+	// (mctlhq/mctl-support#2, decided in mctl-api#811).
+	EngineA2A = "a2a"
 
 	PhasePending   = "Pending"
 	PhaseRunning   = "Running"

@@ -305,8 +305,8 @@ func (in SurfaceRefInput) validate() error {
 }
 
 func validateEngine(engine, ref string) error {
-	if engine != EngineTemporal && engine != EngineArgo {
-		return invalid("engine must be %q or %q", EngineTemporal, EngineArgo)
+	if engine != EngineTemporal && engine != EngineArgo && engine != EngineA2A {
+		return invalid("engine must be %q, %q or %q", EngineTemporal, EngineArgo, EngineA2A)
 	}
 	return checkText("engine_ref", ref, MaxEngineRefBytes, true)
 }

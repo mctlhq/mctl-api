@@ -743,7 +743,7 @@ components:
       properties:
         id: {type: string, example: we_9a01c2d3-0000-4000-8000-000000000000}
         work_item_id: {type: string}
-        engine: {type: string, enum: [temporal, argo]}
+        engine: {type: string, enum: [temporal, argo, a2a]}
         engine_ref: {type: string}
         attempt: {type: integer}
         resumed_from_execution_id: {type: string}
@@ -4522,7 +4522,7 @@ paths:
               type: object
               additionalProperties: false
               properties:
-                engine: {type: string, enum: [temporal, argo]}
+                engine: {type: string, enum: [temporal, argo, a2a]}
                 engine_ref: {type: string, maxLength: 256}
                 phase: {type: string, enum: [Pending, Running, Succeeded, Failed, Error], default: Pending}
                 surface: {type: string}
@@ -5064,7 +5064,7 @@ paths:
               properties:
                 expected_state_version: {type: integer, format: int64}
                 resumed_from_execution_id: {type: string}
-                engine: {type: string, enum: [temporal, argo]}
+                engine: {type: string, enum: [temporal, argo, a2a]}
                 engine_ref: {type: string}
                 surface: {type: string}
                 idempotency_key: {type: string}
@@ -5228,7 +5228,7 @@ paths:
               additionalProperties: false
               properties:
                 claim_token: {type: string}
-                engine: {type: string, enum: [temporal, argo]}
+                engine: {type: string, enum: [temporal, argo, a2a]}
                 engine_ref: {type: string, maxLength: 256}
               required: [claim_token, engine, engine_ref]
       responses:

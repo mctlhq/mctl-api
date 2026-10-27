@@ -110,7 +110,8 @@ may live in different databases.
   approval state. A retention-swept intent (mctl-api#353) reads back with
   `text` empty and `text_redacted: true` — consumers must treat that as
   "text not observable", never as an empty intent.
-- **`WorkItemExecution`** — `id` (`we_...`), `engine` (`temporal` | `argo`),
+- **`WorkItemExecution`** — `id` (`we_...`), `engine` (`temporal` | `argo` | `a2a`; `a2a` is a task
+  served by an A2A agent service, `engine_ref` its task id),
   `engine_ref`, `attempt`, `resumed_from_execution_id`, `phase`
   (`Pending` | `Running` | `Succeeded` | `Failed` | `Error`), `started_at`,
   `ended_at`. At most one non-terminal execution per work item.
