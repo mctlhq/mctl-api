@@ -114,12 +114,19 @@ func NewWorkloadClientFromEnv() (*WorkloadClient, error) {
 	return NewWorkloadClient(cs), nil
 }
 
+// instanceLabel names the Helm release a pod belongs to; for a tenant service
+// it is the workload name {team}-{app}.
+const instanceLabel = "app.kubernetes.io/instance"
+
 // ListServicePods lists the pods of workload ({team}-{app}) in namespace. It
 // selects by the app.kubernetes.io/instance label and falls back to the pod
-// name prefix "<workload>-" when the label matches nothing.
+// name prefix "<workload>-" when the label matches nothing. The fallback only
+// takes pods that carry no instance label: a labelled pod belongs to its own
+// release, such as a sibling service "web-worker" whose pods also start with
+// "acme-web-".
 func (c *WorkloadClient) ListServicePods(ctx context.Context, namespace, workload string) ([]PodState, error) {
 	list, err := c.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/instance=" + workload,
+		LabelSelector: instanceLabel + "=" + workload,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing pods in %s: %w", namespace, err)
@@ -131,8 +138,9 @@ func (c *WorkloadClient) ListServicePods(ctx context.Context, namespace, workloa
 			return nil, fmt.Errorf("listing pods in %s: %w", namespace, err)
 		}
 		for i := range all.Items {
-			if strings.HasPrefix(all.Items[i].Name, workload+"-") {
-				pods = append(pods, all.Items[i])
+			p := &all.Items[i]
+			if p.Labels[instanceLabel] == "" && strings.HasPrefix(p.Name, workload+"-") {
+				pods = append(pods, *p)
 			}
 		}
 	}
@@ -257,6 +265,12 @@ func (c *WorkloadClient) ListEvents(ctx context.Context, namespace string, q Eve
 	if err != nil {
 		return nil, false, fmt.Errorf("listing events in %s: %w", namespace, err)
 	}
+	var siblings []string
+	if q.Workload != "" {
+		if siblings, err = c.siblingWorkloads(ctx, namespace, q.Workload); err != nil {
+			return nil, false, err
+		}
+	}
 	limit := q.Limit
 	if limit <= 0 {
 		limit = DefaultEventLimit
@@ -275,7 +289,7 @@ func (c *WorkloadClient) ListEvents(ctx context.Context, namespace string, q Eve
 		if q.Type != "" && e.Type != q.Type {
 			continue
 		}
-		if q.Workload != "" && !belongsToWorkload(e.InvolvedObject.Name, q.Workload) {
+		if q.Workload != "" && !belongsToWorkload(e.InvolvedObject.Name, q.Workload, siblings) {
 			continue
 		}
 		first := e.FirstTimestamp.Time
@@ -306,11 +320,42 @@ func (c *WorkloadClient) ListEvents(ctx context.Context, namespace string, q Eve
 	return events, truncated, nil
 }
 
+// siblingWorkloads returns the other releases in namespace whose name extends
+// workload ("acme-web-worker" for "acme-web"), read from the pods' instance
+// labels. Their objects also start with "<workload>-", so ListEvents must
+// exclude them. A failed pod list is an error, never "no siblings". A sibling
+// with no pods at all is not seen.
+func (c *WorkloadClient) siblingWorkloads(ctx context.Context, namespace, workload string) ([]string, error) {
+	list, err := c.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: instanceLabel})
+	if err != nil {
+		return nil, fmt.Errorf("listing pods in %s: %w", namespace, err)
+	}
+	seen := map[string]bool{}
+	var out []string
+	for i := range list.Items {
+		v := list.Items[i].Labels[instanceLabel]
+		if v != workload && strings.HasPrefix(v, workload+"-") && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
 // belongsToWorkload reports whether an object name is the workload itself or
-// one of its children ("<workload>-..."). The trailing dash keeps "acme-web"
-// from matching "acme-webhook-...".
-func belongsToWorkload(name, workload string) bool {
-	return name == workload || strings.HasPrefix(name, workload+"-")
+// one of its children ("<workload>-..."), and not the object of a sibling
+// release whose name extends the workload's. The trailing dash keeps
+// "acme-web" from matching "acme-webhook-...".
+func belongsToWorkload(name, workload string, siblings []string) bool {
+	if name != workload && !strings.HasPrefix(name, workload+"-") {
+		return false
+	}
+	for _, s := range siblings {
+		if name == s || strings.HasPrefix(name, s+"-") {
+			return false
+		}
+	}
+	return true
 }
 
 func eventLastSeen(e *corev1.Event) time.Time {

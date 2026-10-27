@@ -26,7 +26,8 @@ import (
 	"github.com/mctlhq/mctl-api/internal/k8s"
 )
 
-var dnsLabelPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+// dnsLabelPattern is an RFC 1123 label, at most 63 characters.
+var dnsLabelPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
 const (
 	minEventWindow     = time.Minute

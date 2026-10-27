@@ -71,10 +71,12 @@ func TestListServicePods_NamePrefixFallback(t *testing.T) {
 	mk := func(name string) *corev1.Pod {
 		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "acme"}}
 	}
-	c := NewWorkloadClient(fake.NewSimpleClientset(mk("acme-web-abc"), mk("acme-webhook-abc")))
+	sibling := mk("acme-web-worker-base-service-7c9d-xyz")
+	sibling.Labels = map[string]string{instanceLabel: "acme-web-worker"}
+	c := NewWorkloadClient(fake.NewSimpleClientset(mk("acme-web-abc"), mk("acme-webhook-abc"), sibling))
 	got, err := c.ListServicePods(context.Background(), "acme", "acme-web")
 	if err != nil || len(got) != 1 || got[0].Name != "acme-web-abc" {
-		t.Fatalf("got %v, %v", got, err)
+		t.Fatalf("got %v, %v (a sibling release's labelled pod must not fall back in)", got, err)
 	}
 	empty, err := c.ListServicePods(context.Background(), "acme", "acme-none")
 	if err != nil || empty == nil || len(empty) != 0 {
@@ -133,5 +135,42 @@ func TestListEvents(t *testing.T) {
 	got, trunc, _ = c.ListEvents(context.Background(), "acme", EventQuery{Since: time.Hour, Limit: 1})
 	if len(got) != 1 || !trunc {
 		t.Errorf("cap: %d %v", len(got), trunc)
+	}
+}
+
+// A sibling release whose name extends the workload's ("acme-web-worker" for
+// "acme-web") is found from pod instance labels, and its events are not
+// reported as the workload's.
+func TestListEvents_ExcludesSiblingRelease(t *testing.T) {
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	ev := func(name, obj string) *corev1.Event {
+		return &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: name, Namespace: "acme"},
+			InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: obj},
+			Type:           "Warning", Reason: "R", Message: "m", LastTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+		}
+	}
+	pod := func(name, instance string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "acme", Labels: map[string]string{instanceLabel: instance}}}
+	}
+	c := NewWorkloadClient(fake.NewSimpleClientset(
+		pod("acme-web-base-service-1-a", "acme-web"),
+		pod("acme-web-worker-base-service-2-b", "acme-web-worker"),
+		ev("own", "acme-web-base-service-1-a"),
+		ev("dep", "acme-web-base-service"),
+		ev("sib", "acme-web-worker-base-service-2-b"),
+		ev("sibdep", "acme-web-worker-base-service"),
+	))
+	c.now = func() time.Time { return now }
+	got, _, err := c.ListEvents(context.Background(), "acme", EventQuery{Since: time.Hour, Workload: "acme-web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, e := range got {
+		names[e.InvolvedName] = true
+	}
+	if len(got) != 2 || !names["acme-web-base-service-1-a"] || !names["acme-web-base-service"] {
+		t.Errorf("got %v, want only acme-web's own objects", names)
 	}
 }
