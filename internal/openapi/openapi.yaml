@@ -2312,6 +2312,48 @@ paths:
                   count:
                     type: integer
 
+  /api/v1/audit/support:
+    get:
+      summary: List support-scope audit rows
+      description: |
+        Admin only. Returns the support.request and support-scope
+        agent_scope.denied rows of a tenant and/or an execution, newest first.
+        At least one of tenant and execution_id is required.
+      tags: [Audit]
+      parameters:
+        - name: tenant
+          in: query
+          schema: {type: string}
+        - name: execution_id
+          in: query
+          schema: {type: string}
+        - name: limit
+          in: query
+          description: Default 100, maximum 500.
+          schema: {type: integer}
+        - name: before
+          in: query
+          description: RFC 3339 cursor; only rows older than it.
+          schema: {type: string, format: date-time}
+      responses:
+        '200':
+          description: Support audit rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditEntry'
+                  count:
+                    type: integer
+        '400':
+          description: Neither tenant nor execution_id given
+        '403':
+          description: Not a platform admin
+
   /api/v1/repos:
     get:
       summary: List available GitHub repositories

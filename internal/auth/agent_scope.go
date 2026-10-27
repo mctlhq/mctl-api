@@ -62,6 +62,9 @@ type AgentScope struct {
 	// MintByTenantMember lets a human member of the bound tenant (or an
 	// admin) mint the scope, instead of the service principal.
 	MintByTenantMember bool
+	// AuditRequests writes one audit row for every request a token with
+	// this scope makes, reads and refusals included.
+	AuditRequests bool
 	// DefaultTTL and MaxTTL override the workitems defaults when non-zero.
 	DefaultTTL, MaxTTL time.Duration
 	Routes             []AgentScopeRoute
@@ -221,7 +224,7 @@ var agentScopes = map[string]*AgentScope{
 	},
 	AgentScopeSupport: {
 		Name: AgentScopeSupport, Agents: []string{"mctl-support"},
-		BoundTenant: true, MintByTenantMember: true,
+		BoundTenant: true, MintByTenantMember: true, AuditRequests: true,
 		DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour,
 		Tool: func(n string) bool { return IsReadTool(n) && supportTools[strings.TrimPrefix(n, "mctl_")] },
 		Routes: append(append([]AgentScopeRoute(nil), mcpRoutes...),
@@ -396,6 +399,16 @@ func (u *User) AgentScope() (*AgentScope, bool) {
 		return nil, false
 	}
 	return LookupAgentScope(name)
+}
+
+// AuditedAgentScope returns the scope of this principal's run token when
+// that scope asks for every request to be audited.
+func (u *User) AuditedAgentScope() (*AgentScope, bool) {
+	scope, ok := u.AgentScope()
+	if !ok || !scope.AuditRequests {
+		return nil, false
+	}
+	return scope, true
 }
 
 // AgentScopeShadowHeader is how a run still on the static service token

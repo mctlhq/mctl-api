@@ -49,8 +49,12 @@ type Entry struct {
 	ViaPrincipalID string `json:"-"`
 	// ViaExecutionID is the WorkItemExecution (we_...) an agent run token is
 	// bound to (mctl-api#376), recorded next to ViaPrincipalID on a request
-	// an agent principal made. "" for every non-agent request.
+	// an agent principal made. "" for every non-agent request. A support
+	// row is found by it (ListSupport).
 	ViaExecutionID string `json:"-"`
+	// Tenant is the tenant a support-scope request was bound to, recorded on
+	// support rows only (mctl-api#813).
+	Tenant string `json:"tenant,omitempty"`
 	// ParametersUnreadable is set when the stored params could not be
 	// decoded; Parameters is then nil. It is a marker rather than a read
 	// error so the otherwise-good row stays visible to List and ListByStatus.
@@ -58,6 +62,27 @@ type Entry struct {
 	// namespace, a traceparent) must refuse explicitly instead of reading nil
 	// as "submitted without parameters" (mctl-api#586).
 	ParametersUnreadable bool `json:"-"`
+}
+
+// OperationSupportRequest is the operation of the one row written for every
+// request made with a support-scope run token (mctl-api#813).
+const OperationSupportRequest = "support.request"
+
+// OperationAgentScopeDenied is the operation of a scope refusal row.
+const OperationAgentScopeDenied = "agent_scope.denied"
+
+// SupportFilter selects support rows. At least one of Tenant and
+// ExecutionID is expected; Limit is applied as given (the caller bounds it).
+type SupportFilter struct {
+	Tenant, ExecutionID string
+	Limit               int
+	Before              time.Time
+}
+
+// SupportReader is implemented by logs that can list support rows: the
+// support.request rows and the support-scope agent_scope.denied rows.
+type SupportReader interface {
+	ListSupport(ctx context.Context, f SupportFilter) ([]Entry, error)
 }
 
 // Log is the interface for recording and querying audit events.
@@ -148,16 +173,51 @@ func (l *Logger) List(limit int) []Entry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	if limit <= 0 || limit > len(l.entries) {
-		limit = len(l.entries)
-	}
-
-	// Return in reverse order (most recent first).
-	result := make([]Entry, limit)
-	for i := 0; i < limit; i++ {
-		result[i] = l.entries[len(l.entries)-1-i]
+	// Return in reverse order (most recent first). Support rows have their
+	// own read, so high-volume reads cannot push operations out of the feed.
+	result := make([]Entry, 0, len(l.entries))
+	for i := len(l.entries) - 1; i >= 0; i-- {
+		if l.entries[i].Operation == OperationSupportRequest {
+			continue
+		}
+		if limit > 0 && len(result) >= limit {
+			break
+		}
+		result = append(result, l.entries[i])
 	}
 	return result
+}
+
+// ListSupport returns support rows, newest first.
+func (l *Logger) ListSupport(_ context.Context, f SupportFilter) ([]Entry, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	var out []Entry
+	for i := len(l.entries) - 1; i >= 0; i-- {
+		e := l.entries[i]
+		if !isSupportRow(e) {
+			continue
+		}
+		if f.Tenant != "" && e.Tenant != f.Tenant {
+			continue
+		}
+		if f.ExecutionID != "" && e.ViaExecutionID != f.ExecutionID {
+			continue
+		}
+		if !f.Before.IsZero() && !e.Timestamp.Before(f.Before) {
+			continue
+		}
+		if f.Limit > 0 && len(out) >= f.Limit {
+			break
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+func isSupportRow(e Entry) bool {
+	return e.Operation == OperationSupportRequest ||
+		(e.Operation == OperationAgentScopeDenied && e.Tenant != "")
 }
 
 // LookupByWorkflow returns the newest entry for workflowName, or (nil, nil)

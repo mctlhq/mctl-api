@@ -573,6 +573,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/pods/{team}/{app}", h.GetServicePods)
 			r.Get("/events/{team}", h.ListNamespaceEvents)
 			r.Get("/audit", h.ListAudit)
+			r.Get("/audit/support", h.ListSupportAudit)
 			r.Get("/agent-runs", h.ListAgentRuns)
 
 			// Platform-wide skill registry.
@@ -1026,6 +1027,7 @@ func NewRouter(opts Options) http.Handler {
 		if opts.MCPServer != nil {
 			opts.MCPServer.SetTenantOwnerChecker(h)
 			opts.MCPServer.SetAgentReceiptGate(h, opts.AgentReceiptGateMode)
+			opts.MCPServer.SetScopedCallAuditor(h)
 			mcpH := opts.MCPServer.NewStreamableHTTPHandler()
 			r.Post("/mcp", mcpH.ServeHTTP)
 			r.Get("/mcp", mcpH.ServeHTTP)
