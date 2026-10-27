@@ -532,6 +532,8 @@ func TestPriceSourceRejectsOutOfVocabularyAndContradictingCost(t *testing.T) {
 		"free with a reported cost":     {PriceSource: PriceSourceProviderFree, ProviderReportedCost: &cost},
 		"free with only a card version": {PriceSource: PriceSourceProviderFree, PricingVersion: "any"},
 		"unknown with a card version":   {PriceSource: PriceSourceUnknown, PricingVersion: "any"},
+		"catalog with the free marker":  {PriceSource: PriceSourceCatalog, CalculatedCost: &zero, PricingVersion: PricingVersionProviderFree},
+		"absent with the free marker":   {CalculatedCost: &zero, PricingVersion: PricingVersionProviderFree},
 	}
 	for name, r := range cases {
 		r.SessionID, r.ModelKey = "s", "m"

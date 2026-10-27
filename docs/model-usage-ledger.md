@@ -178,7 +178,8 @@ mctlhq/mctl-api#827). A closed vocabulary; any other value is a `400`.
 A cost or card version that contradicts the source is a `400`: a
 `calculated_cost` or `pricing_version` sent with `unknown`, and a non-zero
 `calculated_cost` or `provider_reported_cost` or a `pricing_version` other than
-`provider_free` sent with `provider_free`. Such a row must never carry, or look
+`provider_free` sent with `provider_free`; and `pricing_version: "provider_free"`
+on any other source. Such a row must never carry, or look
 as if it carried, a list-price estimate. Rows written before the field existed read back as `mctl_catalog`,
 which is how they were priced. Every record read back carries the field, so a
 null cost can be told apart as "unknown" rather than "not priced yet".

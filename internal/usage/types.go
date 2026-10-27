@@ -315,6 +315,12 @@ func (r *Record) Validate() error {
 func (r *Record) validatePriceSource() error {
 	switch r.PriceSource {
 	case "", PriceSourceCatalog:
+		// The reverse contradiction: the marker version on a catalog row
+		// would make it read as provider_free in a record listing while it
+		// groups under mctl_catalog.
+		if r.PricingVersion == PricingVersionProviderFree {
+			return fmt.Errorf("%w: pricing_version %q requires price_source %q", ErrInvalidRecord, r.PricingVersion, PriceSourceProviderFree)
+		}
 	case PriceSourceProviderFree:
 		if r.CalculatedCost != nil && *r.CalculatedCost != 0 {
 			return fmt.Errorf("%w: price_source %q carries a non-zero calculated_cost", ErrInvalidRecord, r.PriceSource)
