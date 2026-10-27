@@ -691,16 +691,27 @@ func TestPriceSourceRoundTripsAndGatesCatalogPricing(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
+	// One workflow for all three rows keeps the reads hermetic on a shared
+	// database and lets one summary see every bucket at once.
+	wf := prefix + "-ps-wf"
 	catalog := testRecord(prefix+"-cat", "test-model", at)
 	free := testRecord(prefix+"-free", "test-model", at)
 	free.Provider, free.PriceSource = "hetzner", PriceSourceProviderFree
+	// A provider that reports its own (zero) cost must still be stored as
+	// provider_free, not left looking unpriced.
+	reported := 0.0
+	freeReported := testRecord(prefix+"-free-reported", "test-model", at)
+	freeReported.Provider, freeReported.PriceSource, freeReported.ProviderReportedCost = "hetzner", PriceSourceProviderFree, &reported
 	unknown := testRecord(prefix+"-unknown", "test-model", at)
 	unknown.Provider, unknown.PriceSource = "hetzner", PriceSourceUnknown
-	if _, err := s.IngestAs(ctx, Ingester{ID: "test"}, []*Record{catalog, free, unknown}); err != nil {
+	for _, r := range []*Record{catalog, free, freeReported, unknown} {
+		r.TemporalWorkflowID = wf
+	}
+	if _, err := s.IngestAs(ctx, Ingester{ID: "test"}, []*Record{catalog, free, freeReported, unknown}); err != nil {
 		t.Fatalf("IngestAs: %v", err)
 	}
 
-	got, err := s.List(ctx, Filter{TemporalWorkflowID: "", TargetRepo: "mctlhq/mctl-api", Since: &at, Limit: MaxQueryLimit})
+	got, err := s.List(ctx, Filter{TemporalWorkflowID: wf})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -734,15 +745,29 @@ func TestPriceSourceRoundTripsAndGatesCatalogPricing(t *testing.T) {
 	catalogCost, zero := 15.0, 0.0
 	check(catalog, PriceSourceCatalog, &catalogCost, "test-v1")
 	check(free, PriceSourceProviderFree, &zero, PricingVersionProviderFree)
+	check(freeReported, PriceSourceProviderFree, &zero, PricingVersionProviderFree)
 	check(unknown, PriceSourceUnknown, nil, "")
 
-	sum, err := s.Summary(ctx, Filter{TemporalWorkflowID: prefix + "-unknown-wf"}, GroupByPriceSource)
+	sum, err := s.Summary(ctx, Filter{TemporalWorkflowID: wf}, GroupByPriceSource)
 	if err != nil {
 		t.Fatalf("Summary: %v", err)
 	}
-	if len(sum.Buckets) != 1 || sum.Buckets[0].Key != PriceSourceUnknown || sum.Buckets[0].CalculatedCost != nil ||
-		sum.Buckets[0].InputTokens == nil || *sum.Buckets[0].InputTokens != 1_000_000 {
-		t.Errorf("summary by price_source for the unknown row: %+v", sum.Buckets)
+	buckets := map[string]*Bucket{}
+	for _, b := range sum.Buckets {
+		buckets[b.Key] = b
+	}
+	if len(buckets) != 3 {
+		t.Fatalf("summary by price_source: %d buckets, want 3: %+v", len(buckets), sum.Buckets)
+	}
+	if b := buckets[PriceSourceCatalog]; b == nil || b.Count != 1 || b.CalculatedCost == nil || *b.CalculatedCost != 15 {
+		t.Errorf("mctl_catalog bucket: %+v", b)
+	}
+	if b := buckets[PriceSourceProviderFree]; b == nil || b.Count != 2 || b.CalculatedCost == nil || *b.CalculatedCost != 0 {
+		t.Errorf("provider_free bucket: %+v", b)
+	}
+	if b := buckets[PriceSourceUnknown]; b == nil || b.Count != 1 || b.CalculatedCost != nil ||
+		b.InputTokens == nil || *b.InputTokens != 1_000_000 {
+		t.Errorf("unknown bucket: %+v", b)
 	}
 }
 

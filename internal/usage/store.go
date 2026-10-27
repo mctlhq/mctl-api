@@ -261,7 +261,7 @@ func (s *Store) IngestAs(ctx context.Context, by Ingester, records []*Record) (*
 			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
 		if err := priceAtIngest(s.catalog, r); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
 		if err := r.Validate(); err != nil {
 			// Naming the index matters: the write is all-or-nothing, so a
@@ -313,18 +313,19 @@ func priceAtIngest(c *Catalog, r *Record) error {
 	if r.PriceSource == "" {
 		r.PriceSource = PriceSourceCatalog
 	}
-	if r.CalculatedCost != nil || r.ProviderReportedCost != nil {
-		return nil
-	}
 	switch r.PriceSource {
 	case PriceSourceProviderFree:
+		// Set unconditionally: validatePriceSource has already refused any
+		// supplied cost or version other than these, and a provider that
+		// also reports its (zero) cost must not leave the row looking
+		// unpriced.
 		zero := 0.0
 		r.CalculatedCost, r.PricingVersion = &zero, PricingVersionProviderFree
 		return nil
 	case PriceSourceUnknown:
 		return nil
 	}
-	if c == nil {
+	if r.CalculatedCost != nil || r.ProviderReportedCost != nil || c == nil {
 		return nil
 	}
 	// A model with no rate card is not a reason to reject the record: the

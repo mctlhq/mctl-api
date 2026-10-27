@@ -212,10 +212,43 @@ func TestUsageHandlers_RejectsInvalidPriceSource(t *testing.T) {
 		t.Errorf("unknown price_source with a cost: want 400, got %d (%s)", resp.Code, resp.Body.String())
 	}
 
-	ok := usageRecordBody(prefix, "ok")
-	ok["price_source"] = "unknown"
-	if resp := postUsage(t, h, map[string]any{"records": []any{ok}}, true); resp.Code != http.StatusOK {
-		t.Errorf("valid unknown price_source: want 200, got %d (%s)", resp.Code, resp.Body.String())
+	freeCost := usageRecordBody(prefix, "free-cost")
+	freeCost["price_source"] = "provider_free"
+	freeCost["calculated_cost"] = 1.23
+	freeCost["pricing_version"] = "provider_free"
+	if resp := postUsage(t, h, map[string]any{"records": []any{freeCost}}, true); resp.Code != http.StatusBadRequest {
+		t.Errorf("provider_free price_source with a non-zero cost: want 400, got %d (%s)", resp.Code, resp.Body.String())
+	}
+
+	for _, source := range []string{"unknown", "provider_free"} {
+		ok := usageRecordBody(prefix, "ok-"+source)
+		ok["price_source"] = source
+		if resp := postUsage(t, h, map[string]any{"records": []any{ok}}, true); resp.Code != http.StatusOK {
+			t.Errorf("valid %s price_source: want 200, got %d (%s)", source, resp.Code, resp.Body.String())
+		}
+	}
+
+	req := adminCtx(httptest.NewRequest("GET", "/api/v1/usage/summary?group_by=price_source&workflow_id="+prefix+"-wf", nil))
+	resp := httptest.NewRecorder()
+	h.GetUsageSummary(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("summary group_by=price_source: want 200, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var sum struct {
+		Buckets []struct {
+			Key   string `json:"key"`
+			Count int    `json:"count"`
+		} `json:"buckets"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &sum); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	got := map[string]int{}
+	for _, b := range sum.Buckets {
+		got[b.Key] = b.Count
+	}
+	if got["unknown"] != 1 || got["provider_free"] != 1 || len(got) != 2 {
+		t.Errorf("summary by price_source = %v, want one unknown and one provider_free row", got)
 	}
 }
 

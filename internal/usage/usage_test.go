@@ -523,12 +523,15 @@ func TestPriceSourceRejectsOutOfVocabularyAndContradictingCost(t *testing.T) {
 	cost := 1.5
 	zero := 0.0
 	cases := map[string]*Record{
-		"out of vocabulary":         {PriceSource: "catalog"},
-		"wrong case":                {PriceSource: "Unknown"},
-		"unknown with a cost":       {PriceSource: PriceSourceUnknown, CalculatedCost: &cost, PricingVersion: "any"},
-		"unknown with a zero cost":  {PriceSource: PriceSourceUnknown, CalculatedCost: &zero, PricingVersion: PricingVersionProviderFree},
-		"free with a non-zero cost": {PriceSource: PriceSourceProviderFree, CalculatedCost: &cost, PricingVersion: PricingVersionProviderFree},
-		"free with a card version":  {PriceSource: PriceSourceProviderFree, CalculatedCost: &zero, PricingVersion: "any"},
+		"out of vocabulary":             {PriceSource: "catalog"},
+		"wrong case":                    {PriceSource: "Unknown"},
+		"unknown with a cost":           {PriceSource: PriceSourceUnknown, CalculatedCost: &cost, PricingVersion: "any"},
+		"unknown with a zero cost":      {PriceSource: PriceSourceUnknown, CalculatedCost: &zero, PricingVersion: PricingVersionProviderFree},
+		"free with a non-zero cost":     {PriceSource: PriceSourceProviderFree, CalculatedCost: &cost, PricingVersion: PricingVersionProviderFree},
+		"free with a card version":      {PriceSource: PriceSourceProviderFree, CalculatedCost: &zero, PricingVersion: "any"},
+		"free with a reported cost":     {PriceSource: PriceSourceProviderFree, ProviderReportedCost: &cost},
+		"free with only a card version": {PriceSource: PriceSourceProviderFree, PricingVersion: "any"},
+		"unknown with a card version":   {PriceSource: PriceSourceUnknown, PricingVersion: "any"},
 	}
 	for name, r := range cases {
 		r.SessionID, r.ModelKey = "s", "m"

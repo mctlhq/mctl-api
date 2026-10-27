@@ -68,7 +68,8 @@ const (
 //   - mctl_catalog: price from the catalog, as before. An absent field means
 //     this, so producers that predate the field are unaffected.
 //   - provider_free: the provider does not charge for this lane. Stored with a
-//     zero cost under PricingVersionProviderFree.
+//     zero cost under PricingVersionProviderFree; a non-zero reported cost
+//     contradicts it and is refused.
 //   - unknown: nobody knows the price. Stored with a null cost and still
 //     counted in token totals.
 const (
@@ -315,12 +316,21 @@ func (r *Record) validatePriceSource() error {
 	switch r.PriceSource {
 	case "", PriceSourceCatalog:
 	case PriceSourceProviderFree:
-		if r.CalculatedCost != nil && (*r.CalculatedCost != 0 || r.PricingVersion != PricingVersionProviderFree) {
-			return fmt.Errorf("%w: price_source %q carries a calculated_cost", ErrInvalidRecord, r.PriceSource)
+		if r.CalculatedCost != nil && *r.CalculatedCost != 0 {
+			return fmt.Errorf("%w: price_source %q carries a non-zero calculated_cost", ErrInvalidRecord, r.PriceSource)
+		}
+		if r.ProviderReportedCost != nil && *r.ProviderReportedCost != 0 {
+			return fmt.Errorf("%w: price_source %q carries a non-zero provider_reported_cost", ErrInvalidRecord, r.PriceSource)
+		}
+		if r.PricingVersion != "" && r.PricingVersion != PricingVersionProviderFree {
+			return fmt.Errorf("%w: price_source %q carries pricing_version %q", ErrInvalidRecord, r.PriceSource, r.PricingVersion)
 		}
 	case PriceSourceUnknown:
-		if r.CalculatedCost != nil {
-			return fmt.Errorf("%w: price_source %q carries a calculated_cost", ErrInvalidRecord, r.PriceSource)
+		// A card version on a costless row would read as if a catalog card
+		// had been involved, which is the impression this source exists to
+		// rule out.
+		if r.CalculatedCost != nil || r.PricingVersion != "" {
+			return fmt.Errorf("%w: price_source %q carries a calculated_cost or pricing_version", ErrInvalidRecord, r.PriceSource)
 		}
 	default:
 		return fmt.Errorf("%w: unknown price_source %q", ErrInvalidRecord, r.PriceSource)

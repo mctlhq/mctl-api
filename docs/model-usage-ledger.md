@@ -175,9 +175,11 @@ mctlhq/mctl-api#827). A closed vocabulary; any other value is a `400`.
 | `provider_free` | catalog not consulted; stored as `calculated_cost: 0` with `pricing_version: "provider_free"` |
 | `unknown` | catalog not consulted; `calculated_cost` stays null, tokens are still counted |
 
-A `calculated_cost` sent with `unknown`, or a non-zero one sent with
-`provider_free`, is a `400`: such a row must never carry a list-price
-estimate. Rows written before the field existed read back as `mctl_catalog`,
+A cost or card version that contradicts the source is a `400`: a
+`calculated_cost` or `pricing_version` sent with `unknown`, and a non-zero
+`calculated_cost` or `provider_reported_cost` or a `pricing_version` other than
+`provider_free` sent with `provider_free`. Such a row must never carry, or look
+as if it carried, a list-price estimate. Rows written before the field existed read back as `mctl_catalog`,
 which is how they were priced. Every record read back carries the field, so a
 null cost can be told apart as "unknown" rather than "not priced yet".
 
