@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.134.0](https://github.com/mctlhq/mctl-api/compare/4.133.0...4.134.0) (2026-10-27)
+
+
+### Features
+
+* **metrics:** count identity hook decisions by target, kind and reason ([b3d9f6c](https://github.com/mctlhq/mctl-api/commit/b3d9f6c65b05ce1ac6729b6edd215183f1fa64fe))
+
 ## [4.133.0](https://github.com/mctlhq/mctl-api/compare/4.132.0...4.133.0) (2026-10-27)
 
 
