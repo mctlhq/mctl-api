@@ -51,9 +51,11 @@ ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS request_id TEXT;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS user_principal_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
 -- The execution an agent run token is bound to (mctl-api#376), dual-written
--- next to via_principal_id on an agent-authenticated request. Write-only:
--- nothing reads it back yet.
+-- next to via_principal_id on an agent-authenticated request. Support rows
+-- (mctl-api#813) are read back by it.
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS via_execution_id TEXT NOT NULL DEFAULT '';
+-- The tenant a support-scope request was bound to (mctl-api#813).
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS tenant TEXT NOT NULL DEFAULT '';
 `
 
 // PostgresLogger persists audit entries to PostgreSQL via pgx.
@@ -87,6 +89,12 @@ func NewPostgresLogger(ctx context.Context, connStr string) (*PostgresLogger, er
 		{"audit_events_queue",
 			`CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_events_queue
 			 ON audit_events (status, timestamp ASC) WHERE workflow <> ''`},
+		{"audit_events_support_tenant",
+			`CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_events_support_tenant
+			 ON audit_events (tenant, timestamp DESC) WHERE tenant <> ''`},
+		{"audit_events_via_execution",
+			`CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_events_via_execution
+			 ON audit_events (via_execution_id, timestamp DESC) WHERE via_execution_id <> ''`},
 	} {
 		if _, err := pool.Exec(ctx, idx.stmt); err != nil {
 			slog.Warn("audit postgres: could not create index", "index", idx.name, "error", err)
@@ -108,23 +116,27 @@ func (p *PostgresLogger) Log(entry Entry) {
 	}
 	entry.Timestamp = time.Now().UTC()
 
-	params, _ := json.Marshal(entry.Parameters)
+	params, merr := json.Marshal(entry.Parameters)
+	if merr != nil {
+		recordWriteFailure(entry, merr)
+		params = nil
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	_, err := p.pool.Exec(ctx,
 		`INSERT INTO audit_events (id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id,
-		                           user_principal_id, via_principal_id, via_execution_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		                           user_principal_id, via_principal_id, via_execution_id, tenant)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		 ON CONFLICT (id) DO NOTHING`,
 		entry.ID, entry.Timestamp, entry.UserID, entry.Operation,
 		params, entry.WorkflowName, entry.Status, entry.RiskLevel, entry.Message,
 		entry.ClientIP, entry.UserAgent, entry.RequestID,
-		entry.PrincipalID, entry.ViaPrincipalID, entry.ViaExecutionID,
+		entry.PrincipalID, entry.ViaPrincipalID, entry.ViaExecutionID, entry.Tenant,
 	)
 	if err != nil {
-		slog.Error("audit postgres: insert failed", "error", err)
+		recordWriteFailure(entry, err)
 	}
 
 	slog.Info("audit",
@@ -149,7 +161,7 @@ func (p *PostgresLogger) List(limit int) []Entry {
 
 	rows, err := p.pool.Query(ctx,
 		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id
-		 FROM audit_events ORDER BY timestamp DESC LIMIT $1`, limit)
+		 FROM audit_events WHERE operation <> $2 ORDER BY timestamp DESC LIMIT $1`, limit, OperationSupportRequest)
 	if err != nil {
 		slog.Error("audit postgres: list failed", "error", err)
 		return nil
@@ -319,6 +331,54 @@ func (p *PostgresLogger) ListByStatus(status string, maxAge time.Duration, limit
 	// An iteration failure is a failed read, not a shorter queue.
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("audit postgres: list by status %q: iterate: %w", status, err)
+	}
+	return entries, nil
+}
+
+// ListSupport returns support rows, newest first. A failed query or iteration
+// is an error, never an empty page.
+func (p *PostgresLogger) ListSupport(ctx context.Context, f SupportFilter) ([]Entry, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	q := `SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id,
+	             user_principal_id, via_principal_id, via_execution_id, tenant
+	        FROM audit_events
+	       WHERE (operation = $1 OR (operation = $2 AND tenant <> ''))
+	         AND ($3 = '' OR tenant = $3)
+	         AND ($4 = '' OR via_execution_id = $4)
+	         AND ($5::timestamptz IS NULL OR timestamp < $5)
+	       ORDER BY timestamp DESC
+	       LIMIT $6`
+	var before *time.Time
+	if !f.Before.IsZero() {
+		before = &f.Before
+	}
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := p.pool.Query(ctx, q, OperationSupportRequest, OperationAgentScopeDenied, f.Tenant, f.ExecutionID, before, limit)
+	if err != nil {
+		return nil, fmt.Errorf("audit postgres: list support: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []Entry
+	for rows.Next() {
+		var pid, vpid, vexec, tenant string
+		e, err := scanAuditEntry(func(dest ...any) error {
+			return rows.Scan(append(dest, &pid, &vpid, &vexec, &tenant)...)
+		})
+		if err != nil {
+			slog.Error("audit postgres: scan failed", "error", err)
+			continue
+		}
+		e.PrincipalID, e.ViaPrincipalID, e.ViaExecutionID, e.Tenant = pid, vpid, vexec, tenant
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("audit postgres: list support: iterate: %w", err)
 	}
 	return entries, nil
 }

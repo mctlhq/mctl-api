@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
@@ -15,7 +16,9 @@ func runScope(t *testing.T, ctx context.Context, tool string) (*mcplib.CallToolR
 	req := mcplib.CallToolRequest{}
 	req.Params.Name = tool
 	ran := false
-	res, err := (&Server{}).agentScopeMiddleware(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	srv := &Server{}
+	srv.SetScopedCallAuditor(&recordingAuditor{})
+	res, err := srv.agentScopeMiddleware(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		ran = true
 		return mcplib.NewToolResultText("ok"), nil
 	})(ctx, req)
@@ -91,7 +94,9 @@ func runScopeArgs(t *testing.T, ctx context.Context, tool string, args map[strin
 	req.Params.Name = tool
 	req.Params.Arguments = args
 	ran := false
-	res, err := (&Server{}).agentScopeMiddleware(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	srv := &Server{}
+	srv.SetScopedCallAuditor(&recordingAuditor{})
+	res, err := srv.agentScopeMiddleware(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		ran = true
 		return mcplib.NewToolResultText("ok"), nil
 	})(ctx, req)
@@ -152,5 +157,73 @@ func TestAgentScopeMiddleware_SupportIsBoundToItsTenant(t *testing.T) {
 		if !res.IsError || !strings.Contains(res.Content[0].(mcplib.TextContent).Text, AgentScopeCodeDenied) {
 			t.Errorf("%s refusal = %+v, want %s", c.tool, res, AgentScopeCodeDenied)
 		}
+	}
+}
+
+type recordingAuditor struct{ recs []ScopedToolCallRecord }
+
+func (a *recordingAuditor) AuditScopedToolCall(_ context.Context, rec ScopedToolCallRecord) {
+	a.recs = append(a.recs, rec)
+}
+
+func supportCtx() context.Context {
+	return auth.WithUser(context.Background(), auth.NewAgentUser("mctl-support", auth.AgentRun{
+		ExecutionID: "we_a", RunID: "art_a", Scope: auth.AgentScopeSupport, Tenant: "labs", RequestedBy: "pr_alice",
+	}))
+}
+
+func callSupport(srv *Server, tool string, args map[string]any, h server.ToolHandlerFunc) (*mcplib.CallToolResult, error) {
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = tool
+	req.Params.Arguments = args
+	return srv.agentScopeMiddleware(h)(supportCtx(), req)
+}
+
+func TestSupportAudit_OneRowPerCall(t *testing.T) {
+	aud := &recordingAuditor{}
+	srv := &Server{}
+	srv.SetScopedCallAuditor(aud)
+
+	var parent string
+	res, _ := callSupport(srv, "mctl_get_service_status", map[string]any{"team": "labs", "service": "x"},
+		func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			parent = loopbackCollectorFromContext(ctx).id
+			if run, ok := srv.OpenAuditParent(parent); !ok || run != "art_a" {
+				t.Errorf("parent not open during the call: %q %v", run, ok)
+			}
+			loopbackCollectorFromContext(ctx).add("GET /api/v1/status/labs/x 200")
+			return mcplib.NewToolResultError("SENTINEL"), nil
+		})
+	if !res.IsError || len(aud.recs) != 1 {
+		t.Fatalf("res=%v recs=%d", res, len(aud.recs))
+	}
+	r := aud.recs[0]
+	if r.Verdict != "allowed" || r.Result != "failed" || r.Tool != "mctl_get_service_status" || r.EntryID != parent ||
+		len(r.Loopback) != 1 {
+		t.Errorf("record = %+v", r)
+	}
+	if _, ok := srv.OpenAuditParent(parent); ok {
+		t.Error("parent still open after the call")
+	}
+
+	aud.recs = nil
+	callSupport(srv, "mctl_list_tenants", nil, func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		t.Error("refused tool ran")
+		return nil, nil
+	})
+	if len(aud.recs) != 1 || aud.recs[0].Verdict != "denied" || aud.recs[0].Tool != "mctl_list_tenants" {
+		t.Errorf("denied records = %+v", aud.recs)
+	}
+}
+
+func TestSupportAudit_RefusedWithoutAuditor(t *testing.T) {
+	ran := false
+	res, _ := callSupport(&Server{}, "mctl_get_service_status", map[string]any{"team": "labs", "service": "x"},
+		func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			ran = true
+			return mcplib.NewToolResultText("ok"), nil
+		})
+	if ran || !res.IsError {
+		t.Fatal("a support call was served with no auditor")
 	}
 }

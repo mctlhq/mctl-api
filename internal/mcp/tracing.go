@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -96,10 +97,20 @@ func (t tracingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if scope := auth.ShadowAgentScopeFromContext(ctx); scope != "" {
 		req.Header.Set(auth.AgentScopeShadowHeader, scope)
 	}
+	col := loopbackCollectorFromContext(ctx)
+	if col != nil {
+		req.Header.Set(AuditParentHeader, col.id)
+	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
+		if col != nil {
+			col.add(req.Method + " " + req.URL.Path + " error")
+		}
 		span.SetStatus(codes.Error, "request failed")
 		return resp, err
+	}
+	if col != nil {
+		col.add(fmt.Sprintf("%s %s %d", req.Method, req.URL.Path, resp.StatusCode))
 	}
 	span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
 	if resp.StatusCode >= 500 {

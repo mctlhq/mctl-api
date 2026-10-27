@@ -226,3 +226,11 @@ func TestHasTenantAccess_BoundAgent(t *testing.T) {
 		t.Errorf("BoundTenant = %q", got)
 	}
 }
+
+func TestAgentScope_AuditRequests(t *testing.T) {
+	sup, _ := LookupAgentScope(AgentScopeSupport)
+	inv, _ := LookupAgentScope(AgentScopeInvestigate)
+	if !sup.AuditRequests || inv.AuditRequests {
+		t.Fatalf("support=%v investigate=%v, want true/false", sup.AuditRequests, inv.AuditRequests)
+	}
+}

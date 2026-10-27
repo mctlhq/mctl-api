@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -53,6 +54,13 @@ type Server struct {
 	// from mctl-agent (mctl-api#723). Unset (stdio, or mode off) means no
 	// gate; see agentReceiptMiddleware.
 	receiptGate atomic.Pointer[agentReceiptGate]
+
+	// scopedAuditor records every call made under an audited agent scope
+	// (support, mctl-api#813). Unset means such calls are refused.
+	scopedAuditor atomic.Pointer[scopedAuditorHolder]
+	// auditParents maps the id of an open audited tool call to the agent run
+	// that made it, so its loopback REST calls fold into its one row.
+	auditParents sync.Map
 
 	// registeredTools is the tool count snapshotted at the end of
 	// NewMCPServer. ownerOnlyToolFilter uses it to tell a tools/call (one
