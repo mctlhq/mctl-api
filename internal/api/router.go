@@ -32,6 +32,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/commerce"
 	"github.com/mctlhq/mctl-api/internal/decisions"
 	"github.com/mctlhq/mctl-api/internal/delegation"
+	"github.com/mctlhq/mctl-api/internal/deployanalyze"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/evidence"
 	"github.com/mctlhq/mctl-api/internal/governance"
@@ -75,6 +76,13 @@ type Options struct {
 	// component, for CI deploys (mctl-api#530). Nil refuses every CI deploy
 	// with 503.
 	ComponentSourceRepos ComponentSourceRepoReader
+	// SourceRepoBindings answers which services are built from a repository
+	// (the reverse of ComponentSourceRepos), for the deploy reads. Nil
+	// answers 503 deploy_binding_unavailable.
+	SourceRepoBindings SourceRepoBindingReader
+	// DeployContentReader reads repository content at a pinned commit for
+	// deploy analysis. Nil answers 502 deploy_github_unavailable.
+	DeployContentReader deployanalyze.ContentReader
 	// WorkflowLogArchive reads archived Argo step logs from object storage
 	// (optional — nil when the archive env vars are unset).
 	WorkflowLogArchive WorkflowLogArchive
@@ -563,6 +571,8 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/tenants/{name}", h.GetTenant)
 			r.Get("/services", h.ListServices)
 			r.Get("/services/{team}/{app}", h.GetService)
+			r.Get("/deploy/analyze", h.DeployAnalyze)
+			r.Get("/deploy/bindings", h.DeployBindings)
 			r.Get("/status/{team}/{app}", h.GetServiceStatus)
 			r.Get("/workflows", h.ListWorkflows)
 			r.Get("/workflows/{name}", h.GetWorkflow)

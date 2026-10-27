@@ -51,6 +51,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/decisions"
 	"github.com/mctlhq/mctl-api/internal/delegation"
+	"github.com/mctlhq/mctl-api/internal/deployanalyze"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/erpactsites"
 	"github.com/mctlhq/mctl-api/internal/events"
@@ -1105,6 +1106,8 @@ func main() {
 		CustomerTenantDeletionPending:  customerTenantDeletionPending(principalStore, deletionProbeRequired),
 		GitReader:                      gitReader,
 		ComponentSourceRepos:           gitReader,
+		SourceRepoBindings:             gitReader,
+		DeployContentReader:            deployanalyze.NewHTTPReader("", gitOpsTokenSource()),
 		ArgoCD:                         argoClient,
 		AuditLog:                       auditLog,
 		Executor:                       executor,

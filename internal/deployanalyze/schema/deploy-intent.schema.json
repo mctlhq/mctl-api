@@ -1,0 +1,239 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mctl.ai/schemas/deploy/v1alpha1/deploy-intent.schema.json",
+  "title": "DeployIntent",
+  "description": "deploy.mctl.ai/v1alpha1 DeployIntent (mctlhq/.github#254, mctlhq/mctl-gitops#2186). The only input an AI session controls when it deploys a repository: mctl-api compiles it onto ordinary base-service values, so this schema is the security boundary. Everything is closed (additionalProperties: false): a field that is not here cannot be requested. There is deliberately no image or digest field -- the platform builds the image from source.revision and records the digest itself -- and no Vault path: secret references resolve under teams/<tenant>/<service> only. Every base-service values key is classified in ../deploy-intent-chart-keys.yaml; scripts/validate-deploy-intent.py keeps the two in step.",
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "const": "deploy.mctl.ai/v1alpha1"
+    },
+    "kind": {
+      "const": "DeployIntent"
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "tenant",
+        "service"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tenant": {
+          "$ref": "#/definitions/name"
+        },
+        "service": {
+          "$ref": "#/definitions/name"
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": [
+        "environment",
+        "source",
+        "detection",
+        "runtime",
+        "exposure"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "enum": [
+            "preview",
+            "production"
+          ]
+        },
+        "source": {
+          "type": "object",
+          "required": [
+            "repository",
+            "revision"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9._-]{1,100}$",
+              "description": "owner/name on github.com. A branch or tag is never accepted: the build is pinned to revision."
+            },
+            "revision": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "dockerfile": {
+              "$ref": "#/definitions/repoPath",
+              "default": "Dockerfile"
+            },
+            "context": {
+              "$ref": "#/definitions/repoPath",
+              "default": "."
+            }
+          }
+        },
+        "detection": {
+          "type": "object",
+          "required": [
+            "tier"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "tier": {
+              "enum": [
+                "tier0"
+              ],
+              "description": "tier0 = Dockerfile in the repository. Buildpacks (tier1) and agent-written Dockerfiles (tier2, via DevLoop) are later. An analysis that finds no supported tier yields no intent at all: Unsupported is an analyzer result, not an intent value."
+            }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "required": [
+            "port",
+            "healthPath"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "port": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535,
+              "description": "Containers run as non-root, so a privileged port could never bind."
+            },
+            "healthPath": {
+              "type": "string",
+              "pattern": "^/[A-Za-z0-9._~/-]{0,255}$"
+            },
+            "replicas": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3,
+              "default": 1,
+              "description": "Schema ceiling only; the tenant quota is enforced by mctl-api."
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "required": [
+            "requests",
+            "limits"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "requests": {
+              "$ref": "#/definitions/resourceSet"
+            },
+            "limits": {
+              "$ref": "#/definitions/resourceSet"
+            }
+          }
+        },
+        "exposure": {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "enum": [
+                "internal",
+                "public"
+              ],
+              "description": "public = <service>.mctl.ai (mctlhq/mctl-gitops#1504). Custom domains are out of scope for v1alpha1."
+            }
+          }
+        },
+        "env": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "$ref": "#/definitions/envName"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "description": "Plain, non-secret values. A secret goes in secretRefs."
+        },
+        "secretRefs": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "required": [
+              "env",
+              "property"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "env": {
+                "$ref": "#/definitions/envName"
+              },
+              "property": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.-]{1,128}$",
+                "description": "Property of the Vault secret teams/<tenant>/<service>. The path is derived, never supplied, and the value never passes through the intent or the agent."
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$"
+    },
+    "repoPath": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._/-]{1,255}$",
+      "not": {
+        "anyOf": [
+          {
+            "pattern": "^/"
+          },
+          {
+            "pattern": "(^|/)\\.\\.(/|$)"
+          }
+        ]
+      },
+      "description": "Relative to the repository root, with no '..' segment. Written without lookahead so RE2-based validators (Go) accept the same pattern."
+    },
+    "envName": {
+      "type": "string",
+      "pattern": "^[A-Z_][A-Z0-9_]{0,127}$",
+      "not": {
+        "pattern": "^(MCTL_|KUBERNETES_|OTEL_)"
+      },
+      "description": "MCTL_, KUBERNETES_ and OTEL_ are reserved for the platform."
+    },
+    "resourceSet": {
+      "type": "object",
+      "required": [
+        "cpu",
+        "memory"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "type": "string",
+          "pattern": "^(?:[1-9][0-9]{0,4}m|[1-9][0-9]?(?:\\.[0-9]{1,3})?|0\\.[0-9]{0,2}[1-9])$"
+        },
+        "memory": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,5}(?:Mi|Gi)$"
+        }
+      }
+    }
+  }
+}

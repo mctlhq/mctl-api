@@ -71,6 +71,8 @@ var recordedHints = map[string]hints{
 	"mctl_get_service_pods":                  {readOnly: true, destructive: false, idempotent: false},
 	"mctl_list_namespace_events":             {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_service_config":                {readOnly: true, destructive: false, idempotent: false},
+	"mctl_deploy_analyze":                    {readOnly: true, destructive: false, idempotent: true},
+	"mctl_get_repo_binding":                  {readOnly: true, destructive: false, idempotent: true},
 	"mctl_get_service_logs":                  {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_service_status":                {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_tenant":                        {readOnly: true, destructive: false, idempotent: false},
@@ -248,6 +250,7 @@ func TestEveryToolDeclaresBothHintsInSource(t *testing.T) {
 // spelled out so the allowlist can be copied rather than derived.
 func TestReadOnlyToolsAreTheRecordedSet(t *testing.T) {
 	want := []string{
+		"mctl_deploy_analyze", "mctl_get_repo_binding",
 		"mctl_erpact_list_sites", "mctl_erpact_site_status",
 		"mctl_get_agent", "mctl_get_commerce_budget", "mctl_get_commerce_receipt", "mctl_get_dev_loop", "mctl_get_epic_status", "mctl_get_incident",
 		"mctl_get_lifecycle_ownership", "mctl_get_operation",

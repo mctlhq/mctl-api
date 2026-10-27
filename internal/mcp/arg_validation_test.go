@@ -53,6 +53,8 @@ var requiredStringArgs = map[string][]string{
 	"mctl_list_namespace_events": {"team"},
 	"mctl_get_tenant":            {"name"},
 	"mctl_get_service_config":    {"team", "service"},
+	"mctl_deploy_analyze":        {"tenant", "repository", "revision"},
+	"mctl_get_repo_binding":      {"repository"},
 	"mctl_list_repos":            {"team"},
 	"mctl_grant_repo_access":     {"team", "repo"},
 	"mctl_sync_repos":            {"team"},
