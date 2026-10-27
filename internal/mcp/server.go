@@ -252,6 +252,8 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListServices())
 	srv.AddTool(s.toolGetServiceStatus())
 	srv.AddTool(s.toolGetServiceConfig())
+	srv.AddTool(s.toolDeployAnalyze())
+	srv.AddTool(s.toolGetRepoBinding())
 	srv.AddTool(s.toolListWorkflows())
 	srv.AddTool(s.toolGetWorkflowStatus())
 	srv.AddTool(s.toolGetResourceUsage())
@@ -1103,6 +1105,75 @@ func (s *Server) toolGetTenant() (mcplib.Tool, server.ToolHandlerFunc) {
 		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/tenants/%s", url.PathEscape(name)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get tenant %s: %v", name, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolDeployAnalyze() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_deploy_analyze",
+		mcplib.WithTitleAnnotation("Analyze Repository For Deploy"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
+		mcplib.WithDescription(`Statically analyze a tenant-bound GitHub repository at a pinned commit and answer whether it can be deployed as-is (Tier 0: a Dockerfile in the repository).
+
+Returns a schema-valid draft DeployIntent (draft_intent) when every check passes, needs_input entries for values mctl will not guess (runtime.port, runtime.healthPath, metadata.service), or supported=false with a machine-readable reason. Unsupported is a normal answer, not an error. Nothing is cloned, built or run, and no image or digest is involved.
+
+Errors are never reported as "absent" or "unsupported": an unreadable commit is deploy_revision_unreadable (422), a GitHub failure is deploy_github_unavailable or deploy_github_malformed (502), and an unreadable repository binding is deploy_binding_unavailable (503).
+
+revision must be a full 40-hex commit SHA; a branch or tag is refused. Only repositories bound to the tenant (in gitops or the portal) are analyzed, and only repositories mctl's own GitHub credential can read.`),
+		mcplib.WithString("tenant", mcplib.Required(), mcplib.Description("Tenant (workspace) name you are a member of")),
+		mcplib.WithString("repository", mcplib.Required(), mcplib.Description("GitHub repository as owner/name")),
+		mcplib.WithString("revision", mcplib.Required(), mcplib.Description("Full 40-character lowercase hex commit SHA")),
+		mcplib.WithString("dockerfile", mcplib.Description("Dockerfile path relative to the repository root (default: Dockerfile)")),
+		mcplib.WithString("context", mcplib.Description("Build context relative to the repository root (default: .)")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		q := url.Values{}
+		for _, k := range []string{"tenant", "repository", "revision"} {
+			v, err := req.RequireString(k)
+			if err != nil {
+				return mcplib.NewToolResultError(err.Error()), nil
+			}
+			q.Set(k, v)
+		}
+		for _, k := range []string{"dockerfile", "context"} {
+			if v := req.GetString(k, ""); v != "" {
+				q.Set(k, v)
+			}
+		}
+		body, err := s.apiGet(ctx, "/api/v1/deploy/analyze?"+q.Encode())
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to analyze repository: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolGetRepoBinding() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_repo_binding",
+		mcplib.WithTitleAnnotation("Get Repository Service Binding"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
+		mcplib.WithDescription("List the services (tenant and service) built from a GitHub repository, from the github.com/source-repo annotation in GitOps, limited to tenants you can see. An unreadable GitOps checkout is an error (deploy_binding_unavailable), never an empty list."),
+		mcplib.WithString("repository", mcplib.Required(), mcplib.Description("GitHub repository as owner/name")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		repo, err := req.RequireString("repository")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		body, err := s.apiGet(ctx, "/api/v1/deploy/bindings?"+url.Values{"repository": {repo}}.Encode())
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to read repository binding: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

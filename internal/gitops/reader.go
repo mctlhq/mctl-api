@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1256,6 +1257,12 @@ func (r *Reader) ComponentSourceRepo(team, component string) (string, error) {
 		return "", fmt.Errorf("gitops checkout unavailable: %w", err)
 	}
 
+	return r.sourceRepoLocked(team, component)
+}
+
+// sourceRepoLocked reads the source-repo annotation of one component. The
+// caller holds the read lock and has checked the checkout revision.
+func (r *Reader) sourceRepoLocked(team, component string) (string, error) {
 	path, err := r.statServiceFileLocked(team, component, "catalog-info.yaml")
 	if err != nil {
 		return "", err
@@ -1281,6 +1288,80 @@ func (r *Reader) ComponentSourceRepo(team, component string) (string, error) {
 		return "", ErrSourceRepoNotRegistered
 	}
 	return repo, nil
+}
+
+// SourceRepoBinding is one service built from a repository.
+type SourceRepoBinding struct {
+	Tenant  string `json:"tenant"`
+	Service string `json:"service"`
+}
+
+// ServicesBySourceRepo returns every service whose catalog-info.yaml names
+// repo (case-insensitive) as its source repository, sorted by tenant and
+// service. It fails closed: an unreadable checkout, services directory,
+// team or app directory, or catalog-info.yaml is an error, never a skipped
+// entry. Only a missing catalog-info.yaml or annotation is skipped.
+func (r *Reader) ServicesBySourceRepo(repo string) ([]SourceRepoBinding, error) {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return nil, errors.New("repository is required")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, err := r.revisionLocked(); err != nil {
+		return nil, fmt.Errorf("gitops checkout unavailable: %w", err)
+	}
+	services := filepath.Join(r.localPath, "platform-gitops", "services")
+	teams, err := readPlainDirs(services)
+	if err != nil {
+		return nil, err
+	}
+	out := []SourceRepoBinding{}
+	for _, team := range teams {
+		apps, err := readPlainDirs(filepath.Join(services, team))
+		if err != nil {
+			return nil, err
+		}
+		for _, app := range apps {
+			got, err := r.sourceRepoLocked(team, app)
+			if errors.Is(err, ErrSourceRepoNotRegistered) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if strings.EqualFold(got, repo) {
+				out = append(out, SourceRepoBinding{Tenant: team, Service: app})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Tenant != out[j].Tenant {
+			return out[i].Tenant < out[j].Tenant
+		}
+		return out[i].Service < out[j].Service
+	})
+	return out, nil
+}
+
+// readPlainDirs lists dir and requires every entry to be a plain directory
+// with a valid service name.
+func readPlainDirs(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() || e.Type()&fs.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%s/%s is not a plain directory", dir, e.Name())
+		}
+		if !serviceNameRe.MatchString(e.Name()) {
+			return nil, fmt.Errorf("%s/%s is not a valid name", dir, e.Name())
+		}
+		names = append(names, e.Name())
+	}
+	return names, nil
 }
 
 // ListPlatformSkills reads all platform-wide skills from

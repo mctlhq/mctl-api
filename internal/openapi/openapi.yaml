@@ -2036,6 +2036,208 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/deploy/analyze:
+    get:
+      summary: Analyze a repository for deploy (Tier 0)
+      description: |
+        Statically analyzes a tenant-bound GitHub repository at a pinned commit and
+        answers whether it can be deployed as-is (a Dockerfile in the repository).
+        The answer is a schema-valid draft DeployIntent (`draft_intent`), `needs_input`
+        entries for values that are never guessed, or `supported: false` with a closed
+        `reason`. Unsupported is HTTP 200. Nothing is cloned, built or run.
+
+        Read failures are never reported as unsupported or absent. Error codes:
+        `deploy_analyze_invalid_input` (400), `deploy_tenant_access_denied` (403),
+        `deploy_repository_not_bound` (403), `deploy_revision_unreadable` (422),
+        `deploy_binding_unavailable` (503), `deploy_github_unavailable` (502),
+        `deploy_github_malformed` (502), `deploy_draft_invalid` (500),
+        `deploy_analyze_failed` (500).
+        Every call, refused or not, writes one audit entry (`deploy.analyze`).
+      tags: [Deploy]
+      parameters:
+        - name: tenant
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: repository
+          in: query
+          required: true
+          description: GitHub repository as owner/name
+          schema:
+            type: string
+        - name: revision
+          in: query
+          required: true
+          description: Full 40-character lowercase hex commit SHA. A branch or tag is refused.
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{40}$'
+        - name: dockerfile
+          in: query
+          required: false
+          description: Dockerfile path relative to the repository root (default Dockerfile)
+          schema:
+            type: string
+        - name: context
+          in: query
+          required: false
+          description: Build context relative to the repository root (default ".")
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Analysis result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [supported, repository, revision, dockerfile, context, draft_intent, needs_input, detected, binding]
+                properties:
+                  supported:
+                    type: boolean
+                  tier:
+                    type: string
+                    enum: [tier0]
+                  repository:
+                    type: string
+                  revision:
+                    type: string
+                  dockerfile:
+                    type: string
+                  context:
+                    type: string
+                  draft_intent:
+                    type: object
+                    nullable: true
+                    description: deploy.mctl.ai/v1alpha1 DeployIntent, null unless supported and needs_input is empty
+                  needs_input:
+                    type: array
+                    items:
+                      type: object
+                      required: [field, reason]
+                      properties:
+                        field:
+                          type: string
+                        reason:
+                          type: string
+                        candidates:
+                          type: array
+                          items: {}
+                  reason:
+                    type: string
+                    enum: [no_dockerfile, dockerfile_not_a_file, dockerfile_too_large, dockerfile_unparseable, compose_too_large, compose_unparseable, multi_service, privileged, host_ports, gpu, runs_as_root, privileged_port]
+                  message:
+                    type: string
+                  detected:
+                    type: object
+                    properties:
+                      port:
+                        type: integer
+                      health_path:
+                        type: string
+                      non_root:
+                        type: boolean
+                      stages:
+                        type: integer
+                  binding:
+                    type: object
+                    properties:
+                      tenant:
+                        type: string
+                      services:
+                        type: array
+                        items:
+                          type: string
+        '400':
+          description: Missing, repeated or invalid input (deploy_analyze_invalid_input)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Not a tenant member (deploy_tenant_access_denied) or repository not bound (deploy_repository_not_bound)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: The revision cannot be read (deploy_revision_unreadable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: The built draft failed validation (deploy_draft_invalid) or the analysis failed (deploy_analyze_failed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: GitHub failed or answered unusably (deploy_github_unavailable, deploy_github_malformed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: The repository binding cannot be read (deploy_binding_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/deploy/bindings:
+    get:
+      summary: List services built from a repository
+      description: |
+        Returns every `{tenant, service}` whose catalog-info `github.com/source-repo`
+        annotation equals the repository (case-insensitive), limited to tenants the
+        caller can see (all tenants for an admin). An unreadable GitOps checkout or
+        catalog-info file is 503 `deploy_binding_unavailable`, never a partial list.
+        Every call writes one audit entry (`deploy.bindings`).
+      tags: [Deploy]
+      parameters:
+        - name: repository
+          in: query
+          required: true
+          description: GitHub repository as owner/name
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Bound services
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [repository, items, count]
+                properties:
+                  repository:
+                    type: string
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        tenant:
+                          type: string
+                        service:
+                          type: string
+                  count:
+                    type: integer
+        '400':
+          description: Missing, repeated or invalid repository (deploy_analyze_invalid_input)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: The repository binding cannot be read (deploy_binding_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/v1/status/{team}/{app}:
     get:
       summary: Get service live status
