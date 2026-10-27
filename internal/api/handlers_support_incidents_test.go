@@ -227,6 +227,32 @@ func TestSupportIncidentProducer_StoreAggregationAndAudit(t *testing.T) {
 		t.Fatalf("aggregation after resolve = %v", items)
 	}
 
+	// The producer only ever sees id, status and occurrence_count.
+	for k := range again {
+		if k != "id" && k != "status" && k != "occurrence_count" {
+			t.Errorf("producer answer carries %q", k)
+		}
+	}
+
+	// It cannot read a row it did not file: neither by reusing that row's id
+	// in its tenant, nor by a fingerprint dedup onto it.
+	if _, err := store.Create(context.Background(), &alerts.Alert{
+		ID: "manual-t4", Source: "manual", Type: "platform_defect", Tenant: "t4", Summary: "s",
+		Severity: "warning", Status: "open", Analysis: "private analysis", ProposedFix: "private fix",
+		Fingerprint: "support:platform_defect:shared",
+	}); err != nil {
+		t.Fatalf("manual t4: %v", err)
+	}
+	for name, over := range map[string]map[string]any{
+		"same id":          {"id": "manual-t4", "tenant": "t4", "fingerprint": "support:platform_defect:other"},
+		"same fingerprint": {"id": "fresh-t4", "tenant": "t4", "fingerprint": "support:platform_defect:shared"},
+	} {
+		rec := postIncidentAs(h, producer, supportBody(over))
+		if rec.Code != http.StatusConflict || strings.Contains(rec.Body.String(), "private") {
+			t.Errorf("%s: got %d %s, want 409 with no row content", name, rec.Code, rec.Body.String())
+		}
+	}
+
 	var rows []audit.Entry
 	for _, e := range log.List(100) {
 		if e.Operation == "incident-create" && e.Status == "succeeded" {
@@ -260,5 +286,12 @@ func TestSupportIncidentProducer_StoreAggregationAndAudit(t *testing.T) {
 	}
 	if dedups != 1 {
 		t.Errorf("deduplicated rows = %d, want 1", dedups)
+	}
+}
+
+// The producer never counts as a person, whatever the gate order.
+func TestSupportIncidentProducer_IsNotAHumanCaller(t *testing.T) {
+	if isHumanCaller(auth.NewSupportIncidentProducerUser()) {
+		t.Fatal("the support incident producer counts as a human caller")
 	}
 }

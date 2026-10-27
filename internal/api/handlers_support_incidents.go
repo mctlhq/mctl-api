@@ -20,6 +20,7 @@ const (
 	codeSupportProducerRouteNotAllowed = "support_incident_producer_route_not_allowed"
 	codeSupportSourceNotAllowed        = "support_incident_source_not_allowed"
 	codeSupportTypeNotAllowed          = "support_incident_type_not_allowed"
+	codeSupportIncidentConflict        = "support_incident_conflict"
 )
 
 // supportIncidentProducerGate confines the support-incident-producer
@@ -80,6 +81,39 @@ func (h *Handlers) confineSupportIncident(w http.ResponseWriter, r *http.Request
 	a.ResolvedAt = nil
 	a.ResolvedBy = ""
 	return true
+}
+
+// respondToSupportProducer answers a producer create. The producer is not
+// confined to a tenant, so Store.Create's same-id retry and (tenant,
+// fingerprint) dedup paths could hand it any row of the tenant it names.
+// Only a support row with the requested fingerprint is acknowledged, and
+// only with its id, status and occurrence count; anything else is the same
+// 409 a cross-tenant id collision gets, with no row content.
+func (h *Handlers) respondToSupportProducer(w http.ResponseWriter, r *http.Request, user *auth.User, requested, stored *alerts.Alert) {
+	if stored.Source != alerts.SourceSupport || stored.Fingerprint != requested.Fingerprint {
+		h.logAudit(r, audit.Entry{
+			UserID:    user.ID,
+			Operation: "incident-create",
+			Parameters: map[string]string{
+				"requested_id": requested.ID,
+				"tenant":       requested.Tenant,
+				"fingerprint":  requested.Fingerprint,
+				"code":         codeSupportIncidentConflict,
+				"actor":        user.ID,
+			},
+			Status:    "denied",
+			RiskLevel: string(operations.RiskLow),
+			Message:   "id or fingerprint matches an incident the producer did not file",
+		})
+		writeErrorCode(w, http.StatusConflict, codeSupportIncidentConflict, "incident id already in use", nil)
+		return
+	}
+	h.auditSupportIncidentCreated(r, user, requested, stored)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":               stored.ID,
+		"status":           stored.Status,
+		"occurrence_count": stored.OccurrenceCount,
+	})
 }
 
 // auditSupportIncidentCreated writes the one audit row of a producer create

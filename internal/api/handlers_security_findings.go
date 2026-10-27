@@ -153,7 +153,7 @@ func securityVisibility(u *auth.User) securityfindings.Visibility {
 // relay, delegation, CI job or any of the single-purpose writer principals.
 func isHumanCaller(u *auth.User) bool {
 	if u == nil || u.IsService() || u.IsAgent() || u.IsCI() || u.IsUsageWriter() || u.IsEvidenceWriter() ||
-		u.IsRegistryPublisher() || u.SecurityProviderRef() != "" {
+		u.IsRegistryPublisher() || u.IsSupportIncidentProducer() || u.SecurityProviderRef() != "" {
 		return false
 	}
 	if _, relayed := u.RelaySurface(); relayed {

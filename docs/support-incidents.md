@@ -25,6 +25,12 @@ dedicated principal, `service:mctl-support-incidents`, authenticated by
 - Every create (or dedup hit) writes one `incident-create` audit row; refusals
   on source or type write a `denied` row. Summary and evidence are not audited.
 - Dedup on `(tenant, fingerprint)` is unchanged.
+- The answer is `201 {"id", "status", "occurrence_count"}`, never the stored
+  row: the id is the stored one, which differs from the requested id on a
+  dedup hit. Because the producer picks the tenant, a same-id retry or dedup
+  hit that lands on a row it did not file (another source, or another
+  fingerprint) answers 409 `support_incident_conflict` with no row content
+  and a `denied` audit row.
 
 ## Aggregation
 

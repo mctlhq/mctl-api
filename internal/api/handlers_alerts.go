@@ -151,7 +151,8 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if producer {
-		h.auditSupportIncidentCreated(r, user, &a, stored)
+		h.respondToSupportProducer(w, r, user, &a, stored)
+		return
 	}
 
 	labelStoredTrace(stored, traceNotDerived)
