@@ -20,7 +20,15 @@ func main() {
 	// erpact tools stay visible and the REST owner gate (requireErpactOwner)
 	// is the enforcement. Production HTTP enforcement is the
 	// SetTenantOwnerChecker call in internal/api/router.go.
-	mcpServer := mctlmcp.NewServer(apiURL, apiToken).NewMCPServer()
+	mctlSrv := mctlmcp.NewServer(apiURL, apiToken)
+	supportCfg, err := mctlmcp.ParseSupportConfig(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if supportCfg.BaseURL != "" {
+		mctlSrv.SetSupportConfig(supportCfg)
+	}
+	mcpServer := mctlSrv.NewMCPServer()
 	if err := server.ServeStdio(mcpServer); err != nil {
 		log.Fatal(err)
 	}

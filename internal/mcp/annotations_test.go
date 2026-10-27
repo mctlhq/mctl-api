@@ -55,6 +55,8 @@ var recordedHints = map[string]hints{
 	"mctl_list_work_item_snapshots":          {readOnly: true, destructive: false, idempotent: false},
 	"mctl_list_work_item_execution_requests": {readOnly: true, destructive: false, idempotent: false},
 	"mctl_request_work_item_execution":       {readOnly: false, destructive: false, idempotent: true},
+	"mctl_ask_support":                       {readOnly: false, destructive: false, idempotent: false},
+	"mctl_get_support_task":                  {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_commerce_budget":               {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_usage_summary":                 {readOnly: true, destructive: false, idempotent: false},
 	"mctl_list_commerce_invocations":         {readOnly: true, destructive: false, idempotent: false},
@@ -252,7 +254,7 @@ func TestReadOnlyToolsAreTheRecordedSet(t *testing.T) {
 	want := []string{
 		"mctl_deploy_analyze", "mctl_get_repo_binding",
 		"mctl_erpact_list_sites", "mctl_erpact_site_status",
-		"mctl_get_agent", "mctl_get_commerce_budget", "mctl_get_commerce_receipt", "mctl_get_dev_loop", "mctl_get_epic_status", "mctl_get_incident",
+		"mctl_get_agent", "mctl_get_commerce_budget", "mctl_get_commerce_receipt", "mctl_get_support_task", "mctl_get_dev_loop", "mctl_get_epic_status", "mctl_get_incident",
 		"mctl_get_lifecycle_ownership", "mctl_get_operation",
 		"mctl_get_ready_work_items", "mctl_get_resource_usage", "mctl_get_service_config", "mctl_get_service_logs", "mctl_get_service_pods", "mctl_list_namespace_events",
 		"mctl_get_service_status", "mctl_get_tenant", "mctl_get_usage_summary", "mctl_get_work_item", "mctl_get_workflow_logs",

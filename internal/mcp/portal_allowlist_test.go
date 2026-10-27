@@ -101,6 +101,7 @@ var mutatingOnPortal = map[string]string{
 	"mctl_abandon_dev_loop":                 "ends a running DevLoop for good",
 	"mctl_acknowledge_incident":             "incident state other operators read",
 	"mctl_add_custom_domain":                "tenant routing intent, plus a DNS ownership challenge",
+	"mctl_ask_support":                      "creates a support task in mctl-support and spends the tenant's model budget (task cap 0.50 USD)",
 	"mctl_approve_dev_loop":                 "releases a running DevLoop to act on a repository",
 	"mctl_create_agent":                     "adds an agent record that can later run",
 	"mctl_create_preview":                   "provisions a preview environment and consumes quota",

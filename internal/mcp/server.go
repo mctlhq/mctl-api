@@ -67,6 +67,10 @@ type Server struct {
 	// tool) from a tools/list without reading the live registry back through
 	// mcpServer on every request. Zero until the snapshot is taken.
 	registeredTools atomic.Int64
+
+	// support configures the tenant support agent tools (mctl-api#814).
+	// Unset means both tools answer "not configured".
+	support atomic.Pointer[SupportConfig]
 }
 
 // NewServer creates a new MCP server. publicURL defaults to the trimmed
@@ -340,6 +344,10 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolGetCommerceBudget())
 	srv.AddTool(s.toolListCommerceInvocations())
 	srv.AddTool(s.toolGetCommerceReceipt())
+
+	// Tenant support agent over A2A (mctl-api#814).
+	srv.AddTool(s.toolAskSupport())
+	srv.AddTool(s.toolGetSupportTask())
 
 	// Model-usage ledger reads (mctl-api#651, ADR-012).
 	srv.AddTool(s.toolGetUsageSummary())

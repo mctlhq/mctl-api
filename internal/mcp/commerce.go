@@ -50,6 +50,16 @@ var commerceTenantArg = mcplib.WithString("tenant",
 // normalization (normalizeIdentifier: trim and lowercase) and refuses only
 // what cannot be one path segment; anything else is the API's to answer.
 func commerceTenantPath(req mcplib.CallToolRequest) (string, *mcplib.CallToolResult) {
+	tenant, errResult := normalizeTenantArg(req)
+	if errResult != nil {
+		return "", errResult
+	}
+	return "/api/v1/commerce/tenants/" + url.PathEscape(tenant), nil
+}
+
+// normalizeTenantArg reads the required tenant argument, trims and lowercases
+// it, and refuses what cannot be one path segment.
+func normalizeTenantArg(req mcplib.CallToolRequest) (string, *mcplib.CallToolResult) {
 	raw, errResult := strictStringArg(req, "tenant")
 	if errResult != nil {
 		return "", errResult
@@ -62,7 +72,7 @@ func commerceTenantPath(req mcplib.CallToolRequest) (string, *mcplib.CallToolRes
 		strings.IndexFunc(tenant, unicode.IsControl) >= 0:
 		return "", mcplib.NewToolResultError("tenant must be one path segment: no '/', '\\', control characters, '.' or '..'")
 	}
-	return "/api/v1/commerce/tenants/" + url.PathEscape(tenant), nil
+	return tenant, nil
 }
 
 // strictStringArg is stringArg that refuses a present non-string value
