@@ -191,6 +191,67 @@ func TestUsageHandlers_RejectsUnreproducibleCost(t *testing.T) {
 	}
 }
 
+// mctlhq/mctl-api#827: price_source is a closed vocabulary. An out-of-vocabulary
+// value is a 400, the same as any other invalid field, and an unknown-priced
+// row cannot smuggle in a calculated cost.
+func TestUsageHandlers_RejectsInvalidPriceSource(t *testing.T) {
+	store, prefix := newTestUsageStore(t)
+	h := &Handlers{opts: Options{Usage: store}}
+
+	bad := usageRecordBody(prefix, "vocab")
+	bad["price_source"] = "free"
+	if resp := postUsage(t, h, map[string]any{"records": []any{bad}}, true); resp.Code != http.StatusBadRequest {
+		t.Errorf("out-of-vocabulary price_source: want 400, got %d (%s)", resp.Code, resp.Body.String())
+	}
+
+	priced := usageRecordBody(prefix, "priced")
+	priced["price_source"] = "unknown"
+	priced["calculated_cost"] = 1.23
+	priced["pricing_version"] = "test-v1"
+	if resp := postUsage(t, h, map[string]any{"records": []any{priced}}, true); resp.Code != http.StatusBadRequest {
+		t.Errorf("unknown price_source with a cost: want 400, got %d (%s)", resp.Code, resp.Body.String())
+	}
+
+	freeCost := usageRecordBody(prefix, "free-cost")
+	freeCost["price_source"] = "provider_free"
+	freeCost["calculated_cost"] = 1.23
+	freeCost["pricing_version"] = "provider_free"
+	if resp := postUsage(t, h, map[string]any{"records": []any{freeCost}}, true); resp.Code != http.StatusBadRequest {
+		t.Errorf("provider_free price_source with a non-zero cost: want 400, got %d (%s)", resp.Code, resp.Body.String())
+	}
+
+	for _, source := range []string{"unknown", "provider_free"} {
+		ok := usageRecordBody(prefix, "ok-"+source)
+		ok["price_source"] = source
+		if resp := postUsage(t, h, map[string]any{"records": []any{ok}}, true); resp.Code != http.StatusOK {
+			t.Errorf("valid %s price_source: want 200, got %d (%s)", source, resp.Code, resp.Body.String())
+		}
+	}
+
+	req := adminCtx(httptest.NewRequest("GET", "/api/v1/usage/summary?group_by=price_source&workflow_id="+prefix+"-wf", nil))
+	resp := httptest.NewRecorder()
+	h.GetUsageSummary(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("summary group_by=price_source: want 200, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var sum struct {
+		Buckets []struct {
+			Key   string `json:"key"`
+			Count int    `json:"count"`
+		} `json:"buckets"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &sum); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	got := map[string]int{}
+	for _, b := range sum.Buckets {
+		got[b.Key] = b.Count
+	}
+	if got["unknown"] != 1 || got["provider_free"] != 1 || len(got) != 2 {
+		t.Errorf("summary by price_source = %v, want one unknown and one provider_free row", got)
+	}
+}
+
 func TestUsageHandlers_RejectsEmptyAndOversizedBatch(t *testing.T) {
 	store, prefix := newTestUsageStore(t)
 	h := &Handlers{opts: Options{Usage: store}}

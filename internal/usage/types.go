@@ -59,6 +59,30 @@ const (
 	CostInvoiceReconciled = "invoice_reconciled"
 )
 
+// Price sources (mctlhq/mctl-agents#826, ADR-012 amendment 2026-10-27): where
+// the money for a record comes from, and therefore whether the catalog may
+// price it at all. The catalog holds list prices of the providers MCTL pays;
+// a third-party lane priced from it would read as plausible-looking money that
+// nobody was ever billed.
+//
+//   - mctl_catalog: price from the catalog, as before. An absent field means
+//     this, so producers that predate the field are unaffected.
+//   - provider_free: the provider does not charge for this lane. Stored with a
+//     zero cost under PricingVersionProviderFree; a non-zero reported cost
+//     contradicts it and is refused.
+//   - unknown: nobody knows the price. Stored with a null cost and still
+//     counted in token totals.
+const (
+	PriceSourceCatalog      = "mctl_catalog"
+	PriceSourceProviderFree = "provider_free"
+	PriceSourceUnknown      = "unknown"
+)
+
+// PricingVersionProviderFree is the pricing_version of a provider_free row. It
+// is not a catalog card version, so a zero cost cannot be mistaken for a card
+// that happened to price the record at nothing.
+const PricingVersionProviderFree = "provider_free"
+
 // Providers as served by the Claude Agent SDK's ModelUsage.provider.
 const (
 	ProviderFirstParty = "firstParty"
@@ -134,6 +158,9 @@ type Record struct {
 	CalculatedCost        *float64 `json:"calculated_cost,omitempty"`
 	PricingVersion        string   `json:"pricing_version,omitempty"`
 	InvoiceReconciledCost *float64 `json:"invoice_reconciled_cost,omitempty"`
+	// PriceSource is one of the PriceSource* constants. Empty on ingest means
+	// PriceSourceCatalog; it is always set on a record read back.
+	PriceSource string `json:"price_source,omitempty"`
 
 	// Outcome.
 	Outcome        string `json:"outcome,omitempty"`
@@ -253,6 +280,9 @@ func (r *Record) Validate() error {
 	if err := r.validateCorrelation(); err != nil {
 		return err
 	}
+	if err := r.validatePriceSource(); err != nil {
+		return err
+	}
 	switch r.Outcome {
 	case "", OutcomeSuccess, OutcomeError, OutcomeInterrupted:
 	default:
@@ -269,6 +299,47 @@ func (r *Record) Validate() error {
 		if v != nil && *v < 0 {
 			return fmt.Errorf("%w: %s must not be negative", ErrInvalidRecord, name)
 		}
+	}
+	return nil
+}
+
+// validatePriceSource refuses a price_source outside the closed vocabulary and a
+// cost that contradicts it. It holds both for a record as the producer sent it
+// and after IngestAs priced it, so it runs before pricing and again in
+// Validate.
+//
+// A producer-supplied calculated_cost on a non-catalog row is refused rather
+// than kept: the point of the field is that such a row never carries a
+// list-price estimate, and accepting one from the wire would reopen exactly
+// that hole.
+func (r *Record) validatePriceSource() error {
+	switch r.PriceSource {
+	case "", PriceSourceCatalog:
+		// The reverse contradiction: the marker version on a catalog row
+		// would make it read as provider_free in a record listing while it
+		// groups under mctl_catalog.
+		if r.PricingVersion == PricingVersionProviderFree {
+			return fmt.Errorf("%w: pricing_version %q requires price_source %q", ErrInvalidRecord, r.PricingVersion, PriceSourceProviderFree)
+		}
+	case PriceSourceProviderFree:
+		if r.CalculatedCost != nil && *r.CalculatedCost != 0 {
+			return fmt.Errorf("%w: price_source %q carries a non-zero calculated_cost", ErrInvalidRecord, r.PriceSource)
+		}
+		if r.ProviderReportedCost != nil && *r.ProviderReportedCost != 0 {
+			return fmt.Errorf("%w: price_source %q carries a non-zero provider_reported_cost", ErrInvalidRecord, r.PriceSource)
+		}
+		if r.PricingVersion != "" && r.PricingVersion != PricingVersionProviderFree {
+			return fmt.Errorf("%w: price_source %q carries pricing_version %q", ErrInvalidRecord, r.PriceSource, r.PricingVersion)
+		}
+	case PriceSourceUnknown:
+		// A card version on a costless row would read as if a catalog card
+		// had been involved, which is the impression this source exists to
+		// rule out.
+		if r.CalculatedCost != nil || r.PricingVersion != "" {
+			return fmt.Errorf("%w: price_source %q carries a calculated_cost or pricing_version", ErrInvalidRecord, r.PriceSource)
+		}
+	default:
+		return fmt.Errorf("%w: unknown price_source %q", ErrInvalidRecord, r.PriceSource)
 	}
 	return nil
 }

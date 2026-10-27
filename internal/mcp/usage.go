@@ -50,7 +50,7 @@ var usageCostFields = []string{"provider_reported_cost", "calculated_cost", "inv
 
 var usageCostSemantics = map[string]string{
 	"provider_reported_cost":  "cost reported by the model provider on the invocation",
-	"calculated_cost":         "list-price estimate computed by mctl-api from the pricing catalog (pricing_version per record); not provider-billed and not invoice spend",
+	"calculated_cost":         "list-price estimate computed by mctl-api from the pricing catalog (pricing_version per record); not provider-billed and not invoice spend. Only price_source=mctl_catalog rows are priced from the catalog: provider_free rows carry 0, unknown rows carry null and are still counted in token totals; group_by=price_source separates them",
 	"invoice_reconciled_cost": "spend reconciled against a provider invoice; null until reconciliation exists",
 }
 
@@ -60,6 +60,7 @@ func usageGroupByValues() []string {
 		string(usage.GroupByAgent), string(usage.GroupByStage), string(usage.GroupByModel),
 		string(usage.GroupByProvider), string(usage.GroupByRepo), string(usage.GroupByWorkflow),
 		string(usage.GroupByWorkItem), string(usage.GroupByExecution), string(usage.GroupByOutcome),
+		string(usage.GroupByPriceSource),
 		"stage", "model",
 	}
 }

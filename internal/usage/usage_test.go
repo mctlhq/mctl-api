@@ -16,6 +16,7 @@ package usage
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -461,5 +462,86 @@ func TestTemporalRunIDOmittedFromWireWhenAbsent(t *testing.T) {
 	}
 	if strings.Contains(string(b), "temporal_run_id") {
 		t.Errorf("temporal_run_id present in wire body despite omitempty: %s", b)
+	}
+}
+
+// mctlhq/mctl-api#827: a non-catalog row never reaches the catalog, even when
+// the model has a wildcard card that Catalog.At would fall back to for any
+// provider. A row without price_source is priced exactly as before.
+func TestNonCatalogPriceSourceIsNeverCatalogPriced(t *testing.T) {
+	cat, err := NewCatalog([]Pricing{
+		{Version: "any", CanonicalModel: "m", EffectiveFrom: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), InputPerMTok: 7},
+	})
+	if err != nil {
+		t.Fatalf("NewCatalog: %v", err)
+	}
+	rec := func(source string) *Record {
+		return &Record{SessionID: "s", ModelKey: "m", CanonicalModel: "m", Provider: "hetzner",
+			PriceSource: source, RecordedAt: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), InputTokens: i64(1_000_000)}
+	}
+
+	unknown := rec(PriceSourceUnknown)
+	if err := priceAtIngest(cat, unknown); err != nil {
+		t.Fatalf("unknown: %v", err)
+	}
+	if unknown.CalculatedCost != nil || unknown.PricingVersion != "" {
+		t.Errorf("unknown row was priced: cost %v version %q", unknown.CalculatedCost, unknown.PricingVersion)
+	}
+
+	free := rec(PriceSourceProviderFree)
+	if err := priceAtIngest(cat, free); err != nil {
+		t.Fatalf("provider_free: %v", err)
+	}
+	if free.CalculatedCost == nil || *free.CalculatedCost != 0 || free.PricingVersion != PricingVersionProviderFree {
+		t.Errorf("provider_free row: cost %v version %q, want 0 under %q", free.CalculatedCost, free.PricingVersion, PricingVersionProviderFree)
+	}
+
+	absent := rec("")
+	if err := priceAtIngest(cat, absent); err != nil {
+		t.Fatalf("absent: %v", err)
+	}
+	if absent.PriceSource != PriceSourceCatalog {
+		t.Errorf("absent price_source = %q, want %q", absent.PriceSource, PriceSourceCatalog)
+	}
+	if absent.CalculatedCost == nil || *absent.CalculatedCost != 7 || absent.PricingVersion != "any" {
+		t.Errorf("absent price_source not priced as before: cost %v version %q", absent.CalculatedCost, absent.PricingVersion)
+	}
+
+	for _, r := range []*Record{unknown, free, absent} {
+		if err := r.EnsureID(); err != nil {
+			t.Fatalf("EnsureID: %v", err)
+		}
+		if err := r.Validate(); err != nil {
+			t.Errorf("priced %q row fails Validate: %v", r.PriceSource, err)
+		}
+	}
+}
+
+// The vocabulary is closed, and a cost that contradicts the source is refused
+// as sent rather than kept.
+func TestPriceSourceRejectsOutOfVocabularyAndContradictingCost(t *testing.T) {
+	cost := 1.5
+	zero := 0.0
+	cases := map[string]*Record{
+		"out of vocabulary":             {PriceSource: "catalog"},
+		"wrong case":                    {PriceSource: "Unknown"},
+		"unknown with a cost":           {PriceSource: PriceSourceUnknown, CalculatedCost: &cost, PricingVersion: "any"},
+		"unknown with a zero cost":      {PriceSource: PriceSourceUnknown, CalculatedCost: &zero, PricingVersion: PricingVersionProviderFree},
+		"free with a non-zero cost":     {PriceSource: PriceSourceProviderFree, CalculatedCost: &cost, PricingVersion: PricingVersionProviderFree},
+		"free with a card version":      {PriceSource: PriceSourceProviderFree, CalculatedCost: &zero, PricingVersion: "any"},
+		"free with a reported cost":     {PriceSource: PriceSourceProviderFree, ProviderReportedCost: &cost},
+		"free with only a card version": {PriceSource: PriceSourceProviderFree, PricingVersion: "any"},
+		"unknown with a card version":   {PriceSource: PriceSourceUnknown, PricingVersion: "any"},
+		"catalog with the free marker":  {PriceSource: PriceSourceCatalog, CalculatedCost: &zero, PricingVersion: PricingVersionProviderFree},
+		"absent with the free marker":   {CalculatedCost: &zero, PricingVersion: PricingVersionProviderFree},
+	}
+	for name, r := range cases {
+		r.SessionID, r.ModelKey = "s", "m"
+		if err := r.EnsureID(); err != nil {
+			t.Fatalf("%s: EnsureID: %v", name, err)
+		}
+		if err := r.Validate(); !errors.Is(err, ErrInvalidRecord) {
+			t.Errorf("%s: Validate = %v, want ErrInvalidRecord", name, err)
+		}
 	}
 }
