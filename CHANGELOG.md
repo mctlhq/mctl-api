@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.128.0](https://github.com/mctlhq/mctl-api/compare/4.127.0...4.128.0) (2026-10-27)
+
+
+### Features
+
+* **agents:** issue-813-feat-audit-audit-reads-made-under-the-su ([8a5ddf6](https://github.com/mctlhq/mctl-api/commit/8a5ddf6137146fa17e206ab8a7306676c3d573b2))
+
+
+### Bug Fixes
+
+* **api:** audit MCP tool calls once, not per transport request ([a8b1581](https://github.com/mctlhq/mctl-api/commit/a8b1581862b7a8efc7f8ccd910181e55f63866d1))
+
 ## [4.127.0](https://github.com/mctlhq/mctl-api/compare/4.126.0...4.127.0) (2026-10-27)
 
 
