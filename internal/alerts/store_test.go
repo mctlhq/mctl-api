@@ -17,6 +17,7 @@ package alerts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 )
@@ -352,5 +353,48 @@ func TestGetByPrefix_Outcomes(t *testing.T) {
 	}
 	if _, err := s.GetByPrefix(ctx, "pfx-%%%%-0001"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("wildcard must be literal, got %v", err)
+	}
+}
+
+// T8: SupportAggregation groups open support incidents by (fingerprint,
+// type), lists each tenant once, orders by count then fingerprint, and
+// answers an empty non-nil slice when there are none.
+func TestSupportAggregation(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	got, err := s.SupportAggregation(ctx)
+	if err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("empty aggregation = %#v, %v; want non-nil empty", got, err)
+	}
+
+	for _, a := range []Alert{
+		{ID: "a1", Source: SourceSupport, Type: SupportTypeNeedsOwner, Tenant: "t2", Fingerprint: "support:needs_owner:b"},
+		{ID: "a2", Source: SourceSupport, Type: SupportTypeNeedsOwner, Tenant: "t1", Fingerprint: "support:needs_owner:b"},
+		{ID: "a3", Source: SourceSupport, Type: SupportTypeQuotaRequest, Tenant: "t1", Fingerprint: "support:quota_request:a"},
+		{ID: "a4", Source: SourceSupport, Type: SupportTypeQuotaRequest, Tenant: "t9", Fingerprint: "support:quota_request:c", Status: StatusResolved},
+		{ID: "a5", Source: SourceManual, Type: SupportTypeNeedsOwner, Tenant: "t3", Fingerprint: "support:needs_owner:b"},
+		{ID: "a6", Source: SourceSupport, Type: SupportTypeNeedsOwner, Tenant: "t4"},
+	} {
+		a := a
+		a.Summary, a.Severity = "s", "warning"
+		if a.Status == "" {
+			a.Status = StatusOpen
+		}
+		if _, err := s.Create(ctx, &a); err != nil {
+			t.Fatalf("create %s: %v", a.ID, err)
+		}
+	}
+
+	got, err = s.SupportAggregation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []SupportAggregate{
+		{Fingerprint: "support:needs_owner:b", Type: SupportTypeNeedsOwner, AffectedTenants: []string{"t1", "t2"}, Count: 2},
+		{Fingerprint: "support:quota_request:a", Type: SupportTypeQuotaRequest, AffectedTenants: []string{"t1"}, Count: 1},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("aggregation = %+v\nwant %+v", got, want)
 	}
 }

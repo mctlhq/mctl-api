@@ -22,7 +22,28 @@ const (
 	SourcePolling       = "polling"
 	SourceGitHubWebhook = "github_webhook"
 	SourceManual        = "manual"
+	SourceSupport       = "support"
 )
+
+// Support incident types, the only types the support-incident-producer
+// principal may file (mctl-api#830).
+const (
+	SupportTypePlatformDefect  = "platform_defect"
+	SupportTypeQuotaRequest    = "quota_request"
+	SupportTypePolicyException = "policy_exception"
+	SupportTypeNeedsOwner      = "needs_owner"
+)
+
+// SupportTypes is the lookup set of the support incident types.
+var SupportTypes = map[string]bool{
+	SupportTypePlatformDefect:  true,
+	SupportTypeQuotaRequest:    true,
+	SupportTypePolicyException: true,
+	SupportTypeNeedsOwner:      true,
+}
+
+// SupportFingerprintPrefix starts every support incident fingerprint.
+const SupportFingerprintPrefix = "support:"
 
 // Alert statuses.
 const (

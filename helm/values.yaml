@@ -150,6 +150,13 @@ githubAppTokenKey: ""
 # Secret leaves the principal disabled rather than failing the pod.
 usageWriterTokenSecret: ""
 
+# Optional: Secret holding MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN, the bearer
+# token of the support-incident-producer principal
+# (service:mctl-support-incidents, mctl-api#830). It may only create
+# source=support incidents. The reference is optional, so an absent Secret
+# leaves the principal disabled rather than failing the pod.
+supportIncidentProducerTokenSecret: ""
+
 # Optional: Secret holding MCTL_EVIDENCE_WRITER_TOKEN, the bearer token of
 # the evidence-writer principal (service:mctl-agents-evidence,
 # mctl-api#409). It may only append execution-evidence records. The

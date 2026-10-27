@@ -77,11 +77,6 @@ func (h *Handlers) auditIncidentChange(r *http.Request, user *auth.User, op stri
 
 // CreateIncident handles POST /api/v1/incidents.
 func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
-	if h.opts.AlertStore == nil {
-		writeError(w, http.StatusServiceUnavailable, "alert store not configured")
-		return
-	}
-
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "authentication required")
@@ -116,11 +111,23 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !user.IsAdmin() && !user.HasTenantAccess(a.Tenant) {
-		writeError(w, http.StatusForbidden, "access denied to tenant: "+a.Tenant)
-		return
+	producer := user.IsSupportIncidentProducer()
+	if producer {
+		if !h.confineSupportIncident(w, r, user, &a) {
+			return
+		}
+	} else {
+		if !user.IsAdmin() && !user.HasTenantAccess(a.Tenant) {
+			writeError(w, http.StatusForbidden, "access denied to tenant: "+a.Tenant)
+			return
+		}
+		if !h.requireTenantRole(w, r, user, a.Tenant, incidentWriteRole, "incident-create", operations.RiskLow) {
+			return
+		}
 	}
-	if !h.requireTenantRole(w, r, user, a.Tenant, incidentWriteRole, "incident-create", operations.RiskLow) {
+
+	if h.opts.AlertStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "alert store not configured")
 		return
 	}
 
@@ -140,6 +147,11 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create incident: "+err.Error())
+		return
+	}
+
+	if producer {
+		h.respondToSupportProducer(w, r, user, &a, stored)
 		return
 	}
 

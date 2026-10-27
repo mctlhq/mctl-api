@@ -15,6 +15,7 @@
 package auth
 
 import (
+	"bufio"
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
@@ -82,6 +83,11 @@ type User struct {
 	// authenticated by MCTL_REGISTRY_PUBLISHER_TOKEN (mctlhq/mctl-agents#470).
 	// Unexported for the same reason as service.
 	registryPublisher bool
+
+	// supportIncidentProducer is set only on the support-incident-producer
+	// principal, authenticated by MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN
+	// (mctl-api#830). Unexported for the same reason as service.
+	supportIncidentProducer bool
 
 	// ci is set only on a GitHub Actions OIDC principal (mctl-api#530):
 	// one CI job of ciRepository, whose immutable repository id is
@@ -636,6 +642,9 @@ func usageWriterToken() string {
 	case token == strings.TrimSpace(os.Getenv(registryPublisherTokenEnv)):
 		slog.Error("usage-writer token equals MCTL_REGISTRY_PUBLISHER_TOKEN; usage-writer principal disabled", "env", usageWriterTokenEnv)
 		return ""
+	case token == strings.TrimSpace(os.Getenv(supportIncidentProducerTokenEnv)):
+		slog.Error("usage-writer token equals MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN; usage-writer principal disabled", "env", usageWriterTokenEnv)
+		return ""
 	}
 	for _, env := range surfaceTokenEnv {
 		if strings.TrimSpace(os.Getenv(env)) == token {
@@ -699,6 +708,9 @@ func evidenceWriterToken() string {
 	case token == strings.TrimSpace(os.Getenv(registryPublisherTokenEnv)):
 		slog.Error("evidence-writer token equals MCTL_REGISTRY_PUBLISHER_TOKEN; evidence-writer principal disabled", "env", evidenceWriterTokenEnv)
 		return ""
+	case token == strings.TrimSpace(os.Getenv(supportIncidentProducerTokenEnv)):
+		slog.Error("evidence-writer token equals MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN; evidence-writer principal disabled", "env", evidenceWriterTokenEnv)
+		return ""
 	}
 	for _, env := range surfaceTokenEnv {
 		if strings.TrimSpace(os.Getenv(env)) == token {
@@ -735,6 +747,77 @@ func NewRegistryPublisherUser() *User {
 // IsRegistryPublisher reports whether this principal authenticated with the
 // registry-publisher token.
 func (u *User) IsRegistryPublisher() bool { return u != nil && u.registryPublisher }
+
+// Support-incident-producer principal (mctl-api#830), modelled on the
+// registry-publisher principal: mctl-support files incidents for the tenant
+// of its current task with its own credential instead of an admin one. It
+// carries no groups, is not an admin, belongs to no tenant and holds no named
+// permission; the API confines it to POST /api/v1/incidents and to
+// source=support incidents of four known types.
+const (
+	SupportIncidentProducerUserID   = "service:mctl-support-incidents"
+	supportIncidentProducerTokenEnv = "MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN" //nolint:gosec // env var name, not a credential
+)
+
+// NewSupportIncidentProducerUser builds the support-incident-producer
+// principal. Exported for tests; only the middleware mints it from a token.
+func NewSupportIncidentProducerUser() *User {
+	return &User{ID: SupportIncidentProducerUserID, supportIncidentProducer: true}
+}
+
+// IsSupportIncidentProducer reports whether this principal authenticated
+// with the support-incident-producer token.
+func (u *User) IsSupportIncidentProducer() bool { return u != nil && u.supportIncidentProducer }
+
+var supportIncidentProducerUnsetLogged sync.Once
+
+// supportIncidentProducerToken reads the support-incident-producer token,
+// refusing one that is too short or equal to the mctl-agent service token,
+// any other principal's static token, any surface token or any
+// security-provider token. The other tokens refuse equality with it in turn,
+// so a shared value disables both sides. Comparison tokens are re-read from
+// the environment, so a token that was itself refused is still not reusable.
+func supportIncidentProducerToken() string {
+	token := strings.TrimSpace(os.Getenv(supportIncidentProducerTokenEnv))
+	if token == "" {
+		supportIncidentProducerUnsetLogged.Do(func() {
+			slog.Info("support-incident-producer token not set; support-incident-producer principal disabled", "env", supportIncidentProducerTokenEnv)
+		})
+		return ""
+	}
+	if len(token) < minSurfaceTokenLen {
+		slog.Error("support-incident-producer token too short; support-incident-producer principal disabled", "env", supportIncidentProducerTokenEnv, "min_length", minSurfaceTokenLen)
+		return ""
+	}
+	others := []string{"MCTL_AGENT_SERVICE_TOKEN", usageWriterTokenEnv, evidenceWriterTokenEnv, registryPublisherTokenEnv}
+	for _, env := range surfaceTokenEnv {
+		others = append(others, env)
+	}
+	for _, env := range others {
+		if strings.TrimSpace(os.Getenv(env)) == token {
+			slog.Error("support-incident-producer token equals another principal's token; support-incident-producer principal disabled", "env", supportIncidentProducerTokenEnv, "equals", env)
+			return ""
+		}
+	}
+	sc := bufio.NewScanner(strings.NewReader(os.Getenv(securityProviderTokensEnv)))
+	for sc.Scan() {
+		_, value, ok := strings.Cut(strings.TrimSpace(sc.Text()), "=")
+		if ok && strings.TrimSpace(value) == token {
+			slog.Error("support-incident-producer token equals another principal's token; support-incident-producer principal disabled", "env", supportIncidentProducerTokenEnv, "equals", securityProviderTokensEnv)
+			return ""
+		}
+	}
+	return token
+}
+
+// supportIncidentProducerUserFor matches a bearer token against the
+// support-incident-producer token in constant time.
+func supportIncidentProducerUserFor(configured, token string) *User {
+	if configured == "" || subtle.ConstantTimeCompare([]byte(configured), []byte(token)) != 1 {
+		return nil
+	}
+	return NewSupportIncidentProducerUser()
+}
 
 // NewCIUser is the principal of one GitHub Actions job of repository
 // ("owner/repo"), whose immutable id is repositoryID (mctl-api#530).
@@ -802,7 +885,7 @@ func registryPublisherToken() string {
 		slog.Error("registry-publisher token too short; registry-publisher principal disabled", "env", registryPublisherTokenEnv, "min_length", minSurfaceTokenLen)
 		return ""
 	}
-	others := []string{"MCTL_AGENT_SERVICE_TOKEN", usageWriterTokenEnv, evidenceWriterTokenEnv}
+	others := []string{"MCTL_AGENT_SERVICE_TOKEN", usageWriterTokenEnv, evidenceWriterTokenEnv, supportIncidentProducerTokenEnv}
 	for _, env := range surfaceTokenEnv {
 		others = append(others, env)
 	}
@@ -849,6 +932,7 @@ func usageWriterUserFor(configured, token string) *User {
 func surfaceTokens() map[string]string {
 	service := strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN"))
 	publisher := strings.TrimSpace(os.Getenv(registryPublisherTokenEnv))
+	producer := strings.TrimSpace(os.Getenv(supportIncidentProducerTokenEnv))
 	byToken := map[string]string{}
 	refused := map[string]bool{}
 	for surface, env := range surfaceTokenEnv {
@@ -864,6 +948,9 @@ func surfaceTokens() map[string]string {
 			continue
 		case token == publisher:
 			slog.Error("surface token equals MCTL_REGISTRY_PUBLISHER_TOKEN; surface principal disabled", "env", env)
+			continue
+		case token == producer:
+			slog.Error("surface token equals MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN; surface principal disabled", "env", env)
 			continue
 		}
 		if _, dup := byToken[token]; dup || refused[token] {
@@ -934,6 +1021,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	usageWriter := usageWriterToken()
 	evidenceWriter := evidenceWriterToken()
 	registryPublisher := registryPublisherToken()
+	supportProducer := supportIncidentProducerToken()
 	securityProviders := securityProviderTokens()
 	var cfg middlewareConfig
 	for _, o := range opts {
@@ -943,7 +1031,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	federationDisabled := federationKillSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED"))
 	registry := cfg.federationRegistry
 	if !federationDisabled && registry == nil {
-		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter, registryPublisher, securityProviders)
+		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter, registryPublisher, supportProducer, securityProviders)
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -1024,6 +1112,8 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					user = ew
 				} else if rp := registryPublisherUserFor(registryPublisher, token); rp != nil {
 					user = rp
+				} else if sip := supportIncidentProducerUserFor(supportProducer, token); sip != nil {
+					user = sip
 				} else if sp := securityProviderUserFor(securityProviders, token); sp != nil {
 					user = sp
 				} else if isJWT(token) {
@@ -1156,13 +1246,14 @@ func federationKillSwitchOn(v string) bool {
 // federation_config.go, with audience enforcement); this default is what
 // every existing caller of Middleware -- including every test in this
 // package -- exercises unchanged.
-func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher string, securityProviders map[string]string) *Registry {
+func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher, supportProducer string, securityProviders map[string]string) *Registry {
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
 		newSurfaceProvider(func() map[string]string { return surfaces }),
 		newUsageWriterProvider(func() string { return usageWriter }),
 		newEvidenceWriterProvider(func() string { return evidenceWriter }),
 		newRegistryPublisherProvider(func() string { return registryPublisher }),
+		newSupportIncidentProducerProvider(func() string { return supportProducer }),
 		newSecurityProviderProvider(func() map[string]string { return securityProviders }),
 	}
 	var jwtProviders []Provider
@@ -1237,6 +1328,8 @@ func userFromVerified(v *Verified) *User {
 		return NewEvidenceWriterUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == RegistryPublisherUserID:
 		return NewRegistryPublisherUser()
+	case v.Identity.Provider == ProviderService && v.Identity.Subject == SupportIncidentProducerUserID:
+		return NewSupportIncidentProducerUser()
 	case v.Identity.Provider == ProviderService && strings.HasPrefix(v.Identity.Subject, SecurityProviderUserPrefix):
 		return NewSecurityProviderUser(strings.TrimPrefix(v.Identity.Subject, SecurityProviderUserPrefix))
 	case v.Identity.Provider == ProviderGitHub:

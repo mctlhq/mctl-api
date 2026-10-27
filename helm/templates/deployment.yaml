@@ -90,6 +90,17 @@ spec:
                   key: MCTL_USAGE_WRITER_TOKEN
                   optional: true
             {{- end }}
+            {{- if .Values.supportIncidentProducerTokenSecret }}
+            # Optional on purpose: a missing Secret leaves the
+            # support-incident-producer principal disabled, it does not keep
+            # the pod from starting.
+            - name: MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.supportIncidentProducerTokenSecret }}
+                  key: MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN
+                  optional: true
+            {{- end }}
             {{- if .Values.evidenceWriterTokenSecret }}
             # Optional on purpose: a missing Secret leaves the
             # evidence-writer principal disabled (only admins can write
