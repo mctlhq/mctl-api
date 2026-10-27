@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.135.0](https://github.com/mctlhq/mctl-api/compare/4.134.0...4.135.0) (2026-10-27)
+
+
+### Features
+
+* **agents:** issue-814-feat-mcp-mctl-ask-support-and-mctl-get-s ([02e2548](https://github.com/mctlhq/mctl-api/commit/02e2548689c1020085aa6eb9882dc781165a1829))
+
+
+### Bug Fixes
+
+* **mcp:** let the support wait outlive the 30s request timeout ([1a48bb5](https://github.com/mctlhq/mctl-api/commit/1a48bb57e519e9bf0d374bdacaa1bf74c89d2329))
+
 ## [4.134.0](https://github.com/mctlhq/mctl-api/compare/4.133.0...4.134.0) (2026-10-27)
 
 
