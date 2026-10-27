@@ -77,6 +77,11 @@ it are stored on the row. Adding a later card therefore cannot reach back and
 change history (ADR-012 invariant 7). Correcting a *past* card is a backfill,
 not a catalog edit, and is out of scope here.
 
+Only records whose `price_source` is `mctl_catalog` are priced from the catalog
+(see below). The wildcard fallback is what makes this necessary: a third-party
+row naming a model that has a wildcard card would otherwise get a list-price
+cost nobody was billed.
+
 ## Endpoints
 
 Reads are admin-only. Aggregate spend per repository and per agent is
@@ -159,6 +164,23 @@ a producer that does not send it is unaffected — and like every other
 correlation field it is not part of the dedupe key, so sending the same
 result again with a different `temporal_run_id` is still deduped.
 
+#### `price_source`
+
+Where the money for the record comes from (mctlhq/mctl-agents#826,
+mctlhq/mctl-api#827). A closed vocabulary; any other value is a `400`.
+
+| Value | Pricing |
+|---|---|
+| `mctl_catalog` (also when absent) | priced from the catalog, as before |
+| `provider_free` | catalog not consulted; stored as `calculated_cost: 0` with `pricing_version: "provider_free"` |
+| `unknown` | catalog not consulted; `calculated_cost` stays null, tokens are still counted |
+
+A `calculated_cost` sent with `unknown`, or a non-zero one sent with
+`provider_free`, is a `400`: such a row must never carry a list-price
+estimate. Rows written before the field existed read back as `mctl_catalog`,
+which is how they were priced. Every record read back carries the field, so a
+null cost can be told apart as "unknown" rather than "not priced yet".
+
 ### `GET /api/v1/usage/records`
 
 Filters: `workflow_id`, `run_id`, `work_item_id`, `execution_id`, `repository`, `issue`,
@@ -187,7 +209,8 @@ complete.
 ### `GET /api/v1/usage/summary?group_by=agent`
 
 `group_by` is one of `agent`, `devloop_stage`, `canonical_model`, `provider`,
-`target_repo`, `temporal_workflow_id`, `work_item_id`, `execution_id`, `outcome`. The set is
+`target_repo`, `temporal_workflow_id`, `work_item_id`, `execution_id`, `outcome`,
+`price_source`. The set is
 closed, so a query parameter can never become SQL.
 
 Results are capped the same way `records` are and the response carries

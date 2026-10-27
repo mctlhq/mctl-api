@@ -191,6 +191,34 @@ func TestUsageHandlers_RejectsUnreproducibleCost(t *testing.T) {
 	}
 }
 
+// mctlhq/mctl-api#827: price_source is a closed vocabulary. An out-of-vocabulary
+// value is a 400, the same as any other invalid field, and an unknown-priced
+// row cannot smuggle in a calculated cost.
+func TestUsageHandlers_RejectsInvalidPriceSource(t *testing.T) {
+	store, prefix := newTestUsageStore(t)
+	h := &Handlers{opts: Options{Usage: store}}
+
+	bad := usageRecordBody(prefix, "vocab")
+	bad["price_source"] = "free"
+	if resp := postUsage(t, h, map[string]any{"records": []any{bad}}, true); resp.Code != http.StatusBadRequest {
+		t.Errorf("out-of-vocabulary price_source: want 400, got %d (%s)", resp.Code, resp.Body.String())
+	}
+
+	priced := usageRecordBody(prefix, "priced")
+	priced["price_source"] = "unknown"
+	priced["calculated_cost"] = 1.23
+	priced["pricing_version"] = "test-v1"
+	if resp := postUsage(t, h, map[string]any{"records": []any{priced}}, true); resp.Code != http.StatusBadRequest {
+		t.Errorf("unknown price_source with a cost: want 400, got %d (%s)", resp.Code, resp.Body.String())
+	}
+
+	ok := usageRecordBody(prefix, "ok")
+	ok["price_source"] = "unknown"
+	if resp := postUsage(t, h, map[string]any{"records": []any{ok}}, true); resp.Code != http.StatusOK {
+		t.Errorf("valid unknown price_source: want 200, got %d (%s)", resp.Code, resp.Body.String())
+	}
+}
+
 func TestUsageHandlers_RejectsEmptyAndOversizedBatch(t *testing.T) {
 	store, prefix := newTestUsageStore(t)
 	h := &Handlers{opts: Options{Usage: store}}

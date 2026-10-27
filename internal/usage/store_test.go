@@ -682,3 +682,109 @@ INSERT INTO model_usage_records (
 		t.Fatalf("re-applying usageSchema a third time: %v", err)
 	}
 }
+
+// mctlhq/mctl-api#827, end to end: price_source is stored and read back, a
+// non-catalog row never gets a catalog cost although test-model has a wildcard
+// card, and the summary can split a total by source.
+func TestPriceSourceRoundTripsAndGatesCatalogPricing(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	catalog := testRecord(prefix+"-cat", "test-model", at)
+	free := testRecord(prefix+"-free", "test-model", at)
+	free.Provider, free.PriceSource = "hetzner", PriceSourceProviderFree
+	unknown := testRecord(prefix+"-unknown", "test-model", at)
+	unknown.Provider, unknown.PriceSource = "hetzner", PriceSourceUnknown
+	if _, err := s.IngestAs(ctx, Ingester{ID: "test"}, []*Record{catalog, free, unknown}); err != nil {
+		t.Fatalf("IngestAs: %v", err)
+	}
+
+	got, err := s.List(ctx, Filter{TemporalWorkflowID: "", TargetRepo: "mctlhq/mctl-api", Since: &at, Limit: MaxQueryLimit})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	byID := map[string]*Record{}
+	for _, r := range got.Records {
+		byID[r.ID] = r
+	}
+	check := func(want *Record, source string, cost *float64, version string) {
+		t.Helper()
+		r := byID[want.ID]
+		if r == nil {
+			t.Fatalf("%s row not read back", source)
+		}
+		if r.PriceSource != source {
+			t.Errorf("price_source = %q, want %q", r.PriceSource, source)
+		}
+		switch {
+		case cost == nil && r.CalculatedCost != nil:
+			t.Errorf("%s row carries calculated_cost %v, want null", source, *r.CalculatedCost)
+		case cost != nil && (r.CalculatedCost == nil || *r.CalculatedCost != *cost):
+			t.Errorf("%s row calculated_cost = %v, want %v", source, r.CalculatedCost, *cost)
+		}
+		if r.PricingVersion != version {
+			t.Errorf("%s row pricing_version = %q, want %q", source, r.PricingVersion, version)
+		}
+		if r.InputTokens == nil || *r.InputTokens != 1_000_000 {
+			t.Errorf("%s row lost its tokens: %v", source, r.InputTokens)
+		}
+	}
+	// 1M input at 10 + 100k output at 50, from the wildcard test card.
+	catalogCost, zero := 15.0, 0.0
+	check(catalog, PriceSourceCatalog, &catalogCost, "test-v1")
+	check(free, PriceSourceProviderFree, &zero, PricingVersionProviderFree)
+	check(unknown, PriceSourceUnknown, nil, "")
+
+	sum, err := s.Summary(ctx, Filter{TemporalWorkflowID: prefix + "-unknown-wf"}, GroupByPriceSource)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if len(sum.Buckets) != 1 || sum.Buckets[0].Key != PriceSourceUnknown || sum.Buckets[0].CalculatedCost != nil ||
+		sum.Buckets[0].InputTokens == nil || *sum.Buckets[0].InputTokens != 1_000_000 {
+		t.Errorf("summary by price_source for the unknown row: %+v", sum.Buckets)
+	}
+}
+
+// A row written before price_source existed has NULL there. It was priced from
+// the catalog, so it must read back, and group, as mctl_catalog; and the
+// database itself refuses a value outside the vocabulary.
+func TestLegacyRowReadsAsCatalogAndDatabaseRefusesUnknownSource(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	_, err := s.pool.Exec(ctx, `
+INSERT INTO model_usage_records (
+    id, schema_version, session_id, result_uuid, model_key, recorded_at, temporal_workflow_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		prefix+"-legacy-id", SchemaVersion, prefix+"-legacy-session", prefix+"-legacy-uuid", "test-model", at, prefix+"-legacy-wf")
+	if err != nil {
+		t.Fatalf("legacy insert: %v", err)
+	}
+	got, err := s.List(ctx, Filter{TemporalWorkflowID: prefix + "-legacy-wf"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got.Records) != 1 || got.Records[0].PriceSource != PriceSourceCatalog {
+		t.Fatalf("legacy row read back as %+v, want price_source %q", got.Records, PriceSourceCatalog)
+	}
+	sum, err := s.Summary(ctx, Filter{TemporalWorkflowID: prefix + "-legacy-wf"}, GroupByPriceSource)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if len(sum.Buckets) != 1 || sum.Buckets[0].Key != PriceSourceCatalog {
+		t.Errorf("legacy row grouped as %+v, want one %q bucket", sum.Buckets, PriceSourceCatalog)
+	}
+
+	_, err = s.pool.Exec(ctx, `
+INSERT INTO model_usage_records (
+    id, schema_version, session_id, result_uuid, model_key, recorded_at, price_source
+) VALUES ($1, $2, $3, $4, $5, $6, 'catalog')`,
+		prefix+"-bad-id", SchemaVersion, prefix+"-bad-session", prefix+"-bad-uuid", "test-model", at)
+	if err == nil {
+		t.Error("the database accepted price_source 'catalog', outside the vocabulary")
+	}
+	if _, err := s.pool.Exec(ctx, usageSchema); err != nil {
+		t.Fatalf("re-applying usageSchema: %v", err)
+	}
+}

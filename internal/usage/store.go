@@ -119,6 +119,15 @@ ALTER TABLE model_usage_records ADD COLUMN IF NOT EXISTS execution_id TEXT NOT N
 -- read as '' and producers that do not send it are unaffected. No backfill.
 ALTER TABLE model_usage_records ADD COLUMN IF NOT EXISTS temporal_run_id TEXT NOT NULL DEFAULT '';
 
+-- Where the money comes from (mctlhq/mctl-agents#826): mctl_catalog,
+-- provider_free or unknown. Nullable and not backfilled: NULL is a row written
+-- before the column existed, and reads as mctl_catalog, which is how it was
+-- priced. The CHECK is part of the ADD COLUMN, so it applies exactly when the
+-- column is created and re-running the schema is a no-op.
+ALTER TABLE model_usage_records ADD COLUMN IF NOT EXISTS price_source TEXT
+    CONSTRAINT price_source_vocabulary
+    CHECK (price_source IS NULL OR price_source IN ('mctl_catalog', 'provider_free', 'unknown'));
+
 CREATE INDEX IF NOT EXISTS model_usage_recorded_at_idx ON model_usage_records (recorded_at);
 CREATE INDEX IF NOT EXISTS model_usage_workflow_idx    ON model_usage_records (temporal_workflow_id);
 CREATE INDEX IF NOT EXISTS model_usage_repo_issue_idx  ON model_usage_records (target_repo, issue_number);
@@ -187,7 +196,7 @@ INSERT INTO model_usage_records (
     provider_reported_cost, calculated_cost, pricing_version, invoice_reconciled_cost,
     outcome, api_error_status, stop_reason, terminal_reason,
     num_turns, duration_api_ms, retry_attempt, recorded_at,
-    ingested_by, ingested_by_principal_id, execution_id, temporal_run_id
+    ingested_by, ingested_by_principal_id, execution_id, temporal_run_id, price_source
 ) VALUES (
     $1,$2,$3,$4,$5,$6,$7,
     $8,$9,$10,$11,$12,
@@ -197,7 +206,7 @@ INSERT INTO model_usage_records (
     $24,$25,$26,$27,
     $28,$29,$30,$31,
     $32,$33,$34,$35,
-    $36,$37,$38,$39
+    $36,$37,$38,$39,$40
 )
 ON CONFLICT (id) DO NOTHING
 `
@@ -246,25 +255,13 @@ func (s *Store) IngestAs(ctx context.Context, by Ingester, records []*Record) (*
 			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
 		r.IngestedBy, r.IngestedByPrincipalID = by.ID, by.PrincipalID
-		if r.CalculatedCost == nil && r.ProviderReportedCost == nil && s.catalog != nil {
-			// A model with no rate card is not a reason to reject the record:
-			// the token counts are still the truth, and a cost can be derived
-			// later once a card exists. Dropping the record would lose the
-			// measurement permanently.
-			if err := s.catalog.Calculate(r); err != nil {
-				if !errors.Is(err, ErrNoPricing) {
-					return nil, err
-				}
-				// Not fatal — the token counts are still the truth and a cost
-				// can be derived later once a card exists. But it must not be
-				// silent: a catalog that failed to load at boot, or one whose
-				// cards all name a provider the producer omits, makes every
-				// row costless, and "spend is zero" is indistinguishable from
-				// "spend was never priced" without this line.
-				slog.Warn("usage record stored without calculated cost: no pricing card matched",
-					"canonical_model", r.CanonicalModel, "model_key", r.ModelKey,
-					"provider", r.Provider, "recorded_at", r.RecordedAt)
-			}
+		// Checked before pricing so that a producer-supplied cost is judged
+		// as sent, not after the server has added its own.
+		if err := r.validatePriceSource(); err != nil {
+			return nil, fmt.Errorf("record %d: %w", i, err)
+		}
+		if err := priceAtIngest(s.catalog, r); err != nil {
+			return nil, err
 		}
 		if err := r.Validate(); err != nil {
 			// Naming the index matters: the write is all-or-nothing, so a
@@ -289,7 +286,7 @@ func (s *Store) IngestAs(ctx context.Context, by Ingester, records []*Record) (*
 			r.ProviderReportedCost, r.CalculatedCost, r.PricingVersion, r.InvoiceReconciledCost,
 			r.Outcome, r.APIErrorStatus, r.StopReason, r.TerminalReason,
 			r.NumTurns, r.DurationAPIMs, r.RetryAttempt, r.RecordedAt,
-			r.IngestedBy, r.IngestedByPrincipalID, r.ExecutionID, r.TemporalRunID,
+			r.IngestedBy, r.IngestedByPrincipalID, r.ExecutionID, r.TemporalRunID, r.PriceSource,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("usage: insert %s: %w", r.ID, err)
@@ -304,6 +301,49 @@ func (s *Store) IngestAs(ctx context.Context, by Ingester, records []*Record) (*
 		return nil, fmt.Errorf("usage: commit: %w", err)
 	}
 	return res, nil
+}
+
+// priceAtIngest sets r.PriceSource and, where it allows, prices r.
+//
+// Only mctl_catalog rows reach the catalog. Catalog.At falls back to a
+// model's wildcard card for a provider without a card of its own, so a
+// third-party row with a canonical model name would otherwise come back with
+// a list-price cost nobody was billed (mctlhq/mctl-api#827).
+func priceAtIngest(c *Catalog, r *Record) error {
+	if r.PriceSource == "" {
+		r.PriceSource = PriceSourceCatalog
+	}
+	if r.CalculatedCost != nil || r.ProviderReportedCost != nil {
+		return nil
+	}
+	switch r.PriceSource {
+	case PriceSourceProviderFree:
+		zero := 0.0
+		r.CalculatedCost, r.PricingVersion = &zero, PricingVersionProviderFree
+		return nil
+	case PriceSourceUnknown:
+		return nil
+	}
+	if c == nil {
+		return nil
+	}
+	// A model with no rate card is not a reason to reject the record: the
+	// token counts are still the truth, and a cost can be derived later once
+	// a card exists. Dropping the record would lose the measurement
+	// permanently.
+	if err := c.Calculate(r); err != nil {
+		if !errors.Is(err, ErrNoPricing) {
+			return err
+		}
+		// Not fatal, but it must not be silent: a catalog that failed to load
+		// at boot, or one whose cards all name a provider the producer omits,
+		// makes every row costless, and "spend is zero" is indistinguishable
+		// from "spend was never priced" without this line.
+		slog.Warn("usage record stored without calculated cost: no pricing card matched",
+			"canonical_model", r.CanonicalModel, "model_key", r.ModelKey,
+			"provider", r.Provider, "recorded_at", r.RecordedAt)
+	}
+	return nil
 }
 
 // Filter narrows a query. A zero Filter matches everything.
@@ -401,7 +441,8 @@ const selectColumns = `
     provider_reported_cost, calculated_cost, pricing_version, invoice_reconciled_cost,
     outcome, api_error_status, stop_reason, terminal_reason,
     num_turns, duration_api_ms, retry_attempt, recorded_at,
-    ingested_by, ingested_by_principal_id, execution_id, temporal_run_id
+    ingested_by, ingested_by_principal_id, execution_id, temporal_run_id,
+    COALESCE(price_source, 'mctl_catalog')
 `
 
 // ListResult is a bounded page of records.
@@ -477,6 +518,7 @@ func scanRecord(rows pgx.Rows) (*Record, error) {
 		&r.Outcome, &r.APIErrorStatus, &r.StopReason, &r.TerminalReason,
 		&r.NumTurns, &r.DurationAPIMs, &r.RetryAttempt, &r.RecordedAt,
 		&r.IngestedBy, &r.IngestedByPrincipalID, &r.ExecutionID, &r.TemporalRunID,
+		&r.PriceSource,
 	); err != nil {
 		return nil, fmt.Errorf("usage: scan: %w", err)
 	}
@@ -498,6 +540,10 @@ const (
 	GroupByWorkItem  GroupBy = "work_item_id"
 	GroupByExecution GroupBy = "execution_id"
 	GroupByOutcome   GroupBy = "outcome"
+	// GroupByPriceSource splits a total by where its money comes from, so a
+	// null calculated_cost can be read as "unknown" or "free" rather than
+	// silently summed as nothing.
+	GroupByPriceSource GroupBy = "price_source"
 )
 
 // The mapped values are fixed SQL fragments, never request data, so a
@@ -517,6 +563,9 @@ var groupColumns = map[GroupBy]string{
 	GroupByWorkItem:  "work_item_id",
 	GroupByExecution: "execution_id",
 	GroupByOutcome:   "outcome",
+	// NULL is a row written before the column existed; it was priced from
+	// the catalog, so it belongs in that bucket rather than in "".
+	GroupByPriceSource: "COALESCE(price_source, 'mctl_catalog')",
 }
 
 // ParseGroupBy resolves a request value to a known dimension.
