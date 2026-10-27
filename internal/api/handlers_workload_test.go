@@ -47,8 +47,22 @@ func (s *stubWorkload) ListEvents(_ context.Context, _ string, q k8s.EventQuery)
 	return s.events, s.truncated, s.err
 }
 
+// workloadTenants registers acme and other; "broken" is a checkout that
+// cannot be read, and every other name (kube-system, argocd) is absent.
+type workloadTenants struct{ GitReader }
+
+func (workloadTenants) TenantExists(name string) (bool, error) {
+	switch name {
+	case "acme", "other":
+		return true, nil
+	case "broken":
+		return false, errors.New("checkout unreadable")
+	}
+	return false, nil
+}
+
 func workloadRouter(rd WorkloadReader) http.Handler {
-	h := &Handlers{opts: Options{WorkloadReader: rd}}
+	h := &Handlers{opts: Options{WorkloadReader: rd, GitReader: workloadTenants{}}}
 	r := chi.NewRouter()
 	r.Get("/api/v1/pods/{team}/{app}", h.GetServicePods)
 	r.Get("/api/v1/events/{team}", h.ListNamespaceEvents)
@@ -153,5 +167,37 @@ func TestListWorkflows_PlatformRowsHiddenFromTenants(t *testing.T) {
 	}
 	if sup := names(supportRun("acme")); len(sup) != 1 || !sup["wf-acme"] {
 		t.Errorf("support sees %v", sup)
+	}
+}
+
+// {team} is used as the Kubernetes namespace. Admins and ReadAllTenants
+// scopes pass HasTenantAccess for any name, so the handlers must refuse a
+// name that is not a registered tenant before the reader runs: 404 for a
+// definite absence, 503 when the lookup fails.
+func TestWorkloadReads_OnlyRegisteredTenants(t *testing.T) {
+	stub := &stubWorkload{}
+	r := workloadRouter(stub)
+	callers := map[string]*auth.User{
+		"admin":        auth.NewGitHubUser("root", []string{"admins"}),
+		"investigator": investigatorRun("wi_own"),
+	}
+	for who, u := range callers {
+		for p, want := range map[string]int{
+			"/api/v1/pods/kube-system/coredns": 404,
+			"/api/v1/events/argocd":            404,
+			"/api/v1/pods/broken/web":          503,
+			"/api/v1/events/broken":            503,
+		} {
+			before := stub.calls
+			if rec := serveUser(r, u, "GET", p); rec.Code != want {
+				t.Errorf("%s %s = %d, want %d", who, p, rec.Code, want)
+			}
+			if stub.calls != before {
+				t.Errorf("%s %s reached the reader", who, p)
+			}
+		}
+		if rec := serveUser(r, u, "GET", "/api/v1/events/acme"); rec.Code != 200 {
+			t.Errorf("%s registered tenant = %d", who, rec.Code)
+		}
 	}
 }

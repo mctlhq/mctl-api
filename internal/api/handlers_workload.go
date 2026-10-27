@@ -51,6 +51,9 @@ func (h *Handlers) GetServicePods(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
+	if !h.requireRegisteredTenant(w, team) {
+		return
+	}
 	if h.opts.WorkloadReader == nil {
 		writeError(w, http.StatusServiceUnavailable, "pod listing unavailable: kubernetes client not configured")
 		return
@@ -88,6 +91,9 @@ func (h *Handlers) ListNamespaceEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if !user.IsAdmin() && !user.HasTenantAccess(team) {
 		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	if !h.requireRegisteredTenant(w, team) {
 		return
 	}
 	q := r.URL.Query()
@@ -138,4 +144,27 @@ func (h *Handlers) ListNamespaceEvents(w http.ResponseWriter, r *http.Request) {
 		"since":     since.String(),
 		"truncated": truncated,
 	})
+}
+
+// requireRegisteredTenant answers false, after writing the response, unless
+// team names a registered tenant. {team} becomes the Kubernetes namespace, and
+// HasTenantAccess is true for any name for admins and ReadAllTenants agent
+// scopes, so without this check they could read kube-system or argocd. Only a
+// definite absence is 404; a failed or missing lookup is 503, never a 404.
+func (h *Handlers) requireRegisteredTenant(w http.ResponseWriter, team string) bool {
+	if h.opts.GitReader == nil {
+		writeError(w, http.StatusServiceUnavailable, "tenant lookup not configured")
+		return false
+	}
+	exists, err := h.opts.GitReader.TenantExists(team)
+	if err != nil {
+		slog.Error("workload read: tenant lookup failed", "team", team, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "tenant lookup failed")
+		return false
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "tenant not found: "+team)
+		return false
+	}
+	return true
 }

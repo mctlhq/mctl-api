@@ -130,9 +130,9 @@ func (c *WorkloadClient) ListServicePods(ctx context.Context, namespace, workloa
 		if err != nil {
 			return nil, fmt.Errorf("listing pods in %s: %w", namespace, err)
 		}
-		for _, p := range all.Items {
-			if strings.HasPrefix(p.Name, workload+"-") {
-				pods = append(pods, p)
+		for i := range all.Items {
+			if strings.HasPrefix(all.Items[i].Name, workload+"-") {
+				pods = append(pods, all.Items[i])
 			}
 		}
 	}
@@ -171,11 +171,12 @@ func toPodState(p *corev1.Pod) PodState {
 
 func containerStates(specs []corev1.Container, statuses []corev1.ContainerStatus) []ContainerState {
 	byName := make(map[string]corev1.ContainerStatus, len(statuses))
-	for _, s := range statuses {
-		byName[s.Name] = s
+	for i := range statuses {
+		byName[statuses[i].Name] = statuses[i]
 	}
 	out := make([]ContainerState, 0, len(specs))
-	for _, sp := range specs {
+	for i := range specs {
+		sp := &specs[i]
 		cs := ContainerState{
 			Name:     sp.Name,
 			Image:    sp.Image,
