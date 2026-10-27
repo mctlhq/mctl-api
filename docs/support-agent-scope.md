@@ -49,3 +49,6 @@ absent), 403 `agent_scope_tenant_forbidden`, 403 `execution_not_in_tenant`,
 - MCP: only the support tool list; `team`, `team_name` and `tenant`
   arguments must equal the bound tenant, and tenant-taking tools must carry it.
 - `User.HasTenantAccess(t)` is true only for the bound tenant.
+
+See also [Support agent over MCP](support-agent-mcp.md) for the
+`mctl_ask_support` and `mctl_get_support_task` tools.

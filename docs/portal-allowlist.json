@@ -518,6 +518,16 @@
       "name": "mctl_get_usage_summary",
       "enabled": false,
       "reason": "Admin-only aggregate of the model-usage ledger: token and cost sums per stage/agent/model/repo for DevLoop workflows; exposes internal workflow ids, repo/issue/PR numbers and estimated spend, no prompt or completion text. Not enabled on the shared portal pending an owner decision (mctl-api#651)."
+    },
+    {
+      "name": "mctl_ask_support",
+      "enabled": true,
+      "reason": "Sends the caller's own bearer to the tenant support agent (mctl-support), tenant-checked in mctl-api and again in mctl-support. Creates a support task and spends the tenant's model budget, and returns diagnosis text about the caller's own tenant (mctl-api#814)."
+    },
+    {
+      "name": "mctl_get_support_task",
+      "enabled": true,
+      "reason": "Read-only fetch of one support task by id. Forwards the caller's own bearer and mctl-support decides visibility, so a task of another tenant answers as mctl-support answers (mctl-api#814)."
     }
   ]
 }

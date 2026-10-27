@@ -84,7 +84,7 @@ func ParseAgentReceiptGateMode(raw string) (AgentReceiptGateMode, error) {
 
 // AgentReceiptGatePolicyVersion names the governed tool set below. Changing
 // the set changes the version.
-const AgentReceiptGatePolicyVersion = "mctl-api/agent-receipt-gate/v1"
+const AgentReceiptGatePolicyVersion = "mctl-api/agent-receipt-gate/v2"
 
 // The reserved tool arguments that carry a receipt.
 const (
@@ -158,6 +158,8 @@ func ParseAgentReceiptMaxAge(raw string) (time.Duration, error) {
 // fails on a tool in neither.
 var governedAgentTools = toolSet(
 	"mctl_abandon_dev_loop",
+	// Creates a support task and spends the tenant's model budget.
+	"mctl_ask_support",
 	// Read-only, but not a read verb, so mctl-agents' policy asks for approval.
 	"mctl_deploy_analyze",
 	"mctl_add_custom_domain",

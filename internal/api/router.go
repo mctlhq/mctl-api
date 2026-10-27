@@ -64,6 +64,10 @@ type Options struct {
 	AuthMiddleware func(http.Handler) http.Handler
 	// MCPServer exposes platform tools over MCP Streamable HTTP at /mcp.
 	MCPServer *mctlmcp.Server
+	// MCPWriteTimeout extends the write deadline of POST /mcp beyond
+	// ServerWriteTimeout (mctl-api#814: mctl_ask_support waits for an answer).
+	// Zero, or a value not above ServerWriteTimeout, changes nothing.
+	MCPWriteTimeout time.Duration
 	// QuotaReader fetches live K8s resource usage (optional — nil in local/test).
 	QuotaReader QuotaReader
 	// PreviewLister lists preview Helm releases (optional — nil means listing is unavailable).
@@ -486,7 +490,8 @@ func NewRouter(opts Options) http.Handler {
 			return "surface-total:" + auth.UserFromContext(r.Context()).ID, nil
 		}))))
 		// Above the gate: relay resolves a link in Postgres there.
-		r.Use(middleware.Timeout(30 * 1000000000)) // 30s
+		// 30s, except POST /mcp when the support wait needs longer (mctl-api#814).
+		r.Use(requestTimeout(30*time.Second, opts.MCPWriteTimeout))
 		// Surface principals reach only their allowlisted routes; relay
 		// routes continue as the linked human.
 		r.Use(h.surfacePrincipalGate)
@@ -1043,13 +1048,51 @@ func NewRouter(opts Options) http.Handler {
 			opts.MCPServer.SetAgentReceiptGate(h, opts.AgentReceiptGateMode)
 			opts.MCPServer.SetScopedCallAuditor(h)
 			mcpH := opts.MCPServer.NewStreamableHTTPHandler()
-			r.Post("/mcp", mcpH.ServeHTTP)
+			r.Post("/mcp", extendWriteDeadline(opts.MCPWriteTimeout, mcpH).ServeHTTP)
 			r.Get("/mcp", mcpH.ServeHTTP)
 			r.Delete("/mcp", mcpH.ServeHTTP)
 		}
 	})
 
 	return r
+}
+
+// requestTimeout is middleware.Timeout(def) for every route except POST /mcp,
+// which gets mcp when mcp exceeds def. mctl_ask_support derives its wait
+// budget from the request context, so a 30s request deadline would cut the
+// configured wait short whatever the write deadline says.
+func requestTimeout(def, mcp time.Duration) func(http.Handler) http.Handler {
+	if mcp <= def {
+		return middleware.Timeout(def)
+	}
+	return func(next http.Handler) http.Handler {
+		std, long := middleware.Timeout(def)(next), middleware.Timeout(mcp)(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && r.URL.Path == "/mcp" {
+				long.ServeHTTP(w, r)
+				return
+			}
+			std.ServeHTTP(w, r)
+		})
+	}
+}
+
+// extendWriteDeadline lifts the connection's write deadline to d from now when
+// d exceeds ServerWriteTimeout; otherwise it returns next unchanged.
+func extendWriteDeadline(d time.Duration, next http.Handler) http.Handler {
+	return extendWriteDeadlineAbove(ServerWriteTimeout, d, next)
+}
+
+func extendWriteDeadlineAbove(threshold, d time.Duration, next http.Handler) http.Handler {
+	if d <= threshold {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(d)); err != nil {
+			slog.Warn("could not extend the /mcp write deadline", "error", err)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // isLoopbackRemote reports whether the transport peer is IPv4 or IPv6

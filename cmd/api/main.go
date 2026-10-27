@@ -949,6 +949,20 @@ func main() {
 	// caller-facing text mctl_whoami shows comes from publicBaseURL below.
 	mcpSrv := mctlmcp.NewInProcessServer(cfg.Port, publicBaseURL(cfg, oauthServer))
 
+	// Tenant support agent tools (mctl-api#814). Unset URL: both answer "not configured".
+	supportCfg, supportErr := mctlmcp.ParseSupportConfig(os.Getenv)
+	if supportErr != nil {
+		slog.Error("invalid support agent configuration", "error", supportErr)
+		os.Exit(1)
+	}
+	var mcpWriteTimeout time.Duration
+	if supportCfg.BaseURL != "" {
+		mcpSrv.SetSupportConfig(supportCfg)
+		mcpWriteTimeout = supportCfg.Wait + 15*time.Second
+	} else {
+		slog.Info("SUPPORT_A2A_URL not set: mctl_ask_support and mctl_get_support_task answer \"not configured\"")
+	}
+
 	// Kubernetes quota client (optional — fails gracefully outside cluster).
 	var quotaReader mctlapi.QuotaReader
 	if qc, qErr := k8s.NewQuotaClient(); qErr != nil {
@@ -1113,6 +1127,7 @@ func main() {
 		Executor:                       executor,
 		AuthMiddleware:                 authMiddleware,
 		MCPServer:                      mcpSrv,
+		MCPWriteTimeout:                mcpWriteTimeout,
 		QuotaReader:                    quotaReader,
 		PreviewLister:                  previewLister,
 		WorkloadReader:                 workloadReader,
