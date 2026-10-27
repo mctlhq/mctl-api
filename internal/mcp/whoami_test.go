@@ -262,3 +262,38 @@ func TestToolWhoami_StdioServer_TrimsTrailingSlash(t *testing.T) {
 		t.Errorf("expected 'Authenticated to https://api.mctl.ai', got: %s", text)
 	}
 }
+
+func whoamiWithBody(t *testing.T, body string) (string, bool) {
+	t.Helper()
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer backend.Close()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(backend.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return callWhoamiViaMCP(t, NewInProcessServer(port, "https://api.mctl.ai"))
+}
+
+func TestToolWhoami_BoundTenant(t *testing.T) {
+	text, isError := whoamiWithBody(t, `{"id":"agent:mctl-support","groups":[],"isAdmin":false,"namespaces":[],"boundTenant":"labs"}`)
+	if isError || !strings.Contains(text, "Bound tenant: labs") {
+		t.Errorf("isError=%v text=%s", isError, text)
+	}
+}
+
+func TestToolWhoami_NoBoundTenantLine(t *testing.T) {
+	text, isError := whoamiWithBody(t, `{"id":"mashkovd","groups":["admins"],"isAdmin":true,"namespaces":["admins"]}`)
+	if isError || strings.Contains(text, "Bound tenant") {
+		t.Errorf("isError=%v text=%s", isError, text)
+	}
+}
+
+func TestToolWhoami_MalformedBody(t *testing.T) {
+	text, isError := whoamiWithBody(t, `{not json`)
+	if !isError || strings.Contains(text, "User:") {
+		t.Errorf("isError=%v text=%s", isError, text)
+	}
+}
