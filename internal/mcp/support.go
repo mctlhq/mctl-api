@@ -256,7 +256,7 @@ func (s *Server) supportDo(ctx context.Context, cfg *SupportConfig, method, path
 		}
 		return nil, nil, &supportError{msg: "mctl-support transport error: " + err.Error()}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, supportMaxBody))
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -547,7 +547,7 @@ func (s *Server) toolAskSupport() (mcplib.Tool, server.ToolHandlerFunc) {
 			if errors.As(err, &se) && se.refusal() {
 				return mcplib.NewToolResultError(err.Error()), nil
 			}
-			if ctx.Err() != nil {
+			if errors.Is(ctx.Err(), context.Canceled) {
 				return nil, ctx.Err()
 			}
 			return mcplib.NewToolResultError(fmt.Sprintf("support_send_outcome_unknown: message %s may or may not have created a task (%s); the call was not retried, and a task may exist and may spend budget", messageID, err.Error())), nil
@@ -555,16 +555,18 @@ func (s *Server) toolAskSupport() (mcplib.Tool, server.ToolHandlerFunc) {
 		if reply != nil {
 			return supportOutcome(nil, reply), nil
 		}
-		return s.supportAwait(ctx, budgetCtx, cfg, task), nil
+		return s.supportAwait(ctx, budgetCtx, cfg, task)
 	}
 	return tool, handler
 }
 
-// supportAwait polls task until it is terminal or interrupted, or budgetCtx ends.
-func (s *Server) supportAwait(ctx, budgetCtx context.Context, cfg *SupportConfig, task *a2aTask) *mcplib.CallToolResult {
+// supportAwait polls task until it is terminal or interrupted, or budgetCtx
+// ends. A client cancellation of ctx is returned as an error; a deadline
+// (the budget's or the request's) ends the wait like the budget does.
+func (s *Server) supportAwait(ctx, budgetCtx context.Context, cfg *SupportConfig, task *a2aTask) (*mcplib.CallToolResult, error) {
 	state := normalizeState(task.Status.State)
 	if isTerminalState(state) || isInterruptedState(state) {
-		return supportOutcome(task, nil)
+		return supportOutcome(task, nil), nil
 	}
 	id := task.ID
 	last := task
@@ -584,13 +586,13 @@ func (s *Server) supportAwait(ctx, budgetCtx context.Context, cfg *SupportConfig
 				last, polled, lastErr = t, true, nil
 				st := normalizeState(t.Status.State)
 				if isTerminalState(st) || isInterruptedState(st) {
-					return supportOutcome(t, nil)
+					return supportOutcome(t, nil), nil
 				}
 				continue
 			}
 			var se *supportError
 			if errors.As(err, &se) && se.refusal() && se.status != http.StatusTooManyRequests {
-				return mcplib.NewToolResultError(fmt.Sprintf("task %s: polling stopped: %s", id, err.Error()))
+				return mcplib.NewToolResultError(fmt.Sprintf("task %s: polling stopped: %s", id, err.Error())), nil
 			}
 			if budgetCtx.Err() != nil {
 				// The budget, not mctl-support, cut this poll short: it says
@@ -605,12 +607,17 @@ func (s *Server) supportAwait(ctx, budgetCtx context.Context, cfg *SupportConfig
 		}
 		break
 	}
-	if lastErr != nil || !polled {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, ctx.Err()
+	}
+	// No poll attempted (the send used the whole budget): the send reply is
+	// the last successful read, so this is an unfinished task, not an error.
+	if lastErr != nil {
 		reason := "no poll completed within the wait"
 		if lastErr != nil {
 			reason = lastErr.Error()
 		}
-		return mcplib.NewToolResultError(fmt.Sprintf("task %s is not finished and could not be read (%s); continue with mctl_get_support_task", id, reason))
+		return mcplib.NewToolResultError(fmt.Sprintf("task %s is not finished and could not be read (%s); continue with mctl_get_support_task", id, reason)), nil
 	}
 	return supportResultJSON(supportAnswer{
 		TaskID:    id,
@@ -618,7 +625,7 @@ func (s *Server) supportAwait(ctx, budgetCtx context.Context, cfg *SupportConfig
 		State:     normalizeState(last.Status.State),
 		Terminal:  false,
 		Note:      "still running; call mctl_get_support_task with this task_id",
-	}, false)
+	}, false), nil
 }
 
 func (s *Server) toolGetSupportTask() (mcplib.Tool, server.ToolHandlerFunc) {
@@ -651,7 +658,7 @@ func (s *Server) toolGetSupportTask() (mcplib.Tool, server.ToolHandlerFunc) {
 		defer cancel()
 		task, _, err := s.supportDo(rctx, cfg, http.MethodGet, "/tasks/"+url.PathEscape(id), nil, false)
 		if err != nil {
-			if ctx.Err() != nil {
+			if errors.Is(ctx.Err(), context.Canceled) {
 				return nil, ctx.Err()
 			}
 			return mcplib.NewToolResultError(fmt.Sprintf("task %s: %s", id, err.Error())), nil

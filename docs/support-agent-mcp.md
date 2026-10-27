@@ -24,11 +24,14 @@ the receipt-gated set (policy `mctl-api/agent-receipt-gate/v2`).
 
 The send uses `configuration.returnImmediately: true`, so the task id arrives
 at once. One budget, `SUPPORT_ASK_WAIT`, covers the send and all polling and is
-never extended. If the task is not finished in time, the result is non-error
-with `terminal: false` and the task id: continue with `mctl_get_support_task`.
+never extended. If the task is not finished in time and its last read
+succeeded (the send reply counts when no poll was due), the result is
+non-error with `terminal: false` and the task id: continue with
+`mctl_get_support_task`. If the last poll failed, it is a tool error that
+still names the task id.
 
-If the send fails without a task id (transport error, budget expiry, 5xx or an
-undecodable reply) the tool returns `support_send_outcome_unknown` naming the
+If the send fails without a task id (transport error, budget or request
+deadline expiry, 5xx or an undecodable reply) the tool returns `support_send_outcome_unknown` naming the
 `messageId`. It does not poll and never resends: a task may exist.
 
 ## Answer
@@ -50,5 +53,6 @@ reason. INPUT_REQUIRED and AUTH_REQUIRED return the state and reason.
 | `SUPPORT_POLL_INTERVAL` | `2s` | Poll spacing, at least 500ms. |
 | `SUPPORT_REQUEST_TIMEOUT` | `15s` | Cap on one `GET /tasks/{id}`, 1s to `SUPPORT_ASK_WAIT`. |
 
-When configured, the `/mcp` write deadline is `SUPPORT_ASK_WAIT + 15s` instead
-of the 30s server default.
+When configured, `POST /mcp` gets both a request timeout and a write deadline
+of `SUPPORT_ASK_WAIT + 15s` instead of the 30s defaults; every other route keeps
+30s. Unconfigured, nothing changes.

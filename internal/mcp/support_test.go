@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +27,7 @@ const (
 
 func fixture(t *testing.T, name string) []byte {
 	t.Helper()
-	b, err := os.ReadFile("testdata/support/" + name)
+	b, err := os.ReadFile("testdata/support/" + name) //nolint:gosec // fixed test fixture names
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +203,7 @@ func TestAskSupport_RequestShapeAndParity(t *testing.T) { // T4, T5, T21
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var direct a2aTask
 	if err := json.NewDecoder(resp.Body).Decode(&direct); err != nil {
 		t.Fatal(err)
@@ -484,7 +485,7 @@ func TestAskSupport_SharedBudget(t *testing.T) { // T22
 func TestAskSupport_BlockingServerAndDirectMessage(t *testing.T) { // T23
 	f := newFake(t, func(w http.ResponseWriter, r *http.Request, n int) {
 		time.Sleep(50 * time.Millisecond)
-		w.Write([]byte(`{"task":` + string(fixture(t, "task_completed_status_message.json")) + `}`))
+		_, _ = w.Write([]byte(`{"task":` + string(fixture(t, "task_completed_status_message.json")) + `}`))
 	})
 	text, isErr := ask(t, supportServer(f, time.Second), memberCtx("example-tenant"), nil)
 	if isErr {
@@ -601,5 +602,57 @@ func TestAskSupport_SupportScopeDenied(t *testing.T) { // T12
 	res, ran := runScopeArgs(t, supportCtx(), "mctl_ask_support", map[string]any{"tenant": "labs", "question": "q"})
 	if ran || !res.IsError || !strings.Contains(res.Content[0].(mcplib.TextContent).Text, AgentScopeCodeDenied) {
 		t.Fatalf("ran=%v res=%+v", ran, res)
+	}
+}
+
+// The request's own deadline (not the budget) ends the send: still an unknown
+// outcome naming the messageId, never a bare context error.
+func TestAskSupport_ParentDeadlineDuringSend(t *testing.T) {
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		time.Sleep(300 * time.Millisecond)
+		writeFixture(t, w, "send_task_submitted.json")
+	})
+	ctx, cancel := context.WithTimeout(memberCtx("example-tenant"), 100*time.Millisecond)
+	defer cancel()
+	text, isErr := ask(t, supportServer(f, time.Second), ctx, nil)
+	if !isErr || !strings.HasPrefix(text, "support_send_outcome_unknown: message ") {
+		t.Fatalf("%q err=%v", text, isErr)
+	}
+}
+
+// A client cancellation while polling is returned as the handler's error.
+func TestAskSupport_ClientCancelDuringPoll(t *testing.T) {
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if r.Method == http.MethodPost {
+			writeFixture(t, w, "send_task_submitted.json")
+			return
+		}
+		writeFixture(t, w, "task_working.json")
+	})
+	ctx, cancel := context.WithCancel(memberCtx("example-tenant"))
+	time.AfterFunc(100*time.Millisecond, cancel)
+	_, h := supportServer(f, time.Second).toolAskSupport()
+	req := mcplib.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"tenant": "example-tenant", "question": "q"}
+	if res, err := h(ctx, req); !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, %+v; want context.Canceled", err, res)
+	}
+}
+
+// The send used the whole budget, so no poll was attempted: the send reply is
+// the last successful read and the result is an unfinished task, not an error.
+func TestAskSupport_SendUsedBudgetNoPoll(t *testing.T) {
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		writeFixture(t, w, "send_task_submitted.json")
+	})
+	s := NewServer("http://127.0.0.1:1", "")
+	s.SetSupportConfig(SupportConfig{BaseURL: f.srv.URL, Wait: 100 * time.Millisecond, PollInterval: time.Second, RequestTimeout: 500 * time.Millisecond})
+	text, isErr := ask(t, s, memberCtx("example-tenant"), nil)
+	a := decodeAnswer(t, text)
+	if isErr || a.Terminal || a.TaskID == "" || a.State != "SUBMITTED" {
+		t.Fatalf("%q err=%v", text, isErr)
 	}
 }
