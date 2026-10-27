@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.133.0](https://github.com/mctlhq/mctl-api/compare/4.132.0...4.133.0) (2026-10-27)
+
+
+### Features
+
+* **agents:** issue-836-feat-whoami-report-the-bound-tenant-of-a ([22a4fb3](https://github.com/mctlhq/mctl-api/commit/22a4fb364e7f5ac19e358c168f839b30d6e809be))
+* **agents:** issue-836-feat-whoami-report-the-bound-tenant-of-a ([4dd2ece](https://github.com/mctlhq/mctl-api/commit/4dd2ecefa899cf70e59770cce57b9b07d4dea381))
+
 ## [4.132.0](https://github.com/mctlhq/mctl-api/compare/4.131.0...4.132.0) (2026-10-27)
 
 
