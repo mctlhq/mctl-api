@@ -66,16 +66,16 @@ func TestSupportAudit_EndToEndOneRowPerToolCall(t *testing.T) {
 		"jsonrpc": "2.0", "id": 1, "method": "initialize",
 		"params": map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{},
 			"clientInfo": map[string]any{"name": "t", "version": "0"}},
-	}).Header.Get("Mcp-Session-Id")
+	}).header.Get("Mcp-Session-Id")
 	mcpPost(t, backend.URL, "tok-sup", sid, map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
 	mcpPost(t, backend.URL, "tok-sup", sid, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 	resp := mcpPost(t, backend.URL, "tok-sup", sid, map[string]any{
 		"jsonrpc": "2.0", "id": 3, "method": "tools/call",
 		"params": map[string]any{"name": "mctl_get_resource_usage", "arguments": map[string]any{"team": "labs"}},
 	})
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || strings.Contains(string(body), `"isError":true`) || !strings.Contains(string(body), "labs") {
-		t.Fatalf("tool call: %d %s", resp.StatusCode, body)
+	body := resp.body
+	if resp.status != http.StatusOK || strings.Contains(string(body), `"isError":true`) || !strings.Contains(string(body), "labs") {
+		t.Fatalf("tool call: %d %s", resp.status, body)
 	}
 	if len(forged) != 2 {
 		t.Fatalf("forged children = %v, want 2 (the loopback call never reached the backend)", forged)
@@ -128,7 +128,14 @@ func TestSupportAudit_EndToEndOneRowPerToolCall(t *testing.T) {
 	}
 }
 
-func mcpPost(t *testing.T, base, token, session string, msg map[string]any) *http.Response {
+// mcpReply is a POST /mcp response, read in full and closed.
+type mcpReply struct {
+	status int
+	header http.Header
+	body   []byte
+}
+
+func mcpPost(t *testing.T, base, token, session string, msg map[string]any) mcpReply {
 	t.Helper()
 	b, _ := json.Marshal(msg)
 	req, _ := http.NewRequest(http.MethodPost, base+"/mcp", bytes.NewReader(b))
@@ -142,8 +149,12 @@ func mcpPost(t *testing.T, base, token, session string, msg map[string]any) *htt
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { resp.Body.Close() })
-	return resp
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mcpReply{status: resp.StatusCode, header: resp.Header, body: body}
 }
 
 func tokenUsers(users map[string]*auth.User) func(http.Handler) http.Handler {
