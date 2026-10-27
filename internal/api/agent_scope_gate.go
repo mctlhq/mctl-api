@@ -76,7 +76,11 @@ func (h *Handlers) agentScopeGate(next http.Handler) http.Handler {
 					r.Method+" "+r.URL.Path+" is outside the "+user.AgentScopeName()+" scope of this agent run", nil)
 				return
 			}
-			if audited && !h.isFoldedLoopbackChild(r, user) {
+			// The MCP transport is audited per tool call in the MCP layer
+			// (AuditScopedToolCall), denials included; a row for the outer
+			// POST /mcp would give every tool call two rows, and
+			// initialize, tools/list and the GET stream rows of their own.
+			if audited && r.URL.Path != "/mcp" && !h.isFoldedLoopbackChild(r, user) {
 				h.serveAudited(w, r, next, user, boundTenant)
 				return
 			}
@@ -259,9 +263,10 @@ func (h *Handlers) ListSupportAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]supportAuditItem, 0, len(entries))
-	for _, e := range entries {
+	for i := range entries {
+		e := &entries[i]
 		items = append(items, supportAuditItem{
-			Entry: audit.RedactEntry(e), Tenant: e.Tenant, UserPrincipalID: e.PrincipalID,
+			Entry: audit.RedactEntry(*e), Tenant: e.Tenant, UserPrincipalID: e.PrincipalID,
 			ViaPrincipalID: e.ViaPrincipalID, ViaExecutionID: e.ViaExecutionID,
 		})
 	}

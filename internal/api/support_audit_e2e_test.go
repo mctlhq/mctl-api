@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,14 +60,22 @@ func TestSupportAudit_EndToEndOneRowPerToolCall(t *testing.T) {
 	backend.Start()
 	defer backend.Close()
 
-	msg, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+	// Through POST /mcp on the router, as a client would: the outer
+	// transport request must not write a row of its own.
+	sid := mcpPost(t, backend.URL, "tok-sup", "", map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "initialize",
+		"params": map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{},
+			"clientInfo": map[string]any{"name": "t", "version": "0"}},
+	}).Header.Get("Mcp-Session-Id")
+	mcpPost(t, backend.URL, "tok-sup", sid, map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
+	mcpPost(t, backend.URL, "tok-sup", sid, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+	resp := mcpPost(t, backend.URL, "tok-sup", sid, map[string]any{
+		"jsonrpc": "2.0", "id": 3, "method": "tools/call",
 		"params": map[string]any{"name": "mctl_get_resource_usage", "arguments": map[string]any{"team": "labs"}},
 	})
-	ctx := auth.WithUser(auth.WithToken(context.Background(), "tok-sup"), sup)
-	resp, _ := json.Marshal(srv.NewMCPServer().HandleMessage(ctx, json.RawMessage(msg)))
-	if strings.Contains(string(resp), `"isError":true`) {
-		t.Fatalf("tool call failed: %s", resp)
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || strings.Contains(string(body), `"isError":true`) || !strings.Contains(string(body), "labs") {
+		t.Fatalf("tool call: %d %s", resp.StatusCode, body)
 	}
 	if len(forged) != 2 {
 		t.Fatalf("forged children = %v, want 2 (the loopback call never reached the backend)", forged)
@@ -84,6 +94,9 @@ func TestSupportAudit_EndToEndOneRowPerToolCall(t *testing.T) {
 			restRows = append(restRows, e)
 		}
 	}
+	if len(mine) != 2 {
+		t.Errorf("rows for the run = %d, want the tool call and the non-loopback forgery only: %+v", len(mine), mine)
+	}
 	if len(mcpRows) != 1 {
 		t.Fatalf("mcp rows = %d, want 1: %+v", len(mcpRows), mine)
 	}
@@ -98,21 +111,52 @@ func TestSupportAudit_EndToEndOneRowPerToolCall(t *testing.T) {
 	if len(restRows) != 1 || restRows[0].Parameters["route"] != "GET /api/v1/resources/labs" {
 		t.Errorf("rest rows for we_sup1 = %+v, want exactly the non-loopback forgery", restRows)
 	}
+	// A stale parent id (the call has closed) from loopback and the same
+	// run no longer folds.
+	stale := httptest.NewRequest(http.MethodGet, "/api/v1/resources/labs", nil)
+	stale.RemoteAddr = "127.0.0.1:4000"
+	stale.Header.Set("Authorization", "Bearer tok-sup")
+	stale.Header.Set(mctlmcp.AuditParentHeader, row.ID)
+	router.ServeHTTP(httptest.NewRecorder(), stale)
+	after, _ := log.ListSupport(context.Background(), audit.SupportFilter{ExecutionID: "we_sup1"})
+	if len(after) != len(mine)+1 {
+		t.Errorf("stale parent header: rows %d -> %d, want one more", len(mine), len(after))
+	}
 	theirs, _ := log.ListSupport(context.Background(), audit.SupportFilter{ExecutionID: "we_sup2"})
 	if len(theirs) != 1 {
 		t.Errorf("another run's forged child wrote %d rows, want 1", len(theirs))
 	}
 }
 
+func mcpPost(t *testing.T, base, token, session string, msg map[string]any) *http.Response {
+	t.Helper()
+	b, _ := json.Marshal(msg)
+	req, _ := http.NewRequest(http.MethodPost, base+"/mcp", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if session != "" {
+		req.Header.Set("Mcp-Session-Id", session)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
 func tokenUsers(users map[string]*auth.User) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			u := users[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			u := users[token]
 			if u == nil {
 				http.Error(w, `{"error":"authentication required"}`, http.StatusUnauthorized)
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), u)))
+			// As auth.Middleware does: the MCP tools reuse the caller's token.
+			next.ServeHTTP(w, r.WithContext(auth.WithUser(auth.WithToken(r.Context(), token), u)))
 		})
 	}
 }

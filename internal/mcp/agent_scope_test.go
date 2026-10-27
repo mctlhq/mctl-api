@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"strings"
 	"testing"
 
@@ -207,7 +208,7 @@ func TestSupportAudit_OneRowPerCall(t *testing.T) {
 	}
 
 	aud.recs = nil
-	callSupport(srv, "mctl_list_tenants", nil, func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	_, _ = callSupport(srv, "mctl_list_tenants", nil, func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		t.Error("refused tool ran")
 		return nil, nil
 	})
@@ -217,6 +218,15 @@ func TestSupportAudit_OneRowPerCall(t *testing.T) {
 }
 
 func TestSupportAudit_RefusedWithoutAuditor(t *testing.T) {
+	allow := AgentScopeDecisions.WithLabelValues("support", "enforce", "mcp", "allow")
+	deny := AgentScopeDecisions.WithLabelValues("support", "enforce", "mcp", "deny")
+	allow0, deny0 := testutil.ToFloat64(allow), testutil.ToFloat64(deny)
+	defer func() {
+		// Counted once, as a deny: never as both allow and deny.
+		if a, d := testutil.ToFloat64(allow)-allow0, testutil.ToFloat64(deny)-deny0; a != 0 || d != 1 {
+			t.Errorf("decisions: allow +%v deny +%v, want +0 / +1", a, d)
+		}
+	}()
 	ran := false
 	res, _ := callSupport(&Server{}, "mctl_get_service_status", map[string]any{"team": "labs", "service": "x"},
 		func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {

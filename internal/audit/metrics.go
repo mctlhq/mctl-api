@@ -13,7 +13,13 @@ var WriteFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Audit rows that could not be written to PostgreSQL, by operation (support.request, other).",
 }, []string{"operation"})
 
-func init() { prometheus.MustRegister(WriteFailures) }
+func init() {
+	prometheus.MustRegister(WriteFailures)
+	// Export both series at 0 from start-up, so the first failure is an
+	// increase an alert can see rather than a series appearing at 1.
+	WriteFailures.WithLabelValues(OperationSupportRequest)
+	WriteFailures.WithLabelValues("other")
+}
 
 // recordWriteFailure counts and logs a failed audit write.
 func recordWriteFailure(entry Entry, err error) {

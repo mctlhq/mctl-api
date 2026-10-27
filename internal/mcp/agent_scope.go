@@ -52,7 +52,6 @@ func (s *Server) agentScopeMiddleware(next server.ToolHandlerFunc) server.ToolHa
 			scope, ok := user.AgentScope()
 			boundTenant, _ := user.BoundTenant()
 			allowed := ok && scope.AllowsToolCall(tool, req.GetArguments(), boundTenant)
-			AgentScopeDecisions.WithLabelValues(name, "enforce", "mcp", AgentScopeVerdict(allowed)).Inc()
 			audited := ok && scope.AuditRequests
 			var auditor ScopedCallAuditor
 			if audited {
@@ -60,13 +59,14 @@ func (s *Server) agentScopeMiddleware(next server.ToolHandlerFunc) server.ToolHa
 					auditor = h.a
 				}
 				if auditor == nil {
-					// Never serve an unaudited read.
-					AgentScopeDecisions.WithLabelValues(name, "enforce", "mcp", "deny").Inc()
+					// Never serve an unaudited read. Counted once, as a deny.
+					AgentScopeDecisions.WithLabelValues(name, "enforce", "mcp", AgentScopeVerdict(false)).Inc()
 					slog.Error("agent scope: no auditor configured, tool refused", "scope", name, "tool", tool)
 					return mcplib.NewToolResultError(fmt.Sprintf(
 						"%s: audit unavailable for the %q scope", AgentScopeCodeDenied, name)), nil
 				}
 			}
+			AgentScopeDecisions.WithLabelValues(name, "enforce", "mcp", AgentScopeVerdict(allowed)).Inc()
 			if !allowed {
 				slog.Warn("agent scope: tool refused", "scope", name, "tool", tool,
 					"execution_id", user.ExecutionID(), "agent_run_id", user.AgentRunID())
