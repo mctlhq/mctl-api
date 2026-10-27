@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.130.0](https://github.com/mctlhq/mctl-api/compare/4.129.0...4.130.0) (2026-10-27)
+
+
+### Features
+
+* **agents:** issue-826-feat-deploy-deploy-analyze-tier-0-and-a ([51ac15b](https://github.com/mctlhq/mctl-api/commit/51ac15b8a630af192dd596d1f511585dc3eeb4b6))
+* **agents:** issue-826-feat-deploy-deploy-analyze-tier-0-and-a ([ee7aaca](https://github.com/mctlhq/mctl-api/commit/ee7aacaa98b20d5dcaad24556f71d48060c4ab95))
+
+
+### Bug Fixes
+
+* **deploy:** size GitHub reads by API shape, not by our file limits ([51a063c](https://github.com/mctlhq/mctl-api/commit/51a063c2936b10985cafcce1eca6be6772edc770))
+
 ## [4.129.0](https://github.com/mctlhq/mctl-api/compare/4.128.1...4.129.0) (2026-10-27)
 
 
