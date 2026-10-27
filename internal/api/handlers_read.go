@@ -352,6 +352,33 @@ func (h *Handlers) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// workflowRowVisible: rows of a tenant need access to that tenant; rows
+// without a readable tenant are platform rows and need platform read.
+// An unreadable row's empty team is "unknown", not "platform", so only an
+// admin sees it.
+func workflowRowVisible(u *auth.User, team string, unreadable bool) bool {
+	if u.IsAdmin() {
+		return true
+	}
+	if bound, ok := u.BoundTenant(); ok {
+		return !unreadable && team != "" && team == bound
+	}
+	if unreadable {
+		return false
+	}
+	if team == "" {
+		return platformReader(u)
+	}
+	return u.HasTenantAccess(team)
+}
+
+// platformReader reports whether u may see platform (empty-tenant) workflow
+// rows: only an agent scope that reads every tenant.
+func platformReader(u *auth.User) bool {
+	scope, ok := u.AgentScope()
+	return ok && scope.ReadAllTenants
+}
+
 func (h *Handlers) ListWorkflows(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
@@ -370,11 +397,7 @@ func (h *Handlers) ListWorkflows(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		team := auditEntryTenant(e)
-		if _, bound := user.BoundTenant(); bound && team == "" {
-			continue
-		}
-		if !user.IsAdmin() && (e.ParametersUnreadable || (team != "" && !user.HasTenantAccess(team))) {
-			// An unreadable row's empty team is "unknown", not "platform".
+		if !workflowRowVisible(user, team, e.ParametersUnreadable) {
 			continue
 		}
 		if teamFilter != "" && team != teamFilter {

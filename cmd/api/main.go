@@ -961,6 +961,12 @@ func main() {
 	} else {
 		previewLister = pc
 	}
+	var workloadReader mctlapi.WorkloadReader
+	if wc, wErr := k8s.NewWorkloadClientFromEnv(); wErr != nil {
+		slog.Warn("k8s workload client unavailable, pod and event reads will return 503", "error", wErr)
+	} else {
+		workloadReader = wc
+	}
 
 	// Agent run token exchange (mctlhq/mctl-agents#737): off unless
 	// AGENT_RUN_EXCHANGE_AUDIENCE names the audience the agent pods'
@@ -1106,6 +1112,7 @@ func main() {
 		MCPServer:                      mcpSrv,
 		QuotaReader:                    quotaReader,
 		PreviewLister:                  previewLister,
+		WorkloadReader:                 workloadReader,
 		LogQuerier:                     logQuerier,
 		WorkflowLogArchive:             workflowLogArchive,
 		BackstageInternalURL:           cfg.BackstageInternalURL,

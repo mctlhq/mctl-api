@@ -139,6 +139,7 @@ var supportTools = map[string]bool{
 	"get_workflow_logs": true, "get_resource_usage": true, "list_incidents": true,
 	"get_incident": true, "incident_summary": true, "list_operations": true, "get_operation": true,
 	"list_domains": true, "list_platform_skills": true, "read_platform_skill": true,
+	"get_service_pods": true, "list_namespace_events": true,
 }
 
 // SupportToolNames returns the sorted bare names of the support tool list.
@@ -157,6 +158,7 @@ var supportTenantTools = map[string]bool{
 	"get_service_status": true, "list_services": true, "get_service_logs": true,
 	"get_service_config": true, "list_workflows": true, "get_resource_usage": true,
 	"list_incidents": true, "list_domains": true,
+	"get_service_pods": true, "list_namespace_events": true,
 }
 
 // tenantQueryKeys are the query parameters that name a tenant. On a
@@ -193,6 +195,8 @@ var agentScopes = map[string]*AgentScope{
 			getRoute(`^/api/v1/previews$`),
 			getRoute(`^/api/v1/resources/[^/]+$`),
 			getRoute(`^/api/v1/logs/[^/]+/[^/]+$`),
+			getRoute(`^/api/v1/pods/[^/]+/[^/]+$`),
+			getRoute(`^/api/v1/events/[^/]+$`),
 			getRoute(`^/api/v1/agent-runs$`),
 			getRoute(`^/api/v1/platform-skills(/[^/]+)?$`),
 			getRoute(`^/api/v1/repos$`),
@@ -226,6 +230,8 @@ var agentScopes = map[string]*AgentScope{
 			tenantRoute(`^/api/v1/services/(?P<tenant>[^/]+)/[^/]+$`),
 			tenantRoute(`^/api/v1/logs/(?P<tenant>[^/]+)/[^/]+$`),
 			tenantRoute(`^/api/v1/resources/(?P<tenant>[^/]+)$`),
+			tenantRoute(`^/api/v1/pods/(?P<tenant>[^/]+)/[^/]+$`),
+			tenantRoute(`^/api/v1/events/(?P<tenant>[^/]+)$`),
 			listRoute(`^/api/v1/services$`, "team"),
 			listRoute(`^/api/v1/workflows$`, "team"),
 			listRoute(`^/api/v1/domains$`, "team"),

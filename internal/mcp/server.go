@@ -247,6 +247,8 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListWorkflows())
 	srv.AddTool(s.toolGetWorkflowStatus())
 	srv.AddTool(s.toolGetResourceUsage())
+	srv.AddTool(s.toolGetServicePods())
+	srv.AddTool(s.toolListNamespaceEvents())
 	srv.AddTool(s.toolListRecentOperations())
 	srv.AddTool(s.toolListOperations())
 	srv.AddTool(s.toolGetOperation())
@@ -545,6 +547,93 @@ func (s *Server) toolGetResourceUsage() (mcplib.Tool, server.ToolHandlerFunc) {
 		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/resources/%s", url.PathEscape(team)))
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get resource usage for %s: %v", team, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolGetServicePods() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_service_pods",
+		mcplib.WithTitleAnnotation("Get Service Pods"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription("Get the state of every pod of a service: phase, container states, last termination reason and exit code (for example OOMKilled), restart count, waiting reason (for example ImagePullBackOff) and resource requests and limits. No env or secret values are returned."),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name"),
+		),
+		mcplib.WithString("service",
+			mcplib.Required(),
+			mcplib.Description("Service name"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team, err := req.RequireString("team")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		service, err := req.RequireString("service")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		body, err := s.apiGet(ctx, fmt.Sprintf("/api/v1/pods/%s/%s", url.PathEscape(team), url.PathEscape(service)))
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get pods for %s/%s: %v", team, service, err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolListNamespaceEvents() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_namespace_events",
+		mcplib.WithTitleAnnotation("List Namespace Events"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription("List recent Kubernetes events in a team namespace, newest first (max 200): quota-exceeded FailedCreate, FailedScheduling, back-off and image pull failures. No env or secret values are returned."),
+		mcplib.WithString("team",
+			mcplib.Required(),
+			mcplib.Description("Team name"),
+		),
+		mcplib.WithString("since",
+			mcplib.Description("Time window, 1m to 24h (default 1h)"),
+		),
+		mcplib.WithString("service",
+			mcplib.Description("Only events about this service's workload"),
+		),
+		mcplib.WithString("type",
+			mcplib.Description("Only events of this type: Warning or Normal"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		team, err := req.RequireString("team")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		q := url.Values{}
+		if v := req.GetString("since", ""); v != "" {
+			q.Set("since", v)
+		}
+		if v := req.GetString("service", ""); v != "" {
+			q.Set("app", v)
+		}
+		if v := req.GetString("type", ""); v != "" {
+			q.Set("type", v)
+		}
+		path := fmt.Sprintf("/api/v1/events/%s", url.PathEscape(team))
+		if len(q) > 0 {
+			path += "?" + q.Encode()
+		}
+		body, err := s.apiGet(ctx, path)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list events for %s: %v", team, err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

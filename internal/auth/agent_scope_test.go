@@ -140,6 +140,11 @@ func TestSupportScope_Allows(t *testing.T) {
 		{"own status", "GET", "/api/v1/status/labs/app", "labs", nil, true},
 		{"own logs", "GET", "/api/v1/logs/labs/app", "labs", nil, true},
 		{"own resources", "GET", "/api/v1/resources/labs", "labs", nil, true},
+		{"own pods", "GET", "/api/v1/pods/labs/app", "labs", nil, true},
+		{"other pods", "GET", "/api/v1/pods/karabu/app", "labs", nil, false},
+		{"own events", "GET", "/api/v1/events/labs", "labs", nil, true},
+		{"other events", "GET", "/api/v1/events/karabu", "labs", nil, false},
+		{"events post", "POST", "/api/v1/events/labs", "labs", nil, false},
 		{"other status", "GET", "/api/v1/status/karabu/app", "labs", nil, false},
 		{"case differs", "GET", "/api/v1/status/Labs/app", "labs", nil, false},
 		{"suffixed", "GET", "/api/v1/status/labs2/app", "labs", nil, false},
@@ -186,6 +191,10 @@ func TestSupportScope_AllowsToolCall(t *testing.T) {
 		{"tenant other on any tool", "mctl_whoami", map[string]any{"tenant": "karabu"}, false},
 		{"non-string tenant", "mctl_list_domains", map[string]any{"team": 5}, false},
 		{"no tenant tool", "mctl_get_incident", map[string]any{"id": "x"}, true},
+		{"pods own", "mctl_get_service_pods", map[string]any{"team": "labs", "service": "x"}, true},
+		{"pods other", "mctl_get_service_pods", map[string]any{"team": "karabu", "service": "x"}, false},
+		{"events no team", "mctl_list_namespace_events", map[string]any{}, false},
+		{"events own", "mctl_list_namespace_events", map[string]any{"team": "labs"}, true},
 		{"write tool", "mctl_deploy_service", map[string]any{"team_name": "labs"}, false},
 	} {
 		if got := s.AllowsToolCall(c.tool, c.args, "labs"); got != c.want {

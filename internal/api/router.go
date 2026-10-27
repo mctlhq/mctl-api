@@ -67,6 +67,8 @@ type Options struct {
 	QuotaReader QuotaReader
 	// PreviewLister lists preview Helm releases (optional — nil means listing is unavailable).
 	PreviewLister PreviewLister
+	// WorkloadReader reads pod state and events (optional — nil means 503).
+	WorkloadReader WorkloadReader
 	// LogQuerier queries Loki for service logs (optional — nil outside cluster).
 	LogQuerier LogQuerier
 	// ComponentSourceRepos answers which repository is registered for a
@@ -568,6 +570,8 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/previews", h.ListPreviews)
 			r.Get("/resources/{tenant}", h.GetResourceUsage)
 			r.Get("/logs/{team}/{app}", h.GetServiceLogs)
+			r.Get("/pods/{team}/{app}", h.GetServicePods)
+			r.Get("/events/{team}", h.ListNamespaceEvents)
 			r.Get("/audit", h.ListAudit)
 			r.Get("/agent-runs", h.ListAgentRuns)
 
