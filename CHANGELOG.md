@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.127.0](https://github.com/mctlhq/mctl-api/compare/4.126.0...4.127.0) (2026-10-27)
+
+
+### Features
+
+* **agents:** issue-812-feat-api-tenant-scoped-pod-state-and-eve ([24e1a3e](https://github.com/mctlhq/mctl-api/commit/24e1a3e69abcb4e6620be0092901ea5606fbf97c))
+* **agents:** issue-812-feat-api-tenant-scoped-pod-state-and-eve ([3b0a451](https://github.com/mctlhq/mctl-api/commit/3b0a4518cba1890c01dc0c9343276dce41f37d42))
+
+
+### Bug Fixes
+
+* **api:** match events by workload, not bare name prefix ([c29078d](https://github.com/mctlhq/mctl-api/commit/c29078dce5137384db12351fc5f800b933ba6387))
+* **api:** refuse workload reads for unregistered tenants ([299238a](https://github.com/mctlhq/mctl-api/commit/299238a194a93e56efe3bd478de991cc84c7b1dc))
+* **k8s:** keep sibling releases out of a workload's pods and events ([79d9f7b](https://github.com/mctlhq/mctl-api/commit/79d9f7b5fed37bca513e6cf2a921595a7fd70b1a))
+
 ## [4.126.0](https://github.com/mctlhq/mctl-api/compare/4.125.0...4.126.0) (2026-10-26)
 
 
