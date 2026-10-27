@@ -195,15 +195,13 @@ func splitWords(s string) []string {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
+		case q != 0 && c == q:
+			q = 0
+		case q != 0 && c == '\\' && q == '"' && i+1 < len(s):
+			i++
+			b.WriteByte(s[i])
 		case q != 0:
-			if c == q {
-				q = 0
-			} else if c == '\\' && q == '"' && i+1 < len(s) {
-				i++
-				b.WriteByte(s[i])
-			} else {
-				b.WriteByte(c)
-			}
+			b.WriteByte(c)
 		case c == '"' || c == '\'':
 			q, has = c, true
 		case c == '\\' && i+1 < len(s):
@@ -295,7 +293,7 @@ func validVarName(n string) bool {
 	}
 	for i := 0; i < len(n); i++ {
 		c := n[i]
-		if !(c == '_' || c >= '0' && c <= '9' && i > 0 || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z') {
+		if c != '_' && (c < '0' || c > '9' || i == 0) && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
 			return false
 		}
 	}

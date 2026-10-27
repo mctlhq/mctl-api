@@ -23,7 +23,13 @@ var (
 )
 
 const (
-	commitBodyCap = 1 << 20
+	// The git commit object (not the REST commit, whose files[] patches grow
+	// with the diff) is a few hundred bytes.
+	commitBodyCap = 64 << 10
+	// contentsBodyCap is the largest Contents API answer: GitHub inlines up
+	// to 1 MiB, base64 with a newline every 60 chars, plus the JSON envelope.
+	// A file over our own limit is detected from "size", never from the body.
+	contentsBodyCap = (1<<20)*4/3*61/60 + 64<<10
 	// MaxDockerfileBytes and MaxComposeBytes cap decoded file sizes.
 	MaxDockerfileBytes = 256 << 10
 	MaxComposeBytes    = 128 << 10
@@ -113,7 +119,7 @@ func (h *HTTPReader) Commit(ctx context.Context, repo, sha string) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrGitHubMalformed, err)
 	}
-	status, body, err := h.get(ctx, h.BaseURL+"/repos/"+r+"/commits/"+url.PathEscape(sha), commitBodyCap)
+	status, body, err := h.get(ctx, h.BaseURL+"/repos/"+r+"/git/commits/"+url.PathEscape(sha), commitBodyCap)
 	if err != nil {
 		return err
 	}
@@ -143,8 +149,7 @@ func (h *HTTPReader) File(ctx context.Context, repo, sha, path string, maxBytes 
 		return FileResult{}, fmt.Errorf("%w: %v", ErrGitHubMalformed, err)
 	}
 	u := h.BaseURL + "/repos/" + r + "/contents/" + escapePath(path) + "?ref=" + url.QueryEscape(sha)
-	limit := int64(maxBytes)*4/3 + 16<<10
-	status, body, err := h.get(ctx, u, limit)
+	status, body, err := h.get(ctx, u, contentsBodyCap)
 	if err != nil {
 		return FileResult{}, err
 	}

@@ -80,7 +80,10 @@ type deployAudit struct {
 	msg    string
 }
 
-func (a *deployAudit) set(status, msg string) { a.status, a.msg = status, msg }
+func (a *deployAudit) set(status, msg string) {
+	a.status, a.msg = status, msg
+	a.params["outcome"] = msg
+}
 
 func (a *deployAudit) write() {
 	a.h.logAudit(a.r, audit.Entry{

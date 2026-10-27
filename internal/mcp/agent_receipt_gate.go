@@ -158,6 +158,8 @@ func ParseAgentReceiptMaxAge(raw string) (time.Duration, error) {
 // fails on a tool in neither.
 var governedAgentTools = toolSet(
 	"mctl_abandon_dev_loop",
+	// Read-only, but not a read verb, so mctl-agents' policy asks for approval.
+	"mctl_deploy_analyze",
 	"mctl_add_custom_domain",
 	"mctl_approve_dev_loop",
 	"mctl_bind_agent_release",
@@ -220,9 +222,6 @@ var ungovernedAgentTools = toolSet(
 	"mctl_resolve_agent",
 	"mctl_resolve_incident",
 	"mctl_acknowledge_incident",
-	// A read-only static analysis; the REST route is closed to scoped agent
-	// runs, so the MCP tool cannot reach it for them either.
-	"mctl_deploy_analyze",
 )
 
 func toolSet(names ...string) map[string]struct{} {

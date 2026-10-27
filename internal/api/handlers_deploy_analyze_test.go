@@ -114,9 +114,10 @@ var deployOutsider = auth.NewGitHubUser("bob", []string{"other"})
 func lastAudit(t *testing.T, f *deployFixture, op string, want int) audit.Entry {
 	t.Helper()
 	var got []audit.Entry
-	for _, e := range f.log.List(100) {
-		if e.Operation == op {
-			got = append(got, e)
+	entries := f.log.List(100)
+	for i := range entries {
+		if entries[i].Operation == op {
+			got = append(got, entries[i])
 		}
 	}
 	if len(got) != want {
@@ -161,7 +162,7 @@ func TestDeployAnalyze_UnsupportedIs200(t *testing.T) {
 	if body["supported"] != false || body["reason"] != "no_dockerfile" || body["draft_intent"] != nil {
 		t.Fatalf("%v", body)
 	}
-	if e := lastAudit(t, f, "deploy.analyze", 1); e.Message != "unsupported:no_dockerfile" {
+	if e := lastAudit(t, f, "deploy.analyze", 1); e.Message != "unsupported:no_dockerfile" || e.Parameters["outcome"] != "unsupported:no_dockerfile" {
 		t.Fatalf("%+v", e)
 	}
 }

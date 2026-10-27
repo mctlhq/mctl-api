@@ -1,6 +1,7 @@
 package deployanalyze
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -78,7 +79,7 @@ func TestVendoredSchemaMatchesSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(want) != string(schemaBytes) {
+	if !bytes.Equal(want, schemaBytes) {
 		t.Fatal("vendored schema differs from " + SchemaSource)
 	}
 }
@@ -336,6 +337,11 @@ func TestHTTPReaderCommit(t *testing.T) {
 			w.WriteHeader(401)
 			return
 		}
+		if r.URL.Path != "/repos/a/b/git/commits/"+sha40 {
+			w.WriteHeader(404)
+			return
+		}
+		// A git commit object; the REST commit with a large diff is never read.
 		_, _ = w.Write([]byte(`{"sha":"` + sha40 + `"}`))
 	})
 	if err := rd.Commit(ctx, "a/b", sha40); err != nil {
@@ -377,11 +383,20 @@ func TestHTTPReaderFile(t *testing.T) {
 	if r, err := serve(200, `{"type":"file","size":1000}`).File(ctx, "a/b", sha40, "Dockerfile", 100); err != nil || !r.TooLarge {
 		t.Fatalf("%+v %v", r, err)
 	}
+	// A real oversized answer carries its content; it must still read as too large.
+	big := strings.Repeat("A", 300<<10)
+	if r, err := serve(200, contentsJSON(big, len(big))).File(ctx, "a/b", sha40, "Dockerfile", MaxDockerfileBytes); err != nil || !r.TooLarge {
+		t.Fatalf("300 KiB Dockerfile: %+v %v", r.TooLarge, err)
+	}
+	big = strings.Repeat("A", 1<<20)
+	if r, err := serve(200, contentsJSON(big, len(big))).File(ctx, "a/b", sha40, "compose.yml", MaxComposeBytes); err != nil || !r.TooLarge {
+		t.Fatalf("1 MiB compose: %+v %v", r.TooLarge, err)
+	}
 	for name, rd := range map[string]*HTTPReader{
 		"length mismatch": serve(200, contentsJSON("hello", 9)),
 		"no content":      serve(200, `{"type":"file","size":5,"encoding":"base64"}`),
 		"bad json":        serve(200, `{`),
-		"over cap":        serve(200, strings.Repeat(" ", 100000)),
+		"over cap":        serve(200, strings.Repeat(" ", contentsBodyCap+10)),
 	} {
 		if _, err := rd.File(ctx, "a/b", sha40, "Dockerfile", 100); !errors.Is(err, ErrGitHubMalformed) {
 			t.Errorf("%s: %v", name, err)
