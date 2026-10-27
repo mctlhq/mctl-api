@@ -2,12 +2,15 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/mctlhq/mctl-api/internal/alerts"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
@@ -139,5 +142,123 @@ func TestSupportIncidentAggregation_Authorization(t *testing.T) {
 	}
 	if got := get(&auth.User{ID: "a", Groups: []string{"admins"}}); got != http.StatusServiceUnavailable {
 		t.Errorf("admin without store: got %d, want 503", got)
+	}
+}
+
+// T5 + T7: producer writes through the real store, the aggregation over them,
+// and the one succeeded audit row per create (Postgres-backed).
+func TestSupportIncidentProducer_StoreAggregationAndAudit(t *testing.T) {
+	store := newTestAlertStore(t)
+	log := audit.NewLogger()
+	h := &Handlers{opts: Options{AuditLog: log, AlertStore: store}}
+	producer := auth.NewSupportIncidentProducerUser()
+	admin := &auth.User{ID: "a", Groups: []string{"admins"}}
+	fp := "support:platform_defect:abc123"
+
+	post := func(id, tenant string, over map[string]any) map[string]any {
+		t.Helper()
+		body := map[string]any{"id": id, "tenant": tenant, "fingerprint": fp}
+		for k, v := range over {
+			body[k] = v
+		}
+		rec := postIncidentAs(h, producer, supportBody(body))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("post %s/%s: got %d %s", id, tenant, rec.Code, rec.Body.String())
+		}
+		var got map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &got)
+		return got
+	}
+	aggregate := func() []map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/incidents/support/aggregation", nil)
+		req = req.WithContext(auth.WithUser(req.Context(), admin))
+		rec := httptest.NewRecorder()
+		h.SupportIncidentAggregation(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("aggregation: got %d %s", rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Items []map[string]any `json:"items"`
+			Count int              `json:"count"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		if out.Count != len(out.Items) {
+			t.Fatalf("count %d != len(items) %d", out.Count, len(out.Items))
+		}
+		return out.Items
+	}
+
+	first := post("inc-t1", "t1", map[string]any{"status": "resolved"})
+	second := post("inc-t2", "t2", nil)
+	if first["id"] == second["id"] {
+		t.Fatalf("two tenants share an incident: %v", first["id"])
+	}
+	if first["status"] != "open" {
+		t.Fatalf("status = %v, want open even when the body said resolved", first["status"])
+	}
+	items := aggregate()
+	if len(items) != 1 || items[0]["fingerprint"] != fp || items[0]["type"] != "platform_defect" ||
+		items[0]["count"] != float64(2) || fmt.Sprint(items[0]["affected_tenants"]) != "[t1 t2]" {
+		t.Fatalf("aggregation = %v", items)
+	}
+
+	// A repeat for t1 joins the open incident and does not count twice.
+	again := post("inc-t1-again", "t1", nil)
+	if again["id"] != "inc-t1" {
+		t.Fatalf("dedup returned %v, want inc-t1", again["id"])
+	}
+	if items := aggregate(); items[0]["count"] != float64(2) {
+		t.Fatalf("count after dedup = %v, want 2", items[0]["count"])
+	}
+
+	// A non-support incident with the same fingerprint is not aggregated.
+	if _, err := store.Create(context.Background(), &alerts.Alert{
+		ID: "manual-1", Source: "manual", Type: "platform_defect", Tenant: "t3",
+		Summary: "s", Severity: "warning", Status: "open", Fingerprint: fp,
+	}); err != nil {
+		t.Fatalf("manual create: %v", err)
+	}
+	// Resolving t1's incident drops it from the open groups.
+	if _, err := store.ResolveByFingerprint(context.Background(), "t1", fp, "a"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if items := aggregate(); len(items) != 1 || items[0]["count"] != float64(1) || fmt.Sprint(items[0]["affected_tenants"]) != "[t2]" {
+		t.Fatalf("aggregation after resolve = %v", items)
+	}
+
+	var rows []audit.Entry
+	for _, e := range log.List(100) {
+		if e.Operation == "incident-create" && e.Status == "succeeded" {
+			rows = append(rows, e)
+		}
+	}
+	if len(rows) != 3 {
+		t.Fatalf("succeeded audit rows = %d, want 3 (one per producer create)", len(rows))
+	}
+	dedups := 0
+	for _, e := range rows {
+		p := e.Parameters
+		if e.UserID != auth.SupportIncidentProducerUserID || p["actor"] != auth.SupportIncidentProducerUserID ||
+			p["source"] != "support" || p["type"] != "platform_defect" || p["fingerprint"] != fp || p["tenant"] == "" {
+			t.Errorf("audit row = %+v", e)
+		}
+		if p["deduplicated"] == "true" {
+			dedups++
+			if p["incident_id"] != "inc-t1" || p["requested_id"] != "inc-t1-again" {
+				t.Errorf("dedup row = %+v", p)
+			}
+		}
+		for k, v := range p {
+			if strings.Contains(v, "secret summary") {
+				t.Errorf("audit parameter %s carries the summary", k)
+			}
+		}
+		if strings.Contains(e.Message, "secret summary") {
+			t.Errorf("audit message carries the summary")
+		}
+	}
+	if dedups != 1 {
+		t.Errorf("deduplicated rows = %d, want 1", dedups)
 	}
 }

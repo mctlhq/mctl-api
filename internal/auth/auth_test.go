@@ -512,6 +512,15 @@ func TestSupportIncidentProducerTokenThatCouldBeConfusedIsRefused(t *testing.T) 
 			}
 		})
 	}
+	t.Run("security provider token", func(t *testing.T) {
+		t.Setenv("MCTL_AGENT_SERVICE_TOKEN", "svc-token-123")
+		t.Setenv("SECURITY_PROVIDERS", secProvidersJSON)
+		t.Setenv("MCTL_SECURITY_PROVIDER_TOKENS", "trivy="+supportProducerToken32)
+		t.Setenv("MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN", supportProducerToken32)
+		if u := authAs(t, supportProducerToken32); u != nil && (u.IsSupportIncidentProducer() || u.SecurityProviderRef() != "") {
+			t.Fatalf("a token shared with a security provider still authenticates: %+v", u)
+		}
+	})
 	t.Run("too short", func(t *testing.T) {
 		t.Setenv("MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN", "short")
 		if u := authAs(t, "short"); u != nil && u.IsSupportIncidentProducer() {
