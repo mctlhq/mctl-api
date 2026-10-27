@@ -83,13 +83,14 @@ type Event struct {
 }
 
 // EventQuery selects events. Zero Since means no lower bound; zero Limit means
-// DefaultEventLimit. NamePrefix keeps events whose involved object name starts
-// with it.
+// DefaultEventLimit. Workload ({team}-{app}) keeps events about the object
+// named exactly that or about objects named "<workload>-...", so app "web"
+// never picks up "webhook".
 type EventQuery struct {
-	Since      time.Duration
-	Type       string
-	NamePrefix string
-	Limit      int
+	Since    time.Duration
+	Type     string
+	Workload string
+	Limit    int
 }
 
 // WorkloadClient reads pod state and events from a tenant namespace.
@@ -273,7 +274,7 @@ func (c *WorkloadClient) ListEvents(ctx context.Context, namespace string, q Eve
 		if q.Type != "" && e.Type != q.Type {
 			continue
 		}
-		if q.NamePrefix != "" && !strings.HasPrefix(e.InvolvedObject.Name, q.NamePrefix) {
+		if q.Workload != "" && !belongsToWorkload(e.InvolvedObject.Name, q.Workload) {
 			continue
 		}
 		first := e.FirstTimestamp.Time
@@ -302,6 +303,13 @@ func (c *WorkloadClient) ListEvents(ctx context.Context, namespace string, q Eve
 		truncated = true
 	}
 	return events, truncated, nil
+}
+
+// belongsToWorkload reports whether an object name is the workload itself or
+// one of its children ("<workload>-..."). The trailing dash keeps "acme-web"
+// from matching "acme-webhook-...".
+func belongsToWorkload(name, workload string) bool {
+	return name == workload || strings.HasPrefix(name, workload+"-")
 }
 
 func eventLastSeen(e *corev1.Event) time.Time {

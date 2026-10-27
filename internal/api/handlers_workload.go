@@ -115,7 +115,7 @@ func (h *Handlers) ListNamespaceEvents(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "app must be a DNS label")
 			return
 		}
-		query.NamePrefix = team + "-" + app
+		query.Workload = team + "-" + app
 	}
 	if h.opts.WorkloadReader == nil {
 		writeError(w, http.StatusServiceUnavailable, "event listing unavailable: kubernetes client not configured")

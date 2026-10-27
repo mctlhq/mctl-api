@@ -91,7 +91,7 @@ func TestListNamespaceEvents_Params(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("code %d", rec.Code)
 	}
-	if stub.lastQuery.Type != "Warning" || stub.lastQuery.NamePrefix != "acme-web" || stub.lastQuery.Limit != 200 {
+	if stub.lastQuery.Type != "Warning" || stub.lastQuery.Workload != "acme-web" || stub.lastQuery.Limit != 200 {
 		t.Errorf("query = %+v", stub.lastQuery)
 	}
 	var body map[string]any

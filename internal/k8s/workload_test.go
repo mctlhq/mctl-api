@@ -107,9 +107,24 @@ func TestListEvents(t *testing.T) {
 	if got[0].InvolvedName != "acme-webhook-1" || got[2].InvolvedName != "acme-web-3" {
 		t.Errorf("order/fallback wrong: %+v", got)
 	}
-	got, _, _ = c.ListEvents(context.Background(), "acme", EventQuery{Since: time.Hour, NamePrefix: "acme-web-"})
+	// The handler passes the bare workload ("acme-web", no trailing dash):
+	// its children and the workload object itself match, "acme-webhook-1"
+	// does not.
+	got, _, _ = c.ListEvents(context.Background(), "acme", EventQuery{Since: time.Hour, Workload: "acme-web"})
 	if len(got) != 2 {
-		t.Errorf("prefix filter: %+v", got)
+		t.Errorf("workload filter: %+v", got)
+	}
+	for _, e := range got {
+		if e.InvolvedName == "acme-webhook-1" {
+			t.Errorf("workload acme-web matched %q", e.InvolvedName)
+		}
+	}
+	wc := NewWorkloadClient(fake.NewSimpleClientset(
+		ev("dep", "acme-web", "Warning", at(time.Minute), metav1.MicroTime{}),
+	))
+	wc.now = func() time.Time { return now }
+	if got, _, _ := wc.ListEvents(context.Background(), "acme", EventQuery{Since: time.Hour, Workload: "acme-web"}); len(got) != 1 {
+		t.Errorf("event about the workload object itself dropped: %+v", got)
 	}
 	got, _, _ = c.ListEvents(context.Background(), "acme", EventQuery{Since: time.Hour, Type: "Normal"})
 	if len(got) != 1 || got[0].InvolvedName != "acme-web-3" {
