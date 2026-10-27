@@ -387,7 +387,7 @@ func (s *Server) toolWhoami() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Check your current authentication status on the mctl platform.
 
-Returns your user ID, team memberships, admin status, and accessible namespaces.
+Returns your user ID, team memberships, admin status, accessible namespaces, and, for a tenant-bound agent token, its bound tenant. A tenant-bound token can act only on that tenant; pass it as team/tenant to other tools.
 Authentication is handled automatically by the MCP connector's OAuth flow.
 To switch accounts, disconnect and reconnect the mctl connector in your client settings.`),
 	)
@@ -400,15 +400,22 @@ To switch accounts, disconnect and reconnect the mctl connector in your client s
 		}
 
 		var identity struct {
-			ID         string   `json:"id"`
-			Groups     []string `json:"groups"`
-			IsAdmin    bool     `json:"isAdmin"`
-			Namespaces []string `json:"namespaces"`
+			ID          string   `json:"id"`
+			Groups      []string `json:"groups"`
+			IsAdmin     bool     `json:"isAdmin"`
+			Namespaces  []string `json:"namespaces"`
+			BoundTenant string   `json:"boundTenant"`
 		}
-		_ = json.Unmarshal(body, &identity)
+		if err := json.Unmarshal(body, &identity); err != nil {
+			slog.Error("whoami response could not be decoded", "error", err)
+			return mcplib.NewToolResultError("Failed to read identity: upstream whoami response could not be decoded"), nil
+		}
 
 		msg := fmt.Sprintf("User: %s\nAdmin: %v\nTeams: %v\nAccessible namespaces: %v",
 			identity.ID, identity.IsAdmin, identity.Groups, identity.Namespaces)
+		if identity.BoundTenant != "" {
+			msg += "\nBound tenant: " + identity.BoundTenant
+		}
 		if u := s.displayURL(); u != "" {
 			msg = "Authenticated to " + u + "\n\n" + msg
 		}

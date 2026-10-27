@@ -66,12 +66,19 @@ func (h *Handlers) Whoami(w http.ResponseWriter, r *http.Request) {
 		namespaces = append(slices.Clone(namespaces), "admins")
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"id":         user.ID,
 		"groups":     groups,
 		"isAdmin":    user.IsAdmin(),
 		"namespaces": namespaces,
-	})
+	}
+	// boundTenant is informational too: it tells a tenant-bound agent token
+	// which tenant it is bound to. Nothing authorizes against it; enforcement
+	// stays in User.BoundTenant() and the scope gates.
+	if t, ok := user.BoundTenant(); ok {
+		resp["boundTenant"] = t
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func uniquePreserveOrder(values []string) []string {

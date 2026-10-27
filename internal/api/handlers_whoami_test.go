@@ -125,3 +125,40 @@ func TestWhoamiPrincipalModeAdminListsAdminsNamespace(t *testing.T) {
 		t.Fatalf("isAdmin=%v groups=%v namespaces=%v; want admin, groups without \"admins\", namespaces with it", got.IsAdmin, got.Groups, got.Namespaces)
 	}
 }
+
+func whoamiRaw(t *testing.T, user *auth.User) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	req = req.WithContext(auth.WithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+	(&Handlers{}).Whoami(rec, req)
+	var m map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return m
+}
+
+func TestWhoamiReportsBoundTenant(t *testing.T) {
+	m := whoamiRaw(t, auth.NewAgentUser("mctl-support", auth.AgentRun{Scope: auth.AgentScopeSupport, Tenant: "labs"}))
+	if m["boundTenant"] != "labs" {
+		t.Errorf("boundTenant = %v, want labs", m["boundTenant"])
+	}
+}
+
+func TestWhoamiOmitsBoundTenantWhenUnbound(t *testing.T) {
+	cases := map[string]*auth.User{
+		"human":        {ID: "u", Groups: []string{"ovk"}},
+		"admin":        {ID: "a", Groups: []string{"admins"}},
+		"investigate":  auth.NewAgentUser("issue-investigator", auth.AgentRun{Scope: auth.AgentScopeInvestigate}),
+		"unscoped":     auth.NewAgentUser("x", auth.AgentRun{}),
+		"empty tenant": auth.NewAgentUser("mctl-support", auth.AgentRun{Scope: auth.AgentScopeSupport}),
+	}
+	for name, u := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, ok := whoamiRaw(t, u)["boundTenant"]; ok {
+				t.Error("boundTenant key present, want omitted")
+			}
+		})
+	}
+}
