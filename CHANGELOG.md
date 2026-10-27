@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.128.1](https://github.com/mctlhq/mctl-api/compare/4.128.0...4.128.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **agents:** accept mctl-support in DevLoop service enums ([a2c75d7](https://github.com/mctlhq/mctl-api/commit/a2c75d7c66cce80ad89426dd8b5d4c531489de14))
+* **agents:** accept mctl-support in DevLoop service enums ([cb0f1d0](https://github.com/mctlhq/mctl-api/commit/cb0f1d0f4122b8a44518e8ca50aa54c789572366))
+
 ## [4.128.0](https://github.com/mctlhq/mctl-api/compare/4.127.0...4.128.0) (2026-10-27)
 
 
