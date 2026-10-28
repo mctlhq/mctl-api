@@ -1,7 +1,7 @@
 # Resolved 2026-10-21 from the golang:1.26.10-alpine manifest list digest on
 # registry-1.docker.io (matches `docker pull golang:1.26.10-alpine && docker
 # inspect --format='{{index .RepoDigests 0}}' golang:1.26.10-alpine`).
-FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS builder
+FROM golang:1.27.3-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS builder
 
 WORKDIR /app
 
