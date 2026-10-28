@@ -10,11 +10,31 @@ HTTP+JSON binding) reachable from every MCP client (mctl-api#814).
 
 ## Authority
 
-The caller's own bearer is forwarded unchanged. mctl-api adds no authority and
-uses no service credential. Its only check is that the caller may act on the
-tenant (`HasTenantAccess`; in stdio mode `/api/v1/whoami`); mctl-support then
+The caller's own API token is never sent to mctl-support. For each tool call
+mctl-api mints one short-lived access token for the caller's principal, with
+`aud` set to `OAUTH_SUPPORT_RESOURCE`, no `groups`, no refresh token and a
+random `jti`, and sends only that token. It is valid only on the four routes
+mctl-support relays (a support-audience token gets 401 on `/mcp`), is never
+persisted, and is never logged or returned. `mctl_ask_support` uses
+`SUPPORT_TOKEN_TTL` (the token must outlive the whole support task);
+`mctl_get_support_task` uses at most `SUPPORT_REQUEST_TIMEOUT + 60s`, capped at
+5m. Each mint writes one audit row, `support.token_mint`, with the principal,
+tenant, tool, `jti`, `aud` and `exp`. Metric: `mctl_support_token_mints_total{result}`.
+
+mctl-api adds no authority and uses no service credential. Its only check is
+that the caller may act on the tenant (`HasTenantAccess`); mctl-support then
 applies its own check. Platform admins pass the mctl-api check for any tenant.
-Redirects are never followed, so the bearer cannot reach another host.
+Redirects are never followed, so the token cannot reach another host.
+
+## Failure modes
+
+The tools fail closed and never fall back to forwarding the API token:
+
+- `support_audience_not_configured`: `OAUTH_SUPPORT_RESOURCE` is empty.
+- `support_token_unavailable`: no minter or auditor is wired (stdio mode, or no
+  OAuth server), or the mint failed.
+- `support_token_refused`: the caller is an agent run principal, a service or
+  surface principal, a relayed request, or has no resolved principal.
 
 A scoped agent run token (for example the `support` scope) cannot call
 `mctl_ask_support`: neither tool is in `supportTools`. `mctl_ask_support` is in
@@ -52,6 +72,7 @@ reason. INPUT_REQUIRED and AUTH_REQUIRED return the state and reason.
 | `SUPPORT_ASK_WAIT` | `60s` | Single wait budget, 5s to 90s. |
 | `SUPPORT_POLL_INTERVAL` | `2s` | Poll spacing, at least 500ms. |
 | `SUPPORT_REQUEST_TIMEOUT` | `15s` | Cap on one `GET /tasks/{id}`, 1s to `SUPPORT_ASK_WAIT`. |
+| `SUPPORT_TOKEN_TTL` | `11m` | Lifetime of the token minted for `mctl_ask_support`, 2m to 15m. Covers mctl-support's 600s task ceiling plus 60s. |
 
 When configured, `POST /mcp` gets both a request timeout and a write deadline
 of `SUPPORT_ASK_WAIT + 15s` instead of the 30s defaults; every other route keeps

@@ -58,6 +58,10 @@ type Server struct {
 	// scopedAuditor records every call made under an audited agent scope
 	// (support, mctl-api#813). Unset means such calls are refused.
 	scopedAuditor atomic.Pointer[scopedAuditorHolder]
+	// supportMinter and supportAuditor mint and record the support-audience
+	// token the support tools send; without both they fail closed.
+	supportMinter  atomic.Pointer[SupportTokenMinter]
+	supportAuditor atomic.Pointer[SupportTokenAuditor]
 	// auditParents maps the id of an open audited tool call to the agent run
 	// that made it, so its loopback REST calls fold into its one row.
 	auditParents sync.Map

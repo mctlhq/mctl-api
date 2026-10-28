@@ -68,6 +68,10 @@ type Entry struct {
 // request made with a support-scope run token (mctl-api#813).
 const OperationSupportRequest = "support.request"
 
+// OperationSupportTokenMint is the operation of the row written for every
+// support-audience token minted for the MCP support tools (mctl-api#852).
+const OperationSupportTokenMint = "support.token_mint"
+
 // OperationAgentScopeDenied is the operation of a scope refusal row.
 const OperationAgentScopeDenied = "agent_scope.denied"
 

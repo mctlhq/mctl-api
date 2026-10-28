@@ -1057,6 +1057,7 @@ func NewRouter(opts Options) http.Handler {
 			opts.MCPServer.SetTenantOwnerChecker(h)
 			opts.MCPServer.SetAgentReceiptGate(h, opts.AgentReceiptGateMode)
 			opts.MCPServer.SetScopedCallAuditor(h)
+			opts.MCPServer.SetSupportTokenAuditor(h)
 			mcpH = opts.MCPServer.NewStreamableHTTPHandler()
 		}
 		if opts.mcpHandler != nil {

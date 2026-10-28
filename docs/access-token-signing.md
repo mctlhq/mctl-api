@@ -121,6 +121,13 @@ A support-audience token passes verification but is accepted on only
 `POST /api/v1/work-items/{id}/executions` and `POST /api/v1/agent-run-tokens`.
 Every other route, `/mcp` included, answers 401 `invalid_token`.
 
+The server also mints support-audience tokens internally for the MCP support
+tools (`mctl_ask_support`, `mctl_get_support_task`; see
+`support-agent-mcp.md`). They carry an optional `jti` claim, which no other
+access token has, no `groups` and no refresh token, and are counted by
+`mctl_support_token_mints_total{result}`. Setting `OAUTH_SUPPORT_RESOURCE=""`
+disables these tools (`support_audience_not_configured`).
+
 `GET /api/v1/whoami` returns `"audience"`, a JSON array of the token's verified
 `aud` values, for access tokens minted by this server. It is omitted for every
 other credential. mctl-support uses it to refuse tokens minted for the API.

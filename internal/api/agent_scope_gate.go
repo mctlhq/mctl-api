@@ -281,3 +281,21 @@ type supportAuditItem struct {
 	ViaPrincipalID  string `json:"viaPrincipalId"`
 	ViaExecutionID  string `json:"viaExecutionId"`
 }
+
+// AuditSupportTokenMint implements mctlmcp.SupportTokenAuditor: one row per
+// support-audience token minted for an MCP support tool. It records the jti
+// and never the token.
+func (h *Handlers) AuditSupportTokenMint(ctx context.Context, rec mctlmcp.SupportTokenMintRecord) {
+	user := auth.UserFromContext(ctx)
+	if user == nil {
+		return
+	}
+	h.logAuditCtx(ctx, audit.Entry{
+		UserID: user.ID, Operation: audit.OperationSupportTokenMint, Status: "succeeded",
+		RiskLevel: string(operations.RiskLow), Tenant: rec.Tenant,
+		Parameters: map[string]string{
+			"tool": rec.Tool, "jti": rec.JTI, "aud": rec.Audience,
+			"exp": rec.ExpiresAt.UTC().Format(time.RFC3339), "layer": "mcp",
+		},
+	})
+}

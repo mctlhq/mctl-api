@@ -86,9 +86,47 @@ func writeFixture(t *testing.T, w http.ResponseWriter, name string) {
 	_, _ = w.Write(fixture(t, name))
 }
 
+const mintedToken = "minted-support-token-456"
+
+type fakeMinter struct {
+	mu    sync.Mutex
+	err   error
+	calls []time.Duration
+}
+
+func (m *fakeMinter) IssueSupportToken(u *auth.User, ttl time.Duration) (auth.SupportToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, ttl)
+	if m.err != nil {
+		return auth.SupportToken{}, m.err
+	}
+	return auth.SupportToken{Token: mintedToken, JTI: "jti-1", Audience: "https://support.example", ExpiresAt: time.Now().Add(ttl)}, nil
+}
+
+type fakeMintAuditor struct {
+	mu   sync.Mutex
+	recs []SupportTokenMintRecord
+}
+
+func (a *fakeMintAuditor) AuditSupportTokenMint(_ context.Context, rec SupportTokenMintRecord) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.recs = append(a.recs, rec)
+}
+
+func withMint(s *Server) (*fakeMinter, *fakeMintAuditor) {
+	m, a := &fakeMinter{}, &fakeMintAuditor{}
+	s.SetSupportTokenMinter(m)
+	s.SetSupportTokenAuditor(a)
+	return m, a
+}
+
 func supportServer(f *fakeSupport, wait time.Duration) *Server {
 	s := NewServer("http://127.0.0.1:1", "")
 	s.SetSupportConfig(SupportConfig{BaseURL: f.srv.URL, Wait: wait, PollInterval: 10 * time.Millisecond, RequestTimeout: 500 * time.Millisecond})
+	withMint(s)
+	withMint(s)
 	return s
 }
 
@@ -169,7 +207,7 @@ func TestAskSupport_RequestShapeAndParity(t *testing.T) { // T4, T5, T21
 		t.Fatalf("POST count = %d", f.count("POST"))
 	}
 	post := f.reqs[0]
-	if post.path != "/message:send" || post.version != "1.0" || post.auth != "Bearer "+testToken {
+	if post.path != "/message:send" || post.version != "1.0" || post.auth != "Bearer "+mintedToken {
 		t.Fatalf("send headers: %+v", post)
 	}
 	if strings.Contains(string(post.body), "blocking") {
@@ -198,7 +236,7 @@ func TestAskSupport_RequestShapeAndParity(t *testing.T) { // T4, T5, T21
 
 	// Parity with a direct GET decoded without the tool.
 	req, _ := http.NewRequest(http.MethodGet, f.srv.URL+"/tasks/x", nil)
-	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Authorization", "Bearer "+mintedToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -253,9 +291,8 @@ func TestAskSupport_TenantRefusal(t *testing.T) { // T1, T3
 func TestAskSupport_NoTokenAndValidation(t *testing.T) { // T10
 	f := newFake(t, func(http.ResponseWriter, *http.Request, int) {})
 	s := supportServer(f, time.Second)
-	ctx := auth.WithUser(context.Background(), &auth.User{ID: "u", Groups: []string{"example-tenant"}})
-	if _, isErr := ask(t, s, ctx, nil); !isErr {
-		t.Fatal("no token must be refused")
+	if _, isErr := ask(t, s, context.Background(), nil); !isErr {
+		t.Fatal("no caller must be refused")
 	}
 	for _, extra := range []map[string]any{
 		{"question": ""}, {"question": strings.Repeat("x", supportMaxQuestion+1)},
@@ -357,7 +394,7 @@ func TestAskSupport_TimeoutThenGet(t *testing.T) { // T6
 		t.Fatal(text)
 	}
 	wantMainAnswer(t, decodeAnswer(t, text))
-	if g.reqs[0].auth != "Bearer "+testToken || g.reqs[0].version != "1.0" {
+	if g.reqs[0].auth != "Bearer "+mintedToken || g.reqs[0].version != "1.0" {
 		t.Fatalf("%+v", g.reqs[0])
 	}
 }
@@ -508,6 +545,7 @@ func TestGetSupportTask_RequestTimeout(t *testing.T) { // T26
 	f := newFake(t, func(w http.ResponseWriter, r *http.Request, n int) { time.Sleep(600 * time.Millisecond) })
 	s := NewServer("http://127.0.0.1:1", "")
 	s.SetSupportConfig(SupportConfig{BaseURL: f.srv.URL, Wait: time.Second, RequestTimeout: 100 * time.Millisecond})
+	withMint(s)
 	_, h := s.toolGetSupportTask()
 	start := time.Now()
 	text, isErr := callSupportTool(t, memberCtx("x"), h, map[string]any{"id": "task-9"})
@@ -650,9 +688,134 @@ func TestAskSupport_SendUsedBudgetNoPoll(t *testing.T) {
 	})
 	s := NewServer("http://127.0.0.1:1", "")
 	s.SetSupportConfig(SupportConfig{BaseURL: f.srv.URL, Wait: 100 * time.Millisecond, PollInterval: time.Second, RequestTimeout: 500 * time.Millisecond})
+	withMint(s)
 	text, isErr := ask(t, s, memberCtx("example-tenant"), nil)
 	a := decodeAnswer(t, text)
 	if isErr || a.Terminal || a.TaskID == "" || a.State != "SUBMITTED" {
 		t.Fatalf("%q err=%v", text, isErr)
+	}
+}
+
+func TestSupport_MintedBearerOnly(t *testing.T) { // T4, T13
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if r.Method == http.MethodPost {
+			writeFixture(t, w, "send_task_submitted.json")
+			return
+		}
+		writeFixture(t, w, "task_completed_status_message.json")
+	})
+	s := supportServer(f, 2*time.Second)
+	m, a := withMint(s)
+	text, isErr := ask(t, s, memberCtx("example-tenant"), nil)
+	if isErr {
+		t.Fatal(text)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.reqs) < 2 {
+		t.Fatalf("reqs = %d", len(f.reqs))
+	}
+	for _, r := range f.reqs {
+		if r.auth != "Bearer "+mintedToken || strings.Contains(string(r.body), testToken) {
+			t.Fatalf("request %s %s carried %q", r.method, r.path, r.auth)
+		}
+	}
+	if strings.Contains(text, testToken) || strings.Contains(text, mintedToken) {
+		t.Fatal("a token reached the tool result")
+	}
+	if len(m.calls) != 1 || m.calls[0] != supportDefaultTokenTTL {
+		t.Fatalf("mint calls = %v", m.calls)
+	}
+	if len(a.recs) != 1 || a.recs[0].Tool != "mctl_ask_support" || a.recs[0].Tenant != "example-tenant" || a.recs[0].JTI == "" {
+		t.Fatalf("audit = %+v", a.recs)
+	}
+}
+
+func TestGetSupportTask_MintedBearerAndTTL(t *testing.T) { // T5
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		writeFixture(t, w, "task_completed_status_message.json")
+	})
+	s := supportServer(f, time.Second)
+	m, a := withMint(s)
+	_, h := s.toolGetSupportTask()
+	if text, isErr := callSupportTool(t, memberCtx("x"), h, map[string]any{"id": "task-1"}); isErr {
+		t.Fatal(text)
+	}
+	if f.reqs[0].auth != "Bearer "+mintedToken {
+		t.Fatalf("auth = %q", f.reqs[0].auth)
+	}
+	if len(m.calls) != 1 || m.calls[0] != 500*time.Millisecond+60*time.Second {
+		t.Fatalf("ttl = %v", m.calls)
+	}
+	if len(a.recs) != 1 || a.recs[0].Tenant != "" || a.recs[0].Tool != "mctl_get_support_task" {
+		t.Fatalf("audit = %+v", a.recs)
+	}
+}
+
+func TestSupport_MintFailuresFailClosed(t *testing.T) { // T6, T7, T8
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"disabled": {auth.ErrSupportResourceDisabled, "support_audience_not_configured"},
+		"refused":  {auth.ErrSupportTokenRefused, "support_token_refused"},
+		"other":    {errors.New("boom " + testToken), "support_token_unavailable"},
+	} {
+		f := newFake(t, func(http.ResponseWriter, *http.Request, int) {})
+		s := supportServer(f, time.Second)
+		m, _ := withMint(s)
+		m.err = tc.err
+		text, isErr := ask(t, s, memberCtx("example-tenant"), nil)
+		if !isErr || !strings.Contains(text, tc.want) || strings.Contains(text, testToken) || f.count("") != 0 {
+			t.Errorf("%s: %q err=%v reqs=%d", name, text, isErr, f.count(""))
+		}
+		_, h := s.toolGetSupportTask()
+		text, isErr = callSupportTool(t, memberCtx("x"), h, map[string]any{"id": "t"})
+		if !isErr || !strings.Contains(text, tc.want) || f.count("") != 0 {
+			t.Errorf("%s get: %q err=%v reqs=%d", name, text, isErr, f.count(""))
+		}
+	}
+}
+
+func TestSupport_NoMinterOrAuditor(t *testing.T) { // T7
+	f := newFake(t, func(http.ResponseWriter, *http.Request, int) {})
+	s := NewServer("http://127.0.0.1:1", testToken)
+	s.SetSupportConfig(SupportConfig{BaseURL: f.srv.URL})
+	s.SetSupportTokenMinter(&fakeMinter{})
+	for _, ctx := range []context.Context{memberCtx("example-tenant"), context.Background()} {
+		text, isErr := ask(t, s, ctx, nil)
+		if !isErr || !strings.Contains(text, "support_token_unavailable") {
+			t.Fatalf("%q err=%v", text, isErr)
+		}
+		_, h := s.toolGetSupportTask()
+		if text, isErr = callSupportTool(t, ctx, h, map[string]any{"id": "t"}); !isErr || !strings.Contains(text, "support_token_unavailable") {
+			t.Fatalf("%q err=%v", text, isErr)
+		}
+	}
+	if f.count("") != 0 {
+		t.Fatal("upstream contacted")
+	}
+}
+
+func TestParseSupportConfig_TokenTTL(t *testing.T) {
+	env := func(v string) func(string) string {
+		return func(k string) string {
+			switch k {
+			case "SUPPORT_A2A_URL":
+				return "https://support.example"
+			case "SUPPORT_TOKEN_TTL":
+				return v
+			}
+			return ""
+		}
+	}
+	for v, ok := range map[string]bool{"": true, "2m": true, "15m": true, "119s": false, "16m": false, "x": false} {
+		cfg, err := ParseSupportConfig(env(v))
+		if (err == nil) != ok {
+			t.Errorf("%q: err = %v", v, err)
+		}
+		if v == "" && cfg.TokenTTL != 11*time.Minute {
+			t.Errorf("default ttl = %s", cfg.TokenTTL)
+		}
 	}
 }
