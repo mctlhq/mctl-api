@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.138.0](https://github.com/mctlhq/mctl-api/compare/4.137.0...4.138.0) (2026-10-28)
+
+
+### Features
+
+* **agents:** issue-852-s2f-mctl-ask-support-forwards-a-support ([9ac4d7e](https://github.com/mctlhq/mctl-api/commit/9ac4d7ee2523208c8e3a20822eb2e38fb76afda9))
+* **agents:** issue-852-s2f-mctl-ask-support-forwards-a-support ([907bcdc](https://github.com/mctlhq/mctl-api/commit/907bcdc20506d0d4742e11b56f87f4b0492187fb))
+
 ## [4.137.0](https://github.com/mctlhq/mctl-api/compare/4.136.0...4.137.0) (2026-10-28)
 
 
