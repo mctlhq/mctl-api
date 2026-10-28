@@ -37,9 +37,11 @@ import (
 )
 
 // Tenant support agent over A2A 1.0 (mctl-api#814, support S1d). Two thin
-// tools forward the caller's OWN bearer, unchanged, to mctl-support. mctl-api
-// adds no authority and uses no service credential; its only check is that
-// the caller may act on the named tenant. mctl-support checks again.
+// tools call mctl-support with a short-lived, support-audience access token
+// that mctl-api mints for the caller's own principal (mctl-api#852). The
+// caller's API token is never sent. mctl-api adds no authority and uses no
+// service credential; its only check is that the caller may act on the named
+// tenant. mctl-support checks again.
 
 const (
 	supportA2AVersion   = "1.0"
@@ -53,6 +55,11 @@ const (
 	supportMinPoll      = 500 * time.Millisecond
 	supportDefaultReqTO = 15 * time.Second
 	supportMinReqTO     = time.Second
+
+	supportDefaultTokenTTL = 11 * time.Minute
+	supportMinTokenTTL     = 2 * time.Minute
+	supportMaxTokenTTL     = 15 * time.Minute
+	supportReadTokenCap    = 5 * time.Minute
 )
 
 // SupportConfig configures the support tools. BaseURL empty means not configured.
@@ -61,6 +68,7 @@ type SupportConfig struct {
 	Wait           time.Duration // single budget for the send and all polling
 	PollInterval   time.Duration
 	RequestTimeout time.Duration // cap on one GET /tasks/{id}
+	TokenTTL       time.Duration // lifetime of the token minted for mctl_ask_support
 }
 
 // SetSupportConfig enables the support tools.
@@ -75,11 +83,14 @@ func (s *Server) SetSupportConfig(c SupportConfig) {
 	if c.RequestTimeout <= 0 {
 		c.RequestTimeout = supportDefaultReqTO
 	}
+	if c.TokenTTL <= 0 {
+		c.TokenTTL = supportDefaultTokenTTL
+	}
 	s.support.Store(&c)
 }
 
 // ParseSupportConfig reads SUPPORT_A2A_URL, SUPPORT_ASK_WAIT,
-// SUPPORT_POLL_INTERVAL and SUPPORT_REQUEST_TIMEOUT. An unset URL returns a
+// SUPPORT_POLL_INTERVAL, SUPPORT_REQUEST_TIMEOUT and SUPPORT_TOKEN_TTL. An unset URL returns a
 // zero config (not configured) and no error; a bad value is an error.
 func ParseSupportConfig(getenv func(string) string) (SupportConfig, error) {
 	raw := strings.TrimSpace(getenv("SUPPORT_A2A_URL"))
@@ -129,6 +140,12 @@ func ParseSupportConfig(getenv func(string) string) (SupportConfig, error) {
 	if cfg.RequestTimeout < supportMinReqTO || cfg.RequestTimeout > cfg.Wait {
 		return SupportConfig{}, fmt.Errorf("SUPPORT_REQUEST_TIMEOUT %s must be between %s and SUPPORT_ASK_WAIT (%s)",
 			cfg.RequestTimeout, supportMinReqTO, cfg.Wait)
+	}
+	if cfg.TokenTTL, err = dur("SUPPORT_TOKEN_TTL", supportDefaultTokenTTL); err != nil {
+		return SupportConfig{}, err
+	}
+	if cfg.TokenTTL < supportMinTokenTTL || cfg.TokenTTL > supportMaxTokenTTL {
+		return SupportConfig{}, fmt.Errorf("SUPPORT_TOKEN_TTL %s must be between %s and %s", cfg.TokenTTL, supportMinTokenTTL, supportMaxTokenTTL)
 	}
 	return cfg, nil
 }
@@ -225,10 +242,9 @@ func (e *supportError) refusal() bool { return e.status >= 300 && e.status < 500
 // supportDo performs one request. wrapped selects the message:send reply
 // shape ({"task"} or {"message"}); otherwise the body is a bare Task. Every
 // failure is an error; a zero answer is never returned in its place.
-func (s *Server) supportDo(ctx context.Context, cfg *SupportConfig, method, path string, body any, wrapped bool) (*a2aTask, *a2aMessage, error) {
-	token := s.effectiveToken(ctx)
-	if token == "" {
-		return nil, nil, &supportError{msg: "no caller token to forward to mctl-support"}
+func (s *Server) supportDo(ctx context.Context, cfg *SupportConfig, bearer, method, path string, body any, wrapped bool) (*a2aTask, *a2aMessage, error) {
+	if bearer == "" {
+		return nil, nil, &supportError{msg: "support_token_unavailable: no support token to send to mctl-support"}
 	}
 	var rdr io.Reader
 	if body != nil {
@@ -244,7 +260,7 @@ func (s *Server) supportDo(ctx context.Context, cfg *SupportConfig, method, path
 	}
 	req.Header.Set("A2A-Version", supportA2AVersion)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -440,6 +456,83 @@ func supportOutcome(task *a2aTask, msg *a2aMessage) *mcplib.CallToolResult {
 	return supportResultJSON(a, false)
 }
 
+// --- support token mint ---
+
+// SupportTokenMinter mints a support-audience access token for a caller.
+type SupportTokenMinter interface {
+	IssueSupportToken(u *auth.User, ttl time.Duration) (auth.SupportToken, error)
+}
+
+// SupportTokenMintRecord is what the auditor learns about one mint. It never
+// carries the token.
+type SupportTokenMintRecord struct {
+	Tool      string
+	Tenant    string
+	JTI       string
+	Audience  string
+	ExpiresAt time.Time
+}
+
+// SupportTokenAuditor records one support-token mint.
+type SupportTokenAuditor interface {
+	AuditSupportTokenMint(ctx context.Context, rec SupportTokenMintRecord)
+}
+
+// SetSupportTokenMinter wires the minter; without one the support tools fail
+// closed (stdio mode).
+func (s *Server) SetSupportTokenMinter(m SupportTokenMinter) { s.supportMinter.Store(&m) }
+
+// SetSupportTokenAuditor wires the mint auditor.
+func (s *Server) SetSupportTokenAuditor(a SupportTokenAuditor) { s.supportAuditor.Store(&a) }
+
+const supportTokenUnavailable = "support_token_unavailable: this server cannot mint a support-audience token"
+
+func (s *Server) supportMintDeps() (SupportTokenMinter, SupportTokenAuditor) {
+	var m SupportTokenMinter
+	var a SupportTokenAuditor
+	if p := s.supportMinter.Load(); p != nil {
+		m = *p
+	}
+	if p := s.supportAuditor.Load(); p != nil {
+		a = *p
+	}
+	return m, a
+}
+
+// supportMintPrecheck fails before any other work when no token can be minted.
+func (s *Server) supportMintPrecheck() *mcplib.CallToolResult {
+	m, a := s.supportMintDeps()
+	if m == nil || a == nil {
+		return mcplib.NewToolResultError(supportTokenUnavailable)
+	}
+	return nil
+}
+
+// mintSupportBearer mints the one token a tool call sends to mctl-support and
+// audits the mint. Errors never contain a token.
+func (s *Server) mintSupportBearer(ctx context.Context, tool, tenant string, ttl time.Duration) (string, *mcplib.CallToolResult) {
+	m, a := s.supportMintDeps()
+	u := auth.UserFromContext(ctx)
+	if m == nil || a == nil || u == nil {
+		return "", mcplib.NewToolResultError(supportTokenUnavailable)
+	}
+	tok, err := m.IssueSupportToken(u, ttl)
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrSupportResourceDisabled):
+			return "", mcplib.NewToolResultError("support_audience_not_configured: OAUTH_SUPPORT_RESOURCE is empty; the caller's token is never forwarded instead")
+		case errors.Is(err, auth.ErrSupportTokenRefused):
+			return "", mcplib.NewToolResultError("support_token_refused: this caller may not be given a support token")
+		}
+		slog.Warn("support token mint failed", "tool", tool, "error", err)
+		return "", mcplib.NewToolResultError("support_token_unavailable: the support token could not be minted")
+	}
+	a.AuditSupportTokenMint(ctx, SupportTokenMintRecord{
+		Tool: tool, Tenant: tenant, JTI: tok.JTI, Audience: tok.Audience, ExpiresAt: tok.ExpiresAt,
+	})
+	return tok.Token, nil
+}
+
 // --- tenant check ---
 
 // supportTenantAllowed reports whether the caller may act on tenant. With a
@@ -482,7 +575,7 @@ func (s *Server) toolAskSupport() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithIdempotentHintAnnotation(false),
-		mcplib.WithDescription(`Ask the tenant support agent a question about your tenant. It creates a support task, spends the tenant's model budget, and waits up to the configured bound for the answer (default 60s). If the answer is not ready in time the result carries the task id: continue with mctl_get_support_task. Your own token is forwarded to the support agent; you must be a member of the tenant.`),
+		mcplib.WithDescription(`Ask the tenant support agent a question about your tenant. It creates a support task, spends the tenant's model budget, and waits up to the configured bound for the answer (default 60s). If the answer is not ready in time the result carries the task id: continue with mctl_get_support_task. mctl-api sends the support agent a short-lived token for your principal, valid only for the support agent; you must be a member of the tenant.`),
 		commerceTenantArg,
 		mcplib.WithString("question", mcplib.Required(), mcplib.Description("The question for the support agent.")),
 		mcplib.WithString("context_id", mcplib.Description("Continue an earlier conversation: the context_id of a previous answer.")),
@@ -510,8 +603,8 @@ func (s *Server) toolAskSupport() (mcplib.Tool, server.ToolHandlerFunc) {
 		if errResult != nil {
 			return errResult, nil
 		}
-		if s.effectiveToken(ctx) == "" {
-			return mcplib.NewToolResultError("no caller token to forward to mctl-support"), nil
+		if errResult := s.supportMintPrecheck(); errResult != nil {
+			return errResult, nil
 		}
 		allowed, err := s.supportTenantAllowed(ctx, tenant)
 		if err != nil {
@@ -520,6 +613,11 @@ func (s *Server) toolAskSupport() (mcplib.Tool, server.ToolHandlerFunc) {
 		}
 		if !allowed {
 			return mcplib.NewToolResultError("tenant_forbidden: you are not a member of tenant " + tenant), nil
+		}
+
+		bearer, errResult := s.mintSupportBearer(ctx, "mctl_ask_support", tenant, cfg.TokenTTL)
+		if errResult != nil {
+			return errResult, nil
 		}
 
 		messageID := uuid.NewString()
@@ -541,7 +639,7 @@ func (s *Server) toolAskSupport() (mcplib.Tool, server.ToolHandlerFunc) {
 		budgetCtx, cancel := context.WithDeadline(ctx, time.Now().Add(cfg.Wait))
 		defer cancel()
 
-		task, reply, err := s.supportDo(budgetCtx, cfg, http.MethodPost, "/message:send", body, true)
+		task, reply, err := s.supportDo(budgetCtx, cfg, bearer, http.MethodPost, "/message:send", body, true)
 		if err != nil {
 			var se *supportError
 			if errors.As(err, &se) && se.refusal() {
@@ -555,7 +653,7 @@ func (s *Server) toolAskSupport() (mcplib.Tool, server.ToolHandlerFunc) {
 		if reply != nil {
 			return supportOutcome(nil, reply), nil
 		}
-		return s.supportAwait(ctx, budgetCtx, cfg, task)
+		return s.supportAwait(ctx, budgetCtx, cfg, bearer, task)
 	}
 	return tool, handler
 }
@@ -563,7 +661,7 @@ func (s *Server) toolAskSupport() (mcplib.Tool, server.ToolHandlerFunc) {
 // supportAwait polls task until it is terminal or interrupted, or budgetCtx
 // ends. A client cancellation of ctx is returned as an error; a deadline
 // (the budget's or the request's) ends the wait like the budget does.
-func (s *Server) supportAwait(ctx, budgetCtx context.Context, cfg *SupportConfig, task *a2aTask) (*mcplib.CallToolResult, error) {
+func (s *Server) supportAwait(ctx, budgetCtx context.Context, cfg *SupportConfig, bearer string, task *a2aTask) (*mcplib.CallToolResult, error) {
 	state := normalizeState(task.Status.State)
 	if isTerminalState(state) || isInterruptedState(state) {
 		return supportOutcome(task, nil), nil
@@ -580,7 +678,7 @@ func (s *Server) supportAwait(ctx, budgetCtx context.Context, cfg *SupportConfig
 			timer.Stop()
 		case <-timer.C:
 			pctx, pcancel := context.WithTimeout(budgetCtx, cfg.RequestTimeout)
-			t, _, err := s.supportDo(pctx, cfg, http.MethodGet, path, nil, false)
+			t, _, err := s.supportDo(pctx, cfg, bearer, http.MethodGet, path, nil, false)
 			pcancel()
 			if err == nil {
 				last, polled, lastErr = t, true, nil
@@ -629,7 +727,7 @@ func (s *Server) toolGetSupportTask() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Get a support task"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription(`Read one support agent task by id: its state and, once completed, the answer. Use it to collect an answer that mctl_ask_support did not wait for. Your own token is forwarded; the support agent decides what you may see.`),
+		mcplib.WithDescription(`Read one support agent task by id: its state and, once completed, the answer. Use it to collect an answer that mctl_ask_support did not wait for. mctl-api sends the support agent a short-lived token for your principal, valid only for the support agent; the support agent decides what you may see.`),
 		mcplib.WithString("id", mcplib.Required(), mcplib.Description("The task_id returned by mctl_ask_support.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -650,9 +748,17 @@ func (s *Server) toolGetSupportTask() (mcplib.Tool, server.ToolHandlerFunc) {
 		case id == "." || id == ".." || strings.ContainsAny(id, `/\?#`) || strings.IndexFunc(id, unicode.IsControl) >= 0:
 			return mcplib.NewToolResultError("id must be one path segment"), nil
 		}
+		readTTL := cfg.RequestTimeout + 60*time.Second
+		if readTTL > supportReadTokenCap {
+			readTTL = supportReadTokenCap
+		}
+		bearer, errResult := s.mintSupportBearer(ctx, "mctl_get_support_task", "", readTTL)
+		if errResult != nil {
+			return errResult, nil
+		}
 		rctx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
 		defer cancel()
-		task, _, err := s.supportDo(rctx, cfg, http.MethodGet, "/tasks/"+url.PathEscape(id), nil, false)
+		task, _, err := s.supportDo(rctx, cfg, bearer, http.MethodGet, "/tasks/"+url.PathEscape(id), nil, false)
 		if err != nil {
 			if errors.Is(ctx.Err(), context.Canceled) {
 				return nil, ctx.Err()

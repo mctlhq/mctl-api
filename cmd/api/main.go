@@ -961,6 +961,9 @@ func main() {
 		slog.Error("invalid support agent configuration", "error", supportErr)
 		os.Exit(1)
 	}
+	if oauthServer != nil {
+		mcpSrv.SetSupportTokenMinter(oauthServer)
+	}
 	var mcpWriteTimeout time.Duration
 	if supportCfg.BaseURL != "" {
 		mcpSrv.SetSupportConfig(supportCfg)

@@ -1638,6 +1638,11 @@ func (s *OAuthServer) issueJWTFor(login, principalID string, groups []string, au
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(ttl).Unix(),
 	}
+	return s.signAccessToken(payload)
+}
+
+// signAccessToken signs payload with the configured algorithm and key.
+func (s *OAuthServer) signAccessToken(payload jwtPayload) (string, error) {
 	if s.signingAlg == JWTAlgEdDSA || s.signingAlg == JWTAlgES256 {
 		if s.keys == nil || s.keys.active == nil {
 			return "", errors.New("issue token: no active signing key")
@@ -2032,6 +2037,9 @@ type jwtPayload struct {
 	Groups    []string `json:"groups"`
 	IssuedAt  int64    `json:"iat"`
 	ExpiresAt int64    `json:"exp"`
+	// ID is the jti claim. Only the internal support mint sets it; every
+	// other access token omits it.
+	ID string `json:"jti,omitempty"`
 	// support is set by verification, never by the token: its aud names the
 	// support resource, so it may reach only the routes mctl-support relays.
 	support bool
