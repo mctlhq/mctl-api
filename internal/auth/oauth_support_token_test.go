@@ -52,7 +52,7 @@ func TestIssueSupportToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := jwtClaims(t, st.Token)
-	if c["aud"] != testSupportRes && !(len(c["aud"].([]any)) == 1 && c["aud"].([]any)[0] == testSupportRes) {
+	if c["aud"] != testSupportRes { // a single string, not an array
 		t.Fatalf("aud = %v", c["aud"])
 	}
 	if c["pid"] != testSupportPID || c["jti"] != st.JTI || st.JTI == "" {
