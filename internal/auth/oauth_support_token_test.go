@@ -18,11 +18,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 const testSupportPID = "prn_01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -119,17 +122,38 @@ func TestIssueJWT_HasNoJTI(t *testing.T) {
 	}
 }
 
-// T2: a disabled principal is refused at mint time and nothing is signed.
+// T2: a disabled or missing principal is refused at mint time and nothing is
+// signed. Only the checker's verdict is a refusal; a principal that could
+// not be read stays an error, counted as one.
 func TestIssueSupportToken_DisabledPrincipal(t *testing.T) {
-	o := newResourceServer(t)
-	c := &checkOnly{err: errors.New("principal disabled")}
-	o.TokenPrincipalChecker = c
-	st, err := o.IssueSupportToken(&User{ID: "alice", githubLogin: true, principalID: testSupportPID}, time.Minute)
-	if err == nil || st.Token != "" {
-		t.Fatalf("disabled principal minted: err=%v", err)
-	}
-	if !slices.Equal(c.checked, []string{testSupportPID}) {
-		t.Fatalf("checked = %v", c.checked)
+	for name, tc := range map[string]struct {
+		err     error
+		refused bool
+		label   string
+	}{
+		"disabled":   {ErrPrincipalDisabled, true, "refused"},
+		"missing":    {fmt.Errorf("%w: principal does not exist", ErrIdentityRefused), true, "refused"},
+		"unreadable": {errors.New("principal could not be resolved: dial tcp: timeout"), false, "error"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			o := newResourceServer(t)
+			c := &checkOnly{err: tc.err}
+			o.TokenPrincipalChecker = c
+			before := testutil.ToFloat64(supportTokenMints.WithLabelValues(tc.label))
+			st, err := o.IssueSupportToken(&User{ID: "alice", githubLogin: true, principalID: testSupportPID}, time.Minute)
+			if err == nil || st.Token != "" {
+				t.Fatalf("minted: err=%v", err)
+			}
+			if errors.Is(err, ErrSupportTokenRefused) != tc.refused {
+				t.Fatalf("err = %v, refused want %v", err, tc.refused)
+			}
+			if got := testutil.ToFloat64(supportTokenMints.WithLabelValues(tc.label)) - before; got != 1 {
+				t.Fatalf("%s mints += %v, want 1", tc.label, got)
+			}
+			if !slices.Equal(c.checked, []string{testSupportPID}) {
+				t.Fatalf("checked = %v", c.checked)
+			}
+		})
 	}
 }
 

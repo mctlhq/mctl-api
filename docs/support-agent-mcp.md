@@ -32,9 +32,11 @@ The tools fail closed and never fall back to forwarding the API token:
 
 - `support_audience_not_configured`: `OAUTH_SUPPORT_RESOURCE` is empty.
 - `support_token_unavailable`: no minter or auditor is wired (stdio mode, or no
-  OAuth server), or the mint failed.
+  OAuth server), no user is in the request context, or the mint failed (for
+  example, the caller's principal could not be read).
 - `support_token_refused`: the caller is an agent run principal, a service or
-  surface principal, a relayed request, or has no resolved principal.
+  surface principal, a relayed request, has no resolved principal, or its
+  principal is disabled or does not exist.
 
 A scoped agent run token (for example the `support` scope) cannot call
 `mctl_ask_support`: neither tool is in `supportTools`. `mctl_ask_support` is in
