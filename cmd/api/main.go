@@ -205,10 +205,12 @@ func main() {
 		// claim only, and a session with none is not refreshed.
 		oauthServer.PrincipalMode = cfg.tenantAuthzMode() == mctlapi.TenantAuthzPrincipal
 		// RFC 8707 resource of the support agent (mctl-api#849). Unset
-		// selects the default; set empty disables it.
-		oauthServer.SupportResource = auth.DefaultSupportResource
-		if v, ok := os.LookupEnv("OAUTH_SUPPORT_RESOURCE"); ok {
-			oauthServer.SupportResource = strings.TrimSpace(v)
+		// selects the default; set empty disables it. A value that would
+		// break every request is a refused boot (mctl-api#851).
+		if err := configureSupportResource(oauthServer, os.LookupEnv); err != nil {
+			slog.Error("invalid configuration", "error", err)
+			stopSignals()
+			os.Exit(1)
 		}
 		// Unset/0 = strict mode off: a stale checkout is used and alerted on
 		// via the gauge above, not failed (mctl-api#411, README.md
@@ -2889,4 +2891,17 @@ func codeScanningReceiver(orgWebhookSecret string, providers map[string]auth.Sec
 		ing = store
 	}
 	return secret, parsed, ing
+}
+
+// configureSupportResource sets the support agent's RFC 8707 resource from
+// OAUTH_SUPPORT_RESOURCE (unset: the default; empty: disabled) and refuses
+// one that names this API or is not an https URL. Call it after
+// ConfigureSigning, which sets the access-token audience it is checked
+// against.
+func configureSupportResource(o *auth.OAuthServer, lookup func(string) (string, bool)) error {
+	o.SupportResource = auth.DefaultSupportResource
+	if v, ok := lookup("OAUTH_SUPPORT_RESOURCE"); ok {
+		o.SupportResource = strings.TrimSpace(v)
+	}
+	return o.ValidateSupportResource()
 }

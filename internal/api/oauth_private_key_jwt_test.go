@@ -319,6 +319,43 @@ func TestPrivateKeyJWTRefreshNoDowngrade(t *testing.T) {
 	}
 }
 
+// mctl-api#851: the auth-method check runs before the resource check, so a
+// private_key_jwt session refreshed with none (the client's document dropped
+// to none) and a mismatched or unknown resource is still a downgrade:
+// invalid_client, the token spent and, with a store, the family revoked.
+// Not invalid_target.
+func TestPrivateKeyJWTRefreshDowngradeBeatsResource(t *testing.T) {
+	for _, resource := range []string{"https://support.mctl.ai", "https://evil.example"} {
+		for _, tc := range []struct {
+			name  string
+			store *pkjwtRefreshStore
+		}{{"memory", nil}, {"store", newPKJWTRefreshStore()}} {
+			t.Run(tc.name+" "+resource, func(t *testing.T) {
+				e := newPKJWTEnv(t)
+				e.o.SupportResource = "https://support.mctl.ai"
+				if tc.store != nil {
+					e.o.RefreshStore = tc.store
+				}
+				rec, body := tokenRequest(e.h, withAssertion(codeGrant(e.code(t)), e.assertion(t, "https://api.mctl.ai")))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("exchange: %d %s", rec.Code, rec.Body.String())
+				}
+				e.setDoc(pkjwtDocBody(cimd.AuthMethodNone), 2*time.Hour)
+				grant := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {body["refresh_token"].(string)}, "client_id": {cimdID}, "resource": {resource}}
+				rec, body = tokenRequest(e.h, grant)
+				wantInvalidClient(t, rec, body)
+				if tc.store != nil && (len(tc.store.reasons) != 1 || tc.store.reasons[0] != "auth_method_downgrade") {
+					t.Fatalf("family not revoked: %v", tc.store.reasons)
+				}
+				grant.Del("resource")
+				if rec, _ := tokenRequest(e.h, grant); rec.Code == http.StatusOK {
+					t.Fatal("refused refresh token still works")
+				}
+			})
+		}
+	}
+}
+
 // A key set that cannot be fetched observed nothing about the client: the
 // token request is a retryable server error, never invalid_client, and the
 // code is kept.
