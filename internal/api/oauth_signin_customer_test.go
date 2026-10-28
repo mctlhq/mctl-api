@@ -334,7 +334,7 @@ func TestCustomerGitHubStartNeedsBothIDs(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	h.startZitadelAuthorize(rec, httptest.NewRequest(http.MethodGet, "/oauth/authorize", nil),
-		"client", testClientRedirect, "client-state", testChallenge(), true)
+		"client", testClientRedirect, "client-state", testChallenge(), "", true)
 	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
 		t.Fatalf("customer start without an IdP id = %d Location=%q, want 503 and no redirect", rec.Code, rec.Header().Get("Location"))
 	}

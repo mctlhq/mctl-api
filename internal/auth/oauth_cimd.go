@@ -101,6 +101,8 @@ type ConsentEntry struct {
 	// AuthMethod is the client's token_endpoint_auth_method as its document
 	// declared it at consent; the code is bound to it.
 	AuthMethod string
+	// Resource is the flow resource ("" is the default API resource).
+	Resource string
 	// BrowserHash is the SHA-256 (hex) of the consent token, held by the
 	// browser that signed in as a cookie.
 	BrowserHash string

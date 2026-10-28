@@ -78,6 +78,12 @@ func (h *Handlers) Whoami(w http.ResponseWriter, r *http.Request) {
 	if t, ok := user.BoundTenant(); ok {
 		resp["boundTenant"] = t
 	}
+	// audience is the verified aud of a local OAuth access token, always an
+	// array; absent for any other credential. mctl-support reads it to
+	// refuse a token minted for the API (mctl-api#849).
+	if aud, ok := user.TokenAudience(); ok {
+		resp["audience"] = aud
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 

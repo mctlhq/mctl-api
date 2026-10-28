@@ -295,7 +295,7 @@ func (h *Handlers) pickOAuthUpstream(w http.ResponseWriter, r *http.Request) (up
 
 // startZitadelAuthorize sends a validated authorization to ZITADEL.
 // customer starts it in the customers organization at its GitHub IdP.
-func (h *Handlers) startZitadelAuthorize(w http.ResponseWriter, r *http.Request, clientID, redirectURI, clientState, codeChallenge string, customer bool) {
+func (h *Handlers) startZitadelAuthorize(w http.ResponseWriter, r *http.Request, clientID, redirectURI, clientState, codeChallenge, resource string, customer bool) {
 	o, z := h.opts.OAuthServer, h.oauthZitadel
 	if z == nil {
 		http.Error(w, "ZITADEL sign-in is not configured", http.StatusServiceUnavailable)
@@ -323,7 +323,7 @@ func (h *Handlers) startZitadelAuthorize(w http.ResponseWriter, r *http.Request,
 	verifier := oauth2.GenerateVerifier()
 	if err := o.StorePendingOIDCAuth(r.Context(), state, auth.PendingOIDCAuth{
 		Upstream: auth.UpstreamZitadel, ClientID: clientID, RedirectURI: redirectURI,
-		CodeChallenge: codeChallenge, ClientState: clientState, Nonce: nonce, Verifier: verifier,
+		CodeChallenge: codeChallenge, ClientState: clientState, Nonce: nonce, Verifier: verifier, Resource: resource,
 	}); err != nil {
 		oauthError(w, redirectURI, clientState, "server_error", "the authorization could not be started; try again")
 		return
@@ -432,7 +432,7 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 			Login: login, PrincipalID: principalID, Groups: groups,
 			ClientID: pending.ClientID, RedirectURI: pending.RedirectURI,
 			CodeChallenge: pending.CodeChallenge, ClientState: pending.ClientState,
-			Upstream: auth.UpstreamZitadel,
+			Upstream: auth.UpstreamZitadel, Resource: pending.Resource,
 		})
 		slog.Info("oauth: ZITADEL sign-in", "principal_id", principalID, "login", login, "zitadel_subject", idt.Subject, "result", result)
 	}

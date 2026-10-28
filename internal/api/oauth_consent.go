@@ -72,13 +72,16 @@ type authzCompletion struct {
 	// AuthMethod is a CIMD client's token_endpoint_auth_method, read from
 	// its document at consent; empty for every other client.
 	AuthMethod string
+	// Resource is the flow resource (OAuthServer.FlowResource): "" for the
+	// default API resource.
+	Resource string
 }
 
 // issueGrant issues the authorization code, writes the oauth.grant_issued
 // audit entry and returns the URL to send the client to.
 func (h *Handlers) issueGrant(r *http.Request, c authzCompletion) (string, error) {
 	o := h.opts.OAuthServer
-	code, err := o.IssueCodeWithAuthMethod(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod)
+	code, err := o.IssueCodeWithAuthMethod(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource)
 	if err != nil {
 		return "", err
 	}
@@ -98,6 +101,7 @@ func (h *Handlers) issueGrant(r *http.Request, c authzCompletion) (string, error
 			"client_name":   truncateEchoedValue(c.ClientName),
 			"redirect_host": target.Host,
 			"upstream":      c.Upstream,
+			"resource":      c.Resource,
 		},
 	})
 	cq := target.Query()
@@ -160,7 +164,7 @@ func (h *Handlers) requestConsent(w http.ResponseWriter, r *http.Request, c auth
 		Login: c.Login, PrincipalID: c.PrincipalID, Groups: c.Groups,
 		ClientID: c.ClientID, ClientName: client.ClientName, RedirectURI: c.RedirectURI,
 		CodeChallenge: c.CodeChallenge, ClientState: []byte(c.ClientState), Upstream: c.Upstream,
-		AuthMethod: client.AuthMethod, BrowserHash: consentHash(token),
+		AuthMethod: client.AuthMethod, Resource: c.Resource, BrowserHash: consentHash(token),
 	})
 	if err != nil {
 		slog.Error("failed to store consent", "error", err)
@@ -294,7 +298,7 @@ func (h *Handlers) takeConsentDecision(w http.ResponseWriter, r *http.Request) s
 	loc, err := h.issueGrant(r, authzCompletion{
 		Login: e.Login, PrincipalID: e.PrincipalID, Groups: e.Groups, ClientID: e.ClientID,
 		RedirectURI: e.RedirectURI, CodeChallenge: e.CodeChallenge, ClientState: state,
-		Upstream: e.Upstream, ClientName: e.ClientName, AuthMethod: e.AuthMethod,
+		Upstream: e.Upstream, ClientName: e.ClientName, AuthMethod: e.AuthMethod, Resource: e.Resource,
 	})
 	if err != nil {
 		slog.Error("failed to issue auth code", "error", err)

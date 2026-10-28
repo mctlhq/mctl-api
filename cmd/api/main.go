@@ -204,6 +204,12 @@ func main() {
 		// Principal mode (mctl-api#377): tokens are accepted by their pid
 		// claim only, and a session with none is not refreshed.
 		oauthServer.PrincipalMode = cfg.tenantAuthzMode() == mctlapi.TenantAuthzPrincipal
+		// RFC 8707 resource of the support agent (mctl-api#849). Unset
+		// selects the default; set empty disables it.
+		oauthServer.SupportResource = auth.DefaultSupportResource
+		if v, ok := os.LookupEnv("OAUTH_SUPPORT_RESOURCE"); ok {
+			oauthServer.SupportResource = strings.TrimSpace(v)
+		}
 		// Unset/0 = strict mode off: a stale checkout is used and alerted on
 		// via the gauge above, not failed (mctl-api#411, README.md
 		// "Authorization group freshness"). GroupsDegradedGrace is

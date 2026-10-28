@@ -163,6 +163,11 @@ type OAuthServer struct {
 	// AccessTokenAudience is the aud minted into and required of access
 	// tokens; empty selects BaseURL.
 	AccessTokenAudience string
+	// SupportResource is the RFC 8707 resource of the tenant support agent
+	// (OAUTH_SUPPORT_RESOURCE). A token minted for it is accepted by
+	// verification but confined to a few routes (see internal/api). Empty
+	// disables it: the resource answers invalid_target.
+	SupportResource string
 	// RejectHS256 refuses every HS256 access token (OAUTH_JWT_ACCEPT_HS256
 	// false). The zero value accepts them.
 	RejectHS256 bool
@@ -1316,12 +1321,13 @@ const (
 
 // StorePendingAuth stores a pending authorization keyed by opaque state,
 // before the user has authenticated with GitHub.
-func (s *OAuthServer) StorePendingAuth(ctx context.Context, state, clientID, redirectURI, codeChallenge string) error {
+func (s *OAuthServer) StorePendingAuth(ctx context.Context, state, clientID, redirectURI, codeChallenge, resource string) error {
 	return s.storePending(ctx, state, pendingAuth{
 		Upstream:      UpstreamGitHub,
 		ClientID:      clientID,
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
+		Resource:      resource,
 		CreatedAt:     time.Now(),
 	})
 }
@@ -1337,6 +1343,8 @@ type PendingOIDCAuth struct {
 	ClientState   string
 	Nonce         string
 	Verifier      string
+	// Resource is the flow resource (FlowResource), "" for the default.
+	Resource string
 }
 
 // StorePendingOIDCAuth stores a pending authorization under the state sent
@@ -1350,6 +1358,7 @@ func (s *OAuthServer) StorePendingOIDCAuth(ctx context.Context, state string, a 
 		ClientState:   a.ClientState,
 		Nonce:         a.Nonce,
 		Verifier:      a.Verifier,
+		Resource:      a.Resource,
 		CreatedAt:     time.Now(),
 	})
 }
@@ -1410,13 +1419,13 @@ type pendingRecord struct {
 // refused here, at sign-in, rather than by IssueJWT once the code has been
 // spent at the token endpoint.
 func (s *OAuthServer) IssueCode(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string) (string, error) {
-	return s.IssueCodeWithAuthMethod(ctx, login, principalID, clientID, redirectURI, codeChallenge, groups, "")
+	return s.IssueCodeWithAuthMethod(ctx, login, principalID, clientID, redirectURI, codeChallenge, groups, "", "")
 }
 
 // IssueCodeWithAuthMethod is IssueCode for a CIMD client whose
 // token_endpoint_auth_method was read from its document at consent. With
 // none given, a CIMD client's document is resolved here instead.
-func (s *OAuthServer) IssueCodeWithAuthMethod(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod string) (string, error) {
+func (s *OAuthServer) IssueCodeWithAuthMethod(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod, resource string) (string, error) {
 	if err := s.checkMintPrincipal(principalID); err != nil {
 		return "", err
 	}
@@ -1435,6 +1444,7 @@ func (s *OAuthServer) IssueCodeWithAuthMethod(ctx context.Context, login, princi
 		ClientID:      clientID,
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
+		Resource:      resource,
 		CreatedAt:     time.Now(),
 	}
 	if s.IsCIMDClient(clientID) {
@@ -1518,9 +1528,24 @@ func (s *OAuthServer) ExchangeCode(ctx context.Context, code, codeVerifier, clie
 // a client assertion. The client is authenticated before the code is taken,
 // so a request that fails authentication does not consume it.
 func (s *OAuthServer) ExchangeCodeWithClientAuth(ctx context.Context, code, codeVerifier, clientID, redirectURI string, ca ClientAssertion) (string, string, error) {
+	return s.ExchangeCodeForResource(ctx, code, codeVerifier, clientID, redirectURI, ca, nil)
+}
+
+// ExchangeCodeForResource is ExchangeCodeWithClientAuth for a request that
+// may carry RFC 8707 resource values. An unknown resource is refused before
+// the code is taken, so it does not burn it; one that differs from the
+// resource the code was issued for is refused with ErrInvalidTarget and
+// mints nothing.
+func (s *OAuthServer) ExchangeCodeForResource(ctx context.Context, code, codeVerifier, clientID, redirectURI string, ca ClientAssertion, requested []string) (string, string, error) {
 	method, err := s.authenticateClient(ctx, clientID, ca)
 	if err != nil {
 		return "", "", err
+	}
+	wantResource := ""
+	if len(requested) > 0 {
+		if wantResource, err = s.FlowResource(requested); err != nil {
+			return "", "", err
+		}
 	}
 	entry, ok, err := s.takeCode(ctx, code)
 	if err != nil {
@@ -1541,7 +1566,10 @@ func (s *OAuthServer) ExchangeCodeWithClientAuth(ctx context.Context, code, code
 	if !verifyPKCE(codeVerifier, entry.CodeChallenge) {
 		return "", "", errors.New("PKCE verification failed")
 	}
-	accessToken, err := s.IssueJWT(entry.Login, entry.PrincipalID, entry.Groups)
+	if len(requested) > 0 && wantResource != entry.Resource {
+		return "", "", fmt.Errorf("%w: the code was issued for a different resource", ErrInvalidTarget)
+	}
+	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, entry.Groups, s.audienceForResource(entry.Resource))
 	if err != nil {
 		return "", "", err
 	}
@@ -1551,7 +1579,7 @@ func (s *OAuthServer) ExchangeCodeWithClientAuth(ctx context.Context, code, code
 	if method == cimd.AuthMethodPrivateKeyJWT {
 		bound = method
 	}
-	refreshToken, err := s.issueRefreshToken(entry.Login, entry.PrincipalID, entry.Groups, clientID, bound)
+	refreshToken, err := s.issueRefreshToken(entry.Login, entry.PrincipalID, entry.Groups, clientID, bound, entry.Resource)
 	if err != nil {
 		return "", "", err
 	}
@@ -1575,6 +1603,14 @@ func (s *OAuthServer) checkMintPrincipal(pid string) error {
 // becomes the pid claim; with no login, the token is for a principal with
 // no GitHub login and its subject is the principal id.
 func (s *OAuthServer) IssueJWT(login, principalID string, groups []string) (string, error) {
+	return s.issueJWTFor(login, principalID, groups, "")
+}
+
+// issueJWTFor is IssueJWT for an explicit audience; "" is the default one.
+func (s *OAuthServer) issueJWTFor(login, principalID string, groups []string, aud string) (string, error) {
+	if aud == "" {
+		aud = s.accessAudience()
+	}
 	if err := s.checkMintPrincipal(principalID); err != nil {
 		return "", err
 	}
@@ -1596,7 +1632,7 @@ func (s *OAuthServer) IssueJWT(login, principalID string, groups []string) (stri
 	payload := jwtPayload{
 		Issuer:    s.BaseURL,
 		Subject:   subject,
-		Audience:  audience{s.accessAudience()},
+		Audience:  audience{aud},
 		PID:       principalID,
 		Groups:    groups,
 		IssuedAt:  now.Unix(),
@@ -1613,12 +1649,12 @@ func (s *OAuthServer) IssueJWT(login, principalID string, groups []string) (stri
 
 // IssueRefreshToken creates and stores a refresh token for the given user and client.
 func (s *OAuthServer) IssueRefreshToken(login, principalID string, groups []string, clientID string) (string, error) {
-	return s.issueRefreshToken(login, principalID, groups, clientID, "")
+	return s.issueRefreshToken(login, principalID, groups, clientID, "", "")
 }
 
 // issueRefreshToken is IssueRefreshToken for a session bound to the client
 // authentication method it was issued under ("" for a public client).
-func (s *OAuthServer) issueRefreshToken(login, principalID string, groups []string, clientID, authMethod string) (string, error) {
+func (s *OAuthServer) issueRefreshToken(login, principalID string, groups []string, clientID, authMethod, resource string) (string, error) {
 	if err := s.checkMintPrincipal(principalID); err != nil {
 		return "", err
 	}
@@ -1633,7 +1669,7 @@ func (s *OAuthServer) issueRefreshToken(login, principalID string, groups []stri
 	}
 	expiresAt := time.Now().Add(ttl)
 	if s.RefreshStore != nil {
-		if err := s.RefreshStore.Insert(token, clientID, refreshstore.Session{Login: login, PrincipalID: principalID, Groups: groups, AuthMethod: authMethod}, expiresAt); err != nil {
+		if err := s.RefreshStore.Insert(token, clientID, refreshstore.Session{Login: login, PrincipalID: principalID, Groups: groups, AuthMethod: authMethod, Resource: resource}, expiresAt); err != nil {
 			slog.Error("oauth: refresh store insert failed", "error", err)
 			return "", fmt.Errorf("store refresh token: %w", ErrServerError)
 		}
@@ -1645,6 +1681,7 @@ func (s *OAuthServer) issueRefreshToken(login, principalID string, groups []stri
 		Groups:      groups,
 		ClientID:    clientID,
 		AuthMethod:  authMethod,
+		Resource:    resource,
 		CreatedAt:   time.Now(),
 		ExpiresAt:   expiresAt,
 	})
@@ -1663,9 +1700,23 @@ func (s *OAuthServer) RefreshAccessToken(refreshToken, clientID string) (string,
 // token is rotated, so a request that fails authentication leaves the
 // session as it was.
 func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refreshToken, clientID string, ca ClientAssertion) (string, string, error) {
+	return s.RefreshAccessTokenForResource(ctx, refreshToken, clientID, ca, nil)
+}
+
+// RefreshAccessTokenForResource is RefreshAccessTokenWithClientAuth for a
+// request that may carry RFC 8707 resource values. The new access token is
+// minted for the resource of the session; a request naming a different one
+// is refused with ErrInvalidTarget before the token is rotated.
+func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refreshToken, clientID string, ca ClientAssertion, requested []string) (string, string, error) {
 	method, err := s.authenticateClient(ctx, clientID, ca)
 	if err != nil {
 		return "", "", err
+	}
+	wantResource := ""
+	if len(requested) > 0 {
+		if wantResource, err = s.FlowResource(requested); err != nil {
+			return "", "", err
+		}
 	}
 	if s.RefreshStore != nil {
 		newToken := deriveSuccessorRefreshToken(s.JWTSecret, refreshToken)
@@ -1682,6 +1733,10 @@ func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refr
 		downgrade := false
 		accept := func(sess refreshstore.Session) error {
 			refused, downgrade = nil, false
+			if len(requested) > 0 && wantResource != sess.Resource {
+				refused = fmt.Errorf("%w: the session was issued for a different resource", ErrInvalidTarget)
+				return refused
+			}
 			if err := checkSessionAuthMethod(sess.AuthMethod, method); err != nil {
 				refused, downgrade = err, true
 				return err
@@ -1727,7 +1782,7 @@ func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refr
 		if !s.PrincipalMode {
 			groups = s.groupsForSession(sess.Login, sess.Groups)
 		}
-		accessToken, err := s.IssueJWT(sess.Login, sess.PrincipalID, groups)
+		accessToken, err := s.issueJWTFor(sess.Login, sess.PrincipalID, groups, s.audienceForResource(sess.Resource))
 		if err != nil {
 			return "", "", err
 		}
@@ -1737,6 +1792,12 @@ func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refr
 
 	s.refreshTokens.rotation.RLock()
 	defer s.refreshTokens.rotation.RUnlock()
+	// A refusal on the resource must not delete the token.
+	if len(requested) > 0 {
+		if peeked, found := s.refreshTokens.peek(refreshToken); found && peeked.ClientID == clientID && wantResource != peeked.Resource {
+			return "", "", fmt.Errorf("%w: the session was issued for a different resource", ErrInvalidTarget)
+		}
+	}
 	entry, ok := s.refreshTokens.loadAndDelete(refreshToken)
 	if !ok {
 		return "", "", errors.New("invalid or expired refresh token")
@@ -1760,7 +1821,7 @@ func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refr
 	if !s.PrincipalMode {
 		groups, fresh = s.sessionGroups(entry.Login, entry.Groups)
 	}
-	accessToken, err := s.IssueJWT(entry.Login, entry.PrincipalID, groups)
+	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, groups, s.audienceForResource(entry.Resource))
 	if err != nil {
 		return "", "", err
 	}
@@ -1768,7 +1829,7 @@ func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refr
 	if fresh {
 		snapshot = groups
 	}
-	newRefreshToken, err := s.issueRefreshToken(entry.Login, entry.PrincipalID, snapshot, clientID, entry.AuthMethod)
+	newRefreshToken, err := s.issueRefreshToken(entry.Login, entry.PrincipalID, snapshot, clientID, entry.AuthMethod, entry.Resource)
 	if err != nil {
 		return "", "", err
 	}
@@ -1845,6 +1906,21 @@ func (s *OAuthServer) ValidateJWT(token string) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
+	u, err := s.userFromPayload(payload)
+	if err != nil {
+		return nil, err
+	}
+	u.tokenAudience = payload.Audience
+	if len(u.tokenAudience) == 0 {
+		// The aud-less HS256 grace token is an API token.
+		u.tokenAudience = audience{s.accessAudience()}
+	}
+	u.supportAudience = payload.support
+	return u, nil
+}
+
+// userFromPayload maps a verified payload to the caller it stands for.
+func (s *OAuthServer) userFromPayload(payload *jwtPayload) (*User, error) {
 	// A subject that is a principal id is a principal with no GitHub
 	// login. A GitHub login can never take that shape (logins hold no
 	// underscore), so no such token can pass for a login, in any mode or
@@ -1956,6 +2032,9 @@ type jwtPayload struct {
 	Groups    []string `json:"groups"`
 	IssuedAt  int64    `json:"iat"`
 	ExpiresAt int64    `json:"exp"`
+	// support is set by verification, never by the token: its aud names the
+	// support resource, so it may reach only the routes mctl-support relays.
+	support bool
 }
 
 func (s *OAuthServer) accessAudience() string {
@@ -2100,7 +2179,12 @@ func (s *OAuthServer) verifyAccessToken(token string) (*jwtPayload, error) {
 		return fail("expired", errors.New("JWT expired"))
 	}
 	if len(payload.Audience) > 0 {
-		if !payload.Audience.contains(s.accessAudience()) {
+		switch {
+		case s.SupportResource != "" && payload.Audience.contains(s.SupportResource):
+			// Wins over an API entry in the same aud: fail closed.
+			payload.support = true
+		case payload.Audience.contains(s.accessAudience()):
+		default:
 			return fail("aud_mismatch", errors.New("JWT audience does not include this API"))
 		}
 	} else {
@@ -2130,6 +2214,9 @@ type authCodeEntry struct {
 	// at issue time; empty for every other client (and for codes issued
 	// before it was recorded).
 	AuthMethod string `json:",omitempty"`
+	// Resource is the flow resource the code was issued for ("" is the
+	// default API resource).
+	Resource string `json:",omitempty"`
 }
 
 type pendingAuth struct {
@@ -2143,7 +2230,9 @@ type pendingAuth struct {
 	ClientState string
 	Nonce       string
 	Verifier    string
-	CreatedAt   time.Time
+	// Resource is the flow resource ("" is the default API resource).
+	Resource  string `json:",omitempty"`
+	CreatedAt time.Time
 }
 
 type refreshTokenEntry struct {
@@ -2152,6 +2241,7 @@ type refreshTokenEntry struct {
 	Groups      []string
 	ClientID    string
 	AuthMethod  string
+	Resource    string
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
 }
@@ -2235,6 +2325,19 @@ func (s *refreshTokenStore) store(token string, entry refreshTokenEntry) {
 
 func (s *refreshTokenStore) loadAndDelete(token string) (refreshTokenEntry, bool) {
 	v, ok := s.tokens.LoadAndDelete(token)
+	if !ok {
+		return refreshTokenEntry{}, false
+	}
+	entry := v.(refreshTokenEntry)
+	if time.Now().After(entry.ExpiresAt) {
+		return refreshTokenEntry{}, false
+	}
+	return entry, true
+}
+
+// peek reads a live token without consuming it.
+func (s *refreshTokenStore) peek(token string) (refreshTokenEntry, bool) {
+	v, ok := s.tokens.Load(token)
 	if !ok {
 		return refreshTokenEntry{}, false
 	}

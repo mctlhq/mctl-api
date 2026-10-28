@@ -15,6 +15,7 @@ optional and publishes a JWKS at `/.well-known/jwks.json`, advertised as
 | `OAUTH_JWT_KEY_RETENTION` | `2h` (raised to the token TTL if longer) | how long a retired key stays verifiable and published; must be at least `OAUTH_TOKEN_TTL` |
 | `OAUTH_JWT_ACCEPT_HS256` | `true` | `false` refuses every HS256 token before any HMAC; refused at boot while the signing alg is HS256 |
 | `OAUTH_JWT_REQUIRE_AUD` | `false` | `true` ends the grace for aud-less HS256 tokens |
+| `OAUTH_SUPPORT_RESOURCE` | `https://support.mctl.ai` | RFC 8707 resource of the support agent; set empty to disable it |
 
 `OAUTH_JWT_SECRET` stays required even after HS256 is drained: refresh-token
 derivation (`deriveSuccessorRefreshToken`) uses it as key material.
@@ -97,3 +98,31 @@ signing alg, and the active key never expires. To retire the EdDSA key, patch
 it to retained (`retired_at` set, `active` left empty), refresh and bump
 `ROLLOUT_MARKER`; it then verifies for one `OAUTH_JWT_KEY_RETENTION` window
 and drops out. Keep the `OAUTH_JWT_SIGNING_KEYS` mapping until then.
+
+## Resource indicators and the support audience
+
+`/oauth/authorize` and `/oauth/token` read the RFC 8707 `resource`
+parameter (at most one value):
+
+- absent, or the API audience, the base URL or `<base URL>/mcp`: the default
+  `aud` (`OAUTH_ACCESS_TOKEN_AUDIENCE`), exactly as before;
+- `OAUTH_SUPPORT_RESOURCE` (default `https://support.mctl.ai`): an access
+  token whose `aud` is that single string;
+- anything else, or a malformed or repeated value: `invalid_target`. At
+  `/authorize` it is a redirect error; at `/token` it is HTTP 400 and the
+  authorization code or refresh token is not consumed.
+
+A code or refresh session keeps the resource it was issued for; a `/token`
+request naming a different one is `invalid_target`. Sessions that predate
+this are the default resource.
+
+A support-audience token passes verification but is accepted on only
+`GET /api/v1/whoami`, `POST /api/v1/work-items`,
+`POST /api/v1/work-items/{id}/executions` and `POST /api/v1/agent-run-tokens`.
+Every other route, `/mcp` included, answers 401 `invalid_token`.
+
+`GET /api/v1/whoami` returns `"audience"`, a JSON array of the token's verified
+`aud` values, for access tokens minted by this server. It is omitted for every
+other credential. mctl-support uses it to refuse tokens minted for the API.
+Setting `OAUTH_SUPPORT_RESOURCE=""` makes the support resource
+`invalid_target` and refuses support-audience tokens at verification.

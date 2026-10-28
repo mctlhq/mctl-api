@@ -83,6 +83,11 @@ type Claims struct {
 	// localOAuthProvider alone sets either.
 	TokenPrincipal string
 	TokenPID       string
+	// TokenAudience is the verified aud of a local OAuth access token, and
+	// SupportAudience whether it names the support resource. Only
+	// localOAuthProvider sets them.
+	TokenAudience   []string
+	SupportAudience bool
 }
 
 // tokenShape is computed once per request from the existing isJWT/jwtIssuer

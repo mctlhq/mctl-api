@@ -108,6 +108,7 @@ type fakeRefreshToken struct {
 	clientID  string
 	groups    []string
 	method    string
+	resource  string
 	familyID  string
 	rotatedTo string
 	revoked   bool
@@ -139,6 +140,7 @@ func (f *fakeRefreshStore) Insert(rawToken, clientID string, sess refreshstore.S
 		clientID: clientID,
 		groups:   append([]string(nil), groups...),
 		method:   sess.AuthMethod,
+		resource: sess.Resource,
 		familyID: fmt.Sprintf("%s-family-%d", login, f.seq),
 	}
 	return nil
@@ -168,7 +170,7 @@ func (f *fakeRefreshStore) RotateIf(oldRawToken, newRawToken, clientID string, _
 		return refreshstore.Session{}, refreshstore.ErrClientMismatch
 	}
 	if accept != nil {
-		if err := accept(refreshstore.Session{Login: entry.login, PrincipalID: entry.pid, Groups: append([]string(nil), entry.groups...), AuthMethod: entry.method}); err != nil {
+		if err := accept(refreshstore.Session{Login: entry.login, PrincipalID: entry.pid, Groups: append([]string(nil), entry.groups...), AuthMethod: entry.method, Resource: entry.resource}); err != nil {
 			return refreshstore.Session{}, err
 		}
 	}
@@ -179,9 +181,10 @@ func (f *fakeRefreshStore) RotateIf(oldRawToken, newRawToken, clientID string, _
 		clientID: entry.clientID,
 		groups:   append([]string(nil), entry.groups...),
 		method:   entry.method,
+		resource: entry.resource,
 		familyID: entry.familyID,
 	}
-	return refreshstore.Session{Login: entry.login, PrincipalID: entry.pid, Groups: append([]string(nil), entry.groups...), AuthMethod: entry.method}, nil
+	return refreshstore.Session{Login: entry.login, PrincipalID: entry.pid, Groups: append([]string(nil), entry.groups...), AuthMethod: entry.method, Resource: entry.resource}, nil
 }
 
 func (f *fakeRefreshStore) RevokeFamily(rawToken, clientID, _ string) error {

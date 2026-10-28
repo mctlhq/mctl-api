@@ -35,6 +35,10 @@ type Session struct {
 	// otherwise). Rotation carries it forward, so the session cannot be
 	// refreshed later with a weaker method.
 	AuthMethod string
+	// Resource is the RFC 8707 resource the session's access tokens are
+	// minted for; empty is the default API resource. Rotation carries it
+	// forward.
+	Resource string
 }
 
 // ErrInvalidToken is returned when a refresh token is not found, expired, or revoked.

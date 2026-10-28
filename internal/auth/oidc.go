@@ -163,6 +163,13 @@ type User struct {
 	tokenPrincipal bool
 	tokenPID       string
 
+	// tokenAudience is the verified aud of a local OAuth access token, in
+	// claim order (nil for every other credential). supportAudience records
+	// that it names the support resource: such a caller is confined to the
+	// routes mctl-support relays (mctl-api#849).
+	tokenAudience   []string
+	supportAudience bool
+
 	// principalAuthz records that this caller's tenants and admin were
 	// decided by principal (TENANT_AUTHZ_MODE=principal, mctl-api#377):
 	// Groups then holds tenants only, and IsAdmin reads platformAdmin and
@@ -1343,11 +1350,13 @@ func userFromVerified(v *Verified) *User {
 			u.principalID, u.tokenPrincipal = v.Claims.TokenPrincipal, true
 		}
 		u.tokenPID = v.Claims.TokenPID
+		u.tokenAudience, u.supportAudience = v.Claims.TokenAudience, v.Claims.SupportAudience
 		return u
 	case v.Identity.Provider == ProviderPrincipal:
 		// Reserved: only the local-OAuth provider yields it, for a token
 		// minted for this principal. No groups: principal mode decides them.
-		return &User{ID: v.Identity.Display, principalID: v.Identity.Subject, tokenPrincipal: true}
+		return &User{ID: v.Identity.Display, principalID: v.Identity.Subject, tokenPrincipal: true,
+			tokenAudience: v.Claims.TokenAudience, supportAudience: v.Claims.SupportAudience}
 	case v.Identity.Provider == ProviderGitHubActions:
 		// No groups, whatever the token held: a CI job is not a tenant
 		// member. Marked ci even if a claim were somehow empty, so the
@@ -1461,3 +1470,17 @@ func writeUnauthorizedOAuth(w http.ResponseWriter, msg, baseURL, path string) {
 	w.WriteHeader(http.StatusUnauthorized)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
+
+// TokenAudience is the verified aud of a local OAuth access token, in claim
+// order; ok is false for any other credential.
+func (u *User) TokenAudience() ([]string, bool) {
+	if u == nil || len(u.tokenAudience) == 0 {
+		return nil, false
+	}
+	return append([]string(nil), u.tokenAudience...), true
+}
+
+// IsSupportAudience reports whether the caller holds an access token minted
+// for the support resource, which may reach only the routes mctl-support
+// relays.
+func (u *User) IsSupportAudience() bool { return u != nil && u.supportAudience }

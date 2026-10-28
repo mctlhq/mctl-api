@@ -161,7 +161,7 @@ func TestFlowStoreFailuresAreServerErrors(t *testing.T) {
 
 	a, _, st := twoReplicas(t)
 	st.putErr = errors.New("db down")
-	if err := a.StorePendingAuth(ctx, "s", "c", "https://client.example/callback", "ch"); !errors.Is(err, ErrServerError) {
+	if err := a.StorePendingAuth(ctx, "s", "c", "https://client.example/callback", "ch", ""); !errors.Is(err, ErrServerError) {
 		t.Fatalf("StorePendingAuth on put failure = %v; want ErrServerError", err)
 	}
 	if _, err := a.IssueCode(context.Background(), "u", "", "c", "https://client.example/callback", "ch", nil); !errors.Is(err, ErrServerError) {
@@ -243,7 +243,7 @@ func TestFlowStoreCallsAreBounded(t *testing.T) {
 	st := &deadlineStore{memFlowStore: newMemFlowStore()}
 	s.FlowStore = st
 	ctx := context.Background()
-	_ = s.StorePendingAuth(ctx, "s", "client-1", "https://client.example/callback", "ch")
+	_ = s.StorePendingAuth(ctx, "s", "client-1", "https://client.example/callback", "ch", "")
 	_, _, _ = s.LoadPendingAuth(ctx, "s")
 	code, _ := s.IssueCode(ctx, "u", "", "client-1", "https://client.example/callback", testPKCEChallenge(t, "v"), nil)
 	if _, _, err := s.ExchangeCode(ctx, code, "v", "client-1", "https://client.example/callback"); err != nil {
