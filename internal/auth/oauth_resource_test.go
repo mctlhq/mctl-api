@@ -74,6 +74,23 @@ func TestResolveResource(t *testing.T) {
 	}
 }
 
+// mctl-api#851: a local run's own http base URL and /mcp endpoint resolve to
+// the default audience; any other http resource is still invalid_target.
+func TestResolveResource_LocalHTTPBase(t *testing.T) {
+	o := NewOAuthServer("http://localhost:8080", "gh-client", "gh-secret", []byte("jwt-secret"), nil, NewGitHubValidator(nil))
+	o.SupportResource = testSupportRes
+	for _, v := range []string{"http://localhost:8080", "http://localhost:8080/", "http://localhost:8080/mcp"} {
+		if got, err := o.ResolveResource([]string{v}); err != nil || got != "http://localhost:8080" {
+			t.Errorf("%s: got %q, %v", v, got, err)
+		}
+	}
+	for _, v := range []string{"http://localhost:9090", "http://support.mctl.ai", "http://localhost:8080/mcp#x"} {
+		if _, err := o.ResolveResource([]string{v}); !errors.Is(err, ErrInvalidTarget) {
+			t.Errorf("%s: err = %v, want ErrInvalidTarget", v, err)
+		}
+	}
+}
+
 func audOf(t *testing.T, o *OAuthServer, tok string) audience {
 	t.Helper()
 	p, err := o.verifyAccessToken(tok)

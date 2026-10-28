@@ -1711,17 +1711,30 @@ func (s *OAuthServer) RefreshAccessTokenWithClientAuth(ctx context.Context, refr
 // RefreshAccessTokenForResource is RefreshAccessTokenWithClientAuth for a
 // request that may carry RFC 8707 resource values. The new access token is
 // minted for the resource of the session; a request naming a different one
-// is refused with ErrInvalidTarget before the token is rotated.
+// is refused with ErrInvalidTarget before the token is rotated. The
+// session's client authentication is checked first, so a private_key_jwt
+// token presented without its assertion is treated as a downgrade whatever
+// resource the request names.
 func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refreshToken, clientID string, ca ClientAssertion, requested []string) (string, string, error) {
 	method, err := s.authenticateClient(ctx, clientID, ca)
 	if err != nil {
 		return "", "", err
 	}
-	wantResource := ""
+	// Decided against the session, after its auth method (mctl-api#851).
+	wantResource, resourceErr := "", error(nil)
 	if len(requested) > 0 {
-		if wantResource, err = s.FlowResource(requested); err != nil {
-			return "", "", err
+		wantResource, resourceErr = s.FlowResource(requested)
+	}
+	resourceRefused := func(sessionResource string) error {
+		switch {
+		case len(requested) == 0:
+			return nil
+		case resourceErr != nil:
+			return resourceErr
+		case wantResource != sessionResource:
+			return fmt.Errorf("%w: the session was issued for a different resource", ErrInvalidTarget)
 		}
+		return nil
 	}
 	if s.RefreshStore != nil {
 		newToken := deriveSuccessorRefreshToken(s.JWTSecret, refreshToken)
@@ -1738,12 +1751,12 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 		downgrade := false
 		accept := func(sess refreshstore.Session) error {
 			refused, downgrade = nil, false
-			if len(requested) > 0 && wantResource != sess.Resource {
-				refused = fmt.Errorf("%w: the session was issued for a different resource", ErrInvalidTarget)
-				return refused
-			}
 			if err := checkSessionAuthMethod(sess.AuthMethod, method); err != nil {
 				refused, downgrade = err, true
+				return err
+			}
+			if err := resourceRefused(sess.Resource); err != nil {
+				refused = err
 				return err
 			}
 			if err := s.refreshablePrincipal(sess.Login, sess.PrincipalID); err != nil {
@@ -1767,6 +1780,9 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 		if err != nil {
 			// Map store errors to the same string used by the in-memory path so
 			// oauth_handlers.go doesn't need to import the refreshstore package.
+			if errors.Is(err, refreshstore.ErrInvalidToken) && resourceErr != nil {
+				return "", "", resourceErr
+			}
 			if errors.Is(err, refreshstore.ErrInvalidToken) || errors.Is(err, refreshstore.ErrReuseDetected) {
 				return "", "", errors.New("invalid or expired refresh token")
 			}
@@ -1797,14 +1813,19 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 
 	s.refreshTokens.rotation.RLock()
 	defer s.refreshTokens.rotation.RUnlock()
-	// A refusal on the resource must not delete the token.
-	if len(requested) > 0 {
-		if peeked, found := s.refreshTokens.peek(refreshToken); found && peeked.ClientID == clientID && wantResource != peeked.Resource {
-			return "", "", fmt.Errorf("%w: the session was issued for a different resource", ErrInvalidTarget)
+	// A refusal on the resource must not delete the token; a downgrade
+	// falls through and spends it below.
+	if peeked, found := s.refreshTokens.peek(refreshToken); found && peeked.ClientID == clientID &&
+		checkSessionAuthMethod(peeked.AuthMethod, method) == nil {
+		if err := resourceRefused(peeked.Resource); err != nil {
+			return "", "", err
 		}
 	}
 	entry, ok := s.refreshTokens.loadAndDelete(refreshToken)
 	if !ok {
+		if resourceErr != nil {
+			return "", "", resourceErr
+		}
 		return "", "", errors.New("invalid or expired refresh token")
 	}
 	if entry.ClientID != clientID {
@@ -1812,6 +1833,9 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 	}
 	// The token is already deleted, which revokes it in this store.
 	if err := checkSessionAuthMethod(entry.AuthMethod, method); err != nil {
+		return "", "", err
+	}
+	if err := resourceRefused(entry.Resource); err != nil {
 		return "", "", err
 	}
 	// The successor row records the groups only when they are a fresh

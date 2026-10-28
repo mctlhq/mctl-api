@@ -15,7 +15,7 @@ optional and publishes a JWKS at `/.well-known/jwks.json`, advertised as
 | `OAUTH_JWT_KEY_RETENTION` | `2h` (raised to the token TTL if longer) | how long a retired key stays verifiable and published; must be at least `OAUTH_TOKEN_TTL` |
 | `OAUTH_JWT_ACCEPT_HS256` | `true` | `false` refuses every HS256 token before any HMAC; refused at boot while the signing alg is HS256 |
 | `OAUTH_JWT_REQUIRE_AUD` | `false` | `true` ends the grace for aud-less HS256 tokens |
-| `OAUTH_SUPPORT_RESOURCE` | `https://support.mctl.ai` | RFC 8707 resource of the support agent; set empty to disable it |
+| `OAUTH_SUPPORT_RESOURCE` | `https://support.mctl.ai` | RFC 8707 resource of the support agent; set empty to disable it; refused at boot unless an absolute https URL that is not the API audience, base URL or `/mcp` |
 
 `OAUTH_JWT_SECRET` stays required even after HS256 is drained: refresh-token
 derivation (`deriveSuccessorRefreshToken`) uses it as key material.
@@ -105,7 +105,8 @@ and drops out. Keep the `OAUTH_JWT_SIGNING_KEYS` mapping until then.
 parameter (at most one value):
 
 - absent, or the API audience, the base URL or `<base URL>/mcp`: the default
-  `aud` (`OAUTH_ACCESS_TOKEN_AUDIENCE`), exactly as before;
+  `aud` (`OAUTH_ACCESS_TOKEN_AUDIENCE`), exactly as before. These match
+  exactly, so a local `http://localhost:8080` base URL resolves too;
 - `OAUTH_SUPPORT_RESOURCE` (default `https://support.mctl.ai`): an access
   token whose `aud` is that single string;
 - anything else, or a malformed or repeated value: `invalid_target`. At
@@ -114,7 +115,9 @@ parameter (at most one value):
 
 A code or refresh session keeps the resource it was issued for; a `/token`
 request naming a different one is `invalid_target`. Sessions that predate
-this are the default resource.
+this are the default resource. On refresh, the session's client
+authentication is checked first: a `private_key_jwt` session refreshed
+without it is an `auth_method_downgrade` whatever resource the request names.
 
 A support-audience token passes verification but is accepted on only
 `GET /api/v1/whoami`, `POST /api/v1/work-items`,

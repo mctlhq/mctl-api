@@ -101,6 +101,11 @@ func (s *OAuthServer) issueSupportToken(u *User, ttl time.Duration) (SupportToke
 		return SupportToken{}, fmt.Errorf("support token ttl %s must be between 0 and %s", ttl, MaxSupportTokenTTL)
 	}
 	if err := s.checkMintPrincipal(pid); err != nil {
+		// The checker's verdict (disabled, or no such principal) is a
+		// refusal; a principal that could not be read stays an error.
+		if errors.Is(err, ErrPrincipalDisabled) || errors.Is(err, ErrIdentityRefused) {
+			return SupportToken{}, fmt.Errorf("%w: %w", ErrSupportTokenRefused, err)
+		}
 		return SupportToken{}, err
 	}
 	subject := pid

@@ -522,12 +522,12 @@
     {
       "name": "mctl_ask_support",
       "enabled": true,
-      "reason": "Sends the caller's own bearer to the tenant support agent (mctl-support), tenant-checked in mctl-api and again in mctl-support. Creates a support task and spends the tenant's model budget, and returns diagnosis text about the caller's own tenant (mctl-api#814)."
+      "reason": "Sends the tenant support agent (mctl-support) a short-lived token minted for the caller with the support audience, never the caller's own bearer (mctl-api#853); tenant-checked in mctl-api and again in mctl-support. Creates a support task and spends the tenant's model budget, and returns diagnosis text about the caller's own tenant (mctl-api#814)."
     },
     {
       "name": "mctl_get_support_task",
       "enabled": true,
-      "reason": "Read-only fetch of one support task by id. Forwards the caller's own bearer and mctl-support decides visibility, so a task of another tenant answers as mctl-support answers (mctl-api#814)."
+      "reason": "Read-only fetch of one support task by id. Sends a short-lived support-audience token minted for the caller, never the caller's own bearer (mctl-api#853), and mctl-support decides visibility, so a task of another tenant answers as mctl-support answers (mctl-api#814)."
     }
   ]
 }

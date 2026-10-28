@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -270,22 +271,28 @@ func TestAskSupport_TenantRefusal(t *testing.T) { // T1, T3
 	if !isErr || !strings.Contains(text, "tenant_forbidden") || f.count("") != 0 {
 		t.Fatalf("got %q err=%v reqs=%d", text, isErr, f.count(""))
 	}
+}
 
-	for _, status := range []int{200, 500} {
-		whoami := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if status != 200 {
-				http.Error(w, "boom", status)
-				return
-			}
-			_, _ = w.Write([]byte(`{"groups":["other-tenant"],"isAdmin":false}`))
-		}))
-		st := NewServer(whoami.URL, testToken)
-		st.SetSupportConfig(SupportConfig{BaseURL: f.srv.URL, Wait: time.Second})
-		text, isErr := ask(t, st, context.Background(), nil)
-		whoami.Close()
-		if !isErr || f.count("") != 0 {
-			t.Fatalf("stdio status %d: %q err=%v reqs=%d", status, text, isErr, f.count(""))
-		}
+// With a minter and auditor wired but no user in the context, the call is
+// refused before the tenant check: nothing asks /api/v1/whoami, nothing is
+// minted and mctl-support is never contacted.
+func TestAskSupport_NoUserRefusedBeforeTenantCheck(t *testing.T) {
+	f := newFake(t, func(http.ResponseWriter, *http.Request, int) {})
+	var apiHits atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiHits.Add(1)
+		_, _ = w.Write([]byte(`{"groups":["example-tenant"],"isAdmin":true}`))
+	}))
+	defer api.Close()
+	s := NewServer(api.URL, testToken)
+	s.SetSupportConfig(SupportConfig{BaseURL: f.srv.URL, Wait: time.Second})
+	m, a := withMint(s)
+	text, isErr := ask(t, s, auth.WithToken(context.Background(), testToken), nil)
+	if !isErr || !strings.Contains(text, "support_token_unavailable") {
+		t.Fatalf("got %q err=%v", text, isErr)
+	}
+	if apiHits.Load() != 0 || len(m.calls) != 0 || len(a.recs) != 0 || f.count("") != 0 {
+		t.Fatalf("api=%d mints=%d audits=%d support=%d", apiHits.Load(), len(m.calls), len(a.recs), f.count(""))
 	}
 }
 

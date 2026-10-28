@@ -499,10 +499,12 @@ func (s *Server) supportMintDeps() (SupportTokenMinter, SupportTokenAuditor) {
 	return m, a
 }
 
-// supportMintPrecheck fails before any other work when no token can be minted.
-func (s *Server) supportMintPrecheck() *mcplib.CallToolResult {
+// supportMintPrecheck fails before any other work when no token can be
+// minted: no minter or auditor is wired (stdio), or no user is in the
+// context, whom mintSupportBearer would refuse anyway.
+func (s *Server) supportMintPrecheck(ctx context.Context) *mcplib.CallToolResult {
 	m, a := s.supportMintDeps()
-	if m == nil || a == nil {
+	if m == nil || a == nil || auth.UserFromContext(ctx) == nil {
 		return mcplib.NewToolResultError(supportTokenUnavailable)
 	}
 	return nil
@@ -535,34 +537,15 @@ func (s *Server) mintSupportBearer(ctx context.Context, tool, tenant string, ttl
 
 // --- tenant check ---
 
-// supportTenantAllowed reports whether the caller may act on tenant. With a
-// user in the context it is HasTenantAccess; without one (stdio) it asks
-// /api/v1/whoami. A lookup failure is an error, never "allowed".
+// supportTenantAllowed reports whether the caller in the context may act on
+// tenant (HasTenantAccess). supportMintPrecheck has already refused a call
+// with no user, so a missing one here is an error, never "allowed".
 func (s *Server) supportTenantAllowed(ctx context.Context, tenant string) (bool, error) {
-	if u := auth.UserFromContext(ctx); u != nil {
-		return u.HasTenantAccess(tenant), nil
+	u := auth.UserFromContext(ctx)
+	if u == nil {
+		return false, errors.New("no caller identity")
 	}
-	body, err := s.apiGet(ctx, "/api/v1/whoami")
-	if err != nil {
-		return false, fmt.Errorf("whoami: %s", s.redactUpstream(err))
-	}
-	var id struct {
-		Groups      []string `json:"groups"`
-		IsAdmin     bool     `json:"isAdmin"`
-		BoundTenant string   `json:"boundTenant"`
-	}
-	if err := json.Unmarshal(body, &id); err != nil {
-		return false, fmt.Errorf("whoami response could not be decoded: %w", err)
-	}
-	if id.IsAdmin || (id.BoundTenant != "" && id.BoundTenant == tenant) {
-		return true, nil
-	}
-	for _, g := range id.Groups {
-		if g == tenant {
-			return true, nil
-		}
-	}
-	return false, nil
+	return u.HasTenantAccess(tenant), nil
 }
 
 // --- tools ---
@@ -603,7 +586,7 @@ func (s *Server) toolAskSupport() (mcplib.Tool, server.ToolHandlerFunc) {
 		if errResult != nil {
 			return errResult, nil
 		}
-		if errResult := s.supportMintPrecheck(); errResult != nil {
+		if errResult := s.supportMintPrecheck(ctx); errResult != nil {
 			return errResult, nil
 		}
 		allowed, err := s.supportTenantAllowed(ctx, tenant)
