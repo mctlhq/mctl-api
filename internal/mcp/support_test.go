@@ -3,9 +3,11 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -125,7 +127,6 @@ func withMint(s *Server) (*fakeMinter, *fakeMintAuditor) {
 func supportServer(f *fakeSupport, wait time.Duration) *Server {
 	s := NewServer("http://127.0.0.1:1", "")
 	s.SetSupportConfig(SupportConfig{BaseURL: f.srv.URL, Wait: wait, PollInterval: 10 * time.Millisecond, RequestTimeout: 500 * time.Millisecond})
-	withMint(s)
 	withMint(s)
 	return s
 }
@@ -816,6 +817,96 @@ func TestParseSupportConfig_TokenTTL(t *testing.T) {
 		}
 		if v == "" && cfg.TokenTTL != 11*time.Minute {
 			t.Errorf("default ttl = %s", cfg.TokenTTL)
+		}
+	}
+}
+
+type oneTenant map[string][]string
+
+func (m oneTenant) PrincipalTenants(pid string) ([]string, []string, error) { return m[pid], nil, nil }
+
+// T4 with the real minter, plus T10: every request mctl-support receives
+// carries one support-audience token for the caller's principal, the same one
+// across the send and the polls, valid no longer than SUPPORT_TOKEN_TTL; the
+// caller's API token never leaves, and neither token reaches a log line.
+func TestSupport_RealMinterBearer(t *testing.T) {
+	const pid = "prn_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	o := auth.NewOAuthServer("https://api.example", "gh-client", "gh-secret", []byte("test-secret"), nil, auth.NewGitHubValidator(nil))
+	o.SupportResource = "https://support.example"
+	o.PrincipalMode = true
+	apiTok, err := o.IssueJWT("alice", pid, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller, err := o.ValidateJWT(apiTok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&auth.PrincipalAuthz{Members: oneTenant{pid: {"example-tenant"}}}).Apply(caller); err != nil {
+		t.Fatal(err)
+	}
+
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if r.Method == http.MethodPost {
+			writeFixture(t, w, "send_task_submitted.json")
+			return
+		}
+		if n < 3 {
+			writeFixture(t, w, "task_working.json")
+			return
+		}
+		writeFixture(t, w, "task_completed_status_message.json")
+	})
+	s := supportServer(f, 2*time.Second)
+	a := &fakeMintAuditor{}
+	s.SetSupportTokenMinter(o)
+	s.SetSupportTokenAuditor(a)
+	start := time.Now()
+	text, isErr := ask(t, s, auth.WithToken(auth.WithUser(context.Background(), caller), apiTok), nil)
+	if isErr {
+		t.Fatal(text)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.reqs) < 3 {
+		t.Fatalf("reqs = %d, want a send and polls", len(f.reqs))
+	}
+	bearer := strings.TrimPrefix(f.reqs[0].auth, "Bearer ")
+	for _, r := range f.reqs {
+		if r.auth != "Bearer "+bearer || strings.Contains(r.auth, apiTok) || strings.Contains(string(r.body), apiTok) {
+			t.Fatalf("%s %s: not the one minted bearer", r.method, r.path)
+		}
+	}
+	u, err := o.ValidateJWT(bearer)
+	if err != nil || !u.IsSupportAudience() || u.PrincipalID() != pid {
+		t.Fatalf("minted bearer: err=%v", err)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.Split(bearer, ".")[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		t.Fatal(err)
+	}
+	if exp := time.Unix(claims.Exp, 0); exp.After(start.Add(supportDefaultTokenTTL + time.Second)) {
+		t.Fatalf("exp %s beyond the TTL", exp)
+	}
+	if len(a.recs) != 1 || a.recs[0].Audience != "https://support.example" {
+		t.Fatalf("audit = %+v", a.recs)
+	}
+	for _, tok := range []string{apiTok, bearer} {
+		sig := tok[strings.LastIndex(tok, ".")+1:]
+		if strings.Contains(logs.String(), sig) || strings.Contains(text, sig) {
+			t.Fatal("a token reached a log line or the tool result")
 		}
 	}
 }
