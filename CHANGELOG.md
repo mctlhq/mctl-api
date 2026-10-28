@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.138.1](https://github.com/mctlhq/mctl-api/compare/4.138.0...4.138.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **auth:** validate the support resource and order refresh checks ([25cc6e3](https://github.com/mctlhq/mctl-api/commit/25cc6e38b9047aa62fd7e6a04a862e7695f84ad7)), closes [#851](https://github.com/mctlhq/mctl-api/issues/851)
+* **mcp:** refuse a support call with no user before the tenant check ([0832f48](https://github.com/mctlhq/mctl-api/commit/0832f489bd1e8d4811b1e15fa136ccbffc3fc486)), closes [#854](https://github.com/mctlhq/mctl-api/issues/854)
+* support follow-ups from the [#850](https://github.com/mctlhq/mctl-api/issues/850) and [#853](https://github.com/mctlhq/mctl-api/issues/853) reviews ([fccb4e3](https://github.com/mctlhq/mctl-api/commit/fccb4e3e98d13194a7145c8cc0d6b182f39241f5))
+
 ## [4.138.0](https://github.com/mctlhq/mctl-api/compare/4.137.0...4.138.0) (2026-10-28)
 
 
