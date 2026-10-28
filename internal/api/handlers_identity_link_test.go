@@ -724,7 +724,7 @@ func TestIdentityLinkSweepClearsEveryIndex(t *testing.T) {
 func TestLoginFlowNeverConsumesALinkState(t *testing.T) {
 	h := newLinkHarness(t)
 	ck, state := h.start()
-	_ = h.oauth.StorePendingAuth(context.Background(), state, "client", "https://claude.ai/cb", "challenge")
+	_ = h.oauth.StorePendingAuth(context.Background(), state, "client", "https://claude.ai/cb", "challenge", "")
 	h.github(ck, state) // the link proceeds to ZITADEL
 	if _, ok, _ := h.oauth.LoadPendingAuth(context.Background(), state); !ok {
 		t.Fatal("the login flow consumed a link state")
@@ -745,7 +745,7 @@ func TestLinkFlowNeverConsumesALoginState(t *testing.T) {
 		t.Fatal(err)
 	}
 	login := ghState + "|client-state"
-	_ = h.oauth.StorePendingAuth(context.Background(), login, "client", "https://claude.ai/cb", "challenge")
+	_ = h.oauth.StorePendingAuth(context.Background(), login, "client", "https://claude.ai/cb", "challenge", "")
 
 	// error= makes the OAuth server answer before it loads the pending entry,
 	// so the entry surviving below is down to linking alone.

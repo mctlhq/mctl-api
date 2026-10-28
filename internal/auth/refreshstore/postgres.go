@@ -59,6 +59,9 @@ CREATE INDEX IF NOT EXISTS oauth_refresh_tokens_principal
 -- The client authentication the session was issued under (mctl-api#694).
 -- Empty for every session but a private_key_jwt CIMD client's.
 ALTER TABLE oauth_refresh_tokens ADD COLUMN IF NOT EXISTS auth_method TEXT NOT NULL DEFAULT '';
+-- The RFC 8707 resource the session's access tokens are minted for
+-- (mctl-api#849). Empty is the default API resource.
+ALTER TABLE oauth_refresh_tokens ADD COLUMN IF NOT EXISTS resource TEXT NOT NULL DEFAULT '';
 `
 
 // PostgresStore is a Postgres-backed implementation of Store.
@@ -147,9 +150,9 @@ func (s *PostgresStore) Insert(rawToken, clientID string, sess Session, expiresA
 	defer cancel()
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO oauth_refresh_tokens
-		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at, auth_method)
-		 VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8)`,
-		tokenHash(rawToken), clientID, sess.Login, sess.PrincipalID, groupsJSON, uuid.New(), expiresAt, sess.AuthMethod,
+		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at, auth_method, resource)
+		 VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8, $9)`,
+		tokenHash(rawToken), clientID, sess.Login, sess.PrincipalID, groupsJSON, uuid.New(), expiresAt, sess.AuthMethod, sess.Resource,
 	)
 	if err != nil {
 		return fmt.Errorf("oauth refresh store: insert: %w", err)
@@ -195,7 +198,7 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	var storedClientID, login, principalID, authMethod string
+	var storedClientID, login, principalID, authMethod, resource string
 	var groupsJSON []byte
 	var familyID uuid.UUID
 	var expiresAt time.Time
@@ -203,12 +206,12 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	var revokedAt *time.Time
 
 	err = tx.QueryRow(ctx,
-		`SELECT client_id, login, principal_id, groups, family_id, expires_at, rotated_at, revoked_at, auth_method
+		`SELECT client_id, login, principal_id, groups, family_id, expires_at, rotated_at, revoked_at, auth_method, resource
 		 FROM oauth_refresh_tokens
 		 WHERE token_hash = $1
 		 FOR UPDATE`,
 		oldHash,
-	).Scan(&storedClientID, &login, &principalID, &groupsJSON, &familyID, &expiresAt, &rotatedAt, &revokedAt, &authMethod)
+	).Scan(&storedClientID, &login, &principalID, &groupsJSON, &familyID, &expiresAt, &rotatedAt, &revokedAt, &authMethod, &resource)
 	if err == pgx.ErrNoRows {
 		return Session{}, ErrInvalidToken
 	}
@@ -250,7 +253,7 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 			return Session{}, ErrInvalidToken
 		}
 		if time.Since(*rotatedAt) < rotationGraceWindow {
-			var childLogin, childPrincipalID, childAuthMethod string
+			var childLogin, childPrincipalID, childAuthMethod, childResource string
 			var childGroupsJSON []byte
 			var childRevokedAt *time.Time
 			var childRotatedAt *time.Time
@@ -263,12 +266,12 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 			// either the up-to-date row or a 40001 serialization error that
 			// the outer Rotate retry loop already handles.
 			lookupErr := tx.QueryRow(ctx,
-				`SELECT login, principal_id, groups, revoked_at, rotated_at, expires_at, auth_method FROM oauth_refresh_tokens
+				`SELECT login, principal_id, groups, revoked_at, rotated_at, expires_at, auth_method, resource FROM oauth_refresh_tokens
 				 WHERE token_hash = $1 AND parent_token_hash = $2
 				   AND family_id = $3 AND client_id = $4
 				 FOR UPDATE`,
 				newHash, oldHash, familyID, clientID,
-			).Scan(&childLogin, &childPrincipalID, &childGroupsJSON, &childRevokedAt, &childRotatedAt, &childExpiresAt, &childAuthMethod)
+			).Scan(&childLogin, &childPrincipalID, &childGroupsJSON, &childRevokedAt, &childRotatedAt, &childExpiresAt, &childAuthMethod, &childResource)
 			if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
 				// A real DB error (including a caught-and-surfaced
 				// serialization failure) must not be misreported as
@@ -289,7 +292,7 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 				if err := json.Unmarshal(childGroupsJSON, &childGroups); err != nil {
 					return Session{}, fmt.Errorf("oauth refresh store: grace unmarshal groups: %w", err)
 				}
-				childSess := Session{Login: childLogin, PrincipalID: childPrincipalID, Groups: childGroups, AuthMethod: childAuthMethod}
+				childSess := Session{Login: childLogin, PrincipalID: childPrincipalID, Groups: childGroups, AuthMethod: childAuthMethod, Resource: childResource}
 				if accept != nil {
 					if err := accept(childSess); err != nil {
 						return Session{}, err
@@ -336,7 +339,7 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	if err := json.Unmarshal(groupsJSON, &groups); err != nil {
 		groups = nil
 	}
-	sess := Session{Login: login, PrincipalID: principalID, Groups: groups, AuthMethod: authMethod}
+	sess := Session{Login: login, PrincipalID: principalID, Groups: groups, AuthMethod: authMethod, Resource: resource}
 	if accept != nil {
 		// Before any write: a refused session keeps its token un-rotated,
 		// and the deferred Rollback releases the row lock.
@@ -360,9 +363,9 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	newGroupsJSON, _ := json.Marshal(groups)
 	_, err = tx.Exec(ctx,
 		`INSERT INTO oauth_refresh_tokens
-		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at, auth_method)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		newHash, clientID, login, principalID, newGroupsJSON, familyID, oldHash, now, newExpiresAt, authMethod,
+		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at, auth_method, resource)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		newHash, clientID, login, principalID, newGroupsJSON, familyID, oldHash, now, newExpiresAt, authMethod, resource,
 	)
 	if err != nil {
 		return Session{}, fmt.Errorf("oauth refresh store: insert rotated: %w", err)

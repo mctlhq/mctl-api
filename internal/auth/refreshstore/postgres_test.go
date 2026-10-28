@@ -754,3 +754,39 @@ func TestRevokePrincipalCatchesAConcurrentRotation(t *testing.T) {
 		t.Errorf("RevokePrincipal reported %d sessions, want the one", res.n)
 	}
 }
+
+// The RFC 8707 resource of a session survives Insert, RotateIf and the
+// in-flight-rotation grace replay; a session that never recorded one reads "".
+func TestResourceRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	withShortGraceWindow(t, time.Hour)
+	exp := time.Now().Add(time.Hour)
+	tok1, tok2, tok3, plain := uniqueTok(t, "r1"), uniqueTok(t, "r2"), uniqueTok(t, "r3"), uniqueTok(t, "rp")
+	const res = "https://support.mctl.ai"
+
+	if err := s.Insert(tok1, "c", Session{Login: "alice", Resource: res}, exp); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	got, err := s.RotateIf(tok1, tok2, "c", exp, nil)
+	if err != nil || got.Resource != res {
+		t.Fatalf("RotateIf = %+v, %v; want resource %q", got, err, res)
+	}
+	// Grace replay returns the child's session.
+	got, err = s.RotateIf(tok1, tok2, "c", exp, nil)
+	if err != nil || got.Resource != res {
+		t.Fatalf("grace replay = %+v, %v; want resource %q", got, err, res)
+	}
+	// The successor carries it on.
+	got, err = s.RotateIf(tok2, tok3, "c", exp, nil)
+	if err != nil || got.Resource != res {
+		t.Fatalf("successor rotation = %+v, %v; want resource %q", got, err, res)
+	}
+
+	if err := s.Insert(plain, "c", Session{Login: "bob"}, exp); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	got, err = s.RotateIf(plain, uniqueTok(t, "rq"), "c", exp, nil)
+	if err != nil || got.Resource != "" {
+		t.Fatalf("session without resource = %+v, %v; want empty", got, err)
+	}
+}

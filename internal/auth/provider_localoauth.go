@@ -60,7 +60,7 @@ func (p *localOAuthProvider) Verify(_ context.Context, raw string) (*Verified, e
 	if err != nil {
 		return nil, err
 	}
-	claims := Claims{Groups: u.Groups, TokenPID: u.tokenPID}
+	claims := Claims{Groups: u.Groups, TokenPID: u.tokenPID, TokenAudience: u.tokenAudience, SupportAudience: u.supportAudience}
 	if u.tokenPrincipal {
 		claims.TokenPrincipal = u.principalID
 	}

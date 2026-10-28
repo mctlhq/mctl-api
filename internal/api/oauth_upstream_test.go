@@ -496,7 +496,7 @@ func TestUpstreamStatesDoNotCross(t *testing.T) {
 	h := newUpstreamHarness(t, OAuthUpstreamBoth, linkedTo("mashkovd"))
 
 	// A GitHub authorization cannot be completed by a ZITADEL callback.
-	_ = h.oauth.StorePendingAuth(context.Background(), "gh-state|client-state", "client", testClientRedirect, testChallenge())
+	_ = h.oauth.StorePendingAuth(context.Background(), "gh-state|client-state", "client", testClientRedirect, testChallenge(), "")
 	if rec := h.callback("gh-state|client-state"); rec.Code != http.StatusBadRequest || len(h.store.calls) != 0 {
 		t.Fatalf("ZITADEL callback on a GitHub state = %d, want 400", rec.Code)
 	}
@@ -520,7 +520,7 @@ func TestGitHubCallbackFollowsTheMode(t *testing.T) {
 		OAuthUpstreamBoth:    http.StatusBadGateway,
 	} {
 		h := newUpstreamHarness(t, mode, linkedTo("mashkovd"))
-		_ = h.oauth.StorePendingAuth(context.Background(), "gh-state|client-state", "client", testClientRedirect, testChallenge())
+		_ = h.oauth.StorePendingAuth(context.Background(), "gh-state|client-state", "client", testClientRedirect, testChallenge(), "")
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		req := httptest.NewRequest(http.MethodGet, githubCallbackPath+"?code=gh-code&state=gh-state%7Cclient-state", nil).WithContext(ctx)

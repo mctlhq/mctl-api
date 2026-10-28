@@ -205,12 +205,22 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// RFC 8707. Checked after client_id and redirect_uri, so it reports
+	// through the now-trusted redirect.
+	resource, err := o.FlowResource(q["resource"])
+	if err != nil {
+		oauthInvalidTarget.WithLabelValues("authorize").Inc()
+		slog.Info("oauth: invalid_target", "endpoint", "authorize", "client_id", truncateEchoedValue(clientID))
+		oauthError(w, redirectURI, state, "invalid_target", "the resource is not one this server issues tokens for")
+		return
+	}
+
 	upstream, customer, ok := h.pickOAuthUpstream(w, r)
 	if !ok {
 		return
 	}
 	if upstream == auth.UpstreamZitadel {
-		h.startZitadelAuthorize(w, r, clientID, redirectURI, state, codeChallenge, customer)
+		h.startZitadelAuthorize(w, r, clientID, redirectURI, state, codeChallenge, resource, customer)
 		return
 	}
 
@@ -228,7 +238,7 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	combinedState := ghState + "|" + state
 
 	// Persist all pending auth details keyed by combined state.
-	if err := o.StorePendingAuth(r.Context(), combinedState, clientID, redirectURI, codeChallenge); err != nil {
+	if err := o.StorePendingAuth(r.Context(), combinedState, clientID, redirectURI, codeChallenge, resource); err != nil {
 		// redirect_uri is allowlisted by now, so the client hears about it
 		// as an OAuth error instead of waiting on a callback.
 		oauthError(w, redirectURI, state, "server_error", "the authorization could not be started; try again")
@@ -339,7 +349,7 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 		Login: login, PrincipalID: principalID, Groups: groups,
 		ClientID: pending.ClientID, RedirectURI: pending.RedirectURI,
 		CodeChallenge: pending.CodeChallenge, ClientState: clientState,
-		Upstream: auth.UpstreamGitHub,
+		Upstream: auth.UpstreamGitHub, Resource: pending.Resource,
 	})
 	oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, res).Inc()
 }
@@ -354,6 +364,16 @@ var oauthClientAuthFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
 }, []string{"grant_type", "assertion"})
 
 func init() { prometheus.MustRegister(oauthClientAuthFailures) }
+
+// oauthInvalidTarget counts RFC 8707 resource refusals by endpoint
+// (mctl-api#849), so a client whose today-ignored resource now answers
+// invalid_target shows up during the rollout.
+var oauthInvalidTarget = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "oauth_invalid_target_total",
+	Help: "OAuth requests refused with invalid_target, by endpoint (mctl-api#849).",
+}, []string{"endpoint"})
+
+func init() { prometheus.MustRegister(oauthInvalidTarget) }
 
 // handleOAuthToken exchanges an authorization code or refresh token for an access token.
 //
@@ -403,14 +423,14 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			tokenError(w, "invalid_request", "code, code_verifier, client_id and redirect_uri are required")
 			return
 		}
-		accessToken, refreshToken, err = o.ExchangeCodeWithClientAuth(r.Context(), code, codeVerifier, clientID, redirectURI, ca)
+		accessToken, refreshToken, err = o.ExchangeCodeForResource(r.Context(), code, codeVerifier, clientID, redirectURI, ca, r.Form["resource"])
 	case "refresh_token":
 		refreshGrant := r.FormValue("refresh_token")
 		if refreshGrant == "" || clientID == "" {
 			tokenError(w, "invalid_request", "refresh_token and client_id are required")
 			return
 		}
-		accessToken, refreshToken, err = o.RefreshAccessTokenWithClientAuth(r.Context(), refreshGrant, clientID, ca)
+		accessToken, refreshToken, err = o.RefreshAccessTokenForResource(r.Context(), refreshGrant, clientID, ca, r.Form["resource"])
 	default:
 		tokenError(w, "unsupported_grant_type", "supported grant_type values are authorization_code and refresh_token")
 		return
@@ -495,6 +515,12 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 				"error":             "invalid_client",
 				"error_description": "client authentication failed",
 			})
+			return
+		}
+		if errors.Is(err, auth.ErrInvalidTarget) {
+			oauthInvalidTarget.WithLabelValues("token").Inc()
+			slog.Info("oauth: invalid_target", "endpoint", "token", "client_id", truncateEchoedValue(clientID))
+			tokenError(w, "invalid_target", "the resource is not valid for this grant")
 			return
 		}
 		tokenError(w, "invalid_grant", "invalid or expired token")
