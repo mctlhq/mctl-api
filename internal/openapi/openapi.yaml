@@ -2286,6 +2286,10 @@ paths:
         Requires in-cluster deployment with Loki accessible at `LOKI_URL`.
 
         Returns log lines sorted by timestamp (most recent first).
+
+        A failed or unconfigured read is an error (503, or 504 on timeout),
+        never an empty list. `count: 0` means only that Loki answered with no
+        lines in this window.
       tags: [Services]
       parameters:
         - name: team
@@ -2306,14 +2310,16 @@ paths:
           schema:
             type: integer
             default: 100
-          description: Number of log lines to return (max 1000)
+            minimum: 1
+            maximum: 1000
+          description: Number of log lines to return (1-1000)
         - name: since
           in: query
           required: false
           schema:
             type: string
             default: 1h
-          description: Time window for log retrieval (e.g. 15m, 1h, 6h, 24h)
+          description: Time window for log retrieval, a Go duration between 1m and 720h (e.g. 15m, 1h, 6h, 24h)
       responses:
         '200':
           description: Log lines
@@ -2332,10 +2338,32 @@ paths:
                       $ref: '#/components/schemas/LogLine'
                   count:
                     type: integer
-                  note:
+                  limit:
+                    type: integer
+                    description: The lines limit actually used.
+                  since:
                     type: string
+                    description: The time window actually used.
+        '400':
+          description: Invalid team, app, lines or since
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '404':
           description: Service or tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Loki unavailable, log querying not configured, or the service lookup could not be confirmed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '504':
+          description: Loki did not answer in time
           content:
             application/json:
               schema:

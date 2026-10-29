@@ -2077,7 +2077,13 @@ Use this when debugging service issues or investigating errors.
 
 Parameters:
 - lines: number of log lines to return (default 100, max 1000)
-- since: time window — e.g. "15m", "1h", "6h", "24h" (default "1h")
+- since: time window — e.g. "15m", "1h", "6h", "24h" (default "1h"), between 1m and 720h
+
+A failed or unconfigured log read is an error (503/504), never an empty list;
+404 means the tenant or service does not exist. An empty "lines" with
+"count": 0 means only that Loki answered with no lines in this window. The
+"lines" limit and "since" window actually used are echoed in the response.
+Invalid "lines" or "since" values are rejected.
 
 Requires in-cluster deployment with Loki enabled (LOKI_URL env var).`),
 		mcplib.WithString("team",
@@ -2089,10 +2095,10 @@ Requires in-cluster deployment with Loki enabled (LOKI_URL env var).`),
 			mcplib.Description("Service name"),
 		),
 		mcplib.WithString("lines",
-			mcplib.Description("Number of log lines to return (default: 100, max: 1000)"),
+			mcplib.Description("Number of log lines to return, 1-1000 (default: 100); other values are rejected"),
 		),
 		mcplib.WithString("since",
-			mcplib.Description("Time window: 15m, 1h, 6h, 24h (default: 1h)"),
+			mcplib.Description("Time window, a duration between 1m and 720h, e.g. 15m, 1h, 6h, 24h (default: 1h); other values are rejected"),
 		),
 	)
 
