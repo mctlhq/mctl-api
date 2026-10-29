@@ -37,6 +37,7 @@ type fakeWorkflowRun struct {
 
 func (f *fakeWorkflowRun) GetID() string                          { return f.id }
 func (f *fakeWorkflowRun) GetRunID() string                       { return f.runID }
+func (f *fakeWorkflowRun) GetFirstExecutionRunID() string         { return f.runID }
 func (f *fakeWorkflowRun) Get(context.Context, interface{}) error { return nil }
 func (f *fakeWorkflowRun) GetWithOptions(context.Context, interface{}, client.WorkflowRunGetOptions) error {
 	return nil
