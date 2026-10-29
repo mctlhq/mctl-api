@@ -79,7 +79,7 @@ func (a *workloadArgo) ListWorkloads() ([]argocd.Workload, error) {
 
 func (workloadTenants) TenantExists(name string) (bool, error) {
 	switch name {
-	case "acme", "other":
+	case "acme", "other", "preview-dev":
 		return true, nil
 	case "broken":
 		return false, errors.New("checkout unreadable")
@@ -259,6 +259,13 @@ func TestGetServicePods_ServiceResolution(t *testing.T) {
 		{name: "external", app: "ext", argo: &workloadArgo{workloads: []argocd.Workload{wl("acme-ext", "acme")}}, want: 200, wantCalls: 1, wantArgo: 1},
 		{name: "other namespace", app: "ext", argo: &workloadArgo{workloads: []argocd.Workload{wl("acme-ext", "other")}}, want: 404, wantArgo: 1},
 		{name: "preview", app: "ext", argo: &workloadArgo{workloads: []argocd.Workload{wl("preview-acme-ext", "acme")}}, want: 404, wantArgo: 1},
+	}
+	// A tenant whose own name starts with "preview-" keeps its external apps.
+	pv := &workloadArgo{workloads: []argocd.Workload{wl("preview-dev-ext", "preview-dev")}}
+	pvStub := &stubWorkload{}
+	rec := serveUser(workloadRouterWith(pvStub, workloadTenants{}, pv), auth.NewGitHubUser("u2", []string{"preview-dev"}), "GET", "/api/v1/pods/preview-dev/ext")
+	if rec.Code != 200 || pvStub.calls != 1 {
+		t.Errorf("preview-prefixed tenant: code %d, reader calls %d (%s)", rec.Code, pvStub.calls, rec.Body.String())
 	}
 	for _, c := range cases {
 		stub := &stubWorkload{}

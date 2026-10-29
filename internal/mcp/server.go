@@ -625,7 +625,7 @@ func (s *Server) toolListNamespaceEvents() (mcplib.Tool, server.ToolHandlerFunc)
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithIdempotentHintAnnotation(false),
-		mcplib.WithDescription("List recent Kubernetes events in a team namespace, newest first (max 200): quota-exceeded FailedCreate, FailedScheduling, back-off and image pull failures. No env or secret values are returned. The cluster retains events for only about 1h: the response carries observed_since (oldest instant whose absence of events is meaningful) and coverage_complete (false when since exceeds retention, so older absence is unknown). An unknown service filter is an error (404/503), never an empty list."),
+		mcplib.WithDescription("List recent Kubernetes events in a team namespace, newest first (max 200): quota-exceeded FailedCreate, FailedScheduling, back-off and image pull failures. No env or secret values are returned. The cluster retains events for a limited time (default 1h; the response states it as event_retention): the response carries observed_since (oldest instant whose absence of events is meaningful) and coverage_complete (false when since exceeds retention, so older absence is unknown). An unknown service filter is an error (404/503), never an empty list."),
 		mcplib.WithString("team",
 			mcplib.Required(),
 			mcplib.Description("Team name"),

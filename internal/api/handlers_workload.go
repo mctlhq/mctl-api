@@ -18,7 +18,6 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -223,9 +222,12 @@ func (h *Handlers) resolveWorkloadService(w http.ResponseWriter, team, app strin
 		writeError(w, http.StatusServiceUnavailable, unconfirmed+" right now; try again later")
 		return false
 	}
+	// An exact {team}-{app} name already excludes preview apps
+	// (preview-{team}-...); a prefix check would reject every app of a
+	// tenant whose own name starts with "preview-".
 	name := team + "-" + app
-	for _, wl := range workloads {
-		if wl.Name == name && wl.DestNamespace == team && !strings.HasPrefix(wl.Name, "preview-") {
+	for i := range workloads {
+		if workloads[i].Name == name && workloads[i].DestNamespace == team {
 			return true
 		}
 	}
