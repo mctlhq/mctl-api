@@ -914,7 +914,8 @@ func classifyLogQueryError(ctx context.Context, err error) (int, string, string)
 		return http.StatusServiceUnavailable, "canceled", "log query failed: request canceled"
 	}
 	var netErr net.Error
-	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+		(errors.As(err, &netErr) && netErr.Timeout()) {
 		return http.StatusGatewayTimeout, "timeout", "log query timed out; Loki did not answer in time, try again or narrow since/lines"
 	}
 	return http.StatusServiceUnavailable, "unavailable", "log query failed: Loki unavailable"

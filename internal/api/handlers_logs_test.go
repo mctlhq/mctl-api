@@ -216,3 +216,18 @@ func TestGetServiceLogs_SupportAuditFailed(t *testing.T) {
 		t.Fatalf("rows = %+v", rows)
 	}
 }
+
+// The request deadline expired while the querier returned an error that
+// wraps nothing (e.g. formatted with %v): still a timeout, not "unavailable".
+func TestGetServiceLogs_RequestDeadlineIsTimeout(t *testing.T) {
+	u := auth.NewGitHubUser("u1", []string{"acme"})
+	req := httptest.NewRequest("GET", "/api/v1/logs/acme/web", nil)
+	ctx, cancel := context.WithDeadline(auth.WithUser(req.Context(), u), time.Now().Add(-time.Second))
+	defer cancel()
+	rec := httptest.NewRecorder()
+	stub := &stubLogQuerier{err: errors.New("loki: request failed: context deadline exceeded")}
+	logsRouter(stub, workloadTenants{}).ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Errorf("got %d %s", rec.Code, rec.Body.String())
+	}
+}
