@@ -1142,6 +1142,7 @@ func main() {
 		QuotaReader:                    quotaReader,
 		PreviewLister:                  previewLister,
 		WorkloadReader:                 workloadReader,
+		EventRetention:                 parseDuration(os.Getenv("WORKLOAD_EVENT_RETENTION"), time.Hour),
 		LogQuerier:                     logQuerier,
 		WorkflowLogArchive:             workflowLogArchive,
 		BackstageInternalURL:           cfg.BackstageInternalURL,
