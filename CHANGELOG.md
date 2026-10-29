@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.140.0](https://github.com/mctlhq/mctl-api/compare/4.139.0...4.140.0) (2026-10-29)
+
+
+### Features
+
+* **agents:** issue-860-fix-logs-a-failed-loki-query-is-returned ([4d6431c](https://github.com/mctlhq/mctl-api/commit/4d6431c5b33491397e5b5149ddd3f51e95632aae))
+
+
+### Bug Fixes
+
+* **agents:** issue-860-fix-logs-a-failed-loki-query-is-returned ([0e885c7](https://github.com/mctlhq/mctl-api/commit/0e885c7f14b27104e7d26e951dd73bec6d2effa8))
+* **logs:** classify an expired request deadline as a timeout ([0c8c297](https://github.com/mctlhq/mctl-api/commit/0c8c297e010bc0ffc8b5fdb4ac0fba399d13421b))
+
 ## [4.139.0](https://github.com/mctlhq/mctl-api/compare/4.138.1...4.139.0) (2026-10-29)
 
 
