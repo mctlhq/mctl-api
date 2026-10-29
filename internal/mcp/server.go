@@ -2095,10 +2095,10 @@ Requires in-cluster deployment with Loki enabled (LOKI_URL env var).`),
 			mcplib.Description("Service name"),
 		),
 		mcplib.WithString("lines",
-			mcplib.Description("Number of log lines to return (default: 100, max: 1000)"),
+			mcplib.Description("Number of log lines to return, 1-1000 (default: 100); other values are rejected"),
 		),
 		mcplib.WithString("since",
-			mcplib.Description("Time window: 15m, 1h, 6h, 24h (default: 1h)"),
+			mcplib.Description("Time window, a duration between 1m and 720h, e.g. 15m, 1h, 6h, 24h (default: 1h); other values are rejected"),
 		),
 	)
 

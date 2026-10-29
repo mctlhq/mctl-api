@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/loki"
 )
@@ -161,5 +163,56 @@ func TestGetServiceLogs_RejectsBeforeLoki(t *testing.T) {
 		if stub.calls != 0 {
 			t.Errorf("%s reached Loki", c.path)
 		}
+	}
+}
+
+func TestGetServiceLogs_Canceled(t *testing.T) {
+	u := auth.NewGitHubUser("u1", []string{"acme"})
+	cases := []struct {
+		name   string
+		err    error
+		cancel bool
+	}{
+		{"wrapped canceled", fmt.Errorf("loki: request failed: %w", context.Canceled), false},
+		// The caller went away: the request context is canceled even though
+		// the client error reads as a timeout. It must not become a 504.
+		{"request context canceled", &url.Error{Op: "Get", URL: "http://loki.internal/q", Err: timeoutNetErr{}}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/api/v1/logs/acme/web", nil)
+			ctx, cancel := context.WithCancel(auth.WithUser(req.Context(), u))
+			if c.cancel {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			rec := httptest.NewRecorder()
+			logsRouter(&stubLogQuerier{err: c.err}, workloadTenants{}).ServeHTTP(rec, req.WithContext(ctx))
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "request canceled") {
+				t.Errorf("got %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// A failed Loki read through the support scope gate is audited as failed.
+func TestGetServiceLogs_SupportAuditFailed(t *testing.T) {
+	log := audit.NewLogger()
+	h := &Handlers{opts: Options{
+		AuditLog:   log,
+		LogQuerier: &stubLogQuerier{err: errors.New("loki: HTTP 500: body")},
+		GitReader:  workloadTenants{},
+		ArgoCD:     &workloadArgo{},
+	}}
+	r := chi.NewRouter()
+	r.Use(h.agentScopeGate)
+	r.Get("/api/v1/logs/{team}/{app}", h.GetServiceLogs)
+	if rec := serveUser(r, auditedSupportRun(t, "acme"), "GET", "/api/v1/logs/acme/web"); rec.Code != 503 {
+		t.Fatalf("code = %d: %s", rec.Code, rec.Body.String())
+	}
+	rows, _ := log.ListSupport(context.Background(), audit.SupportFilter{Tenant: "acme"})
+	if len(rows) != 1 || rows[0].Status != "failed" || rows[0].Parameters["http_status"] != "503" {
+		t.Fatalf("rows = %+v", rows)
 	}
 }
