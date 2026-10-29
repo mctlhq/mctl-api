@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.139.0](https://github.com/mctlhq/mctl-api/compare/4.138.1...4.139.0) (2026-10-29)
+
+
+### Features
+
+* **agents:** issue-859-fix-workload-unknown-service-and-expired ([5fb83ff](https://github.com/mctlhq/mctl-api/commit/5fb83ff1a1079dbdaccb8f1360df4bfc8eca87e5))
+
+
+### Bug Fixes
+
+* **agents:** issue-859-fix-workload-unknown-service-and-expired ([e615f9b](https://github.com/mctlhq/mctl-api/commit/e615f9bc589807492ce9b2f36b8b2920b2f82cc7))
+* **workload:** drop preview prefix check, fix lint, describe retention ([90140bd](https://github.com/mctlhq/mctl-api/commit/90140bd65f9a9c703a02499e433941167210ae1e))
+
 ## [4.138.1](https://github.com/mctlhq/mctl-api/compare/4.138.0...4.138.1) (2026-10-28)
 
 
