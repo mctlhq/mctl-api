@@ -20,9 +20,11 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/k8s"
@@ -49,7 +51,31 @@ func (s *stubWorkload) ListEvents(_ context.Context, _ string, q k8s.EventQuery)
 
 // workloadTenants registers acme and other; "broken" is a checkout that
 // cannot be read, and every other name (kube-system, argocd) is absent.
-type workloadTenants struct{ GitReader }
+type workloadTenants struct {
+	GitReader
+	// svcErr, when set, is returned by ServiceExists. Otherwise only the
+	// service "web" exists.
+	svcErr error
+}
+
+func (w workloadTenants) ServiceExists(_, component string) (bool, error) {
+	if w.svcErr != nil {
+		return false, w.svcErr
+	}
+	return component == "web", nil
+}
+
+type workloadArgo struct {
+	ArgoStatusClient
+	workloads []argocd.Workload
+	err       error
+	calls     int
+}
+
+func (a *workloadArgo) ListWorkloads() ([]argocd.Workload, error) {
+	a.calls++
+	return a.workloads, a.err
+}
 
 func (workloadTenants) TenantExists(name string) (bool, error) {
 	switch name {
@@ -198,6 +224,118 @@ func TestWorkloadReads_OnlyRegisteredTenants(t *testing.T) {
 		}
 		if rec := serveUser(r, u, "GET", "/api/v1/events/acme"); rec.Code != 200 {
 			t.Errorf("%s registered tenant = %d", who, rec.Code)
+		}
+	}
+}
+
+func workloadRouterWith(rd WorkloadReader, git GitReader, argo ArgoStatusClient) http.Handler {
+	h := &Handlers{opts: Options{WorkloadReader: rd, GitReader: git, ArgoCD: argo}}
+	r := chi.NewRouter()
+	r.Get("/api/v1/pods/{team}/{app}", h.GetServicePods)
+	r.Get("/api/v1/events/{team}", h.ListNamespaceEvents)
+	return r
+}
+
+func TestGetServicePods_ServiceResolution(t *testing.T) {
+	u := auth.NewGitHubUser("u1", []string{"acme"})
+	wl := func(name, ns string) argocd.Workload { return argocd.Workload{Name: name, DestNamespace: ns} }
+	argoErr := errors.New("argocd down")
+	cases := []struct {
+		name      string
+		app       string
+		git       workloadTenants
+		argo      *workloadArgo
+		nilArgo   bool
+		want      int
+		wantCalls int
+		wantArgo  int
+		prefix    string
+	}{
+		{name: "catalogue", app: "web", argo: &workloadArgo{}, want: 200, wantCalls: 1},
+		{name: "unknown", app: "typo", argo: &workloadArgo{}, want: 404, wantArgo: 1, prefix: "service not found: typo"},
+		{name: "gitops error", app: "web", git: workloadTenants{svcErr: errors.New("boom")}, argo: &workloadArgo{}, want: 503},
+		{name: "no argocd", app: "typo", nilArgo: true, want: 503},
+		{name: "argocd error", app: "typo", argo: &workloadArgo{err: argoErr}, want: 503, wantArgo: 1},
+		{name: "external", app: "ext", argo: &workloadArgo{workloads: []argocd.Workload{wl("acme-ext", "acme")}}, want: 200, wantCalls: 1, wantArgo: 1},
+		{name: "other namespace", app: "ext", argo: &workloadArgo{workloads: []argocd.Workload{wl("acme-ext", "other")}}, want: 404, wantArgo: 1},
+		{name: "preview", app: "ext", argo: &workloadArgo{workloads: []argocd.Workload{wl("preview-acme-ext", "acme")}}, want: 404, wantArgo: 1},
+	}
+	for _, c := range cases {
+		stub := &stubWorkload{}
+		var argo ArgoStatusClient
+		if !c.nilArgo {
+			argo = c.argo
+		}
+		git := c.git
+		r := workloadRouterWith(stub, git, argo)
+		rec := serveUser(r, u, "GET", "/api/v1/pods/acme/"+c.app)
+		if rec.Code != c.want {
+			t.Errorf("%s: code = %d, want %d (%s)", c.name, rec.Code, c.want, rec.Body.String())
+		}
+		if stub.calls != c.wantCalls {
+			t.Errorf("%s: reader calls = %d, want %d", c.name, stub.calls, c.wantCalls)
+		}
+		if c.argo != nil && !c.nilArgo && c.argo.calls != c.wantArgo {
+			t.Errorf("%s: argocd calls = %d, want %d", c.name, c.argo.calls, c.wantArgo)
+		}
+		if c.prefix != "" && !strings.Contains(rec.Body.String(), c.prefix) {
+			t.Errorf("%s: body %s lacks %q", c.name, rec.Body.String(), c.prefix)
+		}
+	}
+}
+
+func TestListNamespaceEvents_ServiceResolutionAndCoverage(t *testing.T) {
+	u := auth.NewGitHubUser("u1", []string{"acme"})
+	stub := &stubWorkload{}
+	argo := &workloadArgo{}
+	r := workloadRouterWith(stub, workloadTenants{}, argo)
+	if rec := serveUser(r, u, "GET", "/api/v1/events/acme?app=typo"); rec.Code != 404 {
+		t.Errorf("unknown app = %d, want 404", rec.Code)
+	}
+	argo.err = errors.New("down")
+	if rec := serveUser(r, u, "GET", "/api/v1/events/acme?app=typo"); rec.Code != 503 {
+		t.Errorf("failed lookup = %d, want 503", rec.Code)
+	}
+	if stub.calls != 0 {
+		t.Error("events listed for an unresolved service")
+	}
+	argo.calls = 0
+	if rec := serveUser(r, u, "GET", "/api/v1/events/acme"); rec.Code != 200 || argo.calls != 0 {
+		t.Errorf("no app: code %d, argocd calls %d", rec.Code, argo.calls)
+	}
+
+	type cov struct {
+		retention time.Duration
+		since     string
+		complete  bool
+		observed  time.Duration
+	}
+	for _, c := range []cov{
+		{0, "24h", false, time.Hour},
+		{0, "30m", true, 30 * time.Minute},
+		{6 * time.Hour, "24h", false, 6 * time.Hour},
+	} {
+		h := &Handlers{opts: Options{WorkloadReader: stub, GitReader: workloadTenants{}, EventRetention: c.retention}}
+		rt := chi.NewRouter()
+		rt.Get("/api/v1/events/{team}", h.ListNamespaceEvents)
+		rec := serveUser(rt, u, "GET", "/api/v1/events/acme?since="+c.since)
+		if rec.Code != 200 {
+			t.Fatalf("code %d", rec.Code)
+		}
+		var body map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if body["coverage_complete"] != c.complete {
+			t.Errorf("%+v: coverage_complete = %v", c, body["coverage_complete"])
+		}
+		if _, has := body["coverage_note"]; has == c.complete {
+			t.Errorf("%+v: coverage_note presence = %v", c, has)
+		}
+		obs, err := time.Parse(time.RFC3339, body["observed_since"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := time.Since(obs) - c.observed; d < -5*time.Second || d > 5*time.Second {
+			t.Errorf("%+v: observed_since off by %v", c, d)
 		}
 	}
 }

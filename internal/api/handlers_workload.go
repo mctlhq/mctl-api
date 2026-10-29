@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -33,6 +34,9 @@ const (
 	minEventWindow     = time.Minute
 	maxEventWindow     = 24 * time.Hour
 	defaultEventWindow = time.Hour
+
+	// defaultEventRetention is the Kubernetes default apiserver --event-ttl.
+	defaultEventRetention = time.Hour
 )
 
 // GetServicePods returns the allow-listed state of every pod of a service.
@@ -53,6 +57,9 @@ func (h *Handlers) GetServicePods(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.requireRegisteredTenant(w, team) {
+		return
+	}
+	if !h.resolveWorkloadService(w, team, app) {
 		return
 	}
 	if h.opts.WorkloadReader == nil {
@@ -122,6 +129,9 @@ func (h *Handlers) ListNamespaceEvents(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "app must be a DNS label")
 			return
 		}
+		if !h.resolveWorkloadService(w, team, app) {
+			return
+		}
 		query.Workload = team + "-" + app
 	}
 	if h.opts.WorkloadReader == nil {
@@ -137,14 +147,30 @@ func (h *Handlers) ListNamespaceEvents(w http.ResponseWriter, r *http.Request) {
 	if events == nil {
 		events = []k8s.Event{}
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"items":     events,
-		"count":     len(events),
-		"team":      team,
-		"namespace": team,
-		"since":     since.String(),
-		"truncated": truncated,
-	})
+	retention := h.opts.EventRetention
+	if retention <= 0 {
+		retention = defaultEventRetention
+	}
+	covered := since
+	if retention < covered {
+		covered = retention
+	}
+	resp := map[string]interface{}{
+		"items":             events,
+		"count":             len(events),
+		"team":              team,
+		"namespace":         team,
+		"since":             since.String(),
+		"truncated":         truncated,
+		"observed_since":    time.Now().UTC().Add(-covered).Format(time.RFC3339),
+		"coverage_complete": since <= retention,
+		"event_retention":   retention.String(),
+	}
+	if since > retention {
+		resp["coverage_note"] = "the cluster keeps events for about " + retention.String() +
+			"; events before observed_since are no longer held, so their absence is unknown"
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // requireRegisteredTenant answers false, after writing the response, unless
@@ -168,4 +194,41 @@ func (h *Handlers) requireRegisteredTenant(w http.ResponseWriter, team string) b
 		return false
 	}
 	return true
+}
+
+// resolveWorkloadService answers false, after writing the response, unless
+// app is a known service of team. The gitops catalogue is checked first; only
+// when it reports the service absent is the ArgoCD workload list consulted, so
+// external and platform applications keep working. A lookup that could not be
+// made is 503, never 404 and never an empty read.
+func (h *Handlers) resolveWorkloadService(w http.ResponseWriter, team, app string) bool {
+	status, msg := h.checkServiceExists(team, app)
+	switch status {
+	case 0:
+		return true
+	case http.StatusNotFound:
+		// Not in the catalogue; fall through to ArgoCD.
+	default:
+		writeError(w, status, msg)
+		return false
+	}
+	unconfirmed := "cannot confirm whether service \"" + app + "\" exists in workspace \"" + team + "\""
+	if h.opts.ArgoCD == nil {
+		writeError(w, http.StatusServiceUnavailable, unconfirmed+": argocd not configured")
+		return false
+	}
+	workloads, err := h.opts.ArgoCD.ListWorkloads()
+	if err != nil {
+		slog.Warn("workload read: argocd workload list failed", "team", team, "service", app, "error", err)
+		writeError(w, http.StatusServiceUnavailable, unconfirmed+" right now; try again later")
+		return false
+	}
+	name := team + "-" + app
+	for _, wl := range workloads {
+		if wl.Name == name && wl.DestNamespace == team && !strings.HasPrefix(wl.Name, "preview-") {
+			return true
+		}
+	}
+	writeError(w, http.StatusNotFound, "service not found: "+app+" (workspace \""+team+"\")")
+	return false
 }

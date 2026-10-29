@@ -79,6 +79,9 @@ type Options struct {
 	PreviewLister PreviewLister
 	// WorkloadReader reads pod state and events (optional — nil means 503).
 	WorkloadReader WorkloadReader
+	// EventRetention is how long the cluster keeps events (apiserver
+	// --event-ttl). Zero means the Kubernetes default of 1h.
+	EventRetention time.Duration
 	// LogQuerier queries Loki for service logs (optional — nil outside cluster).
 	LogQuerier LogQuerier
 	// ComponentSourceRepos answers which repository is registered for a

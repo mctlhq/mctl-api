@@ -70,6 +70,9 @@ env:
   ROADMAP_STATE_LOCAL_PATH: /data/roadmap-state
   ARGOCD_URL: https://ops.mctl.me
   ARGO_WORKFLOWS_NAMESPACE: argo-workflows
+  # Optional: how long the cluster keeps events (apiserver --event-ttl), used
+  # for observed_since/coverage_complete on the events read. Default 1h.
+  # WORKLOAD_EVENT_RETENTION: 1h
   # Federation registry (mctl-api#374, docs/federation.md). Empty means: no
   # explicit providers beyond the legacy DEX_ISSUER_URL/DEX_CLIENT_ID shim,
   # and the kill switch off. Set MCTL_OIDC_PROVIDERS to the JSON provider
