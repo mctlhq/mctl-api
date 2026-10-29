@@ -573,26 +573,22 @@ func TestE2E_ServiceLogs(t *testing.T) {
 	t.Logf("testing logs for %s/%s", team, name)
 
 	status, body := c.get(t, fmt.Sprintf("/api/v1/logs/%s/%s?lines=10&since=1h", team, name))
+	if status == 503 && fmt.Sprintf("%v", body["error"]) == "log querying not configured" {
+		t.Skip("log querying not configured")
+	}
 	if status != 200 {
 		t.Fatalf("GET /api/v1/logs expected 200, got %d: %v", status, body)
 	}
 
-	// Either lines returned OR a note explaining why (Loki not configured / no logs).
-	_, hasLines := body["lines"]
-	_, hasNote := body["note"]
-	if !hasLines && !hasNote {
-		t.Fatalf("log response missing both 'lines' and 'note' fields: %v", body)
+	lines, ok := body["lines"].([]interface{})
+	if !ok {
+		t.Fatalf("log response 'lines' is not an array: %v", body)
 	}
-
-	count := 0
-	if c, ok := body["count"].(float64); ok {
-		count = int(c)
+	count, _ := body["count"].(float64)
+	if int(count) != len(lines) {
+		t.Fatalf("count=%v does not match len(lines)=%d", body["count"], len(lines))
 	}
-	note := ""
-	if n, ok := body["note"].(string); ok {
-		note = n
-	}
-	t.Logf("✓ /api/v1/logs/%s/%s: count=%d note=%q", team, name, count, note)
+	t.Logf("/api/v1/logs/%s/%s: count=%d", team, name, len(lines))
 }
 
 // ── Custom domains ────────────────────────────────────────────────────────────

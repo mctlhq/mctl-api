@@ -15,9 +15,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"slices"
 	"sort"
@@ -34,6 +36,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/k8s"
+	"github.com/mctlhq/mctl-api/internal/loki"
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
@@ -833,50 +836,88 @@ func (h *Handlers) GetServiceLogs(w http.ResponseWriter, r *http.Request) {
 	team := chi.URLParam(r, "team")
 	app := chi.URLParam(r, "app")
 
+	if !dnsLabelPattern.MatchString(team) || !dnsLabelPattern.MatchString(app) {
+		writeError(w, http.StatusBadRequest, "team and app must be DNS labels")
+		return
+	}
 	if !user.IsAdmin() && !user.HasTenantAccess(team) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
 
-	lines := 100
+	lines := defaultLogLines
 	if l := r.URL.Query().Get("lines"); l != "" {
-		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 1000 {
-			lines = n
+		n, err := strconv.Atoi(l)
+		if err != nil || n < 1 || n > maxLogLines {
+			writeError(w, http.StatusBadRequest, "lines must be an integer between 1 and 1000")
+			return
 		}
+		lines = n
 	}
 
-	since := time.Hour
+	since := defaultLogWindow
 	if s := r.URL.Query().Get("since"); s != "" {
-		if d, err := time.ParseDuration(s); err == nil && d > 0 {
-			since = d
+		d, err := time.ParseDuration(s)
+		if err != nil || d < minLogWindow || d > maxLogWindow {
+			writeError(w, http.StatusBadRequest, "since must be a duration between 1m and 720h")
+			return
 		}
+		since = d
 	}
 
-	resp := map[string]interface{}{
-		"team": team,
-		"app":  app,
+	if !h.requireRegisteredTenant(w, team) {
+		return
+	}
+	if !h.resolveWorkloadService(w, team, app) {
+		return
 	}
 
 	if h.opts.LogQuerier == nil {
-		resp["lines"] = []interface{}{}
-		resp["count"] = 0
-		resp["note"] = "Log querying requires in-cluster deployment with Loki (set LOKI_URL)"
-		writeJSON(w, http.StatusOK, resp)
+		writeError(w, http.StatusServiceUnavailable, "log querying not configured")
 		return
 	}
 
 	logLines, err := h.opts.LogQuerier.QueryRange(r.Context(), team, app, lines, since)
 	if err != nil {
-		resp["lines"] = []interface{}{}
-		resp["count"] = 0
-		resp["note"] = "Loki query error: " + err.Error()
-		writeJSON(w, http.StatusOK, resp)
+		status, class, msg := classifyLogQueryError(r.Context(), err)
+		slog.Warn("log query failed", "team", team, "app", app, "error_class", class, "error", err)
+		writeError(w, status, msg)
 		return
 	}
+	if logLines == nil {
+		logLines = []loki.LogLine{}
+	}
 
-	resp["lines"] = logLines
-	resp["count"] = len(logLines)
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"team":  team,
+		"app":   app,
+		"lines": logLines,
+		"count": len(logLines),
+		"limit": lines,
+		"since": since.String(),
+	})
+}
+
+const (
+	defaultLogLines  = 100
+	maxLogLines      = 1000
+	defaultLogWindow = time.Hour
+	minLogWindow     = time.Minute
+	maxLogWindow     = 720 * time.Hour
+)
+
+// classifyLogQueryError maps a failed Loki read to an HTTP status, an error
+// class for logging and a fixed client message that never carries the Loki
+// URL, the LogQL query or the upstream response body.
+func classifyLogQueryError(ctx context.Context, err error) (int, string, string) {
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return http.StatusServiceUnavailable, "canceled", "log query failed: request canceled"
+	}
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return http.StatusGatewayTimeout, "timeout", "log query timed out; Loki did not answer in time, try again or narrow since/lines"
+	}
+	return http.StatusServiceUnavailable, "unavailable", "log query failed: Loki unavailable"
 }
 
 // auditListItem is an audit entry as GET /audit serves it. The unreadable
