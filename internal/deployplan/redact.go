@@ -20,8 +20,10 @@ var vaultPathKeys = map[string]bool{
 
 // Redact returns a deep copy of values in which every Vault path is replaced
 // by redacted:sha256:<hex of the real path>. The hash keeps the digest bound
-// to the real path without disclosing it. Kubernetes secret names are not
-// credentials and are kept.
+// to the real path. It is unsalted, so a reader who can guess a structured
+// path (teams/<tenant>/<service>/...) can confirm it; that is acceptable
+// because plan readers are members of that tenant. Kubernetes secret names
+// are not credentials and are kept.
 func Redact(values map[string]any) map[string]any {
 	out := deepCopy(values).(map[string]any)
 	redactTree(out)
