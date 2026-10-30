@@ -74,3 +74,21 @@ jobs:
             'repos/mctlhq/mctl-gitops/contents/platform-gitops/agent-platform/schemas/deploy-intent.schema.json?ref=main' > "$src"
           test -s "$src"
           DEPLOY_INTENT_SCHEMA_SOURCE="$src" go test -count=1 -run TestVendoredSchemaMatchesSource ./internal/deployanalyze/
+
+      - name: deploy-plan upstream drift
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_REPO_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/deployplan-upstream"
+          mkdir -p "$dir"
+          for src in \
+            platform-gitops/argo-workflows/cluster-templates/wft-preview-deploy.yaml \
+            platform-gitops/argo-workflows/cluster-templates/tpl-git-commit.yaml \
+            platform-gitops/argo-workflows/scripts/rewrite_preview_values.py; do
+            out="$dir/$(basename "$src")"
+            gh api -H 'Accept: application/vnd.github.raw' \
+              "repos/mctlhq/mctl-gitops/contents/$src?ref=main" > "$out"
+            test -s "$out"
+          done
+          DEPLOYPLAN_UPSTREAM_SOURCE_DIR="$dir" go test -count=1 -run 'TestUpstreamSnapshots' -v ./internal/deployplan/

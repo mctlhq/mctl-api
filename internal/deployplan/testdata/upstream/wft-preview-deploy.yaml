@@ -1,0 +1,489 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ClusterWorkflowTemplate
+metadata:
+  name: preview-deploy
+  annotations:
+    workflows.argoproj.io/description: |
+      Deploy an ephemeral preview environment for a service.
+
+      Two modes:
+        1. Existing image (git_ref=""):  deploys image_tag directly.
+        2. Build from branch (git_ref set): triggers build-image.yaml in mctl-gitops,
+           waits for the image to be pushed to GHCR, then deploys.
+
+      The preview Helm release (preview-{app}-{id}) runs in {team}-preview, not
+      the production tenant namespace. Tenant Vault paths are rewritten to
+      teams/<team>/<service>/preview/* and resolved through a namespaced
+      SecretStore whose ESO role cannot read production secrets. Platform
+      paths (GHCR, shared R2 artifact store) stay on ClusterSecretStore.
+      Accessible at {app}-{id}.{PLATFORM_DOMAIN} (covered by *.{PLATFORM_DOMAIN} wildcard).
+      Cleanup via preview-delete workflow (helm uninstall).
+      Vault ESO role eso-tenant-{team}-preview is created by wft-create-tenant
+      (not by this workflow — preview-deploy must not use the provisioner policy).
+      Seed preview secrets before the first deploy:
+        vault kv put secret/teams/<team>/<service>/preview/<leaf> ...
+      Missing preview paths fail closed (pod never gets prod credentials).
+spec:
+  ttlStrategy:
+    secondsAfterSuccess: 1800
+    secondsAfterFailure: 86400
+    secondsAfterCompletion: 3600
+  entrypoint: preview-pipeline
+  serviceAccountName: argo-workflow-sa
+  # Pod Security "restricted": this workflow runs in the tenant namespace
+  # (mctl-api operations.WorkflowNamespace), which is moving from
+  # enforce=baseline to restricted (handoff audit, block B step 3). The pod
+  # securityContext covers every container; container-level fields are not
+  # inherited from it, so podSpecPatch adds them to Argo's own init and wait
+  # containers (argoexec runs as root by default) and to main. HOME=/tmp
+  # because python, alpine/k8s and alpine/git have no passwd entry for uid
+  # 1000; steps that use ssh run mctl-workflow-tools, which has one.
+  # Templates reached through templateRef (tpl-*, the completion hook) run
+  # under this spec too.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  podSpecPatch: |
+    initContainers:
+      - name: init
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+    containers:
+      - name: wait
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+      - name: main
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        env:
+          - name: HOME
+            value: /tmp
+
+  arguments:
+    parameters:
+      - name: team_name
+      - name: component_name
+      - name: image_tag
+        # Required when git_ref="". When git_ref is set the MCP layer pre-generates the tag.
+      - name: ttl_hours
+        default: "24"
+      - name: git_ref
+        default: ""
+        # Branch, SHA, or tag to build from. Leave empty to deploy an existing image_tag.
+      - name: dockerfile_repo
+        default: ""
+        # Source repo in "org/repo" format. Required when git_ref is set.
+      - name: dockerfile_path
+        default: "Dockerfile"
+      - name: port
+        # `value`, not `default`: Argo rejects a workflow whose argument has
+        # only an empty default and was not submitted ("spec.arguments.port.value
+        # or spec.arguments.port.valueFrom is required"), and mctl-api never
+        # sends port, so every preview-deploy failed validation before any pod.
+        value: ""
+        # Container port override. Leave empty to use the value from the service values.yaml.
+        # Use when the image being previewed listens on a different port than production.
+
+  templates:
+    - name: preview-pipeline
+      dag:
+        tasks:
+          # The component name is the image name: the build pushes
+          # ghcr.io/<org>/<component_name>. Checked before anything is built.
+          - name: image-name
+            templateRef:
+              name: tpl-validate-tenant
+              clusterScope: true
+              template: image-name
+            arguments:
+              parameters:
+                - name: team_name
+                  value: "{{workflow.parameters.team_name}}"
+                - name: component_name
+                  value: "{{workflow.parameters.component_name}}"
+                - name: git_ref
+                  value: "{{workflow.parameters.git_ref}}"
+
+          - name: build-image
+            template: trigger-github-build
+            dependencies: [image-name]
+            when: "\"{{workflow.parameters.git_ref}}\" != \"\""
+            arguments:
+              parameters:
+                - name: dockerfile_repo
+                  value: "{{workflow.parameters.dockerfile_repo}}"
+                - name: git_ref
+                  value: "{{workflow.parameters.git_ref}}"
+                - name: image_tag
+                  value: "{{workflow.parameters.image_tag}}"
+                - name: dockerfile_path
+                  value: "{{workflow.parameters.dockerfile_path}}"
+                - name: team_name
+                  value: "{{workflow.parameters.team_name}}"
+                - name: component_name
+                  value: "{{workflow.parameters.component_name}}"
+
+          - name: deploy-preview
+            template: deploy
+            # `dependencies` (not `depends`) treats a Skipped build — no
+            # git_ref, deploying an existing image_tag — as satisfied, as it
+            # did before this task existed; a Failed image-name stops it.
+            dependencies: [image-name, build-image]
+            arguments:
+              parameters:
+                - name: team_name
+                  value: "{{workflow.parameters.team_name}}"
+                - name: component_name
+                  value: "{{workflow.parameters.component_name}}"
+                - name: image_tag
+                  value: "{{workflow.parameters.image_tag}}"
+                - name: ttl_hours
+                  value: "{{workflow.parameters.ttl_hours}}"
+                - name: port
+                  value: "{{workflow.parameters.port}}"
+
+    # ── Build: trigger build-image.yaml in mctl-gitops, poll until done ─────────
+    - name: trigger-github-build
+      inputs:
+        parameters:
+          - name: dockerfile_repo
+          - name: git_ref
+          - name: image_tag
+          - name: dockerfile_path
+            default: "Dockerfile"
+          - name: team_name
+          - name: component_name
+      script:
+        image: python:3.12-alpine
+        command: [python3]
+        envFrom:
+          - configMapRef:
+              name: mctl-platform-config
+        env:
+          - name: PARAM_DOCKERFILE_REPO
+            value: "{{inputs.parameters.dockerfile_repo}}"
+          - name: PARAM_GIT_REF
+            value: "{{inputs.parameters.git_ref}}"
+          - name: PARAM_IMAGE_TAG
+            value: "{{inputs.parameters.image_tag}}"
+          - name: PARAM_DOCKERFILE_PATH
+            value: "{{inputs.parameters.dockerfile_path}}"
+          - name: PARAM_TEAM_NAME
+            value: "{{inputs.parameters.team_name}}"
+          - name: PARAM_COMPONENT_NAME
+            value: "{{inputs.parameters.component_name}}"
+          - name: GITHUB_PAT
+            valueFrom:
+              secretKeyRef:
+                name: github-actions-pat
+                key: token
+        source: |
+          import os, json, time, urllib.request, urllib.error, sys
+
+          PAT = os.environ["GITHUB_PAT"]
+          GITOPS_ORG = os.environ["GITOPS_ORG"]
+          GITOPS_REPO = os.environ["GITOPS_REPO"]
+          API = "https://api.github.com"
+
+          # Parameters arrive as env, never interpolated into this
+          # script's text. This block is Python, not shell, but the
+          # exposure is identical: Argo substitutes the placeholder into
+          # the source BEFORE the interpreter parses it, so a value
+          # carrying a quote escapes the string literal and executes —
+          # in a pod holding GITHUB_PAT. gitops#992.
+          dockerfile_repo = os.environ["PARAM_DOCKERFILE_REPO"]
+          git_ref         = os.environ["PARAM_GIT_REF"]
+          image_tag       = os.environ["PARAM_IMAGE_TAG"]
+          dockerfile_path = os.environ["PARAM_DOCKERFILE_PATH"]
+          team_name       = os.environ["PARAM_TEAM_NAME"]
+          component_name  = os.environ["PARAM_COMPONENT_NAME"]
+          build_id        = "{{workflow.name}}"
+
+          # Image name derived from org + component — consistent with deploy-service
+          image_name = f"ghcr.io/{GITOPS_ORG}/{component_name}"
+
+          headers = {
+              "Authorization": f"Bearer {PAT}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "Content-Type": "application/json",
+          }
+
+          def api_request(method, path, data=None):
+              url = f"{API}{path}"
+              body = json.dumps(data).encode() if data else None
+              req = urllib.request.Request(url, data=body, headers=headers, method=method)
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      if resp.status == 204:
+                          return None
+                      return json.loads(resp.read())
+              except urllib.error.HTTPError as e:
+                  body_text = e.read().decode()
+                  print(f"HTTP {e.code}: {body_text}", file=sys.stderr)
+                  raise
+
+          print(f"Building: {dockerfile_repo}@{git_ref} -> {image_name}:{image_tag}")
+          dispatch_path = f"/repos/{GITOPS_ORG}/{GITOPS_REPO}/actions/workflows/build-image.yaml/dispatches"
+          api_request("POST", dispatch_path, {
+              "ref": "main",
+              "inputs": {
+                  "repo":            dockerfile_repo,
+                  "git_ref":         git_ref,
+                  "image_name":      image_name,
+                  "image_tag":       image_tag,
+                  "dockerfile_path": dockerfile_path,
+                  "team_name":       team_name,
+                  "component_name":  component_name,
+                  "build_id":        build_id,
+              }
+          })
+          print("Workflow dispatched, waiting for run...")
+
+          run_name = f"build-{build_id}"
+          run_id = None
+          for attempt in range(30):
+              time.sleep(10)
+              runs = api_request("GET",
+                  f"/repos/{GITOPS_ORG}/{GITOPS_REPO}/actions/workflows/build-image.yaml/runs?per_page=5")
+              for run in runs.get("workflow_runs", []):
+                  if run.get("name", "") == run_name or build_id in run.get("name", ""):
+                      run_id = run["id"]
+                      break
+              if run_id:
+                  break
+              print(f"  Waiting for run... ({attempt + 1}/30)")
+
+          if not run_id:
+              print("Timed out waiting for workflow run", file=sys.stderr)
+              sys.exit(1)
+
+          run_url = f"https://github.com/{GITOPS_ORG}/{GITOPS_REPO}/actions/runs/{run_id}"
+          print(f"Run: {run_url}")
+
+          for attempt in range(40):
+              time.sleep(15)
+              run = api_request("GET", f"/repos/{GITOPS_ORG}/{GITOPS_REPO}/actions/runs/{run_id}")
+              status = run["status"]
+              conclusion = run.get("conclusion")
+              if status == "completed":
+                  if conclusion == "success":
+                      print(f"Build succeeded: {image_name}:{image_tag}")
+                      sys.exit(0)
+                  else:
+                      print(f"Build failed: {conclusion} — {run_url}", file=sys.stderr)
+                      sys.exit(1)
+              print(f"  Build {status}... ({attempt + 1}/40)")
+
+          print("Timed out waiting for build (10 min)", file=sys.stderr)
+          sys.exit(1)
+        resources:
+          requests:
+            memory: 128Mi
+            cpu: 50m
+
+    # ── Deploy: Helm install/upgrade into {team}-preview ─────────────────────────
+    - name: deploy
+      inputs:
+        parameters:
+          - name: team_name
+            value: "{{workflow.parameters.team_name}}"
+          - name: component_name
+            value: "{{workflow.parameters.component_name}}"
+          - name: image_tag
+            value: "{{workflow.parameters.image_tag}}"
+          - name: ttl_hours
+            value: "{{workflow.parameters.ttl_hours}}"
+          - name: port
+            value: "{{workflow.parameters.port}}"
+      outputs:
+        parameters:
+          - name: preview_id
+            valueFrom:
+              path: /tmp/preview_id
+          - name: preview_url
+            valueFrom:
+              path: /tmp/preview_url
+      script:
+        image: ghcr.io/mctlhq/mctl-workflow-tools:1.0.0@sha256:5e367f737d4bffaa1b6ea04a29681dc760fd476790f80bf93cbc4571d4ccfe6b
+        command: [sh]
+        env:
+          - name: PARAM_TEAM_NAME
+            value: "{{inputs.parameters.team_name}}"
+          - name: PARAM_COMPONENT_NAME
+            value: "{{inputs.parameters.component_name}}"
+          - name: PARAM_IMAGE_TAG
+            value: "{{inputs.parameters.image_tag}}"
+          - name: PARAM_TTL_HOURS
+            value: "{{inputs.parameters.ttl_hours}}"
+          - name: PARAM_PORT
+            value: "{{inputs.parameters.port}}"
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+        envFrom:
+          - configMapRef:
+              name: mctl-platform-config
+        volumeMounts:
+          - name: deploy-key
+            mountPath: /secrets/deploy-key
+            readOnly: true
+        source: |
+          set -euo pipefail
+
+          # Parameters arrive as env, never interpolated into this
+          # script's text. An Argo placeholder is substituted BEFORE sh
+          # parses the line (this comment cannot show one literally —
+          # Argo would substitute it here too), so a value containing a
+          # quote and a semicolon runs as a command, in a pod that is
+          # root with the gitops deploy key mounted. gitops#992.
+          # The whole block is bound, not just the parameters the
+          # operations registry happens to constrain: a reader should not
+          # have to cross-check the registry to know which line is safe.
+          TEAM="$PARAM_TEAM_NAME"
+          COMPONENT="$PARAM_COMPONENT_NAME"
+          TAG="$PARAM_IMAGE_TAG"
+          TTL_HOURS="$PARAM_TTL_HOURS"
+          PORT="$PARAM_PORT"
+          NS="${TEAM}-preview"
+
+          # TAG and PORT do not stop at the shell: both are handed to
+          # `helm --set` below, and helm's --set parser SPLITS ON COMMAS.
+          # A tag of
+          #     1.0,image.repository=attacker/evil
+          # is therefore not one value with a comma in it — it is two
+          # overrides, the second of which replaces the image of a
+          # release deployed into the tenant's preview namespace. Env
+          # binding cannot help here: the injection happens inside helm,
+          # after sh has already passed the value through intact.
+          # (claude P1 + agy finding 2 on gitops#993.)
+          #
+          # Neither carries a Pattern in the operations registry, so the
+          # grammar is asserted here.
+          case "$TAG" in
+            "" | *[!A-Za-z0-9._-]* )
+              echo "❌ image_tag must match the OCI tag grammar [A-Za-z0-9._-]; got: ${TAG}" >&2
+              exit 1
+              ;;
+          esac
+          case "$PORT" in
+            "") ;;
+            *[!0-9]* )
+              echo "❌ port must be a decimal integer; got: ${PORT}" >&2
+              exit 1
+              ;;
+          esac
+          # TTL_HOURS becomes the release's expiry, which preview-reaper
+          # enforces, so it is arithmetic input now and checked like PORT.
+          # Same grammar as the registry pattern ^[0-9]{1,4}$, asserted
+          # here rather than trusted, like TAG and PORT above. Leading zeros
+          # are stripped because sh reads 08 as a bad octal number.
+          case "$TTL_HOURS" in
+            "" | *[!0-9]* | ?????* )
+              echo "❌ ttl_hours must be 1-4 decimal digits; got: ${TTL_HOURS}" >&2
+              exit 1
+              ;;
+          esac
+          TTL_HOURS=$(echo "$TTL_HOURS" | sed 's/^0*//')
+          TTL_HOURS="${TTL_HOURS:-0}"
+          EXPIRES_AT=$(( $(date +%s) + TTL_HOURS * 3600 ))
+
+          PREVIEW_ID=$(echo "${ARGO_WORKFLOW_NAME}" | tr -cd 'a-z0-9' | tail -c 6)
+          RELEASE="preview-${COMPONENT}-${PREVIEW_ID}"
+          HOST="${COMPONENT}-${PREVIEW_ID}.${PLATFORM_DOMAIN}"
+
+          echo "${PREVIEW_ID}" > /tmp/preview_id
+          echo "https://${HOST}" > /tmp/preview_url
+
+          mkdir -p ~/.ssh
+          cp /secrets/deploy-key/ssh-privatekey ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # GitHub's published SSH host keys, PINNED rather than trusted on
+          # first use. Source: https://api.github.com/meta (.ssh_keys),
+          # fetched 2026-09-02. This replaces an `ssh-keyscan` of
+          # ssh.github.com, which is trust-on-first-use: it accepted
+          # whatever key answered, on a connection carrying a
+          # WRITE-capable deploy key. A MITM or DNS-poison was recorded
+          # as the truth and then honoured.
+          #
+          # Keyed on [ssh.github.com]:443 — ssh looks up the host and
+          # port it actually connects to, which the Host block rewrites.
+          #
+          # If GitHub rotates a host key these lines must be updated; it
+          # last happened in March 2023, when the RSA key was replaced.
+          cat > ~/.ssh/known_hosts <<'GITHUB_HOST_KEYS'
+          [ssh.github.com]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          [ssh.github.com]:443 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+          [ssh.github.com]:443 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+          GITHUB_HOST_KEYS
+          chmod 600 ~/.ssh/known_hosts
+          git config --global url."ssh://git@ssh.github.com:443/".insteadOf "https://github.com/"
+          git clone --depth=1 "https://github.com/${GITOPS_ORG}/${GITOPS_REPO}.git" /tmp/mctl-gitops
+
+          CHART_PATH="/tmp/mctl-gitops/platform-gitops/helm-charts/base-service"
+          SERVICE_VALUES="/tmp/mctl-gitops/platform-gitops/services/${TEAM}/${COMPONENT}/values.yaml"
+          PREVIEW_VALUES="/tmp/preview-values.yaml"
+
+          python3 /tmp/mctl-gitops/platform-gitops/argo-workflows/scripts/rewrite_preview_values.py \
+            --team "${TEAM}" --service "${COMPONENT}" \
+            --in "${SERVICE_VALUES}" --out "${PREVIEW_VALUES}"
+
+          # preview.yaml (namespace, RBAC, SecretStore) is applied by ArgoCD
+          # from the tenant chart. Do not --create-namespace: that would skip
+          # NetworkPolicy and the preview-only ESO role.
+          echo "Waiting for namespace ${NS} (tenant-${TEAM} chart)..."
+          ready=""
+          i=1
+          while [ "$i" -le 36 ]; do
+            if helm list -n "${NS}" >/dev/null 2>&1; then
+              ready=1
+              echo "${NS} is ready"
+              break
+            fi
+            echo "  waiting ${i}/36"
+            i=$((i + 1))
+            sleep 5
+          done
+          if [ -z "${ready}" ]; then
+            echo "ERROR: namespace ${NS} is not ready after 3m." >&2
+            echo "Wait for ArgoCD Application tenant-${TEAM} to sync preview.yaml" >&2
+            echo "(Namespace, helm-deploy Role, SecretStore), then retry." >&2
+            exit 1
+          fi
+
+          helm upgrade --install "${RELEASE}" "${CHART_PATH}" \
+            --namespace "${NS}" \
+            --values "${PREVIEW_VALUES}" \
+            --set image.tag="${TAG}" \
+            --set ingress.enabled=true \
+            --set ingress.className=traefik \
+            --set "ingress.annotations.cert-manager\\.io/cluster-issuer=letsencrypt-prod" \
+            --set "ingress.hosts={${HOST}}" \
+            --set "ingress.tls[0].secretName=${RELEASE}-tls" \
+            --set "ingress.tls[0].hosts={${HOST}}" \
+            --set blueGreen.enabled=false \
+            --set dbInitJob.enabled=false \
+            ${PORT:+--set service.port="${PORT}"} \
+            --set-string "podLabels.mctl\\.ai/preview=true" \
+            --set-string "podLabels.mctl\\.ai/preview-id=${PREVIEW_ID}" \
+            --labels "mctl.ai/expires-at=${EXPIRES_AT}" \
+            --wait --timeout=5m
+
+          echo "Preview deployed: https://${HOST} (release: ${RELEASE}, namespace: ${NS}, ttl: ${TTL_HOURS}h)"
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+      volumes:
+        - name: deploy-key
+          secret:
+            secretName: mctl-gitops-deploy-key
