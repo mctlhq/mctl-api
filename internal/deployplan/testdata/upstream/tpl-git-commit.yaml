@@ -1,0 +1,847 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ClusterWorkflowTemplate
+metadata:
+  name: tpl-git-commit
+  annotations:
+    workflows.argoproj.io/description: |
+      Reusable template: clones the gitops repo, runs a generation script,
+      commits and pushes only within the allowed path prefix.
+      Authenticates to GitHub with the mctl-gitops SSH deploy key.
+spec:
+  templates:
+    # ── Generate and commit service manifests ─────────────────────────────────
+    - name: commit-service
+      inputs:
+        parameters:
+          - name: action          # onboard | deploy | update-config
+          - name: team_name
+          - name: component_name
+          - name: component_type  # base-service | worker-service
+          - name: image_tag
+            default: "latest"
+          - name: port
+            default: "8080"
+          - name: host
+            default: ""
+          - name: health_check_path
+            default: ""
+          - name: env_vars
+            default: ""
+          - name: secret_env_vars
+            default: ""
+          - name: provision_database
+            default: "false"
+          - name: clear_env
+            default: "false"
+          - name: clear_secrets
+            default: "false"
+          - name: skip_health_check
+            default: "false"
+          - name: dockerfile_repo
+            default: ""
+          - name: service_template
+            default: "default"
+          - name: config_patch
+            default: ""
+          - name: image_user      # `uid` or `uid:gid` from check-image-user
+            default: ""
+      script:
+        image: ghcr.io/mctlhq/mctl-workflow-tools:1.0.0@sha256:5e367f737d4bffaa1b6ea04a29681dc760fd476790f80bf93cbc4571d4ccfe6b
+        command: [sh]
+        env:
+          - name: HEALTH_CHECK_PATH
+            value: "{{inputs.parameters.health_check_path}}"
+          - name: PARAM_ENV_VARS
+            value: "{{inputs.parameters.env_vars}}"
+          - name: PARAM_SECRET_ENV_VARS
+            value: "{{inputs.parameters.secret_env_vars}}"
+          - name: PARAM_TEAM_NAME
+            value: "{{inputs.parameters.team_name}}"
+          - name: PARAM_COMPONENT_NAME
+            value: "{{inputs.parameters.component_name}}"
+          - name: PARAM_COMPONENT_TYPE
+            value: "{{inputs.parameters.component_type}}"
+          - name: PARAM_ACTION
+            value: "{{inputs.parameters.action}}"
+          - name: PARAM_IMAGE_TAG
+            value: "{{inputs.parameters.image_tag}}"
+          - name: PARAM_PORT
+            value: "{{inputs.parameters.port}}"
+          - name: PARAM_HOST
+            value: "{{inputs.parameters.host}}"
+          - name: PARAM_DOCKERFILE_REPO
+            value: "{{inputs.parameters.dockerfile_repo}}"
+          - name: PARAM_PROVISION_DATABASE
+            value: "{{inputs.parameters.provision_database}}"
+          - name: PARAM_CLEAR_ENV
+            value: "{{inputs.parameters.clear_env}}"
+          - name: PARAM_CLEAR_SECRETS
+            value: "{{inputs.parameters.clear_secrets}}"
+          - name: PARAM_SERVICE_TEMPLATE
+            value: "{{inputs.parameters.service_template}}"
+          - name: PARAM_CONFIG_PATCH
+            value: "{{inputs.parameters.config_patch}}"
+          - name: PARAM_SKIP_HEALTH_CHECK
+            value: "{{inputs.parameters.skip_health_check}}"
+          - name: PARAM_IMAGE_USER
+            value: "{{inputs.parameters.image_user}}"
+        envFrom:
+          - configMapRef:
+              name: mctl-platform-config
+        source: |
+          set -e
+
+          TEAM="$PARAM_TEAM_NAME"
+          SERVICE="$PARAM_COMPONENT_NAME"
+          TYPE="$PARAM_COMPONENT_TYPE"
+          ACTION="$PARAM_ACTION"
+          TAG="$PARAM_IMAGE_TAG"
+          PORT="$PARAM_PORT"
+          HOST="$PARAM_HOST"
+          ENV_VARS="$PARAM_ENV_VARS"
+          SECRET_VARS="$PARAM_SECRET_ENV_VARS"
+          REPO="$PARAM_DOCKERFILE_REPO"
+          PROVISION_DB="$PARAM_PROVISION_DATABASE"
+          CLEAR_ENV="$PARAM_CLEAR_ENV"
+          CLEAR_SECRETS="$PARAM_CLEAR_SECRETS"
+          SERVICE_TEMPLATE="$PARAM_SERVICE_TEMPLATE"
+          CONFIG_PATCH="$PARAM_CONFIG_PATCH"
+          IMAGE_USER="$PARAM_IMAGE_USER"
+
+          # Normalize sentinels (Backstage strips bare empty strings from YAML)
+          [ "$HOST" = "none" ] && HOST=""
+          [ "$TAG" = "auto" ] && TAG=""
+          # clear_env/clear_secrets: use param value, or detect __CLEAR__ sentinel
+          [ "$CLEAR_ENV" != "true" ] && CLEAR_ENV=false
+          [ "$CLEAR_SECRETS" != "true" ] && CLEAR_SECRETS=false
+          [ "$ENV_VARS" = "__CLEAR__" ] && CLEAR_ENV=true && ENV_VARS=""
+          [ "$SECRET_VARS" = "__CLEAR__" ] && CLEAR_SECRETS=true && SECRET_VARS=""
+
+          # Auto-generate domain for base-service if host not explicitly set
+          if [ "$TYPE" = "base-service" ] && { [ -z "$HOST" ] || [ "$HOST" = "auto" ]; }; then
+            HOST="${TEAM}-${SERVICE}.${PLATFORM_DOMAIN}"
+            echo "Auto-generated domain: ${HOST}"
+          fi
+          SKIP_HEALTH="$PARAM_SKIP_HEALTH_CHECK"
+
+          # KEY=value lines, parsed the way write-service-secrets(-from-secret)
+          # in tpl-vault-write parse them: split on the first '=', trim blanks
+          # around key and value, drop one pair of matching surrounding quotes
+          # from the value. This was `echo "$x" | xargs`, which fails outright
+          # on an unbalanced quote (a value like a"b could not be onboarded at
+          # all) and silently strips inner quotes and backslashes and squeezes
+          # runs of spaces in every other value. printf, not echo: dash and
+          # busybox echo expand backslash escapes.
+          trim() {
+            _t="$1"
+            while :; do case "$_t" in [[:space:]]*) _t="${_t#?}" ;; *) break ;; esac; done
+            while :; do case "$_t" in *[[:space:]]) _t="${_t%?}" ;; *) break ;; esac; done
+            printf '%s' "$_t"
+          }
+          unquote() {
+            _t="$1"
+            case "$_t" in
+              \"*\"|\'*\') _t="${_t#?}"; _t="${_t%?}" ;;
+            esac
+            printf '%s' "$_t"
+          }
+
+          # ── 0a. Validate everything that reaches a yq or sed program ──────────
+          # Second layer, not the only one: every yq call below now passes its
+          # values through the environment (strenv), so an injection payload is
+          # data rather than expression text. This block exists so that a future
+          # edit which reintroduces interpolation does not silently reopen the
+          # hole (gitops#997, same reasoning as #995).
+          #
+          # An anchored grep -E matches PER LINE, so "ok\n<payload>" passes
+          # '^...$' happily. Every value here is checked for embedded newlines
+          # first (the bug fixed in 397fa765 on the custom-domain pair).
+          reject_multiline() {
+            if [ "$(printf '%s' "$2" | wc -l)" -ne 0 ]; then
+              echo "❌ ${1} must be a single line"
+              exit 1
+            fi
+          }
+
+          # config_patch is a raw yq PROGRAM, not a value: there is no strenv()
+          # shape for it, because the expression itself is the parameter. Its
+          # only producer was a mctl-api resource-profile handler that was
+          # removed in mctlhq/mctl-api#520; nothing sends it today. The
+          # validator stays so that any future producer is held to
+          # the same shape, a pipeline of plain assignments:
+          #
+          #   .resources.requests.cpu = "500m" | ... | .env.NODE_OPTIONS = "..."
+          #
+          # mctl-api now drops parameters an operation does not declare, and
+          # config_patch is not declared on deploy-service, so it can no longer
+          # arrive from a request body (mctlhq/mctl-api#246). This is the
+          # second layer, so that a regression there cannot rewrite .image or
+          # .externalSecret from here.
+          #
+          # Checking only that the expression STARTS with an allowed root is
+          # not enough: `|` chains independent top-level assignments, an idiom
+          # this file uses itself, so `.resources.x = "y" | .image.tag =
+          # "pwned"` would pass a prefix check and still rewrite the image
+          # (claude P1 on the PR that introduced this). Every segment is
+          # therefore checked, not just the first.
+          #
+          # `|=` pipelines are deliberately not supported: their right-hand
+          # side is not an assignment root, and nothing produces one today.
+          #
+          # Splitting on `|` alone is also not enough, because two other yq
+          # operators re-root an expression inside a segment that still opens
+          # with an allowed prefix, both verified against yq v4.47.1:
+          #
+          #   .env.bypass = (.image.tag = "pwned")   parentheses evaluate the
+          #                                          inner assignment against
+          #                                          the ROOT document
+          #   .env.a = "x", .image.tag = "pwned"     `,` unions two independent
+          #                                          expressions
+          #
+          # Both rewrote .image.tag on a fixture. `(`, `)` and `,` are therefore
+          # rejected outright; the plain-assignment shape above needs
+          # neither (agy P1 on this PR).
+          validate_config_patch() {
+            reject_multiline "config_patch" "$1"
+            # No escapes into the environment, the filesystem, or a subshell.
+            case "$1" in
+              *'$'* | *'`'* | *env\(* | *strenv\(* | *load* | *eval*)
+                echo "❌ config_patch may not reference env, files or subshells: ${1}"
+                exit 1
+                ;;
+            esac
+            # Structural operators that re-root the expression regardless of
+            # the prefix each segment carries. See the note above.
+            case "$1" in
+              *'('* | *')'* | *','*)
+                echo "❌ config_patch may not use ( ) or , — they re-root the expression: ${1}"
+                exit 1
+                ;;
+            esac
+            _rest="$1"
+            while [ -n "$_rest" ]; do
+              case "$_rest" in
+                *"|"*) _seg="${_rest%%|*}"; _rest="${_rest#*|}" ;;
+                *)     _seg="$_rest";      _rest="" ;;
+              esac
+              # Strip leading blanks without xargs, which would also strip the
+              # quotes and fail outright on an unbalanced one.
+              while :; do
+                case "$_seg" in
+                  " "*|"	"*) _seg="${_seg#?}" ;;
+                  *) break ;;
+                esac
+              done
+              case "$_seg" in
+                .resources.*|.env.*|.configMaps[*) ;;
+                *)
+                  echo "❌ config_patch segment must assign into .resources, .env or .configMaps: ${_seg}"
+                  exit 1
+                  ;;
+              esac
+            done
+          }
+
+          for pair in "team_name:${TEAM}" "component_name:${SERVICE}"; do
+            name="${pair#*:}"
+            reject_multiline "${pair%%:*}" "$name"
+            echo "$name" | grep -qE '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$' || {
+              echo "❌ Invalid ${pair%%:*}: ${name}"; exit 1; }
+          done
+
+          if [ -n "$HOST" ] && [ "$HOST" != "none" ] && [ "$HOST" != "auto" ]; then
+            reject_multiline "host" "$HOST"
+            echo "$HOST" | grep -qE '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(\.[a-z]{2,})+$' || {
+              echo "❌ Invalid host: ${HOST}"; exit 1; }
+          fi
+
+          if [ -n "$TAG" ]; then
+            reject_multiline "image_tag" "$TAG"
+            # docker/distribution's tag grammar, minus the leading separator -
+            # the same shape release-deploy.yaml enforces before committing a
+            # tag into a manifest.
+            echo "$TAG" | grep -qE '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$' || {
+              echo "❌ Invalid image_tag: ${TAG}"; exit 1; }
+          fi
+
+          if [ -n "$REPO" ]; then
+            reject_multiline "dockerfile_repo" "$REPO"
+            echo "$REPO" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$' || {
+              echo "❌ Invalid dockerfile_repo: ${REPO}"; exit 1; }
+          fi
+
+          # The values below reach a `sed` PROGRAM rather than a yq expression:
+          #
+          #   sed -e "s|__PORT__|${PORT}|g" ...
+          #
+          # `|` is the substitution delimiter, so a value containing one closes
+          # the s/// and everything after it is read as further sed commands -
+          # `s|.*|<anything>|g` rewrites the whole rendered manifest, which is
+          # a strictly larger blast radius than the yq holes this change is
+          # about. `port` carries no Pattern in the operations registry and is
+          # not checked by tpl-validate-tenant either, so it arrives exactly as
+          # a caller sent it (agy P1 on this PR).
+          reject_multiline "port" "$PORT"
+          echo "$PORT" | grep -qE '^[0-9]{1,5}$' || {
+            echo "❌ Invalid port: ${PORT}"; exit 1; }
+
+          # check-image-user writes a non-zero uid with an optional numeric gid,
+          # nothing else; anything other than that or empty is refused rather
+          # than committed as a security context.
+          if [ -n "$IMAGE_USER" ]; then
+            reject_multiline "image_user" "$IMAGE_USER"
+            echo "$IMAGE_USER" | grep -qE '^[1-9][0-9]{0,9}(:[0-9]{1,10})?$' || {
+              echo "❌ Invalid image_user: ${IMAGE_USER}"; exit 1; }
+          fi
+
+          # git, ssh, yq and helm come from mctl-workflow-tools 1.0.0: yq v4.52.4,
+          # helm v3.16.4, sha256-pinned at build time. The yq calls below rely
+          # on v4 (strenv, no startswith), so a tools bump must stay on yq v4.
+          # This step runs non-root, so it installs nothing.
+          mkdir -p ~/.ssh
+          cp /secrets/deploy-key/ssh-privatekey ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Use port 443 (port 22 is blocked). Host keys are pinned below.
+          printf 'Host github.com\n  Hostname ssh.github.com\n  Port 443\n  IdentityFile ~/.ssh/id_ed25519\n' > ~/.ssh/config
+          # GitHub's published SSH host keys, PINNED rather than trusted on
+          # first use. Source: https://api.github.com/meta (.ssh_keys),
+          # fetched 2026-09-02. This replaces StrictHostKeyChecking=no,
+          # which accepted whatever key answered on a connection that
+          # carries a WRITE-capable deploy key: a MITM or a DNS-poison of
+          # ssh.github.com was handed that key with no complaint.
+          #
+          # Keyed on [ssh.github.com]:443, not github.com. The Host block
+          # above rewrites hostname and port, and ssh looks up what it
+          # actually connects to — a github.com entry would silently miss.
+          #
+          # If GitHub rotates a host key these lines must be updated; it
+          # last happened in March 2023, when the RSA key was replaced.
+          cat > ~/.ssh/known_hosts <<'GITHUB_HOST_KEYS'
+          [ssh.github.com]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          [ssh.github.com]:443 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+          [ssh.github.com]:443 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+          GITHUB_HOST_KEYS
+          chmod 600 ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/config
+
+          # ── 1. Clone gitops repo via SSH ─────────────────────────────────────
+          # This template used to mint a GitHub App installation token here for
+          # "API calls", but nothing in it ever read $GH_TOKEN — every git
+          # operation below goes over the SSH deploy key. The block was removed
+          # along with the github-app-credentials mount: it was a live consumer
+          # of MCTL App's private key inside the cluster for no benefit, and
+          # MCTL App is being narrowed to read-only (#761).
+          echo "📥 Cloning ${GITOPS_REPO}..."
+          git clone --depth=1 "git@github.com:${GITOPS_ORG}/${GITOPS_REPO}.git" /tmp/mctl-gitops
+          cd /tmp/mctl-gitops
+
+          git config user.name "argo-workflows[bot]"
+          git config user.email "argo-workflows[bot]@users.noreply.github.com"
+
+          # ── 2. Service directory ──────────────────────────────────────────
+          DIR="platform-gitops/services/${TEAM}/${SERVICE}"
+
+          # ── 3. Security: validate path stays within allowed scope ─────────
+          ALLOWED_BASES="platform-gitops/services/${TEAM}"
+          ALLOWED=false
+          for base in $ALLOWED_BASES; do
+            case "$DIR" in
+              ${base}/*) ALLOWED=true ;;
+              ${base}) ALLOWED=true ;;
+            esac
+          done
+          if [ "$ALLOWED" != "true" ]; then
+            echo "❌ Security: path $DIR is outside allowed scope for team $TEAM"
+            exit 1
+          fi
+
+          # ── 4. Generate files ──────────────────────────────────────────────
+          if [ "$ACTION" = "onboard" ]; then
+            mkdir -p "$DIR"
+
+            # values.yaml from template catalog. "default" is the service_template
+            # parameter's own schema default, not a caller's explicit choice — so it
+            # must not override component_type's implied chart. Only an explicit,
+            # non-default service_template name is allowed to pick its own directory.
+            if [ "$SERVICE_TEMPLATE" != "default" ] && [ -d "platform-gitops/argo-workflows/service-templates/${SERVICE_TEMPLATE}" ]; then
+              TPL="platform-gitops/argo-workflows/service-templates/${SERVICE_TEMPLATE}/values.yaml.tpl"
+              echo "Using explicit service template: ${SERVICE_TEMPLATE}"
+            elif [ "$TYPE" = "worker-service" ]; then
+              echo "component_type=worker-service, using worker template"
+              TPL="platform-gitops/argo-workflows/service-templates/worker/values.yaml.tpl"
+            else
+              TPL="platform-gitops/argo-workflows/service-templates/default/values.yaml.tpl"
+            fi
+
+            sed \
+              -e "s|__TEAM_NAME__|${TEAM}|g" \
+              -e "s|__SERVICE_NAME__|${SERVICE}|g" \
+              -e "s|__IMAGE_TAG__|${TAG}|g" \
+              -e "s|__PORT__|${PORT}|g" \
+              -e "s|__HOST__|${HOST}|g" \
+              "$TPL" > "${DIR}/values.yaml"
+
+            # Auto-add mirror domain (alternate ↔ primary) + TLS
+            if [ "$HOST" != "none" ] && [ -n "$HOST" ]; then
+              MIRROR=""
+              if [ -n "${PLATFORM_DOMAIN_ALT}" ]; then
+                case "$HOST" in
+                  *.${PLATFORM_DOMAIN_ALT}) MIRROR=$(echo "$HOST" | sed "s/\.${PLATFORM_DOMAIN_ALT}$/.${PLATFORM_DOMAIN}/") ;;
+                  *.${PLATFORM_DOMAIN}) MIRROR=$(echo "$HOST" | sed "s/\.${PLATFORM_DOMAIN}$/.${PLATFORM_DOMAIN_ALT}/") ;;
+                esac
+              fi
+              if [ -n "$MIRROR" ]; then
+                # Exported, not just assigned: strenv() reads the process
+                # environment, and a plain shell variable is not in it.
+                export MIRROR
+                yq eval -i '.ingress.hosts += [strenv(MIRROR)]' "${DIR}/values.yaml"
+              fi
+              export TLS_NAME="${SERVICE}-tls"
+              yq eval -i '.ingress.annotations."cert-manager.io/cluster-issuer" = "letsencrypt-prod"' "${DIR}/values.yaml"
+              yq eval -i '.ingress.tls = [{"secretName": strenv(TLS_NAME), "hosts": .ingress.hosts}]' "${DIR}/values.yaml"
+            fi
+
+            # Override probe path if requested. Runs before the
+            # skip_health_check null-out below so that skip_health_check
+            # always wins if both are somehow set — otherwise this would
+            # re-add a path to a probes object that was just nulled out.
+            if [ -n "$HEALTH_CHECK_PATH" ]; then
+              yq eval -i '.probes.liveness.path = strenv(HEALTH_CHECK_PATH) | .probes.readiness.path = strenv(HEALTH_CHECK_PATH)' "${DIR}/values.yaml"
+            fi
+
+            # Disable probes if requested
+            if [ "$SKIP_HEALTH" = "true" ]; then
+              yq eval -i '.probes.liveness = null | .probes.readiness = null' "${DIR}/values.yaml"
+            fi
+
+            # Database secret injection
+            if [ "$PROVISION_DB" = "true" ]; then
+              export DB_SECRET="${TEAM}-${SERVICE}-db-creds"
+              export VAULT_PATH="teams/${TEAM}/${SERVICE}/database"
+              yq eval -i '.envFrom = ((.envFrom // []) | map(select(.secretRef.name != strenv(DB_SECRET))) + [{"secretRef": {"name": strenv(DB_SECRET)}}])' "${DIR}/values.yaml"
+              yq eval -i '.dbSecret.vaultPath = strenv(VAULT_PATH)' "${DIR}/values.yaml"
+              yq eval -i '.dbSecret.secretName = strenv(DB_SECRET)' "${DIR}/values.yaml"
+            fi
+
+            # env_vars
+            if [ -n "$ENV_VARS" ]; then
+              while IFS= read -r line; do
+                key=$(trim "${line%%=*}")
+                case "$line" in *=*) rest="${line#*=}" ;; *) rest="" ;; esac
+                [ -z "$key" ] && continue
+                case "$key" in \#*) continue ;; esac
+                value=$(unquote "$(trim "$rest")")
+                # The key lands in an expression PATH, where strenv() does not
+                # substitute - `.env.${key}` with a key of `x = 1 | .image.tag =
+                # "pwned" #` rewrites the image a service runs. So the key is
+                # both shape-checked here and passed as data via the [strenv()]
+                # subscript below (gitops#997).
+                reject_multiline "env var name" "$key"
+                echo "$key" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$' || {
+                  echo "❌ Invalid env var name: ${key}"; exit 1; }
+                export KEY="$key" VALUE="$value"
+                yq eval -i '.env[strenv(KEY)] = strenv(VALUE)' "${DIR}/values.yaml"
+              done <<ENVEOF
+          $PARAM_ENV_VARS
+          ENVEOF
+            fi
+
+            # secret_env_vars → ExternalSecret config
+            if [ -n "$SECRET_VARS" ]; then
+              export SECRET_NAME="${SERVICE}-secrets"
+              yq eval -i '.externalSecret.targetSecret = strenv(SECRET_NAME)' "${DIR}/values.yaml"
+              yq eval -i '.externalSecret.data = []' "${DIR}/values.yaml"
+              while IFS= read -r line; do
+                key=$(trim "${line%%=*}")
+                [ -z "$key" ] && continue
+                case "$key" in \#*) continue ;; esac
+                reject_multiline "secret env var name" "$key"
+                echo "$key" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$' || {
+                  echo "❌ Invalid secret env var name: ${key}"; exit 1; }
+                export KEY="$key" REMOTE_KEY="teams/${TEAM}/${SERVICE}"
+                yq eval -i '.externalSecret.data += [{"secretKey": strenv(KEY), "remoteKey": strenv(REMOTE_KEY), "property": strenv(KEY)}]' "${DIR}/values.yaml"
+              done <<SECRETEOF
+          $PARAM_SECRET_ENV_VARS
+          SECRETEOF
+              yq eval -i '.envFrom = ((.envFrom // []) | map(select(.secretRef.name != strenv(SECRET_NAME))) + [{"secretRef": {"name": strenv(SECRET_NAME)}}])' "${DIR}/values.yaml"
+            fi
+
+            # Pin the image's numeric USER (gitops#2149). Under the chart's
+            # runAsNonRoot default the repo-wide sweep in
+            # tests/test_check_image_user.py requires runAsUser in values, so
+            # an onboard without it turned validate red for every later PR.
+            # `//` keeps a pin a service template already carries. Only
+            # onboard writes it: deploy never touches a pin set by hand.
+            if [ -n "$IMAGE_USER" ]; then
+              export PIN_UID="${IMAGE_USER%%:*}"
+              yq eval -i '.containerSecurityContext.runAsUser = (.containerSecurityContext.runAsUser // (strenv(PIN_UID) | to_number))' "${DIR}/values.yaml"
+              case "$IMAGE_USER" in
+                *:*)
+                  export PIN_GID="${IMAGE_USER#*:}"
+                  yq eval -i '.containerSecurityContext.runAsGroup = (.containerSecurityContext.runAsGroup // (strenv(PIN_GID) | to_number))' "${DIR}/values.yaml"
+                  ;;
+              esac
+              echo "Pinned runAsUser/runAsGroup from the image USER ${IMAGE_USER}"
+            fi
+
+            # catalog-info.yaml
+            COMPONENT_TYPE=$( [ "$TYPE" = "base-service" ] && echo "service" || echo "worker" )
+            sed \
+              -e "s|__TEAM_NAME__|${TEAM}|g" \
+              -e "s|__SERVICE_NAME__|${SERVICE}|g" \
+              -e "s|__COMPONENT_TYPE__|${COMPONENT_TYPE}|g" \
+              -e "s|__DOCKERFILE_REPO__|${REPO}|g" \
+              "platform-gitops/argo-workflows/file-templates/catalog-info.yaml.tpl" > "${DIR}/catalog-info.yaml"
+
+            if [ -z "$REPO" ]; then
+              yq eval -i 'del(.metadata.annotations."github.com/source-repo")' "${DIR}/catalog-info.yaml"
+              yq eval -i 'del(.metadata.links[] | select(.title == "Source Repository"))' "${DIR}/catalog-info.yaml"
+            fi
+
+            if [ -n "$HOST" ]; then
+              export HOST
+              yq eval -i '.metadata.links += [{"url": "https://" + strenv(HOST), "title": "Service URL", "icon": "web"}]' "${DIR}/catalog-info.yaml"
+            fi
+
+            # Validate Helm template before committing
+            echo "🔍 Validating Helm template..."
+
+            if ! helm template test "platform-gitops/helm-charts/base-service" \
+              -f "${DIR}/values.yaml" > /dev/null 2>&1; then
+              echo "❌ Helm validation failed:"
+              helm template test "platform-gitops/helm-charts/base-service" -f "${DIR}/values.yaml" 2>&1 || true
+              exit 1
+            fi
+            echo "✅ Helm template valid"
+
+            git add "${DIR}/"
+            git commit -m "feat: onboard ${TEAM}/${SERVICE} (${TAG})"
+
+          elif [ "$ACTION" = "deploy" ]; then
+            export TAG
+            yq eval -i '.image.tag = strenv(TAG)' "${DIR}/values.yaml"
+            export REPO="$(yq eval '.image.repository' "${DIR}/values.yaml")"
+
+            # Sync any extraContainers riding the same image repo to the
+            # new tag — kuptsi-app and similar services run a sibling
+            # worker (e.g. temporal-worker) off the same build, so both
+            # halves must move in lockstep on every release. Only touches
+            # containers already pointing at ${REPO}:… — sidecars on a
+            # different image (log shippers, busybox, etc.) are left
+            # alone. Mirrors the release-deploy.yaml GH Action fix
+            # (e579cf4) so mctl_deploy_service action=deploy and the
+            # release-deploy GH workflow stay equivalent.
+            # yq v4 lacks startswith(); use test() with `.` escaped so a
+            # repo like ghcr.io/... doesn't accidentally match ghcr_io/...
+            # ${REPO//./\.} is a bashism and this script runs under alpine's
+            # ash, where it expands to nothing - the regex then matched every
+            # image. sed is portable and does the same escaping.
+            export REPO_RE="$(printf '%s' "$REPO" | sed 's/\./\\./g')"
+            yq eval -i '(.extraContainers[]? | select(.image // "" | test("^" + strenv(REPO_RE) + ":")) | .image) = strenv(REPO) + ":" + strenv(TAG)' "${DIR}/values.yaml"
+
+            # Clear env vars if sentinel __CLEAR__ was set
+            if [ "$CLEAR_ENV" = "true" ]; then
+              yq eval -i '.env = {}' "${DIR}/values.yaml"
+              echo "Cleared all env vars"
+            elif [ -n "$ENV_VARS" ]; then
+              while IFS= read -r line; do
+                key=$(trim "${line%%=*}")
+                case "$line" in *=*) rest="${line#*=}" ;; *) rest="" ;; esac
+                [ -z "$key" ] && continue
+                case "$key" in \#*) continue ;; esac
+                value=$(unquote "$(trim "$rest")")
+                # The key lands in an expression PATH, where strenv() does not
+                # substitute - `.env.${key}` with a key of `x = 1 | .image.tag =
+                # "pwned" #` rewrites the image a service runs. So the key is
+                # both shape-checked here and passed as data via the [strenv()]
+                # subscript below (gitops#997).
+                reject_multiline "env var name" "$key"
+                echo "$key" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$' || {
+                  echo "❌ Invalid env var name: ${key}"; exit 1; }
+                export KEY="$key" VALUE="$value"
+                yq eval -i '.env[strenv(KEY)] = strenv(VALUE)' "${DIR}/values.yaml"
+              done <<ENVEOF3
+          $PARAM_ENV_VARS
+          ENVEOF3
+            fi
+
+            # Clear secrets if sentinel __CLEAR__ was set
+            if [ "$CLEAR_SECRETS" = "true" ]; then
+              yq eval -i '.externalSecret = {}' "${DIR}/values.yaml"
+              yq eval -i '.envFrom = []' "${DIR}/values.yaml"
+              echo "Cleared all secret env vars"
+            elif [ -n "$SECRET_VARS" ]; then
+              export SECRET_NAME="${SERVICE}-secrets"
+              yq eval -i '.externalSecret.targetSecret = strenv(SECRET_NAME)' "${DIR}/values.yaml"
+              # `| grep -q null` matched the literal text anywhere in the
+              # rendered block, so a data entry whose value happened to contain
+              # "null" re-emptied the list. Compare the parsed value instead.
+              if [ "$(yq eval '.externalSecret.data | type' "${DIR}/values.yaml")" != "!!seq" ]; then
+                yq eval -i '.externalSecret.data = []' "${DIR}/values.yaml"
+              fi
+              while IFS= read -r line; do
+                key=$(trim "${line%%=*}")
+                [ -z "$key" ] && continue
+                case "$key" in \#*) continue ;; esac
+                reject_multiline "secret env var name" "$key"
+                echo "$key" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$' || {
+                  echo "❌ Invalid secret env var name: ${key}"; exit 1; }
+                export KEY="$key" REMOTE_KEY="teams/${TEAM}/${SERVICE}"
+                EXISTS=$(yq '.externalSecret.data[] | select(.secretKey == strenv(KEY))' "${DIR}/values.yaml")
+                if [ -z "$EXISTS" ]; then
+                  yq eval -i '.externalSecret.data += [{"secretKey": strenv(KEY), "remoteKey": strenv(REMOTE_KEY), "property": strenv(KEY)}]' "${DIR}/values.yaml"
+                fi
+              done <<SECRETEOF3
+          $PARAM_SECRET_ENV_VARS
+          SECRETEOF3
+              yq eval -i '.envFrom = ((.envFrom // []) | map(select(.secretRef.name != strenv(SECRET_NAME))) + [{"secretRef": {"name": strenv(SECRET_NAME)}}])' "${DIR}/values.yaml"
+            fi
+
+            git add "${DIR}/values.yaml"
+            if git diff --cached --quiet; then
+              echo "ℹ️  No changes — already at ${TAG}"
+            else
+              git commit -m "deploy: ${TEAM}/${SERVICE} → ${TAG}"
+            fi
+
+          elif [ "$ACTION" = "update-config" ]; then
+            CHANGED=false
+
+            if [ "$CLEAR_ENV" = "true" ]; then
+              yq eval -i '.env = {}' "${DIR}/values.yaml"
+              echo "Cleared all env vars"
+              CHANGED=true
+            elif [ -n "$ENV_VARS" ]; then
+              while IFS= read -r line; do
+                key=$(trim "${line%%=*}")
+                case "$line" in *=*) rest="${line#*=}" ;; *) rest="" ;; esac
+                [ -z "$key" ] && continue
+                case "$key" in \#*) continue ;; esac
+                value=$(unquote "$(trim "$rest")")
+                # The key lands in an expression PATH, where strenv() does not
+                # substitute - `.env.${key}` with a key of `x = 1 | .image.tag =
+                # "pwned" #` rewrites the image a service runs. So the key is
+                # both shape-checked here and passed as data via the [strenv()]
+                # subscript below (gitops#997).
+                reject_multiline "env var name" "$key"
+                echo "$key" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$' || {
+                  echo "❌ Invalid env var name: ${key}"; exit 1; }
+                export KEY="$key" VALUE="$value"
+                yq eval -i '.env[strenv(KEY)] = strenv(VALUE)' "${DIR}/values.yaml"
+              done <<ENVEOF2
+          $PARAM_ENV_VARS
+          ENVEOF2
+              CHANGED=true
+            fi
+
+            if [ "$CLEAR_SECRETS" = "true" ]; then
+              yq eval -i '.externalSecret = {}' "${DIR}/values.yaml"
+              yq eval -i '.envFrom = []' "${DIR}/values.yaml"
+              echo "Cleared all secret env vars"
+              CHANGED=true
+            elif [ -n "$SECRET_VARS" ]; then
+              export SECRET_NAME="${SERVICE}-secrets"
+              yq eval -i '.externalSecret.targetSecret = strenv(SECRET_NAME)' "${DIR}/values.yaml"
+              # `| grep -q null` matched the literal text anywhere in the
+              # rendered block, so a data entry whose value happened to contain
+              # "null" re-emptied the list. Compare the parsed value instead.
+              if [ "$(yq eval '.externalSecret.data | type' "${DIR}/values.yaml")" != "!!seq" ]; then
+                yq eval -i '.externalSecret.data = []' "${DIR}/values.yaml"
+              fi
+              while IFS= read -r line; do
+                key=$(trim "${line%%=*}")
+                [ -z "$key" ] && continue
+                case "$key" in \#*) continue ;; esac
+                reject_multiline "secret env var name" "$key"
+                echo "$key" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$' || {
+                  echo "❌ Invalid secret env var name: ${key}"; exit 1; }
+                export KEY="$key" REMOTE_KEY="teams/${TEAM}/${SERVICE}"
+                EXISTS=$(yq '.externalSecret.data[] | select(.secretKey == strenv(KEY))' "${DIR}/values.yaml")
+                if [ -z "$EXISTS" ]; then
+                  yq eval -i '.externalSecret.data += [{"secretKey": strenv(KEY), "remoteKey": strenv(REMOTE_KEY), "property": strenv(KEY)}]' "${DIR}/values.yaml"
+                fi
+              done <<SECRETEOF2
+          $PARAM_SECRET_ENV_VARS
+          SECRETEOF2
+              yq eval -i '.envFrom = ((.envFrom // []) | map(select(.secretRef.name != strenv(SECRET_NAME))) + [{"secretRef": {"name": strenv(SECRET_NAME)}}])' "${DIR}/values.yaml"
+              CHANGED=true
+            fi
+
+            # config_patch is a raw yq PROGRAM, not a value: there is no
+            # strenv() shape for it, because the expression itself is the
+            # parameter. Its only producer was a mctl-api resource-profile
+            # handler that was removed in mctlhq/mctl-api#520; nothing sends
+            # it today.
+            #
+            # mctl-api now drops parameters an operation does not declare, and
+            # config_patch is not declared on deploy-service, so it can no
+            # longer arrive from a request body (mctlhq/mctl-api#246). This is
+            # the second layer: validate_config_patch only lets the patch
+            # assign into .resources, .env and .configMaps, so a regression on
+            # the API side cannot rewrite .image or .externalSecret from here.
+            if [ -n "$CONFIG_PATCH" ]; then
+              validate_config_patch "$CONFIG_PATCH"
+              yq eval -i "$CONFIG_PATCH" "${DIR}/values.yaml"
+              CHANGED=true
+            fi
+
+            git add "${DIR}/values.yaml"
+            if git diff --cached --quiet; then
+              echo "ℹ️  No changes detected"
+            else
+              git commit -m "config: update env for ${TEAM}/${SERVICE}"
+            fi
+          fi
+
+          # ── 5. Push with rebase retry ──────────────────────────────────────
+          MAX_RETRIES=5
+          for i in $(seq 1 $MAX_RETRIES); do
+            if git push origin HEAD:main; then
+              echo "✅ Pushed successfully"
+              break
+            fi
+            if [ $i -lt $MAX_RETRIES ]; then
+              echo "⚠️  Push failed (attempt $i), rebasing..."
+              # `git pull --rebase` must not run bare under `set -e`: a conflict aborts
+              # the script mid-rebase and the retry loop never gets its second attempt,
+              # leaving a half-applied rebase behind. Abort it so the next iteration
+              # starts from a clean worktree (same shape as the agents templates,
+              # gitops#982).
+              if ! git pull --rebase origin main; then
+                git rebase --abort 2>/dev/null || true
+                echo "⚠️  Rebase failed (attempt ${i}); retrying" >&2
+              fi
+            else
+              echo "❌ Push failed after $MAX_RETRIES attempts"
+              exit 1
+            fi
+          done
+
+          echo "✅ Commit pushed — ArgoCD will sync automatically"
+        volumeMounts:
+          - name: deploy-key
+            mountPath: /secrets/deploy-key
+      volumes:
+        - name: deploy-key
+          secret:
+            secretName: mctl-gitops-deploy-key
+
+    # ── Delete service directory ──────────────────────────────────────────────
+    - name: delete-service
+      inputs:
+        parameters:
+          - name: team_name
+          - name: component_name
+          - name: component_type
+      script:
+        image: ghcr.io/mctlhq/mctl-workflow-tools:1.0.0@sha256:5e367f737d4bffaa1b6ea04a29681dc760fd476790f80bf93cbc4571d4ccfe6b
+        command: [sh]
+        envFrom:
+          - configMapRef:
+              name: mctl-platform-config
+        env:
+          - name: PARAM_TEAM_NAME
+            value: "{{inputs.parameters.team_name}}"
+          - name: PARAM_COMPONENT_NAME
+            value: "{{inputs.parameters.component_name}}"
+          - name: PARAM_COMPONENT_TYPE
+            value: "{{inputs.parameters.component_type}}"
+        source: |
+          set -e
+          TEAM="$PARAM_TEAM_NAME"
+          SERVICE="$PARAM_COMPONENT_NAME"
+          TYPE="$PARAM_COMPONENT_TYPE"
+
+          # Both names become a path that is removed with `git rm -rf`, so
+          # only the shape the operations API enforces is accepted: one line,
+          # no slash, no dot.
+          for n in "$TEAM" "$SERVICE"; do
+            if [ "$(printf '%s' "$n" | wc -l)" -ne 0 ] \
+              || ! printf '%s' "$n" | grep -qE '^[a-z0-9][a-z0-9-]{0,30}$'; then
+              echo "❌ Invalid team or service name: '$n'"
+              exit 1
+            fi
+          done
+
+          # Setup SSH
+          mkdir -p ~/.ssh
+          cp /secrets/deploy-key/ssh-privatekey ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Use port 443 (port 22 is blocked). Host keys are pinned below.
+          printf 'Host github.com\n  Hostname ssh.github.com\n  Port 443\n  IdentityFile ~/.ssh/id_ed25519\n' > ~/.ssh/config
+          # GitHub's published SSH host keys, PINNED rather than trusted on
+          # first use. Source: https://api.github.com/meta (.ssh_keys),
+          # fetched 2026-09-02. This replaces StrictHostKeyChecking=no,
+          # which accepted whatever key answered on a connection that
+          # carries a WRITE-capable deploy key: a MITM or a DNS-poison of
+          # ssh.github.com was handed that key with no complaint.
+          #
+          # Keyed on [ssh.github.com]:443, not github.com. The Host block
+          # above rewrites hostname and port, and ssh looks up what it
+          # actually connects to — a github.com entry would silently miss.
+          #
+          # If GitHub rotates a host key these lines must be updated; it
+          # last happened in March 2023, when the RSA key was replaced.
+          cat > ~/.ssh/known_hosts <<'GITHUB_HOST_KEYS'
+          [ssh.github.com]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          [ssh.github.com]:443 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+          [ssh.github.com]:443 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+          GITHUB_HOST_KEYS
+          chmod 600 ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/config
+
+          git clone --depth=1 "git@github.com:${GITOPS_ORG}/${GITOPS_REPO}.git" /tmp/mctl-gitops
+          cd /tmp/mctl-gitops
+          git config user.name "argo-workflows[bot]"
+          git config user.email "argo-workflows[bot]@users.noreply.github.com"
+
+          DIR="platform-gitops/services/${TEAM}/${SERVICE}"
+
+          # A missing directory is not an error: this is the first step of a
+          # retire that is not transactional, and a retry after a later step
+          # failed must get past it. What gets deleted afterwards is bounded
+          # by retire-service's preflight, which only lets an absent or
+          # team-owned Argo CD Application through.
+          if [ ! -d "$DIR" ]; then
+            echo "⚠️  Service directory not found: $DIR — already deleted by an earlier run?"
+            exit 0
+          fi
+
+          git rm -rf "$DIR"
+
+          # Clean up empty team directory
+          TEAM_DIR=$(dirname "$DIR")
+          if [ -d "$TEAM_DIR" ] && [ -z "$(ls -A "$TEAM_DIR")" ]; then
+            rmdir "$TEAM_DIR"
+            echo "🗑️  Removed empty team directory: $TEAM_DIR"
+          fi
+
+          git commit -m "delete: ${TEAM}/${SERVICE}"
+
+          for i in $(seq 1 5); do
+            if git push origin HEAD:main; then
+              echo "✅ Deleted and pushed"
+              break
+            fi
+            if [ $i -lt 5 ]; then
+              # `git pull --rebase` must not run bare under `set -e`: a conflict aborts
+              # the script mid-rebase and the retry loop never gets its second attempt,
+              # leaving a half-applied rebase behind. Abort it so the next iteration
+              # starts from a clean worktree (same shape as the agents templates,
+              # gitops#982).
+              if ! git pull --rebase origin main; then
+                git rebase --abort 2>/dev/null || true
+                echo "⚠️  Rebase failed (attempt ${i}); retrying" >&2
+              fi
+            else
+              echo "❌ Push failed after 5 attempts"
+              exit 1
+            fi
+          done
+        volumeMounts:
+          - name: deploy-key
+            mountPath: /secrets/deploy-key
+      volumes:
+        - name: deploy-key
+          secret:
+            secretName: mctl-gitops-deploy-key
