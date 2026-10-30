@@ -306,7 +306,13 @@ components:
 
     ExecuteRequest:
       type: object
-      description: Key-value map of operation parameters
+      description: |
+        Key-value map of operation parameters. An operation that declares
+        `RequiresConfirm` (`create-tenant`, `provision-database`,
+        `retire-service`, `delete-tenant`) also needs `"confirm": "yes"`
+        (trimmed, case-insensitive). It is read before undeclared parameters
+        are dropped, answers 428 `operation_confirmation_required` when it is
+        missing, and is never passed to the workflow.
       additionalProperties:
         type: string
       example:
@@ -314,6 +320,101 @@ components:
         component_name: payment-api
         action: deploy
         git_tag: "1.2.3"
+
+    DeployPlanRequest:
+      type: object
+      required: [intent]
+      additionalProperties: false
+      properties:
+        intent:
+          type: object
+          description: A DeployIntent (deploy.mctl.ai/v1alpha1), validated against the vendored closed schema
+        idempotency_key:
+          type: string
+          maxLength: 200
+          description: Repeating it with the same resulting digest returns the stored plan
+        ttl_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+          description: Plan lifetime, default 1800
+
+    DeployPlanApproval:
+      type: object
+      properties:
+        required:
+          type: boolean
+        role:
+          type: string
+          example: owner
+        reason:
+          type: string
+          example: preview_update_requires_approval_until_build_sandbox
+
+    DeployPlan:
+      type: object
+      properties:
+        id:
+          type: string
+          description: dpl_ plus a UUID
+        digest:
+          type: string
+          description: sha256 of the mctl-deploy-plan/v1 encoding of the bound fields
+          example: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        schema_version:
+          type: string
+          example: mctl-deploy-plan/v1
+        tenant:
+          type: string
+        service:
+          type: string
+        environment:
+          type: string
+          enum: [preview]
+        intent:
+          type: object
+          description: The canonical intent, with schema defaults made explicit
+        revision:
+          type: string
+        gitops_base_sha:
+          type: string
+        action:
+          type: string
+          enum: [update]
+        preview_id:
+          type: string
+        values_before_sha256:
+          type: string
+        values_after:
+          type: string
+          description: Redacted canonical YAML of the effective preview values
+        diff:
+          type: string
+          description: Unified diff of the effective preview values before and after the intent
+        host:
+          type: string
+        requires_approval:
+          type: boolean
+        required_role:
+          type: string
+        approval_reason:
+          type: string
+        approval:
+          $ref: '#/components/schemas/DeployPlanApproval'
+        created_by:
+          type: string
+        surface:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        expired:
+          type: boolean
+        replayed:
+          type: boolean
 
     ExecuteResponse:
       type: object
@@ -2238,6 +2339,132 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/deploy/plan:
+    post:
+      summary: Plan a preview deploy
+      description: |
+        Computes an immutable, server-side preview plan for a DeployIntent (for
+        example the `draft_intent` of `/api/v1/deploy/analyze`). The plan is the
+        effective preview Helm values for the service at the pinned gitops
+        commit: the base `values.yaml`, the intent-derived changes, the preview
+        rewrite of `wft-preview-deploy` and its fixed `--set` overrides, with a
+        deterministic preview id and host. It is stored once and identified by
+        a digest (`mctl-deploy-plan/v1`) that a later grant can bind to.
+        Planning writes nothing to gitops, Argo or the cluster; the only write
+        is one `deploy_plans` row. Secret references are redacted
+        (`redacted:sha256:<hex>`). `environment: production` and a service that
+        does not exist in gitops yet are refused.
+
+        Needs the `deploy-service` minimum role (developer) on `metadata.tenant`.
+        Every call writes one audit entry (`deploy.plan`). Check order:
+        envelope, revision shape, schema, production, role, repository binding,
+        revision exists, gitops read, compile, store.
+      tags: [Deploy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeployPlanRequest'
+      responses:
+        '200':
+          description: The same idempotency key and digest as a stored plan; that plan is returned with `replayed` true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeployPlan'
+        '201':
+          description: Plan created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeployPlan'
+        '400':
+          description: Invalid envelope, an unknown top-level key, a body over 256 KiB or `ttl_seconds` outside 60..86400 (deploy_plan_invalid_input)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Not allowed (the caller lacks the role), the repository is not bound to the tenant (deploy_repository_not_bound), or the service is built from another repository (deploy_service_not_bound)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The idempotency key was used for a different plan (deploy_plan_idempotency_conflict); `details.plan_id` names the stored plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: |
+            One of deploy_intent_invalid (schema error, including unknown fields such as `extraObjects`),
+            deploy_revision_not_a_sha (a branch or tag; refs are never resolved),
+            prod_requires_promote (production is reached only through promote),
+            deploy_revision_unreadable (GitHub does not know the commit),
+            onboard_requires_preview_onboard (the service directory is absent at the pinned gitops commit),
+            deploy_preview_values_refused (the preview rewrite refuses the base values)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: The base values.yaml is not a YAML mapping (deploy_values_unparseable) or the plan could not be computed (deploy_plan_failed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: GitHub failed or answered unusably (deploy_github_unavailable, deploy_github_malformed); never reported as an absent revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: The repository binding (deploy_binding_unavailable), the gitops checkout (deploy_gitops_unavailable) or the plan store (deploy_plan_store_unavailable) cannot be read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/deploy/plans/{id}:
+    get:
+      summary: Get a stored deploy plan
+      description: |
+        Returns a stored plan with its digest and `expired`, computed on read
+        as `now >= expires_at` and never stored. Visible to members of the
+        plan's tenant and to platform admins; any other caller gets the same
+        404 as an unknown id. Every call writes one audit entry
+        (`deploy.plan.read`).
+      tags: [Deploy]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: dpl_0a1b2c3d-0000-4000-8000-000000000000
+      responses:
+        '200':
+          description: The plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeployPlan'
+        '404':
+          description: No such plan, or the caller may not see it (deploy_plan_not_found)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: The plan store cannot be read (deploy_plan_store_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/v1/status/{team}/{app}:
     get:
       summary: Get service live status
@@ -2804,6 +3031,12 @@ paths:
                 $ref: '#/components/schemas/Error'
         '404':
           description: Operation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '428':
+          description: 'The operation requires confirmation and the body has no confirm field set to yes (operation_confirmation_required); nothing was submitted'
           content:
             application/json:
               schema:

@@ -162,6 +162,8 @@ var governedAgentTools = toolSet(
 	"mctl_ask_support",
 	// Read-only, but not a read verb, so mctl-agents' policy asks for approval.
 	"mctl_deploy_analyze",
+	// Stores an immutable plan row; not a read verb.
+	"mctl_deploy_plan",
 	"mctl_add_custom_domain",
 	"mctl_approve_dev_loop",
 	"mctl_bind_agent_release",

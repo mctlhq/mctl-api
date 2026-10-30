@@ -1,0 +1,18 @@
+image:
+  tag: 3.1.0
+extraExternalSecrets:
+  smtp:
+    targetSecret: smtp
+    data:
+      - secretKey: PASS
+        remoteKey: teams/acme/worker/mail
+        property: pass
+  already:
+    targetSecret: already
+    data:
+      - secretKey: X
+        remoteKey: secret/data/teams/acme/worker/preview/x
+        property: x
+dbSecret:
+  secretName: worker-db
+  vaultPath: teams/acme/worker

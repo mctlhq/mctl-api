@@ -741,6 +741,7 @@ func TestE2E_MCPDestructiveEphemeralTenantSmoke(t *testing.T) {
 		}
 		_, _ = c.post(t, "/api/v1/operations/delete-tenant/execute", map[string]string{
 			"tenant_name": tenant,
+			"confirm":     "yes",
 		})
 	}()
 
@@ -749,6 +750,7 @@ func TestE2E_MCPDestructiveEphemeralTenantSmoke(t *testing.T) {
 		"display_name":  "MCP Smoke " + tenant,
 		"description":   "Ephemeral MCP smoke tenant",
 		"contact_email": "platform-smoke@mctl.ai",
+		"confirm":       "yes",
 	}, 100)
 	createWorkflow, createNS := mustWorkflowRef(t, "mctl_create_tenant", createText)
 	cleanupRequested = true
@@ -760,6 +762,7 @@ func TestE2E_MCPDestructiveEphemeralTenantSmoke(t *testing.T) {
 	provisionText := mcpToolText(t, c, sessionID, "mctl_provision_database", map[string]interface{}{
 		"team_name": tenant,
 		"app_name":  service,
+		"confirm":   "yes",
 	}, 101)
 	provisionWorkflow, provisionNS := mustWorkflowRef(t, "mctl_provision_database", provisionText)
 	t.Logf("✓ provision database workflow: https://workflows.mctl.ai/workflows/%s/%s", provisionNS, provisionWorkflow)

@@ -1226,6 +1226,49 @@ func (r *Reader) ReadFiles(names ...string) (map[string][]byte, string, error) {
 	return out, rev, nil
 }
 
+// ServiceValuesAt reads platform-gitops/services/<team>/<component>/values.yaml,
+// the component's github.com/source-repo annotation and the checkout's
+// commit under one read lock, so all three are one checkout: a refresh
+// cannot land between them.
+//
+// exists=false (with a nil error) is the one documented absence: a path
+// element below the services directory does not exist. sourceRepo is ""
+// when the checkout was read and the component carries no annotation. A
+// checkout that never synced or is stale, a missing services directory, a
+// symlink or non-plain entry on the path, an unreadable file or annotation
+// are errors, never an absence: a failed read must not pass for "this
+// service does not exist yet".
+func (r *Reader) ServiceValuesAt(team, component string) (data []byte, sourceRepo string, exists bool, rev string, err error) {
+	if !serviceNameRe.MatchString(team) || !serviceNameRe.MatchString(component) {
+		return nil, "", false, "", fmt.Errorf("invalid team or component name %q/%q", team, component)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.checkFreshLocked(); err != nil {
+		return nil, "", false, "", err
+	}
+	rev, err = r.revisionLocked()
+	if err != nil {
+		return nil, "", false, "", err
+	}
+	path, err := r.statServiceFileLocked(team, component, "values.yaml")
+	if err != nil {
+		return nil, "", false, "", fmt.Errorf("checking service %s/%s: %w", team, component, err)
+	}
+	if path == "" {
+		return nil, "", false, rev, nil
+	}
+	data, err = os.ReadFile(path) //nolint:gosec // validated names, regular file inside the checkout
+	if err != nil {
+		return nil, "", false, "", fmt.Errorf("reading values of %s/%s: %w", team, component, err)
+	}
+	sourceRepo, err = r.sourceRepoLocked(team, component)
+	if err != nil && !errors.Is(err, ErrSourceRepoNotRegistered) {
+		return nil, "", false, "", err
+	}
+	return data, sourceRepo, true, rev, nil
+}
+
 // ErrSourceRepoNotRegistered is ComponentSourceRepo's answer when the
 // checkout was read and the component, its catalog-info.yaml or the
 // github.com/source-repo annotation is absent. Every other error means the

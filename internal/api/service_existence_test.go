@@ -170,7 +170,7 @@ func TestCreateTenant_RefusesPlatformApplicationNames(t *testing.T) {
 			backend := httptest.NewServer(tokenAuth(users)(mf.router))
 			defer backend.Close()
 			text, isError := callTool(t, mctlmcp.NewServer(backend.URL, ""), "tok-new", "mctl_create_tenant",
-				map[string]string{"tenant_name": name})
+				map[string]string{"tenant_name": name, "confirm": "yes"})
 			if !isError || !strings.Contains(text, "reserved") {
 				t.Fatalf("MCP: isError=%v text=%q; want reserved", isError, text)
 			}
@@ -195,7 +195,7 @@ func TestCreateTenant_RefusesNamesOverlappingAnExistingTenant(t *testing.T) {
 			backend := httptest.NewServer(tokenAuth(users)(mf.router))
 			defer backend.Close()
 			text, isError := callTool(t, mctlmcp.NewServer(backend.URL, ""), "tok-new", "mctl_create_tenant",
-				map[string]string{"tenant_name": name})
+				map[string]string{"tenant_name": name, "confirm": "yes"})
 			if !isError || !strings.Contains(text, "overlaps") {
 				t.Fatalf("MCP: isError=%v text=%q; want overlaps", isError, text)
 			}

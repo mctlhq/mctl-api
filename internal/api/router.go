@@ -95,6 +95,12 @@ type Options struct {
 	// DeployContentReader reads repository content at a pinned commit for
 	// deploy analysis. Nil answers 502 deploy_github_unavailable.
 	DeployContentReader deployanalyze.ContentReader
+	// DeployPlans stores immutable deploy plans (POST /deploy/plan). Nil
+	// answers 503 deploy_plan_store_unavailable.
+	DeployPlans DeployPlanStore
+	// DeployGitops reads a service's values and the checkout revision for
+	// deploy plans. Nil answers 503 deploy_gitops_unavailable.
+	DeployGitops DeployPlanGitops
 	// WorkflowLogArchive reads archived Argo step logs from object storage
 	// (optional — nil when the archive env vars are unset).
 	WorkflowLogArchive WorkflowLogArchive
@@ -593,6 +599,8 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/services/{team}/{app}", h.GetService)
 			r.Get("/deploy/analyze", h.DeployAnalyze)
 			r.Get("/deploy/bindings", h.DeployBindings)
+			r.Post("/deploy/plan", h.DeployPlan)
+			r.Get("/deploy/plans/{id}", h.GetDeployPlan)
 			r.Get("/status/{team}/{app}", h.GetServiceStatus)
 			r.Get("/workflows", h.ListWorkflows)
 			r.Get("/workflows/{name}", h.GetWorkflow)

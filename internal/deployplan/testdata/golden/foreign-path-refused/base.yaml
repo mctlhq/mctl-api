@@ -1,0 +1,4 @@
+externalSecret:
+  data:
+    - secretKey: A
+      remoteKey: teams/other/web

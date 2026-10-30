@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -78,6 +79,9 @@ type deployAudit struct {
 	params map[string]string
 	status string
 	msg    string
+	// skip drops the row: the request was refused by a helper that already
+	// wrote its own audit entry.
+	skip bool
 }
 
 func (a *deployAudit) set(status, msg string) {
@@ -86,6 +90,9 @@ func (a *deployAudit) set(status, msg string) {
 }
 
 func (a *deployAudit) write() {
+	if a.skip {
+		return
+	}
 	a.h.logAudit(a.r, audit.Entry{
 		UserID: a.user.ID, Operation: a.op, Parameters: a.params,
 		Status: a.status, RiskLevel: string(operations.RiskLow), Message: a.msg,
@@ -111,6 +118,47 @@ func (a *deployAudit) refuse(w http.ResponseWriter, httpStatus int, code, messag
 	}
 	a.set(kind, kind+":"+code)
 	writeErrorCode(w, httpStatus, code, message, nil)
+}
+
+// deployRefusal is a coded refusal a deploy helper hands back to its handler.
+type deployRefusal struct {
+	status  int
+	code    string
+	message string
+}
+
+// deployRepoBound checks that repo is bound to tenant: by the gitops
+// github.com/source-repo annotation of one of the tenant's services, else by
+// the portal binding. It returns the tenant's services built from repo. An
+// unreadable binding is 503 deploy_binding_unavailable and an unbound
+// repository 403 deploy_repository_not_bound.
+func (h *Handlers) deployRepoBound(ctx context.Context, tenant, repo string) ([]string, *deployRefusal) {
+	unavailable := &deployRefusal{http.StatusServiceUnavailable, "deploy_binding_unavailable", "the repository binding cannot be read right now"}
+	if h.opts.SourceRepoBindings == nil {
+		return nil, unavailable
+	}
+	all, err := h.opts.SourceRepoBindings.ServicesBySourceRepo(repo)
+	if err != nil {
+		slog.Error("deploy: reading repository bindings", "error", err)
+		return nil, unavailable
+	}
+	services := []string{}
+	for _, b := range all {
+		if b.Tenant == tenant {
+			services = append(services, b.Service)
+		}
+	}
+	if len(services) == 0 {
+		bound, err := h.repoBoundToTeam(ctx, tenant, repo)
+		if err != nil {
+			slog.Error("deploy: portal binding check", "error", err)
+			return nil, unavailable
+		}
+		if !bound {
+			return nil, &deployRefusal{http.StatusForbidden, "deploy_repository_not_bound", "the repository is not bound to this tenant"}
+		}
+	}
+	return services, nil
 }
 
 // DeployAnalyze answers GET /api/v1/deploy/analyze: a static, read-only
@@ -149,33 +197,10 @@ func (h *Handlers) DeployAnalyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.opts.SourceRepoBindings == nil {
-		a.refuse(w, http.StatusServiceUnavailable, "deploy_binding_unavailable", "the repository binding cannot be read right now")
+	services, refusal := h.deployRepoBound(r.Context(), tenant, repo)
+	if refusal != nil {
+		a.refuse(w, refusal.status, refusal.code, refusal.message)
 		return
-	}
-	all, err := h.opts.SourceRepoBindings.ServicesBySourceRepo(repo)
-	if err != nil {
-		slog.Error("deploy analyze: reading repository bindings", "error", err)
-		a.refuse(w, http.StatusServiceUnavailable, "deploy_binding_unavailable", "the repository binding cannot be read right now")
-		return
-	}
-	services := []string{}
-	for _, b := range all {
-		if b.Tenant == tenant {
-			services = append(services, b.Service)
-		}
-	}
-	if len(services) == 0 {
-		bound, err := h.repoBoundToTeam(r.Context(), tenant, repo)
-		if err != nil {
-			slog.Error("deploy analyze: portal binding check", "error", err)
-			a.refuse(w, http.StatusServiceUnavailable, "deploy_binding_unavailable", "the repository binding cannot be read right now")
-			return
-		}
-		if !bound {
-			a.refuse(w, http.StatusForbidden, "deploy_repository_not_bound", "the repository is not bound to this tenant")
-			return
-		}
 	}
 
 	if h.opts.DeployContentReader == nil {

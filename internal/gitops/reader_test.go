@@ -1771,3 +1771,62 @@ func TestListTenantsStrict(t *testing.T) {
 		t.Fatal("a stale checkout must not answer")
 	}
 }
+
+func TestServiceValuesAt(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	r.head = sha
+
+	// Never synced and stale checkouts do not answer.
+	if _, _, _, _, err := r.ServiceValuesAt("labs", "web"); err == nil {
+		t.Fatal("a checkout that never synced must not answer")
+	}
+	r.lastSync.Store(time.Now().Add(-CheckoutMaxAge - time.Minute).UnixNano())
+	if _, _, _, _, err := r.ServiceValuesAt("labs", "web"); err == nil {
+		t.Fatal("a stale checkout must not answer")
+	}
+	r.lastSync.Store(time.Now().UnixNano())
+
+	// A missing services root is a broken checkout, not an absent service.
+	if _, _, _, _, err := r.ServiceValuesAt("labs", "web"); err == nil {
+		t.Fatal("a missing services root must be an error")
+	}
+
+	writeServiceValues(t, dir, "labs", "web")
+	data, repo, exists, rev, err := r.ServiceValuesAt("labs", "web")
+	if err != nil || !exists || rev != sha || repo != "" || !strings.Contains(string(data), "1.0.0") {
+		t.Fatalf("existing: data=%q repo=%q exists=%v rev=%q err=%v", data, repo, exists, rev, err)
+	}
+
+	cat := filepath.Join(dir, "platform-gitops", "services", "labs", "web", "catalog-info.yaml")
+	if err := os.WriteFile(cat, []byte("metadata:\n  annotations:\n    github.com/source-repo: acme/web\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, repo, _, _, err = r.ServiceValuesAt("labs", "web"); err != nil || repo != "acme/web" {
+		t.Fatalf("source repo = %q, %v", repo, err)
+	}
+
+	// A documented absence: exists=false, the revision still reported.
+	_, _, exists, rev, err = r.ServiceValuesAt("labs", "missing")
+	if err != nil || exists || rev != sha {
+		t.Fatalf("absent: exists=%v rev=%q err=%v", exists, rev, err)
+	}
+
+	// A symlinked values.yaml is an error.
+	svc := filepath.Join(dir, "platform-gitops", "services", "labs", "linked")
+	if err := os.MkdirAll(svc, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "platform-gitops", "services", "labs", "web", "values.yaml"), filepath.Join(svc, "values.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, exists, _, err = r.ServiceValuesAt("labs", "linked"); err == nil || exists {
+		t.Fatalf("a symlinked values.yaml must be an error, got exists=%v err=%v", exists, err)
+	}
+
+	// An unsynced revision is an error even when the file reads.
+	r.head = ""
+	if _, _, _, _, err = r.ServiceValuesAt("labs", "web"); err == nil {
+		t.Fatal("a checkout with no revision must be an error")
+	}
+}

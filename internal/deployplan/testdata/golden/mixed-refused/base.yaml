@@ -1,0 +1,6 @@
+externalSecret:
+  data:
+    - secretKey: A
+      remoteKey: platform/ghcr
+    - secretKey: B
+      remoteKey: teams/acme/web
