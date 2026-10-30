@@ -89,8 +89,21 @@ func TestUpstreamSnapshotsMatchSource(t *testing.T) {
 		t.Skip("DEPLOYPLAN_UPSTREAM_SOURCE_DIR not set; drift is checked in CI")
 	}
 	p := loadUpstreamProvenance(t)
+	root, err := os.OpenRoot(src)
+	if err != nil {
+		t.Fatalf("opening DEPLOYPLAN_UPSTREAM_SOURCE_DIR: %v", err)
+	}
+	defer root.Close()
+	required := map[string]bool{}
+	for _, name := range requiredUpstreamSnapshots {
+		required[name] = true
+	}
 	for _, f := range p.Files {
-		want, err := os.ReadFile(filepath.Join(src, f.Snapshot))
+		if !required[f.Snapshot] {
+			t.Errorf("provenance.json lists unexpected snapshot %q", f.Snapshot)
+			continue
+		}
+		want, err := root.ReadFile(f.Snapshot)
 		if err != nil {
 			t.Errorf("source %s: %v", f.SourcePath, err)
 			continue
