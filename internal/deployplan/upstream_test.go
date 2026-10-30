@@ -33,6 +33,30 @@ var requiredUpstreamSnapshots = []string{
 	"rewrite_preview_values.py",
 }
 
+func requiredUpstreamSet() map[string]bool {
+	set := map[string]bool{}
+	for _, name := range requiredUpstreamSnapshots {
+		set[name] = true
+	}
+	return set
+}
+
+// openUpstreamRoot confines reads to dir, so a provenance entry naming a
+// path outside it cannot be read.
+func openUpstreamRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("opening %s: %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := root.Close(); err != nil {
+			t.Errorf("closing %s: %v", dir, err)
+		}
+	})
+	return root
+}
+
 func loadUpstreamProvenance(t *testing.T) upstreamProvenance {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(upstreamDir, "provenance.json"))
@@ -58,10 +82,16 @@ func TestUpstreamSnapshotsMatchProvenance(t *testing.T) {
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(p.SourceCommit) {
 		t.Errorf("source_commit %q is not a 40-hex commit SHA", p.SourceCommit)
 	}
+	root := openUpstreamRoot(t, upstreamDir)
+	required := requiredUpstreamSet()
 	seen := map[string]bool{}
 	for _, f := range p.Files {
+		if !required[f.Snapshot] {
+			t.Errorf("provenance.json lists unexpected snapshot %q", f.Snapshot)
+			continue
+		}
 		seen[f.Snapshot] = true
-		data, err := os.ReadFile(filepath.Join(upstreamDir, f.Snapshot))
+		data, err := root.ReadFile(f.Snapshot)
 		if err != nil {
 			t.Errorf("snapshot %s: %v", f.Snapshot, err)
 			continue
@@ -89,19 +119,9 @@ func TestUpstreamSnapshotsMatchSource(t *testing.T) {
 		t.Skip("DEPLOYPLAN_UPSTREAM_SOURCE_DIR not set; drift is checked in CI")
 	}
 	p := loadUpstreamProvenance(t)
-	root, err := os.OpenRoot(src)
-	if err != nil {
-		t.Fatalf("opening DEPLOYPLAN_UPSTREAM_SOURCE_DIR: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := root.Close(); err != nil {
-			t.Errorf("closing source root: %v", err)
-		}
-	})
-	required := map[string]bool{}
-	for _, name := range requiredUpstreamSnapshots {
-		required[name] = true
-	}
+	root := openUpstreamRoot(t, src)
+	snapshots := openUpstreamRoot(t, upstreamDir)
+	required := requiredUpstreamSet()
 	for _, f := range p.Files {
 		if !required[f.Snapshot] {
 			t.Errorf("provenance.json lists unexpected snapshot %q", f.Snapshot)
@@ -112,7 +132,7 @@ func TestUpstreamSnapshotsMatchSource(t *testing.T) {
 			t.Errorf("source %s: %v", f.SourcePath, err)
 			continue
 		}
-		got, err := os.ReadFile(filepath.Join(upstreamDir, f.Snapshot))
+		got, err := snapshots.ReadFile(f.Snapshot)
 		if err != nil {
 			t.Errorf("snapshot %s: %v", f.Snapshot, err)
 			continue
