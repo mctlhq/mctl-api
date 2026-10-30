@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.141.0](https://github.com/mctlhq/mctl-api/compare/4.140.0...4.141.0) (2026-10-30)
+
+
+### Features
+
+* **agents:** issue-872-feat-deploy-implement-the-accepted-866-d ([99f394d](https://github.com/mctlhq/mctl-api/commit/99f394d20c8f0eacc455a3cb7f2f1f7acf35299d))
+* **agents:** issue-872-feat-deploy-implement-the-accepted-866-d ([48a4b69](https://github.com/mctlhq/mctl-api/commit/48a4b69c392331e41e674fe2493d12e9c9d9747f))
+
+
+### Bug Fixes
+
+* **deploy:** redact every Vault path key and fix review findings ([2400c1f](https://github.com/mctlhq/mctl-api/commit/2400c1f1ed6aa6a24c7c769fd16b59c98ee3ceb9))
+
 ## [4.140.0](https://github.com/mctlhq/mctl-api/compare/4.139.0...4.140.0) (2026-10-29)
 
 
