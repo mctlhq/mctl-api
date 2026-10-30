@@ -93,7 +93,11 @@ func TestUpstreamSnapshotsMatchSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opening DEPLOYPLAN_UPSTREAM_SOURCE_DIR: %v", err)
 	}
-	defer root.Close()
+	t.Cleanup(func() {
+		if err := root.Close(); err != nil {
+			t.Errorf("closing source root: %v", err)
+		}
+	})
 	required := map[string]bool{}
 	for _, name := range requiredUpstreamSnapshots {
 		required[name] = true
