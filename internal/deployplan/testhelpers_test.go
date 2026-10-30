@@ -1,7 +1,6 @@
 package deployplan
 
 import (
-	"encoding/json"
 	"testing"
 )
 
@@ -22,13 +21,4 @@ func mustParse(t *testing.T, raw []byte) (Intent, []byte) {
 		t.Fatalf("ParseIntent: %v\n%s", err, raw)
 	}
 	return in, canon
-}
-
-func mustJSON(t *testing.T, v any) string {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
 }

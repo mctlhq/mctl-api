@@ -74,7 +74,7 @@ var recordedHints = map[string]hints{
 	"mctl_list_namespace_events":             {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_service_config":                {readOnly: true, destructive: false, idempotent: false},
 	"mctl_deploy_analyze":                    {readOnly: true, destructive: false, idempotent: true},
-	"mctl_deploy_plan":                       {readOnly: false, destructive: false, idempotent: true},
+	"mctl_deploy_plan":                       {readOnly: false, destructive: false, idempotent: false},
 	"mctl_get_deploy_plan":                   {readOnly: true, destructive: false, idempotent: true},
 	"mctl_get_repo_binding":                  {readOnly: true, destructive: false, idempotent: true},
 	"mctl_get_service_logs":                  {readOnly: true, destructive: false, idempotent: false},

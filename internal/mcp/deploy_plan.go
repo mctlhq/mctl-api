@@ -18,7 +18,7 @@ func (s *Server) toolDeployPlan() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Plan Preview Deploy"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithIdempotentHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Compute an immutable preview deploy plan for a DeployIntent (for example the draft_intent from mctl_deploy_analyze, possibly edited).
 
 Planning changes nothing: it writes no gitops file and touches no cluster. The only write is one stored plan row. The server compiles the effective preview Helm values for the service at the pinned revision and gitops commit, and returns the plan id, a unified diff, the preview host, the digest and the approval the plan will need. Secret references are redacted.

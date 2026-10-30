@@ -1,6 +1,7 @@
 package deployplan
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -39,7 +40,7 @@ func TestParseIntent_CanonicalIsStableAndDefaultsExplicit(t *testing.T) {
 	_, a := mustParse(t, omitted)
 	_, b := mustParse(t, explicit)
 	_, c := mustParse(t, reordered)
-	if string(a) != string(b) || string(a) != string(c) {
+	if !bytes.Equal(a, b) || !bytes.Equal(a, c) {
 		t.Fatalf("canonical forms differ:\n%s\n%s\n%s", a, b, c)
 	}
 	for _, want := range []string{`"dockerfile":"Dockerfile"`, `"context":"."`, `"replicas":1`} {
@@ -48,7 +49,7 @@ func TestParseIntent_CanonicalIsStableAndDefaultsExplicit(t *testing.T) {
 		}
 	}
 	_, again := mustParse(t, omitted)
-	if string(again) != string(a) {
+	if !bytes.Equal(again, a) {
 		t.Error("canonical JSON is not byte-stable")
 	}
 	in, _ := mustParse(t, omitted)

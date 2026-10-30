@@ -22,11 +22,12 @@ import (
 
 const planBaseSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-// Secret-looking values the scan must never find in any response or audit row.
+// Vault paths the scan must never find in any response or audit row. The
+// plan never resolves a secretRefs value (it reads no Vault), so there is no
+// resolved secret value to plant; env values are plain by the schema.
 const (
-	secretRemoteKey = "teams/acme/web"
-	secretVaultPath = "secret/data/teams/acme/web/database"
-	secretEnvValue  = "ghp_FIXTURESECRETVALUE0123456789"
+	secretRemoteKey = "teams/acme/web"                      //nolint:gosec // G101: a fixture Vault path, not a credential
+	secretVaultPath = "secret/data/teams/acme/web/database" //nolint:gosec // G101: a fixture Vault path, not a credential
 )
 
 const planBaseValues = `
@@ -44,6 +45,11 @@ externalSecret:
 dbSecret:
   secretName: web-db
   vaultPath: secret/data/teams/acme/web/database
+registryCredentials:
+  vaultKey: platform/registry/ghcr
+workContext:
+  tokenVaultKey: platform/mctl-api/surface-tokens
+  tokenVaultProperty: telegram-token
 `
 
 // repoBindings binds only acme/web to tenant acme.
@@ -154,7 +160,6 @@ func newPlanFixture(t *testing.T) *planFixture {
 var (
 	planDev    = auth.NewGitHubUser("alice", []string{"acme"})
 	planViewer = auth.NewGitHubUser("vic", []string{"acme"})
-	planOwner  = auth.NewGitHubUser("olga", []string{"acme"})
 	planOther  = auth.NewGitHubUser("bob", []string{"other"})
 )
 
@@ -196,9 +201,10 @@ func (f *planFixture) plan(t *testing.T, user *auth.User, intent map[string]any,
 
 func (f *planFixture) auditRows(op string) []audit.Entry {
 	var out []audit.Entry
-	for _, e := range f.log.List(1000) {
-		if e.Operation == op {
-			out = append(out, e)
+	rows := f.log.List(1000)
+	for i := range rows {
+		if rows[i].Operation == op {
+			out = append(out, rows[i])
 		}
 	}
 	return out
@@ -465,10 +471,11 @@ func TestDeployPlan_NoSecretsAnywhere(t *testing.T) {
 		b, _ := json.Marshal(e)
 		responses = append(responses, string(b))
 	}
-	// The key "vaultPath" is a field name of the chart, not a path.
+	// Key names of the chart ("vaultPath", "tokenVaultKey", ...) are not paths.
+	keyNames := strings.NewReplacer("vaultPath", "", "tokenVaultKey", "", "tokenVaultProperty", "", "vaultKey", "")
 	for i, text := range responses {
-		scan := strings.ReplaceAll(text, "vaultPath", "")
-		for _, banned := range []string{"teams/", "secret/data", "vault", "Vault", "ghp_", "ghs_", "gho_", secretRemoteKey, secretVaultPath, secretEnvValue, "leaky-service"} {
+		scan := keyNames.Replace(text)
+		for _, banned := range []string{"teams/", "secret/data", "vault", "Vault", "ghp_", "ghs_", "gho_", secretRemoteKey, secretVaultPath, "platform/mctl-api/surface-tokens", "platform/registry/ghcr", "leaky-service"} {
 			if strings.Contains(scan, banned) {
 				t.Errorf("item %d contains %q:\n%s", i, banned, text)
 			}

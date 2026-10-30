@@ -67,6 +67,11 @@ func parseValues(base []byte) (map[string]any, error) {
 	if err := yaml.Unmarshal(base, &doc); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrValuesUnparseable, err)
 	}
+	if doc == nil {
+		// An empty or null document, as `yaml.safe_load(f) or {}` in the
+		// preview script treats it.
+		return map[string]any{}, nil
+	}
 	norm, err := normalize(doc)
 	if err != nil {
 		return nil, err

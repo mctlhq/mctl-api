@@ -6,43 +6,45 @@ const redactedPrefix = "redacted:sha256:"
 
 func redactedPath(path string) string { return redactedPrefix + SHA256Hex(path) }
 
+// vaultPathKeys are the base-service chart keys whose value is a Vault path:
+// externalSecret.data[].remoteKey, extraExternalSecrets.*.data[].remoteKey,
+// dbSecret.vaultPath, registryCredentials.vaultKey and
+// workContext.tokenVaultKey. They are matched by name at any depth, so a path
+// under a key the chart adds later in the same shape is not shown either.
+var vaultPathKeys = map[string]bool{
+	"remoteKey":     true,
+	"vaultPath":     true,
+	"vaultKey":      true,
+	"tokenVaultKey": true,
+}
+
 // Redact returns a deep copy of values in which every Vault path is replaced
-// by redacted:sha256:<hex of the real path>: externalSecret.data[].remoteKey,
-// extraExternalSecrets.*.data[].remoteKey and dbSecret.vaultPath. The hash
-// keeps the digest bound to the real path without disclosing it. Kubernetes
-// secret names are not credentials and are kept.
+// by redacted:sha256:<hex of the real path>. The hash keeps the digest bound
+// to the real path without disclosing it. Kubernetes secret names are not
+// credentials and are kept.
 func Redact(values map[string]any) map[string]any {
 	out := deepCopy(values).(map[string]any)
-	if ext, ok := out["externalSecret"].(map[string]any); ok {
-		redactData(ext["data"])
-	}
-	if extras, ok := out["extraExternalSecrets"].(map[string]any); ok {
-		for _, v := range extras {
-			if es, ok := v.(map[string]any); ok {
-				redactData(es["data"])
-			}
-		}
-	}
-	if db, ok := out["dbSecret"].(map[string]any); ok {
-		if p, present := db["vaultPath"]; present && p != nil && fmt.Sprint(p) != "" {
-			db["vaultPath"] = redactedPath(fmt.Sprint(p))
-		}
-	}
+	redactTree(out)
 	return out
 }
 
-func redactData(data any) {
-	list, ok := data.([]any)
-	if !ok {
-		return
-	}
-	for _, item := range list {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
+func redactTree(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, e := range t {
+			if vaultPathKeys[k] {
+				if _, nested := e.(map[string]any); !nested && e != nil && fmt.Sprint(e) != "" {
+					if _, list := e.([]any); !list {
+						t[k] = redactedPath(fmt.Sprint(e))
+						continue
+					}
+				}
+			}
+			redactTree(e)
 		}
-		if k, present := m["remoteKey"]; present && k != nil && fmt.Sprint(k) != "" {
-			m["remoteKey"] = redactedPath(fmt.Sprint(k))
+	case []any:
+		for _, e := range t {
+			redactTree(e)
 		}
 	}
 }

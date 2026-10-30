@@ -48,13 +48,6 @@ func TestRequiredApproval(t *testing.T) {
 
 // The detector is real: a matrix that maps preview update to "no approval"
 // is caught by the same assertion.
-func TestRequiredApproval_MutatedMatrixIsCaught(t *testing.T) {
-	mutated := func(string, Action) Approval { return Approval{} }
-	if mutated(EnvironmentPreview, ActionUpdate) == (Approval{Required: true, Role: "owner", Reason: "preview_update_requires_approval_until_build_sandbox"}) {
-		t.Fatal("the mutated matrix passes the converged assertion; the test would not detect the regression")
-	}
-}
-
 func TestPlanExpiredIsLazy(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	p := &Plan{ExpiresAt: now.Add(time.Minute)}

@@ -27,7 +27,7 @@ type goldenCase struct {
 
 func readFile(t *testing.T, path string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // G304: test reads its own testdata
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,6 @@ func TestCompilePreview_UnparseableBase(t *testing.T) {
 	for name, base := range map[string]string{
 		"a list":        "- a\n- b\n",
 		"a scalar":      "just text\n",
-		"empty":         "",
 		"yaml error":    "a: [1\n",
 		"non-str keys":  "1: a\n",
 		"nested badkey": "a:\n  1: x\n",
@@ -231,6 +230,17 @@ func TestUpstreamKeysMatchCompiler(t *testing.T) {
 	for _, p := range intentYQPaths {
 		if !seen[p] {
 			t.Errorf("the compiler models %s but tpl-git-commit.yaml no longer assigns it", p)
+		}
+	}
+}
+
+// An empty or null values document is {} for the preview script
+// (`yaml.safe_load(f) or {}`), so the plan must not refuse it.
+func TestCompilePreview_EmptyBaseIsEmptyMapping(t *testing.T) {
+	in, _ := mustParse(t, testIntentJSON("acme", "web", ""))
+	for name, base := range map[string]string{"empty": "", "null": "null\n", "comment only": "# nothing\n"} {
+		if _, _, err := CompilePreview([]byte(base), in, "abc123", "web-abc123.mctl.ai"); err != nil {
+			t.Errorf("%s: err = %v, want nil", name, err)
 		}
 	}
 }
