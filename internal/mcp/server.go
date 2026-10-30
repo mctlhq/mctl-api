@@ -262,6 +262,8 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolGetServiceConfig())
 	srv.AddTool(s.toolDeployAnalyze())
 	srv.AddTool(s.toolGetRepoBinding())
+	srv.AddTool(s.toolDeployPlan())
+	srv.AddTool(s.toolGetDeployPlan())
 	srv.AddTool(s.toolListWorkflows())
 	srv.AddTool(s.toolGetWorkflowStatus())
 	srv.AddTool(s.toolGetResourceUsage())
@@ -891,10 +893,18 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		mcplib.WithString("contact_email",
 			mcplib.Description("Team contact email"),
 		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		params := extractStringParams(req.GetArguments())
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("create workspace %q", args["tenant_name"])); r != nil {
+			return r, nil
+		}
+		params := extractStringParams(args)
+		params["confirm"] = "yes"
 		body, err := s.apiPost(ctx, "/api/v1/operations/create-tenant/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create tenant: %v", err)), nil
@@ -1090,10 +1100,18 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			mcplib.Required(),
 			mcplib.Description("Application name"),
 		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
 	)
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		params := extractStringParams(req.GetArguments())
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("provision a database for %q in team %q", args["app_name"], args["team_name"])); r != nil {
+			return r, nil
+		}
+		params := extractStringParams(args)
+		params["confirm"] = "yes"
 		body, err := s.apiPost(ctx, "/api/v1/operations/provision-database/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to provision database: %v", err)), nil
@@ -1286,7 +1304,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			return r, nil
 		}
 		params := extractStringParams(args)
-		delete(params, "confirm")
+		params["confirm"] = "yes"
 		body, err := s.apiPost(ctx, "/api/v1/operations/retire-service/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to retire service: %v", err)), nil
@@ -1335,7 +1353,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			return r, nil
 		}
 		params := extractStringParams(args)
-		delete(params, "confirm")
+		params["confirm"] = "yes"
 		body, err := s.apiPost(ctx, "/api/v1/operations/delete-tenant/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to delete tenant: %v", err)), nil

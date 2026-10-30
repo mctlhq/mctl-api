@@ -1,0 +1,13 @@
+image:
+  repository: ghcr.io/acme/api
+  tag: 2.0.0
+imagePullSecrets:
+  - name: ghcr-pull
+externalSecret:
+  store: platform-store
+  storeKind: ClusterSecretStore
+  targetSecret: ghcr-pull
+  data:
+    - secretKey: .dockerconfigjson
+      remoteKey: secret/data/platform/ghcr
+      property: config

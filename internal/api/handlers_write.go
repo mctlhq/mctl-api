@@ -96,6 +96,25 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		ciAuthorized = true
 	}
 
+	// RequiresConfirm is enforced here, before StripUndeclared (which would
+	// drop a confirm key) and before any workflow parameter is built. The
+	// confirm field is consumed: it never reaches Argo.
+	if op.RequiresConfirm {
+		if !confirmedYes(input["confirm"]) {
+			h.logAudit(r, audit.Entry{
+				UserID:    user.ID,
+				Operation: opName,
+				Status:    "denied",
+				RiskLevel: string(op.RiskLevel),
+				Message:   "denied:operation_confirmation_required",
+			})
+			writeErrorCode(w, http.StatusPreconditionRequired, "operation_confirmation_required",
+				"operation "+opName+" requires \"confirm\": \"yes\" in the request body", nil)
+			return
+		}
+	}
+	delete(input, "confirm")
+
 	// Drop anything the operation does not declare, before RBAC reads the
 	// input and before it reaches Argo — but AFTER the authentication check,
 	// so an unauthenticated caller cannot spend the server's CPU sorting keys
@@ -810,4 +829,10 @@ func legacyRelayParams(user *auth.User, opName string, input map[string]string) 
 		"service":           input["service"],
 		"slug":              input["slug"],
 	}
+}
+
+// confirmedYes reports whether v is an explicit confirmation: trimmed,
+// case-insensitive "yes" (the same rule as the MCP requireConfirm gate).
+func confirmedYes(v string) bool {
+	return strings.EqualFold(strings.TrimSpace(v), "yes")
 }

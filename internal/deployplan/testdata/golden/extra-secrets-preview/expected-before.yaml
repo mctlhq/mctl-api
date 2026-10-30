@@ -1,0 +1,42 @@
+blueGreen:
+  enabled: false
+dbInitJob:
+  enabled: false
+dbSecret:
+  secretName: worker-db
+  store: tenant-store
+  storeKind: SecretStore
+  vaultPath: teams/acme/worker/preview
+extraExternalSecrets:
+  already:
+    data:
+    - property: x
+      remoteKey: secret/data/teams/acme/worker/preview/x
+      secretKey: X
+    store: tenant-store
+    storeKind: SecretStore
+    targetSecret: already
+  smtp:
+    data:
+    - property: pass
+      remoteKey: teams/acme/worker/preview/mail
+      secretKey: PASS
+    store: tenant-store
+    storeKind: SecretStore
+    targetSecret: smtp
+image:
+  tag: rev-0123456789abcdef0123456789abcdef01234567
+ingress:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  className: traefik
+  enabled: true
+  hosts:
+  - worker-abc123.mctl.ai
+  tls:
+  - hosts:
+    - worker-abc123.mctl.ai
+    secretName: preview-worker-abc123-tls
+podLabels:
+  mctl.ai/preview: 'true'
+  mctl.ai/preview-id: abc123

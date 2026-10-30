@@ -368,6 +368,39 @@ var ownerUser = auth.NewGitHubUser("test-owner", []string{"tests"})
 // postAs sends POST with a user injected into context.
 func postAs(t *testing.T, router http.Handler, path string, body interface{}, user *auth.User) *httptest.ResponseRecorder {
 	t.Helper()
+	return postAsRaw(t, router, path, withTestConfirm(path, body), user)
+}
+
+// withTestConfirm adds confirm=yes to the body of an execute request for an
+// operation with RequiresConfirm, so tests of the checks that follow the
+// confirm gate keep exercising them. Tests of the gate itself use postAsRaw.
+func withTestConfirm(path string, body interface{}) interface{} {
+	m, ok := body.(map[string]string)
+	if !ok {
+		return body
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 5 || parts[2] != "operations" || parts[4] != "execute" {
+		return body
+	}
+	op, found := operations.NewRegistry().Get(parts[3])
+	if !found || !op.RequiresConfirm {
+		return body
+	}
+	if _, has := m["confirm"]; has {
+		return body
+	}
+	out := make(map[string]string, len(m)+1)
+	for k, v := range m {
+		out[k] = v
+	}
+	out["confirm"] = "yes"
+	return out
+}
+
+// postAsRaw posts the body exactly as given.
+func postAsRaw(t *testing.T, router http.Handler, path string, body interface{}, user *auth.User) *httptest.ResponseRecorder {
+	t.Helper()
 	b, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")

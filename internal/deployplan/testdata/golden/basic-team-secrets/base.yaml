@@ -1,0 +1,33 @@
+image:
+  repository: ghcr.io/acme/web
+  tag: 1.0.0
+replicaCount: 2
+service:
+  port: 3000
+probes:
+  liveness:
+    path: /live
+  readiness:
+    path: /ready
+env:
+  LOG_LEVEL: info
+externalSecret:
+  targetSecret: web-secrets
+  data:
+    - secretKey: API_KEY
+      remoteKey: teams/acme/web
+      property: API_KEY
+envFrom:
+  - secretRef:
+      name: web-secrets
+dbSecret:
+  secretName: web-db
+  vaultPath: secret/data/teams/acme/web/database
+ingress:
+  enabled: false
+  hosts:
+    - web.mctl.ai
+  tls:
+    - secretName: web-tls
+      hosts:
+        - web.mctl.ai

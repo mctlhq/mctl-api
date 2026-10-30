@@ -434,9 +434,14 @@ var builtinOperations = []Operation{
 		Description:      "Deploy a new service or update an existing one. Builds Docker image from source, stores secrets in Vault, commits Helm values to the GitOps repo, and triggers ArgoCD sync. Repo MUST contain a Dockerfile at the configured `dockerfile_path`. For first-time onboarding of a brand-new repo, see https://docs.mctl.ai/guides/scaffolding for Node/Python/Go/static templates and the canonical CI auto-deploy job. WARNING: Ensure health endpoints (/healthz, /readyz) bypass authentication middleware, otherwise Kubernetes liveness/readiness probes will fail with 401 Unauthorized and the pod will crashloop.",
 		WorkflowTemplate: "deploy-service",
 		RiskLevel:        RiskMedium,
-		RequiresConfirm:  false,
-		MinRole:          RoleDeveloper,
-		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{component_name}/"},
+		// RequiresConfirm stays false on purpose. The flag is per operation,
+		// and action=deploy is the unattended CI OIDC auto-deploy path
+		// (authorizeCIDeploy), which has no human to confirm. First onboard
+		// is high risk: it is refused at plan time (onboard_requires_preview_onboard)
+		// and is gated later by a server-held grant, not confirm="yes".
+		RequiresConfirm: false,
+		MinRole:         RoleDeveloper,
+		ModifiesPaths:   []string{"platform-gitops/services/{team_name}/{component_name}/"},
 		Parameters: []ParameterDef{
 			{Name: "action", Type: "string", Required: true, Description: "Operation type", Enum: []string{"onboard", "deploy", "update-config"}},
 			{Name: "team_name", Type: "string", Required: true, Description: "Team (workspace) name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},

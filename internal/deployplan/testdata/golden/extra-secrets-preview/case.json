@@ -1,0 +1,35 @@
+{
+  "tenant": "acme",
+  "service": "worker",
+  "revision": "0123456789abcdef0123456789abcdef01234567",
+  "preview_id": "abc123",
+  "host": "worker-abc123.mctl.ai",
+  "intent": {
+    "apiVersion": "deploy.mctl.ai/v1alpha1",
+    "kind": "DeployIntent",
+    "metadata": {
+      "tenant": "acme",
+      "service": "worker"
+    },
+    "spec": {
+      "environment": "preview",
+      "source": {
+        "repository": "acme/worker",
+        "revision": "0123456789abcdef0123456789abcdef01234567"
+      },
+      "detection": {
+        "tier": "tier0"
+      },
+      "runtime": {
+        "port": 8080,
+        "healthPath": "/healthz"
+      },
+      "exposure": {
+        "mode": "public"
+      },
+      "env": {
+        "MODE": "batch"
+      }
+    }
+  }
+}

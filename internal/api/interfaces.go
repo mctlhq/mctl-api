@@ -21,6 +21,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/argoarchive"
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
+	"github.com/mctlhq/mctl-api/internal/deployplan"
 	"github.com/mctlhq/mctl-api/internal/erpactsites"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/k8s"
@@ -162,4 +163,18 @@ type WorkflowLogArchive interface {
 // deployer token; see cmd/api/main.go).
 type VaultReader interface {
 	ReadKV(ctx context.Context, path string) (map[string]string, error)
+}
+
+// DeployPlanStore stores immutable deploy plans (internal/deployplan). There
+// is no update method on purpose.
+type DeployPlanStore interface {
+	Insert(ctx context.Context, p *deployplan.Plan) (stored *deployplan.Plan, replayed bool, err error)
+	Get(ctx context.Context, id string) (*deployplan.Plan, error)
+}
+
+// DeployPlanGitops reads a service's values, source-repo annotation and the
+// checkout revision as one consistent read (gitops.Reader.ServiceValuesAt).
+// It fails closed: only a documented absence is exists=false.
+type DeployPlanGitops interface {
+	ServiceValuesAt(team, component string) (data []byte, sourceRepo string, exists bool, rev string, err error)
 }

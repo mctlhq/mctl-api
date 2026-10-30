@@ -27,7 +27,7 @@ func TestToolCreateTenant_SurfacesReservedNameReason(t *testing.T) {
 	result, err := handler(context.Background(), mcplib.CallToolRequest{
 		Params: mcplib.CallToolParams{
 			Name:      "mctl_create_tenant",
-			Arguments: map[string]any{"tenant_name": "kube-system"},
+			Arguments: map[string]any{"tenant_name": "kube-system", "confirm": "yes"},
 		},
 	})
 	if err != nil {

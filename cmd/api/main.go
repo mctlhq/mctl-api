@@ -52,6 +52,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/decisions"
 	"github.com/mctlhq/mctl-api/internal/delegation"
 	"github.com/mctlhq/mctl-api/internal/deployanalyze"
+	"github.com/mctlhq/mctl-api/internal/deployplan"
 	"github.com/mctlhq/mctl-api/internal/domains"
 	"github.com/mctlhq/mctl-api/internal/erpactsites"
 	"github.com/mctlhq/mctl-api/internal/events"
@@ -639,6 +640,23 @@ func main() {
 		}
 	}
 
+	// Deploy-plan store (mctl-api#866): immutable preview plans, kept in the
+	// same database as the work items and behind the same WORK_ITEMS_DISABLED
+	// kill switch. Nil makes POST /api/v1/deploy/plan and
+	// GET /api/v1/deploy/plans/{id} answer 503.
+	var deployPlans mctlapi.DeployPlanStore
+	if !workItemsDisabled && workItemsDBURL != "" {
+		dps, dpErr := initStore(initCtx, storeFailures, "deploy plans", func(ctx context.Context) (*deployplan.Store, error) {
+			return deployplan.NewStore(ctx, workItemsDBURL)
+		})
+		if dpErr != nil {
+			slog.Error("deploy-plan store init failed; deploy plan routes will return 503", "error", dpErr)
+		} else {
+			deployPlans = dps
+			defer dps.Close()
+		}
+	}
+
 	// Execution-evidence store (mctl-api#409, Tier B of
 	// evidence.mctl.ai/v1alpha1). Same shape as the work-items store:
 	// EVIDENCE_DB_URL, else AUDIT_DB_URL, with a kill switch. Nil makes
@@ -1133,6 +1151,8 @@ func main() {
 		ComponentSourceRepos:           gitReader,
 		SourceRepoBindings:             gitReader,
 		DeployContentReader:            deployanalyze.NewHTTPReader("", gitOpsTokenSource()),
+		DeployPlans:                    deployPlans,
+		DeployGitops:                   gitReader,
 		ArgoCD:                         argoClient,
 		AuditLog:                       auditLog,
 		Executor:                       executor,

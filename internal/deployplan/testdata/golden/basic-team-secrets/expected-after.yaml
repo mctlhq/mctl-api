@@ -1,0 +1,58 @@
+blueGreen:
+  enabled: false
+dbInitJob:
+  enabled: false
+dbSecret:
+  secretName: web-db
+  store: tenant-store
+  storeKind: SecretStore
+  vaultPath: secret/data/teams/acme/web/preview/database
+env:
+  FEATURE: 'on'
+  LOG_LEVEL: info
+envFrom:
+- secretRef:
+    name: web-secrets
+externalSecret:
+  data:
+  - property: API_KEY
+    remoteKey: teams/acme/web/preview
+    secretKey: API_KEY
+  - property: password
+    remoteKey: teams/acme/web/preview
+    secretKey: DB_PASSWORD
+  store: tenant-store
+  storeKind: SecretStore
+  targetSecret: web-secrets
+image:
+  repository: ghcr.io/acme/web
+  tag: rev-0123456789abcdef0123456789abcdef01234567
+ingress:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  className: traefik
+  enabled: true
+  hosts:
+  - web-abc123.mctl.ai
+  tls:
+  - hosts:
+    - web-abc123.mctl.ai
+    secretName: preview-web-abc123-tls
+podLabels:
+  mctl.ai/preview: 'true'
+  mctl.ai/preview-id: abc123
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /healthz
+replicaCount: 1
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+service:
+  port: 8080

@@ -205,6 +205,16 @@
       "reason": "Read-only static analysis of a tenant-bound repository for deploy (mctlhq/.github#254); enabling it on the shared portal is a separate owner decision."
     },
     {
+      "name": "mctl_deploy_plan",
+      "enabled": false,
+      "reason": "Writes an immutable preview deploy plan row (mctlhq/mctl-api#866); enabling it on the shared portal is a separate owner decision."
+    },
+    {
+      "name": "mctl_get_deploy_plan",
+      "enabled": false,
+      "reason": "Read-only lookup of a stored preview deploy plan (mctlhq/mctl-api#866); enabling it on the shared portal is a separate owner decision."
+    },
+    {
       "name": "mctl_get_repo_binding",
       "enabled": false,
       "reason": "Read-only repository to service binding lookup for deploy (mctlhq/.github#254); enabling it on the shared portal is a separate owner decision."

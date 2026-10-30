@@ -1,0 +1,39 @@
+blueGreen:
+  enabled: false
+dbInitJob:
+  enabled: false
+externalSecret:
+  data:
+  - property: config
+    remoteKey: secret/data/platform/ghcr
+    secretKey: .dockerconfigjson
+  store: platform-store
+  storeKind: ClusterSecretStore
+  targetSecret: ghcr-pull
+image:
+  repository: ghcr.io/acme/api
+  tag: rev-0123456789abcdef0123456789abcdef01234567
+imagePullSecrets:
+- name: ghcr-pull
+ingress:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  className: traefik
+  enabled: true
+  hosts:
+  - api-abc123.mctl.ai
+  tls:
+  - hosts:
+    - api-abc123.mctl.ai
+    secretName: preview-api-abc123-tls
+podLabels:
+  mctl.ai/preview: 'true'
+  mctl.ai/preview-id: abc123
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /healthz
+replicaCount: 1
+service:
+  port: 8080

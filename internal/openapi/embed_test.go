@@ -18,6 +18,9 @@ func TestSpecParses(t *testing.T) {
 		t.Fatalf("openapi.yaml does not parse: %v", err)
 	}
 	for path, methods := range map[string][]string{
+		"/api/v1/deploy/plan":                                                       {"post"},
+		"/api/v1/deploy/plans/{id}":                                                 {"get"},
+		"/api/v1/operations/{name}/execute":                                         {"post"},
 		"/api/v1/work-items":                                                        {"get", "post"},
 		"/api/v1/work-items/{id}":                                                   {"get", "patch"},
 		"/api/v1/work-items/{id}/intents":                                           {"get", "post"},
