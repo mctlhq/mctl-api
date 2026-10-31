@@ -430,6 +430,46 @@ components:
         message:
           type: string
 
+    AssistantCatalogEntry:
+      type: object
+      properties:
+        name: {type: string}
+        version: {type: string}
+        title: {type: string}
+        description: {type: string}
+        tags: {type: array, items: {type: string}}
+        examples: {type: array, items: {type: string}}
+        lifecycle: {type: string, enum: [published, deprecated]}
+        digest: {type: string, description: 'sourceManifest.contentHash, e.g. sha256:...'}
+        variables:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              type: {type: string}
+              required: {type: boolean}
+              default: {description: Omitted for a secret variable or when unset.}
+              choices: {type: array, items: {type: string}}
+              description: {type: string}
+        intents:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              description: {type: string}
+              tier: {type: string}
+        defaults:
+          type: object
+          properties:
+            mode: {type: string}
+            limits: {type: object, description: spec.defaults.limits as published}
+            disclosure:
+              type: object
+              properties:
+                policy: {type: string}
+
     PlatformSkillMetadata:
       type: object
       properties:
@@ -3049,6 +3089,117 @@ paths:
                 $ref: '#/components/schemas/Error'
         '503':
           description: create-tenant could not check whether the tenant exists (gitops checkout unavailable or stale); nothing was submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/assistant-catalog:
+    get:
+      summary: List the public Telegram assistant catalog
+      description: |
+        Public, no authentication. Every TelegramAssistant definition version
+        in the agent registry whose `metadata.visibility` is `public`, whose
+        `metadata.status` is not `draft` and whose registry lifecycle is
+        `published`, ordered by name and then by version, highest first. A
+        projection only: instructions, tools, records, escalation, owner and
+        provenance are never returned, and a secret variable's default is
+        omitted.
+      tags: [Assistant Catalog]
+      security: []
+      responses:
+        '200':
+          description: Catalog entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AssistantCatalogEntry'
+                  count:
+                    type: integer
+        '503':
+          description: Agent registry not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/assistant-catalog/{name}/versions/{version}:
+    get:
+      summary: Read one public Telegram assistant version
+      description: |
+        Public, no authentication. The same projection as the list. A
+        `deprecated` registry lifecycle is answered (with its lifecycle) so
+        an existing pin can still be described; `disabled`, non-public,
+        draft, unknown and non-assistant versions are all 404.
+      tags: [Assistant Catalog]
+      security: []
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}, example: hr-recruiter}
+        - {name: version, in: path, required: true, schema: {type: string}, example: 0.1.0}
+      responses:
+        '200':
+          description: Catalog entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssistantCatalogEntry'
+        '404':
+          description: No public assistant at this version (code `assistant_not_found`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/assistant-catalog/{name}/versions/{version}/definition:
+    get:
+      summary: Read a full materialized Telegram assistant definition
+      description: |
+        The stored materialized TelegramAssistant document, instructions
+        included, with its registry lifecycle and digest. Only the
+        `surface:telegram` principal (no `X-MCTL-Surface-Actor` required) or
+        an admin; anyone else is 401/403. Every lifecycle is answered,
+        `disabled` included, and both `public` and `admin` visibility. The
+        document is returned as stored in JSONB, so key order and whitespace
+        differ from the publisher's bytes: canonicalize before comparing the
+        digest.
+      tags: [Assistant Catalog]
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+        - {name: version, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Full definition
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: {type: string}
+                  version: {type: string}
+                  lifecycle: {type: string, enum: [published, deprecated, disabled]}
+                  contentHash: {type: string, example: 'sha256:...'}
+                  definition:
+                    type: object
+                    description: The materialized TelegramAssistant document.
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Not the telegram surface or an admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No TelegramAssistant at this version (code `assistant_not_found`)
           content:
             application/json:
               schema:

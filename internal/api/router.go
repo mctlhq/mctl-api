@@ -474,6 +474,18 @@ func NewRouter(opts Options) http.Handler {
 		r.Post("/oauth/register", h.handleOAuthRegister)
 	})
 
+	// Telegram assistant catalog (mctl-api#876) — public, no auth: a
+	// projection of published TelegramAssistant definitions that never
+	// carries instructions or provenance. Per-IP budget, like the OAuth
+	// endpoints. The full definition sits under the authenticated group
+	// below (GET .../versions/{version}/definition); chi backtracks to the
+	// /api/v1 mount for it, which internal/api/router_test.go pins.
+	r.Group(func(r chi.Router) {
+		r.Use(httprate.Limit(120, 1*time.Minute, httprate.WithKeyFuncs(keyByTrustedIP)))
+		r.Get("/api/v1/assistant-catalog", h.ListAssistantCatalog)
+		r.Get("/api/v1/assistant-catalog/{name}/versions/{version}", h.GetAssistantCatalogVersion)
+	})
+
 	// Webhook callbacks (unauthenticated/token-validated)
 	r.Post("/api/v1/workflows/events/argo-complete", h.HandleArgoWorkflowComplete)
 	r.Post("/api/v1/webhooks/github", h.HandleGitHubWebhook)
@@ -700,6 +712,11 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/agents/{name}/preflight", h.PreflightAgent)
 			r.Post("/agents/{name}/bindings/rollback", h.RollbackBinding)
 			r.Get("/agents/{name}/bindings/{revision}", h.GetBinding)
+
+			// Full materialized TelegramAssistant definition (mctl-api#876):
+			// the telegram surface principal or an admin. The public
+			// projection of the same rows is registered outside this group.
+			r.Get("/assistant-catalog/{name}/versions/{version}/definition", h.GetAssistantDefinition)
 
 			// Write endpoints with real side effects (trigger Argo Workflows,
 			// start/signal a Temporal workflow) — tighter rate limit, shared

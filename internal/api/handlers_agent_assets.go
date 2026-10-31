@@ -256,6 +256,11 @@ func (h *Handlers) PreflightAgent(w http.ResponseWriter, r *http.Request) {
 			} else {
 				spec = &s
 			}
+		case errors.Is(err, agentregistry.ErrProfilelessDefinition):
+			// A TelegramAssistant has no profile to preflight; falling
+			// through to gitops would preflight a profile it never uses.
+			writeAgentPlatformError(w, err)
+			return
 		case isRegistryNotFound(err):
 			// fall through to gitops
 		default:
