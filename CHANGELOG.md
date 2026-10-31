@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.143.0](https://github.com/mctlhq/mctl-api/compare/4.142.0...4.143.0) (2026-10-31)
+
+
+### Features
+
+* **agents:** issue-868-feat-mcp-create-workitems-and-append-rea ([2d6d364](https://github.com/mctlhq/mctl-api/commit/2d6d3642eed9980362050a7690b35ecd8159d00c))
+* **agents:** issue-868-feat-mcp-create-workitems-and-append-rea ([480a431](https://github.com/mctlhq/mctl-api/commit/480a431df8547a3c6716e66dcff1398d692849d5))
+
 ## [4.142.0](https://github.com/mctlhq/mctl-api/compare/4.141.0...4.142.0) (2026-10-31)
 
 
