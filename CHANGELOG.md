@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.144.0](https://github.com/mctlhq/mctl-api/compare/4.143.0...4.144.0) (2026-10-31)
+
+
+### Features
+
+* **agents:** issue-883-feat-workitems-record-server-derived-cli ([e894a3e](https://github.com/mctlhq/mctl-api/commit/e894a3e1587e1b442883f3e6eb0fd550f3e51f66))
+* **agents:** issue-883-feat-workitems-record-server-derived-cli ([b85ce35](https://github.com/mctlhq/mctl-api/commit/b85ce3543aa62b45321458411fc314d8c549db0a))
+
 ## [4.143.0](https://github.com/mctlhq/mctl-api/compare/4.142.0...4.143.0) (2026-10-31)
 
 
