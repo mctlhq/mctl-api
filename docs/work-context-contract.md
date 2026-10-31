@@ -111,7 +111,13 @@ may live in different databases.
   (`GET /work-items/{id}/intents[/...]`), their own work item included:
   403 / tool error `agent_scope_denied` (mctl-api#880). The investigator's
   intent source (`WORK_ITEM_INTENT_SOURCE`) must therefore stay `off`, and
-  its snapshots do not include intents. An intent remains provenance and input, never authorization or
+  its snapshots do not include intents. Snapshots sealed while that source
+  was `on` (mctl-agents 1.63.0 until mctl-gitops#2320, 2026-10-31) still embed
+  intent text, and a later scoped run can read them through the bound snapshot
+  routes. This is accepted as a bounded legacy exposure (mctl-api#886): those
+  routes admit only the run's own work item, the text was sealed by an
+  investigate run of that same item that had already read it, and the rows
+  leave with the snapshot retention sweep. An intent remains provenance and input, never authorization or
   approval state. A retention-swept intent (mctl-api#353) reads back with
   `text` empty and `text_redacted: true` — consumers must treat that as
   "text not observable", never as an empty intent.
