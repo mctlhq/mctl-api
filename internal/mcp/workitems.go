@@ -22,11 +22,15 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 // Canonical WorkItem tools (mctl-api#341): MCP as a second surface over the
@@ -218,6 +222,142 @@ Idempotent by idempotency_key: repeating the same call with the same key returns
 			body["resumed_from_execution_id"] = from
 		}
 		return s.workItemCall(ctx, http.MethodPost, "/api/v1/work-items/"+id+"/execution-requests", body, "request work item execution")
+	}
+	return tool, handler
+}
+
+func (s *Server) toolCreateWorkItem() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_create_work_item",
+		mcplib.WithTitleAnnotation("Create a work item"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
+		mcplib.WithDescription(`Creates a canonical WorkItem in a tenant and returns it, including its "wi_" id. Creating starts no execution.
+
+Who acts comes from your authentication, never from an argument. The tenant is checked against your own access (403 tenant_forbidden), and a role below developer, for example viewer, is refused (403 tenant_role_forbidden). A private item is visible only to its creator.
+
+idempotency_key is required: repeating the same call with the same key returns the original item. The same key with different arguments is refused with 409 idempotency_key_reused, and an external_key that is already in use is refused with 409 external_key_in_use. "replayed": true means an existing item was returned, either by a retry with the same key or because external_key matched an existing open item.
+
+No discovery tool exists: pass the returned "wi_" id explicitly to another client, which can then call mctl_list_work_item_intents.`),
+		mcplib.WithString("tenant", mcplib.Required(), mcplib.Description("Tenant (workspace) name the item belongs to.")),
+		mcplib.WithString("title", mcplib.Required(), mcplib.Description("Short title of the work item.")),
+		mcplib.WithString("idempotency_key", mcplib.Required(),
+			mcplib.Description("A key you choose for this one creation. Reuse it only to retry the same call.")),
+		mcplib.WithString("visibility", mcplib.Enum("tenant", "private"),
+			mcplib.Description(`"tenant" (default) or "private" (visible only to you).`)),
+		mcplib.WithString("external_key", mcplib.Description("Optional correlation key from the originating system.")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		tenant := strings.TrimSpace(stringArg(req, "tenant"))
+		if tenant == "" {
+			return mcplib.NewToolResultError("missing required argument: tenant"), nil
+		}
+		title := strings.TrimSpace(stringArg(req, "title"))
+		if title == "" {
+			return mcplib.NewToolResultError("missing required argument: title"), nil
+		}
+		key := strings.TrimSpace(stringArg(req, "idempotency_key"))
+		if key == "" {
+			return mcplib.NewToolResultError("missing required argument: idempotency_key"), nil
+		}
+		body := map[string]any{
+			"tenant":          tenant,
+			"title":           title,
+			"idempotency_key": key,
+			"origin_surface":  workItemSurface,
+		}
+		if v := strings.TrimSpace(stringArg(req, "visibility")); v != "" {
+			if v != "tenant" && v != "private" {
+				return mcplib.NewToolResultError(`visibility must be "tenant" or "private"`), nil
+			}
+			body["visibility"] = v
+		}
+		if v := strings.TrimSpace(stringArg(req, "external_key")); v != "" {
+			body["external_key"] = v
+		}
+		return s.workItemCall(ctx, http.MethodPost, "/api/v1/work-items", body, "create work item")
+	}
+	return tool, handler
+}
+
+func (s *Server) toolAppendWorkItemIntent() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_append_work_item_intent",
+		mcplib.WithTitleAnnotation("Append a work item intent"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
+		mcplib.WithDescription(`Appends what was asked, as free text, to one WorkItem so another client can read it with mctl_list_work_item_intents. An intent is provenance, not approval, and appending starts no execution.
+
+The text is at most 8 KiB and is sent unchanged, never truncated. Text that contains a secret-shaped value is refused with 400 secret_in_text and is not stored. Who acts comes from your authentication; a viewer is refused (403 tenant_role_forbidden), and an item that is private to someone else or in a foreign tenant answers 404 work_item_not_found.
+
+idempotency_key is required: the same key and text return the original intent ("replayed": true); the same key with different text is refused with 409 idempotency_key_reused.`),
+		workItemIDArg,
+		mcplib.WithString("text", mcplib.Required(), mcplib.Description("The intent text (at most 8 KiB). Never include secrets.")),
+		mcplib.WithString("idempotency_key", mcplib.Required(),
+			mcplib.Description("A key you choose for this one append. Reuse it only to retry the same call.")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id, errResult := requiredIDArg(req, "work_item_id")
+		if errResult != nil {
+			return errResult, nil
+		}
+		text := stringArg(req, "text")
+		if strings.TrimSpace(text) == "" {
+			return mcplib.NewToolResultError("missing required argument: text"), nil
+		}
+		key := strings.TrimSpace(stringArg(req, "idempotency_key"))
+		if key == "" {
+			return mcplib.NewToolResultError("missing required argument: idempotency_key"), nil
+		}
+		body := map[string]any{
+			"text":            text,
+			"idempotency_key": key,
+			"surface":         workItemSurface,
+		}
+		return s.workItemCall(ctx, http.MethodPost, "/api/v1/work-items/"+id+"/intents", body, "append work item intent")
+	}
+	return tool, handler
+}
+
+func (s *Server) toolListWorkItemIntents() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_list_work_item_intents",
+		mcplib.WithTitleAnnotation("Work item intents"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription(`The intents appended to one WorkItem, oldest first, as a page: intents, truncated and limit. While truncated is true, call again with after_id set to the last id returned.
+
+An intent with text_redacted: true had its text removed by retention. The text is unavailable; it is not an empty instruction, and clients must never reconstruct it.
+
+`+workItemReadNote),
+		workItemIDArg,
+		mcplib.WithNumber("after_id", mcplib.Description("Return only intents with an id greater than this (a non-negative integer).")),
+		mcplib.WithNumber("limit", mcplib.Description("Page size, an integer from 1 to 100.")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id, errResult := requiredIDArg(req, "work_item_id")
+		if errResult != nil {
+			return errResult, nil
+		}
+		q := url.Values{}
+		if raw, present := req.GetArguments()["after_id"]; present && raw != nil {
+			v, ok := raw.(float64)
+			if !ok || v < 0 || v != math.Trunc(v) || v > 1<<53 {
+				return mcplib.NewToolResultError("after_id must be a non-negative integer"), nil
+			}
+			q.Set("after_id", strconv.FormatInt(int64(v), 10))
+		}
+		if raw, present := req.GetArguments()["limit"]; present && raw != nil {
+			v, ok := raw.(float64)
+			if !ok || v < 1 || v != math.Trunc(v) || v > workitems.MaxIntentPageLimit {
+				return mcplib.NewToolResultError(fmt.Sprintf("limit must be an integer from 1 to %d", workitems.MaxIntentPageLimit)), nil
+			}
+			q.Set("limit", strconv.FormatInt(int64(v), 10))
+		}
+		path := "/api/v1/work-items/" + id + "/intents"
+		if len(q) > 0 {
+			path += "?" + q.Encode()
+		}
+		return s.workItemCall(ctx, http.MethodGet, path, nil, "work item intents")
 	}
 	return tool, handler
 }

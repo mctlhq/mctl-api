@@ -195,6 +195,8 @@ var governedAgentTools = toolSet(
 	"mctl_request_lifecycle_handoff",
 	"mctl_request_lifecycle_reconcile",
 	"mctl_request_work_item_execution",
+	"mctl_create_work_item",
+	"mctl_append_work_item_intent",
 	"mctl_retire_service",
 	"mctl_retry_lifecycle_handoff",
 	"mctl_rollback_agent",

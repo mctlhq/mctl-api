@@ -452,11 +452,10 @@ change to `workitem/v1`. When the contract changes, this document and
 
 - The Telegram, ChatGPT, CLI or portal adapters themselves. This contract
   defines what adapters read and write; building them is separate work.
-- MCP tool wrappers (`mctl_*` tools) for work items. Adding tools forces
-  coordinated updates to `internal/mcp/server_test.go`
-  (`TestNewMCPServer_ToolCount`) and `internal/mcp/annotations_test.go`
-  (`recordedHints`); the REST + OpenAPI contract is what adapters and
-  `mctl-agents` need first, so MCP tools are explicit follow-up work.
+- MCP lookup of a WorkItem by `external_key`, and listing WorkItems over MCP.
+  The MCP tools that exist are described in the MCP surface section; the
+  handoff passes the `wi_` id explicitly. `intent_id` on execution requests
+  and resume is follow-up work (mctl-api#871).
 - Synchronizing messages between surfaces, push/fan-out delivery, or any
   real-time subscription mechanism.
 - Changing Temporal `DevLoopWorkflow` or Argo workflow semantics, replacing
@@ -587,6 +586,9 @@ call. Nothing is inherited from the surface that created the item.
 | `mctl_list_work_item_snapshots` | `GET /work-items/{id}/snapshots[/{snapshot_id}]` |
 | `mctl_list_work_item_execution_requests` | `GET /work-items/{id}/execution-requests[/{request_id}]` |
 | `mctl_request_work_item_execution` | `POST /work-items/{id}/execution-requests` |
+| `mctl_create_work_item` | `POST /work-items` |
+| `mctl_append_work_item_intent` | `POST /work-items/{id}/intents` |
+| `mctl_list_work_item_intents` | `GET /work-items/{id}/intents` |
 
 - The write tool sends only `kind`, `expected_state_version`,
   `resumed_from_execution_id`, `idempotency_key` (required) and
@@ -597,8 +599,22 @@ call. Nothing is inherited from the surface that created the item.
   `execution_request_open` with the open request's id.
 - For a direct caller, `surface` is a label, not an authenticated claim. Who
   asked is `requested_by`, taken from the token.
-- All five tools are off on the shared portal (`docs/portal-allowlist.json`)
-  until the owner enables them.
+- `mctl_create_work_item`, `mctl_append_work_item_intent` and
+  `mctl_list_work_item_intents` start no execution, request or snapshot.
+  Fulfilment of mcp-origin items depends on mctl-agents#904 and mctl-api#871.
+- Shared portal exposure, as recorded in
+  [`docs/portal-allowlist.json`](portal-allowlist.json):
+
+| Tool | Route | Shared portal |
+|---|---|---|
+| `mctl_get_work_item` | `GET /work-items/{id}` | enabled |
+| `mctl_list_work_item_executions` | `GET /work-items/{id}/executions` | enabled |
+| `mctl_list_work_item_snapshots` | `GET /work-items/{id}/snapshots[/{snapshot_id}]` | enabled |
+| `mctl_list_work_item_execution_requests` | `GET /work-items/{id}/execution-requests[/{request_id}]` | enabled |
+| `mctl_request_work_item_execution` | `POST /work-items/{id}/execution-requests` | disabled |
+| `mctl_create_work_item` | `POST /work-items` | disabled |
+| `mctl_append_work_item_intent` | `POST /work-items/{id}/intents` | disabled |
+| `mctl_list_work_item_intents` | `GET /work-items/{id}/intents` | disabled |
 
 Not built yet, tracked as its own issue (#353 approvals and retention):
 

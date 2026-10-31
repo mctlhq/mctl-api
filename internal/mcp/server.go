@@ -345,6 +345,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListWorkItemSnapshots())
 	srv.AddTool(s.toolListWorkItemExecutionRequests())
 	srv.AddTool(s.toolRequestWorkItemExecution())
+	srv.AddTool(s.toolCreateWorkItem())
+	srv.AddTool(s.toolAppendWorkItemIntent())
+	srv.AddTool(s.toolListWorkItemIntents())
 
 	// Tenant-scoped commerce reads (mctl-api#569).
 	srv.AddTool(s.toolGetCommerceBudget())
