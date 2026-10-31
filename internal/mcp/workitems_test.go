@@ -31,10 +31,11 @@ import (
 )
 
 type workItemCallRecord struct {
-	line string
-	auth string
-	body map[string]any
-	keys []string
+	line  string
+	query string
+	auth  string
+	body  map[string]any
+	keys  []string
 }
 
 func workItemBackend(t *testing.T, status int, reply string) (*httptest.Server, *[]workItemCallRecord) {
@@ -42,7 +43,7 @@ func workItemBackend(t *testing.T, status int, reply string) (*httptest.Server, 
 	var calls []workItemCallRecord
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
-		rec := workItemCallRecord{line: r.Method + " " + r.URL.EscapedPath(), auth: r.Header.Get("Authorization")}
+		rec := workItemCallRecord{line: r.Method + " " + r.URL.EscapedPath(), query: r.URL.RawQuery, auth: r.Header.Get("Authorization")}
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &rec.body)
 			for k := range rec.body {
@@ -258,5 +259,180 @@ func TestWorkItemToolsRefuseNonStringOptionalIDs(t *testing.T) {
 	}
 	if len(*calls) != 2 {
 		t.Fatalf("want 2 list calls, got %v", *calls)
+	}
+}
+
+func TestCreateWorkItemSendsDocumentedBody(t *testing.T) {
+	ts, calls := workItemBackend(t, http.StatusCreated, `{"work_item":{"id":"wi_1"}}`)
+	r := callRoadmapTool(t, (*Server).toolCreateWorkItem, ts.URL, map[string]any{
+		"tenant": "t", "title": " T ", "idempotency_key": "k", "actor": "evil", "surface": "x",
+	})
+	if r.IsError {
+		t.Fatal(resultText(t, r))
+	}
+	got := (*calls)[0]
+	if got.line != "POST /api/v1/work-items" || strings.Join(got.keys, ",") != "idempotency_key,origin_surface,tenant,title" || got.body["origin_surface"] != "mcp" {
+		t.Fatalf("unexpected call %+v", got)
+	}
+	callRoadmapTool(t, (*Server).toolCreateWorkItem, ts.URL, map[string]any{
+		"tenant": "t", "title": "T", "idempotency_key": "k", "visibility": "private", "external_key": "e",
+	})
+	if b := (*calls)[1].body; b["visibility"] != "private" || b["external_key"] != "e" {
+		t.Fatalf("optional fields lost: %v", b)
+	}
+}
+
+func TestCreateWorkItemRefusesLocally(t *testing.T) {
+	ts, calls := workItemBackend(t, http.StatusCreated, `{}`)
+	for _, args := range []map[string]any{
+		{"tenant": "t", "title": "T"},
+		{"tenant": "t", "title": "T", "idempotency_key": "  "},
+		{"tenant": "t", "idempotency_key": "k"},
+		{"title": "T", "idempotency_key": "k"},
+		{"tenant": "t", "title": "T", "idempotency_key": "k", "visibility": "public"},
+	} {
+		if r := callRoadmapTool(t, (*Server).toolCreateWorkItem, ts.URL, args); !r.IsError {
+			t.Errorf("%v accepted", args)
+		}
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("refused calls reached the API: %v", *calls)
+	}
+}
+
+func TestCreateWorkItemReplayAndTypedRefusal(t *testing.T) {
+	ts, _ := workItemBackend(t, http.StatusOK, `{"work_item":{"id":"wi_1"}}`)
+	r := callRoadmapTool(t, (*Server).toolCreateWorkItem, ts.URL, map[string]any{"tenant": "t", "title": "T", "idempotency_key": "k"})
+	if !strings.Contains(resultText(t, r), `"replayed":true`) {
+		t.Fatalf("200 must be marked replayed: %s", resultText(t, r))
+	}
+	ts, _ = workItemBackend(t, http.StatusConflict, `{"error":"x","code":"external_key_in_use","details":{"id":"wi_9"}}`)
+	r = callRoadmapTool(t, (*Server).toolCreateWorkItem, ts.URL, map[string]any{"tenant": "t", "title": "T", "idempotency_key": "k"})
+	text := resultText(t, r)
+	if !r.IsError || !strings.Contains(text, "HTTP 409") || !strings.Contains(text, "external_key_in_use") || !strings.Contains(text, "wi_9") {
+		t.Fatalf("typed refusal lost: %s", text)
+	}
+}
+
+func TestAppendWorkItemIntentForwardsTextVerbatim(t *testing.T) {
+	ts, calls := workItemBackend(t, http.StatusCreated, `{}`)
+	text := " " + strings.Repeat("a", 8<<10) + "\n"
+	r := callRoadmapTool(t, (*Server).toolAppendWorkItemIntent, ts.URL, map[string]any{
+		"work_item_id": "wi_1", "text": text, "idempotency_key": "k",
+	})
+	if r.IsError {
+		t.Fatal(resultText(t, r))
+	}
+	got := (*calls)[0]
+	if got.line != "POST /api/v1/work-items/wi_1/intents" || got.body["text"] != text ||
+		got.body["surface"] != "mcp" || strings.Join(got.keys, ",") != "idempotency_key,surface,text" {
+		t.Fatalf("unexpected call %s keys=%v", got.line, got.keys)
+	}
+}
+
+func TestAppendWorkItemIntentRefusesLocally(t *testing.T) {
+	ts, calls := workItemBackend(t, http.StatusCreated, `{}`)
+	for _, args := range []map[string]any{
+		{"work_item_id": "wi_1", "idempotency_key": "k"},
+		{"work_item_id": "wi_1", "text": "x"},
+		{"work_item_id": "wi_1", "text": "x", "idempotency_key": " "},
+		{"work_item_id": "..", "text": "x", "idempotency_key": "k"},
+		{"work_item_id": "a/b", "text": "x", "idempotency_key": "k"},
+	} {
+		if r := callRoadmapTool(t, (*Server).toolAppendWorkItemIntent, ts.URL, args); !r.IsError {
+			t.Errorf("%v accepted", args)
+		}
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("refused calls reached the API: %v", *calls)
+	}
+}
+
+func TestAppendWorkItemIntentKeepsRefusalsAndReplay(t *testing.T) {
+	ts, _ := workItemBackend(t, http.StatusBadRequest, `{"error":"x","code":"secret_in_text"}`)
+	r := callRoadmapTool(t, (*Server).toolAppendWorkItemIntent, ts.URL, map[string]any{"work_item_id": "wi_1", "text": "x", "idempotency_key": "k"})
+	if !r.IsError || !strings.Contains(resultText(t, r), "secret_in_text") {
+		t.Fatalf("refusal lost: %s", resultText(t, r))
+	}
+	ts, _ = workItemBackend(t, http.StatusOK, `{"intent":{"id":1}}`)
+	r = callRoadmapTool(t, (*Server).toolAppendWorkItemIntent, ts.URL, map[string]any{"work_item_id": "wi_1", "text": "x", "idempotency_key": "k"})
+	if !strings.Contains(resultText(t, r), `"replayed":true`) {
+		t.Fatalf("200 must be marked replayed: %s", resultText(t, r))
+	}
+}
+
+func TestListWorkItemIntentsQueryAndValidation(t *testing.T) {
+	reply := `{"intents":[{"id":1,"text":"","text_redacted":true}],"truncated":false,"limit":50}`
+	ts, calls := workItemBackend(t, http.StatusOK, reply)
+	r := callRoadmapTool(t, (*Server).toolListWorkItemIntents, ts.URL, map[string]any{"work_item_id": "wi_1"})
+	if r.IsError || resultText(t, r) != reply {
+		t.Fatalf("reply must pass through unchanged: %s", resultText(t, r))
+	}
+	callRoadmapTool(t, (*Server).toolListWorkItemIntents, ts.URL, map[string]any{"work_item_id": "wi_1", "after_id": float64(7), "limit": float64(100)})
+	if got := (*calls)[0].line; got != "GET /api/v1/work-items/wi_1/intents" {
+		t.Errorf("bare call = %s", got)
+	}
+	if got := (*calls)[0].query; got != "" {
+		t.Errorf("absent after_id/limit must not be sent, got query %q", got)
+	}
+	if got := (*calls)[1].line; got != "GET /api/v1/work-items/wi_1/intents" {
+		t.Errorf("query is not part of the path: %s", got)
+	}
+	if got := (*calls)[1].query; got != "after_id=7&limit=100" {
+		t.Errorf("query = %q, want after_id=7&limit=100", got)
+	}
+	callRoadmapTool(t, (*Server).toolListWorkItemIntents, ts.URL, map[string]any{"work_item_id": "wi_1", "after_id": float64(0)})
+	if got := (*calls)[2].query; got != "after_id=0" {
+		t.Errorf("after_id=0 must be sent alone, got query %q", got)
+	}
+	n := len(*calls)
+	for _, args := range []map[string]any{
+		{"work_item_id": "wi_1", "after_id": float64(-1)},
+		{"work_item_id": "wi_1", "after_id": 1.5},
+		{"work_item_id": "wi_1", "after_id": "x"},
+		{"work_item_id": "wi_1", "limit": float64(0)},
+		{"work_item_id": "wi_1", "limit": float64(101)},
+		{"work_item_id": "..", "limit": float64(1)},
+	} {
+		if r := callRoadmapTool(t, (*Server).toolListWorkItemIntents, ts.URL, args); !r.IsError {
+			t.Errorf("%v accepted", args)
+		}
+	}
+	if len(*calls) != n {
+		t.Fatalf("refused calls reached the API")
+	}
+}
+
+// T9 (mctl-api#868): creating a WorkItem, appending an intent and reading the
+// intents is provenance only. None of the three tools may reach an execution,
+// execution-request or resume route.
+func TestWorkItemHandoffToolsNeverReachExecutionRoutes(t *testing.T) {
+	ts, calls := workItemBackend(t, http.StatusCreated, `{"work_item":{"id":"wi_1"}}`)
+	steps := []struct {
+		build func(*Server) (mcplib.Tool, server.ToolHandlerFunc)
+		args  map[string]any
+		want  string
+	}{
+		{(*Server).toolCreateWorkItem, map[string]any{"tenant": "t", "title": "T", "idempotency_key": "k1", "visibility": "private", "external_key": "e"}, "POST /api/v1/work-items"},
+		{(*Server).toolAppendWorkItemIntent, map[string]any{"work_item_id": "wi_1", "text": "do X", "idempotency_key": "k2"}, "POST /api/v1/work-items/wi_1/intents"},
+		{(*Server).toolListWorkItemIntents, map[string]any{"work_item_id": "wi_1", "after_id": float64(1), "limit": float64(10)}, "GET /api/v1/work-items/wi_1/intents"},
+	}
+	for _, st := range steps {
+		if r := callRoadmapTool(t, st.build, ts.URL, st.args); r.IsError {
+			t.Fatalf("%s: %s", st.want, resultText(t, r))
+		}
+	}
+	if len(*calls) != len(steps) {
+		t.Fatalf("want exactly %d API calls, got %d: %+v", len(steps), len(*calls), *calls)
+	}
+	for i, c := range *calls {
+		if c.line != steps[i].want {
+			t.Errorf("call %d = %q, want %q", i, c.line, steps[i].want)
+		}
+		for _, forbidden := range []string{"/execution-requests", "/executions", "/resume"} {
+			if strings.Contains(c.line, forbidden) || strings.Contains(c.query, forbidden) {
+				t.Errorf("call %d %q reaches %s", i, c.line, forbidden)
+			}
+		}
 	}
 }

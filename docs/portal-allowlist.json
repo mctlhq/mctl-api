@@ -510,6 +510,21 @@
       "reason": "Records an execution request that the dispatcher turns into a DevLoop/investigator run on an existing WorkItem; consumes agent budget. Requester is the caller's token, the service principal is refused. Mutating: enabling it here also needs an entry in mutatingOnPortal. Not yet enabled on the shared portal: that is an owner decision, not part of mctl-api#341."
     },
     {
+      "name": "mctl_create_work_item",
+      "enabled": false,
+      "reason": "Opens a WorkItem in a tenant under the caller's own token (developer role required, idempotency key required). Starts no execution. Not enabled on the shared portal: exposure of a tenant-work write is an owner decision (mctlhq/.github#237)."
+    },
+    {
+      "name": "mctl_append_work_item_intent",
+      "enabled": false,
+      "reason": "Stores caller-supplied free text (up to 8 KiB, secret-shaped values refused) on a WorkItem under the caller's own token. Starts no execution. Not enabled on the shared portal: that is an owner decision (mctlhq/.github#237)."
+    },
+    {
+      "name": "mctl_list_work_item_intents",
+      "enabled": false,
+      "reason": "Read-only intents of a WorkItem, returning raw intent text that can be sensitive (redacted text reads as unavailable). Per-call tenant and private-item checks apply. Not enabled on the shared portal: that is an owner decision (mctlhq/.github#237)."
+    },
+    {
       "name": "mctl_get_commerce_budget",
       "enabled": false,
       "reason": "Reads one tenant's commerce budget balance (available, reserved, committed and pending liability in integer minor units). Tenant owner authority is checked by the API on the caller's own token. Not enabled on the shared portal: that is a separate owner decision (mctl-api#569)."
