@@ -106,7 +106,12 @@ may live in different databases.
   asked for: `actor_principal`, `actor_client_id`, `surface`, `text` (max 8 KiB), `params`,
   `text_redacted`, `created_at`. Never a full chat transcript. Readable
   (`GET /work-items/{id}/intents[/{intent_id}]`) by whoever can see the
-  item; an intent remains provenance and input, never authorization or
+  item. Scoped agent run tokens (any `AgentScope`) are refused raw intent
+  reads on MCP (`mctl_list_work_item_intents`) and REST
+  (`GET /work-items/{id}/intents[/...]`), their own work item included:
+  403 / tool error `agent_scope_denied` (mctl-api#880). The investigator's
+  intent source (`WORK_ITEM_INTENT_SOURCE`) must therefore stay `off`, and
+  its snapshots do not include intents. An intent remains provenance and input, never authorization or
   approval state. A retention-swept intent (mctl-api#353) reads back with
   `text` empty and `text_redacted: true` — consumers must treat that as
   "text not observable", never as an empty intent.

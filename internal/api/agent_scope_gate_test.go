@@ -86,6 +86,9 @@ func TestAgentScopeGate_ScopedRunReachesOnlyItsScope(t *testing.T) {
 		// Mutations, even on its own work item.
 		{http.MethodPost, "/api/v1/incidents/inc-1/resolve", http.StatusForbidden},
 		{http.MethodPost, "/api/v1/work-items/wi_own/executions", http.StatusForbidden},
+		// Raw intents, even on its own work item (mctl-api#880).
+		{http.MethodGet, "/api/v1/work-items/wi_own/intents", http.StatusForbidden},
+		{http.MethodGet, "/api/v1/work-items/wi_own/intents/7", http.StatusForbidden},
 	} {
 		rec := serveUser(router, run, c.method, c.path)
 		if rec.Code != c.want {
@@ -111,8 +114,8 @@ func TestAgentScopeGate_ScopedRunReachesOnlyItsScope(t *testing.T) {
 			t.Errorf("denied audit row lacks the run: %v", e.Parameters)
 		}
 	}
-	if denied != 6 {
-		t.Errorf("agent_scope.denied audit rows = %d, want 6", denied)
+	if denied != 8 {
+		t.Errorf("agent_scope.denied audit rows = %d, want 8", denied)
 	}
 }
 
