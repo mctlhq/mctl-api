@@ -31,10 +31,11 @@ import (
 )
 
 type workItemCallRecord struct {
-	line string
-	auth string
-	body map[string]any
-	keys []string
+	line  string
+	query string
+	auth  string
+	body  map[string]any
+	keys  []string
 }
 
 func workItemBackend(t *testing.T, status int, reply string) (*httptest.Server, *[]workItemCallRecord) {
@@ -42,7 +43,7 @@ func workItemBackend(t *testing.T, status int, reply string) (*httptest.Server, 
 	var calls []workItemCallRecord
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
-		rec := workItemCallRecord{line: r.Method + " " + r.URL.EscapedPath(), auth: r.Header.Get("Authorization")}
+		rec := workItemCallRecord{line: r.Method + " " + r.URL.EscapedPath(), query: r.URL.RawQuery, auth: r.Header.Get("Authorization")}
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &rec.body)
 			for k := range rec.body {
@@ -371,8 +372,18 @@ func TestListWorkItemIntentsQueryAndValidation(t *testing.T) {
 	if got := (*calls)[0].line; got != "GET /api/v1/work-items/wi_1/intents" {
 		t.Errorf("bare call = %s", got)
 	}
+	if got := (*calls)[0].query; got != "" {
+		t.Errorf("absent after_id/limit must not be sent, got query %q", got)
+	}
 	if got := (*calls)[1].line; got != "GET /api/v1/work-items/wi_1/intents" {
 		t.Errorf("query is not part of the path: %s", got)
+	}
+	if got := (*calls)[1].query; got != "after_id=7&limit=100" {
+		t.Errorf("query = %q, want after_id=7&limit=100", got)
+	}
+	callRoadmapTool(t, (*Server).toolListWorkItemIntents, ts.URL, map[string]any{"work_item_id": "wi_1", "after_id": float64(0)})
+	if got := (*calls)[2].query; got != "after_id=0" {
+		t.Errorf("after_id=0 must be sent alone, got query %q", got)
 	}
 	n := len(*calls)
 	for _, args := range []map[string]any{
@@ -389,5 +400,39 @@ func TestListWorkItemIntentsQueryAndValidation(t *testing.T) {
 	}
 	if len(*calls) != n {
 		t.Fatalf("refused calls reached the API")
+	}
+}
+
+// T9 (mctl-api#868): creating a WorkItem, appending an intent and reading the
+// intents is provenance only. None of the three tools may reach an execution,
+// execution-request or resume route.
+func TestWorkItemHandoffToolsNeverReachExecutionRoutes(t *testing.T) {
+	ts, calls := workItemBackend(t, http.StatusCreated, `{"work_item":{"id":"wi_1"}}`)
+	steps := []struct {
+		build func(*Server) (mcplib.Tool, server.ToolHandlerFunc)
+		args  map[string]any
+		want  string
+	}{
+		{(*Server).toolCreateWorkItem, map[string]any{"tenant": "t", "title": "T", "idempotency_key": "k1", "visibility": "private", "external_key": "e"}, "POST /api/v1/work-items"},
+		{(*Server).toolAppendWorkItemIntent, map[string]any{"work_item_id": "wi_1", "text": "do X", "idempotency_key": "k2"}, "POST /api/v1/work-items/wi_1/intents"},
+		{(*Server).toolListWorkItemIntents, map[string]any{"work_item_id": "wi_1", "after_id": float64(1), "limit": float64(10)}, "GET /api/v1/work-items/wi_1/intents"},
+	}
+	for _, st := range steps {
+		if r := callRoadmapTool(t, st.build, ts.URL, st.args); r.IsError {
+			t.Fatalf("%s: %s", st.want, resultText(t, r))
+		}
+	}
+	if len(*calls) != len(steps) {
+		t.Fatalf("want exactly %d API calls, got %d: %+v", len(steps), len(*calls), *calls)
+	}
+	for i, c := range *calls {
+		if c.line != steps[i].want {
+			t.Errorf("call %d = %q, want %q", i, c.line, steps[i].want)
+		}
+		for _, forbidden := range []string{"/execution-requests", "/executions", "/resume"} {
+			if strings.Contains(c.line, forbidden) || strings.Contains(c.query, forbidden) {
+				t.Errorf("call %d %q reaches %s", i, c.line, forbidden)
+			}
+		}
 	}
 }
