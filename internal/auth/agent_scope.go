@@ -327,7 +327,9 @@ func (s *AgentScope) Allows(req AgentScopeRequest) bool {
 			}
 		}
 	}
-	for _, d := range s.Deny {
+	// agentDeniedRoutes bind every scope, like agentDeniedTools in
+	// AllowsTool, so a future scope that forgets Deny still refuses them.
+	for _, d := range append(append([]AgentScopeRoute(nil), agentDeniedRoutes...), s.Deny...) {
 		if (d.Method == "" || d.Method == req.Method) && d.Pattern.MatchString(req.Path) {
 			return false
 		}
