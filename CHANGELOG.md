@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.145.0](https://github.com/mctlhq/mctl-api/compare/4.144.0...4.145.0) (2026-10-31)
+
+
+### Features
+
+* **agents:** issue-880-security-mcp-decide-whether-scoped-agent ([493107e](https://github.com/mctlhq/mctl-api/commit/493107e797837d0332d2c998e3abdfe082812875))
+* **agents:** issue-880-security-mcp-decide-whether-scoped-agent ([38b9f4f](https://github.com/mctlhq/mctl-api/commit/38b9f4fcd851a960305d033bc5fbe5a6e69c5e4f))
+
+
+### Bug Fixes
+
+* **auth:** apply the intents route deny to every agent scope ([48578a0](https://github.com/mctlhq/mctl-api/commit/48578a03ad35e34bfcd01af88b68f542c93b6317))
+
 ## [4.144.0](https://github.com/mctlhq/mctl-api/compare/4.143.0...4.144.0) (2026-10-31)
 
 
