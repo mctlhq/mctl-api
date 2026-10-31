@@ -28,8 +28,12 @@ type Mutation struct {
 	// bound to (mctl-api#376), recorded next to ActingPrincipal/ViaPrincipalID
 	// on a request an agent principal made. "" for every non-agent request.
 	ViaExecutionID string
-	Surface        string
-	RequestID      string
+	// ActorClientID is the OAuth client the authenticating access token was
+	// issued to; provenance only (never authorization); "" when the credential
+	// is not an mctl-api OAuth access token. Not part of RequestHash.
+	ActorClientID string
+	Surface       string
+	RequestID     string
 	// IdempotencyKey deduplicates the request: per tenant for Create, per
 	// work item for everything else. RequestHash is the digest of the
 	// request the key was first used with. The same key with a different

@@ -1569,7 +1569,7 @@ func (s *OAuthServer) ExchangeCodeForResource(ctx context.Context, code, codeVer
 	if len(requested) > 0 && wantResource != entry.Resource {
 		return "", "", fmt.Errorf("%w: the code was issued for a different resource", ErrInvalidTarget)
 	}
-	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, entry.Groups, s.audienceForResource(entry.Resource))
+	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, entry.Groups, s.audienceForResource(entry.Resource), entry.ClientID)
 	if err != nil {
 		return "", "", err
 	}
@@ -1599,15 +1599,31 @@ func (s *OAuthServer) checkMintPrincipal(pid string) error {
 	return nil
 }
 
+// maxClientIDLen bounds the client_id claim minted into and read from a token.
+const maxClientIDLen = 512
+
+// boundedClientID returns id when it is a sane client identifier, else "".
+func boundedClientID(id string) string {
+	if len(id) > maxClientIDLen {
+		return ""
+	}
+	for _, r := range id {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	return id
+}
+
 // IssueJWT creates a signed JWT access token for the given user. principalID
 // becomes the pid claim; with no login, the token is for a principal with
 // no GitHub login and its subject is the principal id.
 func (s *OAuthServer) IssueJWT(login, principalID string, groups []string) (string, error) {
-	return s.issueJWTFor(login, principalID, groups, "")
+	return s.issueJWTFor(login, principalID, groups, "", "")
 }
 
 // issueJWTFor is IssueJWT for an explicit audience; "" is the default one.
-func (s *OAuthServer) issueJWTFor(login, principalID string, groups []string, aud string) (string, error) {
+func (s *OAuthServer) issueJWTFor(login, principalID string, groups []string, aud, clientID string) (string, error) {
 	if aud == "" {
 		aud = s.accessAudience()
 	}
@@ -1634,6 +1650,7 @@ func (s *OAuthServer) issueJWTFor(login, principalID string, groups []string, au
 		Subject:   subject,
 		Audience:  audience{aud},
 		PID:       principalID,
+		ClientID:  boundedClientID(clientID),
 		Groups:    groups,
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(ttl).Unix(),
@@ -1803,7 +1820,7 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 		if !s.PrincipalMode {
 			groups = s.groupsForSession(sess.Login, sess.Groups)
 		}
-		accessToken, err := s.issueJWTFor(sess.Login, sess.PrincipalID, groups, s.audienceForResource(sess.Resource))
+		accessToken, err := s.issueJWTFor(sess.Login, sess.PrincipalID, groups, s.audienceForResource(sess.Resource), clientID)
 		if err != nil {
 			return "", "", err
 		}
@@ -1850,7 +1867,7 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 	if !s.PrincipalMode {
 		groups, fresh = s.sessionGroups(entry.Login, entry.Groups)
 	}
-	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, groups, s.audienceForResource(entry.Resource))
+	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, groups, s.audienceForResource(entry.Resource), clientID)
 	if err != nil {
 		return "", "", err
 	}
@@ -1945,6 +1962,7 @@ func (s *OAuthServer) ValidateJWT(token string) (*User, error) {
 		u.tokenAudience = audience{s.accessAudience()}
 	}
 	u.supportAudience = payload.support
+	u.oauthClientID = boundedClientID(payload.ClientID)
 	return u, nil
 }
 
@@ -2057,7 +2075,10 @@ type jwtPayload struct {
 	// PID is the canonical principal the token was minted for
 	// (mctl-api#377). Subject is the GitHub login, or the principal id
 	// itself for a principal with no GitHub login.
-	PID       string   `json:"pid,omitempty"`
+	PID string `json:"pid,omitempty"`
+	// ClientID is the OAuth client the token was issued to (RFC 9068).
+	// Provenance only: never read for authorization.
+	ClientID  string   `json:"client_id,omitempty"`
 	Groups    []string `json:"groups"`
 	IssuedAt  int64    `json:"iat"`
 	ExpiresAt int64    `json:"exp"`

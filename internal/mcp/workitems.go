@@ -234,7 +234,7 @@ func (s *Server) toolCreateWorkItem() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Creates a canonical WorkItem in a tenant and returns it, including its "wi_" id. Creating starts no execution.
 
-Who acts comes from your authentication, never from an argument. The tenant is checked against your own access (403 tenant_forbidden), and a role below developer, for example viewer, is refused (403 tenant_role_forbidden). A private item is visible only to its creator.
+Who acts comes from your authentication, never from an argument; the OAuth client your token was issued to is likewise recorded by the server, never from an argument. The tenant is checked against your own access (403 tenant_forbidden), and a role below developer, for example viewer, is refused (403 tenant_role_forbidden). A private item is visible only to its creator.
 
 idempotency_key is required: repeating the same call with the same key returns the original item. The same key with different arguments is refused with 409 idempotency_key_reused, and an external_key that is already in use is refused with 409 external_key_in_use. "replayed": true means an existing item was returned, either by a retry with the same key or because external_key matched an existing open item.
 
@@ -288,7 +288,7 @@ func (s *Server) toolAppendWorkItemIntent() (mcplib.Tool, server.ToolHandlerFunc
 		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Appends what was asked, as free text, to one WorkItem so another client can read it with mctl_list_work_item_intents. An intent is provenance, not approval, and appending starts no execution.
 
-The text is at most 8 KiB and is sent unchanged, never truncated. Text that contains a secret-shaped value is refused with 400 secret_in_text and is not stored. Who acts comes from your authentication; a viewer is refused (403 tenant_role_forbidden), and an item that is private to someone else or in a foreign tenant answers 404 work_item_not_found.
+The text is at most 8 KiB and is sent unchanged, never truncated. Text that contains a secret-shaped value is refused with 400 secret_in_text and is not stored. Who acts comes from your authentication, and the OAuth client your token was issued to is recorded by the server, never from an argument; a viewer is refused (403 tenant_role_forbidden), and an item that is private to someone else or in a foreign tenant answers 404 work_item_not_found.
 
 idempotency_key is required: the same key and text return the original intent ("replayed": true); the same key with different text is refused with 409 idempotency_key_reused.`),
 		workItemIDArg,

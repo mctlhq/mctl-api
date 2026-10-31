@@ -144,12 +144,15 @@ ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT 
 -- like the principal id columns above: nothing reads it back yet.
 ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS via_execution_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE work_item_intents ADD COLUMN IF NOT EXISTS actor_principal_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_item_intents ADD COLUMN IF NOT EXISTS actor_client_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_items ADD COLUMN IF NOT EXISTS origin_client_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS actor_client_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS work_item_create_requests_item ON work_item_create_requests (work_item_id);
 `
 
 const itemColumns = `id, tenant, owner_principal, visibility, origin_surface, title, external_key,
 	state, waiting_reason, superseded_by, state_version, created_by, created_at, updated_at,
-	completed_at, schema_version, owner_principal_id`
+	completed_at, schema_version, owner_principal_id, origin_client_id`
 
 const executionColumns = `id, work_item_id, engine, engine_ref, attempt, resumed_from_execution_id,
 	phase, started_at, ended_at`
@@ -246,7 +249,7 @@ func scanItem(row pgx.Row) (*WorkItem, error) {
 	var w WorkItem
 	if err := row.Scan(&w.ID, &w.Tenant, &w.OwnerPrincipal, &w.Visibility, &w.OriginSurface, &w.Title,
 		&w.ExternalKey, &w.State, &w.WaitingReason, &w.SupersededBy, &w.StateVersion, &w.CreatedBy,
-		&w.CreatedAt, &w.UpdatedAt, &w.CompletedAt, &w.SchemaVersion, &w.OwnerPrincipalID); err != nil {
+		&w.CreatedAt, &w.UpdatedAt, &w.CompletedAt, &w.SchemaVersion, &w.OwnerPrincipalID, &w.OriginClientID); err != nil {
 		return nil, err
 	}
 	w.CreatedAt = w.CreatedAt.UTC()
@@ -351,10 +354,10 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*WorkItem, bool, er
 		}
 
 		w, err := scanItem(tx.QueryRow(ctx, `INSERT INTO work_items (`+itemColumns+`)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,'`+StateActive+`','','',1,$3,$8,$8,NULL,$9,$10)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,'`+StateActive+`','','',1,$3,$8,$8,NULL,$9,$10,$11)
 			RETURNING `+itemColumns,
 			WorkItemIDPrefix+uuid.NewString(), in.Tenant, in.Actor, in.Visibility, in.OriginSurface,
-			in.Title, in.ExternalKey, now, SchemaVersion, in.ActorPrincipalID))
+			in.Title, in.ExternalKey, now, SchemaVersion, in.ActorPrincipalID, in.ActorClientID))
 		if err != nil {
 			return fmt.Errorf("workitems: create: %w", err)
 		}
@@ -394,10 +397,10 @@ func appendEvent(ctx context.Context, tx pgx.Tx, id, kind, from, to string, m Mu
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO work_item_events
 		(work_item_id, seq, kind, from_state, to_state, actor_principal, acting_principal, surface, request_id, detail, created_at,
-		 actor_principal_id, via_principal_id, via_execution_id)
+		 actor_principal_id, via_principal_id, via_execution_id, actor_client_id)
 		VALUES ($1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM work_item_events WHERE work_item_id=$1),
-		        $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-		id, kind, from, to, m.Actor, m.ActingPrincipal, m.Surface, m.RequestID, raw, at, m.ActorPrincipalID, m.ViaPrincipalID, m.ViaExecutionID)
+		        $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		id, kind, from, to, m.Actor, m.ActingPrincipal, m.Surface, m.RequestID, raw, at, m.ActorPrincipalID, m.ViaPrincipalID, m.ViaExecutionID, m.ActorClientID)
 	if err != nil {
 		return fmt.Errorf("workitems: append event: %w", err)
 	}
@@ -881,11 +884,11 @@ func (s *Store) AppendIntent(ctx context.Context, in IntentInput) (*Intent, bool
 		var intent Intent
 		var text *string
 		err = tx.QueryRow(ctx, `INSERT INTO work_item_intents
-			(work_item_id, actor_principal, surface, text, params, created_at, actor_principal_id)
-			VALUES ($1,$2,$3,$4,$5,$6,$7)
-			RETURNING id, work_item_id, actor_principal, surface, text, params, created_at`,
-			cur.ID, in.Actor, in.Surface, in.Text, params, now, in.ActorPrincipalID).Scan(
-			&intent.ID, &intent.WorkItemID, &intent.ActorPrincipal, &intent.Surface, &text, &intent.Params, &intent.CreatedAt)
+			(work_item_id, actor_principal, surface, text, params, created_at, actor_principal_id, actor_client_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			RETURNING id, work_item_id, actor_principal, surface, text, params, created_at, actor_client_id`,
+			cur.ID, in.Actor, in.Surface, in.Text, params, now, in.ActorPrincipalID, in.ActorClientID).Scan(
+			&intent.ID, &intent.WorkItemID, &intent.ActorPrincipal, &intent.Surface, &text, &intent.Params, &intent.CreatedAt, &intent.ActorClientID)
 		if err != nil {
 			return fmt.Errorf("workitems: append intent: %w", err)
 		}
@@ -913,9 +916,9 @@ func (s *Store) AppendIntent(ctx context.Context, in IntentInput) (*Intent, bool
 func getIntent(ctx context.Context, q querier, itemID, id string) (*Intent, error) {
 	var intent Intent
 	var text *string
-	err := q.QueryRow(ctx, `SELECT id, work_item_id, actor_principal, surface, text, params, created_at
+	err := q.QueryRow(ctx, `SELECT id, work_item_id, actor_principal, surface, text, params, created_at, actor_client_id
 		FROM work_item_intents WHERE work_item_id=$1 AND id::text=$2`, itemID, id).Scan(
-		&intent.ID, &intent.WorkItemID, &intent.ActorPrincipal, &intent.Surface, &text, &intent.Params, &intent.CreatedAt)
+		&intent.ID, &intent.WorkItemID, &intent.ActorPrincipal, &intent.Surface, &text, &intent.Params, &intent.CreatedAt, &intent.ActorClientID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("workitems: intent %s of %s: %w", id, itemID, ErrNotFound)
 	}
@@ -948,7 +951,7 @@ func (s *Store) Intents(ctx context.Context, itemID string, afterID int64, limit
 	if limit > MaxIntentPageLimit {
 		limit = MaxIntentPageLimit
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id, work_item_id, actor_principal, surface, text, params, created_at
+	rows, err := s.pool.Query(ctx, `SELECT id, work_item_id, actor_principal, surface, text, params, created_at, actor_client_id
 		FROM work_item_intents WHERE work_item_id=$1 AND id > $2 ORDER BY id LIMIT $3`, itemID, afterID, limit+1)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: intents: %w", err)
@@ -959,7 +962,7 @@ func (s *Store) Intents(ctx context.Context, itemID string, afterID int64, limit
 		var intent Intent
 		var text *string
 		if err := rows.Scan(&intent.ID, &intent.WorkItemID, &intent.ActorPrincipal, &intent.Surface,
-			&text, &intent.Params, &intent.CreatedAt); err != nil {
+			&text, &intent.Params, &intent.CreatedAt, &intent.ActorClientID); err != nil {
 			return nil, fmt.Errorf("workitems: intents: %w", err)
 		}
 		if text != nil {
@@ -986,9 +989,9 @@ func (s *Store) Intents(ctx context.Context, itemID string, afterID int64, limit
 func (s *Store) Intent(ctx context.Context, itemID, id string) (*Intent, error) {
 	var intent Intent
 	var text *string
-	err := s.pool.QueryRow(ctx, `SELECT id, work_item_id, actor_principal, surface, text, params, created_at
+	err := s.pool.QueryRow(ctx, `SELECT id, work_item_id, actor_principal, surface, text, params, created_at, actor_client_id
 		FROM work_item_intents WHERE work_item_id=$1 AND id::text=$2`, itemID, id).Scan(
-		&intent.ID, &intent.WorkItemID, &intent.ActorPrincipal, &intent.Surface, &text, &intent.Params, &intent.CreatedAt)
+		&intent.ID, &intent.WorkItemID, &intent.ActorPrincipal, &intent.Surface, &text, &intent.Params, &intent.CreatedAt, &intent.ActorClientID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("workitems: intent %s of %s: %w", id, itemID, ErrIntentNotFound)
 	}
@@ -1056,7 +1059,7 @@ func (s *Store) LinkSurface(ctx context.Context, in SurfaceRefInput) (*SurfaceRe
 // answers an empty list, not ErrNotFound, so the caller Gets the item first.
 func (s *Store) Events(ctx context.Context, itemID string) ([]Event, error) {
 	rows, err := s.pool.Query(ctx, `SELECT work_item_id, seq, kind, from_state, to_state, actor_principal,
-			acting_principal, surface, request_id, detail, created_at
+			acting_principal, surface, request_id, detail, created_at, actor_client_id
 		FROM work_item_events WHERE work_item_id=$1 ORDER BY seq`, itemID)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: events: %w", err)
@@ -1066,7 +1069,7 @@ func (s *Store) Events(ctx context.Context, itemID string) ([]Event, error) {
 	for rows.Next() {
 		var e Event
 		if err := rows.Scan(&e.WorkItemID, &e.Seq, &e.Kind, &e.FromState, &e.ToState, &e.ActorPrincipal,
-			&e.ActingPrincipal, &e.Surface, &e.RequestID, &e.Detail, &e.CreatedAt); err != nil {
+			&e.ActingPrincipal, &e.Surface, &e.RequestID, &e.Detail, &e.CreatedAt, &e.ActorClientID); err != nil {
 			return nil, fmt.Errorf("workitems: events: %w", err)
 		}
 		e.CreatedAt = e.CreatedAt.UTC()

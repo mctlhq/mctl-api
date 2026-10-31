@@ -71,6 +71,11 @@ var forbiddenIdentityFields = []string{
 	"actor", "actor_principal", "owner", "owner_principal", "created_by",
 	"on_behalf_of", "subject", "delegated_actor", "acting_principal", "user", "user_id",
 	"requested_by", "decided_by",
+	// The OAuth client is derived from the verified access token, never input.
+	// These keys, bare client_id included, are reserved on every route that
+	// shares this list (work-item bodies, dev-loop approve, human-input
+	// response): a future body needing a client_id field must not reuse it.
+	"actor_client_id", "origin_client_id", "client_id",
 	// The served actor/subject record (mctl-api#376 D1, D2): always derived
 	// from authentication, so a body naming one is refused, not ignored.
 	"actor_kind", "actor_name", "subject_principal_id", "subject_kind", "agent_run_id",
@@ -277,6 +282,7 @@ func mutationFor(w http.ResponseWriter, r *http.Request, user *auth.User, op, it
 		Actor: principalOf(user), ActingPrincipal: user.ActingPrincipal(),
 		ActorPrincipalID: user.PrincipalID(), ViaPrincipalID: user.ViaPrincipalID(),
 		ViaExecutionID: user.ExecutionID(),
+		ActorClientID:  user.OAuthClientID(),
 		Surface:        surface, IdempotencyKey: key,
 	}
 	if meta, ok := ClientMetaFromContext(r.Context()); ok {

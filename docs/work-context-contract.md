@@ -91,7 +91,7 @@ may live in different databases.
 ## Resource model
 
 - **`WorkItem`** — `id` (`wi_...`), `tenant`, `owner_principal`,
-  `visibility` (`tenant` | `private`), `origin_surface`, `title`,
+  `visibility` (`tenant` | `private`), `origin_surface`, `origin_client_id`, `title`,
   `external_key`, `state`, `waiting_reason`, `superseded_by`,
   `state_version`, `created_by`, `created_at`, `updated_at`,
   `completed_at`, `schema_version` (`workitem/v1`).
@@ -100,10 +100,10 @@ may live in different databases.
   `execution_attached` | `approval_requested` | `approval_decided` |
   `surface_linked` | `snapshot_sealed` | `execution_requested` |
   `execution_request_claimed` | `execution_request_fulfilled` |
-  `execution_request_rejected`), `from_state`, `to_state`, `actor_principal`, `surface`,
+  `execution_request_rejected`), `from_state`, `to_state`, `actor_principal`, `actor_client_id`, `surface`,
   `request_id`, `detail`, `created_at`. Unique per `(work_item_id, seq)`.
 - **`WorkItemIntent`** — a bounded, normalized statement of what the user
-  asked for: `actor_principal`, `surface`, `text` (max 8 KiB), `params`,
+  asked for: `actor_principal`, `actor_client_id`, `surface`, `text` (max 8 KiB), `params`,
   `text_redacted`, `created_at`. Never a full chat transcript. Readable
   (`GET /work-items/{id}/intents[/{intent_id}]`) by whoever can see the
   item; an intent remains provenance and input, never authorization or
@@ -290,6 +290,16 @@ transcript sink.
   it; phase 2 (mctl-api#377) moves authorization and tenant membership onto
   it. A relayed request also carries the relaying surface's principal
   (`auth.User.ViaPrincipalID()`). See [principals.md](principals.md).
+- **`actor_client_id` / `origin_client_id`** (intents and events / work
+  items) name the OAuth client an mctl-api access token was issued to. They
+  come only from the signed `client_id` claim (RFC 9068) of the verified
+  token, are never accepted from a body or tool argument (400
+  `actor_not_accepted`), and authorize nothing. `""` means not recorded: a
+  non-OAuth credential, a service/surface/agent/CI token, or a token minted
+  before the claim existed. Tokens obtained through the shared Cloudflare MCP
+  portal name the portal's client, not the end client; the work-item write
+  tools are disabled there. In the MCP surface this is the server-derived way
+  to tell two clients of the same principal apart.
 - The acting principal is always derived from `auth.UserFromContext`
   (`internal/auth/oidc.go`) — GitHub PAT, Dex JWT, OAuth JWT, or the static
   service principal (`auth.User.IsService()`). A caller-supplied actor field

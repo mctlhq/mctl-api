@@ -198,20 +198,22 @@ type WorkItem struct {
 	// at creation; "" for an item created before principals were recorded
 	// or by a caller with none (mctl-agents#668: names the owner as a
 	// human-input respondent). Authorization still reads OwnerPrincipal.
-	OwnerPrincipalID string     `json:"owner_principal_id,omitempty"`
-	Visibility       string     `json:"visibility"`
-	OriginSurface    string     `json:"origin_surface"`
-	Title            string     `json:"title"`
-	ExternalKey      string     `json:"external_key,omitempty"`
-	State            string     `json:"state"`
-	WaitingReason    string     `json:"waiting_reason,omitempty"`
-	SupersededBy     string     `json:"superseded_by,omitempty"`
-	StateVersion     int64      `json:"state_version"`
-	CreatedBy        string     `json:"created_by"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	CompletedAt      *time.Time `json:"completed_at,omitempty"`
-	SchemaVersion    string     `json:"schema_version"`
+	OwnerPrincipalID string `json:"owner_principal_id,omitempty"`
+	// OriginClientID is the OAuth client of the creating token; "" = not recorded.
+	OriginClientID string     `json:"origin_client_id"`
+	Visibility     string     `json:"visibility"`
+	OriginSurface  string     `json:"origin_surface"`
+	Title          string     `json:"title"`
+	ExternalKey    string     `json:"external_key,omitempty"`
+	State          string     `json:"state"`
+	WaitingReason  string     `json:"waiting_reason,omitempty"`
+	SupersededBy   string     `json:"superseded_by,omitempty"`
+	StateVersion   int64      `json:"state_version"`
+	CreatedBy      string     `json:"created_by"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	SchemaVersion  string     `json:"schema_version"`
 }
 
 // Event is one append-only lifecycle record.
@@ -222,6 +224,8 @@ type Event struct {
 	FromState      string `json:"from_state,omitempty"`
 	ToState        string `json:"to_state,omitempty"`
 	ActorPrincipal string `json:"actor_principal"`
+	// ActorClientID is the OAuth client of the acting token; "" = not recorded.
+	ActorClientID string `json:"actor_client_id"`
 	// ActingPrincipal is the surface principal that relayed the change for
 	// ActorPrincipal, when it was relayed.
 	ActingPrincipal string          `json:"acting_principal,omitempty"`
@@ -237,7 +241,9 @@ type Intent struct {
 	WorkItemID     string `json:"work_item_id"`
 	ActorPrincipal string `json:"actor_principal"`
 	Surface        string `json:"surface,omitempty"`
-	Text           string `json:"text"`
+	// ActorClientID is the OAuth client of the appending token; "" = not recorded.
+	ActorClientID string `json:"actor_client_id"`
+	Text          string `json:"text"`
 	// TextRedacted is true when retention has swept this intent's text: Text
 	// then reads "", and that emptiness must never be read as an empty
 	// intent. Always present, never omitted, so a reader cannot mistake its
