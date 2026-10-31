@@ -111,7 +111,22 @@ func (s *Store) PublishDefinitionVersion(ctx context.Context, d *DefinitionVersi
 	if _, err := ParseVersion(d.Version); err != nil {
 		return nil, fmt.Errorf("agentregistry: publish definition version: version: %w", err)
 	}
-	if _, err := ParseRange(d.ProfileRange); err != nil {
+	// A TelegramAssistant is the one profile-less kind (see
+	// KindTelegramAssistant): the Telegram worker does not execute
+	// ExecutionProfile ceilings, so a placeholder profile would advertise
+	// limits nobody enforces. It must therefore carry no range at all, and
+	// every other kind still requires one. The kind is read leniently here,
+	// so a spec that is not an object still reports the range first, as it
+	// always has, and is refused by ValidateSpecIsObject below either way.
+	if IsProfileless(d.SpecJSON) {
+		if d.ProfileRange != "" {
+			return nil, fmt.Errorf("agentregistry: publish definition version: profile_range: %w: a %s binds to no execution profile, so it must not declare a range",
+				ErrInvalidRange, KindTelegramAssistant)
+		}
+		if err := validateAssistantDefinition(d); err != nil {
+			return nil, fmt.Errorf("agentregistry: publish definition version: spec: %w", err)
+		}
+	} else if _, err := ParseRange(d.ProfileRange); err != nil {
 		return nil, fmt.Errorf("agentregistry: publish definition version: profile_range: %w", err)
 	}
 	// The profile path validates its spec through validateProfileSpec; this
@@ -397,6 +412,16 @@ func loadProfileVersionForShare(ctx context.Context, tx pgx.Tx, profile, version
 	return p, nil
 }
 
+// refuseProfileless refuses to bind or resolve a profile-less definition.
+// Its stored range is empty, so without this the compatibility check would
+// fail as an unparseable range, which names the wrong problem.
+func refuseProfileless(def *DefinitionVersion) error {
+	if IsProfileless(def.SpecJSON) {
+		return fmt.Errorf("%w: %s@%s is a %s", ErrProfilelessDefinition, def.Agent, def.Version, KindTelegramAssistant)
+	}
+	return nil
+}
+
 // validateBindingPair runs the lifecycle and compatibility checks for
 // CreateBinding: both named versions must be published (neither deprecated
 // nor disabled), and the profile version must satisfy the definition's
@@ -419,6 +444,9 @@ func validateBindingPair(def *DefinitionVersion, prof *ProfileVersion) error {
 // never restore a pair where either version has since become disabled, and
 // the pair must still satisfy the declared compatibility range.
 func validateBindingPairNotDisabled(def *DefinitionVersion, prof *ProfileVersion) error {
+	if err := refuseProfileless(def); err != nil {
+		return err
+	}
 	if def.Lifecycle == LifecycleDisabled {
 		return fmt.Errorf("%w: definition %s@%s", ErrVersionDisabled, def.Agent, def.Version)
 	}
@@ -471,6 +499,11 @@ func (s *Store) CreateBinding(ctx context.Context, req CreateBindingRequest) (*R
 
 	def, err := loadDefinitionVersionForShare(ctx, tx, req.Agent, req.DefinitionVersion)
 	if err != nil {
+		return nil, err
+	}
+	// Before the profile lookup, so a profile-less definition is refused as
+	// such rather than as a missing profile version.
+	if err := refuseProfileless(def); err != nil {
 		return nil, err
 	}
 	prof, err := loadProfileVersionForShare(ctx, tx, req.Profile, req.ProfileVersion)
@@ -620,6 +653,11 @@ func (s *Store) RollbackBinding(ctx context.Context, agent, environment string, 
 	if err != nil {
 		return nil, err
 	}
+	// Before the profile lookup, so a profile-less definition is refused as
+	// such rather than as a missing profile version.
+	if err := refuseProfileless(def); err != nil {
+		return nil, err
+	}
 	prof, err := loadProfileVersionForShare(ctx, tx, target.Profile, target.ProfileVersion)
 	if err != nil {
 		return nil, err
@@ -663,6 +701,9 @@ func (s *Store) RollbackBinding(ctx context.Context, agent, environment string, 
 // buildResolvedBinding assembles the consumer-facing envelope from a binding
 // plus its two version rows.
 func buildResolvedBinding(b *ReleaseBinding, def *DefinitionVersion, prof *ProfileVersion) (*ResolvedBinding, error) {
+	if err := refuseProfileless(def); err != nil {
+		return nil, err
+	}
 	rng, err := ParseRange(def.ProfileRange)
 	if err != nil {
 		return nil, fmt.Errorf("agentregistry: resolve: %w", err)
@@ -757,6 +798,9 @@ func (s *Store) ResolveBinding(ctx context.Context, agent, environment string) (
 func (s *Store) ResolveExplicit(ctx context.Context, agent, definitionVersion, profile, profileVersion string) (*ResolvedBinding, error) {
 	def, err := s.definitionVersion(ctx, agent, definitionVersion)
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseProfileless(def); err != nil {
 		return nil, err
 	}
 

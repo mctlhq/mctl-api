@@ -122,6 +122,8 @@ func agentPlatformError(err error) (status int, code string, ok bool) {
 		return http.StatusUnprocessableEntity, "incompatible_profile", true
 	case errors.Is(err, agentregistry.ErrFixtureNotPromotable):
 		return http.StatusUnprocessableEntity, "fixture_not_promotable", true
+	case errors.Is(err, agentregistry.ErrProfilelessDefinition):
+		return http.StatusUnprocessableEntity, "profileless_definition", true
 	case errors.Is(err, agentregistry.ErrMissingPolicyFields):
 		return http.StatusBadRequest, "missing_policy_fields", true
 	case errors.Is(err, agentregistry.ErrMissingRequiredFields):

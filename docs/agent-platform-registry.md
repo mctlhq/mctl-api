@@ -301,6 +301,7 @@ binding not found) that predate this error-code scheme.
 | 422 | `version_deprecated` | either named version is `deprecated` |
 | 422 | `version_disabled` | either named version is `disabled` |
 | 422 | `fixture_not_promotable` | `binding_source: compatibility-fixture` was used on a bind/rollback |
+| 422 | `profileless_definition` | a bind, rollback, resolve or preflight names a `TelegramAssistant` definition, which binds to no profile |
 
 ## MCP tools
 
@@ -347,6 +348,40 @@ All seven new tools default to `"enabled": false` in
 `docs/portal-allowlist.json`, matching `mctl_create_agent` and the rest of
 the v1 registry family — the portal does not expose any registry mutation
 or catalog-read tool today.
+
+## Telegram assistants (mctl-api#876)
+
+A `TelegramAssistant` is stored as an ordinary `DefinitionVersion` whose
+`spec` is the materialized document mctl-telegram builds
+(`apiVersion: assistants.mctl.ai/v1alpha1`, `kind: TelegramAssistant`,
+instructions embedded as `spec.instructions.text`), with mctl-telegram's
+digest in `sourceManifest.contentHash`. Publishing is the same human-admin
+`POST /agents/{name}/definition-versions`; there is no publisher principal.
+
+- **Profile-less.** The Telegram worker does not execute ExecutionProfile
+  ceilings, so a placeholder profile would advertise limits nobody
+  enforces. A `TelegramAssistant` is therefore published with an empty
+  `profile_range` (a non-empty one is `invalid_range`), every other kind
+  still requires one, and any bind, rollback, resolve or preflight against
+  it is `422 profileless_definition`.
+- **Publish checks.** `metadata.name` and `metadata.version` must equal the
+  agent and version it is published under; `metadata.visibility` must be
+  `public` or `admin` (`tenant` has no binding model yet);
+  `metadata.status` must be `draft`, `active` or `deprecated`. Anything else
+  is `invalid_spec`. Everything else in the spec stays opaque.
+- **Public catalog**, no authentication, a projection that never carries
+  instructions, tools, records, escalation, owner or provenance:
+  - `GET /api/v1/assistant-catalog` lists every version that is a public,
+    non-draft `TelegramAssistant` with lifecycle `published`.
+  - `GET /api/v1/assistant-catalog/{name}/versions/{version}` answers the
+    same entries plus `deprecated` ones (so a pin can still be described);
+    everything else, `disabled` included, is `404 assistant_not_found`.
+- **Service fetch**: `GET /api/v1/assistant-catalog/{name}/versions/{version}/definition`
+  returns `{name, version, lifecycle, contentHash, definition}` with the
+  full document, for the `surface:telegram` principal (no actor header
+  needed) or an admin. Every lifecycle is answered, so the worker's refresh
+  learns of `deprecated` and `disabled`. `definition` comes back from
+  JSONB: canonicalize it before comparing the digest.
 
 ## Execution identity
 

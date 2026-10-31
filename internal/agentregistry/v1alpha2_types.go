@@ -85,6 +85,7 @@ var Sentinels = map[string]error{
 	"ErrMissingPolicyFields":        ErrMissingPolicyFields,
 	"ErrMissingRequiredFields":      ErrMissingRequiredFields,
 	"ErrInvalidSpec":                ErrInvalidSpec,
+	"ErrProfilelessDefinition":      ErrProfilelessDefinition,
 }
 
 // RequiredProfilePolicyFields names the fields an ExecutionProfile's

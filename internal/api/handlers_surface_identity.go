@@ -82,6 +82,13 @@ type surfaceRoute struct {
 	relay   bool
 }
 
+// assistantDefinitionPattern is the one non-relay surface route that may be
+// called without naming an end user: the Telegram worker reads assistant
+// definitions on its own behalf (its lifecycle refresh has no user). The
+// limiters then key on the surface alone, which surfaceAggregateLimit caps
+// anyway.
+var assistantDefinitionPattern = regexp.MustCompile(`^/api/v1/assistant-catalog/[^/]+/versions/[^/]+/definition$`)
+
 // surfaceRoutes are the only routes a surface principal may call. Anything
 // else answers 403 before any handler runs: a surface credential is a narrow
 // relay capability, not an API key. Relay is opt-in per route, here.
@@ -127,6 +134,10 @@ var surfaceRoutes = []surfaceRoute{
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/snapshots/[^/]+$`), true},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/events$`), true},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/work-items/[^/]+/evidence$`), true},
+	// The full materialized TelegramAssistant definition (mctl-api#876),
+	// for the Telegram worker's install path and its lifecycle refresh. Not
+	// relayed: the handler admits only the telegram surface itself.
+	{http.MethodGet, assistantDefinitionPattern, false},
 }
 
 const (
@@ -181,7 +192,7 @@ func (h *Handlers) surfacePrincipalGate(next http.Handler) http.Handler {
 				// Redeem: the surface acts as itself, naming the identity
 				// it observed. Required here, so no limiter ever keys on
 				// an absent one.
-				if r.Header.Get(SurfaceActorHeader) == "" {
+				if r.Header.Get(SurfaceActorHeader) == "" && route.pattern != assistantDefinitionPattern {
 					writeErrorCode(w, http.StatusBadRequest, sidCodeInvalid,
 						SurfaceActorHeader+" must name the "+surface+" identity", nil)
 					return
