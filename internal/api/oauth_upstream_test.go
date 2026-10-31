@@ -233,6 +233,11 @@ func TestZitadelSigninIssuesTheLinkedGitHubLoginsCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, wantClaims := jwtClaims(t, access), jwtClaims(t, ref)
+	// The code exchange stamps the authenticated client; IssueJWT has none.
+	if got["client_id"] != "client" {
+		t.Fatalf("client_id = %v, want the exchanging client", got["client_id"])
+	}
+	delete(got, "client_id")
 	if !reflect.DeepEqual(got, wantClaims) {
 		t.Fatalf("ZITADEL sign-in JWT claims = %v, want the GitHub sign-in's %v", got, wantClaims)
 	}

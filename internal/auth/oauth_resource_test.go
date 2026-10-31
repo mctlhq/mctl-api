@@ -200,7 +200,7 @@ func TestRefreshKeepsResource(t *testing.T) {
 func TestSupportAudienceVerification(t *testing.T) {
 	o := newResourceServer(t)
 	mint := func(aud string) string {
-		tok, err := o.issueJWTFor("alice", "", nil, aud)
+		tok, err := o.issueJWTFor("alice", "", nil, aud, "")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -136,3 +136,13 @@ disables these tools (`support_audience_not_configured`).
 other credential. mctl-support uses it to refuse tokens minted for the API.
 Setting `OAUTH_SUPPORT_RESOURCE=""` makes the support resource
 `invalid_target` and refuses support-audience tokens at verification.
+
+## The `client_id` claim
+
+Access tokens minted by the authorization-code exchange and the refresh grant
+carry a signed `client_id` claim (RFC 9068) naming the OAuth client the code or
+refresh session is bound to. It is exposed as `auth.User.OAuthClientID()` and
+recorded on work items, intents and events as provenance only; it is never used
+for authorization. Tokens from `IssueJWT`, the support mint, or minted before
+the claim existed carry none and read as `""`. A value over 512 bytes or with
+control characters is omitted at mint and read as `""`.

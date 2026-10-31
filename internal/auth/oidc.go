@@ -170,6 +170,10 @@ type User struct {
 	tokenAudience   []string
 	supportAudience bool
 
+	// oauthClientID is the verified client_id claim of a local OAuth access
+	// token. Provenance only: never read for authorization.
+	oauthClientID string
+
 	// principalAuthz records that this caller's tenants and admin were
 	// decided by principal (TENANT_AUTHZ_MODE=principal, mctl-api#377):
 	// Groups then holds tenants only, and IsAdmin reads platformAdmin and
@@ -1351,12 +1355,14 @@ func userFromVerified(v *Verified) *User {
 		}
 		u.tokenPID = v.Claims.TokenPID
 		u.tokenAudience, u.supportAudience = v.Claims.TokenAudience, v.Claims.SupportAudience
+		u.oauthClientID = v.Claims.OAuthClientID
 		return u
 	case v.Identity.Provider == ProviderPrincipal:
 		// Reserved: only the local-OAuth provider yields it, for a token
 		// minted for this principal. No groups: principal mode decides them.
 		return &User{ID: v.Identity.Display, principalID: v.Identity.Subject, tokenPrincipal: true,
-			tokenAudience: v.Claims.TokenAudience, supportAudience: v.Claims.SupportAudience}
+			tokenAudience: v.Claims.TokenAudience, supportAudience: v.Claims.SupportAudience,
+			oauthClientID: v.Claims.OAuthClientID}
 	case v.Identity.Provider == ProviderGitHubActions:
 		// No groups, whatever the token held: a CI job is not a tenant
 		// member. Marked ci even if a claim were somehow empty, so the
@@ -1478,6 +1484,16 @@ func (u *User) TokenAudience() ([]string, bool) {
 		return nil, false
 	}
 	return append([]string(nil), u.tokenAudience...), true
+}
+
+// OAuthClientID is the OAuth client the verified mctl-api access token was
+// issued to, or "" when the credential is not such a token (or predates the
+// claim). Provenance only: it must never feed authorization.
+func (u *User) OAuthClientID() string {
+	if u == nil {
+		return ""
+	}
+	return u.oauthClientID
 }
 
 // IsSupportAudience reports whether the caller holds an access token minted

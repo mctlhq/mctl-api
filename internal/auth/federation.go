@@ -88,6 +88,8 @@ type Claims struct {
 	// localOAuthProvider sets them.
 	TokenAudience   []string
 	SupportAudience bool
+	// OAuthClientID is the verified client_id claim (provenance only).
+	OAuthClientID string
 }
 
 // tokenShape is computed once per request from the existing isJWT/jwtIssuer
