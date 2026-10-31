@@ -265,7 +265,7 @@ func TestWorkItemToolsRefuseNonStringOptionalIDs(t *testing.T) {
 func TestCreateWorkItemSendsDocumentedBody(t *testing.T) {
 	ts, calls := workItemBackend(t, http.StatusCreated, `{"work_item":{"id":"wi_1"}}`)
 	r := callRoadmapTool(t, (*Server).toolCreateWorkItem, ts.URL, map[string]any{
-		"tenant": "t", "title": " T ", "idempotency_key": "k", "actor": "evil", "surface": "x",
+		"tenant": "t", "title": " T ", "idempotency_key": "k", "actor": "evil", "surface": "x", "client_id": "evil", "actor_client_id": "evil", "origin_client_id": "evil",
 	})
 	if r.IsError {
 		t.Fatal(resultText(t, r))
@@ -318,7 +318,7 @@ func TestAppendWorkItemIntentForwardsTextVerbatim(t *testing.T) {
 	ts, calls := workItemBackend(t, http.StatusCreated, `{}`)
 	text := " " + strings.Repeat("a", 8<<10) + "\n"
 	r := callRoadmapTool(t, (*Server).toolAppendWorkItemIntent, ts.URL, map[string]any{
-		"work_item_id": "wi_1", "text": text, "idempotency_key": "k",
+		"work_item_id": "wi_1", "text": text, "idempotency_key": "k", "client_id": "evil", "actor_client_id": "evil",
 	})
 	if r.IsError {
 		t.Fatal(resultText(t, r))

@@ -72,6 +72,9 @@ var forbiddenIdentityFields = []string{
 	"on_behalf_of", "subject", "delegated_actor", "acting_principal", "user", "user_id",
 	"requested_by", "decided_by",
 	// The OAuth client is derived from the verified access token, never input.
+	// These keys, bare client_id included, are reserved on every route that
+	// shares this list (work-item bodies, dev-loop approve, human-input
+	// response): a future body needing a client_id field must not reuse it.
 	"actor_client_id", "origin_client_id", "client_id",
 	// The served actor/subject record (mctl-api#376 D1, D2): always derived
 	// from authentication, so a body naming one is refused, not ignored.
