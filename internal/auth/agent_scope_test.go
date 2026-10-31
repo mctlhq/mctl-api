@@ -293,6 +293,7 @@ func TestInvestigateScope_DenyIsLoadBearing(t *testing.T) {
 	cp := *s
 	cp.Deny = nil
 	saved := agentDeniedRoutes
+	t.Cleanup(func() { agentDeniedRoutes = saved })
 	agentDeniedRoutes = nil
 	admitted := cp.AllowsRoute(http.MethodGet, "/api/v1/work-items/wi_a/intents", "wi_a", "we_1")
 	agentDeniedRoutes = saved
