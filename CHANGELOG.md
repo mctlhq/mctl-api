@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.142.0](https://github.com/mctlhq/mctl-api/compare/4.141.0...4.142.0) (2026-10-31)
+
+
+### Features
+
+* **agentregistry:** Telegram assistant catalog over the v1alpha2 store ([e6436a0](https://github.com/mctlhq/mctl-api/commit/e6436a06b58872990d304cb8ea35888c393e6810))
+* **agentregistry:** Telegram assistant catalog over the v1alpha2 store ([5d4e9da](https://github.com/mctlhq/mctl-api/commit/5d4e9da19ca849048ec13290bb9cb35debf10dc5))
+
 ## [4.141.0](https://github.com/mctlhq/mctl-api/compare/4.140.0...4.141.0) (2026-10-30)
 
 
