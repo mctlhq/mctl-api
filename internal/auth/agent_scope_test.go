@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 	"net/url"
+	"regexp"
 	"testing"
 )
 
@@ -58,6 +59,12 @@ func TestInvestigateScope_Routes(t *testing.T) {
 		{http.MethodPost, "/api/v1/incidents/x/resolve", "wi_a", false},
 		{http.MethodPost, "/api/v1/operations/deploy-service/execute", "wi_a", false},
 		{http.MethodPost, "/mcp", "wi_a", true},
+		{http.MethodGet, "/api/v1/work-items/wi_a/intents", "wi_a", false},
+		{http.MethodGet, "/api/v1/work-items/wi_a/intents/1", "wi_a", false},
+		{http.MethodGet, "/api/v1/work-items/wi_a/intents/", "wi_a", false},
+		{http.MethodHead, "/api/v1/work-items/wi_a/intents", "wi_a", false},
+		{http.MethodGet, "/api/v1/work-items/wi_a/snapshots", "wi_a", true},
+		{http.MethodGet, "/api/v1/work-items/wi_a/execution-requests", "wi_a", true},
 	} {
 		if got := s.AllowsRoute(c.method, c.path, c.workItem, "we_1"); got != c.want {
 			t.Errorf("AllowsRoute(%s %s, %q) = %v, want %v", c.method, c.path, c.workItem, got, c.want)
@@ -241,5 +248,58 @@ func TestAgentScope_AuditRequests(t *testing.T) {
 	inv, _ := LookupAgentScope(AgentScopeInvestigate)
 	if !sup.AuditRequests || inv.AuditRequests {
 		t.Fatalf("support=%v investigate=%v, want true/false", sup.AuditRequests, inv.AuditRequests)
+	}
+}
+
+func TestAgentScopes_RefuseWorkItemIntents(t *testing.T) {
+	if !IsReadTool("mctl_list_work_item_intents") {
+		t.Fatal("expected the naming rule to classify the intents tool as a read")
+	}
+	for _, name := range AgentScopeNames() {
+		s, _ := LookupAgentScope(name)
+		for _, tool := range []string{"mctl_list_work_item_intents", "list_work_item_intents"} {
+			if s.AllowsTool(tool) {
+				t.Errorf("scope %s allows %s", name, tool)
+			}
+		}
+		if s.AllowsRoute(http.MethodGet, "/api/v1/work-items/wi_a/intents", "wi_a", "we_1") {
+			t.Errorf("scope %s allows the intents route", name)
+		}
+	}
+}
+
+// A scope that admits work-item reads but declares no Deny (for example a
+// future BoundTenant scope) must still refuse intents: the route deny list
+// is global, like the tool deny list.
+func TestAgentScopes_IntentDenyIsGlobal(t *testing.T) {
+	bare := &AgentScope{
+		Name: "test-bare", BoundTenant: true,
+		Routes: []AgentScopeRoute{{Method: http.MethodGet, BindWorkItem: true,
+			Pattern: regexp.MustCompile(`^/api/v1/work-items/([^/]+)(/.*)?$`)}},
+	}
+	req := AgentScopeRequest{Method: http.MethodGet, WorkItemID: "wi_a", Tenant: "acme"}
+	req.Path = "/api/v1/work-items/wi_a/snapshots"
+	if !bare.Allows(req) {
+		t.Fatal("the test scope should admit its own work item's snapshots")
+	}
+	req.Path = "/api/v1/work-items/wi_a/intents"
+	if bare.Allows(req) {
+		t.Error("a scope without Deny admits intents")
+	}
+}
+
+func TestInvestigateScope_DenyIsLoadBearing(t *testing.T) {
+	s, _ := LookupAgentScope(AgentScopeInvestigate)
+	cp := *s
+	cp.Deny = nil
+	saved := agentDeniedRoutes
+	agentDeniedRoutes = nil
+	admitted := cp.AllowsRoute(http.MethodGet, "/api/v1/work-items/wi_a/intents", "wi_a", "we_1")
+	agentDeniedRoutes = saved
+	if !admitted {
+		t.Error("without the deny lists the bound route should admit intents")
+	}
+	if s.AllowsRoute(http.MethodGet, "/api/v1/work-items/wi_a/intents", "wi_a", "we_1") {
+		t.Error("the real scope must refuse intents")
 	}
 }

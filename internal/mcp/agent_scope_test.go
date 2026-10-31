@@ -36,7 +36,7 @@ func TestAgentScopeMiddleware_ScopedRunCallsOnlyItsTools(t *testing.T) {
 	if _, ran := runScope(t, ctx, "mctl_get_logs"); !ran {
 		t.Error("a read tool was refused")
 	}
-	for _, tool := range []string{"mctl_resolve_incident", "mctl_deploy_service", "mctl_trigger_issue"} {
+	for _, tool := range []string{"mctl_resolve_incident", "mctl_deploy_service", "mctl_trigger_issue", "mctl_list_work_item_intents"} {
 		res, ran := runScope(t, ctx, tool)
 		if ran {
 			t.Errorf("%s ran for a scoped investigate run", tool)

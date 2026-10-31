@@ -68,6 +68,11 @@ type AgentScope struct {
 	// DefaultTTL and MaxTTL override the workitems defaults when non-zero.
 	DefaultTTL, MaxTTL time.Duration
 	Routes             []AgentScopeRoute
+	// Deny is checked before Routes: a match refuses the request whatever
+	// Routes admit. An empty Method matches every method. Bindings are
+	// ignored, so a deny entry refuses the path for every work item, the
+	// run's own included.
+	Deny []AgentScopeRoute
 	// Tool reports whether an mctl MCP tool may be called.
 	Tool func(name string) bool
 }
@@ -116,6 +121,16 @@ func IsReadTool(name string) bool {
 		}
 	}
 	return false
+}
+
+// agentDeniedTools are MCP tools (bare names) no agent scope may call, even
+// though IsReadTool classifies them as reads: raw WorkItem intents are
+// human-authored instructions (mctl-api#880, owner decision).
+var agentDeniedTools = map[string]bool{"list_work_item_intents": true}
+
+// agentDeniedRoutes mirror agentDeniedTools on REST (mctl-api#880).
+var agentDeniedRoutes = []AgentScopeRoute{
+	{Pattern: regexp.MustCompile(`^/api/v1/work-items/[^/]+/intents(/.*)?$`)},
 }
 
 func getRoute(pattern string) AgentScopeRoute {
@@ -188,6 +203,7 @@ var agentScopes = map[string]*AgentScope{
 		Agents:         []string{"issue-investigator"},
 		ReadAllTenants: true,
 		Tool:           IsReadTool,
+		Deny:           agentDeniedRoutes,
 		Routes: append(append([]AgentScopeRoute(nil), mcpRoutes...),
 			getRoute(`^/api/v1/whoami$`),
 			getRoute(`^/api/v1/identity/self$`),
@@ -226,6 +242,7 @@ var agentScopes = map[string]*AgentScope{
 		Name: AgentScopeSupport, Agents: []string{"mctl-support"},
 		BoundTenant: true, MintByTenantMember: true, AuditRequests: true,
 		DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour,
+		Deny: agentDeniedRoutes,
 		Tool: func(n string) bool { return IsReadTool(n) && supportTools[strings.TrimPrefix(n, "mctl_")] },
 		Routes: append(append([]AgentScopeRoute(nil), mcpRoutes...),
 			getRoute(`^/api/v1/whoami$`),
@@ -310,6 +327,13 @@ func (s *AgentScope) Allows(req AgentScopeRequest) bool {
 			}
 		}
 	}
+	// agentDeniedRoutes bind every scope, like agentDeniedTools in
+	// AllowsTool, so a future scope that forgets Deny still refuses them.
+	for _, d := range append(append([]AgentScopeRoute(nil), agentDeniedRoutes...), s.Deny...) {
+		if (d.Method == "" || d.Method == req.Method) && d.Pattern.MatchString(req.Path) {
+			return false
+		}
+	}
 	for _, r := range s.Routes {
 		if r.Method != req.Method {
 			continue
@@ -379,6 +403,9 @@ func (s *AgentScope) AllowsToolCall(name string, args map[string]any, tenant str
 
 // AllowsTool reports whether an mctl MCP tool may be called in the scope.
 func (s *AgentScope) AllowsTool(name string) bool {
+	if agentDeniedTools[strings.TrimPrefix(name, "mctl_")] {
+		return false
+	}
 	return s.Tool != nil && s.Tool(name)
 }
 
