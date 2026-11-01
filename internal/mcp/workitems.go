@@ -170,6 +170,8 @@ Fails closed rather than forking work:
 - only one open request per item: a second one is refused with execution_request_open, naming the open request;
 - a resume while an execution is still running is refused with execution_active.
 
+intent_id pins the intent the run acts on. An intent whose text is unavailable (redacted) is refused with 409 intent_unavailable, and an intent of another item answers 404 intent_not_found. No other intent is ever substituted: a replacement needs a new request with a new idempotency_key.
+
 Idempotent by idempotency_key: repeating the same call with the same key returns the original request ("replayed": true) instead of making a second one; the same key with different arguments is refused with idempotency_key_reused.`),
 		workItemIDArg,
 		mcplib.WithString("kind",
@@ -183,6 +185,9 @@ Idempotent by idempotency_key: repeating the same call with the same key returns
 		),
 		mcplib.WithString("resumed_from_execution_id",
 			mcplib.Description(`For kind "resume": the execution ("we_...") to resume from. Its sealed snapshot becomes the parent of the new one.`),
+		),
+		mcplib.WithNumber("intent_id",
+			mcplib.Description("Optional. The id of the intent (from mctl_list_work_item_intents) the execution must act on. Omit to send none."),
 		),
 		mcplib.WithString("idempotency_key",
 			mcplib.Required(),
@@ -220,6 +225,13 @@ Idempotent by idempotency_key: repeating the same call with the same key returns
 		}
 		if from != "" {
 			body["resumed_from_execution_id"] = from
+		}
+		if raw, present := req.GetArguments()["intent_id"]; present {
+			v, ok := raw.(float64)
+			if !ok || v < 1 || v != math.Trunc(v) || v > 1<<53 {
+				return mcplib.NewToolResultError("intent_id must be a positive integer"), nil
+			}
+			body["intent_id"] = int64(v)
 		}
 		return s.workItemCall(ctx, http.MethodPost, "/api/v1/work-items/"+id+"/execution-requests", body, "request work item execution")
 	}

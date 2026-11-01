@@ -661,19 +661,30 @@ type rowsQuerier interface {
 }
 
 func listExecutions(ctx context.Context, q rowsQuerier, itemID string) ([]Execution, error) {
-	rows, err := q.Query(ctx, `SELECT `+executionColumns+` FROM work_item_executions
-		WHERE work_item_id=$1 ORDER BY attempt`, itemID)
+	rows, err := q.Query(ctx, `SELECT wie.id, wie.work_item_id, wie.engine, wie.engine_ref, wie.attempt,
+			wie.resumed_from_execution_id, wie.phase, wie.started_at, wie.ended_at,
+			COALESCE(xr.surface, ''), COALESCE(xr.requested_by, ''), COALESCE(xr.acting_principal, '')
+		FROM work_item_executions wie
+		LEFT JOIN work_item_execution_requests xr ON xr.execution_id = wie.id AND xr.state = 'fulfilled'
+		WHERE wie.work_item_id=$1 ORDER BY wie.attempt`, itemID)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: list executions: %w", err)
 	}
 	defer rows.Close()
 	out := []Execution{}
 	for rows.Next() {
-		e, err := scanExecution(rows)
-		if err != nil {
+		var e Execution
+		if err := rows.Scan(&e.ID, &e.WorkItemID, &e.Engine, &e.EngineRef, &e.Attempt,
+			&e.ResumedFromExecutionID, &e.Phase, &e.StartedAt, &e.EndedAt,
+			&e.Surface, &e.RequestedBy, &e.ActingPrincipal); err != nil {
 			return nil, fmt.Errorf("workitems: list executions: %w", err)
 		}
-		out = append(out, *e)
+		e.StartedAt = e.StartedAt.UTC()
+		if e.EndedAt != nil {
+			t := e.EndedAt.UTC()
+			e.EndedAt = &t
+		}
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }

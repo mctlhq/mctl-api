@@ -265,6 +265,13 @@ type Execution struct {
 	Phase                  string     `json:"phase"`
 	StartedAt              time.Time  `json:"started_at"`
 	EndedAt                *time.Time `json:"ended_at,omitempty"`
+	// Surface, RequestedBy and ActingPrincipal are the provenance of the
+	// execution request this execution fulfilled. They are absent for an
+	// execution attached without a request: absent means unknown, never a
+	// surface.
+	Surface         string `json:"surface,omitempty"`
+	RequestedBy     string `json:"requested_by,omitempty"`
+	ActingPrincipal string `json:"acting_principal,omitempty"`
 }
 
 // SurfaceRef correlates a work item to a surface-native conversation for
