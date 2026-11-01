@@ -5388,9 +5388,12 @@ paths:
     post:
       summary: Request approval of one runtime side effect
       description: |
-        Service principal only, acting directly (a relayed surface or a person
-        gets 403 `approval_requester_forbidden`); `requested_by` is the
-        authenticated principal. The server computes `intent_hash`; a sent
+        Service principal acting directly, or a scoped agent run token for
+        its own execution (a relayed surface or a person gets 403
+        `approval_requester_forbidden`; so does an agent run naming another
+        `execution_id` or `work_item_id`, or requesting a
+        `mctl-agents-approve` gate); `requested_by` is the authenticated
+        principal. The server computes `intent_hash`; a sent
         `intent_hash` must equal it (400 `intent_hash_mismatch`).
         Idempotent per (requested_by, idempotency_key), the key in the body or
         the `Idempotency-Key` header (they must agree): the same key with the
@@ -5547,8 +5550,10 @@ paths:
     get:
       summary: One action approval request
       description: |
-        Read by a human admin, or by the service that requested it (another
-        caller's request answers 404). The waiting workflow re-reads this
+        Read by a human admin, or by the principal that requested it (another
+        caller's request answers 404). An agent run token reads only its own
+        requests for its own execution, and that execution's
+        `mctl-agents-approve` grant. The waiting workflow re-reads this
         after any wake-up; `state` applies lazy expiry.
       tags: [Action Approvals]
       parameters:
@@ -5609,8 +5614,10 @@ paths:
     post:
       summary: Spend an approved action approval request, exactly once
       description: |
-        The requesting service only (anyone else 403
-        `approval_requester_forbidden`; another service's request 404). One
+        The requester only: the service, or an agent run token for its own
+        execution (anyone else 403 `approval_requester_forbidden`; another
+        requester's request, or another execution's, 404). An agent run never
+        consumes the `mctl-agents-approve` grant it may read. One
         atomic compare-and-set from `approved` to `consumed`, which holds
         only while the stored `intent_hash` equals the presented one and the
         request has not expired; it records `consumed_at`. Of any number of
@@ -5649,9 +5656,10 @@ paths:
     post:
       summary: Mark a consumed action approval request executed, exactly once
       description: |
-        The single-use execution mark. The requesting service only (anyone
-        else 403 `approval_requester_forbidden`; another service's request
-        404). One atomic compare-and-set from `consumed` to `executed`, which
+        The single-use execution mark. The requester only, as for consume,
+        plus the agent run of the execution a `mctl-agents-approve` grant
+        names (anyone else 403 `approval_requester_forbidden`; another
+        requester's request, or another execution's, 404). One atomic compare-and-set from `consumed` to `executed`, which
         holds only while the stored `target` equals the presented one and the
         stored `artifact_hash` is non-empty and equals the presented one; it
         records `executed_at`. Of any number of concurrent marks exactly one

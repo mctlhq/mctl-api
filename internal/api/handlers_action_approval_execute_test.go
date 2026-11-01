@@ -178,13 +178,12 @@ func TestActionApprovals_OnlyTheRequestingServiceMarksExecuted(t *testing.T) {
 	id, target := a["id"].(string), a["target"].(string)
 	body := executeBody(target, executeArtifactHash)
 	surface := auth.NewSurfaceUser("telegram")
-	run := auth.NewAgentUser("implementer", auth.AgentRun{Agent: "implementer", ExecutionID: e.tenant + "-exec", RunID: "art_test"})
 	for name, u := range map[string]*auth.User{
-		"tenant user":     e.user("alice"),
-		"human admin":     rootAdmin,
-		"surface":         surface,
-		"relayed":         auth.NewRelayedUser("root", []string{"admins", e.tenant}, surface),
-		"agent run token": run,
+		"tenant user":             e.user("alice"),
+		"human admin":             rootAdmin,
+		"surface":                 surface,
+		"relayed":                 auth.NewRelayedUser("root", []string{"admins", e.tenant}, surface),
+		"unbound agent run token": auth.NewAgentUser("implementer", auth.AgentRun{Agent: "implementer", RunID: "art_test"}),
 	} {
 		res := e.markExecuted(u, id, body)
 		if res.code != http.StatusForbidden || code(res) != aarCodeRequesterForbidden {
@@ -196,6 +195,13 @@ func TestActionApprovals_OnlyTheRequestingServiceMarksExecuted(t *testing.T) {
 	}
 	if res := e.markExecuted(nil, id, body); res.code != http.StatusUnauthorized {
 		t.Errorf("anonymous execute = %d %s", res.code, res.raw)
+	}
+	// A run bound to the request's execution is an approval requester
+	// (mctlhq/mctl-agents#717 S4), but this request is the service's: it
+	// reads as absent to the run.
+	run := auth.NewAgentUser("implementer", auth.AgentRun{Agent: "implementer", ExecutionID: e.tenant + "-exec", RunID: "art_test", Scope: auth.AgentScopeInvestigate})
+	if res := e.markExecuted(run, id, body); res.code != http.StatusNotFound || code(res) != aarCodeNotFound {
+		t.Errorf("bound agent run execute = %d %s", res.code, res.raw)
 	}
 
 	// A consumed request another service made answers 404 to this one, as
