@@ -928,6 +928,31 @@ var builtinOperations = []Operation{
 			{Name: "work_item_owner_principal_id", Type: "string", Required: false, OmitWhenEmpty: true,
 				Description: "Optional. Canonical principal (prn_...) of the work item owner, carried into a DevLoop human-input continuation (mctl-agents#684). Set only by the DevLoop; omit otherwise.",
 				Pattern:     `^prn_[0-9A-HJKMNP-TV-Z]{26}$`},
+			// Provenance of the dispatched execution request
+			// (mctlhq/mctl-agents#573, #904): dev_loop.py sends the request's
+			// surface and its authenticated requested_by for a dispatched run,
+			// so the sealed ContextSnapshot records the current surface and
+			// whether this execution moved surfaces. cwft-mctl-agents-investigate
+			// declares them since mctlhq/mctl-gitops#2329; the investigator
+			// accepts surface "mcp" from mctl-agents 1.114.0.
+			//
+			// Shape only, not the vocabulary. The closed surface and actor
+			// vocabularies are mctl-agents' (the DevLoop forwards only values
+			// that passed them, and the investigator re-checks); a third copy
+			// here would drift, and a drifted Enum would fail every dispatched
+			// investigate submit with a 400. The patterns keep the values to
+			// mctl-api's own label shape (workitems.surfacePattern) and to a
+			// bounded principal token. OmitWhenEmpty, so a run without them keeps
+			// its exact argv.
+			{Name: "surface", Type: "string", Required: false, OmitWhenEmpty: true,
+				Description: "Optional. Surface the dispatched execution request was made on (e.g. telegram, mcp). A label, never an identity. Set only by the DevLoop; omit otherwise.",
+				Pattern:     `^[a-z][a-z0-9_-]{0,31}$`},
+			{Name: "actor_kind", Type: "string", Required: false, OmitWhenEmpty: true,
+				Description: "Optional. Kind of actor that made the dispatched execution request (e.g. human). Set only by the DevLoop; omit otherwise.",
+				Pattern:     `^[a-z][a-z_-]{0,31}$`},
+			{Name: "actor_id", Type: "string", Required: false, OmitWhenEmpty: true,
+				Description: "Optional. Authenticated principal that made the dispatched execution request (its requested_by, e.g. github:<login>). Set only by the DevLoop; omit otherwise.",
+				Pattern:     `^[A-Za-z0-9][A-Za-z0-9_.:@/+-]{0,255}$`},
 			traceparentParam(),
 		}, append(agentPinParams("issue-investigator"),
 			devLoopCorrelationParams("temporal_workflow_id", "temporal_run_id", "execution_request_id")...)...),
