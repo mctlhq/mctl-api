@@ -358,3 +358,17 @@ func TestApprovalBinding_ObserveCountsUnboundOnly(t *testing.T) {
 		t.Fatal("no approval.binding_absent audit keyed by workflow_id")
 	}
 }
+
+// A deny is never bound: a stale or partial binding on it is ignored and the
+// deny still lands.
+func TestActionApprovalDecision_DenyIgnoresBinding(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	id := e.newPendingApproval("deny-b")
+	body := map[string]any{"decision": workitems.DecisionDeny, "binding": map[string]any{"approval_ref": "aar_other"}}
+	if res := e.do(rootAdmin, "POST", "/api/v1/action-approvals/"+id+"/decision", body); res.code != http.StatusOK {
+		t.Fatalf("deny with a stale binding = %d %s", res.code, res.raw)
+	}
+	if st := e.approvalState(id)["state"]; st != workitems.ApprovalDenied {
+		t.Fatalf("grant is %v", st)
+	}
+}
