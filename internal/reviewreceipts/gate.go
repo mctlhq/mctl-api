@@ -82,9 +82,9 @@ func EvaluateReviewGate(live *ReviewSubject, request *ReviewRequest, pool []Revi
 		return request.AuthoringLineageRoot == "" || r.LineageRoot != request.AuthoringLineageRoot
 	}
 	var indep []ReviewReceipt
-	for _, r := range own {
-		if independent(r) {
-			indep = append(indep, r)
+	for i := range own {
+		if independent(own[i]) {
+			indep = append(indep, own[i])
 		}
 	}
 	if len(indep) == 0 {
@@ -92,9 +92,9 @@ func EvaluateReviewGate(live *ReviewSubject, request *ReviewRequest, pool []Revi
 	}
 	if requiredAssurance == AssuranceIndependent {
 		var assured []ReviewReceipt
-		for _, r := range indep {
-			if r.Assurance == AssuranceIndependent {
-				assured = append(assured, r)
+		for i := range indep {
+			if indep[i].Assurance == AssuranceIndependent {
+				assured = append(assured, indep[i])
 			}
 		}
 		if len(assured) == 0 {
