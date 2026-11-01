@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.146.0](https://github.com/mctlhq/mctl-api/compare/4.145.0...4.146.0) (2026-11-01)
+
+
+### Features
+
+* **operations:** declare resume provenance on investigate ([435416e](https://github.com/mctlhq/mctl-api/commit/435416e7cc9968c62c76877b9b0c8b2615f5e6c9))
+* **operations:** declare resume provenance on investigate ([dd8097b](https://github.com/mctlhq/mctl-api/commit/dd8097b21beac3ac528d4274556f60b60febabee))
+
 ## [4.145.0](https://github.com/mctlhq/mctl-api/compare/4.144.0...4.145.0) (2026-10-31)
 
 
