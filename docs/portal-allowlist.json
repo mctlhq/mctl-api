@@ -545,6 +545,16 @@
       "reason": "Admin-only aggregate of the model-usage ledger: token and cost sums per stage/agent/model/repo for DevLoop workflows; exposes internal workflow ids, repo/issue/PR numbers and estimated spend, no prompt or completion text. Not enabled on the shared portal pending an owner decision (mctl-api#651)."
     },
     {
+      "name": "mctl_get_review_gate",
+      "enabled": true,
+      "reason": "Read-only, admin-only review gate: a verdict plus the review request and complete receipt pool it was computed from (subject digests, reviewer names, finding refs; no document bytes beyond the Tier A receipts). A manual receipt is advisory and never satisfies independent assurance; an unavailable store is a typed error, never an empty pool (mctl-api#897)."
+    },
+    {
+      "name": "mctl_submit_review_assertion",
+      "enabled": false,
+      "reason": "A write: a human administrator records a manual advisory review receipt against an open manual-mode request. Refused for service, relayed and surface callers by the API. Not enabled on the shared portal: a human-admin write is a separate owner decision (mctl-api#897)."
+    },
+    {
       "name": "mctl_ask_support",
       "enabled": true,
       "reason": "Sends the tenant support agent (mctl-support) a short-lived token minted for the caller with the support audience, never the caller's own bearer (mctl-api#853); tenant-checked in mctl-api and again in mctl-support. Creates a support task and spends the tenant's model budget, and returns diagnosis text about the caller's own tenant (mctl-api#814)."

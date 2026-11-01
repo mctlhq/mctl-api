@@ -239,3 +239,28 @@ func contains(list []string, v string) bool {
 	}
 	return false
 }
+
+// Key is the canonical JSON of the identity, equal for two identities if and
+// only if they are equal. Stores index it so SQL and Go agree on equality.
+func (i SubjectIdentity) Key() string {
+	return string(canonicalJSON([]string{i[0], i[1], i[2], i[3]}))
+}
+
+// Key is the canonical JSON of the binding, equal for two bindings if and
+// only if they are equal.
+func (b SubjectBinding) Key() string {
+	return string(canonicalJSON(map[string]any{
+		"kind":             b.Kind,
+		"repository":       b.Repository,
+		"report_root":      b.ReportRoot,
+		"report_path":      b.ReportPath,
+		"source_sha":       b.SourceSHA,
+		"base_sha":         b.BaseSHA,
+		"head_sha":         b.HeadSHA,
+		"inventory_digest": b.InventoryDigest,
+		"digest_version":   b.DigestVersion,
+		"service":          b.Service,
+		"slug":             b.Slug,
+		"content_digest":   b.ContentDigest,
+	}))
+}

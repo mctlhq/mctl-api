@@ -69,6 +69,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/pgshared"
 	"github.com/mctlhq/mctl-api/internal/principals"
+	"github.com/mctlhq/mctl-api/internal/reviewstore"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
 	"github.com/mctlhq/mctl-api/internal/securityfindings"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
@@ -770,6 +771,42 @@ func main() {
 		}
 	}
 
+	// Durable review receipts (mctl-api#897), in the evidence database, with
+	// a kill switch. REVIEW_REQUEST_TTL (a Go duration, default 24h) closes
+	// stale requests; REVIEW_POOL_MAX (default 10000) bounds the complete
+	// receipt pool. An invalid value leaves the store nil rather than
+	// silently weakening a bound. Nil makes every /api/v1/review-* route
+	// answer 503.
+	var reviewStore *reviewstore.Store
+	switch {
+	case killSwitchOn(os.Getenv("REVIEW_RECEIPTS_DISABLED")):
+		slog.Warn("REVIEW_RECEIPTS_DISABLED is set; /api/v1/review-* routes will return 503")
+	case evidenceDBURL == "":
+		slog.Warn("no EVIDENCE_DB_URL or AUDIT_DB_URL; /api/v1/review-* routes will return 503")
+	default:
+		reviewCfg, cfgErr := reviewConfigFromEnv(os.Getenv("REVIEW_REQUEST_TTL"), os.Getenv("REVIEW_POOL_MAX"))
+		if cfgErr != nil {
+			slog.Error("invalid review receipt configuration; /api/v1/review-* routes will return 503", "error", cfgErr)
+			break
+		}
+		rs, rsErr := initStore(initCtx, storeFailures, "review-receipts", func(ctx context.Context) (*reviewstore.Store, error) {
+			return reviewstore.NewStore(ctx, evidenceDBURL, reviewCfg)
+		})
+		if rsErr != nil {
+			slog.Error("review receipt store init failed; /api/v1/review-* routes will return 503", "error", rsErr)
+		} else {
+			reviewStore = rs
+			defer rs.Close()
+			// Left unset (a nil interface, never a typed nil), ingestion
+			// answers 503 review_evidence_unavailable.
+			if evidenceStore != nil {
+				reviewStore.SetEvidence(evidenceStore)
+			} else {
+				slog.Warn("no evidence store; review request ingest will return 503")
+			}
+		}
+	}
+
 	// Surface identity links (mctl-api#350). Same shape as the work-items
 	// store: SURFACE_IDENTITY_DB_URL, else AUDIT_DB_URL, with a kill switch.
 	// SURFACE_LINK_TTL (a Go duration, e.g. 2160h) gives new links an
@@ -1189,6 +1226,7 @@ func main() {
 		CodeScanningConfig:             codeScanningConfig,
 		CodeScanningIngester:           codeScanningIngester,
 		Decisions:                      decisionStore,
+		ReviewStore:                    reviewStore,
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,
@@ -2943,4 +2981,25 @@ func configureSupportResource(o *auth.OAuthServer, lookup func(string) (string, 
 		o.SupportResource = strings.TrimSpace(v)
 	}
 	return o.ValidateSupportResource()
+}
+
+// reviewConfigFromEnv reads REVIEW_REQUEST_TTL and REVIEW_POOL_MAX. Empty
+// takes the default; anything unparseable or non-positive is an error.
+func reviewConfigFromEnv(ttl, poolMax string) (reviewstore.Config, error) {
+	cfg := reviewstore.Config{}
+	if v := strings.TrimSpace(ttl); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return cfg, fmt.Errorf("REVIEW_REQUEST_TTL %q must be a positive Go duration", v)
+		}
+		cfg.TTL = d
+	}
+	if v := strings.TrimSpace(poolMax); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return cfg, fmt.Errorf("REVIEW_POOL_MAX %q must be a positive integer", v)
+		}
+		cfg.PoolMax = n
+	}
+	return cfg, nil
 }
