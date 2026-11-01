@@ -109,3 +109,20 @@ func TestConfigValidate_AgentReceiptMaxAge(t *testing.T) {
 		t.Errorf("surrounding whitespace: %s", got)
 	}
 }
+
+// MCTL_APPROVAL_BINDING defaults to observe and refuses an unknown value.
+func TestConfigValidate_ApprovalBinding(t *testing.T) {
+	cfg := config{ApprovalBindingRaw: "strict", CommerceDisabled: true}
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "MCTL_APPROVAL_BINDING") {
+		t.Errorf("validate() = %v, want a refusal naming MCTL_APPROVAL_BINDING", err)
+	}
+	for raw, want := range map[string]string{"": "observe", "off": "off", "observe": "observe", "enforce": "enforce"} {
+		cfg := config{ApprovalBindingRaw: raw, CommerceDisabled: true, WorkItemsConfigured: true}
+		if err := cfg.validate(); err != nil {
+			t.Errorf("%q: validate() = %v", raw, err)
+		}
+		if got := string(cfg.approvalBindingMode()); got != want {
+			t.Errorf("%q: mode %q, want %q", raw, got, want)
+		}
+	}
+}

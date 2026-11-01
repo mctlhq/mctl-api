@@ -51,6 +51,27 @@ itself is unchanged.
 A decision may send `context_digest`; a value that differs from the current
 digest is 409 `approval_context_changed` and the request stays pending.
 
+## Decision binding (mctl-api#869)
+
+Both direct human decision routes (`POST /api/v1/action-approvals/{id}/decision`
+and `POST /api/v1/agents/dev-loop/{workflow_id}/approve`) accept an optional
+`binding` object `{approval_ref, context_digest, content_digest}`: the `aar_`
+id, `decision_context.context_digest` and the approval `artifact_hash` the
+person was shown. When present all three are required (422
+`approval_binding_missing`, `details.missing_fields`). On the DevLoop route
+only the grant named by `approval_ref` is decided, never the execution's
+newest: a newer grant is 409 `approval_context_changed` with
+`details.current_approval_ref` and `details.reapproval_required=true`. A
+differing digest is the same 409 and the grant stays pending. An approved
+grant with the same binding returns the existing decision.
+
+`MCTL_APPROVAL_BINDING` migrates legacy callers: `off` (no check on absence),
+`observe` (default; a decision without `binding` is accepted, audited as
+`approval.binding_absent` and counted in `approval_binding_absent_total`),
+`enforce` (no `binding` is 422 `approval_binding_missing`; the top-level
+`context_digest` no longer substitutes). An unknown value fails startup.
+Authority is unchanged: only a human admin acting directly decides.
+
 ## Privacy rule
 
 The context holds references, digests, enums and reason codes only. It never
@@ -98,6 +119,7 @@ Callers should key on `details.reapproval_required`, not on the code text.
 | `approval_context_incomplete` (spend) | 409 | true: an approved row, e.g. a legacy one, whose mandatory context is incomplete is never spent | #721 |
 | `approval_context_invalid` (create) | 400 | n/a | F6 |
 | `approval_context_changed` | 409 | true | F6 |
+| `approval_binding_missing` | 422 | n/a: nothing decided, send all three binding fields | #869 |
 | `approval_stale` | 409 | true | F4 |
 | `approval_expired` | 409 | true | F4 |
 | `approval_authority_revoked` | 409 | true | F3 |
@@ -111,7 +133,10 @@ Callers should key on `details.reapproval_required`, not on the code text.
 
 Structural and secret validation (400) is evaluated before governance
 completeness (422), in both create and decide. Terminal-state refusals keep
-precedence over governance refusals at decide and spend.
+precedence over governance refusals at decide and spend. The binding
+checks run in this order: authority (403), body (400), binding mode and shape
+(422), grant named by `approval_ref` (409), terminal state, then policy,
+context completeness and the digest comparison (409).
 
 ## Freshness
 

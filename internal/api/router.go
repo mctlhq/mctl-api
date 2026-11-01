@@ -205,6 +205,9 @@ type Options struct {
 	// approval stays spendable after it was decided. Zero means
 	// governance.DefaultMaxDecisionAge.
 	ApprovalMaxDecisionAge time.Duration
+	// ApprovalBindingMode is MCTL_APPROVAL_BINDING (mctl-api#869): off,
+	// observe (default of the flag) or enforce. Empty here is off.
+	ApprovalBindingMode ApprovalBindingMode
 	// Clock replaces time.Now for approval freshness; nil is time.Now.
 	Clock func() time.Time
 	// PrincipalAuthz decides, in principal mode, a relayed or delegated

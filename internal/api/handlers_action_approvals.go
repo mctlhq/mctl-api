@@ -123,6 +123,7 @@ var actionApprovalRefusals = []struct {
 	{workitems.ErrApprovalConsumed, http.StatusConflict, aarCodeConsumed, false},
 	{governance.ErrSpendContextIncomplete, http.StatusConflict, aarCodeContextIncomplete, true},
 	{governance.ErrContextIncomplete, http.StatusUnprocessableEntity, aarCodeContextIncomplete, false},
+	{errBindingMissing, http.StatusUnprocessableEntity, aarCodeBindingMissing, false},
 	{governance.ErrContextInvalid, http.StatusBadRequest, aarCodeContextInvalid, false},
 	{governance.ErrContextChanged, http.StatusConflict, aarCodeContextChanged, true},
 	{governance.ErrApprovalStale, http.StatusConflict, aarCodeStale, true},
@@ -164,6 +165,10 @@ func writeActionApprovalError(w http.ResponseWriter, err error) {
 			var inc *incompleteContextError
 			if errors.As(err, &inc) {
 				details = map[string]interface{}{"missing_fields": inc.missing}
+			}
+			var bm *bindingMissingError
+			if errors.As(err, &bm) {
+				details = map[string]interface{}{"missing_fields": bm.missing}
 			}
 			var spend *governance.SpendContextIncompleteError
 			if errors.As(err, &spend) {
@@ -506,6 +511,8 @@ type actionDecisionBody struct {
 	// as it stands now (GET decision_context.context_digest): it proves the
 	// reviewer approved what they were shown (mctl-api#700).
 	ContextDigest string `json:"context_digest,omitempty"`
+	// Binding names the grant, context and content the person was shown.
+	Binding *decisionBinding `json:"binding,omitempty"`
 }
 
 // DecideActionApproval handles POST /api/v1/action-approvals/{id}/decision.
@@ -542,12 +549,34 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 		writeActionApprovalError(w, err)
 		return
 	}
+	// A decision that is not an approve is never bound.
+	bind := body.Binding
+	if body.Decision != workitems.DecisionApprove {
+		bind = nil
+	} else {
+		if missing := h.bindingGate(r, user, bindingRouteActionApproval, chi.URLParam(r, "id"), bind); missing != nil {
+			err := &bindingMissingError{missing: missing}
+			h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", chi.URLParam(r, "id"), aarCodeBindingMissing)
+			writeActionApprovalError(w, err)
+			return
+		}
+		if bind != nil && bind.ApprovalRef != cur.ID {
+			h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", cur.ID, aarCodeContextChanged)
+			writeActionApprovalError(w, governance.ErrContextChanged)
+			return
+		}
+	}
+	// Same binding on an already approved grant: the existing decision.
+	if bind != nil && cur.State == workitems.ApprovalApproved && bindingMatches(bind, cur, cur.DecidedContextDigest) {
+		h.writeApproval(w, http.StatusOK, cur)
+		return
+	}
 	// The completeness gate applies only to a decision that could succeed;
 	// terminal-state and self-decision refusals keep precedence.
 	digest := ""
 	if cur.State == workitems.ApprovalPending && cur.RequestedBy != principalOf(user) {
 		var ok bool
-		digest, ok = h.guardDecision(w, r, user, cur, body.Decision, body.ContextDigest)
+		digest, ok = h.guardDecision(w, r, user, cur, body.Decision, body.ContextDigest, bind)
 		if !ok {
 			return
 		}

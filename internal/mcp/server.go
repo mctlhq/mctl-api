@@ -3191,12 +3191,28 @@ Human admins only, acting directly: a service or agent credential is refused 403
 		mcplib.WithString("reason",
 			mcplib.Description("Optional. Free-text reason for the approval, recorded on the signal payload and in the audit log for audit only. The implementer never sees it, so it cannot carry amendments."),
 		),
+		// The optional binding (mctl-api#869): all three or none.
+		mcplib.WithString("binding_approval_ref",
+			mcplib.Description("Optional binding. The aar_ id of the grant you were shown. Send all three binding_* arguments or none; only that grant is decided, never the newest."),
+		),
+		mcplib.WithString("binding_context_digest",
+			mcplib.Description("Optional binding. decision_context.context_digest of that grant at render time."),
+		),
+		mcplib.WithString("binding_content_digest",
+			mcplib.Description("Optional binding. The grant's artifact_hash (proposal content digest) at render time."),
+		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		workflowID := stringArg(req, "workflow_id")
 		body := map[string]interface{}{}
 		if reason := stringArg(req, "reason"); reason != "" {
 			body["reason"] = reason
+		}
+		ref, cd, ct := stringArg(req, "binding_approval_ref"), stringArg(req, "binding_context_digest"), stringArg(req, "binding_content_digest")
+		if ref != "" || cd != "" || ct != "" {
+			// A partial binding is sent as is: the API refuses it with
+			// 422 approval_binding_missing.
+			body["binding"] = map[string]interface{}{"approval_ref": ref, "context_digest": cd, "content_digest": ct}
 		}
 		respBody, err := s.apiPostJSON(ctx, "/api/v1/agents/dev-loop/"+url.PathEscape(workflowID)+"/approve", body)
 		if err != nil {

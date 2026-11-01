@@ -1202,6 +1202,7 @@ func main() {
 		Principals:                     principalResolver,
 		TenantAuthzMode:                cfg.tenantAuthzMode(),
 		AgentReceiptGateMode:           cfg.agentReceiptGateMode(),
+		ApprovalBindingMode:            cfg.approvalBindingMode(),
 		AgentReceiptMaxAge:             cfg.agentReceiptMaxAge(),
 		LegacyApproverDisabled:         cfg.legacyApproverDisabled(),
 		PrincipalMembership:            gitReader,
@@ -1556,6 +1557,9 @@ type config struct {
 	// AgentReceiptGateRaw is MCTL_AGENT_RECEIPT_GATE (mctl-api#723): off
 	// (default), observe or enforce. An unknown value refuses to start.
 	AgentReceiptGateRaw string
+	// ApprovalBindingRaw is MCTL_APPROVAL_BINDING (mctl-api#869): off,
+	// observe (default) or enforce.
+	ApprovalBindingRaw string
 	// AgentReceiptMaxAgeRaw is MCTL_AGENT_RECEIPT_MAX_AGE (mctl-api#773): a
 	// Go duration, default 5m, at most 1h. An invalid value refuses to
 	// start.
@@ -1692,6 +1696,7 @@ func loadConfig() config {
 		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
 		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
 		AgentReceiptGateRaw:            os.Getenv("MCTL_AGENT_RECEIPT_GATE"),
+		ApprovalBindingRaw:             os.Getenv("MCTL_APPROVAL_BINDING"),
 		AgentReceiptMaxAgeRaw:          os.Getenv("MCTL_AGENT_RECEIPT_MAX_AGE"),
 		WorkItemsConfigured:            workItemsStoreConfigured(),
 		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
@@ -1939,6 +1944,9 @@ func (c config) validate() error {
 		// platform-wide refusal.
 		return errors.New("MCTL_AGENT_RECEIPT_GATE=enforce needs the work-items store (WORK_ITEMS_DB_URL or AUDIT_DB_URL, and WORK_ITEMS_DISABLED off)")
 	}
+	if _, err := mctlapi.ParseApprovalBindingMode(c.ApprovalBindingRaw); err != nil {
+		return err
+	}
 	if _, err := mctlmcp.ParseAgentReceiptMaxAge(c.AgentReceiptMaxAgeRaw); err != nil {
 		return err
 	}
@@ -2125,6 +2133,16 @@ func (c config) agentReceiptGateMode() mctlmcp.AgentReceiptGateMode {
 	m, err := mctlmcp.ParseAgentReceiptGateMode(c.AgentReceiptGateRaw)
 	if err != nil {
 		return mctlmcp.AgentReceiptGateOff
+	}
+	return m
+}
+
+// approvalBindingMode is the parsed MCTL_APPROVAL_BINDING. validate has
+// already refused an unknown value.
+func (c config) approvalBindingMode() mctlapi.ApprovalBindingMode {
+	m, err := mctlapi.ParseApprovalBindingMode(c.ApprovalBindingRaw)
+	if err != nil {
+		return mctlapi.ApprovalBindingObserve
 	}
 	return m
 }

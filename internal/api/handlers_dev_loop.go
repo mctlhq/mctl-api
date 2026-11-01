@@ -28,6 +28,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/governance"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/temporalclient"
 	"github.com/mctlhq/mctl-api/internal/workitems"
@@ -459,6 +460,8 @@ type approveDevLoopRequest struct {
 	// let a caller that still sends one believe it was honoured.
 	Approver string `json:"approver"`
 	Reason   string `json:"reason"`
+	// Binding names the grant, context and content the person was shown.
+	Binding *decisionBinding `json:"binding,omitempty"`
 }
 
 // ApproveDevLoopWorkflow handles POST /api/v1/agents/dev-loop/{workflow_id}/approve
@@ -531,7 +534,7 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 	// together with the code that reads it.
 	approver := user.ID
 	auditParams := map[string]string{"approver": approver}
-	ref, ok := h.decideDevLoopApproval(w, r, user, workflowID, body.Reason, auditParams)
+	ref, ok := h.decideDevLoopApproval(w, r, user, workflowID, body.Reason, auditParams, body.Binding)
 	if !ok {
 		return
 	}
@@ -614,7 +617,7 @@ const (
 // legacy payload is still allowed; with the legacy payload disabled that is
 // a 409. A store that cannot be read is a 503 and never "no grant": a read
 // that failed is not evidence that nothing is pending.
-func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request, user *auth.User, workflowID, reason string, auditParams map[string]string) (string, bool) {
+func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request, user *auth.User, workflowID, reason string, auditParams map[string]string, bind *decisionBinding) (string, bool) {
 	refuse := func(status int, code, msg string) (string, bool) {
 		h.logAudit(r, audit.Entry{
 			UserID:       user.ID,
@@ -628,7 +631,20 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 		writeErrorCode(w, status, code, msg, nil)
 		return "", false
 	}
+	if missing := h.bindingGate(r, user, bindingRouteDevLoop, workflowID, bind); missing != nil {
+		h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", workflowID, aarCodeBindingMissing)
+		writeActionApprovalError(w, &bindingMissingError{missing: missing})
+		return "", false
+	}
 	noGrant := func(why string) (string, bool) {
+		// A bound decision names a grant, so with none to match it there is
+		// nothing to decide: it never falls back to the unbound legacy
+		// payload, which would approve a made-up approval_ref (and satisfy
+		// enforce) without binding to anything.
+		if bind != nil {
+			return refuse(http.StatusConflict, devLoopCodeGrantMissing,
+				why+"; the decision names "+bind.ApprovalRef+" and there is no grant to bind it to")
+		}
 		if h.opts.LegacyApproverDisabled {
 			return refuse(http.StatusConflict, devLoopCodeGrantMissing,
 				why+"; the legacy approver payload is disabled (MCTL_AGENTS_APPROVE_LEGACY_APPROVER=false)")
@@ -640,7 +656,7 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 		return refuse(http.StatusServiceUnavailable, wiCodeUnavailable, "could not read the DevLoop's approval grant")
 	}
 	if h.opts.WorkItems == nil {
-		if h.opts.LegacyApproverDisabled {
+		if h.opts.LegacyApproverDisabled || bind != nil {
 			return refuse(http.StatusServiceUnavailable, wiCodeUnavailable,
 				"the work-item store is not configured, so the DevLoop's approval grant cannot be read")
 		}
@@ -671,11 +687,25 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 		return noGrant("no " + devLoopApprovalKind + " approval for execution " + exec.ID)
 	}
 	newest := list[0]
+	// A bound decision decides the named grant and never the newest one: a
+	// card for a superseded grant must not approve its successor.
+	if bind != nil && bind.ApprovalRef != newest.ID {
+		h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", bind.ApprovalRef, aarCodeContextChanged,
+			map[string]string{"current_approval_ref": newest.ID})
+		writeErrorCode(w, http.StatusConflict, aarCodeContextChanged, governance.ErrContextChanged.Error(),
+			map[string]interface{}{"current_approval_ref": newest.ID, "reapproval_required": true})
+		return "", false
+	}
 	switch newest.State {
 	case workitems.ApprovalApproved:
+		if bind != nil && !bindingMatches(bind, &newest, newest.DecidedContextDigest) {
+			h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", newest.ID, aarCodeContextChanged)
+			writeActionApprovalError(w, governance.ErrContextChanged)
+			return "", false
+		}
 		return newest.ID, true
 	case workitems.ApprovalPending:
-		digest, ok := h.guardDecision(w, r, user, &newest, workitems.DecisionApprove, "")
+		digest, ok := h.guardDecision(w, r, user, &newest, workitems.DecisionApprove, "", bind)
 		if !ok {
 			return "", false
 		}
