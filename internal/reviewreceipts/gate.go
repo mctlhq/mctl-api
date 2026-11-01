@@ -1,0 +1,106 @@
+package reviewreceipts
+
+import (
+	"fmt"
+	"strings"
+)
+
+// EvaluateReviewGate answers whether the live subject has a current,
+// independent review. It is a pure port of Tier A evaluate_review_gate.
+//
+// live is the subject as the caller just observed it (nil when it could not
+// be observed). request carries the authoring facts for that live revision
+// (nil when unavailable). pool is the complete candidate pool in ingest
+// order, oldest first. requiredAssurance is "independent" or "any"; any other
+// value is an error.
+func EvaluateReviewGate(live *ReviewSubject, request *ReviewRequest, pool []ReviewReceipt, requiredAssurance string) (string, error) {
+	if requiredAssurance != AssuranceIndependent && requiredAssurance != AssuranceAny {
+		return "", fmt.Errorf("required_assurance must be one of [%s %s]", AssuranceIndependent, AssuranceAny)
+	}
+	if live == nil {
+		return GateUnknown, nil
+	}
+	var same, bound []ReviewReceipt
+	for _, r := range pool {
+		if r.Subject.Identity() == live.Identity() {
+			same = append(same, r)
+		}
+	}
+	for _, r := range same {
+		if r.Subject.Binding() == live.Binding() {
+			bound = append(bound, r)
+		}
+	}
+	if len(bound) == 0 {
+		if len(same) > 0 {
+			return GateStale, nil
+		}
+		return GateMissing, nil
+	}
+	// The authoring facts must describe this exact revision.
+	if request == nil || request.Subject.Binding() != live.Binding() || request.RequestID == "" {
+		return GateUnknown, nil
+	}
+	if request.Mode == ModeWorker && request.AuthoringExecutionID == "" {
+		return GateUnknown, nil
+	}
+	var own []ReviewReceipt
+	for _, r := range bound {
+		if r.RequestID == request.RequestID {
+			own = append(own, r)
+		}
+	}
+	if len(own) == 0 {
+		return GateMissing, nil
+	}
+	authors := map[string]struct{}{}
+	for _, a := range request.AuthorActors {
+		authors[strings.ToLower(a)] = struct{}{}
+	}
+	attempts := map[string]struct{}{}
+	for _, a := range request.AuthoringAttemptIDs {
+		attempts[a] = struct{}{}
+	}
+	independent := func(r ReviewReceipt) bool {
+		if r.ReviewerActor == "" {
+			return false
+		}
+		if _, isAuthor := authors[strings.ToLower(r.ReviewerActor)]; isAuthor {
+			return false
+		}
+		// A worker receipt that cannot name its execution, attempt and
+		// lineage cannot be compared with the author's.
+		if r.Mode == ModeWorker && (r.ReviewerExecutionID == "" || r.AttemptID == "" || r.LineageRoot == "") {
+			return false
+		}
+		if request.AuthoringExecutionID != "" && r.ReviewerExecutionID == request.AuthoringExecutionID {
+			return false
+		}
+		if _, same := attempts[r.AttemptID]; r.AttemptID != "" && same {
+			return false
+		}
+		return !(request.AuthoringLineageRoot != "" && r.LineageRoot == request.AuthoringLineageRoot)
+	}
+	var indep []ReviewReceipt
+	for _, r := range own {
+		if independent(r) {
+			indep = append(indep, r)
+		}
+	}
+	if len(indep) == 0 {
+		return GateNotIndependent, nil
+	}
+	if requiredAssurance == AssuranceIndependent {
+		var assured []ReviewReceipt
+		for _, r := range indep {
+			if r.Assurance == AssuranceIndependent {
+				assured = append(assured, r)
+			}
+		}
+		if len(assured) == 0 {
+			return GateAdvisoryOnly, nil
+		}
+		indep = assured
+	}
+	return outcomeToGate[indep[len(indep)-1].Outcome], nil
+}
