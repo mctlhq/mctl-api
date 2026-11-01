@@ -21,14 +21,14 @@ func EvaluateReviewGate(live *ReviewSubject, request *ReviewRequest, pool []Revi
 		return GateUnknown, nil
 	}
 	var same, bound []ReviewReceipt
-	for _, r := range pool {
-		if r.Subject.Identity() == live.Identity() {
-			same = append(same, r)
+	for i := range pool {
+		if pool[i].Subject.Identity() == live.Identity() {
+			same = append(same, pool[i])
 		}
 	}
-	for _, r := range same {
-		if r.Subject.Binding() == live.Binding() {
-			bound = append(bound, r)
+	for i := range same {
+		if same[i].Subject.Binding() == live.Binding() {
+			bound = append(bound, same[i])
 		}
 	}
 	if len(bound) == 0 {
@@ -45,9 +45,9 @@ func EvaluateReviewGate(live *ReviewSubject, request *ReviewRequest, pool []Revi
 		return GateUnknown, nil
 	}
 	var own []ReviewReceipt
-	for _, r := range bound {
-		if r.RequestID == request.RequestID {
-			own = append(own, r)
+	for i := range bound {
+		if bound[i].RequestID == request.RequestID {
+			own = append(own, bound[i])
 		}
 	}
 	if len(own) == 0 {
@@ -79,7 +79,7 @@ func EvaluateReviewGate(live *ReviewSubject, request *ReviewRequest, pool []Revi
 		if _, same := attempts[r.AttemptID]; r.AttemptID != "" && same {
 			return false
 		}
-		return !(request.AuthoringLineageRoot != "" && r.LineageRoot == request.AuthoringLineageRoot)
+		return request.AuthoringLineageRoot == "" || r.LineageRoot != request.AuthoringLineageRoot
 	}
 	var indep []ReviewReceipt
 	for _, r := range own {
@@ -102,5 +102,11 @@ func EvaluateReviewGate(live *ReviewSubject, request *ReviewRequest, pool []Revi
 		}
 		indep = assured
 	}
-	return outcomeToGate[indep[len(indep)-1].Outcome], nil
+	// A receipt not built by ParseReceipt/SealReceipt may carry an unknown
+	// outcome; that is unknown, never a silent empty verdict.
+	verdict, ok := outcomeToGate[indep[len(indep)-1].Outcome]
+	if !ok {
+		return GateUnknown, nil
+	}
+	return verdict, nil
 }

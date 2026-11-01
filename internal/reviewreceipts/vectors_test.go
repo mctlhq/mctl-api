@@ -2,6 +2,8 @@ package reviewreceipts
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -17,6 +19,8 @@ import (
 const (
 	vectorsSourceCommit = "2684641c719b7c7b3944243f0f9ae1f70a238693"
 	vectorsFile         = "testdata/review_receipt_vectors.json"
+	// sha256 of the byte-for-byte copy at vectorsSourceCommit.
+	vectorsSHA256 = "7d5ddb23426f82ddcc2abbd706401ef4c5c185fd40fb0d8d2ebc1cd7ab0bb700"
 )
 
 type docVector struct {
@@ -107,6 +111,10 @@ func TestVectorsFileNamesSourceCommit(t *testing.T) {
 	raw, err := os.ReadFile(vectorsFile)
 	if err != nil || !bytes.HasPrefix(raw, []byte("{")) {
 		t.Fatalf("vector file unreadable: %v", err)
+	}
+	sum := sha256.Sum256(raw)
+	if got := hex.EncodeToString(sum[:]); got != vectorsSHA256 {
+		t.Fatalf("vectors file drifted from the pinned copy: sha256 %s, want %s", got, vectorsSHA256)
 	}
 }
 
@@ -391,4 +399,41 @@ func TestParseListBoundBeforeDedup(t *testing.T) {
 	if _, err := ParseRequest(b); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("got %v", err)
 	}
+}
+
+// An unknown outcome on a receipt that bypassed ParseReceipt must fail
+// closed instead of returning an empty verdict.
+func TestGateUnknownOutcomeFailsClosed(t *testing.T) {
+	v := loadVectors(t)
+	for _, g := range v.Gate {
+		if g.Expected != GateSatisfied {
+			continue
+		}
+		live, err := ParseSubject(*g.Live)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := ParseRequest(*g.Request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pool []ReviewReceipt
+		for _, raw := range g.Receipts {
+			rc, err := ParseReceipt(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rc.Outcome = "BOGUS"
+			pool = append(pool, rc)
+		}
+		got, err := EvaluateReviewGate(&live, &req, pool, g.RequiredAssurance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != GateUnknown {
+			t.Fatalf("%s: unknown outcome produced %q, want %q", g.Name, got, GateUnknown)
+		}
+		return
+	}
+	t.Fatal("no satisfied gate vector to mutate")
 }

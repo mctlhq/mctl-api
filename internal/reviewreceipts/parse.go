@@ -567,7 +567,6 @@ func receiptFromMap(m map[string]any) (ReviewReceipt, error) {
 		}
 		criteria = append(criteria, Criterion{ID: id, Status: st})
 	}
-	findings := ArtifactRef{}
 	fv, present := m["findings_ref"]
 	if !present {
 		fv = map[string]any{}
