@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -281,4 +282,92 @@ VALUES ('rc_0000000000000000', $1, 'h', '\x00', 'manual', 'independent', 'acme',
 		t.Fatalf("second NewStore: %v", err)
 	}
 	s2.Close()
+}
+
+// The gate over what the store returns: a manual PASS satisfies
+// required_assurance=any but never independent, a subject with nothing stored
+// is not satisfied, and re-running the gate on the returned input reproduces
+// the verdict.
+func TestGateOverStoredReceipts(t *testing.T) {
+	s, _ := newTestStore(t, Config{PoolMax: 1 << 30})
+	ctx := context.Background()
+	subj := proposal("g-"+uuid.NewString()[:8], "e")
+	req, raw := sealed(t, subj, reviewreceipts.ModeManual)
+	if _, _, err := s.IngestRequest(ctx, raw, Actor{Name: "svc"}); err != nil {
+		t.Fatal(err)
+	}
+	gate := func(live reviewreceipts.ReviewSubject, assurance string) string {
+		t.Helper()
+		sr, pool, err := s.GateInput(ctx, live)
+		if err != nil {
+			t.Fatalf("GateInput: %v", err)
+		}
+		var rq *reviewreceipts.ReviewRequest
+		if sr != nil {
+			rq = &sr.Request
+		}
+		v, err := reviewreceipts.EvaluateReviewGate(&live, rq, pool, assurance)
+		if err != nil {
+			t.Fatalf("EvaluateReviewGate: %v", err)
+		}
+		return v
+	}
+	if v := gate(subj, reviewreceipts.AssuranceAny); v == reviewreceipts.GateSatisfied {
+		t.Fatalf("no receipt yet, yet the gate answered %s", v)
+	}
+	in := ManualInput{RequestID: req.RequestID, Subject: subj, Outcome: "PASS", Criteria: allMet()}
+	if _, err := s.SubmitManual(ctx, in, Actor{Name: "github:alice"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if v := gate(subj, reviewreceipts.AssuranceAny); v != reviewreceipts.GateSatisfied {
+		t.Errorf("manual PASS under any: %s, want %s", v, reviewreceipts.GateSatisfied)
+	}
+	if v := gate(subj, reviewreceipts.AssuranceIndependent); v == reviewreceipts.GateSatisfied {
+		t.Errorf("manual PASS satisfied required_assurance=independent")
+	}
+	other := proposal("g-"+uuid.NewString()[:8], "f")
+	if v := gate(other, reviewreceipts.AssuranceAny); v == reviewreceipts.GateSatisfied {
+		t.Errorf("a subject with nothing stored was satisfied")
+	}
+}
+
+// The pool is in ingest order, oldest first: the gate depends on it.
+func TestPoolIsInIngestOrder(t *testing.T) {
+	s, _ := newTestStore(t, Config{PoolMax: 1 << 30})
+	ctx := context.Background()
+	subj := proposal("o-"+uuid.NewString()[:8], "9")
+	req, raw := sealed(t, subj, reviewreceipts.ModeManual)
+	if _, _, err := s.IngestRequest(ctx, raw, Actor{Name: "svc"}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now()
+	var want []string
+	for i := 0; i < 3; i++ {
+		// The receipt id does not depend on the time, so vary the content.
+		in := ManualInput{RequestID: req.RequestID, Subject: subj, Outcome: "PASS", Criteria: allMet(),
+			FindingsRef: reviewreceipts.ArtifactRef{Name: fmt.Sprintf("notes-%d", i), Kind: "text", ContentHash: "sha256:" + strings.Repeat(fmt.Sprint(i), 64)}}
+		rc, err := s.SubmitManual(ctx, in, Actor{Name: "github:alice"}, base.Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatalf("submit %d: %v", i, err)
+		}
+		want = append(want, rc.Receipt.ReceiptID)
+	}
+	_, stored, err := s.Pool(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	var last int64
+	for _, sr := range stored {
+		if sr.IngestSeq <= last {
+			t.Fatalf("ingest_seq not strictly increasing: %d after %d", sr.IngestSeq, last)
+		}
+		last = sr.IngestSeq
+		if sr.Receipt.RequestID == req.RequestID {
+			got = append(got, sr.Receipt.ReceiptID)
+		}
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("pool order %v, want submission order %v", got, want)
+	}
 }
