@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.150.0](https://github.com/mctlhq/mctl-api/compare/4.149.0...4.150.0) (2026-11-01)
+
+
+### Features
+
+* **agents:** issue-897-feat-review-durable-manual-review-receip ([33b292e](https://github.com/mctlhq/mctl-api/commit/33b292e2d99f1d0f0e901b2b051faf917076d227))
+* **agents:** issue-897-feat-review-durable-manual-review-receip ([f49b4ba](https://github.com/mctlhq/mctl-api/commit/f49b4baa472bfe71798f21d5997f29ebef68cd0e))
+
 ## [4.149.0](https://github.com/mctlhq/mctl-api/compare/4.148.0...4.149.0) (2026-11-01)
 
 
