@@ -33,6 +33,7 @@ var cwftDeclaredParams = map[string][]string{
 		"work_item_id", "execution_id",
 		"temporal_workflow_id", "temporal_run_id", "execution_request_id",
 		"human_input_responses", "work_item_owner_principal_id", "traceparent",
+		"surface", "actor_kind", "actor_id",
 	},
 	"mctl-agents-implement": {
 		"service", "slug", "force", "max_proposals", "agent_image", "agent_version",
