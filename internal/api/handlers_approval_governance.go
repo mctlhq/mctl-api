@@ -89,7 +89,7 @@ type approvalWithContext struct {
 // guardDecision is the completeness and binding check of an approve. A deny
 // is never gated. It returns the context digest to record. It has answered
 // when ok is false; the request stays pending.
-func (h *Handlers) guardDecision(w http.ResponseWriter, r *http.Request, user *auth.User, a *workitems.ActionApprovalRequest, decision, sentDigest string) (string, bool) {
+func (h *Handlers) guardDecision(w http.ResponseWriter, r *http.Request, user *auth.User, a *workitems.ActionApprovalRequest, decision, sentDigest string, bind *decisionBinding) (string, bool) {
 	if decision != workitems.DecisionApprove {
 		return "", true
 	}
@@ -106,7 +106,8 @@ func (h *Handlers) guardDecision(w http.ResponseWriter, r *http.Request, user *a
 		writeActionApprovalError(w, err)
 		return "", false
 	}
-	if sentDigest != "" && sentDigest != c.ContextDigest {
+	if (sentDigest != "" && sentDigest != c.ContextDigest) ||
+		(bind != nil && (bind.ContextDigest != c.ContextDigest || bind.ContentDigest != a.ArtifactHash)) {
 		h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", a.ID, aarCodeContextChanged)
 		writeActionApprovalError(w, governance.ErrContextChanged)
 		return "", false

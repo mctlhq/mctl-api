@@ -1187,10 +1187,10 @@ components:
                  approval_decider_forbidden, approval_reader_forbidden, approval_execution_invalid,
                  approval_execution_not_open, approval_context_incomplete, approval_context_invalid,
                  approval_context_changed, approval_stale, approval_authority_revoked,
-                 approval_decider_disabled, approval_authority_unavailable, approval_policy_drift, approval_policy_unregistered, approval_policy_unavailable]
+                 approval_decider_disabled, approval_authority_unavailable, approval_policy_drift, approval_policy_unregistered, approval_policy_unavailable, approval_binding_missing]
         details:
           type: object
-          description: 'reapproval_required=true: the approval can never be spent, request a new one. missing_fields: the empty mandatory context fields (approval_context_incomplete).'
+          description: 'reapproval_required=true: the approval can never be spent, request a new one. missing_fields: the empty mandatory context fields (approval_context_incomplete) or the absent or malformed binding fields (approval_binding_missing); current_approval_ref: the DevLoop execution newest grant (approval_context_changed on the DevLoop approve route).'
           properties:
             reapproval_required: {type: boolean}
             missing_fields: {type: array, items: {type: string}}
@@ -4149,6 +4149,25 @@ paths:
                 reason:
                   type: string
                   description: Optional free-form approval note.
+                binding:
+                  type: object
+                  additionalProperties: false
+                  description: |
+                    Optional in off and observe, required in enforce (422
+                    `approval_binding_missing`, `details.missing_fields`); all
+                    three fields are required when present. Only the grant
+                    named by approval_ref is decided, never the newest: when
+                    the execution newest grant has another id the answer is
+                    409 `approval_context_changed` with
+                    `details.current_approval_ref` and
+                    `details.reapproval_required=true`. A differing
+                    context_digest or content_digest is the same 409 and the
+                    grant stays pending.
+                  properties:
+                    approval_ref: {type: string, description: 'The aar_ id shown'}
+                    context_digest: {type: string, description: 'decision_context.context_digest at render time'}
+                    content_digest: {type: string, description: 'The approval artifact_hash (the proposal content digest) at render time'}
+                  required: [approval_ref, context_digest, content_digest]
       responses:
         '200':
           description: Signal delivered
@@ -5566,14 +5585,23 @@ paths:
               properties:
                 decision: {type: string, enum: [approve, deny]}
                 reason: {type: string, maxLength: 1024}
-                context_digest: {type: string, description: 'Optional; must equal the current decision_context.context_digest, else 409 approval_context_changed'}
+                context_digest: {type: string, description: 'Legacy alias, optional in off and observe; must equal the current decision_context.context_digest, else 409 approval_context_changed. In MCTL_APPROVAL_BINDING=enforce it no longer substitutes for binding.'}
+                binding:
+                  type: object
+                  additionalProperties: false
+                  description: 'Optional in off and observe, required in enforce (422 approval_binding_missing). When present all three fields are required. approval_ref must equal the path id; context_digest and content_digest must equal the grant current decision_context.context_digest and artifact_hash, else 409 approval_context_changed and the request stays pending.'
+                  properties:
+                    approval_ref: {type: string, description: 'The aar_ id shown'}
+                    context_digest: {type: string, description: 'decision_context.context_digest at render time'}
+                    content_digest: {type: string, description: 'The approval artifact_hash (the proposal content digest) at render time'}
+                  required: [approval_ref, context_digest, content_digest]
               required: [decision]
       responses:
         '200': {description: Decided, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalResponse'}}}}
         '400': {description: 'invalid_request, secret_in_text (a credential in reason), or actor_not_accepted (a body naming decided_by)', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '403': {description: 'approval_decider_forbidden or approval_self_decision', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '404': {description: approval_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
-        '422': {description: 'approval_context_incomplete', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
+        '422': {description: 'approval_context_incomplete or approval_binding_missing (details.missing_fields)', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '409': {description: 'approval_already_decided, approval_expired or approval_context_changed', content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ActionApprovalError'}}}}
 
