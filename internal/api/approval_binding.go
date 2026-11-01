@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -11,7 +12,6 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/workitems"
-	"net/http"
 )
 
 // Binding of a direct human decision to the exact grant and context the
@@ -99,7 +99,7 @@ func (h *Handlers) approvalBindingMode() ApprovalBindingMode {
 // observe mode, per route: the evidence for the enforce flip.
 var approvalBindingAbsentTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "approval_binding_absent_total",
-	Help: "Direct human decisions accepted without a binding in observe mode (mctl-api#869), by route.",
+	Help: "Direct human approve attempts seen without a binding in observe mode (mctl-api#869), by route; counted before the outcome is known.",
 }, []string{"route"})
 
 func init() { prometheus.MustRegister(approvalBindingAbsentTotal) }
@@ -116,6 +116,11 @@ func (h *Handlers) bindingGate(r *http.Request, user *auth.User, route, id strin
 	if b != nil {
 		return b.missingFields()
 	}
+	// On the DevLoop route the id is the workflow's, not an aar_.
+	idKey := "approval_id"
+	if route == bindingRouteDevLoop {
+		idKey = "workflow_id"
+	}
 	switch h.approvalBindingMode() {
 	case ApprovalBindingEnforce:
 		return b.missingFields()
@@ -124,7 +129,7 @@ func (h *Handlers) bindingGate(r *http.Request, user *auth.User, route, id strin
 		h.logAudit(r, audit.Entry{
 			UserID:     user.ID,
 			Operation:  "approval.binding_absent",
-			Parameters: map[string]string{"route": route, "approval_id": id, "actor": principalOf(user)},
+			Parameters: map[string]string{"route": route, idKey: id, "actor": principalOf(user)},
 			Status:     "succeeded",
 			RiskLevel:  string(operations.RiskMedium),
 		})

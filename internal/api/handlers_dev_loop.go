@@ -637,6 +637,14 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 		return "", false
 	}
 	noGrant := func(why string) (string, bool) {
+		// A bound decision names a grant, so with none to match it there is
+		// nothing to decide: it never falls back to the unbound legacy
+		// payload, which would approve a made-up approval_ref (and satisfy
+		// enforce) without binding to anything.
+		if bind != nil {
+			return refuse(http.StatusConflict, devLoopCodeGrantMissing,
+				why+"; the decision names "+bind.ApprovalRef+" and there is no grant to bind it to")
+		}
 		if h.opts.LegacyApproverDisabled {
 			return refuse(http.StatusConflict, devLoopCodeGrantMissing,
 				why+"; the legacy approver payload is disabled (MCTL_AGENTS_APPROVE_LEGACY_APPROVER=false)")
@@ -648,7 +656,7 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 		return refuse(http.StatusServiceUnavailable, wiCodeUnavailable, "could not read the DevLoop's approval grant")
 	}
 	if h.opts.WorkItems == nil {
-		if h.opts.LegacyApproverDisabled {
+		if h.opts.LegacyApproverDisabled || bind != nil {
 			return refuse(http.StatusServiceUnavailable, wiCodeUnavailable,
 				"the work-item store is not configured, so the DevLoop's approval grant cannot be read")
 		}

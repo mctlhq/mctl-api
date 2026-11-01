@@ -2,8 +2,13 @@ package api
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
@@ -238,5 +243,118 @@ func TestDevLoopApprove_BindingModeAndUnreadableStore(t *testing.T) {
 	}
 	if fake.lastApprovePayload != nil {
 		t.Fatalf("signalled %v", fake.lastApprovePayload)
+	}
+}
+
+// Review P2 on #902: a bound decision with no grant to match must never fall
+// back to the unbound legacy approval, in any mode and with the legacy flag
+// on: a made-up approval_ref would otherwise approve the workflow and satisfy
+// enforce.
+func TestDevLoopApprove_BoundDecisionNeverFallsBackToLegacy(t *testing.T) {
+	made := bindingJSON(map[string]any{"approval_ref": "aar_madeup", "context_digest": "sha256:x", "content_digest": "sha256:y"})
+	for _, mode := range []ApprovalBindingMode{ApprovalBindingOff, ApprovalBindingObserve, ApprovalBindingEnforce} {
+		e, fake := newDevLoopGrantEnv(t)
+		e.h.opts.ApprovalBindingMode = mode
+		e.h.opts.LegacyApproverDisabled = false
+		run := e.startDevLoopRun("nf-" + string(mode))
+		for name, wf := range map[string]string{"no pending grant": run.workflowID, "no execution": e.tenant + "-unattached"} {
+			fake.lastApprovePayload = nil
+			res := e.approveDevLoop(rootAdmin, wf, made)
+			if res.code != http.StatusConflict || code(res) != devLoopCodeGrantMissing {
+				t.Fatalf("%s/%s: %d %s, want 409 %s", mode, name, res.code, res.raw, devLoopCodeGrantMissing)
+			}
+			if fake.lastApprovePayload != nil {
+				t.Fatalf("%s/%s: signalled %v", mode, name, fake.lastApprovePayload)
+			}
+		}
+	}
+}
+
+// Without a work-items store a bound decision cannot be checked, so it is a
+// 503 and never the legacy approval.
+func TestDevLoopApprove_BoundDecisionWithoutStore(t *testing.T) {
+	fake := &fakeDevLoopClient{}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: audit.NewLogger(), GitReader: ownerEverywhere{}}}
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/wf/approve",
+		strings.NewReader(bindingJSON(map[string]any{"approval_ref": "aar_x", "context_digest": "sha256:x", "content_digest": "sha256:y"})))
+	req = withChiParam(req, "workflow_id", "wf")
+	req = req.WithContext(auth.WithUser(req.Context(), rootAdmin))
+	rec := httptest.NewRecorder()
+	h.ApproveDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("bound, no store = %d %s", rec.Code, rec.Body.String())
+	}
+	if fake.lastApprovePayload != nil {
+		t.Fatalf("signalled %v", fake.lastApprovePayload)
+	}
+}
+
+// T6: an unreadable grant store is a 503 for a bound decision, not the legacy
+// payload, and nothing is signalled.
+func TestDevLoopApprove_BoundDecisionUnreadableStore(t *testing.T) {
+	e, fake := newDevLoopGrantEnv(t)
+	run := e.startDevLoopRun("unread")
+	id := e.requestDevLoopGrant(run.execID, "gate-u")
+	card := bindingJSON(e.bindingOf(id))
+	e.h.opts.WorkItems.Close()
+	res := e.approveDevLoop(rootAdmin, run.workflowID, card)
+	if res.code != http.StatusServiceUnavailable {
+		t.Fatalf("unreadable store = %d %s, want 503", res.code, res.raw)
+	}
+	if fake.lastApprovePayload != nil {
+		t.Fatalf("signalled %v", fake.lastApprovePayload)
+	}
+}
+
+// An already approved newest grant is returned only to the binding it was
+// decided under.
+func TestDevLoopApprove_ApprovedGrantNeedsTheSameBinding(t *testing.T) {
+	e, fake := newDevLoopGrantEnv(t)
+	run := e.startDevLoopRun("appr")
+	id := e.requestDevLoopGrant(run.execID, "gate-ap")
+	card := e.bindingOf(id)
+	if res := e.approveDevLoop(rootAdmin, run.workflowID, bindingJSON(card)); res.code != http.StatusOK {
+		t.Fatalf("approve = %d %s", res.code, res.raw)
+	}
+	fake.lastApprovePayload = nil
+	other := map[string]any{"approval_ref": id, "context_digest": "sha256:other", "content_digest": card["content_digest"]}
+	res := e.approveDevLoop(rootAdmin, run.workflowID, bindingJSON(other))
+	if res.code != http.StatusConflict || code(res) != aarCodeContextChanged {
+		t.Fatalf("approved + other digest = %d %s", res.code, res.raw)
+	}
+	if fake.lastApprovePayload != nil {
+		t.Fatalf("signalled %v", fake.lastApprovePayload)
+	}
+}
+
+// Observe mode counts an unbound approve per route and audits it with the
+// workflow id on the DevLoop route; bound requests count nothing.
+func TestApprovalBinding_ObserveCountsUnboundOnly(t *testing.T) {
+	e, _ := newDevLoopGrantEnv(t)
+	e.h.opts.ApprovalBindingMode = ApprovalBindingObserve
+	run := e.startDevLoopRun("obs")
+	id := e.requestDevLoopGrant(run.execID, "gate-o")
+	c := approvalBindingAbsentTotal.WithLabelValues(bindingRouteDevLoop)
+	before := testutil.ToFloat64(c)
+	if res := e.approveDevLoop(rootAdmin, run.workflowID, bindingJSON(e.bindingOf(id))); res.code != http.StatusOK {
+		t.Fatalf("bound = %d %s", res.code, res.raw)
+	}
+	if got := testutil.ToFloat64(c); got != before {
+		t.Fatalf("a bound approve was counted: %v -> %v", before, got)
+	}
+	if res := e.approveDevLoop(rootAdmin, run.workflowID, ""); res.code != http.StatusOK {
+		t.Fatalf("unbound = %d %s", res.code, res.raw)
+	}
+	if got := testutil.ToFloat64(c); got != before+1 {
+		t.Fatalf("unbound approve counted %v, want %v", got, before+1)
+	}
+	found := false
+	for _, en := range e.audit.List(1000) {
+		if en.Operation == "approval.binding_absent" && en.Parameters["workflow_id"] == run.workflowID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no approval.binding_absent audit keyed by workflow_id")
 	}
 }
