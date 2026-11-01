@@ -400,16 +400,17 @@ func TestVerifyAgentReceipt_ConcurrentCallsAuthorizeOne(t *testing.T) {
 // execution. The run's own receipt is spent like the service's.
 func TestVerifyAgentReceipt_AgentReceiptIsItsExecutions(t *testing.T) {
 	env := newWorkItemsEnv(t)
-	run := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: env.tenant + "-receipt", RunID: "art_a"})
+	run := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: env.tenant + "-receipt", RunID: "art_a", Scope: auth.AgentScopeInvestigate})
 	in := env.receiptInput("agent", receiptTool)
 	in.RequestedBy = principalOf(run)
 	ref := env.receipt(in, "consumed")
 	check := mcp.ReceiptCheck{Tool: receiptTool, Ref: ref, ArtifactHash: "sha256:action", Redeem: true}
 
 	for name, u := range map[string]*auth.User{
-		"another run":      auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: env.tenant + "-other", RunID: "art_b"}),
-		"an unbound token": auth.NewAgentUser("implementer", auth.AgentRun{RunID: "art_c"}),
-		"the service":      auth.NewServiceUser(),
+		"another run":              auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: env.tenant + "-other", RunID: "art_b", Scope: auth.AgentScopeInvestigate}),
+		"unscoped, same execution": auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: env.tenant + "-receipt", RunID: "art_d"}),
+		"an unbound token":         auth.NewAgentUser("implementer", auth.AgentRun{RunID: "art_c"}),
+		"the service":              auth.NewServiceUser(),
 	} {
 		if got := env.h.VerifyAgentReceipt(context.Background(), u, check); got != mcp.ReceiptCodeNotFound {
 			t.Errorf("%s: %q, want %q", name, got, mcp.ReceiptCodeNotFound)

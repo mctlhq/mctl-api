@@ -1,10 +1,14 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 // Execution-bound agent approvals (mctlhq/mctl-agents#717 S4): an agent run
@@ -16,9 +20,14 @@ import (
 // that name it are cleaned up by their execution id, like the rest.
 const agentTestWorkItem = "wi_agent-test"
 
+// agentTestScope is a defined scope. The handlers need a scoped token; which
+// scopes reach the approval routes is the scope gate's route list, which
+// these handler-level tests do not run.
+const agentTestScope = auth.AgentScopeInvestigate
+
 func (e *workItemsEnv) agentRun(execID, runID string) *auth.User {
 	return auth.NewAgentUser("implementer", auth.AgentRun{
-		Agent: "implementer", ExecutionID: execID, WorkItemID: agentTestWorkItem, RunID: runID,
+		Agent: "implementer", ExecutionID: execID, WorkItemID: agentTestWorkItem, RunID: runID, Scope: agentTestScope,
 	})
 }
 
@@ -85,19 +94,22 @@ func TestAgentApprovals_ARunRequestsOnlyForItsOwnExecution(t *testing.T) {
 		"another execution":       {run, otherExec},
 		"another work item":       {run, otherItem},
 		"the DevLoop gate":        {run, devLoop},
-		"a token with no binding": {auth.NewAgentUser("implementer", auth.AgentRun{RunID: "art_unbound"}), e.agentApprovalBody("k-agent-unbound")},
+		"a token with no binding": {auth.NewAgentUser("implementer", auth.AgentRun{RunID: "art_unbound", Scope: agentTestScope}), e.agentApprovalBody("k-agent-unbound")},
+		// The agent scope gate passes an unscoped token through unchecked,
+		// so the handlers refuse it themselves.
+		"an unscoped token": {auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: e.tenant + "-exec", RunID: "art_unscoped"}), e.agentApprovalBody("k-agent-unscoped")},
 	} {
 		res := e.do(c.user, "POST", "/api/v1/action-approvals", c.body)
 		if res.code != http.StatusForbidden || code(res) != aarCodeRequesterForbidden {
 			t.Errorf("%s: create = %d %s", name, res.code, res.raw)
 		}
 	}
-	if n := e.auditRefusals("action_approval.create_refused", "", aarCodeRequesterForbidden); n < 4 {
-		t.Errorf("refusals audited = %d, want 4", n)
+	if n := e.auditRefusals("action_approval.create_refused", "", aarCodeRequesterForbidden); n < 5 {
+		t.Errorf("refusals audited = %d, want 5", n)
 	}
 	// Its own work item is accepted.
 	item := e.open(auth.NewServiceUser(), nil)["id"].(string)
-	bound := auth.NewAgentUser("implementer", auth.AgentRun{Agent: "implementer", ExecutionID: e.tenant + "-exec", WorkItemID: item, RunID: "art_run_a"})
+	bound := auth.NewAgentUser("implementer", auth.AgentRun{Agent: "implementer", ExecutionID: e.tenant + "-exec", WorkItemID: item, RunID: "art_run_a", Scope: agentTestScope})
 	own := e.agentApprovalBody("k-agent-own-item")
 	own["work_item_id"] = item
 	if res := e.do(bound, "POST", "/api/v1/action-approvals", own); res.code != http.StatusCreated {
@@ -173,7 +185,7 @@ func TestAgentApprovals_ARunMarksItsExecutionsDevLoopGrant(t *testing.T) {
 		t.Fatalf("approve = %d %s", res.code, res.raw)
 	}
 	grant := e.approvalRow(id)
-	run := auth.NewAgentUser("implementer", auth.AgentRun{Agent: "implementer", ExecutionID: dl.execID, WorkItemID: dl.itemID, RunID: "art_impl"})
+	run := auth.NewAgentUser("implementer", auth.AgentRun{Agent: "implementer", ExecutionID: dl.execID, WorkItemID: dl.itemID, RunID: "art_impl", Scope: agentTestScope})
 	other := e.agentRun(e.tenant+"-exec-other", "art_other")
 
 	if res := e.do(run, "GET", "/api/v1/action-approvals/"+id, nil); res.code != http.StatusOK {
@@ -215,5 +227,51 @@ func TestAgentApprovals_ARunMarksItsExecutionsDevLoopGrant(t *testing.T) {
 	}
 	if res := e.markExecuted(run, id, body); res.code != http.StatusConflict || code(res) != aarCodeExecuted {
 		t.Fatalf("second execute = %d %s", res.code, res.raw)
+	}
+}
+
+// Every run of one agent shares its principal, so idempotency keys collide
+// across executions: the conflict must not name the other run's request.
+func TestAgentApprovals_AKeyConflictDoesNotNameAnotherRunsRequest(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	run := e.agentRun(e.tenant+"-exec", "art_run_a")
+	other := e.agentRun(e.tenant+"-exec-other", "art_run_b")
+	res := e.do(run, "POST", "/api/v1/action-approvals", e.agentApprovalBody("k-agent-shared"))
+	if res.code != http.StatusCreated {
+		t.Fatalf("create = %d %s", res.code, res.raw)
+	}
+	id := res.body["approval"].(map[string]any)["id"].(string)
+	b := e.agentApprovalBody("k-agent-shared")
+	b["execution_id"] = e.tenant + "-exec-other"
+	res = e.do(other, "POST", "/api/v1/action-approvals", b)
+	if res.code != http.StatusConflict || code(res) != aarCodeIdempotencyConflict {
+		t.Fatalf("conflict = %d %s", res.code, res.raw)
+	}
+	if strings.Contains(res.raw, id) || strings.Contains(res.raw, "sha256:") {
+		t.Fatalf("conflict names the other request: %s", res.raw)
+	}
+}
+
+// A mctl-agents-approve request the run may see is the control worker's
+// grant: one any other principal made for the execution is not it.
+func TestAgentApprovals_OnlyTheServicesGrantIsTheRuns(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	run := e.agentRun(e.tenant+"-exec", "art_run_a")
+	in := workitems.ActionApprovalInput{
+		ActionIntent: workitems.ActionIntent{
+			ExecutionID: e.tenant + "-exec", ActionKind: devLoopApprovalKind, Target: "mctl-api/issue-1-x",
+			ArgsDigest: "sha256:args", PolicyRuleID: "dev-loop.human-approval", PolicyVersion: "v1",
+			ArtifactHash: testContentDigest,
+		},
+		RequestedBy:    "service:someone-else",
+		IdempotencyKey: e.tenant + "-k-not-the-worker",
+		ExpiresAt:      time.Now().Add(time.Hour),
+	}
+	a, _, err := e.h.opts.WorkItems.CreateActionApproval(context.Background(), in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if res := e.do(run, "GET", "/api/v1/action-approvals/"+a.ID, nil); res.code != http.StatusNotFound {
+		t.Fatalf("run reads another principal's gate = %d %s", res.code, res.raw)
 	}
 }

@@ -100,16 +100,20 @@ func isHumanAdmin(u *auth.User) bool {
 	return u.IsAdmin() && !u.IsService() && !relayed && !surface
 }
 
-// boundAgentExecution is the execution a directly acting agent run token is
-// bound to (mctlhq/mctl-agents#717 S4). False for every other principal,
-// for a relayed request, and for a run token bound to no execution: an
-// agent's approvals are always one execution's, so a token without one has
-// none.
+// boundAgentExecution is the execution a directly acting, scoped agent run
+// token is bound to (mctlhq/mctl-agents#717 S4). False for every other
+// principal, for a relayed request, for a run token bound to no execution
+// (an agent's approvals are always one execution's), and for an unscoped
+// run token: the agent scope gate passes those through unchecked, so only
+// a scope's route list may decide which runs reach these routes at all.
 func boundAgentExecution(u *auth.User) (string, bool) {
 	if u == nil || !u.IsAgent() {
 		return "", false
 	}
 	if _, relayed := u.RelaySurface(); relayed {
+		return "", false
+	}
+	if _, scoped := u.AgentScope(); !scoped {
 		return "", false
 	}
 	exec := u.ExecutionID()
@@ -136,7 +140,8 @@ func isAgentOwnApproval(u *auth.User, a *workitems.ActionApprovalRequest) bool {
 // although the control worker requested it.
 func isAgentExecutionGrant(u *auth.User, a *workitems.ActionApprovalRequest) bool {
 	exec, ok := boundAgentExecution(u)
-	return ok && a.ExecutionID == exec && a.ActionKind == devLoopApprovalKind
+	return ok && a.ExecutionID == exec && a.ActionKind == devLoopApprovalKind &&
+		a.RequestedBy == principalOf(auth.NewServiceUser())
 }
 
 // canSeeActionApproval: a human admin sees every request, the requesting
@@ -463,6 +468,14 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 	}
 	a, created, err := h.opts.WorkItems.CreateActionApproval(r.Context(), in)
 	if err != nil {
+		// Every run of one agent shares its principal, so an agent's key can
+		// collide with another run's request; the store's message names
+		// that request, which this run may not read.
+		if _, agent := boundAgentExecution(user); agent && errors.Is(err, workitems.ErrApprovalIdempotencyConflict) {
+			writeErrorCode(w, http.StatusConflict, aarCodeIdempotencyConflict,
+				"this idempotency key is already used for a different intent; include the execution in the key", nil)
+			return
+		}
 		writeActionApprovalError(w, err)
 		return
 	}

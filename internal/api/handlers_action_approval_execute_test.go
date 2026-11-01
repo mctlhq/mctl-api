@@ -199,7 +199,7 @@ func TestActionApprovals_OnlyTheRequestingServiceMarksExecuted(t *testing.T) {
 	// A run bound to the request's execution is an approval requester
 	// (mctlhq/mctl-agents#717 S4), but this request is the service's: it
 	// reads as absent to the run.
-	run := auth.NewAgentUser("implementer", auth.AgentRun{Agent: "implementer", ExecutionID: e.tenant + "-exec", RunID: "art_test"})
+	run := auth.NewAgentUser("implementer", auth.AgentRun{Agent: "implementer", ExecutionID: e.tenant + "-exec", RunID: "art_test", Scope: auth.AgentScopeInvestigate})
 	if res := e.markExecuted(run, id, body); res.code != http.StatusNotFound || code(res) != aarCodeNotFound {
 		t.Errorf("bound agent run execute = %d %s", res.code, res.raw)
 	}
