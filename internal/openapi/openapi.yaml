@@ -891,6 +891,9 @@ components:
         phase: {type: string, enum: [Pending, Running, Succeeded, Failed, Error]}
         started_at: {type: string, format: date-time}
         ended_at: {type: string, format: date-time}
+        surface: {type: string, description: 'The surface of the execution request this execution fulfilled. Absent for an execution attached without a request: absent means unknown, never a surface (mctl-api#871).'}
+        requested_by: {type: string, description: The authenticated requester of that execution request. Absent as for surface.}
+        acting_principal: {type: string, description: The surface principal that relayed that request, when one did. Absent otherwise.}
       required: [id, work_item_id, engine, engine_ref, attempt, phase, started_at]
 
     WorkItemIntent:
@@ -5808,6 +5811,7 @@ paths:
                   schema_version: {type: string, enum: [workitem/v1]}
                   execution_request: {$ref: '#/components/schemas/ExecutionRequest'}
                   claim_token: {type: string, description: Fences this claim; present it to fulfil or reject}
+                  intent_available: {type: boolean, description: 'Present only when the request pins an intent_id: false when that intent''s text is unavailable (redacted), so the holder can reject the request before starting any engine run (mctl-api#871).'}
                 required: [schema_version, execution_request, claim_token]
         '204': {description: Nothing is claimable}
         '400': {description: invalid_request (lease out of range), content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
@@ -5862,7 +5866,7 @@ paths:
         '400': {description: invalid_request, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
         '403': {description: execution_request_claimant_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
         '404': {description: execution_request_not_found, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
-        '409': {description: 'execution_request_not_claimed, execution_request_closed, state_version_conflict, invalid_transition or execution_active', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '409': {description: 'execution_request_not_claimed, execution_request_closed, state_version_conflict, invalid_transition, execution_active, or intent_unavailable (the pinned intent''s text became unavailable after the request was made; the request stays claimed for the holder to reject)', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
 
   /api/v1/execution-requests/{request_id}/reject:
     post:

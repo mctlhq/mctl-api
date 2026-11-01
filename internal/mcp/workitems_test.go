@@ -436,3 +436,40 @@ func TestWorkItemHandoffToolsNeverReachExecutionRoutes(t *testing.T) {
 		}
 	}
 }
+
+// mctl-api#871 T8: intent_id is forwarded as an integer with exactly the
+// REST semantics; a bad value never reaches the API; absent sends no key.
+func TestRequestWorkItemExecutionPinsAnIntent(t *testing.T) {
+	ts, calls := workItemBackend(t, http.StatusCreated, `{"execution_request":{"id":"xr_1"}}`)
+	r := callRoadmapTool(t, (*Server).toolRequestWorkItemExecution, ts.URL, map[string]any{
+		"work_item_id": "wi_1", "kind": "start", "expected_state_version": float64(1), "idempotency_key": "k",
+		"intent_id": float64(42),
+	})
+	if r.IsError {
+		t.Fatal(resultText(t, r))
+	}
+	got := (*calls)[0]
+	if want := "expected_state_version,idempotency_key,intent_id,kind,surface"; strings.Join(got.keys, ",") != want {
+		t.Fatalf("body keys = %v, want %s", got.keys, want)
+	}
+	if got.body["intent_id"] != float64(42) {
+		t.Fatalf("intent_id = %v, want 42", got.body["intent_id"])
+	}
+
+	for name, bad := range map[string]any{
+		"zero": float64(0), "negative": float64(-1), "fraction": 1.5, "string": "42",
+		"above 2^53": float64(1<<53) * 2, "null": nil,
+	} {
+		before := len(*calls)
+		r := callRoadmapTool(t, (*Server).toolRequestWorkItemExecution, ts.URL, map[string]any{
+			"work_item_id": "wi_1", "kind": "start", "expected_state_version": float64(1), "idempotency_key": "k",
+			"intent_id": bad,
+		})
+		if !r.IsError {
+			t.Errorf("%s: accepted intent_id %v", name, bad)
+		}
+		if len(*calls) != before {
+			t.Errorf("%s: a refused intent_id reached the API", name)
+		}
+	}
+}
