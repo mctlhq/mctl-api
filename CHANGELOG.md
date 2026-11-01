@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.147.0](https://github.com/mctlhq/mctl-api/compare/4.146.0...4.147.0) (2026-11-01)
+
+
+### Features
+
+* **agents:** issue-871-feat-mcp-bind-execution-to-readable-inte ([7695090](https://github.com/mctlhq/mctl-api/commit/7695090725d22f75b4b36ec7f713cd64098454b2))
+* **agents:** issue-871-feat-mcp-bind-execution-to-readable-inte ([3a2e897](https://github.com/mctlhq/mctl-api/commit/3a2e89724a69b20de312e45aa184b0dcb9d79601))
+
+
+### Bug Fixes
+
+* **work-items:** scope the provenance join to the item ([0b43ba2](https://github.com/mctlhq/mctl-api/commit/0b43ba27636329466dd57c908b72a6dad7a1a6f3))
+
 ## [4.146.0](https://github.com/mctlhq/mctl-api/compare/4.145.0...4.146.0) (2026-11-01)
 
 
