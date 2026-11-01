@@ -377,8 +377,8 @@ Surfaces correlate to it; they never own its lifecycle.
   and the requester spends it once with `POST .../{id}/consume {intent_hash}`,
   then marks it executed once with `POST .../{id}/execute {target,
   artifact_hash}`. `GET /api/v1/action-approvals[/{id}]` reads, with lazy
-  expiry (mctl-api#366). An agent run token (mctlhq/mctl-agents#717 S4)
-  requests only for the execution (and work item) it is bound to, never a
+  expiry (mctl-api#366). A scoped agent run token (mctlhq/mctl-agents#717
+  S4; an unscoped one gets none of this) requests only for the execution (and work item) it is bound to, never a
   `mctl-agents-approve` gate, and reads, lists, consumes and marks executed
   only its own requests for that execution; the one other request it sees
   is its execution's `mctl-agents-approve` grant, which it may read and mark

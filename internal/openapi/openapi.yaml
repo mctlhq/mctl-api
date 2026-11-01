@@ -5388,8 +5388,8 @@ paths:
     post:
       summary: Request approval of one runtime side effect
       description: |
-        Service principal acting directly, or an agent run token for its own
-        execution (a relayed surface or a person gets 403
+        Service principal acting directly, or a scoped agent run token for
+        its own execution (a relayed surface or a person gets 403
         `approval_requester_forbidden`; so does an agent run naming another
         `execution_id` or `work_item_id`, or requesting a
         `mctl-agents-approve` gate); `requested_by` is the authenticated
