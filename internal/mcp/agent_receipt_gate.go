@@ -38,16 +38,16 @@ import (
 //     so an old one is a crashed run or a replay.
 //   - A receipt that could not be checked is its own code, never "valid"
 //     and never "missing".
-//   - Human principals, relayed requests and agent principals are not
-//     gated: only the direct mctl-agent service principal is. A scoped
-//     run token needs no receipt because no run scope admits a governed
-//     tool: the scope refuses the call first.
-//     TestAgentScopesAdmitNoGovernedTool holds that; a scope that must
-//     reach a governed tool has to extend this gate to agent principals
-//     before it can pass. An unscoped run token skips the scope check and
-//     is not held by that test: it is kept off governed tools only by
-//     having no tenant, no admin and just the permissions it was minted
-//     with, which the REST calls behind every tool check.
+//   - Gated: the direct mctl-agent service principal, and every agent run
+//     token acting directly (mctlhq/mctl-agents#717 S4). An agent's receipt
+//     must also be bound to the execution its token is bound to: an agent
+//     requests and consumes approvals only for its own execution, and a
+//     receipt of another execution, or a token bound to none, is not found.
+//     Human principals and relayed requests are not gated.
+//     No run scope admits a governed tool yet, so a scoped run is refused
+//     by its scope before this gate (TestAgentScopesAdmitNoGovernedTool);
+//     this gate is what then holds a scope that is widened to one. An
+//     unscoped run token skips the scope check, and is now held here too.
 //
 // v1 binds an approval to the principal, the tool and one successful use. It
 // does not bind the call's arguments: the server does not recompute the
@@ -392,6 +392,28 @@ func isAgentServicePrincipal(u *auth.User) bool {
 	return !relayed
 }
 
+// isReceiptGatedPrincipal is a caller the gate holds: the mctl-agent
+// service principal or an agent run token, either acting directly.
+func isReceiptGatedPrincipal(u *auth.User) bool {
+	if isAgentServicePrincipal(u) {
+		return true
+	}
+	if u == nil || !u.IsAgent() {
+		return false
+	}
+	_, relayed := u.RelaySurface()
+	return !relayed
+}
+
+// gatedCallerLabel names a gated caller in a refusal: "mctl-agent" for the
+// service principal, as before, and the agent run otherwise.
+func gatedCallerLabel(u *auth.User) string {
+	if name, ok := u.AgentName(); ok {
+		return "agent run " + name
+	}
+	return "mctl-agent"
+}
+
 // takeReceiptArgs removes the reserved arguments from req and returns them.
 func takeReceiptArgs(req mcplib.CallToolRequest) (ref, artifactHash string, out mcplib.CallToolRequest) {
 	args := req.GetArguments()
@@ -427,7 +449,7 @@ func (s *Server) agentReceiptMiddleware(next server.ToolHandlerFunc) server.Tool
 			return next(ctx, req)
 		}
 		user := auth.UserFromContext(ctx)
-		if !isAgentServicePrincipal(user) {
+		if !isReceiptGatedPrincipal(user) {
 			return next(ctx, req)
 		}
 		enforce := gate.mode == AgentReceiptGateEnforce
@@ -449,8 +471,8 @@ func (s *Server) agentReceiptMiddleware(next server.ToolHandlerFunc) server.Tool
 		})
 		if refused {
 			return mcplib.NewToolResultError(fmt.Sprintf(
-				"%s: %s from mctl-agent needs a consumed action approval for this call (%s)",
-				code, tool, AgentReceiptGatePolicyVersion)), nil
+				"%s: %s from %s needs a consumed action approval for this call (%s)",
+				code, tool, gatedCallerLabel(user), AgentReceiptGatePolicyVersion)), nil
 		}
 		if !enforce || code != "" {
 			return next(ctx, req)

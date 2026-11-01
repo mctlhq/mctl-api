@@ -25,11 +25,21 @@ import (
 //   - create, consume and mark executed: a service principal acting
 //     directly (never a relayed surface). requested_by is the authenticated
 //     principal; consume and mark executed act on its own requests only.
+//   - the same for an agent run token bound to an execution
+//     (mctlhq/mctl-agents#717 S4), but only for that execution: it creates
+//     requests only for its own execution_id (and its own work item, when
+//     one is named), and reads, consumes and marks executed only requests
+//     it made for that execution. It never creates a DevLoop approval
+//     (devLoopApprovalKind): that gate is the control worker's. The one
+//     request it did not make that it may touch is the DevLoop grant of its
+//     own execution, which it may read and mark executed, never consume.
 //   - decide: a human admin acting directly: never a service principal,
-//     never a relayed surface, never the requester of the request.
+//     never an agent, never a relayed surface, never the requester of the
+//     request.
 //   - read: a human admin reads every request; a service principal reads
-//     the requests it made. Anyone else is refused. A request the caller may
-//     not read answers 404, so its existence does not leak.
+//     the requests it made; an agent run as above. Anyone else is refused. A
+//     request the caller may not read answers 404, so its existence does
+//     not leak.
 
 // maxActionApprovalBodyBytes bounds a request body: the bound fields are at
 // most a few KiB together.
@@ -90,10 +100,53 @@ func isHumanAdmin(u *auth.User) bool {
 	return u.IsAdmin() && !u.IsService() && !relayed && !surface
 }
 
+// boundAgentExecution is the execution a directly acting agent run token is
+// bound to (mctlhq/mctl-agents#717 S4). False for every other principal,
+// for a relayed request, and for a run token bound to no execution: an
+// agent's approvals are always one execution's, so a token without one has
+// none.
+func boundAgentExecution(u *auth.User) (string, bool) {
+	if u == nil || !u.IsAgent() {
+		return "", false
+	}
+	if _, relayed := u.RelaySurface(); relayed {
+		return "", false
+	}
+	exec := u.ExecutionID()
+	return exec, exec != ""
+}
+
+// isApprovalRequester is a principal that may request, consume and mark
+// executed its own approvals: the direct service, or an execution-bound
+// agent run.
+func isApprovalRequester(u *auth.User) bool {
+	_, agent := boundAgentExecution(u)
+	return isDirectService(u) || agent
+}
+
+// isAgentOwnApproval: an execution-bound agent run made a for its own
+// execution.
+func isAgentOwnApproval(u *auth.User, a *workitems.ActionApprovalRequest) bool {
+	exec, ok := boundAgentExecution(u)
+	return ok && a.ExecutionID == exec && a.RequestedBy == principalOf(u)
+}
+
+// isAgentExecutionGrant: a is the DevLoop grant of the agent run's own
+// execution, which the run reads and marks executed (never consumes)
+// although the control worker requested it.
+func isAgentExecutionGrant(u *auth.User, a *workitems.ActionApprovalRequest) bool {
+	exec, ok := boundAgentExecution(u)
+	return ok && a.ExecutionID == exec && a.ActionKind == devLoopApprovalKind
+}
+
 // canSeeActionApproval: a human admin sees every request, the requesting
-// service its own.
+// service its own, an agent run its own execution's own and that
+// execution's DevLoop grant.
 func canSeeActionApproval(u *auth.User, a *workitems.ActionApprovalRequest) bool {
 	if isHumanAdmin(u) {
+		return true
+	}
+	if isAgentOwnApproval(u, a) || isAgentExecutionGrant(u, a) {
 		return true
 	}
 	return isDirectService(u) && a.RequestedBy == principalOf(u)
@@ -310,14 +363,17 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	if !isDirectService(user) {
+	if !isApprovalRequester(user) {
 		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", aarCodeRequesterForbidden)
 		writeErrorCode(w, http.StatusForbidden, aarCodeRequesterForbidden,
-			"only a service principal acting directly may request an action approval", nil)
+			"only a service principal acting directly, or an agent run for its own execution, may request an action approval", nil)
 		return
 	}
 	var body actionApprovalBody
 	if !decodeWorkItemBodyLimit(w, r, &body, maxActionApprovalBodyBytes) {
+		return
+	}
+	if !h.admitAgentApprovalCreate(w, r, user, body) {
 		return
 	}
 	key := r.Header.Get("Idempotency-Key")
@@ -353,11 +409,11 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 		// Recorded only (mctl-api#373 phase 1).
 		RequestedByPrincipalID: user.PrincipalID(),
 		ViaPrincipalID:         user.ViaPrincipalID(),
-		// The requester as actor and subject (mctl-api#376 D2). Only a
-		// direct service may create today (isDirectService above), so the
-		// subject and agent_run_id stay empty until an agent run token may
-		// request an approval (#376 slice C): an empty subject here means
-		// "no caller can produce one yet", not "checked and not delegated".
+		// The requester as actor and subject (mctl-api#376 D2). An agent run
+		// records its run token id as agent_run_id; its execution is the
+		// request's execution_id, which admitAgentApprovalCreate held to the
+		// token's. A run token carries no subject, so an agent's request has
+		// none: it is not acting for anyone.
 		ActorKind:      actor.Kind,
 		ActorName:      actor.Name,
 		AgentRunID:     user.AgentRunID(),
@@ -417,6 +473,31 @@ func (h *Handlers) CreateActionApproval(w http.ResponseWriter, r *http.Request) 
 	h.writeApproval(w, createdStatus(created), a)
 }
 
+// admitAgentApprovalCreate holds an agent run's request to its own
+// execution and work item (mctlhq/mctl-agents#717 S4). It admits every
+// other requester unchanged. A refusal is audited and answered here.
+func (h *Handlers) admitAgentApprovalCreate(w http.ResponseWriter, r *http.Request, user *auth.User, body actionApprovalBody) bool {
+	exec, ok := boundAgentExecution(user)
+	if !ok {
+		return true
+	}
+	refuse := func(msg string) bool {
+		h.auditActionApprovalRefusal(r, user, "action_approval.create_refused", "", aarCodeRequesterForbidden,
+			map[string]string{"bound_execution_id": exec})
+		writeErrorCode(w, http.StatusForbidden, aarCodeRequesterForbidden, msg, nil)
+		return false
+	}
+	switch {
+	case body.ExecutionID != exec:
+		return refuse("an agent run may request an action approval only for its own execution")
+	case body.WorkItemID != "" && body.WorkItemID != user.WorkItemID():
+		return refuse("an agent run may request an action approval only for its own work item")
+	case body.ActionKind == devLoopApprovalKind:
+		return refuse("the " + devLoopApprovalKind + " approval is requested by the control worker, never by an agent run")
+	}
+	return true
+}
+
 // requireOpenExecution admits a DevLoop approval only for an existing,
 // non-terminal we_ execution (mctl-api#571 R2): the grant is bound to that
 // execution later, so a free-form workflow id or a finished run would make
@@ -451,8 +532,8 @@ func (h *Handlers) GetActionApproval(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !isHumanAdmin(user) && !isDirectService(user) {
-		writeErrorCode(w, http.StatusForbidden, aarCodeReaderForbidden, "action approvals are read by admins and the requesting service", nil)
+	if !isHumanAdmin(user) && !isApprovalRequester(user) {
+		writeErrorCode(w, http.StatusForbidden, aarCodeReaderForbidden, "action approvals are read by admins and their requester", nil)
 		return
 	}
 	a, ok := h.visibleActionApproval(w, r, user)
@@ -470,16 +551,25 @@ func (h *Handlers) ListActionApprovals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := workitems.ActionApprovalFilter{}
+	q := r.URL.Query()
+	f.State, f.ExecutionID = q.Get("state"), q.Get("execution_id")
+	exec, agent := boundAgentExecution(user)
 	switch {
 	case isHumanAdmin(user):
+	case agent:
+		// Its own requests for its own execution only. The DevLoop grant it
+		// may read is not listed: it is read by id.
+		if f.ExecutionID != "" && f.ExecutionID != exec {
+			writeErrorCode(w, http.StatusForbidden, aarCodeReaderForbidden, "an agent run lists only its own execution's action approvals", nil)
+			return
+		}
+		f.RequestedBy, f.ExecutionID = principalOf(user), exec
 	case isDirectService(user):
 		f.RequestedBy = principalOf(user)
 	default:
-		writeErrorCode(w, http.StatusForbidden, aarCodeReaderForbidden, "action approvals are read by admins and the requesting service", nil)
+		writeErrorCode(w, http.StatusForbidden, aarCodeReaderForbidden, "action approvals are read by admins and their requester", nil)
 		return
 	}
-	q := r.URL.Query()
-	f.State, f.ExecutionID = q.Get("state"), q.Get("execution_id")
 	if f.State != "" && !workitems.ValidApprovalState(f.State) {
 		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "state must be one of pending, approved, denied, consumed, in_flight, executed, expired", nil)
 		return
@@ -608,15 +698,20 @@ func (h *Handlers) ConsumeActionApproval(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if !isDirectService(user) {
+	if !isApprovalRequester(user) {
 		h.auditActionApprovalRefusal(r, user, "action_approval.consume_refused", chi.URLParam(r, "id"), aarCodeRequesterForbidden)
 		writeErrorCode(w, http.StatusForbidden, aarCodeRequesterForbidden,
-			"only the requesting service may consume an action approval", nil)
+			"only the requester may consume an action approval", nil)
 		return
 	}
-	// Only the requester's own request: another's answers 404.
+	// Only the requester's own request: another's answers 404. An agent run
+	// may read its execution's DevLoop grant, but never spend it.
 	cur, ok := h.visibleActionApproval(w, r, user)
 	if !ok {
+		return
+	}
+	if _, agent := boundAgentExecution(user); agent && !isAgentOwnApproval(user, cur) {
+		writeActionApprovalError(w, workitems.ErrApprovalNotFound)
 		return
 	}
 	var body actionConsumeBody
@@ -656,16 +751,17 @@ type actionExecuteBody struct {
 // MarkActionApprovalExecuted handles
 // POST /api/v1/action-approvals/{id}/execute: mark a consumed request
 // executed exactly once, for exactly its bound target and artifact. Only
-// the requesting service, on its own request, as for consume.
+// the requester on its own request, as for consume, and the agent run of
+// the execution a DevLoop grant names.
 func (h *Handlers) MarkActionApprovalExecuted(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.workItemsUser(w, r)
 	if !ok {
 		return
 	}
-	if !isDirectService(user) {
+	if !isApprovalRequester(user) {
 		h.auditActionApprovalRefusal(r, user, "action_approval.execute_refused", chi.URLParam(r, "id"), aarCodeRequesterForbidden)
 		writeErrorCode(w, http.StatusForbidden, aarCodeRequesterForbidden,
-			"only the requesting service may mark an action approval executed", nil)
+			"only the requester, or the agent run of the execution a DevLoop grant names, may mark an action approval executed", nil)
 		return
 	}
 	// Only the requester's own request: another's answers 404.
@@ -687,7 +783,16 @@ func (h *Handlers) MarkActionApprovalExecuted(w http.ResponseWriter, r *http.Req
 		writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid, "artifact_hash is required", nil)
 		return
 	}
-	a, err := h.opts.WorkItems.MarkActionApprovalExecuted(r.Context(), cur.ID, body.Target, body.ArtifactHash, principalOf(user))
+	// The store's compare-and-set holds the request to its requester. For
+	// the DevLoop grant of an agent run's own execution, which the control
+	// worker requested, visibleActionApproval above is what admitted the
+	// run, so the requester the store checks is the grant's own; the run
+	// is recorded as the executor in the audit row.
+	requester := principalOf(user)
+	if isAgentExecutionGrant(user, cur) && !isAgentOwnApproval(user, cur) {
+		requester = cur.RequestedBy
+	}
+	a, err := h.opts.WorkItems.MarkActionApprovalExecuted(r.Context(), cur.ID, body.Target, body.ArtifactHash, requester)
 	if err != nil {
 		if code := actionApprovalRefusalCode(err); code != "" {
 			h.auditActionApprovalRefusal(r, user, "action_approval.execute_refused", cur.ID, code)
@@ -695,6 +800,10 @@ func (h *Handlers) MarkActionApprovalExecuted(w http.ResponseWriter, r *http.Req
 		writeActionApprovalError(w, err)
 		return
 	}
-	h.auditActionApproval(r, user, "action_approval.execute", a, operations.RiskMedium)
+	var extra []map[string]string
+	if exec, agent := boundAgentExecution(user); agent {
+		extra = append(extra, map[string]string{"bound_execution_id": exec, "agent_run_id": user.AgentRunID()})
+	}
+	h.auditActionApproval(r, user, "action_approval.execute", a, operations.RiskMedium, extra...)
 	h.writeApproval(w, http.StatusOK, a)
 }
