@@ -41,6 +41,7 @@ import (
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/openapi"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/reviewstore"
 	"github.com/mctlhq/mctl-api/internal/roadmap"
 	"github.com/mctlhq/mctl-api/internal/securityfindings"
 	"github.com/mctlhq/mctl-api/internal/surfaceid"
@@ -295,6 +296,9 @@ type Options struct {
 	// Decisions is the durable decision record (mctl-api#701). Optional —
 	// nil makes every /api/v1/decisions* route answer 503.
 	Decisions *decisions.Store
+	// ReviewStore is the durable review-receipt store (mctl-api#897).
+	// Optional — nil makes every /api/v1/review-* route answer 503.
+	ReviewStore *reviewstore.Store
 	// HumanInputLedger is the idempotency/delivery record for human-input
 	// responses (mctl-api#261). Optional — nil makes the response endpoint
 	// 503: without it a response could be neither deduplicated nor
@@ -856,6 +860,21 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/decisions/{id}/attempts", h.AppendDecisionAttempt)
 			})
 
+			// Review requests and manual receipts (mctl-api#897). Their own
+			// bucket, sized with evidence and decisions under the global
+			// limit: see reviewWritesPerMinute.
+			r.Group(func(r chi.Router) {
+				r.Use(httprate.Limit(reviewWritesPerMinute, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					if user := auth.UserFromContext(r.Context()); user != nil {
+						return "review:" + rateLimitSubject(r, user), nil
+					}
+					return keyByTrustedIP(r)
+				})))
+				r.Post("/review-requests", h.IngestReviewRequest)
+				r.Post("/review-receipts/manual", h.SubmitManualReview)
+				r.Post("/review-receipts", h.SubmitWorkerReview)
+			})
+
 			// Agent run tokens (mctl-api#376): minting is isDirectService
 			// only, so every mint shares the exact same principal key as
 			// every other route on the 20/min write budget above. An agent
@@ -906,6 +925,10 @@ func NewRouter(opts Options) http.Handler {
 			// Decision record reads (mctl-api#701): admin-only.
 			r.Get("/decisions/{id}", h.GetDecision)
 			r.Get("/decisions", h.ListDecisions)
+			// Review receipt reads (mctl-api#897): admin-only, complete or 503.
+			r.Get("/review-requests/{id}", h.GetReviewRequest)
+			r.Get("/review-receipts", h.ListReviewReceipts)
+			r.Get("/review-gate", h.GetReviewGate)
 
 			// Liveness read for one DevLoopWorkflow. Deliberately OUTSIDE the
 			// write group above: it has no side effects, and the shepherd

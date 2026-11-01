@@ -360,6 +360,8 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 
 	// Model-usage ledger reads (mctl-api#651, ADR-012).
 	srv.AddTool(s.toolGetUsageSummary())
+	srv.AddTool(s.toolSubmitReviewAssertion())
+	srv.AddTool(s.toolGetReviewGate())
 
 	// Cloudflare MCP portal (dispatch only — no Cloudflare credential here).
 	srv.AddTool(s.toolTriggerPortalServerAuthApply())

@@ -82,10 +82,10 @@ const (
 func evidenceWriterGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if user := auth.UserFromContext(r.Context()); user.IsEvidenceWriter() &&
-			(r.Method != http.MethodPost || r.URL.Path != evidenceWriterRoute) && !isDecisionWriteRoute(r) {
+			(r.Method != http.MethodPost || r.URL.Path != evidenceWriterRoute) && !isDecisionWriteRoute(r) && !isReviewRequestWriteRoute(r) {
 			writeErrorCode(w, http.StatusForbidden, codeEvidenceWriterForbidden,
 				"the evidence writer may only call POST "+evidenceWriterRoute+", POST "+decisionsRoute+
-					" and POST "+decisionsRoute+"/{id}/attempts", nil)
+					", POST "+decisionsRoute+"/{id}/attempts and POST "+reviewRequestsRoute, nil)
 			return
 		}
 		next.ServeHTTP(w, r)
