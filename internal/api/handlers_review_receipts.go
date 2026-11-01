@@ -416,7 +416,7 @@ func (h *Handlers) GetReviewGate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var reqPtr *reviewreceipts.ReviewRequest
-	var reqDoc json.RawMessage = json.RawMessage("null")
+	var reqDoc = json.RawMessage("null")
 	closed := false
 	if sr != nil {
 		reqPtr = &sr.Request

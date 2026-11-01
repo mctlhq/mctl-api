@@ -85,6 +85,18 @@ response carries `request`, `request_closed` and the whole `pool`, so Tier A
 can re-run `evaluate_review_gate` and get the same verdict. The request
 selected for a binding is the newest by `ingest_seq`, open or closed.
 
+### Capacity
+
+The pool is fleet-wide and append-only, and this slice has no retention (it
+is out of scope of mctl-api#897). The bound is deliberate: a pool that cannot
+be read completely fails the gate closed instead of evaluating a truncated
+one. Operationally this means that once `review_receipts` holds more than
+`REVIEW_POOL_MAX` rows, every pool read and gate read answers 503
+`review_pool_too_large` until an operator acts. Either raise
+`REVIEW_POOL_MAX` or purge old rows (DELETE stays allowed on all three
+tables; only UPDATE is refused). A retention or per-identity read is a
+follow-up and must land before the volume gets near the bound.
+
 ## Disabled worker path
 
 Worker receipts stay off until both hold: an authoritative

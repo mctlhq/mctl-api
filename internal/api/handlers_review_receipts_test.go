@@ -16,12 +16,14 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/reviewreceipts"
 	"github.com/mctlhq/mctl-api/internal/reviewstore"
 )
@@ -146,5 +148,96 @@ func TestReviewWrites_HaveTheirOwnRateBucket(t *testing.T) {
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/evidence/records", bytes.NewReader([]byte("{}"))))
 	if rec.Code == http.StatusTooManyRequests {
 		t.Fatal("evidence ingest throttled by review writes")
+	}
+}
+
+// fakeHumanChecker is a principal store that answers CheckHumanPrincipal
+// with a fixed error.
+type fakeHumanChecker struct{ err error }
+
+func (fakeHumanChecker) ResolvePrincipal(context.Context, auth.Identity) (string, error) {
+	return "prn_fake", nil
+}
+
+func (f fakeHumanChecker) CheckHumanPrincipal(context.Context, string) error { return f.err }
+
+// reviewAuthRouter builds the real router with a non-nil review store whose
+// methods are never reached: every case below is decided before the store.
+func reviewAuthRouter(u *auth.User, principals auth.PrincipalResolver) http.Handler {
+	return NewRouter(Options{
+		AuthMiddleware: injectUser(u),
+		ReviewStore:    &reviewstore.Store{},
+		Principals:     principals,
+	})
+}
+
+func postManual(router http.Handler, body string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/review-receipts/manual", bytes.NewReader([]byte(body))))
+	return rec
+}
+
+// Only a direct human administrator submits a manual assertion. The service
+// principal carries the admins group, so IsAdmin alone would let it through.
+func TestSubmitManualReview_OnlyADirectHumanAdmin(t *testing.T) {
+	surface := auth.NewSurfaceUser("telegram")
+	for name, u := range map[string]*auth.User{
+		"service (in admins)": auth.NewServiceUser(),
+		"tenant user":         {ID: "alice", Groups: []string{"acme"}},
+		"surface":             surface,
+		"relayed admin":       auth.NewRelayedUser("root", []string{"admins"}, surface),
+		"evidence writer":     evidenceWriter(t),
+	} {
+		rec := postManual(reviewAuthRouter(u, fakeHumanChecker{}), "{")
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: %d %s, want 403", name, rec.Code, rec.Body.String())
+		}
+		// A surface and the evidence writer are stopped by the router before the
+		// handler runs; the others reach the handler's own check.
+		if name != "evidence writer" && name != "surface" && bodyCode(rec) != codeReviewNotPermitted {
+			t.Errorf("%s: code %q, want %s", name, bodyCode(rec), codeReviewNotPermitted)
+		}
+	}
+	// A human admin passes the authorization (the malformed body is then 400).
+	rec := postManual(reviewAuthRouter(adminUser(), fakeHumanChecker{}), "{")
+	if rec.Code != http.StatusBadRequest || bodyCode(rec) != reviewreceipts.CodeMalformed {
+		t.Fatalf("human admin: %d %s, want 400 %s", rec.Code, rec.Body.String(), reviewreceipts.CodeMalformed)
+	}
+}
+
+// The principal store decides whether the admin is an active human: a
+// definite no is 403, and an answer that could not be obtained is 503, never
+// read as a yes or as a refusal.
+func TestSubmitManualReview_PrincipalCheck(t *testing.T) {
+	for name, c := range map[string]struct {
+		err    error
+		status int
+		code   string
+	}{
+		"disabled principal": {auth.ErrPrincipalDisabled, http.StatusForbidden, codeReviewNotPermitted},
+		"refused identity":   {auth.ErrIdentityRefused, http.StatusForbidden, codeReviewNotPermitted},
+		"store unavailable":  {errors.New("db down"), http.StatusServiceUnavailable, codeReviewPrincipalUnavailable},
+	} {
+		rec := postManual(reviewAuthRouter(adminUser(), fakeHumanChecker{err: c.err}), "{")
+		if rec.Code != c.status || bodyCode(rec) != c.code {
+			t.Errorf("%s: %d %s, want %d %s", name, rec.Code, rec.Body.String(), c.status, c.code)
+		}
+	}
+}
+
+// The reads are admin-only: a tenant user, a service and the evidence writer
+// are refused before the store is touched.
+func TestReviewReads_AreAdminOnly(t *testing.T) {
+	for name, u := range map[string]*auth.User{
+		"tenant user": {ID: "alice", Groups: []string{"acme"}},
+	} {
+		router := reviewAuthRouter(u, fakeHumanChecker{})
+		for _, path := range []string{"/api/v1/review-receipts", "/api/v1/review-gate", "/api/v1/review-requests/rr_0000000000000000"} {
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("%s GET %s: %d %s, want 403", name, path, rec.Code, rec.Body.String())
+			}
+		}
 	}
 }

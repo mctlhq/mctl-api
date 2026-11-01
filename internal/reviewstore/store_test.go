@@ -15,6 +15,7 @@
 package reviewstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -103,7 +104,7 @@ func TestIngestReplayConflictAndErrors(t *testing.T) {
 	if err != nil || replayed {
 		t.Fatalf("first ingest: replayed=%v err=%v", replayed, err)
 	}
-	if got.Tenant != "acme" || string(got.Document) != string(raw) {
+	if got.Tenant != "acme" || !bytes.Equal(got.Document, raw) {
 		t.Fatalf("tenant/document not preserved: %+v", got)
 	}
 	if _, replayed, err = s.IngestRequest(ctx, raw, Actor{Name: "svc"}); err != nil || !replayed {
@@ -251,6 +252,16 @@ func TestPoolBoundAndImmutability(t *testing.T) {
 	if p, _, err := s.Pool(ctx); !errors.Is(err, ErrPoolTooLarge) || p != nil {
 		t.Fatalf("want ErrPoolTooLarge with no pool, got %v %v", p, err)
 	}
+	// A row-level trigger never fires on an empty table, so give the nonce
+	// table a row before asserting that it refuses an UPDATE.
+	if _, err := s.pool.Exec(ctx, `INSERT INTO review_nonce_consumptions (nonce_sha256, request_id, receipt_id, consumed_at)
+VALUES ($1, $2, 'rc_0000000000000001', now())`, strings.Repeat("0", 64), req.RequestID); err != nil {
+		t.Fatalf("seed nonce consumption: %v", err)
+	}
+	// DELETE stays allowed; other tests assert this table is empty.
+	t.Cleanup(func() {
+		_, _ = s.pool.Exec(context.Background(), `DELETE FROM review_nonce_consumptions WHERE nonce_sha256 = $1`, strings.Repeat("0", 64))
+	})
 	for _, q := range []string{
 		`UPDATE review_requests SET tenant = 'x'`,
 		`UPDATE review_receipts SET tenant = 'x'`,
