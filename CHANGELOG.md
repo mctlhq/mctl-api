@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.149.0](https://github.com/mctlhq/mctl-api/compare/4.148.0...4.149.0) (2026-11-01)
+
+
+### Features
+
+* **agents:** issue-869-feat-governance-bind-direct-human-decisi ([69c9af2](https://github.com/mctlhq/mctl-api/commit/69c9af27bc112b2fcb0af2a5453a7db150947afa))
+* **agents:** issue-869-feat-governance-bind-direct-human-decisi ([9de9506](https://github.com/mctlhq/mctl-api/commit/9de9506a3bf8aed66dccdfeac4f1e58cc4a44887))
+
+
+### Bug Fixes
+
+* **api:** refuse a bound DevLoop approve when no grant exists ([3487bdb](https://github.com/mctlhq/mctl-api/commit/3487bdb490456521751656d1c999f83551be773c))
+
 ## [4.148.0](https://github.com/mctlhq/mctl-api/compare/4.147.0...4.148.0) (2026-11-01)
 
 
