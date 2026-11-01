@@ -90,7 +90,35 @@ var (
 	ErrExecutionRequestClosed = errors.New("execution request is already closed")
 	// ErrIntentNotFound: intent_id names no intent of this work item.
 	ErrIntentNotFound = errors.New("intent not found")
+	// ErrIntentUnavailable: the pinned intent exists but its text is gone
+	// (redacted), so a run would act on a placeholder.
+	ErrIntentUnavailable = errors.New("intent text is unavailable")
 )
+
+// IntentUnavailableError names the pinned intent whose text is unavailable.
+// It carries the id only, never text.
+type IntentUnavailableError struct {
+	IntentID int64
+}
+
+func (e *IntentUnavailableError) Error() string {
+	return fmt.Sprintf("intent %d: %s", e.IntentID, ErrIntentUnavailable)
+}
+func (e *IntentUnavailableError) Unwrap() error { return ErrIntentUnavailable }
+
+// pinnedIntentState reports whether intent id belongs to the work item and,
+// if so, whether its text is still readable (not NULL).
+func pinnedIntentState(ctx context.Context, q querier, itemID string, id int64) (found, readable bool, err error) {
+	err = q.QueryRow(ctx, `SELECT text IS NOT NULL FROM work_item_intents WHERE work_item_id=$1 AND id=$2`,
+		itemID, id).Scan(&readable)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("workitems: find intent: %w", err)
+	}
+	return true, readable, nil
+}
 
 // OpenRequestError refuses a new request while one is open, naming it so the
 // client can follow it instead.
@@ -190,6 +218,9 @@ type ExecutionRequest struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 	ClosedAt      *time.Time `json:"closed_at,omitempty"`
 	SchemaVersion string     `json:"schema_version"`
+	// IntentAvailable is set only by ClaimExecutionRequest, when the request
+	// pins an intent; it is never serialized in the request itself.
+	IntentAvailable *bool `json:"-"`
 }
 
 func utcPtr(t *time.Time) *time.Time {
@@ -355,13 +386,15 @@ func (s *Store) CreateExecutionRequest(ctx context.Context, in ExecutionRequestI
 			return err
 		}
 		if in.IntentID != nil {
-			var found bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM work_item_intents WHERE work_item_id=$1 AND id=$2)`,
-				cur.ID, *in.IntentID).Scan(&found); err != nil {
-				return fmt.Errorf("workitems: find intent: %w", err)
+			found, readable, err := pinnedIntentState(ctx, tx, cur.ID, *in.IntentID)
+			if err != nil {
+				return err
 			}
 			if !found {
 				return fmt.Errorf("workitems: intent %d of %s: %w", *in.IntentID, cur.ID, ErrIntentNotFound)
+			}
+			if !readable {
+				return &IntentUnavailableError{IntentID: *in.IntentID}
 			}
 		}
 		now := s.now()
@@ -490,6 +523,13 @@ func (s *Store) ClaimExecutionRequest(ctx context.Context, in ClaimInput) (*Exec
 			if item, err = getItem(ctx, tx, c.itemID); err != nil {
 				return err
 			}
+			if x.IntentID != nil {
+				_, readable, err := pinnedIntentState(ctx, tx, c.itemID, *x.IntentID)
+				if err != nil {
+					return err
+				}
+				x.IntentAvailable = &readable
+			}
 			if err := appendEvent(ctx, tx, c.itemID, EventExecutionRequestClaimed, "", "", in.Mutation,
 				map[string]any{"execution_request_id": x.ID, "claim_expires_at": x.ClaimExpiresAt}, now); err != nil {
 				return err
@@ -597,6 +637,15 @@ func (s *Store) FulfilExecutionRequest(ctx context.Context, in FulfilInput) (*Ex
 		}
 		if x.State != ExecutionRequestClaimed || !in.holds(x) || x.ClaimExpiresAt == nil || !x.ClaimExpiresAt.After(now) {
 			return fmt.Errorf("%w: %s", ErrExecutionRequestNotClaimed, x.ID)
+		}
+		if x.IntentID != nil {
+			_, readable, err := pinnedIntentState(ctx, tx, cur.ID, *x.IntentID)
+			if err != nil {
+				return err
+			}
+			if !readable {
+				return &IntentUnavailableError{IntentID: *x.IntentID}
+			}
 		}
 		var err error
 		switch x.Kind {

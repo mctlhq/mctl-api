@@ -42,6 +42,7 @@ const (
 	xrCodeNotClaimed          = "execution_request_not_claimed"
 	xrCodeClosed              = "execution_request_closed"
 	xrCodeIntentNotFound      = "intent_not_found"
+	xrCodeIntentUnavailable   = "intent_unavailable"
 	xrCodeRequesterForbidden  = "execution_request_requester_forbidden"
 	xrCodeClaimantForbidden   = "execution_request_claimant_forbidden"
 )
@@ -78,7 +79,12 @@ func refuseExecutionIdentity(w http.ResponseWriter, r *http.Request) bool {
 func writeExecutionRequestError(w http.ResponseWriter, err error) {
 	var open *workitems.OpenRequestError
 	var closed *workitems.ClosedRequestError
+	var unavailable *workitems.IntentUnavailableError
 	switch {
+	case errors.As(err, &unavailable):
+		writeErrorCode(w, http.StatusConflict, xrCodeIntentUnavailable,
+			"the pinned intent's text is unavailable; a new request must pin a replacement intent (a claim holder rejects this one first)",
+			map[string]interface{}{"intent_id": unavailable.IntentID})
 	case errors.As(err, &open):
 		writeErrorCode(w, http.StatusConflict, xrCodeOpen, err.Error(), map[string]interface{}{
 			"execution_request_id": open.Open.ID, "state": open.Open.State,
@@ -110,6 +116,8 @@ func executionRequestRefusalCode(err error) string {
 		return xrCodeNotClaimed
 	case errors.Is(err, workitems.ErrExecutionRequestClosed):
 		return xrCodeClosed
+	case errors.Is(err, workitems.ErrIntentUnavailable):
+		return xrCodeIntentUnavailable
 	}
 	return ""
 }
@@ -305,7 +313,11 @@ func (h *Handlers) ClaimExecutionRequest(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	h.auditExecutionRequest(r, user, "work_item.execution_request_claimed", x, item.Tenant, nil)
-	writeExecutionRequest(w, http.StatusOK, x, map[string]any{"claim_token": x.ClaimToken})
+	extra := map[string]any{"claim_token": x.ClaimToken}
+	if x.IntentAvailable != nil {
+		extra["intent_available"] = *x.IntentAvailable
+	}
+	writeExecutionRequest(w, http.StatusOK, x, extra)
 }
 
 type fulfilBody struct {
