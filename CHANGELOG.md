@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.148.0](https://github.com/mctlhq/mctl-api/compare/4.147.0...4.148.0) (2026-11-01)
+
+
+### Features
+
+* **agents:** issue-895-feat-review-tier-b-adapter-for-version-b ([80b7f78](https://github.com/mctlhq/mctl-api/commit/80b7f782f3cb8427bc5b2cf6d1cefb198b7e7916))
+* **agents:** issue-895-feat-review-tier-b-adapter-for-version-b ([157581e](https://github.com/mctlhq/mctl-api/commit/157581e40ab0ac86a345ed3fa57b8909daf29d6f))
+
+
+### Bug Fixes
+
+* **reviewreceipts:** clear lint findings, fail closed on unknown outcome, pin vectors sha256 ([10f00e6](https://github.com/mctlhq/mctl-api/commit/10f00e6f4474ccf2c2be66c018226200e1832b0a))
+* **reviewreceipts:** index loops in the remaining gate range copies ([47d7b8d](https://github.com/mctlhq/mctl-api/commit/47d7b8d8e35f941884df3fd3fd81a7e1fc728de2))
+
 ## [4.147.0](https://github.com/mctlhq/mctl-api/compare/4.146.0...4.147.0) (2026-11-01)
 
 
