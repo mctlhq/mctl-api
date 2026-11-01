@@ -665,7 +665,8 @@ func listExecutions(ctx context.Context, q rowsQuerier, itemID string) ([]Execut
 			wie.resumed_from_execution_id, wie.phase, wie.started_at, wie.ended_at,
 			COALESCE(xr.surface, ''), COALESCE(xr.requested_by, ''), COALESCE(xr.acting_principal, '')
 		FROM work_item_executions wie
-		LEFT JOIN work_item_execution_requests xr ON xr.execution_id = wie.id AND xr.state = 'fulfilled'
+		LEFT JOIN work_item_execution_requests xr
+			ON xr.work_item_id = wie.work_item_id AND xr.execution_id = wie.id AND xr.state = 'fulfilled'
 		WHERE wie.work_item_id=$1 ORDER BY wie.attempt`, itemID)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: list executions: %w", err)

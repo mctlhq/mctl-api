@@ -266,9 +266,13 @@ type Execution struct {
 	StartedAt              time.Time  `json:"started_at"`
 	EndedAt                *time.Time `json:"ended_at,omitempty"`
 	// Surface, RequestedBy and ActingPrincipal are the provenance of the
-	// execution request this execution fulfilled. They are absent for an
-	// execution attached without a request: absent means unknown, never a
-	// surface.
+	// execution request this execution fulfilled (mctl-api#871). Only the
+	// listing reads them (listExecutions: GET .../executions and a work
+	// item's latest_execution); single-execution reads, the attach response
+	// and the fulfil response leave them out, and the fulfil response's
+	// execution_request already carries the same facts. Wherever they are
+	// absent they are unknown, never a surface: an execution attached
+	// without a request has none in the listing either.
 	Surface         string `json:"surface,omitempty"`
 	RequestedBy     string `json:"requested_by,omitempty"`
 	ActingPrincipal string `json:"acting_principal,omitempty"`

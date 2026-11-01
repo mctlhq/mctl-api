@@ -83,7 +83,7 @@ func writeExecutionRequestError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &unavailable):
 		writeErrorCode(w, http.StatusConflict, xrCodeIntentUnavailable,
-			"the pinned intent's text is unavailable; request again with a replacement intent",
+			"the pinned intent's text is unavailable; a new request must pin a replacement intent (a claim holder rejects this one first)",
 			map[string]interface{}{"intent_id": unavailable.IntentID})
 	case errors.As(err, &open):
 		writeErrorCode(w, http.StatusConflict, xrCodeOpen, err.Error(), map[string]interface{}{

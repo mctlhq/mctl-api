@@ -891,7 +891,7 @@ components:
         phase: {type: string, enum: [Pending, Running, Succeeded, Failed, Error]}
         started_at: {type: string, format: date-time}
         ended_at: {type: string, format: date-time}
-        surface: {type: string, description: 'The surface of the execution request this execution fulfilled. Absent for an execution attached without a request: absent means unknown, never a surface (mctl-api#871).'}
+        surface: {type: string, description: 'The surface of the execution request this execution fulfilled. Filled only on GET /work-items/{id}/executions and a work item''s latest_execution; other responses omit it. Absent means unknown, never a surface; an execution attached without a request has none (mctl-api#871).'}
         requested_by: {type: string, description: The authenticated requester of that execution request. Absent as for surface.}
         acting_principal: {type: string, description: The surface principal that relayed that request, when one did. Absent otherwise.}
       required: [id, work_item_id, engine, engine_ref, attempt, phase, started_at]
