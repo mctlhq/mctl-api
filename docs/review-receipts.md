@@ -117,7 +117,8 @@ before storing anything; the sealed document is never rewritten.
 | `review_provenance_unavailable` | 503 | provenance could not be read or is not wired |
 
 `reviewstore.ProveReviewer(ctx, executionID)` returns only the stored
-attempt and lineage, for mctl-api#895 to call with the run token's execution.
+attempt and lineage, for mctl-api#917 (autonomous worker ingestion) to call
+with the run token's execution.
 
 ## Disabled worker path
 
@@ -131,10 +132,15 @@ until ALL of these have landed and are verified:
    `internal/reviewreceipts/types.go`, with a shared vector holding a real id.
 3. mctl-agents vendors `execution_attempt_vectors.json` and runs the parity
    test with the pinned digest.
-4. mctl-api#895: run-token binding of the reviewer, nonce consumption (a write
+4. mctl-api#917: run-token binding of the reviewer, nonce consumption (a write
    to `review_nonce_consumptions`), and an eligibility check that the
    reviewer execution was attached by a platform-authorized principal or
-   path, using the recorded `attached_by` fields.
+   path, using the recorded `attached_by` fields. (mctl-api#895 is closed as
+   Slice A, the pure library and gate, and does not own worker enablement.)
+
+The owners are: mctl-api#896 (provenance), the `we_<uuid>` amendment
+(mctl-agents#977), the vector vendoring and parity test (mctl-agents#975) and
+mctl-api#917 (worker ingestion).
 
 ## Configuration
 

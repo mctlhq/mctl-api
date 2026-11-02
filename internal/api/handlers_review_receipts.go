@@ -316,7 +316,7 @@ func (h *Handlers) SubmitManualReview(w http.ResponseWriter, r *http.Request) {
 }
 
 // SubmitWorkerReview handles POST /api/v1/review-receipts. Disabled until
-// every prerequisite in docs/review-receipts.md has landed (mctl-api#895
+// every prerequisite in docs/review-receipts.md has landed (mctl-api#917
 // among them); it reads no body.
 func (h *Handlers) SubmitWorkerReview(w http.ResponseWriter, r *http.Request) {
 	if user := auth.UserFromContext(r.Context()); user == nil {
@@ -324,7 +324,7 @@ func (h *Handlers) SubmitWorkerReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeErrorCode(w, http.StatusNotImplemented, codeReviewWorkerIngestDisabled,
-		"worker review receipts are disabled until the reviewer run-token binding and the remaining prerequisites exist (mctl-api#895)", nil)
+		"worker review receipts are disabled until the reviewer run-token binding and the remaining prerequisites exist (mctl-api#917)", nil)
 }
 
 // GetReviewRequest handles GET /api/v1/review-requests/{id}.
