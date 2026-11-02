@@ -243,8 +243,9 @@ type manualReceiptBody struct {
 }
 
 // decodeReviewBody strictly decodes a review submission: unknown keys and
-// trailing data are refused with a typed 400.
-func decodeReviewBody(w http.ResponseWriter, raw []byte, dst any) bool {
+// trailing data are refused with a typed 400. On a refusal it returns the
+// code it answered, so a caller can audit the real reason; "" on success.
+func decodeReviewBody(w http.ResponseWriter, raw []byte, dst any) string {
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
@@ -253,13 +254,13 @@ func decodeReviewBody(w http.ResponseWriter, raw []byte, dst any) bool {
 			code = reviewreceipts.CodeUnknownKey
 		}
 		writeErrorCode(w, http.StatusBadRequest, code, "invalid JSON body: "+err.Error(), nil)
-		return false
+		return code
 	}
 	if dec.More() {
 		writeErrorCode(w, http.StatusBadRequest, reviewreceipts.CodeMalformed, "trailing data after JSON object", nil)
-		return false
+		return reviewreceipts.CodeMalformed
 	}
-	return true
+	return ""
 }
 
 // SubmitManualReview handles POST /api/v1/review-receipts/manual. Direct
@@ -292,7 +293,7 @@ func (h *Handlers) SubmitManualReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body manualReceiptBody
-	if !decodeReviewBody(w, raw, &body) {
+	if decodeReviewBody(w, raw, &body) != "" {
 		return
 	}
 	subject, err := reviewreceipts.ParseSubject(body.Subject)
@@ -417,17 +418,19 @@ func (h *Handlers) SubmitWorkerReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !user.IsAgent() || user.ExecutionID() == "" || user.AgentScopeName() != auth.AgentScopeReview {
+		h.auditWorkerReview(r, user, "", "", "failed", codeReviewRunTokenRequired)
 		writeErrorCode(w, http.StatusForbidden, codeReviewRunTokenRequired,
 			"a worker review needs an execution-bound agent run token with the review scope", nil)
 		return
 	}
 	raw, ok := readReviewBody(w, r)
 	if !ok {
+		h.auditWorkerReview(r, user, "", "", "failed", reviewreceipts.CodeMalformed)
 		return
 	}
 	var body workerReceiptBody
-	if !decodeReviewBody(w, raw, &body) {
-		h.auditWorkerReview(r, user, "", "", "failed", reviewreceipts.CodeMalformed)
+	if code := decodeReviewBody(w, raw, &body); code != "" {
+		h.auditWorkerReview(r, user, "", "", "failed", code)
 		return
 	}
 	refuse := func(err error) {

@@ -246,8 +246,8 @@ var agentScopes = map[string]*AgentScope{
 	},
 	AgentScopeReview: {
 		Name: AgentScopeReview,
-		// Placeholder until the real reviewer agent name of
-		// mctlhq/mctl-agents#905 is confirmed; a name nobody mints fails closed.
+		// review-worker is the canonical reviewer agent name, decided in
+		// mctlhq/mctl-agents#905.
 		Agents:        []string{"review-worker"},
 		AuditRequests: true,
 		Deny:          agentDeniedRoutes,

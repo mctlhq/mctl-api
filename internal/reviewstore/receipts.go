@@ -124,7 +124,7 @@ type Reviewer struct {
 // request. Every refusal happens before any write; the nonce consumption and
 // the receipt are one transaction.
 func (s *Store) SubmitWorker(ctx context.Context, in WorkerInput, rv Reviewer, now time.Time) (*StoredReceipt, error) {
-	if !strings.HasPrefix(rv.ExecutionID, workitems.ExecutionIDPrefix) {
+	if !strings.HasPrefix(rv.ExecutionID, workitems.ExecutionIDPrefix) || !reviewreceipts.ValidExecutionID(rv.ExecutionID) {
 		return nil, ErrRunTokenUnbound
 	}
 	req, err := s.Request(ctx, in.RequestID)

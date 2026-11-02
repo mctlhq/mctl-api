@@ -168,14 +168,14 @@ and every row recorded before mctl-api#917 are ineligible: a caller-chosen
 
 Prerequisites 1-4 are delivered: provenance with `ProveReviewer`
 (mctl-api#896); `we_<uuid>` ids in Tier A (mctl-agents#980) and Tier B
-(#923); the vendored vectors and parity test (mctl-agents#979); and the
+(mctl-api#923); the vendored vectors and parity test (mctl-agents#979); and the
 run-token binding, nonce consumption and eligibility rule above
 (mctl-api#917).
 
-Still needed to enable it: the real reviewer agent name from
-mctl-agents#905 replaces the placeholder `review-worker` in the `review`
-scope, and an operator sets `REVIEW_WORKER_INGEST_ENABLED=true` through a
-mctl-gitops change. Setting it back (or `REVIEW_RECEIPTS_DISABLED=true`)
+The reviewer agent is `review-worker`, the canonical name decided in
+mctl-agents#905; the `review` scope admits only it. The one remaining step to
+enable the route is an operator setting `REVIEW_WORKER_INGEST_ENABLED=true`
+through a mctl-gitops change. Setting it back (or `REVIEW_RECEIPTS_DISABLED=true`)
 returns the route to 501 (or 503).
 
 ## Configuration
