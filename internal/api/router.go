@@ -929,6 +929,9 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/review-requests/{id}", h.GetReviewRequest)
 			r.Get("/review-receipts", h.ListReviewReceipts)
 			r.Get("/review-gate", h.GetReviewGate)
+			// Execution provenance read (mctl-api#896): admin, or the agent
+			// run token bound to the same execution.
+			r.Get("/executions/{execution_id}/provenance", h.GetExecutionProvenance)
 
 			// Liveness read for one DevLoopWorkflow. Deliberately OUTSIDE the
 			// write group above: it has no side effects, and the shepherd

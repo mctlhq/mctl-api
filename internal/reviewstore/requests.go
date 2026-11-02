@@ -94,6 +94,9 @@ func (s *Store) IngestRequest(ctx context.Context, raw []byte, actor Actor) (*St
 	if err != nil {
 		return nil, false, err
 	}
+	if err := s.checkAuthoring(ctx, req); err != nil {
+		return nil, false, err
+	}
 	tag, err := s.pool.Exec(ctx, `
 INSERT INTO review_requests (request_id, content_hash, document, subject_kind, identity_key, binding_key,
     mode, nonce_sha256, authoring_execution_id, tenant, ingested_by, ingested_by_principal_id, ingested_at)

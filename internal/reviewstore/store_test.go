@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/mctlhq/mctl-api/internal/executionprovenance"
 	"os"
 	"strings"
 	"testing"
@@ -60,6 +61,8 @@ func newTestStore(t *testing.T, cfg Config) (*Store, *fakeEvidence) {
 	t.Cleanup(s.Close)
 	ev := &fakeEvidence{tenant: "acme"}
 	s.SetEvidence(ev)
+	fp, _, _ := provFixtureFor("we_" + strings.Repeat("a", 16))
+	s.SetProvenance(fp)
 	return s, ev
 }
 
@@ -76,6 +79,8 @@ func sealed(t *testing.T, subj reviewreceipts.ReviewSubject, mode string) (revie
 	req, err := reviewreceipts.SealRequest(reviewreceipts.SealRequestInput{
 		Subject: subj, Mode: mode, Nonce: "nonce-" + uuid.NewString(),
 		AuthoringExecutionID: "we_" + strings.Repeat("a", 16), CreatedAt: "2026-01-01T00:00:00Z",
+		AuthoringAttemptIDs:  []string{executionprovenance.AttemptID("argo", "wf-author")},
+		AuthoringLineageRoot: executionprovenance.LineageRoot("we_" + strings.Repeat("a", 16)),
 	})
 	if err != nil {
 		t.Fatalf("SealRequest: %v", err)

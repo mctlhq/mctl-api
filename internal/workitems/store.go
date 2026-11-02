@@ -148,6 +148,38 @@ ALTER TABLE work_item_intents ADD COLUMN IF NOT EXISTS actor_client_id TEXT NOT 
 ALTER TABLE work_items ADD COLUMN IF NOT EXISTS origin_client_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE work_item_events ADD COLUMN IF NOT EXISTS actor_client_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS work_item_create_requests_item ON work_item_create_requests (work_item_id);
+
+-- Authoritative attempt and lineage of an execution (mctl-api#896,
+-- execution_attempt_v1). Written by insertExecution in the execution's own
+-- transaction, never updated.
+CREATE TABLE IF NOT EXISTS execution_provenance (
+    execution_id          TEXT PRIMARY KEY REFERENCES work_item_executions (id) ON DELETE CASCADE,
+    contract_version      TEXT NOT NULL,
+    attempt_id            TEXT NOT NULL,
+    lineage_root          TEXT NOT NULL,
+    engine                TEXT NOT NULL,
+    engine_run            TEXT NOT NULL,
+    parent_execution_id   TEXT NOT NULL DEFAULT '',
+    root_execution_id     TEXT NOT NULL,
+    attached_by           TEXT NOT NULL,
+    attached_by_principal TEXT NOT NULL DEFAULT '',
+    recorded_at           TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS execution_provenance_lineage ON execution_provenance (lineage_root, attempt_id);
+CREATE OR REPLACE FUNCTION execution_provenance_immutable() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'execution_provenance rows are immutable';
+END;
+$$ LANGUAGE plpgsql;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'execution_provenance_no_update') THEN
+        CREATE TRIGGER execution_provenance_no_update
+            BEFORE UPDATE ON execution_provenance
+            FOR EACH ROW EXECUTE FUNCTION execution_provenance_immutable();
+    END IF;
+END;
+$$;
 `
 
 const itemColumns = `id, tenant, owner_principal, visibility, origin_surface, title, external_key,
@@ -592,7 +624,7 @@ func resumeTx(ctx context.Context, tx pgx.Tx, cur *WorkItem, in ResumeInput, now
 				in.Engine, in.EngineRef, execs[i].ID, cur.ID)
 		}
 	}
-	exec, err := insertExecution(ctx, tx, cur.ID, in.Engine, in.EngineRef, PhasePending, from, len(execs)+1, now)
+	exec, err := insertExecution(ctx, tx, in.Mutation, cur.ID, in.Engine, in.EngineRef, PhasePending, from, len(execs)+1, now)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -630,7 +662,7 @@ func containsExecution(execs []Execution, id string) bool {
 	return false
 }
 
-func insertExecution(ctx context.Context, tx pgx.Tx, itemID, engine, ref, phase, from string, attempt int, now time.Time) (*Execution, error) {
+func insertExecution(ctx context.Context, tx pgx.Tx, m Mutation, itemID, engine, ref, phase, from string, attempt int, now time.Time) (*Execution, error) {
 	var ended *time.Time
 	if IsTerminalPhase(phase) {
 		ended = &now
@@ -640,6 +672,10 @@ func insertExecution(ctx context.Context, tx pgx.Tx, itemID, engine, ref, phase,
 		ExecutionIDPrefix+uuid.NewString(), itemID, engine, ref, attempt, from, phase, now, ended))
 	if err != nil {
 		return nil, fmt.Errorf("workitems: insert execution: %w", err)
+	}
+	// Same transaction: a failure here rolls the execution back too.
+	if err := insertProvenance(ctx, tx, e, from, m, now); err != nil {
+		return nil, err
 	}
 	return e, nil
 }
@@ -856,7 +892,7 @@ func attachNewTx(ctx context.Context, tx pgx.Tx, cur *WorkItem, in ExecutionInpu
 			}
 		}
 	}
-	out, err := insertExecution(ctx, tx, cur.ID, in.Engine, in.EngineRef, in.Phase, "", len(execs)+1, now)
+	out, err := insertExecution(ctx, tx, in.Mutation, cur.ID, in.Engine, in.EngineRef, in.Phase, "", len(execs)+1, now)
 	if err != nil {
 		return nil, err
 	}

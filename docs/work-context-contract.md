@@ -102,6 +102,10 @@ may live in different databases.
   `execution_request_claimed` | `execution_request_fulfilled` |
   `execution_request_rejected`), `from_state`, `to_state`, `actor_principal`, `actor_client_id`, `surface`,
   `request_id`, `detail`, `created_at`. Unique per `(work_item_id, seq)`.
+- **`execution_provenance`** — one immutable row per `work_item_executions`
+  row, written in the same transaction: `attempt_id`, `lineage_root`,
+  `contract_version` (`execution_attempt_v1`), `root_execution_id`, the
+  attaching principal. See [execution-provenance.md](execution-provenance.md).
 - **`WorkItemIntent`** — a bounded, normalized statement of what the user
   asked for: `actor_principal`, `actor_client_id`, `surface`, `text` (max 8 KiB), `params`,
   `text_redacted`, `created_at`. Never a full chat transcript. Readable

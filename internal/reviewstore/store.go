@@ -112,20 +112,27 @@ const (
 
 // Typed refusals. The HTTP layer maps each to a status and code.
 var (
-	ErrUnsealed             = errors.New("review request is not sealed: content_hash and request_id are required")
-	ErrAuthoringUnresolved  = errors.New("authoring_execution_id resolves to no evidence record")
-	ErrTenantUnresolved     = errors.New("the authoring evidence names no tenant")
-	ErrEvidenceUnavailable  = errors.New("evidence could not be read")
-	ErrIdempotencyConflict  = errors.New("a different document is already stored under this request_id")
-	ErrNonceReused          = errors.New("the nonce is already used by another review request")
-	ErrRequestNotFound      = errors.New("review request not found")
-	ErrRequestClosed        = errors.New("review request is closed")
-	ErrRequestModeWorker    = errors.New("review request is worker mode; a manual receipt cannot answer it")
-	ErrBindingMismatch      = errors.New("the subject binding differs from the request's")
-	ErrPoolTooLarge         = errors.New("the receipt pool exceeds the complete-read bound")
-	ErrStoreCorrupt         = errors.New("a stored review document no longer parses")
-	ErrManualNotAdvisory    = errors.New("a manual receipt must be advisory")
-	errEvidenceStoreMissing = fmt.Errorf("%w: no evidence store", ErrEvidenceUnavailable)
+	ErrUnsealed            = errors.New("review request is not sealed: content_hash and request_id are required")
+	ErrAuthoringUnresolved = errors.New("authoring_execution_id resolves to no evidence record")
+	ErrTenantUnresolved    = errors.New("the authoring evidence names no tenant")
+	ErrEvidenceUnavailable = errors.New("evidence could not be read")
+	ErrIdempotencyConflict = errors.New("a different document is already stored under this request_id")
+	ErrNonceReused         = errors.New("the nonce is already used by another review request")
+	ErrRequestNotFound     = errors.New("review request not found")
+	ErrRequestClosed       = errors.New("review request is closed")
+	ErrRequestModeWorker   = errors.New("review request is worker mode; a manual receipt cannot answer it")
+	ErrBindingMismatch     = errors.New("the subject binding differs from the request's")
+	ErrPoolTooLarge        = errors.New("the receipt pool exceeds the complete-read bound")
+	ErrStoreCorrupt        = errors.New("a stored review document no longer parses")
+	ErrManualNotAdvisory   = errors.New("a manual receipt must be advisory")
+	// ErrAuthoringUnproven: the authoring facts of a request do not match the
+	// server-recorded execution provenance (mctl-api#896).
+	ErrAuthoringUnproven = errors.New("authoring execution, attempts or lineage are not proven by execution provenance")
+	// ErrExecutionUnproven: an execution has no server-recorded provenance.
+	ErrExecutionUnproven = errors.New("the execution has no recorded provenance")
+	// ErrProvenanceUnavailable: provenance could not be read or is not wired.
+	ErrProvenanceUnavailable = errors.New("execution provenance could not be read")
+	errEvidenceStoreMissing  = fmt.Errorf("%w: no evidence store", ErrEvidenceUnavailable)
 )
 
 // Closure reasons.
@@ -159,6 +166,7 @@ type Store struct {
 	ttl         time.Duration
 	poolMax     int
 	evidence    EvidenceLookup
+	provenance  ProvenanceLookup
 }
 
 // NewStore connects, applies the schema and returns a ready store.
@@ -191,6 +199,11 @@ func NewStore(ctx context.Context, connStr string, cfg Config) (*Store, error) {
 // SetEvidence wires the authoring-execution resolver. Call once, before
 // serving. Left unset, ingestion fails with ErrEvidenceUnavailable.
 func (s *Store) SetEvidence(ev EvidenceLookup) { s.evidence = ev }
+
+// SetProvenance wires the execution provenance lookup (mctl-api#896). Call
+// once, before serving. Left unset, every authoring check and ProveReviewer
+// fail with ErrProvenanceUnavailable.
+func (s *Store) SetProvenance(p ProvenanceLookup) { s.provenance = p }
 
 // Close releases the pool.
 func (s *Store) Close() {

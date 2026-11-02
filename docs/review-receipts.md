@@ -97,12 +97,44 @@ one. Operationally this means that once `review_receipts` holds more than
 tables; only UPDATE is refused). A retention or per-identity read is a
 follow-up and must land before the volume gets near the bound.
 
+## Authoring verification
+
+Request ingest checks the authoring facts against the server-written
+execution provenance ([execution-provenance.md](execution-provenance.md))
+before storing anything; the sealed document is never rewritten.
+
+- Worker mode: `authoring_execution_id` must be a `we_` id with a
+  provenance record, `authoring_lineage_root` must equal its `lineage_root`,
+  `authoring_attempt_ids` must contain its `attempt_id`, and every listed
+  attempt must belong to a recorded execution of that lineage.
+- Manual mode: the same checks apply when `authoring_attempt_ids` or
+  `authoring_lineage_root` is non-empty; empty facts stay permitted.
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `review_authoring_unproven` | 422 | the authoring facts do not match the record |
+| `review_execution_unproven` | 403 | `ProveReviewer`: no record for the execution |
+| `review_provenance_unavailable` | 503 | provenance could not be read or is not wired |
+
+`reviewstore.ProveReviewer(ctx, executionID)` returns only the stored
+attempt and lineage, for mctl-api#895 to call with the run token's execution.
+
 ## Disabled worker path
 
-Worker receipts stay off until both hold: an authoritative
-`execution_id -> attempt_id + lineage_root` (mctl-api#896) and the run-token
-binding of the reviewer. Enabling it then needs a write to
-`review_nonce_consumptions`; no schema change.
+`POST /api/v1/review-receipts` stays at 501 `review_worker_ingest_disabled`
+until ALL of these have landed and are verified:
+
+1. Authoritative attempt and lineage provenance with `ProveReviewer`
+   (mctl-api#896, delivered).
+2. Tier A and Tier B accept real `we_<hyphenated-uuid>` execution ids: an
+   ADR 025 amendment of `executionIDRE` in mctl-agents and in
+   `internal/reviewreceipts/types.go`, with a shared vector holding a real id.
+3. mctl-agents vendors `execution_attempt_vectors.json` and runs the parity
+   test with the pinned digest.
+4. mctl-api#895: run-token binding of the reviewer, nonce consumption (a write
+   to `review_nonce_consumptions`), and an eligibility check that the
+   reviewer execution was attached by a platform-authorized principal or
+   path, using the recorded `attached_by` fields.
 
 ## Configuration
 
