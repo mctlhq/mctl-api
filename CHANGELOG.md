@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.151.0](https://github.com/mctlhq/mctl-api/compare/4.150.2...4.151.0) (2026-11-02)
+
+
+### Features
+
+* **agents:** issue-896-feat-review-authoritative-attempt-proven ([4980d8a](https://github.com/mctlhq/mctl-api/commit/4980d8a727b2944755031942f12a1c86a03cabce))
+* **review:** accept we_&lt;uuid&gt; execution ids in Tier B ([431e42d](https://github.com/mctlhq/mctl-api/commit/431e42dbdcc8c5196fddf2e482a1e2e216b2ed1f))
+* **review:** accept we_&lt;uuid&gt; execution ids in Tier B ([9435c0f](https://github.com/mctlhq/mctl-api/commit/9435c0f30a84d9c71188fd25aa1a6d6c2418e3c4))
+
+
+### Bug Fixes
+
+* **review:** prove execution provenance guards and point worker enablement at [#917](https://github.com/mctlhq/mctl-api/issues/917) ([d6da234](https://github.com/mctlhq/mctl-api/commit/d6da23435d5208b551ce24051a99f48c20946665))
+* **review:** prove the execution provenance guards and point worker enablement at [#917](https://github.com/mctlhq/mctl-api/issues/917) ([e793c71](https://github.com/mctlhq/mctl-api/commit/e793c71daf200150a03e6a5670b3af0858f4eceb))
+
 ## [4.150.2](https://github.com/mctlhq/mctl-api/compare/4.150.1...4.150.2) (2026-11-02)
 
 
