@@ -260,6 +260,7 @@ func TestCreateErpactSite_NameValidation(t *testing.T) {
 		{"reserved system name", "erpact-system"},
 		{"empty", ""},
 		{"too long", "erpact-" + strings.Repeat("a", 60)},
+		{"double prefix", "erpact-erpact-acme"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -825,6 +826,7 @@ func TestIsTenantOwner(t *testing.T) {
 func TestErpactShortName(t *testing.T) {
 	cases := map[string]string{
 		"acme.erpact.online":           "erpact-acme",
+		"erpact-bar2.erpact.online":    "erpact-bar2", // migrated to CLO: no double prefix
 		"erpact-acme.mctl.ai":          "erpact-acme",
 		"erpact-shared-stteam.mctl.ai": "erpact-shared-stteam",
 		// A host under neither domain stays visible as itself instead of
