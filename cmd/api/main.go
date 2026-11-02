@@ -804,6 +804,13 @@ func main() {
 			} else {
 				slog.Warn("no evidence store; review request ingest will return 503")
 			}
+			// Left unset (a nil interface, never a typed nil), authoring
+			// checks answer 503 review_provenance_unavailable.
+			if workItemsStore != nil {
+				reviewStore.SetProvenance(workItemsStore)
+			} else {
+				slog.Warn("no work-items store; review authoring checks will return 503")
+			}
 		}
 	}
 

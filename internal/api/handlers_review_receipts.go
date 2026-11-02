@@ -20,7 +20,8 @@ package api
 // Request ingest needs evidence:write (the producer that authored the
 // subject registers the sealed request). A manual advisory receipt needs a
 // direct human administrator. The worker receipt path is disabled until the
-// authoritative execution -> attempt/lineage binding exists (mctl-api#896).
+// remaining prerequisites of docs/review-receipts.md have landed. Authoring
+// facts are verified against execution provenance (mctl-api#896).
 // Every read is admin-only and fails closed: a pool is complete or a typed
 // 503, never a partial list.
 
@@ -71,6 +72,9 @@ const (
 	codeReviewPoolTooLarge         = "review_pool_too_large"
 	codeReviewEvidenceUnavailable  = "review_evidence_unavailable"
 	codeReviewPrincipalUnavailable = "review_principal_unavailable"
+	codeReviewAuthoringUnproven    = "review_authoring_unproven"
+	codeReviewExecutionUnproven    = "review_execution_unproven"
+	codeReviewProvenanceUnavail    = "review_provenance_unavailable"
 )
 
 // isReviewRequestWriteRoute reports whether r is POST /api/v1/review-requests,
@@ -94,6 +98,8 @@ var reviewRefusals = []struct {
 	{reviewstore.ErrAuthoringUnresolved, http.StatusUnprocessableEntity, codeReviewAuthoringUnresolved},
 	{reviewstore.ErrTenantUnresolved, http.StatusUnprocessableEntity, codeReviewTenantUnresolved},
 	{reviewstore.ErrPoolTooLarge, http.StatusServiceUnavailable, codeReviewPoolTooLarge},
+	{reviewstore.ErrAuthoringUnproven, http.StatusUnprocessableEntity, codeReviewAuthoringUnproven},
+	{reviewstore.ErrExecutionUnproven, http.StatusForbidden, codeReviewExecutionUnproven},
 }
 
 func writeReviewError(w http.ResponseWriter, err error) {
@@ -112,6 +118,12 @@ func writeReviewError(w http.ResponseWriter, err error) {
 		slog.Error("review: evidence unavailable", "error", err)
 		writeErrorCode(w, http.StatusServiceUnavailable, codeReviewEvidenceUnavailable,
 			"the authoring evidence could not be read", nil)
+		return
+	}
+	if errors.Is(err, reviewstore.ErrProvenanceUnavailable) {
+		slog.Error("review: execution provenance unavailable", "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, codeReviewProvenanceUnavail,
+			"the execution provenance could not be read", nil)
 		return
 	}
 	// ErrStoreCorrupt and any driver error: the server cannot answer. The
@@ -304,15 +316,15 @@ func (h *Handlers) SubmitManualReview(w http.ResponseWriter, r *http.Request) {
 }
 
 // SubmitWorkerReview handles POST /api/v1/review-receipts. Disabled until
-// mctl-api#896 supplies an authoritative execution -> attempt/lineage
-// binding; it reads no body.
+// every prerequisite in docs/review-receipts.md has landed (mctl-api#895
+// among them); it reads no body.
 func (h *Handlers) SubmitWorkerReview(w http.ResponseWriter, r *http.Request) {
 	if user := auth.UserFromContext(r.Context()); user == nil {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	writeErrorCode(w, http.StatusNotImplemented, codeReviewWorkerIngestDisabled,
-		"worker review receipts are disabled until the execution attempt and lineage binding exists (mctl-api#896)", nil)
+		"worker review receipts are disabled until the reviewer run-token binding and the remaining prerequisites exist (mctl-api#895)", nil)
 }
 
 // GetReviewRequest handles GET /api/v1/review-requests/{id}.
