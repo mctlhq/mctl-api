@@ -78,6 +78,11 @@ const (
 // shows up in the listing instead of silently matching the wrong site.
 func erpactShortName(host string) string {
 	if label, ok := strings.CutSuffix(host, "."+erpactMainDomain); ok {
+		// Sites moved to CLO (2026-11-01) keep their full name as the label
+		// (erpact-bar2.erpact.online); only a bare label gets the prefix.
+		if strings.HasPrefix(label, erpactSiteHostPrefix) {
+			return label
+		}
 		return erpactSiteHostPrefix + label
 	}
 	if short, ok := strings.CutSuffix(host, "."+erpactLegacyMainDomain); ok {
@@ -130,6 +135,12 @@ func validateErpactSiteName(name string) (string, error) {
 	}
 	if erpactSystemNames[strings.TrimPrefix(name, "erpact-")] {
 		return "", fmt.Errorf("site name %q is reserved", name)
+	}
+	// A label that itself starts with "erpact-" would create
+	// erpact-x.erpact.online, which lists back as "erpact-x" and collides with
+	// the site "erpact-x" (label "x"). Migrated sites already use that form.
+	if strings.HasPrefix(strings.TrimPrefix(name, erpactSiteHostPrefix), erpactSiteHostPrefix) {
+		return "", fmt.Errorf("site name %q is reserved: the part after \"erpact-\" must not start with \"erpact-\"", name)
 	}
 	return name, nil
 }
