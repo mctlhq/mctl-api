@@ -42,9 +42,10 @@ import (
 // erpactSiteCap bounds how many sites tenant `erpact` may have through this
 // path, so an assistant cannot be asked to spin up an unbounded number of
 // databases and disk volumes on existing cluster capacity (owner decision,
-// 2026-10-08: cap is 10).
+// 2026-10-08: cap was 10; raised to 15 on 2026-11-02 at the owner's request,
+// the CLO cluster hosts 11 sites and needs room for a timing test site).
 const erpactTenant = "erpact"
-const erpactSiteCap = 10
+const erpactSiteCap = 15
 
 // erpactCreateMu serializes the cap check and the create call, so two
 // concurrent requests cannot both see "9 of 10" and both create. It covers
