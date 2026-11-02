@@ -97,6 +97,15 @@ func (h *Handlers) VerifyAgentReceipt(ctx context.Context, user *auth.User, c mc
 	if a.RequestedBy != caller {
 		return mcp.ReceiptCodeNotFound
 	}
+	// An agent run's receipt is its own execution's, as its REST access is
+	// (mctlhq/mctl-agents#717 S4): all runs of one agent share a principal,
+	// so the requester alone does not tell one run's approval from
+	// another's. A token bound to no execution has no receipt.
+	if user.IsAgent() {
+		if exec, ok := boundAgentExecution(user); !ok || a.ExecutionID != exec {
+			return mcp.ReceiptCodeNotFound
+		}
+	}
 	if a.ActionKind != mcp.ReceiptActionKindPrefix+c.Tool {
 		return mcp.ReceiptCodeOperationMismatch
 	}

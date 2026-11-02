@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -331,15 +332,46 @@ func TestAgentReceiptGate_OnlyDirectAgentPrincipalIsGated(t *testing.T) {
 		"anonymous": nil,
 		"human":     auth.NewGitHubUser("alice", []string{"admins"}),
 		"lookalike": auth.NewGitHubUser(auth.ServiceUserID, []string{"admins"}),
+		"agent-ish": auth.NewGitHubUser(auth.AgentPrincipalPrefix+"implementer", []string{"admins"}),
 		"surface":   surface,
 		"relayed":   auth.NewRelayedUser("alice", nil, surface),
-		"agent":     auth.NewAgentUser("investigator", auth.AgentRun{}),
 	} {
 		s, v := gatedServer(AgentReceiptGateEnforce, ReceiptCodeNotFound)
 		_, ran, _ := runGate(t, s, u, "mctl_deploy_service", nil)
 		if !ran || len(v.checks)+len(v.audited) != 0 {
 			t.Errorf("%s: gated (ran=%v checks=%d audits=%d)", name, ran, len(v.checks), len(v.audited))
 		}
+	}
+}
+
+// Agent run tokens are gated like the service principal
+// (mctlhq/mctl-agents#717 S4): a governed call without a receipt is
+// refused in enforce, whether or not the token is bound to an execution,
+// and one with a receipt is checked and reserved.
+func TestAgentReceiptGate_AgentRunTokensAreGated(t *testing.T) {
+	for name, u := range map[string]*auth.User{
+		"bound":   auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", WorkItemID: "wi_1", RunID: "art_1"}),
+		"unbound": auth.NewAgentUser("investigator", auth.AgentRun{}),
+	} {
+		s, v := gatedServer(AgentReceiptGateEnforce, "")
+		res, ran, _ := runGate(t, s, u, "mctl_deploy_service", nil)
+		if ran || res == nil || !res.IsError || len(v.audited) != 1 || v.audited[0].Code != ReceiptCodeMissing {
+			t.Errorf("%s without a receipt: ran=%v res=%+v audits=%+v", name, ran, res, v.audited)
+		}
+		if res != nil && !strings.Contains(fmt.Sprint(res.Content), "agent run") {
+			t.Errorf("%s: refusal does not name the agent run: %+v", name, res.Content)
+		}
+	}
+	u := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: "we_1", RunID: "art_1"})
+	s, v := gatedServer(AgentReceiptGateEnforce, "")
+	_, ran, _ := runGate(t, s, u, "mctl_deploy_service", receiptArgs())
+	if !ran || len(v.checks) != 1 || !v.checks[0].Redeem || len(v.settled) != 1 {
+		t.Fatalf("with a receipt: ran=%v checks=%+v settled=%+v", ran, v.checks, v.settled)
+	}
+	// A relayed agent is not the agent acting: not gated, as for any relay.
+	relayed := auth.NewRelayedUser("alice", nil, auth.NewSurfaceUser("telegram"))
+	if isReceiptGatedPrincipal(relayed) {
+		t.Fatal("relayed caller is gated")
 	}
 }
 
@@ -517,9 +549,11 @@ func TestDescribeMalformedReceipt(t *testing.T) {
 	}
 }
 
-// The gate passes agent principals (run tokens) through because their
-// scope refuses every governed tool first. A scope that admits one would
-// reach the tool with no receipt at all, so no scope may.
+// No run scope admits a governed tool yet. Agent principals are now
+// receipt-gated too (TestAgentReceiptGate_AgentRunTokensAreGated), so this
+// is no longer the only thing between a run and a governed tool, but
+// widening a scope to one is still a reviewed decision of its own: change
+// this test when that decision is made, not by accident.
 func TestAgentScopesAdmitNoGovernedTool(t *testing.T) {
 	// TestAgentReceiptGate_ClassifiesEveryTool holds every governed tool to
 	// a registered one, so the governed set is the whole surface to check.
@@ -538,7 +572,7 @@ func TestAgentScopesAdmitNoGovernedTool(t *testing.T) {
 		for tool := range governedAgentTools {
 			for _, spelling := range []string{tool, strings.TrimPrefix(tool, "mctl_")} {
 				if scope.AllowsTool(spelling) {
-					t.Errorf("scope %q admits governed tool %s: agent principals are not receipt-gated, so extend the gate before granting it", name, spelling)
+					t.Errorf("scope %q admits governed tool %s: granting a run a governed tool is its own reviewed decision", name, spelling)
 				}
 			}
 		}

@@ -393,3 +393,39 @@ func TestVerifyAgentReceipt_ConcurrentCallsAuthorizeOne(t *testing.T) {
 		t.Fatalf("%d calls authorized, want exactly 1 (%v)", won, codes)
 	}
 }
+
+// An agent run's receipt is its own execution's (mctlhq/mctl-agents#717
+// S4): every run of one agent shares a principal, so a receipt another run
+// consumed reads as absent, and so does any receipt to a token bound to no
+// execution. The run's own receipt is spent like the service's.
+func TestVerifyAgentReceipt_AgentReceiptIsItsExecutions(t *testing.T) {
+	env := newWorkItemsEnv(t)
+	run := auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: env.tenant + "-receipt", RunID: "art_a", Scope: auth.AgentScopeInvestigate})
+	in := env.receiptInput("agent", receiptTool)
+	in.RequestedBy = principalOf(run)
+	ref := env.receipt(in, "consumed")
+	check := mcp.ReceiptCheck{Tool: receiptTool, Ref: ref, ArtifactHash: "sha256:action", Redeem: true}
+
+	for name, u := range map[string]*auth.User{
+		"another run":              auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: env.tenant + "-other", RunID: "art_b", Scope: auth.AgentScopeInvestigate}),
+		"unscoped, same execution": auth.NewAgentUser("implementer", auth.AgentRun{ExecutionID: env.tenant + "-receipt", RunID: "art_d"}),
+		"an unbound token":         auth.NewAgentUser("implementer", auth.AgentRun{RunID: "art_c"}),
+		"the service":              auth.NewServiceUser(),
+	} {
+		if got := env.h.VerifyAgentReceipt(context.Background(), u, check); got != mcp.ReceiptCodeNotFound {
+			t.Errorf("%s: %q, want %q", name, got, mcp.ReceiptCodeNotFound)
+		}
+	}
+	if s := env.state(ref); s != workitems.ApprovalConsumed {
+		t.Fatalf("after refusals: %s", s)
+	}
+	if got := env.h.VerifyAgentReceipt(context.Background(), run, check); got != "" {
+		t.Fatalf("own receipt: %q", got)
+	}
+	if err := env.h.SettleAgentReceipt(context.Background(), run, check, true); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if s := env.state(ref); s != workitems.ApprovalExecuted {
+		t.Fatalf("after settle: %s", s)
+	}
+}
