@@ -75,6 +75,12 @@ const (
 	codeReviewAuthoringUnproven    = "review_authoring_unproven"
 	codeReviewExecutionUnproven    = "review_execution_unproven"
 	codeReviewProvenanceUnavail    = "review_provenance_unavailable"
+	codeReviewRequestModeManual    = "review_request_mode_manual"
+	codeReviewNonceMismatch        = "review_nonce_mismatch"
+	codeReviewNonceConsumed        = "review_nonce_consumed"
+	codeReviewReviewerIneligible   = "review_reviewer_ineligible"
+	codeReviewNotIndependent       = "review_reviewer_not_independent"
+	codeReviewRunTokenRequired     = "review_run_token_required"
 )
 
 // isReviewRequestWriteRoute reports whether r is POST /api/v1/review-requests,
@@ -100,6 +106,12 @@ var reviewRefusals = []struct {
 	{reviewstore.ErrPoolTooLarge, http.StatusServiceUnavailable, codeReviewPoolTooLarge},
 	{reviewstore.ErrAuthoringUnproven, http.StatusUnprocessableEntity, codeReviewAuthoringUnproven},
 	{reviewstore.ErrExecutionUnproven, http.StatusForbidden, codeReviewExecutionUnproven},
+	{reviewstore.ErrRequestModeManual, http.StatusConflict, codeReviewRequestModeManual},
+	{reviewstore.ErrNonceMismatch, http.StatusForbidden, codeReviewNonceMismatch},
+	{reviewstore.ErrNonceConsumed, http.StatusConflict, codeReviewNonceConsumed},
+	{reviewstore.ErrReviewerIneligible, http.StatusForbidden, codeReviewReviewerIneligible},
+	{reviewstore.ErrReviewerNotIndependent, http.StatusConflict, codeReviewNotIndependent},
+	{reviewstore.ErrRunTokenUnbound, http.StatusForbidden, codeReviewRunTokenRequired},
 }
 
 func writeReviewError(w http.ResponseWriter, err error) {
@@ -230,6 +242,26 @@ type manualReceiptBody struct {
 	} `json:"findings_ref"`
 }
 
+// decodeReviewBody strictly decodes a review submission: unknown keys and
+// trailing data are refused with a typed 400.
+func decodeReviewBody(w http.ResponseWriter, raw []byte, dst any) bool {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		code := reviewreceipts.CodeMalformed
+		if strings.HasPrefix(err.Error(), "json: unknown field") {
+			code = reviewreceipts.CodeUnknownKey
+		}
+		writeErrorCode(w, http.StatusBadRequest, code, "invalid JSON body: "+err.Error(), nil)
+		return false
+	}
+	if dec.More() {
+		writeErrorCode(w, http.StatusBadRequest, reviewreceipts.CodeMalformed, "trailing data after JSON object", nil)
+		return false
+	}
+	return true
+}
+
 // SubmitManualReview handles POST /api/v1/review-receipts/manual. Direct
 // human administrators only; the receipt is always manual and advisory.
 func (h *Handlers) SubmitManualReview(w http.ResponseWriter, r *http.Request) {
@@ -260,18 +292,7 @@ func (h *Handlers) SubmitManualReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body manualReceiptBody
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		code := reviewreceipts.CodeMalformed
-		if strings.HasPrefix(err.Error(), "json: unknown field") {
-			code = reviewreceipts.CodeUnknownKey
-		}
-		writeErrorCode(w, http.StatusBadRequest, code, "invalid JSON body: "+err.Error(), nil)
-		return
-	}
-	if dec.More() {
-		writeErrorCode(w, http.StatusBadRequest, reviewreceipts.CodeMalformed, "trailing data after JSON object", nil)
+	if !decodeReviewBody(w, raw, &body) {
 		return
 	}
 	subject, err := reviewreceipts.ParseSubject(body.Subject)
@@ -315,16 +336,135 @@ func (h *Handlers) SubmitManualReview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// SubmitWorkerReview handles POST /api/v1/review-receipts. Disabled until
-// every prerequisite in docs/review-receipts.md has landed (mctl-api#917
-// among them); it reads no body.
+// workerReceiptBody is every key a worker receipt may carry. The reviewer's
+// actor, execution, attempt and lineage are derived from the run token and
+// server-written provenance, so they are not here: sending one is
+// review_unknown_key.
+type workerReceiptBody struct {
+	RequestID string          `json:"request_id"`
+	Subject   json.RawMessage `json:"subject"`
+	Nonce     string          `json:"nonce"`
+	Outcome   string          `json:"outcome"`
+	Criteria  []struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	} `json:"criteria"`
+	FindingsRef struct {
+		Name        string `json:"name"`
+		Kind        string `json:"kind"`
+		ContentHash string `json:"content_hash"`
+	} `json:"findings_ref"`
+	EvidenceRef string `json:"evidence_ref"`
+}
+
+func (h *Handlers) auditWorkerReview(r *http.Request, user *auth.User, requestID, receiptID, status, code string) {
+	params := map[string]string{
+		"run_id":       user.AgentRunID(),
+		"execution_id": user.ExecutionID(),
+		"request_id":   requestID,
+	}
+	op := "review.worker_submit"
+	if receiptID != "" {
+		params["receipt_id"] = receiptID
+	}
+	if code != "" {
+		op = "review.worker_submit_refused"
+		params["code"] = code
+	}
+	h.logAudit(r, audit.Entry{
+		UserID: user.ID, Operation: op, Parameters: params,
+		Status: status, RiskLevel: string(operations.RiskLow),
+	})
+}
+
+// reviewErrorCode is the code writeReviewError will answer, for the audit
+// entry of a refusal.
+func reviewErrorCode(err error) string {
+	var docErr *reviewreceipts.Error
+	if errors.As(err, &docErr) {
+		return docErr.Code
+	}
+	for _, m := range reviewRefusals {
+		if errors.Is(err, m.target) {
+			return m.code
+		}
+	}
+	switch {
+	case errors.Is(err, reviewstore.ErrEvidenceUnavailable):
+		return codeReviewEvidenceUnavailable
+	case errors.Is(err, reviewstore.ErrProvenanceUnavailable):
+		return codeReviewProvenanceUnavail
+	}
+	return codeReviewStoreUnavailable
+}
+
+// SubmitWorkerReview handles POST /api/v1/review-receipts: an autonomous
+// reviewer run answers a worker-mode request with its review-scoped,
+// execution-bound run token (mctl-api#917). While
+// REVIEW_WORKER_INGEST_ENABLED is not true it answers 501 and reads no body.
 func (h *Handlers) SubmitWorkerReview(w http.ResponseWriter, r *http.Request) {
-	if user := auth.UserFromContext(r.Context()); user == nil {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	writeErrorCode(w, http.StatusNotImplemented, codeReviewWorkerIngestDisabled,
-		"worker review receipts are disabled until the reviewer run-token binding and the remaining prerequisites exist (mctl-api#917)", nil)
+	if !h.opts.ReviewWorkerIngestEnabled {
+		writeErrorCode(w, http.StatusNotImplemented, codeReviewWorkerIngestDisabled,
+			"worker review receipts are disabled; REVIEW_WORKER_INGEST_ENABLED is not true", nil)
+		return
+	}
+	if !h.reviewStoreOrUnavailable(w) {
+		return
+	}
+	if !user.IsAgent() || user.ExecutionID() == "" || user.AgentScopeName() != auth.AgentScopeReview {
+		writeErrorCode(w, http.StatusForbidden, codeReviewRunTokenRequired,
+			"a worker review needs an execution-bound agent run token with the review scope", nil)
+		return
+	}
+	raw, ok := readReviewBody(w, r)
+	if !ok {
+		return
+	}
+	var body workerReceiptBody
+	if !decodeReviewBody(w, raw, &body) {
+		h.auditWorkerReview(r, user, "", "", "failed", reviewreceipts.CodeMalformed)
+		return
+	}
+	refuse := func(err error) {
+		h.auditWorkerReview(r, user, body.RequestID, "", "failed", reviewErrorCode(err))
+		writeReviewError(w, err)
+	}
+	subject, err := reviewreceipts.ParseSubject(body.Subject)
+	if err != nil {
+		refuse(err)
+		return
+	}
+	in := reviewstore.WorkerInput{
+		RequestID: body.RequestID, Subject: subject, Nonce: body.Nonce, Outcome: body.Outcome,
+		FindingsRef: reviewreceipts.ArtifactRef{
+			Name: body.FindingsRef.Name, Kind: body.FindingsRef.Kind, ContentHash: body.FindingsRef.ContentHash,
+		},
+		EvidenceRef: body.EvidenceRef,
+	}
+	for _, c := range body.Criteria {
+		in.Criteria = append(in.Criteria, reviewreceipts.Criterion{ID: c.ID, Status: c.Status})
+	}
+	rc, err := h.opts.ReviewStore.SubmitWorker(r.Context(), in, reviewstore.Reviewer{
+		Actor: reviewActor(user), ExecutionID: user.ExecutionID(), RunID: user.AgentRunID(),
+	}, time.Now())
+	if err != nil {
+		refuse(err)
+		return
+	}
+	h.auditWorkerReview(r, user, rc.Receipt.RequestID, rc.Receipt.ReceiptID, "succeeded", "")
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"receipt_id": rc.Receipt.ReceiptID,
+		"request_id": rc.Receipt.RequestID,
+		"mode":       rc.Receipt.Mode,
+		"assurance":  rc.Receipt.Assurance,
+		"tenant":     rc.Tenant,
+		"receipt":    json.RawMessage(rc.Document),
+	})
 }
 
 // GetReviewRequest handles GET /api/v1/review-requests/{id}.

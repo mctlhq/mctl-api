@@ -68,6 +68,10 @@ env:
   # review route; REVIEW_REQUEST_TTL (Go duration, default 24h) closes stale
   # requests; REVIEW_POOL_MAX (default 10000) bounds the complete receipt
   # pool. An invalid value leaves the store off. All are plain env entries.
+  # REVIEW_WORKER_INGEST_ENABLED=true opens the worker receipt route
+  # POST /api/v1/review-receipts to review-scoped agent run tokens
+  # (mctl-api#917); unset or any other value keeps it answering 501. Enable it
+  # only once the real reviewer agent name (mctl-agents#905) is in the review scope.
   GITOPS_REPO_URL: https://github.com/mctlhq/mctl-gitops.git
   GITOPS_BRANCH: main
   GITOPS_LOCAL_PATH: /data/mctl-gitops

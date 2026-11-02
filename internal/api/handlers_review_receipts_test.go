@@ -96,6 +96,23 @@ func TestReview_WorkerIngestIsDisabled(t *testing.T) {
 	}
 }
 
+func TestReview_WorkerIngestEnabledNeedsAReviewRunToken(t *testing.T) {
+	for name, u := range map[string]*auth.User{
+		"admin":          adminUser(),
+		"unscoped agent": auth.NewAgentUser("review-worker", auth.AgentRun{ExecutionID: "we_x"}),
+		"review unbound": auth.NewAgentUser("review-worker", auth.AgentRun{Scope: auth.AgentScopeReview}),
+	} {
+		router := NewRouter(Options{
+			AuthMiddleware: injectUser(u), ReviewWorkerIngestEnabled: true, ReviewStore: &reviewstore.Store{},
+		})
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/review-receipts", bytes.NewReader([]byte("{}"))))
+		if rec.Code != http.StatusForbidden || bodyCode(rec) != codeReviewRunTokenRequired {
+			t.Errorf("%s: got %d %s, want 403 %s", name, rec.Code, rec.Body.String(), codeReviewRunTokenRequired)
+		}
+	}
+}
+
 func TestWriteReviewError_Table(t *testing.T) {
 	for _, c := range []struct {
 		err    error
@@ -117,6 +134,12 @@ func TestWriteReviewError_Table(t *testing.T) {
 		{fmt.Errorf("w: %w", reviewstore.ErrExecutionUnproven), 403, codeReviewExecutionUnproven},
 		{fmt.Errorf("w: %w", reviewstore.ErrProvenanceUnavailable), 503, codeReviewProvenanceUnavail},
 		{fmt.Errorf("w: %w", reviewstore.ErrEvidenceUnavailable), 503, codeReviewEvidenceUnavailable},
+		{reviewstore.ErrRequestModeManual, 409, codeReviewRequestModeManual},
+		{reviewstore.ErrNonceMismatch, 403, codeReviewNonceMismatch},
+		{reviewstore.ErrNonceConsumed, 409, codeReviewNonceConsumed},
+		{reviewstore.ErrReviewerIneligible, 403, codeReviewReviewerIneligible},
+		{reviewstore.ErrReviewerNotIndependent, 409, codeReviewNotIndependent},
+		{reviewstore.ErrRunTokenUnbound, 403, codeReviewRunTokenRequired},
 		{reviewstore.ErrStoreCorrupt, 503, codeReviewStoreUnavailable},
 		{errors.New("driver"), 503, codeReviewStoreUnavailable},
 	} {

@@ -281,9 +281,10 @@ func mutationFor(w http.ResponseWriter, r *http.Request, user *auth.User, op, it
 	m := workitems.Mutation{
 		Actor: principalOf(user), ActingPrincipal: user.ActingPrincipal(),
 		ActorPrincipalID: user.PrincipalID(), ViaPrincipalID: user.ViaPrincipalID(),
-		ViaExecutionID: user.ExecutionID(),
-		ActorClientID:  user.OAuthClientID(),
-		Surface:        surface, IdempotencyKey: key,
+		ViaExecutionID:     user.ExecutionID(),
+		ActorClientID:      user.OAuthClientID(),
+		ActorDirectService: isDirectService(user) && !user.IsAgent(),
+		Surface:            surface, IdempotencyKey: key,
 	}
 	if meta, ok := ClientMetaFromContext(r.Context()); ok {
 		m.RequestID = truncateRequestID(meta.RequestID)

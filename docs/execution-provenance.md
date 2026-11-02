@@ -25,7 +25,11 @@ a stored row field; no request field supplies them.
 `insertExecution` writes one `execution_provenance` row in the execution's
 own transaction (a failure rolls the execution back). A trigger refuses
 UPDATE. The row also records `attached_by` and `attached_by_principal`: who
-chose `engine`/`engine_ref`. Provenance proves which attempt and lineage an
+chose `engine`/`engine_ref`. It also records the server-derived `attach_path` (`attach`, `resume`,
+`fulfil_start`, `fulfil_resume`) and `attached_direct_service`, true only when
+the service principal acted directly (not relayed, not an agent). Review
+eligibility rests on `attached_direct_service` alone (mctl-api#917); rows
+recorded before it hold `''`/`false` and are ineligible. Provenance proves which attempt and lineage an
 execution has, not that it is an eligible reviewer. Executions created
 before this change have no row (`execution_provenance_absent`); no backfill.
 

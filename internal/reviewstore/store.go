@@ -71,6 +71,17 @@ CREATE TABLE IF NOT EXISTS review_receipts (
     CONSTRAINT review_receipts_manual_advisory CHECK (mode <> 'manual' OR assurance = 'advisory')
 );
 
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'review_receipts_worker_independent') THEN
+        ALTER TABLE review_receipts ADD CONSTRAINT review_receipts_worker_independent
+            CHECK (mode <> 'worker' OR assurance = 'independent');
+    END IF;
+END;
+$$;
+
+-- Written by SubmitWorker in the same transaction as the worker receipt: the
+-- primary key is the single-use primitive for a request's nonce.
 CREATE TABLE IF NOT EXISTS review_nonce_consumptions (
     nonce_sha256 TEXT PRIMARY KEY,
     request_id   TEXT NOT NULL REFERENCES review_requests (request_id),
@@ -130,6 +141,13 @@ var (
 	ErrAuthoringUnproven = errors.New("authoring execution, attempts or lineage are not proven by execution provenance")
 	// ErrExecutionUnproven: an execution has no server-recorded provenance.
 	ErrExecutionUnproven = errors.New("the execution has no recorded provenance")
+	// Worker receipt refusals (mctl-api#917).
+	ErrRequestModeManual      = errors.New("review request is manual mode; a worker receipt cannot answer it")
+	ErrNonceMismatch          = errors.New("the presented nonce does not match the request's")
+	ErrNonceConsumed          = errors.New("the request's nonce is already consumed")
+	ErrReviewerIneligible     = errors.New("the reviewer execution was not attached by the platform acting directly")
+	ErrReviewerNotIndependent = errors.New("the reviewer execution is not independent of the authoring execution")
+	ErrRunTokenUnbound        = errors.New("a run token bound to a reviewer execution is required")
 	// ErrProvenanceUnavailable: provenance could not be read or is not wired.
 	ErrProvenanceUnavailable = errors.New("execution provenance could not be read")
 	errEvidenceStoreMissing  = fmt.Errorf("%w: no evidence store", ErrEvidenceUnavailable)

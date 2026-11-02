@@ -16,12 +16,18 @@ package reviewstore
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/mctlhq/mctl-api/internal/workitems"
 
 	"github.com/mctlhq/mctl-api/internal/reviewreceipts"
 )
@@ -90,6 +96,118 @@ ON CONFLICT (receipt_id) DO NOTHING`,
 		rc.ReceiptID, rc.RequestID, rc.ContentHash, doc, rc.Mode, rc.Assurance, req.Tenant,
 		actor.Name, actor.PrincipalID, now); err != nil {
 		return nil, fmt.Errorf("reviewstore: insert receipt: %w", err)
+	}
+	return s.receipt(ctx, rc.ReceiptID)
+}
+
+// WorkerInput is the caller-owned part of a worker receipt. The reviewer's
+// identity, execution, attempt and lineage are never in it.
+type WorkerInput struct {
+	RequestID   string
+	Subject     reviewreceipts.ReviewSubject
+	Nonce       string
+	Outcome     string
+	Criteria    []reviewreceipts.Criterion
+	FindingsRef reviewreceipts.ArtifactRef
+	EvidenceRef string
+}
+
+// Reviewer is the authenticated reviewer run, taken from the run token and
+// never from a request body.
+type Reviewer struct {
+	Actor       Actor
+	ExecutionID string
+	RunID       string
+}
+
+// SubmitWorker records one independent worker receipt against an open worker
+// request. Every refusal happens before any write; the nonce consumption and
+// the receipt are one transaction.
+func (s *Store) SubmitWorker(ctx context.Context, in WorkerInput, rv Reviewer, now time.Time) (*StoredReceipt, error) {
+	if !strings.HasPrefix(rv.ExecutionID, workitems.ExecutionIDPrefix) {
+		return nil, ErrRunTokenUnbound
+	}
+	req, err := s.Request(ctx, in.RequestID)
+	if err != nil {
+		return nil, err
+	}
+	if req.Closed {
+		return nil, fmt.Errorf("%w: %s (%s)", ErrRequestClosed, req.Request.RequestID, req.ClosedReason)
+	}
+	if req.Request.Mode != reviewreceipts.ModeWorker {
+		return nil, fmt.Errorf("%w: %s", ErrRequestModeManual, req.Request.RequestID)
+	}
+	if in.Subject.Binding() != req.Request.Subject.Binding() {
+		return nil, fmt.Errorf("%w: %s", ErrBindingMismatch, req.Request.RequestID)
+	}
+	want, got := nonceDigest(req.Request.Nonce), nonceDigest(in.Nonce)
+	if subtle.ConstantTimeCompare([]byte(want), []byte(got)) != 1 {
+		return nil, fmt.Errorf("%w: %s", ErrNonceMismatch, req.Request.RequestID)
+	}
+	p, err := s.lookupProvenance(ctx, rv.ExecutionID)
+	if errors.Is(err, workitems.ErrProvenanceAbsent) {
+		return nil, fmt.Errorf("%w: %s", ErrExecutionUnproven, rv.ExecutionID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !p.AttachedDirectService {
+		return nil, fmt.Errorf("%w: %s", ErrReviewerIneligible, rv.ExecutionID)
+	}
+	r := req.Request
+	if p.ExecutionID == r.AuthoringExecutionID ||
+		slices.Contains(r.AuthoringAttemptIDs, p.AttemptID) ||
+		(r.AuthoringLineageRoot != "" && p.LineageRoot == r.AuthoringLineageRoot) ||
+		slices.ContainsFunc(r.AuthorActors, func(a string) bool { return strings.EqualFold(a, rv.Actor.Name) }) {
+		return nil, fmt.Errorf("%w: %s", ErrReviewerNotIndependent, rv.ExecutionID)
+	}
+	now = now.UTC()
+	rc, err := reviewreceipts.SealReceipt(r, reviewreceipts.SealReceiptInput{
+		Outcome:             in.Outcome,
+		Criteria:            in.Criteria,
+		FindingsRef:         in.FindingsRef,
+		ReviewerActor:       rv.Actor.Name,
+		ReviewerExecutionID: p.ExecutionID,
+		AttemptID:           p.AttemptID,
+		LineageRoot:         p.LineageRoot,
+		EvidenceRef:         in.EvidenceRef,
+		CreatedAt:           now.Format("2006-01-02T15:04:05Z"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Defence in depth beside the table CHECK.
+	if rc.Mode != reviewreceipts.ModeWorker || rc.Assurance != reviewreceipts.AssuranceIndependent {
+		return nil, ErrReviewerNotIndependent
+	}
+	doc, err := marshalDict(rc.Dict())
+	if err != nil {
+		return nil, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reviewstore: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+INSERT INTO review_nonce_consumptions (nonce_sha256, request_id, receipt_id, consumed_at)
+VALUES ($1, $2, $3, $4)`, want, rc.RequestID, rc.ReceiptID, now); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return nil, fmt.Errorf("%w: %s", ErrNonceConsumed, rc.RequestID)
+		}
+		return nil, fmt.Errorf("reviewstore: consume nonce: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO review_receipts (receipt_id, request_id, content_hash, document, mode, assurance, tenant,
+    submitted_by, submitted_by_principal_id, submitted_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		rc.ReceiptID, rc.RequestID, rc.ContentHash, doc, rc.Mode, rc.Assurance, req.Tenant,
+		rv.Actor.Name, rv.Actor.PrincipalID, now); err != nil {
+		return nil, fmt.Errorf("reviewstore: insert receipt: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("reviewstore: commit: %w", err)
 	}
 	return s.receipt(ctx, rc.ReceiptID)
 }
