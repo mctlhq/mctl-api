@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.152.0](https://github.com/mctlhq/mctl-api/compare/4.151.0...4.152.0) (2026-11-02)
+
+
+### Features
+
+* **approvals:** execution-bound action approvals for agent run tokens ([823844a](https://github.com/mctlhq/mctl-api/commit/823844aef2cbbe3d31e0b298a54dfd3d5df9ffd6))
+
 ## [4.151.0](https://github.com/mctlhq/mctl-api/compare/4.150.2...4.151.0) (2026-11-02)
 
 
