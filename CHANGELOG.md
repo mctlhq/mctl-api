@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.150.2](https://github.com/mctlhq/mctl-api/compare/4.150.1...4.150.2) (2026-11-02)
+
+
+### Bug Fixes
+
+* **erpact:** hide the CLO bench host from the site list ([9b03f09](https://github.com/mctlhq/mctl-api/commit/9b03f0923830a83e624df31a977e0c48c504377c))
+* **erpact:** hide the CLO bench host from the site list ([67863e7](https://github.com/mctlhq/mctl-api/commit/67863e7b8393efb3795434fb375c00bce9a140e8))
+
 ## [4.150.1](https://github.com/mctlhq/mctl-api/compare/4.150.0...4.150.1) (2026-11-02)
 
 
