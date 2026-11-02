@@ -63,6 +63,11 @@ env:
   # spans; unset (default) means no exporter, propagation still works.
   # OTEL_SDK_DISABLED=true forces export off. OTEL_MCTL_RECORD_ENDUSER=true
   # adds mctl.actor.* span attributes. A down Collector never affects responses.
+  # Review receipts (mctl-api#897, docs/review-receipts.md), stored in the
+  # evidence database: REVIEW_RECEIPTS_DISABLED=true answers 503 on every
+  # review route; REVIEW_REQUEST_TTL (Go duration, default 24h) closes stale
+  # requests; REVIEW_POOL_MAX (default 10000) bounds the complete receipt
+  # pool. An invalid value leaves the store off. All are plain env entries.
   GITOPS_REPO_URL: https://github.com/mctlhq/mctl-gitops.git
   GITOPS_BRANCH: main
   GITOPS_LOCAL_PATH: /data/mctl-gitops

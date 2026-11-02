@@ -42,9 +42,10 @@ import (
 // erpactSiteCap bounds how many sites tenant `erpact` may have through this
 // path, so an assistant cannot be asked to spin up an unbounded number of
 // databases and disk volumes on existing cluster capacity (owner decision,
-// 2026-10-08: cap is 10).
+// 2026-10-08: cap was 10; raised to 15 on 2026-11-02 at the owner's request,
+// the CLO cluster hosts 11 sites and needs room for a timing test site).
 const erpactTenant = "erpact"
-const erpactSiteCap = 10
+const erpactSiteCap = 15
 
 // erpactCreateMu serializes the cap check and the create call, so two
 // concurrent requests cannot both see "9 of 10" and both create. It covers
@@ -78,6 +79,11 @@ const (
 // shows up in the listing instead of silently matching the wrong site.
 func erpactShortName(host string) string {
 	if label, ok := strings.CutSuffix(host, "."+erpactMainDomain); ok {
+		// Sites moved to CLO (2026-11-01) keep their full name as the label
+		// (erpact-bar2.erpact.online); only a bare label gets the prefix.
+		if strings.HasPrefix(label, erpactSiteHostPrefix) {
+			return label
+		}
 		return erpactSiteHostPrefix + label
 	}
 	if short, ok := strings.CutSuffix(host, "."+erpactLegacyMainDomain); ok {
@@ -131,6 +137,12 @@ func validateErpactSiteName(name string) (string, error) {
 	if erpactSystemNames[strings.TrimPrefix(name, "erpact-")] {
 		return "", fmt.Errorf("site name %q is reserved", name)
 	}
+	// A label that itself starts with "erpact-" would create
+	// erpact-x.erpact.online, which lists back as "erpact-x" and collides with
+	// the site "erpact-x" (label "x"). Migrated sites already use that form.
+	if strings.HasPrefix(strings.TrimPrefix(name, erpactSiteHostPrefix), erpactSiteHostPrefix) {
+		return "", fmt.Errorf("site name %q is reserved: the part after \"erpact-\" must not start with \"erpact-\"", name)
+	}
 	return name, nil
 }
 
@@ -144,8 +156,14 @@ func validateErpactSiteName(name string) (string, error) {
 // It stays on the legacy domain: the deployer pins it (sharedNamespaceHost).
 const erpactBaseHostName = "erpact-shared-stteam." + erpactLegacyMainDomain
 
+// erpactCLOBaseHostName is the same bench on the CLO cluster (2026-11-01): the
+// deployer pins it to shared-stteam.clo.erpact.online (sharedNamespaceHost in
+// erpact/clo-apps helm-deployer/values.yaml). Without it the bench was listed
+// as a site "erpact-shared-stteam.clo" and counted against erpactSiteCap.
+const erpactCLOBaseHostName = "shared-stteam.clo." + erpactMainDomain
+
 func erpactIsBaseHost(s erpactsites.Site) bool {
-	return strings.EqualFold(s.Name, erpactBaseHostName)
+	return strings.EqualFold(s.Name, erpactBaseHostName) || strings.EqualFold(s.Name, erpactCLOBaseHostName)
 }
 
 // requireErpactAccess gates every erpact-sites route on authentication and

@@ -182,6 +182,30 @@ func TestListErpactSites_FiltersBaseHostAndMapsShortName(t *testing.T) {
 	}
 }
 
+// The CLO bench host (shared-stteam.clo.erpact.online) is infrastructure too:
+// it must not be listed as a site named "erpact-shared-stteam.clo".
+func TestListErpactSites_FiltersCLOBaseHost(t *testing.T) {
+	dep := &fakeErpactDeployer{sites: []erpactsites.Site{
+		{Name: "shared-stteam.clo.erpact.online", Enabled: true},
+		{Name: "erpact-bar2.erpact.online", Enabled: true, Status: "ACTIVE"},
+	}}
+	h := erpactTestHandlers(dep, erpactRoles())
+
+	req := withUser(httptest.NewRequest(http.MethodGet, "/api/v1/tenants/erpact/sites", nil), erpactOwner())
+	w := httptest.NewRecorder()
+	h.ListErpactSites(w, req)
+
+	var resp struct {
+		Sites []erpactSiteResponse `json:"sites"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Sites) != 1 || resp.Sites[0].Name != "erpact-bar2" {
+		t.Fatalf("CLO base host must be filtered, got %+v", resp.Sites)
+	}
+}
+
 func TestListErpactSites_DeployerErrorIsNotAnEmptyList(t *testing.T) {
 	dep := &fakeErpactDeployer{listErr: errors.New("connection refused")}
 	h := erpactTestHandlers(dep, erpactRoles())
@@ -260,6 +284,7 @@ func TestCreateErpactSite_NameValidation(t *testing.T) {
 		{"reserved system name", "erpact-system"},
 		{"empty", ""},
 		{"too long", "erpact-" + strings.Repeat("a", 60)},
+		{"double prefix", "erpact-erpact-acme"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -825,6 +850,7 @@ func TestIsTenantOwner(t *testing.T) {
 func TestErpactShortName(t *testing.T) {
 	cases := map[string]string{
 		"acme.erpact.online":           "erpact-acme",
+		"erpact-bar2.erpact.online":    "erpact-bar2", // migrated to CLO: no double prefix
 		"erpact-acme.mctl.ai":          "erpact-acme",
 		"erpact-shared-stteam.mctl.ai": "erpact-shared-stteam",
 		// A host under neither domain stays visible as itself instead of

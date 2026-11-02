@@ -1,5 +1,44 @@
 # Changelog
 
+## [4.151.0](https://github.com/mctlhq/mctl-api/compare/4.150.2...4.151.0) (2026-11-02)
+
+
+### Features
+
+* **agents:** issue-896-feat-review-authoritative-attempt-proven ([4980d8a](https://github.com/mctlhq/mctl-api/commit/4980d8a727b2944755031942f12a1c86a03cabce))
+* **review:** accept we_&lt;uuid&gt; execution ids in Tier B ([431e42d](https://github.com/mctlhq/mctl-api/commit/431e42dbdcc8c5196fddf2e482a1e2e216b2ed1f))
+* **review:** accept we_&lt;uuid&gt; execution ids in Tier B ([9435c0f](https://github.com/mctlhq/mctl-api/commit/9435c0f30a84d9c71188fd25aa1a6d6c2418e3c4))
+
+
+### Bug Fixes
+
+* **review:** prove execution provenance guards and point worker enablement at [#917](https://github.com/mctlhq/mctl-api/issues/917) ([d6da234](https://github.com/mctlhq/mctl-api/commit/d6da23435d5208b551ce24051a99f48c20946665))
+* **review:** prove the execution provenance guards and point worker enablement at [#917](https://github.com/mctlhq/mctl-api/issues/917) ([e793c71](https://github.com/mctlhq/mctl-api/commit/e793c71daf200150a03e6a5670b3af0858f4eceb))
+
+## [4.150.2](https://github.com/mctlhq/mctl-api/compare/4.150.1...4.150.2) (2026-11-02)
+
+
+### Bug Fixes
+
+* **erpact:** hide the CLO bench host from the site list ([9b03f09](https://github.com/mctlhq/mctl-api/commit/9b03f0923830a83e624df31a977e0c48c504377c))
+* **erpact:** hide the CLO bench host from the site list ([67863e7](https://github.com/mctlhq/mctl-api/commit/67863e7b8393efb3795434fb375c00bce9a140e8))
+
+## [4.150.1](https://github.com/mctlhq/mctl-api/compare/4.150.0...4.150.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **erpact:** do not double the erpact- prefix for migrated sites ([2f3d200](https://github.com/mctlhq/mctl-api/commit/2f3d200215c910700e096f1623c46fb3e42e1310))
+* **erpact:** do not double the erpact- prefix for migrated sites ([449b97b](https://github.com/mctlhq/mctl-api/commit/449b97bc89a8055f8aac6d9cfbd55fd779a19ca7))
+
+## [4.150.0](https://github.com/mctlhq/mctl-api/compare/4.149.0...4.150.0) (2026-11-01)
+
+
+### Features
+
+* **agents:** issue-897-feat-review-durable-manual-review-receip ([33b292e](https://github.com/mctlhq/mctl-api/commit/33b292e2d99f1d0f0e901b2b051faf917076d227))
+* **agents:** issue-897-feat-review-durable-manual-review-receip ([f49b4ba](https://github.com/mctlhq/mctl-api/commit/f49b4baa472bfe71798f21d5997f29ebef68cd0e))
+
 ## [4.149.0](https://github.com/mctlhq/mctl-api/compare/4.148.0...4.149.0) (2026-11-01)
 
 

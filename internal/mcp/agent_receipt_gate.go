@@ -205,6 +205,8 @@ var governedAgentTools = toolSet(
 	"mctl_scale_service",
 	"mctl_set_agent_version_lifecycle",
 	"mctl_signup_capacity",
+	// A manual advisory review assertion is a write, not a read verb.
+	"mctl_submit_review_assertion",
 	"mctl_start_epic_wave",
 	"mctl_sync_repos",
 	"mctl_trigger_agents_run",
