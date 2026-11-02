@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/mctlhq/mctl-api/internal/executionprovenance"
 	"os"
 	"strings"
 	"testing"
@@ -29,6 +28,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/mctlhq/mctl-api/internal/evidence"
+	"github.com/mctlhq/mctl-api/internal/executionprovenance"
 	"github.com/mctlhq/mctl-api/internal/reviewreceipts"
 )
 
@@ -374,5 +374,28 @@ func TestPoolIsInIngestOrder(t *testing.T) {
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("pool order %v, want submission order %v", got, want)
+	}
+}
+
+// A byte-identical replay of a stored request does not need the provenance
+// store; anything that is not a replay still fails closed when it is down.
+func TestIngestReplayDoesNotDependOnProvenanceStore(t *testing.T) {
+	s, _ := newTestStore(t, Config{})
+	ctx := context.Background()
+	slug := "s-" + uuid.NewString()[:8]
+	_, raw := sealed(t, proposal(slug, "b"), reviewreceipts.ModeManual)
+	if _, replayed, err := s.IngestRequest(ctx, raw, Actor{Name: "svc"}); err != nil || replayed {
+		t.Fatalf("first ingest: replayed=%v err=%v", replayed, err)
+	}
+	s.SetProvenance(&fakeProvenance{readErr: errors.New("db down")})
+	if _, replayed, err := s.IngestRequest(ctx, raw, Actor{Name: "svc"}); err != nil || !replayed {
+		t.Fatalf("replay with provenance down: replayed=%v err=%v", replayed, err)
+	}
+	_, other := sealed(t, proposal(slug+"x", "c"), reviewreceipts.ModeManual)
+	if _, _, err := s.IngestRequest(ctx, other, Actor{Name: "svc"}); !errors.Is(err, ErrProvenanceUnavailable) {
+		t.Fatalf("new request with provenance down: %v, want ErrProvenanceUnavailable", err)
+	}
+	if _, _, err := s.IngestRequest(ctx, append([]byte(" "), raw...), Actor{}); err == nil {
+		t.Fatal("changed bytes under a stored request id must not be accepted as a replay")
 	}
 }

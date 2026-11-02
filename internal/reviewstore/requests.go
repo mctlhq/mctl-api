@@ -94,6 +94,16 @@ func (s *Store) IngestRequest(ctx context.Context, raw []byte, actor Actor) (*St
 	if err != nil {
 		return nil, false, err
 	}
+	// A byte-identical replay of a stored request was verified when it was
+	// first ingested. It must not depend on the provenance store being up.
+	// Any read failure other than "not found" is an error, never a miss.
+	if stored, rerr := s.Request(ctx, req.RequestID); rerr == nil {
+		if bytes.Equal(stored.Document, raw) {
+			return stored, true, nil
+		}
+	} else if !errors.Is(rerr, ErrRequestNotFound) {
+		return nil, false, rerr
+	}
 	if err := s.checkAuthoring(ctx, req); err != nil {
 		return nil, false, err
 	}
