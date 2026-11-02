@@ -155,8 +155,14 @@ func validateErpactSiteName(name string) (string, error) {
 // It stays on the legacy domain: the deployer pins it (sharedNamespaceHost).
 const erpactBaseHostName = "erpact-shared-stteam." + erpactLegacyMainDomain
 
+// erpactCLOBaseHostName is the same bench on the CLO cluster (2026-11-01): the
+// deployer pins it to shared-stteam.clo.erpact.online (sharedNamespaceHost in
+// erpact/clo-apps helm-deployer/values.yaml). Without it the bench was listed
+// as a site "erpact-shared-stteam.clo" and counted against erpactSiteCap.
+const erpactCLOBaseHostName = "shared-stteam.clo." + erpactMainDomain
+
 func erpactIsBaseHost(s erpactsites.Site) bool {
-	return strings.EqualFold(s.Name, erpactBaseHostName)
+	return strings.EqualFold(s.Name, erpactBaseHostName) || strings.EqualFold(s.Name, erpactCLOBaseHostName)
 }
 
 // requireErpactAccess gates every erpact-sites route on authentication and
