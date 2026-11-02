@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.150.1](https://github.com/mctlhq/mctl-api/compare/4.150.0...4.150.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **erpact:** do not double the erpact- prefix for migrated sites ([2f3d200](https://github.com/mctlhq/mctl-api/commit/2f3d200215c910700e096f1623c46fb3e42e1310))
+* **erpact:** do not double the erpact- prefix for migrated sites ([449b97b](https://github.com/mctlhq/mctl-api/commit/449b97bc89a8055f8aac6d9cfbd55fd779a19ca7))
+
 ## [4.150.0](https://github.com/mctlhq/mctl-api/compare/4.149.0...4.150.0) (2026-11-01)
 
 
