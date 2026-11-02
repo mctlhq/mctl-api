@@ -185,7 +185,9 @@ func (e *reviewWorkerEnv) wantRefused(what string, res wiResponse, status int, w
 // refusalAudits counts review.worker_submit_refused rows carrying code.
 func (e *reviewWorkerEnv) refusalAudits(wantCode string) int {
 	n := 0
-	for _, entry := range e.audit.List(10000) {
+	entries := e.audit.List(10000)
+	for i := range entries {
+		entry := &entries[i]
 		if entry.Operation == "review.worker_submit_refused" && entry.Status == "failed" && entry.Parameters["code"] == wantCode {
 			n++
 		}
